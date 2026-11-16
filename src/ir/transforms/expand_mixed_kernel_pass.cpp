@@ -1346,20 +1346,391 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
 }
 
 // ============================================================================
-// GM-Mediated Cross-Lane Dependency Detection (issue #1433)
+// Store/Load Cross-Lane Dependencies
 // ============================================================================
 //
-// A tile.store to a GM tensor on one lane (e.g. AIC) followed by a tile.load
-// from the same GM tensor on the other lane (e.g. AIV) is a genuine cross-core
-// data dependency, but neither op is a tile.move, so CollectCVBoundaryMoves
-// never records it. Without a fence the two split kernels race on the shared
-// GM region (see issue #1433). We detect such pairs and emit a pure-
-// synchronisation tpush/tpop handshake: the data still flows through GM
-// unchanged, while the consumer's tpop blocks until the producer's tpush
-// (sequenced after the store) completes, establishing the missing
-// happens-before edge. The popped tile is a fence token, freed immediately by
-// FinalizeTpopTfrees. BuildAutomaticPipeSetup then injects the pipe setup just
-// as it does for tile.move boundaries.
+// A tile.store followed by a tile.load on the other lane is not represented by
+// an explicit tile.move boundary. A5 promotes supported exchanges to direct
+// C2V payloads below. The legacy GM-backed handshake collector is used only by
+// backends whose cross-core transport requires GM pipe storage (A2/A3).
+
+// A5's C2V FIFO carries Acc data directly into Vec. Its PIPE_V wait is not
+// a GM acquire, so an unused FIFO token cannot order a later MTE2 load.
+// Promote a complete, top-level row-partition write phase to a Vec snapshot:
+// every producer partition crosses through a real boundary move, is assembled
+// into private Vec storage, and releases its FIFO slot before the next pop.
+// Keeping the original stores preserves caller-visible tensor side effects.
+// Consumer loads become copies of slices, preserving their snapshot semantics
+// even when a later vector operation overwrites its input tile in place.
+// This analysis is O(N log N): two IR walks, indexed SSA roots, and one sort
+// per disjoint tensor's partition list. No element-sized coverage bitmap.
+std::vector<StmtPtr> PromoteDirectC2VData(const std::vector<StmtPtr>& stmts,
+                                          const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
+                                          bool has_split_consumers) {
+  struct Access {
+    StmtPtr stmt;
+    CallPtr call;
+    CoreAffinity affinity;
+    size_t order;
+    bool top_level;
+  };
+  struct Phase {
+    std::vector<Access> stores;
+    std::vector<Access> loads;
+  };
+  std::unordered_map<const Var*, const Var*> roots;
+  std::unordered_map<const Var*, Phase> phases;
+  std::vector<const Var*> origin_order;
+  std::vector<const Var*> other_uses;
+  bool authored_sync = false;
+  bool authored_pipe = false;
+  size_t order = 0;
+  auto root = [&](const Var* var) {
+    // Definitions are visited before their uses; each alias points directly
+    // to its root. Cyclic loop carries intentionally remain separate roots.
+    auto it = roots.find(var);
+    return it == roots.end() ? var : it->second;
+  };
+  auto record_other_uses = [&](const ExprPtr& expr) {
+    var_collectors::VarDefUseCollector uses;
+    uses.VisitExpr(expr);
+    for (const Var* var : uses.var_uses) {
+      if (AsTensorTypeLike(var->GetType())) other_uses.push_back(root(var));
+    }
+  };
+  auto yield_root = [&](const YieldStmtPtr& yield, size_t index) -> const Var* {
+    if (!yield || index >= yield->value_.size()) return nullptr;
+    const auto var = AsVarLike(yield->value_[index]);
+    return var ? root(var.get()) : nullptr;
+  };
+  auto enter_carries = [&](const auto& loop) {
+    for (const auto& arg : loop->iter_args_) {
+      record_other_uses(arg->initValue_);
+      if (auto init = AsVarLike(arg->initValue_); init && AsTensorTypeLike(init->GetType())) {
+        roots[arg.get()] = root(init.get());
+      }
+    }
+  };
+  auto exit_carries = [&](const auto& loop) {
+    const auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+    for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
+      const auto init = AsVarLike(loop->iter_args_[i]->initValue_);
+      const Var* yielded = yield_root(yield, i);
+      // The zero-iteration path returns the initializer. A loop return has
+      // one allocation origin only when entry and exit agree; never infer it
+      // from the initializer alone if a carry can rebind to another tensor.
+      if (init && yielded == root(init.get())) roots[loop->return_vars_[i].get()] = yielded;
+    }
+  };
+  std::function<void(const std::vector<StmtPtr>&, bool)> collect;
+  collect = [&](const std::vector<StmtPtr>& body, bool top_level) {
+    for (const auto& stmt : body) {
+      const size_t position = order++;
+      auto assign = As<AssignStmt>(stmt);
+      auto eval = As<EvalStmt>(stmt);
+      auto call = assign ? As<Call>(assign->value_) : eval ? As<Call>(eval->expr_) : nullptr;
+      if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait")) authored_sync = true;
+      if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe") ||
+          IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpop_from_aic") ||
+          IsOp(call, "tile.tpush_to_aic") || IsOp(call, "tile.tpop_from_aiv") ||
+          GetSplitReshapeOpName(call) || (call && ClassifyMoveDirection(call) != CVDirection::NONE)) {
+        // Both directions share automatic FIFO setup. Existing boundary moves
+        // also become endpoints later; adding payloads could form a wait cycle
+        // or recycle a slot still live through a yield/in-place alias. Without
+        // a lifetime proof, leave such protocols to explicit transfers.
+        authored_pipe = true;
+      }
+      if (assign && !call) {
+        if (auto source = AsVarLike(assign->value_); source && AsTensorTypeLike(source->GetType())) {
+          roots[assign->var_.get()] = root(source.get());
+        }
+      }
+      if (call && (IsOp(call, "tile.store") || IsOp(call, "tile.load"))) {
+        const bool store = IsOp(call, "tile.store");
+        const auto tensor = AsVarLike(call->args_[store ? 2 : 0]);
+        if (tensor) {
+          const Var* origin = root(tensor.get());
+          if (!phases.count(origin)) origin_order.push_back(origin);
+          auto& phase = phases[origin];
+          const auto affinity = stmt_map.at(stmt.get());
+          // An ignored store result does not remove its memory effect. Record
+          // Eval accesses before marking them unsupported, so an all-bare
+          // producer phase cannot disappear at the empty-side check below.
+          (store ? phase.stores : phase.loads).push_back({stmt, call, affinity, position, top_level});
+          if (assign) {
+            if (store) roots[assign->var_.get()] = origin;
+          } else {
+            other_uses.push_back(origin);
+          }
+        }
+      } else if (call || (assign && As<Submit>(assign->value_)) || (eval && As<Submit>(eval->expr_))) {
+        // Include nested argument tuples and Submit: an opaque operation can
+        // change the tensor through an alias before a later consumer load.
+        record_other_uses(assign ? assign->value_ : eval->expr_);
+      } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+        for (const auto& arg : launch->args_) record_other_uses(arg);
+      }
+      if (auto loop = As<ForStmt>(stmt)) {
+        // Carrying a tensor escapes this static phase. Still track stable
+        // origins so a post-loop load cannot evade the escape diagnostic.
+        enter_carries(loop);
+        collect(FlattenBody(loop->body_), false);
+        exit_carries(loop);
+      } else if (auto loop = As<WhileStmt>(stmt)) {
+        enter_carries(loop);
+        collect(FlattenBody(loop->body_), false);
+        exit_carries(loop);
+      } else if (auto branch = As<IfStmt>(stmt)) {
+        collect(FlattenBody(branch->then_body_), false);
+        if (branch->else_body_) collect(FlattenBody(*branch->else_body_), false);
+        const auto then_yield = transform_utils::GetLastYieldStmt(branch->then_body_);
+        const auto else_yield =
+            branch->else_body_ ? transform_utils::GetLastYieldStmt(*branch->else_body_) : nullptr;
+        for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
+          const Var* lhs = yield_root(then_yield, i);
+          const Var* rhs = yield_root(else_yield, i);
+          if (lhs && lhs == rhs) roots[branch->return_vars_[i].get()] = lhs;
+        }
+      } else if (auto reg = As<RegScopeStmt>(stmt)) {
+        var_collectors::VarDefUseCollector uses;
+        uses.VisitStmt(reg);
+        for (const Var* var : uses.var_uses) {
+          if (AsTensorTypeLike(var->GetType())) other_uses.push_back(root(var));
+        }
+      }
+    }
+  };
+  collect(stmts, true);
+  const std::unordered_set<const Var*> escaped(other_uses.begin(), other_uses.end());
+  std::unordered_map<const Stmt*, StmtPtr> replacements;
+  auto& registry = OpRegistry::GetInstance();
+  auto static_value = [](const ExprPtr& expr) -> int64_t {
+    auto value = As<ConstInt>(expr);
+    return value ? value->value_ : -1;
+  };
+  auto normalize_index_tuple = [](const ExprPtr& expr) {
+    const auto tuple = As<MakeTuple>(expr);
+    INTERNAL_CHECK_SPAN(tuple, expr->span_) << "Expected a tuple of load/store coordinates";
+    std::vector<ExprPtr> values;
+    values.reserve(tuple->elements_.size());
+    for (const auto& value : tuple->elements_) {
+      const auto type = As<ScalarType>(value->GetType());
+      INTERNAL_CHECK_SPAN(type, value->span_) << "Expected scalar load/store coordinates";
+      if (type->dtype_ == DataType::INT64 || type->dtype_ == DataType::UINT64 ||
+          type->dtype_ == DataType::INDEX) {
+        values.push_back(value);
+      } else if (auto constant = As<ConstInt>(value)) {
+        values.push_back(MakeIndexConst(constant->value_, value->span_));
+      } else {
+        // GM load/store accepts narrow integers; on-chip slice/assemble only
+        // accepts 64-bit or INDEX coordinates. Widen without truncating them.
+        values.push_back(MakeCast(value, DataType::INDEX, value->span_));
+      }
+    }
+    return std::make_shared<MakeTuple>(values, expr->span_);
+  };
+  for (const Var* origin : origin_order) {
+    const auto& phase = phases.at(origin);
+    if (phase.stores.empty() || phase.loads.empty()) continue;
+    const bool cube_writes = std::any_of(phase.stores.begin(), phase.stores.end(),
+                                         [](const Access& a) { return a.affinity == CoreAffinity::CUBE; });
+    const bool vector_reads = std::any_of(phase.loads.begin(), phase.loads.end(),
+                                          [](const Access& a) { return a.affinity == CoreAffinity::VECTOR; });
+    if (!cube_writes || !vector_reads) continue;
+    const auto tensor = As<TensorType>(origin->GetType());
+    bool supported = tensor && tensor->shape_.size() == 2 && !escaped.count(origin) && !authored_pipe &&
+                     !has_split_consumers;
+    const int64_t rows = supported ? static_value(tensor->shape_[0]) : -1;
+    const int64_t cols = supported ? static_value(tensor->shape_[1]) : -1;
+    supported &= rows > 0 && cols > 0;
+    if (tensor) {
+      supported &= tensor->dtype_ == DataType::FP32 || tensor->dtype_ == DataType::FP16 ||
+                   tensor->dtype_ == DataType::BF16;
+    }
+    if (tensor && tensor->tensor_view_) supported &= tensor->tensor_view_->layout == TensorLayout::ND;
+    std::vector<std::pair<int64_t, int64_t>> intervals;
+    for (const auto& write : phase.stores) {
+      const auto tile = As<TileType>(write.call->args_[0]->GetType());
+      const auto offsets = As<MakeTuple>(write.call->args_[1]);
+      bool valid = tensor && write.top_level && write.affinity == CoreAffinity::CUBE &&
+                   write.call->args_.size() == 3 && tile && tile->shape_.size() == 2 && offsets &&
+                   offsets->elements_.size() == 2 && tile->dtype_ == tensor->dtype_;
+      // Atomic/quantized/activated stores change the value written to GM;
+      // their raw Acc payload is not an equivalent consumer value.
+      valid &= write.call->GetKwarg<int>("atomic", 0) == 0 && write.call->GetKwarg<int>("st_phase", 0) == 0 &&
+               !write.call->GetKwarg<bool>("pre_relu", false);
+      for (const auto& [key, value] : write.call->kwargs_) {
+        if (key == "pre_quant") valid = false;
+      }
+      if (valid) {
+        const int64_t start = static_value(offsets->elements_[0]);
+        const int64_t count = static_value(tile->shape_[0]);
+        valid = start >= 0 && count > 0 && start <= rows && count <= rows - start &&
+                static_value(offsets->elements_[1]) == 0 && static_value(tile->shape_[1]) == cols;
+        const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+        if (!view.valid_shape.empty()) {
+          valid &= view.valid_shape.size() == 2 && static_value(view.valid_shape[0]) == count &&
+                   static_value(view.valid_shape[1]) == cols;
+        }
+        if (valid) intervals.emplace_back(start, start + count);
+      }
+      supported &= valid;
+    }
+    std::sort(intervals.begin(), intervals.end());
+    int64_t covered = 0;
+    for (const auto& interval : intervals) {
+      supported &= interval.first == covered;
+      covered = interval.second;
+    }
+    supported &= covered == rows;
+    for (const auto& read : phase.loads) {
+      const auto type = As<TileType>(read.call->GetType());
+      supported &= tensor && read.affinity == CoreAffinity::VECTOR &&
+                   read.order > phase.stores.back().order && type && type->shape_.size() == 2 &&
+                   type->dtype_ == tensor->dtype_ && read.call->args_.size() == 4 &&
+                   !read.call->GetKwarg<bool>("clamp", false);
+    }
+    // Event presence alone never proves that a GM exchange is ordered. In
+    // particular, unrelated events must not exempt an unsupported phase from
+    // diagnosis. We do not prove authored event occurrences or add a FIFO
+    // alongside them, since the new FIFO could also introduce a wait cycle.
+    CHECK_SPAN(!authored_sync, phase.stores.front().stmt->span_)
+        << "Direct C2V promotion cannot mix an automatic write phase with authored cross-core events; "
+           "use explicit tile moves or explicit AIC/AIV kernels";
+    CHECK_SPAN(supported, phase.stores.front().stmt->span_)
+        << "Direct C2V promotion requires a complete static 2D row-partition write phase before vector "
+           "reads; use explicit tile moves or separate producer/consumer tasks for tensor '"
+        << origin->name_hint_ << "'";
+
+    VarPtr snapshot;
+    size_t partition = 0;
+    for (const auto& write : phase.stores) {
+      const auto& span = write.stmt->span_;
+      std::vector<StmtPtr> emitted{write.stmt};
+      auto bind = [&](const std::string& suffix, const CallPtr& call) {
+        auto var = std::make_shared<Var>(origin->name_hint_ + suffix + std::to_string(partition),
+                                         call->GetType(), span);
+        emitted.push_back(std::make_shared<AssignStmt>(var, call, span));
+        return var;
+      };
+      if (!snapshot) {
+        snapshot =
+            bind("_c2v_init",
+                 registry.Create("tile.create", {std::make_shared<MakeTuple>(tensor->shape_, span)},
+                                 {{"dtype", tensor->dtype_}, {"target_memory", MemorySpace::Vec}}, span));
+      }
+      // Explicit ND Vec layout is required: the Acc tile's NZ layout must not
+      // leak into the consumer snapshot. The normal boundary lowering turns
+      // this move into TPUSH/TPOP with the backend's transfer representation.
+      auto payload = bind("_c2v_payload", registry.Create("tile.move", {write.call->args_[0]},
+                                                          {{"target_memory", MemorySpace::Vec},
+                                                           {"blayout", TileLayout::row_major},
+                                                           {"slayout", TileLayout::none_box}},
+                                                          span));
+      snapshot =
+          bind("_c2v_snapshot",
+               registry.Create("tile.assemble",
+                               {snapshot, payload, normalize_index_tuple(write.call->args_[1])}, span));
+      replacements[write.stmt.get()] = MakeBody(emitted, span);
+      ++partition;
+    }
+    for (const auto& read : phase.loads) {
+      const auto& span = read.stmt->span_;
+      const auto assign = As<AssignStmt>(read.stmt);
+      INTERNAL_CHECK_SPAN(assign, span) << "Promoted consumer must bind its load result";
+      const auto type = As<TileType>(read.call->GetType());
+      const auto view = tile_view_semantics::GetEffectiveTileView(*type);
+      const auto& valid = view.valid_shape.empty() ? type->shape_ : view.valid_shape;
+      // A GM load reads only its valid extent, whereas a slice's whole
+      // physical window must fit in the snapshot. Use that valid extent as
+      // the slice allocation; static dimensions are required by tile.slice.
+      // Dynamic/empty valid regions need an explicit transfer instead of an
+      // overhanging on-chip view whose bounds cannot be represented here.
+      bool padded = false;
+      for (size_t dim = 0; dim < valid.size(); ++dim) {
+        const int64_t count = static_value(valid[dim]);
+        CHECK_SPAN(count > 0, span)
+            << "Direct C2V promotion requires positive static consumer valid extents; "
+               "use explicit tile moves for dynamic or empty valid regions";
+        padded |= count != static_value(type->shape_[dim]);
+      }
+      auto valid_tuple = normalize_index_tuple(std::make_shared<MakeTuple>(valid, span));
+      auto slice = registry.Create(
+          "tile.slice", {snapshot, valid_tuple, normalize_index_tuple(read.call->args_[1]), valid_tuple},
+          span);
+      auto slice_var = std::make_shared<Var>(assign->var_->name_hint_ + "_c2v_slice", slice->GetType(), span);
+      std::vector<StmtPtr> emitted{std::make_shared<AssignStmt>(slice_var, slice, span)};
+      CallPtr copy;
+      if (padded) {
+        auto bind = [&](const std::string& suffix, const CallPtr& call) {
+          auto var = std::make_shared<Var>(assign->var_->name_hint_ + suffix, call->GetType(), span);
+          emitted.push_back(std::make_shared<AssignStmt>(var, call, span));
+          return var;
+        };
+        auto storage =
+            bind("_c2v_storage",
+                 registry.Create("tile.create", {read.call->args_[2]},
+                                 {{"dtype", type->dtype_}, {"target_memory", MemorySpace::Vec}}, span));
+        auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+        auto copied = bind(
+            "_c2v_copy",
+            registry.Create(
+                "tile.assemble",
+                {storage, slice_var, std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span)},
+                span));
+        // The fresh allocation keeps the original physical shape and never
+        // aliases the shared snapshot. Only the inserted region is valid;
+        // padding remains unspecified, just as for the original GM load.
+        copy = registry.Create("tile.set_validshape",
+                               {copied, valid_tuple->elements_[0], valid_tuple->elements_[1]}, span);
+      } else {
+        std::vector<std::pair<std::string, std::any>> kwargs{{"target_memory", MemorySpace::Vec}};
+        const auto snapshot_view =
+            tile_view_semantics::GetEffectiveTileView(*As<TileType>(snapshot->GetType()));
+        // A slice inherits the snapshot layout, but a GM load chooses its
+        // layout from the requested shape. In particular [N, 1] loads are
+        // column-major even when sliced from a wide row-major snapshot.
+        // Compare against that source layout: before views are materialized,
+        // slice deduction may temporarily infer layout from its own shape.
+        if (view.blayout != snapshot_view.blayout || view.slayout != snapshot_view.slayout) {
+          kwargs.emplace_back("blayout", view.blayout);
+          kwargs.emplace_back("slayout", view.slayout);
+        }
+        copy = registry.Create("tile.move", {slice_var}, kwargs, span);
+      }
+      emitted.push_back(std::make_shared<AssignStmt>(
+          assign->var_, transform_utils::PreserveCallAttrs(read.call, copy), span));
+      replacements[read.stmt.get()] = MakeBody(emitted, span);
+    }
+  }
+  class Rewriter : public IRMutator {
+   public:
+    explicit Rewriter(const std::unordered_map<const Stmt*, StmtPtr>& replacements)
+        : replacements_(replacements) {}
+
+   protected:
+    StmtPtr VisitStmt_(const AssignStmtPtr& stmt) override {
+      auto it = replacements_.find(stmt.get());
+      return it == replacements_.end() ? stmt : it->second;
+    }
+    StmtPtr VisitStmt_(const SeqStmtsPtr& stmt) override {
+      // IRMutator dispatches nested bodies through the typed visitor methods.
+      // Flatten the sequences introduced by one-to-many replacements so the
+      // existing boundary collector sees every synthesized move.
+      std::vector<StmtPtr> result;
+      for (const auto& child : stmt->stmts_) {
+        auto children = FlattenBody(VisitStmt(child));
+        result.insert(result.end(), children.begin(), children.end());
+      }
+      return MakeBody(result, stmt->span_);
+    }
+
+   private:
+    const std::unordered_map<const Stmt*, StmtPtr>& replacements_;
+  } rewriter(replacements);
+  if (replacements.empty()) return stmts;
+  return FlattenBody(rewriter.VisitStmt(MakeBody(stmts, stmts.front()->span_)));
+}
 
 struct GmSyncPush {
   CoreSide producer_side;
@@ -2138,6 +2509,15 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   std::unordered_map<const Var*, ExprPtr> simt_gm_aliases;
   AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs, placement, &simt_gm_aliases);
 
+  if (!PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+    stmts = PromoteDirectC2VData(stmts, stmt_map, had_regions || func->GetAttr<bool>(kAttrSplitAiv, false));
+    tpop_defs = CollectTpopDefs(stmts);
+    stmt_map.clear();
+    var_affinity.clear();
+    simt_gm_aliases.clear();
+    AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs, placement, &simt_gm_aliases);
+  }
+
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, tpop_defs);
 
@@ -2145,7 +2525,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
   std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
   std::map<const Stmt*, std::vector<GmSyncPop>> gm_sync_pops;
-  CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
+  if (PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+    CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
+  }
 
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;

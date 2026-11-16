@@ -43,8 +43,10 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.runtime.tensor_spec import ScalarSpec
 
 # Shapes match the issue repro exactly.
 B = 16
@@ -227,6 +229,131 @@ class TestScatterOnlyDiagnostic:
     def test_scatter_only(self, test_runner, platform):
         result = test_runner.run(ScatterOnlyTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
+
+
+@pl.jit
+def partitioned_matmul_gm_epilogue(
+    a: pl.Tensor[[128, 512], pl.BF16],
+    b: pl.Tensor[[512, 128], pl.BF16],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    """Issue #2745: four cube stores precede eight vector loads in one task."""
+    tmp = pl.create_tensor([128, 128], dtype=pl.FP32)
+    with pl.spmd(1):
+        _idx = pl.tile.get_block_idx()
+        for block in pl.unroll(4):
+            row = block * 32
+            value = pl.matmul(a[row : row + 32, :], b, out_dtype=pl.FP32)
+            tmp[row : row + 32, :] = value
+        for row in pl.range(0, 128, 16):
+            out[row : row + 16, :] = pl.add(tmp[row : row + 16, :], 1.0)
+    return out
+
+
+def _partitioned_matmul_case(distinct_partitions: bool):
+    # The all-ones case reproduces the issue verbatim. Distinct partitions also
+    # catch missing or reordered payloads when the partitions travel over C2V.
+    a = torch.ones(128, 512, dtype=torch.bfloat16)
+    if distinct_partitions:
+        a *= (torch.arange(128) // 32 + 1).reshape(128, 1)
+    b = torch.ones(512, 128, dtype=torch.bfloat16)
+    out = torch.zeros(128, 128, dtype=torch.float32)
+
+    def golden(tensors):
+        return {"out": tensors["a"].float() @ tensors["b"].float() + 1.0}
+
+    return st.case(
+        partitioned_matmul_gm_epilogue,
+        a,
+        b,
+        out,
+        name=f"partitioned_matmul_gm_sync_{'distinct' if distinct_partitions else 'ones'}",
+        golden=golden,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.platforms("a5", "a5sim", reason="A5 direct C2V promotion of partitioned intermediates")
+@st.cases(_partitioned_matmul_case(False), _partitioned_matmul_case(True))
+def test_partitioned_matmul_gm_sync(case_run):
+    case_run.assert_passed()
+
+
+def _padded_c2v_case(row: int, col: int, shape: tuple[int, int] = (16, 16), valid: tuple[int, int] = (8, 8)):
+    tile_rows, tile_cols = shape
+    valid_rows, valid_cols = valid
+
+    @pl.jit.incore
+    def kernel(
+        a: pl.Tensor[[32, 32], pl.BF16],
+        b: pl.Tensor[[32, 32], pl.BF16],
+        scratch: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
+        out: pl.Out[pl.Tensor[[valid_rows, valid_cols], pl.FP32]],
+        row_offset: pl.Scalar[pl.INT32],
+        col_offset: pl.Scalar[pl.INT32],
+    ):
+        lhs_mat = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+        rhs_mat = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+        acc = pl.matmul(lhs, rhs)
+        scratch = pl.store(acc, [0, 0], scratch)
+        value = pl.load(
+            scratch,
+            [row_offset, col_offset],
+            [tile_rows, tile_cols],
+            valid_shape=[pl.const(valid_rows, pl.INT32), pl.const(valid_cols, pl.INT32)],
+        )
+        result = pl.add(value, 1.0)
+        return pl.store(result, [0, 0], out)
+
+    @pl.jit
+    def entry(
+        a: pl.Tensor,
+        b: pl.Tensor,
+        out: pl.Out[pl.Tensor],
+        row_offset: pl.Scalar[pl.INT32],
+        col_offset: pl.Scalar[pl.INT32],
+    ):
+        scratch = pl.create_tensor([32, 32], dtype=pl.FP32)
+        out = kernel(a, b, scratch, out, row_offset, col_offset)
+        return out
+
+    # Distinct rows and columns expose offset mistakes and invalid padding
+    # leaking into the stored result. All expected values are exactly FP32.
+    a = (torch.arange(32) + 1).reshape(32, 1).expand(32, 32).to(torch.bfloat16).contiguous()
+    b = (torch.arange(32) + 1).reshape(1, 32).expand(32, 32).to(torch.bfloat16).contiguous()
+
+    def golden(tensors):
+        product = tensors["a"].float() @ tensors["b"].float()
+        return {"out": product[row : row + valid_rows, col : col + valid_cols] + 1.0}
+
+    return st.case(
+        entry,
+        a,
+        b,
+        torch.zeros(valid_rows, valid_cols, dtype=torch.float32),
+        row,
+        col,
+        name=f"padded_c2v_{row}_{col}",
+        scalars=[ScalarSpec("row_offset", row, "int32"), ScalarSpec("col_offset", col, "int32")],
+        golden=golden,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.platforms("a5", "a5sim", reason="A5 direct C2V promotion of padded tail loads")
+@st.cases(
+    _padded_c2v_case(24, 0),
+    _padded_c2v_case(0, 24),
+    _padded_c2v_case(24, 24),
+    _padded_c2v_case(0, 7, (32, 1), (32, 1)),
+    _padded_c2v_case(24, 7, (16, 1), (8, 1)),
+)
+def test_padded_c2v_tail(case_run):
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":
