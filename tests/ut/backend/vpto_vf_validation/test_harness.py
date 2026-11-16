@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from pypto.jit.decorator import JITFunction
 
@@ -76,6 +77,7 @@ def test_timeout_keeps_partial_diagnostics(tmp_path):
         "tests/st/runtime/vpto/test_alias_helper_sync.py",
         "tests/st/runtime/vpto/test_tile_helper_sync.py",
         "tests/st/runtime/vpto/test_reg_scope_onboard.py",
+        "tests/st/runtime/vpto/test_reg_interleave_onboard.py",
         "tests/st/runtime/vpto/test_simt_gm_copy_onboard.py",
         "tests/st/runtime/vpto/test_simt_ir_onboard.py",
         "tests/st/runtime/vpto/test_vpto_vf_onboard.py",
@@ -223,6 +225,45 @@ def test_onboard_caller_uses_selected_ptoas(monkeypatch, tmp_path, available):
         with pytest.raises(AssertionError, match="PTOAS_ROOT"):
             prepare(tmp_path)
         assert commands == []
+
+
+@pytest.fixture(scope="module")
+def interleave_harness():
+    root = Path(__file__).resolve().parents[4]
+    return runpy.run_path(str(root / "tests/st/runtime/vpto/test_reg_interleave_onboard.py"))
+
+
+def test_interleave_reference_result_order(interleave_harness):
+    data = np.arange(1, 1025, dtype=np.uint16)
+    expected = interleave_harness["_golden"](data, 8, 8)
+    # Independent explicit expectations catch a swapped result or a round-trip
+    # oracle that would let matching interleave/deinterleave bugs cancel out.
+    results = (
+        [1, 513, 2, 514, 3, 515, 4, 516],
+        [5, 517, 6, 518, 7, 519, 8, 520],
+        [1, 3, 5, 7, 513, 515, 517, 519],
+        [2, 4, 6, 8, 514, 516, 518, 520],
+    )
+    for offset, result in zip(interleave_harness["OFFSETS"], results):
+        np.testing.assert_array_equal(expected[offset : offset + 8], result)
+
+
+@pytest.mark.parametrize(
+    "dtype", ["INT8", "UINT8", "INT16", "UINT16", "INT32", "UINT32", "FP16", "BF16", "FP32"]
+)
+@pytest.mark.parametrize("lanes", [8, 64, 128, 256])
+def test_interleave_inputs_expose_ignored_mask_and_swapped_outputs(interleave_harness, dtype, lanes):
+    for repeat in range(2):
+        data = interleave_harness["_inputs"](dtype, repeat)
+        full = interleave_harness["_golden"](data, lanes, lanes)
+        partial = interleave_harness["_golden"](data, lanes, lanes // 2)
+        outputs = []
+        for offset in interleave_harness["OFFSETS"]:
+            output = full[offset : offset + lanes]
+            outputs.append(output)
+            assert np.any(output != partial[offset : offset + lanes])
+        assert not np.array_equal(outputs[0], outputs[1])
+        assert not np.array_equal(outputs[2], outputs[3])
 
 
 if __name__ == "__main__":
