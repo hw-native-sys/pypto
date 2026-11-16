@@ -947,7 +947,7 @@ def test_ccu_allgather_full_codegen(tmp_path, host, runtime, ranks):
     assert f"'parameter_size': {8 * (9 + 3 * ranks)}" in config
     assert "'parameter_alignment': 64" in config
     assert "request_count" not in config
-    assert "CCU_RUNTIME_SUPPORTED = False" in config
+    assert "CCU_RUNTIME_SUPPORTED = True" in config
     root = config_paths[0].parent
     wrapper = _sole_file(root / "kernels" / "aiv", "*allgather*.cpp").read_text()
     assert "get_async_ctx(args)" in wrapper
@@ -965,8 +965,8 @@ def test_ccu_allgather_full_codegen(tmp_path, host, runtime, ranks):
     assert (root / "ccu/allgather_schedule.hpp").is_file()
     assert f"constexpr uint32_t kRanks = {ranks}" in module
     assert "stable_output[rank].addr += words[3]" in module
-    assert "ccu::LocalCopy(local_[slot][rank], source_[slot], length_[slot], event, bit)" in module
-    assert "ccu::Write(binding_->channels[peer], remote_[slot][rank], source_[slot]," in module
+    assert "ccu::LocalCopy(local_[slot][peer], source_[slot], length_[slot], event, bit)" in module
+    assert "ccu::Write(binding_->channels[peer], remote_[slot][peer], source_[slot]," in module
     assert "CCU_IF(words[11 + 3 * slot] == peer)" in module
     assert "{{" not in wrapper + module
     orch = _sole_file(root / "orchestration", "*.cpp").read_text()
@@ -1009,9 +1009,9 @@ def test_ccu_allgather_generated_abi_and_data_path(tmp_path, native, ranks):
         output = "ccu/generated_module.inc"
         variables = {"entry_symbol": "pypto_ccu_allgather_test"}
         headers = (
+            "ccu_manifest_identity.h",
             "hcomm/ccu/ccu_primitives.hpp",
             "hcomm/ccu/ccu_res.h",
-            "platform_comm/ccu/ccu_native_abi.h",
         )
         fixture = "ccu_allgather_native_test.cpp"
     else:
@@ -1041,7 +1041,9 @@ def test_ccu_allgather_generated_abi_and_data_path(tmp_path, native, ranks):
             "-std=c++17",
             "-Wno-attributes",
             f"-DTEST_RANKS={ranks}",
-            "-DSIMPLER_CCU_DOMAIN_ABI_VERSION=2",
+            *([] if native else ["-DSIMPLER_CCU_ABI_VERSION=2"]),
+            "-I",
+            str(Path(__file__).resolve().parents[4] / "runtime/src/common"),
             "-I",
             str(tmp_path),
             "-I",

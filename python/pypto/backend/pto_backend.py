@@ -1756,13 +1756,8 @@ def _ccu_config(entries: list[_codegen_core.CcuModule]) -> str:
     return (
         "\n# Native CCU sources compiled and packaged by the runtime builder.\n"
         f"CCU_MODULES = {modules!r}\n"
-        "CCU_BUILD_IDENTITY = {\n"
-        "    'algorithm': 'sha256',\n"
-        "    'pypto_ccu_sdk_identity': 'hcomm/ccu/ccu_res.h',\n"
-        "    'pypto_ccu_isa_identity': 'pto/pto-inst.hpp',\n"
-        "}\n"
         "CCU_DOMAIN_ABI_VERSION = 2\n"
-        "CCU_RUNTIME_SUPPORTED = False  # Pending simpler domain binding/device ABI.\n"
+        "CCU_RUNTIME_SUPPORTED = True\n"
     )
 
 

@@ -572,10 +572,16 @@ def _compile_and_assemble_locked(
         kernel_config = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(kernel_config)
 
-    if getattr(kernel_config, "CCU_DOMAIN_ABI_VERSION", None) == 2:
-        raise NotImplementedError(
-            "CCU domain binding ABI v2 is codegen-only; simpler runtime integration is pending"
-        )
+    ccu_modules_config = getattr(kernel_config, "CCU_MODULES", [])
+    if ccu_modules_config:
+        if platform != "a5":
+            raise ValueError(f"Native CCU modules require a5, got {platform!r}")
+        abi_version = getattr(kernel_config, "CCU_DOMAIN_ABI_VERSION", None)
+        if abi_version != 2:
+            raise ValueError(f"Native CCU modules require domain ABI v2, got {abi_version!r}")
+        for index, module in enumerate(ccu_modules_config):
+            if type(module["ccu_id"]) is not int or module["ccu_id"] != index:
+                raise ValueError("CCU_MODULES must be ordered by contiguous callable-local ccu_id")
 
     kernels = kernel_config.KERNELS
     orchestration = kernel_config.ORCHESTRATION
@@ -699,9 +705,7 @@ def _compile_and_assemble_locked(
 
     # Native modules use callable-local IDs in the emitted package order.
     ccu_modules: list[bytes] = []
-    for index, module in enumerate(getattr(kernel_config, "CCU_MODULES", [])):
-        if module["ccu_id"] != index:
-            raise ValueError("CCU_MODULES must be ordered by contiguous callable-local ccu_id")
+    for module in ccu_modules_config:
         ccu_modules.append(compiler.compile_ccu(str(work_dir / module["source"])))
 
     # Assemble ChipCallable

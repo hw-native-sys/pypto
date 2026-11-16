@@ -72,6 +72,9 @@ class KernelCompiler:
         self._sanitizers = self._sanitizers or getattr(self.sdk, "_sanitizers", "")
         if self._sanitizers:
             self.sdk.host_gxx = GxxToolchain(prefer_g15=True)
+            self.sdk._sanitizers = self._sanitizers
+            if self.sdk.ccu is not None:
+                self.sdk.ccu.host_toolchain = self.sdk.host_gxx
         self.project_root = self.sdk.project_root
 
     def get_incore_include_dirs(self) -> list[str]:
@@ -261,45 +264,24 @@ class KernelCompiler:
             return binary
 
     def compile_ccu(self, source_path: str) -> bytes:
-        """Build a native CCU Host module using simpler's SDK identities.
-
-        Follow simpler's native-domain example until its CCU toolchain query
-        is available (simpler #3054). The module remains a complete Host ELF.
-        """
+        """Build a native Host ELF using Simpler's complete CCU build metadata."""
         if self.platform != "a5":
             raise ValueError(f"Native CCU modules require a5, got {self.platform!r}")
-        from simpler.ccu import ccu_sdk_root, runtime_build_identity  # noqa: PLC0415
-
         source = self._source_path(source_path)
-        sdk = ccu_sdk_root()
-        sdk_identity, isa_identity = runtime_build_identity()
+        inputs = self.sdk.ccu_compile_cache_token()
         with tempfile.TemporaryDirectory(prefix="pypto-ccu-") as directory:
             root = Path(directory)
-            identities = root / "build_identity.cpp"
-            identities.write_text(
-                "#include <cstdint>\n"
-                f"extern const uint8_t pypto_ccu_sdk_identity[32] = {{{','.join(map(str, sdk_identity))}}};\n"
-                f"extern const uint8_t pypto_ccu_isa_identity[32] = {{{','.join(map(str, isa_identity))}}};\n"
+            (root / "ccu_manifest_identity.h").write_text(
+                inputs["manifest_identity_header"], encoding="ascii"
             )
             output = root / "module.so"
             cmd = [
-                self.sdk.host_gxx.cxx_path,
-                *self.sdk.host_gxx.get_compile_flags(),
-                *self._sanitizer_flags(self.sdk.host_gxx),
+                inputs["cxx_path"],
+                *inputs["compile_flags"],
+                *self._include_flags([str(root), *inputs["include_dirs"]]),
                 str(compiler_visible_path(source)),
-                str(identities),
-                *self._include_flags(
-                    [
-                        str(self.project_root / "src/common"),
-                        str(sdk / "include"),
-                        str(sdk / "include/hccl"),
-                        str(sdk / "pkg_inc/hcomm/ccu"),
-                        str(sdk / "include/hcomm/ccu"),
-                    ]
-                ),
-                f"-L{sdk / 'lib64'}",
-                "-lasccomm_ccu",
-                "-lhcomm",
+                *inputs["link_flags"],
+                *inputs["library_paths"],
                 "-o",
                 str(output),
             ]

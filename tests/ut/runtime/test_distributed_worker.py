@@ -2362,6 +2362,17 @@ class _RecordingOrch:
 class TestSubmitChip:
     """``_submit_chip`` derives each dispatch's DFX dir; the runtime applies it."""
 
+    @pytest.mark.parametrize("dfx", [False, True])
+    @pytest.mark.parametrize("bindings", [[], [object(), object()]])
+    def test_forwards_ccu_bindings_to_selected_worker(self, tmp_path, dfx, bindings):
+        orch = _RecordingOrch()
+        submit = MagicMock(return_value="submitted")
+        orch.submit_next_level = submit
+        config = _SpyDfxConfig(output_prefix=str(tmp_path) if dfx else "")
+        assert _submit_chip(orch, "chip", "args", config, 1, ccu_bindings=bindings) == "submitted"
+        submit.assert_called_once_with("chip", "args", config, worker=1, ccu_bindings=bindings)
+        assert submit.call_args.kwargs["ccu_bindings"] is bindings
+
     def test_forwards_the_base_prefix_unchanged(self):
         orch = _RecordingOrch()
         cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")

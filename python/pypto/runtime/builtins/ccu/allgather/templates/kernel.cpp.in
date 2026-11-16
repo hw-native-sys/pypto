@@ -14,9 +14,9 @@
 #include <pto/pto-inst.hpp>
 #include "async_kernel_api.h"
 #include "tensor.h"
-// Draft domain-binding ABI: intentionally reject the legacy runtime headers.
-#if !defined(SIMPLER_CCU_DOMAIN_ABI_VERSION) || SIMPLER_CCU_DOMAIN_ABI_VERSION != 2
-#error "CCU domain binding requires simpler device ABI v2 (not implemented by the pinned runtime)"
+// Native registration and device submission share Simpler ABI v2.
+#if !defined(SIMPLER_CCU_ABI_VERSION) || SIMPLER_CCU_ABI_VERSION != 2
+#error "CCU domain binding requires simpler device ABI v2"
 #endif
 #define PYPTO_CCU_INLINE __aicore__ inline
 #include "../../ccu/allgather_schedule.hpp"

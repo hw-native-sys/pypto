@@ -1070,17 +1070,11 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     :func:`_resolve_chip_worker`. Resolution happens before the DFX namespacing
     so the artifacts land under the chip that actually ran the dispatch.
     """
-    if ccu_bindings:
-        # The pinned runtime does not provide coordinated CCU prepare/activation.
-        # Reject before submitting any rank, rather than blocking a collective.
-        raise NotImplementedError(
-            "CCU domain bindings are codegen-only until simpler provides coordinated "
-            "domain registration, CHIP submission and device ABI v2"
-        )
+    bindings = {"ccu_bindings": ccu_bindings} if ccu_bindings is not None else {}
     worker = _resolve_chip_worker(orch, worker)
     base = config.output_prefix
     if not base:
-        return orch.submit_next_level(callable_id, task_args, config, worker=worker)
+        return orch.submit_next_level(callable_id, task_args, config, worker=worker, **bindings)
     idx_map = getattr(orch, "_dfx_dispatch_idx", None)
     if idx_map is None:
         # Defensive: a caller that bypassed ``orch_fn`` (no reset) still gets
@@ -1089,7 +1083,7 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     rank_label = _dfx_rank_label(worker)
     k = idx_map.get(rank_label, 0)
     _record_dispatch_program(orch, callable_id, Path(f"{base}/{rank_label}/d{k}"))
-    handle = orch.submit_next_level(callable_id, task_args, config, worker=worker)
+    handle = orch.submit_next_level(callable_id, task_args, config, worker=worker, **bindings)
     # Advance only once the submit is accepted. A synchronous rejection creates
     # no capture, so counting it would leave every later marker one directory
     # ahead of the child's own numbering -- self-correcting when the counter was

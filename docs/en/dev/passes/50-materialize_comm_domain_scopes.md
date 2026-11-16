@@ -329,4 +329,4 @@ HOST dispatch `ccu_bindings` SSA references. Each registration carries the
 dispatch device and returns a local handle. All registrations precede the first
 task submission; rank loops retain their bodies and select handles at dispatch.
 Bindings must match the consumer device. It does not merge overlapping member sets. See [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather) for
-provenance, participant checks and the codegen-only runtime boundary.
+provenance, participant checks and the runtime integration contract.
