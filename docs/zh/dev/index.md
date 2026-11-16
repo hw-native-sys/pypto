@@ -423,7 +423,3 @@ CI 检查和冲突。工作流不要求批准前 head 与 base 保持最新。
 
 - [PTO ISA 参考](../reference/index.md) —— 后端所面向的硬件模型。
 - [运行时文档](https://www.pypto.ai/simpler/) —— 执行已编译程序的调度器。
-
-每 rank 一进程的 Path B 约定参见 [Gloo 与对称内存窗口](gloo-shmem-pathb.md)。
-
-- [Path B 入门：我们做了什么](gloo-shmem-pathb-introduction.md)

@@ -550,7 +550,3 @@ first clean review on a controlled PR and verify the review's commit ID and
 
 - [PTO ISA reference](../reference/index.md) — the hardware model the backend targets.
 - [Runtime documentation](https://www.pypto.ai/simpler/) — the scheduler that executes compiled programs.
-
-See [Gloo and symmetric-memory windows](gloo-shmem-pathb.md) for the single-process-per-rank Path B contract.
-
-- [Path B from scratch: what we built](gloo-shmem-pathb-introduction.md)
