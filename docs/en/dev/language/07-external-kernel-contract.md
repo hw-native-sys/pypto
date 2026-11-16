@@ -148,9 +148,9 @@ must implement a bridge that checks the complete manifest, lifetime-safe JIT
 binding, and the relevant compatibility regressions. In particular, resource and
 64-byte GM write-isolation requirements cannot be dropped when introducing the
 runtime path. Device completion, numerical and performance acceptance remain 34.7.
-The next runtime work must establish cache-line conflict serialization and
+The next runtime work must integrate batch cache-line ordering and
 validate compiler stack requirements and resource ownership, and connect the
-call adapter, binding checker and pairwise conflict checker to submission. The existing text-only ELF
+call adapter and ordered submission helper with validated runtime loading. The existing text-only ELF
 checks alone do not establish these guarantees.
 `test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
 when installed, the real public compiler export; it does not validate a binary.
@@ -223,7 +223,9 @@ into the JIT/runtime submission path remain required.
 owned `conflict_check.hpp` with both binding checkers. The two `PreparedKernel`
 records may have different signatures, dtypes and access effects. Their manifests
 must declare 64-byte `serialize_conflicting_cache_lines` GM isolation; missing or
-unknown policies are rejected. The generated symbol accepts two `CoreTaskArgs`
+unknown policies are rejected. The optional `within_group` field must equal
+`kernel_author_must_ensure`: synchronization within a cooperative kernel group
+remains the kernel author's obligation. The generated symbol accepts two `CoreTaskArgs`
 objects and returns whether this pair requires serialization.
 
 Both invocations are fully validated before the predicate returns, even when a
@@ -248,8 +250,42 @@ insufficient. Bindings must stay unchanged and their storage must stay alive
 until execution completes; changes require another check. A `false` result
 proves only this pair's GM non-conflict and says nothing about local resources,
 stack/loading requirements or completion visibility. Calls outside this protocol
-also require a dependency or isolation policy. Integration with TMR scheduling
-and the JIT remains follow-up work.
+also require a dependency or isolation policy. The batch helper below converts
+these predicates into TMR dependencies; JIT integration remains follow-up work.
+
+### CANNBotDSL ordered batch submission
+
+`pypto.backend.cannbotdsl_submit.build_ordered_submitter(prepared)` accepts a
+nonempty tuple of prepared kernels and produces an owned `ordered_submit.hpp`.
+Its generated function takes `std::array<CoreTaskArgs*, N>` and a synchronous
+callback `(size_t index, CoreTaskArgs& args) -> TaskId`, returning the submitted
+IDs in batch order. The callback must submit exactly the indexed prepared
+kernel, synchronously consume the provided arguments and dependencies, and
+return its fresh task ID. This helper does not load kernels or authorize their
+execution; the callback's runtime integration must establish those guarantees.
+
+Before the first callback, the helper validates every argument and existing
+dependency, checks every pair, and allocates dependency storage. Every
+conflicting earlier call contributes `DEP_WAIT`, including nonadjacent calls.
+Disjoint and read/read pairs add no edge. Existing dependencies keep their
+flags, including `DEP_RETAIN`; a matching edge gains `DEP_WAIT` without losing
+retention. A batch with outputs on lines A, B, A therefore adds first-to-third
+ordering while allowing the middle task to remain independent.
+
+The helper temporarily binds its dependency arrays to each `CoreTaskArgs` and
+disables early dispatch. Original dependency pointers, flags and the early
+setting are restored after each callback, including during exception unwinding.
+The callback must not retain these temporary pointers or mutate batch bindings.
+A failed/invalid or reused task ID stops subsequent submission. Already submitted
+tasks cannot be rolled back; a callback failure is not an atomic batch failure.
+
+All producers must remain referenceable in the same active TMR scope until
+consumers are submitted. Bindings must stay fixed and backing storage must
+survive execution. Every invocation recomputes conflicts; no address-dependent
+result is cached. The helper orders only this batch: other potentially concurrent
+calls need separate ordering or isolation. It does not prove intra-group safety,
+resource ownership, stack limits, binary loading or completion visibility, and
+is not yet connected to JIT discovery or `TMRBridge.lower`.
 
 ## Requests and prepared kernels
 

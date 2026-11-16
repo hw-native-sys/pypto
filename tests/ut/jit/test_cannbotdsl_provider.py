@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 from pypto.backend.cannbotdsl_abi import build_binding_checker, build_call_adapter, build_conflict_checker
+from pypto.backend.cannbotdsl_submit import build_ordered_submitter
 from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
 from pypto.jit.external.contracts import (
@@ -1411,6 +1412,315 @@ def test_conflict_checker_rejects_unknown_cache_line_policy(compiler, isolation,
     pair = (second, first) if side == "first" else (first, second)
     with pytest.raises(ContractError, match="64-byte GM cache-line isolation"):
         build_conflict_checker(*pair)
+
+
+def _run_ordered_submitter(artifact, tmp_path, body, *, prefix=""):
+    main = f"""
+{prefix}
+#include <cstring>
+[[noreturn]] void assert_impl(const char* condition, const char*, int) {{ throw condition; }}
+int main() {{
+    simpler::tmr::Tensor x[3]{{}}, out[3]{{}};
+    CoreTaskArgs args[3];
+    std::array<CoreTaskArgs*, 3> bindings{{&args[0], &args[1], &args[2]}};
+    for (unsigned i = 0; i < 3; ++i) {{
+        x[i].buffer = {{0x1000, 4096}}; x[i].ndims = 2; x[i].dtype = DataType::FLOAT32;
+        x[i].shapes[0] = x[i].shapes[1] = x[i].strides[0] = x[i].strides[1] = 1;
+        out[i] = x[i]; out[i].buffer.addr = 0x2000 + i * 4096;
+        args[i].add_input(x[i]); args[i].add_output(out[i]); args[i].add_scalar(1.0f);
+        args[i].set_allow_early_resolve(true);
+    }}
+    out[2].buffer.addr = 0x2004; // Nonadjacent writes share a line, not bytes.
+    unsigned calls = 0;
+    std::vector<TaskId> observed[3];
+    std::vector<DepFlags> flags[3];
+    auto submit = [&](size_t i, CoreTaskArgs& arg) {{
+        if (i != calls++ || &arg != &args[i] || arg.allow_early_resolve()) throw "submit contract";
+        for (uint32_t d = 0; d < arg.explicit_dep_count(); ++d) {{
+            observed[i].push_back(arg.explicit_dep(d));
+            flags[i].push_back(arg.explicit_dep_kind(d));
+        }}
+        return TaskId::make(0, 100 + int(i));
+    }};
+    auto run = [&]() {{ return {artifact.symbol}(bindings, submit); }};
+{body}
+}}
+"""
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True)
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, f"ordered submitter exited {result.returncode}: {result.stderr}"
+
+
+@pytest.mark.parametrize("scenario", ["nonadjacent", "chain", "all", "read_only", "empty", "offset"])
+def test_ordered_submitter_builds_complete_dependency_graph(compiler, tmp_path, scenario):
+    if scenario == "read_only":
+        compiler.manifest["parameters"][1]["access"] = "read"
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    artifact = build_ordered_submitter((prepared,) * 3)
+    setup, edges = {
+        "nonadjacent": ("", [(0, 2)]),
+        "chain": (
+            "x[1].buffer.addr = 0x2004; x[2].buffer.addr = 0x3004; out[2].buffer.addr = 0x4000;",
+            [(0, 1), (1, 2)],
+        ),
+        "all": ("out[1].buffer.addr = 0x2008;", [(0, 1), (0, 2), (1, 2)]),
+        "read_only": ("", []),
+        "empty": ("x[0].shapes[0] = out[0].shapes[0] = 0;", []),
+        "offset": ("out[2].start_offset = 15;", []),
+    }[scenario]
+    expected = []
+    for i in range(3):
+        preds = [j for j, target in edges if target == i]
+        expected.append(f"if (observed[{i}].size() != {len(preds)}) return 10;")
+        for d, j in enumerate(preds):
+            expected.append(f"if (observed[{i}][{d}] != ids[{j}] || flags[{i}][{d}] != DEP_WAIT) return 11;")
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        setup
+        + "\nauto ids = run();\n"
+        + "\n".join(expected)
+        + """
+    if (calls != 3) return 12;
+    for (auto& arg : args)
+        if (arg.explicit_dep_count() != 0 || !arg.allow_early_resolve()) return 13;
+    // No address/dependency cache: rebinding a later batch removes its edge.
+    out[0].buffer.addr = 0x5000; out[1].buffer.addr = 0x6000; out[2].buffer.addr = 0x7000;
+    calls = 0;
+    for (unsigned i = 0; i < 3; ++i) { observed[i].clear(); flags[i].clear(); }
+    run();
+    for (auto& deps : observed) if (!deps.empty()) return 14;
+    return 0;
+""",
+    )
+
+
+@pytest.mark.parametrize("explicit_kinds", [False, True])
+def test_ordered_submitter_preserves_and_merges_existing_dependencies(compiler, tmp_path, explicit_kinds):
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    artifact = build_ordered_submitter((prepared,) * 3)
+    binding = (
+        "args[2].set_dependencies_with_kinds(original, original_kinds, 2);"
+        if explicit_kinds
+        else "args[2].set_dependencies(original, 2);"
+    )
+    # A retain-only edge to the first task must gain WAIT rather than losing
+    # RETAIN or consuming a second slot. Plain dependencies default to both.
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        f"""
+    TaskId original[] = {{TaskId::make(0, 9), TaskId::make(0, 100)}};
+    DepFlags original_kinds[] = {{DEP_WAIT, DEP_RETAIN}};
+    {binding}
+    auto ids = run();
+    if (observed[2].size() != 2 || observed[2][0] != original[0] || observed[2][1] != ids[0]) return 1;
+    if (flags[2][0] != {"DEP_WAIT" if explicit_kinds else "(DEP_WAIT | DEP_RETAIN)"}) return 2;
+    if (flags[2][1] != (DEP_WAIT | DEP_RETAIN)) return 3;
+    if (args[2].explicit_deps_data() != original || args[2].explicit_dep_count() != 2) return 4;
+    if (args[2].explicit_dep_kinds_data() != {"original_kinds" if explicit_kinds else "nullptr"}) return 5;
+    if (!args[2].allow_early_resolve()) return 6;
+    return 0;
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid,diagnostic",
+    [
+        ("out[2].dtype = DataType::INT32;", "dtype"),
+        ("bindings[2] = nullptr;", "null arguments"),
+        ('args[2].set_error("invalid test binding");', "invalid arguments"),
+        ("args[2].set_dependencies(bad, 1);", "invalid dependency"),
+        ("args[2].set_dependencies_with_kinds(good, unknown, 1);", "unknown dependency flags"),
+    ],
+)
+def test_ordered_submitter_validates_entire_batch_before_submit(compiler, tmp_path, invalid, diagnostic):
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    artifact = build_ordered_submitter((prepared,) * 3)
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        f"""
+    TaskId bad[] = {{TaskId::invalid()}}, good[] = {{TaskId::make(0, 9)}};
+    DepFlags unknown[] = {{static_cast<DepFlags>(4)}};
+    {invalid}
+    try {{ run(); return 1; }} catch (const char* why) {{
+        if (!std::strstr(why, "{diagnostic}")) return 2;
+    }}
+    if (calls != 0 || args[0].explicit_dep_count() != 0 || !args[0].allow_early_resolve()) return 3;
+    return 0;
+""",
+    )
+
+
+@pytest.mark.parametrize("failure", ["invalid_id", "throw", "reused_id"])
+def test_ordered_submitter_stops_and_restores_after_submit_failure(compiler, tmp_path, failure):
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    artifact = build_ordered_submitter((prepared,) * 3)
+    failed = {
+        "invalid_id": "return TaskId::invalid();",
+        "throw": 'throw "callback failed";',
+        "reused_id": "return TaskId::make(0, 100);",
+    }[failure]
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        f"""
+    TaskId original[] = {{TaskId::make(0, 9)}};
+    args[1].set_dependencies(original, 1);
+    auto fail = [&](size_t i, CoreTaskArgs& arg) -> TaskId {{
+        auto id = submit(i, arg);
+        if (i == 1) {{ {failed} }}
+        return id;
+    }};
+    try {{ {artifact.symbol}(bindings, fail); return 1; }} catch (const char*) {{}}
+    if (calls != 2 || args[1].explicit_deps_data() != original || args[1].explicit_dep_count() != 1) return 2;
+    if (!args[1].allow_early_resolve() || args[2].explicit_dep_count() != 0) return 3;
+    return 0;
+""",
+    )
+
+
+def test_real_export_ordered_submitter_accepts_group_isolation(tmp_path):
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    @cb.kernel
+    def scaled(alpha, x, out):
+        for row in cb.range(x.shape[0]):
+            out[row, 0] = x[row, 0] * alpha
+
+    tensor = TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1))
+    request = replace(
+        _request(),
+        parameters=(_request().parameters[0], ParameterSpec("x", tensor), ParameterSpec("out", tensor)),
+    )
+    prepared = adapter.CANNBotDSLProvider().prepare(scaled, request)
+    artifact = build_ordered_submitter((prepared,) * 3)
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        """
+    auto ids = run();
+    return calls == 3 && observed[0].empty() && observed[1].empty() &&
+        observed[2].size() == 1 && observed[2][0] == ids[0] && flags[2][0] == DEP_WAIT ? 0 : 1;
+""",
+    )
+
+
+@pytest.mark.parametrize("policy", ["consumer_must_ensure", None, True])
+def test_conflict_checker_rejects_unknown_within_group_policy(compiler, policy):
+    compiler.manifest["resources"]["gm_write_isolation"]["within_group"] = policy
+    prepared = _prepare_call(compiler)
+    with pytest.raises(ContractError, match="64-byte GM cache-line isolation"):
+        build_ordered_submitter((prepared,))
+
+
+@pytest.mark.parametrize("prepared", [(), [], None])
+def test_ordered_submitter_requires_nonempty_kernel_tuple(prepared):
+    with pytest.raises(ContractError, match="nonempty tuple"):
+        build_ordered_submitter(prepared)
+
+
+def test_ordered_submitter_composes_owned_headers_for_different_kernels(compiler, tmp_path, monkeypatch):
+    tensor = TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1))
+    writer = _prepare_binding(compiler, tensor)
+    compiler.manifest["parameters"][1]["access"] = "read"
+    reader = _prepare_binding(compiler, tensor)
+    # Generation consumes the owned manifest, not the exporter's current state
+    # or installation. A batch can combine distinct logical access contracts.
+    shutil.rmtree(compiler.include)
+    monkeypatch.setitem(sys.modules, "cannbotdsl", None)
+    artifact = build_ordered_submitter((writer, reader, writer))
+    standalone = build_conflict_checker(writer, reader)
+    files = {f.path: f for f in (*artifact.files, *standalone.files)}
+    entry = files[artifact.entry]
+    content = entry.content + f'\n#include "{standalone.entry}"\n'.encode()
+    files[entry.path] = replace(entry, content=content, sha256=hashlib.sha256(content).hexdigest())
+    artifact = replace(artifact, files=tuple(files.values()))
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        """
+    out[1].buffer.addr = 0x2008;
+    auto ids = run();
+    if (!observed[0].empty() || observed[1].size() != 1 || observed[2].size() != 2) return 1;
+    if (observed[1][0] != ids[0] || observed[2][0] != ids[0] || observed[2][1] != ids[1]) return 2;
+    return 0;
+""",
+    )
+
+
+def test_ordered_submitter_singleton_still_validates_bindings(compiler, tmp_path):
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    artifact = build_ordered_submitter((prepared,))
+    main = f"""
+[[noreturn]] void assert_impl(const char* condition, const char*, int) {{ throw condition; }}
+int main() {{
+    simpler::tmr::Tensor x{{}}, out{{}};
+    x.buffer = {{0x1000, 4096}}; x.ndims = 2; x.dtype = DataType::FLOAT32;
+    x.shapes[0] = x.shapes[1] = x.strides[0] = x.strides[1] = 1;
+    out = x; out.buffer.addr = 0x2000;
+    CoreTaskArgs args;
+    args.add_input(x); args.add_output(out); args.add_scalar(1.0f);
+    std::array<CoreTaskArgs*, 1> bindings{{&args}};
+    unsigned calls = 0;
+    auto submit = [&](size_t, CoreTaskArgs& arg) {{
+        ++calls;
+        if (arg.explicit_dep_count() != 0) throw "unexpected dependency";
+        return TaskId::make(0, 7);
+    }};
+    auto ids = {artifact.symbol}(bindings, submit);
+    if (calls != 1 || ids[0] != TaskId::make(0, 7)) return 1;
+    out.buffer.size = 0;
+    try {{ {artifact.symbol}(bindings, submit); return 2; }} catch (const char*) {{}}
+    return calls == 1 ? 0 : 3;
+}}
+"""
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True)
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_ordered_submitter_uses_public_tmr_submit_api(compiler, tmp_path):
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    artifact = build_ordered_submitter((prepared,) * 3)
+    # Exercise the real public submit wrapper with an instrumented ops table.
+    # The test consumes actual TMR arguments without starting a device runtime.
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        f"""
+    static unsigned dispatches = 0;
+    RuntimeOps ops{{}};
+    ops.is_fatal = [](RuntimeContext*) {{ return false; }};
+    ops.submit_task = [](RuntimeContext*, const MixedKernels& kernels, const CoreTaskArgs& arg) {{
+        unsigned i = dispatches++;
+        if (kernels.aiv0_kernel_id != int(10 + i) || arg.allow_early_resolve()) throw "dispatch contract";
+        if (arg.explicit_dep_count() != (i == 2 ? 1U : 0U)) throw "dependency count";
+        if (i == 2 && (arg.explicit_dep(0) != TaskId::make(0, 100) ||
+                      arg.explicit_dep_kind(0) != DEP_WAIT)) throw "dependency kind";
+        TaskOutputTensors result;
+        result.set_task_id(TaskId::make(0, 100 + int(i)));
+        return result;
+    }};
+    RuntimeContext runtime{{&ops, ScopeMode::AUTO}};
+    test_runtime = &runtime;
+    auto ids = {artifact.symbol}(bindings, [](size_t i, CoreTaskArgs& arg) {{
+        return rt_submit_aiv_task(10 + int(i), arg).task_id();
+    }});
+    return dispatches == 3 && ids[2] == TaskId::make(0, 102) ? 0 : 1;
+""",
+        prefix="""
+#include "orchestration_api.h"
+RuntimeContext* test_runtime = nullptr;
+RuntimeContext* framework_current_runtime() { return test_runtime; }
+""",
+    )
 
 
 if __name__ == "__main__":
