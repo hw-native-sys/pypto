@@ -257,6 +257,16 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
            ", ub>");
       pointer = adjusted;
     }
+    const size_t base_index = indexed_read ? 3 : 4;
+    if (args.size() > base_index) {
+      // A scalar base shift is independent of the index element width. Keep
+      // the original index register and predicate unchanged for gather/scatter.
+      auto offset = GetExprAsCode(args[base_index]);
+      auto adjusted = NewNamedTemp("reg_indexed_offset_base");
+      Emit(adjusted + " = pto.addptr " + pointer + ", " + offset + " : <" + element + ", ub> -> <" + element +
+           ", ub>");
+      pointer = adjusted;
+    }
     // PTOAS >= 0.72 conservatively synchronizes unknown indexed footprints,
     // including aliased views and surrounding contiguous UB accesses.
     if (indexed_read) {
@@ -328,6 +338,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
   auto mull_type = [](const ir::RegTypePtr& type) {
     return "!pto.vmi.vreg<" + std::to_string(type->shape_) + "xi32>";
   };
+  const bool unmasked_interleave =
+      (ir::IsOp(call, "reg.intlv") || ir::IsOp(call, "reg.dintlv")) && args.size() == 2;
   std::string operands, types, attrs;
   for (const auto& arg : args) {
     if (!operands.empty()) {
@@ -358,6 +370,18 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     }
     operands += value;
     types += type;
+  }
+  if (unmasked_interleave) {
+    // VMI requires a predicate even for an all-active public call. Generate it
+    // locally and omit the result-clearing selects below: there are no inactive
+    // lanes, and the direct load/rearrangement chain remains fusible by PTOAS.
+    auto source = ir::As<ir::RegType>(args[0]->GetType());
+    auto mask_type =
+        GetRegTypeString(std::make_shared<ir::RegType>(source->shape_, DataType::BOOL, ir::RegKind::MaskReg));
+    auto mask = NewNamedTemp("interleave_all");
+    Emit(mask + " = pto.vmi.pset \"PAT_ALL\" : " + mask_type);
+    operands += ", " + mask;
+    types += ", " + mask_type;
   }
   if (ir::IsOp(call, "reg.full_mask")) operands = "\"PAT_ALL\"";
   if (ir::IsOp(call, "reg.create_group_mask")) {
@@ -450,7 +474,7 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
         names[i] = typed;
       }
     }
-    if (ir::IsOp(call, "reg.intlv") || ir::IsOp(call, "reg.dintlv")) {
+    if ((ir::IsOp(call, "reg.intlv") || ir::IsOp(call, "reg.dintlv")) && !unmasked_interleave) {
       // PTOAS 0.71 emits unmasked interleave instructions even with pmode=zero.
       // Enforce the public inactive-lane contract on both independent results.
       auto type = ir::As<ir::RegType>(tuple->types_[0]);

@@ -272,3 +272,48 @@ def test_group_mask_dynamic_count_and_invalid_geometry():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("write", [False, True])
+def test_indexed_scalar_base_offset(write):
+    src, m = tile(size=256), mask()
+    base = ir.Var("base", ir.ScalarType(DataType.INDEX), SPAN)
+    indices = vec(DataType.UINT32)
+    result = (
+        pl.reg.scatter(src, indices, vec(), m, base_offset=base)
+        if write
+        else pl.reg.gather(src, indices, m, base_offset=base)
+    ).unwrap()
+    assert isinstance(result, ir.Call)
+    assert result.args[-1] is base
+    effect = ir.get_reg_memory_effect(result)
+    # The scalar base is not the predicate. Indexed accesses still describe
+    # unknown intervals and must never establish contiguous initialization.
+    assert effect["mask"] is m
+    assert effect["begin"] is None and effect["end"] is None
+    for bad_base in [-1, 256, ir.Var("wrong", ir.ScalarType(DataType.INT32), SPAN)]:
+        with pytest.raises(ValueError, match="bounds|INDEX"):
+            if write:
+                pl.reg.scatter(src, indices, vec(), m, base_offset=bad_base)
+            else:
+                pl.reg.gather(src, indices, m, base_offset=bad_base)
+
+
+@pytest.mark.parametrize("base", [True, False])
+def test_indexed_base_rejects_boolean(base):
+    with pytest.raises(TypeError, match="not bool"):
+        pl.reg.gather(tile(), vec(DataType.UINT32), mask(), base_offset=base)
+    with pytest.raises(TypeError, match="not bool"):
+        pl.reg.scatter(tile(), vec(DataType.UINT32), vec(), mask(), base_offset=base)
+
+
+@pytest.mark.parametrize("name", ["intlv", "dintlv"])
+@pytest.mark.parametrize("dtype", [DataType.FP32, DataType.BF16])
+def test_unmasked_rearrangement_types(name, dtype):
+    first, second = getattr(pl.reg, name)(vec(dtype, 128), vec(dtype, 128))
+    assert first.unwrap().tuple is second.unwrap().tuple
+    assert len(first.unwrap().tuple.args) == 2
+    assert first.unwrap().type.dtype == dtype
+    assert first.unwrap().type.shape == 128
+    with pytest.raises(ValueError, match="lane shape"):
+        getattr(pl.reg, name)(vec(dtype, 128), vec(dtype, 64))

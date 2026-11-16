@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 numerical acceptance for all eighteen extended register operations.
+"""A5 numerical acceptance for extended registers, scalar bases and unmasked rearrangements.
 
 Build with --build OUTPUT in a task-submit --no-device job. Execute the saved
 artifacts with --worker OUTPUT DEVICE in a task-submit --device auto job, using
@@ -45,10 +45,14 @@ CASES = (
     "indexed_f32",
     "indexed_u32",
     "indexed_f16",
+    "indexed_base_f32",
+    "indexed_base_f16",
     "histogram128",
     "histogram256",
     "reinterpret",
     "mx_quant",
+    "unmasked_f32",
+    "unmasked_bf16",
 )
 FLOAT_OPS = ("expdif", "axpy", "mula", "lrelu", "prelu")
 INTEGER_OPS = ("mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv")
@@ -195,6 +199,47 @@ def _indexed_body(dtype):
     return body
 
 
+def _indexed_base_body(dtype):
+    """Compose scalar element bases with nonzero Tile view origins."""
+    index_dtype = pl.UINT16 if dtype == pl.FP16 else pl.UINT32
+
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], dtype],
+        out: pl.InOut[pl.Tensor[[1, 1024], dtype]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], dtype]:
+        loaded = pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec)
+        a = pl.reshape(pl.slice(loaded, [1, 224], [0, 32]), [224])
+        c = pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec)
+        destination = pl.reshape(pl.slice(c, [1, 256], [0, 32]), [256])
+        c = pl.reshape(c, [1024])
+        base = pl.cast(32 + n, pl.INDEX)
+        active = pl.cast(n, pl.INDEX)
+        with pl.reg_scope():
+            lane = pl.reg.index_gen(0, lanes=64, dtype=index_dtype)
+            full = pl.reg.full_mask(lanes=64)
+            scaled = pl.reg.shift_lefts(lane, 1, full)
+            last = pl.reg.broadcast(127, lanes=64, dtype=index_dtype)
+            offsets = pl.reg.sub(last, scaled, full)
+            mask = pl.reg.active_mask(active, lanes=64)
+            fixed = pl.reg.gather(a, offsets, mask, base_offset=16)
+            dynamic = pl.reg.gather(a, offsets, mask, base_offset=base)
+            updated = pl.reg.scatter(destination, offsets, fixed, mask, base_offset=16)
+            fixed_read = pl.reg.gather(updated, offsets, mask, base_offset=16)
+            updated = pl.reg.scatter(updated, offsets, dynamic, mask, base_offset=base)
+            dynamic_read = pl.reg.gather(updated, offsets, mask, base_offset=base)
+            c = pl.reg.store(c, offset=384, value=fixed)
+            c = pl.reg.store(c, offset=512, value=dynamic)
+            c = pl.reg.store(c, offset=640, value=fixed_read)
+            c = pl.reg.store(c, offset=768, value=dynamic_read)
+        c = pl.reshape(c, [1, 1024])
+        pl.store(c, [0, 0], out)
+        return out
+
+    return body
+
+
 def _mx_quant_body():
     """MX group scaling entirely in registers: grouped amax, broadcast, divide.
 
@@ -247,15 +292,51 @@ def _mx_quant_body():
     return body
 
 
+def _unmasked_body(dtype):
+    register_dtype = pl.BF16 if dtype == pl.UINT16 else pl.FP32
+
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], dtype],
+        out: pl.InOut[pl.Tensor[[1, 1024], dtype]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], dtype]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            first = pl.reg.load(a, lanes=128)
+            second = pl.reg.load(a, offset=128, lanes=128)
+            x = pl.reg.interpret_cast(first, dtype=register_dtype)
+            y = pl.reg.interpret_cast(second, dtype=register_dtype)
+            low, high = pl.reg.intlv(x, y)
+            even, odd = pl.reg.dintlv(x, y)
+            low_bits = pl.reg.interpret_cast(low, dtype=dtype)
+            high_bits = pl.reg.interpret_cast(high, dtype=dtype)
+            even_bits = pl.reg.interpret_cast(even, dtype=dtype)
+            odd_bits = pl.reg.interpret_cast(odd, dtype=dtype)
+            c = pl.reg.store(c, offset=64, value=low_bits)
+            c = pl.reg.store(c, offset=192, value=high_bits)
+            c = pl.reg.store(c, offset=448, value=even_bits)
+            c = pl.reg.store(c, offset=576, value=odd_bits)
+        c = pl.reshape(c, [1, 1024])
+        pl.store(c, [0, 0], out)
+        return out
+
+    return body
+
+
 def _program(case):
     dtype = {
         "integer_u32": pl.UINT32,
         "integer_i32": pl.INT32,
         "indexed_u32": pl.UINT32,
         "indexed_f16": pl.FP16,
+        "indexed_base_f32": pl.FP32,
+        "indexed_base_f16": pl.FP16,
         "histogram128": pl.UINT8,
         "histogram256": pl.UINT8,
         "reinterpret": pl.UINT32,
+        "unmasked_bf16": pl.UINT16,
     }.get(case, pl.FP32)
     output_dtype = pl.UINT16 if case.startswith("histogram") else dtype
     bins = 128 if case == "histogram128" else 256
@@ -296,6 +377,10 @@ def _program(case):
         body = _reinterpret_body()
     elif case == "mx_quant":
         body = _mx_quant_body()
+    elif case.startswith("unmasked_"):
+        body = _unmasked_body(dtype)
+    elif case.startswith("indexed_base_"):
+        body = _indexed_base_body(dtype)
     elif case.startswith("integer_"):
 
         @pl.jit.incore
@@ -399,6 +484,8 @@ def _build(output):
             if case == "reinterpret"
             else MX_OPS
             if case == "mx_quant"
+            else ("intlv", "dintlv")
+            if case.startswith("unmasked_")
             else ("gather", "scatter")
         )
         for op in ops:
@@ -427,6 +514,18 @@ def _build(output):
 
 
 def _inputs(case, repeat):
+    if case == "unmasked_bf16":
+        # Distinct finite BF16 bit patterns test lane ordering without rounding
+        # or NaN equality obscuring a misplaced payload. UINT16 transports the
+        # bits through NumPy; the kernel reinterprets them as BF16 registers.
+        bits = (0x3E00 + np.arange(256, dtype=np.uint16) * 13).astype(np.uint16)
+        bits[::3] |= np.uint16(0x8000)
+        return np.roll(bits, repeat * 37)
+    if case == "unmasked_f32":
+        return (np.arange(256, dtype=np.float32) * 0.25 - 31.75 + repeat * 0.125).astype(np.float32)
+    if case.startswith("indexed_base_"):
+        dtype = np.float16 if case.endswith("f16") else np.float32
+        return (np.arange(256) * 3 - 256 + repeat * 1024).astype(dtype)
     if case == "mx_quant":
         # Dyadic values, so every quotient below is exact and the golden stays
         # an equality check. The two groups have DIFFERENT maxima (8.0 and 1.0):
@@ -466,6 +565,8 @@ def _inputs(case, repeat):
 
 
 def _initial(case, data):
+    if case == "unmasked_bf16":
+        return np.full(1024, 0xA55A, dtype=np.uint16)
     if case.startswith("histogram"):
         initial = np.full(1024, 0xCCCC, dtype=np.uint16)
         bins = 128 if case == "histogram128" else 256
@@ -476,6 +577,26 @@ def _initial(case, data):
 
 def _golden(case, data, n):
     expected = _initial(case, data)
+    if case.startswith("unmasked_"):
+        x, y = data[:128], data[128:]
+        interleaved = np.column_stack((x, y)).reshape(-1)
+        expected[64:192] = interleaved[:128]
+        expected[192:320] = interleaved[128:]
+        expected[448:576] = data[::2]
+        expected[576:704] = data[1::2]
+        return expected
+    if case.startswith("indexed_base_"):
+        offsets = 127 - np.arange(64) * 2
+        fixed = 32 + 16 + offsets
+        dynamic = 32 + 32 + n + offsets
+        # Compare both shifted scatter regions, including overlapping writes,
+        # and every untouched guard element in the complete output allocation.
+        expected[fixed[:n]] = data[fixed[:n]]
+        expected[dynamic[:n]] = data[dynamic[:n]]
+        for start, indices in ((384, fixed), (512, dynamic), (640, fixed), (768, dynamic)):
+            expected[start : start + 64] = 0
+            expected[start : start + n] = data[indices[:n]]
+        return expected
     if case == "mx_quant":
         lane = np.arange(64)
         first_group = lane < 32

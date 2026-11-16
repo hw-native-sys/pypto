@@ -60,7 +60,8 @@ def kernel(
 | `pmode` | 非激活结果 lane 的处理策略。仅接受 `"zero"`，即非激活向量 lane 清零。 |
 
 签名中的 `*` 表示之后的参数只能按关键字传入。省略可选 mask 时所有 lane 参与。
-除转换、位重解释、直方图、归约、`expdif` 和字节 `gather` 外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
+除转换、位重解释、直方图、归约、`expdif` 和字节 `gather` 外，
+结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
 lane 广播。DSL 数值字面量会归一化为要求的 scalar dtype；整数参数不接受 Python
 `bool`。原始 IR 和 Builder 操作数必须已具有要求的 dtype。
 
@@ -277,7 +278,7 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 
 ## 扩展 VMI 操作
 
-以下 API 位于 `pl.reg`，发射对应的 `pto.vmi.v*` 操作。除 `mula` 的 mask 可选外，
+以下 API 位于 `pl.reg`，发射对应的 `pto.vmi.v*` 操作。除 `mula`、`intlv`、`dintlv` 的 mask 可选外，
 其余操作均要求执行掩码。算术 `pmode` 为 `"zero"`；进借位操作和 `scatter` 不暴露
 `pmode` 参数。除表中特别说明外，向量输入的 dtype、符号性和 lane 数必须一致。
 已有 Scalar SSA 不会被隐式转换；`axpy`/`lrelu` 的 Python 标量字面量按向量 dtype 归一化。
@@ -294,10 +295,10 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 | `subc(lhs, rhs, mask)` | `vsubc` | `(result, not_borrow)`；INT32/UINT32 |
 | `addcs(lhs, rhs, carry_in, mask)` | `vaddcs` | `lhs + rhs + carry_in` 的 `(result, carry_out)`；INT32/UINT32 |
 | `subcs(lhs, rhs, carry_in, mask)` | `vsubcs` | `lhs - rhs - (1 - carry_in)` 的 `(result, not_borrow_out)`；INT32/UINT32 |
-| `gather(tile, offsets, mask)` | `vgather` | 带掩码的索引 UB 读取；非活动结果 lane 为零 |
-| `scatter(tile, offsets, value, mask)` | `vscatter` | 带掩码的索引 UB 写入；返回目标 Tile 别名 |
-| `intlv(lhs, rhs, mask)` | `vintlv` | 交织后的 `(low, high)`；lane 数必须为偶数 |
-| `dintlv(lhs, rhs, mask)` | `vdintlv` | 解交织后的 `(even, odd)`；lane 数必须为偶数 |
+| `gather(tile, offsets, mask, base_offset=0)` | `vgather` | 带掩码的索引 UB 读取；非活动结果 lane 为零 |
+| `scatter(tile, offsets, value, mask, base_offset=0)` | `vscatter` | 带掩码的索引 UB 写入；返回目标 Tile 别名 |
+| `intlv(lhs, rhs, mask=None)` | `vintlv` | 交织后的 `(low, high)`；lane 数必须为偶数 |
+| `dintlv(lhs, rhs, mask=None)` | `vdintlv` | 解交织后的 `(even, odd)`；lane 数必须为偶数 |
 
 未知索引或动态读取不会关闭同一分配上已知静态读取的初始化检查；调用者仍需保证
 未知读取自身的安全。
@@ -392,3 +393,13 @@ PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费
 32 位元素（b32 掩码粒度）。字节和半字消费者（包括直方图）必须使用常量活动数量；
 其他动态粒度会被 PTOAS lowering 拒绝。VF helper 支持混合 Tile dtype：
 从同一 UB 基址派生对应类型的指针，偏移按各 Tile 自身的元素位宽计算。
+
+可选 `base_offset` 是以源/目标元素为单位的 INDEX 标量偏移，在应用无符号向量索引之前
+叠加到 Tile view 原点。它移动 UB 指针，不广播偏移或扩宽索引。
+调用方仍须保证动态活动地址的边界及初始化；非活动 lane 不访问内存。
+现有调用默认使用零基址偏移。
+
+`intlv` 和 `dintlv` 可省略 mask，表示所有 lane 均活动。
+显式 mask 仍保证非活动结果为零；省略 mask 无需额外的结果清零选择指令。
+相邻的两次 BF16 load 后接无 mask 的 `dintlv` 因此可降低为 A5 `DINTLV_B16`，
+后续 `convert` 自动选择所需 EVEN/ODD 部分。物理转换部分仍由后端决定。
