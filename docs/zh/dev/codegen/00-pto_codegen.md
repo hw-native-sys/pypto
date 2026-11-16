@@ -354,6 +354,12 @@ BF16 Vec tile。FP16 对应 `f32_f16`，FP32 对应 `no_convert`，`pre_relu=Fal
 PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位按传输类型计算大小，而不是按 FP32
 累加器计算；累加器本身保持 FP32，供其他消费者使用。
 
+显式 AIC/AIV Fixpipe kernel 分别使用 `@pl.jit.incore(level=pl.Level.AIC)` 和
+`@pl.jit.incore(level=pl.Level.AIV)`，由
+`@pl.jit.incore(level=pl.Level.CORE_GROUP)` 包装函数共同调用，再通过 `@pl.jit` 入口启动。
+每个端点显式返回输出张量。`tests/st/runtime/ops/test_c2v_fixpipe.py` 中的系统测试通过这条
+JIT 路径编译并执行标量/向量量化、环形槽位复用、嵌套流水线和 NZ2NZ 转发。
+
 **说明：**
 
 - Push 操作使用带类型 tile buffer 的 `ins()` 子句；前端 Pop 操作生成 SSA 结果，并带 `-> !pto.tile_buf<...>` 结果类型
