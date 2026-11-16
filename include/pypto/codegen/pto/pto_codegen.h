@@ -1214,6 +1214,9 @@ class PTOCodegen : public CodegenBase {
     /// RegScope pre-scanning uses this provenance when an external alias is
     /// defined before the scope and therefore is outside its statement tree.
     std::map<const ir::Var*, ir::VarPtr> tile_aliases;
+    /// C2V values and zero-copy reshapes, keyed by identity. Their UB addresses
+    /// come from the pipe at runtime, rather than general-pool MemRef offsets.
+    std::map<const ir::Var*, ir::VarPtr> c2v_tile_roots;
     std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
         memref_to_tile_type;  ///< keyed by base_ Ptr
 
@@ -1365,6 +1368,7 @@ class PTOCodegen : public CodegenBase {
       memref_to_mlir.clear();
       var_to_memref.clear();
       tile_aliases.clear();
+      c2v_tile_roots.clear();
       memref_to_tile_type.clear();
 
       emitted_numeric_constants.clear();

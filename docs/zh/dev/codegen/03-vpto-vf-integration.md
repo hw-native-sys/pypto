@@ -30,6 +30,8 @@ flowchart TD
 `generate_bundle()`，把 helper 写入 `vpto/<kernel>/`，并生成记录符号、参数类型、
 effects 与偏移的 manifest。`kernel_config.py` 通过 `vpto_sources` 关联这些路径。
 多个显式作用域生成多个 helper，最终链接进同一个 kernel。
+一个 AIC/AIV 配对可以共用 grouped caller 模块；仅 AIV 镜像链接 VF helper。
+双 AIV 调度在两个硬件 lane 上运行同一份 AIV 镜像。
 
 Bundle 将 helper 产物与调用入口分开记录。`helpers` 中每个产物只保存一次；
 沿用的 `VFHelper` 类型也通过 `kind="simt"` 承载 SIMT helper。
@@ -46,6 +48,11 @@ Helper 发射复用 `PTOCodegen` 的寄存器操作 lowering。UB 指针对应�
 MemRef 基址；VMI 发射器为每次访问加上 Tile view 的元素起点，且只加一次。
 不同静态分配 view 的捕获项通过一个公共 UB 基址和常量位移重建，使独立编译后的
 helper 仍保留访问重叠关系。
+
+C2V 接收 Tile 使用独立的运行时指针，每次调用从当前 popped Tile 提取地址。
+零拷贝 reshape、valid-shape view 与 store 别名共用该捕获项。存储仍归 pipe
+所有，访问必须在对应 free 之前完成。静态局部捕获项继续共用基址；
+C2V 支持不意味着允许任意参数传入的 UB 指针。
 
 Tile 参数及其派生 view 会被拒绝：它们的运行时 UB 指针关系不能通过局部
 分配的规划偏移确定。
@@ -103,14 +110,14 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helpe
 | 目标 | A5、AIV、ONBOARD、PyPTO Tile 内存规划器 |
 | 分组 | 独立 AIV，或包含一个 AIC 函数和一个 AIV 函数的 mixed Group；同一个 AIV 函数可以在一个或两个 vector lane 上执行 |
 | 作用域 | 寄存器操作和最多四层嵌套的规范硬件循环 |
-| 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；不同 Tile dtype 共用 UB 基址 |
+| 内存 | 寄存器读写和索引访存；静态规划的不同 dtype Tile 共用 UB 基址，C2V Tile 携带运行时指针 |
 | 别名 | 公共 UB 基址、静态 view 位移、store SSA 别名 |
 | Mask 与标量 | 运行时 mask 与受支持的标量捕获 |
 | 打包 | 源码 artifact 迁移、包含 helper 标识的二进制缓存 |
 
-Mixed Group 的 VF 捕获项必须指向静态规划的局部 UB 分配。
-C2V 接收之后的 cast/copy 可以物化这样的分配；仅对 FIFO 接收结果做 reshape 并不会。
-直接捕获 FIFO 缓冲区、参数支持的 Tile、未分组 peer、更广泛的 Group 组合、
+Mixed Group 的 VF 捕获项可以指向静态规划的局部 UB 分配，
+也可以指向已跟踪的 C2V 接收 Tile 及其零拷贝 view。
+参数支持的 Tile、未分组 peer、更广泛的 Group 组合、
 grouped SIMT、设备对象的 CPU 模拟执行、Bridge 调用及一般 helper 控制流仍不受支持。
 访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
 具体 dtype、mask 与索引访存契约见[寄存器操作参考](../language/06-register-operations.md)。
@@ -137,8 +144,10 @@ def mixed_reg(a: pl.Tensor[[32, 32], pl.BF16],
 
 `tests/st/runtime/vpto/test_mixed_reg_onboard.py` 覆盖这条路径，以及包含两个 helper
 的 split-AIV 变体。测试检查完整输出数值、未修改区域、AIC 符号隔离、AIV 链接、
-缓存命中、helper 内容变更失效和产物迁移。直接 FIFO 捕获还需要单独验证存储生命周期
-和操作完成条件，本次支持范围不包含它。
+缓存命中、helper 内容变更失效和产物迁移。
+`tests/st/runtime/vpto/test_mixed_reg_scope_onboard.py` 检查直接 C2V 捕获、
+store 返回别名，以及八次持久化 dispatch 中每次三轮迭代的槽位复用，
+对两个 AIV lane 的完整输出执行精确比较。
 
 ## Required hardware loops
 

@@ -2977,6 +2977,17 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   if (TryEmitRegCall(call, op->var_)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
+  if (ir::IsOp(call, "tile.tpop_from_aic")) {
+    fs_.c2v_tile_roots[op->var_.get()] = op->var_;
+  } else if (ir::IsOp(call, "tile.reshape") || ir::IsOp(call, "tile.set_validshape")) {
+    if (!call->args_.empty()) {
+      if (auto source = AsVarLike(call->args_[0])) {
+        if (auto found = fs_.c2v_tile_roots.find(source.get()); found != fs_.c2v_tile_roots.end()) {
+          fs_.c2v_tile_roots[op->var_.get()] = found->second;
+        }
+      }
+    }
+  }
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
@@ -3124,6 +3135,9 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // Keep this provenance even for emit_tile_addr_ codegen. RegScope may
       // occur later in the function and needs to canonicalize this alias.
       fs_.tile_aliases[op->var_.get()] = rhs_var;
+      if (auto found = fs_.c2v_tile_roots.find(rhs_var.get()); found != fs_.c2v_tile_roots.end()) {
+        fs_.c2v_tile_roots[op->var_.get()] = found->second;
+      }
     }
     if (ir::AsTensorTypeLike(op->var_->GetType())) {
       const std::string view = TryGetTensorView(rhs_var);

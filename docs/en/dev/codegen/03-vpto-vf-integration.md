@@ -51,6 +51,11 @@ pointers denote planned MemRef bases; the VMI emitter adds each Tile view's
 element origin exactly once. Captures from different statically allocated
 views are reconstructed from one common UB base with constant displacements.
 This retains overlap information across the separate compilation boundary.
+Tiles received through C2V use separate runtime pointers extracted from the
+popped Tile on each call. Zero-copy reshape/valid-shape views and store aliases
+share that capture. Their storage remains owned by the pipe, and access must
+finish before the corresponding free. Planned local captures retain their
+common base; arbitrary parameter-backed pointers are not enabled by C2V support.
 Tile parameters and their derived views are rejected: their runtime UB pointers
 cannot be related using the planner offsets assigned to local allocations.
 
@@ -113,14 +118,13 @@ is position independent; helpers still have to obey the device-call ABI.
 | Target | A5, AIV, ONBOARD, PyPTO Tile memory planner |
 | Grouping | Standalone AIV or a mixed Group with one AIC function and one AIV function; the AIV may execute on one or both vector lanes |
 | Scope | Register operations and canonical hardware loops nested up to four levels |
-| Memory | Register loads/stores and indexed accesses supported by the frontend and PTOAS; mixed Tile dtypes share one UB base |
+| Memory | Register loads/stores and indexed accesses; planned mixed-dtype Tiles share one UB base, C2V Tiles carry runtime pointers |
 | Aliasing | Common UB base, static view displacements and store SSA aliases |
 | Masks and scalars | Runtime masks and supported scalar captures |
 | Packaging | Source artifact relocation, helper-aware binary cache |
 
-Mixed Group VF captures must refer to statically planned local UB allocations.
-A cast/copy after a C2V receive can materialize such an allocation; reshaping a
-FIFO receive does not. Direct FIFO-backed captures, parameter-backed Tiles,
+Mixed Group VF captures may refer to statically planned local UB allocations
+or tracked C2V receives and their zero-copy views. Parameter-backed Tiles,
 ungrouped peers, broader Group layouts, grouped SIMT, CPU simulation of device
 objects, Bridge calls and general helper control flow remain unsupported.
 Memory-mode and alignment constraints are checked by the
@@ -152,8 +156,10 @@ def mixed_reg(a: pl.Tensor[[32, 32], pl.BF16],
 `tests/st/runtime/vpto/test_mixed_reg_onboard.py` covers this path and a split-AIV
 variant with two helpers. It checks full-output numerics, untouched regions,
 AIC symbol isolation, AIV linking, cache hits, helper-content invalidation and
-artifact relocation. Direct FIFO capture requires separate storage-lifetime
-and completion validation and is not enabled by this support.
+artifact relocation. `tests/st/runtime/vpto/test_mixed_reg_scope_onboard.py`
+checks direct C2V capture, returned store aliases and slot reuse through three
+iterations in each of eight persistent dispatches, using exact full-output
+comparisons on both AIV lanes.
 
 ## Required hardware loops
 

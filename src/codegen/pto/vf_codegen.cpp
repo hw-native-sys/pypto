@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -116,7 +117,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   // Collapse SSA store versions to their existing caller view. Memoization
   // bounds chained stores to O(N log N); identity, never names, identifies views.
   std::map<const ir::Var*, ir::VarPtr> roots;
-  auto resolve = [&](ir::VarPtr var) {
+  auto resolve_view = [&](ir::VarPtr var) {
     std::vector<ir::VarPtr> path;
     std::set<const ir::Var*> seen;
     while (operands.aliases.count(var.get()) || fs_.tile_aliases.count(var.get())) {
@@ -132,6 +133,11 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     for (const auto& item : path) roots[item.get()] = var;
     return var;
   };
+  auto resolve = [&](const ir::VarPtr& var) {
+    auto view = resolve_view(var);
+    auto found = fs_.c2v_tile_roots.find(view.get());
+    return found == fs_.c2v_tile_roots.end() ? view : found->second;
+  };
 
   PTOCodegen helper(backend_);
   helper.emit_source_loc_ = emit_source_loc_;
@@ -146,7 +152,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   std::map<const ir::Var*, size_t> captures;
   std::vector<int64_t> origins;
   std::vector<ir::TileTypePtr> capture_tiles;
-  size_t base_index = 0;
+  std::optional<size_t> base_index;
   // Memory captures precede scalar captures, both in deterministic first-use
   // order. Keep Tile operands at the call site so PTOAS can relate the helper's
   // effects to surrounding transfers and aliases. Only the adapter extracts UB
@@ -155,6 +161,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     auto target = ir::AsVarLike(call->args_[0]);
     CHECK_SPAN(target, call->span_) << "VF memory capture requires an external Tile variable";
     auto root = resolve(target);
+    const bool c2v_capture = fs_.c2v_tile_roots.count(root.get()) != 0;
     auto tile = ir::As<ir::TileType>(root->GetType());
     INTERNAL_CHECK_SPAN(tile, call->span_) << "VF memory capture must have Tile type";
     // Incoming Tile pointers have independent runtime addresses. Their MemRef
@@ -163,16 +170,16 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
         << "VF shared-base captures do not support parameter-backed Tiles or their views";
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
-    // FIFO receives and their views have runtime bases. Diagnose this storage
-    // limitation before memory-effect analysis reports an unknown access range.
-    CHECK_SPAN(tile->memref_.has_value(), call->span_)
-        << "VF captures require statically planned local UB; FIFO-backed Tiles are not supported";
+    // Only tracked C2V receives may borrow a runtime UB base. Other captures
+    // must retain the statically planned local-storage contract.
+    CHECK_SPAN(c2v_capture || tile->memref_.has_value(), call->span_)
+        << "VF captures require statically planned local UB or a tracked C2V Tile";
     // Check every access, including later uses of an already captured Tile.
     // Loop offsets need not be static. Preserve capture provenance, but leave
     // loop access ranges and synchronization to the caller and PTOAS respectively.
     auto effect = ir::GetRegMemoryEffect(call);
-    CHECK_SPAN(effect.root && (effect.begin || !operands.loops.empty() || IsOp(call, "reg.gather") ||
-                               IsOp(call, "reg.scatter")),
+    CHECK_SPAN((effect.root || c2v_capture) && (effect.begin || !operands.loops.empty() ||
+                                                IsOp(call, "reg.gather") || IsOp(call, "reg.scatter")),
                call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
@@ -183,11 +190,16 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       // Including that view origin here would apply it twice. Do not infer
       // disjointness from Var identity: reused allocations can also alias.
       auto origin = tile->memref_ ? ir::As<ir::ConstInt>((*tile->memref_)->byte_offset_) : nullptr;
-      CHECK_SPAN(origin && origin->value_ >= 0, call->span_)
+      CHECK_SPAN(c2v_capture || (origin && origin->value_ >= 0), call->span_)
           << "Cannot prove register offset bounds or static VF capture address";
-      origins.push_back(origin->value_);
+      // A received pipe slot has no fixed general-pool address. Pass its Tile
+      // handle through the adapter so each iteration extracts the actual slot.
+      // Planned captures still share one symbolic UB base for alias analysis.
+      origins.push_back(c2v_capture ? -1 : origin->value_);
       capture_tiles.push_back(tile);
-      if (origins.back() < origins[base_index]) base_index = origins.size() - 1;
+      if (!c2v_capture && (!base_index || origins.back() < origins[*base_index])) {
+        base_index = origins.size() - 1;
+      }
       arguments.push_back(GetExprAsCode(root));
       artifact.caller_parameter_types.push_back(GetExprTypeAnnotation(root));
       artifact.parameter_effects.emplace_back("read");
@@ -202,21 +214,33 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   }
   std::vector<std::string> addresses;
   if (!capture_tiles.empty()) {
-    const auto dtype = capture_tiles[base_index]->dtype_;
+    const auto dtype = capture_tiles[base_index.value_or(0)]->dtype_;
     const auto element_bytes = static_cast<int64_t>(dtype.GetByte());
     INTERNAL_CHECK_SPAN(element_bytes > 0, scope->span_)
         << "VF capture element must have a positive byte size";
     // VMI memory operands carry signedness, unlike ordinary signless Tiles.
     const auto element = dtype.IsSignedInt() ? "si" + std::to_string(dtype.GetBit()) : GetTypeString(dtype);
-    artifact.parameter_types.push_back("!pto.ptr<" + element + ", ub>");
-    artifact.parameter_indices.push_back(base_index);
-    helper.fs_.used_ssa_names.insert("arg0");
+    if (base_index) {
+      artifact.parameter_types.push_back("!pto.ptr<" + element + ", ub>");
+      artifact.parameter_indices.push_back(*base_index);
+      helper.fs_.used_ssa_names.insert("arg0");
+    }
     for (size_t i = 0; i < origins.size(); ++i) {
-      const int64_t relative = origins[i] - origins[base_index];
-      artifact.capture_byte_offsets.push_back(relative);
       const auto target_dtype = capture_tiles[i]->dtype_;
       const auto target_element = target_dtype.IsSignedInt() ? "si" + std::to_string(target_dtype.GetBit())
                                                              : GetTypeString(target_dtype);
+      if (origins[i] < 0) {
+        const auto name = "arg" + std::to_string(artifact.parameter_types.size());
+        helper.fs_.used_ssa_names.insert(name);
+        artifact.parameter_types.push_back("!pto.ptr<" + target_element + ", ub>");
+        artifact.parameter_indices.push_back(i);
+        artifact.capture_byte_offsets.push_back(0);
+        addresses.push_back("%" + name);
+        continue;
+      }
+      INTERNAL_CHECK_SPAN(base_index.has_value(), scope->span_) << "Planned VF capture has no shared base";
+      const int64_t relative = origins[i] - origins[*base_index];
+      artifact.capture_byte_offsets.push_back(relative);
       const auto target_bytes = static_cast<int64_t>(target_dtype.GetByte());
       INTERNAL_CHECK_SPAN(target_bytes > 0, scope->span_)
           << "VF capture element must have a positive byte size";
@@ -297,9 +321,14 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   // caller boundary, not VF-internal UB hazards. Kernel-tail sync stays enabled.
   Emit("func.call @" + artifact.adapter_symbol + "(" + values + ") : (" + types + ") -> ()");
   for (const auto& [raw, source] : operands.aliases) {
-    const auto root = resolve(source);
+    // Keep the caller's view type when returning a store alias. The VF capture
+    // may use its original popped Tile, whose rank differs from this view.
+    const auto view = resolve_view(source);
+    const auto root = resolve(view);
     const auto& result = operands.references.at(raw);
-    BindVarToMlir(result, GetExprAsCode(root));
+    BindVarToMlir(result, GetExprAsCode(view));
+    fs_.tile_aliases[result.get()] = view;
+    if (fs_.c2v_tile_roots.count(root.get())) fs_.c2v_tile_roots[result.get()] = root;
     const auto ctx = GetCommCtxSSAFor(root.get());
     if (!ctx.empty()) RegisterCommCtxFor(result, ctx);
   }

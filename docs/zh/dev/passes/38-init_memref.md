@@ -53,6 +53,7 @@ program_with_memrefs = init_pass(program)
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
+   - **Pipe 持有的 tile**：tpop 结果、零拷贝 view 及 `reg.store`/`reg.scatter` 等写回别名保持无 MemRef；存储归通信 pipe 所有
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
 6. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象

@@ -53,6 +53,7 @@ program_with_memrefs = init_pass(program)
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
+   - **Pipe-owned tiles**: tpop results, zero-copy views and writeback aliases such as `reg.store`/`reg.scatter` remain MemRef-less; their storage belongs to the communication pipe
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
 6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR

@@ -14,6 +14,7 @@ import re
 import subprocess
 from contextlib import ExitStack, nullcontext
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import pto_backend
@@ -64,6 +65,51 @@ def compile_vf_bundle(bundle, tmp_path):
         )
         assert result.returncode == 0, f"{path}\n{source}\n{result.stderr}"
         assert output.is_file() and output.stat().st_size > 0
+
+
+@pytest.mark.ptoas_compile
+def test_c2v_capture_uses_runtime_address_and_preserves_store_view(tmp_path):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def mixed(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.BF16],
+            rhs: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ):
+            a = pl.tile.load(lhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b = pl.tile.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(a, b)
+            raw = pl.tile.move(
+                acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+            )
+            flat = pl.reshape(raw, [256])
+            extra = pl.tile.full([256], dtype=pl.FP32, value=1.0)
+            with pl.reg_scope():
+                x = pl.reg.load(flat, 0, lanes=64)
+                y = pl.reg.load(extra, 0, lanes=64)
+                x = pl.reg.add(x, y)
+                stored = pl.reg.store(flat, 0, x)
+            restored = pl.reshape(stored, [16, 16])
+            out = pl.tile.store(restored, [0, 0], out)
+            return out
+
+    with passes.PassContext([]):
+        program = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default).run_passes(Program)
+    program = ir.Program(
+        [f for f in program.functions.values() if ir.is_incore_type(f.func_type)], "C2V", SPAN
+    )
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    consumer = bundle.caller_source.split("func.func @mixed_aiv", 1)[1].split("func.func", 1)[0]
+    assert consumer.count("pto.alloc_tile") == 1
+    assert bundle.caller_source.index("pto.tstore") < bundle.caller_source.index("pto.tfree_from_aic")
+    compile_vf_bundle(bundle, tmp_path)
+    helper = bundle.helpers[0]
+    assert len(helper.parameter_types) == 2
+    assert helper.parameter_effects == ["readwrite", "read"]
+    assert bundle.caller_source.count("pto.tile_buf_addr") == 2
+    assert "pto.vmi.vload" in helper.source and "pto.vmi.vstore" in helper.source
 
 
 @pytest.mark.ptoas_compile
