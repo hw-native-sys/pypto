@@ -92,6 +92,14 @@ std::string EmitPartitionViewPTO(const std::string& name_hint, const std::string
 std::string EmitFlatOffsetSSAFromValues(const std::vector<std::string>& indices,
                                         const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen,
                                         const std::string& name_hint);
+/// Format resolved native operands only: no IR lookup, allocation or view repair.
+/// Attributes such as TCVT rounding belong inside ins, before the type list.
+/// Empty annotations retain the legacy untyped-operand spelling.
+std::string FormatInsOutsClause(const std::vector<std::pair<std::string, std::string>>& inputs,
+                                const std::vector<std::pair<std::string, std::string>>& outputs,
+                                const std::string& input_attributes = "");
+/// Precision attributes belong after outs, unlike conversion/compare attributes.
+std::string FormatPrecisionAttribute(std::string_view attribute_kind);
 std::string GenerateInsOutsClause(const ir::CallPtr& op, codegen::PTOCodegen& codegen,
                                   const std::string& config_attr = "");
 bool HasStaticValidShape(const std::shared_ptr<const ir::TileType>& tile_type);

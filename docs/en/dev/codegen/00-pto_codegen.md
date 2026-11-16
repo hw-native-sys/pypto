@@ -143,6 +143,21 @@ destination as the first input, as PTOAS requires. `buffer.extract` renders as
 `pto.textract` with `index` offsets, and a Mat to Left/Right `buffer.copy` as
 `pto.tmov`.
 
+### Shared native emission
+
+Tile and Buffer resolve operands separately, then share
+`pto_ops_detail::FormatInsOutsClause` for explicit SSA/type pairs and ordered
+outputs. Conversion/compare attributes go inside `ins`; `FormatPrecisionAttribute`
+places precision selectors after `outs`. Neither formatter discovers storage,
+constructs views, allocates scratch or changes operand types. Tile callbacks
+still resolve those decisions first; Buffer operands arrive already explicit.
+
+`GetPtoElementwiseSpec` supplies common elementwise instruction and precision
+attribute names to both paths. It is emission metadata, not a support registry:
+target, dtype, layout, aliasing and default-selection checks remain separate.
+Adding a native spelling does not enable a new Buffer form. Other operator
+families retain their specialized emitters.
+
 ### Class Structure
 
 **Header**: `include/pypto/codegen/pto/pto_codegen.h`

@@ -574,26 +574,19 @@ std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inpu
 std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,
                                             const std::vector<ir::ExprPtr>& destinations,
                                             const std::string& attributes) {
-  std::ostringstream clause;
-  clause << "ins(";
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprAsCode(inputs[i]);
-  }
-  // TCVT/TCMP put configuration inside ins, before its type annotations.
-  clause << attributes << " : ";
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprTypeAnnotation(inputs[i]);
-  }
-  clause << ") outs(";
-  for (size_t i = 0; i < destinations.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprAsCode(destinations[i]);
-  }
-  clause << " : ";
-  for (size_t i = 0; i < destinations.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprTypeAnnotation(destinations[i]);
-  }
-  clause << ")";
-  return clause.str();
+  const auto resolve = [this](const std::vector<ir::ExprPtr>& operands) {
+    std::vector<std::pair<std::string, std::string>> values;
+    values.reserve(operands.size());
+    for (const auto& operand : operands) values.emplace_back(GetExprAsCode(operand), "");
+    for (size_t i = 0; i < operands.size(); ++i) {
+      values[i].second = GetExprTypeAnnotation(operands[i]);
+    }
+    return values;
+  };
+  // Resolve the two lists in order; formatting cannot discover or repair storage.
+  const auto ins = resolve(inputs);
+  const auto outs = resolve(destinations);
+  return backend::pto_ops_detail::FormatInsOutsClause(ins, outs, attributes);
 }
 
 bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& result) {
@@ -720,10 +713,10 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     using K = backend::BufferConversionKind;
     if (conversion->kind == K::Cast) {
       const auto mode = call->GetKwarg<int>("mode", 0);
-      attributes = " {rmode = #pto<round_mode " + backend::pto_ops_detail::round_modes.at(mode) +
+      attributes = "{rmode = #pto<round_mode " + backend::pto_ops_detail::round_modes.at(mode) +
                    ">, satmode = #pto<saturation_mode OFF>}";
     } else if (conversion->kind == K::Compare || conversion->kind == K::CompareScalar) {
-      attributes = " {cmpMode = #pto<cmp " +
+      attributes = "{cmpMode = #pto<cmp " +
                    backend::pto_ops_detail::cmp_modes.at(call->GetKwarg<int>("cmp_type")) + ">}";
     }
     Emit(std::string(conversion->native_op) + " " +
@@ -759,9 +752,8 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
                 call->args_.back());
     if (recipe && recipe->precision != backend::BufferPrecisionKind::None &&
         call->GetKwarg<bool>("high_precision", false)) {
-      line << " {precisionType = #pto<" << backend::BufferPrecisionAttributeName(recipe->precision)
-           << (recipe->precision == backend::BufferPrecisionKind::Div ? " diff_compensation>}"
-                                                                      : " high_precision>}");
+      line << backend::pto_ops_detail::FormatPrecisionAttribute(
+          backend::BufferPrecisionAttributeName(recipe->precision));
       // Report the logical op, not `recipe->buffer_op`: the user wrote
       // `tile.div`, and lowering it through Buffer IR must not change what the
       // diagnostic names.

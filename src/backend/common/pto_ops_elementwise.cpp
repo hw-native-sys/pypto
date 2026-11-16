@@ -29,6 +29,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/pto_native_ops.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -433,10 +434,7 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   const bool high_precision = op->GetKwarg<bool>("high_precision", false);
   std::string code = pto_op_name + " " + GenerateInsOutsClause(op, codegen);
   if (high_precision) {
-    code += " {precisionType = #pto<";
-    code += attr_kind;
-    // PTOAS 0.70 names the former division HighPrecision selector DiffCompensation.
-    code += ir::IsOp(op, "tile.div") ? " diff_compensation>}" : " high_precision>}";
+    code += pto_ops_detail::FormatPrecisionAttribute(attr_kind);
     codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
   }
   codegen.Emit(code);
@@ -899,7 +897,7 @@ static std::string MakePreluCodegenPTO(const CallPtr& op, codegen::CodegenBase& 
 
 struct SimpleOpEntry {
   const char* op_name;
-  const char* pto_op_name;
+  const char* pto_op_name;  ///< nullptr uses the shared elementwise native specification.
   size_t arity;
   std::optional<size_t> i32_operand_idx = std::nullopt;
 };
@@ -907,9 +905,9 @@ struct SimpleOpEntry {
 // clang-format off
 static const SimpleOpEntry kSimpleOps[] = {
     // Tile x Tile arithmetic operations
-    {"tile.add",             "pto.tadd",             2},
-    {"tile.sub",             "pto.tsub",             2},
-    {"tile.mul",             "pto.tmul",             2},
+    {"tile.add",             nullptr,                  2},
+    {"tile.sub",             nullptr,                  2},
+    {"tile.mul",             nullptr,                  2},
     // Tile x Tile partial-combine operations
     {"tile.part_add",        "pto.tpartadd",         2},
     {"tile.part_mul",        "pto.tpartmul",         2},
@@ -922,32 +920,32 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.shl",             "pto.tshl",             2},
     {"tile.shr",             "pto.tshr",             2},
     // Tile x Tile comparison/selection operations
-    {"tile.maximum",         "pto.tmax",             2},
-    {"tile.minimum",         "pto.tmin",             2},
+    {"tile.maximum",         nullptr,                  2},
+    {"tile.minimum",         nullptr,                  2},
     // Unary operations
-    {"tile.abs",             "pto.tabs",             1},
-    {"tile.exp",             "pto.texp",             1},
-    {"tile.sqrt",            "pto.tsqrt",            1},
+    {"tile.abs",             nullptr,                  1},
+    {"tile.exp",             nullptr,                  1},
+    {"tile.sqrt",            nullptr,                  1},
     // tile.rsqrt is registered with a custom codegen handler below (supports 1 or 2 args).
-    {"tile.neg",             "pto.tneg",             1},
+    {"tile.neg",             nullptr,                  1},
     {"tile.not",             "pto.tnot",             1},
-    {"tile.relu",            "pto.trelu",            1},
+    {"tile.relu",            nullptr,                  1},
     // Ternary operations (tile x tile + carry/select)
     {"tile.addc",            "pto.taddc",            3},
     {"tile.subc",            "pto.tsubc",            3},
     // Tile x Scalar operations
-    {"tile.adds",            "pto.tadds",            2},
-    {"tile.subs",            "pto.tsubs",            2},
-    {"tile.muls",            "pto.tmuls",            2},
-    {"tile.divs",            "pto.tdivs",            2},
+    {"tile.adds",            nullptr,                  2},
+    {"tile.subs",            nullptr,                  2},
+    {"tile.muls",            nullptr,                  2},
+    {"tile.divs",            nullptr,                  2},
     {"tile.ands",            "pto.tands",            2},
     {"tile.ors",             "pto.tors",             2},
     {"tile.xors",            "pto.txors",            3},  // src0, scalar, tmp
     {"tile.shls",            "pto.tshls",            2, 1},
     {"tile.shrs",            "pto.tshrs",            2, 1},
-    {"tile.maximums",        "pto.tmaxs",            2},
-    {"tile.minimums",        "pto.tmins",            2},
-    {"tile.lrelu",           "pto.tlrelu",           2},
+    {"tile.maximums",        nullptr,                  2},
+    {"tile.minimums",        nullptr,                  2},
+    {"tile.lrelu",           nullptr,                  2},
     // Ternary scalar operations (tile x scalar + carry/select)
     {"tile.addsc",           "pto.taddsc",           3},
     {"tile.subsc",           "pto.tsubsc",           3},
@@ -1014,7 +1012,8 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // Register simple N-ary ops
   for (const auto& entry : kSimpleOps) {
     if (!ShouldRegister(exclude_ops, entry.op_name)) continue;
-    std::string pto_op = entry.pto_op_name;
+    std::string pto_op =
+        entry.pto_op_name ? entry.pto_op_name : GetPtoElementwiseSpec(entry.op_name).native_op;
     size_t arity = entry.arity;
     std::optional<size_t> i32_operand_idx = entry.i32_operand_idx;
     auto reg_entry = backend.RegisterOp(entry.op_name);
@@ -1031,7 +1030,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
 
   struct RemainderOpEntry {
     const char* op_name;
-    const char* pto_op_name;
+    const char* pto_op_name;  ///< nullptr uses the shared elementwise native specification.
     size_t arity;
     const char* precision_attr_kind;
   };
@@ -1097,22 +1096,19 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return std::string("");
   });
 
-  auto register_precision_op = [&](const char* op_name, const char* pto_op_name, size_t arity,
-                                   const char* attr_kind) {
-    if (!ShouldRegister(exclude_ops, op_name)) return;
+  for (const char* op_name : {"tile.div", "tile.log", "tile.recip"}) {
+    if (!ShouldRegister(exclude_ops, op_name)) continue;
+    const auto spec = GetPtoElementwiseSpec(op_name);
+    const size_t arity = std::string_view(op_name) == "tile.div" ? 2 : 1;
     auto reg_entry = backend.RegisterOp(op_name);
-    reg_entry.f_codegen([pto_op = std::string(pto_op_name), arity, attr_kind = std::string(attr_kind)](
-                            const CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakePrecisionCodegenPTO(pto_op, arity, attr_kind.c_str(), op, codegen);
+    reg_entry.f_codegen([spec, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakePrecisionCodegenPTO(spec.native_op, arity, spec.precision_attribute, op, codegen);
     });
     for (size_t i = 0; i < arity; ++i) {
       reg_entry.set_input_layout(i, ir::TileLayout::row_major);
     }
     reg_entry.set_output_layout(ir::TileLayout::row_major);
-  };
-  register_precision_op("tile.div", "pto.tdiv", 2, "div_precision");
-  register_precision_op("tile.log", "pto.tlog", 1, "log_precision");
-  register_precision_op("tile.recip", "pto.trecip", 1, "recip_precision");
+  }
 
   // tile.row_expand_add follows the PTOAS overloads with and without tmp.
   // Its row-sensitive layout contract is validated by the IR op: the generic
@@ -1272,7 +1268,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   if (ShouldRegister(exclude_ops, "tile.full")) {
     backend.RegisterOp("tile.full")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeFullCodegenPTO("pto.texpands", op, codegen);
+          return MakeFullCodegenPTO(GetPtoElementwiseSpec("tile.full").native_op, op, codegen);
         })
         .set_output_layout(ir::TileLayout::row_major);
   }
