@@ -40,8 +40,37 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 测试在正式合入前使用 GitHub 生成的 PR 与集成分支的临时合并版本，完整测试任务与 main 相同。
 纯文档 PR 也运行核心测试；文档示例和 serving guard 保留按变更路径判断的运行条件。
 结果直接显示在 PR Checks 中；必需测试失败或被跳过时，`full-pr-result` 会失败，
-无需评论 `/ci full`。评论命令和 push 触发的完整 CI 仍仅支持 main。
+无需评论 `/ci full`。`/ci full` 命令和 push 触发的完整 CI 仍仅支持 main。
 手动运行 `CI Full` 时，输入留空即可测试选定分支。
+
+### 仅运行 A5 分布式测试
+
+对于以 `integration/urma-ccu-test` 为目标且处于打开状态的 PR，在对话区新发评论：
+
+```text
+/ci a5-distributed
+```
+
+任何能够评论的人均可触发，包括 fork 贡献者。整条评论必须只有该命令（允许首尾空白）；
+编辑旧评论不会触发，其他目标分支会被拒绝。
+`CI A5 Distributed` 仅运行工具链准备和 `onboard-tests-a5-distributed`，
+包含双卡 Host-domain 和四卡 URMA 测试。它不等待 lint、不应用纯文档豁免，也不重新运行完整测试。
+
+控制器固定当前集成分支 base、PR head 和 GitHub 临时合并版本；存在冲突或等待合并信息刷新时
+版本发生变化都会被拒绝。结果以 `ci/a5-distributed` 显示在 PR head 上，并链接到日志和产物。
+依赖任务失败、取消或跳过均不能产生成功结果。此检查独立于 `ci/full` 和 `full-pr-result`，
+集成分支原有的自动完整 CI 保持不变。新提交需要新评论才能重新运行此独立检查。
+同一 PR 的请求排队执行，互不取消。校验失败时查看 `CI A5 Distributed` 的 `changes` 任务。
+
+**部署：** 必须将 `.github/workflows/ci-a5-distributed.yml`、
+`.github/scripts/ci_a5_distributed.py` 及其导入的 `ci_control.py` 安装到仓库默认分支（`main`）。
+GitHub 从默认分支加载 `issue_comment` 工作流，因此仅放在集成分支上不会生效。
+控制器和组合 action 从受信任的工作流 SHA 检出；设备任务只有读取权限。
+生成器及其 pre-commit hook 也需同步到 main：修改完整工作流中的分布式任务后，执行
+`python tests/lint/generate_ci_a5_distributed.py --write` 同步独立工作流。
+pre-commit 会检查生成文件是否过期。
+
+### main PR 的完整 CI
 
 下文的评论触发流程适用于以 main 为目标的 PR。
 

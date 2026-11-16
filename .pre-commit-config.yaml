@@ -78,6 +78,14 @@ repos:
           language_version: python3
           pass_filenames: false
 
+        - id: check-ci-a5-distributed-workflow
+          name: check-ci-a5-distributed-workflow
+          entry: python tests/lint/generate_ci_a5_distributed.py
+          language: python
+          language_version: python3
+          pass_filenames: false
+          files: ^(\.github/workflows/ci-(full|a5-distributed)\.yml|tests/lint/generate_ci_(lint|a5_distributed)\.py)$
+
         - id: check-op-name-literals
           name: check-op-name-literals
           entry: python tests/lint/check_op_name_literals.py

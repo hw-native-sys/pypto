@@ -44,8 +44,45 @@ integration branch before merging, with the same full test jobs as main. Even
 docs-only PRs run the core tests; docs examples and the serving guard retain their
 path-based conditions. Results appear directly in PR Checks, and `full-pr-result`
 fails when a required test fails or is skipped. No `/ci full` comment is needed.
-The comment command and push-triggered full CI still support only main. Manual
+The `/ci full` command and push-triggered full CI still support only main. Manual
 `CI Full` runs with empty inputs test the selected branch.
+
+### Run only A5 distributed tests
+
+For an open PR targeting `integration/urma-ccu-test`, add a new conversation comment:
+
+```text
+/ci a5-distributed
+```
+
+Anyone who can comment may request this run, including fork contributors. The
+command must be the entire comment (surrounding whitespace is allowed); editing
+an old comment does not trigger it. Other target branches are rejected.
+`CI A5 Distributed` runs only toolchain setup and `onboard-tests-a5-distributed`,
+including the two-card Host-domain and four-card URMA tests. It does not wait for
+lint, apply the docs-only exemption, or restart the full suite.
+
+The controller freezes the current integration base, PR head and GitHub test
+merge, and rejects conflicts or revisions that change while the merge refreshes.
+Results appear as `ci/a5-distributed` on the PR head, with a link to logs and
+artifacts. Failed, cancelled or skipped dependencies cannot produce success.
+This check is independent of `ci/full` and `full-pr-result`; the automatic full
+integration CI still runs as before. A new commit needs a new comment to rerun
+this independent check. Requests for the same PR queue without cancelling each
+other. If validation fails, inspect the `changes` job in `CI A5 Distributed`.
+
+**Deployment:** install `.github/workflows/ci-a5-distributed.yml`,
+`.github/scripts/ci_a5_distributed.py` and its `ci_control.py` import on the
+repository's default branch (`main`). GitHub loads `issue_comment` workflows
+from the default branch, so installing these only on the integration branch
+will not activate the command. The controller and composite actions are checked
+out at the trusted workflow SHA; device jobs receive only read permissions.
+Also carry the generator and its pre-commit hook to main: after changing the
+full workflow's distributed job, run
+`python tests/lint/generate_ci_a5_distributed.py --write` to synchronize the
+independent workflow. Pre-commit rejects generated-file drift.
+
+### Full CI for main PRs
 
 The following comment-triggered workflow applies to PRs targeting main.
 

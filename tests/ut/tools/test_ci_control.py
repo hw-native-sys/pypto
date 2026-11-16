@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2647,6 +2648,187 @@ def test_duplicate_scan_includes_legacy_and_current_full_only(control, monkeypat
     )
     point = datetime(2026, 11, 5, tzinfo=timezone.utc)
     assert control.unfinished_request_exists(REPO, title, point, point) == (path in control.FULL_WORKFLOWS)
+
+
+@pytest.fixture
+def a5_control(monkeypatch, controller):
+    monkeypatch.setitem(sys.modules, "ci_control", controller)
+    spec = importlib.util.spec_from_file_location(
+        "ci_a5_distributed", ROOT / ".github/scripts/ci_a5_distributed.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("GITHUB_RUN_ID", "1234")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    return module
+
+
+@pytest.fixture
+def a5_request(a5_control, monkeypatch, pr, event):
+    pr["base"]["ref"] = a5_control.BRANCH
+    event["comment"]["body"] = a5_control.COMMAND
+    writes, outputs = [], {}
+
+    def api(path, payload=None, **kwargs):
+        if payload is not None:
+            writes.append((path, payload, kwargs))
+            return {"id": 987}
+        if path == f"repos/{REPO}/pulls/123":
+            return copy.deepcopy(pr)
+        if path == f"repos/{REPO}/git/ref/heads/{a5_control.BRANCH}":
+            return {"ref": f"refs/heads/{a5_control.BRANCH}", "object": {"type": "commit", "sha": BASE}}
+        if path == f"repos/{REPO}/git/commits/{MERGE}":
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+        pytest.fail(f"Unexpected API: {path}")
+
+    monkeypatch.setattr(a5_control, "api", api)
+    monkeypatch.setattr(a5_control, "output", outputs.update)
+    return pr, event, writes, outputs
+
+
+def test_a5_command_pins_merge_and_creates_independent_check(a5_control, a5_request):
+    _, event, writes, outputs = a5_request
+    # External/fork commenters have the same admission policy as /ci full.
+    event["comment"]["body"] = "  /ci a5-distributed\n"
+    a5_control.prepare(REPO, event)
+    assert outputs == {"checkout_sha": MERGE, "check_id": "987"}
+    assert len(writes) == 1
+    path, payload, _ = writes[0]
+    assert path == f"repos/{REPO}/check-runs"
+    assert payload["name"] == "ci/a5-distributed"
+    assert payload["head_sha"] == HEAD
+    assert payload["status"] == "in_progress"
+    assert payload["details_url"].endswith("/runs/1234/attempts/1")
+
+
+@pytest.mark.parametrize("case", ["suffix", "full", "edited", "issue"])
+def test_a5_ignores_unrelated_comments(a5_control, a5_request, monkeypatch, case):
+    _, event, writes, outputs = a5_request
+    if case == "suffix":
+        event["comment"]["body"] += " extra"
+    elif case == "full":
+        event["comment"]["body"] = "/ci full"
+    elif case == "edited":
+        event["action"] = "edited"
+    else:
+        del event["issue"]["pull_request"]
+    monkeypatch.setattr(a5_control, "api", lambda *a: pytest.fail("Ignored comments must not read or write"))
+    a5_control.prepare(REPO, event)
+    assert not writes and not outputs
+
+
+@pytest.mark.parametrize("case", ["main", "closed", "repo", "deleted-fork", "conflict", "sha"])
+def test_a5_rejects_invalid_pr_before_writes(a5_control, a5_request, case):
+    pr, event, writes, outputs = a5_request
+    if case == "main":
+        pr["base"]["ref"] = "main"
+    elif case == "closed":
+        pr["state"] = "closed"
+    elif case == "repo":
+        pr["base"]["repo"]["full_name"] = "different/repo"
+    elif case == "deleted-fork":
+        pr["head"]["repo"] = None
+    elif case == "conflict":
+        pr["mergeable"] = False
+    else:
+        pr["head"]["sha"] = "invalid"
+    with pytest.raises(ValueError):
+        a5_control.prepare(REPO, event)
+    assert not writes and not outputs
+
+
+@pytest.mark.parametrize("case", ["recovers", "head-changed", "base-changed", "timeout", "api-failure"])
+def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch, case):
+    pr, event, writes, outputs = a5_request
+    api = a5_control.api
+    elapsed = [0]
+    monkeypatch.setattr(
+        a5_control,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+        ),
+    )
+
+    def delayed_api(path, payload=None, **kwargs):
+        result = api(path, payload, **kwargs)
+        if payload is not None:
+            return result
+        if path.endswith(f"/git/commits/{MERGE}"):
+            if case == "api-failure":
+                raise RuntimeError("API unavailable")
+            if not elapsed[0] or case == "timeout":
+                result["parents"][0]["sha"] = "d" * 40
+        if elapsed[0] and case == "head-changed" and path.endswith("/pulls/123"):
+            result["head"]["sha"] = "e" * 40
+        if elapsed[0] and case == "base-changed" and "/git/ref/" in path:
+            result["object"]["sha"] = "f" * 40
+        return result
+
+    monkeypatch.setattr(a5_control, "api", delayed_api)
+    if case == "recovers":
+        a5_control.prepare(REPO, event)
+        assert elapsed[0] == 5
+        assert outputs["checkout_sha"] == MERGE
+    else:
+        with pytest.raises((ValueError, RuntimeError)):
+            a5_control.prepare(REPO, event)
+        assert not writes and not outputs
+        assert elapsed[0] <= 60
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "skipped", "cancelled"])
+@pytest.mark.parametrize("job", ["changes", "toolchain", "onboard-tests-a5-distributed"])
+def test_a5_result_requires_every_dependency(a5_control, monkeypatch, result, job):
+    needs: dict[str, Any] = {name: {"result": "success"} for name in ("changes", "toolchain", a5_control.JOB)}
+    needs["changes"]["outputs"] = {"check_id": "987"}
+    needs[job]["result"] = result
+    writes = []
+    monkeypatch.setattr(a5_control, "api", lambda *args, **kwargs: writes.append((args, kwargs)))
+    if result == "success":
+        a5_control.finish(REPO, needs)
+    else:
+        with pytest.raises(ValueError, match="did not pass"):
+            a5_control.finish(REPO, needs)
+    (path, payload), kwargs = writes[0]
+    assert path == f"repos/{REPO}/check-runs/987"
+    assert kwargs == {"method": "PATCH"}
+    assert payload["status"] == "completed"
+    assert payload["conclusion"] == ("success" if result == "success" else "failure")
+
+
+def test_a5_workflow_is_independent_and_reuses_full_device_steps(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "tests/lint"))
+    generator = importlib.import_module("generate_ci_a5_distributed")
+
+    source = (ROOT / ".github/workflows/ci-full.yml").read_text()
+    target = (ROOT / ".github/workflows/ci-a5-distributed.yml").read_text()
+    assert generator.render(source) == target
+    full = yaml.safe_load(source)["jobs"]
+    workflow = yaml.safe_load(target)
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"changes", "toolchain", "onboard-tests-a5-distributed", "result"}
+    assert set(workflow[True]) == {"issue_comment"}
+    assert "github.event.issue.number" in workflow["run-name"]
+    assert "contains(" in jobs["changes"]["if"]
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+    assert workflow["permissions"] == {}
+    for name in ("toolchain", "onboard-tests-a5-distributed"):
+        assert jobs[name]["steps"] == full[name]["steps"]
+        assert jobs[name]["permissions"] == {"contents": "read"}
+        assert "checkout_sha != ''" in jobs[name]["if"]
+    assert jobs["onboard-tests-a5-distributed"]["needs"] == ["changes", "toolchain"]
+    assert (
+        jobs["onboard-tests-a5-distributed"]["timeout-minutes"]
+        == full["onboard-tests-a5-distributed"]["timeout-minutes"]
+    )
+    for name in ("changes", "result"):
+        checkout = jobs[name]["steps"][0]["with"]
+        assert checkout["ref"] == "${{ github.workflow_sha }}"
+        assert checkout["persist-credentials"] is False
+    assert jobs["result"]["if"].startswith("always()")
+    assert set(jobs["result"]["needs"]) == {"changes", "toolchain", "onboard-tests-a5-distributed"}
 
 
 if __name__ == "__main__":
