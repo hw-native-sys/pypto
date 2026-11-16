@@ -113,6 +113,12 @@ class VerificationLevel(Enum):
     BASIC = ...
     ROUNDTRIP = ...
 
+class AutoSyncStrategy(Enum):
+    """PTOAS automatic synchronization policy. BUFID requires A5."""
+
+    EVENT = 0
+    BUFID = 1
+
 class MemoryPlanner(Enum):
     """Selects who plans on-chip buffer memory."""
 
@@ -306,6 +312,7 @@ class PassContext:
         enable_buffer_ir: bool = True,
         enable_software_pipeline: bool = False,
         report_hardware_loops: bool = False,
+        sync_strategy: AutoSyncStrategy = AutoSyncStrategy.EVENT,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -318,6 +325,8 @@ class PassContext:
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
         ``kernel_config.py``. Passes that legalize runtime-specific IR read it
         from the context.
+
+        ``sync_strategy`` selects EVENT (default) or BUFID (A5 only).
 
         ``enable_buffer_ir`` defaults to true and selects supported whole kernels
         for Buffer IR. Unsupported kernels retain Tile; false selects Tile for all.
@@ -349,6 +358,10 @@ class PassContext:
 
     def get_backend(self) -> Backend:
         """Return the configured backend; raise ValueError when none is configured."""
+        ...
+
+    def get_sync_strategy(self) -> AutoSyncStrategy:
+        """Get the PTOAS synchronization policy (EVENT by default)."""
         ...
 
     def get_memory_planner(self) -> MemoryPlanner:
@@ -1107,6 +1120,7 @@ __all__ = [
     "IRPropertySet",
     "VerificationMode",
     "VerificationLevel",
+    "AutoSyncStrategy",
     "MemoryPlanner",
     "DiagnosticPhase",
     "DiagnosticCheck",

@@ -15,7 +15,8 @@ from types import ModuleType, SimpleNamespace
 
 import pypto.language as pl
 import pytest
-from pypto.jit.__main__ import main, stat, warm
+from pypto import passes
+from pypto.jit.__main__ import _run_config, main, stat, warm
 
 
 @pytest.fixture
@@ -115,6 +116,17 @@ def test_stat_never_executes_payload_or_creates_root(tmp_path):
     )
     assert stat(root)["payload_bytes"] == 42
     assert not list(root.rglob("__pycache__"))
+
+
+@pytest.mark.parametrize("strategy", ["EVENT", "BUFID"])
+def test_warmup_sync_policy_is_an_explicit_enum(tmp_path, strategy):
+    config = _run_config({"sync_strategy": strategy}, None, tmp_path)
+    assert config.sync_strategy == passes.AutoSyncStrategy.__members__[strategy]
+
+
+def test_warmup_rejects_unknown_sync_policy(tmp_path):
+    with pytest.raises(ValueError, match="Invalid run_config.sync_strategy"):
+        _run_config({"sync_strategy": "unified"}, None, tmp_path)
 
 
 if __name__ == "__main__":

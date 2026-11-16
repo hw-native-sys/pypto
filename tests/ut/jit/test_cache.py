@@ -174,6 +174,7 @@ class TestMakeCacheKey:
             ("enable_pypto_l0c_double_buffer", False),
             ("dep_layouts", ()),
             ("runtime", "tensormap_and_ringbuffer"),
+            ("sync_strategy", "event"),
             ("enable_buffer_ir", False),
             ("buffer_ir_version", 0),
             ("gather_compare_scratch_version", 2),

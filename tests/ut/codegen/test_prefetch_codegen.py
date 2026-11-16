@@ -291,7 +291,7 @@ class TestPrefetchBackendArtifact:
         monkeypatch.setattr(
             pto_backend,
             "_compile_pto_module",
-            lambda _pto_code, _module_name, _output_dir, _memory_planner=None: (
+            lambda _pto_code, _module_name, _output_dir, _memory_planner=None, **_kwargs: (
                 'extern "C" __global__ AICORE void test_func() {}\n'
             ),
         )

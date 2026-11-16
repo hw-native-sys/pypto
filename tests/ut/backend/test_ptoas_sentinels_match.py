@@ -10,8 +10,8 @@
 """Regression guards binding ``pto_rebuild`` to ``pto_backend`` invariants.
 
 The rebuild path in ``pypto.runtime.debug.pto_rebuild`` deliberately holds
-local copies of the wrapper sentinel literals and base ptoas flag list while
-sharing the lightweight body-preprocessing helper with the main backend.
+local copies of the wrapper sentinel literals and legacy event fallback flags,
+while sharing replay metadata validation and body preprocessing with the backend.
 These tests catch silent drift if either side evolves.
 """
 
@@ -68,29 +68,14 @@ def test_preprocess_matches_pto_backend() -> None:
     )
 
 
-def test_base_ptoas_flags_subset_of_backend_flags() -> None:
-    """The rebuild path uses base flags only (no backend-handler extras).
-
-    Both ``pto_rebuild._ptoas_flags`` and ``pto_backend._get_ptoas_flags`` pick
-    the ``--pto-level`` from the memory planner (rebuild infers it from the
-    ``.pto`` content; a fresh compile from ``memory_planner``), so the drift
-    guard checks that every distinct token the rebuild path can emit — across
-    both a level3 (``addr =`` present) and level2 (absent) ``.pto`` — still
-    appears in ``_get_ptoas_flags``'s source. Source-level check avoids needing
-    a configured backend in this test.
-    """
-    src = inspect.getsource(pto_backend._get_ptoas_flags)
-    # Union of tokens the rebuild path emits for both level3 and level2 inputs.
-    rebuild_flags = {
-        tok
-        for content in ("qk = pto.alloc_tile addr = %c0 : ...", "qk = pto.alloc_tile : ...")
-        for flag in pto_rebuild._ptoas_flags(content)
-        for tok in flag.replace("--pto-level=", "").split()
-    }
-    missing = [tok for tok in rebuild_flags if repr(tok) not in src and tok not in src]
-    assert not missing, (
-        f"pto_rebuild base flag tokens {missing!r} no longer found in pto_backend._get_ptoas_flags source."
-    )
+def test_base_ptoas_flags_match_backend(monkeypatch) -> None:
+    handler = SimpleNamespace(get_extra_ptoas_flags=lambda: [])
+    monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
+    for planner, content in [
+        (MemoryPlanner.PYPTO, "%qk = pto.alloc_tile addr = %c0 : ..."),
+        (MemoryPlanner.PTOAS, "%qk = pto.alloc_tile : ..."),
+    ]:
+        assert pto_rebuild._ptoas_flags(content) == pto_backend._get_ptoas_flags(planner)
 
 
 @pytest.mark.parametrize(

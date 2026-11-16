@@ -90,7 +90,7 @@ def artifact_root() -> Path:
     with (
         mock.patch(
             "pypto.backend.pto_backend._compile_pto_module",
-            lambda _code, _name, _dir, _planner=None: _STUB_PTOAS_OUTPUT,
+            lambda _code, _name, _dir, _planner=None, **_kwargs: _STUB_PTOAS_OUTPUT,
         ),
         passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
     ):
@@ -498,7 +498,7 @@ def _compile_orch(program, *, platform: str = "a2a3") -> str:
     with (
         mock.patch(
             "pypto.backend.pto_backend._compile_pto_module",
-            lambda _code, _name, _dir, _planner=None: _STUB_PTOAS_OUTPUT,
+            lambda _code, _name, _dir, _planner=None, **_kwargs: _STUB_PTOAS_OUTPUT,
         ),
         passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
     ):

@@ -173,7 +173,7 @@ compiled(*tensors, config=config)
 
 | 由谁读取 | 类型 | 字段 |
 | -------- | ---- | ---- |
-| `ir.compile` | `CompileOptions` | `backend_type`、`execution_mode`（兼容旧 `platform`）、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
+| `ir.compile` | `CompileOptions` | `backend_type`、`execution_mode`（兼容旧 `platform`）、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`sync_strategy`、`distributed_config` |
 | 派发 | `RunOptions` | `platform`、`device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)），以及内嵌的 `DfxOptions` |
 | 一次派发采集哪些诊断 | `DfxOptions` | `enable_chip_swimlane`、`enable_dump_args`、`enable_pmu`、`enable_dep_gen`、`enable_scope_stats`（[DFX](03-runtime-dfx.md)） |
 | 仅系统测试 harness | —— | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
@@ -253,6 +253,44 @@ compiled = ir.compile(program, **CompileOptions(execution_mode=ExecutionMode.ONB
 副本，省略 `platform` 与 `backend_type` 并单独转发 platform；现在它和其他调用方一样
 调用 `compile_kwargs()`，于是给一边加的开关不会在另一边悄悄缺席。`lower()` 仍有自己
 那份更窄的映射 —— 它止步于 codegen 之前，对准的是 pass 流水线而不是 `ir.compile`。
+
+## 自动同步：`sync_strategy`
+
+所有目标默认使用 `passes.AutoSyncStrategy.EVENT`，保留
+`--enable-insert-sync`。`BUFID` 通过 `--enable-bufid_sync` 复用 PTOAS 的
+Buffer-ID 分析、分配和插入，替换 event 标志。仅支持
+`BackendType.Ascend950`（A5）；A2/A3 请求在 pass/codegen 前报错。
+本版本不公开 unified 同步策略。
+
+```python
+from pypto import passes
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode
+
+with passes.PassContext([], sync_strategy=passes.AutoSyncStrategy.BUFID):
+    compiled = ir.compile(program, backend_type=BackendType.Ascend950,
+                          execution_mode=ExecutionMode.ONBOARD)
+```
+
+没有活动上下文时，`ir.compile(..., sync_strategy=...)`、
+`CompileOptions(sync_strategy=...)` 和 `RunConfig(sync_strategy=...)` 也接受该枚举。
+活动 `PassContext` 与显式编译选项同时存在会报错；应把设置放在该上下文。
+转储和性能分析会继承此设置。内存规划保持独立：A5 上三种 planner 都能选择两种策略。
+JIT 缓存身份包含最终策略，包括从上下文继承的选择。
+
+每个已编译的 `ptoas/<unit>.pto` 都有同级 `<unit>.json`，记录
+`sync_strategy`（`event` 或 `bufid`）和 `ptoas_flags`（含级别、目标的语义标志，
+不含转储路径）。Debug replay 对根目录及逐 rank 单元恢复这些标志。
+旧产物缺少元数据或策略字段时回退 event；元数据损坏、策略不受支持或标志不一致时
+明确报错，不能静默切换。保留 PTO 文件时应同时保留此元数据文件。
+更改策略或分配级别应重新编译整个程序。
+
+PTOAS 的手写同步保护规则是：**任何** `pto.get_buf`、`pto.rls_buf`、
+`pto.get_buf_dyn` 或 `pto.rls_buf_dyn` 都使自动 BufidSync 跳过**整个函数**，
+包括其他访问和嵌套区域。该函数全部本地依赖由程序员负责，并输出 remark 提示。
+模块中其他函数仍自动同步。这需要带静态/动态保护的 PTOAS；仅探测静态操作的旧版本
+不能安全地组合动态手写同步与自动 BufidSync。此规则不定义手写 event 协议与
+自动 Buffer-ID 插入的混合策略。
 
 ## 层与层之间的箭头朝哪
 
