@@ -13,6 +13,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import runpy
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pypto.backend.cannbotdsl_abi import build_call_adapter
+from pypto.backend.cannbotdsl_abi import build_binding_checker, build_call_adapter
 from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
 from pypto.jit.external.contracts import (
@@ -721,7 +722,7 @@ def _prepare_call(compiler, source=_CALL_SOURCE, request=None):
     return adapter.CANNBotDSLProvider().prepare(_kernel, _request() if request is None else request)
 
 
-def _compile_call(artifact, tmp_path, main, *, device=False):
+def _compile_call(artifact, tmp_path, main, *, device=False, orchestration=False):
     compiler = shutil.which("ccec") if device else shutil.which("g++-15") or shutil.which("g++")
     if compiler is None:
         pytest.skip("CANN device compiler unavailable" if device else "C++ compiler unavailable")
@@ -731,12 +732,20 @@ def _compile_call(artifact, tmp_path, main, *, device=False):
         path.write_bytes(file.content)
     root = Path(__file__).resolve().parents[3]
     includes = [root / "runtime/src/common", root / "runtime/src/common/task_interface"]
+    if orchestration:
+        # The runtime's declared header order selects TMR's TensorRef/Arg
+        # implementation instead of a similarly named header from another ABI.
+        src = root / "runtime/src"
+        runtime = src / "a5/runtime/tensormap_and_ringbuffer"
+        config = runpy.run_path(str(runtime / "build_config.py"))["BUILD_CONFIG"]["orchestration"]
+        includes = [runtime / p for p in config["include_dirs"]] + includes
+        includes += [src / "a5/platform/include", src / "common/platform/include", src]
     includes.extend(tmp_path / path for path in artifact.include_dirs)
     source = tmp_path / "caller.cpp"
     source.write_text(
         ("" if device else "#define __aicore__\n#define __gm__\n") + f'#include "{artifact.entry}"\n' + main
     )
-    flags = ["-std=c++17", "-O2"]
+    flags = ["-std=c++17", "-O2", "-DNDEBUG"]
     output = tmp_path / ("caller.o" if device else "caller")
     if device:
         # Derive SDK include roots from the selected compiler installation,
@@ -769,8 +778,12 @@ def test_call_adapter_packs_runtime_views_and_preserves_scalar_bits(compiler, tm
     # Generated adapters are callable headers, not loadable runtime entries.
     assert artifact.entry == "call_adapter.hpp" and artifact.symbol.endswith("::invoke")
     assert b"kernel_entry" not in artifact.files[-1].content
+    checker = build_binding_checker(prepared)
+    artifact = replace(artifact, files=(*checker.files, *artifact.files))
     main = f"""
 #include <cstring>
+#include "{checker.entry}"
+[[noreturn]] void assert_impl(const char* condition, const char*, int) {{ throw condition; }}
 int main() {{
     float input[100]{{}}, output[120]{{}};
     for (int i = 0; i < 100; ++i) input[i] = float(i + 1);
@@ -782,7 +795,9 @@ int main() {{
     out.buffer = {{uint64_t(output), sizeof(output)}}; out.ndims = 2;
     out.start_offset = 7; out.shapes[0] = 2; out.shapes[1] = 32;
     out.strides[0] = 40; out.strides[1] = 1;
+    CoreTaskArgs bindings; bindings.add_input(x); bindings.add_output(out); bindings.add_scalar({bits}ULL);
     int64_t args[] = {{int64_t(&x), int64_t(&out), {bits}LL}};
+    {checker.symbol}(bindings);
     {artifact.symbol}(args);
     uint32_t actual; std::memcpy(&actual, &output[7], 4);
     if (actual != {bits}U) return 1;
@@ -791,11 +806,12 @@ int main() {{
     // Reuse the same generated source with a different invocation's pointers
     // and offsets. No call-specific address is captured in the artifact.
     x.start_offset = 4; out.start_offset = 8;
+    {checker.symbol}(bindings);
     {artifact.symbol}(args);
     if (output[9] != input[5] || output[48] != input[44]) return 4;
 }}
 """
-    result, binary = _compile_call(artifact, tmp_path, main)
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True)
     assert result.returncode == 0, result.stderr
     executed = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
     assert executed.returncode == 0, executed.stderr
@@ -830,11 +846,12 @@ def test_compiler_checks_manifest_against_actual_native_layout(compiler, tmp_pat
 
 
 @pytest.mark.parametrize("change", ["source", "manifest", "metadata", "missing_header", "cpp_type"])
-def test_adapter_revalidates_owned_artifacts_without_the_compiler(compiler, monkeypatch, change):
+@pytest.mark.parametrize("builder", [build_call_adapter, build_binding_checker])
+def test_adapter_revalidates_owned_artifacts_without_the_compiler(compiler, monkeypatch, change, builder):
     prepared = _prepare_call(compiler)
     shutil.rmtree(compiler.include)
     monkeypatch.setitem(sys.modules, "cannbotdsl", None)
-    assert build_call_adapter(prepared).symbol
+    assert builder(prepared).symbol
     if change == "metadata":
         prepared = replace(prepared, execution=replace(prepared.execution, cores=(Core.AIC,), aiv_lanes=0))
     else:
@@ -855,7 +872,7 @@ def test_adapter_revalidates_owned_artifacts_without_the_compiler(compiler, monk
             files[1] = replace(files[1], content=content, sha256=hashlib.sha256(content).hexdigest())
         prepared = replace(prepared, artifact=replace(prepared.artifact, files=tuple(files)))
     with pytest.raises(ContractError):
-        build_call_adapter(prepared)
+        builder(prepared)
 
 
 @pytest.mark.parametrize(
@@ -995,6 +1012,237 @@ inline void kernel_scaled(NativeTensor x, NativeTensor out, float) {
     assert result.returncode == 0, result.stderr
     executed = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
     assert executed.returncode == 0, executed.stderr
+
+
+def _prepare_binding(compiler, tensor, *, element="f32", cpp_type="float"):
+    """Declare a fake export; runtime bindings are independently supplied in C++."""
+    contract = compiler.manifest["contract"]
+    dimensions = {d for d in (*tensor.shape, *tensor.strides) if isinstance(d, str)}
+    contract["dimensions"] = [
+        {"name": d, "min": int(d in tensor.strides), "max": None, "multiple_of": 1}
+        for d in sorted(dimensions)
+    ]
+    fields = []
+    members = [f"__gm__ {cpp_type}* ptr;"]
+    for field, values in (("shape", tensor.shape), ("stride", tensor.strides)):
+        dynamic = [axis for axis, value in enumerate(values) if isinstance(value, str)]
+        for slot, axis in enumerate(dynamic):
+            fields.append({"field": field, "dimension": axis, "slot": slot, "offset": 8 * (len(fields) + 1)})
+        if dynamic:
+            members.append(f"int64_t {field}[{len(dynamic)}];")
+        expressions = [
+            {"kind": "dimension", "name": v} if isinstance(v, str) else {"kind": "constant", "value": v}
+            for v in values
+        ]
+        for parameter in contract["parameters"][1:]:
+            parameter["argument"].update(element=element, **{field: expressions})
+        for parameter in compiler.manifest["parameters"][:2]:
+            parameter[field] = [-1 if isinstance(v, str) else v for v in values]
+    for parameter in compiler.manifest["parameters"][:2]:
+        parameter.update(
+            dtype=element, element_cpp_type=cpp_type, dynamic_fields=fields, size=8 * (len(fields) + 1)
+        )
+    request = _request()
+    request = replace(
+        request, parameters=(request.parameters[0], ParameterSpec("x", tensor), ParameterSpec("out", tensor))
+    )
+    source = (
+        f"struct NativeTensor {{ {' '.join(members)} }};\n"
+        "inline void kernel_scaled(NativeTensor, NativeTensor, float) {}\n"
+    )
+    return _prepare_call(compiler, source, request)
+
+
+def _run_binding_checker(artifact, tmp_path, body):
+    main = (
+        """
+#include <cstring>
+[[noreturn]] void assert_impl(const char* condition, const char*, int) { throw condition; }
+int main() {
+    simpler::tmr::Tensor x{}, out{};
+    x.buffer = {0x1000, 4096}; x.ndims = 2; x.dtype = DataType::FLOAT32;
+    x.shapes[0] = 2; x.shapes[1] = 32; x.strides[0] = 40; x.strides[1] = 1;
+    x.start_offset = 3;
+    out = x; out.buffer.addr = 0x4000; out.start_offset = 7;
+    CoreTaskArgs args; args.add_input(x); args.add_output(out); args.add_scalar(2.0f);
+"""
+        + f"""
+    auto check = [&]() {{ {artifact.symbol}(args); }};
+    auto rejects = [&](const char* message) {{
+        try {{ check(); }} catch (const char* why) {{ return std::strstr(why, message) != nullptr; }}
+        return false;
+    }};
+{body}
+}}
+"""
+    )
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True)
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, f"checker exited {result.returncode}: {result.stderr}"
+
+
+def test_binding_checker_rechecks_actual_arguments(compiler, tmp_path):
+    artifact = build_binding_checker(_prepare_call(compiler))
+    # One generated checker observes mutations between invocations. Assertions
+    # must stay enabled under NDEBUG; no storage is dereferenced by the checker.
+    _run_binding_checker(
+        artifact,
+        tmp_path,
+        f"""
+    check();
+    out.ndims = 1; if (!rejects("rank")) return 1; out.ndims = 2;
+    out.dtype = DataType::INT32; if (!rejects("dtype")) return 2; out.dtype = DataType::FLOAT32;
+    out.shapes[0] = 3; if (!rejects("shared symbol rows")) return 3; out.shapes[0] = 2;
+    out.shapes[1] = 31; if (!rejects("dimension 1")) return 4; out.shapes[1] = 32;
+    out.strides[0] = 41; if (!rejects("shared symbol pitch")) return 5; out.strides[0] = 40;
+    out.strides[1] = 2; if (!rejects("stride 1")) return 6; out.strides[1] = 1;
+    out.strides[0] = 0; if (!rejects("positive stride")) return 7; out.strides[0] = 40;
+    out.start_offset = 1024; if (!rejects("storage bounds")) return 8; out.start_offset = 7;
+    out.start_offset = UINT64_MAX; if (!rejects("overflow")) return 9; out.start_offset = 7;
+    out.start_offset = (1ULL << 62); if (!rejects("byte extent overflow")) return 10; out.start_offset = 7;
+    out.buffer.addr = UINT64_MAX - 4; if (!rejects("address overflow")) return 11;
+    out.buffer.addr = 0; if (!rejects("null storage")) return 12; out.buffer.addr = 0x4000;
+    out.buffer.addr++; if (!rejects("alignment")) return 13; out.buffer.addr--;
+    x.strides[0] = out.strides[0] = 31;
+    if (!rejects("non-overlapping elements")) return 14;
+    x.strides[0] = out.strides[0] = 40;
+    out.buffer.addr = x.buffer.addr; if (!rejects("overlap needs alias permission")) return 15;
+    out.start_offset = 100; check();  // Disjoint sibling views of one allocation.
+    out.buffer.addr = 0x4000; out.start_offset = 7;
+    args.tag(1) = TensorArgType::OUTPUT;
+    if (!rejects("runtime-allocated outputs")) return 16;
+    args.tag(1) = TensorArgType::OUTPUT_EXISTING;
+    // Empty views still validate offsets, positive strides and pointer arithmetic.
+    x.shapes[0] = out.shapes[0] = 0;
+    x.buffer.addr = out.buffer.addr = 0; check();
+    out.start_offset = 1025; if (!rejects("storage bounds")) return 17; out.start_offset = 7;
+    out.strides[0] = 0; if (!rejects("positive stride")) return 18; out.strides[0] = 40;
+    CoreTaskArgs missing;
+    try {{ {artifact.symbol}(missing); return 19; }} catch (const char* why) {{
+        if (!std::strstr(why, "argument counts")) return 20;
+    }}
+    args.add_scalar(1.0f); if (!rejects("argument counts")) return 21;
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    "address,offset,accepted", [(0x1004, 3, True), (0x1000, 1, False), (0x1000, 4, True), (0x1001, 0, False)]
+)
+def test_binding_alignment_uses_first_element_pointer(compiler, tmp_path, address, offset, accepted):
+    tensor = TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1), alignment=16)
+    artifact = build_binding_checker(_prepare_binding(compiler, tensor))
+    _run_binding_checker(
+        artifact,
+        tmp_path,
+        f"""
+    x.buffer.addr = {address}; x.start_offset = {offset}; out.start_offset = 4;
+    return rejects("alignment") == {str(accepted).lower()} ? 1 : 0;
+""",
+    )
+
+
+@pytest.mark.parametrize("access", ["read", "read_write", "write"])
+def test_binding_alias_rules_follow_effects(compiler, tmp_path, access):
+    compiler.manifest["parameters"][1]["access"] = access
+    artifact = build_binding_checker(_prepare_call(compiler))
+    _run_binding_checker(
+        artifact,
+        tmp_path,
+        f"""
+    out.buffer = x.buffer; out.start_offset = x.start_offset;
+    return rejects("overlap needs alias permission") == {str(access != "read").lower()} ? 0 : 1;
+""",
+    )
+
+
+def test_binding_nonoverlap_proof_handles_permuted_and_empty_views(compiler, tmp_path):
+    tensor = TensorSpec(("rows", "cols", 32), DataType.FP32, strides=("plane", "pitch", 1))
+    artifact = build_binding_checker(_prepare_binding(compiler, tensor))
+    _run_binding_checker(
+        artifact,
+        tmp_path,
+        """
+    struct Case { uint32_t rows, cols, plane, pitch; bool accepted; } cases[] = {
+        {2, 3, 128, 40, true},   // Row-major with padding.
+        {2, 3, 32, 64, true},    // Permuted outer axes, innermost stride still one.
+        {1, 3, 1, 40, true},    // Singleton axis contributes no addresses.
+        {2, 3, 64, 32, false},   // Two coordinates refer to the same element.
+        {3, 2, 64, 96, false},   // Disjoint interleaving is conservatively rejected.
+        {0, 3, 1, 1, true},     // Empty views have no overlapping elements.
+    };
+    for (auto c : cases) {
+        x.ndims = out.ndims = 3;
+        x.shapes[0] = out.shapes[0] = c.rows; x.shapes[1] = out.shapes[1] = c.cols;
+        x.shapes[2] = out.shapes[2] = 32;
+        x.strides[0] = out.strides[0] = c.plane; x.strides[1] = out.strides[1] = c.pitch;
+        x.strides[2] = out.strides[2] = 1;
+        if (rejects("non-overlapping elements") == c.accepted) return 1;
+    }
+    // Every field fits TMR's uint32, but the total reachable span can overflow.
+    x.shapes[0] = x.shapes[1] = UINT32_MAX;
+    x.strides[0] = x.strides[1] = UINT32_MAX;
+    x.buffer.size = UINT64_MAX;
+    if (!rejects("extent overflow")) return 2;
+""",
+    )
+
+
+@pytest.mark.parametrize("offset", [3, "pitch"])
+def test_binding_checker_constrains_offset(compiler, tmp_path, offset):
+    tensor = TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1), offset=offset)
+    artifact = build_binding_checker(_prepare_binding(compiler, tensor))
+    _run_binding_checker(
+        artifact,
+        tmp_path,
+        f"""
+    x.start_offset = out.start_offset = {3 if offset == 3 else 40}; check();
+    out.start_offset++; return rejects("offset") ? 0 : 1;
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    "dtype,dsl_type,element,ctype,tag",
+    [
+        (DataType.INDEX, "int64", "i64", "int64_t", "INT64"),
+        (DataType.FP8E4M3FN, "float8_e4m3fn", "f8e4m3", "fp8_e4m3fn_t", "FP8E4M3FN"),
+        (DataType.FP8E8M0, "float8_e8m0", "f8e8m0", "fp8_e8m0_t", "FP8E8M0"),
+        (DataType.FP8E5M2, "float8_e5m2", "f8e5m2", "fp8_e5m2_t", None),
+    ],
+)
+def test_binding_checker_runtime_dtype_support(compiler, tmp_path, dtype, dsl_type, element, ctype, tag):
+    setattr(compiler.cb.dtypes, dsl_type, object())
+    tensor = TensorSpec(("rows", 32), dtype, strides=("pitch", 1))
+    prepared = _prepare_binding(compiler, tensor, element=element, cpp_type=ctype)
+    if tag is None:
+        with pytest.raises(ContractError, match="unsupported dtype"):
+            build_binding_checker(prepared)
+        return
+    artifact = build_binding_checker(prepared)
+    _run_binding_checker(
+        artifact,
+        tmp_path,
+        f"""
+    x.dtype = out.dtype = DataType::{tag}; check();
+    out.dtype = DataType::FLOAT32; return rejects("dtype") ? 0 : 1;
+""",
+    )
+
+
+@pytest.mark.parametrize("field,value", [("shape", 1 << 32), ("stride", 1 << 32), ("offset", 1 << 64)])
+def test_binding_checker_rejects_unrepresentable_constraints(compiler, field, value):
+    tensor = TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1))
+    if field == "shape":
+        tensor = replace(tensor, shape=(value, 32))
+    elif field == "stride":
+        tensor = replace(tensor, strides=(value, 1))
+    else:
+        tensor = replace(tensor, offset=value)
+    prepared = _prepare_binding(compiler, tensor)
+    with pytest.raises(ContractError, match="exceeds uint"):
+        build_binding_checker(prepared)
 
 
 if __name__ == "__main__":

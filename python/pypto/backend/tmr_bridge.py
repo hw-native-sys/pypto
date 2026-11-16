@@ -18,7 +18,7 @@ The callable must be an inline device function, not a host launch stub.
 import hashlib
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,9 +130,9 @@ def _validate(prepared: PreparedKernel, target: RuntimeTarget) -> None:
     _validate_parameters(prepared)
 
 
-def _validate_parameters(prepared: PreparedKernel) -> None:
+def _validate_parameters(prepared: PreparedKernel, *, dtypes: Mapping[DataType, str] = _DTYPES) -> None:
     for p in prepared.contract.parameters:
-        if p.type.dtype not in _DTYPES:
+        if p.type.dtype not in dtypes:
             raise ContractError(f"TMR bridge: unsupported dtype for {p.name!r}: {p.type.dtype}")
         if isinstance(p.type, TensorSpec):
             if p.type.layout != TensorLayout.ND or not 1 <= len(p.type.shape) <= 5:
@@ -247,7 +247,21 @@ def _wrapper(prepared: PreparedKernel) -> str:
     return "\n".join(lines)
 
 
-def _preflight(prepared: PreparedKernel, symbol: str) -> str:
+def _preflight(
+    prepared: PreparedKernel,
+    symbol: str,
+    *,
+    dtypes: Mapping[DataType, str] = _DTYPES,
+    view_pointer: bool = False,
+    non_overlapping: bool = False,
+) -> str:
+    """Check TMR bindings with the pointer and view policy selected by the ABI.
+
+    c_pointer passes the allocation base and permits internally overlapping
+    views. Descriptor consumers can instead require an aligned first-element
+    pointer and provably non-overlapping elements. These policies do not prove
+    cache-line isolation between independently scheduled tasks.
+    """
     tensors, scalars = _slots(prepared)
     lines = [
         "#include <cstdint>",
@@ -282,7 +296,7 @@ def _preflight(prepared: PreparedKernel, symbol: str) -> str:
         check(f"args.tag({slot}) != TensorArgType::OUTPUT", f"{n}: runtime-allocated outputs unsupported")
         lines.append(f"    const auto& {t} = args.tensor({slot}).ref();")
         check(f"{t}.ndims == {len(spec.shape)}", f"{n}: rank")
-        check(f"{t}.dtype == DataType::{_DTYPES[spec.dtype]}", f"{n}: dtype")
+        check(f"{t}.dtype == DataType::{dtypes[spec.dtype]}", f"{n}: dtype")
         itemsize = spec.dtype.get_byte()
         lines.append(f"    uint64_t end{index} = {t}.start_offset;")
         # Empty tensors have no touched bytes, but pointer arithmetic and native
@@ -309,9 +323,40 @@ def _preflight(prepared: PreparedKernel, symbol: str) -> str:
         check(f"end{index} <= {t}.buffer.size", f"{n}: storage bounds")
         check(f"{t}.buffer.addr <= UINT64_MAX - end{index}", f"{n}: address overflow")
         check(f"empty{index} || {t}.buffer.addr != 0", f"{n}: null storage")
-        # c_pointer passes the allocation base unchanged; the separate offset
-        # must not hide a misaligned pointer or impose a view-alignment promise.
-        check(f"{t}.buffer.addr % {spec.alignment} == 0", f"{n}: alignment")
+        # Bounds above prove the addition safe even for empty views. A typed
+        # first-element pointer needs natural element alignment too; c_pointer
+        # retains its existing allocation-base alignment contract.
+        pointer = f"({t}.buffer.addr + begin{index})" if view_pointer else f"{t}.buffer.addr"
+        alignment = max(spec.alignment, itemsize) if view_pointer else spec.alignment
+        check(f"{pointer} % {alignment} == 0", f"{n}: alignment")
+        if non_overlapping:
+            # A sufficient proof, not a dense-layout requirement: traverse axes
+            # in ascending stride order, ignoring singleton axes. Each new
+            # step must clear the span of all previously visited axes. This
+            # accepts padding and permutations; ambiguous interleaving rejects.
+            # Rank is bounded by five. The earlier extent checks also prove
+            # that these span additions fit in uint64 for nonempty views.
+            axes = ", ".join(str(axis) for axis in range(len(spec.shape)))
+            lines += [
+                "    {",
+                f"        unsigned axes[] = {{{axes}}};",
+                f"        for (unsigned i = 1; i < {len(spec.shape)}; ++i) {{",
+                "            unsigned j = i, axis = axes[i];",
+                f"            while (j > 0 && {t}.strides[axes[j - 1]] > {t}.strides[axis]) {{",
+                "                axes[j] = axes[j - 1]; --j;",
+                "            }",
+                "            axes[j] = axis;",
+                "        }",
+                "        uint64_t span = 1;",
+                f"        if (!empty{index}) for (unsigned axis : axes) {{",
+                f"            if ({t}.shapes[axis] <= 1) continue;",
+            ]
+            check(f"{t}.strides[axis] >= span", f"{n}: cannot prove non-overlapping elements")
+            lines += [
+                f"            span += uint64_t({t}.shapes[axis] - 1) * {t}.strides[axis];",
+                "        }",
+                "    }",
+            ]
     for arg in prepared.native_abi.parameters:
         if arg.value in (ABIValue.DIMENSION, ABIValue.STRIDE, ABIValue.OFFSET):
             spec = prepared.contract.parameters[arg.parameter].type

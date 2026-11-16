@@ -26,7 +26,7 @@ from pypto.jit.external.providers.cannbotdsl import ABI_NAME, _contracts, _valid
 from pypto.jit.external.validation import ContractError, validate_prepared
 from pypto.pypto_core import DataType
 
-from .tmr_bridge import _file, _slots
+from .tmr_bridge import _DTYPES, _file, _preflight, _slots, _validate_parameters
 
 # CANN C API spellings differ from PTO's float8_* names. Other supported
 # element types use the shared IR C++ spelling, including INDEX as int64_t.
@@ -34,6 +34,15 @@ _TENSOR_CPP_TYPES = {
     DataType.FP8E4M3FN: "fp8_e4m3fn_t",
     DataType.FP8E5M2: "fp8_e5m2_t",
     DataType.FP8E8M0: "fp8_e8m0_t",
+}
+
+# TMR has no E5M2 tag. INDEX uses INT64 storage; keep its logical identity in
+# the prepared request. Do not widen c_pointer's supported dtype set here.
+_TMR_DTYPES = {
+    **_DTYPES,
+    DataType.INDEX: "INT64",
+    DataType.FP8E4M3FN: "FP8E4M3FN",
+    DataType.FP8E8M0: "FP8E8M0",
 }
 
 
@@ -177,14 +186,7 @@ def _scalar_lines(item: dict[str, Any], typ: str, name: str, slot: int) -> list[
     return lines
 
 
-def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
-    """Own a compile-only device call adapter and its native dependencies.
-
-    The caller must supply valid TMR packed arguments (tensors first, scalars
-    second), and prove bounds, dtype, strides, alignment and aliasing on every
-    invocation. This function validates declarations and the compiled ABI only;
-    returning a SourceArtifact does not authorize runtime submission.
-    """
+def _validate_call(prepared: PreparedKernel) -> dict[str, Any]:
     manifest = _manifest(prepared)
     symbol = _identifier(prepared.artifact.symbol, "entry symbol")
     if symbol == "kernel_entry":
@@ -199,6 +201,40 @@ def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
                 raise ContractError("CANNBotDSL adapter: TMR tensor rank must be in 1..5")
         elif spec.dtype in (DataType.FP16, DataType.BF16):
             raise ContractError("CANNBotDSL adapter: half-width runtime scalars are not supported")
+    return manifest
+
+
+def build_binding_checker(prepared: PreparedKernel) -> SourceArtifact:
+    """Generate a host checker for each invocation's actual TMR arguments.
+
+    The caller must run the exported function on CoreTaskArgs before packing
+    or submitting those same bindings, including on artifact cache hits. The
+    checker proves metadata/bounds and conservative element non-overlap, not
+    concurrent cache-line isolation, resource ownership or task completion.
+    """
+    _validate_call(prepared)
+    _validate_parameters(prepared, dtypes=_TMR_DTYPES)
+    for parameter in prepared.contract.parameters:
+        if not isinstance(parameter.type, TensorSpec) and parameter.type.dtype in _TENSOR_CPP_TYPES:
+            raise ContractError("CANNBotDSL adapter: FP8 runtime scalars are not supported")
+    symbol = f"pypto_cannbotdsl_check_{prepared_digest(prepared)}"
+    source = '#pragma once\n#include "types.h"\n' + _preflight(
+        prepared, symbol, dtypes=_TMR_DTYPES, view_pointer=True, non_overlapping=True
+    )
+    return SourceArtifact((_file("binding_check.hpp", source.encode()),), "binding_check.hpp", symbol)
+
+
+def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
+    """Own a compile-only device call adapter and its native dependencies.
+
+    The caller must supply valid TMR packed arguments (tensors first, scalars
+    second), and run build_binding_checker's function on every invocation.
+    This function validates declarations and the compiled ABI only; returning
+    a SourceArtifact does not authorize runtime submission.
+    """
+    manifest = _validate_call(prepared)
+    symbol = prepared.artifact.symbol
+    tensors, scalars = _slots(prepared)
     namespace = f"pypto_cannbotdsl_{prepared_digest(prepared)}"
     lines = [
         "#pragma once",

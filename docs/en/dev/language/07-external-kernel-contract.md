@@ -130,8 +130,8 @@ shape/stride expressions and dimension bounds must match the request exactly;
 extra or stronger constraints are rejected. The supported view convention is
 first-valid-element pointers with consumer-applied offsets and non-overlapping
 positive strides. Cross-parameter write overlap is not supported. These checks
-validate declarations; checking actual addresses, bounds and overlaps on each
-invocation remains the runtime bridge's responsibility.
+validate declarations; the binding checker below validates actual addresses,
+bounds and overlaps. A runtime bridge must invoke it before every submission.
 
 The owned artifact contains `device_callable.hpp`, the complete
 `device_manifest.json`, and digest-checked copies of DSL extension headers. The
@@ -149,8 +149,9 @@ binding, and the relevant compatibility regressions. In particular, resource and
 64-byte GM write-isolation requirements cannot be dropped when introducing the
 runtime path. Device completion, numerical and performance acceptance remain 34.7.
 The next runtime work must establish cache-line conflict serialization and
-validate compiler stack requirements, alongside descriptor packing and resource
-ownership. The existing text-only ELF checks alone do not establish these guarantees.
+validate compiler stack requirements and resource ownership, and connect the
+call adapter and binding checker to submission. The existing text-only ELF
+checks alone do not establish these guarantees.
 `test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
 when installed, the real public compiler export; it does not validate a binary.
 
@@ -175,11 +176,46 @@ FP16/BF16 scalar slots are not supported.
 
 This is a callable header, **not an `ExternalTask` or a loadable runtime entry**:
 it deliberately defines no `kernel_entry` and does not change `TMRBridge` ABI
-support. Its caller must validate actual bindings on every invocation and meet
+support. Its caller must run the binding checker on every invocation and meet
 the retained resource, cache-line, stack, binary-loading and completion
 requirements. Host C++ tests execute packing and offset handling; optional
 CCEC tests compile real public exports. Neither establishes device execution
 or runtime completion correctness.
+
+### CANNBotDSL per-invocation binding checker
+
+`pypto.backend.cannbotdsl_abi.build_binding_checker(prepared)` produces an owned
+`SourceArtifact` containing `binding_check.hpp`. After revalidating the prepared
+manifest and source/header digests, it generates a checker for actual TMR
+`CoreTaskArgs`. Include it with the A5 TMR orchestration headers and invoke its
+exported symbol before packing or submitting those same bindings. Generation
+does not import the optional compiler or capture any live tensor addresses.
+The checker must run again on every call, including artifact cache hits.
+
+It reuses the TMR binding checks for argument counts, existing output storage,
+rank/dtype, static and shared dimensions, positive strides, offset constraints,
+storage bounds and arithmetic overflow. CANNBotDSL alignment applies to the
+first-element address (`buffer.addr + start_offset * element_bytes`), with at
+least natural element alignment. The `c_pointer` bridge retains its separate
+allocation-base alignment rule.
+
+Within each nonempty tensor, the checker sorts axes by stride, ignores singleton
+axes, and requires each step to clear the span of previously visited axes. This
+proves non-overlap for padded and permuted layouts; interleaved layouts that
+cannot be proved by this conservative check are rejected. Across parameters,
+bounding byte intervals may overlap only when neither parameter writes. Empty
+views touch no bytes but still require valid strides, offsets and representable,
+aligned pointers. These checks remain active in release builds.
+
+TMR metadata limits are enforced before generating the checker. `INDEX` uses
+the runtime `INT64` tensor tag; E4M3FN and E8M0 use their distinct FP8 tags.
+E5M2 is rejected because TMR has no corresponding tag. FP8 runtime scalars and
+FP16/BF16 runtime scalars are unsupported.
+
+Passing this checker **does not authorize device execution**: byte-level
+non-overlap does not establish 64-byte cache-line isolation between tasks.
+Resource ownership, stack/loading validation, task completion and integration
+into the JIT/runtime submission path remain required.
 
 ## Requests and prepared kernels
 
