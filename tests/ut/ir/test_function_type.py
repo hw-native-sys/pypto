@@ -27,6 +27,7 @@ def test_function_type_enum():
         ir.FunctionType.Spmd,
         ir.FunctionType.Inline,
         ir.FunctionType.Graph,
+        ir.FunctionType.CCU,
         ir.FunctionType.SIMT,
     ]
     assert len(all_types) == len(set(all_types))

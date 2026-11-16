@@ -402,6 +402,7 @@ _TYPE_FACTORIES: dict[str, Callable[[], ir.Type]] = {
     "PtrType": lambda: ir.PtrType(),
     "WindowBufferType": lambda: ir.WindowBufferType(),
     "CommCtxType": lambda: ir.CommCtxType(),
+    "CcuRegistrationType": lambda: ir.CcuRegistrationType(),
     "PrefetchAsyncContextType": lambda: ir.PrefetchAsyncContextType(),
     "AsyncEventType": lambda: ir.AsyncEventType(),
     "AsyncSessionType": lambda: ir.AsyncSessionType(),
