@@ -870,48 +870,6 @@ ExprPtr ScopeOutliner::VisitExpr_(const IterArgPtr& op) {
 }
 
 /**
- * @brief Compute used_after when no explicit context is available.
- *
- * Two regimes:
- *   1. Scope is nested inside another (non-target) ScopeStmt — only store
- *      targets escape, because scope boundaries confine locally-defined
- *      variables.
- *   2. Scope is at the top level or inside a control-flow body — retain the
- *      original defensive fallback: all defined vars + store targets are
- *      treated as outputs so the caller retains access.
- */
-std::unordered_set<const Var*> ScopeOutliner::ComputeFallbackUsedAfter(const ScopeStmtPtr& scope) const {
-  // A deferred-completion waiter is registration-only: its scalar
-  // bookkeeping and loop induction variables are local implementation
-  // details, never semantic outputs.  In particular, exporting all local
-  // definitions from a terminal waiter would try to return a loop variable
-  // outside the ForStmt that defines it.  OutlineScope validates the full
-  // waiter contract immediately after this fallback is computed, so no
-  // legitimate store/output can be hidden by returning an empty set here.
-  if (ContainsDeferredWait(scope->body_)) return {};
-
-  StoreTargetCollector store_collector;
-  store_collector.VisitStmt(scope->body_);
-  std::unordered_set<const Var*> used_after;
-  if (!inside_nested_scope_body_) {
-    var_collectors::VarDefUseCollector def_collector;
-    def_collector.VisitStmt(scope->body_);
-    // Scalars, tuple unpacking temporaries, and Reg values are not runtime
-    // outputs. Tuple projections already expose their tensor definitions;
-    // exporting the tuple too would create a nested terminal SPMD output.
-    // Actual live-out uses are handled by the explicit tail-use analysis.
-    for (const Var* var : def_collector.var_defs) {
-      if (As<ScalarType>(var->GetType()) || As<TupleType>(var->GetType()) || As<RegType>(var->GetType())) {
-        continue;
-      }
-      used_after.insert(var);
-    }
-  }
-  used_after.insert(store_collector.store_targets.begin(), store_collector.store_targets.end());
-  return used_after;
-}
-
-/**
  * @brief Process SeqStmts to analyze scope outputs using subsequent statements.
  *
  * For each target scope, collects variables referenced in all subsequent statements
@@ -999,16 +957,8 @@ StmtPtr ScopeOutliner::VisitStmt_(const SeqStmtsPtr& op) {
       auto used_after = after_refs;
       used_after.insert(required_outputs_.begin(), required_outputs_.end());
 
-      // When no context is available (no subsequent statements and no parent
-      // requirements), fall back to scope-nesting-aware defaults.  This
-      // happens when a single ScopeStmt is wrapped in SeqStmts inside a
-      // control-flow body (if/for/while) where the outer context hasn't
-      // propagated required_outputs_, or when the scope sits directly
-      // inside another scope (e.g. an InCoreScopeStmt at the top of a
-      // SpmdScopeStmt body produced by the ``for i in pl.spmd(...)`` form).
-      if (used_after.empty()) {
-        used_after = ComputeFallbackUsedAfter(scope);
-      }
+      // An empty set is a known absence of value uses, not missing context.
+      // External stores are exported independently by OutlineScope.
 
       // Outline this scope with context about what's used after
       auto outlined_stmt = OutlineScope(scope, used_after);
@@ -1035,19 +985,6 @@ StmtPtr ScopeOutliner::VisitStmt_(const SeqStmtsPtr& op) {
   return SeqStmts::Flatten(std::move(new_stmts), op->span_);
 }
 
-/**
- * @brief Handle ScopeStmts that are direct children of another node (not
- * inside a SeqStmts).
- *
- * The fallback honours scope nesting via ``inside_nested_scope_body_``: an
- * inner scope whose only "context" is an enclosing non-target scope has no
- * way for its locally-defined variables to escape, so we only expose store
- * targets. Scopes at the true top level (outside any parent scope body)
- * retain the original defensive "all defs are outputs" behaviour.
- */
-// Shared per-kind logic: outline if kind matches, else descend with the
-// nested-scope flag set so any target-kind scope we find inside can make a
-// correct used_after decision.
 template <typename ScopeT>
 StmtPtr ScopeOutliner::VisitScopeKind(const std::shared_ptr<const ScopeT>& op) {
   if (op->GetScopeKind() != target_scope_kind_) {
@@ -1056,19 +993,9 @@ StmtPtr ScopeOutliner::VisitScopeKind(const std::shared_ptr<const ScopeT>& op) {
     inside_nested_scope_body_ = prev;
     return result;
   }
-  // Prefer the enclosing SeqStmts' propagated requirements over the
-  // "no context" fallback.  This matters when a target scope is a direct
-  // child of another scope (SpmdScopeStmt{InCoreScopeStmt{...}}) — the
-  // enclosing SeqStmts visitor populates required_outputs_ with variables
-  // the post-scope statements still reference.
-  if (required_outputs_.empty()) {
-    return OutlineScope(op, ComputeFallbackUsedAfter(op));
-  }
-  std::unordered_set<const Var*> used_after = required_outputs_;
-  StoreTargetCollector store_collector;
-  store_collector.VisitStmt(op->body_);
-  used_after.insert(store_collector.store_targets.begin(), store_collector.store_targets.end());
-  return OutlineScope(op, used_after);
+  // A direct child has no local statement tail. Its enclosing node has
+  // already supplied all external requirements, possibly an empty set.
+  return OutlineScope(op, required_outputs_);
 }
 
 StmtPtr ScopeOutliner::VisitStmt_(const InCoreScopeStmtPtr& op) { return VisitScopeKind(op); }
@@ -1686,10 +1613,9 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   std::vector<std::pair<const Var*, const Var*>> deferred_post_store_aliases;
   for (const Var* var_ptr : body_collector.var_defs_ordered) {
     if (!used_after.count(var_ptr)) continue;
-    // Fallback output discovery includes store destinations. A destination
-    // bound by a loop *inside* this scope still leaves that loop through its
-    // return_vars, never through the IterArg binder itself. Exporting the
-    // binder would later substitute a plain Var into a loop header.
+    // A loop inside the scope exports values through its return_vars, never
+    // through the IterArg binder itself. Exporting a binder would later
+    // substitute a plain Var into a loop header.
     if (var_ptr->GetKind() == ObjectKind::IterArg) continue;
 
     // Skip if this var_def is a post-store alias of an external store

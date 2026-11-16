@@ -225,9 +225,8 @@ def test_explicit_incore_register_region_survives_outlining(kind, graph_ancestor
     if graph_ancestor:
         body = ir.GraphScopeStmt("graph", body=sequence(body, ir.EvalStmt(integer(0), SPAN)), span=SPAN)
     assert verify(body, kind) == []
-    # Keep the scope terminal while retaining a second statement so the
-    # outliner must use its fallback output analysis. Reg locals must not be
-    # exported merely because no following variable use exists.
+    # Keep the scope free of subsequent variable uses while retaining a second
+    # statement. Reg locals must not be exported when no external use exists.
     function = ir.Function("kernel", [], [], sequence(body, ir.EvalStmt(integer(0), SPAN)), SPAN, type=kind)
     program = ir.Program([function], "RegTest", SPAN)
     outlined = passes.outline_incore_scopes()(program)
@@ -264,8 +263,8 @@ def test_terminal_scalar_tuple_is_not_a_fallback_output(tuple_depth, inside_regi
     properties = passes.IRPropertySet()
     properties.insert(passes.IRProperty.RegScopeValid)
     assert passes.PropertyVerifierRegistry.verify(properties, program) == []
-    # Main excludes all unused tuple temporaries from fallback outputs, whether
-    # they are defined inside RegScope or directly in the enclosing InCore scope.
+    # Unused tuple temporaries stay local, whether they are defined inside
+    # RegScope or directly in the enclosing InCore scope.
     outlined = passes.outline_incore_scopes()(program)
     assert passes.PropertyVerifierRegistry.verify(properties, outlined) == []
     kernel = next(f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore)
@@ -302,9 +301,11 @@ def test_terminal_register_region_scalar_tuple_unpacking():
     ir.assert_structural_equal(after, Expected)
 
 
-def test_terminal_register_region_preserves_tile_output():
-    # A store's Tile alias is a legal output even though its Reg operand must
-    # remain local to the outlined RegScope.
+@pytest.mark.parametrize("used_after", [False, True], ids=["unused-alias", "used-alias"])
+def test_register_region_exports_only_live_tile_output(used_after):
+    # reg.store mutates the captured Tile even when its result alias is unused.
+    # Export that alias only for a real outer use; Reg values stay local in both
+    # cases. The old fallback exported the dead alias as well.
     tile_type = ir.TileType([64], DataType.FP32, memory_space=ir.MemorySpace.Vec)
     tile = ir.Var("tile", tile_type, SPAN)
     value = ir.Var("value", ir.RegType(64, DataType.FP32, ir.RegKind.VecReg), SPAN)
@@ -312,12 +313,28 @@ def test_terminal_register_region_preserves_tile_output():
     load = ir.create_op_call("reg.load", [tile, integer(0)], {"lanes": 64}, SPAN)
     store = ir.create_op_call("reg.store", [tile, integer(0), value], {}, SPAN)
     local_body = region(sequence(ir.AssignStmt(value, load, SPAN), ir.AssignStmt(out, store, SPAN)))
-    body = sequence(ir.InCoreScopeStmt(body=local_body, span=SPAN), ir.EvalStmt(integer(0), SPAN))
+    outer_use = out if used_after else integer(0)
+    body = sequence(ir.InCoreScopeStmt(body=local_body, span=SPAN), ir.EvalStmt(outer_use, SPAN))
     function = ir.Function("kernel", [tile], [], body, SPAN, type=ir.FunctionType.Orchestration)
     outlined = passes.outline_incore_scopes()(ir.Program([function], "RegTest", SPAN))
     kernel = next(f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore)
-    assert len(kernel.return_types) == 1
-    assert isinstance(kernel.return_types[0], ir.TileType)
+    if used_after:
+        assert len(kernel.return_types) == 1
+        assert isinstance(kernel.return_types[0], ir.TileType)
+    else:
+        assert kernel.return_types == []
+    # Dropping a dead return must preserve the write and its captured buffer.
+    assert kernel.param_directions == [ir.ParamDirection.InOut]
+    kernel_body = kernel.body
+    if isinstance(kernel_body, ir.SeqStmts):
+        kernel_body = kernel_body.stmts[0]
+    assert isinstance(kernel_body, ir.RegScopeStmt)
+    assert isinstance(kernel_body.body, ir.SeqStmts)
+    stored = kernel_body.body.stmts[1]
+    assert isinstance(stored, ir.AssignStmt)
+    assert isinstance(stored.value, ir.Call)
+    assert stored.value.op.name == ir.get_op("reg.store").name
+    assert stored.value.args[0].same_as(kernel.params[0])
     properties = passes.IRPropertySet()
     properties.insert(passes.IRProperty.RegScopeValid)
     assert passes.PropertyVerifierRegistry.verify(properties, outlined) == []
