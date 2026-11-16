@@ -740,5 +740,92 @@ def test_default_tensor_scatter(case_run, request):
     _assert_buffer_result(case_run, request)
 
 
+def _compare_gather_entry(store_indices, dtype):
+    threshold = 1 if dtype == pl.INT32 else 1.0
+    mode = "eq" if dtype == pl.INT32 else "gt"
+
+    @pl.jit.incore
+    def kernel(
+        a: pl.Tensor,
+        indices_out: pl.InOut[pl.Tensor],
+        counts_out: pl.InOut[pl.Tensor],
+        live_out: pl.InOut[pl.Tensor],
+        temporary_out: pl.InOut[pl.Tensor],
+    ):
+        source = pl.load(a, [0, 0], [8, 128])
+        scratch = pl.create_tile([1, 8192], dtype=pl.UINT8)
+        indices, counts = pl.tile.gather_compare(
+            source, pl.const(threshold, dtype), scratch, cmp_mode=mode, out_cols=128, offset=7
+        )
+        # A later temporary may reuse scratch, while the source and both
+        # results remain live. This exercises typed workspace preservation.
+        temporary = pl.tile.full([8, 128], pl.FP32, -999.0)
+        temporary_out = pl.store(temporary, [0, 0], temporary_out)
+        if store_indices:
+            indices_out = pl.store(indices, [0, 0], indices_out)
+        counts_out = pl.store(counts, [0, 0], counts_out)
+        live_out = pl.store(source, [0, 0], live_out)
+        return indices_out, counts_out, live_out, temporary_out
+
+    @pl.jit
+    def entry(
+        a: pl.Tensor,
+        indices_out: pl.InOut[pl.Tensor],
+        counts_out: pl.InOut[pl.Tensor],
+        live_out: pl.InOut[pl.Tensor],
+        temporary_out: pl.InOut[pl.Tensor],
+    ):
+        return kernel(a, indices_out, counts_out, live_out, temporary_out)
+
+    return entry
+
+
+def _compare_gather_golden(tensors):
+    a = tensors["a"]
+    matches = a == 1 if a.dtype == torch.int32 else a > 1
+    counts = matches.sum(dim=1).reshape(1, 8).int()
+    # The full-match case defines the entire index output. The mixed-match
+    # case deliberately leaves indices unread and verifies the other result.
+    indices = (torch.arange(1024).reshape(8, 128) + 7).int() if torch.all(matches) else tensors["indices_out"]
+    return {
+        "indices_out": indices,
+        "counts_out": counts,
+        "live_out": a.clone(),
+        "temporary_out": torch.full((8, 128), -999.0),
+    }
+
+
+@st.cases(
+    *[
+        st.case(
+            _compare_gather_entry(full_match, dtype),
+            (
+                torch.full((8, 128), 1 if dtype == pl.INT32 else 2)
+                if full_match
+                else torch.arange(1024).reshape(8, 128) % 5
+            ).to(torch_dtype),
+            torch.full((8, 128), -777, dtype=torch.int32),
+            torch.full((1, 8), -777, dtype=torch.int32),
+            torch.full((8, 128), -777, dtype=torch_dtype),
+            torch.full((8, 128), -777.0),
+            name=f"buffer_compare_gather_{torch_dtype}_{full_match}_{planner.name.lower()}",
+            golden=_compare_gather_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for dtype, torch_dtype in (
+            (pl.FP32, torch.float32),
+            (pl.FP16, torch.float16),
+            (pl.INT32, torch.int32),
+        )
+        for full_match in (True, False)
+        for planner in _PLANNERS
+    ]
+)
+def test_default_compare_gather(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

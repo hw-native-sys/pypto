@@ -174,5 +174,118 @@ def test_indexed_operations_reject_inherited_strided_pitch(kind):
     assert any("dense physical row pitch" in diagnostic.message for diagnostic in diagnostics)
 
 
+def _compare_operands() -> list[ir.Expr]:
+    return [
+        _buffer("source", (8, 128)),
+        ir.ConstFloat(1.0, DataType.FP32, SPAN),
+        _buffer("mask", (8, 32), DataType.UINT8),
+        _buffer("workspace", (1, 8192), DataType.UINT8),
+        _buffer("indices", (8, 128), DataType.INT32),
+        _buffer("counts", (1, 8), DataType.INT32),
+    ]
+
+
+def _compare_call(args, mode=4):
+    return _ir._create_internal_op_call("buffer.gather_compare", args, {"cmp_mode": mode, "offset": 7}, SPAN)
+
+
+def test_compare_gather_explicit_effects_and_roundtrip():
+    call = _compare_call(_compare_operands())
+    assert ir.get_op_output_arity(call.op.name) == 0
+    assert ir.op_arg_is_workspace(call.op.name, 3)
+    for index in (0, 2, 3, 4, 5):
+        effect = ir.get_op_buffer_arg_effect(call.op.name, index)
+        assert effect.data == (ir.BufferAccess.Read if index == 0 else ir.BufferAccess.Write)
+    statement = ir.EvalStmt(call, SPAN)
+    ir.assert_structural_equal(statement, ir.deserialize(ir.serialize(statement)), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("bad", ["capacity", "mask", "count", "indices", "mode", "threshold"])
+def test_compare_gather_rejects_incomplete_contract(bad):
+    args = _compare_operands()
+    if bad == "capacity":
+        args[3] = _buffer("workspace", (1, 1024), DataType.UINT8)
+    elif bad == "mask":
+        args[2] = _buffer("mask", (1, 256), DataType.UINT8)
+    elif bad == "count":
+        args[5] = _buffer("counts", (1, 16), DataType.INT32)
+    elif bad == "indices":
+        args[4] = _buffer("indices", (8, 32), DataType.INT32)
+    elif bad == "threshold":
+        args[1] = ir.ConstInt(1, DataType.INT32, SPAN)
+    with pytest.raises(ValueError, match="requires"):
+        _compare_call(args, mode=1 if bad == "mode" else 4)
+
+
+def _compare_buffer_program(overlap=None, detached_mask=False):
+    args = _compare_operands()
+    statements = []
+    addresses = {0: 0, 3: 4096, 4: 12288, 5: 16384}
+    if overlap:
+        addresses[overlap[1]] = addresses[overlap[0]]
+    for index, address in addresses.items():
+        destination = args[index]
+        assert isinstance(destination, ir.Var)
+        allocation = ir.Call(
+            ir.get_op("buffer.alloc"),
+            [ir.MakeTuple([], SPAN), ir.ConstInt(address, DataType.INDEX, SPAN)],
+            {},
+            None,
+            args[index].type,
+            SPAN,
+        )
+        statements.append(ir.AssignStmt(destination, allocation, SPAN))
+    mask = args[2]
+    assert isinstance(mask, ir.Var)
+    if detached_mask:
+        allocation = ir.Call(
+            ir.get_op("buffer.alloc"),
+            [ir.MakeTuple([], SPAN), ir.ConstInt(4096, DataType.INDEX, SPAN)],
+            {},
+            None,
+            args[2].type,
+            SPAN,
+        )
+        statements.append(ir.AssignStmt(mask, allocation, SPAN))
+    else:
+        prefix = _buffer("prefix", (1, 256), DataType.UINT8)
+        offsets = ir.MakeTuple([ir.ConstInt(0, DataType.INDEX, SPAN)] * 2, SPAN)
+        subview = ir.Call(ir.get_op("buffer.subview"), [args[3], offsets], {}, None, prefix.type, SPAN)
+        statements.append(ir.AssignStmt(prefix, subview, SPAN))
+        reshape = ir.Call(ir.get_op("buffer.reshape"), [prefix], {}, None, args[2].type, SPAN)
+        statements.append(ir.AssignStmt(mask, reshape, SPAN))
+    statements.append(ir.EvalStmt(_compare_call(args), SPAN))
+    function = ir.Function(
+        "kernel",
+        [],
+        [],
+        ir.SeqStmts(statements, SPAN),
+        SPAN,
+        type=ir.FunctionType.InCore,
+        ir_stage=ir.FunctionIRStage.Buffer,
+    )
+    return ir.Program([function], "CompareGather", SPAN)
+
+
+@pytest.mark.parametrize("overlap", [None, (0, 3), (0, 4), (0, 5), (3, 4), (3, 5), (4, 5)])
+def test_compare_gather_verifies_complete_workspace_and_output_disjointness(overlap):
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.BufferIR)
+    diagnostics = passes.PropertyVerifierRegistry.verify(properties, _compare_buffer_program(overlap))
+    if overlap:
+        assert any("disjoint" in d.message for d in diagnostics)
+    else:
+        assert not diagnostics
+
+
+def test_compare_gather_mask_requires_backing_provenance():
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.BufferIR)
+    diagnostics = passes.PropertyVerifierRegistry.verify(
+        properties, _compare_buffer_program(detached_mask=True)
+    )
+    assert any("explicit workspace backing" in d.message for d in diagnostics)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

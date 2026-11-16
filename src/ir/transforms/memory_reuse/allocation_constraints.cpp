@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/buffer_tuple_results.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
@@ -291,8 +292,8 @@ class ForbidAliasCollector : public IRVisitor {
   // *values* need no such mapping: enforcement compares physical MemRef bases,
   // which every group member already shares.
   ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
-                       const BufferViewAnalysis* views)
-      : views_(views) {
+                       const BufferViewAnalysis* views, const StmtPtr& body)
+      : views_(views), tuples_(body) {
     for (const auto& [var, group] : sharing_groups) {
       if (!group.empty()) member_to_rep_[var.get()] = group[0].get();
     }
@@ -365,6 +366,16 @@ class ForbidAliasCollector : public IRVisitor {
           if (target && source && target->base_ != source->base_) forbid_arg(1);
         }
         RecordForOutput(op->var_, forbidden_inputs);
+        if (const auto tuple = tuples_.Get(op->var_)) {
+          for (const auto& output : tuple->outputs) {
+            auto forbidden = forbidden_inputs;
+            // Native outputs are simultaneous writes, including unread ones.
+            for (const auto& other : tuple->outputs) {
+              if (other != output) forbidden.push_back(other);
+            }
+            RecordForOutput(output, forbidden);
+          }
+        }
         // tile.transpose is registered not_inplace_safe(), so its output is
         // already forbidden from aliasing any input above (pto.ttrans writes
         // dst directly from src on the scalar path — dst == src corrupts).
@@ -391,6 +402,7 @@ class ForbidAliasCollector : public IRVisitor {
 
   ForbidAliasMap forbidden_;
   const BufferViewAnalysis* views_;
+  BufferTupleResults tuples_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
@@ -945,7 +957,7 @@ void CollectAccessConstraints(const FunctionPtr& func,
   const auto* context = PassContext::Current();
   std::optional<BufferViewAnalysis> views;
   if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
-  ForbidAliasCollector forbid_collector(sharing_groups, views ? &*views : nullptr);
+  ForbidAliasCollector forbid_collector(sharing_groups, views ? &*views : nullptr, func->body_);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
 }

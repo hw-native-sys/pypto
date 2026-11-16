@@ -339,7 +339,9 @@ def test_each_tuple_output_uses_its_own_shared_storage_view():
     indices_root = tile("indices_root", (8, 32), pl.INT32)
     counts_root = tile("counts_root", (32, 1), pl.INT32)
     source = tile("source", (32, 64), pl.FP32)
-    workspace = tile("workspace", (32, 64), pl.UINT8)
+    # Native scratch includes 32 mask rows, the INT32 index table and thresholds.
+    # Keep the shared-output view assertions below independent of this capacity.
+    workspace = tile("workspace", (1, 9344), pl.UINT8)
     assert isinstance(indices_root.type, ir.TileType)
     assert isinstance(counts_root.type, ir.TileType)
     indices_type = ir.TileType(
