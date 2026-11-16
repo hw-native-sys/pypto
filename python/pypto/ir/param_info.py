@@ -31,6 +31,7 @@ import torch
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    CommCtxType,
     ConstInt,
     Function,
     FunctionType,
@@ -405,10 +406,13 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
             layout = view.layout.name if view is not None else "ND"
         elif isinstance(param_type, ScalarType):
             dtype = param_type.dtype
+        elif isinstance(param_type, CommCtxType):
+            # Materialized communication contexts are device pointers in the chip scalar ABI.
+            dtype = DataType.UINT64
         else:
             raise TypeError(
                 f"Unsupported parameter type for {param.name_hint!r}: {type(param_type).__name__}. "
-                f"Expected ShapedType or ScalarType."
+                f"Expected ShapedType, ScalarType, or CommCtxType."
             )
 
         param_infos.append(

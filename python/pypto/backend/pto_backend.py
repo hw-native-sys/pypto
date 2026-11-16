@@ -1464,9 +1464,10 @@ def _generate_config_file(
     registrations may reference the same generated source with different tensor
     directions. Scalars are excluded from runtime tensor signatures.
 
-    ``orchestration_signature`` is the orchestration entry's per-tensor
-    ``ArgDirection`` names ("IN"/"OUT"/"INOUT"), in ``orch_args`` tensor order
-    (scalars excluded). When present, the ``ORCHESTRATION`` dict gains a
+    ``orchestration_signature`` contains the orchestration entry's tensor
+    ``ArgDirection`` names ("IN"/"OUT"/"INOUT") in ``orch_args`` tensor order,
+    followed by "SCALAR" for each scalar slot, including CommContext pointers.
+    When present, the ``ORCHESTRATION`` dict gains a
     ``"signature"`` field so the runtime builds a non-empty ChipCallable
     signature, indexed by the orch tensor index in
     ``bind_callable_to_runtime_impl``. This lets read-only IN tensors skip the

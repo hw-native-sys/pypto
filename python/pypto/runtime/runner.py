@@ -309,6 +309,9 @@ class RunConfig:
             there.  Use a path from a previous run
             (e.g. ``build_output/<name>_<ts>_<random>/data``) to reuse existing golden
             data, or specify a new path to persist data to a fixed location.
+        domain_provider: Optional runtime-only provider for generated HOST domain
+            allocations. It receives the same keyword arguments as allocate_domain.
+            SHMEM providers are process-local and must not cross an L3 fork.
         aicpu_thread_num: Optional per-invocation override of the AICPU
             thread count. ``None`` (default) defers to the value baked
             into ``kernel_config.py``'s ``RUNTIME_CONFIG`` at compile
@@ -400,6 +403,8 @@ class RunConfig:
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
+    # Runtime-only override for generated HOST domain allocation.
+    domain_provider: Callable[..., Any] | None = None
     dump_ptoas_passes: bool = False
     enable_software_pipeline: bool | None = None
 
@@ -448,6 +453,7 @@ class RunConfig:
             distributed_config: "DistributedConfig | None" = ...,
             analyze_auto_scopes_for_deps: bool = ...,
             memory_planner: MemoryPlanner | None = ...,
+            domain_provider: Callable[..., Any] | None = ...,
             dump_ptoas_passes: bool = ...,
             enable_software_pipeline: bool | None = ...,
         ) -> None: ...
@@ -619,6 +625,7 @@ class RunConfig:
             ring_heap=self.ring_heap,
             ring_dep_pool=self.ring_dep_pool,
             dfx=self.dfx_options(),
+            domain_provider=self.domain_provider,
         )
 
     def dfx_options(self) -> "DfxOptions":
@@ -881,6 +888,7 @@ class RunOptions:
     ring_heap: int | list[int] | tuple[int, ...] | None = None
     ring_dep_pool: int | list[int] | tuple[int, ...] | None = None
     dfx: DfxOptions = DfxOptions()
+    domain_provider: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)

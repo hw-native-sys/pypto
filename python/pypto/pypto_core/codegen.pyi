@@ -125,7 +125,7 @@ class OrchestrationResult:
 
     @property
     def orchestration_signature(self) -> list[str]:
-        """Orchestration entry per-tensor ArgDirection names (scalars excluded), in orch_args tensor order."""
+        """Orchestration tensor ArgDirection names in pool order, followed by SCALAR entries."""
         ...
 
 class BuiltinNextLevelSpec:

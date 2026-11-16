@@ -213,6 +213,7 @@ class ChipWorker(Worker):
         self._impl_close_pending = False
         self._impl_needs_rebuild = False
         self._initialized = False
+        self._borrowed_context_generation: int | None = None
         # Maps id(chip_callable) -> handle returned by simpler Worker.register()
         # (an opaque ``CallableHandle`` since runtime #891; typed ``Any`` to
         # avoid a hard import of the simpler type). Simpler's L2 ABI requires
@@ -259,9 +260,24 @@ class ChipWorker(Worker):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def init(self) -> None:
-        """Initialize device state. Idempotent — a second call is a no-op."""
+    def init(self, *, borrowed_context_generation: int | None = None) -> None:
+        """Initialize an owned device, or borrow the caller's current context.
+
+        For borrowing, construct with ``auto_init=False`` and supply a nonzero
+        uint64 generation token. Keep the context alive until close; use a new
+        token after recreating it. Borrowed direct dispatch also requires a
+        caller stream and DEVICE operands, with framework work synchronized
+        before submission. Simpler validates platform and SDMA restrictions.
+        """
+        if borrowed_context_generation is not None and (
+            type(borrowed_context_generation) is not int or not 0 < borrowed_context_generation < 1 << 64
+        ):
+            raise ValueError("borrowed_context_generation must be a nonzero uint64 integer")
         if self._initialized:
+            if borrowed_context_generation is not None and (
+                borrowed_context_generation != self._borrowed_context_generation
+            ):
+                raise ValueError("Cannot change the context generation of an initialized ChipWorker")
             return
         if self._impl_close_pending:
             raise RuntimeError(
@@ -289,7 +305,12 @@ class ChipWorker(Worker):
         claim_program_mode()
         try:
             with _device_init_lock:
-                self._impl.init(prewarm_config=_get_simpler_call_config_cls()())
+                init_options = (
+                    {}
+                    if borrowed_context_generation is None
+                    else {"borrowed_context_generation": borrowed_context_generation}
+                )
+                self._impl.init(prewarm_config=_get_simpler_call_config_cls()(), **init_options)
         except BaseException:
             # Simpler marks a partially failed startup terminal. Drive its
             # retryable cleanup immediately; if cleanup itself fails, retain
@@ -303,6 +324,7 @@ class ChipWorker(Worker):
                 self._impl_needs_rebuild = True
             raise
         self._initialized = True
+        self._borrowed_context_generation = borrowed_context_generation
 
     def close(self) -> None:
         """Release device state. Idempotent; a later :meth:`init` uses a new backend."""
@@ -673,7 +695,9 @@ class ChipWorker(Worker):
     # Internal hook for the runner reuse path
     # ------------------------------------------------------------------
 
-    def _run_chip(self, chip_callable: Any, orch_args: Any, cfg: Any) -> None:
+    def _run_chip(
+        self, chip_callable: Any, orch_args: Any, cfg: Any, *, caller_stream: int | None = None
+    ) -> None:
         """Dispatch *chip_callable* on the underlying simpler ``Worker``.
 
         Registers the callable (caching its cid) and runs it. The simpler
@@ -688,7 +712,8 @@ class ChipWorker(Worker):
         if cid is None:
             cid = self._impl.register(chip_callable)
             self._cid_cache[key] = cid
-        self._impl.run(cid, orch_args, cfg)
+        run_options = {} if caller_stream is None else {"caller_stream": caller_stream}
+        self._impl.run(cid, orch_args, cfg, **run_options)
 
     # ------------------------------------------------------------------
     # Context manager — publishes ``self`` on the active stack

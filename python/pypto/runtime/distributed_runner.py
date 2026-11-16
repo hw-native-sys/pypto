@@ -1514,6 +1514,7 @@ def _make_dispatch_orchestration(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
+    domain_provider: Callable[..., Any] | None = None,
 ) -> Callable[..., None]:
     """Build one orchestration closure over a handle-owned metadata frame."""
     # ``world_size`` is the only worker-level scalar the entry needs; codegen
@@ -1536,6 +1537,7 @@ def _make_dispatch_orchestration(
         # across the swimlane two-pass, exactly like the DFX counter above.
         orch._pypto_chip_count = device_nums
         orch._pypto_commless_seq = 0
+        provider_kwargs = {} if domain_provider is None else {"_domain_provider": domain_provider}
         entry_fn(
             orch,
             _unused_args,
@@ -1545,6 +1547,7 @@ def _make_dispatch_orchestration(
             sub_ids=sub_ids,
             _keep=keepalive,
             world_size=device_nums,
+            **provider_kwargs,
         )
 
     return orch_fn
@@ -1561,6 +1564,7 @@ def _submit_dispatch(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
+    domain_provider: Callable[..., Any] | None = None,
 ) -> Any:
     """Submit one orchestration closure and return Simpler's run handle."""
     orch_fn = _make_dispatch_orchestration(
@@ -1572,6 +1576,7 @@ def _submit_dispatch(
         device_nums,
         keepalive,
         dfx_dispatch_idx=dfx_dispatch_idx,
+        domain_provider=domain_provider,
     )
     return w.submit(orch_fn)
 
@@ -1584,6 +1589,8 @@ def _dispatch(
     sub_ids: dict[str, Any],
     call_config: Any,
     device_nums: int,
+    *,
+    domain_provider: Callable[..., Any] | None = None,
 ) -> None:
     """Blocking compatibility composition of submit plus result."""
     keepalive: list[Any] = []
@@ -1596,6 +1603,7 @@ def _dispatch(
         call_config,
         device_nums,
         keepalive,
+        domain_provider=domain_provider,
     )
     native_handle.result()
 
@@ -1715,7 +1723,16 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
             # the prebuilt runtime-arena cache instead of paying the ~800ms cold
             # build inside the timed dispatch. No-op without a prebuilt arena.
             w.init(prewarm_config=call_config)
-            _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, len(dc.device_ids))
+            _dispatch(
+                w,
+                entry_fn,
+                tensors,
+                chip_cids,
+                sub_ids,
+                call_config,
+                len(dc.device_ids),
+                domain_provider=None if config is None else config.domain_provider,
+            )
         except BaseException:  # noqa: BLE001 - cleanup must also run for interruption
             if w is not None:
                 _close_local_worker_after_error(w, "one-shot distributed execution")
@@ -2458,6 +2475,18 @@ class DistributedWorker(Worker):
         cleanup: list[Callable[[], None]],
     ) -> Any:
         """Submit through either the ordinary or persistent prepared path."""
+        from .runner import RunConfig  # noqa: PLC0415
+
+        domain_provider = next(
+            (
+                item.domain_provider
+                for item in keepalive
+                if isinstance(item, RunConfig) and item.domain_provider is not None
+            ),
+            None,
+        )
+        if self._persistent and domain_provider is not None:
+            raise ValueError("External domain_provider is not supported by persistent distributed workers")
         if self._persistent:
             return self._submit_persistent(state, tensors, call_config, keepalive, cleanup)
         # The prepared worker reuses one child across submits, so the DFX
@@ -2473,6 +2502,7 @@ class DistributedWorker(Worker):
             state["device_nums"],
             keepalive,
             dfx_dispatch_idx=self._dfx_dispatch_idx,
+            domain_provider=domain_provider,
         )
 
     def _submit_native_dispatch(

@@ -539,5 +539,31 @@ def test_program_initialization_claims_mode_but_construction_does_not(kernel_env
     program.close()
 
 
+def test_borrowed_context_and_stream_forwarding(fake_simpler_worker):
+    worker = ChipWorker(config=RunConfig(platform="a2a3"), auto_init=False)
+    worker.init(borrowed_context_generation=7)
+    assert fake_simpler_worker.init.call_args.kwargs["borrowed_context_generation"] == 7
+    worker.init(borrowed_context_generation=7)
+    assert fake_simpler_worker.init.call_count == 1
+    with pytest.raises(ValueError, match="generation"):
+        worker.init(borrowed_context_generation=8)
+    callable_obj, args, cfg = object(), object(), object()
+    worker._run_chip(callable_obj, args, cfg, caller_stream=123)
+    fake_simpler_worker.run.assert_called_once_with(
+        fake_simpler_worker.register.return_value, args, cfg, caller_stream=123
+    )
+    worker.close()
+    worker.init(borrowed_context_generation=8)
+    worker.close()
+
+
+@pytest.mark.parametrize("generation", [0, -1, True, 1 << 64])
+def test_invalid_borrowed_generation_fails_before_native_init(fake_simpler_worker, generation):
+    worker = ChipWorker(config=RunConfig(platform="a2a3"), auto_init=False)
+    with pytest.raises(ValueError, match="uint64"):
+        worker.init(borrowed_context_generation=generation)
+    fake_simpler_worker.init.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

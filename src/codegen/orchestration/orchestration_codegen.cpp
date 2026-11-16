@@ -507,6 +507,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
+  // ChipCallable uses separate tensor/scalar pools. Borrowed execution also
+  // validates the scalar count, including compiler-materialized CommContext pointers.
+  orchestration_signature.insert(orchestration_signature.end(), scalar_params.size(), "SCALAR");
+
   std::unordered_map<std::string, std::string> dist_param_to_ctx_param;
   INTERNAL_CHECK(dist_tensor_param_names.size() == comm_ctx_param_names.size())
       << "Materialized orchestration signature has " << dist_tensor_param_names.size()

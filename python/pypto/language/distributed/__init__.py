@@ -43,6 +43,7 @@ from pypto.pypto_core.ir import AtomicType, CommEngine, NotifyOp, ReduceOp, Wait
 from .op import (
     alloc_window_buffer,
     get_comm_ctx,
+    import_window_buffer,
     nranks,
     rank,
     remote_load,
@@ -65,6 +66,7 @@ __all__ = [
     "WaitCmp",
     "alloc_window_buffer",
     "get_comm_ctx",
+    "import_window_buffer",
     "nranks",
     "rank",
     "remote_load",
