@@ -53,7 +53,7 @@ jobs:
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, npu-a5]
+    runs-on: [self-hosted, linux, npu-a5, pr]
     defaults:
       run:
         working-directory: daily-a5-checkout
