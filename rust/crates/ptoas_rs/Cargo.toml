@@ -1,0 +1,31 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "ptoas_rs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ptoas-rs -- lift PTO assembly back to tile-rs, and report what the lift and the Rust compiler can prove about it."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ptoas-rs"
+path = "src/bin/ptoas-rs.rs"
+
+# The plan differ. Separate because it answers a different question -- what moved
+# between two memory plans -- and is useful without lifting anything.
+[[bin]]
+name = "pto-diff"
+path = "src/bin/pto-diff.rs"
+
+[dependencies]

@@ -1,0 +1,12 @@
+module {
+  llvm.func @bm_swiglu_1_2304(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %cl = llvm.mlir.constant(2304 : i32) : i32
+    %g = llvm.call @__tile_load_f32(%arg0, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %u = llvm.call @__tile_load_f32(%arg1, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %s = llvm.call @__tile_silu_f32(%g, %g, %r, %cl) : (i32, i32, i32, i32) -> i32
+    %o = llvm.call @__tile_mul_f32(%s, %s, %u, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%arg2, %o, %r, %cl) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

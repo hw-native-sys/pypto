@@ -1,0 +1,28 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[workspace]
+resolver = "2"
+members = ["crates/controller", "crates/engine_ascend", "crates/engine_core"]
+
+# A SEPARATE workspace from `rust/`, deliberately. The frontend tools there have
+# no third-party dependencies at all, and that is a property worth keeping
+# checkable: a serving utility needs a SQLite registry, a signature verifier and
+# a memory map, and folding them into one workspace would make "the tools need
+# nothing" stop being true of anything.
+#
+# It shares the repository's licence and its stable-Rust pin.
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.98"
+license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
+
+[workspace.dependencies]
+anyhow = "1"

@@ -1,0 +1,24 @@
+// Hand-written probe, 2026-11-09. A 4x1024 window of a 4x4096 parent, with a
+// TILE of the same 4x1024 geometry -- the case `tile_load_strided_f32<ROWS,
+// COLS, ROW_STRIDE>` exists for. Deliberately minimal: one load, one unary the
+// lift models on its own, one store, so a refusal here is about the WINDOW and
+// cannot be a fusion that declined.
+module {
+  func.func @strided_window_matched(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4 = arith.constant 4 : index
+    %c1024 = arith.constant 1024 : index
+    %c4096 = arith.constant 4096 : index
+    %v0 = pto.make_tensor_view %arg0, shape = [%c4, %c4096], strides = [%c4096, %c1] : !pto.tensor_view<?x?xf32>
+    %p0 = pto.partition_view %v0, offsets = [%c0, %c0], sizes = [%c4, %c1024] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<4x1024xf32>
+    %t0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=1024, v_row=4, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%p0 : !pto.partition_tensor_view<4x1024xf32>) outs(%t0 : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=1024, v_row=4, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %t1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=1024, v_row=4, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.texp ins(%t0 : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=1024, v_row=4, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%t1 : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=1024, v_row=4, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %v1 = pto.make_tensor_view %arg1, shape = [%c4, %c4096], strides = [%c4096, %c1] : !pto.tensor_view<?x?xf32>
+    %p1 = pto.partition_view %v1, offsets = [%c0, %c0], sizes = [%c4, %c1024] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<4x1024xf32>
+    pto.tstore ins(%t1 : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=1024, v_row=4, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%p1 : !pto.partition_tensor_view<4x1024xf32>)
+    return
+  }
+}

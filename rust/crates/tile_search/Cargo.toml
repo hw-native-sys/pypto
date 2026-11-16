@@ -1,0 +1,40 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "tile_search"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "tile-search -- enumerate the tilings a kernel admits, keep the ones the target accepts, and rank them."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tile-search"
+path = "src/bin/tile-search.rs"
+
+[dependencies]
+# The feasibility oracle. A candidate is admissible when THIS emitter accepts
+# it -- not when a model of the hardware says it should, which is the whole
+# design point.
+rspto_emit = { path = "../rspto_emit" }
+# The SECOND oracle, and the reason there is one. A candidate admissible to the
+# PTO emitter is not necessarily admissible to the AscendC one -- measured over
+# the bench, five kernels reach PTO and are refused by AscendC, two of them on a
+# per-buffer extent a different tiling could satisfy. With one oracle those two
+# were unreachable: tile-search found the captured value already accepted and
+# reported "nothing to change", which is the right answer to the wrong question.
+ascendc_emit = { path = "../ascendc_emit" }
+tile_codegen = { path = "../tile_codegen" }
+# Lifting the winner back to tile-rs, so the output is a kernel and not only a
+# chosen number.
+ptoas_rs = { path = "../ptoas_rs" }

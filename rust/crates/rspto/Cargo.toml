@@ -1,0 +1,44 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "rspto"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "rspto -- lower a tile-rs kernel to PTO assembly, from Rust source or from tile-dialect MLIR."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rspto"
+path = "src/bin/rspto.rs"
+
+[dev-dependencies]
+# The integration test asserts that only the PTO target is registered, which
+# needs the registry and the emitter it registers into.
+rspto_emit = { path = "../rspto_emit" }
+tile_codegen = { path = "../tile_codegen" }
+
+[dependencies]
+# The emitter. Both input modes converge on it, so a .tile in and a .rs in cannot
+# produce different PTO.
+rspto_emit = { path = "../rspto_emit" }
+# The registry and EmitOpts. The CLI dispatches through CodegenTarget rather than
+# calling the emitter directly, so it exercises the same path any other consumer uses.
+tile_codegen = { path = "../tile_codegen" }
+# No dependency for the Rust input mode. That half needs a nightly toolchain,
+# a prebuilt codegen backend and a device target specification; emitting PTO from
+# MLIR needs none of them, so this crate has no third-party dependencies at all.
+
+# No argument-parsing crate. The parser is hand-rolled because this tool's whole
+# claim is that it needs nothing: it builds on stable with zero third-party
+# dependencies, and a six-flag CLI is not worth giving that up.

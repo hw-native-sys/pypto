@@ -138,25 +138,47 @@ claude plugin install pypto-user@pypto-skills
 
 ### Running Examples
 
-PyPTO includes examples organized by complexity:
-
-#### 1. Hello World (simplest program)
+The examples lower a kernel to PTO, compile it, and run it. They need three
+things beyond the Python package: a C++ compiler, `ptoas >= 0.72`, and the
+`simpler` runtime bindings. `scripts/setup-demo-env.sh` prepares all three and
+prints the environment to use:
 
 ```bash
+source scripts/setup-demo-env.sh
+```
+
+It is idempotent — re-running skips whatever is already in place. Everything it
+installs lives under one ignored directory, `.demo-env/`, and sourcing the script
+exports the environment it built, so no manual `export` is needed. Then:
+
+```bash
+# 1. Hello World (simplest program)
 python examples/beginner/01_hello_world.py
-```
 
-#### 2. Beginner & Intermediate Examples (element-wise, matmul, softmax, ...)
-
-```bash
+# 2. Element-wise, matmul, softmax
 python examples/intermediate/02_softmax.py
-```
 
-#### 3. Model Examples (FFN, paged attention, LLaMA, ...)
-
-```bash
+# 3. FFN, paged attention, LLaMA
 python examples/models/01_ffn.py
 ```
+
+Each prints `OK` on success.
+
+![The three examples running](docs/assets/demo-examples.gif)
+
+Two machine-specific notes the script handles for you, recorded here because they
+cost real time to diagnose:
+
+- **A shadowed `diff` breaks the build.** Some IDEs put the OpenHarmony toolchain
+  on `PATH`, whose `diff` always exits 0. autoconf reads that as "config.h is
+  unchanged" and writes nothing, so the build fails later with
+  `config.h: No such file or directory` in `3rdparty/libbacktrace`. The script
+  removes that directory from `PATH`; if you build by hand, keep it out.
+- **`ptoas` must be v0.72 or newer.** Older versions are rejected at codegen time
+  with an explicit version error. The release ships wheels for Python 3.10-3.12
+  only, so the script installs the CLI in its own interpreter under
+  `.demo-env/ptoas` and exports `PTOAS_ROOT`; the demos only execute the binary,
+  so your Python version does not matter.
 
 ### Running Tests
 

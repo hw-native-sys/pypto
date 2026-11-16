@@ -1,0 +1,33 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "engine_core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Model-side core for the DeepSeek V4.1 Flash serving utility: GGUF reading, tokeniser, layer views, decode step."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+
+# No build script, and no `metal`, `objc` or `cc`. Those existed only for a
+# bridge to a vendored third-party engine that was used as a correctness oracle
+# on Apple hardware; it is not part of this tree, and src/lib.rs records where it
+# was and what is owed in its place.
+
+[target.'cfg(unix)'.dependencies]
+# mmap for the GGUF byte source, declared directly rather than through a
+# wrapper crate. The alternative is reading an ~80 GB file into memory, which is
+# not an alternative.
+libc = "0.2"

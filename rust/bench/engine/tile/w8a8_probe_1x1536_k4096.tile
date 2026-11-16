@@ -1,0 +1,14 @@
+// Engine slot (ds4-rs-ascend): W8A8 matvec, int8 weights with a per-output-channel
+// scale/offset. Ascend-native deployment quantisation.
+module {
+  llvm.func @w8a8_probe_1x1536_k4096(%xbuf: !llvm.ptr<1>, %w: !llvm.ptr<1>, %sc: !llvm.ptr<1>, %of: !llvm.ptr<1>, %o: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %kk = llvm.mlir.constant(4096 : i32) : i32
+    %nn = llvm.mlir.constant(1536 : i32) : i32
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %x = llvm.call @__tile_load_f32(%xbuf, %r, %kk) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_matvec_w8a8_f32(%w, %sc, %of, %x, %z, %nn, %kk) : (!llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%o, %res, %r, %nn) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

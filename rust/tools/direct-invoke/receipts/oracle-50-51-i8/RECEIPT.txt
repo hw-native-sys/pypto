@@ -1,0 +1,280 @@
+ORACLE 50 and 51: the i8 lane's two oracles, and one blocker neither can fix
+=============================================================================
+910b (101.245.76.149), Ascend910B2 dav-2201, CANN 8.5.2. 2026-11-09.
+
+WHY THESE TWO. Three of the nine kernels short of `verified` are i8:
+gemm_i8_v41_16x5120x2304, gemm_i8_v41_1x5120x2304 and quant_i8_v41_8x5120. The GEMM
+pair needs an i8 GEMM oracle with in-flight per-column dequant; the quantize needs an
+i8 result read back. Both were deferred until the f16 lmheads scored, which they did
+at C_m 63/72 -- a condition met by measurement, verified independently in this lane,
+not by anyone's say-so.
+
+WHAT `scale` IS, settled from the sources rather than ruled on. It was being treated
+as one question with three answers; it is two questions:
+
+    quant_i8_v41_8x5120      __tile_load_f32(%arg1, 1, 1)   -> a 1x1 tile, ONE f32
+    gemm_i8_v41_16x5120x2304 %arg3 passed to the intrinsic   -> a GM POINTER, a
+                                                               per-column TENSOR
+
+A scalar and a per-column tensor are not competing readings of the same operand.
+
+ORACLE 50 -- i8 GEMM, i32 accumulate, per-column dequant to f16
+----------------------------------------------------------------
+CALIBRATED at M=16 K=64 N=48, chosen so every parameter has a DISTINCT value and
+K/16 = 4 fractals by N/16 = 3 groups, because a geometry where the candidates collapse
+cannot test them (the 16x16x16 lesson: there, every stride candidate equals 16).
+Properties were RECOMPUTED at the calibration shape rather than inherited from the
+lmhead derivation.
+
+    g50_ok        PASS  wrong=0    max_abs=5.000e-01  max_rel=4.568e-04
+    g50_scaleoff  FAIL  wrong=768  max_abs=1.379e+03  max_rel=3.702e+01
+
+The correct arm's max_rel of 4.568e-04 matches the f16 round-trip floor computed
+OFFLINE as 4.57e-04, to three significant figures. The negative arm is the scale read
+one column over -- the defect the per-column scale exists to catch, and the SMALLEST
+of the four perturbations in the derivation (4.34e-02 at the lmhead shape), so it is
+the tightest arm available rather than the loudest.
+
+THE FILL WAS DERIVED THROUGH FIVE CANDIDATES. Three of the four faults were in my own
+designs and none would have been visible by reading:
+
+ 1. A PERIOD THAT DIVIDES K CANCELS EXACTLY. `% 5` over K = 5120 = 2^10*5 is 1024 whole
+    periods of a zero-mean pattern: accumulator 0..26 WITH EXACT ZEROS, which makes a
+    relative gate meaningless. Both moduli used leave a remainder.
+ 2. A MULTIPLIER SHARING A FACTOR WITH ITS MODULUS kills the dependence outright.
+    `(k*5 + n*11) % 11` makes B INDEPENDENT OF n, since n*11 % 11 == 0, and a B-column
+    error then scores EXACTLY ZERO. Found only because the sensitivity table printed
+    0.00e+00 -- i.e. because sensitivity was computed PER ERROR CLASS instead of
+    asserted. Every pair is now checked coprime.
+ 3. A LARGE ACCUMULATOR IS THE WRONG INSTINCT. With non-zero-mean terms
+    acc ~ K*mean(A)*mean(B) dominates, the n-dependent part is a ~1% perturbation, and
+    a transpose or column shift lands near 3e-3 relative -- at or under f16's floor.
+    ZERO-MEAN terms make the accumulator STRUCTURE-dominated and every structural error
+    an O(1) relative change. So ORACLE 48's accidental cancellation was never a flaw to
+    tolerate: it is the property that made it sensitive.
+ 4. THE SCALE IS THE DEGENERACY KILLER. C[m][n] = acc[m][n] * scale[n], so a strictly
+    distinct per-column scale gives distinct expected values even where acc repeats --
+    the fix for ORACLE 48's collapse to 272 values. Scrambled by *37 so ADJACENT
+    columns differ by ~3% rather than 1 part in 2300.
+
+Final sensitivity at the lmhead shape, median relative change against a floor of
+4.88e-04: scale one column over 3.24e-02, one k dropped 1.27e-01, a 256-wide K block
+1.10, B column group off by 16 1.02, B transposed 1.08. ALL FIVE detectable -- and
+designs 2 and 4 had "one k dropped" BELOW the floor, so that is a property of this
+fill, not of i8 GEMMs.
+
+ORACLE 51 -- f32 -> i8 quantize, and it NAMES THE CONVENTION
+-------------------------------------------------------------
+The convention was unknown, with four readings all in real use. Scoring one and
+printing FAIL would not say which the kernel implements, so the oracle counts matches
+for ALL FOUR and reports them. The negative arm is the MULTIPLY convention, chosen so
+the run VALIDATES THE DISCRIMINATOR rather than merely rejecting a defect:
+
+                   A div+round   B mul+round   C div+trunc   D clamp-128   sat
+    g51_div PASS      40960          347          20782         40778      364
+    g51_mul FAIL        347        40960            686           286      364
+    (R=8 CL=5120 scale=0.5, 40960 elements, output INTEGER so the gate is EXACT)
+
+EVERY OFFLINE PREDICTION MATCHED EXACTLY, computed before the oracle was written:
+A-vs-B differ 40613 (measured wrong=40613), saturating 364 (364), A-vs-C differ 20178
+(40960-20782), A-vs-D differ 182 (40960-40778). Four for four.
+
+Two regimes, with the counts computed first: the bulk (|x| <= 30 in 0.25 steps) stays
+inside the i8 range so the ARITHMETIC is tested, and the 0.25 steps put x/s exactly on
+.5 cases, which is what separates round-to-nearest from truncation; one column in 97
+saturates so the CLAMP is tested without swamping. A FIRST DESIGN let |x| reach 127.5
+and saturated HALF the elements, masking the arithmetic -- caught by computing the
+saturation count, not by running it.
+
+DECLARED BOUND: x depends on c through c*13 % 241, so a column shift by a multiple of
+241 is invisible. A row-stride error shifts by CL = 5120 and 5120 % 241 = 59, so that
+IS visible, and the errors an elementwise quantize produces are per-element anyway.
+
+THE BLOCKER NEITHER ORACLE CAN FIX
+-----------------------------------
+This harness CANNOT DRIVE gemm_i8_v41_16x5120x2304. The copy-back is arity-keyed --
+arity 3 -> gm2, 4 -> p3, 5 -> p4, 9 -> p8 -- so the convention is THE LAST GM ARGUMENT
+IS THE OUTPUT. The kernel's signature is (arg0 A, arg1 B, arg2 out, arg3 scale): output
+at position 2, scale at 3. At arity 4 the harness would copy back p3, the SCALE BUFFER,
+and score that as the result.
+
+The gap cannot be closed by seeding p3 at arity 4: SIX banked records use arity 4, and
+changing what that path writes would alter their inputs. Checked before considering it.
+
+So it is a kernel/harness contract mismatch, not an oracle gap and not an edit. Three
+options, and the choice is the owner's because it changes a benchmark artefact: the
+`.tile` generator emits (A, B, scale, out) with the output LAST; or the harness gains an
+explicit output index instead of inferring one from arity; or the kernel is driven at
+arity 5 with a dummy. The first is cleanest and generalises to any future kernel with a
+non-final output. quant_i8_v41_8x5120 is unaffected -- 3 GM args with the output last.
+
+TWO DEFECTS OF MINE, both only visible by running
+--------------------------------------------------
+ORACLE 50's first calibration scored ALL ZEROS ON BOTH ARMS -- max_abs exactly equal to
+ref_abs's maximum, the all-zero signature. Identical failure under an independent
+perturbation said the defect was not in the perturbed space, and it was not: my kernel
+wrote to g2 under a last-arg-is-output convention.
+
+And acc_absmax printed "(derivation expects <= 182)", the K=5120 N=2304 figure, then
+fired on a CORRECT kernel at K=64 N=48 where 204 is right. A control that cries wolf at
+every shape but one gets ignored, which is the failure it was added to prevent. It now
+states the invariant -- 0 or near 0 means the fill cancelled -- with both measured
+anchors beside it. That is the exact inverse of the other lane's failure the same day:
+a control that was silent and correct and got read past. Both end with the control
+ignored, and stating the invariant with its anchors is the repair in both directions.
+
+NEITHER ORACLE HAS PRODUCED A VERDICT ABOUT ANY CORPUS KERNEL. They are instruments,
+calibrated; C_m stands at 63/72.
+
+INERTNESS. ORACLE 48's .aicore_binary is byte-identical before and after ORACLE 50
+(2304 B, md5 ce66379745b2e86d) with the source path held constant and both sections
+confirmed non-empty before comparing -- an AGREEMENT conclusion is exactly where the
+empty-extraction trap bites. After ORACLE 51 was added, ORACLE 50's calibration pair
+still returns PASS and FAIL respectively. Both oracle blocks sit BESIDE the per-element
+fill loop, verified by brace-depth walk (loop 166..429, blocks at 455), which is the
+nesting defect that made ORACLE 48 unusable at scale and that no gate on values could
+have caught.
+
+ADDENDUM 1 -- ORACLE 51 SCORED THE WRONG CONVENTION, AND THE DECLARATION SAYS SO
+=================================================================================
+2026-11-09, same host. The convention was recorded above as "unknown, with four
+readings all in real use". It is not unknown: it is DECLARED, and I built the oracle
+before reading the declaration.
+
+    tile_std/src/tile.rs:1014-1015
+    /// Symmetric INT8 quantize: round(x / scale), clamped to [-128, 127].
+    pub fn __tile_quantize_f32_i8(dst, src, scale: f32, rows, cols) -> u32;
+
+Divide and round, as scored -- but clamped to [-128, 127], where this oracle scored
+[-127, 127] as its primary. That is the oracle's own convention D, not A.
+
+CORROBORATED INDEPENDENTLY by the other emitter, which already lowers this intrinsic:
+`mlir_to_pto.rs:874-893` records that the arm "emits a broadcast divide and two
+converts", and that an earlier version "emitted `pto.tdiv` of the data by the 1 x 1
+scale". Divide, from a second source that was written without reference to the first.
+
+WHAT SAVES IT IS THE THING IT WAS BUILT FOR. The discriminating table would have caught
+this on the first run against a correct kernel: A and D separate on 182 of 40960
+elements, so a correct kernel would have come back FAIL with D at 40960 and A at 40778,
+and the convention would have been named rather than guessed at. The design worked. The
+PRIMARY should not have needed it -- a declaration in the tree's own tile_std is not an
+unknown, and "unknown" was my failure to read, not a property of the intrinsic.
+
+RE-CALIBRATED THREE WAYS against the corrected primary:
+
+    g51_decl  (divide, round, clamp [-128,127])  PASS   A=40960  B=347    C=20782  D=40778
+    g51_div   (divide, round, clamp [-127,127])  FAIL   A=40778  B=286    C=20600  D=40960
+    g51_mul   (multiply, round, clamp [-128,127]) FAIL  A=286    B=40899  C=625    D=347
+
+Each arm's own convention comes back highest, so the table identifies which of the three
+a kernel implements rather than merely rejecting two of them.
+
+A SECOND MISMATCH, declared versus called, NOT resolved here. The declaration types the
+scale as `scale: f32` -- an IMMEDIATE. The corpus call site passes a TILE:
+
+    %sc = __tile_load_f32(%arg1, %one, %one)
+    %q  = __tile_quantize_f32_i8(%x, %x, %sc, %r, %cl)
+
+`mlir_to_pto` handles the tile form as a broadcast, so the call site is what the working
+lowering targets. The same file already carries this failure shape for a sibling:
+tile.rs:403-407 records that `__tile_rms_norm_f32` "used to declare a third `dst`
+parameter that no call site passes, and to type `eps` as `u32` while every caller passes
+an `f32` constant". So a tile_std declaration is authoritative for SEMANTICS and has
+twice been wrong about SIGNATURE. The AscendC arm must take the tile form -- reading
+element 0 of the 1 x 1 buffer -- while implementing the declared arithmetic.
+
+THE LESSON, which is rule 20 arriving from a third direction: the refutation was in the
+tree the whole time, one grep away, in a doc comment on the very function being
+modelled. I computed five candidate fills, derived four sensitivity classes and
+validated both arms on device BEFORE reading the one line that states the contract.
+Effort spent on the measurement is not a substitute for reading the declaration.
+
+ADDENDUM 2 -- A FIFTH CONVENTION, ADDED BEFORE THE ARM RATHER THAN AFTER IT FAILED
+====================================================================================
+Writing the AscendC arm surfaced a rounding exposure the four-way table could not have
+named, and two missing arms rather than one.
+
+THE ROUNDING MODE. `tile_std` declares "round(x / scale)", which in Rust is half AWAY
+FROM ZERO, and the oracle's reference uses `std::llround`, which is the same. But this
+emitter uses only two rounding modes anywhere -- `CAST_NONE` and `CAST_RINT` -- and
+CAST_RINT is half-to-EVEN. This fill has 0.25 steps against a 0.5 scale, so:
+
+    exact .5 cases in x/s                         20178 / 40960   49.3%
+    half-away vs half-to-even differ on           10092 / 40960   24.6%
+
+So an arm emitting CAST_RINT would have FAILED the oracle's primary on 10092 elements
+with NOTHING IN THE TABLE able to name why -- the exact outcome a discriminating table
+exists to prevent, arriving through an axis the table did not cover. Convention E
+(divide, half-to-even, clamp [-128,127]) was added before the arm was written.
+
+VALIDATED FIVE WAYS. Each arm's own convention comes back highest:
+
+                      A away/c128   B mul   C trunc   D clamp127   E even/c128
+    g51_decl  PASS       40960       347     20782      40778        30868
+    g51_even  FAIL       30868       686     30874      30686        40960
+    g51_div   FAIL       40778       286     20600      40960        30686
+    g51_mul   FAIL         286     40899       625        347          625
+
+BOUND, stated rather than left to be noticed: the table enumerates FIVE of the eight
+combinations in (mul|div) x (away|even) x (c127|c128). `g51_mul` reads 40899 rather
+than 40960 because that arm pairs multiply with the +-127 clamp, which is not one of
+the five. The highest entry still names the dominant axis correctly, and the shortfall
+from 40960 is itself the signal that a second axis also differs -- but a reader should
+not expect an exact 40960 for a kernel combining two deviations.
+
+AND THE KERNEL NEEDS TWO ARMS, NOT ONE. `quant_i8_v41_8x5120` was filed as blocked on
+the missing `__tile_quantize_f32_i8` arm. The emitter's store arms are
+`__tile_store_at_f32, _bf16, _f16, _f32, _i32, _ub_to_gm_nz2nd_f32` -- there is NO
+`__tile_store_i8`, and the kernel's final operation is exactly that. So the quantize
+arm alone would emit a tile nothing can write out. The asymmetry census did not list
+`__tile_store_i8` as missing because it draws no refusal of its own: the quantize
+refusal fires first and the store is never reached. One blocker hiding another, which
+is the same shape as the cube bisect's eleven runs.
+
+ADDENDUM 3 -- THE HARDWARE ROUNDS HALF-TO-EVEN, AND tile_std DECLARES HALF-AWAY
+=================================================================================
+2026-11-10. The quantize arm emits, compiles and runs. Scored at a shape TOO SMALL TO
+CHUNK, which partitions the arm from the chunked path:
+
+    R=1 CL=256   wrong=63   max_abs=1.000e+00   max_rel=7.874e-03
+    A_div_roundaway_c128=193  B_mul_round=4  C_div_trunc=192
+    D_clamp127=191            E_div_roundeven_c128=256  of 256
+
+E MATCHES ALL 256. The arm computes divide, round, clamp [-128,127] correctly; it
+rounds HALF-TO-EVEN, and every one of the 63 "wrong" elements is off by exactly 1 --
+the .5 cases, and nothing else.
+
+That is the convention table doing the whole job it was built for. Convention E was
+added BEFORE this run, on the reasoning that `CAST_RINT` is the only rounding mode
+this emitter uses that rounds at all and that it is half-to-even. Without that arm in
+the table this would have been a FAIL with all five low and no way to attribute it.
+
+THE CONTRACT DISCREPANCY, which is a question and not a defect to fix quietly:
+
+    tile_std/src/tile.rs:1014   "round(x / scale)"   -- Rust `round` is half AWAY FROM ZERO
+    AscendC CAST_RINT            round-to-nearest    -- half to EVEN
+
+They differ on exactly the inputs that land on .5, and this fill puts 49.3% of x/s
+values there by design, which is why the disagreement is unmissable rather than a
+rounding footnote. Three readings, and the choice is the owner's:
+
+  * the declaration is loose -- "round" means round-to-nearest and half-to-even
+    satisfies it, in which case the oracle's PRIMARY should become E and the record
+    should say the part rounds half-to-even;
+  * the declaration is exact -- the arm must implement half-away, which the part does
+    not give for free and which costs extra vector work on a path whose only consumer
+    is a quantiser;
+  * the declaration should be amended to state the mode, since "round" in a doc
+    comment has now cost one false primary and one misattributed FAIL.
+
+NOT RESOLVED HERE. The oracle keeps A as primary so the disagreement stays visible in
+every run rather than being absorbed, and the table names E every time.
+
+AND THE CHUNKED PATH IS INDEPENDENTLY BROKEN, which this partition established rather
+than assumed: at R=8 CL=5120 the same arm gives wrong=36904 with E at only 5615 of
+40960, where the unchunked shape gives E at 256 of 256. One known cause is in the
+emitted source -- the chunk rebind advances EVERY GM argument by `__off`, including
+the 1 x 1 scale, so chunk c reads its scale at element c*5120 of a one-element tensor.
+`first_bad=3` sits inside chunk 0 where `__off` is zero, so at least one further cause
+remains. The chunk path assumes every GM operand is partitioned along the chunk axis;
+a broadcast scalar is not.

@@ -1,0 +1,72 @@
+########## logs/st_n24_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=24 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=24 delivered=24 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n24_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=24 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=24 delivered=24 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n24_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=24 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=24 delivered=24 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n32_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=32 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=32 delivered=32 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n32_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=32 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=32 delivered=32 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n32_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=32 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=32 delivered=32 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n4_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=4 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n4_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=4 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+
+########## logs/st_n4_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=4 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+PASS
+

@@ -1,0 +1,18 @@
+module {
+  func.func @svprobe(%in: !pto.ptr<f32>, %out: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c4 = arith.constant 4 : index
+    %c32 = arith.constant 32 : index
+    %tv = pto.make_tensor_view %in, shape = [%c4, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %pv = pto.partition_view %tv, offsets = [%c0, %c0], sizes = [%c4, %c32] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<4x32xf32>
+    %f = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%pv : !pto.partition_tensor_view<4x32xf32>) outs(%f : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %s = "pto.subview"(%f, %c2, %c0) {operandSegmentSizes = array<i32: 1, 2, 0, 0>, sizes = [2, 32]} : (!pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>, index, index) -> !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %tv2 = pto.make_tensor_view %out, shape = [%c2, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %pv2 = pto.partition_view %tv2, offsets = [%c0, %c0], sizes = [%c2, %c32] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<2x32xf32>
+    pto.tstore ins(%s : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%pv2 : !pto.partition_tensor_view<2x32xf32>)
+    return
+  }
+}

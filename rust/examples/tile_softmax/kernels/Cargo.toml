@@ -1,0 +1,28 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "tile_softmax_kernels"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
+description = "A hand-written tile-rs softmax kernel, for comparison against lifted output"
+
+# Excluded from the workspace with `tile_std`, which it is written against: a
+# kernel crate is `#![no_core]` and only ever builds on the pinned nightly,
+# through the codegen backend. It is carried as the REFERENCE a lifted kernel
+# is compared to -- `crates/ptoas_rs/tests/two_lift_paths.rs` reads it to check
+# that the lift's output and a hand-written kernel use the same safe API -- so
+# it earns its place here even though nothing in this tree compiles it.
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+tile_std = { path = "../../../crates/tile_std" }

@@ -1,0 +1,27 @@
+// GLM-5.3-Flash (glm5-next), shapes read from the model's own GGUF.
+// Form: llvm.func + hacc.entry + __tile_* -- the shape the emitters consume.
+module {
+  llvm.func @glm53_kda_conv_8192(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>, %arg3: !llvm.ptr<1>, %arg4: !llvm.ptr<1>, %arg5: !llvm.ptr<1>, %arg6: !llvm.ptr<1>, %arg7: !llvm.ptr<1>, %arg8: !llvm.ptr<1>) attributes {hacc.entry} {
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %cl = llvm.mlir.constant(8192 : i32) : i32
+    %x0 = llvm.call @__tile_load_f32(%arg0, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %x1 = llvm.call @__tile_load_f32(%arg1, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %x2 = llvm.call @__tile_load_f32(%arg2, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %x3 = llvm.call @__tile_load_f32(%arg3, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %w0 = llvm.call @__tile_load_f32(%arg4, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %w1 = llvm.call @__tile_load_f32(%arg5, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %w2 = llvm.call @__tile_load_f32(%arg6, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %w3 = llvm.call @__tile_load_f32(%arg7, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %p0 = llvm.call @__tile_mul_f32(%z, %x0, %w0, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %pj1 = llvm.call @__tile_mul_f32(%z, %x1, %w1, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %p1 = llvm.call @__tile_add_f32(%z, %p0, %pj1, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %pj2 = llvm.call @__tile_mul_f32(%z, %x2, %w2, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %p2 = llvm.call @__tile_add_f32(%z, %p1, %pj2, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %pj3 = llvm.call @__tile_mul_f32(%z, %x3, %w3, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %p3 = llvm.call @__tile_add_f32(%z, %p2, %pj3, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%arg8, %p3, %r, %cl) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+
+    llvm.return
+  }
+}

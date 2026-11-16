@@ -1,0 +1,50 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/pto_ir",
+    "crates/rspto",
+    "crates/rspto_emit",
+    "crates/ascendc_emit",
+    "crates/ptoas_rs",
+    "crates/tile_search",
+    "crates/pto_to_ascendc",
+    "crates/tile_codegen",
+    "crates/tile_std_ref",
+]
+
+# Crates land here one at a time. Still to come: tile_lower, the Rust input
+# mode (see the README on why it is not here yet).
+#
+# `tile_std` is deliberately NOT a member and is listed below as excluded. It is
+# the kernel-side DSL: a `#![no_core]` crate that declares its own lang items
+# because the accelerator target has no `core`, so it can only ever build on
+# nightly. Keeping it out of the workspace is what lets everything else build on
+# stable -- cargo applies one toolchain per workspace build, so a single nightly
+# member would impose nightly on all of them. Nothing here links it; the tools
+# EMIT code that targets it, and the kernel crates that use it are compiled
+# separately by the codegen backend.
+# `tile_std_macros` is excluded with it: it is tile_std's only dependency, and
+# the only crate in this tree with third-party dependencies at all.
+exclude = [
+    # Its own workspace (its own deps and lockfile), nested here so the whole
+    # Rust surface is one tree. Cargo needs it excluded, or the outer lockfile
+    # would absorb its deps.
+    "ds4-rs-ascend",
+    "crates/tile_std",
+    "crates/tile_std_macros",
+    "examples/tile_softmax/kernels",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.98"
+license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"

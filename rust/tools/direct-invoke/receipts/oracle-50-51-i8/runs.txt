@@ -1,0 +1,28 @@
+########## logs/g50_ok.log
+[di-stage] device malloc done     t=    0.88s
+[di-stage] fills done, h2d        t=    0.88s
+elements=768 wrong=0 max_abs=5.000e-01 max_rel=4.568e-04
+dtype=i8->f16 M=16 K=64 N=48 n=1024 acc_absmax=204 (derivation expects <= 182) ref_abs 1.562500e-02 .. 1.379766e+03 first_bad=-1
+PASS
+
+########## logs/g50_scaleoff.log
+[di-stage] device malloc done     t=    0.87s
+[di-stage] fills done, h2d        t=    0.87s
+elements=768 wrong=768 max_abs=1.379e+03 max_rel=3.702e+01
+dtype=i8->f16 M=16 K=64 N=48 n=1024 acc_absmax=204 (derivation expects <= 182) ref_abs 1.562500e-02 .. 1.379766e+03 first_bad=0
+FAIL
+
+########## logs/g51_div.log
+[di-stage] device malloc done     t=    0.91s
+[di-stage] fills done, h2d        t=    0.91s
+elements=40960 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+dtype=f32->i8 R=8 CL=5120 scale=0.500000 saturating=364 match: A_div_round=40960 B_mul_round=347 C_div_trunc=20782 D_clamp128=40778 of 40960 first_bad=-1
+PASS
+
+########## logs/g51_mul.log
+[di-stage] device malloc done     t=    0.89s
+[di-stage] fills done, h2d        t=    0.89s
+elements=40960 wrong=40613 max_abs=8.200e+01 max_rel=6.457e-01
+dtype=f32->i8 R=8 CL=5120 scale=0.500000 saturating=364 match: A_div_round=347 B_mul_round=40960 C_div_trunc=686 D_clamp128=286 of 40960 first_bad=1
+FAIL
+

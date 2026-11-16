@@ -1,0 +1,23 @@
+module {
+  func.func @op_scores(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>, %arg2: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 32 : index
+    %c3 = arith.constant 32 : index
+    %c4 = arith.constant 64 : index
+    %a_view = pto.make_tensor_view %arg0, shape = [%c2, %c4], strides = [%c4, %c1] : !pto.tensor_view<?x?xf32>
+    %a_part = pto.partition_view %a_view, offsets = [%c0, %c0], sizes = [%c2, %c4] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x64xf32>
+    %a_tile = pto.alloc_tile : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=64>
+    pto.tload ins(%a_part : !pto.partition_tensor_view<32x64xf32>) outs(%a_tile : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=64>)
+    %b_view = pto.make_tensor_view %arg1, shape = [%c4, %c3], strides = [%c3, %c1] : !pto.tensor_view<?x?xf32>
+    %b_part = pto.partition_view %b_view, offsets = [%c0, %c0], sizes = [%c4, %c3] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<64x32xf32>
+    %b_tile = pto.alloc_tile : !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=32>
+    pto.tload ins(%b_part : !pto.partition_tensor_view<64x32xf32>) outs(%b_tile : !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=32>)
+    %c_view = pto.make_tensor_view %arg2, shape = [%c2, %c3], strides = [%c3, %c1] : !pto.tensor_view<?x?xf32>
+    %c_part = pto.partition_view %c_view, offsets = [%c0, %c0], sizes = [%c2, %c3] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
+    %c_tile = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32>
+    pto.tmatmul ins(%a_tile, %b_tile : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=64>, !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=32>) outs(%c_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32>)
+    pto.tstore ins(%c_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32>) outs(%c_part : !pto.partition_tensor_view<32x32xf32>)
+    return
+  }
+}

@@ -1,0 +1,28 @@
+Narration cue sheet -- rspto
+Timestamps are at DEMO_SPEED=1.60 and shift with it.
+Read each line at its mark; the terminal holds for it.
+
+00:00	SECTION: rspto -- lowering a kernel to PTO
+00:03	A Rust path into PTO, alongside the Python one. Stable Rust, no LLVM, no third-party crates.
+00:24	SECTION: The input is chosen by extension, and nothing else
+00:27	.tile is tile-dialect MLIR. It needs nothing at all -- no backend, no download.
+00:46	That is PTO assembly, for the same assembler the Python backend feeds.
+01:04	SECTION: The two spellings cannot disagree
+01:07	.mlir is the spelling the codegen backend writes. Accepted so an artefact needs no renaming.
+01:24	Same emitter, so the question is whether the bytes agree. Not an opinion -- a diff.
+01:34	No output from cmp means byte-identical. A test in the suite asserts this on every run.
+01:47	SECTION: Stopping at the intermediate representation
+01:50	--emit tile writes the MLIR instead of the PTO, which is what a build system wants mid-pipeline.
+02:14	SECTION: A refusal is a result
+02:17	Two of the sixteen bench kernels cannot run on this part. Watch what the tool does about it.
+02:28	That refusal is intended: the live tile set is larger than the unified buffer, and the message says by how much
+02:40	That refusal is intended: a different bound -- the row-major tile bound for this architecture
+02:45	Neither is emitted and left to fail on a card. The bound is named, with the numbers.
+02:56	SECTION: The reshaped variants, which do run
+02:59	The corpus carries the same computations at widths that fit, so a refusal is not a dead end.
+03:24	SECTION: The whole corpus, in one pass
+03:27	Sixteen kernels. Fourteen emit; two are refused for the reasons just shown.
+03:43	SECTION: What the Rust input mode costs, and why it is absent
+03:46	A tile-rs .rs kernel needs a codegen backend loaded into rustc, plus a nightly toolchain.
+03:53	Exit code 4, not 2. The mode is understood; the half that serves it is not built in.
+04:01	That refusal is intended: it names the missing half rather than reporting a bad filename

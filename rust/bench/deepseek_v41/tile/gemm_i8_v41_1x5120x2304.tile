@@ -1,0 +1,13 @@
+module {
+  llvm.func @bm_gemm_i8_1_5120_2304(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>, %arg3: !llvm.ptr<1>) attributes {hacc.entry} {
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %m = llvm.mlir.constant(1 : i32) : i32
+    %k = llvm.mlir.constant(5120 : i32) : i32
+    %n = llvm.mlir.constant(2304 : i32) : i32
+    %a = llvm.call @__tile_load_i8(%arg0, %m, %k) : (!llvm.ptr<1>, i32, i32) -> i32
+    %bw = llvm.call @__tile_load_i8(%arg1, %k, %n) : (!llvm.ptr<1>, i32, i32) -> i32
+    %o = llvm.call @__tile_matmul_i8_acc_i32_dequant_f16(%c0, %a, %bw, %arg3, %m, %k, %n) : (i32, i32, i32, !llvm.ptr<1>, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f16(%arg2, %o, %m, %n) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

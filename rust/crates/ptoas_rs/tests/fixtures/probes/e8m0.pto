@@ -1,0 +1,85 @@
+// Probe: can an MXFP4 e8m0 SCALE BYTE be turned into its f32 value IN-KERNEL?
+//
+// This is the last thing standing between the packed 4-bit layout (0.625 B/weight, f32 block
+// scales) and the native one (0.53125 B/weight) — 179.6 GiB down to 155.4, which turns 4.2 GiB
+// of spare HBM into 28.4, and cuts prefill's streamed bytes ~15%.
+//
+// e8m0 semantics: scale = 2^(e-127), so the f32 we want has exponent field e and a zero
+// mantissa, i.e. bits = e << 23. There is no arithmetic route to that: the alternative is a
+// multiplicative bit-decomposition costing ~20-40 extra vector ops per row, and this kernel's
+// wall is per-OP fixed cost rather than data volume, so that would cost ~50% of decode. Hence
+// the shift and the reinterpret are load-bearing, and this probe exists to find out what is
+// available BEFORE any emitter work is written against them.
+//
+// Input is stored as `e - 128` in an si8 lane ON PURPOSE. The scale plane is one byte per block
+// either way, so the host is free to choose the bias, and this choice makes si8 sign-extension
+// CORRECT rather than something a mask must undo: every value in [-128,127] widens to itself and
+// `+128` recovers e exactly (f16 is exact on integers below 2048).
+//
+// WHAT IS UNPROVEN, named so a rejection says which:
+//   tcvt f32 -> i32   widen the lane to 32 bits, so a 23-bit shift is possible at all
+//   tshls    on i32   tshrs is documented i16/i32; tshls' accepted widths are NOT established
+//   tmov i32 -> f32   the reinterpret. `pto.tcast` DOES NOT EXIST — ptoas rejects it with
+//                     "custom op 'pto.tcast' is unknown", so the emitter comment claiming it
+//                     reinterprets a dtype is wrong and the one saying there is no such op is
+//                     right. tmov between differently-typed tiles is the only candidate left,
+//                     and the emitter's own cast path already uses it as a passthrough.
+//
+// The numeric oracle is what settles tmov's SEMANTICS, which acceptance cannot: a CONVERT
+// returns the float value of e<<23 (a huge integer), a REINTERPRET returns 2^(e-127). Both
+// compile. The raw i32 is stored to a second output so the shift can be checked independently
+// of whatever tmov turns out to do.
+module {
+  func.func @e8m0probe(%in: !pto.ptr<i8>, %out: !pto.ptr<f32>, %obits: !pto.ptr<i32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %c32 = arith.constant 32 : index
+
+    %tv = pto.make_tensor_view %in, shape = [%c8, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xi8>
+    %pv = pto.partition_view %tv, offsets = [%c0, %c0], sizes = [%c8, %c32] : !pto.tensor_view<?x?xi8> -> !pto.partition_tensor_view<8x32xi8>
+    %tb = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i8, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%pv : !pto.partition_tensor_view<8x32xi8>) outs(%tb : !pto.tile_buf<loc=vec, dtype=i8, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // si8 -> f16: the q8_0 dequant's own step, exact for every byte.
+    %th = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tcvt ins(%tb : !pto.tile_buf<loc=vec, dtype=i8, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%th : !pto.tile_buf<loc=vec, dtype=f16, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // Undo the host bias: e = (e - 128) + 128.
+    %k128 = arith.constant 128.0 : f16
+    %the = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tadds ins(%th, %k128 : !pto.tile_buf<loc=vec, dtype=f16, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f16) outs(%the : !pto.tile_buf<loc=vec, dtype=f16, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    %tf = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tcvt ins(%the : !pto.tile_buf<loc=vec, dtype=f16, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%tf : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // PROBE 1: f32 -> i32 lanes.
+    %ti = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tcvt ins(%tf : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ti : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // PROBE 2: shift left 23 on i32, putting e into the f32 exponent field.
+    %sh = arith.constant 23 : i32
+    %tsh = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tshls ins(%ti, %sh : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>, i32) outs(%tsh : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // PROBE 3: reinterpret those bits as f32 via tmov.
+    %tr = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tmov ins(%tsh : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%tr : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // e == 0 must mean 2^-127, but bits 0<<23 are exactly +0. One tmaxs fixes it for the
+    // whole domain: every e >= 1 gives at least 2^-126 > 2^-127, so the max is the identity
+    // there and only e == 0 is lifted. Whether a DENORMAL constant survives the vector unit
+    // is the open question this now answers.
+    %kden = arith.constant 5.877471754111438e-39 : f32
+    %tfx = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tmaxs ins(%tr, %kden : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%tfx : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %tv2 = pto.make_tensor_view %out, shape = [%c8, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %pv2 = pto.partition_view %tv2, offsets = [%c0, %c0], sizes = [%c8, %c32] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<8x32xf32>
+    pto.tstore ins(%tfx : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%pv2 : !pto.partition_tensor_view<8x32xf32>)
+
+    %tv3 = pto.make_tensor_view %obits, shape = [%c8, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xi32>
+    %pv3 = pto.partition_view %tv3, offsets = [%c0, %c0], sizes = [%c8, %c32] : !pto.tensor_view<?x?xi32> -> !pto.partition_tensor_view<8x32xi32>
+    pto.tstore ins(%tsh : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=32, v_row=8, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%pv3 : !pto.partition_tensor_view<8x32xi32>)
+    return
+  }
+}

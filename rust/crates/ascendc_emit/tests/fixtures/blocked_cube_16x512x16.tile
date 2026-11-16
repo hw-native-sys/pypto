@@ -1,0 +1,27 @@
+// Part of the SIZE BISECT for the blocked cube arm, written after the
+// 16x768x192 fixture ran on device and returned wrong values. The lesson that
+// produced this ladder is the mirror of runs 6-8 in
+// `evidence/0024-the-cube-arm-runs`: three independent perturbations of a
+// parameter space that failed identically showed the defect was not in that
+// space -- and the mirror is that tuning parameters before the smallest working
+// case EXISTS is how a week gets spent.
+//
+// RUNG B: TWO K blocks (Kb=256), one group. Adds the cmatrixInitVal /
+// isBias accumulation across K to rung A and nothing else.
+//
+// Each rung adds exactly one mechanism to the one below it, so the rung that
+// first disagrees with the oracle names the mechanism. Below the recogniser's
+// budget gate, so these are emitted with a forced small `per_buf_bytes`; the
+// corpus path is unaffected.
+module {
+  llvm.func @bm_gemm_f16_16_512_16(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>) attributes {hacc.entry} {
+    %m = llvm.mlir.constant(16 : i32) : i32
+    %k = llvm.mlir.constant(512 : i32) : i32
+    %n = llvm.mlir.constant(16 : i32) : i32
+    %a = llvm.call @__tile_load_f16(%arg0, %m, %k) : (!llvm.ptr<1>, i32, i32) -> i32
+    %bw = llvm.call @__tile_load_f16(%arg1, %k, %n) : (!llvm.ptr<1>, i32, i32) -> i32
+    %o = llvm.call @__tile_matmul_f16(%a, %a, %bw, %m, %k, %n) : (i32, i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f16(%arg2, %o, %m, %n) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

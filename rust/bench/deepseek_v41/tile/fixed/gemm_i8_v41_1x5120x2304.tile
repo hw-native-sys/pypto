@@ -1,0 +1,42 @@
+// The i8 dequant GEMM at decode shape, fixed so the call matches the intrinsic
+// tile_std declares.
+//
+// The captured form passes SIX operands where tile_std declares seven
+// (crates/tile_std/src/tile.rs:785):
+//
+//     __tile_matmul_i8_acc_i32_dequant_f16(dst, a, b, scale, m, k, n)
+//
+// The declared `scale: *const f32` is missing and the A tile is passed as
+// `dst`, so every operand after `b` is shifted: `scale` receives the m
+// constant, `m` receives k, `k` receives n, and `n` falls off the end.
+//
+// This one did not emit a wrong kernel, but it did produce a wrong DIAGNOSIS.
+// At six operands the blocked-matmul pre-pass cannot read the shape at all, so
+// it never marks the operand loads, and the emitter refused with
+//
+//     matmul_i8: both operand loads must be deferred for blocked emit
+//     (a.deferred=false, b.deferred=false); detect_blocked_matmul_loads must
+//     mark i8 matmul inputs
+//
+// which blames one of our own passes for what the input had made unreadable.
+// With the call corrected the true constraint appears, and it belongs to the
+// part rather than to this repository: on the 910B2 cube M must be a multiple
+// of 16 (fixedRowSize), so a decode-shape M=1 i8 GEMM has to be padded. The
+// corpus already carries that padded form as gemm_i8_v41_16x5120x2304, so this
+// variant exists to record the corrected CALL and the refusal it earns, not to
+// add an artefact.
+//
+// 1x5120 @ 5120x2304 -> 1x2304, i8 operands, i32 accumulator, f16 out.
+module {
+  llvm.func @bm_gemm_i8_1_5120_2304(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>, %arg3: !llvm.ptr<1>) attributes {hacc.entry} {
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %m = llvm.mlir.constant(1 : i32) : i32
+    %k = llvm.mlir.constant(5120 : i32) : i32
+    %n = llvm.mlir.constant(2304 : i32) : i32
+    %a = llvm.call @__tile_load_i8(%arg0, %m, %k) : (!llvm.ptr<1>, i32, i32) -> i32
+    %bw = llvm.call @__tile_load_i8(%arg1, %k, %n) : (!llvm.ptr<1>, i32, i32) -> i32
+    %o = llvm.call @__tile_matmul_i8_acc_i32_dequant_f16(%c0, %a, %bw, %arg3, %m, %k, %n) : (i32, i32, i32, !llvm.ptr<1>, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f16(%arg2, %o, %m, %n) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

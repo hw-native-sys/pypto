@@ -1,0 +1,59 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "engine_ascend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Ascend decode surface: placement, memory, the parallel split, and the kernel launch path."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+engine_core = { path = "../engine_core" }
+
+[[bin]]
+# The generation entry point: tokenise, prefill, decode, stream. This is the
+# serving core the controller plans for, and it is the smallest thing that can
+# demonstrate the decode path end to end.
+name = "ds4-generate"
+path = "src/bin/ds4_generate.rs"
+
+[features]
+# Links the CANN/ACL runtime and launches kernels on a card. Off by default so
+# `cargo check` type-checks the whole crate on any host -- the planning and
+# placement work does not need a card, which is what makes this utility useful
+# for capacity planning off-box.
+ascend = []
+
+[[example]]
+name = "w8a8_lm_head_banded"
+required-features = ["ascend"]
+
+[[example]]
+name = "w8a8_moe_device"
+required-features = ["ascend"]
+
+[[example]]
+name = "w8a8_expert_down"
+required-features = ["ascend"]
+
+[[example]]
+name = "engine_elf_probe"
+# Needs the CANN runtime: without the feature `with_devices` does not exist, so an unconditional
+# example breaks `cargo test` for everyone who is not building for a device.
+required-features = ["ascend"]
+
+[[example]]
+name = "w8a8_full_token_device"
+required-features = ["ascend"]

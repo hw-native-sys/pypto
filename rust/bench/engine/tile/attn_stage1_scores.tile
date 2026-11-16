@@ -1,0 +1,17 @@
+module {
+  llvm.func @attn_s1(%q: !llvm.ptr<1>, %kv: !llvm.ptr<1>, %sk: !llvm.ptr<1>, %o: !llvm.ptr<1>) attributes {hacc.entry} {
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %c1 = llvm.mlir.constant(1 : i32) : i32
+    %c8 = llvm.mlir.constant(8 : i32) : i32
+    %c64 = llvm.mlir.constant(64 : i32) : i32
+    %q1 = llvm.call @__tile_load_at_f32(%q, %c0, %c1, %c64) : (!llvm.ptr<1>, i32, i32, i32) -> i32
+    %qb = llvm.call @__tile_col_expand_f32(%c0, %q1, %c8, %c64) : (i32, i32, i32, i32) -> i32
+    %sink = llvm.call @__tile_load_at_f32(%sk, %c0, %c1, %c8) : (!llvm.ptr<1>, i32, i32, i32) -> i32
+    %kb = llvm.call @__tile_load_at_f32(%kv, %c0, %c8, %c64) : (!llvm.ptr<1>, i32, i32, i32) -> i32
+    %pp = llvm.call @__tile_mul_f32(%c0, %kb, %qb, %c8, %c64) : (i32, i32, i32, i32, i32) -> i32
+    %s8 = llvm.call @__tile_reduce_sum_f32(%c0, %pp, %c8, %c64) : (i32, i32, i32, i32) -> i32
+    %sa = llvm.call @__tile_add_f32(%c0, %s8, %sink, %c1, %c8) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%o, %sa, %c1, %c8) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

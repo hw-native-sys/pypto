@@ -1,0 +1,30 @@
+// gate_up_silu, fixed so both Ascend emitters accept it.
+//
+// The captured form tiles the whole 8960-wide intermediate at once. Six live tiles of
+// 8960 f32 is 215040B against a 196608B UB, which is what its C1 diagnostic reports
+// ("tile of 35840B at offset 179200B would use 215040B > UB_SIZE 196608B").
+//
+// Fixed: block the intermediate to 2048. The width has to satisfy BOTH emitters, which
+// budget the UB differently and were measured, not guessed:
+//   * PTO tracks a live working set — six tiles of 2048 f32 is 49152B against 196608B.
+//   * AscendC splits the UB into equal slots and reports "13440 bytes available per
+//     buffer (188416 UB / 14 slots)", so a tile may be at most 3360 f32 there. 4096 fit
+//     PTO and was refused by AscendC; 2048 fits both with headroom.
+//   * 2048/8 = 256 elems = 1024B per fractal, and 1024 % 512 == 0, so PTO's C2 stride
+//     rule holds too.
+// Qwen's 8960 intermediate is covered by invoking this per block; the op is pointwise
+// in the intermediate dimension, so blocking it is exact rather than an approximation.
+module {
+  llvm.func @gate_up_silu(%a: !llvm.ptr<1>, %wg: !llvm.ptr<1>, %wu: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %c = llvm.mlir.constant(2048 : i32) : i32
+    %in0 = llvm.call @__tile_load_f32(%a, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %in1 = llvm.call @__tile_load_f32(%wg, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %in2 = llvm.call @__tile_load_f32(%wu, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_gate_up_silu_f16(%c0, %in0, %in1, %in2, %r, %c) : (i32, i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%out, %res, %r, %c) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

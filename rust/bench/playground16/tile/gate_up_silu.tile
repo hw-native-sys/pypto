@@ -1,0 +1,17 @@
+// Captured from the tile-rs lowering, fused path: func.func -> llvm.func.
+// Form: a fused transformer kernel, in the llvm.func + hacc.entry + __tile_* shape
+// the emitters consume.
+module {
+  llvm.func @gate_up_silu(%a: !llvm.ptr<1>, %wg: !llvm.ptr<1>, %wu: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %c = llvm.mlir.constant(8960 : i32) : i32
+    %in0 = llvm.call @__tile_load_f32(%a, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %in1 = llvm.call @__tile_load_f32(%wg, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %in2 = llvm.call @__tile_load_f32(%wu, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_gate_up_silu_f16(%c0, %in0, %in1, %in2, %r, %c) : (i32, i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%out, %res, %r, %c) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

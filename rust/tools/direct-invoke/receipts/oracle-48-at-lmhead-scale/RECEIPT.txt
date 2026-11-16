@@ -1,0 +1,186 @@
+ORACLE 48 at lmhead scale: one real defect fixed, and the scale blocker is NOT it
+==================================================================================
+910b (101.245.76.149), Ascend910B2 dav-2201, CANN 8.5.2. 2026-11-09.
+
+GOAL. `C` stood at 61/72 with eleven kernels short. Two of them --
+`gemm_f16_lmhead_v41_16x5120x12928` and `..._16x5120x16160` -- were `static-verified`
+on `ptoas-assembles` alone, and ORACLE 48 (general f16 GEMM, M=MV_N K=MV_K N=MV_P)
+was built this week precisely to score them. This is the attempt, and it did not
+bank them. What it established is worth more than the attempt cost.
+
+1. THE ARTEFACTS ARE NOT BLOCKED, AND THE ASSEMBLER PIN IS A RED HERRING
+------------------------------------------------------------------------
+All five `static-verified` deepseek kernels have `.tile` and `.pto` and NO `.cpp`,
+so the device route needed artefact generation. It is not refused:
+
+    gemm_f16_lmhead_v41_16x5120x12928   EMITS  (4381 bytes)
+    gemm_f16_lmhead_v41_16x5120x16160   EMITS  (4381 bytes)
+    gemm_i8_v41_16x5120x2304            refuses: no arm for __tile_matmul_i8_acc_i32_dequant_f16
+    mx4pk_v41_5120x2304                 refuses: no arm for __tile_mul_mv_id_mxfp4_pk_f32
+    quant_i8_v41_8x5120                 refuses: no arm for __tile_quantize_f32_i8
+
+The three refusals are correct behaviour -- the emitter names the missing arm and
+declines rather than silently dropping the operation.
+
+The equal 4381 byte size for two different N was checked, not assumed: the md5s
+differ, each file carries its own N seven times, and the extents land as
+`__v0 = 16; __v1 = 5120; __v2 = 12928`. Both N values are five digits, so the equal
+length is coincidence and no extent was dropped.
+
+A PROVENANCE FINDING THAT TURNED OUT NOT TO BIND. `toolchain/versions.env` sets
+`PTOAS_VERSION=v0.70`; this Mac has **0.68** and the device host has **0.71**, so the
+pinned assembler exists on NEITHER machine, and ZERO of the 146 ledger records name
+an assembler version. That is the scorer defect one level down in the artefact chain.
+It does not block these two, because the committed `.cpp` corpus is NOT built through
+ptoas at all: the `.tile` route uses no assembler, and 5 of deepseek's 8 committed
+`.cpp` reproduce BYTE-IDENTICALLY through it (swiglu, residual_add,
+rmsnorm_1x5120_decode, embedding, rmsnorm_8x1280_quarter). The `.pto` route with 0.68
+reproduces NONE of them and emits 62% more text.
+
+2. A REAL DEFECT IN MY OWN ORACLE, FIXED, AND PROVEN INERT
+-----------------------------------------------------------
+ORACLE 48's reference was
+
+    for m: for nn: for k:  acc += ah[m*K+k] * bh[k*N+nn]
+
+which walks B down a COLUMN -- stride N halves. At N = 12928 every one of the M*N*K
+inner steps touches a fresh cache line AND a fresh page, and the whole K*N array is
+re-walked once per output, 206848 times. At the calibration shape (M=4 K=8 N=4) the
+entire array is 64 bytes, which is exactly why the cost was invisible when it was
+written.
+
+Replaced by hoisting k outside nn and accumulating a row of doubles, so B is read
+sequentially. THE ARITHMETIC IS UNCHANGED: each output still sums over k in ascending
+order, one f64 add at a time, so every value is bit-identical. A memory-order change,
+not a numerical one.
+
+PROVEN INERT against the recorded calibration, both arms, every digit:
+
+                     recorded 2026-11-09        re-run with the interchange
+    g48f_ok    PASS  wrong=0  max_abs 0.000e+00  PASS  wrong=0  max_abs 0.000e+00
+    g48f_drop  FAIL  wrong=16 max_abs 2.500e-01  FAIL  wrong=16 max_abs 2.500e-01
+                              max_rel 5.600e+00                 max_rel 5.600e+00
+
+`ref_abs 3.906250e-02 .. 6.640625e-01` and `first_bad` (-1 / 0) also identical. The
+negative arm matters as much as the positive one: an inert change that silently
+stopped detecting the dropped k would pass a positive-only check.
+
+3. AND THE SCALE BLOCKER IS NOT THAT LOOP -- STATED AS THE OPEN QUESTION
+------------------------------------------------------------------------
+With the interchange in place the lmhead run still did not finish. Measured:
+
+  * `vec_add_run` ran **17 minutes** at 99.9% CPU with `TIME` equal to `ELAPSED` to
+    the second, and `strace -c` over 4 s captured **ZERO syscalls**. So it is pure
+    host userspace compute -- NOT a spinning device sync, and not a hung kernel.
+  * AICore was **0% on all eight chips** throughout, sampled repeatedly. The launch
+    had completed; this is host post-processing. Nothing was in flight, which is why
+    stopping my own process was safe.
+  * Three `gdb` stack samples seconds apart all landed on ONE instruction in `main`.
+    Disassembly there: `mov w5, #0x3280` (= 12928, the inner trip count) with `umulh`
+    -- magic-number division, i.e. an integer MODULO -- plus `fmov`. That is the shape
+    of the B fill, `((k*5 + nn*11) % 17)`, 66.2M iterations.
+  * A standalone g++ replica of the INTERCHANGED reference at the same extents runs
+    in **8.60 s at -O0 and 5.20 s at -O2**. So 1.06e9 iterations is seconds on this
+    box, and neither that loop nor a 66.2M-iteration modulo fill explains 17 minutes.
+
+So the interchange fixed a genuine O(cache-miss) defect that was NOT the binding
+constraint. The remaining cost is unexplained by instruction count, and the one
+difference I have not isolated is that `main.asc` is compiled by **bisheng** under
+`-x asc`, not by g++, so its HOST codegen may be the factor. NOT MEASURED: a bisheng
+build of the same replica. That is the next instrument, and it is cheap.
+
+Secondary, and real at this scale: the harness declares NINE host vectors of `n`
+floats plus `a` at `EMB_ROWS * n`. At the n = 33,095,680 this kernel forces (the
+weight matrix is 132 MB and every buffer is `n` floats) that is ~1.6 GB of host
+allocation per run, measured RSS 483 MB at the sampled moment.
+
+WHAT THIS DOES AND DOES NOT LICENSE. It does NOT license any verdict on either
+lmhead kernel: no reference was ever computed, so there is no PASS and no FAIL, and
+both stay `static-verified`. `C` is unchanged at 61/72. The two generated `.cpp` were
+REMOVED from the corpus rather than left in place -- unbanked they move no KPI, and
+on disk they would have put `totals.ascendc` at 8 against 10 rows carrying an
+artefact, reintroducing in a different column the gate failure the other lane had
+just repaired. Regenerating them is one command.
+
+A SENSITIVITY LIMIT, recorded before any future run so it cannot be quietly skipped.
+At K = 5120 a single dropped k contributes about 2e-4 relative, which is BELOW f16's
+representation floor at |C| ~ 1920 (spacing 1.0, so ~2.6e-4). So this oracle at this
+shape can detect a dropped K-BLOCK and CANNOT detect a single dropped k. That is a
+gap in the instrument, not a reason to loosen the gate, and it belongs in the
+evidence record if these ever bank.
+
+TWO INSTRUMENT ERRORS OF MY OWN, both the same shape as the findings above.
+A `cmp -l` comparison reported "differs (0 bytes)" for two kernels where the emitter
+had produced NO FILE AT ALL -- comparing against an artefact never produced. And a
+`pgrep -f run_i89.sh` waiter MATCHED ITS OWN COMMAND LINE, so it reported the run
+finished while it was still going and handed back an empty result, which reads
+exactly like a silent failure. Both are detectors answering confidently about
+something they never measured.
+
+ADDENDUM 1 -- THE STALL WAS MINE, AND IT WAS A NESTING ERROR
+=============================================================
+2026-11-09, same host. Section 3 above left the 17-minute stall unlocalised after
+refuting three hypotheses. It is now found, and it was none of them.
+
+THE DEFECT. ORACLE 48's input fill block sat INSIDE the per-element
+`for (int i = 0; i < n; ++i)` loop. Confirmed by a brace-depth walk over the file:
+the loop spanned lines 173..482 and the fill was at line 310. The block fills the
+WHOLE A and B arrays, so nested it was O(n * (M*K + K*N)) -- the B fill's 66.2M
+iterations run n = 33,095,680 times, i.e. 2.2e15 iterations. It was never going to
+finish. The other oracles' init blocks belong in that loop because they are
+genuinely per-element, assigning a-sub-i and b-sub-i; this one is not.
+
+WHY NO CORRECTNESS GATE COULD CATCH IT, which is the part worth keeping. The fill is
+IDEMPOTENT: every pass writes identical values. So the oracle produced CORRECT
+results and passed BOTH its positive and its negative calibration arm with the
+defect present. At the calibration shape (M=4 K=8 N=4, n=32) the nesting costs 2048
+iterations -- instant. The bug changed only TIME, and only at a scale no calibration
+had reached. No gate on VALUES could have seen it, however adversarial its inputs.
+
+MEASURED AFTER THE HOIST, same build, same shape, from the stage timers:
+
+    [di-stage] device malloc done     t=    0.84s
+    [di-stage] fills done, h2d        t=    1.36s      <- fill stage: 0.52 s
+
+From "never finishes" to 0.52 s. And value-inert: the calibration pair re-run after
+the hoist is unchanged to every digit -- g48f_ok PASS wrong=0 max_abs 0.000e+00,
+g48f_drop FAIL wrong=16 max_abs 2.500e-01 max_rel 5.600e+00.
+
+HOW IT WAS FOUND, because the method is the transferable part. Three hypotheses were
+refuted by measurement before instrumenting: the reference's loop order (real defect,
+fixed, but the interchanged form does these extents in 5.20 s standalone), bisheng's
+host codegen (7.51 s at -O0 and 2.57 s at -O2 on this box, indistinguishable from
+g++), and a device hang (TIME equal to ELAPSED, zero syscalls, AICore 0%). Each cost
+a build. Three stage timers then named the stage in one run, and a brace-depth walk
+named the line. THE INDENTATION LOOKED TOP-LEVEL, which is why it survived being
+written and read; the walk is the authority and the layout is not.
+
+Two of my own errors in the fix itself, recorded because they are the same shape as
+everything else here: the first hoist took the first four-space closing brace after
+the block as the loop's end and moved the block to another spot still inside the
+loop; the second put a brace character inside the explanatory comment, which the
+walk then counted as code and reported the file unbalanced. Prose about braces must
+not contain braces.
+
+4. WITH THE INSTRUMENT FIXED, THE ARTEFACT FAULTS
+--------------------------------------------------
+    gemm_f16_lmhead_v41_16x5120x12928
+    FAIL aclrtSynchronizeStream(stream) -> 507035
+
+So the two lmheads are not kernels whose verdict the oracle withheld -- the generated
+kernel does not run. The other lane reached the same conclusion structurally and
+independently, from the emitted C++: `__tile_matmul_f16` emits a scalar `GetValue`
+triple loop marked TILE_DEGENERATE_MATMUL, so the artefact is that loop composed with
+a chunked window INDEXING THE UNCHUNKED EXTENTS, which is `unfaithful()` class 2.
+Two routes, one structural and one behavioural, agreeing.
+
+WHAT IS NOT CLAIMED. 507035 is NOT read as proving that cause. `chip-910` B16 is
+explicit that the inference runs one way: a UB over-allocation has been shown to
+PRODUCE 507035, but 507035 does not IMPLY one, and the code has three attested
+causes. The claim here is only that the artefact faults, and that the other lane's
+structural account is consistent with it.
+
+NET. C stays 61/72. ORACLE 48 is now usable at lmhead scale -- which it demonstrably
+was not. The blocker has moved from the instrument to the artefact, and the only
+route to these two kernels is a blocked cube arm that drives the cube unit, which
+nothing in this tree has ever done for a corpus matmul.

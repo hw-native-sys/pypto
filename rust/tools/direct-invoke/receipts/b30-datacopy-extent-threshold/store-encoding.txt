@@ -1,0 +1,14 @@
+=== pad store .aicore_binary ===
+pad   4   B md5=add6154af91c size=3216
+pad   24  B md5=85760ced85d1 size=3216
+pad   32  B md5=b72ebe6a5148 size=3216
+--- pad 24 vs 32 (cmp -l, octal) ---
+ 513  30  40
+
+=== plain store .aicore_binary ===
+plain 4   B md5=e6f72e7ed693 size=3216
+plain 32  B md5=157070ea8d8c size=3216
+--- plain 4 vs 32 (cmp -l, octal) ---
+ 509  20   2
+ 510   0  40
+ 512   7  20

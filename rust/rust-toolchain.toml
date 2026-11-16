@@ -1,0 +1,30 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+# Stable. Measured on rustc 1.98.1: the PTO emitter, the PTO-to-tile-rs lift and
+# both CLIs build and pass their suites on stable, and the stable-built emitter
+# produces byte-identical PTO to the nightly-built one across the whole kernel
+# bench.
+#
+# Exactly two things in this project need nightly, and neither is built from
+# this workspace:
+#
+#   * `tile_std`, the kernel-side DSL. It is a `#![no_core]` crate declaring its
+#     own lang items and intrinsics, because the accelerator target has no
+#     `core` to link. That is 25 nightly features -- `no_core`, `lang_items`,
+#     `intrinsics`, `prelude_import` among them -- and they are internal
+#     compiler features with no stabilisation path. It is excluded from this
+#     workspace and carries its own pin.
+#   * Miri, which exists only on nightly.
+#
+# So the toolchain a contributor needs depends on which half they touch, and the
+# default is the cheap one. See docs/en/dev/rust/index.md.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]

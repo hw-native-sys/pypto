@@ -1,0 +1,9 @@
+=== pad LOAD .aicore_binary, 64 B destination ===
+8_c1   md5=8dd9395c5e7e07b1b6ce5e5b1030c150  ed8_c1.bin size=3536
+16_c3  md5=15093eccd527c27a57350b2f91f80285  ed16_c3.bin size=3536
+36_c1  md5=c69b52ac123a4806a762cb95ed9a4047 size=3536
+--- CONFOUNDED pair (pad length AND read cell both differ): 8_c1 vs 16_c3 ---
+ 633  10  20
+ 685   4  14
+--- ONE-VARIABLE pair (same cell 1, pad 8 vs 36) ---
+ 633  10  44

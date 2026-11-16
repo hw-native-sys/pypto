@@ -1,0 +1,25 @@
+// A wide row reduction, as a tile-search fixture.
+//
+// WHY THIS EXISTS AS ITS OWN FILE. The search's central case is "a kernel the
+// emitter refuses AS CAPTURED, which a smaller extent rescues". The playground
+// corpus's `gate_up_silu` was that case until 2026-11-05, when rspto learned to
+// chunk: an elementwise chain at 8960 is now split into equal chunks and accepted,
+// so the premise vanished and the test was left asserting a refusal that no longer
+// happens.
+//
+// A REDUCTION cannot be chunked -- it accumulates across the width, so splitting it
+// changes the answer -- which makes the refusal stable while the extent stays the
+// thing that fixes it. 8 x 5120 f32 is 163840 B, so two live tiles overflow; 8 x 640
+// fits comfortably, and the search has a real ladder of candidates between them,
+// which is also what the idempotence check needs.
+module {
+  llvm.func @wide_reduce(%a: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(8 : i32) : i32
+    %c = llvm.mlir.constant(5120 : i32) : i32
+    %in0 = llvm.call @__tile_load_f32(%a, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %sum = llvm.call @__tile_reduce_sum_f32(%c0, %in0, %r, %c) : (i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%out, %sum, %r, %r) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

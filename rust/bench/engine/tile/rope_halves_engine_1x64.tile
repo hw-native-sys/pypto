@@ -1,0 +1,25 @@
+// Engine slot (ds4-rs-ascend): rope over halves, 4 inputs -> 1 output written
+// as two 32-element halves. Formula and chain from the layer0 fixture.
+module {
+  llvm.func @rope_halves_engine_1x64(%x: !llvm.ptr<1>, %cs: !llvm.ptr<1>, %sn: !llvm.ptr<1>, %o: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %cw = llvm.mlir.constant(64 : i32) : i32
+    %ch = llvm.mlir.constant(32 : i32) : i32
+    %lo = llvm.call @__tile_load_f32(%x, %r, %ch) : (!llvm.ptr<1>, i32, i32) -> i32
+    %hop = llvm.getelementptr inbounds %x[%ch] : (!llvm.ptr<1>, i32) -> !llvm.ptr<1>
+    %hi = llvm.call @__tile_load_f32(%hop, %r, %ch) : (!llvm.ptr<1>, i32, i32) -> i32
+    %cos = llvm.call @__tile_load_f32(%cs, %r, %ch) : (!llvm.ptr<1>, i32, i32) -> i32
+    %sin = llvm.call @__tile_load_f32(%sn, %r, %ch) : (!llvm.ptr<1>, i32, i32) -> i32
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %t1 = llvm.call @__tile_mul_f32(%z, %lo, %cos, %r, %ch) : (i32, i32, i32, i32, i32) -> i32
+    %t2 = llvm.call @__tile_mul_f32(%z, %hi, %sin, %r, %ch) : (i32, i32, i32, i32, i32) -> i32
+    %ol = llvm.call @__tile_sub_f32(%z, %t1, %t2, %r, %ch) : (i32, i32, i32, i32, i32) -> i32
+    %t3 = llvm.call @__tile_mul_f32(%z, %hi, %cos, %r, %ch) : (i32, i32, i32, i32, i32) -> i32
+    %t4 = llvm.call @__tile_mul_f32(%z, %lo, %sin, %r, %ch) : (i32, i32, i32, i32, i32) -> i32
+    %oh = llvm.call @__tile_add_f32(%z, %t3, %t4, %r, %ch) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%o, %ol, %r, %ch) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    %oop = llvm.getelementptr inbounds %o[%ch] : (!llvm.ptr<1>, i32) -> !llvm.ptr<1>
+    llvm.call @__tile_store_f32(%oop, %oh, %r, %ch) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

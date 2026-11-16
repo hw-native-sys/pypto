@@ -1,0 +1,21 @@
+module {
+  func.func @sstore(%x: !pto.ptr<f32>, %o: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c16 = arith.constant 16 : index
+    // contiguous LOAD of the first 16 elements (ND2ND, definitely supported)
+    %xtv = pto.make_tensor_view %x, shape = [%c1, %c16], strides = [%c16, %c1] : !pto.tensor_view<?x?xf32>
+    %xpv = pto.partition_view %xtv, offsets = [%c0, %c0], sizes = [%c1, %c16] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x16xf32>
+    %t = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%xpv : !pto.partition_tensor_view<1x16xf32>) outs(%t : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    pto.barrier <PIPE_ALL>
+    // STRIDED store: 32-element output viewed as [2 x 16] strides [1,2], so row 0
+    // is the even lanes. If TSTORE has looser layout rules than TLOAD, this lands
+    // the tile in lanes 0,2,4,...,30 and the interleave problem is solved.
+    %otv = pto.make_tensor_view %o, shape = [%c2, %c16], strides = [%c1, %c2] : !pto.tensor_view<?x?xf32>
+    %opv = pto.partition_view %otv, offsets = [%c0, %c0], sizes = [%c1, %c16] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x16xf32>
+    pto.tstore ins(%t : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%opv : !pto.partition_tensor_view<1x16xf32>)
+    return
+  }
+}

@@ -1,0 +1,62 @@
+########## probe-b30/g48f_ok.cpp
+#include "kernel_operator.h"
+class Kernel_gf {
+public:
+    __aicore__ inline Kernel_gf() {}
+    __aicore__ inline void Init(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+        a.SetGlobalBuffer((__gm__ half *)g0, 1048576);
+        b.SetGlobalBuffer((__gm__ half *)g1, 1048576);
+        c.SetGlobalBuffer((__gm__ half *)g2, 1048576);
+    }
+    __aicore__ inline void Process() {
+        const int M = 4, K = 8, N = 4, KK = 8;
+        for (int m = 0; m < M; ++m)
+            for (int nn = 0; nn < N; ++nn) {
+                float acc = 0.0f;
+                for (int k = 0; k < KK; ++k)
+                    acc += (float)a.GetValue(m * K + k) * (float)b.GetValue(k * N + nn);
+                c.SetValue(m * N + nn, (half)acc);
+            }
+        return;
+    }
+private:
+    AscendC::GlobalTensor<half> a, b, c;
+};
+extern "C" __global__ __aicore__ void gemmf(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+    Kernel_gf op; op.Init(g0, g1, g2); op.Process();
+}
+extern "C" void gemmf_do(uint32_t bd, void *st, uint8_t *g0, uint8_t *g1, uint8_t *g2) {
+    gemmf<<<bd, nullptr, st>>>(g0, g1, g2);
+}
+
+########## probe-b30/g48f_drop.cpp
+#include "kernel_operator.h"
+class Kernel_gf {
+public:
+    __aicore__ inline Kernel_gf() {}
+    __aicore__ inline void Init(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+        a.SetGlobalBuffer((__gm__ half *)g0, 1048576);
+        b.SetGlobalBuffer((__gm__ half *)g1, 1048576);
+        c.SetGlobalBuffer((__gm__ half *)g2, 1048576);
+    }
+    __aicore__ inline void Process() {
+        const int M = 4, K = 8, N = 4, KK = 7;
+        for (int m = 0; m < M; ++m)
+            for (int nn = 0; nn < N; ++nn) {
+                float acc = 0.0f;
+                for (int k = 0; k < KK; ++k)
+                    acc += (float)a.GetValue(m * K + k) * (float)b.GetValue(k * N + nn);
+                c.SetValue(m * N + nn, (half)acc);
+            }
+        return;
+    }
+private:
+    AscendC::GlobalTensor<half> a, b, c;
+};
+extern "C" __global__ __aicore__ void gemmf(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+    Kernel_gf op; op.Init(g0, g1, g2); op.Process();
+}
+extern "C" void gemmf_do(uint32_t bd, void *st, uint8_t *g0, uint8_t *g1, uint8_t *g2) {
+    gemmf<<<bd, nullptr, st>>>(g0, g1, g2);
+}
+
