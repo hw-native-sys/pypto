@@ -104,8 +104,9 @@ minimum 1, including when also used as an extent. Compiler options are not yet a
 
 For example, a `(rows, 32)` tensor whose row stride is dynamic is described as
 `TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1))`. A runtime-bound
-view offset remains in the request; the eventual bridge must apply it exactly
-once when constructing the provider's first-valid-element pointer.
+view offset remains in the request; the call adapter below applies it exactly
+once when constructing the provider's first-valid-element pointer. Runtime
+binding validation must prove that the resulting address is in bounds.
 
 The result is a `PreparedKernel` with the named `cannbotdsl.device_callable` v1
 descriptor ABI, preserving the export's physical argument order. Public returns
@@ -152,6 +153,33 @@ validate compiler stack requirements, alongside descriptor packing and resource
 ownership. The existing text-only ELF checks alone do not establish these guarantees.
 `test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
 when installed, the real public compiler export; it does not validate a binary.
+
+### CANNBotDSL call adapter (compile-only)
+
+`pypto.backend.cannbotdsl_abi.build_call_adapter(prepared)` produces an owned
+`SourceArtifact` containing `call_adapter.hpp` and the native source, manifest
+and headers. It reads no provider directory and imports no optional compiler.
+The adapter revalidates the manifest against the prepared contract, native ABI,
+execution metadata and source/header digests before generating code.
+
+The generated device function consumes TMR argument storage (tensors first,
+then scalar bit slots), preserves the export's physical argument order, applies
+element offsets once, and populates dynamic shape/stride arrays. C++ assertions
+check the actual function signature, POD layout, pointer and array types,
+offsets, sizes and alignment against the manifest. Integer carriers preserve
+bits even when their native signedness differs from the logical type. Tensor
+element types must match the request; equal byte widths are insufficient. Floating
+scalars preserve signed zero and NaN payloads. Bool slots normalize the low byte
+to a valid C++ bool. TMR limits are 32 tensors, 16 scalars and tensor rank 1..5;
+FP16/BF16 scalar slots are not supported.
+
+This is a callable header, **not an `ExternalTask` or a loadable runtime entry**:
+it deliberately defines no `kernel_entry` and does not change `TMRBridge` ABI
+support. Its caller must validate actual bindings on every invocation and meet
+the retained resource, cache-line, stack, binary-loading and completion
+requirements. Host C++ tests execute packing and offset handling; optional
+CCEC tests compile real public exports. Neither establishes device execution
+or runtime completion correctness.
 
 ## Requests and prepared kernels
 

@@ -292,8 +292,10 @@ def _artifact(cb: Any, source: str, manifest: dict[str, Any]) -> SourceArtifact:
     return SourceArtifact(tuple(files), "device_callable.hpp", manifest["symbol"], ("include",))
 
 
-def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKernel:
-    manifest = export.manifest
+def _contracts(
+    manifest: Any, request: KernelRequest
+) -> tuple[KernelContract, NativeABI, ExecutionRequirements]:
+    """Decode the same contract at preparation and owned-artifact consumption."""
     _require(isinstance(manifest, dict), "device manifest must be an object")
     _require(
         manifest.get("protocol") == ABI_NAME
@@ -402,9 +404,7 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
         and completion.get("publication") == "consumer_after_all_participants_return",
         "export does not guarantee local completion before participant return",
     )
-    artifact = _artifact(cb, export.source, manifest)
-    prepared = PreparedKernel(
-        request,
+    return (
         KernelContract(
             request.parameters,
             tuple(effects[i] for i in sorted(effects)),
@@ -412,9 +412,21 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
                 WritebackBinding(i) for i in sorted(effects) if effects[i].coverage != Coverage.NONE
             ),
         ),
-        artifact,
         NativeABI(ABI_NAME, 1, tuple(abi)),
         ExecutionRequirements(cores[core_type], expected["aiv"], Completion.ENTRY_RETURN),
+    )
+
+
+def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKernel:
+    manifest = export.manifest
+    contract, abi, execution = _contracts(manifest, request)
+    artifact = _artifact(cb, export.source, manifest)
+    prepared = PreparedKernel(
+        request,
+        contract,
+        artifact,
+        abi,
+        execution,
         # The output digest is useful provenance but cannot prove a complete
         # Python input snapshot. Never authorize preparation-cache reuse with it.
         PreparationIdentity(
