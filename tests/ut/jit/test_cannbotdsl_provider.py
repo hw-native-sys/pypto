@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pypto.backend.cannbotdsl_abi import build_binding_checker, build_call_adapter
+from pypto.backend.cannbotdsl_abi import build_binding_checker, build_call_adapter, build_conflict_checker
 from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
 from pypto.jit.external.contracts import (
@@ -846,9 +846,17 @@ def test_compiler_checks_manifest_against_actual_native_layout(compiler, tmp_pat
 
 
 @pytest.mark.parametrize("change", ["source", "manifest", "metadata", "missing_header", "cpp_type"])
-@pytest.mark.parametrize("builder", [build_call_adapter, build_binding_checker])
-def test_adapter_revalidates_owned_artifacts_without_the_compiler(compiler, monkeypatch, change, builder):
+@pytest.mark.parametrize("kind", ["call", "binding", "conflict_first", "conflict_second"])
+def test_adapter_revalidates_owned_artifacts_without_the_compiler(compiler, monkeypatch, change, kind):
     prepared = _prepare_call(compiler)
+    original = prepared
+    builders = {
+        "call": build_call_adapter,
+        "binding": build_binding_checker,
+        "conflict_first": lambda p: build_conflict_checker(p, original),
+        "conflict_second": lambda p: build_conflict_checker(original, p),
+    }
+    builder = builders[kind]
     shutil.rmtree(compiler.include)
     monkeypatch.setitem(sys.modules, "cannbotdsl", None)
     assert builder(prepared).symbol
@@ -1243,6 +1251,166 @@ def test_binding_checker_rejects_unrepresentable_constraints(compiler, field, va
     prepared = _prepare_binding(compiler, tensor)
     with pytest.raises(ContractError, match="exceeds uint"):
         build_binding_checker(prepared)
+
+
+def _run_conflict_checker(artifact, tmp_path, body):
+    main = f"""
+#include <cstring>
+[[noreturn]] void assert_impl(const char* condition, const char*, int) {{ throw condition; }}
+int main() {{
+    simpler::tmr::Tensor x{{}}, out{{}};
+    x.buffer = {{0x1000, 4096}}; x.ndims = 2; x.dtype = DataType::FLOAT32;
+    x.shapes[0] = x.shapes[1] = x.strides[0] = x.strides[1] = 1;
+    out = x; out.buffer.addr = 0x2000;
+    auto x2 = x, out2 = out; x2.buffer.addr = 0x3000; out2.buffer.addr = 0x2004;
+    CoreTaskArgs first, second;
+    first.add_input(x); first.add_output(out); first.add_scalar(1.0f);
+    second.add_input(x2); second.add_output(out2); second.add_scalar(1.0f);
+    auto conflicts = [&]() {{ return {artifact.symbol}(first, second); }};
+{body}
+}}
+"""
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True)
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, f"conflict checker exited {result.returncode}: {result.stderr}"
+
+
+@pytest.mark.parametrize(
+    "first_access,second_access,conflict",
+    [
+        ("write", "write", True),
+        ("read", "write", True),
+        ("write", "read", True),
+        ("read_write", "read", True),
+        ("read", "read", False),
+        ("none", "write", False),
+        ("read_write", "none", False),
+    ],
+)
+def test_cache_line_conflicts_follow_both_access_modes(
+    compiler, tmp_path, first_access, second_access, conflict
+):
+    tensor = TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1))
+    compiler.manifest["parameters"][1]["access"] = first_access
+    first = _prepare_binding(compiler, tensor)
+    compiler.manifest["parameters"][1]["access"] = second_access
+    second = _prepare_binding(compiler, tensor)
+    # Each invocation touches disjoint bytes, but both touch line 0x2000.
+    # NONE is an unused parameter, not a read or write dependency.
+    _run_conflict_checker(
+        build_conflict_checker(first, second),
+        tmp_path,
+        f"return conflicts() == {str(conflict).lower()} ? 0 : 1;",
+    )
+
+
+def test_cache_line_conflicts_recheck_views_and_validate_before_return(compiler, tmp_path):
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    artifact = build_conflict_checker(prepared, prepared)
+    _run_conflict_checker(
+        artifact,
+        tmp_path,
+        f"""
+    if (!conflicts()) return 1;  // Adjacent float elements share a cache line.
+    out2.buffer.addr = 0x2040;
+    if (conflicts()) return 2;   // Exactly the next line is independent.
+    out2.buffer.addr = 0x2000; out2.start_offset = 16;
+    if (conflicts()) return 3;   // Apply the view offset before line rounding.
+    out2.start_offset = 15;
+    if (!conflicts()) return 4;
+    out2.buffer.addr = 0x2004; out2.start_offset = 15;
+    if (conflicts()) return 5;   // A misaligned allocation can have an aligned view.
+    out2.buffer.addr = 0x2000; out2.start_offset = 0;
+    x2.shapes[0] = out2.shapes[0] = 0;
+    if (conflicts()) return 6;   // Empty writes have no cache-line footprint.
+    x2.shapes[0] = out2.shapes[0] = 1;
+    out2.buffer.addr = 0x4000; x2.buffer.addr = 0x2004;
+    if (!conflicts()) return 7;  // First output conflicts with second input.
+    x2.buffer.addr = 0x1000;
+    if (conflicts()) return 8;   // Shared read-only input needs no serialization.
+    out2.buffer.addr = 0x1004;
+    if (!conflicts()) return 9;  // First input conflicts with second output.
+    out2.buffer.addr = 0x2004; x2.buffer.addr = 0x3000;
+    out2.dtype = DataType::INT32;
+    try {{ conflicts(); return 10; }} catch (const char* why) {{
+        if (!std::strstr(why, "dtype")) return 11;
+    }}
+    out2.dtype = DataType::FLOAT32; out.buffer.size = 0;
+    try {{ conflicts(); return 12; }} catch (const char* why) {{
+        if (!std::strstr(why, "storage bounds")) return 13;
+    }}
+    out.buffer.size = 4096;
+    if (!{artifact.symbol}(first, first)) return 14; // Reusing the same bindings writes the same line.
+    // The byte envelope includes holes; uncertainty requires serialization.
+    x.shapes[0] = out.shapes[0] = 2; x.strides[0] = out.strides[0] = 32;
+    out2.buffer.addr = 0x2040;
+    if (!conflicts()) return 15;
+    x.shapes[0] = out.shapes[0] = 1; x.strides[0] = out.strides[0] = 1;
+    // Inclusive last-line comparison never rounds the top address up to zero.
+    out.buffer.addr = UINT64_MAX - 7; out.buffer.size = 4;
+    out2.buffer.addr = UINT64_MAX - 11; out2.buffer.size = 4;
+    if (!conflicts()) return 16;
+    out2.buffer.addr = UINT64_MAX - 67;
+    if (conflicts()) return 17;
+    return 0;
+""",
+    )
+
+
+def test_cache_line_conflicts_support_different_dtypes_and_header_composition(compiler, tmp_path):
+    first = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    compiler.cb.dtypes.uint8 = object()
+    second = _prepare_binding(
+        compiler,
+        TensorSpec(("rows", 1), DataType.UINT8, strides=("pitch", 1)),
+        element="u8",
+        cpp_type="uint8_t",
+    )
+    artifact = build_conflict_checker(first, second)
+    reverse = build_conflict_checker(second, first)
+    standalone = build_binding_checker(first)
+    # Standalone, forward and reverse checkers share binding definitions. This
+    # exercises deduplication across different physical include paths as well.
+    files = {f.path: f for f in (*artifact.files, *reverse.files, *standalone.files)}
+    forward_file = next(f for f in artifact.files if f.path == artifact.entry)
+    content = forward_file.content + b'\n#include "conflict_check.hpp"\n#include "binding_check.hpp"\n'
+    files["forward.hpp"] = replace(
+        forward_file, path="forward.hpp", content=content, sha256=hashlib.sha256(content).hexdigest()
+    )
+    artifact = replace(artifact, files=tuple(files.values()), entry="forward.hpp")
+    _run_conflict_checker(
+        artifact,
+        tmp_path,
+        f"""
+    x2.dtype = out2.dtype = DataType::UINT8;
+    out2.buffer.addr = 0x203f;  // Last byte of the float output's cache line.
+    if (!conflicts() || !{reverse.symbol}(second, first)) return 1;
+    out2.buffer.addr = 0x2040;
+    if (conflicts() || {reverse.symbol}(second, first)) return 2;
+    return 0;
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    "isolation",
+    [
+        None,
+        {},
+        {"granularity_bytes": 64.0, "rule": "serialize_conflicting_cache_lines"},
+        {"granularity_bytes": 32, "rule": "serialize_conflicting_cache_lines"},
+        {"granularity_bytes": 64, "rule": "assume_disjoint"},
+    ],
+)
+@pytest.mark.parametrize("side", ["first", "second"])
+def test_conflict_checker_rejects_unknown_cache_line_policy(compiler, isolation, side):
+    first = _prepare_call(compiler)
+    compiler.manifest["resources"]["gm_write_isolation"] = isolation
+    second = _prepare_call(compiler)
+    pair = (second, first) if side == "first" else (first, second)
+    with pytest.raises(ContractError, match="64-byte GM cache-line isolation"):
+        build_conflict_checker(*pair)
 
 
 if __name__ == "__main__":

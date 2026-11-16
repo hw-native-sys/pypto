@@ -150,7 +150,7 @@ binding, and the relevant compatibility regressions. In particular, resource and
 runtime path. Device completion, numerical and performance acceptance remain 34.7.
 The next runtime work must establish cache-line conflict serialization and
 validate compiler stack requirements and resource ownership, and connect the
-call adapter and binding checker to submission. The existing text-only ELF
+call adapter, binding checker and pairwise conflict checker to submission. The existing text-only ELF
 checks alone do not establish these guarantees.
 `test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
 when installed, the real public compiler export; it does not validate a binary.
@@ -216,6 +216,40 @@ Passing this checker **does not authorize device execution**: byte-level
 non-overlap does not establish 64-byte cache-line isolation between tasks.
 Resource ownership, stack/loading validation, task completion and integration
 into the JIT/runtime submission path remain required.
+
+### CANNBotDSL cross-invocation cache-line conflicts
+
+`pypto.backend.cannbotdsl_abi.build_conflict_checker(first, second)` produces an
+owned `conflict_check.hpp` with both binding checkers. The two `PreparedKernel`
+records may have different signatures, dtypes and access effects. Their manifests
+must declare 64-byte `serialize_conflicting_cache_lines` GM isolation; missing or
+unknown policies are rejected. The generated symbol accepts two `CoreTaskArgs`
+objects and returns whether this pair requires serialization.
+
+Both invocations are fully validated before the predicate returns, even when a
+conflict is already apparent. It computes each accessed tensor's conservative
+byte envelope from its actual allocation address, element offset, dimensions,
+strides and element width, then compares inclusive cache-line indices. Using
+inclusive indices avoids an overflowing round-up at the top of the address
+space. Empty tensors and `Access.NONE` contribute no accesses. Read/read sharing
+is allowed; a shared line with at least one write returns `true`. Holes in strided
+views are included conservatively.
+
+For example, two one-element FP32 output views at `0x2000` and `0x2004` do not
+share bytes, but the predicate returns `true` because both touch line `0x2000`.
+Moving the second view to `0x2040` returns `false` when their other accesses are
+independent. A write sharing a line with the other invocation's input also
+requires serialization. Pointer offsets are applied before computing lines.
+
+This is a scheduling predicate, not a lock or submission API. A consumer must
+compare every potentially concurrent pair and enforce completion-before-start
+ordering whenever it returns `true`. Checking only neighboring calls is
+insufficient. Bindings must stay unchanged and their storage must stay alive
+until execution completes; changes require another check. A `false` result
+proves only this pair's GM non-conflict and says nothing about local resources,
+stack/loading requirements or completion visibility. Calls outside this protocol
+also require a dependency or isolation policy. Integration with TMR scheduling
+and the JIT remains follow-up work.
 
 ## Requests and prepared kernels
 
