@@ -59,6 +59,40 @@ def helpers(prog: ir.Program) -> list[ir.Function]:
     return [f for f in prog.functions.values() if f.func_type == ir.FunctionType.VF]
 
 
+def aiv_payload_stmts(aiv: ir.Function) -> list[ir.Stmt]:
+    """Check native shared initialization, then inspect the primary payload."""
+    assert isinstance(aiv.body, ir.SeqStmts)
+    body = aiv.body.stmts
+    if not aiv.attrs.get("dual_aiv_dispatch", False):
+        return body
+    (lane,) = (
+        s
+        for s in body
+        if isinstance(s, ir.AssignStmt)
+        and isinstance(s.value, ir.Call)
+        and s.value.op.name == ir.get_op("tile.get_subblock_idx").name
+    )
+    (branch,) = (s for s in body if isinstance(s, ir.IfStmt))
+    assert isinstance(branch.condition, ir.Eq) and branch.condition.left is lane.var
+    assert isinstance(branch.condition.right, ir.ConstInt) and branch.condition.right.value == 0
+    (setup,) = (
+        s
+        for s in body
+        if isinstance(s, ir.EvalStmt)
+        and isinstance(s.expr, ir.Call)
+        and s.expr.op.name == ir.get_op("system.aiv_initialize_pipe").name
+    )
+    assert body.index(setup) < body.index(branch)
+    inactive = branch.else_body
+    if isinstance(inactive, ir.SeqStmts):
+        assert len(inactive.stmts) == 1
+        inactive = inactive.stmts[0]
+    assert isinstance(inactive, ir.ReturnStmt)
+    assert all(any(value is param for param in aiv.params) for value in inactive.value)
+    assert isinstance(branch.then_body, ir.SeqStmts)
+    return branch.then_body.stmts
+
+
 def test_early_pass_order():
     names = PassManager.get_strategy().pass_names
     assert names.index("OutlineRegScopes") == names.index("OutlineSimtScopes") + 1
@@ -359,7 +393,7 @@ def test_vf_loop_result_keeps_outer_receive_until_store(pass_name):
     (vf,) = helpers(result)
     aiv = next(f for f in result.functions.values() if f.func_type == ir.FunctionType.AIV)
     assert isinstance(aiv.body, ir.SeqStmts)
-    body = aiv.body.stmts
+    body = aiv_payload_stmts(aiv)
     (loop,) = (s for s in body if isinstance(s, ir.ForStmt))
     assert vf.name in ir.python_print(loop)
     (pop,) = (
@@ -436,7 +470,7 @@ def test_vf_tuple_projection_keeps_received_slot_across_branch():
     # must survive until its last store without gaining a new allocation.
     stores = [
         s.value
-        for s in aiv.body.stmts
+        for s in aiv_payload_stmts(aiv)
         if isinstance(s, ir.AssignStmt)
         and isinstance(s.value, ir.Call)
         and s.value.op.name == ir.get_op("tile.store").name
@@ -1359,7 +1393,7 @@ def test_vf_tuple_control_flow_result_keeps_pipe_storage_live(region, different_
     assert isinstance(aiv.body, ir.SeqStmts)
     projected = [
         s.var.type
-        for s in aiv.body.stmts
+        for s in aiv_payload_stmts(aiv)
         if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.TupleGetItemExpr)
     ]
     assert len(projected) == 2

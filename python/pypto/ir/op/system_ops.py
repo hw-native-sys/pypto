@@ -405,7 +405,7 @@ def set_intra_block(
     core_type: KernelType | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Signal a named intra-block event (native A5 synchronization).
+    """Signal an event to synchronize AIC and AIV within one execution block.
 
     Args:
         event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.
@@ -436,7 +436,7 @@ def wait_intra_block(
     core_type: KernelType | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Wait for a named intra-block event (native A5 synchronization).
+    """Wait for an event from the peer core within the same execution block.
 
     Args:
         event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.

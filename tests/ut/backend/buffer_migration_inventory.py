@@ -345,6 +345,8 @@ MIGRATION_FAMILIES = (
             "system.cacheinvalid",
             "system.sync_set",
             "system.sync_wait",
+            "system.set_intra_block",
+            "system.wait_intra_block",
             "system.set_flag",
             "system.wait_flag",
             "system.set_ffts",

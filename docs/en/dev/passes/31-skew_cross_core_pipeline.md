@@ -11,7 +11,7 @@ The old approach unrolled these loops (`pl.pipeline(stage=F)`) and let `Canonica
 - **Single round-trip, producer role** — exactly one `tpush` and one `tpop`, and the `tpush`'s backward slice does not feed the body via an SSA edge (the cube: `QK → tpush`, `tpop → SV`). The two halves are linked only by the in-order cross-core FIFO, so the producer runs **`D = max(2, stage-1)` iterations ahead** (cross-core defaults to depth-2): a `produce(start … start+(D-1)·step)` prologue, a `ForKind::Sequential` steady loop whose loop var `k` leads each group and pairs the group's `D` produces `produce(k+i·step)` with the trailing `D` consumes `consume(k-(D-i)·step)`, stepping `k` by `D·step` over `[start+D·step, start+trip·step)`, and a `consume(last D)` epilogue. The cube issues group k's `D` `QK`s while the vector runs group (k-D)'s `D` softmaxes. See [Skew depth](#skew-depth-stage) for `D` selection and the buffer-separation it buys.
 - **Consumer role, or multi-round-trip** — the lead op feeds the body via SSA (the vector: the popped scores feed softmax), or there is more than one message per FIFO direction. The loop is **demoted to a plain `ForKind::Sequential` loop** (body unchanged). This drops the unroll's back-to-back `tpop` while preserving the in-order FIFO; cross-core overlap then comes from the *peer* core's producer skew putting each tile in the FIFO a step early, so the in-order `tpop` never blocks.
 
-Every **non-cross-core** pipeline loop (same-core GM→L1, L1→L0, nested matmul stage loops — no `tpush`/`tpop`) is left untouched for `LowerPipelineLoops` to replicate.
+Every **non-cross-core** pipeline loop without intra-block events (same-core GM→L1, L1→L0, nested matmul stage loops — no `tpush`/`tpop`) is left untouched for `LowerPipelineLoops` to replicate.
 
 The output is `ForKind::Sequential` with no `pipeline_stages` marker, so `LowerPipelineLoops` (triggers on `kind == Pipeline`) skips it and `CanonicalizeIOOrder` (scoped to pipeline bodies) does not re-sort the hand-ordered skew.
 
@@ -36,6 +36,17 @@ For a `ForStmt(kind=Pipeline, attrs={"pipeline_stages": F})` with `F > 1`:
    - otherwise — `carried` non-empty (consumer role), more than one `tpush`/`tpop` (multi-round-trip; skewing one message would reorder the in-order FIFO — a silent wrong-data bug the verifiers don't catch), dynamic bounds, or trip < 2 → **`DemoteToSequential`**.
 
 Either way a cross-core loop **always** leaves this pass as `ForKind::Sequential` with no `pipeline_stages` marker, so it never reaches `LowerPipelineLoops` or `CanonicalizeIOOrder` as a Pipeline body.
+
+### Intra-block synchronization events
+
+Any pipeline loop containing `system.set_intra_block` or
+`system.wait_intra_block` is demoted to Sequential, including `stage=1` and
+events in nested control. This takes precedence over tpush/tpop skew.
+The authored event/payload order and cross-iteration event reuse must survive:
+SSA edges alone cannot constrain IO scheduling for these events. The pass
+counts events during its normal traversal, so nesting adds no body rescans.
+No new synchronization is inserted; loops without intra-block events retain their
+existing skew or same-core pipeline behavior.
 
 ### Skew depth (`stage`)
 

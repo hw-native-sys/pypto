@@ -1250,6 +1250,16 @@ def _register_expands(m: dict[str, OpHandler], prefix: str) -> None:
     m[f"{prefix}.col_expand_expdif"] = lambda a, _kw: f"torch.exp({a[0]} - {a[1]})"
 
 
+def _reject_named_intra_block(_args: list[str], _kwargs: dict[str, Any]) -> str:
+    # Ignoring these events is unsound when a mixed reference shares payloads
+    # between AIC/AIV threads. Event banks and native pipe ordering are not
+    # modeled here, so reject before starting any reference worker threads.
+    raise ValueError(
+        "torch_codegen cannot model named intra-block synchronization; "
+        "use the native PTO backend for programs with set_intra_block/wait_intra_block"
+    )
+
+
 def _register_ops() -> None:  # noqa: PLR0915
     m = _OP_MAP
 
@@ -1515,14 +1525,15 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.tpop_from_aiv"] = _handle_tpop_from_aiv
     m["tile.get_subblock_idx"] = lambda _a, _kw: "_get_subblock_idx()"
 
+    m["system.set_intra_block"] = _reject_named_intra_block
+    m["system.wait_intra_block"] = _reject_named_intra_block
+
     # --- System ops (no-ops) ---
     for op_name in (
         "system.sync_src",
         "system.sync_dst",
         "system.sync_set",
         "system.sync_wait",
-        "system.set_intra_block",
-        "system.wait_intra_block",
         "system.set_flag",
         "system.wait_flag",
         "system.set_ffts",

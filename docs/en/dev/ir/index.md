@@ -21,6 +21,7 @@ the page covering what you are changing.
 | [Multi-Output Operators](09-multi_output_ops.md) | Operators that produce several values: `TupleType` results, why destinations never become arguments, and what the registry enforces |
 | [Operator Effects](10-operator-effects.md) | Functional argument access, write channels, and core placement/replication contracts |
 | [Scalar SIMT IR](11-simt.md) | Void helpers, explicit launch results, scalar GM/UB access, and derived resources |
+| [Intra-Block Synchronization](12-intra-block-sync.md) | AIC/AIV event synchronization within one execution block, ordering, placement, and event resources |
 
 ## See Also
 

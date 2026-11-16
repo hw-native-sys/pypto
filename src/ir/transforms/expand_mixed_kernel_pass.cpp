@@ -1429,7 +1429,10 @@ std::vector<StmtPtr> PromoteDirectC2VData(const std::vector<StmtPtr>& stmts,
       auto assign = As<AssignStmt>(stmt);
       auto eval = As<EvalStmt>(stmt);
       auto call = assign ? As<Call>(assign->value_) : eval ? As<Call>(eval->expr_) : nullptr;
-      if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait")) authored_sync = true;
+      if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait") ||
+          IsOp(call, "system.set_intra_block") || IsOp(call, "system.wait_intra_block")) {
+        authored_sync = true;
+      }
       if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe") ||
           IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpop_from_aic") ||
           IsOp(call, "tile.tpush_to_aic") || IsOp(call, "tile.tpop_from_aiv") ||
