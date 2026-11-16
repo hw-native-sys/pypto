@@ -461,6 +461,9 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   // stores remain user errors rather than surfacing as pass/codegen invariants.
   if (output_tensor_type->tensor_view_ && IsMxTensorLayout(output_tensor_type->tensor_view_->layout)) {
     const TensorLayout destination_layout = output_tensor_type->tensor_view_->layout;
+    CHECK_SPAN(destination_layout != TensorLayout::MX_A_ND, args[2]->span_)
+        << "tile.store does not support an MX_A_ND destination: MX_A_ND describes the GM-to-Mat "
+           "scale-load conversion only; store row-major scales through an ND tensor instead";
     const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
     CHECK_SPAN(tile_type->dtype_ == DataType::FP8E8M0, args[0]->span_)
         << "The operator " << op_name << " into an MX-layout tensor requires an FP8E8M0 source tile, but got "

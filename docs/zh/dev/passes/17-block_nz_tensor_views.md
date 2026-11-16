@@ -107,6 +107,15 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
     pl.tile.load(w, [1, 16, 16, 0, 0], [1, 16, 16, 16, 32], target_memory=pl.Mem.Mat)
 ```
 
+### A5 向量 FP8 写回
+
+A5 支持把 FP8E4M3FN Vec NZ tile plain store 到匹配的 `pl.NZ` GM 张量。
+源使用标准 512 字节 NZ panel，`compact` 为 `null`，静态有效区域
+须为完整的 16x32 box。FP8 的 C0=32，逻辑 `[32,256]` 转为 `[1,8,2,16,32]`。
+存储保持 NZ box 顺序及 FP8 符号零字节。不支持 atomic、FIXPIPE
+后处理或显式 `st_phase`。此路径不把 NZ 转为 ND，也不启用 A5 Acc NZ 写回。
+详见 [FP4](../fp4.md)。
+
 ### Accumulator 写回
 
 在 A2/A3 上，`pl.store(acc, offsets, out)` 可以把有效区域完整、静态二维的 FP32
@@ -315,7 +324,7 @@ NZ load 与 Acc store 的范围都有明确边界。范围之外一律报错并�
 | `tensor.slice` 在末尾 `[R, C]` 平面上开窗 | 拒绝——该窗口不连续 |
 | `tensor.reshape` 把整块张量展平成 `[N]` | 原样保留——见[展平 NZ 张量](#展平-nz-张量) |
 | `tensor.reshape` 成其它形状 | 拒绝——它重新解释了分块形式无法承载的坐标 |
-| 写入 NZ 目标的 `tile.store` | 在 [Accumulator 写回](#accumulator-写回) 的范围内支持 |
+| 写入 NZ 目标的 `tile.store` | 在 [Accumulator 写回](#accumulator-写回) 或 [A5 向量 FP8 写回](#a5-向量-fp8-写回) 的范围内支持 |
 | 受支持的 load、store、slice 或整块展平之外的消费者 | 拒绝——不支持的 NZ 坐标不能原样透传 |
 | 显式 tensor stride 或部分 tensor `valid_shape` | 拒绝 |
 | `tile.load` 的动态 `valid_shape[-2]` 可证明是 16 的倍数（不规则的最后一个 tile） | 分块——行 fractal 数变为 `FloorDiv(rows, 16)` |

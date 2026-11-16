@@ -77,6 +77,7 @@ class Ascend950Handler : public BackendHandler {
   // destination (tstore_acc2gm case 60, `<1, float, bfloat16_t, bfloat16_t>`)
   // while the a5 port of that same case runs it with atomicType `<0, ...>`.
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return false; }
+  [[nodiscard]] bool SupportsVecFp8NzGmStore() const override { return true; }
 
   // A5 fix-pipe Acc->GM destination whitelist, non-quant branch: same set as
   // a2a3. ptoas rejects anything else at `pto.tstore` ("expects A5 acc tstore

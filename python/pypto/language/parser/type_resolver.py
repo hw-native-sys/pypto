@@ -244,6 +244,7 @@ class TypeResolver:
         "NZ": ir.TensorLayout.NZ,
         "MX_A_ZZ": ir.TensorLayout.MX_A_ZZ,
         "MX_B_NN": ir.TensorLayout.MX_B_NN,
+        "MX_A_ND": ir.TensorLayout.MX_A_ND,
     }
 
     _MEMORY_SPACE_MAP: dict[str, "ir.MemorySpace"] = {

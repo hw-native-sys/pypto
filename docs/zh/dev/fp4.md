@@ -49,7 +49,8 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | 打包 GM 视图与 load/store | 两种格式均支持 ND/DN 载体维度、步长和偏移；宽度为一个载体时仍保持 ND；PTOAS v0.67 负责 DMA 描述符转换 |
 | 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同的编排层 GM 别名；连续且带地址的二维行主序 Vec 别名使用 PYPTO 或 DSA_RP 内存规划器 |
 | 任一打包格式 ↔ BF16 转换 | 无分块 Vec 上的原生 TCVT；ND 列或完整静态连续 DN 行按 2:1 展开或收缩 |
-| 任一打包格式 → FP8E4M3FN/FP8E5M2 转换 | 经 BF16 和 FP32 合法化，并发出警告；也可使用主机参考实现或查找表 |
+| E2M1 → FP8E4M3FN 转换 | 原生 A5 TCVT，可直接输出 ND 或 NZ，无 BF16/FP32 中间结果 |
+| 其他打包 FP4 → FP8 转换 | 经 BF16 和 FP32 合法化，并发出警告 |
 | E2M1↔E1M2 转换 | 经 BF16 进行数值转换，载体 shape 不变 |
 | 其他宽类型转换 | 使用现有合法化路径，要求中间转换无损；编码限制见下文 |
 | 打包 Vec 布局转换 | ND→NZ；载体维度随打包轴变化，数值维度保持不变 |
@@ -86,7 +87,37 @@ BF16 编码支持 `rint`、`round`、`floor`、`ceil` 和 `trunc`，拒绝 `odd`
 打包要求完整的数值对：源维度为正偶数，或动态 `valid_shape` 可证明为偶数，
 例如 `2 * n`。解码会展开载体维度，不要求该载体维度为偶数。
 
-所有打包转换均要求 `none_box` 存储；更宽类型的转换链要求 ND 布局。
+打包转换的源要求 `none_box` 存储；更宽类型的转换链要求 ND 布局。
+A5 E2M1 到 E4M3 的 Tile 转换可以直接输出 NZ：
+
+```python
+fp8_nz = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ)
+```
+
+源为 ND Vec tile，物理载体列数须为 32 的倍数，有效列数须为正静态值；有效行数可以
+动态变化，`valid_shape` 可以是更窄的矩形。直接路径使用 PYPTO 或 DSA_RP 地址规划
+绑定静态列描述符。PTOAS 规划或动态有效列的普通转换保留 BF16/FP32 转换链；
+显式 NZ 请求要求使用有地址的直接路径。结果保持逻辑 `[M, 2*K]` 维度，
+NZ 描述符决定物理存储。NZ 的物理行数须为 16 的倍数，有效行尾通过 `valid_shape` 表达。
+该布局选项仅支持 Tile。E1M2 和 FP8E5M2 没有此直接路径。
+需要 PTOAS v0.74 或更新版本及匹配的 A5 ISA。
+
+源 `tile.slice` 保留父 tile 的行跨度和动态行偏移。源窗口的 UB 地址必须能证明为
+32 字节对齐，因此静态打包列偏移须为 32 的倍数。父行跨度为 32 字节的倍数时，
+动态行偏移仍保持对齐。无法证明对齐的动态列偏移会被拒绝；可改为将该打包窗口
+加载到独立的对齐 tile。
+
+通过 `tpush_to_aic` 可将 NZ 结果直接搬运到 Cube，无需额外的 ND 到 NZ 搬运。
+A5 上还可通过 Vec plain store 写入匹配的 `pl.NZ` FP8E4M3FN GM 张量。
+该 store 要求完整静态 16x32 box，不支持 atomic、FIXPIPE 后处理或显式 `st_phase`。
+写入保持 NZ box 顺序，不会将 NZ 转回 ND。固定版本的 CPU 模拟器会丢失符号零，
+物理字节验收使用 A5 硬件。
+
+RowPlusOne padding 暂缓实现，相关汇编器工作由
+[PTOAS #1684](https://github.com/hw-native-sys/PTOAS/issues/1684) 与
+[PTOAS #1685](https://github.com/hw-native-sys/PTOAS/pull/1685) 跟踪；
+当前公开的 cast 仅生成普通 NZ 存储。
+
 经 BF16 解码可精确保留每个 FP4 值。隐式编码链同样要求经 BF16 后保留原始源值：
 FP16/FP32 及较宽整数源会被拒绝，因为该中间步骤可能导致两次舍入。
 若确实需要中间舍入，应先显式转换为 BF16。固定版本模拟器对小数 FP4 转换的舍入有误，

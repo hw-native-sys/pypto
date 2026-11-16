@@ -95,15 +95,14 @@ void CheckMxViewIsCanonical(const TensorView& view, const std::vector<ExprPtr>& 
   // verification disabled, before claiming TensorViewCanonical.
   INTERNAL_CHECK_SPAN(shape.size() != 2 || mx_legalized, span)
       << "Internal error: MaterializeTensorStrides requires LegalizeMxScaleTensorViews "
-         "before accepting logical MX tensor views";
-  INTERNAL_CHECK_SPAN(tensor_view_semantics::IsLogicalMxShape(shape, view.layout) ||
-                          tensor_view_semantics::IsBlockedMxShape(shape),
-                      span)
+         "(or legacy BlockMxScaleTensorViews) before accepting logical MX tensor views";
+  INTERNAL_CHECK_SPAN(tensor_view_semantics::IsCanonicalMxShape(shape, view.layout), span)
       << "Internal error: MaterializeTensorStrides found an MX tensor whose shape is not canonical "
       << "(expected an aligned logical rank-2 shape or static [1, positive block count, positive group "
          "count, "
       << tile_view_semantics::kMXSFractalRows << ", " << tile_view_semantics::kMXSFractalCols
-      << "]) — LegalizeMxScaleTensorViews did not run or missed it";
+      << "]; MX_A_ND requires row-major [rows, positive even groups]) — "
+      << "LegalizeMxScaleTensorViews did not run or missed it";
 }
 
 /// Rewrite a TensorType (or recursively a TupleType containing TensorTypes)
@@ -364,7 +363,10 @@ class MaterializeTensorStridesMutator : public IRMutator {
 /// Materialize a single function: rebuild params / return_types / body.
 /// Returns the input function unchanged when no rewrite is needed.
 FunctionPtr TransformFunction(const FunctionPtr& func) {
-  const bool mx_legalized = func->HasAttr("mx_tensor_views_legalized");
+  // The legacy pass also validates every MX access. It leaves MX_A_ND rank 2
+  // because that source is already physical row-major, while blocking ZZ/NN.
+  const bool mx_legalized =
+      func->HasAttr("mx_tensor_views_legalized") || func->HasAttr("mx_tensor_views_blocked");
   // 1) Rewrite param types. New params get fresh Var objects; record old→new
   //    so body references resolve to the rewritten Var.
   bool params_changed = false;

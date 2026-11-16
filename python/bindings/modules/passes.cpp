@@ -598,10 +598,12 @@ void BindPass(nb::module_& m) {
              "requires TileOps2D: the destination tile must already be 2-D).");
   passes.def("legalize_mx_scale_tensor_views", &pass::LegalizeMxScaleTensorViews,
              "Validate MX scale views and aligned offsets, retaining logical rank-2 coordinates.\n"
+             "MX_A_ND preserves compact row bases and valid-row tails; scale groups remain paired.\n"
              "PTOAS owns physical packing; run before MaterializeTensorStrides.");
   passes.def("block_mx_scale_tensor_views", &pass::BlockMxScaleTensorViews,
              "Create a pass that rewrites logical MX scale tensors into A5's packed rank-5 form\n\n"
              "MX_A_ZZ [M, G] and MX_B_NN [G, N] become [1, block/16, group/2, 16, 2].\n"
+             "MX_A_ND stays row-major rank 2, allowing compact row bases and valid-row tails.\n"
              "The pass rewrites tile.load windows and ND/MX backing aliases while preserving\n"
              "logical tile result types. Symbolic offsets must be provably aligned and\n"
              "non-negative. Must run after FlattenTileNdTo2D and before\n"

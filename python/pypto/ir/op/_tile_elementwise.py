@@ -18,6 +18,7 @@ from pypto.pypto_core.ir import (
     Expr,
     ScalarType,
     Span,
+    TensorLayout,
 )
 
 from ..utils import (
@@ -979,6 +980,7 @@ def cast(
     *,
     tmp: Expr | None = None,
     saturation_mode: str | int | None = None,
+    layout: TensorLayout | None = None,
 ) -> Call:
     """Cast tile to target data type (element-wise).
 
@@ -998,6 +1000,9 @@ def cast(
              destination, the target's own behavior for a float one. Only a
              deviation from that default is recorded on the call.
 
+        layout: Optional destination layout. A5 E2M1-to-E4M3 tiles support
+            ``NZ`` directly, without an intermediate ND tile.
+
     Returns:
         Call expression for element-wise cast to target dtype
 
@@ -1012,6 +1017,8 @@ def cast(
     kwargs: dict[str, Any] = {"target_type": target_type, "mode": mode_val}
     if deviation is not None:
         kwargs["saturation_mode"] = deviation
+    if layout is not None:
+        kwargs["layout"] = layout
     args: list[Expr] = [tile] if tmp is None else [tile, tmp]
     return _ir_core.create_op_call("tile.cast", args, kwargs, actual_span)
 

@@ -497,11 +497,13 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       ((src_layout == TensorLayout::MX_A_ZZ && new_layout == TensorLayout::ND) ||
        (src_layout == TensorLayout::ND && new_layout == TensorLayout::MX_A_ZZ) ||
        (src_layout == TensorLayout::MX_B_NN && new_layout == TensorLayout::ND) ||
-       (src_layout == TensorLayout::ND && new_layout == TensorLayout::MX_B_NN));
+       (src_layout == TensorLayout::ND && new_layout == TensorLayout::MX_B_NN) ||
+       (src_layout == TensorLayout::MX_A_ND && new_layout == TensorLayout::ND) ||
+       (src_layout == TensorLayout::ND && new_layout == TensorLayout::MX_A_ND));
   CHECK_SPAN((!IsMxTensorLayout(src_layout) && !IsMxTensorLayout(new_layout)) || is_mx_scale_backing_nd_view,
              args[0]->span_)
       << "tensor.view does not support MX layouts except shaped ND/MX_A_ZZ/MX_B_NN backing views "
-         "for FP8E8M0";
+         "and shaped ND/MX_A_ND backing views for FP8E8M0";
   // NZ is a legal TensorType layout (in its blocked form), but tensor.view
   // reinterprets shape/strides, and a blocked NZ view's dims are a fractal
   // decomposition rather than free axes — re-viewing them would break the

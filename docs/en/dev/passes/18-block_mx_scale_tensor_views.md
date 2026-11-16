@@ -6,18 +6,25 @@
 PTO pipeline for PTOAS v0.74. It runs after `FlattenTileNdTo2D` and
 `BlockNzTensorViews`, before `MaterializeTensorStrides`.
 
-The pass retains logical `MX_A_ZZ [M, G]` and `MX_B_NN [G, N]` tensor shapes,
+The pass retains logical `MX_A_ZZ [M, G]`, `MX_B_NN [G, N]` and
+`MX_A_ND [M, G]` tensor shapes,
 load/store coordinates, and shaped ND/MX aliases. `MaterializeTensorStrides`
 emits logical contiguous strides `[cols, 1]`. Codegen transcribes these views
 directly; PTOAS constructs the physical SFractal descriptors.
 
-Shape and offset checks are shared with the legacy pass below: static positive
-extents aligned to 16 rows / 2 groups, and provably non-negative aligned offsets.
-Distributed MX tensors and partial tensor valid shapes remain unsupported.
-A narrowed load valid shape does not shrink the DMA box: the pass uses the full
+Shape and offset checks are shared with the legacy pass below. ZZ/NN require
+static positive extents aligned to 16 rows / 2 groups and provably non-negative
+aligned offsets. Distributed MX tensors remain unsupported; partial tensor
+valid shapes remain unsupported for ZZ/NN. A narrowed ZZ/NN load valid shape does not shrink the DMA box: the pass uses the full
 aligned logical load window while preserving the tile result's active extents.
 Direct stores from fractal-32 Vec scale tiles remain unsupported by PTOAS; a
 logical destination view does not make that source layout legal.
+
+`MX_A_ND` preserves row-major GM storage and converts directly to ZZ Mat during
+TLOAD. Rows and row offsets may be dynamic and need not be multiples of 16;
+the positive static group dimension and group offsets must contain complete
+aligned pairs. Its exact valid-row tail is retained in the DMA window. See the
+`MX_A_ND` example below for K=2304 / 72 scale groups per row.
 
 Functions are stamped `mx_tensor_views_legalized` to make repeated legalization
 idempotent. The public factory is `passes.legalize_mx_scale_tensor_views()`.
@@ -46,17 +53,39 @@ layouts and keep separate transformation and proof implementations.
 
 ## Physical form
 
-The DSL exposes two logical rank-2 scale layouts:
+The DSL exposes three logical rank-2 scale layouts:
 
 ```text
 MX_A_ZZ [M, G] -> [1, M/16, G/2, 16, 2]
 MX_B_NN [G, N] -> [1, N/16, G/2, 16, 2]
+MX_A_ND [M, G] -> [M, G]
 ```
 
 The trailing `[16, 2]` is one 32-byte FP8E8M0 scale box. Row-major strides over
 the blocked shape are the physical GlobalTensor strides, so
 `MaterializeTensorStrides` can use its ordinary packed-stride path after this
 pass.
+
+`MX_A_ND` keeps the existing row-major GM ABI, including compact expert rows.
+Its logical rank-2 view is already canonical; PTOAS builds the ISA's paired
+GlobalTensor descriptor and TLOAD converts directly into row-major ZZ Mat.
+The row extent may be dynamic or not divisible by 16. Scale groups are static,
+positive and even (for example, K=2304 has 72 groups). Group offsets must be
+non-negative multiples of 2; row offsets remain ordinary row coordinates.
+
+```python
+# In an @pl.jit.incore kernel, scales has layout pl.MX_A_ND.
+scale_mat = pl.load(scales, [compact_row_base, 0], [16, 72],
+                    valid_shape=[valid_rows, 72])
+left_scale = pl.move(scale_mat, pl.Mem.LeftScale)
+```
+
+The valid-row tail is preserved in the physical load, so it does not read
+into the next compact expert. `MX_A_ND` is a load descriptor; write row-major
+scale bytes through an ordinary ND tensor, then create a shaped FP8E8M0
+`tensor.view(..., layout=pl.MX_A_ND)` alias. A metadata view itself never packs
+or rearranges scale bytes. The usual `matmul_mx` LeftScale semantics remain
+unchanged, and B scales still use `MX_B_NN`.
 
 ## Position in the pipeline
 

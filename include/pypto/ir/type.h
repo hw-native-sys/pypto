@@ -215,12 +215,14 @@ enum class TensorLayout {
   DN,       ///< DN layout
   NZ,       ///< NZ layout
   MX_A_ZZ,  ///< MX Left/A scale GM pack (ZZ)
-  MX_B_NN   ///< MX Right/B scale GM pack (NN)
+  MX_B_NN,  ///< MX Right/B scale GM pack (NN)
+  MX_A_ND   ///< Row-major MX Left/A scales; TLOAD converts ND to L1 ZZ
 };
 
 /** True when layout selects the MX scale GM load path (TLoadMxCube*). */
 inline bool IsMxTensorLayout(TensorLayout layout) {
-  return layout == TensorLayout::MX_A_ZZ || layout == TensorLayout::MX_B_NN;
+  return layout == TensorLayout::MX_A_ZZ || layout == TensorLayout::MX_B_NN ||
+         layout == TensorLayout::MX_A_ND;
 }
 
 /**

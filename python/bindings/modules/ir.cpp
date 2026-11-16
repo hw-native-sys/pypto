@@ -516,6 +516,7 @@ void BindIR(nb::module_& m) {
       .value("NZ", TensorLayout::NZ, "NZ layout")
       .value("MX_A_ZZ", TensorLayout::MX_A_ZZ, "MX Left/A scale GM pack (ZZ)")
       .value("MX_B_NN", TensorLayout::MX_B_NN, "MX Right/B scale GM pack (NN)")
+      .value("MX_A_ND", TensorLayout::MX_A_ND, "Row-major MX Left/A scales (TLOAD converts to L1 ZZ)")
       .export_values();
 
   // PadValue enum - must be before both TensorView and TileView since both carry it

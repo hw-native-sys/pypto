@@ -60,6 +60,7 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse 是否做 load + tpop_from_aic 原地复用危害规避 | `true` | `false` |
 | `RequiresLevel3TmpScratch()` | InitMemRef 是否物化 level-3 显式 tmp；codegen static-view 桥接 | `true` | `false` |
 | `RequiresVtoCFractalAdapt()` | AIV 端 V→C tpush 是否需要 fractal 适配 `tile.move` | `false` | `true` |
+| `SupportsVecFp8NzGmStore()` | 是否支持 FP8E4M3FN Vec NZ 到 NZ GM 的普通存储；独立于 Acc/FIXPIPE 存储 | `false` | `true` |
 | `RequiresRuntimeSubblockBridge()` | 拆分 AIV 包装器是否从 runtime 上下文取 subblock id | `true` | `false` |
 | `RequiresNoSplitDualAivDispatch()` | `no_split` 混合 kernel 是否仍需在两个 AIV lane 上同时下发 | `true` | `false` |
 | `SplitsCubeToVectorTransportInHardware()` | 切分的 Cube-to-Vector push 是否由硬件把传输的 extent 各分一半给两个 AIV lane（此时该 extent 即 lane 划分） | `false` | `true` |

@@ -233,7 +233,26 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 
 只要给了 `stride`、`valid_shape`、`pad` 三者之一，`layout=` 就是必填的。`pl.TensorLayout` 是这些布局常量所属的枚举 —— `pl.ND` 就是 `pl.TensorLayout.ND`。
 
-剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS v0.60 负责物理打包）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须都是 `FP8E4M3FN`。两种打包 FP4 格式均可在显式调用 `pl.cast(fp4_tile, pl.FP8E4M3FN)` 后作为左操作数；A5 在 `matmul_mx` 前经 BF16 和 FP32 对其合法化。 原生 FP4×FP4 与反向 FP8×FP4 均不支持。`pl.quant_mx` 支持 MXFP8 和原生 E2M1 MXFP4，`group_axis` 对齐 PTOAS `grpAxis`。FP8 结果可在同一个混合 InCore 任务中经 V2C 供 `matmul_mx` 使用，包括生成的 Vec→Mat→scale memory 路径。
+`pl.MX_A_ZZ`、`pl.MX_B_NN` 与 `pl.MX_A_ND` 标注 Ascend950 上 MX
+（microscaling）操作数的 **GM scale 张量**。`MX_A_ZZ` 对应左/A 侧 scale pack，
+`MX_B_NN` 对应右/B 侧，`MX_A_ND` 对应行主序左/A scales。Mat 到 scale 的
+`pl.move` 会校验最终布局，再搬入 `LeftScale` / `RightScale`。
+
+`MX_A_ND` 是仅供 load 使用的 FP8E8M0 描述符，逻辑维度为 `[rows,K/32]`。
+AIC `pl.load` 直接把 ND scales 转为 Mat ZZ，支持动态 compact 行基址，无需
+16 行对齐，并保留有效行尾。scale groups 数和每次 load 的 group extent 都须为
+正静态偶数，group offset 须可证明非负且为 2 的倍数。例如 `[rows,72]` scales 可用
+`pl.load(scales, [row_base,0], [16,72], valid_shape=[valid_rows,72])`。
+`target_memory` 可省略或指定 `pl.Mem.Mat`。写入使用 ND 张量，再通过
+`tensor.view(..., layout=pl.MX_A_ND)` 为相同字节建立别名，无需重新打包。
+`matmul_mx` scale 语义保持不变。
+
+这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` / `MX_A_ND` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS 提供 ISA 描述符）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须同为 `FP8E4M3FN` 或同为打包 FP4。混合 FP4/FP8 操作数须先显式调用 `pl.cast(fp4_tile, pl.FP8E4M3FN)`。
+A5 上，连续 ND E2M1 tile 的物理载体列数为 32 的倍数时，转换只需一次直接 TCVT。
+Tile 输入还支持 `layout=pl.NZ`，直接解码到采用普通物理存储的 cube 可用 NZ。
+NZ 物理行数须为 16 的倍数，有效行尾使用 `valid_shape`。
+E1M2、FP8E5M2 目标及不满足直接路径约束的 E2M1 源描述符仍使用 BF16/FP32 转换链。
+详见 [FP4](../../dev/fp4.md)。`pl.quant_mx` 支持 MXFP8 和原生 E2M1 MXFP4，`group_axis` 对齐 PTOAS `grpAxis`。FP8 结果可在同一个混合 InCore 任务中经 V2C 供 `matmul_mx` 使用，包括生成的 Vec→Mat→scale memory 路径。
 
 使用默认 FP8 dtype 时，tensor 量化在 axis1 返回 `[M,K]` 数据与 `MX_A_ZZ[M,K/32]`
 缩放因子；axis0 输入 `[N,K]` 时，返回 `[K,N]` 数据与 `MX_B_NN[K/32,N]` 缩放因子。

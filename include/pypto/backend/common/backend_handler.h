@@ -394,6 +394,11 @@ class BackendHandler {
   /// Source dtype, layout and full-parent-row legality are checked separately.
   [[nodiscard]] virtual int GetAccToNzGmStoreMaxCols() const { return 0; }
 
+  /// Whether Vec FP8E4M3FN NZ tiles may be stored directly to matching NZ GM.
+  /// Source geometry, compact pitch, and plain-store attributes are checked
+  /// separately; this capability does not enable FIXPIPE/Acc NZ stores.
+  [[nodiscard]] virtual bool SupportsVecFp8NzGmStore() const { return false; }
+
   /**
    * @brief Whether the cube fix-pipe may store an Acc-resident tile straight
    *        into a GM tensor of @p dtype.

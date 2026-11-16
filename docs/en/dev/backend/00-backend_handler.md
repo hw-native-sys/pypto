@@ -63,6 +63,7 @@ to global state.
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse load + tpop_from_aic in-place hazard guard | `true` | `false` |
 | `RequiresLevel3TmpScratch()` | InitMemRef materialize level-3 explicit tmp; codegen static-view bridges | `true` | `false` |
 | `RequiresVtoCFractalAdapt()` | AIV-side V-to-C fractal adapter `tile.move` | `false` | `true` |
+| `SupportsVecFp8NzGmStore()` | Plain FP8E4M3FN Vec NZ to NZ GM stores; independent of Acc/FIXPIPE stores | `false` | `true` |
 | `RequiresRuntimeSubblockBridge()` | split AIV wrappers source subblock id from runtime | `true` | `false` |
 | `RequiresNoSplitDualAivDispatch()` | `no_split` mixed kernels still dispatch on both AIV lanes | `true` | `false` |
 | `SplitsCubeToVectorTransportInHardware()` | a split Cube-to-Vector push hands each AIV lane half of the transported extent, so that extent is the lane partition | `false` | `true` |

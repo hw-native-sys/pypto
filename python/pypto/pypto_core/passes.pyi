@@ -581,7 +581,11 @@ def block_nz_tensor_views() -> Pass:
     """
 
 def legalize_mx_scale_tensor_views() -> Pass:
-    """Validate MX alignment and load windows, preserving logical rank-2 views for PTOAS."""
+    """Validate MX alignment and load windows, preserving logical rank-2 views for PTOAS.
+
+    ZZ/NN retain their aligned complete-box windows. ``MX_A_ND`` keeps compact
+    dynamic row bases and valid-row tails, with complete aligned scale pairs.
+    """
 
 def block_mx_scale_tensor_views() -> Pass:
     """Create a pass that physicalizes logical MX scale tensor views.
@@ -591,6 +595,9 @@ def block_mx_scale_tensor_views() -> Pass:
     ``tile.load`` windows and ND/MX backing aliases while preserving logical
     tile result types. Symbolic offsets must be provably aligned and
     non-negative.
+
+    ``MX_A_ND [M, G]`` instead remains row-major rank 2. Compact row bases and
+    valid-row tails are preserved; the group axis must contain aligned pairs.
 
     Must run after ``flatten_tile_nd_to_2d`` and before
     ``materialize_tensor_strides``.

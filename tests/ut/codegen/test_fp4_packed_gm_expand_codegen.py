@@ -829,5 +829,514 @@ def test_dense_dn_tensor_slice_cast_preserves_other_consumer_layout(tmp_path, dt
         assert cpp.is_file()
 
 
+def _direct_fp4_to_fp8_program(layout=None, *, partial=False, carrier_cols=128):
+    output_layout = pl.NZ if layout == pl.NZ else pl.ND
+    source_valid = [17, carrier_cols - 8] if partial else [32, carrier_cols]
+    observation_valid = [32, carrier_cols * 2] if layout == pl.NZ else [source_valid[0], source_valid[1] * 2]
+
+    @pl.program
+    class DirectDecode:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[32, carrier_cols], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[32, carrier_cols * 2], pl.FP8E4M3FN, output_layout]],
+        ) -> pl.Tensor[[32, carrier_cols * 2], pl.FP8E4M3FN, output_layout]:
+            packed = pl.tile.load(src, [0, 0], [32, carrier_cols], valid_shape=source_valid)
+            decoded = pl.cast(packed, pl.FP8E4M3FN, layout=layout)
+            # NZ GM stores transfer complete 16x32 boxes. Only the observation
+            # alias is widened after decoding. The codegen test does not assert
+            # values outside the decoded valid region.
+            observed = pl.tile.set_validshape(decoded, observation_valid[0], observation_valid[1])
+            return pl.tile.store(observed, [0, 0], out)
+
+    return DirectDecode
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("layout", [None, pl.ND, pl.NZ])
+def test_direct_fp4_to_fp8_cast_emits_one_fused_tcvt(tmp_path, planner, partial, layout):
+    # Before this path, casting generated BF16 and FP32 temporaries and a
+    # separate ND-to-NZ move. The destination descriptor must reach TCVT itself.
+    mlir = _emit_incore_mlir(_direct_fp4_to_fp8_program(layout, partial=partial), planner)
+    casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
+    assert len(casts) == 1, mlir
+    cast = casts[0]
+    assert "dtype=!pto.f4E2M1x2, rows=32, cols=128" in cast, cast
+    assert "dtype=f8E4M3FN, rows=32, cols=256" in cast, cast
+    assert "dtype=bf16" not in mlir and "dtype=f32" not in mlir, mlir
+    assert "pto.tmov " not in mlir, mlir
+    # FP4 and FP8 both report eight storage bits, but the decoder expands two
+    # values per carrier. Automatic reuse must not alias this numerical widening.
+    source = re.search(r"ins\((%[\w.$-]+)", cast)
+    target = re.search(r"outs\((%[\w.$-]+)", cast)
+    assert source and target, cast
+    allocations = {
+        match.group(1): match.group(2)
+        for line in mlir.splitlines()
+        if (match := re.search(r"(%[\w.$-]+) = pto.alloc_tile addr = (%[\w.$-]+)", line))
+    }
+    assert allocations[source.group(1)] != allocations[target.group(1)], mlir
+    if layout == pl.NZ:
+        assert "blayout=col_major, slayout=row_major" in cast, cast
+        fp8_allocations = [
+            line for line in mlir.splitlines() if "pto.alloc_tile" in line and "f8E4M3FN" in line
+        ]
+        assert fp8_allocations and all("slayout=row_major" in line for line in fp8_allocations), mlir
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "direct_fp4_to_fp8.pto"
+        cpp = tmp_path / "direct_fp4_to_fp8.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 1
+
+
+def test_direct_fp4_to_fp8_nz_cast_rejects_unaligned_physical_source():
+    # A valid rectangle can be narrow; the physical ND row must still be one
+    # complete 32-byte source block for the ISA's residual-block load.
+    with pytest.raises(ValueError, match="physical carrier columns divisible by 32"):
+        _emit_incore_mlir(_direct_fp4_to_fp8_program(layout=pl.NZ, carrier_cols=16))
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "layout", "error"),
+    [
+        (pl.FP4E1M2X2, pl.FP8E4M3FN, pl.NZ, "layout=NZ supports only"),
+        (pl.FP4E2M1X2, pl.FP8E5M2, pl.NZ, "layout=NZ supports only"),
+        (pl.FP4E2M1X2, pl.FP8E4M3FN, pl.TensorLayout.DN, "layout must be ND or NZ"),
+    ],
+)
+def test_fp4_to_fp8_cast_rejects_unsupported_output_options(source, target, layout, error):
+    value = ir.Var("source", ir.TileType([32, 128], source), ir.Span.unknown())
+    with pytest.raises(ValueError, match=error):
+        ir.op.tile.cast(value, target, layout=layout)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_direct_fp4_to_fp8_named_raw_nz_slots_remain_disjoint(tmp_path, planner):
+    raw_slots = pl.MemRef("RAW", slots=2)
+    nz_slots = pl.MemRef("NZ", slots=2)
+
+    @pl.program
+    class NamedDecode:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[128, 128], pl.UINT8],
+            out: pl.Out[pl.Tensor[[128, 256], pl.FP8E4M3FN, pl.NZ]],
+        ) -> pl.Tensor[[128, 256], pl.FP8E4M3FN, pl.NZ]:
+            raw: pl.Tile[[128, 128], pl.UINT8, raw_slots[1], pl.Mem.Vec] = pl.load(src, [0, 0], [128, 128])
+            decoded: pl.Tile[
+                [128, 256],
+                pl.FP8E4M3FN,
+                nz_slots[1],
+                pl.Mem.Vec,
+                pl.TileView(
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                ),
+            ] = pl.cast(
+                pl.reinterpret_view(raw, pl.FP4E2M1X2),
+                pl.FP8E4M3FN,
+                layout=pl.NZ,
+            )
+            return pl.store(decoded, [0, 0], out)
+
+    mlir = _emit_incore_mlir(NamedDecode, planner)
+    cast = next(line for line in mlir.splitlines() if "pto.tcvt " in line)
+    assert mlir.count("pto.tcvt ") == 1 and "pto.tmov " not in mlir, mlir
+    assert "compact=0" in cast, cast
+    source = re.search(r"ins\((%[\w.$-]+)", cast)
+    target = re.search(r"outs\((%[\w.$-]+)", cast)
+    assert source and target, cast
+    allocations = {
+        match.group(1): match.group(2)
+        for line in mlir.splitlines()
+        if (match := re.search(r"(%[\w.$-]+) = pto.alloc_tile addr = (%[\w.$-]+)", line))
+    }
+    constants = {
+        match.group(1): int(match.group(2))
+        for line in mlir.splitlines()
+        if (match := re.search(r"(%[\w.$-]+) = arith.constant (-?\d+) : i64", line))
+    }
+    source_address = constants[allocations[source.group(1)]]
+    target_address = constants[allocations[target.group(1)]]
+    # Check the actual byte windows independently of multi-buffer SSA naming.
+    # One FP4 carrier expands into two FP8 bytes; neither window may overlap.
+    assert source_address + 128 * 128 <= target_address or target_address + 128 * 256 <= source_address
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "named_direct_fp4_to_fp8.pto"
+        cpp = tmp_path / "named_direct_fp4_to_fp8.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 1
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_narrow_fp4_to_fp8_nd_cast_retains_existing_legalization(tmp_path, planner):
+    mlir = _emit_incore_mlir(_direct_fp4_to_fp8_program(carrier_cols=16), planner)
+    # The fused decoder reads full 32-byte source blocks; a narrower physical
+    # row keeps its existing numerical chain instead of acquiring a new error.
+    assert mlir.count("pto.tcvt ") == 3, mlir
+    assert "dtype=bf16" in mlir and "dtype=f32" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "narrow_fp4_to_fp8.pto"
+        cpp = tmp_path / "narrow_fp4_to_fp8.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 3
+
+
+@pytest.mark.parametrize("destination_offset", [0, 32, 4096])
+def test_direct_fp4_to_fp8_rejects_explicitly_overlapping_memrefs(destination_offset):
+    span = ir.Span.unknown()
+    source_shape, result_shape = [32, 128], [32, 256]
+    source_base = ir.Var("source_base", ir.PtrType(), span)
+    result_base = ir.Var("result_base", ir.PtrType(), span)
+    source_type = ir.TileType(
+        source_shape,
+        pl.FP4E2M1X2,
+        ir.MemRef(source_base, ir.ConstInt(0, pl.INT64, span), 4096, span),
+        None,
+        ir.MemorySpace.Vec,
+    )
+    result_type = ir.TileType(
+        result_shape,
+        pl.FP8E4M3FN,
+        ir.MemRef(result_base, ir.ConstInt(destination_offset, pl.INT64, span), 8192, span),
+        None,
+        ir.MemorySpace.Vec,
+    )
+    src = ir.Var("src", ir.TensorType(source_shape, pl.FP4E2M1X2), span)
+    out = ir.Var("out", ir.TensorType(result_shape, pl.FP8E4M3FN), span)
+    source, result = ir.Var("source", source_type, span), ir.Var("result", result_type, span)
+    output = ir.Var("output", out.type, span)
+    offsets = ir.MakeTuple([ir.ConstInt(0, pl.INDEX, span)] * 2, span)
+    sizes = ir.MakeTuple([ir.ConstInt(n, pl.INDEX, span) for n in source_shape], span)
+    load = ir.Call(ir.get_op("tile.load"), [src, offsets, sizes], {}, source_type, span)
+    cast = ir.Call(
+        ir.get_op("tile.cast"), [source], {"target_type": pl.FP8E4M3FN, "mode": 1}, result_type, span
+    )
+    store = ir.Call(ir.get_op("tile.store"), [result, offsets, out], out.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(source, load, span),
+            ir.AssignStmt(result, cast, span),
+            ir.AssignStmt(output, store, span),
+            ir.ReturnStmt([output], span),
+        ],
+        span,
+    )
+    function = ir.Function(
+        "direct_cast_overlap",
+        [(src, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+        [out.type],
+        body,
+        span,
+        ir.FunctionType.AIV,
+    )
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend950)
+    program = ir.Program([function], "direct_cast_overlap", span)
+    if destination_offset < 4096:
+        with pytest.raises(ValueError, match="tile.cast.*requires non-overlapping"):
+            codegen.PTOCodegen().generate(program)
+    else:
+        assert "pto.tcvt" in codegen.PTOCodegen().generate(program)
+
+
+def test_rank_one_fp4_to_fp8_direct_cast_keeps_nd_vector_support(tmp_path):
+    @pl.program
+    class VectorDecode:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[128], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[1, 256], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[1, 256], pl.FP8E4M3FN]:
+            packed = pl.load(src, [0], [128])
+            decoded = pl.cast(packed, pl.FP8E4M3FN)
+            observed = pl.reshape(decoded, [1, 256])
+            return pl.store(observed, [0, 0], out)
+
+    mlir = _emit_incore_mlir(VectorDecode)
+    casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
+    assert len(casts) == 1, mlir
+    assert "dtype=!pto.f4E2M1x2, rows=1, cols=128" in casts[0]
+    assert "dtype=f8E4M3FN, rows=1, cols=256" in casts[0]
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "vector_fp4_to_fp8.pto"
+        cpp = tmp_path / "vector_fp4_to_fp8.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 1
+
+
+def _vec_fp8_nz_store_ir(*, source_dtype=pl.FP8E4M3FN, nz_source=True, valid_rows=32, options=None):
+    span = ir.Span.unknown()
+    source_view = ir.TileView(
+        valid_shape=[valid_rows, 256],
+        blayout=ir.TileLayout.col_major if nz_source else ir.TileLayout.row_major,
+        slayout=ir.TileLayout.row_major if nz_source else ir.TileLayout.none_box,
+    )
+    source = ir.Var(
+        "source", ir.TileType([32, 256], source_dtype, None, source_view, ir.MemorySpace.Vec), span
+    )
+    output = ir.Var(
+        "output",
+        ir.TensorType([32, 256], pl.FP8E4M3FN, tensor_view=ir.TensorView(layout=ir.TensorLayout.NZ)),
+        span,
+    )
+    offsets = ir.MakeTuple([ir.ConstInt(0, pl.INDEX, span)] * 2, span)
+    # Explicit malformed kwargs exercise backend validation independently of
+    # the frontend's earlier atomic/epilogue dtype checks.
+    store = ir.Call(ir.get_op("tile.store"), [source, offsets, output], options or {}, output.type, span)
+    function = ir.Function(
+        "vec_nz_store",
+        [(source, ir.ParamDirection.In), (output, ir.ParamDirection.Out)],
+        [],
+        ir.EvalStmt(store, span),
+        span,
+        ir.FunctionType.AIV,
+    )
+    return ir.Program([function], "vec_nz_store", span)
+
+
+@pytest.mark.parametrize(
+    ("options", "valid_rows", "nz_source", "source_dtype", "error"),
+    [
+        ({"atomic": 1}, 32, True, pl.FP8E4M3FN, "requires a plain store"),
+        ({"pre_quant": 1.0}, 32, True, pl.FP8E4M3FN, "requires a plain store"),
+        ({"pre_relu": True}, 32, True, pl.FP8E4M3FN, "requires a plain store"),
+        ({"st_phase": 1}, 32, True, pl.FP8E4M3FN, "requires a plain store"),
+        ({}, 17, True, pl.FP8E4M3FN, "complete 16x32 boxes"),
+        ({}, 32, False, pl.FP8E4M3FN, "requires a standard 512-byte NZ tile"),
+        ({}, 32, True, pl.FP8E5M2, "supports only FP8E4M3FN"),
+    ],
+)
+def test_vec_fp8_nz_store_rejects_unsupported_modes(options, valid_rows, nz_source, source_dtype, error):
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend950)
+    program = _vec_fp8_nz_store_ir(
+        source_dtype=source_dtype, nz_source=nz_source, valid_rows=valid_rows, options=options
+    )
+    with pytest.raises(ValueError, match=error):
+        passes.block_nz_tensor_views()(program)
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+def test_vec_fp8_nz_store_backend_capability_is_independent_of_acc_store(backend_type):
+    from pypto import backend  # noqa: PLC0415
+
+    reset_for_testing()
+    set_backend_type(backend_type)
+    assert backend.get_handler().supports_vec_fp8_nz_gm_store() == (backend_type == BackendType.Ascend950)
+    program = _vec_fp8_nz_store_ir()
+    if backend_type == BackendType.Ascend950:
+        assert "[1, 8, 2, 16, 32]" in passes.block_nz_tensor_views()(program).as_python()
+    else:
+        with pytest.raises(ValueError, match="requires the A5 FP8 NZ store capability"):
+            passes.block_nz_tensor_views()(program)
+
+
+def test_direct_fp4_to_fp8_keeps_runtime_rows_with_static_columns(tmp_path):
+    @pl.program
+    class DynamicRows:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[32, 128], pl.FP4E2M1X2],
+            rows: pl.Tensor[[1], pl.INT64],
+            out: pl.Out[pl.Tensor[[32, 256], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 256], pl.FP8E4M3FN]:
+            valid_rows = pl.tensor.read(rows, [0])
+            packed = pl.load(src, [0, 0], [32, 128], valid_shape=[valid_rows, 128])
+            decoded = pl.cast(packed, pl.FP8E4M3FN)
+            # ND has a fixed physical row pitch. Observe the whole envelope
+            # after conversion; only the compile-time descriptor is checked.
+            observed = pl.tile.set_validshape(decoded, 32, 256)
+            return pl.store(observed, [0, 0], out)
+
+    mlir = _emit_incore_mlir(DynamicRows)
+    casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
+    assert len(casts) == 1, mlir
+    assert "v_row=?, v_col=128" in casts[0] and "v_row=?, v_col=256" in casts[0], casts[0]
+    pto = tmp_path / "dynamic_rows_fp4_to_fp8.pto"
+    cpp = tmp_path / "dynamic_rows_fp4_to_fp8.cpp"
+    pto.write_text(mlir)
+    _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+    assert cpp.read_text().count("TCVT(") == 1
+
+
+def test_dynamic_valid_columns_keep_existing_fp4_cast_bridge():
+    @pl.program
+    class DynamicColumns:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[32, 128], pl.FP4E2M1X2],
+            columns: pl.Tensor[[1], pl.INT64],
+            out: pl.Out[pl.Tensor[[32, 256], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 256], pl.FP8E4M3FN]:
+            valid_columns = pl.tensor.read(columns, [0])
+            packed = pl.load(src, [0, 0], [32, 128], valid_shape=[32, valid_columns])
+            return pl.store(pl.cast(packed, pl.FP8E4M3FN), [0, 0], out)
+
+    mlir = _emit_incore_mlir(DynamicColumns)
+    assert mlir.count("pto.tcvt ") == 3, mlir
+    assert "dtype=bf16" in mlir and "dtype=f32" in mlir, mlir
+
+
+def test_ptoas_memory_planner_keeps_existing_fp4_to_fp8_nd_bridge(tmp_path):
+    mlir = _emit_incore_mlir(_direct_fp4_to_fp8_program(), passes.MemoryPlanner.PTOAS)
+    assert mlir.count("pto.tcvt ") == 3, mlir
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "planned_fp4_to_fp8_bridge.pto"
+        cpp = tmp_path / "planned_fp4_to_fp8_bridge.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level2", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 3
+
+
+def test_direct_fp4_to_fp8_nz_requires_addressed_memory_planner():
+    with pytest.raises(ValueError, match="require addressed PYPTO or DSA_RP memory planning"):
+        _emit_incore_mlir(_direct_fp4_to_fp8_program(layout=pl.NZ), passes.MemoryPlanner.PTOAS)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_direct_fp4_to_fp8_static_columns_preserve_runtime_slot_address(tmp_path, planner):
+    raw_slots = pl.MemRef("RAW", slots=2)
+    nz_slots = pl.MemRef("NZ", slots=2)
+
+    @pl.program
+    class RuntimeSlots:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[64, 128], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[64, 256], pl.FP8E4M3FN, pl.NZ]],
+        ) -> pl.Tensor[[64, 256], pl.FP8E4M3FN, pl.NZ]:
+            # A packed Tensor accepts UINT8 carriers without changing bytes.
+            # Load that declared format directly: UB byte reinterpretation has
+            # a separate existing static-offset restriction.
+            for packet in pl.range(2):
+                raw: pl.Tile[[32, 128], pl.FP4E2M1X2, raw_slots[packet], pl.Mem.Vec] = pl.load(
+                    src, [packet * 32, 0], [32, 128]
+                )
+                decoded: pl.Tile[
+                    [32, 256],
+                    pl.FP8E4M3FN,
+                    nz_slots[packet],
+                    pl.Mem.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.cast(raw, pl.FP8E4M3FN, layout=pl.NZ)
+                out = pl.store(decoded, [packet * 32, 0], out)
+            return out
+
+    mlir = _emit_incore_mlir(RuntimeSlots, planner)
+    cast = next(line for line in mlir.splitlines() if "pto.tcvt " in line)
+    source = re.search(r"ins\((%[\w.$-]+)", cast)
+    assert source, cast
+    source_allocation = next(
+        line for line in mlir.splitlines() if line.strip().startswith(source.group(1) + " = ")
+    )
+    address = re.search(r"addr = (%[\w.$-]+)", source_allocation)
+    constants = {
+        match.group(1)
+        for line in mlir.splitlines()
+        if (match := re.search(r"(%[\w.$-]+) = arith.constant", line))
+    }
+    assert address and address.group(1) not in constants, mlir
+    assert "v_col=128" in cast and "v_col=256" in cast, cast
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "runtime_slot_fp4_to_fp8.pto"
+        cpp = tmp_path / "runtime_slot_fp4_to_fp8.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert "TCVT(" in cpp.read_text()
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("dynamic_offset", [False, True])
+def test_direct_fp4_to_fp8_slice_preserves_parent_pitch_and_offset(tmp_path, planner, dynamic_offset):
+    offset_scale, offset_base = (1, 0) if dynamic_offset else (0, 8)
+
+    @pl.program
+    class SliceDecode:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[32, 128], pl.FP4E2M1X2],
+            start: pl.Scalar[pl.INT64],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP8E4M3FN, pl.NZ]],
+        ) -> pl.Tensor[[16, 128], pl.FP8E4M3FN, pl.NZ]:
+            packed = pl.load(src, [0, 0], [32, 128])
+            row = start * offset_scale + offset_base
+            window = pl.tile.slice(packed, [16, 64], [row, 32], valid_shape=[13, 56])
+            decoded = pl.cast(window, pl.FP8E4M3FN, layout=pl.NZ)
+            observed = pl.tile.set_validshape(decoded, 16, 128)
+            return pl.store(observed, [0, 0], out)
+
+    mlir = _emit_incore_mlir(SliceDecode, planner)
+    cast = next(line for line in mlir.splitlines() if "pto.tcvt " in line)
+    assert mlir.count("pto.tcvt ") == 1 and "dtype=bf16" not in mlir and "dtype=f32" not in mlir, mlir
+    source = re.search(r"ins\((%[\w.$-]+)", cast)
+    assert source, cast
+    source_view = next(line for line in mlir.splitlines() if line.strip().startswith(source.group(1) + " = "))
+    parent = re.search(r"= pto.subview (%[\w.$-]+)\[", source_view)
+    assert parent, source_view
+    parent_view = next(line for line in mlir.splitlines() if line.strip().startswith(parent.group(1) + " = "))
+    offsets = re.search(r"= pto.subview %[\w.$-]+\[(%[\w.$-]+), (%[\w.$-]+)\]", parent_view)
+    assert offsets and "valid [" in parent_view, parent_view
+    constants = {
+        match.group(1)
+        for line in mlir.splitlines()
+        if (match := re.search(r"(%[\w.$-]+) = arith.constant", line))
+    }
+    assert (offsets.group(1) not in constants) == dynamic_offset, mlir
+    assert "v_col=56" in cast and "v_col=112" in cast, cast
+    pto, cpp = tmp_path / "slice_fp4_to_fp8.pto", tmp_path / "slice_fp4_to_fp8.cpp"
+    pto.write_text(mlir)
+    _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+    emitted = cpp.read_text()
+    assert emitted.count("TCVT(") == 1, emitted
+    # The actual C++ source descriptor must retain the parent's 128-byte row
+    # pitch (256 logical FP4 values), even though the selected window is 64 bytes.
+    source_name = re.search(r"TCVT\([^,]+,\s*([A-Za-z_]\w*)\s*,", emitted)
+    assert source_name, emitted
+    assert re.search(
+        r"Tile<TileType::Vec, float4_e2m1x2_t, (?:16|32), 256, BLayout::RowMajor, 13, 112,[^>]+>\s*"
+        + re.escape(source_name.group(1))
+        + r"\s*[;({]",
+        emitted,
+    ), emitted
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("dynamic_column", [False, True])
+def test_direct_fp4_to_fp8_slice_requires_aligned_source(planner, dynamic_column):
+    column_scale, column_base = (1, 0) if dynamic_column else (0, 1)
+
+    @pl.program
+    class UnalignedSliceDecode:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[32, 512], pl.FP4E2M1X2],
+            column: pl.Scalar[pl.INT64],
+            out: pl.Out[pl.Tensor[[16, 512], pl.FP8E4M3FN, pl.NZ]],
+        ) -> pl.Tensor[[16, 512], pl.FP8E4M3FN, pl.NZ]:
+            packed = pl.load(src, [0, 0], [32, 512])
+            start = column * column_scale + column_base
+            window = pl.tile.slice(packed, [16, 256], [0, start], valid_shape=[16, 256])
+            return pl.store(pl.cast(window, pl.FP8E4M3FN, layout=pl.NZ), [0, 0], out)
+
+    # NORM register loads use the source window's actual UB address. A known
+    # one-byte offset and an unknown runtime column are both unsafe to emit.
+    with pytest.raises(ValueError, match="32-byte-aligned source subview"):
+        _emit_incore_mlir(UnalignedSliceDecode, planner)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

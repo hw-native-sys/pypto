@@ -210,6 +210,7 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
         break;
       case TensorLayout::MX_A_ZZ:
       case TensorLayout::MX_B_NN:
+      case TensorLayout::MX_A_ND:
         INTERNAL_CHECK(false) << "MX layouts were rejected before remote-load layout deduction";
     }
   }

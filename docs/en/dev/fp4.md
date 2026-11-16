@@ -57,7 +57,8 @@ below. Native MXFP4 quantization supports E2M1 only.
 | Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
 | Either packed format ↔ UINT8/INT8 alias | Same-shape orchestration GM aliases; dense addressed 2D row-major Vec aliases with PYPTO or DSA_RP planning |
 | Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
-| Either packed format → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
+| E2M1 → FP8E4M3FN cast | Direct A5 TCVT, ND or fused NZ output; no BF16/FP32 intermediate |
+| Other packed FP4 → FP8 casts | Legalized through BF16 and FP32, with a warning |
 | E2M1↔E1M2 conversion | Numerical cast through BF16; carrier shape is unchanged |
 | Other wider-type casts | Existing legalization with lossless intermediates; see the encoding constraint below |
 | Packed Vec layout conversion | ND→NZ; carrier geometry changes with the packing axis while preserving the value geometry |
@@ -101,7 +102,42 @@ rejected. Packing requires complete pairs: a positive even source extent or a
 provably even dynamic `valid_shape`, such as `2 * n`. Decoding expands the
 carrier extent without requiring it to be even.
 
-All packed casts require `none_box` storage. Wider cast chains require ND.
+Packed cast sources require `none_box` storage. Wider cast chains require ND.
+A5 E2M1-to-E4M3 tiles support fused NZ output:
+
+```python
+fp8_nz = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ)
+```
+
+The source is an ND Vec tile with physical carrier columns divisible by 32
+and static positive valid columns; valid rows may be runtime values.
+`valid_shape` may describe a narrower rectangle. The direct path uses PYPTO
+or DSA_RP address planning to bind static-column descriptors. Plain casts with
+PTOAS planning or dynamic valid columns retain the BF16/FP32 bridge; an explicit
+NZ request requires the addressed direct path. The result keeps logical
+`[M, 2*K]` dimensions while its NZ descriptor controls physical storage.
+NZ physical rows must be divisible by 16; use `valid_shape` for row tails.
+The layout option is Tile-only. E1M2 and FP8E5M2 do not have this direct path.
+PTOAS v0.74 or newer and the matching pinned A5 ISA are required.
+
+A source `tile.slice` retains its parent row pitch and runtime row offset.
+Its UB address must be provably 32-byte aligned: use static packed column
+offsets divisible by 32. Runtime row offsets remain aligned when the parent
+row pitch is a multiple of 32 bytes. Unknown runtime column offsets are
+rejected; load that packed window into its own aligned tile instead.
+
+Use `tpush_to_aic` to transfer the NZ result to the Cube without another
+ND-to-NZ move. On A5, a plain Vec store can also copy it to a matching `pl.NZ`
+FP8E4M3FN GM tensor. That store requires complete static 16x32 boxes and rejects
+atomic, FIXPIPE epilogue, and explicit `st_phase` options. It preserves NZ box
+order and does not convert NZ back to ND. The pinned CPU simulator loses
+signed zero, so physical-byte acceptance uses A5 hardware.
+
+RowPlusOne padding remains deferred to the assembler work tracked in
+[PTOAS #1684](https://github.com/hw-native-sys/PTOAS/issues/1684) and
+[PTOAS #1685](https://github.com/hw-native-sys/PTOAS/pull/1685); the public cast
+currently emits ordinary NZ storage.
+
 Decoding through BF16 preserves every FP4 value exactly. Implicit encoding chains must also preserve
 the original source through BF16: FP16/FP32 and larger integer sources are
 rejected because that intermediate can double-round. Write an explicit BF16

@@ -265,6 +265,7 @@ _LAYOUT_TO_PL: dict[TensorLayout, str] = {
     TensorLayout.NZ: "pl.NZ",
     TensorLayout.MX_A_ZZ: "pl.MX_A_ZZ",
     TensorLayout.MX_B_NN: "pl.MX_B_NN",
+    TensorLayout.MX_A_ND: "pl.MX_A_ND",
 }
 
 

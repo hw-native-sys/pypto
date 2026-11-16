@@ -394,6 +394,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
           tensor_view.layout = TensorLayout::MX_A_ZZ;
         } else if (layout_str == "MX_B_NN") {
           tensor_view.layout = TensorLayout::MX_B_NN;
+        } else if (layout_str == "MX_A_ND") {
+          tensor_view.layout = TensorLayout::MX_A_ND;
         } else {
           CHECK(false) << "Unknown TensorLayout: " << layout_str;
         }

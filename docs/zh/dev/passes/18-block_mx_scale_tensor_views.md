@@ -6,15 +6,20 @@
 `BlockMxScaleTensorViews`。它位于 `FlattenTileNdTo2D`、`BlockNzTensorViews`
 之后，`MaterializeTensorStrides` 之前。
 
-该 pass 保留 `MX_A_ZZ [M, G]` 和 `MX_B_NN [G, N]` 的逻辑形状、
+该 pass 保留 `MX_A_ZZ [M, G]`、`MX_B_NN [G, N]` 和 `MX_A_ND [M, G]` 的逻辑形状、
 load/store 坐标及带形状的 ND/MX 别名。`MaterializeTensorStrides` 生成
 逻辑连续 stride `[cols, 1]`；代码生成直接转写视图，由 PTOAS 构造物理 SFractal 描述符。
 
-形状和偏移检查与下述旧版 pass 共用：静态正数维度按 16 行 / 2 组对齐，
-偏移须可证明非负且对齐。仍不支持分布式 MX 及部分 tensor valid shape。
-缩小 load 的 valid shape 不会缩小 DMA 窗口：pass 使用完整对齐的逻辑加载范围，
+形状和偏移检查与下述旧版 pass 共用。ZZ/NN 要求静态正数维度按 16 行 / 2 组对齐，
+偏移须可证明非负且对齐。仍不支持分布式 MX；ZZ/NN 仍不支持部分 tensor valid shape。
+缩小 ZZ/NN load 的 valid shape 不会缩小 DMA 窗口：pass 使用完整对齐的逻辑加载范围，
 同时保留结果 tile 的有效范围。PTOAS 仍不支持从 fractal-32 Vec scale tile
 直接 store；逻辑目标视图不会使这种源布局变为合法。
+
+`MX_A_ND` 保持行主序 GM 存储，在 TLOAD 中直接转换为 ZZ Mat。行数和行偏移可以动态，
+也不必为 16 的倍数；静态正数 group 维度和 group 偏移必须覆盖对齐的完整二元素组。
+其实际有效行尾部会保留在 DMA 窗口中。下方 `MX_A_ND` 示例使用 K=2304，
+对应每行 72 组 scale。
 
 函数标记 `mx_tensor_views_legalized` 保证重复执行幂等。公开工厂函数为
 `passes.legalize_mx_scale_tensor_views()`。
@@ -40,16 +45,35 @@ codegen 不再私下重建另一套 MX view。
 
 ## 物理形式
 
-DSL 暴露两种逻辑 rank-2 scale layout：
+DSL 暴露三种逻辑 rank-2 scale layout：
 
 ```text
 MX_A_ZZ [M, G] -> [1, M/16, G/2, 16, 2]
 MX_B_NN [G, N] -> [1, N/16, G/2, 16, 2]
+MX_A_ND [M, G] -> [M, G]
 ```
 
 末尾 `[16, 2]` 是一个 32 字节 FP8E8M0 scale box。对分块 shape 求行主序
 stride 就得到物理 GlobalTensor stride，因此本 pass 之后
 `MaterializeTensorStrides` 可以直接使用普通紧致 stride 路径。
+
+`MX_A_ND` 保持原来的行主序 GM ABI，支持紧密排列的 expert 行。其逻辑 rank-2
+view 已经是规范形式；PTOAS 构造 ISA 的二元素打包 GlobalTensor 描述符，TLOAD
+直接将数据转换为行主序 ZZ Mat。行数可以动态变化，也不必是 16 的倍数。
+scale group 数必须为静态正偶数（例如 K=2304 对应 72 组），group 偏移必须为
+非负偶数；行偏移始终保持普通行坐标。
+
+```python
+# 在 @pl.jit.incore 内核中，scales 的布局为 pl.MX_A_ND。
+scale_mat = pl.load(scales, [compact_row_base, 0], [16, 72],
+                    valid_shape=[valid_rows, 72])
+left_scale = pl.move(scale_mat, pl.Mem.LeftScale)
+```
+
+有效行尾部会保留到实际 load，不会读入下一个紧密排列 expert 的行。
+`MX_A_ND` 仅描述 load：通过普通 ND tensor 写入行主序 scale 字节，再使用带 shape
+的 FP8E8M0 `tensor.view(..., layout=pl.MX_A_ND)` 创建别名。metadata view
+本身不打包、不重排字节。`matmul_mx` 的 LeftScale 语义不变，B scale 仍使用 `MX_B_NN`。
 
 ## 在流水线中的位置
 

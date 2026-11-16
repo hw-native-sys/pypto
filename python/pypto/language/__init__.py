@@ -288,6 +288,7 @@ DN = TensorLayout.DN
 NZ = TensorLayout.NZ
 MX_A_ZZ = TensorLayout.MX_A_ZZ
 MX_B_NN = TensorLayout.MX_B_NN
+MX_A_ND = TensorLayout.MX_A_ND
 
 # Re-export DataType constants for convenience
 FP4E2M1X2 = DataType.FP4E2M1X2  # packed carrier (PTOAS / Torch)
@@ -564,6 +565,7 @@ __all__ = [
     "NZ",
     "MX_A_ZZ",
     "MX_B_NN",
+    "MX_A_ND",
     "FP4E2M1X2",
     "FP4E1M2X2",
     "fp4e2m1x2",

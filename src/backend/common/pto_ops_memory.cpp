@@ -43,6 +43,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
+#include "pypto/ir/transforms/utils/vec_nz_store.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -175,6 +176,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
       pto_layout = "mx_a_zz";
     } else if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_B_NN) {
       pto_layout = "mx_b_nn";
+    } else if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ND) {
+      pto_layout = "mx_a_nd";
     }
     if (!pto_layout.empty()) {
       INTERNAL_CHECK_SPAN(
@@ -191,7 +194,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // no implicit dn_swap here — earlier passes ensure all coordinate systems
   // match before codegen. For MX, LegalizeMxScaleTensorViews sets args[3] to the
   // fractal-aligned logical shapes window when logical valid_shape was
-  // narrowed, so partition sizes stay SFractal-safe.
+  // narrowed, so partition sizes stay SFractal-safe. MX_A_ND keeps its
+  // compact row extent: TLOAD converts only those valid rows into ZZ.
   std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
   std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
   std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
@@ -271,7 +275,21 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   auto tensor_type = AsTensorTypeLike(output_tensor->GetType());
   INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "tile.store output_tensor must have TensorType";
 
-  if (tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::NZ) {
+  const bool nz_destination =
+      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::NZ;
+  if (nz_destination && tile_type->GetMemorySpace() == ir::MemorySpace::Vec) {
+    ir::ValidateVecFp8NzStore(op, tile_type, tensor_type, codegen.GetBackendHandler());
+    // BlockNzTensorViews already expressed complete boxes in canonical GM
+    // coordinates. Retain its rank-five partition and the typed NZ source;
+    // neither an ND materialization nor an Acc/FIXPIPE conversion is involved.
+    const auto sizes = op->args_.size() == 4 ? As<ir::MakeTuple>(op->args_[3]) : nullptr;
+    INTERNAL_CHECK_SPAN(
+        ir::tensor_view_semantics::IsBlockedNzShape(tensor_type->shape_, tensor_type->dtype_) && sizes &&
+            sizes->elements_.size() == ir::tensor_view_semantics::kNzBlockedRank &&
+            offsets_tuple->elements_.size() == ir::tensor_view_semantics::kNzBlockedRank,
+        op->span_)
+        << "Internal error: Vec NZ tile.store requires a blocked rank-five partition";
+  } else if (nz_destination) {
     // Validate the concrete write after tiling, using the same source and
     // destination descriptors that the ordinary rank-N emitter uses below.
     CHECK_SPAN(tile_type->dtype_ == DataType::FP32 && tensor_type->dtype_ == DataType::FP32 &&
@@ -1149,6 +1167,9 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
         break;
       case ir::TensorLayout::MX_B_NN:
         layout_str = "mx_b_nn";
+        break;
+      case ir::TensorLayout::MX_A_ND:
+        layout_str = "mx_a_nd";
         break;
       case ir::TensorLayout::ND:
         break;

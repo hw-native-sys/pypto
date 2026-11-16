@@ -24,6 +24,41 @@
 
 namespace pypto::ir {
 
+// The A5 register decoder accepts an ND E2M1 source and writes E4M3 directly
+// to ND or NZ. Generic elementwise layout repair must not insert an ND result
+// and a separate NZ move around this fused operation.
+inline bool IsDirectFp4E2M1ToFp8Cast(const CallPtr& call) {
+  if (!call || !IsOp(call, "tile.cast") || call->args_.empty()) return false;
+  const auto source = As<TileType>(call->args_[0]->GetType());
+  const auto result = As<TileType>(call->GetType());
+  return source && result && source->dtype_ == DataType::FP4E2M1X2 && result->dtype_ == DataType::FP8E4M3FN;
+}
+
+// Native adjacency describes supported dtype pairs. Direct widening also has
+// source-descriptor requirements; outside them retain the existing BF16/FP32
+// legalization instead of rejecting a previously accepted narrow/strided tile.
+inline bool HasDirectFp4ToFp8SourceGeometry(const TileTypePtr& source) {
+  if (!source || (source->shape_.size() != 1 && source->shape_.size() != 2)) return false;
+  const auto columns = As<ConstInt>(source->shape_.back());
+  if (!columns || columns->value_ < 32 || columns->value_ % 32 != 0) return false;
+  const auto view = tile_view_semantics::GetEffectiveTileView(*source);
+  // PTOAS checks packed-axis validity from the type. Runtime columns keep the
+  // existing bridge rather than acquiring a new late assembler restriction.
+  if (view.valid_shape.empty()) return false;
+  const auto valid_columns = As<ConstInt>(view.valid_shape.back());
+  if (!valid_columns || valid_columns->value_ <= 0) return false;
+  if (view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box ||
+      view.compact != CompactMode::null)
+    return false;
+  if (view.stride.empty()) return true;
+  if (view.stride.size() != source->shape_.size()) return false;
+  const auto column_stride = As<ConstInt>(view.stride.back());
+  if (!column_stride || column_stride->value_ != 1) return false;
+  if (source->shape_.size() == 1) return true;
+  const auto row_stride = As<ConstInt>(view.stride[0]);
+  return row_stride && row_stride->value_ == columns->value_;
+}
+
 // Native A5 FP4 TCVT has a working contiguous DN path only when both descriptors
 // carry full static validity. Its dynamic-valid path can fault even for dense
 // DN data. Layout inference must preserve this narrow case for codegen to emit

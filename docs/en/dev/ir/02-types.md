@@ -410,11 +410,15 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 - `ND`: ND layout
 - `DN`: DN layout
 - `NZ`: NZ layout
+- `MX_A_ZZ` / `MX_B_NN`: packed A/B scale boxes for MX matmul
+- `MX_A_ND`: row-major A scales `[rows, K/32]`; a Mat load converts them to ZZ
+  during TLOAD, without Vec packing. Rows and row offsets need not be multiples
+  of 16; the scale-group dimension and offsets must use complete pairs.
 
 **TensorView fields:**
 
 - `stride`: stride for each dimension
-- `layout`: `TensorLayout.ND` / `DN` / `NZ` / `MX_A_ZZ` / `MX_B_NN`
+- `layout`: `TensorLayout.ND` / `DN` / `NZ` / `MX_A_ZZ` / `MX_B_NN` / `MX_A_ND`
 - `valid_shape`: optional valid-region dimensions (empty means use full shape)
 - `pad`: `PadValue.null` (default) / `zero` / `max` / `min` — padding mode used
   when loads/slices read outside the `valid_shape`. Peer of `TileView.pad`;

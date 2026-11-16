@@ -361,11 +361,14 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 - `ND`：ND 布局
 - `DN`：DN 布局
 - `NZ`：NZ 布局
+- `MX_A_ZZ` / `MX_B_NN`：MX matmul 的 A/B scale 分块布局
+- `MX_A_ND`：行主序 A scale `[rows, K/32]`；加载到 Mat 时由 TLOAD 转为 ZZ，
+  无需 Vec 打包。行数和行偏移不必是 16 的倍数；scale group 维度和偏移必须覆盖完整的二元素组。
 
 **TensorView 字段：**
 
 - `stride`：每个维度的步长
-- `layout`：`TensorLayout.ND` / `DN` / `NZ` / `MX_A_ZZ` / `MX_B_NN`
+- `layout`：`TensorLayout.ND` / `DN` / `NZ` / `MX_A_ZZ` / `MX_B_NN` / `MX_A_ND`
 - `valid_shape`：可选的有效区域维度（为空表示使用完整 shape）
 - `pad`：`PadValue.null`（默认）/ `zero` / `max` / `min`，用于访问超出
   `valid_shape` 部分时的填充模式。与 `TileView.pad` 对称；

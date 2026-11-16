@@ -18,11 +18,14 @@
  *
  *   MX_A_ZZ [M, G] -> [1, M/16, G/2, 16, 2]
  *   MX_B_NN [G, N] -> [1, N/16, G/2, 16, 2]
+ *   MX_A_ND [M, G] -> [M, G] (packed row-major, TLOAD converts to L1 ZZ)
  *
  * LegalizeMxScaleTensorViews retains logical rank-2 views for PTOAS v0.74.
  * BlockMxScaleTensorViews owns the legacy conversion, including tensor types, tile.load windows,
  * ND/MX backing aliases, Call/Submit result types, and symbolic offset proofs.
- * It runs after BlockNzTensorViews and before MaterializeTensorStrides.
+ * MX_A_ND keeps its compact row coordinates and valid-row tails; only its
+ * scale-group axis needs complete aligned pairs. It runs after
+ * BlockNzTensorViews and before MaterializeTensorStrides.
  */
 
 #include <any>
@@ -56,6 +59,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -148,11 +152,22 @@ bool IsMxTensorType(const TypePtr& type) {
 
 std::vector<ExprPtr> BlockMxShape(const std::vector<ExprPtr>& shape, TensorLayout layout, const Span& span) {
   CHECK_SPAN(IsMxTensorLayout(layout), span)
-      << "BlockMxShape requires MX_A_ZZ or MX_B_NN, got " << TensorLayoutToString(layout);
+      << "BlockMxShape requires an MX layout, got " << TensorLayoutToString(layout);
   CHECK_SPAN(shape.size() == 2, span)
       << "MX layout requires a rank-2 logical shape, got rank " << shape.size();
 
-  const bool is_a = layout == TensorLayout::MX_A_ZZ;
+  // ND activation scales are already packed row-major in GM. Keep their
+  // logical coordinates so PTOAS selects MX_A_ND2ZZ during the Mat load;
+  // folding M into 16-row boxes would both change the ABI and reject compact
+  // expert bases. Only the contiguous scale-group axis is paired by the ISA.
+  if (layout == TensorLayout::MX_A_ND) {
+    CHECK_SPAN(tensor_view_semantics::IsCanonicalMxShape(shape, layout), span)
+        << "MX_A_ND requires a rank-2 shape [rows, groups] with positive rows and a static positive "
+           "even group dimension; rows may be dynamic and need not be multiples of 16";
+    return shape;
+  }
+
+  const bool is_a = layout != TensorLayout::MX_B_NN;
   const size_t block_axis = is_a ? 0 : 1;
   const size_t group_axis = is_a ? 1 : 0;
   constexpr int64_t kRows = tile_view_semantics::kMXSFractalRows;
@@ -181,7 +196,7 @@ std::vector<ExprPtr> BlockMxShape(const std::vector<ExprPtr>& shape, TensorLayou
 std::vector<ExprPtr> BlockMxOffsets(const std::vector<ExprPtr>& offsets, TensorLayout layout,
                                     const Span& span, const MxOffsetFacts& facts) {
   CHECK_SPAN(IsMxTensorLayout(layout), span)
-      << "BlockMxOffsets requires MX_A_ZZ or MX_B_NN, got " << TensorLayoutToString(layout);
+      << "BlockMxOffsets requires an MX layout, got " << TensorLayoutToString(layout);
   CHECK_SPAN(offsets.size() == 2, span) << "MX layout requires rank-2 offsets, got " << offsets.size();
 
   const bool is_a = layout == TensorLayout::MX_A_ZZ;
@@ -213,6 +228,13 @@ std::vector<ExprPtr> BlockMxOffsets(const std::vector<ExprPtr>& offsets, TensorL
     return MakeFloorDiv(offset, std::make_shared<ConstInt>(divisor, DataType::INDEX, span), span);
   };
 
+  // MX_A_ND addresses complete row-major scale pairs directly. Preserve the
+  // compact row base without an alignment/sign proof: no quotient is emitted
+  // on that axis and ordinary window-bounds validation still applies.
+  if (layout == TensorLayout::MX_A_ND) {
+    block_axis_offset(offsets[1], kCols, "group");
+    return offsets;
+  }
   auto block_offset = block_axis_offset(offsets[block_axis], kRows, "block");
   auto group_offset = block_axis_offset(offsets[group_axis], kCols, "group");
   auto make_index = [&span](int64_t value) {
@@ -246,6 +268,7 @@ TypePtr BlockMxType(const TypePtr& type, const Span& span, bool logical_views) {
     if (!maybe_view.has_value()) return type;
     const TensorView& view = *maybe_view;
     auto blocked_shape = BlockMxShape(tensor_type->shape_, view.layout, span);
+    if (view.layout == TensorLayout::MX_A_ND) return type;
     CHECK_SPAN(view.valid_shape.empty(), span)
         << "MX layout does not support a partial tensor valid_shape yet; the whole tensor must be valid.";
     // PTOAS v0.74 owns physical packing; keep logical coordinates in the default pipeline.
@@ -562,7 +585,15 @@ class BlockMxMutator : public IRMutator {
 
     args[1] = BlockMxTupleArg(args[1], layout, op->span_, /*is_offsets=*/true, facts_, logical_views_);
     args[2] = BlockMxTupleArg(args[2], layout, op->span_, /*is_offsets=*/false, facts_, logical_views_);
-    if (args.size() >= 4) args[3] = args[2];
+    if (args.size() >= 4) {
+      // ZZ/NN loads address complete physical boxes even when the logical tile
+      // valid rows are narrowed. ND loading instead consumes the valid-row
+      // tail itself and must not read into the next compact expert's rows.
+      args[3] =
+          layout == TensorLayout::MX_A_ND
+              ? BlockMxTupleArg(args[3], layout, op->span_, /*is_offsets=*/false, facts_, logical_views_)
+              : args[2];
+    }
     return args;
   }
 

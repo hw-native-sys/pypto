@@ -10,10 +10,19 @@ For each `var = tile.cast(...)`:
    (transcribed from pto-isa `tcvt` Supported Conversions). The pass holds no per-architecture
    knowledge of its own, so a new backend ships its own table and needs no change here.
    With no backend configured the pass is a no-op.
-2. Already native: leave unchanged (including FIXPIPE-foldable `FP32→BF16/FP16` with `mode=rint`).
+2. Already native and descriptor-compatible: leave unchanged (including FIXPIPE-foldable
+   `FP32→BF16/FP16` with `mode=rint`). A5 E2M1→E4M3 uses the direct edge only
+   for contiguous ND sources with physical carrier columns divisible by 32;
+   otherwise the existing BF16/FP32 bridge remains available.
 3. Non-native: BFS for a shortest path; among equal-length paths prefer "same byte-width → float, then adjust width".
 
 Typical A5 results: `INT32→FP16` → `INT32→FP32→FP16`; `FP16→BF16` → `FP16→FP32→BF16`.
+
+A5 E2M1→E4M3 Tile casts can request `layout=pl.NZ`. The cast produces NZ directly,
+without a wide temporary or FP8 ND materialization. Its logical dimensions
+still expand carrier columns 2:1, using the ordinary NZ physical layout.
+Explicit NZ requests outside the direct descriptor constraints fail instead
+of silently adding a separate layout conversion. See [FP4](../fp4.md).
 
 Unreachable pairs hard-fail with src/dst/arch in the diagnostic.
 

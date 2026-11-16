@@ -609,5 +609,66 @@ def test_packed_fp4_dense_dn_tensor_runtime(case_run):
     case_run.assert_passed()
 
 
+def _make_direct_fp4_to_fp8_decode(layout):
+    output_layout = pl.NZ if layout == pl.NZ else pl.ND
+
+    @pl.jit(auto_scope=False)
+    def decode(
+        src: pl.Tensor[[32, 128], pl.FP4E2M1X2],
+        out: pl.Out[pl.Tensor[[32, 256], pl.FP8E4M3FN, output_layout]],
+    ):
+        with pl.spmd(1):
+            row = pl.tile.get_block_idx() * 32
+            packed = pl.tile.load(src, [row, 0], [32, 128])
+            decoded = pl.cast(packed, pl.FP8E4M3FN, layout=layout)
+            pl.tile.store(decoded, [row, 0], out)
+        return out
+
+    return decode
+
+
+def _all_packed_byte_patterns():
+    # Every packed byte occurs in each 16-row NZ panel, exercising all
+    # low/high-nibble combinations, both signs, and signed zero.
+    return torch.arange(256, dtype=torch.uint8).repeat(16).reshape(32, 128)
+
+
+def _direct_fp4_to_fp8_golden(layout):
+    def golden(tensors):
+        # Decode via the independent numerical E2M1 reference, then use Torch's
+        # FP8 conversion. Comparing raw encodings distinguishes +0 and -0.
+        values = _packed_fp4_values(tensors["src"], pl.FP4E2M1X2).to(torch.float8_e4m3fn)
+        if layout == pl.NZ:
+            # TSTORE writes compact GM NZ [N/32, M/16, 16, 32]. It reads the
+            # producer's NZ panel layout, so incorrect decode ordering changes
+            # the observed bytes.
+            values = values.reshape(2, 16, 8, 32).permute(2, 0, 1, 3).contiguous().reshape(32, 256)
+        return {"out": values}
+
+    return golden
+
+
+# The pinned CPU simulator loses FP4 negative zero. Signed-zero byte acceptance
+# requires A5 hardware.
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            _make_direct_fp4_to_fp8_decode(layout),
+            tensors=[
+                TensorSpec("src", [32, 128], DataType.UINT8, init_value=_all_packed_byte_patterns),
+                TensorSpec("out", [32, 256], DataType.FP8E4M3FN, is_output=True, init_value=0),
+            ],
+            name=f"fp4_e2m1_to_fp8_all_256_patterns_{name}",
+            golden=_direct_fp4_to_fp8_golden(layout),
+            compare=_compare_packed_bytes,
+        )
+        for name, layout in (("nd", None), ("nz", pl.NZ))
+    ]
+)
+def test_direct_fp4_to_fp8_all_patterns(case_run):
+    case_run.assert_passed()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--platform", "a5"])

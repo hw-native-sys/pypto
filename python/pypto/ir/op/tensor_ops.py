@@ -507,7 +507,7 @@ def matmul_mx(
 
     Args:
         lhs: A-side quantized data tensor with shape ``[M, K]``.
-        lhs_scale: A-side ``MX_A_ZZ`` FP8E8M0 scale tensor with shape
+        lhs_scale: A-side ``MX_A_ZZ`` or row-major ``MX_A_ND`` FP8E8M0 scale tensor with shape
             ``[M, K/32]``.
         rhs: B-side quantized data tensor with shape ``[K, N]``.
         rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
@@ -1978,7 +1978,7 @@ def view(
        both require an explicit target ``valid_shape``.
     Combining ``shape`` with a layout change is valid for type deduction and
     PTO in-core lowering. Only orchestration lowering is restricted: it supports
-    ND shape reinterprets and shaped ND/MX_A_ZZ/MX_B_NN backing/consumer views
+    ND shape reinterprets and shaped ND/MX_A_ZZ/MX_B_NN/MX_A_ND backing/consumer views
     for FP8E8M0 MX scales; other layout-changing shape reinterprets are
     unsupported because the runtime ``Tensor::reshape`` cannot express an
     arbitrary-layout view.
@@ -1996,7 +1996,7 @@ def view(
             collapse reinterprets a source with partial validity.
         layout: Target ``TensorLayout`` (ND or DN). Must not be ``NZ``.
             When provided without ``shape``, performs a layout-only flip.
-            Orchestration also permits shaped ND/MX_A_ZZ/MX_B_NN backing and
+            Orchestration also permits shaped ND/MX_A_ZZ/MX_B_NN/MX_A_ND backing and
             consumer views for FP8E8M0 MX scales; other layout-changing shape
             views remain limited to in-core lowering.
         span: Optional source span for debugging (auto-captured if not

@@ -633,15 +633,29 @@ inline bool IsBlockedMxShape(const std::vector<ExprPtr>& shape) {
 }
 
 /// PTOAS v0.74 accepts logical MX views; their layout tag owns physical packing.
-/// Keep the existing static alignment contract until dynamic MX lowering is supported.
+/// ZZ/NN retain static fractal alignment. ND activation scales are already
+/// row-major GM data: rows may be dynamic and need no 16-row alignment, while
+/// the contiguous group axis still consists of complete scale pairs.
 inline bool IsLogicalMxShape(const std::vector<ExprPtr>& shape, TensorLayout layout) {
   if (shape.size() != 2 || !IsMxTensorLayout(layout)) return false;
+  if (layout == TensorLayout::MX_A_ND) {
+    auto rows = As<ConstInt>(shape[0]);
+    auto groups = As<ConstInt>(shape[1]);
+    return (!rows || rows->value_ > 0) && groups && groups->value_ > 0 &&
+           groups->value_ % tile_view_semantics::kMXSFractalCols == 0;
+  }
   const bool is_a = layout == TensorLayout::MX_A_ZZ;
   auto block = As<ConstInt>(shape[is_a ? 0 : 1]);
   auto group = As<ConstInt>(shape[is_a ? 1 : 0]);
   return block && group && block->value_ > 0 && group->value_ > 0 &&
          block->value_ % tile_view_semantics::kMXSFractalRows == 0 &&
          group->value_ % tile_view_semantics::kMXSFractalCols == 0;
+}
+
+/// Accept the default logical form or legacy blocked ZZ/NN views. MX_A_ND
+/// always retains its rank-2 row-major ABI, including in the legacy pass.
+inline bool IsCanonicalMxShape(const std::vector<ExprPtr>& shape, TensorLayout layout) {
+  return IsLogicalMxShape(shape, layout) || (layout != TensorLayout::MX_A_ND && IsBlockedMxShape(shape));
 }
 
 /// Build packed canonical strides for the given (shape, layout).
@@ -659,6 +673,7 @@ inline bool IsLogicalMxShape(const std::vector<ExprPtr>& shape, TensorLayout lay
 ///        enforces that invariant downstream.
 ///   MX : logical rank-2 row-major strides for PTOAS-owned packing, or physical
 ///        row-major strides for the explicit legacy rank-5 blocking pass.
+///        MX_A_ND already matches row-major GM data and always remains rank 2.
 ///
 /// Throws ``pypto::ValueError`` for DN layout with rank < 2.
 inline std::vector<ExprPtr> BuildLogicalStridesFromLayout(const std::vector<ExprPtr>& shape,

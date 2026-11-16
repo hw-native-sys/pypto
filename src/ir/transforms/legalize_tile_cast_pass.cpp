@@ -56,6 +56,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -181,9 +182,11 @@ bool IsFp4FloatBridge(DataType dtype) {
 // BFS shortest path; returns the sequence of intermediate/final target types
 // (excluding `from`). Empty vector means already native? No — caller checks
 // native first. Empty here means unreachable.
-std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType to) {
+std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType to,
+                                    bool allow_direct_fp4_to_fp8) {
   if (from == to) return {};
-  if (IsNativeCast(adj, from, to)) {
+  if (IsNativeCast(adj, from, to) &&
+      (allow_direct_fp4_to_fp8 || from != DataType::FP4E2M1X2 || to != DataType::FP8E4M3FN)) {
     return {to};
   }
   if (to.IsPackedFp4() && !HasLosslessFp4EncodingBridge(from)) return {};
@@ -219,6 +222,9 @@ std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType 
     }
 
     for (const DataType& nxt : neigh) {
+      if (!allow_direct_fp4_to_fp8 && cur_info.via == DataType::FP4E2M1X2 && nxt == DataType::FP8E4M3FN) {
+        continue;
+      }
       if (to.IsPackedFp4() && nxt != to && !IsFp4FloatBridge(nxt)) continue;
       // Intermediates must preserve everything the destination can represent;
       // the destination itself is always admissible.
@@ -275,9 +281,12 @@ void MaybeWarnPackedFp4ToFp8(DataType src, DataType dst, const Span& span, std::
 
 class LegalizeTileCastMutator : public IRMutator {
  public:
-  LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name,
+  LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name, bool addressed_fp4_cast,
                           std::vector<Diagnostic>* diags)
-      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)), diags_(diags) {}
+      : arch_name_(std::move(arch_name)),
+        adj_(BuildAdj(table)),
+        addressed_fp4_cast_(addressed_fp4_cast),
+        diags_(diags) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -294,13 +303,28 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
-
-    if (IsNativeCast(adj_, src, dst)) {
+    const bool allow_direct_fp4_to_fp8 = addressed_fp4_cast_ && HasDirectFp4ToFp8SourceGeometry(src_tile);
+    const bool direct_pair = src == DataType::FP4E2M1X2 && dst == DataType::FP8E4M3FN;
+    // Packed FP4 cannot use PTOAS treshape to acquire static valid columns.
+    // Addressed planners rebind a typed descriptor; addressless plain casts
+    // retain their existing bridge rather than acquiring a new limitation.
+    CHECK_SPAN(!direct_pair || addressed_fp4_cast_ ||
+                   call->GetKwarg<TensorLayout>("layout", TensorLayout::ND) != TensorLayout::NZ,
+               op->span_)
+        << "Direct FP4 to FP8 NZ casts require addressed PYPTO or DSA_RP memory planning";
+    CHECK_SPAN(!direct_pair || allow_direct_fp4_to_fp8 ||
+                   call->GetKwarg<TensorLayout>("layout", TensorLayout::ND) != TensorLayout::NZ,
+               op->span_)
+        << "Direct FP4E2M1X2 to FP8E4M3FN NZ conversion requires contiguous ND source "
+           "physical carrier columns divisible by 32 and static positive valid columns";
+    if (IsNativeCast(adj_, src, dst) && (!direct_pair || allow_direct_fp4_to_fp8)) {
       return IRMutator::VisitStmt_(op);
     }
 
-    std::vector<DataType> chain = FindCastChain(adj_, src, dst);
+    // Native exact E2M1 widening has no wide intermediates to warn about.
+    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
+
+    std::vector<DataType> chain = FindCastChain(adj_, src, dst, allow_direct_fp4_to_fp8);
     CHECK_SPAN(!chain.empty() || !dst.IsPackedFp4() || HasLosslessFp4EncodingBridge(src), op->span_)
         << "LegalizeTileCast: no lossless cast path from " << src.ToString() << " to " << dst.ToString()
         << "; the required BF16 intermediate can double-round. Cast to BF16 explicitly before FP4 "
@@ -359,6 +383,7 @@ class LegalizeTileCastMutator : public IRMutator {
  private:
   std::string arch_name_;
   AdjList adj_;
+  bool addressed_fp4_cast_;
   std::size_t temp_counter_ = 0;
   std::vector<Diagnostic>* diags_;
 };
@@ -383,7 +408,9 @@ FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
     return func;
   }
   std::vector<Diagnostic> diags;
-  LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch(), &diags);
+  const bool addressed_fp4_cast = ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS;
+  LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch(),
+                                  addressed_fp4_cast, &diags);
   auto result = mutator.VisitFunction(func);
   EmitDiagnostics(diags, "LegalizeTileCast");
   return result;
