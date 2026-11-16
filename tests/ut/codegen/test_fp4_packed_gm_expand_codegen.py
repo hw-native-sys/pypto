@@ -946,7 +946,9 @@ def test_direct_fp4_to_fp8_named_raw_nz_slots_remain_disjoint(tmp_path, planner)
     mlir = _emit_incore_mlir(NamedDecode, planner)
     cast = next(line for line in mlir.splitlines() if "pto.tcvt " in line)
     assert mlir.count("pto.tcvt ") == 1 and "pto.tmov " not in mlir, mlir
-    assert "compact=0" in cast, cast
+    # Canonical tile buffer types omit the default (null) compact mode.
+    assert "compact=" not in cast, cast
+    assert "blayout=col_major, slayout=row_major" in cast, cast
     source = re.search(r"ins\((%[\w.$-]+)", cast)
     target = re.search(r"outs\((%[\w.$-]+)", cast)
     assert source and target, cast
