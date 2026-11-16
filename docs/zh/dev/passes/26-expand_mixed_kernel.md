@@ -709,6 +709,10 @@ Fixpipe 要求 `dir_mask=1`（仅 C2V）、Acc 输入，且 push/pop/free 的 `s
 转换后的 dtype、物理形状、消费者布局，以及**转换后字节数**是否适合 slot。
 随后 PTOAS 还会独立验证。
 
+验证器在检查地址来源、入向生产者数量和两端契约前，会在两端沿链追溯
+reserve/import 缓冲区的恒等 SSA 别名。每个别名的来源在单次遍历中缓存，
+总查找复杂度为 O(N log N)；算术计算得到的地址不属于恒等缓冲区别名。
+
 当前 PTOAS 要求同一个 pipe id 的全部 Fixpipe pop 使用相同 tile 类型。
 因此不同物理 payload 形状必须使用独立的显式 pipe id，即使各自都能放入最大的 slot。
 PyPTO 会提前拒绝此组合；真实 PTOAS 负例独立验证该边界。

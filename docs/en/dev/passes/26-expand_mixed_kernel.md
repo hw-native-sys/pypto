@@ -822,6 +822,11 @@ policy. The producer imports the named consumer reserve buffer. The
 physical shapes, consumer layouts, and capacity in **post-conversion bytes**.
 PTOAS performs its own verification again before lowering.
 
+Identity SSA aliases of reserved/imported pipe buffers are followed transitively
+on both endpoints before checking provenance, incoming-peer counts and peer
+contracts. The verifier caches each alias origin in one traversal, keeping
+lookup work O(N log N); arithmetic-derived addresses are not buffer aliases.
+
 Current PTOAS requires all Fixpipe pops on one pipe id to use the same tile
 type. Different physical payload shapes therefore require separate explicit
 pipe ids even if every payload fits the maximum slot size. PyPTO rejects this

@@ -102,6 +102,36 @@ def _program(
     return Program
 
 
+class _PipeBufferAliases(ir.IRMutator):
+    """Retain ordinary scalar SSA aliases through the actual compiler pipeline."""
+
+    def __init__(self, producer_depth: int, consumer_depth: int, offset: int = 0):
+        super().__init__()
+        self._offset = offset
+        self._depths = {
+            "system.aic_initialize_pipe": producer_depth,
+            "system.aiv_initialize_pipe": consumer_depth,
+        }
+
+    def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:
+        call = op.expr
+        depth = self._depths.get(call.op.name, 0) if isinstance(call, ir.Call) else 0
+        if not depth:
+            return super().visit_eval_stmt(op)
+        assert isinstance(call, ir.Call)
+        value = call.args[0]
+        if self._offset:
+            value = ir.Add(value, ir.ConstInt(self._offset, DataType.INT32, op.span), DataType.INT32, op.span)
+        statements: list[ir.Stmt] = []
+        for index in range(depth):
+            alias = ir.Var(f"c2v_buffer_alias_{index}", value.type, op.span)
+            statements.append(ir.AssignStmt(alias, value, op.span))
+            value = alias
+        aliased = ir.Call(call.op, [value, *call.args[1:]], dict(call.kwargs), call.type, call.span)
+        statements.append(ir.EvalStmt(aliased, op.span))
+        return ir.SeqStmts(statements, op.span)
+
+
 def _generate(program, buffer_ir=False, verification_level=passes.VerificationLevel.BASIC):
     with passes.PassContext([], enable_buffer_ir=buffer_ir, verification_level=verification_level):
         lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
@@ -152,6 +182,38 @@ def test_explicit_fixpipe_compiles(quant, relu, tmp_path):
     if quant.endswith("vec"):
         assert "SET_QUANT_VECTOR" in cpp
         assert "TileType::Scaling, uint64_t" in cpp
+
+
+@pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.parametrize("side", ["producer", "consumer", "both"])
+@pytest.mark.parametrize("depth", [1, 4])
+@pytest.mark.ptoas_compile
+def test_pipe_buffer_aliases_compile(buffer_ir, side, depth, tmp_path):
+    # Both imported and reserved addresses may have shared, transitive aliases.
+    # Compile all the way to PTOAS so SSA alias emission is checked as well.
+    aliases = _PipeBufferAliases(depth if side != "consumer" else 0, depth if side != "producer" else 0)
+    _, mlir = _generate(aliases.visit_program(_program()), buffer_ir)
+    _assemble(mlir, tmp_path)
+
+
+def test_buffer_arithmetic_is_not_an_identity_alias():
+    # Offsetting a reserved address does not name the same FIFO allocation.
+    program = _PipeBufferAliases(4, 4, offset=16).visit_program(_program())
+    with pytest.raises(Error, match="must trace to reserve_buffer/import_peer_buffer"):
+        _generate(program)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"peer_quant": "f32_f16"}, "contract mismatch"),
+        ({"slot_size": 128}, "exceeds slot_size"),
+    ],
+)
+def test_buffer_aliases_preserve_contract_errors(kwargs, message):
+    program = _PipeBufferAliases(4, 4).visit_program(_program(**kwargs))
+    with pytest.raises(Error, match=message):
+        _generate(program)
 
 
 @pytest.mark.parametrize(
