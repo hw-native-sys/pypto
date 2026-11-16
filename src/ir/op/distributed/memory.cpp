@@ -74,6 +74,20 @@ TypePtr DeduceAllocWindowBufferType(const std::vector<ExprPtr>& args,
   auto name = GetKwarg<std::string>(kwargs, "name", "pld.tensor.alloc_window_buffer");
   CHECK(!name.empty()) << "pld.tensor.alloc_window_buffer requires a non-empty 'name' kwarg";
 
+  std::string source = "device";
+  for (const auto& [key, value] : kwargs) {
+    if (key == "memory_source") {
+      source = AnyCast<std::string>(value, "memory_source");
+      CHECK(source == "host" || source == "device")
+          << "alloc_window_buffer memory_source must be 'device' or 'host', got " << source;
+    }
+  }
+  for (const auto& [key, value] : kwargs) {
+    if (key != "init") continue;
+    CHECK(!AnyCast<std::string>(value, "init").empty())
+        << "alloc_window_buffer init must be a non-empty string";
+    CHECK(source == "host") << "alloc_window_buffer init requires memory_source='host'";
+  }
   // The op produces a Ptr — exact mirror of tile.alloc / tensor.alloc.
   return GetPtrType();
 }
@@ -120,6 +134,8 @@ REGISTER_OP("pld.tensor.alloc_window_buffer")
     .set_op_category("DistributedOp")
     .add_argument("size", "Per-rank allocation size in bytes (ScalarType expression)")
     .set_attr<std::string>("name")
+    .set_attr<std::string>("memory_source")
+    .set_attr<std::string>("init")
     .no_memory_spec()
     .f_deduce_type(DeduceAllocWindowBufferType);
 

@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from importlib import resources
 
@@ -2221,6 +2222,196 @@ def test_if_cross_branch_phi_yields_tensors() -> None:
     assert not re.search(r"boundary__ssa_v\d+\s*=.*\w+__ssa", then_block), (
         "Then-branch must not contain bare Python tensor assignments:\n" + code
     )
+
+
+def test_host_window_requests_urma_and_context():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[64], pl.FP32]) -> pld.DistributedTensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
+            buf = pld.alloc_window_buffer(256, memory_source="host")
+            table = pld.window(buf, [64], dtype=pl.FP32)
+            self.chip(table, device=0)
+            return table
+
+    code = _lower(Prog)
+    compile(code, "host_domain.py", "exec")
+    assert "memory_source=AddressSpace.HOST" in code
+    assert 'workspace_engines=("urma",)' in code
+    assert '__comm_d0.device_context(0, workspace_engines=("urma",))' in code
+    assert "host._requires_host_domain = True" in code
+    assert "validate_host_domain_runtime" not in code
+
+
+@pytest.mark.parametrize("key", ["engram_l1", 'table"\\\nkey', "table_\u8868_\x01\x7f"])
+def test_host_window_initializer_is_only_a_runtime_binding(key, monkeypatch):
+    # Reproduce the compiler-only CI environment even when Simpler is installed.
+    monkeypatch.setitem(sys.modules, "simpler", None)
+    monkeypatch.setitem(sys.modules, "simpler.task_interface", None)
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[17], pl.FP32]) -> pld.DistributedTensor[[17], pl.FP32]:
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[17], pl.FP32]:
+            buf = pld.alloc_window_buffer(68, memory_source="host", init=key)
+            table = pld.window(buf, [17], dtype=pl.FP32)
+            self.chip(table, device=0)
+            return table
+
+    code = _lower(Prog)
+    compile(code, "host_init.py", "exec")
+    # Decode the emitted metadata without executing module imports: codegen UTs
+    # must work without Simpler installed, including for escaped source keys.
+    source_keys = [
+        ast.literal_eval(stmt.value)
+        for stmt in ast.parse(code).body
+        if isinstance(stmt, ast.Assign)
+        and any(ast.unparse(target) == "host._window_source_keys" for target in stmt.targets)
+    ]
+    assert source_keys == [(key,)]
+    assert "initializer=make_window_initializer(_window_sources," in code
+    assert '"buf",' in code
+    assert ", 68)," in code
+    assert "open(" not in code
+
+
+def test_host_peer_mte_is_rejected_through_chip_call():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def read(self, x: pld.DistributedTensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+            pld.tensor.get(out, 1, x)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+            self.read(x, out)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+            buf = pld.alloc_window_buffer(256, memory_source="host")
+            table = pld.window(buf, [1, 64], dtype=pl.FP32)
+            self.chip(table, out, device=0)
+
+    with pytest.raises(ValueError, match="Host communication windows require URMA"):
+        _lower(Prog)
+
+
+def test_host_local_window_can_share_chip_with_device_peer_access():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def read(
+            self,
+            local: pld.DistributedTensor[[1, 64], pl.FP32],
+            peer: pld.DistributedTensor[[1, 64], pl.FP32],
+        ):
+            pld.tensor.get(local, 1, peer)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            local: pld.DistributedTensor[[1, 64], pl.FP32],
+            peer: pld.DistributedTensor[[1, 64], pl.FP32],
+        ):
+            self.read(local, peer)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self):
+            host_buf = pld.alloc_window_buffer(256, memory_source="host")
+            device_buf = pld.alloc_window_buffer(256)
+            local = pld.window(host_buf, [1, 64], dtype=pl.FP32)
+            peer = pld.window(device_buf, [1, 64], dtype=pl.FP32)
+            for rank in pl.range(2):
+                self.chip(local, peer, device=rank)
+
+    code = _lower(Prog)
+    assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
+    assert code.count("memory_source=AddressSpace.HOST") == 1
+
+
+def test_host_collective_rejects_peer_mte_before_builtin_lowering():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, signal: pld.DistributedTensor[[64], pl.INT32]):
+            return signal
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self):
+            buf = pld.alloc_window_buffer(256, memory_source="host")
+            signal = pld.window(buf, [64], dtype=pl.INT32)
+            for rank in pl.range(2):
+                self.chip(signal, device=rank)
+            pld.tensor.barrier(signal)
+
+    with pytest.raises(ValueError, match="Host communication windows require URMA"):
+        _lower_host_collectives(Prog)
+
+
+@pytest.mark.parametrize("indexed", [False, True], ids=["all_to_all_v", "indexed_all_to_all_v"])
+@pytest.mark.parametrize("host_operand", ["input", "target", "signal", "send_counts", "recv_counts"])
+def test_l2_collective_checks_host_peer_access_after_builtin_lowering(indexed, host_operand):
+    """Builtin stubs hide peer accesses, including a plain-Tensor send_counts formal."""
+    input_source = "host" if host_operand == "input" else "device"
+    target_source = "host" if host_operand == "target" else "device"
+    signal_source = "host" if host_operand == "signal" else "device"
+    counts_source = "host" if host_operand == "send_counts" else "device"
+    recv_source = "host" if host_operand == "recv_counts" else "device"
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            inp: pld.DistributedTensor[[8, 64], pl.FP32],
+            target: pl.InOut[pld.DistributedTensor[[8, 64], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            counts: pld.DistributedTensor[[2, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            index: pl.Tensor[[2, 4], pl.INT32],
+        ) -> pld.DistributedTensor[[8, 64], pl.FP32]:
+            if indexed:
+                result = pld.tensor.indexed_all_to_all_v(inp, target, signal, counts, recv, index, core_num=1)
+            else:
+                result = pld.tensor.all_to_all_v(inp, target, signal, counts, recv, core_num=1)
+            return result
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, index: pl.Tensor[[2, 4], pl.INT32]):
+            input_buf = pld.alloc_window_buffer(2048, memory_source=input_source)
+            target_buf = pld.alloc_window_buffer(2048, memory_source=target_source)
+            signal_buf = pld.alloc_window_buffer(8, memory_source=signal_source)
+            counts_buf = pld.alloc_window_buffer(8, memory_source=counts_source)
+            recv_buf = pld.alloc_window_buffer(8, memory_source=recv_source)
+            for rank in pl.range(2):
+                inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
+                target = pld.window(target_buf, [8, 64], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [2, 1], dtype=pl.INT32)
+                counts = pld.window(counts_buf, [2, 1], dtype=pl.INT32)
+                recv = pld.window(recv_buf, [2, 1], dtype=pl.INT32)
+                self.chip(inp, target, signal, counts, recv, index, device=rank)
+
+    # Fold the captured variant selector, then reproduce the production ordering:
+    # L2 collectives become builtins before domains and context are materialized.
+    program = passes.simplify()(Prog)
+    program = passes.normalize_return_order()(program)
+    program = passes.lower_l2_tensor_collectives()(program)
+    if host_operand in {"target", "signal", "send_counts"}:
+        with pytest.raises(ValueError, match="Host communication windows require URMA.*__builtin_"):
+            _lower(program)
+    else:
+        # Local-only Host input/recv_counts must not be rejected with peer operands.
+        code = _lower(program)
+        compile(code, "host_l2_collective.py", "exec")
+        assert code.count("memory_source=AddressSpace.HOST") == 1
 
 
 if __name__ == "__main__":

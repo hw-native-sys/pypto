@@ -26,6 +26,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/core/python_string.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -816,7 +817,10 @@ std::string IRPythonPrinter::PrintWindowBuffer(const WindowBufferPtr& window) {
   oss << prefix_ << "._dump.window_buffer(" << std::quoted(GetWindowBufferName(window))
       << ", base=" << std::quoted(GetVarName(window->base_.get())) << ", size=" << PrintSubExpr(window->size_)
       << ", load_from_host=" << (window->load_from_host_ ? "True" : "False")
-      << ", store_to_host=" << (window->store_to_host_ ? "True" : "False") << ")";
+      << ", store_to_host=" << (window->store_to_host_ ? "True" : "False");
+  if (window->memory_source_ != "device") oss << ", memory_source=" << std::quoted(window->memory_source_);
+  if (!window->init_.empty()) oss << ", init=" << QuotePythonString(window->init_);
+  oss << ")";
   return oss.str();
 }
 

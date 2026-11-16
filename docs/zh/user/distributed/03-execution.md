@@ -28,7 +28,7 @@ with compiled.prepare() as rt:
 
 | 方法 | 描述 |
 | ---- | ---- |
-| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None, startup_timeout_s=None)` | 创建 worker、fork 芯片进程，返回 `DistributedWorker`。作为上下文管理器使用。 |
+| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, window_sources=None, callbacks=None, sub_worker_overrides=None, startup_timeout_s=None)` | 创建 worker、fork 芯片进程，返回 `DistributedWorker`。作为上下文管理器使用。 |
 | `rt(x, y, z)` | 单次分发——转换参数，调用 host_orch。 |
 | `rt.run(compiled, x, y, z)` | 多程序分发——选择目标程序。 |
 | `rt.submit(compiled, x, y, z)` | 有界异步分发——返回 `DistributedRunHandle`。 |
@@ -297,3 +297,18 @@ worker 复用其芯片进程和通信设置——没有 fork 开销。`compiled_
 - [00-model](00-model.md) — 快速开始和模型词汇
 - [04-debugging](04-debugging.md) — 常见故障模式
 - [入门指南](../00-getting_started.md) — 运行时设置
+
+### Host 窗口文件来源
+
+对于声明了 `memory_source="host", init="engram_l1"` 的窗口，在 `compiled.prepare()`
+或 `DistributedWorker` 中传入 `window_sources={"engram_l1": shard_files}`。
+文件在**编译后**打开，按域内 rank 顺序排列。初始化从文件偏移零开始读取逻辑窗口大小，
+之后恢复文件原有位置。文件由调用者管理。启用 `persistent=True` 后只在创建域时加载一次，
+Host 与 Device 窗口默认均在复用前清零。设置 `reset_persistent_windows=False` 可保留已加载的表，
+此时所有复用通信 buffer 的状态均由调用者管理。清零不会重新执行 initializer。
+完整生命周期与错误约定见 [Host DDR 窗口](../../dev/passes/50-materialize_comm_domain_scopes.md)。
+
+Rank 列表也可以包含连续 CPU `torch.Tensor`，例如
+`window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`，或混合文件与 tensor。
+Tensor 在创建域时按原始字节复制，不转换 dtype；来源至少包含窗口逻辑字节数。
+初始化完成前须保持来源的存储与内容稳定。运行时能力检查在 worker 初始化阶段完成，不在每次 submit 重复执行。
