@@ -91,7 +91,10 @@ int64_t StoreExtent(const Args& args, const Kwargs& kwargs) {
   int stride = GetKwargOr<int>(kwargs, "block_stride", 1);
   CHECK_SPAN(stride > 0 && stride <= std::numeric_limits<int16_t>::max(), args[0]->span_)
       << "block_stride must be a positive i16 integer (1..32767)";
-  const int64_t block = 32 / value->dtype_.GetByte();
+  const auto bytes = static_cast<int64_t>(value->dtype_.GetByte());
+  CHECK_SPAN(bytes > 0 && bytes <= 32, args[2]->span_)
+      << "Register store element size must be in [1, 32] bytes";
+  const int64_t block = 32 / bytes;
   const int64_t last = value->shape_ - 1;
   const int64_t tail = last % block + 1;
   CHECK(last / block <= (std::numeric_limits<int64_t>::max() - tail) / (stride * block))

@@ -195,7 +195,12 @@ class InitializationChecker : public IRVisitor {
         if (stride == 1) {
           Add(effect.root.get(), begin, begin + active * bytes);
         } else {
-          for (int64_t lane = 0; lane < active; lane += block) {
+          // Lane counts are numeric IR attributes, not IR nodes. Expanding an
+          // arbitrary count would violate the pass's O(N log N) budget. Keep
+          // a fixed-size prefix proof; omitted blocks remain unproved, never
+          // initialized gaps or a reason to disable checking this allocation.
+          const int64_t tracked_lanes = std::min(active, kMaxTrackedStoreBlocks * block);
+          for (int64_t lane = 0; lane < tracked_lanes; lane += block) {
             const int64_t start = begin + (lane / block) * stride * 32;
             Add(effect.root.get(), start, start + std::min(block, active - lane) * bytes);
           }
@@ -276,6 +281,10 @@ class InitializationChecker : public IRVisitor {
   }
 
  private:
+  // Analysis budget only, not a hardware/API lane limit. Large stores remain
+  // legal; preinitialized destinations retain their complete incoming proof.
+  static constexpr int64_t kMaxTrackedStoreBlocks = 256;
+
   struct Change {
     const Var* root;
     int64_t begin, end;

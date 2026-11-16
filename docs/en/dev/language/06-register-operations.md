@@ -106,6 +106,11 @@ PTOAS receives an i16 stride operand and lowers BF16 stores to `vsstb`.
 For example, `pl.reg.store(dst, 16, values, mask, block_stride=16)` writes
 128 BF16 lanes into eight NZ panels at element offsets `16, 272, ..., 1808`.
 Dynamic stride scalars are not exposed in this initial API.
+Static initialization analysis records at most the first 256 blocks of each
+strided store to bound compile-time work independently of the lane count.
+Later blocks are not proved initialized by that store; initialize the destination
+first when subsequent register loads need that larger region. This analysis
+budget does not restrict the store's lane count or change its generated writes.
 
 Offsets count **elements**, not bytes. Static offsets must be nonnegative and the
 whole accessed footprint must fit the Tile capacity, including for masked
