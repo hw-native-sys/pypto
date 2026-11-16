@@ -301,8 +301,9 @@ register 通过 `chip_callee` 显式指定消费它的 callable。CCU 编号与 
 
 此次迁移只支持 codegen。产物标记 `CCU_DOMAIN_ABI_VERSION = 2` 和
 `CCU_RUNTIME_SUPPORTED = False`。runtime builder 在编译/注册 native module 前
-拒绝执行；`_submit_chip` 也拒绝带绑定的提交，等待 simpler 提供协调 prepare/激活。
-当前 pin 的 simpler headers 尚未实现该接口。
+拒绝执行；`_submit_chip` 也拒绝带绑定的提交，等待 PyPTO 集成与端到端验证。
+当前 pin 的 simpler runtime 已包含 PR #3093 的域注册与协调 prepare/激活接口，
+包括 `ChipCallable.build(..., ccu_modules=...)`。
 
 设备调用采用已核对的 simpler PR #3093 接口：
 `submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`。ctx 选择域，定义编号选择该域

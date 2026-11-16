@@ -71,8 +71,9 @@ transfer is outstanding. A remote consumer still needs the
 existing cross-rank notify/wait protocol: local task completion orders the
 issuer, not the peer's reads.
 
-**ABI note.** `CommContext` grew from 1056 to 1088 bytes for the workspace
-engine fields. The change is global, including A2/A3 builds, so codegen and
+**ABI note.** `CommContext` is 1104 bytes with four workspace engine slots
+(SDMA, URMA, RDMA, CCU). The CCU slot extends the previous 1088-byte layout
+without changing the rank or window offsets. The change is global, including A2/A3 builds, so codegen and
 the runtime must move together. The async helper reads the URMA workspace
 from `comm_workspace<CommWorkspaceKind::URMA>(*ctx)` and requires the domain
 to request `workspace_engines=("urma",)` (the program-wide conservative

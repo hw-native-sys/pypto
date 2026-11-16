@@ -363,8 +363,9 @@ registrations there. No cross-call registration sharing is performed.
 This migration is **codegen-only**. `CCU_DOMAIN_ABI_VERSION = 2` and
 `CCU_RUNTIME_SUPPORTED = False` mark generated artifacts. The runtime builder
 rejects execution before compiling/registering native modules; `_submit_chip`
-also refuses bound submissions until simpler supplies coordinated prepare and
-activation. The pinned simpler headers do not implement this interface.
+also refuses bound submissions pending PyPTO integration and end-to-end validation.
+The pinned simpler runtime includes PR #3093's domain registration and coordinated
+prepare/activation interfaces, including `ChipCallable.build(..., ccu_modules=...)`.
 
 The device call follows simpler PR #3093's checked interface:
 `submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`. The context chooses
