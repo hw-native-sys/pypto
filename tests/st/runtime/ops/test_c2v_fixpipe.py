@@ -159,8 +159,11 @@ def _explicit_case(
         words: pl.Tensor[[1, 32], pl.INT64],
     ):
         peer = pl.import_peer_buffer(name="fixpipe_slots", peer_func="fixpipe_consumer")
+        # Scalar aliases must preserve the imported peer's buffer provenance.
+        peer_alias = peer
+        peer_address = peer_alias
         pl.aic_initialize_pipe(
-            peer,
+            peer_address,
             dir_mask=1,
             slot_size=2048,
             slot_num=2,
@@ -206,8 +209,10 @@ def _explicit_case(
         words: pl.Tensor[[1, 32], pl.INT64],
     ):
         buf = pl.reserve_buffer(name="fixpipe_slots", size=4096)
+        buf_alias = buf
+        buf_address = buf_alias
         pl.aiv_initialize_pipe(
-            buf,
+            buf_address,
             dir_mask=1,
             slot_size=2048,
             slot_num=2,

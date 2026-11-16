@@ -532,7 +532,14 @@ struct FixpipeFunctionInfo : IRVisitor {
   std::map<int, std::vector<CallPtr>> pushes;
   std::map<int, std::vector<CallPtr>> pops;
   void VisitStmt_(const AssignStmtPtr& stmt) override {
-    if (auto call = As<Call>(stmt->value_)) definitions[stmt->var_.get()] = call;
+    if (auto call = As<Call>(stmt->value_)) {
+      definitions[stmt->var_.get()] = call;
+    } else if (auto alias = AsVarLike(stmt->value_)) {
+      // SSA definitions precede their uses. Cache the terminal call at each
+      // identity alias so peer lookups remain O(log N), even for shared chains.
+      auto origin = definitions.find(alias.get());
+      if (origin != definitions.end()) definitions[stmt->var_.get()] = origin->second;
+    }
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
@@ -605,7 +612,8 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       if (init->args_.empty()) continue;
       auto buffer = AsVarLike(init->args_[0]);
       auto def = buffer ? local.definitions.find(buffer.get()) : local.definitions.end();
-      if (def == local.definitions.end()) {
+      if (def == local.definitions.end() ||
+          (!IsOp(def->second, "system.reserve_buffer") && !IsOp(def->second, "system.import_peer_buffer"))) {
         if (has_epilogue)
           error(init, "Fixpipe c2v_consumer_buf must trace to reserve_buffer/import_peer_buffer");
         continue;
