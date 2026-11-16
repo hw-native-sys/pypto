@@ -71,7 +71,7 @@ to global state.
 
 `tile.rsqrt(high_precision=True)` is excluded from this warning hook: it requires a scratch tile and emits `precisionType` for A5; A2/A3 honour the request through the scratch overload even though they ignore the selector. Precision is selected by the explicit attribute, never by scratch presence alone.
 
-`tile.rem(high_precision=True)` is also excluded: PTO-ISA `90a37965` implements the FP32 high-precision TREM algorithm on A2/A3. Its larger scratch capacity is validated before emission.
+`tile.rem(high_precision=True)` is also excluded: PTO-ISA `83b1b2b52` implements the FP32 high-precision TREM algorithm on A2/A3. Its larger scratch capacity is validated before emission.
 
 `SupportsRuntimeBoundLocalSoftwarePipeline()` defaults to `false`, preserving
 the existing loop fallback until a backend enables this lowering. It is

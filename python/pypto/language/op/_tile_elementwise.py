@@ -480,9 +480,10 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
         rhs: Right-hand side tile
         tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
             Provide two physical and valid rows (required by PTOAS) with at least
-            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
-            row stride rounded to 8 elements. High-precision rem requires
-            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0))``,
+            ``k * S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements and k is 3 for INT32, else 1.
+            High-precision rem requires
+            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8))``,
             with ``C = max(valid_cols // 64, 1)``; use physical columns to
             bound dynamic valid columns. A5 does not consume scratch.
         high_precision: Select the FP32 high-precision TREM algorithm on A2/A3 and A5.
@@ -506,8 +507,9 @@ def rems(lhs: Tile, rhs: int | float | Expr | Scalar, tmp: Tile) -> Tile:
         rhs: Scalar value
         tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
             Provide one physical and valid row with at least
-            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
-            row stride rounded to 8 elements. A5 does not consume scratch.
+            ``k * S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements and k is 2 for INT32, else 1.
+            A5 does not consume scratch.
 
     Returns:
         Tile wrapping the rems operation

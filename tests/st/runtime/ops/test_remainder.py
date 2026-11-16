@@ -22,7 +22,7 @@ current pinned PTO-ISA contract:
 * For A2/A3 INT32 TREM/TREMS, every source element and scalar must stay in
   the inclusive PTO-ISA domain ``[-2**24, 2**24]``.
 * INT32 TREM/TREMS store their source tiles again after the instruction to
-  verify that the temporary in-place FP32 conversion is fully restored.
+  verify that the sources are left intact.
 
 Inputs combine positive, negative, and zero dividends with positive and
 negative, strictly non-zero divisors. Full, row-tail, column-tail, and combined
@@ -109,9 +109,16 @@ def _make_program(
 ):
     pl_dtype = _PL_DT[dtype]
     valid = list(valid_shape)
-    # With N=64, DEFAULT needs 64 candidate + 8 mask + 8 address elements.
-    # HIGH_PRECISION TREM additionally needs staged state (272 elements total).
-    scratch_cols = 272 if high_precision else 80
+    # With N=64, DEFAULT needs 64 candidate + 8 mask + 8 address elements;
+    # INT32 keeps three (TREM) or two (TREMS) 64-element data areas.
+    # HIGH_PRECISION TREM additionally needs staged state and a fused buffer
+    # (784 elements total).
+    if high_precision:
+        scratch_cols = 784
+    elif dtype == DataType.INT32:
+        scratch_cols = 208 if op_name == "rem" else 144
+    else:
+        scratch_cols = 80
     scratch_rows = 2 if op_name == "rem" else 1
 
     if op_name == "rem":
@@ -139,8 +146,7 @@ def _make_program(
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     out = pl.store(result, [0, 0], out)
-                    # A2/A3 temporarily converts both sources INT32 -> FP32 in place.
-                    # Re-read them after TREM so a broken restore path is observable.
+                    # Re-read the sources after TREM to check they are left intact.
                     lhs_after = pl.store(lhs_tile, [0, 0], lhs_after)
                     rhs_after = pl.store(rhs_tile, [0, 0], rhs_after)
                     return out, lhs_after, rhs_after
@@ -210,7 +216,7 @@ def _make_program(
                     )
                     result = pl.tile.rems(lhs_tile, scalar, tmp)
                     out = pl.store(result, [0, 0], out)
-                    # Re-read the source after TREMS to verify its INT32 restore path.
+                    # Re-read the source after TREMS to check it is left intact.
                     lhs_after = pl.store(lhs_tile, [0, 0], lhs_after)
                     return out, lhs_after
 

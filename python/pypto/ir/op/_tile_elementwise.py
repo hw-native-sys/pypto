@@ -153,9 +153,10 @@ def rem(
         rhs: Right-hand side tile (TileType)
         tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
             Provide two physical and valid rows (required by PTOAS) with at least
-            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
-            row stride rounded to 8 elements. High-precision rem requires
-            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0))``,
+            ``k * S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements and k is 3 for INT32, else 1.
+            High-precision rem requires
+            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8))``,
             with ``C = max(valid_cols // 64, 1)``; use physical columns to
             bound dynamic valid columns. A5 does not consume scratch.
         span: Optional source span for debugging (auto-captured if not provided)
@@ -181,8 +182,9 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
         rhs: Scalar (int/float/Expr with ScalarType)
         tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
             Provide one physical and valid row with at least
-            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
-            row stride rounded to 8 elements. A5 does not consume scratch.
+            ``k * S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements and k is 2 for INT32, else 1.
+            A5 does not consume scratch.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

@@ -29,7 +29,7 @@ def test_comm_context_layout_constants():
     assert layout.WINDOWS_IN_OFFSET == 16
     assert layout.WINDOWS_OUT_OFFSET == 528
     assert layout.WINDOW_SLOT_STRIDE == 8
-    assert layout.COMM_CTX_SIZE == 1088
+    assert layout.COMM_CTX_SIZE == 1104
 
 
 def test_window_slot_array_fits_between_in_and_out():
