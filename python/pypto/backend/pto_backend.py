@@ -2457,6 +2457,7 @@ def _collect_chip_task_functions(
         _ir_core.FunctionType.Spmd,
         _ir_core.FunctionType.Graph,
         _ir_core.FunctionType.SIMT,
+        _ir_core.FunctionType.VF,
     )
 
     result: list[_ir_core.Function] = [orch_func]
@@ -2560,7 +2561,7 @@ def _generate_pto_bundle(
     return bundle.caller_source, tuple(bundle.helpers), bundle.entry_helpers
 
 
-def _with_simt_helpers(
+def _with_device_helpers(
     entries: list[_ir_core.Function], program: _ir_core.Program
 ) -> list[_ir_core.Function]:
     """Keep reachable device helpers in a unit without registering runtime tasks.
@@ -2579,7 +2580,10 @@ def _with_simt_helpers(
             if name in visited:
                 continue
             callee = program.get_function(name)
-            if callee is not None and callee.func_type == _ir_core.FunctionType.SIMT:
+            if callee is not None and callee.func_type in (
+                _ir_core.FunctionType.SIMT,
+                _ir_core.FunctionType.VF,
+            ):
                 visited.add(name)
                 functions.append(callee)
     return functions
@@ -2679,7 +2683,7 @@ def _generate_single_chip(
                     )
                 continue
             grouped_program = _ir_core.Program(
-                _with_simt_helpers(members, transformed_program), group_name, transformed_program.span
+                _with_device_helpers(members, transformed_program), group_name, transformed_program.span
             )
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
@@ -2722,7 +2726,7 @@ def _generate_single_chip(
                 if peer_func is not None:
                     peer_funcs.append(peer_func)
             single_program = _ir_core.Program(
-                _with_simt_helpers([*peer_funcs, func], transformed_program),
+                _with_device_helpers([*peer_funcs, func], transformed_program),
                 func.name,
                 transformed_program.span,
             )

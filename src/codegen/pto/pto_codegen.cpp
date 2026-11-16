@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -1052,7 +1053,11 @@ void PTOCodegen::RecordEntryHelperUse(const std::string& symbol) {
 }
 
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
+  ir::return_lineage::ScopedTraceCache lineage_cache;
   vf_helpers_.clear();
+  vf_program_ = program;
+  bound_vf_regions_.clear();
+  vf_return_aliases_.clear();
   entry_helpers_.clear();
   entry_helper_uses_.clear();
   simt_functions_.clear();
@@ -1107,7 +1112,7 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   stream_ << "} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
-    if (func->func_type_ == ir::FunctionType::SIMT) continue;
+    if (func->func_type_ == ir::FunctionType::SIMT || func->func_type_ == ir::FunctionType::VF) continue;
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
         << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
@@ -2978,6 +2983,16 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
     }
   }
   auto call = As<ir::Call>(op->value_);
+  if (TryEmitVFCall(call, op->var_)) return;
+  if (auto item = ir::As<ir::TupleGetItemExpr>(op->value_)) {
+    if (auto tuple = ir::AsVarLike(item->tuple_); tuple && vf_return_aliases_.count(tuple.get())) {
+      const auto& values = vf_return_aliases_.at(tuple.get());
+      INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < values.size(), op->span_)
+          << "Internal error: VF return projection out of bounds";
+      BindVarToMlir(op->var_, GetExprAsCode(values[item->index_]));
+      return;
+    }
+  }
   if (TryEmitRegCall(call, op->var_)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
@@ -3190,6 +3205,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 // ========================================================================
 
 void PTOCodegen::VisitExpr_(const CallPtr& op) {
+  if (TryEmitVFCall(op)) return;
   if (TryEmitSimtCall(op)) return;
   if (TryEmitRegCall(op, nullptr)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(op)) return;

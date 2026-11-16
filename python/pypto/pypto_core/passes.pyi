@@ -403,6 +403,10 @@ class PassPipeline:
 
 # Factory functions
 
+def outline_reg_scopes() -> Pass:
+    """Outline register scopes into synchronous device helpers before SSA conversion."""
+    ...
+
 def outline_simt_scopes() -> Pass:
     """Outline per-thread regions before SSA conversion."""
 
@@ -1137,6 +1141,7 @@ __all__ = [
     "init_mem_ref",
     "materialize_simt_outputs",
     "outline_simt_scopes",
+    "outline_reg_scopes",
     "specialize_simt_helpers",
     "memory_reuse",
     "allocate_memory_addr",

@@ -4,6 +4,11 @@
 A5 (Ascend950). This page lists every supported `pl.reg` operation, its parameters,
 return type and dtype restrictions. All names in the tables have the `pl.reg.` prefix.
 
+The compiler outlines each register scope early into a `FunctionType.VF`
+device helper. The public `reg_scope()` syntax is unchanged. Captured Tiles
+and Scalars become function parameters; Tile aliases can be returned, while
+registers and local Scalars remain inside the helper.
+
 ## Scope and register values
 
 ```python

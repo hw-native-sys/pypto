@@ -2,6 +2,11 @@
 
 Framework for organizing and executing IR transformation passes on Programs with property tracking, instrumentation, and strategy-based optimization pipelines.
 
+The initial scope-outlining stage runs `OutlineSimtScopes`, then
+`OutlineRegScopes`, before inlining, SSA conversion and mixed-kernel expansion.
+Both expose device helpers in the Program; VF helpers use synchronous calls
+and the existing parameter/return contracts.
+
 ## Overview
 
 | Component | Description |

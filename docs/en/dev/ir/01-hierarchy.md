@@ -671,6 +671,7 @@ Consequences:
 | `Inline` | Whole-body substitution at every call site; eliminated by `InlineFunctions` before any other pass |
 | `Graph` | Callable orchestration fragment, recorded once and replayed by the `host_build_graph` runtime |
 | `SIMT` | Void device helper invoked only by `SimtLaunchStmt`; no runtime task metadata |
+| `VF` | Synchronous register device helper; Tile/Scalar parameters and Tile alias returns; no runtime task metadata |
 
 `IsInCoreType(type)` / `ir.is_incore_type(type)` returns `True` for `InCore`, `AIC`, and `AIV`.
 

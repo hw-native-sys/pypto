@@ -39,6 +39,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 
 namespace pypto {
 namespace ir {
@@ -48,7 +49,8 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 const auto& GetLastYieldStmt = transform_utils::GetLastYieldStmt;
 
 StmtPtr FinalizeNestedTpopTfrees(const StmtPtr& stmt, core_affinity::CoreSide side,
-                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
+                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                 const ProgramPtr& program);
 
 }  // namespace
 
@@ -151,11 +153,13 @@ const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Va
 }
 
 std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
-                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                        const ProgramPtr& program) {
+  return_lineage::ScopedTraceCache lineage_cache;
   std::vector<StmtPtr> normalized_inputs;
   normalized_inputs.reserve(stmts.size());
   for (const auto& stmt : stmts) {
-    normalized_inputs.push_back(FinalizeNestedTpopTfrees(stmt, side, tpop_var_remap));
+    normalized_inputs.push_back(FinalizeNestedTpopTfrees(stmt, side, tpop_var_remap, program));
   }
 
   std::map<const Var*, TpopLifetime> chains;
@@ -193,6 +197,12 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
         break;
       }
       auto call = std::dynamic_pointer_cast<const Call>(alias_src);
+      if (auto helper = ResolveVFCall(call, program)) {
+        auto args = VFReturnedArguments(helper, call);
+        if (args.size() != 1) break;
+        alias_src = args[0];
+        continue;
+      }
       if (!call || !call->op_ || call->args_.empty() ||
           !op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
         break;
@@ -290,8 +300,21 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
     }
   };
 
+  std::unordered_map<const Var*, std::vector<ExprPtr>> vf_tuple_aliases;
   propagate_stmt_aliases_into = [&](const StmtPtr& stmt, TpopVarRemap& remap) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (auto call = As<Call>(assign->value_); As<TupleType>(assign->var_->GetType())) {
+        if (auto helper = ResolveVFCall(call, program))
+          vf_tuple_aliases[assign->var_.get()] = VFReturnedArguments(helper, call);
+      }
+      if (auto item = As<TupleGetItemExpr>(assign->value_)) {
+        if (auto tuple = AsVarLike(item->tuple_); tuple && vf_tuple_aliases.count(tuple.get())) {
+          const auto& args = vf_tuple_aliases.at(tuple.get());
+          if (item->index_ >= 0 && static_cast<size_t>(item->index_) < args.size())
+            propagate_alias_into(assign->var_, args[item->index_], remap);
+          return;
+        }
+      }
       propagate_alias_into(assign->var_, assign->value_, remap);
       return;
     }
@@ -441,21 +464,25 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 namespace {
 
 StmtPtr FinalizeNestedTpopTfrees(const StmtPtr& stmt, core_affinity::CoreSide side,
-                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                 const ProgramPtr& program) {
   if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    auto new_body = tpop_tfree::FinalizeTpopTfrees(FlattenBody(for_stmt->body_), side, tpop_var_remap);
+    auto new_body =
+        tpop_tfree::FinalizeTpopTfrees(FlattenBody(for_stmt->body_), side, tpop_var_remap, program);
     return loop_repair::RebuildForStmt(for_stmt, loop_repair::MakeBody(new_body, for_stmt->span_));
   }
   if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    auto new_then = tpop_tfree::FinalizeTpopTfrees(FlattenBody(if_stmt->then_body_), side, tpop_var_remap);
+    auto new_then =
+        tpop_tfree::FinalizeTpopTfrees(FlattenBody(if_stmt->then_body_), side, tpop_var_remap, program);
     std::optional<std::vector<StmtPtr>> new_else;
     if (const auto& else_body = if_stmt->else_body_) {
-      new_else = tpop_tfree::FinalizeTpopTfrees(FlattenBody(*else_body), side, tpop_var_remap);
+      new_else = tpop_tfree::FinalizeTpopTfrees(FlattenBody(*else_body), side, tpop_var_remap, program);
     }
     return loop_repair::RebuildIfStmt(if_stmt, new_then, new_else);
   }
   if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    auto new_body = tpop_tfree::FinalizeTpopTfrees(FlattenBody(while_stmt->body_), side, tpop_var_remap);
+    auto new_body =
+        tpop_tfree::FinalizeTpopTfrees(FlattenBody(while_stmt->body_), side, tpop_var_remap, program);
     return loop_repair::RebuildWhileStmt(while_stmt, loop_repair::MakeBody(new_body, while_stmt->span_));
   }
   return stmt;

@@ -2459,7 +2459,7 @@ struct ExpandedKernel {
 };
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, const AivPlacement& placement,
-                                   bool had_regions) {
+                                   bool had_regions, const ProgramPtr& program) {
   // Custom pipelines may call this pass without LowerAutoVectorSplit. Do not
   // let retired mixed AUTO metadata reach the standalone AIV/AIC halving path.
   const auto split_mode = func->GetSplitMode();
@@ -2592,7 +2592,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // signature is what makes a yield of a parameter resolvable on either lane.
   auto aic_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map, remap_keys(aic_tpop_remap), func->params_),
-      CoreSide::AIC, aic_tpop_remap);
+      CoreSide::AIC, aic_tpop_remap, program);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
@@ -2600,7 +2600,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
                                  superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
-      CoreSide::AIV, aiv_tpop_remap);
+      CoreSide::AIV, aiv_tpop_remap, program);
 
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery
@@ -3011,6 +3011,25 @@ Pass ExpandMixedKernel() {
         consumed->body_ = std::move(body);
         func = consumed;
       }
+      // Early-outlined register helpers retain the original region's AIV
+      // affinity even though a GlobalVar call has no operator registration.
+      class VFPlacement : public IRVisitor {
+       public:
+        VFPlacement(const ProgramPtr& program, AivPlacement& placement)
+            : program_(program), placement_(placement) {}
+
+       protected:
+        void VisitExpr_(const CallPtr& call) override {
+          auto callee = program_->GetFunction(call->op_->name_);
+          if (callee && callee->func_type_ == FunctionType::VF) placement_.insert(call.get());
+          IRVisitor::VisitExpr_(call);
+        }
+
+       private:
+        ProgramPtr program_;
+        AivPlacement& placement_;
+      } vf_placement(program, consumer.aiv_only_calls);
+      vf_placement.VisitStmt(func->body_);
       const auto& placement = consumer.aiv_only_calls;
 
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)
@@ -3056,7 +3075,7 @@ Pass ExpandMixedKernel() {
       bool has_group_caller = incore_with_group_caller.count(func->name_) > 0;
       bool needs_preserved_name = incore_with_preserved_name_caller.count(func->name_) > 0;
       auto expanded = ExpandMixedFunction(func, /*create_group=*/needs_preserved_name || !has_group_caller,
-                                          placement, consumer.had_regions);
+                                          placement, consumer.had_regions, program);
 
       new_functions.push_back(expanded.aic_func);
       new_functions.push_back(expanded.aiv_func);

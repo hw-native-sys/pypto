@@ -158,6 +158,9 @@ Pass SpecializeSimtHelpers();
 /// Outline transient per-thread regions before inlining and SSA conversion.
 Pass OutlineSimtScopes();
 
+/// Outline register scopes into synchronous device helpers before SSA conversion.
+Pass OutlineRegScopes();
+
 /**
  * @brief Create the semantic must-alias materialization pass
  *

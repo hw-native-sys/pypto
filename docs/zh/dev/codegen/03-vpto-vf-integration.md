@@ -1,5 +1,9 @@
 # EmitC 与 VPTO VF 执行接入
 
+默认 pipeline 在 SIMT 提取之后、SSA 和 mixed-kernel 拆分之前，将寄存器区域提取为
+`FunctionType.VF` 辅助函数。Codegen 消费显式调用和函数定义，物理 UB 偏移在 caller
+完成内存规划后绑定。参见[作用域提取](../passes/01-outline_simt_scopes.md#outlineregscopes)。
+
 显式 `pl.reg_scope()` 可以通过常驻运行时（persistent runtime）在 A5 AIV
 kernel 内执行。普通 Tile 操作使用 EmitC，每个寄存器作用域生成一个独立编译的
 VPTO helper。本功能扩展 typed VMI lowering，不改变 DSL，也不自动选择向量作用域。

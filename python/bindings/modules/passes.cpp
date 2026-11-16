@@ -420,6 +420,9 @@ void BindPass(nb::module_& m) {
       .def("get_passes", &PassPipeline::GetPasses, "Get copies of all passes in execution order");
 
   // Factory functions with snake_case names
+  passes.def("outline_reg_scopes", &pass::OutlineRegScopes,
+             "Outline register scopes into synchronous device helpers before SSA conversion");
+
   passes.def("outline_simt_scopes", &pass::OutlineSimtScopes,
              "Outline per-thread regions before SSA conversion");
 

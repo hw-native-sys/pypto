@@ -76,3 +76,51 @@ by rank/path compression and names use an ordered set: O(N log N) overall.
 
 See [SIMT authoring and IR](../ir/11-simt.md) for the public syntax and
 [pass manager](00-pass_manager.md) for pipeline integration.
+
+## OutlineRegScopes
+
+`OutlineRegScopes` runs immediately after `OutlineSimtScopes`, before
+`InlineFunctions`, SSA conversion and `ExpandMixedKernel`. It extracts each
+`RegScopeStmt` into a synchronous `FunctionType.VF` helper and replaces the
+region with an ordinary function call. The helper retains its register scope,
+so registers, masks and hardware loops keep their lexical ownership. A VF is a
+device helper, not an independently scheduled kernel or a `Submit` target.
+
+```python
+# Before
+with pl.reg_scope():
+    x = pl.reg.load(src, lanes=64)
+    out = pl.reg.store(dst, value=x)
+z = pl.tile.add(out, out)
+
+# After (the compiler adds kernel_vf_0 to the Program)
+out = self.kernel_vf_0(src, dst)
+z = pl.tile.add(out, out)
+```
+
+Captures use Var identity and deterministic first-use order, with type-symbol
+dependencies preceding their Tile parameter. Tile shape/view expressions
+contribute scalar captures too. Parameters use the existing
+`In`/`InOut` directions; stores make the destination `InOut`. A returned Tile
+alias names its captured parameter in the helper's return contract. Registers
+and region-local Scalars cannot cross this boundary. No-live-out scopes still
+produce a call, preserving writes even when store results are unused. The new
+helper is locally normalized with the existing SSA converter before deriving
+directions and alias returns, so source-level rebinding cannot change an
+earlier result's storage. The caller stays in the frontend phase.
+Conditional rebindings retain their incoming capture, including zero-trip loop
+values. Tile branch results and loop carries must resolve to the same captured
+storage on every path; choosing between different buffers is rejected.
+
+`ExpandMixedKernel` places VF calls on AIV. The caller owns all Tile allocations;
+`InitMemRef` resolves returned aliases through the function's return lineage,
+while VF helpers receive no independent allocation. VF `InOut` parameters borrow
+storage: they do not invalidate the caller's original Tile handle. Register
+initialization checks bind the helper to the caller's actual storage, so `InOut`
+is never mistaken for proof that the entire Tile is initialized.
+
+PTO codegen binds the explicit helper parameters to final caller operands and
+uses the existing register emitter and annotated Tile adapter. Each execution
+call receives an artifact with the appropriate physical UB offsets. This
+preserves the current execution restrictions and does not add synchronization
+in the outlining pass.

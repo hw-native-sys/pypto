@@ -9,6 +9,15 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+// Complexity exception for VF initialization validation: allocation and alias
+// lookup remain indexed, but VerifyRegMemoryInitialization visits each helper
+// with its call site's actual views, scalar values and initialized intervals.
+// Its bound is O((N + E) log(N + E)), where E is the sum of helper-body sizes
+// over VF call sites. E can be quadratic in the compact Program size when a
+// large helper is reused many times. In/InOut and alias-return declarations
+// alone cannot prove partially masked initialization. This exception requires
+// approval under .claude/rules/pass-complexity.md before merging.
+
 #include <algorithm>
 #include <any>
 #include <array>
@@ -60,6 +69,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/simplify.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -477,8 +487,11 @@ class DeclaredAllocCollector : public IRVisitor {
 class InitMemRefMutator : public IRMutator {
  public:
   InitMemRefMutator(const DeclaredAllocMap& declared_allocs, const backend::BackendHandler* handler,
-                    FunctionType func_type)
-      : declared_allocs_(declared_allocs), handler_(handler), func_type_(func_type) {}
+                    FunctionType func_type, ProgramPtr program)
+      : declared_allocs_(declared_allocs),
+        handler_(handler),
+        func_type_(func_type),
+        program_(std::move(program)) {}
 
   /// Whether `type` is bound to one of this function's declared allocations.
   [[nodiscard]] bool HasUserBinding(const TypePtr& type) const {
@@ -805,9 +818,37 @@ class InitMemRefMutator : public IRMutator {
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
   }
 
+  // A VF result denotes exactly the argument's view, including MemRef-less
+  // cross-core pipe views. It never owns a new allocation.
+  StmtPtr BindVFResult(const ExprPtr& source, const AssignStmtPtr& op, const ExprPtr& value) {
+    auto var = std::make_shared<Var>(op->var_->name_hint_, source->GetType(), op->var_->span_);
+    var_map_[op->var_] = var;
+    return std::make_shared<AssignStmt>(var, value, op->span_, op->leading_comments_);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
+
+    if (auto call = As<Call>(new_value)) {
+      if (auto helper = ResolveVFCall(call, program_)) {
+        auto aliases = VFReturnedArguments(helper, call);
+        if (aliases.size() == 1) return BindVFResult(aliases[0], op, new_value);
+        auto var = GetNewVar(op->var_);
+        vf_returns_[var.get()] = std::move(aliases);
+        return std::make_shared<AssignStmt>(var, new_value, op->span_, op->leading_comments_);
+      }
+    }
+    if (auto item = As<TupleGetItemExpr>(new_value)) {
+      auto tuple = AsVarLike(item->tuple_);
+      if (tuple && vf_returns_.count(tuple.get())) {
+        const auto& aliases = vf_returns_.at(tuple.get());
+        INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < aliases.size(),
+                            op->span_)
+            << "Internal error: VF return projection out of bounds";
+        return BindVFResult(aliases[item->index_], op, new_value);
+      }
+    }
 
     // A tile that owns no general-pool buffer — a cross-core tpop result (its
     // data lives in the reserved C2V/V2C slot, addressed via the pipe), or a
@@ -1075,6 +1116,8 @@ class InitMemRefMutator : public IRMutator {
   const DeclaredAllocMap& declared_allocs_;
   const backend::BackendHandler* handler_ = nullptr;
   FunctionType func_type_ = FunctionType::InCore;
+  ProgramPtr program_;
+  std::map<const Var*, std::vector<ExprPtr>> vf_returns_;
   uint64_t next_id_ = 0;
 };
 
@@ -1091,10 +1134,10 @@ class InitMemRefMutator : public IRMutator {
  * Memory space is read from TileType::memory_space_ (set by InferTileMemorySpace).
  * Variables without memory_space default to DDR.
  */
-FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
+FunctionPtr TransformInitMemRef(const FunctionPtr& func, const ProgramPtr& program) {
   // Helper storage is borrowed from each launch caller; allocating here would
   // give the helper an unrelated UB/GM buffer instead of its supplied operand.
-  if (func->func_type_ == FunctionType::SIMT) return func;
+  if (func->func_type_ == FunctionType::SIMT || func->func_type_ == FunctionType::VF) return func;
   // Lowering may introduce constant SSA aliases after the early Simplify pass.
   // Normalize them with the shared transformation before building addresses,
   // including when InitMemRef is invoked outside the default pipeline.
@@ -1151,7 +1194,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
     }
   }
 
-  InitMemRefMutator mutator(declared_allocs, handler, normalized_func->func_type_);
+  InitMemRefMutator mutator(declared_allocs, handler, normalized_func->func_type_, program);
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());
@@ -1175,7 +1218,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
       value = std::move(*remapped);
     }
   }
-  VerifyRegMemoryInitialization(result_func);
+  VerifyRegMemoryInitialization(result_func, program);
 
   // Step 4: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
   memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/false);
@@ -1213,7 +1256,16 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef", kInitMemRefProperties); }
+Pass InitMemRef() {
+  return CreateProgramPass(
+      [](const ProgramPtr& program) {
+        return_lineage::ScopedTraceCache lineage_cache;
+        auto result = MutableCopy(program);
+        for (auto& [_, function] : result->functions_) function = TransformInitMemRef(function, program);
+        return ProgramPtr(result);
+      },
+      "InitMemRef", kInitMemRefProperties);
+}
 }  // namespace pass
 
 // ============================================================================
@@ -1227,7 +1279,8 @@ namespace {
  */
 class HasMemRefsVerifier : public IRVisitor {
  public:
-  explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics, ProgramPtr program)
+      : diagnostics_(diagnostics), program_(std::move(program)) {}
 
   void VisitStmt_(const SimtLaunchStmtPtr& op) override {
     for (const auto& result : op->results_) {
@@ -1241,9 +1294,29 @@ class HasMemRefsVerifier : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op || !op->var_ || !op->var_->GetType()) return;
+    if (auto call = As<Call>(op->value_)) {
+      if (auto helper = ResolveVFCall(call, program_)) {
+        auto aliases = VFReturnedArguments(helper, call);
+        if (aliases.size() == 1) {
+          if (auto var = AsVarLike(aliases[0]); var && buffer_less_.count(var.get()))
+            buffer_less_.insert(op->var_.get());
+        } else {
+          vf_returns_[op->var_.get()] = std::move(aliases);
+        }
+      }
+    }
+    if (auto item = As<TupleGetItemExpr>(op->value_)) {
+      if (auto tuple = AsVarLike(item->tuple_); tuple && vf_returns_.count(tuple.get())) {
+        const auto& aliases = vf_returns_.at(tuple.get());
+        if (item->index_ >= 0 && static_cast<size_t>(item->index_) < aliases.size()) {
+          if (auto var = AsVarLike(aliases[item->index_]); var && buffer_less_.count(var.get()))
+            buffer_less_.insert(op->var_.get());
+        }
+      }
+    }
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
     if (tile_type && !tile_type->memref_.has_value()) {
-      if (IsBufferLessByDesign(op)) {
+      if (buffer_less_.count(op->var_.get()) || IsBufferLessByDesign(op)) {
         buffer_less_.insert(op->var_.get());
       } else {
         diagnostics_.emplace_back(
@@ -1265,6 +1338,8 @@ class HasMemRefsVerifier : public IRVisitor {
 
   std::set<const Var*> buffer_less_;
   std::vector<Diagnostic>& diagnostics_;
+  ProgramPtr program_;
+  std::map<const Var*, std::vector<ExprPtr>> vf_returns_;
 };
 
 }  // namespace
@@ -1275,9 +1350,10 @@ class HasMemRefsPropertyVerifierImpl : public PropertyVerifier {
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    return_lineage::ScopedTraceCache lineage_cache;
     for (const auto& [gv, func] : program->functions_) {
-      if (!func || !func->body_) continue;
-      HasMemRefsVerifier verifier(diagnostics);
+      if (!func || !func->body_ || func->func_type_ == FunctionType::VF) continue;
+      HasMemRefsVerifier verifier(diagnostics, program);
       verifier.VisitStmt(func->body_);
     }
   }

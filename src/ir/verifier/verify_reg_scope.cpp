@@ -68,7 +68,7 @@ class RegionChecker : public IRVisitor {
       if (!incore_ || blocked_ || function_->func_type_ == FunctionType::AIC) {
         Error("RegScope requires an InCore/AIV context", op->span_);
       }
-      if (final_ && function_->func_type_ != FunctionType::AIV) {
+      if (final_ && function_->func_type_ != FunctionType::AIV && function_->func_type_ != FunctionType::VF) {
         Error("RegScope final placement requires AIV after ExpandMixedKernel", op->span_);
       }
       if (backend::BackendConfig::IsConfigured() &&
@@ -329,7 +329,7 @@ class RegionChecker : public IRVisitor {
   // Inline helpers inherit execution placement from their eventual caller.
   // The final verifier still requires AIV after all helpers are expanded.
   bool incore_ = (IsInCoreType(function_->func_type_) && function_->func_type_ != FunctionType::AIC) ||
-                 function_->func_type_ == FunctionType::Inline;
+                 function_->func_type_ == FunctionType::Inline || function_->func_type_ == FunctionType::VF;
   bool collecting_ = true;
   bool blocked_ = false;
   bool storing_container_ = false;

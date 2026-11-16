@@ -3090,7 +3090,9 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
 
   // Orchestration bodies submit tasks and never hold TileType variables; a
   // Graph body is orchestration too, so it is skipped for the same reason.
-  if (IsOrchestrationLike(func->func_type_) || func->func_type_ == FunctionType::SIMT) return func;
+  if (IsOrchestrationLike(func->func_type_) || func->func_type_ == FunctionType::SIMT ||
+      func->func_type_ == FunctionType::VF)
+    return func;
 
   StmtPtr new_body = func->body_;
   const auto* ctx = PassContext::Current();

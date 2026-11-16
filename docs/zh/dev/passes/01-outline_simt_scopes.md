@@ -55,3 +55,41 @@ SIMT 内的形状解包始终展开为标量，即使条件写入要求保留运
 别名采用按秩合并和路径压缩，命名使用有序集合，总复杂度为 O(N log N)。
 
 公共语法见 [SIMT 编写与 IR](../ir/11-simt.md)，流水线见 [Pass 管理器](00-pass_manager.md)。
+
+## OutlineRegScopes
+
+`OutlineRegScopes` 紧接 `OutlineSimtScopes`，位于 `InlineFunctions`、SSA 转换和
+`ExpandMixedKernel` 之前。它把每个 `RegScopeStmt` 提取为同步的 `FunctionType.VF`
+辅助函数，并在原位置生成普通函数调用。辅助函数保留寄存器作用域，因此寄存器、
+掩码和硬件循环仍具有明确的词法归属。VF 是设备辅助函数，不是独立调度的 kernel，
+也不能作为 `Submit` 的目标。
+
+```python
+# Before
+with pl.reg_scope():
+    x = pl.reg.load(src, lanes=64)
+    out = pl.reg.store(dst, value=x)
+z = pl.tile.add(out, out)
+
+# After (the compiler adds kernel_vf_0 to the Program)
+out = self.kernel_vf_0(src, dst)
+z = pl.tile.add(out, out)
+```
+
+捕获按 Var 身份和确定的首次使用顺序排列，Tile 形状及 view 表达式中的符号也会成为
+Scalar 捕获。参数复用现有的 `In`/`InOut` 方向；store 的目的参数为 `InOut`。
+返回的 Tile 别名通过函数的返回契约关联到捕获参数。寄存器和作用域内的局部 Scalar
+不能跨越函数边界。没有外部使用的返回值时仍生成调用，保留 store 的写副作用。
+
+`ExpandMixedKernel` 将 VF 调用放在 AIV。Tile 存储仍归 caller 所有，`InitMemRef`
+通过现有返回来源分析关联返回别名，VF helper 不单独分配内存。VF 的 `InOut`
+表示借用存储，不使 caller 的原 Tile handle 失效。寄存器初始化检查使用 caller
+的实际存储绑定分析 helper，不把 `InOut` 当作整个 Tile 已初始化的证明。
+
+PTO codegen 将显式 helper 参数绑定到最终 caller 实参，复用已有寄存器发射器和
+带 effects 注解的 Tile adapter。每个执行调用使用与其 UB 偏移匹配的产物。
+现有执行能力限制保持不变，提取 pass 不添加同步。
+
+提取时先用现有 SSA 转换器规范化新 helper，再推导参数方向和返回别名，避免源码变量重新赋值改变较早结果的存储身份；调用方仍处于前端阶段。捕获顺序遵循首次使用顺序，但 Tile 类型引用的标量符号必须先于该 Tile 参数声明。
+条件重新赋值会保留传入的捕获值，包括循环执行零次时的值。Tile 分支结果和循环携带值
+在所有路径上必须指向同一个捕获存储；在不同缓冲区之间选择会被拒绝。

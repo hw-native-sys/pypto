@@ -70,6 +70,7 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
   class StorageEffectPresence final : public IRVisitor {
    public:
     bool found = false;
+    ProgramPtr program;
 
    protected:
     void VisitStmt_(const SimtLaunchStmtPtr& op) override {
@@ -81,6 +82,8 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
       IRVisitor::VisitStmt_(op);
     }
     void VisitExpr_(const CallPtr& call) override {
+      auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
+      if (callee && callee->func_type_ == FunctionType::VF) found = true;
       auto& registry = OpRegistry::GetInstance();
       if (registry.IsRegistered(call->op_->name_) && registry.GetEntry(call->op_->name_).GetRegSpec()) {
         found = true;
@@ -88,6 +91,7 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
       IRVisitor::VisitExpr_(call);
     }
   } effects;
+  effects.program = program;
   effects.VisitStmt(region);
   const Stmt* previous = nullptr;
 
@@ -174,7 +178,7 @@ class InOutUseDisciplineChecker : public IRVisitor {
     // handled as Mode B in RFC #1026, which is out of scope here.
     if (!program_) return;
     FunctionPtr callee = program_->GetFunction(op->op_->name_);
-    if (!callee) return;
+    if (!callee || callee->func_type_ == FunctionType::VF) return;
 
     const size_t n = std::min(callee->param_directions_.size(), op->args_.size());
     for (size_t i = 0; i < n; ++i) {

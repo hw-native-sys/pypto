@@ -34,7 +34,7 @@ Keep the English and Chinese documentation synchronized.
 
 | Order | Pass | What it does |
 | ----- | ---- | ------------ |
-| 01 | [OutlineSimtScopes](01-outline_simt_scopes.md) | Outlines per-thread scopes into canonical helpers and launches before SSA |
+| 01 | [OutlineSimtScopes / OutlineRegScopes](01-outline_simt_scopes.md) | Outlines SIMT and register scopes into device helpers before caller SSA |
 | 02 | [InlineFunctions](02-inline_functions.md) | Splices `FunctionType.Inline` bodies into every call site |
 | 03 | [UnrollLoops](03-unroll_loops.md) | Expands `ForKind::Unroll` loops at compile time |
 | 04 | [CtrlFlowTransform](04-ctrl_flow_transform.md) | Rewrites `break` / `continue` into structured control flow |

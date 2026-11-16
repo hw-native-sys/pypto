@@ -26,6 +26,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -44,6 +45,13 @@ void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
     RecordRootCandidates(param, {param.get()});
   }
+}
+
+void BufferRootCollector::VisitStmt(const StmtPtr& stmt) {
+  // Nested visits share the cache; the outermost visit clears it before a
+  // caller can mutate the Program or reuse this analysis for another one.
+  return_lineage::ScopedTraceCache lineage_cache;
+  IRVisitor::VisitStmt(stmt);
 }
 
 void BufferRootCollector::VisitStmt_(const IfStmtPtr& if_stmt) {
@@ -128,7 +136,16 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
   // (see .claude/rules/pass-submit-awareness.md).
   if (auto call = transform_utils::AsCallOrSubmitView(assign->value_)) {
     const std::string& op_name = call->op_->name_;
-    if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
+    if (auto helper = ResolveVFCall(call, program_)) {
+      auto aliases = VFReturnedArguments(helper, call);
+      if (As<TupleType>(call->GetType())) {
+        std::vector<RootInfo> roots;
+        for (const auto& alias : aliases) roots.push_back({ResolveRootCandidates(alias), IsAmbiguous(alias)});
+        tuple_output_roots_[assign->var_.get()] = std::move(roots);
+      } else if (!aliases.empty()) {
+        RecordRootCandidates(assign->var_, ResolveRootCandidates(aliases[0]), IsAmbiguous(aliases[0]));
+      }
+    } else if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
       RecordRootCandidates(assign->var_, {assign->var_.get()});
     } else if (IsOp(call, "tensor.assemble")) {
       if (call->args_.size() == 3) {

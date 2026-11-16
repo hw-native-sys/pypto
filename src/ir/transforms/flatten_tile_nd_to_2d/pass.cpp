@@ -101,7 +101,7 @@ class FlattenSimtTiles : public IRMutator {
 
 FunctionPtr TransformFunction(const FunctionPtr& func) {
   if (func->func_type_ == FunctionType::SIMT) return FlattenSimtTiles(func).VisitFunction(func);
-  if (!IsInCoreType(func->func_type_)) {
+  if (!IsInCoreType(func->func_type_) && func->func_type_ != FunctionType::VF) {
     return func;
   }
 

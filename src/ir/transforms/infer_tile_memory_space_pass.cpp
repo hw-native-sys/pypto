@@ -1282,7 +1282,7 @@ Pass InferTileMemorySpace() {
       // must have its tiles placed here too. Gating on InCore alone left those
       // tiles unset, and InitMemRef then defaulted them to DDR -- yielding a
       // vector op reading a DDR operand, which no hardware does.
-      if (IsInCoreType(func->func_type_)) {
+      if (IsInCoreType(func->func_type_) || func->func_type_ == FunctionType::VF) {
         new_functions[gvar] = TransformInferTileMemorySpace(func);
       } else {
         new_functions[gvar] = func;
@@ -1384,7 +1384,7 @@ class TileMemoryInferredPropertyVerifierImpl : public PropertyVerifier {
       if (!func || !func->body_) continue;
       // Must mirror the pass's own gate above: verifying a narrower set than
       // the pass transforms is how the AIC/AIV miss stayed invisible.
-      if (!IsInCoreType(func->func_type_)) continue;
+      if (!IsInCoreType(func->func_type_) && func->func_type_ != FunctionType::VF) continue;
       TileMemoryInferredVerifier verifier(diagnostics, func->name_);
       verifier.VisitStmt(func->body_);
     }

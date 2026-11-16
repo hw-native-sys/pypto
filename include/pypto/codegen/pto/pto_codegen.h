@@ -906,6 +906,10 @@ class PTOCodegen : public CodegenBase {
   std::set<std::pair<std::string, std::string>> entry_helper_uses_;
   void RecordEntryHelperUse(const std::string& symbol);
   std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
+  ir::ProgramPtr vf_program_;
+  std::vector<ir::RegScopeStmtPtr> bound_vf_regions_;
+  std::map<const ir::Var*, std::vector<ir::ExprPtr>> vf_return_aliases_;
+  bool TryEmitVFCall(const ir::CallPtr& call, const ir::VarPtr& result = nullptr);
   void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
   void EmitVFAdapter(const VFHelper& helper);
   /// SIMT functions borrow storage through a pointer ABI, never Tile values.

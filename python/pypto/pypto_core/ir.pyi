@@ -860,6 +860,7 @@ class FunctionType(enum.Enum):
     """Recordable/replayable orchestration fragment."""
 
     SIMT = ...
+    VF = ...
     """Per-thread device helper launched inside an AIV task, returning void."""
 
 class SimtParamAccess:
@@ -3300,7 +3301,7 @@ def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
     """
 
 def is_device_function_type(func_type: FunctionType) -> bool:
-    """Whether this function executes device IR, including a SIMT helper."""
+    """Whether this function executes device IR, including SIMT and VF helpers."""
     ...
 
 def is_incore_type(func_type: FunctionType) -> bool:
