@@ -13,7 +13,7 @@ The old approach unrolled these loops (`pl.pipeline(stage=F)`) and let `Canonica
 
 Every **non-cross-core** pipeline loop (same-core GM→L1, L1→L0, nested matmul stage loops — no `tpush`/`tpop`) is left untouched for `LowerPipelineLoops` to replicate, unless it contains explicit quant configuration.
 
-Any pipeline loop containing `system.set_quant_scalar` or `system.set_quant_vector` is first demoted to Sequential, including one-way C2V loops and stage=1. Quant registers are implicit TPUSH inputs; neither the skew's SSA slice nor the one-way unroll/IO scheduler models these dependencies. This fallback preserves each iteration's configuration/push ordering.
+Any pipeline loop containing `system.set_quant_scalar` or `system.set_quant_vector` is first demoted to Sequential, including one-way C2V loops and stage=1. Quant registers are implicit TPUSH inputs; neither the skew's SSA slice nor the one-way unroll/IO scheduler models these dependencies. This fallback preserves each iteration's configuration/push ordering. Setters anywhere in nested control flow protect all pipeline ancestors, using a counter in the existing traversal rather than repeated subtree scans. Sibling pipelines without setters retain their ordinary behavior.
 
 The output is `ForKind::Sequential` with no `pipeline_stages` marker, so `LowerPipelineLoops` (triggers on `kind == Pipeline`) skips it and `CanonicalizeIOOrder` (scoped to pipeline bodies) does not re-sort the hand-ordered skew.
 

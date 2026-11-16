@@ -758,6 +758,12 @@ Scaling 分配保守地保持存活至整个函数结束：setter 将地址写�
 代价是占用更多 4 KiB 规划预算。包含量化配置的单向和双向 `pl.pipeline` 循环
 都会降为顺序循环，包括 stage=1。这保持配置与 push 的顺序，直至 skew 与单向
 unroll/IO 调度器都能显式建模这些寄存器依赖。
+顺序循环或其他控制流内嵌套的 setter 也会保护所有外层 pipeline 循环。
+pass 在现有遍历中累计 setter，不反复扫描每个祖先的子树；无关的兄弟循环仍可流水化。
+
+主线的 `c2v_dtype` / `pre_relu` 简写继续支持 ND、FP32 源的转换契约，
+不能与 `acc_push_epilogue` 混用，也不能用 `nosplit=False` 覆盖其不拆分策略。
+DN/NZ 布局和 scalar/vector 量化使用结构化记录。
 
 ### 回归与证据
 

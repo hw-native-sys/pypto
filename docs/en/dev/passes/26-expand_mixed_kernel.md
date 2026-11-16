@@ -883,6 +883,14 @@ of the 4 KiB planning budget. One-way and bidirectional `pl.pipeline` loops
 containing quant configuration are lowered to sequential loops, including
 stage=1. This preserves configuration/push ordering until both skewing and the
 one-way unroll/IO scheduler model these register dependencies explicitly.
+Setters nested in sequential loops or other control flow protect every enclosing
+pipeline loop as well. The pass counts setters during its existing traversal,
+without rescanning each ancestor's subtree; unrelated sibling loops remain eligible.
+
+Main's `c2v_dtype` / `pre_relu` shorthand remains available for its ND FP32-source
+conversion contract. It cannot be combined with `acc_push_epilogue`, and its
+non-split policy cannot be overridden with `nosplit=False`. Use the structured
+record for DN/NZ layouts or scalar/vector quantization.
 
 ### Regression and evidence
 

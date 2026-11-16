@@ -108,6 +108,7 @@ def _explicit_case(
     layout_mode="nz2nd",
     integer_no_convert=False,
     pipeline_stages=1,
+    nested_quant=False,
 ):
     relu_mode = "normal_relu" if use_relu else "no_relu"
     scalar_scale = -0.5 if negative_scale else 0.5
@@ -115,12 +116,15 @@ def _explicit_case(
     scalar_quant = quant_mode.endswith("scalar")
     vector_quant = quant_mode == "deqf16_vec"
     column_major = layout_mode == "nz2dn"
-    out_rows, out_cols = 160, 16
+    iterations = 2 if nested_quant else 5
+    input_rows = iterations * 32
+    messages = iterations * (4 if nested_quant else 1)
+    out_rows, out_cols = messages * 32, 16
     input_dtype = torch.int8 if quant_mode.startswith("deq") or integer_no_convert else torch.bfloat16
     output_dtype = {"no_convert": torch.float32, "f32_bf16": torch.bfloat16}.get(quant_mode, torch.float16)
     if integer_no_convert:
         output_dtype = torch.int32
-    a = (torch.arange(160 * 64).reshape(160, 64) % 7 - 3).to(input_dtype)
+    a = (torch.arange(input_rows * 64).reshape(input_rows, 64) % 7 - 3).to(input_dtype)
     b = (torch.arange(64 * 16).reshape(16, 64) % 11 - 5).to(input_dtype)
     # Vary channel scales and iteration inputs to detect stale slots or controls.
     channel_scales = torch.tensor([0.5, 1.0] * 16, dtype=torch.float32)
@@ -129,7 +133,11 @@ def _explicit_case(
     if use_relu:
         expected = expected.clamp_min(0)
     expected = expected.to(torch.float32)
-    if quant_mode.endswith("scalar"):
+    if nested_quant:
+        expected = expected.reshape(iterations, 32, 16).repeat_interleave(4, dim=0).reshape(out_rows, 16)
+        scales = torch.tensor([scalar_scale, scalar_scale * 0.5] * (iterations * 2))
+        expected *= scales.repeat_interleave(32).reshape(-1, 1)
+    elif quant_mode.endswith("scalar"):
         expected *= scalar_scale
         if pipeline_stages > 1:
             expected *= torch.arange(1, 6).repeat_interleave(32).reshape(-1, 1)
@@ -152,7 +160,7 @@ def _explicit_case(
         @pl.function(type=pl.FunctionType.AIC)
         def fixpipe_producer(
             self,
-            a: pl.Tensor[[160, 64], ir_input_dtype],
+            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
             b: pl.Tensor[[16, 64], ir_input_dtype],
             out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
             words: pl.Tensor[[1, 32], pl.INT64],
@@ -172,23 +180,35 @@ def _explicit_case(
                 pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
             ] = pl.load(words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
             controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
-            for iteration in pl.pipeline(5, stage=pipeline_stages):
-                lhs = pl.load(a, [iteration * 32, 0], [32, 64], target_memory=pl.Mem.Mat)
-                rhs = pl.load(b, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
-                acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
-                if scalar_quant:
-                    if pipeline_stages > 1:
-                        pl.set_quant_scalar(pl.cast(pl.cast(iteration + 1, pl.INT32), pl.FP32) * quant_scale)
-                    else:
+            for iteration in pl.pipeline(iterations, stage=pipeline_stages):
+                if nested_quant:
+                    for repeat in pl.range(2):
+                        lhs = pl.load(a, [iteration * 32, 0], [32, 64], target_memory=pl.Mem.Mat)
+                        rhs = pl.load(b, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                        acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
                         pl.set_quant_scalar(quant_scale)
-                if vector_quant:
-                    pl.set_quant_vector(controls)
-                pl.tpush_to_aiv(acc, split=0)
+                        pl.tpush_to_aiv(acc, split=0)
+                        pl.set_quant_scalar(quant_scale * 0.5)
+                        pl.tpush_to_aiv(acc, split=0)
+                else:
+                    lhs = pl.load(a, [iteration * 32, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    rhs = pl.load(b, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                    acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
+                    if scalar_quant:
+                        if pipeline_stages > 1:
+                            pl.set_quant_scalar(
+                                pl.cast(pl.cast(iteration + 1, pl.INT32), pl.FP32) * quant_scale
+                            )
+                        else:
+                            pl.set_quant_scalar(quant_scale)
+                    if vector_quant:
+                        pl.set_quant_vector(controls)
+                    pl.tpush_to_aiv(acc, split=0)
 
         @pl.function(type=pl.FunctionType.AIV)
         def fixpipe_consumer(
             self,
-            a: pl.Tensor[[160, 64], ir_input_dtype],
+            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
             b: pl.Tensor[[16, 64], ir_input_dtype],
             out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
             words: pl.Tensor[[1, 32], pl.INT64],
@@ -201,7 +221,7 @@ def _explicit_case(
                 slot_num=2,
                 acc_push_epilogue={"layout": layout_mode, "quant": quant_mode, "relu": relu_mode},
             )
-            for iteration in pl.range(5):
+            for iteration in pl.range(messages):
                 if column_major:
                     tile_dn: pl.Tile[
                         [32, 16],
@@ -221,7 +241,7 @@ def _explicit_case(
         @pl.function(type=pl.FunctionType.Group)
         def group(
             self,
-            a: pl.Tensor[[160, 64], ir_input_dtype],
+            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
             b: pl.Tensor[[16, 64], ir_input_dtype],
             out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
             words: pl.Tensor[[1, 32], pl.INT64],
@@ -233,7 +253,7 @@ def _explicit_case(
         @pl.function(type=pl.FunctionType.Orchestration)
         def main(
             self,
-            a: pl.Tensor[[160, 64], ir_input_dtype],
+            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
             b: pl.Tensor[[16, 64], ir_input_dtype],
             out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
             words: pl.Tensor[[1, 32], pl.INT64],
@@ -243,14 +263,14 @@ def _explicit_case(
     return st.case(
         ExplicitPipe,
         tensors=[
-            TensorSpec("a", [160, 64], datatype_from_torch(input_dtype), init_value=a),
+            TensorSpec("a", [input_rows, 64], datatype_from_torch(input_dtype), init_value=a),
             TensorSpec("b", [16, 64], datatype_from_torch(input_dtype), init_value=b),
             TensorSpec("out", [out_rows, out_cols], datatype_from_torch(output_dtype), is_output=True),
             TensorSpec("words", [1, 32], datatype_from_torch(torch.int64), init_value=control_words),
         ],
         name=(
             f"fixpipe_{layout_mode}_{quant_mode}_relu={use_relu}_negative={negative_scale}"
-            f"_i32={integer_no_convert}_stages={pipeline_stages}"
+            f"_i32={integer_no_convert}_stages={pipeline_stages}_nested={nested_quant}"
         ),
         golden=lambda _tensors: expected,
         platform="a5",
@@ -292,6 +312,17 @@ def test_explicit_quant_relu_ring_reuse(case_run):
     ]
 )
 def test_one_way_pipeline_varying_quant_scale(case_run):
+    case_run.assert_passed()
+
+
+@st.cases(
+    *[
+        _explicit_case(quant, False, layout_mode=layout, pipeline_stages=2, nested_quant=True)
+        for quant in ("deqf16_scalar", "qf322f16_pre_scalar")
+        for layout in ("nz2nd", "nz2dn")
+    ]
+)
+def test_nested_pipeline_quant_scales(case_run):
     case_run.assert_passed()
 
 

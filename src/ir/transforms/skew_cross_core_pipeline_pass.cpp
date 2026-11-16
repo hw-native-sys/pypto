@@ -136,14 +136,6 @@ bool BodyHasCrossCorePair(const StmtPtr& body) {
   return has_push && has_pop;
 }
 
-bool BodyHasQuantConfiguration(const StmtPtr& body) {
-  for (const auto& stmt : FlattenToStmts(SplitBodyYield(body).first)) {
-    auto call = GetCallFromStmt(stmt);
-    if (IsOp(call, "system.set_quant_scalar") || IsOp(call, "system.set_quant_vector")) return true;
-  }
-  return false;
-}
-
 /// Tag every tile-producing `Call` in @p body with one `(group, stage)`
 /// pipeline-membership pair.
 ///
@@ -240,6 +232,12 @@ StmtPtr TagPipelineStage(const StmtPtr& body, int32_t group, int32_t stage) {
  * `pipeline_stages` attr, so re-running this pass finds no trigger.
  */
 class SkewCrossCoreMutator : public IRMutator {
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    if (IsOp(op, "system.set_quant_scalar") || IsOp(op, "system.set_quant_vector")) ++quant_config_count_;
+    return IRMutator::VisitExpr_(op);
+  }
+
  public:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     if (op->kind_ != ForKind::Pipeline || !op->HasAttr(kPipelineStagesAttr)) {
@@ -257,12 +255,15 @@ class SkewCrossCoreMutator : public IRMutator {
     auto inner_start = VisitExpr(op->start_);
     auto inner_stop = VisitExpr(op->stop_);
     auto inner_step = VisitExpr(op->step_);
+    const size_t quant_before_body = quant_config_count_;
     auto inner_body = VisitStmt(op->body_);
 
     // Quant registers are implicit TPUSH inputs. Neither skewing nor the
     // one-way pipeline unroll/IO scheduler models these dependencies. Preserve
-    // configure/push order before either the stage-1 or no-pair early return.
-    if (BodyHasQuantConfiguration(inner_body)) {
+    // configure/push order before either early return. The existing traversal
+    // propagates nested setters to every pipeline ancestor in O(N) total work;
+    // rescanning each loop's subtree would become quadratic for deep nests.
+    if (quant_config_count_ != quant_before_body) {
       return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
     }
 
@@ -306,6 +307,8 @@ class SkewCrossCoreMutator : public IRMutator {
   }
 
  private:
+  size_t quant_config_count_ = 0;
+
   /// Monotonic pipeline-group id for the membership tags this pass stamps. Started
   /// at a high base so it never collides with LowerPipelineLoops' own 0-based group
   /// ids (both passes write `pipeline_membership`; a shared id would make MemoryReuse

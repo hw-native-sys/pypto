@@ -717,7 +717,7 @@ def _build_pipe_init_kwargs(
     return kwargs
 
 
-def aic_initialize_pipe(
+def aic_initialize_pipe(  # noqa: PLR0913 - preserve both public pipe-contract forms
     c2v_consumer_buf: PipeBufOperand = 0,
     v2c_consumer_buf: PipeBufOperand = 0,
     *,
@@ -756,6 +756,8 @@ def aic_initialize_pipe(
             otherwise omitted, preserving the PTOAS default.
         acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
             ``relu``. Requires C2V only and split=0 on every transfer.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -766,7 +768,7 @@ def aic_initialize_pipe(
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
 
 
-def aiv_initialize_pipe(
+def aiv_initialize_pipe(  # noqa: PLR0913 - preserve both public pipe-contract forms
     c2v_consumer_buf: PipeBufOperand = 0,
     v2c_consumer_buf: PipeBufOperand = 0,
     *,
@@ -803,6 +805,8 @@ def aiv_initialize_pipe(
             otherwise omitted, preserving the PTOAS default.
         acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
             ``relu``. Requires C2V only and split=0 on every transfer.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)

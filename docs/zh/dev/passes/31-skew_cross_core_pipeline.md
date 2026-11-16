@@ -13,7 +13,7 @@
 
 每个**非跨核**的 pipeline 循环（同核 GM→L1、L1→L0、嵌套 matmul stage 循环 —— 没有 `tpush`/`tpop`）保持不变，交给 `LowerPipelineLoops` 复制，包含显式量化配置的循环除外。
 
-包含 `system.set_quant_scalar` 或 `system.set_quant_vector` 的 pipeline 循环会首先降为 Sequential，包括单向 C2V 和 stage=1。量化寄存器是 TPUSH 的隐式输入，skew 的 SSA 切片与单向 unroll/IO 调度器都未建模这些依赖；此回退策略保持每次迭代配置与 push 的顺序。
+包含 `system.set_quant_scalar` 或 `system.set_quant_vector` 的 pipeline 循环会首先降为 Sequential，包括单向 C2V 和 stage=1。量化寄存器是 TPUSH 的隐式输入，skew 的 SSA 切片与单向 unroll/IO 调度器都未建模这些依赖；此回退策略保持每次迭代配置与 push 的顺序。 嵌套控制流内的 setter 会保护所有 pipeline 祖先，利用现有遍历中的计数器避免重复扫描子树；不含 setter 的兄弟流水循环保持原行为。
 
 输出为 `ForKind::Sequential` 且不带 `pipeline_stages` 标记，因此 `LowerPipelineLoops`（触发条件 `kind == Pipeline`）会跳过它，`CanonicalizeIOOrder`（作用域限定在 pipeline body）也不会再去重排已手工排好序的 skew。
 

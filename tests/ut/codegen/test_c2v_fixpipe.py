@@ -195,6 +195,18 @@ def test_schema_rejects_unsupported_transport(kwargs, message):
         )
 
 
+@pytest.mark.parametrize("initialize", [system_ops.aic_initialize_pipe, system_ops.aiv_initialize_pipe])
+@pytest.mark.parametrize("legacy", [{"c2v_dtype": DataType.FP32}, {"pre_relu": True}])
+def test_pipe_contract_forms_cannot_be_combined(initialize, legacy):
+    with pytest.raises(ValueError, match="cannot be combined"):
+        initialize(dir_mask=1, slot_size=2048, acc_push_epilogue=_epilogue(), **legacy)
+
+
+def test_legacy_pipe_dtype_requires_nosplit():
+    with pytest.raises(ValueError, match="requires nosplit=true"):
+        system_ops.aic_initialize_pipe(dir_mask=1, slot_size=2048, c2v_dtype=DataType.FP32, nosplit=False)
+
+
 def test_converted_slot_uses_result_bytes(tmp_path):
     # FP32 source occupies 2048 bytes; the FP16 transport occupies only 1024.
     _, mlir = _generate(_program("f32_f16", slot_size=1024))
@@ -471,7 +483,7 @@ def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
 
 def test_fixpipe_rejects_unvalidated_a2a3_target():
     backend.reset_for_testing()
-    backend.set_backend_type(backend.BackendType.Ascend910B)
+    backend.set_backend_type(backend.BackendType.Ascend910)
     with pytest.raises(Error, match="currently require Ascend950"):
         _generate(_program())
 
