@@ -304,8 +304,10 @@ bool HasFutureAivSplit(const FunctionPtr& func) {
    private:
     void Record(const std::vector<std::pair<std::string, std::any>>& kwargs) {
       for (const auto& [key, value] : kwargs) {
-        if (key == "split" && value.type() == typeid(int) && std::any_cast<int>(value) != 0) {
-          requested = true;
+        if (key == "split") {
+          if (const auto* split_value = std::any_cast<int>(&value); split_value && *split_value != 0) {
+            requested = true;
+          }
         }
       }
     }
