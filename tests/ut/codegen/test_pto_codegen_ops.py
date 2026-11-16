@@ -25,6 +25,7 @@ from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType, pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 # ============================================================================
@@ -1798,6 +1799,52 @@ class TestRemainderFamilyCodegen:
             pytest.skip("PTOAS is not available")
         cpp = pto_backend._compile_pto_module(mlir, "rem_dynamic_restore", str(tmp_path))
         assert "TREM(" in cpp and cpp.count("TCVT(") == 2
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("dynamic_axis", ["row", "column"])
+    def test_a2a3_rem_restores_strided_sources_with_mixed_validity(self, tmp_path, dynamic_axis):
+        builder = ir.IRBuilder()
+        with builder.function("rem_mixed_restore", type=ir.FunctionType.InCore) as function:
+            lhs = function.param("lhs", ir.TensorType([16, 32], DataType.INT32))
+            rhs = function.param("rhs", ir.TensorType([16, 32], DataType.INT32))
+            out = function.param(
+                "out", ir.TensorType([16, 16], DataType.INT32), direction=ir.ParamDirection.Out
+            )
+            extent = function.param("extent", ir.ScalarType(DataType.INDEX))
+            valid = [extent, 16] if dynamic_axis == "row" else [8, extent]
+            left_base = builder.let("left_base", tile.load(lhs, [0, 0], [16, 32]))
+            right_base = builder.let("right_base", tile.load(rhs, [0, 0], [16, 32]))
+            left = builder.let("left", tile.slice(left_base, [16, 16], [0, 8], valid_shape=valid))
+            right = builder.let("right", tile.slice(right_base, [16, 16], [0, 8], valid_shape=valid))
+            tmp = builder.let("tmp", tile.create([2, 32], DataType.INT32, target_memory=ir.MemorySpace.Vec))
+            result = builder.let("result", tile.rem(left, right, tmp))
+            stored = builder.let("stored", tile.store(result, [0, 0], out))
+            function.return_type(out.type)
+            builder.return_stmt(stored)
+
+        program = ir.Program([function.get_result()], "rem_mixed_restore", ir.Span.unknown())
+        mlir = self._generate_mlir(program)
+        subviews = [strip_loc(line).strip() for line in mlir.splitlines() if " = pto.subview " in line]
+        int32_views = [line for line in subviews if "dtype=i32" in line]
+        fp32_views = [line for line in subviews if "dtype=f32" in line]
+        assert len(int32_views) == len(fp32_views) == 2, mlir
+        expected_valid = "v_row=?, v_col=16" if dynamic_axis == "row" else "v_row=8, v_col=?"
+        for line in fp32_views:
+            assert expected_valid in line.split(" -> ", 1)[1], line
+        restores = [strip_loc(line) for line in mlir.splitlines() if "pto.tcvt " in line]
+        for line in int32_views:
+            source = line.split(" = ", 1)[0]
+            source_type = line.split(" -> ", 1)[1]
+            # The writeback must use the original subview and its exact type,
+            # rather than reshaping its storage into a compact INT32 alias.
+            assert any(f"outs({source} : {source_type})" in restore for restore in restores), mlir
+            assert f" = pto.treshape {source} :" not in mlir, mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "rem_mixed_restore", str(tmp_path))
+        assert "TREM(" in cpp and cpp.count("TCVT(") == 2
+        valid_cpp = "-1, 16" if dynamic_axis == "row" else "8, -1"
+        assert f"Tile<TileType::Vec, float, 16, 32, BLayout::RowMajor, {valid_cpp}," in cpp, cpp
 
     @pytest.mark.parametrize("scalar", [-(2**24) - 1, 2**24 + 1])
     def test_a2a3_rejects_out_of_domain_int32_rems_constant(self, scalar):

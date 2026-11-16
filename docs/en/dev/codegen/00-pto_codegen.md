@@ -15,11 +15,7 @@ A2/A3 remainder scratch must match the input dtype and be disjoint from its sour
 
 `S` is the source row stride rounded to 8 elements. FP32 high-precision TREM requires the larger of that column count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)`, where `C = max(valid_cols // 64, 1)`; use physical width to bound dynamic valid columns.
 
-The ISA leaves INT32 sources as FP32: codegen restores both TREM inputs and the TREMS dividend before later consumers. A2/A3 INT32 TREM rejects overlapping sources because the ISA would convert the same storage twice before computing the result.
-
-For a sliced source, restoration reinterprets the root allocation as FP32 and
-then rebuilds the same subviews. This preserves the parent's physical pitch,
-offsets and active extents; dynamic validity is initialized on the FP32 alias.
+The ISA leaves INT32 sources as FP32: codegen restores both TREM inputs and the TREMS dividend before later consumers. For slices, it reinterprets the FP32 root before rebuilding subviews with the original parent pitch, offsets and per-axis validity; dynamic aliases are explicitly initialized. A2/A3 INT32 TREM rejects overlapping sources because the ISA would convert the same storage twice before computing the result.
 
 ## Design Principle: Strict 1-to-1 Mapping
 

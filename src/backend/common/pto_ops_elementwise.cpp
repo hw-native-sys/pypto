@@ -515,7 +515,24 @@ static std::pair<std::string, std::string> MakeRemainderFp32SourceView(const Exp
     const auto& [window, child] = *it;
     fp32_type = std::make_shared<ir::TileType>(child->shape_, DataType::FP32, child->memref_,
                                                child->tile_view_, child->memory_space_);
-    const auto child_type = codegen.GetViewTileBufTypeStringFromTileType(fp32_type);
+    auto child_info = codegen::ExtractTileTypeInfo(*fp32_type, codegen.GetTypeString(DataType::FP32));
+    const auto child_valid = ir::GetValidShape(fp32_type);
+    const auto valid_row = As<ir::ConstInt>(child_valid[0]);
+    const auto valid_col = As<ir::ConstInt>(child_valid[1]);
+    // Explicit subview validity is typed independently on each axis, matching
+    // tile.slice: a constant valid_col must stay static even when rows vary.
+    child_info.v_row_dynamic = valid_row == nullptr;
+    child_info.v_col_dynamic = valid_col == nullptr;
+    if (valid_row) child_info.v_row = valid_row->value_;
+    if (valid_col) child_info.v_col = valid_col->value_;
+    const auto memory_space = fp32_type->GetMemorySpace();
+    INTERNAL_CHECK_SPAN(memory_space.has_value(), source->span_)
+        << "Internal error: remainder source subview requires a memory space";
+    const auto child_type = codegen::FormatTileBufTypeString(
+        codegen::MemorySpaceToMLIR(memory_space.value()), child_info.dtype_str, child_info.rows,
+        child_info.cols, child_info.blayout, child_info.slayout, child_info.fractal, child_info.pad,
+        child_info.compact, child_info.v_row, child_info.v_col, child_info.v_row_dynamic,
+        child_info.v_col_dynamic);
     const auto child_view = codegen.NewNamedTemp(prefix + "_slice");
     const auto valid = valid_codes(fp32_type);
     codegen.Emit(child_view + " = pto.subview " + fp32_view + "[" + window->row_off_ssa + ", " +
@@ -660,12 +677,15 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
       const std::string prefix = "rem_src" + std::to_string(i);
       const auto [fp32_view, fp32_view_type] =
           MakeRemainderFp32SourceView(op->args_[i], codegen, prefix + "_fp32");
-      const std::string int32_view = EnsureStaticViewTileSsa(op->args_[i], codegen, prefix + "_int32");
+      const std::string int32_view = codegen.GetExprAsCode(op->args_[i]);
+      const std::string int32_view_type = codegen.GetExprTypeAnnotation(op->args_[i]);
       const std::string satmode =
           ir::SaturationModeToPTOString(static_cast<int>(ir::EmittedSaturationModeFor(source_type->dtype_)));
-      EmitInsOutsWithViewTypes(
-          codegen, "pto.tcvt", {{fp32_view, fp32_view_type}}, int32_view, source_type,
-          "{rmode = #pto<round_mode ROUND>, satmode = #pto<saturation_mode " + satmode + ">}");
+      // Restore into the original handle with its actual SSA type: rebuilding
+      // an INT32 alias from TileType would discard subview pitch/mixed validity.
+      codegen.Emit("pto.tcvt ins(" + fp32_view +
+                   " {rmode = #pto<round_mode ROUND>, satmode = #pto<saturation_mode " + satmode +
+                   ">} : " + fp32_view_type + ") outs(" + int32_view + " : " + int32_view_type + ")");
     }
   }
   return result;
