@@ -23,6 +23,7 @@ import pytest
 from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION
 from pypto.runtime._device_image import validate_device_image
 from pypto.runtime._stack_usage import validate_stack_usage
+from pypto.runtime.elf_parser import extract_text_section
 
 
 @pytest.fixture
@@ -347,10 +348,87 @@ def _text_only_elf():
 )
 def test_text_only_rejects_malformed_images(offset, fmt, value, error):
     image = _text_only_elf()
-    assert validate_device_image(bytes(image), entry_symbol="kernel_entry") == {"kernel_entry", "helper"}
+    assert validate_device_image(bytes(image), entry_symbol="kernel_entry") == {
+        frozenset({"kernel_entry"}),
+        frozenset({"helper"}),
+    }
     struct.pack_into(f"<{fmt}", image, offset, value)
     with pytest.raises(ValueError, match=error):
         validate_device_image(bytes(image), entry_symbol="kernel_entry")
+
+
+@pytest.mark.parametrize("entry_symbol", [None, "kernel_entry"])
+def test_device_image_rejects_text_in_section_zero(entry_symbol):
+    image = _text_only_elf()
+    # The loader selects the first .text, while the entry symbols refer to the
+    # second one. Admission must reject this image before trusting its symbols.
+    image[128:144] = b"validated bytes!"
+    image[144:160] = b"different bytes!"
+    image[512:576] = image[640:704]
+    struct.pack_into("<Q", image, 512 + 24, 144)
+    assert extract_text_section(bytes(image)) == b"different bytes!"
+    with pytest.raises(ValueError, match="null section at index 0"):
+        validate_device_image(bytes(image), entry_symbol=entry_symbol)
+
+
+@pytest.mark.parametrize("offset,fmt", [(0, "I"), (4, "I"), (8, "Q"), (32, "Q")])
+def test_device_image_requires_null_section_zero(offset, fmt):
+    image = _text_only_elf()
+    struct.pack_into(f"<{fmt}", image, 512 + offset, 1)
+    with pytest.raises(ValueError, match="null section at index 0"):
+        validate_device_image(bytes(image), entry_symbol="kernel_entry")
+
+
+@pytest.mark.parametrize("definition", ["kernel_entry", "helper"])
+def test_text_only_accepts_stack_report_for_either_function_alias(tmp_path, definition):
+    image = _text_only_elf()
+    struct.pack_into("<Q", image, 272 + 8, 0x1000)
+    functions = validate_device_image(bytes(image), entry_symbol="kernel_entry")
+    assert functions == {frozenset({"kernel_entry", "helper"})}
+    path = tmp_path / "kernel.su"
+    path.write_text(f"source:{definition}\t0\tstatic\n")
+    validate_stack_usage(path, functions)
+
+
+@pytest.mark.parametrize(
+    "report,error",
+    [
+        ("source:dead\t0\tstatic\n", "missing stack-usage evidence"),
+        ("source:kernel_entry\t0\tstatic\nsource:helper\t16\tstatic\n", "zero-stack"),
+        ("source:kernel_entry\t0\tstatic\nsource:helper\t0\tdynamic\n", "zero-stack"),
+        ("source:kernel_entry\t16\tstatic\nsource:helper\t0\tstatic\n", "zero-stack"),
+    ],
+)
+def test_text_only_rejects_missing_or_unsafe_alias_evidence(tmp_path, report, error):
+    image = _text_only_elf()
+    struct.pack_into("<Q", image, 272 + 8, 0x1000)
+    path = tmp_path / "kernel.su"
+    path.write_text(report)
+    with pytest.raises(ValueError, match=error):
+        validate_stack_usage(path, validate_device_image(bytes(image), entry_symbol="kernel_entry"))
+
+
+@pytest.mark.parametrize("length", [0, 8])
+def test_text_only_does_not_merge_different_function_extents(tmp_path, length):
+    image = _text_only_elf()
+    struct.pack_into("<QQ", image, 272 + 8, 0x1000, length)
+    path = tmp_path / "kernel.su"
+    path.write_text("source:kernel_entry\t0\tstatic\n")
+    with pytest.raises(ValueError, match="missing stack-usage evidence.*helper"):
+        validate_stack_usage(path, validate_device_image(bytes(image), entry_symbol="kernel_entry"))
+
+
+def test_text_only_does_not_merge_zero_sized_symbols(tmp_path):
+    image = _text_only_elf()
+    struct.pack_into("<Q", image, 272 + 16, 0)
+    image[181:187] = b"alias\0"
+    struct.pack_into("<Q", image, 704 + 32, 27)
+    struct.pack_into("<Q", image, 768 + 32, 96)
+    struct.pack_into("<IBBHQQ", image, 296, 21, 0x12, 0, 2, 0x1008, 0)
+    path = tmp_path / "kernel.su"
+    path.write_text("source:kernel_entry\t0\tstatic\nsource:helper\t0\tstatic\n")
+    with pytest.raises(ValueError, match="missing stack-usage evidence.*alias"):
+        validate_stack_usage(path, validate_device_image(bytes(image), entry_symbol="kernel_entry"))
 
 
 @pytest.mark.parametrize(
@@ -371,7 +449,7 @@ def test_text_only_requires_compiler_stack_evidence(tmp_path, report, error):
     if report is not None:
         path.write_text(report)
     with pytest.raises(ValueError, match=error):
-        validate_stack_usage(path, frozenset({"kernel_entry", "helper"}))
+        validate_stack_usage(path, frozenset({frozenset({"kernel_entry"}), frozenset({"helper"})}))
 
 
 def test_text_only_ignores_stack_frames_removed_by_linker(tmp_path):
@@ -520,7 +598,8 @@ def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, l
             compiler.compile_incore(str(source), **kwargs)
     else:
         binary = compiler.compile_incore(str(source), **kwargs)
-        assert "kernel_entry" in validate_device_image(binary, entry_symbol="kernel_entry")
+        functions = validate_device_image(binary, entry_symbol="kernel_entry")
+        assert any("kernel_entry" in names for names in functions)
 
 
 @pytest.mark.parametrize("platform,core", [("a5sim", "aiv"), ("a2a3", "aiv"), ("a5", "aic")])

@@ -166,10 +166,14 @@ SDK data such as `g_tilingKey`; referenced data must still pass the final check.
 Before returning the linked ELF, the compiler requires one nonempty executable
 `.text` section, a global `kernel_entry` at its first byte, no other nonempty
 allocated sections, no remaining relocations or unresolved symbols, and valid
-section and symbol tables. Nonempty `.ascend.meta*` sections are rejected because
-kernel launch metadata can require additional SU/SIMT stack or UB provisioning.
+section and symbol tables, including a null section at index 0. Nonempty
+`.ascend.meta*` sections are rejected because kernel launch metadata can require
+additional SU/SIMT stack or UB provisioning.
 Every retained function must have a compiler report
-showing **static zero-stack usage**. Missing reports, dynamic frames and positive
+showing **static zero-stack usage**. Function aliases with identical nonempty code
+ranges share a frame and need at least one report; every available alias report
+must show static zero-stack usage. Zero-sized symbols are checked independently.
+Missing reports, dynamic frames and positive
 stack sizes fail: the persistent runtime currently exposes no per-task compiler
 stack reservation contract. Reports for functions discarded by the linker do
 not consume a budget. Compilation, report generation and checking happen in the

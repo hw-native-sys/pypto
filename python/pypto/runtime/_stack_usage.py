@@ -12,7 +12,7 @@
 from pathlib import Path
 
 
-def validate_stack_usage(report: Path, functions: frozenset[str]) -> None:
+def validate_stack_usage(report: Path, functions: frozenset[frozenset[str]]) -> None:
     """Require static zero-stack evidence for every retained device function.
 
     The persistent runtime has no per-task compiler stack reservation contract.
@@ -33,10 +33,14 @@ def validate_stack_usage(report: Path, functions: frozenset[str]) -> None:
         if not name or name in records or not fields[1].isascii() or not fields[1].isdecimal():
             raise ValueError(f"Device image: invalid or duplicate stack-usage record {line!r}")
         records[name] = (fields[1], fields[2])
-    missing = functions - records.keys()
+    missing = [sorted(names) for names in functions if not names.intersection(records)]
     if missing:
         raise ValueError(f"Device image: missing stack-usage evidence for {sorted(missing)}")
-    for name in functions:
+    # A compiler emits a report for the definition, not every function alias.
+    # Check every available alias record so contradictory evidence cannot hide
+    # behind another name's zero-stack report.
+    retained_names = {name for names in functions for name in names}
+    for name in retained_names.intersection(records):
         size, kind = records[name]
         if int(size) != 0 or kind != "static":
             raise ValueError(

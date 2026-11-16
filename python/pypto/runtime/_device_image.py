@@ -50,6 +50,8 @@ def _sections(data: bytes) -> tuple[int, list[_Section], bytes]:
     if size != 64 or not count or not 0 < names_index < count or offset + count * size > len(data):
         raise ValueError("Device image has an invalid section table")
     sections = [_Section(*struct.unpack_from("<IIQQQQIIQQ", data, offset + i * size)) for i in range(count)]
+    if sections[0] != _Section(0, 0, 0, 0, 0, 0, 0, 0, 0, 0):
+        raise ValueError("Device image requires a null section at index 0")
     for section in sections:
         # NOBITS has an address extent but deliberately has no file payload.
         if section.kind != 8 and section.offset + section.size > len(data):
@@ -95,9 +97,9 @@ def _function_name(symbol: bytes) -> str:
 
 def _functions(
     data: bytes, sections: list[_Section], text_index: int, entry_symbol: str | None
-) -> frozenset[str]:
+) -> frozenset[frozenset[str]]:
     text = sections[text_index]
-    functions: set[str] = set()
+    functions: dict[str, tuple[int, int]] = {}
     found_entry = False
     for section in sections:
         if section.kind not in (2, 11):
@@ -133,18 +135,28 @@ def _functions(
             function = _function_name(symbol)
             if function in functions:
                 raise ValueError(f"Device image has duplicate function symbol {function!r}")
-            functions.add(function)
+            functions[function] = (address, length)
             if function == entry_symbol:
                 if found_entry or address != text.address or not length or info >> 4 != 1:
                     raise ValueError("Device image needs one global entry function at the start of .text")
                 found_entry = True
     if entry_symbol is not None and not found_entry:
         raise ValueError(f"Device image is missing entry function {entry_symbol!r}")
-    return frozenset(functions)
+    return _function_groups(functions)
 
 
-def validate_device_image(data: bytes, *, entry_symbol: str | None = None) -> frozenset[str]:
-    """Validate a linked AI Core ELF and optionally identify all retained functions.
+def _function_groups(functions: dict[str, tuple[int, int]]) -> frozenset[frozenset[str]]:
+    groups: dict[tuple[int, int, str], set[str]] = {}
+    for name, (address, length) in functions.items():
+        # Aliases describe one frame only when their complete, nonempty ranges
+        # match. A zero-sized symbol does not establish a shared code extent.
+        key = (address, length, name if length == 0 else "")
+        groups.setdefault(key, set()).add(name)
+    return frozenset(frozenset(names) for names in groups.values())
+
+
+def validate_device_image(data: bytes, *, entry_symbol: str | None = None) -> frozenset[frozenset[str]]:
+    """Validate a linked AI Core ELF and group retained function aliases by code range.
 
     The loader keeps only .text and calls its first byte. No allocated data,
     unresolved symbols or relocation records can survive. Requiring a named
