@@ -397,7 +397,7 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
       ``cache=pl.CachePolicy.DEFAULT`` opts a single read back into the cache
       inside a bypassing scope.
 
-    Requires PTOAS >= v0.72. **On A2/A3** a declared read compiles to a
+    Requires PTOAS >= v0.74. **On A2/A3** a declared read compiles to a
     ``cache_policy`` attribute on ``pto.tload`` plus the device's no-cache alias
     offset, which the assembler adds to that one load's source address; the
     offset comes from the driver through the dispatch payload, and a device that
@@ -755,7 +755,7 @@ def matmul(
         b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul operation
@@ -872,7 +872,7 @@ def matmul_acc(
         b_trans: Whether to transpose rhs
         init_cond: Optional predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul_acc operation

@@ -489,7 +489,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 1. [`LowerCompositeOps`](15-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](16-flatten_tile_nd_to_2d.md)
 3. [`BlockNzTensorViews`](17-block_nz_tensor_views.md)
-4. [`BlockMxScaleTensorViews`](18-block_mx_scale_tensor_views.md)
+4. [`LegalizeMxScaleTensorViews`](18-block_mx_scale_tensor_views.md)
 5. [`LegalizeTileCast`](19-legalize_tile_cast.md)（把目标 ISA 无法用单条 `pto.tcvt` 表达的 `tile.cast` 展开为原生 cast 链）
 6. [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md)
 7. [`CanonicalizeTileSlice`](21-canonicalize_tile_slice.md)

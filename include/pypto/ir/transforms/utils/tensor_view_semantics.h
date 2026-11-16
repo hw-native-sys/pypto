@@ -632,6 +632,18 @@ inline bool IsBlockedMxShape(const std::vector<ExprPtr>& shape) {
          fractal_cols->value_ == tile_view_semantics::kMXSFractalCols;
 }
 
+/// PTOAS v0.74 accepts logical MX views; their layout tag owns physical packing.
+/// Keep the existing static alignment contract until dynamic MX lowering is supported.
+inline bool IsLogicalMxShape(const std::vector<ExprPtr>& shape, TensorLayout layout) {
+  if (shape.size() != 2 || !IsMxTensorLayout(layout)) return false;
+  const bool is_a = layout == TensorLayout::MX_A_ZZ;
+  auto block = As<ConstInt>(shape[is_a ? 0 : 1]);
+  auto group = As<ConstInt>(shape[is_a ? 1 : 0]);
+  return block && group && block->value_ > 0 && group->value_ > 0 &&
+         block->value_ % tile_view_semantics::kMXSFractalRows == 0 &&
+         group->value_ % tile_view_semantics::kMXSFractalCols == 0;
+}
+
 /// Build packed canonical strides for the given (shape, layout).
 ///
 /// Definitions (per RFC #1300 §2.3, amended for NZ / MX):
@@ -645,9 +657,8 @@ inline bool IsBlockedMxShape(const std::vector<ExprPtr>& shape) {
 ///        ordinary row-major and match pto-isa's ``BaseShape2D<..., NZ>``
 ///        exactly. Callers must block the shape first — ``CheckNzViewIsBlocked``
 ///        enforces that invariant downstream.
-///   MX : row-major over the blocked rank-5 shape. Logical rank-2 MX strides
-///        are not physical GM addressing; callers must block first, and
-///        ``IsBlockedMxShape`` enforces that invariant downstream.
+///   MX : logical rank-2 row-major strides for PTOAS-owned packing, or physical
+///        row-major strides for the explicit legacy rank-5 blocking pass.
 ///
 /// Throws ``pypto::ValueError`` for DN layout with rank < 2.
 inline std::vector<ExprPtr> BuildLogicalStridesFromLayout(const std::vector<ExprPtr>& shape,

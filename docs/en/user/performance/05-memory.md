@@ -269,7 +269,7 @@ coherency bug, which is why this is never a default and never inferred. The
 compiler rejects the case it can see — declaring `BYPASS` on a tensor the scope
 writes is an error — but it cannot prove the general case.
 
-**Requires PTOAS >= v0.72.** On a2a3, a `BYPASS` read
+**Requires PTOAS >= v0.74.** On a2a3, a `BYPASS` read
 compiles to a load issued against the page's uncached alias, using the offset
 the device's driver reports for it; a device that exposes no such alias reports
 zero, which leaves the read ordinary and correct. A5 selects an ISA cache mode

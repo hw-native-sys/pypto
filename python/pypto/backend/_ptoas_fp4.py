@@ -20,7 +20,7 @@ from pypto._environment import toolchain_probe_env
 from pypto.pypto_core import DataType, ir
 
 from ._ptoas_config import get_ptoas_timeout
-from ._ptoas_locate import check_ptoas_version, find_ptoas_binary
+from ._ptoas_locate import PTOAS_MIN_VERSION, check_ptoas_version, find_ptoas_binary
 
 _MX_OPS = frozenset(
     ir.get_op(name).name for name in ("tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias")
@@ -89,8 +89,9 @@ def check_native_fp4_mx_support() -> None:
     """
     binary = find_ptoas_binary()
     hint = (
-        "Native FP4 MX matmul requires the PTOAS v0.72 logical Cube geometry contract (PTOAS #1700). "
-        "Set PTOAS_ROOT to the released v0.72 assembler or a compatible newer/patched build."
+        f"Native FP4 MX matmul requires PTOAS {PTOAS_MIN_VERSION} or newer with the logical Cube "
+        "geometry contract (PTOAS #1700). "
+        f"Set PTOAS_ROOT to the released {PTOAS_MIN_VERSION} assembler or a compatible newer/patched build."
     )
     if binary is None:
         raise RuntimeError(f"{hint} No PTOAS executable was found.")

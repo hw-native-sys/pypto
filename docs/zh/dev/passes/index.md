@@ -46,7 +46,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 15 | [LowerCompositeOps](15-lower_composite_ops.md) | 把复合 tile / 分布式算子分解为基础原语 |
 | 16 | [FlattenTileNdTo2D](16-flatten_tile_nd_to_2d.md) | 合并除最后一维外的所有维度，把 3D+ tile 操作拍平为 2D |
 | 17 | [BlockNzTensorViews](17-block_nz_tensor_views.md) | 把逻辑 `pl.NZ` 张量改写为 pto-isa 的分块 rank-5 形式，并同步改写其 `tile.load` 坐标 |
-| 18 | [BlockMxScaleTensorViews](18-block_mx_scale_tensor_views.md) | 将逻辑 MX scale 视图迁移为规范的 rank-5 物理分块形式 |
+| 18 | [LegalizeMxScaleTensorViews](18-block_mx_scale_tensor_views.md) | 验证 MX scale 对齐约束并保留逻辑 rank-2 视图 |
 | 19 | [LegalizeTileCast](19-legalize_tile_cast.md) | 把 ISA 无法单条指令完成的 `tile.cast` 展开为最短的原生 cast 链 |
 | 20 | [AutoTileMatmulL0](20-auto_tile_matmul_l0.md) | 依据后端 L0 容量选择 L0 tile 形状 `(m, n, k)` 并据此分块 matmul |
 | 21 | [CanonicalizeTileSlice](21-canonicalize_tile_slice.md) | 把 `tile.slice` 下降为规范的 `tile.extract` 形式 |

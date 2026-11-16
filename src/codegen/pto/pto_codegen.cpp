@@ -1008,7 +1008,8 @@ const backend::BackendHandler* PTOCodegen::GetBackendHandler() const { return ba
 void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const std::string& pto_op_name,
                                             const ir::Span& span) {
   const auto* handler = GetBackendHandler();
-  if (handler->HonorsHighPrecisionAlgorithm()) return;
+  // The pinned A2/A3 ISA implements high-precision TREM as well as A5.
+  if (handler->HonorsHighPrecisionAlgorithm() || pto_op_name == "pto.trem") return;
   if (!reported_precision_sites_.insert(op_name + "@" + span.to_string()).second) return;
 
   const std::string arch = handler->GetPtoTargetArch();
@@ -1651,7 +1652,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         continue;
       }
       if (fs_.ffts_workspace_vars.count(var.get()) > 0) continue;
-      // BlockMxScaleTensorViews rewrites MX TensorTypes into packed rank-5 form;
+      // LegalizeMxScaleTensorViews keeps MX TensorTypes in logical rank-2 form;
       // bind a parameter view like NZ so EmitMakeTensorViews / tile.load share
       // the same make_tensor_view (no hand-rolled EmitMxPhysicalView).
       RegisterBasePtr(var, GetVarName(var));

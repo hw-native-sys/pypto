@@ -51,7 +51,7 @@ Keep the English and Chinese documentation synchronized.
 | 15 | [LowerCompositeOps](15-lower_composite_ops.md) | Decomposes composite tile / distributed ops into primitives |
 | 16 | [FlattenTileNdTo2D](16-flatten_tile_nd_to_2d.md) | Flattens 3D+ tile operations to 2D by merging all but the last dimension |
 | 17 | [BlockNzTensorViews](17-block_nz_tensor_views.md) | Rewrites logical `pl.NZ` tensors into pto-isa's blocked rank-5 form and retargets their `tile.load` coordinates |
-| 18 | [BlockMxScaleTensorViews](18-block_mx_scale_tensor_views.md) | Migrates logical MX scale views into canonical packed rank-5 physical form |
+| 18 | [LegalizeMxScaleTensorViews](18-block_mx_scale_tensor_views.md) | Validates MX scale alignment while preserving logical rank-2 views |
 | 19 | [LegalizeTileCast](19-legalize_tile_cast.md) | Expands `tile.cast` pairs the ISA cannot emit as one instruction into the shortest native chain |
 | 20 | [AutoTileMatmulL0](20-auto_tile_matmul_l0.md) | Picks an L0 tile shape `(m, n, k)` from the backend's L0 capacities and tiles matmuls to it |
 | 21 | [CanonicalizeTileSlice](21-canonicalize_tile_slice.md) | Lowers `tile.slice` into the canonical `tile.extract` form |

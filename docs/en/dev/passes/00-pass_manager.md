@@ -493,7 +493,7 @@ The PTO-oriented tile stage of `Default` is:
 1. [`LowerCompositeOps`](15-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](16-flatten_tile_nd_to_2d.md)
 3. [`BlockNzTensorViews`](17-block_nz_tensor_views.md)
-4. [`BlockMxScaleTensorViews`](18-block_mx_scale_tensor_views.md)
+4. [`LegalizeMxScaleTensorViews`](18-block_mx_scale_tensor_views.md)
 5. [`LegalizeTileCast`](19-legalize_tile_cast.md) (expands `tile.cast` pairs the target ISA cannot emit as one `pto.tcvt`)
 6. [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md)
 7. [`CanonicalizeTileSlice`](21-canonicalize_tile_slice.md)

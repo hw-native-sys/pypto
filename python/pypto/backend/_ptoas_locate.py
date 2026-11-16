@@ -21,7 +21,7 @@ from pypto._environment import toolchain_probe_env
 # `PTOAS_VERSION` pin in toolchain/versions.env (what CI installs), restated here
 # because an installed wheel does not ship that file; bump both in one change.
 # tests/ut/backend/test_ptoas_locate.py fails when they differ.
-PTOAS_MIN_VERSION = "v0.72"
+PTOAS_MIN_VERSION = "v0.74"
 PTOAS_RELEASES_URL = "https://github.com/hw-native-sys/PTOAS/releases"
 
 # `ptoas --version` prints e.g. "ptoas 0.61"; a dev build may append a suffix.

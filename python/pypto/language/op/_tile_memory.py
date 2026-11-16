@@ -198,7 +198,7 @@ def load(
             the full contract). An explicit value here always wins over a
             scope-level ``pl.set_cache_policy`` declaration for the same tensor,
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
-            back into the cache inside a bypassing scope. Requires PTOAS >= v0.72,
+            back into the cache inside a bypassing scope. Requires PTOAS >= v0.74,
             where a BYPASS read compiles to a load issued against the page's
             uncached alias on A2/A3. New A5 code uses the six modes in
             CachePolicy; legacy CachePolicy.BYPASS reads retain their A5

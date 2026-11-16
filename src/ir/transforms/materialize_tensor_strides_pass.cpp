@@ -86,15 +86,24 @@ void CheckNzViewIsBlocked(const TensorView& view, const std::vector<ExprPtr>& sh
       << "]), got rank " << shape.size() << " — BlockNzTensorViews did not run or missed it";
 }
 
-/// Assert that an MX scale view has already been rewritten into its packed
-/// rank-5 form. Same rationale as ``CheckNzViewIsBlocked``.
-void CheckMxViewIsBlocked(const TensorView& view, const std::vector<ExprPtr>& shape, const Span& span) {
+/// Accept logical MX views for PTOAS v0.74 and explicit legacy blocked views.
+void CheckMxViewIsCanonical(const TensorView& view, const std::vector<ExprPtr>& shape, const Span& span,
+                            bool mx_legalized) {
   if (!IsMxTensorLayout(view.layout)) return;
-  INTERNAL_CHECK_SPAN(tensor_view_semantics::IsBlockedMxShape(shape), span)
-      << "Internal error: MaterializeTensorStrides found an MX tensor whose shape is not blocked "
-      << "(expected static [1, positive block count, positive group count, "
+  // An aligned logical shape alone does not prove load offsets are aligned or
+  // non-negative. Require the legalization pass even with explicit strides or
+  // verification disabled, before claiming TensorViewCanonical.
+  INTERNAL_CHECK_SPAN(shape.size() != 2 || mx_legalized, span)
+      << "Internal error: MaterializeTensorStrides requires LegalizeMxScaleTensorViews "
+         "before accepting logical MX tensor views";
+  INTERNAL_CHECK_SPAN(tensor_view_semantics::IsLogicalMxShape(shape, view.layout) ||
+                          tensor_view_semantics::IsBlockedMxShape(shape),
+                      span)
+      << "Internal error: MaterializeTensorStrides found an MX tensor whose shape is not canonical "
+      << "(expected an aligned logical rank-2 shape or static [1, positive block count, positive group "
+         "count, "
       << tile_view_semantics::kMXSFractalRows << ", " << tile_view_semantics::kMXSFractalCols
-      << "]) — BlockMxScaleTensorViews did not run or missed it";
+      << "]) — LegalizeMxScaleTensorViews did not run or missed it";
 }
 
 /// Rewrite a TensorType (or recursively a TupleType containing TensorTypes)
@@ -107,7 +116,7 @@ void CheckMxViewIsBlocked(const TensorView& view, const std::vector<ExprPtr>& sh
 /// ``span`` locates the IR node carrying the type (Var / IterArg / Call /
 /// Submit / function param / function return) and is only read when the type
 /// is rejected.
-TypePtr MaterializeType(const TypePtr& type, const Span& span) {
+TypePtr MaterializeType(const TypePtr& type, const Span& span, bool mx_legalized) {
   if (!type) return type;
 
   if (auto dist_type = As<DistributedTensorType>(type)) {
@@ -119,7 +128,7 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
     // ordering: an unblocked NZ view is invalid whether or not its stride is
     // explicit.
     CheckNzViewIsBlocked(view, dist_type->shape_, dist_type->dtype_, span);
-    CheckMxViewIsBlocked(view, dist_type->shape_, span);
+    CheckMxViewIsCanonical(view, dist_type->shape_, span, mx_legalized);
     if (!view.stride.empty()) {
       return type;
     }
@@ -138,7 +147,7 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
     }
     const TensorView& view = *tensor_type->tensor_view_;
     CheckNzViewIsBlocked(view, tensor_type->shape_, tensor_type->dtype_, span);
-    CheckMxViewIsBlocked(view, tensor_type->shape_, span);
+    CheckMxViewIsCanonical(view, tensor_type->shape_, span, mx_legalized);
     if (!view.stride.empty()) {
       // Already explicit.
       return type;
@@ -155,7 +164,7 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
     new_elems.reserve(tuple_type->types_.size());
     bool changed = false;
     for (const auto& sub : tuple_type->types_) {
-      auto new_sub = MaterializeType(sub, span);
+      auto new_sub = MaterializeType(sub, span, mx_legalized);
       if (new_sub.get() != sub.get()) changed = true;
       new_elems.push_back(std::move(new_sub));
     }
@@ -172,6 +181,8 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
 /// TileMemorySpaceMutator handles its ``var_cache_``).
 class MaterializeTensorStridesMutator : public IRMutator {
  public:
+  explicit MaterializeTensorStridesMutator(bool mx_legalized) : mx_legalized_(mx_legalized) {}
+
   /// Pre-populate the substitution cache with param/iter-arg Vars whose
   /// types were rebuilt at the function boundary. This way the body's
   /// references to those Vars resolve to the new Vars instead of the old.
@@ -183,7 +194,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
     if (it != var_cache_.end()) {
       return it->second;
     }
-    auto new_type = MaterializeType(op->GetType(), op->span_);
+    auto new_type = MaterializeType(op->GetType(), op->span_, mx_legalized_);
     if (new_type.get() == op->GetType().get()) {
       var_cache_[op] = op;
       return op;
@@ -199,7 +210,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
       return it->second;
     }
     auto new_init = IRMutator::VisitExpr(op->initValue_);
-    auto new_type = MaterializeType(op->GetType(), op->span_);
+    auto new_type = MaterializeType(op->GetType(), op->span_, mx_legalized_);
     bool init_changed = new_init.get() != op->initValue_.get();
     bool type_changed = new_type.get() != op->GetType().get();
     if (!init_changed && !type_changed) {
@@ -225,7 +236,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
       new_args.push_back(std::move(new_arg));
     }
 
-    auto new_return_type = MaterializeType(op->GetType(), op->span_);
+    auto new_return_type = MaterializeType(op->GetType(), op->span_, mx_legalized_);
     bool type_changed = new_return_type.get() != op->GetType().get();
 
     // ``manual_dep_edges`` / ``compiler_manual_dep_edges`` carry VarPtrs that
@@ -301,7 +312,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
     auto base = IRMutator::VisitExpr_(op);
     auto submit = As<Submit>(base);
     if (!submit) return base;
-    auto new_return_type = MaterializeType(submit->GetType(), submit->span_);
+    auto new_return_type = MaterializeType(submit->GetType(), submit->span_, mx_legalized_);
     if (new_return_type.get() == submit->GetType().get()) return submit;
     // MaterializeType recurses the TupleType, materializing each leading
     // return TensorType and leaving the trailing Scalar[TASK_ID] untouched.
@@ -346,12 +357,14 @@ class MaterializeTensorStridesMutator : public IRMutator {
   }
 
  private:
+  bool mx_legalized_;
   std::unordered_map<VarPtr, VarPtr> var_cache_;
 };
 
 /// Materialize a single function: rebuild params / return_types / body.
 /// Returns the input function unchanged when no rewrite is needed.
 FunctionPtr TransformFunction(const FunctionPtr& func) {
+  const bool mx_legalized = func->HasAttr("mx_tensor_views_legalized");
   // 1) Rewrite param types. New params get fresh Var objects; record old→new
   //    so body references resolve to the rewritten Var.
   bool params_changed = false;
@@ -359,7 +372,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   new_params.reserve(func->params_.size());
   std::unordered_map<VarPtr, VarPtr> param_substitutions;
   for (const auto& old_param : func->params_) {
-    auto new_type = MaterializeType(old_param->GetType(), old_param->span_);
+    auto new_type = MaterializeType(old_param->GetType(), old_param->span_, mx_legalized);
     if (new_type.get() == old_param->GetType().get()) {
       new_params.push_back(old_param);
       continue;
@@ -375,14 +388,14 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   std::vector<TypePtr> new_return_types;
   new_return_types.reserve(func->return_types_.size());
   for (const auto& rt : func->return_types_) {
-    auto new_rt = MaterializeType(rt, func->span_);
+    auto new_rt = MaterializeType(rt, func->span_, mx_legalized);
     if (new_rt.get() != rt.get()) returns_changed = true;
     new_return_types.push_back(std::move(new_rt));
   }
 
   // 3) Walk body. Pre-populate the Var cache with param substitutions so
   //    body references to params resolve to the new Vars.
-  MaterializeTensorStridesMutator mutator;
+  MaterializeTensorStridesMutator mutator(mx_legalized);
   for (const auto& [old_var, new_var] : param_substitutions) {
     mutator.AddSubstitution(old_var, new_var);
   }

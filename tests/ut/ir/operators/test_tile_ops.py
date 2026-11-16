@@ -4891,7 +4891,7 @@ class TestTileBitwiseArithmeticOps:
         ],
     )
     def test_tile_remainder_rejects_undersized_tmp(self, op, tmp_shape):
-        """TREM needs two scratch rows; both tmp forms must cover valid columns."""
+        """Scratch must meet PTOAS row and column minima before ISA capacity checks."""
         span = ir.Span.unknown()
         src_view = ir.TileView(valid_shape=[7, 13])
         src = ir.Var("src", ir.TileType([8, 16], DataType.FP32, tile_view=src_view), span)

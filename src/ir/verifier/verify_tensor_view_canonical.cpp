@@ -100,11 +100,14 @@ class TensorViewCanonicalVisitor : public IRVisitor {
            "trailing dims [16, c0] produced by BlockNzTensorViews)");
       return;
     }
-    if (IsMxTensorLayout(view.layout) && !tensor_view_semantics::IsBlockedMxShape(tensor_type->shape_)) {
-      Emit(span,
-           "TensorType has an unblocked MX layout (expected the blocked rank-5 shape "
-           "[1, positive block count, positive group count, 16, 2] produced by "
-           "BlockMxScaleTensorViews)");
+    if (IsMxTensorLayout(view.layout) &&
+        !tensor_view_semantics::IsLogicalMxShape(tensor_type->shape_, view.layout) &&
+        !tensor_view_semantics::IsBlockedMxShape(tensor_type->shape_)) {
+      Emit(
+          span,
+          "TensorType has a non-canonical MX layout (expected aligned logical rank-2 or blocked rank-5 shape "
+          "[1, positive block count, positive group count, 16, 2] produced by "
+          "BlockMxScaleTensorViews)");
       return;
     }
 

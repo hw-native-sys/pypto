@@ -1,4 +1,33 @@
-# BlockMxScaleTensorViews Pass
+# LegalizeMxScaleTensorViews and legacy BlockMxScaleTensorViews
+
+## Default pipeline: logical views
+
+`LegalizeMxScaleTensorViews` replaces `BlockMxScaleTensorViews` in the default
+PTO pipeline for PTOAS v0.74. It runs after `FlattenTileNdTo2D` and
+`BlockNzTensorViews`, before `MaterializeTensorStrides`.
+
+The pass retains logical `MX_A_ZZ [M, G]` and `MX_B_NN [G, N]` tensor shapes,
+load/store coordinates, and shaped ND/MX aliases. `MaterializeTensorStrides`
+emits logical contiguous strides `[cols, 1]`. Codegen transcribes these views
+directly; PTOAS constructs the physical SFractal descriptors.
+
+Shape and offset checks are shared with the legacy pass below: static positive
+extents aligned to 16 rows / 2 groups, and provably non-negative aligned offsets.
+Distributed MX tensors and partial tensor valid shapes remain unsupported.
+A narrowed load valid shape does not shrink the DMA box: the pass uses the full
+aligned logical load window while preserving the tile result's active extents.
+Direct stores from fractal-32 Vec scale tiles remain unsupported by PTOAS; a
+logical destination view does not make that source layout legal.
+
+Functions are stamped `mx_tensor_views_legalized` to make repeated legalization
+idempotent. The public factory is `passes.legalize_mx_scale_tensor_views()`.
+
+## Legacy explicit blocking
+
+`passes.block_mx_scale_tensor_views()` retains the rank-5 transformation below
+for explicit callers. It is no longer in the default pipeline, and its output
+is not a valid MX tensor-view input to PTOAS v0.74. Do not chain it before the
+new logical legalization pass.
 
 ## Overview
 

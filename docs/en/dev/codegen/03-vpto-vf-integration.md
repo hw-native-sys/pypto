@@ -78,7 +78,7 @@ reconstructing memory dependencies or imposing an LLVM instruction whitelist.
 PTOAS/Bisheng diagnostics propagate to the caller. The separate external-symbol
 and device-image checks below enforce the helper packaging contract.
 
-Indexed gather/scatter rely on the pinned PTOAS 0.72 or newer for conservative
+Indexed gather/scatter rely on the pinned PTOAS v0.74 or newer for conservative
 RAW/WAR/WAW synchronization of unknown footprints within a vecscope. This
 includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730);
 PyPTO does not add per-access `VV_ALL` fences. Caller/helper boundary and GM
@@ -181,7 +181,7 @@ synchronization and optimization.
 
 ## Run the complete examples
 
-Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.72
+Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.74
 or newer, and configure the matching CANN/Bisheng toolchain. Keep runtime pin
 checking enabled. Reserve an idle A5 device before running either command:
 

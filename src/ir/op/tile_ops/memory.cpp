@@ -455,8 +455,8 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << " requires third argument to be a TensorType or DistributedTensorType, but got "
       << args[2]->GetType()->TypeName();
   // MX scale tensors are written in their logical 2-D coordinates here. The
-  // BlockMxScaleTensorViews pass converts both the destination and these
-  // coordinates to the packed rank-5 SFractal representation before codegen.
+  // LegalizeMxScaleTensorViews validates alignment while preserving these
+  // coordinates; PTOAS v0.74 constructs the packed physical SFractal descriptor.
   // Validate the hardware-facing source contract here so malformed authored
   // stores remain user errors rather than surfacing as pass/codegen invariants.
   if (output_tensor_type->tensor_view_ && IsMxTensorLayout(output_tensor_type->tensor_view_->layout)) {

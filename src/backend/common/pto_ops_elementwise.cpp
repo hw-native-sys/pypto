@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -442,6 +443,27 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   return "";
 }
 
+// PTO-ISA 90a37965 uses one scratch row: candidate values, a 32-byte-aligned
+// comparison mask, and a 32-byte address buffer. High-precision TREM adds
+// staged vector state; using the physical width bounds dynamic valid columns.
+static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::TileType>& src,
+                                              bool high_precision, const ir::Span& span) {
+  const auto columns = As<ir::ConstInt>(src->shape_[1]);
+  CHECK_SPAN(columns && columns->value_ > 0 && columns->value_ <= std::numeric_limits<int64_t>::max() / 4,
+             span)
+      << "A2/A3 remainder requires bounded positive static physical columns";
+  const int64_t row_stride = ((columns->value_ + 7) / 8) * 8;
+  int64_t required = row_stride + ((row_stride + 255) / 256) * 8 + 8;
+  if (high_precision) {
+    const auto valid_columns = As<ir::ConstInt>(ir::GetValidShape(src)[1]);
+    const int64_t width = valid_columns ? valid_columns->value_ : columns->value_;
+    const int64_t vectors = std::max<int64_t>(width / 64, 1);
+    const int64_t staged = 192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? 64 : 0);
+    required = std::max(required, staged);
+  }
+  return required;
+}
+
 static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_t arity,
                                            const char* precision_attr_kind, const CallPtr& op,
                                            codegen::CodegenBase& codegen_base) {
@@ -495,27 +517,6 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
                           op->span_)
           << "Internal error: A2/A3 remainder source and tmp must be 2D";
 
-      const int64_t required_rows = pto_op_name == "pto.trem" ? 2 : 1;
-      const auto required_row_expr =
-          std::make_shared<ir::ConstInt>(required_rows, DataType::INDEX, op->span_);
-      CHECK_SPAN(
-          ir::ProveValidExtentLessEqual(required_row_expr, tmp_type->shape_[0]) == ir::ProofResult::kTrue,
-          tmp->span_)
-          << op->op_->name_ << " on A2/A3 requires tmp physical rows >= " << required_rows;
-      CHECK_SPAN(
-          ir::ProveValidExtentLessEqual(src_type->shape_[1], tmp_type->shape_[1]) == ir::ProofResult::kTrue,
-          tmp->span_)
-          << op->op_->name_ << " on A2/A3 requires tmp physical columns to cover all source columns";
-      CHECK_SPAN(
-          ir::ProveValidExtentLessEqual(required_row_expr, tmp_valid_shape[0]) == ir::ProofResult::kTrue,
-          tmp->span_)
-          << op->op_->name_ << " on A2/A3 requires tmp valid rows >= " << required_rows;
-      CHECK_SPAN(
-          ir::ProveValidExtentLessEqual(src_valid_shape[1], tmp_valid_shape[1]) == ir::ProofResult::kTrue,
-          tmp->span_)
-          << op->op_->name_
-          << " on A2/A3 requires tmp valid columns to provably cover the source valid columns";
-
       const auto tmp_memref = tmp_type->memref_.value_or(nullptr);
       INTERNAL_CHECK_SPAN(tmp_memref, op->span_)
           << "Internal error: " << op->op_->name_ << " tmp must carry a MemRef before PTO codegen";
@@ -528,6 +529,41 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
         CHECK_SPAN(!ir::MemRef::MayAlias(tmp_memref, source_memref), op->span_)
             << op->op_->name_ << " on A2/A3 requires tmp not to overlap source operand " << i;
       }
+
+      if (pto_op_name == "pto.trem" && src_type->dtype_ == DataType::INT32) {
+        const auto rhs_type = As<ir::TileType>(op->args_[1]->GetType());
+        // The ISA converts both operands in-place before computing the result.
+        // Overlap would convert the same storage twice, even if restores were
+        // deduplicated afterward.
+        CHECK_SPAN(
+            !ir::MemRef::MayAlias(src_type->memref_.value_or(nullptr), rhs_type->memref_.value_or(nullptr)),
+            op->span_)
+            << "tile.rem on A2/A3 requires INT32 sources not to overlap";
+      }
+
+      const int64_t required_rows = pto_op_name == "pto.trem" ? 2 : 1;
+      const int64_t required_columns =
+          GetA2A3RemainderScratchColumns(src_type, op->GetKwarg<bool>("high_precision", false), op->span_);
+      const auto required_col_expr =
+          std::make_shared<ir::ConstInt>(required_columns, DataType::INDEX, op->span_);
+      const auto required_row_expr =
+          std::make_shared<ir::ConstInt>(required_rows, DataType::INDEX, op->span_);
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(required_row_expr, tmp_type->shape_[0]) == ir::ProofResult::kTrue,
+          tmp->span_)
+          << op->op_->name_ << " on A2/A3 requires tmp physical rows >= " << required_rows;
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(required_col_expr, tmp_type->shape_[1]) == ir::ProofResult::kTrue,
+          tmp->span_)
+          << op->op_->name_ << " on A2/A3 requires tmp physical columns >= " << required_columns;
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(required_row_expr, tmp_valid_shape[0]) == ir::ProofResult::kTrue,
+          tmp->span_)
+          << op->op_->name_ << " on A2/A3 requires tmp valid rows >= " << required_rows;
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(required_col_expr, tmp_valid_shape[1]) == ir::ProofResult::kTrue,
+          tmp->span_)
+          << op->op_->name_ << " on A2/A3 requires tmp valid columns >= " << required_columns;
     }
   }
 
@@ -538,33 +574,36 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
     result = MakeNaryCodegenPTO(pto_op_name, arity, op, codegen_base);
   }
 
-  if (!is_a5 && pto_op_name == "pto.trem" && src_type->dtype_ == DataType::INT32) {
-    // The A2/A3 INT32 TREM implementation restores rhs after its quotient
-    // calculation, then converts rhs in-place to FP32 again for sign correction.
-    // Restore that second conversion before any later consumer observes rhs.
-    const auto rhs_type = As<ir::TileType>(op->args_[1]->GetType());
-    INTERNAL_CHECK_SPAN(rhs_type, op->span_) << "Internal error: tile.rem second argument must be a TileType";
-    const auto rhs_fp32_type = std::make_shared<ir::TileType>(
-        rhs_type->shape_, DataType::FP32, rhs_type->memref_, rhs_type->tile_view_, rhs_type->memory_space_);
-    const std::string rhs_fp32 =
-        EnsureTileViewSsa(op->args_[1], rhs_fp32_type, codegen, "trem_rhs_fp32_view");
-    const std::string rhs_int32 = EnsureStaticViewTileSsa(op->args_[1], codegen, "trem_rhs_int32_view");
-    // `satmode` is stamped for the same reason `tile.cast` stamps it (see
-    // MakeTcvtCodegenPTO): PTOAS v0.63 flipped its default for an omitted attribute
-    // from OFF to ON, so leaving it out hands the decision to the assembler release.
-    // This arm only runs for an INT32 `tile.rem`, whose operands share a dtype, so
-    // the destination is INT32 and resolves to ON -- which is also what this restore
-    // wants: an `|rhs|` above 2^24 already lost precision on the way into FP32, and
-    // INT32_MAX rounds up to 2^31, which is out of range. Clamping puts it back at
-    // INT32_MAX; the non-saturating result there is architecture-defined.
-    INTERNAL_CHECK_SPAN(rhs_type->dtype_ == DataType::INT32, op->span_)
-        << "Internal error: A2/A3 INT32 tile.rem rhs must be INT32, got " << rhs_type->dtype_.ToString();
-    const std::string satmode =
-        ir::SaturationModeToPTOString(static_cast<int>(ir::EmittedSaturationModeFor(rhs_type->dtype_)));
-    EmitInsOutsWithViewTypes(
-        codegen, "pto.tcvt", {{rhs_fp32, codegen.GetViewTileBufTypeStringFromTileType(rhs_fp32_type)}},
-        rhs_int32, rhs_type,
-        "{rmode = #pto<round_mode ROUND>, satmode = #pto<saturation_mode " + satmode + ">}");
+  if (!is_a5 && src_type->dtype_ == DataType::INT32 &&
+      (pto_op_name == "pto.trem" || pto_op_name == "pto.trems")) {
+    // ISA 90a37965 reconverts the dividend into dst, leaving src0 as FP32.
+    // TREM also converts src1 back to FP32 for sign correction. Restore every
+    // source before later consumers; the remainder alias contract keeps dst
+    // disjoint from all inputs.
+    const auto dst_var = codegen.GetCurrentResultVar();
+    const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
+    const auto dst_memref = dst_type ? dst_type->memref_.value_or(nullptr) : nullptr;
+    INTERNAL_CHECK_SPAN(dst_memref, op->span_) << "Internal error: remainder result must carry a MemRef";
+    const size_t source_count = pto_op_name == "pto.trem" ? 2 : 1;
+    for (size_t i = 0; i < source_count; ++i) {
+      const auto source_type = As<ir::TileType>(op->args_[i]->GetType());
+      const auto source_memref = source_type->memref_.value_or(nullptr);
+      INTERNAL_CHECK_SPAN(source_memref, op->span_) << "Internal error: remainder source must carry a MemRef";
+      INTERNAL_CHECK_SPAN(!ir::MemRef::MayAlias(source_memref, dst_memref), op->span_)
+          << "Internal error: remainder result must not alias its sources";
+      const auto fp32_type =
+          std::make_shared<ir::TileType>(source_type->shape_, DataType::FP32, source_type->memref_,
+                                         source_type->tile_view_, source_type->memory_space_);
+      const std::string prefix = "rem_src" + std::to_string(i);
+      const std::string fp32_view = EnsureTileViewSsa(op->args_[i], fp32_type, codegen, prefix + "_fp32");
+      const std::string int32_view = EnsureStaticViewTileSsa(op->args_[i], codegen, prefix + "_int32");
+      const std::string satmode =
+          ir::SaturationModeToPTOString(static_cast<int>(ir::EmittedSaturationModeFor(source_type->dtype_)));
+      EmitInsOutsWithViewTypes(
+          codegen, "pto.tcvt", {{fp32_view, codegen.GetViewTileBufTypeStringFromTileType(fp32_type)}},
+          int32_view, source_type,
+          "{rmode = #pto<round_mode ROUND>, satmode = #pto<saturation_mode " + satmode + ">}");
+    }
   }
   return result;
 }

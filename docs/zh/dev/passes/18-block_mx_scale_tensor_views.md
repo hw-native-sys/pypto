@@ -1,4 +1,29 @@
-# BlockMxScaleTensorViews Pass
+# LegalizeMxScaleTensorViews 与旧版 BlockMxScaleTensorViews
+
+## 默认流水线：逻辑视图
+
+面向 PTOAS v0.74，`LegalizeMxScaleTensorViews` 在默认 PTO 流水线中替代
+`BlockMxScaleTensorViews`。它位于 `FlattenTileNdTo2D`、`BlockNzTensorViews`
+之后，`MaterializeTensorStrides` 之前。
+
+该 pass 保留 `MX_A_ZZ [M, G]` 和 `MX_B_NN [G, N]` 的逻辑形状、
+load/store 坐标及带形状的 ND/MX 别名。`MaterializeTensorStrides` 生成
+逻辑连续 stride `[cols, 1]`；代码生成直接转写视图，由 PTOAS 构造物理 SFractal 描述符。
+
+形状和偏移检查与下述旧版 pass 共用：静态正数维度按 16 行 / 2 组对齐，
+偏移须可证明非负且对齐。仍不支持分布式 MX 及部分 tensor valid shape。
+缩小 load 的 valid shape 不会缩小 DMA 窗口：pass 使用完整对齐的逻辑加载范围，
+同时保留结果 tile 的有效范围。PTOAS 仍不支持从 fractal-32 Vec scale tile
+直接 store；逻辑目标视图不会使这种源布局变为合法。
+
+函数标记 `mx_tensor_views_legalized` 保证重复执行幂等。公开工厂函数为
+`passes.legalize_mx_scale_tensor_views()`。
+
+## 旧版显式分块
+
+`passes.block_mx_scale_tensor_views()` 为显式调用者保留下述 rank-5 转换。
+它不再属于默认流水线，其输出不能作为 PTOAS v0.74 的 MX tensor-view 输入。
+不要在新的逻辑 legalization pass 前调用旧版分块 pass。
 
 ## 概述
 

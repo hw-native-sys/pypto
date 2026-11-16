@@ -84,6 +84,7 @@ class TestQuantMxCodegen:
         assert len(stores) == 1
         assert "dtype=!pto.f4E2M1x2, rows=64, cols=32" in stores[0]
 
+    @pytest.mark.ptoas_compile
     @pytest.mark.parametrize(("case", "slot_num"), [("direct", 4), ("none", 4), ("split", 4), ("none", 2)])
     def test_public_mx_gather_compiles(self, case, slot_num, tmp_path):
         """Both public MX scale orientations survive an explicit AIV/AIC crossing."""

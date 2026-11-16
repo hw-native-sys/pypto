@@ -272,7 +272,7 @@ For rank-2 FP32 operands on Ascend950, `matmul`, `matmul_acc`, and
 FP32; halfway values round to even or away from zero, respectively. Omitting
 the option preserves ordinary FP32 matmul. The setting survives tensor-to-tile
 lowering and automatic L0 tiling and applies only to that operation. This
-requires PTOAS v0.72 or newer and its PTO/EmitC path; it does not enable VPTO
+requires PTOAS v0.74 or newer and its PTO/EmitC path; it does not enable VPTO
 lowering. Other input dtypes, non-2D operands, and Ascend910 are rejected.
 The Torch reference generator rounds both multiplicands using the requested
 mode for Tensor, Tile, and Buffer IR; bias and accumulator values stay FP32.

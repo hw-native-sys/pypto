@@ -161,6 +161,7 @@ def test_public_recipes_preserve_explicit_destinations_through_binary_artifacts(
         )
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("ascend_backend", _BACKENDS, indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("high_precision", [False, True])
@@ -176,6 +177,8 @@ def test_native_toolchain_accepts_the_actual_lowered_recipe_pipeline(
     level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
     _run_ptoas(str(source), str(output), [f"--pto-level={level}", f"--pto-arch={arch}"])
     assert output.is_file()
+    # The renamed PTOAS enum must preserve the existing EmitC precision ABI.
+    assert ("pto::DivAlgorithm::HIGH_PRECISION" in output.read_text()) == high_precision
 
 
 _SCALAR_NATIVE = ("tadds", "tsubs", "tmuls", "tdivs", "tmaxs", "tmins", "tlrelu", "texpands")

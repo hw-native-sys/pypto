@@ -90,7 +90,7 @@ PyPTO keeps the carrier ABI above and expands the packed axis of Mat/Left/Right
 physical and valid dimensions when emitting PTO. GM and Vec descriptors retain
 carrier dimensions; allocation byte sizes are unchanged. Executable generation
 probes the selected assembler's logical operand, accumulator, and scale geometry
-before enabling native FP4 MX. Use the released v0.72 or a compatible newer/patched
+before enabling native FP4 MX. Use the released v0.74 or a compatible newer/patched
 build via `PTOAS_ROOT`; older development builds with carrier-based Cube semantics
 are incompatible. IR-only generation (`skip_ptoas=True`) remains available.
 

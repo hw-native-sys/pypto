@@ -2,6 +2,21 @@
 
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
+PyPTO 要求 PTOAS v0.74 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `c1c234667` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `90a37965`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
+
+[LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) 保留 MX 的逻辑二维形状、步幅和偏移。PTOAS 根据 `mx_a_zz` / `mx_b_nn` 构造打包后的物理描述符；不能将这些视图重新标记为 ND。
+
+A2/A3 余数操作的 scratch 类型必须与输入相同，且不能与输入重叠。物理范围与有效范围均须满足：
+
+| 操作 | 最小行数 | 最小列数 |
+| ---- | -------- | -------- |
+| TREM | 2（PTOAS 要求） | `S + 8*ceil(S/256) + 8` |
+| TREMS | 1 | `S + 8*ceil(S/256) + 8` |
+
+`S` 是按 8 个元素对齐的源行跨度。FP32 高精度 TREM 要求的列数是该值与 `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)` 的较大者，其中 `C = max(valid_cols // 64, 1)`；有效列数动态变化时，用物理宽度作为上界。
+
+ISA 将 INT32 输入留在 FP32 表示；代码生成在后续使用前恢复 TREM 的两个输入和 TREMS 的被除数。A2/A3 的 INT32 TREM 拒绝输入重叠，因为 ISA 会在计算结果前重复转换同一存储。
+
 ## 设计原则：严格的 1-to-1 映射
 
 代码生成必须是从 IR 到生成代码的**严格 1-to-1 转换**。每个 IR 节点直接映射到对应的输出代码结构——代码生成层不应执行优化、分析或间接转换。
