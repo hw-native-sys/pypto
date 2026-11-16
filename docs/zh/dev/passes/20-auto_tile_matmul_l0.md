@@ -29,7 +29,27 @@ PYPTO 与 DSA_RP 禁用自动 L0C 双缓冲，包括旧版
 
 **失效属性 (Invalidated)**：无。
 
-**何时使用**：一律在默认 tile 阶段流水线中运行。如果没有需要切分或折叠 cast 的 Mat-resident matmul，本 pass 是 no-op。
+**何时使用**：一律在默认 tile 阶段流水线中运行。如果没有需要切分、折叠 cast 或共享初始化/累加分支的 Mat-resident matmul，本 pass 是 no-op。
+
+## PTOAS planner 路径共享初始化/累加分支
+
+K 分块前，PTOAS 路径识别以
+`if cond: next = tile.matmul(a, b)` / `else: next = tile.matmul_acc(acc, a, b)`
+结尾的流水线归约，将其改写为
+`tile.matmul_acc(acc, a, b, init_cond=cond)`；分支顺序相反时使用 `not cond`。
+已有 K 分块逻辑只在第一个子块执行初始化，后续子块按原顺序累加。
+这样只生成一组共享的 Mat→L0 提取操作，避免 PTOAS 为互斥分支重复分配
+缓冲复用事件（PTOAS issue #1727）。
+
+匹配要求：循环只有一个累加器，由私有且仅使用一次的 `tile.create` 初始化；
+分支只有一个结果，直接作为该流水线的 yield；矩阵操作数与调用元数据相同；
+Mat 操作数是静态二维类型，输出可放入 L0C。两个分支都只能包含矩阵操作和 yield。
+存在存活别名、显式累加器 MemRef、布局或元数据不一致、已有初始化谓词、
+额外副作用或其他控制流结构时，保留原有 lowering。
+内存空间推导前允许累加器尚未标注空间，其他类型字段必须一致。
+
+PYPTO 与 DSA_RP 保持原有调度。这项改写不引入跨迭代预取，也不改变轮转缓冲。
+全部同步仍由 PTOAS 插入；PyPTO 不删除 barrier，也不分配事件 ID。
 
 ## API
 

@@ -5657,6 +5657,267 @@ class Before:
     assert all([dim.value for dim in var.type.shape] == [M, 256] for var in owners)
 
 
+class TestSharedMatmulBranches:
+    """Canonical init/acc branches share extraction only with a private accumulator."""
+
+    @pytest.mark.parametrize(
+        "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
+    )
+    def test_shared_operands_use_existing_init_predicate(self, planner):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 1536], pl.BF16],
+                b: pl.Tensor[[1536, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                init = pl.tile.create([16, 128], dtype=pl.FP32)
+                for i, (acc,) in pl.pipeline(8, stage=2, init_values=(init,)):
+                    lhs = pl.tile.load(a, [0, i * 192], [16, 192], target_memory=pl.Mem.Mat)
+                    rhs = pl.tile.load(b, [i * 192, 0], [192, 128], target_memory=pl.Mem.Mat)
+                    if i == 0:
+                        value = pl.tile.matmul(lhs, rhs)
+                    else:
+                        value = pl.tile.matmul_acc(acc, lhs, rhs)
+                    result = pl.yield_(value)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 1536], pl.BF16],
+                b: pl.Tensor[[1536, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                init = pl.tile.create([16, 128], dtype=pl.FP32)
+                for i, (acc,) in pl.pipeline(8, stage=2, init_values=(init,)):
+                    lhs = pl.tile.load(a, [0, i * 192], [16, 192], target_memory=pl.Mem.Mat)
+                    rhs = pl.tile.load(b, [i * 192, 0], [192, 128], target_memory=pl.Mem.Mat)
+                    value = pl.tile.matmul_acc(acc, lhs, rhs, init_cond=(i == 0))
+                    result = pl.yield_(value)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=planner):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+            expected = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Expected))
+        if planner == passes.MemoryPlanner.PTOAS:
+            ir.assert_structural_equal(after, expected)
+        else:
+            # Other planners keep their existing branch/unroll scheduling.
+            assert "if " in after.as_python()
+
+    def test_reverse_init_branch(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat], b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat]
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    if i != 0:
+                        value = pl.tile.matmul_acc(acc, a, b)
+                    else:
+                        value = pl.tile.matmul(a, b)
+                    result = pl.yield_(value)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat], b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat]
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    value = pl.tile.matmul_acc(acc, a, b, init_cond=not (i != 0))
+                    result = pl.yield_(value)
+                return result
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+            expected = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Expected))
+        ir.assert_structural_equal(after, expected)
+
+    @pytest.mark.parametrize("else_phase", [pl.AccPhase.Unspecified, pl.AccPhase.Partial])
+    def test_different_call_metadata_retains_branch(self, else_phase):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat], b: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat]
+            ) -> pl.Tile[[16, 32], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 32], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    if i == 0:
+                        value = pl.tile.matmul(a, b, acc_phase=pl.AccPhase.Unspecified)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, b, acc_phase=else_phase)
+                    result = pl.yield_(value)
+                return result
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+        assert ("if " in after.as_python()) == (else_phase != pl.AccPhase.Unspecified)
+
+    def test_different_operand_retains_branch(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat],
+                b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat],
+                other: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    if i == 0:
+                        value = pl.tile.matmul(a, b)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, other)
+                    result = pl.yield_(value)
+                return result
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+        assert "if " in after.as_python()
+
+    @pytest.mark.parametrize("read_initial", [False, True])
+    def test_live_accumulator_or_initializer_retains_branch(self, read_initial):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat],
+                b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    if i == 0:
+                        value = pl.tile.matmul(a, b)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, b)
+                    # Both captures are live after the init arm. Sharing the
+                    # accumulator would overwrite a value this store observes.
+                    if read_initial:
+                        out = pl.tile.store(init, [0, 0], out)
+                    else:
+                        out = pl.tile.store(acc, [0, 0], out)
+                    result = pl.yield_(value)
+                return result
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+        assert "if " in after.as_python()
+
+    def test_branch_side_effect_retained(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat],
+                b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    if i == 0:
+                        value = pl.tile.matmul(a, b)
+                        out = pl.tile.store(value, [0, 0], out)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, b)
+                    result = pl.yield_(value)
+                return result
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+        assert "if " in after.as_python()
+
+    def test_explicit_accumulator_storage_retains_branch(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat], b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat]
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init: pl.Tile[[16, 16], pl.FP32, pl.MemRef("acc_storage"), pl.Mem.Acc] = pl.tile.create(
+                    [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    if i == 0:
+                        value = pl.tile.matmul(a, b)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, b)
+                    result = pl.yield_(value)
+                return result
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+        assert "if " in after.as_python()
+
+    def test_accumulator_capture_before_tail_branch_is_not_shared(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat],
+                b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    # EvalStmt keeps the loop at one iter_arg: the rejection
+                    # must come from the extra accumulator read, not loop shape.
+                    pl.tile.store(acc, [0, 0], out)
+                    if i == 0:
+                        value = pl.tile.matmul(a, b)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, b)
+                    result = pl.yield_(value)
+                return result
+
+        before = passes.convert_to_ssa()(Before)
+        func = next(iter(before.functions.values()))
+        assert isinstance(func.body, ir.SeqStmts)
+        loop = func.body.stmts[1]
+        assert isinstance(loop, ir.ForStmt)
+        assert len(loop.iter_args) == 1
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(before)
+        assert "if " in after.as_python()
+
+    def test_already_predicated_accumulation_retains_branch(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat], b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat]
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    if i == 0:
+                        value = pl.tile.matmul(a, b)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, b, init_cond=(i == 2))
+                    result = pl.yield_(value)
+                return result
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(passes.convert_to_ssa()(Before))
+        assert "if " in after.as_python()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

@@ -182,5 +182,52 @@ def test_retired_scratch_permits_larger_tiles_with_ptoas(tmp_path, rows):
     assert "pto.subview" in pto, "the first phase must retain its software slots"
 
 
+@pytest.mark.parametrize("trips", [1, 3, 8, 32])
+@pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.parametrize("backend", [BackendType.Ascend910, BackendType.Ascend950])
+def test_ptoas_matmul_branch_shares_extracts(tmp_path, trips, buffer_ir, backend):
+    """Branch-specific reuse groups used to exhaust the event pool (#1727)."""
+    total_k = 192 * trips
+
+    @pl.jit
+    def kernel(
+        a: pl.Tensor[[16, total_k], pl.BF16],
+        b: pl.Tensor[[total_k, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            acc = pl.create_tensor([16, 128], dtype=pl.FP32)
+            for i in pl.pipeline(trips, stage=2):
+                lhs = a[:, i * 192 : (i + 1) * 192]
+                rhs = b[i * 192 : (i + 1) * 192, :]
+                if i == 0:
+                    acc = pl.matmul(lhs, rhs, out_dtype=pl.FP32)
+                else:
+                    acc = pl.matmul_acc(acc, lhs, rhs)
+            out = pl.assemble(out, acc, [0, 0])
+        return out
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=buffer_ir):
+        kernel.compile(
+            config=RunConfig(
+                backend_type=backend,
+                execution_mode=ExecutionMode.ONBOARD,
+                codegen_only=True,
+                save_kernels=True,
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+    pto, cpp = _read_single(tmp_path)
+    assert "pto.alloc_multi_tile" in pto and "pto.multi_tile_get" in pto
+    assert pto.count("pto.textract") == 4
+    # PTOAS still owns every dependency. Only its normal completion barrier
+    # remains; no barrier is stripped by PyPTO or by this test.
+    assert cpp.count("pipe_barrier(PIPE_ALL)") == 1
+    # Both subtiles retain distinct readiness points, allowing extraction of
+    # the second subtile to overlap the first matrix instruction.
+    assert "set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0)" in cpp
+    assert "set_flag(PIPE_MTE1, PIPE_M, EVENT_ID1)" in cpp
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
