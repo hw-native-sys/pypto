@@ -136,6 +136,82 @@ JIT 循环归纳变量 (induction variable) 在循环体中遮蔽之前的标量
 
 `pl.while_` 使用 `for` 语法，但其目标全部是循环携带值 (loop-carried values)，没有归纳变量。赋值形式的 `pl.yield_` 左值定义循环后的输出，包括零次迭代的结果。循环体中遮蔽进入前的别名和已折叠 shape；仅当名称不是该循环的输出时，才恢复外层绑定。JIT 和 parser 共用 yield 归属规则：嵌套条件分支或真实循环中的 yield 属于对应结构。运行时作用域（`pl.scope` / `pl.manual_scope`）和 `pl.split_aiv` 是透明包装。A5 回归验证条件分支的 yield 不会替换外层标量别名。
 
+## 路由索引压缩验收
+
+`tests/st/runtime/vpto/test_simt_collectives_onboard.py` 的 `test_simt_compaction`
+验证公开示例 [`04_simt_compaction.py`](../../../../examples/advanced/04_simt_compaction.py)。
+Ballot 和 shuffle scan 两种实现共用独立 CPU 参考，检查稳定索引、计数及排他排名。
+七种标志模式和九种有效长度 (0/1/17/31/32/33/47/63/64) 共计 126 项 A5 检查，
+覆盖空/满选择、bit 31、warp 独立性、负数标志及未写输出尾部。
+
+索引压缩和行更新示例在未传入 `--device` 时只编译，因此 CPU 示例遍历
+无需设备即可验证它们。传入 `--device` 指定已分配的 A5 设备后，才执行并
+检查输出；下述专用上板验收提供数值正确性覆盖。
+
+先不占卡准备产物，再通过本机队列回放：
+
+```bash
+python tests/st/runtime/vpto/test_simt_collectives_onboard.py \
+  --compaction-worker build/simt-compaction
+task-submit --device auto --max-time 600 --run \
+  'python tests/st/runtime/vpto/test_simt_collectives_onboard.py --compaction-worker build/simt-compaction "$TASK_DEVICE"'
+```
+
+两条命令均使用已配置的项目环境。在队列任务中设置
+`PYPTO_SIMT_COMPACTION_BENCH_ROUNDS=20`，即可为每种实现执行三轮预热、20 轮测量，
+将结果记录至 `result.json`。准备阶段将产物目录写入 `artifacts.json`，
+修改示例后需重新准备；回放通过 `CompiledProgram.from_dir` 使用这些产物。
+
+2026-11-16 在 A5、PTOAS v0.72、CANN 9.3.0 上的样本通过全部 126 项检查。
+设备总耗时 (device wall) 中位数分别为 ballot 63.03 µs、scan 63.47 µs，
+范围分别为 57.50–68.43 和 58.25–66.66 µs。范围重叠，不能据此判断性能优势。
+设备总耗时包含编排、launch 和 GM 访问，既不等于独立指令延迟，
+也不是与 Tile/SIMD 的比较；下方混合行更新验收提供独立的 Tile/SIMD 对照。
+
+## 混合行更新验收
+
+[`06_simt_row_update.py`](../../../../examples/advanced/06_simt_row_update.py)
+比较 Tile → SIMT → Tile 与 Tile 广播乘法 → 掩码 SIMD → Tile。
+两者均处理 `[8, 64]` FP32 数据和八个行系数，返回向量消费者处理后的更新 Tile，
+并保留旧 Tile 快照。系数行满足 32 字节对齐，不添加手工同步调用。
+
+`tests/st/runtime/vpto/test_simt_ir_onboard.py` 中的 `test_simt_integration`
+对两种行更新分别验证七种有效列数 (0/1/31/32/33/63/64) 和三组变化输入，
+并对已有 GM copy、UB gather 分别回放七种长度及三组输入，共 **84 项设备检查**。
+参考结果检查输出、未写尾部、快照和未修改的行更新输入。GM copy 保留非零偏移
+保护区和下游 Tile load；UB gather 保留二维寻址、向量生产者和旧 Tile 读取。
+
+```bash
+python tests/st/runtime/vpto/test_simt_ir_onboard.py \
+  --integration-worker build/simt-integration
+task-submit --device auto --max-time 600 --run \
+  'PYPTO_SIMT_INTEGRATION_BENCH_ROUNDS=30 python tests/st/runtime/vpto/test_simt_ir_onboard.py --integration-worker build/simt-integration "$TASK_DEVICE"'
+```
+
+两条命令使用已配置的项目环境。准备阶段不占卡，编译并装载全部四个程序；
+回放通过 `integration-artifacts.json` 重建产物。修改示例后需重新准备。
+`integration-result.json` 保留检查计数及全部测量样本。
+
+2026-11-16 的 A5 样本（PTOAS v0.72、CANN 9.3.0）通过全部 84 项检查。
+每种实现及长度经过三轮预热、30 轮测量：
+
+| 有效列数 | Tile/SIMT 中位数 (µs) | Tile/SIMD 中位数 (µs) |
+| -------- | --------------------: | --------------------: |
+| 0 | 61.58 | 62.73 |
+| 33 | 62.95 | 61.55 |
+| 64 | 61.13 | 62.32 |
+
+样本范围重叠（SIMT 57.03–69.95 µs，SIMD 56.70–85.18 µs），此小规模规则工作负载
+不能证明性能优势。每次调用包含一个 runtime task 和一次 SIMT/VF helper launch。
+生成的调用方执行三次 GM Tile load、两次 store：**8,224 逻辑字节**
+（两个 2,048 字节输入、32 字节系数行及两个 2,048 字节输出），另有保留旧版本所需
+的 2,048 字节 UB seed 复制。SIMD 路径还会物化广播乘法候选值。逻辑字节数不是
+实测总线流量，缓存行、对齐和 UB 访问会产生其他成本。
+
+即使 `valid=0` 也保留 Tile 生产者、消费者、快照和 helper launch，因此其耗时是
+综合开销对照，不是独立 launch 测量。设备总耗时包含编排与调度，不能通过相减这些
+有噪声的样本分离 launch、访存及算术延迟。独立归因需要更大工作负载或核内分析。
+
 ## 标量数学与转换验证
 
 显式标量接口降低为原生 `pto.absf/minf/maxf`、数学操作、`pto.prmt`、`pto.mulhi`

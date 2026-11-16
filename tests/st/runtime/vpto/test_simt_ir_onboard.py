@@ -24,7 +24,7 @@ from pypto import CacheConfig
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit._artifact_manifest import BuildKind
-from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
+from pypto.runtime import ChipWorker, ExecutionMode, RunConfig, benchmark
 from pypto.runtime._artifact_sources import read_kernel_config, validate_generated_sources
 from pypto.runtime.runtime_pin import check_runtime_pin
 
@@ -118,6 +118,88 @@ def compile_scope(directory: Path, case: str) -> CompiledProgram:
             dump_passes=True,
         ),
     )
+
+
+def compile_row_update(directory: Path, use_simt: bool) -> CompiledProgram:
+    example = runpy.run_path(str(ROOT / "examples/advanced/06_simt_row_update.py"))
+    return example["row_update"].compile(
+        USE_SIMT=use_simt,
+        config=RunConfig(
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            cache_config=CacheConfig(enabled=False),
+            save_kernels_dir=str(directory),
+            dump_passes=True,
+        ),
+    )
+
+
+def row_inputs(repeat: int):
+    src = torch.arange(512, dtype=torch.float32).reshape(8, 64) * 0.25 + repeat
+    scales = torch.tensor([[0.0, -2.0, 0.5, 4.0, -0.25, 1.0, 2.0, -4.0]]) + repeat * 0.25
+    seed = -src - 100.0 - repeat
+    return src, scales, seed, torch.zeros_like(src), torch.zeros_like(src)
+
+
+def check_row_update(args, valid: int):
+    src, scales, seed, dst, snapshot = args
+    expected = seed.clone()
+    expected[:, :valid] = ((src + 1.0) * scales.reshape(8, 1))[:, :valid]
+    torch.testing.assert_close(dst, expected + 2.0, rtol=0, atol=0)
+    torch.testing.assert_close(snapshot, seed, rtol=0, atol=0)
+
+
+def integration_acceptance(output: Path, device: int | None):
+    """Prepare CPU-side once, then replay the exact artifacts on a reserved card."""
+    artifact_file = output / "integration-artifacts.json"
+    artifacts = json.loads(artifact_file.read_text()) if device is not None else {}
+    checks = {}
+    timings = {}
+    for case in ("gm", "ub", "row_simt", "row_simd"):
+        if device is None:
+            compiled = (
+                compile_row_update(output / case, case == "row_simt")
+                if case.startswith("row_")
+                else compile_scope(output / case, case)
+            )
+        else:
+            compiled = CompiledProgram.from_dir(artifacts[case])
+        compiled.load()
+        if device is None:
+            artifacts[case] = str(compiled.output_dir.resolve())
+            continue
+        config = RunConfig(
+            backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, device_id=device
+        )
+        with ChipWorker(config=config, runtime=compiled.runtime_name) as worker:
+            if case in ("gm", "ub"):
+                checks[case] = _numerics(worker, compiled, case, "integration-replay")
+                continue
+            handle = worker.register(compiled)
+            checks[case] = 0
+            for repeat in range(3):
+                for valid in (0, 1, 31, 32, 33, 63, 64):
+                    args = row_inputs(repeat)
+                    inputs = [arg.clone() for arg in args[:3]]
+                    handle(*args, valid)
+                    check_row_update(args, valid)
+                    for actual, original in zip(args[:3], inputs):
+                        torch.testing.assert_close(actual, original, rtol=0, atol=0)
+                    checks[case] += 1
+        rounds = int(os.environ.get("PYPTO_SIMT_INTEGRATION_BENCH_ROUNDS", "0"))
+        if rounds:
+            timings[case] = {}
+            for valid in (0, 33, 64):
+                args = row_inputs(1)
+                stats = benchmark(compiled, (*args, valid), rounds=rounds, warmup=3, config=config)
+                check_row_update(args, valid)
+                timings[case][str(valid)] = {
+                    "device_wall_us": stats.samples,
+                    "median_us": stats.device_us_median,
+                }
+    if device is None:
+        artifact_file.write_text(json.dumps(artifacts))
+    (output / "integration-result.json").write_text(json.dumps({"checks": checks, "timings": timings}))
 
 
 def _variants(output: Path, case: str):
@@ -232,8 +314,26 @@ def test_simt_ir(case, onboard):
     assert report["checks"] == (63 if onboard else 0)
 
 
+@pytest.mark.parametrize("onboard", [False, True], ids=["build", "persistent"])
+def test_simt_integration(tmp_path, onboard):
+    gate = "PYPTO_RUN_VPTO_ONBOARD" if onboard else "PYPTO_RUN_VPTO_VF_VALIDATION"
+    if os.environ.get(gate) != "1":
+        pytest.skip(f"Opt in with {gate}=1")
+    support = runpy.run_path(str(FIXTURE / "test_validation.py"))
+    command = [sys.executable, Path(__file__).resolve(), "--integration-worker", tmp_path]
+    timeout = int(os.environ.get("PYPTO_VPTO_TIMEOUT", "600"))
+    support["run"](tmp_path, "integration-build", command, timeout=timeout)
+    if onboard:
+        command.append(os.environ["PYPTO_VPTO_DEVICE_ID"])
+        support["run"](tmp_path, "integration-onboard", command, timeout=timeout)
+    result = json.loads((tmp_path / "integration-result.json").read_text())
+    assert result["checks"] == ({"gm": 21, "ub": 21, "row_simt": 21, "row_simd": 21} if onboard else {})
+
+
 if __name__ == "__main__":
-    if len(sys.argv) in (4, 5) and sys.argv[1] == "--worker":
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--integration-worker":
+        integration_acceptance(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) == 4 else None)
+    elif len(sys.argv) in (4, 5) and sys.argv[1] == "--worker":
         _acceptance(Path(sys.argv[2]), sys.argv[3], int(sys.argv[4]) if len(sys.argv) == 5 else None)
     else:
         raise SystemExit(pytest.main([__file__, "-v", *sys.argv[1:]]))
