@@ -122,7 +122,7 @@ def _matmul_mx_golden(
     b_scale_codes: torch.Tensor,
 ) -> torch.Tensor:
     """Compute MX matmul from decoded values and logical per-group E8M0 scales."""
-    k_group = torch.arange(K) // MX_GROUP_SIZE
+    k_group = torch.arange(a.shape[1]) // MX_GROUP_SIZE
     a_scale = torch.pow(2.0, a_scale_codes.to(torch.float64) - 127)
     b_scale = torch.pow(2.0, b_scale_codes.to(torch.float64) - 127)
     a_scaled = a.to(torch.float64) * a_scale[:, k_group]
@@ -288,6 +288,79 @@ class TestMatmulMx:
         case = MatmulMxTestCase(lhs_dtype, rhs_dtype)
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
+
+    def test_matmul_mx_narrow_scale_windows(self, test_runner):
+        result = test_runner.run(NarrowScaleWindowTestCase())
+        assert result.passed, f"Test failed: {result.error}"
+
+
+@pl.jit.incore
+def mxfp8_narrow_scale_kernel(
+    a: pl.Tensor[[64, 256], pl.FP8E4M3FN],
+    a_scale: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[256, 64], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[8, 64], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
+    # Both scale windows span two SFractal block rows and only half of the
+    # parent's group dimension. Compact window strides cannot address them.
+    lhs = pl.load(a, [16, 64], [32, 128])
+    sa = pl.load(a_scale, [16, 2], [32, 4])
+    rhs = pl.load(b, [64, 16], [128, 32])
+    sb = pl.load(b_scale, [2, 16], [4, 32])
+    out = pl.store(pl.matmul_mx(lhs, sa, rhs, sb), [0, 0], out)
+    return out
+
+
+@pl.jit
+def mxfp8_narrow_scale(
+    a: pl.Tensor[[64, 256], pl.FP8E4M3FN],
+    a_scale: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[256, 64], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[8, 64], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
+    return mxfp8_narrow_scale_kernel(a, a_scale, b, b_scale, out)
+
+
+class NarrowScaleWindowTestCase(PTOTestCase):
+    """Catch wrong scale offsets, parent strides, and destination tile aliases."""
+
+    __test__ = False
+
+    def __init__(self):
+        super().__init__(RunConfig(rtol=0.0, atol=0.0), platform="a5")
+
+    def get_name(self) -> str:
+        return "matmul_mx_narrow_scale_windows"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        generator = torch.Generator().manual_seed(97)
+        a = MatmulMxTestCase._make_fp8_data((64, 256), generator)
+        b = MatmulMxTestCase._make_fp8_data((256, 64), generator)
+        # Different block rows and group pairs must have different scales so
+        # an incorrect source pointer cannot accidentally produce the golden.
+        sa_codes = (125 + (torch.arange(64)[:, None] // 16 + torch.arange(8)[None, :]) % 4).to(torch.uint8)
+        sb_codes = (125 + (torch.arange(8)[:, None] + torch.arange(64)[None, :] // 16) % 4).to(torch.uint8)
+        sa = _pack_a_scale(sa_codes).view(torch.float8_e8m0fnu)
+        sb = _pack_b_scale(sb_codes).view(torch.float8_e8m0fnu)
+        return [
+            TensorSpec("a", [64, 256], DataType.FP8E4M3FN, init_value=a),
+            TensorSpec("a_scale", [64, 8], DataType.FP8E8M0, init_value=sa),
+            TensorSpec("b", [256, 64], DataType.FP8E4M3FN, init_value=b),
+            TensorSpec("b_scale", [8, 64], DataType.FP8E8M0, init_value=sb),
+            TensorSpec("out", [32, 32], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return mxfp8_narrow_scale.specialize()
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a = tensors["a"].to(torch.float64)[16:48, 64:192]
+        b = tensors["b"].to(torch.float64)[64:192, 16:48]
+        sa = _unpack_a_scale(tensors["a_scale"].view(torch.uint8))[16:48, 2:6]
+        sb = _unpack_b_scale(tensors["b_scale"].view(torch.uint8))[2:6, 16:48]
+        tensors["out"][:] = _matmul_mx_golden(a, sa, b, sb)
 
 
 def _native_fp4_entry(lhs_dtype, rhs_dtype):

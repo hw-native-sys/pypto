@@ -17,6 +17,10 @@ A2/A3 remainder scratch must match the input dtype and be disjoint from its sour
 
 The ISA leaves INT32 sources as FP32: codegen restores both TREM inputs and the TREMS dividend before later consumers. A2/A3 INT32 TREM rejects overlapping sources because the ISA would convert the same storage twice before computing the result.
 
+For a sliced source, restoration reinterprets the root allocation as FP32 and
+then rebuilds the same subviews. This preserves the parent's physical pitch,
+offsets and active extents; dynamic validity is initialized on the FP32 alias.
+
 ## Design Principle: Strict 1-to-1 Mapping
 
 Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each IR node maps directly to its corresponding output construct — no optimization, analysis, or indirection transformation should occur in the codegen layer.

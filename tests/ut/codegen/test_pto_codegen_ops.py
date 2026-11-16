@@ -1733,6 +1733,72 @@ class TestRemainderFamilyCodegen:
         cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
         assert cpp.count("TCVT(") == len(restores)
 
+    @pytest.mark.ptoas_compile
+    def test_a2a3_rems_restores_strided_source(self, tmp_path):
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 32], pl.INT32],
+                out: pl.Tensor[[16, 16], pl.INT32],
+                src_after: pl.Tensor[[16, 16], pl.INT32],
+            ):
+                base = pl.load(src, [0, 0], [16, 32])
+                # Keep the parent's 32-column pitch through an aligned view.
+                window = pl.tile.slice(base, [16, 16], [0, 8])
+                tmp: pl.Tile[[1, 32], pl.INT32] = pl.tile.create(
+                    [1, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                )
+                result = pl.tile.rems(window, 3, tmp)
+                pl.store(result, [0, 0], out)
+                pl.store(window, [0, 0], src_after)
+
+        mlir = self._generate_mlir(Program)
+        assert "pto.subview" in mlir and "pto.textract" not in mlir
+        cpp = pto_backend._compile_pto_module(mlir, "rems_strided_source", str(tmp_path))
+        assert "TREMS(" in cpp and "TCVT(" in cpp
+        # Restoration keeps the parent's physical pitch and the window's validity.
+        assert re.search(r"Tile<TileType::Vec, float, 16, 32, BLayout::RowMajor, 16, 16,", cpp), cpp
+
+    @pytest.mark.ptoas_compile
+    def test_a2a3_rem_initializes_dynamic_source_restore_views(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 16], pl.INT32],
+                rhs: pl.Tensor[[16, 16], pl.INT32],
+                out: pl.Tensor[[16, 16], pl.INT32],
+                lhs_after: pl.Tensor[[16, 16], pl.INT32],
+                rhs_after: pl.Tensor[[16, 16], pl.INT32],
+                rows: pl.Scalar[pl.INDEX],
+            ):
+                left = pl.load(lhs, [0, 0], [16, 16], valid_shape=[rows, 16])
+                right = pl.load(rhs, [0, 0], [16, 16], valid_shape=[rows, 16])
+                tmp = pl.tile.create([2, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec)
+                result = pl.tile.rem(left, right, tmp)
+                pl.store(result, [0, 0], out)
+                pl.store(left, [0, 0], lhs_after)
+                pl.store(right, [0, 0], rhs_after)
+
+        mlir = self._generate_mlir(Program)
+        # A fresh dynamic TRESHAPE only aliases the address. Each conversion
+        # must initialize its FP32 read view to the original runtime extent.
+        for source in ("rem_src0_fp32", "rem_src1_fp32"):
+            initialized = next(line for line in mlir.splitlines() if f"pto.set_validshape %{source}," in line)
+            assert ", %arg5, %c16_index :" in initialized, mlir
+            assert "dtype=f32" in initialized and "v_row=?, v_col=?" in initialized, mlir
+            assert mlir.index(initialized) < mlir.index(f"pto.tcvt ins(%{source}")
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "rem_dynamic_restore", str(tmp_path))
+        assert "TREM(" in cpp and cpp.count("TCVT(") == 2
+
     @pytest.mark.parametrize("scalar", [-(2**24) - 1, 2**24 + 1])
     def test_a2a3_rejects_out_of_domain_int32_rems_constant(self, scalar):
         @pl.program

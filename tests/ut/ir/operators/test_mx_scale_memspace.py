@@ -490,10 +490,12 @@ class TestMxScaleMemSpaces:
         program = passes.legalize_mx_scale_tensor_views()(program)
         program = passes.materialize_tensor_strides()(program)
         pto = codegen.PTOCodegen().generate(program)
-        # The ordinary tensor-view path emits logical rank-2 descriptors; PTOAS
-        # translates their MX layout into physical packed addressing.
-        assert pto.count("pto.make_tensor_view") == 1
+        # Keep the logical root view and form a compact logical window view
+        # over the physically adjusted pointer used by the transfer.
+        assert pto.count("pto.make_tensor_view") == 2
         assert "pto.make_tensor_view %arg0" in pto
+        assert "pto.addptr %arg0" in pto
+        assert "pto.make_tensor_view %mx_scale_ptr" in pto
         assert "mx5d_view" not in pto
         # Preserve the logical [16, 2] MX_A_ZZ shape and contiguous logical strides.
         assert "shape = [%c16_index, %c2_index]" in pto

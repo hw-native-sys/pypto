@@ -8,14 +8,20 @@ PTO pipeline for PTOAS v0.74. It runs after `FlattenTileNdTo2D` and
 
 The pass retains logical `MX_A_ZZ [M, G]` and `MX_B_NN [G, N]` tensor shapes,
 load/store coordinates, and shaped ND/MX aliases. `MaterializeTensorStrides`
-emits logical contiguous strides `[cols, 1]`. Codegen transcribes these views
-directly; PTOAS constructs the physical SFractal descriptors.
+emits logical contiguous strides `[cols, 1]`. Codegen computes MX load pointers
+from the packed parent's physical SFractal geometry before emitting compact
+logical descriptors with zero-origin partitions. Full-group windows use one
+transfer; narrow group windows use separate 16-row A / 16-column B blocks so
+each pointer retains the parent's physical group pitch. Source windows are
+clipped to the parent bounds, including zero-transfer empty windows.
 
 Shape and offset checks are shared with the legacy pass below: static positive
 extents aligned to 16 rows / 2 groups, and provably non-negative aligned offsets.
 Distributed MX tensors and partial tensor valid shapes remain unsupported.
 A narrowed load valid shape does not shrink the DMA box: the pass uses the full
 aligned logical load window while preserving the tile result's active extents.
+Parent-bound clipping affects the transfer descriptor, not the result tile's
+logical validity.
 Direct stores from fractal-32 Vec scale tiles remain unsupported by PTOAS; a
 logical destination view does not make that source layout legal.
 

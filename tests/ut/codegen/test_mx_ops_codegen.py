@@ -9,6 +9,8 @@
 
 """Codegen tests for MXFP8, native FP4, and explicit FP4-to-FP8 legalization."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -254,7 +256,7 @@ class TestMxMatmulCodegen:
 
     @pytest.mark.ptoas_compile
     def test_mx_scale_load_accepts_provable_dynamic_offset(self, tmp_path):
-        """Provable MX offsets remain logical; PTOAS performs the physical addressing."""
+        """IR offsets stay logical; codegen bounds their packed SFractal addresses."""
 
         @pl.program
         class Program:
@@ -272,11 +274,14 @@ class TestMxMatmulCodegen:
         _assemble_mx(mlir, tmp_path)
         assert "cf.assert" not in mlir
         assert "arith.remui" not in mlir
-        assert "arith.floordivsi" not in mlir
+        assert "arith.floordivsi" in mlir
+        assert "arith.minsi" in mlir
+        assert "scf.if " in mlir
         assert "pto.tload" in mlir
         assert "{layout = #pto.layout<mx_a_zz>}" in mlir
         partitions = [line for line in mlir.splitlines() if "partition_view" in line]
-        assert any("sizes = [%c16_index, %c2_index]" in line for line in partitions)
+        assert partitions
+        assert all("offsets = [%c0_index, %c0_index]" in line for line in partitions)
 
     def test_mx_scale_load_preserves_layout_with_a5_bypass(self):
         """A5 NOT_ALLOC_KEEP keeps the MX layout and selects an ISA hint without an offset."""
@@ -467,7 +472,8 @@ class TestMxMatmulCodegen:
         mx_views = [
             line for line in mlir.splitlines() if "pto.make_tensor_view" in line and "#pto.layout<mx_" in line
         ]
-        assert len(mx_views) == 2
+        # Both authored aliases and both bounded transfer views stay logical.
+        assert len(mx_views) == 4
         assert all(line.count("?") == 2 for line in mx_views)
         assert any("#pto.layout<mx_a_zz>" in line for line in mx_views)
         assert any("#pto.layout<mx_b_nn>" in line for line in mx_views)
@@ -598,7 +604,7 @@ class TestMxMatmulCodegen:
             assert cpp.count("TMATMUL_MX(") == 2
 
     @pytest.mark.ptoas_compile
-    def test_mx_view_preserves_aligned_logical_offsets(self, tmp_path):
+    def test_mx_logical_views_use_physical_pointer_offsets(self, tmp_path):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
@@ -627,12 +633,115 @@ class TestMxMatmulCodegen:
                 pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
-        _assemble_mx(mlir, tmp_path)
-        partitions = [
-            line for line in mlir.splitlines() if "partition_view" in line and "!pto.f8E8M0" in line
+        scale_partitions = [
+            line for line in mlir.splitlines() if "partition_view" in line and "f8E8M0" in line
         ]
-        assert any("offsets = [%c16_index, %c2_index]" in line for line in partitions)
-        assert any("offsets = [%c2_index, %c0_index]" in line for line in partitions)
+        assert scale_partitions
+        assert all("offsets = [%c0_index, %c0_index]" in line for line in scale_partitions)
+        assert "pto.addptr" in mlir
+        if find_ptoas_binary() is not None:
+            cpp = pto_backend._compile_pto_module(mlir, "mx_offset", str(tmp_path))
+            # A starts at block-row 1 / group-pair 1: 64 + 32 bytes.
+            # B starts at group-pair 1: 32 bytes, with two column blocks.
+            for offset in (96, 32):
+                assert re.search(rf"\b\w+ = {offset};", cpp), cpp
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_mx_narrow_windows_preserve_parent_stride(self, tmp_path, planner):
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                sb: pl.Tensor[[8, 64], pl.FP8E8M0, pl.MX_B_NN],
+            ):
+                _a = pl.load(sa, [16, 2], [32, 4], target_memory=pl.Mem.Mat)
+                _b = pl.load(sb, [2, 16], [4, 32], target_memory=pl.Mem.Mat)
+
+        reset_for_testing()
+        set_backend_type(BackendType.Ascend950)
+        with passes.PassContext([], memory_planner=planner):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
+        mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+        views = [line for line in mlir.splitlines() if "pto.make_tensor_view %mx_scale_ptr" in line]
+        assert len(views) == 4
+        assert all("!pto.tensor_view<?x?x!pto.f8E8M0>" in line for line in views)
+        cpp = pto_backend._compile_pto_module(mlir, "mx_narrow", str(tmp_path), planner)
+        # The two windows share physical source offsets, but their parent
+        # block pitch is 128 bytes while their compact destination pitch is 64.
+        # An ordinary logical partition would start at 130 / 144 instead.
+        for offset in (160, 288):
+            names = re.findall(rf"\b(\w+) = {offset};", cpp)
+            assert names and any(f"+ {name}" in cpp for name in names), cpp
+        assert cpp.count("TLOAD(") == 4
+
+    @pytest.mark.ptoas_compile
+    def test_mx_full_group_windows_keep_one_transfer_per_operand(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                sb: pl.Tensor[[8, 64], pl.FP8E8M0, pl.MX_B_NN],
+            ):
+                _a = pl.load(sa, [16, 0], [32, 8], target_memory=pl.Mem.Mat)
+                _b = pl.load(sb, [0, 16], [8, 32], target_memory=pl.Mem.Mat)
+
+        mlir = _emit_incore_mlir(Program)
+        # All groups form one contiguous packed interval across block rows.
+        # Correcting narrow windows must preserve the common one-DMA path.
+        assert mlir.count("pto.tload") == 2
+        assert "pto.subview" not in mlir
+        cpp = _assemble_mx(mlir, tmp_path)
+        assert re.search(r"\b\w+ = 128;", cpp), cpp
+        assert cpp.count("TLOAD(") == 2
+
+    @pytest.mark.ptoas_compile
+    def test_mx_compact_views_clip_parent_tails(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                sb: pl.Tensor[[8, 64], pl.FP8E8M0, pl.MX_B_NN],
+            ):
+                _a = pl.load(sa, [48, 6], [32, 4], valid_shape=[16, 2], target_memory=pl.Mem.Mat)
+                _b = pl.load(sb, [6, 48], [4, 32], valid_shape=[2, 16], target_memory=pl.Mem.Mat)
+
+        mlir = _emit_incore_mlir(Program)
+        assert mlir.count("pto.tload") == 2
+        views = [line for line in mlir.splitlines() if "pto.make_tensor_view %mx_scale_ptr" in line]
+        assert len(views) == 2
+        assert any("shape = [%c16_index, %c2_index]" in line for line in views)
+        assert any("shape = [%c2_index, %c16_index]" in line for line in views)
+        if find_ptoas_binary() is not None:
+            cpp = pto_backend._compile_pto_module(mlir, "mx_tail", str(tmp_path))
+            assert re.search(r"\b\w+ = 480;", cpp), cpp
+            assert cpp.count("TLOAD(") == 2
+
+    @pytest.mark.ptoas_compile
+    def test_mx_empty_source_window_emits_no_descriptor(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ]):
+                _ = pl.load(sa, [64, 0], [16, 2], target_memory=pl.Mem.Mat, clamp=True)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "pto.tload" not in mlir
+        # The eager logical parameter view is harmless; no transfer descriptor
+        # or out-of-bounds pointer may be materialized for this empty window.
+        assert "pto.make_tensor_view %mx_scale_ptr" not in mlir
+        assert "pto.addptr" not in mlir
+        if find_ptoas_binary() is not None:
+            pto_backend._compile_pto_module(mlir, "mx_empty", str(tmp_path))
 
     def test_matmul_mx_bias_emits_pto_op(self):
         @pl.program

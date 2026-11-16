@@ -8,12 +8,16 @@
 
 该 pass 保留 `MX_A_ZZ [M, G]` 和 `MX_B_NN [G, N]` 的逻辑形状、
 load/store 坐标及带形状的 ND/MX 别名。`MaterializeTensorStrides` 生成
-逻辑连续 stride `[cols, 1]`；代码生成直接转写视图，由 PTOAS 构造物理 SFractal 描述符。
+逻辑连续 stride `[cols, 1]`。代码生成先根据父张量的物理 SFractal 几何计算
+MX load 指针，再生成紧凑逻辑描述符和从零开始的 partition。完整 group 窗口
+使用一次传输；窄 group 窗口按 A 的 16 行 / B 的 16 列拆分，使各块指针保留
+父张量的物理 group 跨度。源窗口按父张量边界裁剪，空窗口不传输。
 
 形状和偏移检查与下述旧版 pass 共用：静态正数维度按 16 行 / 2 组对齐，
 偏移须可证明非负且对齐。仍不支持分布式 MX 及部分 tensor valid shape。
 缩小 load 的 valid shape 不会缩小 DMA 窗口：pass 使用完整对齐的逻辑加载范围，
-同时保留结果 tile 的有效范围。PTOAS 仍不支持从 fractal-32 Vec scale tile
+同时保留结果 tile 的有效范围。父张量边界裁剪仅影响传输描述符，不改变结果
+tile 的逻辑有效范围。PTOAS 仍不支持从 fractal-32 Vec scale tile
 直接 store；逻辑目标视图不会使这种源布局变为合法。
 
 函数标记 `mx_tensor_views_legalized` 保证重复执行幂等。公开工厂函数为

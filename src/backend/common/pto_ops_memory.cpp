@@ -14,6 +14,7 @@
  * @brief PTO codegen registration for memory / tensor / array / SPMD ops.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -119,6 +120,233 @@ static std::optional<std::string> GetPtoL2Hint(const CallPtr& op, codegen::PTOCo
   INTERNAL_UNREACHABLE_SPAN(op->span_) << "Internal error: invalid cache policy";
 }
 
+// PTOAS v0.74 takes logical rank-2 MX descriptors. A group window of the
+// canonical packed tensor is contiguous within each 16-row (A) / 16-column
+// (B) SFractal, but not across successive SFractals unless it covers all groups.
+// Address the packed GM bytes first, then give each contiguous window its own
+// zero-origin descriptor. This keeps physical parent strides in the address
+// calculation instead of asking a logical partition to reconstruct them.
+static std::string MakeMxScaleLoadCodegenPTO(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                             const std::optional<std::string>& l2_hint) {
+  auto tensor = AsVarLike(op->args_[0]);
+  auto tensor_type = AsTensorTypeLike(tensor->GetType());
+  auto offsets = As<ir::MakeTuple>(op->args_[1]);
+  auto window = As<ir::MakeTuple>(op->args_[2]);
+  auto tile_type = As<ir::TileType>(op->GetType());
+  INTERNAL_CHECK_SPAN(tensor_type && offsets && window && tile_type, op->span_)
+      << "Internal error: MX scale load requires canonical tensor, window, and tile types";
+  INTERNAL_CHECK_SPAN(tensor_type->tensor_view_.has_value(), op->span_)
+      << "Internal error: MX scale load requires a tensor view";
+  const auto& tensor_view = tensor_type->tensor_view_.value();
+  INTERNAL_CHECK_SPAN(ir::tensor_view_semantics::IsLogicalMxShape(tensor_type->shape_, tensor_view.layout) &&
+                          offsets->elements_.size() == 2 && window->elements_.size() == 2,
+                      op->span_)
+      << "Internal error: MX scale load requires legalized logical rank-2 coordinates";
+  const bool is_a = tensor_view.layout == ir::TensorLayout::MX_A_ZZ;
+  const size_t block_axis = is_a ? 0 : 1;
+  const size_t group_axis = is_a ? 1 : 0;
+  auto constant = [&](const ExprPtr& expr) {
+    auto value = As<ir::ConstInt>(expr);
+    INTERNAL_CHECK_SPAN(value && value->value_ > 0, op->span_)
+        << "Internal error: MX scale shapes must have positive static extents";
+    return value->value_;
+  };
+  const int64_t parent_blocks = constant(tensor_type->shape_[block_axis]) / 16;
+  const int64_t parent_groups = constant(tensor_type->shape_[group_axis]) / 2;
+  const int64_t blocks = constant(window->elements_[block_axis]) / 16;
+  const int64_t groups = constant(window->elements_[group_axis]) / 2;
+  const int64_t group_width = groups * 2;
+  const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+  const auto one = codegen.GetOrEmitConstant(int64_t{1}, DataType::INDEX);
+  const auto two = codegen.GetOrEmitConstant(int64_t{2}, DataType::INDEX);
+  const auto sixteen = codegen.GetOrEmitConstant(int64_t{16}, DataType::INDEX);
+  auto binary = [&](const std::string& operation, const std::string& lhs, const std::string& rhs,
+                    const std::string& hint) {
+    auto result = codegen.NewNamedTemp(hint);
+    codegen.Emit(result + " = " + operation + " " + lhs + ", " + rhs + " : index");
+    return result;
+  };
+  auto compare = [&](const std::string& predicate, const std::string& lhs, const std::string& rhs) {
+    auto result = codegen.NewNamedTemp("mx_in_bounds");
+    codegen.Emit(result + " = arith.cmpi " + predicate + ", " + lhs + ", " + rhs + " : index");
+    return result;
+  };
+  // LegalizeMxScaleTensorViews proved alignment and non-negativity while
+  // retaining logical coordinates. Convert them to packed 16x2 box indices;
+  // ordinary rank-2 partition offsets would apply row-major byte addressing.
+  const auto logical_offsets = GetIndexOffsetCodes(offsets->elements_, codegen);
+  const auto block_value = As<ir::ConstInt>(offsets->elements_[block_axis]);
+  const auto group_value = As<ir::ConstInt>(offsets->elements_[group_axis]);
+  const std::optional<int64_t> block_offset =
+      block_value ? std::make_optional(block_value->value_ / 16) : std::nullopt;
+  const std::optional<int64_t> group_offset =
+      group_value ? std::make_optional(group_value->value_ / 2) : std::nullopt;
+  const auto block_code = block_offset
+                              ? codegen.GetOrEmitConstant(*block_offset, DataType::INDEX)
+                              : binary("arith.floordivsi", logical_offsets[block_axis], sixteen,
+                                       "mx_block_offset");
+  const auto group_code = group_offset
+                              ? codegen.GetOrEmitConstant(*group_offset, DataType::INDEX)
+                              : binary("arith.floordivsi", logical_offsets[group_axis], two,
+                                       "mx_group_offset");
+  std::string available_groups;
+  int64_t static_groups = -1;
+  if (group_offset) {
+    static_groups =
+        std::min(groups, std::max(int64_t{0}, parent_groups - std::max(int64_t{0}, *group_offset)));
+    if (static_groups == 0) return "";
+    available_groups = codegen.GetOrEmitConstant(static_groups, DataType::INDEX);
+  } else {
+    auto remaining = binary("arith.subi", codegen.GetOrEmitConstant(parent_groups, DataType::INDEX),
+                            group_code, "mx_remaining_groups");
+    auto non_negative = binary("arith.maxsi", remaining, zero, "mx_non_negative_groups");
+    available_groups = binary("arith.minsi", non_negative, codegen.GetOrEmitConstant(groups, DataType::INDEX),
+                              "mx_available_groups");
+  }
+  const auto columns = static_groups >= 0 ? codegen.GetOrEmitConstant(static_groups * 2, DataType::INDEX)
+                                          : binary("arith.muli", available_groups, two, "mx_scale_columns");
+  const std::string column_dim = static_groups >= 0 ? std::to_string(static_groups * 2) : "?";
+  const auto dtype = codegen.GetTypeString(tensor_type->dtype_);
+  const auto pointer_type = "!pto.ptr<" + dtype + ", gm>";
+  const auto view_type = "!pto.tensor_view<?x?x" + dtype + ">";
+  const std::string layout = is_a ? "mx_a_zz" : "mx_b_nn";
+  auto tile_info = codegen::ExtractTileTypeInfo(*tile_type, dtype);
+  auto compact_tile_type = [&](int64_t rows, int64_t cols, bool row_major) {
+    return codegen::FormatTileBufTypeString(
+        "mat", dtype, rows, cols, row_major ? ir::TileLayout::row_major : ir::TileLayout::col_major,
+        row_major ? ir::TileLayout::row_major : ir::TileLayout::col_major, tile_info.fractal, tile_info.pad,
+        tile_info.compact, rows, cols, false, false);
+  };
+  const auto destination = codegen.GetCurrentResultTarget();
+  const auto destination_type = codegen.GetCurrentResultTileBufTypeString();
+  auto emit_pointer = [&](const std::string& source_block) {
+    // Packed [1, blocks, groups, 16, 2] storage has a parent block pitch of
+    // groups*32 bytes and a group-pair pitch of 32 bytes. The partition's
+    // narrower group extent must never replace that parent block pitch.
+    auto block_bytes = binary("arith.muli", source_block,
+                              codegen.GetOrEmitConstant(parent_groups * 32, DataType::INDEX),
+                              "mx_block_bytes");
+    auto group_bytes = binary("arith.muli", group_code,
+                              codegen.GetOrEmitConstant(int64_t{32}, DataType::INDEX), "mx_group_bytes");
+    auto flat_offset = binary("arith.addi", block_bytes, group_bytes, "mx_byte_offset");
+    auto pointer = codegen.NewNamedTemp("mx_scale_ptr");
+    codegen.Emit(pointer + " = pto.addptr " + codegen.GetTensorBasePtr(tensor) + ", " + flat_offset + " : " +
+                 pointer_type + " -> " + pointer_type);
+    return pointer;
+  };
+  auto emit_transfer = [&](const std::string& pointer, const std::string& rows, const std::string& cols,
+                           const std::string& row_dim, const std::string& col_dim, const std::string& target,
+                           const std::string& target_type) {
+    auto view = codegen.NewNamedTemp("mx_scale_view");
+    codegen.Emit(view + " = pto.make_tensor_view " + pointer + ", shape = [" + rows + ", " + cols +
+                 "], strides = [" + cols + ", " + one + "] {layout = #pto.layout<" + layout +
+                 ">} : " + view_type);
+    auto partition_type = MakePartitionTensorViewType({row_dim, col_dim}, dtype);
+    auto partition = EmitPartitionViewPTO("mx_scale", view, view_type, partition_type, {zero, zero},
+                                          {rows, cols}, codegen);
+    std::string attributes = " {layout = #pto.layout<" + layout + ">";
+    if (l2_hint) attributes += ", l2_hint = #pto.load_l2_hint<" + *l2_hint + ">";
+    attributes += "}";
+    codegen.Emit("pto.tload ins(" + partition + " : " + partition_type + ") outs(" + target + " : " +
+                 target_type + ")" + attributes);
+  };
+  if (group_offset && *group_offset == 0 && groups == parent_groups) {
+    // Covering the entire group axis makes successive packed SFractals
+    // contiguous too. Keep this common case as one DMA, including a bounded
+    // row tail, instead of splitting an otherwise compact transfer.
+    int64_t static_blocks = -1;
+    std::string available_blocks;
+    if (block_offset) {
+      static_blocks =
+          std::min(blocks, std::max(int64_t{0}, parent_blocks - std::max(int64_t{0}, *block_offset)));
+      if (static_blocks == 0) return "";
+      available_blocks = codegen.GetOrEmitConstant(static_blocks, DataType::INDEX);
+    } else {
+      auto remaining = binary("arith.subi", codegen.GetOrEmitConstant(parent_blocks, DataType::INDEX),
+                              block_code, "mx_remaining_blocks");
+      auto non_negative = binary("arith.maxsi", remaining, zero, "mx_non_negative_blocks");
+      available_blocks = binary("arith.minsi", non_negative,
+                                codegen.GetOrEmitConstant(blocks, DataType::INDEX), "mx_available_blocks");
+      auto condition = compare("sgt", available_blocks, zero);
+      codegen.EmitStructural("scf.if " + condition + " {");
+      codegen.IncreaseIndent();
+    }
+    auto extent = static_blocks >= 0 ? codegen.GetOrEmitConstant(static_blocks * 16, DataType::INDEX)
+                                     : binary("arith.muli", available_blocks, sixteen, "mx_block_extent");
+    std::string extent_dim = static_blocks >= 0 ? std::to_string(static_blocks * 16) : "?";
+    auto pointer = emit_pointer(block_code);
+    emit_transfer(pointer, is_a ? extent : columns, is_a ? columns : extent, is_a ? extent_dim : column_dim,
+                  is_a ? column_dim : extent_dim, destination, destination_type);
+    if (!block_offset) {
+      codegen.DecreaseIndent();
+      codegen.EmitStructural("}");
+    }
+    return "";
+  }
+  std::string row_major_destination = destination;
+  std::string row_major_type = destination_type;
+  if (!is_a) {
+    // NN scale storage is byte-compatible with the transposed RR type. PTOAS
+    // supports this MX TRESHAPE alias; using it also expresses all subviews in
+    // the supported 16x2 boxed orientation without allocating extra storage.
+    row_major_type = compact_tile_type(blocks * 16, group_width, true);
+    row_major_destination = codegen.NewNamedTemp("mx_scale_rows");
+    codegen.Emit(row_major_destination + " = pto.treshape " + destination + " : " + destination_type +
+                 " -> " + row_major_type);
+  }
+  for (int64_t block = 0; block < blocks; ++block) {
+    if (block_offset && std::max(int64_t{0}, *block_offset) + block >= parent_blocks) continue;
+    auto source_block = block == 0
+                            ? block_code
+                            : binary("arith.addi", block_code,
+                                     codegen.GetOrEmitConstant(block, DataType::INDEX), "mx_source_block");
+    std::string condition;
+    if (!block_offset) {
+      condition = compare("slt", source_block, codegen.GetOrEmitConstant(parent_blocks, DataType::INDEX));
+    }
+    if (!group_offset) {
+      auto has_groups = compare("sgt", available_groups, zero);
+      if (condition.empty()) {
+        condition = has_groups;
+      } else {
+        auto combined = codegen.NewNamedTemp("mx_window_in_bounds");
+        codegen.Emit(combined + " = arith.andi " + condition + ", " + has_groups + " : i1");
+        condition = combined;
+      }
+    }
+    if (!condition.empty()) {
+      codegen.EmitStructural("scf.if " + condition + " {");
+      codegen.IncreaseIndent();
+    }
+    // Materialize only bounded pointers. Both the row-block pitch and the
+    // group offset use the original packed parent's strides, never those of
+    // the compact load descriptor.
+    auto pointer = emit_pointer(source_block);
+    const auto subview_type = compact_tile_type(16, group_width, true);
+    const auto subview = codegen.NewNamedTemp("mx_scale_block");
+    codegen.Emit(subview + " = pto.subview " + row_major_destination + "[" +
+                 codegen.GetOrEmitConstant(block * 16, DataType::INDEX) + ", " + zero + "] sizes [16, " +
+                 std::to_string(group_width) + "] : " + row_major_type + " -> " + subview_type);
+    auto load_target = subview;
+    auto load_type = subview_type;
+    if (!is_a) {
+      load_target = codegen.NewNamedTemp("mx_scale_column_block");
+      load_type = compact_tile_type(group_width, 16, false);
+      codegen.Emit(load_target + " = pto.treshape " + subview + " : " + subview_type + " -> " + load_type);
+    }
+    emit_transfer(pointer, is_a ? sixteen : columns, is_a ? columns : sixteen, is_a ? "16" : column_dim,
+                  is_a ? column_dim : "16", load_target, load_type);
+    if (!condition.empty()) {
+      codegen.DecreaseIndent();
+      codegen.EmitStructural("}");
+    }
+  }
+  // The physical aliases above use the complete aligned box. The original
+  // destination's logical valid shape remains unchanged for subsequent scale
+  // extraction and matmul.
+  return "";
+}
+
 // tile.load: emit pto.subview + pto.tload
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -167,31 +395,14 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
 
-  // PTOAS v0.74 owns MX packing. Both the source view and load window are
-  // logical rank-2; retaining the MX tag selects the physical scale layout.
-  std::string pto_layout;
-  if (tensor_type->tensor_view_.has_value()) {
-    if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ZZ) {
-      pto_layout = "mx_a_zz";
-    } else if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_B_NN) {
-      pto_layout = "mx_b_nn";
-    }
-    if (!pto_layout.empty()) {
-      INTERNAL_CHECK_SPAN(
-          ir::tensor_view_semantics::IsLogicalMxShape(tensor_type->shape_, tensor_type->tensor_view_->layout),
-          op->span_)
-          << "Internal error: MX tile.load reached codegen without a canonical logical rank-2 shape — "
-          << "use LegalizeMxScaleTensorViews for PTOAS v0.74";
-    }
+  if (tensor_type->tensor_view_ && ir::IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
+    return MakeMxScaleLoadCodegenPTO(op, codegen, l2_hint);
   }
-  const bool is_mx_load = !pto_layout.empty();
 
   // RFC #1300 P7: the IR's offsets / shapes / valid_shape are already in
   // canonical coordinates (matching the source TensorType's shape). There is
   // no implicit dn_swap here — earlier passes ensure all coordinate systems
-  // match before codegen. For MX, LegalizeMxScaleTensorViews sets args[3] to the
-  // fractal-aligned logical shapes window when logical valid_shape was
-  // narrowed, so partition sizes stay SFractal-safe.
+  // match before codegen. MX loads use bounded packed descriptors above.
   std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
   std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
   std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
@@ -209,9 +420,6 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::vector<std::string> attrs;
   if (l2_hint) {
     attrs.emplace_back("l2_hint = #pto.load_l2_hint<" + *l2_hint + ">");
-  }
-  if (is_mx_load) {
-    attrs.push_back("layout = #pto.layout<" + pto_layout + ">");
   }
   if (policy == ir::CachePolicy::kBypass && !l2_hint) {
     attrs.emplace_back("cache_policy = #pto.load_cache_policy<l2_bypass>");

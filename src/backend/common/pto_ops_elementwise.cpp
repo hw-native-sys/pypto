@@ -42,6 +42,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -464,6 +465,71 @@ static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::Ti
   return required;
 }
 
+// Restore through an FP32 view of the allocation before reproducing its source
+// slices. Reshaping a sliced handle directly loses the parent's physical pitch
+// when PTOAS resolves the subview and can produce a byte-size mismatch.
+static std::pair<std::string, std::string> MakeRemainderFp32SourceView(const ExprPtr& source,
+                                                                       codegen::PTOCodegen& codegen,
+                                                                       const std::string& prefix) {
+  auto tile_type = As<ir::TileType>(source->GetType());
+  INTERNAL_CHECK_SPAN(tile_type, source->span_)
+      << "Internal error: remainder source restoration requires a TileType";
+  using Window = codegen::PTOCodegen::SubviewMaterializationInfo;
+  std::vector<std::pair<const Window*, std::shared_ptr<const ir::TileType>>> windows;
+  std::string source_ssa = codegen.GetExprAsCode(source);
+  std::string source_type = codegen.GetExprTypeAnnotation(source);
+  while (const auto* window = codegen.GetSubviewMaterialization(source_ssa)) {
+    INTERNAL_CHECK_SPAN(window->source_rows > 0 && window->source_cols > 0, source->span_)
+        << "Internal error: remainder source subview requires static parent geometry";
+    windows.emplace_back(window, tile_type);
+    const std::vector<ExprPtr> parent_shape{ir::MakeIndexConst(window->source_rows),
+                                            ir::MakeIndexConst(window->source_cols)};
+    auto parent_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+    // Only the final alias is read by TCVT. Intermediate aliases can expose the
+    // complete physical box; the final subview restores the original validity.
+    parent_view.valid_shape = parent_shape;
+    tile_type = std::make_shared<ir::TileType>(parent_shape, tile_type->dtype_, std::nullopt, parent_view,
+                                               tile_type->memory_space_);
+    source_ssa = window->source_ssa;
+    source_type = window->source_type;
+  }
+  auto fp32_type = std::make_shared<ir::TileType>(tile_type->shape_, DataType::FP32, tile_type->memref_,
+                                                  tile_type->tile_view_, tile_type->memory_space_);
+  std::string fp32_view = codegen.EnsureTileView(source_ssa, source_type, fp32_type, prefix);
+  std::string fp32_view_type = codegen.GetViewTileBufTypeStringFromTileType(fp32_type);
+  auto valid_codes = [&](const std::shared_ptr<const ir::TileType>& type) {
+    std::vector<std::string> codes;
+    for (const auto& extent : ir::GetValidShape(type)) {
+      codes.push_back(pto_ops_detail::EmitIndexOperand(codegen, extent, "remainder source valid extent"));
+    }
+    return codes;
+  };
+  if (!pto_ops_detail::HasStaticValidShape(fp32_type)) {
+    // TRESHAPE aliases the address but does not initialize dynamic validity.
+    // Set it on this fresh FP32 handle without changing the INT32 descriptor.
+    const auto valid = valid_codes(fp32_type);
+    codegen.Emit("pto.set_validshape " + fp32_view + ", " + valid[0] + ", " + valid[1] + " : " +
+                 fp32_view_type);
+  }
+  for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
+    const auto& [window, child] = *it;
+    fp32_type = std::make_shared<ir::TileType>(child->shape_, DataType::FP32, child->memref_,
+                                               child->tile_view_, child->memory_space_);
+    const auto child_type = codegen.GetViewTileBufTypeStringFromTileType(fp32_type);
+    const auto child_view = codegen.NewNamedTemp(prefix + "_slice");
+    const auto valid = valid_codes(fp32_type);
+    codegen.Emit(child_view + " = pto.subview " + fp32_view + "[" + window->row_off_ssa + ", " +
+                 window->col_off_ssa + "] sizes [" + std::to_string(window->view_rows) + ", " +
+                 std::to_string(window->view_cols) + "] valid [" + valid[0] + ", " + valid[1] +
+                 "] : " + fp32_view_type + " -> " + child_type);
+    codegen.RegisterTileBufType(child_view, child_type, fp32_type);
+    codegen.RegisterTileViewName(child_view, fp32_view);
+    fp32_view = child_view;
+    fp32_view_type = child_type;
+  }
+  return {fp32_view, fp32_view_type};
+}
+
 static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_t arity,
                                            const char* precision_attr_kind, const CallPtr& op,
                                            codegen::CodegenBase& codegen_base) {
@@ -591,17 +657,14 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
       INTERNAL_CHECK_SPAN(source_memref, op->span_) << "Internal error: remainder source must carry a MemRef";
       INTERNAL_CHECK_SPAN(!ir::MemRef::MayAlias(source_memref, dst_memref), op->span_)
           << "Internal error: remainder result must not alias its sources";
-      const auto fp32_type =
-          std::make_shared<ir::TileType>(source_type->shape_, DataType::FP32, source_type->memref_,
-                                         source_type->tile_view_, source_type->memory_space_);
       const std::string prefix = "rem_src" + std::to_string(i);
-      const std::string fp32_view = EnsureTileViewSsa(op->args_[i], fp32_type, codegen, prefix + "_fp32");
+      const auto [fp32_view, fp32_view_type] =
+          MakeRemainderFp32SourceView(op->args_[i], codegen, prefix + "_fp32");
       const std::string int32_view = EnsureStaticViewTileSsa(op->args_[i], codegen, prefix + "_int32");
       const std::string satmode =
           ir::SaturationModeToPTOString(static_cast<int>(ir::EmittedSaturationModeFor(source_type->dtype_)));
       EmitInsOutsWithViewTypes(
-          codegen, "pto.tcvt", {{fp32_view, codegen.GetViewTileBufTypeStringFromTileType(fp32_type)}},
-          int32_view, source_type,
+          codegen, "pto.tcvt", {{fp32_view, fp32_view_type}}, int32_view, source_type,
           "{rmode = #pto<round_mode ROUND>, satmode = #pto<saturation_mode " + satmode + ">}");
     }
   }
