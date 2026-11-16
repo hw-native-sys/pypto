@@ -181,6 +181,21 @@ Use `PassContext([], enable_buffer_ir=False)` for the legacy path. JIT keys
 include the bool and a Buffer semantics version; nested dump/profiling contexts,
 precompile workers and debug recompilation preserve the effective value.
 
+## Shared native emission
+
+Tile and Buffer resolve operands separately, then share
+`pto_ops_detail::FormatInsOutsClause` for explicit SSA/type pairs and ordered
+outputs. Conversion/compare attributes go inside `ins`; `FormatPrecisionAttribute`
+places precision selectors after `outs`. Neither formatter discovers storage,
+constructs views, allocates scratch or changes operand types. Tile callbacks
+still resolve those decisions first; Buffer operands arrive already explicit.
+
+`GetPtoNativeOpSpec` supplies common elementwise, row-compute and transpose
+instruction names plus precision attributes to both paths. It is emission metadata, not a support registry:
+target, dtype, layout, aliasing and default-selection checks remain separate.
+Adding a native spelling does not enable a new Buffer form. Other operator
+families retain their specialized emitters.
+
 ## Runtime-valid default selection
 
 Runtime valid shapes are enabled for Vec load/store, `set_validshape` with an

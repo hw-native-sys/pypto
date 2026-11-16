@@ -35,12 +35,9 @@ ISA 将 INT32 输入留在 FP32 表示；代码生成在后续使用前恢复 TR
 
 ### 核心特性
 
-- **自动 MLIR 生成**: 将 PyPTO IR 转换为 PTO-ISA MLIR 方言
-- **结构化代码生成 (CodeGen)**: 按顺序输出常量、张量 (Tensor) 视图和分配
 - **隐式降级**: 从 `tile.load`/`tile.store` 自动生成 `pto.partition_view`
 - **基于 Tile 变量的分配**: 为每个 Tile 变量生成带显式 `addr` 的 `pto.alloc_tile` 操作
 - **类型 (Type) 感知转换**: 从 TileType 元数据推导 tile_buf/tensor_view 类型
-- **PTOAS 类型标注**: 为所有操作生成带类型的 `ins`/`outs` 子句
 
 ### 生成顺序
 
@@ -124,17 +121,7 @@ Mat 到 Left/Right 的 `buffer.copy` 发射为 `pto.tmov`。
 
 ### 共享原生发射
 
-Tile 与 Buffer 适配层分别解析操作数，再使用
-`pto_ops_detail::FormatInsOutsClause` 格式化显式 SSA/类型对。格式化器保留
-目的地顺序，把转换/比较属性放在 `ins` 内；`FormatPrecisionAttribute` 把
-精度选择属性放在 `outs` 后。两个格式化器都不查找存储、不构造视图、不分配
-scratch，也不改变操作数类型。仍需这些决策的 Tile callback 在调用格式化器
-之前完成处理；Buffer 路径接收的操作数已经显式化。
-
-`GetPtoNativeOpSpec` 向 Tile 注册和 Buffer 配方提供共用的逐元素、行计算和转置
-指令名，以及精度属性名。这是发射元数据，不是支持能力注册表：目标、dtype、布局、
-别名和默认选择条件仍由各路径检查。增加原生名称不会开放新的 Buffer 形态。
-其他算子族继续使用现有专用发射器。
+Tile 与 Buffer 共用[原生元数据和格式化器](../passes/58-lower_tile_to_buffer.md#共享原生发射)。
 
 ### 类结构
 

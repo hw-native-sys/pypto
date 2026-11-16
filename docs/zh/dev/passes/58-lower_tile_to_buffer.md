@@ -131,6 +131,20 @@ False:       所有 kernel                 => Tile
 用 `PassContext([], enable_buffer_ir=False)` 选择旧路径。JIT 缓存包含 bool 与 Buffer
 语义版本；嵌套 dump/profiling 上下文、预编译 worker 和调试重编译保持有效开关值。
 
+## 共享原生发射
+
+Tile 与 Buffer 适配层分别解析操作数，再使用
+`pto_ops_detail::FormatInsOutsClause` 格式化显式 SSA/类型对。格式化器保留
+目的地顺序，把转换/比较属性放在 `ins` 内；`FormatPrecisionAttribute` 把
+精度选择属性放在 `outs` 后。两个格式化器都不查找存储、不构造视图、不分配
+scratch，也不改变操作数类型。仍需这些决策的 Tile callback 在调用格式化器
+之前完成处理；Buffer 路径接收的操作数已经显式化。
+
+`GetPtoNativeOpSpec` 向 Tile 注册和 Buffer 配方提供共用的逐元素、行计算和转置
+指令名，以及精度属性名。这是发射元数据，不是支持能力注册表：目标、dtype、布局、
+别名和默认选择条件仍由各路径检查。增加原生名称不会开放新的 Buffer 形态。
+其他算子族继续使用现有专用发射器。
+
 ## 运行时 valid 的默认选择
 
 默认支持 Vec load/store、结果被赋值的 `set_validshape`（包括窗口），以及上表中

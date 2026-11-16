@@ -35,12 +35,9 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 
 ### Key Features
 
-- **Automatic MLIR Generation**: Converts PyPTO IR to PTO-ISA MLIR dialect
-- **Structured Code Generation**: Outputs constants, tensor views, allocations in order
 - **Implicit Lowering**: Automatically generates `pto.partition_view` from `tile.load`/`tile.store`
 - **MemRef-based Allocation**: Maps IR MemRef objects to `pto.alloc_tile` operations
 - **Type-aware Conversion**: Derives tile_buf/tensor_view types from TileType metadata
-- **PTOAS Type Annotations**: Emits typed `ins`/`outs` clauses for all operations
 
 ### Generation Order
 
@@ -145,18 +142,7 @@ destination as the first input, as PTOAS requires. `buffer.extract` renders as
 
 ### Shared native emission
 
-Tile and Buffer resolve operands separately, then share
-`pto_ops_detail::FormatInsOutsClause` for explicit SSA/type pairs and ordered
-outputs. Conversion/compare attributes go inside `ins`; `FormatPrecisionAttribute`
-places precision selectors after `outs`. Neither formatter discovers storage,
-constructs views, allocates scratch or changes operand types. Tile callbacks
-still resolve those decisions first; Buffer operands arrive already explicit.
-
-`GetPtoNativeOpSpec` supplies common elementwise, row-compute and transpose
-instruction names plus precision attributes to both paths. It is emission metadata, not a support registry:
-target, dtype, layout, aliasing and default-selection checks remain separate.
-Adding a native spelling does not enable a new Buffer form. Other operator
-families retain their specialized emitters.
+Tile and Buffer share [native metadata and formatting](../passes/58-lower_tile_to_buffer.md#shared-native-emission).
 
 ### Class Structure
 
