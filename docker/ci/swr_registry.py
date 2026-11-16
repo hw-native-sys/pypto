@@ -36,6 +36,17 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class ConfigRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> urllib.request.Request:
+        # Blob stores can redirect to signed HTTPS URLs. Never forward the
+        # registry bearer token, even to a redirect on the same host.
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise ValueError("SWR config redirect must use HTTPS")
+        return urllib.request.Request(newurl)
+
+
 class Registry:
     """Access a single SWR repository directly, ignoring host proxy variables."""
 
@@ -92,6 +103,26 @@ class Registry:
         if data.get("schemaVersion") != 2 or data.get("mediaType") not in (MEDIA_TYPE, OCI_MEDIA_TYPE):
             raise ValueError(f"Expected a single-platform image manifest for {tag}")
         return Manifest(content, data["mediaType"], digest, data["config"]["digest"])
+
+    def publication_metadata(self, manifest: Manifest) -> tuple[str, str]:
+        """Read recipe/run provenance from the content-verified image config."""
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", manifest.config_digest):
+            raise ValueError("Invalid image config digest")
+        request = urllib.request.Request(
+            f"{self.base}/v2/{self.repository}/blobs/{manifest.config_digest}",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), ConfigRedirect())
+        with opener.open(request, timeout=60) as response:
+            content = response.read()
+        if f"sha256:{hashlib.sha256(content).hexdigest()}" != manifest.config_digest:
+            raise ValueError("SWR image config digest mismatch")
+        labels: dict[str, Any] = json.loads(content)["config"].get("Labels") or {}
+        recipe = labels.get("org.pypto.image.recipe", "")
+        run_number = labels.get("org.pypto.image.run-number", "")
+        if not isinstance(recipe, str) or not isinstance(run_number, str):
+            raise ValueError("Image publication metadata must be strings")
+        return recipe, run_number
 
     def put(self, tag: str, manifest: Manifest) -> None:
         status, _, _ = self.request("PUT", tag, manifest.content, manifest.media_type)
