@@ -141,6 +141,7 @@ def _assemble(mlir, tmp_path, expected_error=None):
     "quant", ["no_convert", "f32_f16", "f32_bf16", "deqf16_scalar", "deqf16_vec", "qf322f16_pre_scalar"]
 )
 @pytest.mark.parametrize("relu", ["no_relu", "normal_relu"])
+@pytest.mark.ptoas_compile
 def test_explicit_fixpipe_compiles(quant, relu, tmp_path):
     _, mlir = _generate(_program(quant, relu))
     cpp = _assemble(mlir, tmp_path)
@@ -207,6 +208,7 @@ def test_legacy_pipe_dtype_requires_nosplit():
         system_ops.aic_initialize_pipe(dir_mask=1, slot_size=2048, c2v_dtype=DataType.FP32, nosplit=False)
 
 
+@pytest.mark.ptoas_compile
 def test_converted_slot_uses_result_bytes(tmp_path):
     # FP32 source occupies 2048 bytes; the FP16 transport occupies only 1024.
     _, mlir = _generate(_program("f32_f16", slot_size=1024))
@@ -344,6 +346,7 @@ class ColumnMajorMove:
 
 
 @pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.ptoas_compile
 def test_automatic_column_major_producer_and_consumer_compile(buffer_ir, tmp_path):
     _, mlir = _generate(ColumnMajorMove, buffer_ir)
     cpp = _assemble(mlir, tmp_path)
@@ -371,6 +374,7 @@ class ColumnMajorLoopTranspose:
             pl.store(normal, [0, 0], out)
 
 
+@pytest.mark.ptoas_compile
 def test_transpose_over_popped_view_in_loop_compiles(tmp_path):
     _, mlir = _generate(ColumnMajorLoopTranspose)
     _assemble(mlir, tmp_path)
@@ -402,6 +406,7 @@ class VaryingColumnMajorMoves:
 
 
 @pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.ptoas_compile
 def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp_path):
     with pytest.raises(Error, match="one physical payload shape/converted dtype"):
         _generate(VaryingColumnMajorMoves, buffer_ir)
@@ -414,6 +419,7 @@ def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp
 @pytest.mark.parametrize("quant", ["deqf16_scalar", "deqf16_vec"])
 @pytest.mark.parametrize("buffer_ir", [False, True])
 @pytest.mark.parametrize("round_trip", [False, True])
+@pytest.mark.ptoas_compile
 def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
     epilogue = _epilogue(quant=quant)
     vector = quant == "deqf16_vec"
