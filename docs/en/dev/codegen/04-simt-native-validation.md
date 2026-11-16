@@ -91,7 +91,7 @@ The matrix targets PTOAS v0.74, A5 (`dav-c310-vec`), and CANN 9.3.0 Bisheng
 LLVM 19 `memory(...)` annotations require the existing compatibility step.
 
 | Operation | FP16×2 | BF16×2 | FP32×2 |
-| --- | --- | --- | --- |
+| --------- | ------ | ------ | ------ |
 | GM and UB load/store, add, multiply | Compiles | Compiles | Compiles |
 | `pto.absf` | Compiles | Compiles | Compiles |
 | `pto.sqrt` | Compiles | PTOAS rejects type | PTOAS rejects type |
