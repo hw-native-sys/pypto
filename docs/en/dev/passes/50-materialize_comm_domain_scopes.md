@@ -25,7 +25,8 @@ the IR types so downstream codegen has O(1) access.
 communication domain. Before materializing domains, this pass scans every function
 in the Program once, including Call and Submit nodes. If any function uses
 `pld.tensor.indexed_all_to_all_v` or its lowered builtin, every materialized domain
-receives `engines=["urma"]`. Otherwise the list is empty.
+receives `urma`. Lowered CCU allgather builtin template identities
+add `ccu`. With no engine requirements the list is empty.
 
 This deliberately conservative policy includes unused functions and unrelated
 domains. Precise per-domain matching is deferred. Distributed codegen only emits
@@ -308,3 +309,24 @@ zeroing before reuse (enabled by default). Initialization is not repeated after
 zeroing. Set `reset_persistent_windows=False` to retain the loaded Engram table;
 this also disables reset for Device scratch/signal buffers, whose state the caller
 must then manage. Domain release remains owned by Simpler.
+
+### CCU engine requirements
+
+`LowerL2TensorCollectives` runs before this pass, so CHIP CCU requirements are
+collected only from Call/Submit references to lowered allgather builtin
+template identities. These contribute `ccu` to every domain, including uses in
+uncalled functions. Raw HOST collective analysis remains necessary because
+`LowerHostTensorCollectives` runs after this pass. Reruns merge CCU requirements
+with existing engines such as `urma`
+without replacing window bindings. See [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather).
+
+### Explicit CCU bindings
+
+After domain construction, CCU uses are resolved against the existing allocation
+slots. Each CHIP call receives independent registrations; the op names that callable.
+The pass inserts `pld.system.register_ccu(allocation, callee=..., chip_callee=...)` and
+HOST dispatch `ccu_bindings` SSA references. Each registration carries the
+dispatch device and returns a local handle. All registrations precede the first
+task submission; rank loops retain their bodies and select handles at dispatch.
+Bindings must match the consumer device. It does not merge overlapping member sets. See [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather) for
+provenance, participant checks and the codegen-only runtime boundary.

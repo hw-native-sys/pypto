@@ -1032,7 +1032,13 @@ def _record_dispatch_program(orch: Any, callable_id: Any, disp_dir: Path) -> Non
 
 # Called from generated host_orch.py code (pyright cannot see those references).
 def _submit_chip(  # pyright: ignore[reportUnusedFunction]
-    orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None
+    orch: Any,
+    callable_id: Any,
+    task_args: Any,
+    config: Any,
+    worker: int | None,
+    *,
+    ccu_bindings: list[Any] | tuple[Any, ...] | None = None,
 ) -> Any:
     """``orch.submit_next_level`` that stamps each dispatch's DFX directory.
 
@@ -1064,6 +1070,13 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     :func:`_resolve_chip_worker`. Resolution happens before the DFX namespacing
     so the artifacts land under the chip that actually ran the dispatch.
     """
+    if ccu_bindings:
+        # The pinned runtime does not provide coordinated CCU prepare/activation.
+        # Reject before submitting any rank, rather than blocking a collective.
+        raise NotImplementedError(
+            "CCU domain bindings are codegen-only until simpler provides coordinated "
+            "domain registration, CHIP submission and device ABI v2"
+        )
     worker = _resolve_chip_worker(orch, worker)
     base = config.output_prefix
     if not base:
@@ -2159,7 +2172,6 @@ class DistributedWorker(Worker):
 
             claim_program_mode()
             self._w.init(prewarm_config=prewarm_cc)
-
             # ``Worker.init()`` eagerly starts the chip/sub-worker hierarchy, so
             # the device-memory API is ready before the first dispatch without a
             # separate call into Simpler's private startup implementation.

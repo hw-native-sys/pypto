@@ -122,6 +122,7 @@ enum class ObjectKind {
   TupleType,
   WindowBufferType,
   CommCtxType,
+  CcuRegistrationType,
   PrefetchAsyncContextType,
   AsyncEventType,
   AsyncSessionType,

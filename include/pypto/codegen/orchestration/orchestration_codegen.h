@@ -12,6 +12,7 @@
 #ifndef PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_CODEGEN_H_
 #define PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_CODEGEN_H_
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -30,10 +31,35 @@ struct KernelRegistration {
   std::vector<std::string> signature;  ///< Tensor directions in payload order; scalars excluded.
 };
 
+/// One template-rendered artifact, with no operator-specific decisions left
+/// for the Python backend. Paths are relative to the template package/artifact.
+struct BuiltinSourceSpec {
+  std::string template_dir;
+  std::string template_file;
+  std::string output_path;
+  std::map<std::string, std::string> variables;
+};
+
+/// One native CCU implementation shared by the listed AIV submission wrappers.
+/// IDs are contiguous and local to this orchestration callable, allocated on
+/// first use like AIV registrations (tensor shape is a wrapper-only specialization).
+struct CcuModule {
+  int ccu_id;
+  std::string template_dir;
+  std::map<std::string, std::string> variables;
+  std::vector<std::string> wrappers;
+  std::string source;
+  std::string entry_symbol;
+  int parameter_size;       ///< Expanded request buffer size in bytes.
+  int parameter_alignment;  ///< Required request buffer alignment in bytes.
+};
+
 /// Generated orchestration and its runtime registrations.
 struct OrchestrationResult {
   std::string code;
   std::vector<KernelRegistration> kernel_registrations;
+  std::vector<BuiltinSourceSpec> builtin_sources;  ///< Only artifacts used by this callable.
+  std::vector<CcuModule> ccu_modules;              ///< Shared source/config contract for native missions.
   /// Orchestration entry's per-tensor runtime ArgDirection names ("IN"/"OUT"/
   /// "INOUT"), in orch_args tensor order (declaration order, scalars skipped).
   /// This matches the orch tensor index the runtime uses in

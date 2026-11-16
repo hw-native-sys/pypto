@@ -187,6 +187,10 @@ void TypeChecker::VisitFunction(const FunctionPtr& func) {
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     if (!param) continue;
+    if (IsA<CcuRegistrationType>(param->GetType())) {
+      RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH,
+                  "CCU registration handles cannot be function parameters", param->span_);
+    }
     ValidateTypeValidShape(
         param->GetType(),
         "Function '" + func->name_ + "' parameter[" + std::to_string(i) + "] '" + param->name_hint_ + "'",
@@ -498,6 +502,25 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
 
 void TypeChecker::VisitExpr_(const CallPtr& op) {
   if (op) {
+    if (IsOp(op, "pld.system.register_ccu")) {
+      auto callee = program_ ? program_->GetFunction(op->GetKwarg<std::string>("callee")) : nullptr;
+      auto chip = program_ ? program_->GetFunction(op->GetKwarg<std::string>("chip_callee")) : nullptr;
+      if (!func_ || func_->level_ != Level::HOST || !callee || callee->func_type_ != FunctionType::CCU ||
+          !chip || chip->level_ != Level::CHIP || !IsOrchestrationLike(chip->func_type_) ||
+          !IsA<CcuRegistrationType>(op->GetType()) || !op->HasAttr(kAttrDevice)) {
+        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH,
+                    "register_ccu requires a HOST resource result, explicit device, valid CCU callee and "
+                    "CHIP callable symbols",
+                    op->span_);
+      }
+    }
+    for (const auto& arg : op->args_) {
+      if (IsA<CcuRegistrationType>(arg->GetType())) {
+        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH,
+                    "CCU registration is only valid in HOST dispatch bindings", op->span_);
+      }
+    }
+
     CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, false);
   }

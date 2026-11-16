@@ -912,3 +912,11 @@ Warp 内协作操作包括 `vote_all/any/uni`、`vote_ballot`、
 原子操作 `atomic_add/min/max/exch/cas` 返回已初始化 GM/UB 存储的旧 INT32/FP32 值。
 `syncthreads`、`threadfence` 和 `threadfence_block` 返回 void。参见
 [原子与同步契约](11-simt.md#原子操作与同步)。
+
+### 内部 CCU 注册
+
+`pld.system.register_ccu(allocation, callee="symbol", chip_callee="chip") -> CcuRegistrationType`
+仅供编译器使用。Ptr 必须可追溯到存活 `CommDomainScopeStmt` 中的
+`alloc_window_buffer`，`callee` 必须解析为 `FunctionType.CCU` 声明，`chip_callee` 指定消费它的 CHIP callable。
+注册具有可观察的资源/失败效果，DCE 保留该操作。必填 `device` Expr attr 选定域内的
+一个设备；返回该设备的本地注册，不启动 mission，消费者必须在同一 device 提交。参见 [CCU lowering](../passes/44-lower_l2_tensor_collectives.md#ccu-allgather)。

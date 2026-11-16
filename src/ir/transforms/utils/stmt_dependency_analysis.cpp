@@ -27,6 +27,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/ccu_collective_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
@@ -178,6 +179,10 @@ class InOutUseDisciplineChecker : public IRVisitor {
 
     const size_t n = std::min(callee->param_directions_.size(), op->args_.size());
     for (size_t i = 0; i < n; ++i) {
+      // The CCU builtin returns only target. Signal and the CHIP-local order
+      // token are reusable control handles. Keep their InOut task effects
+      // without demanding a nonexistent SSA return.
+      if (IsCcuControlParameter(callee, i)) continue;
       ParamDirection dir = callee->param_directions_[i];
       if (dir != ParamDirection::InOut && dir != ParamDirection::Out) continue;
       VarPtr var = AsVarLike(op->args_[i]);

@@ -660,6 +660,10 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
  private:
   StmtPtr LowerCollective(const CallPtr& call, const Span& span,
                           const std::vector<std::string>& leading_comments) {
+    CHECK_SPAN(
+        !IsOp(call, "pld.tensor.allgather") || call->GetKwarg<std::string>("engine", "default") != "ccu",
+        call->span_)
+        << "CCU collective is supported only in CHIP orchestration, not HOST";
     const auto* rule = LookupHostCollectiveRule(call->op_->name_);
     INTERNAL_CHECK(rule) << "LowerHostTensorCollectives: missing rule for " << call->op_->name_;
     INTERNAL_CHECK_SPAN(!scope_stack_.empty(), call->span_)

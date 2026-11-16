@@ -51,6 +51,7 @@ to global state.
 
 | Method | Purpose | Ascend910 | Ascend950 |
 | ------ | ------- | --------- | --------- |
+| `SupportCcu()` | Compiler-side CCU capability (source/runtime support separate) | `false` | `true` |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
 | `GetSyncResourceCatalog()` | Immutable [synchronization resource facts](01-sync_resources.md) owned by this backend | A2/A3 pools | A5 pools |
 | `GetLaunchSpecCoreCountMethod()` | runtime API name for the logical block count on `launch_spec` | `"set_block_num"` | `"set_block_num"` |

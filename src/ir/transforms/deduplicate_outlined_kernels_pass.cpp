@@ -136,17 +136,19 @@ class CalleeRewriter : public IRMutator {
     return found == aliases_.end() ? op : std::make_shared<GlobalVar>(found->second);
   }
   bool RewritePeer(const OpPtr& op, std::vector<std::pair<std::string, std::any>>& kwargs) const {
-    if (!IsPeerImport(op)) return false;
+    const bool registration = IsOp(op, "pld.system.register_ccu");
+    if (!IsPeerImport(op) && !registration) return false;
+    bool changed = false;
     for (auto& [key, value] : kwargs) {
-      if (key != "peer_func") continue;
+      if (registration ? (key != "callee" && key != "chip_callee") : key != "peer_func") continue;
       auto peer = std::any_cast<std::string>(&value);
-      if (!peer) return false;
+      if (!peer) continue;
       auto found = aliases_.find(*peer);
-      if (found == aliases_.end()) return false;
+      if (found == aliases_.end()) continue;
       value = found->second;
-      return true;
+      changed = true;
     }
-    return false;
+    return changed;
   }
   const Names& aliases_;
   std::unordered_map<const Expr*, ExprPtr> cache_;
@@ -271,8 +273,9 @@ FunctionInfo InspectFunction(const FunctionPtr& function) {
   for (const auto& type : info.inspection.types) {
     // Explicit storage and communication handles remain outside the contract.
     // Local prefetch handles and legacy statement results were checked by use.
-    if (As<MemRefType>(type) || As<WindowBufferType>(type) || As<CommCtxType>(type) || As<PtrType>(type) ||
-        As<BufferType>(type) || As<MultiBufferType>(type)) {
+    if (As<MemRefType>(type) || As<WindowBufferType>(type) || As<CommCtxType>(type) ||
+        As<CcuRegistrationType>(type) || As<PtrType>(type) || As<BufferType>(type) ||
+        As<MultiBufferType>(type)) {
       info.eligible = false;
     }
   }

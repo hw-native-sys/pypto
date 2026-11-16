@@ -37,6 +37,8 @@ class Ascend950Handler : public BackendHandler {
  public:
   static const Ascend950Handler& Instance();
 
+  [[nodiscard]] bool SupportCcu() const override { return true; }
+
   [[nodiscard]] std::optional<SimtLimits> GetSimtLimits() const override {
     return SimtLimits{{2048, 2048, 2048}, 2048, {{256, 128}, {512, 64}, {1024, 32}, {2048, 16}}};
   }

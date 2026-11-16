@@ -77,9 +77,9 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
     const auto& registry = OpRegistry::GetInstance();
     auto validated = [&registry](const char* op_name) { return registry.GetOp(op_name)->name_; };
     return std::unordered_set<std::string>{
-        validated("tile.tpush_to_aiv"), validated("tile.tpush_to_aic"), validated("tile.tpop_from_aic"),
-        validated("tile.tpop_from_aiv"), validated("tile.store"), validated("tile.assemble"),
-        validated("system.tfree_to_aic"), validated("system.tfree_to_aiv"),
+        validated("pld.system.register_ccu"), validated("tile.tpush_to_aiv"), validated("tile.tpush_to_aic"),
+        validated("tile.tpop_from_aic"), validated("tile.tpop_from_aiv"), validated("tile.store"),
+        validated("tile.assemble"), validated("system.tfree_to_aic"), validated("system.tfree_to_aiv"),
         validated("system.reserve_buffer"), validated("system.import_peer_buffer"),
         validated("system.aic_initialize_pipe"), validated("system.aiv_initialize_pipe"),
         // Async transfers write the destination through

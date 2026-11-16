@@ -981,6 +981,8 @@ def allgather(
     local_data: Tensor | DistributedTensor,
     target: DistributedTensor,
     signal: DistributedTensor,
+    *,
+    engine: str = "default",
 ) -> DistributedTensor:
     """All-gather: gather data from all ranks (push-based).
 
@@ -1000,7 +1002,12 @@ def allgather(
     ``[world_size, 1]``. InCore composites take rank-2 ``[nranks, 1]`` -- the
     rank count may be dynamic.
 
+    ``engine="ccu"`` selects the Ascend950 CHIP BF16 path for 2..64 ranks.
+    All operands must be full contiguous windows in one domain; input is
+    ``[1, SIZE]``, target ``[NR, SIZE]``, and signal INT32 ``[NR, 1]``.
+
     Args:
+        engine: "default" or "ccu" (CHIP orchestration only).
         local_data: This rank's single chunk — ``[1, SIZE]`` :class:`pl.Tensor`
             (InCore) or ``[1, SIZE]`` :class:`pld.DistributedTensor` staging
             window (HOST).  Must differ from ``target``.
@@ -1019,7 +1026,7 @@ def allgather(
         "pld.tensor.allgather", target=target, signal=signal
     )
     input_expr = _unwrap(local_data)
-    call = _ir_tensor.allgather(input_expr, target_expr, signal_expr)
+    call = _ir_tensor.allgather(input_expr, target_expr, signal_expr, engine=engine)
     return DistributedTensor(expr=call)
 
 

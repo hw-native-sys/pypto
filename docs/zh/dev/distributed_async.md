@@ -60,8 +60,9 @@ return data
 在该 task 退役前不得覆盖 `src`。生产者任务可以在提交前后执行其他计算，但在传输未完成前不得覆盖 `src`。远端消费者仍需要现有的跨 rank notify/wait
 协议：本地 task 完成只排序发起方，不排序对端的读取。
 
-**ABI 说明。** 为 workspace engine 字段，`CommContext` 从 1056 字节增长到
-1088 字节。该变化是全局的（包括 A2/A3 构建），codegen 与 runtime 必须一起
+**ABI 说明。** `CommContext` 包含四个 workspace engine 槽位（SDMA、URMA、RDMA、CCU），
+大小为 1104 字节。CCU 槽位将原来的 1088 字节布局扩展至 1104 字节，rank 与 window 偏移保持不变。
+该变化是全局的（包括 A2/A3 构建），codegen 与 runtime 必须一起
 升级。异步 helper 通过 `comm_workspace<CommWorkspaceKind::URMA>(*ctx)` 读取
 URMA workspace，并要求通信域申请 `workspace_engines=("urma",)`（目前为程序级
 保守策略）。

@@ -213,6 +213,8 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return prefix_ + "._dump.WindowBuffer";
   }
 
+  if (As<CcuRegistrationType>(type)) return prefix_ + "._dump.CcuRegistration";
+
   if (As<CommCtxType>(type)) {
     // Singleton marker — printed with the public DSL wrapper name, matching the
     // ``pl.AsyncEvent`` family below. ``pld`` is hardcoded rather than derived

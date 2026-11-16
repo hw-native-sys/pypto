@@ -3,6 +3,11 @@
 Materializes one explicit `CommCtxType` parameter and argument for each
 `DistributedTensorType` function parameter, except in SIMT helpers.
 
+CCU CHIP callables, wrappers and builtin declarations follow this same rule.
+A CHIP may use several domains; repeated contexts are valid. HOST registration handles remain only in
+`ccu_bindings` dispatch configuration. Native CCU algorithm packing excludes
+compiler-added contexts. The definition ID is a codegen constant, not a wrapper parameter.
+
 ## Overview
 
 Distributed tensors need a communication context at every dispatch boundary:

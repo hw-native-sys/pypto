@@ -1,7 +1,6 @@
 # Operator System
 
-> **Legacy Python API examples:** `platform=` calls on this page are retained for
-> compatibility. They emit `DeprecationWarning`; new code should use
+> **Legacy Python API examples:** `platform=` calls on this page are retained for compatibility. They emit `DeprecationWarning`; new code should use
 > `backend_type` and `execution_mode`. See the [target mapping](../08-entry-points.md#legacy-platform-examples).
 
 Type-safe operator definitions with automatic type deduction, organized into modular categories (TensorOp, TileOp, SyncOp, CrossCoreOp).
@@ -38,8 +37,7 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.row_max`, `buffer.row_sum` | FP32 matrix, explicit scratch, column-vector destination | Void |
 | `buffer.row_expand_sub`, `buffer.row_expand_div` | FP32 matrix, column vector, matrix destination | Void |
 
-These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
-for shape, dtype, valid-state, and alias requirements.
+These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts) for shape, dtype, valid-state, and alias requirements.
 
 Internal `buffer.get_block_idx`, `buffer.get_block_num`, and
 `buffer.get_subblock_idx` are zero-argument Buffer-stage queries. They return
@@ -994,3 +992,9 @@ supported types and shuffle widths.
 Atomics `atomic_add/min/max/exch/cas` return the old INT32/FP32 value from
 initialized GM/UB storage. `syncthreads`, `threadfence` and `threadfence_block`
 return void. See [atomic and synchronization contracts](11-simt.md#atomics-and-synchronization).
+
+### Internal CCU registration
+
+`pld.system.register_ccu(allocation, callee="symbol", chip_callee="chip") -> CcuRegistrationType` is compiler-only. The Ptr must trace to `alloc_window_buffer` in a live `CommDomainScopeStmt`; `callee` resolves to a `FunctionType.CCU` declaration; `chip_callee` names its consuming CHIP callable.
+Registration has resource/failure effects preserved by DCE. Its required `device` Expr attr selects one domain member and returns that device's local registration without launching a mission.
+Consumers must submit on the same device. See [CCU lowering](../passes/44-lower_l2_tensor_collectives.md#ccu-allgather).

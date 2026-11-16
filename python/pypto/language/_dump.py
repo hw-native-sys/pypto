@@ -28,6 +28,7 @@ from pypto.pypto_core import ir
 
 # Annotation-only marker values. The parser resolves the spelling, not the value.
 WindowBuffer = ir.WindowBufferType.get()
+CcuRegistration = ir.CcuRegistrationType.get()
 Unknown = ir.UnknownType()
 
 

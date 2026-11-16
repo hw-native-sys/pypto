@@ -571,6 +571,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "WindowBufferType") {
       return GetWindowBufferType();
+    } else if (type_kind == "CcuRegistrationType") {
+      return GetCcuRegistrationType();
     } else if (type_kind == "CommCtxType") {
       return GetCommCtxType();
     } else if (type_kind == "PrefetchAsyncContextType") {

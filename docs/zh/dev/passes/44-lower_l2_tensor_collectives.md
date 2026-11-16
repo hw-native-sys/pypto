@@ -237,3 +237,94 @@ recv_counts 可以是本地 Tensor；send_counts 必须是窗口。
 每个目标队列只有一个写入者。调用者必须为共享队列的交换建立顺序；即使
 payload 窗口不同，复用同一个 InOut signal 也能建立此依赖。
 不支持 HOST 和 InCore 调用。参见[用户约定](../../user/distributed/20-all_to_all.md#a5-urma-索引-alltoallv)。
+
+## CCU allgather
+
+`engine="ccu"` 将 Ascend950 CHIP BF16 allgather 降低为 AIV wrapper 和
+`FunctionType.CCU` native builtin 声明。支持输入窗口 `[1, N]`、目标 `[NR, N]`
+和 INT32 signal `[NR, 1]`，要求完整连续 ND 视图、静态正 shape、2–64 rank，
+以及 CHIP 中的直线调用序列。input 和 target 必须不同。
+
+共享 AIV wrapper 的参数为 `(input, target, signal, order)`，三个用户窗口保留
+DistributedTensor 类型。函数体以有副作用的语句调用真实 CCU callee，并返回 target 别名。
+native 声明通过 `builtin_template_dir/vars` 指定实现，源码按实现和特化去重，与 wrapper
+shape 无关。codegen 从 callee 解析 callable 内的定义编号，HOST 的 `ccu_id` 与设备请求
+使用同一个编号。不再有调用点编号、slot 形参或 `ccu_slot` attr。
+
+每个 CHIP 共享一个本地 InOut order Tensor，保守串行化 CCU 请求。signal 保留
+InOut 调度效果，即使 native allgather 不打包它。方向和依赖先于域物化推导。
+`MaterializeDistTensorCtx` 为每个 DistributedTensor 追加 ctx，包括 wrapper 的
+三个窗口。编译器追加的 ctx 不进入 native 算法参数包，wrapper 总共有七个参数。
+
+### 域内注册
+
+`MaterializeCommDomainScopes` 保持现有窗口/device 成员推导规则。临时来源分析
+沿 SSA 别名、Tensor 视图和函数返回参数别名，在每个 HOST dispatch 解析窗口。
+同一次请求的所有窗口（包括 signal）必须同域；一个 CHIP 的不同请求可以使用不同域。
+
+每个被使用的 `(device, domain, definition)` 组合，在代表 allocation 之后、
+所属域内插入 HOST 内部操作：
+
+```text
+reg0 = pld.system.register_ccu(buffer, callee="ccu_definition", chip_callee="chip") {device=0}
+reg1 = pld.system.register_ccu(buffer, callee="ccu_definition", chip_callee="chip") {device=1}
+for rank in range(2):
+    window = pld.tensor.window(buffer, ...)
+    if rank == 0:
+        reg = reg0
+    else:
+        reg = reg1
+    chip(window, ..., device=rank, ccu_bindings=[reg])
+```
+
+`device` 必填，每次注册返回该 worker 的本地 handle。所有可能首次创建的注册必须先于
+本轮第一次任务提交，即使 HOST 有多个 rank 提交循环。窗口创建与 rank 循环保留，
+仅在提交处按 rank 选择对应 handle。若 allocation 在首次提交之后才可用，则拒绝新增
+CCU 注册。每个 CHIP 调用生成独立的注册 SSA 值，即使调用同一个 callable；仅合并单次
+提交内的重复需求，底层注册缓存交给 simpler。handle 不得逃出所属域。
+
+注册具有资源/失败效果，DCE 保留它。handle 是 dispatch attr 中的 SSA 引用，不是 CHIP
+算法参数。每个域检查静态参与覆盖与 collective 协议顺序/次数，协议兼容的各 rank 本地
+定义符号不必相同。支持最多 64 个 rank 的正次数静态循环及可静态判定的 rank 选择分支；
+其他条件/重复提交、动态 rank 选择、嵌套设备调用或控制流内 allocation 仍不支持。
+
+HOST Python 生成 `domain.get_or_register_ccu(callables[name], ccu_id=N, worker=rank)`，
+并向同一 rank 的 `_submit_chip` 传递 `ccu_bindings=[local_registration, ...]`。
+序列是去重后的启动需求集合，下标和顺序没有身份含义。IR 的 `device` 映射为 runtime `worker`。
+register 通过 `chip_callee` 显式指定消费它的 callable。CCU 编号与 AIV `func_id` 一样，
+在每个 callable 内按首次使用顺序分配。CHIP codegen 只生成一份注册表，打包与 wrapper
+常量使用该表，HOST codegen 直接读取同一结果。相同定义在不同 callable 中可以编号不同，
+各自注册。不同提交可在同一域/编号处使用不同定义，单次提交不能在那里绑定冲突注册。
+编译器不跨 CHIP 调用共享注册。
+
+### Native 源码契约与验证边界
+
+此次迁移只支持 codegen。产物标记 `CCU_DOMAIN_ABI_VERSION = 2` 和
+`CCU_RUNTIME_SUPPORTED = False`。runtime builder 在编译/注册 native module 前
+拒绝执行；`_submit_chip` 也拒绝带绑定的提交，等待 PyPTO 集成与端到端验证。
+当前 pin 的 simpler runtime 已包含 PR #3093 的域注册与协调 prepare/激活接口，
+包括 `ChipCallable.build(..., ccu_modules=...)`。
+
+设备调用采用已核对的 simpler PR #3093 接口：
+`submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`。ctx 选择域，定义编号选择该域
+唯一的本地 mission；相同组合的重复请求复用 mission，并通过任务完成依赖串行化。
+不再使用独立的 CHIP execution accessor。当前 runtime pin 尚待联调验证，保留 wrapper/native
+ABI guard 和运行时执行保护。
+
+请求保留 `9 + 3 * NR` 个 uint64 word，64 字节对齐：input 地址/token、字节数、
+来源行字节偏移、segment 数、四个 GoSize 值，再为每个目标保存地址/token 和
+域逻辑 rank。peer 使用普通 scalar，删除 `PeerRank` 转换；注册 channel 按域逻辑
+rank 索引，包括自 rank 的 LocalCopy 选择。
+
+HBM 算法保留 32 KiB chunk、16 lane、4 GiB 分段、独立 main/remainder LoopGroup、
+ready/completion 握手和常驻 trigger 循环。所有请求完成且结果可见后，simpler 必须
+停止并确认无剩余访存，再释放本轮资源。不增加静态请求次数或用户 EXIT 请求。
+
+peer 握手统一使用 notify index `0`，ready 使用 mask `1`，completion 使用 mask `2`。
+共享同一域 channel 的所有请求必须串行执行，才能安全复用该 index。
+callable 局部的 `ccu_id` 仅用于选择 mission，不用于选择 peer notify index，
+不同 rank 上的值可以不同。
+
+CPU 测试覆盖完整 lowering/codegen、重叠域、注册复用、定义编号一致性、普通 ctx 转发、
+源码打包，以及通过模拟 primitive 执行生成的 wrapper/native 源码。
+这些测试不验证硬件调度、资源生命周期或 HCOMM 指令生成。
