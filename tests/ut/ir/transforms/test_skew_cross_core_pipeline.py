@@ -101,6 +101,52 @@ class TestSkewCrossCorePipeline:
         # The default pipeline folds compile-time mode branches before skewing.
         ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))
 
+    @pytest.mark.parametrize("vector", [False, True])
+    def test_nested_quant_configuration_protects_ancestors_only(self, vector):
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                q: pl.Tensor[[64, 64], pl.FP32],
+                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
+            ):
+                for i in pl.pipeline(2, stage=2):
+                    for j in pl.pipeline(2, stage=3):
+                        for k in pl.range(2):
+                            tile = pl.tile.load(q, [i * 16, 0], [16, 64])
+                            if vector:
+                                pl.system.set_quant_vector(controls)
+                            else:
+                                pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                            pl.tile.tpush_to_aiv(tile, split=0)
+                for i in pl.pipeline(2, stage=2):
+                    sibling = pl.tile.load(q, [i * 16, 0], [16, 64])
+                    pl.tile.store(sibling, [i * 16, 0], q)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                q: pl.Tensor[[64, 64], pl.FP32],
+                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
+            ):
+                for i in pl.range(2):
+                    for j in pl.range(2):
+                        for k in pl.range(2):
+                            tile = pl.tile.load(q, [i * 16, 0], [16, 64])
+                            if vector:
+                                pl.system.set_quant_vector(controls)
+                            else:
+                                pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                            pl.tile.tpush_to_aiv(tile, split=0)
+                for i in pl.pipeline(2, stage=2):
+                    sibling = pl.tile.load(q, [i * 16, 0], [16, 64])
+                    pl.tile.store(sibling, [i * 16, 0], q)
+
+        ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))
+
     def test_single_roundtrip_producer_skews(self):
         """AIC-style (cube) produce-first body — one ``tpush_to_aiv`` then one
         ``tpop_from_aiv`` — skews at the cross-core default depth-2: a 2-produce

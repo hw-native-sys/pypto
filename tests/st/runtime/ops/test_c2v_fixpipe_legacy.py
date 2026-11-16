@@ -22,6 +22,8 @@ from pypto.backend import pto_backend
 from test_c2v_fixpipe import _case, column_view
 
 
+@pytest.mark.platforms("a5", reason="The legacy physical-byte oracle is validated on A5 hardware only.")
+@pytest.mark.inline_case(reason="The replay must compile after its PTOAS monkeypatch is installed.")
 def test_legacy_column_major_bytes_are_detected(test_runner, monkeypatch):
     real_ptoas = pto_backend._run_ptoas
 

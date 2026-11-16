@@ -843,6 +843,8 @@ def aic_initialize_pipe(  # noqa: PLR0913
             otherwise omitted, preserving the PTOAS default.
         acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
             ``relu``. Requires C2V only and split=0 on every transfer.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -906,6 +908,8 @@ def aiv_initialize_pipe(  # noqa: PLR0913
             otherwise omitted, preserving the PTOAS default.
         acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
             ``relu``. Requires C2V only and split=0 on every transfer.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
+            Cannot be combined with the c2v_dtype/pre_relu shorthand.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
