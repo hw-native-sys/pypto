@@ -432,6 +432,41 @@ def test_tensor_fallback_strides_keep_batch_axes_outermost(shape, layout, expect
         assert f"arith.muli %arg{axis + 1}, {constants[stride]} : index" in source
 
 
+@pytest.mark.parametrize("emit_tile_addr", [False, True])
+@pytest.mark.parametrize("valid", [(8, 16), (16, 32)])
+def test_simt_borrows_partial_tpop_with_unchanged_physical_pitch(emit_tile_addr, valid):
+    """A validity-only TPOP reshape keeps the dense 32-element physical row pitch."""
+    rows, cols = valid
+    program = parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def read(self, src: pl.Tile[[16, 32], pl.FP32, pl.Mem.Vec],
+             dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]]):
+        value = pl.simt.load(src, [1, 0])
+        pl.simt.store(dst, [0, 0], value)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]]):
+        popped: pl.Tile[[16, 32], pl.FP32, pl.Mem.Vec,
+                        pl.TileView(valid_shape=[{rows}, {cols}])] = pl.tpop_from_aic(split=0)
+        result = pl.simt.launch(self.read, popped, dst,
+                               block_dims=(1, 1, 1), result_param_indices=(1,))
+        pl.tfree_to_aic(popped)
+        return result
+""")
+    program = passes.init_mem_ref()(passes.specialize_simt_helpers()(passes.convert_to_ssa()(program)))
+    program = passes.stamp_tfree_split()(program)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_tile_addr=emit_tile_addr)
+    assert "func.call @__pypto_simt_" in bundle.caller_source
+    assert "pto.tpop_from_aic" in bundle.caller_source
+    assert "pto.tfree_from_aic" in bundle.caller_source
+    if valid == (8, 16):
+        assert "tpop_logical" in bundle.caller_source
+    assert "pto.load" in bundle.helpers[0].source
+    assert "arith.constant 32 : index" in bundle.helpers[0].source
+
+
 @pytest.mark.parametrize("offset", [0, 8])
 @pytest.mark.parametrize("alias_depth", [0, 1, 2])
 @pytest.mark.parametrize("local_tile,emit_tile_addr", [(False, True), (True, False), (True, True)])

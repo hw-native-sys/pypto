@@ -458,7 +458,10 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     codegen.Emit(logical_buf + " = pto.treshape " + transport_buf + " : " + result_type + " -> " +
                  logical_type);
     codegen.RegisterTileBufType(logical_buf, logical_type, result_tile_type);
-    codegen.RegisterTileViewName(logical_buf, transport_buf);
+    // This descriptor changes validity only, retaining the TPOP's full physical
+    // shape and pitch. Keep its FIFO provenance without marking it as a general
+    // Tile view: SIMT can safely borrow it with the original dense layout.
+    codegen.RegisterTpopTileName(logical_buf);
     codegen.SetCurrentResultBuf(logical_buf);
   }
 

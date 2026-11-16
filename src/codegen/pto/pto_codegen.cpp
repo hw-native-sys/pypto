@@ -2769,11 +2769,9 @@ void PTOCodegen::RegisterTpopTileName(const std::string& ssa_name) { fs_.tpop_ti
 
 bool PTOCodegen::IsLocallyBoundTileName(const std::string& ssa_name) const {
   const auto source = fs_.tile_view_names.find(ssa_name);
-  // Full-span reshape chains share a root; subviews keep a distinct origin.
-  // PTOAS >= 0.74 also accepts function-local TPOP descriptors as roots, even
-  // though their payload belongs to the FIFO rather than a local allocation.
   const auto& root = source == fs_.tile_view_names.end() ? ssa_name : source->second;
-  return IsMutableTileName(root) || fs_.tpop_tile_names.count(root) > 0;
+  return IsMutableTileName(root) || fs_.tpop_tile_names.count(root) > 0 ||
+         fs_.locally_bound_subview_names.count(root) > 0;
 }
 
 std::string PTOCodegen::EnsureTileView(
@@ -2855,6 +2853,18 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
                                                 const SubviewMaterializationInfo& info) {
   fs_.subview_materializations[subview_ssa] = info;
+  // Definitions precede uses, so cache contiguous ancestry as each subview is
+  // emitted. Cropping columns across multiple rows retains the parent's pitch;
+  // reshaping that descriptor to the packed window size is illegal in PTOAS.
+  // Requiring the parent to be eligible keeps a later full-width child from
+  // hiding a strided ancestor, without repeatedly walking the chain or merging
+  // distinct offsets in tile_view_names (which would break alias checks).
+  const bool contiguous = info.view_rows == 1 || (info.source_cols > 0 && info.view_cols == info.source_cols);
+  if (contiguous && IsLocallyBoundTileName(info.source_ssa)) {
+    fs_.locally_bound_subview_names.insert(subview_ssa);
+  } else {
+    fs_.locally_bound_subview_names.erase(subview_ssa);
+  }
 }
 
 PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterialization(

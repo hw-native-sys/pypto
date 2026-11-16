@@ -3074,16 +3074,13 @@ class TestTileSliceCodegen:
             f"valid [6,6] (min(size, valid - offset)) on the materialized result; got:\n{alloc_line}"
         )
 
-    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
-        """Regression for issue #1507: subview must not emit static v_row=0, v_col=0
-        when the parent's IR carries the lane1 [0, 0] valid_shape sentinel.
+    @pytest.mark.parametrize("window_cols", [8, 32])
+    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self, window_cols):
+        """Empty contiguous slices avoid static zero masks; strided ones diagnose.
 
-        The parent's static type string always renders v_row=?, v_col=? (per
-        ExtractTileTypeInfo in pto_type_utils.cpp), so PTOAS infers the
-        subview's result valid from the slice's `sizes`. Our inference must
-        align — reading the parent's tile_view_.valid_shape (which can be the
-        sentinel [0, 0] after SplitVectorKernel's WithZeroValidShape) would
-        produce v_row=0, v_col=0 that PTOAS rejects.
+        The lane1 [0, 0] sentinel must survive as initialized dynamic validity.
+        A column-cropped multi-row subview retains its parent's physical pitch,
+        so emitting a descriptor reshape for it is not supported by PTOAS.
         """
 
         @pl.program
@@ -3091,15 +3088,22 @@ class TestTileSliceCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                dst: pl.Tensor[[16, 8], pl.FP32],
-            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                dst: pl.Tensor[[16, window_cols], pl.FP32],
+            ) -> pl.Tensor[[16, window_cols], pl.FP32]:
                 sentinel_tile: pl.Tile[
                     [16, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
                 ] = pl.tile.create([16, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
-                sliced: pl.Tile[[16, 8], pl.FP32] = pl.tile.slice(sentinel_tile, [16, 8], [0, 0])
+                sliced: pl.Tile[[16, window_cols], pl.FP32] = pl.tile.slice(
+                    sentinel_tile, [16, window_cols], [0, 0]
+                )
                 return pl.store(sliced, [0, 0], dst)
 
+        if window_cols < 32:
+            with pytest.raises(ValueError, match="contiguous slice ancestry"):
+                self._generate_mlir(Prog)
+            return
         mlir = self._generate_mlir(Prog)
+        assert "pto.set_validshape %slice_empty" in mlir, mlir
         subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
         assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
         result_type = subview_lines[0].split("->", 1)[-1]

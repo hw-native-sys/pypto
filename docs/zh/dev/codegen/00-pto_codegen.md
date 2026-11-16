@@ -281,38 +281,21 @@ PTOAS 0.65 通过为 scale 发出 `uint64_t`、为行列索引发出 `uint16_t`�
 仍由 `FixpipeEpilogueValid` 拒绝；范围更广的各后端能力表继续独立管辖 Acc-to-GM
 store。
 
-**`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
-`valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、
-`scf.if` 结果、跨核 pop slot。而**视图**——`tile.slice` 下沉出的 `pto.subview`，
-或 `pto.treshape`——把有效范围存在自身类型里，ptoas 会拒绝对它执行这条指令，所以
-PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发射点被记录，而不是从渲染出
-的维度推断：带运行时 `valid_shape` 的切片渲染成 `v_row=?, v_col=?`，与由 alloc
-承载的 handle 完全一样。要收窄视图，请给切片传 `valid_shape=`（它会落到
-`pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
-tile 调用 `set_validshape`。
+**`tile.set_validshape` 下沉。** PyPTO 将用户侧有效尺寸修改限制在受支持的可变 handle 上。
+任意 slice/reshape 视图仍会被拒绝，包括动态有效尺寸切片；视图身份独立于渲染出的维度进行跟踪。
+请在切片上使用 `valid_shape=`，或先收窄源 tile。编译器创建的动态描述符可以单独初始化。 非 FP4 静态空切片先通过全窗口 Subview 绑定地址，再用实际空有效尺寸初始化动态 reshape，避免静态零掩码，且不分配或复制数据。打包 FP4 按照 [FP4 切片限制](../fp4.md) 复用已初始化的带地址描述符。
 
-**空有效区域。** 任意有效维度为零都表示有效区域为空，与物理分配大小无关。
-以本地分配为根的普通 reshape 和 reinterpret 视图使用动态有效维度表示空区域，
-并在 `pto.treshape` 后立即通过 `pto.set_validshape` 初始化两个维度。
-静态正数有效维度仍保留静态编码。编译器初始化新描述符不代表用户可以在任意
-视图上调用 `pl.set_validshape`。
+**空有效区域。** 任意有效维度为零都表示空区域，与物理分配大小无关。空区域或运行时有效尺寸的
+reshape/reinterpret 描述符使用动态有效维度，并在 `pto.treshape` 后通过 `pto.set_validshape`
+初始化；静态正数有效维度保持静态编码。普通 Tile/Buffer 传输跳过静态空窗口，并保护运行时窗口，
+保留输出身份和未写入区域的数据。Final 阶段 store 保持无条件执行，以清除配对生产者的单元标志；
+若要跳过 phased 操作，应在源码中同时保护生产者和 store，且仍须满足后端既有限制。
 
-普通 Tile 和 Buffer 内存传输省略静态空窗口。运行时尺寸窗口仅在非空条件分支内
-创建并访问。跳过 store 时保留输出 tensor 的身份和目标数据；这些条件保护
-不会删除跨核通信或同步操作。
-`st_phase=Final` 的 store 不参与该优化：它必须与 `acc_phase=Final` 的生产者
-保留在同一直线执行区域，才能清除生产者设置的单元标志（unit flag）。后端对
-空窗口的既有限制仍然适用；若要跳过空的 phased 操作，应在源码中同时对生产者
-和 store 添加条件保护。
-
-动态有效尺寸视图的 SSA 源可以追溯至本地分配或 TPOP。
-PTOAS >= 0.74 支持初始化 TPOP 派生的描述符，无需分配或复制 FIFO 数据
-（[PTOAS #1724](https://github.com/hw-native-sys/PTOAS/issues/1724)）。
-`SplitVectorKernel` 保留重放 lane 上的 reshape/reinterpret/transpose 视图，
-将其有效尺寸设为零，并保留全部 TPOP/TPUSH/TFREE 握手。有效区域为空不会缩小
-物理分配，因此将这些别名替换为 `tile.create` 会浪费完整的数据缓冲区。
-Subview 和控制流来源仍需先物化到本地 tile，再创建动态视图；Subview 初始化仍受
-[PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706) 阻塞。
+PTOAS >= 0.74 支持本地分配、TPOP 派生及连续 Subview 派生的描述符
+（[#1724](https://github.com/hw-native-sys/PTOAS/issues/1724)、[#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)）。
+代码生成检查 SSA 来源，同时保留切片偏移和独立别名身份；推导出的运行时切片有效尺寸显式传给 PTOAS。
+每一层切片来源都必须连续；全宽子切片不能掩盖带跨步的父切片。跨步窗口、未知来源或控制流来源都需在初始化描述符前先物化。`SplitVectorKernel` 保留空 replay reshape/reinterpret/transpose
+别名及 TPOP/TPUSH/TFREE 握手；将这些 FIFO 别名替换为 `tile.create` 会额外分配完整数据缓冲区。
 
 ### 跨核操作到 PTO 指令
 

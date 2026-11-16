@@ -310,45 +310,11 @@ allow the validated `INT32 Acc → FP16 Mat` (`DEQF16`) form. Other scaled
 Acc-to-Mat dtype pairs remain rejected by `FixpipeEpilogueValid`; the wider
 per-backend tables continue to govern Acc-to-GM stores independently.
 
-**`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
-operand's `valid_row` / `valid_col` operands, so the operand must be a handle
-that has them: an alloc, an `scf.if` result, a cross-core pop slot.  A **view** —
-the `pto.subview` a `tile.slice` lowers to, or a `pto.treshape` — carries its
-valid extent in its own type instead, so ptoas rejects the op against one; PyPTO
-therefore rejects it first, with a message pointing at the slice.  View-ness is
-tracked at those emission sites rather than inferred from the rendered dims: a
-slice given a runtime `valid_shape` renders `v_row=?, v_col=?` exactly as an
-alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
-(it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
-or call `set_validshape` on the source tile before taking the view.
+**`tile.set_validshape` lowering.** PyPTO restricts user-facing validity mutation to supported mutable handles. Arbitrary slice/reshape views remain rejected, including runtime-valid slices; view identity is tracked independently of the rendered dimensions. Use `valid_shape=` on a slice or narrow its source first. Compiler-created dynamic descriptors can be initialized separately. Non-FP4 statically empty slices bind an address-only, full-window subview and initialize a dynamic reshape with the actual empty extent; this avoids static zero masks without allocating or copying payload data. Packed FP4 uses initialized addressed descriptors under the [FP4 slice restrictions](../fp4.md).
 
-**Empty valid regions.** A zero in either valid dimension denotes an empty
-region, independently of the physical allocation. Ordinary reshape and
-reinterpret views rooted in a local allocation use dynamic valid dimensions
-for empty regions and initialize both dimensions with `pto.set_validshape`
-immediately after `pto.treshape`. Static positive valid dimensions retain their
-static encoding. Initializing a compiler-created descriptor does not make the
-user-facing `pl.set_validshape` operation legal on arbitrary views.
+**Empty valid regions.** Either valid dimension being zero denotes an empty region, regardless of physical allocation size. Empty/runtime-valid reshape and reinterpret descriptors use dynamic valid dimensions initialized by `pto.set_validshape` after `pto.treshape`; static positive dimensions retain their static encoding. Ordinary Tile/Buffer transfers skip static empty windows and guard runtime windows, preserving output identity and untouched destination data. Final-phase stores remain unconditional to clear the paired producer's unit flag; guard producer and store together in source when skipping a phased operation, subject to existing backend restrictions.
 
-Ordinary Tile and Buffer memory transfers omit statically empty windows. Runtime-sized
-windows are created and accessed only inside a non-empty guard. Skipping a store
-preserves its output tensor identity and leaves destination data unchanged;
-these guards do not remove cross-core communication or synchronization.
-Stores with `st_phase=Final` are excluded: they must remain in the same
-straight-line region as their `acc_phase=Final` producer to clear its unit flag.
-Their existing backend restrictions on empty windows still apply; when skipping
-an empty phased operation, guard the producer and store together in the source.
-
-Dynamic-valid views accept an SSA source rooted in a local allocation or TPOP.
-PTOAS >= 0.74 supports initialization of TPOP-derived descriptors without
-allocating or copying their FIFO payload ([PTOAS #1724](https://github.com/hw-native-sys/PTOAS/issues/1724)).
-`SplitVectorKernel` preserves reshape/reinterpret/transpose views on the replay
-lane with zero valid extents and retains all TPOP/TPUSH/TFREE handshakes. Empty
-validity does not reduce physical allocation size, so replacing these aliases
-with `tile.create` would waste a full payload buffer. Subview and control-flow
-sources still require materialization into a local tile before taking a dynamic
-view; subview initialization remains blocked by
-[PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706).
+PTOAS >= 0.74 supports locally allocated, TPOP-derived, and contiguous subview-derived descriptors ([#1724](https://github.com/hw-native-sys/PTOAS/issues/1724), [#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)). Codegen checks SSA ancestry while preserving slice offsets and distinct alias identities; inferred runtime slice validity is passed explicitly. Every slice ancestor must be contiguous; a full-width child cannot hide a strided parent. Strided windows and unknown/control-flow roots require materialization before descriptor initialization. `SplitVectorKernel` retains empty replay reshape/reinterpret/transpose aliases and TPOP/TPUSH/TFREE handshakes. Replacing these FIFO aliases with `tile.create` would allocate a full payload buffer.
 
 ### Cross-Core Operations → PTO Instructions
 

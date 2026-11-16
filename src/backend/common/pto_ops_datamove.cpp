@@ -1116,11 +1116,14 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
     const auto result = codegen.GetCurrentResultVar();
     INTERNAL_CHECK(result) << "Internal error: reshape result must have an IR variable";
     // A MemRef on the result does not prove that the emitted source is locally
-    // bound: subviews and control-flow results may still inherit that MemRef.
-    // Follow the actual SSA origin, including intervening static reshape views.
+    // bound: control-flow results may still inherit that MemRef. Follow the
+    // actual SSA origin through reshape and subview definitions; PTOAS retains
+    // the subview offset when binding the new descriptor.
     CHECK_SPAN(codegen.IsLocallyBoundTileName(src), result->span_)
-        << "A dynamic-valid tile view requires a local allocation or TPOP source; PTOAS cannot initialize "
-           "reshape/reinterpret/transpose views of subview or control-flow handles. "
+        << "A dynamic-valid tile view requires a local allocation or TPOP source with contiguous slice "
+           "ancestry; "
+           "PTOAS cannot initialize strided subview-derived descriptors or views of unknown/control-flow "
+           "handles. "
            "Materialize the source into a local tile before taking the view.";
   }
   if (!result_type.empty()) {
@@ -1413,27 +1416,46 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       INTERNAL_CHECK_SPAN(valid_tuple, op->span_) << "tile.slice valid_shape must be a literal tuple";
       INTERNAL_CHECK_SPAN(valid_tuple->elements_.size() >= 2, op->span_)
           << "tile.slice valid_shape must have at least 2 elements";
-      const auto pto_valid = codegen::GetPtoTileCoordinates(*source_tile_type, valid_tuple->elements_);
-      valid_row = codegen.GetExprAsCode(pto_valid[0]);
-      valid_col = codegen.GetExprAsCode(pto_valid[1]);
     }
 
     std::string result_target = codegen.GetCurrentResultTarget();
     std::string result_type = codegen.GetCurrentResultTileBufTypeString();
     INTERNAL_CHECK_SPAN(!result_target.empty(), op->span_) << "tile.slice requires assignment target";
 
-    // tile.slice is always a pure pto.subview view of its source. The 4-arg
-    // form (explicit valid_shape) encodes the result valid into pto.subview's
-    // `valid [...]` clause; no pto.tmov / pto.set_validshape is emitted. This
-    // keeps tile.slice consistent with its set_output_memory_inherit_input
+    // tile.slice shares its source storage through pto.subview. Nonempty
+    // explicit validity goes into the `valid [...]` clause; static empty
+    // validity is initialized on a dynamic descriptor below. Neither path
+    // moves data, preserving the set_output_memory_inherit_input
     // contract (the result MemRef shares the source base by design) and
     // avoids the alias corruption seen in #1622 where the previous
     // materializing path's pto.tmov destination overlapped the source
     // allocation when the slice offset was dynamic.
     auto view_type_info = InferSubviewTileTypeComponents(*source_tile_type, *shape_tuple, *offset_tuple,
                                                          codegen.GetTypeString(source_tile_type->dtype_));
+    if (!has_explicit_valid_shape && (view_type_info.v_row_dynamic || view_type_info.v_col_dynamic)) {
+      // PTOAS cannot infer runtime clipping from a parent's dynamic type alone.
+      // Carry PyPTO's window intersection explicitly, before drop_dims changes
+      // the logical rank, so slice -> reinterpret retains empty/partial extents.
+      auto inferred_valid = ir::InferWindowReadValidShape({
+          /*source_physical=*/source_tile_type->shape_,
+          /*source_valid=*/ir::GetValidShape(source_tile_type),
+          /*offsets=*/offset_tuple->elements_,
+          /*window=*/shape_tuple->elements_,
+          /*requested_valid=*/{},
+          /*kind=*/ir::WindowReadKind::kExactWindow,
+          /*clamp=*/false,
+          /*op_name=*/"tile.slice",
+          /*bounds_remedy=*/"Keep the slice inside the source allocation",
+          /*span=*/op->span_,
+      });
+      valid_tuple = std::make_shared<ir::MakeTuple>(inferred_valid, op->span_);
+      has_explicit_valid_shape = true;
+    }
     if (has_explicit_valid_shape) {
-      // User-supplied valid_shape takes precedence over inference. Each dim is
+      const auto pto_valid = codegen::GetPtoTileCoordinates(*source_tile_type, valid_tuple->elements_);
+      valid_row = codegen.GetExprAsCode(pto_valid[0]);
+      valid_col = codegen.GetExprAsCode(pto_valid[1]);
+      // Explicit valid operands take precedence over PTOAS type inference. Each dim is
       // honored independently: a ConstInt valid operand yields a static result
       // dim, a dynamic operand yields a dynamic one. Do NOT promote both dims
       // to dynamic when one is — for the explicit `valid [...]` form PTOAS
@@ -1448,6 +1470,24 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       view_type_info.v_col_dynamic = valid_col_const == nullptr;
       if (valid_row_const) view_type_info.v_row = valid_row_const->value_;
       if (valid_col_const) view_type_info.v_col = valid_col_const->value_;
+    }
+
+    const auto slice_type = codegen.GetCurrentResultTileType();
+    INTERNAL_CHECK_SPAN(slice_type, op->span_) << "tile.slice result must be TileType";
+    const bool empty_slice = ir::tile_view_semantics::HasZeroValidExtent(ir::GetValidShape(slice_type));
+    if (empty_slice) {
+      // Constant subview valid operands require matching static type dimensions
+      // in PTOAS, but a static zero mask has no PTO-ISA valid-shape accessor.
+      // Bind a full-window address carrier, then initialize a dynamic reshape
+      // below. The carrier is never read or written as data; both descriptors
+      // retain the slice offset without allocating another payload buffer.
+      valid_row = codegen.GetExprAsCode(pto_shape[0]);
+      valid_col = codegen.GetExprAsCode(pto_shape[1]);
+      has_explicit_valid_shape = true;
+      view_type_info.v_row = view_type_info.rows;
+      view_type_info.v_col = view_type_info.cols;
+      view_type_info.v_row_dynamic = false;
+      view_type_info.v_col_dynamic = false;
     }
 
     INTERNAL_CHECK_SPAN(source_tile_type->memory_space_.has_value(), op->span_)
@@ -1552,10 +1592,47 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     }
     codegen.RegisterSubviewMaterialization(view_ssa, mat_info);
 
-    // Bind the slice's result variable to the subview SSA; the pre-emitted
-    // alloc_tile for the result becomes dead and is eliminated by downstream
-    // PTOAS passes.
+    // Bind the result to the subview by default. Its pre-emitted alloc_tile
+    // becomes dead unless the empty packed-FP4 path below reuses it.
     codegen.SetCurrentResultBuf(view_ssa);
+    if (empty_slice) {
+      const auto empty_type = codegen.GetViewTileBufTypeStringFromTileType(slice_type);
+      if (slice_type->dtype_.IsPackedFp4()) {
+        // Packed FP4 aliases use the result's initialized fixed-address descriptor.
+        // A subview may regain its parent's pitch in PTOAS, making a reshape to
+        // the window's physical size illegal. Reusing the declaration is safe
+        // only when its address and dense row pitch exactly represent the slice.
+        const auto memref = ir::GetDefinedMemRef(slice_type);
+        const auto address = memref ? ir::As<ir::ConstInt>(memref->byte_offset_) : nullptr;
+        CHECK_SPAN(codegen.EmitTileAddr() && address && !codegen.IsParameterBackedTile(slice_type) &&
+                       codegen.IsLocallyBoundTileName(src),
+                   op->span_)
+            << "Empty packed FP4 tile.slice requires a static PYPTO or DSA_RP address; "
+               "PTOAS-planned and addressless slices are unsupported. Slice the GM tensor and load "
+               "the window instead";
+        // A nested view can hide an offset in its inherited MemRef. Require a
+        // direct local source rather than treating that MemRef as address proof.
+        CHECK_SPAN(mat_info.const_offset && !codegen.IsTileViewName(src) &&
+                       slice_type->memory_space_ == ir::MemorySpace::Vec &&
+                       view_type_info.blayout == ir::TileLayout::row_major &&
+                       view_type_info.slayout == ir::TileLayout::none_box &&
+                       (mat_info.view_rows == 1 || mat_info.view_cols == mat_info.source_cols) &&
+                       memref->size_ == static_cast<uint64_t>(mat_info.view_rows * mat_info.view_cols),
+                   op->span_)
+            << "Empty packed FP4 tile.slice requires a contiguous Vec window with a static offset; "
+               "dynamic offsets, nested views, and strided/fractal views are unsupported. "
+               "Slice the GM tensor and load the window instead";
+        INTERNAL_CHECK_SPAN(codegen.GetSSATileBufType(result_target) == empty_type, op->span_)
+            << "Internal error: empty FP4 slice must have an initialized address-backed descriptor";
+        codegen.SetCurrentResultBuf(result_target);
+        codegen.RegisterTileViewName(result_target, view_ssa);
+      } else {
+        EmitTreshapeViewFromSsa(codegen, view_ssa, view_type, result_target, empty_type, "slice_empty");
+      }
+      // Lazy consumers must still see the original source and window geometry
+      // through the initialized descriptor rather than the full-valid carrier.
+      codegen.RegisterSubviewMaterialization(codegen.GetCurrentResultTarget(), mat_info);
+    }
     return std::string("");
   });
 
