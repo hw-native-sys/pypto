@@ -181,14 +181,12 @@ static std::string MakeMxScaleLoadCodegenPTO(const CallPtr& op, codegen::PTOCode
       block_value ? std::make_optional(block_value->value_ / 16) : std::nullopt;
   const std::optional<int64_t> group_offset =
       group_value ? std::make_optional(group_value->value_ / 2) : std::nullopt;
-  const auto block_code = block_offset
-                              ? codegen.GetOrEmitConstant(*block_offset, DataType::INDEX)
-                              : binary("arith.floordivsi", logical_offsets[block_axis], sixteen,
-                                       "mx_block_offset");
-  const auto group_code = group_offset
-                              ? codegen.GetOrEmitConstant(*group_offset, DataType::INDEX)
-                              : binary("arith.floordivsi", logical_offsets[group_axis], two,
-                                       "mx_group_offset");
+  const auto block_code =
+      block_offset ? codegen.GetOrEmitConstant(*block_offset, DataType::INDEX)
+                   : binary("arith.floordivsi", logical_offsets[block_axis], sixteen, "mx_block_offset");
+  const auto group_code =
+      group_offset ? codegen.GetOrEmitConstant(*group_offset, DataType::INDEX)
+                   : binary("arith.floordivsi", logical_offsets[group_axis], two, "mx_group_offset");
   std::string available_groups;
   int64_t static_groups = -1;
   if (group_offset) {
@@ -223,9 +221,9 @@ static std::string MakeMxScaleLoadCodegenPTO(const CallPtr& op, codegen::PTOCode
     // Packed [1, blocks, groups, 16, 2] storage has a parent block pitch of
     // groups*32 bytes and a group-pair pitch of 32 bytes. The partition's
     // narrower group extent must never replace that parent block pitch.
-    auto block_bytes = binary("arith.muli", source_block,
-                              codegen.GetOrEmitConstant(parent_groups * 32, DataType::INDEX),
-                              "mx_block_bytes");
+    auto block_bytes =
+        binary("arith.muli", source_block, codegen.GetOrEmitConstant(parent_groups * 32, DataType::INDEX),
+               "mx_block_bytes");
     auto group_bytes = binary("arith.muli", group_code,
                               codegen.GetOrEmitConstant(int64_t{32}, DataType::INDEX), "mx_group_bytes");
     auto flat_offset = binary("arith.addi", block_bytes, group_bytes, "mx_byte_offset");
