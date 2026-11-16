@@ -252,10 +252,18 @@ def build_conflict_checker(first: PreparedKernel, second: PreparedKernel) -> Sou
         policy = cast(dict[str, Any], isolation)
         if (
             not isinstance(isolation, dict)
-            or set(policy) != {"granularity_bytes", "rule"}
+            or set(policy)
+            not in (
+                {"granularity_bytes", "rule"},
+                {"granularity_bytes", "rule", "within_group"},
+            )
             or type(policy["granularity_bytes"]) is not int
             or policy["granularity_bytes"] != 64
             or policy["rule"] != "serialize_conflicting_cache_lines"
+            # This producer obligation is independent of ordering *between*
+            # invocations. Accept only the documented spelling, never a new
+            # policy that might transfer intra-group synchronization to us.
+            or policy.get("within_group", "kernel_author_must_ensure") != "kernel_author_must_ensure"
         ):
             raise ContractError(
                 "CANNBotDSL conflict checker: expected 64-byte GM cache-line isolation "
@@ -267,7 +275,9 @@ def build_conflict_checker(first: PreparedKernel, second: PreparedKernel) -> Sou
     # The same kernel can appear on both sides. Emit its checker only once,
     # using digest-based paths so multiple pair artifacts can share headers.
     files = {f"checks/{digest}.hpp": checker.files[0].content for digest, checker in zip(digests, checkers)}
-    lines = ["#pragma once", *(f'#include "{path}"' for path in files)]
+    guard = f"{symbol.upper()}_HPP"
+    lines = ["#pragma once", f"#ifndef {guard}", f"#define {guard}"]
+    lines += [*(f'#include "{path}"' for path in files)]
     lines += [
         f"template<class FirstArgs, class SecondArgs> inline bool {symbol}(",
         "        const FirstArgs& first, const SecondArgs& second) {",
@@ -309,7 +319,7 @@ def build_conflict_checker(first: PreparedKernel, second: PreparedKernel) -> Sou
                     f"    if (!{left}.empty && !{right}.empty &&",
                     f"        {left}.first <= {right}.last && {right}.first <= {left}.last) return true;",
                 ]
-    lines += ["    return false;", "}", ""]
+    lines += ["    return false;", "}", "#endif", ""]
     files["conflict_check.hpp"] = "\n".join(lines).encode()
     return SourceArtifact(
         tuple(_file(path, content) for path, content in files.items()), "conflict_check.hpp", symbol

@@ -119,8 +119,9 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 该描述符 ABI。34.5 的后续工作需要实现检查完整 manifest 的 bridge、正确管理产物
 生命周期的 JIT 绑定及相关兼容回归。尤其不能在接入 runtime 时丢弃资源和 64 字节 GM
 写隔离要求。设备完成可见性、数值和性能验收仍由 34.7 跟踪。
-下一阶段 runtime 工作还须落实缓存行冲突串行化、编译器栈需求校验和资源所有权，
-并将调用适配器、绑定校验器和调用对冲突校验器接入提交路径；现有仅加载 text 的 ELF 检查本身不能提供这些保证。
+下一阶段 runtime 工作还须接入批次缓存行排序、校验编译器栈需求和资源所有权，
+并将调用适配器和有序提交辅助层与经过校验的 runtime 加载流程连接起来；
+现有仅加载 text 的 ELF 检查本身不能提供这些保证。
 `test_cannbotdsl_provider.py` 使用 fake 公开导出器验证交接边界，并在安装了可选包时
 使用真实公开编译器导出验证；这些测试不代表二进制验收。
 
@@ -176,7 +177,9 @@ runtime 完成正确性验收。
 `pypto.backend.cannbotdsl_abi.build_conflict_checker(first, second)` 生成包含两侧绑定
 校验器的自持有 `conflict_check.hpp`。两个 `PreparedKernel` 可以有不同的签名、dtype
 和访问效果。两侧 manifest 必须声明 64 字节 `serialize_conflicting_cache_lines` GM
-隔离策略；缺失或未知策略会被拒绝。导出符号接受两个 `CoreTaskArgs`，返回这对调用
+隔离策略；缺失或未知策略会被拒绝。可选字段 `within_group` 必须为
+`kernel_author_must_ensure`，表示协作 kernel 组内的同步仍由 kernel 作者保证。
+导出符号接受两个 `CoreTaskArgs`，返回这对调用
 是否需要串行化。
 
 无论是否已经发现冲突，返回前都会完整校验两侧调用。它根据实际分配地址、元素
@@ -194,7 +197,34 @@ offset、shape、stride 和元素宽度计算各访问 tensor 的保守字节包
 返回 `true` 时保证前一调用完成后才开始后一调用；仅检查相邻调用不足以保证安全。
 绑定在执行完成前必须保持不变，存储必须保持有效；绑定变化后必须重新检查。
 返回 `false` 仅证明这一对调用没有 GM 冲突，不证明本地资源、栈/加载要求或完成
-可见性。协议之外的调用也需要依赖或隔离策略。接入 TMR 调度和 JIT 仍是后续工作。
+可见性。协议之外的调用也需要依赖或隔离策略。下述批量辅助层将判定结果转换为
+TMR 依赖；接入 JIT 仍是后续工作。
+
+### CANNBotDSL 有序批量提交
+
+`pypto.backend.cannbotdsl_submit.build_ordered_submitter(prepared)` 接受非空的
+prepared kernel tuple，生成自持有的 `ordered_submit.hpp`。生成函数接受
+`std::array<CoreTaskArgs*, N>` 和同步回调
+`(size_t index, CoreTaskArgs& args) -> TaskId`，按批次顺序返回提交得到的 ID。
+回调必须提交对应位置的 prepared kernel，同步消费传入的参数和依赖，并返回新任务
+ID。辅助层不负责加载 kernel 或授权执行；回调所接入的 runtime 必须先满足这些要求。
+
+第一次回调之前，辅助层验证所有参数及已有依赖、检查所有调用对并分配依赖存储。
+每个有冲突的先前调用都贡献 `DEP_WAIT`，包括非相邻调用。不相交和 read/read
+共享不增加依赖。已有依赖的 flags（包括 `DEP_RETAIN`）保持有效；匹配到已有边时
+补充 `DEP_WAIT`，不会移除 retain。输出分别位于缓存行 A、B、A 的批次只增加
+第一项到第三项的顺序约束，中间项仍可独立执行。
+
+辅助层临时替换各 `CoreTaskArgs` 的依赖数组并禁用提前调度。每次回调之后恢复原有
+依赖指针、flags 和提前调度设置，异常展开时也恢复。回调不得保留临时指针或修改
+批次绑定。提交失败、无效或重复任务 ID 会阻止后续提交；已经提交的任务无法回滚，
+因此回调失败不代表批次原子失败。
+
+消费者提交前，所有生产者必须在同一个有效 TMR scope 内保持可引用。绑定必须保持
+不变，底层存储必须存活到执行完成。每次调用重新计算冲突，不缓存依赖实际地址的
+结果。辅助层只约束本批次，其他可能并发的调用仍需独立的依赖或隔离策略。它不证明
+组内安全、资源所有权、栈限制、二进制加载或完成可见性，尚未接入 JIT 发现流程和
+`TMRBridge.lower`。
 
 ## 请求与编译结果
 
