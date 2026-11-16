@@ -174,6 +174,47 @@ min/max 显式携带 `signed`。测试经公共 JIT 和 PTOAS LLVM 导出编译�
 warp、部分活跃集合、ballot bit 31、有符号归约、shuffle 子组及非活跃输出保留。
 仅编译测试不代表设备执行验收通过。
 
+### 稳定路由索引与组合 scan
+
+[`examples/advanced/04_simt_compaction.py`](../../../../examples/advanced/04_simt_compaction.py)
+在两个 warp 内分别将非零 INT32 标志压缩为有序输入索引。例如标志
+`[0, 1, 0, -1, ...]` 对应首行输出 `[1, 3]`，计数为 `2`。每行容量为 32，
+计数之后的单元保留初始值。调用方保证 `0 <= valid <= 64`。
+
+`USE_BALLOT` 编译期参数选择两种实现：
+
+- **Ballot：**统计当前 lane 之前的置位数，得到排他前缀排名 (exclusive rank)。
+  非负的低位掩码排除 bit 31，避免移位 32 位；使用已有标量位操作计算置位数。
+- **Scan：**组合距离为 1、2、4、8、16 的五级 `shuffle_up`。
+  每个 lane 都执行 shuffle，仅源 lane 在范围内时累加结果；减去当前标志得到排他排名。
+
+两种实现均在受保护的输入 load 后重新汇合。超过 `valid` 的 lane 贡献零但仍参与，
+因此空 warp 和部分有效 warp 也可通过 lane 31 广播总数。`ranks[tid]` 为每个物理
+lane 记录排他计数，包括补零的尾部。选中 lane 将输入索引写入
+`indices[warp, rank]`，lane 0 写入 `counts[warp]`。
+
+排名也可用于路由载荷寻址。合并各行还需要对 warp 计数做前缀和并执行 scatter；
+本示例不提供全局压缩、跨 AIV 同步或完整 dispatch/combine。
+scan 由已有操作组合，不新增原生指令。
+
+### Tile/SIMT 混合行更新
+
+[`examples/advanced/06_simt_row_update.py`](../../../../examples/advanced/06_simt_row_update.py)
+比较使用八个行系数更新 `[8, 64]` FP32 Tile 的两种方式。每行中小于运行时
+`valid` 的列更新为 `(src + 1) * scale`，其他列保留 seed。
+后续 Tile 消费者为全部元素加 2 并写出结果；第二个输出在更新**之后**读取原始
+seed Tile，检查旧值与新版本仍然独立。
+
+SIMT 路径使用 `dims=(64, 8, 1)`，直接读取原始 `[1, 8]` 系数 Tile，
+捕获生产者 Tile 和可写 seed，并在 scope 结束后自动将 seed 绑定至更新结果。
+对照路径使用 Tile `row_expand_mul`，再在 `reg_scope` 中通过 SIMD 掩码写入，
+产生相同输出，包括尾部和原始 Tile 快照。两者都依赖编译器正常生成的
+MTE/Vector/helper 依赖，不添加手工 fence。
+调用方保证 `0 <= valid <= 64`，且输入、输出存储互不重叠。
+
+本示例验证混合流水线，不预设 SIMT 对规则行算术比向量操作更快。
+设备检查和测量方法见[混合行更新验收](../codegen/05-simt-lowering.md#混合行更新验收)。
+
 ## 原子操作与同步
 
 `pl.simt.atomic_add/min/max/exch(storage, indices, value)` 和

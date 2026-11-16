@@ -20,6 +20,7 @@ import pytest
 import torch
 from pypto import CacheConfig, runtime
 from pypto.backend import BackendType
+from pypto.ir import CompiledProgram
 from pypto.runtime import ExecutionMode, RunConfig
 
 pytestmark = pytest.mark.platforms("a5", reason="SIMT collectives require A5")
@@ -146,6 +147,101 @@ def check_results(integers, floats, active):
     torch.testing.assert_close(floats[valid_f], expected_f[valid_f], rtol=0, atol=0)
 
 
+def compile_compaction(directory: Path, use_ballot: bool):
+    example = runpy.run_path(str(ROOT / "examples/advanced/04_simt_compaction.py"))
+    return example["compact"].compile(
+        USE_BALLOT=use_ballot,
+        config=RunConfig(
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            cache_config=CacheConfig(enabled=False),
+            save_kernels_dir=str(directory),
+            dump_passes=True,
+        ),
+    )
+
+
+def compaction_inputs():
+    lanes = torch.arange(64)
+    generator = torch.Generator().manual_seed(3404)
+    return (
+        torch.zeros(64, dtype=torch.int32),
+        torch.ones(64, dtype=torch.int32),
+        (lanes % 2).to(torch.int32),
+        # Both sign bits and both warp boundaries must survive ballot counting.
+        ((lanes == 0) | (lanes == 31) | (lanes == 32) | (lanes == 63)).to(torch.int32),
+        (lanes < 32).to(torch.int32),
+        (lanes >= 32).to(torch.int32),
+        # Selection means nonzero, including negative values, not flags == 1.
+        torch.randint(-2, 3, (64,), generator=generator, dtype=torch.int32),
+    )
+
+
+def check_compaction(flags, indices, counts, ranks, valid):
+    selected = (flags != 0) & (torch.arange(64) < valid)
+    expected_indices = torch.full_like(indices, -777)
+    expected_counts = selected.reshape(2, 32).sum(dim=1).to(torch.int32)
+    expected_ranks = (
+        (selected.reshape(2, 32).cumsum(dim=1) - selected.reshape(2, 32).to(torch.int64))
+        .reshape(64)
+        .to(torch.int32)
+    )
+    for warp in range(2):
+        ids = torch.arange(warp * 32, (warp + 1) * 32)
+        chosen = ids[selected[ids]].to(torch.int32)
+        expected_indices[warp, : len(chosen)] = chosen
+    torch.testing.assert_close(indices, expected_indices, rtol=0, atol=0)
+    torch.testing.assert_close(counts, expected_counts, rtol=0, atol=0)
+    torch.testing.assert_close(ranks, expected_ranks, rtol=0, atol=0)
+
+
+def compaction_acceptance(output: Path, device: int | None):
+    checks = 0
+    timings = {}
+    artifact_file = output / "artifacts.json"
+    # Prepare before acquiring a device; replay preserves the exact compiled
+    # programs and avoids holding a shared card through native compilation.
+    artifacts = json.loads(artifact_file.read_text()) if device is not None else {}
+    for use_ballot in (True, False):
+        method = "ballot" if use_ballot else "scan"
+        compiled = (
+            CompiledProgram.from_dir(artifacts[method])
+            if device is not None
+            else compile_compaction(output / method, use_ballot)
+        )
+        compiled.load()
+        if device is None:
+            artifacts[method] = str(compiled.output_dir.resolve())
+            continue
+        config = RunConfig(
+            backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, device_id=device
+        )
+        with runtime.ChipWorker(config=config, runtime=compiled.runtime_name) as worker:
+            handle = worker.register(compiled)
+            for flags in compaction_inputs():
+                original = flags.clone()
+                for valid in (0, 1, 17, 31, 32, 33, 47, 63, 64):
+                    indices = torch.full((2, 32), -777, dtype=torch.int32)
+                    counts = torch.full((2,), -777, dtype=torch.int32)
+                    ranks = torch.full((64,), -777, dtype=torch.int32)
+                    handle(flags, indices, counts, ranks, valid)
+                    check_compaction(flags, indices, counts, ranks, valid)
+                    torch.testing.assert_close(flags, original, rtol=0, atol=0)
+                    checks += 1
+        rounds = int(os.environ.get("PYPTO_SIMT_COMPACTION_BENCH_ROUNDS", "0"))
+        if rounds:
+            # Reuse the same sparse input for both methods. Device wall includes
+            # orchestration/launch, and must not be described as kernel latency.
+            flags = compaction_inputs()[-1]
+            stats = runtime.benchmark(
+                compiled, (flags, indices, counts, ranks, 64), rounds=rounds, warmup=3, config=config
+            )
+            timings[method] = {"device_wall_us": stats.samples, "median_us": stats.device_us_median}
+    if device is None:
+        artifact_file.write_text(json.dumps(artifacts))
+    (output / "result.json").write_text(json.dumps({"checks": checks, "timings": timings}))
+
+
 def acceptance(output: Path, device: int | None):
     compiled = compile_collectives(output)
     compiled.load()
@@ -191,8 +287,26 @@ def test_simt_collectives(tmp_path, onboard):
     assert result["while_checks"] == (7 if onboard else 0)
 
 
+@pytest.mark.parametrize("onboard", [False, True], ids=["build", "persistent"])
+def test_simt_compaction(tmp_path, onboard):
+    gate = "PYPTO_RUN_VPTO_ONBOARD" if onboard else "PYPTO_RUN_VPTO_VF_VALIDATION"
+    if os.environ.get(gate) != "1":
+        pytest.skip(f"Opt in with {gate}=1")
+    support = runpy.run_path(str(ROOT / "tests/ut/backend/vpto_vf_validation/test_validation.py"))
+    command = [sys.executable, Path(__file__).resolve(), "--compaction-worker", tmp_path]
+    timeout = int(os.environ.get("PYPTO_VPTO_TIMEOUT", "600"))
+    support["run"](tmp_path, "compaction-build", command, timeout=timeout)
+    if onboard:
+        command.append(os.environ["PYPTO_VPTO_DEVICE_ID"])
+        support["run"](tmp_path, "compaction-onboard", command, timeout=timeout)
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert result["checks"] == (126 if onboard else 0)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) in (3, 4) and sys.argv[1] == "--worker":
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--compaction-worker":
+        compaction_acceptance(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) == 4 else None)
+    elif len(sys.argv) in (3, 4) and sys.argv[1] == "--worker":
         acceptance(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) == 4 else None)
     else:
         raise SystemExit(pytest.main([__file__, "-v", *sys.argv[1:]]))

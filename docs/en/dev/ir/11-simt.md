@@ -198,6 +198,56 @@ public JIT and PTOAS LLVM export. Opt-in device acceptance lives in
 partial active sets, ballot bit 31, signed reductions, shuffle subgroups and
 untouched inactive outputs. Compile-only tests do not establish device execution.
 
+### Stable routing indices and composed scan
+
+[`examples/advanced/04_simt_compaction.py`](../../../../examples/advanced/04_simt_compaction.py)
+compacts nonzero INT32 flags into ordered input indices, independently within
+each of two warps. For flags `[0, 1, 0, -1, ...]`, the first output row starts
+with `[1, 3]` and its count is `2`. Each row has capacity 32; cells after its
+count keep their initial value. The caller supplies `0 <= valid <= 64`.
+
+The `USE_BALLOT` constexpr selects two implementations:
+
+- **Ballot:** count the set bits below the current lane to obtain its exclusive
+  rank. A nonnegative lower-lane mask excludes bit 31 without a shift by 32;
+  scalar bit operations implement population count using existing IR.
+- **Scan:** compose five `shuffle_up` stages at distances 1, 2, 4, 8 and 16.
+  Every lane executes each shuffle; only lanes with an in-range source add its
+  result. Subtracting the lane's flag yields its exclusive rank.
+
+Both implementations reconverge after guarded input loads. Lanes past `valid`
+contribute zero but still participate, so lane 31 can broadcast the total even
+for an empty or partial warp. `ranks[tid]` records the exclusive count for every
+physical lane, including the zero-padded tail. Selected lanes scatter their
+input index to `indices[warp, rank]`; lane zero writes `counts[warp]`.
+
+The ranks can also index a routing payload. Combining rows requires a separate
+prefix sum of warp counts and a scatter; this example does not provide global
+compaction, cross-AIV synchronization, or complete dispatch/combine. The scan is
+a composition of existing operations, not a new native instruction.
+
+### Tile/SIMT mixed row updates
+
+[`examples/advanced/06_simt_row_update.py`](../../../../examples/advanced/06_simt_row_update.py)
+compares two ways to update a `[8, 64]` FP32 Tile with eight per-row coefficients.
+For each row, columns below the runtime `valid` use `(src + 1) * scale`; the
+remaining columns retain the seed. A Tile consumer adds 2 to all elements and
+stores the result. A second output reads the original seed Tile **after** the
+update, checking that the original value remains distinct from the new version.
+
+The SIMT path uses `dims=(64, 8, 1)` and reads coefficients from their original
+loaded `[1, 8]` Tile. It captures the producer Tile and writable seed, then
+automatically rebinds the seed to the scope result. The comparison uses Tile
+`row_expand_mul` followed by masked SIMD stores in `reg_scope`; it computes the
+same outputs, including tails and the original Tile snapshot. Both rely on
+normal compiler-generated MTE/Vector/helper dependencies, without manual fences.
+The caller supplies `0 <= valid <= 64` and separate input/output storage.
+
+This example demonstrates a mixed pipeline, not an assertion that SIMT is
+faster than vector operations for regular row arithmetic. See
+[integration acceptance](../codegen/05-simt-lowering.md#mixed-row-update-acceptance)
+for device checks and the timing methodology.
+
 ## Atomics and synchronization
 
 `pl.simt.atomic_add/min/max/exch(storage, indices, value)` and

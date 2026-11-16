@@ -159,6 +159,90 @@ JIT loop induction variables shadow prior scalar aliases and folded shape values
 
 `pl.while_` uses `for` syntax but binds only loop-carried values, with no induction variable. Assignment-form `pl.yield_` targets define the post-loop outputs, including zero-iteration results. Incoming aliases and folded shapes are shadowed inside the loop; an outer binding is restored only when its name is not an output of that loop. JIT and the parser share yield ownership rules: yields in nested conditionals or real loops belong to those constructs. Runtime scopes (`pl.scope` / `pl.manual_scope`) and `pl.split_aiv` are transparent wrappers. The A5 regression checks that conditional yields do not replace an outer scalar alias.
 
+## Routing compaction acceptance
+
+The `test_simt_compaction` case in
+`tests/st/runtime/vpto/test_simt_collectives_onboard.py` exercises the public
+[`04_simt_compaction.py`](../../../../examples/advanced/04_simt_compaction.py)
+example. Ballot and shuffle-scan variants share an independent CPU oracle for
+stable indices, counts and exclusive ranks. Seven flag patterns and nine valid
+lengths (0/1/17/31/32/33/47/63/64) give 126 A5 checks. Cases include empty/full
+selection, bit 31, independent warps, negative flags and untouched output tails.
+
+Prepare without a card, then replay under the local device queue:
+
+```bash
+python tests/st/runtime/vpto/test_simt_collectives_onboard.py \
+  --compaction-worker build/simt-compaction
+task-submit --device auto --max-time 600 --run \
+  'python tests/st/runtime/vpto/test_simt_collectives_onboard.py --compaction-worker build/simt-compaction "$TASK_DEVICE"'
+```
+
+Both commands use the configured project environment. Set
+`PYPTO_SIMT_COMPACTION_BENCH_ROUNDS=20` in the queued job to record three warmups
+and 20 measured launches per method in `result.json`. Preparation records the
+artifact directories in `artifacts.json`; rerun preparation after changing the
+example. The replay uses `CompiledProgram.from_dir` with those artifacts.
+
+On A5 with PTOAS v0.72 and CANN 9.3.0, the 2026-11-16 sample passed all 126
+checks. Median device wall times were 63.03 µs (ballot) and 63.47 µs (scan), with
+ranges 57.50–68.43 and 58.25–66.66 µs. These overlapping ranges establish no
+performance advantage. Device wall includes orchestration, launch and GM work;
+it neither isolates instruction latency nor compares against Tile/SIMD. The
+mixed row-update acceptance below supplies the separate Tile/SIMD comparison.
+
+## Mixed row-update acceptance
+
+[`06_simt_row_update.py`](../../../../examples/advanced/06_simt_row_update.py)
+compares Tile → SIMT → Tile with Tile broadcast multiply → masked SIMD → Tile.
+Both process `[8, 64]` FP32 data and eight row coefficients, return the updated
+Tile after a vector consumer, and preserve an original-Tile snapshot. The
+coefficient row is 32-byte aligned. There are no manual synchronization calls.
+
+`test_simt_integration` in `tests/st/runtime/vpto/test_simt_ir_onboard.py`
+checks seven valid column counts (0/1/31/32/33/63/64) and three changing input
+sets for each row variant. It also replays the existing GM-copy and UB-gather
+kernels for seven lengths and three inputs each: **84 device checks** in all.
+The oracle checks outputs, untouched tails, snapshots and unchanged row inputs.
+GM copy retains nonzero-offset guards and a downstream Tile load; UB gather
+retains two-dimensional addressing, a vector producer and an old-Tile read.
+
+```bash
+python tests/st/runtime/vpto/test_simt_ir_onboard.py \
+  --integration-worker build/simt-integration
+task-submit --device auto --max-time 600 --run \
+  'PYPTO_SIMT_INTEGRATION_BENCH_ROUNDS=30 python tests/st/runtime/vpto/test_simt_ir_onboard.py --integration-worker build/simt-integration "$TASK_DEVICE"'
+```
+
+Run both commands in the configured project environment. Preparation builds
+and loads all four programs without reserving a card; replay reconstructs them
+from `integration-artifacts.json`. Rebuild after changing the example.
+`integration-result.json` retains check counts and all timing samples.
+
+The 2026-11-16 A5 sample (PTOAS v0.72, CANN 9.3.0) passed all 84 checks. With
+three warmups and 30 measured launches per variant and length:
+
+| Valid columns | Tile/SIMT median (µs) | Tile/SIMD median (µs) |
+| ------------- | --------------------: | --------------------: |
+| 0 | 61.58 | 62.73 |
+| 33 | 62.95 | 61.55 |
+| 64 | 61.13 | 62.32 |
+
+The sample ranges overlap (SIMT 57.03–69.95 µs, SIMD 56.70–85.18 µs), so this
+small regular workload establishes no speed advantage. Each invocation has one
+runtime task and one SIMT/VF helper launch. Generated callers perform three GM
+Tile loads and two stores: **8,224 logical bytes** (two 2,048-byte inputs, a
+32-byte coefficient row, and two 2,048-byte outputs), plus a 2,048-byte UB seed
+copy to preserve the original version. The SIMD path additionally materializes
+the broadcast-multiply candidate. Logical byte counts are not measured bus
+traffic; cache lines, alignment and UB accesses add further costs.
+
+Even `valid=0` retains the Tile producers, consumer, snapshot and helper launch.
+Its timing is a combined overhead control, not an isolated launch measurement.
+Device wall includes orchestration and scheduling; subtracting these noisy
+samples cannot separate launch, memory and arithmetic latency. Larger workloads
+or in-core profiling are needed to attribute those costs independently.
+
 ## Scalar math and conversion validation
 
 The explicit scalar APIs lower to native `pto.absf/minf/maxf`, math operations,

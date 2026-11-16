@@ -751,5 +751,66 @@ def test_public_math_native_compile(tmp_path, pytestconfig):
         backend.reset_for_testing()
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("use_ballot", [True, False], ids=["ballot", "scan"])
+def test_public_compaction_native_compile(tmp_path, use_ballot):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    example = Path(__file__).resolve().parents[3] / "examples/advanced/04_simt_compaction.py"
+    compact = runpy.run_path(str(example))["compact"]
+    backend.reset_for_testing()
+    try:
+        compiled = compact.compile(
+            USE_BALLOT=use_ballot,
+            config=RunConfig(
+                backend_type=backend.BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
+                cache_config=CacheConfig(enabled=False),
+                save_kernels_dir=str(tmp_path),
+            ),
+        )
+        assert isinstance(compiled, CompiledProgram)
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        text = helpers[0].read_text()
+        assert "pto.ldg" in text and "pto.stg" in text
+        assert "pto.shuffle_idx" in text
+        assert ("pto.vote_ballot" in text) == use_ballot
+        assert ("pto.shuffle_up" in text) != use_ballot
+    finally:
+        backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("use_simt", [True, False], ids=["simt", "simd"])
+def test_public_row_update_native_compile(tmp_path, use_simt):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    example = Path(__file__).resolve().parents[3] / "examples/advanced/06_simt_row_update.py"
+    entry = runpy.run_path(str(example))["row_update"]
+    backend.reset_for_testing()
+    try:
+        compiled = entry.compile(
+            USE_SIMT=use_simt,
+            config=RunConfig(
+                backend_type=backend.BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
+                cache_config=CacheConfig(enabled=False),
+                save_kernels_dir=str(tmp_path),
+            ),
+        )
+        assert isinstance(compiled, CompiledProgram)
+        manifests = list((tmp_path / "vpto").rglob("manifest.json"))
+        assert len(manifests) == 1
+        helpers = json.loads(manifests[0].read_text())["helpers"]
+        assert len(helpers) == 1
+        assert (helpers[0]["kind"] == "simt") == use_simt
+        source = "\n".join(p.read_text() for p in (tmp_path / "vpto").rglob("*.pto"))
+        assert ("pto.simt_launch" in source) == use_simt
+        assert ("pto.vmi." in source) != use_simt
+    finally:
+        backend.reset_for_testing()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
