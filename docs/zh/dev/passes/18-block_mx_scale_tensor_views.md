@@ -20,6 +20,9 @@ load/store 坐标及带形状的 ND/MX 别名。`MaterializeTensorStrides` 生�
 也不必为 16 的倍数；静态正数 group 维度和 group 偏移必须覆盖对齐的完整二元素组。
 其实际有效行尾部会保留在 DMA 窗口中。下方 `MX_A_ND` 示例使用 K=2304，
 对应每行 72 组 scale。
+使用 `clamp=True` 时，DMA 窗口采用推导出的源有效范围，而不是原始请求：
+从仅有 19 个有效行的源加载到 32 行 tile 时，只读取这 19 行。
+裁剪后的 scale group 范围仍须覆盖完整的二元素组。
 
 函数标记 `mx_tensor_views_legalized` 保证重复执行幂等。公开工厂函数为
 `passes.legalize_mx_scale_tensor_views()`。

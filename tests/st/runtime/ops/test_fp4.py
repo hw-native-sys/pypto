@@ -633,6 +633,14 @@ def _all_packed_byte_patterns():
     return torch.arange(256, dtype=torch.uint8).repeat(16).reshape(32, 128)
 
 
+def _row_distinct_packed_byte_patterns():
+    # An odd row phase makes all 32 rows different, including the two 16-row
+    # panels. Column panels differ too, so NZ row/panel swaps change the bytes.
+    rows = torch.arange(32, dtype=torch.int32).unsqueeze(1)
+    columns = torch.arange(128, dtype=torch.int32).unsqueeze(0)
+    return ((rows * 17 + columns) % 256).to(torch.uint8)
+
+
 def _direct_fp4_to_fp8_golden(layout):
     def golden(tensors):
         # Decode via the independent numerical E2M1 reference, then use Torch's
@@ -664,7 +672,17 @@ def _direct_fp4_to_fp8_golden(layout):
             compare=_compare_packed_bytes,
         )
         for name, layout in (("nd", None), ("nz", pl.NZ))
-    ]
+    ],
+    st.case(
+        _make_direct_fp4_to_fp8_decode(pl.NZ),
+        tensors=[
+            TensorSpec("src", [32, 128], DataType.UINT8, init_value=_row_distinct_packed_byte_patterns),
+            TensorSpec("out", [32, 256], DataType.FP8E4M3FN, is_output=True, init_value=0),
+        ],
+        name="fp4_e2m1_to_fp8_row_distinct_nz_panels",
+        golden=_direct_fp4_to_fp8_golden(pl.NZ),
+        compare=_compare_packed_bytes,
+    ),
 )
 def test_direct_fp4_to_fp8_all_patterns(case_run):
     case_run.assert_passed()

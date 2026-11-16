@@ -51,6 +51,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -279,16 +280,52 @@ void MaybeWarnPackedFp4ToFp8(DataType src, DataType dst, const Span& span, std::
                       span);
 }
 
+// Standalone AIV splitting runs later and may halve carrier columns or make
+// valid columns runtime-dependent. Authored per-lane functions bypass that
+// rewrite, so their already-final geometry remains eligible for direct casts.
+bool HasFutureAivSplit(const FunctionPtr& func) {
+  if (func->func_type_ != FunctionType::AIV || func->GetAttr<bool>(kAttrSplitAiv, false)) return false;
+  const auto split = func->GetSplitMode();
+  if (split.has_value() && *split != SplitMode::None) return true;
+  class SplitRequestCollector : public IRVisitor {
+   public:
+    bool requested = false;
+
+   protected:
+    void VisitExpr_(const CallPtr& call) override {
+      Record(call->kwargs_);
+      IRVisitor::VisitExpr_(call);
+    }
+    void VisitExpr_(const SubmitPtr& submit) override {
+      Record(submit->kwargs_);
+      IRVisitor::VisitExpr_(submit);
+    }
+
+   private:
+    void Record(const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      for (const auto& [key, value] : kwargs) {
+        if (key == "split" && value.type() == typeid(int) && std::any_cast<int>(value) != 0) {
+          requested = true;
+        }
+      }
+    }
+  } collector;
+  collector.VisitStmt(func->body_);
+  return collector.requested;
+}
+
 class LegalizeTileCastMutator : public IRMutator {
  public:
   LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name, bool addressed_fp4_cast,
-                          std::vector<Diagnostic>* diags)
+                          bool future_aiv_split, std::vector<Diagnostic>* diags)
       : arch_name_(std::move(arch_name)),
         adj_(BuildAdj(table)),
         addressed_fp4_cast_(addressed_fp4_cast),
+        future_aiv_split_(future_aiv_split),
         diags_(diags) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    definitions_[op->var_.get()] = op->value_;
     auto call = As<Call>(op->value_);
     if (!call || !IsOp(call, "tile.cast")) {
       return IRMutator::VisitStmt_(op);
@@ -303,7 +340,13 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    const bool allow_direct_fp4_to_fp8 = addressed_fp4_cast_ && HasDirectFp4ToFp8SourceGeometry(src_tile);
+    const bool explicit_nz = call->GetKwarg<TensorLayout>("layout", TensorLayout::ND) == TensorLayout::NZ;
+    // Plain ND retains its old bridge for slice-derived addresses and future
+    // lane splitting. NZ is an explicit native-only request; the
+    // backend keeps its source-located geometry/alignment diagnostics for it.
+    const bool allow_direct_fp4_to_fp8 =
+        addressed_fp4_cast_ && HasDirectFp4ToFp8SourceGeometry(src_tile) &&
+        (explicit_nz || (!future_aiv_split_ && !HasSliceSource(call->args_[0])));
     const bool direct_pair = src == DataType::FP4E2M1X2 && dst == DataType::FP8E4M3FN;
     // Packed FP4 cannot use PTOAS treshape to acquire static valid columns.
     // Addressed planners rebind a typed descriptor; addressless plain casts
@@ -381,9 +424,45 @@ class LegalizeTileCastMutator : public IRMutator {
   }
 
  private:
+  bool HasSliceSource(const ExprPtr& expr) {
+    const auto [cached, inserted] = slice_sources_.emplace(expr.get(), false);
+    if (!inserted) return cached->second;
+    bool sliced = false;
+    if (const auto var = AsVarLike(expr)) {
+      const auto definition = definitions_.find(var.get());
+      sliced = definition != definitions_.end() && HasSliceSource(definition->second);
+    } else if (const auto call = As<Call>(expr)) {
+      if (IsOp(call, "tile.slice")) {
+        // A slice can hide an unaligned or runtime address until backend
+        // emission. Plain ND keeps its previous bridge for these views; NZ
+        // explicitly requests the direct decoder and its alignment checks.
+        sliced = true;
+      } else if (call->op_ && OpRegistry::GetInstance().IsRegistered(call->op_->name_)) {
+        const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+        const auto reuses_input = entry.GetOutputReusesInputArg();
+        const auto& memory = entry.GetMemorySpec();
+        if (reuses_input.has_value() && *reuses_input < call->args_.size()) {
+          sliced = HasSliceSource(call->args_[*reuses_input]);
+        } else if (memory.has_value() && memory->output_inherits_input) {
+          for (const auto& arg : call->args_) {
+            if (As<TileType>(arg->GetType())) {
+              sliced = HasSliceSource(arg);
+              break;
+            }
+          }
+        }
+      }
+    }
+    slice_sources_[expr.get()] = sliced;
+    return sliced;
+  }
+
   std::string arch_name_;
   AdjList adj_;
   bool addressed_fp4_cast_;
+  bool future_aiv_split_;
+  std::unordered_map<const Var*, ExprPtr> definitions_;
+  std::unordered_map<const Expr*, bool> slice_sources_;
   std::size_t temp_counter_ = 0;
   std::vector<Diagnostic>* diags_;
 };
@@ -410,7 +489,7 @@ FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
   std::vector<Diagnostic> diags;
   const bool addressed_fp4_cast = ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS;
   LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch(),
-                                  addressed_fp4_cast, &diags);
+                                  addressed_fp4_cast, HasFutureAivSplit(func), &diags);
   auto result = mutator.VisitFunction(func);
   EmitDiagnostics(diags, "LegalizeTileCast");
   return result;

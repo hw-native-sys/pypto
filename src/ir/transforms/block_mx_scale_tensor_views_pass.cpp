@@ -585,14 +585,31 @@ class BlockMxMutator : public IRMutator {
 
     args[1] = BlockMxTupleArg(args[1], layout, op->span_, /*is_offsets=*/true, facts_, logical_views_);
     args[2] = BlockMxTupleArg(args[2], layout, op->span_, /*is_offsets=*/false, facts_, logical_views_);
-    if (args.size() >= 4) {
-      // ZZ/NN loads address complete physical boxes even when the logical tile
-      // valid rows are narrowed. ND loading instead consumes the valid-row
-      // tail itself and must not read into the next compact expert's rows.
-      args[3] =
-          layout == TensorLayout::MX_A_ND
-              ? BlockMxTupleArg(args[3], layout, op->span_, /*is_offsets=*/false, facts_, logical_views_)
-              : args[2];
+    if (layout == TensorLayout::MX_A_ND) {
+      // Type inference intersects the request with the GM source valid region,
+      // including clamp=True and source-level valid_shape. The authored fourth
+      // operand can still contain the larger request, so using it here would
+      // emit a DMA partition that reads beyond the source's compact rows.
+      // Tile and GM coordinates agree for rank-two MX_A_ND; keep the allocated
+      // tile shape, but transfer only its already-inferred valid rectangle.
+      const auto result_type = As<TileType>(op->GetType());
+      INTERNAL_CHECK_SPAN(result_type, op->span_)
+          << "Internal error: MX_A_ND tile.load result must carry a TileType";
+      const auto valid = tile_view_semantics::GetEffectiveTileView(*result_type).valid_shape;
+      auto valid_arg = std::make_shared<MakeTuple>(valid, op->span_);
+      // Validate the effective group extent too: clamping must never truncate
+      // one of the two-byte scale pairs consumed by the ISA's ND-to-ZZ load.
+      auto checked_valid =
+          BlockMxTupleArg(valid_arg, layout, op->span_, /*is_offsets=*/false, facts_, logical_views_);
+      if (args.size() >= 4) {
+        args[3] = std::move(checked_valid);
+      } else {
+        args.push_back(std::move(checked_valid));
+      }
+    } else if (args.size() >= 4) {
+      // ZZ/NN loads still address complete physical boxes even when the
+      // logical tile's active rows are narrowed.
+      args[3] = args[2];
     }
     return args;
   }

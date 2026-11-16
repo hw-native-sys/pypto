@@ -2386,6 +2386,7 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
+              tests/st/runtime/cross_core/test_w2_fp4_nz_mx_scale.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               tests/st/runtime/ops/test_rsqrt.py::test_a5_rsqrt_precision_ulp \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
@@ -2404,6 +2405,7 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/ops/test_matmul_mx.py \
+              tests/st/runtime/ops/test_fp4.py::test_direct_fp4_to_fp8_all_patterns \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"

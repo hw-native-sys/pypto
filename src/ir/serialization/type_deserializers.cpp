@@ -245,9 +245,6 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
       } else if (type_name == "TensorLayout") {
         require_value("TensorLayout");
         kwargs.emplace_back(key, StringToTensorLayout(value_str));
-      } else if (type_name == "CompactMode") {
-        require_value("CompactMode");
-        kwargs.emplace_back(key, StringToCompactMode(value_str));
       } else if (type_name == "TileLayout") {
         require_value("TileLayout");
         kwargs.emplace_back(key, StringToTileLayout(value_str));

@@ -48,8 +48,9 @@ inline bool HasDirectFp4ToFp8SourceGeometry(const TileTypePtr& source) {
   const auto valid_columns = As<ConstInt>(view.valid_shape.back());
   if (!valid_columns || valid_columns->value_ <= 0) return false;
   if (view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box ||
-      view.compact != CompactMode::null)
+      view.compact != CompactMode::null) {
     return false;
+  }
   if (view.stride.empty()) return true;
   if (view.stride.size() != source->shape_.size()) return false;
   const auto column_stride = As<ConstInt>(view.stride.back());

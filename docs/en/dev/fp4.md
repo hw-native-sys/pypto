@@ -113,8 +113,11 @@ The source is an ND Vec tile with physical carrier columns divisible by 32
 and static positive valid columns; valid rows may be runtime values.
 `valid_shape` may describe a narrower rectangle. The direct path uses PYPTO
 or DSA_RP address planning to bind static-column descriptors. Plain casts with
-PTOAS planning or dynamic valid columns retain the BF16/FP32 bridge; an explicit
-NZ request requires the addressed direct path. The result keeps logical
+PTOAS planning or dynamic valid columns retain the BF16/FP32 bridge. Plain ND
+casts from slice-derived views and standalone AIV functions awaiting lane
+splitting also keep that bridge conservatively; authored per-lane kernels are
+already final and remain eligible. An explicit NZ request requires the
+addressed direct path. The result keeps logical
 `[M, 2*K]` dimensions while its NZ descriptor controls physical storage.
 NZ physical rows must be divisible by 16; use `valid_shape` for row tails.
 The layout option is Tile-only. E1M2 and FP8E5M2 do not have this direct path.

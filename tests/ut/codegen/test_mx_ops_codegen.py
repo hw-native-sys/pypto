@@ -686,6 +686,22 @@ class TestMxMatmulCodegen:
 
 
 class TestMxANDScaleCodegen:
+    @pytest.mark.parametrize("row_offset", [0, 5])
+    def test_clamped_source_rows_bound_the_dma_partition(self, row_offset):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, scales: pl.Tensor[[19, 72], pl.FP8E8M0, pl.MX_A_ND]):
+                _ = pl.load(scales, [row_offset, 0], [32, 72], clamp=True)
+
+        mlir = _emit_incore_mlir(Program)
+        (tload,) = [line for line in mlir.splitlines() if "pto.tload " in line]
+        # Allocating a 32-row tile is valid; transferring 32 rows from the
+        # 19-row source would overread, including when valid_shape was omitted.
+        assert f"!pto.partition_tensor_view<{19 - row_offset}x72x!pto.f8E8M0>" in tload
+        assert "!pto.partition_tensor_view<32x72x!pto.f8E8M0>" not in tload
+        assert "loc=mat, dtype=!pto.f8E8M0, rows=32, cols=72" in mlir
+
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
     def test_compact_a_scales_load_directly_to_zz_mat(self, tmp_path, planner):
         """Keep row-major scale ABI and load the dynamic tail on AIC, without Vec packing."""

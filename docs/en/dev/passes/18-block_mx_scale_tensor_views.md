@@ -25,6 +25,9 @@ TLOAD. Rows and row offsets may be dynamic and need not be multiples of 16;
 the positive static group dimension and group offsets must contain complete
 aligned pairs. Its exact valid-row tail is retained in the DMA window. See the
 `MX_A_ND` example below for K=2304 / 72 scale groups per row.
+With `clamp=True`, the DMA window uses the inferred source-valid extent rather
+than the authored request: a 32-row tile loaded from 19 valid source rows reads
+only those 19 rows. The clamped scale-group extent must still contain complete pairs.
 
 Functions are stamped `mx_tensor_views_legalized` to make repeated legalization
 idempotent. The public factory is `passes.legalize_mx_scale_tensor_views()`.

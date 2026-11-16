@@ -1162,11 +1162,12 @@ def test_direct_fp4_to_fp8_keeps_runtime_rows_with_static_columns(tmp_path):
     casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
     assert len(casts) == 1, mlir
     assert "v_row=?, v_col=128" in casts[0] and "v_row=?, v_col=256" in casts[0], casts[0]
-    pto = tmp_path / "dynamic_rows_fp4_to_fp8.pto"
-    cpp = tmp_path / "dynamic_rows_fp4_to_fp8.cpp"
-    pto.write_text(mlir)
-    _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
-    assert cpp.read_text().count("TCVT(") == 1
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "dynamic_rows_fp4_to_fp8.pto"
+        cpp = tmp_path / "dynamic_rows_fp4_to_fp8.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 1
 
 
 def test_dynamic_valid_columns_keep_existing_fp4_cast_bridge():
@@ -1296,21 +1297,22 @@ def test_direct_fp4_to_fp8_slice_preserves_parent_pitch_and_offset(tmp_path, pla
     }
     assert (offsets.group(1) not in constants) == dynamic_offset, mlir
     assert "v_col=56" in cast and "v_col=112" in cast, cast
-    pto, cpp = tmp_path / "slice_fp4_to_fp8.pto", tmp_path / "slice_fp4_to_fp8.cpp"
-    pto.write_text(mlir)
-    _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
-    emitted = cpp.read_text()
-    assert emitted.count("TCVT(") == 1, emitted
-    # The actual C++ source descriptor must retain the parent's 128-byte row
-    # pitch (256 logical FP4 values), even though the selected window is 64 bytes.
-    source_name = re.search(r"TCVT\([^,]+,\s*([A-Za-z_]\w*)\s*,", emitted)
-    assert source_name, emitted
-    assert re.search(
-        r"Tile<TileType::Vec, float4_e2m1x2_t, (?:16|32), 256, BLayout::RowMajor, 13, 112,[^>]+>\s*"
-        + re.escape(source_name.group(1))
-        + r"\s*[;({]",
-        emitted,
-    ), emitted
+    if find_ptoas_binary() is not None:
+        pto, cpp = tmp_path / "slice_fp4_to_fp8.pto", tmp_path / "slice_fp4_to_fp8.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        emitted = cpp.read_text()
+        assert emitted.count("TCVT(") == 1, emitted
+        # The actual C++ source descriptor must retain the parent's 128-byte row
+        # pitch (256 logical FP4 values), even though the selected window is 64 bytes.
+        source_name = re.search(r"TCVT\([^,]+,\s*([A-Za-z_]\w*)\s*,", emitted)
+        assert source_name, emitted
+        assert re.search(
+            r"Tile<TileType::Vec, float4_e2m1x2_t, (?:16|32), 256, BLayout::RowMajor, 13, 112,[^>]+>\s*"
+            + re.escape(source_name.group(1))
+            + r"\s*[;({]",
+            emitted,
+        ), emitted
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
@@ -1336,6 +1338,57 @@ def test_direct_fp4_to_fp8_slice_requires_aligned_source(planner, dynamic_column
     # one-byte offset and an unknown runtime column are both unsafe to emit.
     with pytest.raises(ValueError, match="32-byte-aligned source subview"):
         _emit_incore_mlir(UnalignedSliceDecode, planner)
+
+
+def test_standalone_left_right_fp4_nd_cast_keeps_bridge_after_split(tmp_path):
+    @pl.program
+    class StandaloneSplitDecode:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def main(
+            self,
+            src: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            packed = pl.load(src, [0, 0], [16, 32])
+            return pl.store(pl.cast(packed, pl.FP8E4M3FN), [0, 0], out)
+
+    mlir = _emit_incore_mlir(StandaloneSplitDecode)
+    assert mlir.count("pto.tcvt ") == 3, mlir
+    assert "dtype=!pto.f4E2M1x2, rows=16, cols=16" in mlir, mlir
+    assert "dtype=bf16" in mlir and "dtype=f32" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        pto, cpp = tmp_path / "split_nd_bridge.pto", tmp_path / "split_nd_bridge.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 3
+
+
+@pytest.mark.parametrize("dynamic_column", [False, True])
+def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path, dynamic_column):
+    column_scale, column_base = (1, 0) if dynamic_column else (0, 1)
+
+    @pl.program
+    class SliceNdDecode:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            src: pl.Tensor[[32, 512], pl.FP4E2M1X2],
+            column: pl.Scalar[pl.INT64],
+            out: pl.Out[pl.Tensor[[16, 512], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 512], pl.FP8E4M3FN]:
+            packed = pl.load(src, [0, 0], [32, 512])
+            start = column * column_scale + column_base
+            window = pl.tile.slice(packed, [16, 256], [0, start], valid_shape=[16, 256])
+            return pl.store(pl.cast(window, pl.FP8E4M3FN), [0, 0], out)
+
+    mlir = _emit_incore_mlir(SliceNdDecode)
+    assert mlir.count("pto.tcvt ") == 3, mlir
+    assert "dtype=bf16" in mlir and "dtype=f32" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        pto, cpp = tmp_path / "slice_nd_bridge.pto", tmp_path / "slice_nd_bridge.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        assert cpp.read_text().count("TCVT(") == 3
 
 
 if __name__ == "__main__":

@@ -126,8 +126,9 @@ CallPtr CreateLayoutMoveCall(const ExprPtr& input, MemorySpace target_memory, Ti
 bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec& spec) {
   if (IsDensePackedFp4DnCast(call) ||
       (IsDirectFp4E2M1ToFp8Cast(call) &&
-       HasDirectFp4ToFp8SourceGeometry(As<TileType>(call->args_[0]->GetType()))))
+       HasDirectFp4ToFp8SourceGeometry(As<TileType>(call->args_[0]->GetType())))) {
     return false;
+  }
   for (size_t i = 0; i < spec.input_layouts.size() && i < call->args_.size(); ++i) {
     const auto& required_layout = spec.input_layouts[i];
     if (!RequiresRowMajor(required_layout)) {
@@ -152,8 +153,9 @@ bool NeedsRepair(const CallPtr& call, const TileTypePtr& result_tile_type,
                  const backend::BackendTileLayoutSpec& spec) {
   if (IsDensePackedFp4DnCast(call) ||
       (IsDirectFp4E2M1ToFp8Cast(call) &&
-       HasDirectFp4ToFp8SourceGeometry(As<TileType>(call->args_[0]->GetType()))))
+       HasDirectFp4ToFp8SourceGeometry(As<TileType>(call->args_[0]->GetType())))) {
     return false;
+  }
   return NeedsInputRepair(call, spec) || NeedsOutputRepair(result_tile_type, spec);
 }
 

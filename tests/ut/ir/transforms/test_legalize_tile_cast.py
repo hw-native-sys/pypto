@@ -915,5 +915,62 @@ def test_direct_fp4_to_fp8_keeps_ptoas_planner_bridge(planner):
     assert _cast_pairs(after) == expected
 
 
+@pytest.mark.parametrize("authored_per_lane", [False, True])
+def test_plain_nd_fp4_cast_preserves_bridge_before_standalone_lane_split(authored_per_lane):
+    @pl.program
+    class Before:
+        @pl.function(
+            type=pl.FunctionType.AIV,
+            attrs={"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": authored_per_lane},
+        )
+        def kernel(self, src: pl.Tensor[[16, 32], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [16, 32])
+            _decoded = pl.cast(packed, pl.FP8E4M3FN)
+
+    # Standalone splitting later narrows each lane to 16 carrier columns, which
+    # cannot use the direct decoder. Authored per-lane geometry is not halved.
+    pairs = _cast_pairs(_run(Before, BackendType.Ascend950))
+    if authored_per_lane:
+        assert pairs == [("fp4e2m1x2", "fp8e4m3fn")]
+    else:
+        assert pairs == [("fp4e2m1x2", "bfloat16"), ("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+
+
+@pytest.mark.parametrize("column", [1, 32])
+def test_plain_nd_fp4_slice_and_metadata_alias_retain_existing_bridge(column):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, src: pl.Tensor[[32, 512], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [32, 512])
+            window = pl.tile.slice(packed, [16, 256], [0, column], valid_shape=[16, 256])
+            alias = pl.tile.set_validshape(window, 16, 256)
+            _decoded = pl.cast(alias, pl.FP8E4M3FN)
+
+    # Both unaligned and aligned slices conservatively keep the old ND path;
+    # metadata aliases must not erase the source window's provenance.
+    assert _cast_pairs(_run(Before, BackendType.Ascend950)) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+
+
+def test_plain_nd_fp4_runtime_column_slice_retains_existing_bridge():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, src: pl.Tensor[[32, 512], pl.FP4E2M1X2], column: pl.Scalar[pl.INT64]):
+            packed = pl.load(src, [0, 0], [32, 512])
+            window = pl.tile.slice(packed, [16, 256], [0, column], valid_shape=[16, 256])
+            _decoded = pl.cast(window, pl.FP8E4M3FN)
+
+    assert _cast_pairs(_run(Before, BackendType.Ascend950)) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

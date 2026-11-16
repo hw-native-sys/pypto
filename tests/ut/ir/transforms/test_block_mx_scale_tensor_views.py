@@ -494,6 +494,59 @@ def test_mx_a_nd_accepts_dynamic_rows_and_materializes_row_major_strides(logical
 
 
 @pytest.mark.parametrize("logical_views", [False, True])
+@pytest.mark.parametrize("row_offset", [0, 5])
+@pytest.mark.parametrize("explicit_valid", [False, True])
+@pytest.mark.parametrize("physical_rows", [19, 37])
+def test_mx_a_nd_clamps_dma_window_to_source_valid_rows(
+    logical_views, row_offset, explicit_valid, physical_rows
+):
+    """Authored 32-row requests must not survive as out-of-bounds DMA windows."""
+    requested_valid = [32, 72] if explicit_valid else None
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            scales: pl.Tensor[
+                [physical_rows, 72],
+                pl.FP8E8M0,
+                pl.TensorView(layout=pl.MX_A_ND, valid_shape=[19, 72]),
+            ],
+        ):
+            _ = pl.load(scales, [row_offset, 0], [32, 72], valid_shape=requested_valid, clamp=True)
+
+    (load,) = _mx_loads(_run(Before, logical_views=logical_views))
+    assert _values(_elements(load.args[2])) == [32, 72]
+    assert _values(_elements(load.args[3])) == [19 - row_offset, 72]
+    assert isinstance(load.type, ir.TileType)
+    assert _values(load.type.shape) == [32, 72]
+    assert load.type.tile_view is not None
+    assert _values(load.type.tile_view.valid_shape) == [19 - row_offset, 72]
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_a_nd_rejects_incomplete_clamped_scale_pair(logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            scales: pl.Tensor[
+                [19, 72],
+                pl.FP8E8M0,
+                pl.TensorView(layout=pl.MX_A_ND, valid_shape=[19, 71]),
+            ],
+        ):
+            _ = pl.load(scales, [0, 0], [32, 72], clamp=True)
+
+    # The request has 72 groups, but the valid GM source clips it to 71. Check
+    # the effective DMA extent rather than accepting the aligned request alone.
+    with pytest.raises(ValueError, match="MX_A_ND.*even group"):
+        _run(Before, logical_views=logical_views)
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
 @pytest.mark.parametrize("groups", [1, 71])
 def test_mx_a_nd_rejects_incomplete_scale_pairs(groups, logical_views):
     @pl.program
