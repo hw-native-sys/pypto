@@ -167,7 +167,8 @@ class TestStmtDependencyGraph:
         assert graph.get_predecessors(stmts[0]) == []
         assert graph.get_predecessors(stmts[1]) == []
 
-    def test_reg_stores_keep_program_order_when_value_ssa_is_independent(self):
+    @pytest.mark.parametrize("block_stride", [None, 2])
+    def test_reg_stores_keep_program_order_when_value_ssa_is_independent(self, block_stride):
         """Two stores of the old Tile version still form a WAW effect edge."""
         span = ir.Span.unknown()
         builder = IRBuilder()
@@ -179,8 +180,8 @@ class TestStmtDependencyGraph:
                 value = builder.emit_reg(
                     "value", "reg.load", [tile, ir.ConstInt(0, ir.DataType.INDEX, span)], {"lanes": 64}
                 )
-                first = builder.emit_reg_store("first", tile, value, 0)
-                builder.emit_reg_store("second", tile, value, 0)
+                first = builder.emit_reg_store("first", tile, value, 0, block_stride=block_stride)
+                builder.emit_reg_store("second", tile, value, 0, block_stride=block_stride)
             builder.return_stmt(first)
         program = ir.Program([function.get_result()], "RegEffects", span)
         body = _seq_body(program, "vf")

@@ -128,8 +128,8 @@ void BindIRBuilder(nb::module_& m) {
           "Raises:\n"
           "    ValueError: If op_name is not a reg.* operation or no RegScope is open")
       .def("emit_reg_store", &IRBuilder::EmitRegStore, nb::arg("name"), nb::arg("tile"), nb::arg("offset"),
-           nb::arg("value"), nb::arg("mask").none(), nb::arg("span"),
-           "Assign a register store's Tile alias result")
+           nb::arg("value"), nb::arg("mask").none(), nb::arg("span"), nb::kw_only(),
+           nb::arg("block_stride") = nb::none(), "Assign a register store's Tile alias result")
       .def("end_function", &IRBuilder::EndFunction, nb::arg("end_span"),
            "End building a function.\n\n"
            "Finalizes the function and returns it.\n\n"

@@ -11,7 +11,7 @@
 
 from typing import Any
 
-from pypto.ir.utils import _get_span_or_capture
+from pypto.ir.utils import _get_span_or_capture, _normalize_reg_block_stride
 from pypto.language.typing import Reg, Scalar, Tile
 from pypto.pypto_core import DataType, ir
 
@@ -57,14 +57,24 @@ def store(
     offset: int | Scalar | ir.Expr = 0,
     value: Reg | ir.Expr | None = None,
     mask: Reg | ir.Expr | None = None,
+    *,
+    block_stride: int | None = None,
 ) -> Tile:
-    """Write active lanes and return a Tile alias of the destination."""
+    """Write active lanes, optionally striding between 32-byte blocks.
+
+    offset is in elements; block_stride is a positive static i16 integer.
+    Gaps and inactive lanes retain their previous destination contents.
+    """
     if value is None:
         raise TypeError("reg.store requires value")
     args = [_expr(tile), _expr(offset), _expr(value)]
     if mask is not None:
         args.append(_expr(mask))
-    return Tile(expr=_call("store", args))
+    kwargs: dict[str, Any] = {}
+    stride = _normalize_reg_block_stride(block_stride)
+    if stride is not None:
+        kwargs["block_stride"] = stride
+    return Tile(expr=_call("store", args, **kwargs))
 
 
 def broadcast(scalar: Reg | Scalar | ir.Expr | int | float, *, lanes: int, dtype: DataType) -> Reg:

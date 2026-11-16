@@ -84,6 +84,21 @@ int64_t Product(const std::vector<ExprPtr>& shape) {
   return result;
 }
 
+// The bounding extent includes gaps for bounds/dependency checks, but gaps
+// must never be credited as initialized. Arithmetic is checked before multiplying.
+int64_t StoreExtent(const Args& args, const Kwargs& kwargs) {
+  auto value = Register(args[2], RegKind::VecReg);
+  int stride = GetKwargOr<int>(kwargs, "block_stride", 1);
+  CHECK_SPAN(stride > 0 && stride <= std::numeric_limits<int16_t>::max(), args[0]->span_)
+      << "block_stride must be a positive i16 integer (1..32767)";
+  const int64_t block = 32 / value->dtype_.GetByte();
+  const int64_t last = value->shape_ - 1;
+  const int64_t tail = last % block + 1;
+  CHECK(last / block <= (std::numeric_limits<int64_t>::max() - tail) / (stride * block))
+      << "Register strided extent overflows";
+  return (last / block) * stride * block + tail;
+}
+
 TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
   auto t = As<TileType>(args[0]->GetType());
   CHECK_SPAN(t, args[0]->span_) << "reg.load/store requires a Vec Tile";
@@ -98,10 +113,9 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
       << "Register access exceeds capacity bounds";
   if (t->tile_view_) {
     const auto& v = *t->tile_view_;
-    // TODO(reg-vmi-generalize): PTOAS VMI supports block/group/strided loads,
-    // but the P0 reg.load/store ABI emits only the contiguous vload/vstore
-    // form. Remove this restriction when those access modes are represented
-    // in the RegOp attributes and lowered by reg_codegen.cpp.
+    // Offsets and block strides address flat storage. A boxed/padded View
+    // needs a separate physical-layout contract; block_stride alone does not
+    // make its logical indexing contiguous.
     CHECK(v.blayout == TileLayout::row_major && v.slayout == TileLayout::none_box &&
           v.compact == CompactMode::null)
         << "Register memory requires a contiguous row-major View";
@@ -412,20 +426,21 @@ REGISTER_OP("reg.load")
     });
 REGISTER_OP("reg.store")
     .set_op_category("RegOp")
-    .set_description("Write a continuous Vec UB interval; return the destination alias")
+    .set_description("Write active lanes in contiguous or block-strided Vec UB storage")
     .set_reg_op("pto.vmi.vstore")
     .add_argument("tile", "Destination Vec Tile")
     .add_argument("offset", "Element offset")
     .add_argument("value", "VecReg value")
     .add_argument("mask", "Optional MaskReg")
+    .set_attr<int>("block_stride")
     .set_arg_effect(0, ArgEffect::Write)
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_output_reuses_input(0)
-    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
       CHECK(a.size() == 3 || a.size() == 4) << "reg.store expects tile, offset, value, optional mask";
       auto v = Register(a[2], RegKind::VecReg);
-      auto t = Memory(a, v->shape_, false);
+      auto t = Memory(a, StoreExtent(a, k), false);
       CHECK(t->dtype_ == v->dtype_) << "Store dtype mismatch";
       if (a.size() == 4) CHECK(Register(a[3], RegKind::MaskReg)->shape_ == v->shape_) << "Mask lane mismatch";
       return t;
@@ -881,7 +896,7 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
   auto validated_reg = As<RegType>(load ? validated->GetType() : call->args_[2]->GetType());
   INTERNAL_CHECK_SPAN(validated_reg, call->span_)
       << "Register memory effect validation produced a non-register result";
-  int64_t lanes = validated_reg->shape_;
+  int64_t extent = IsOp(call, "reg.store") ? StoreExtent(call->args_, call->kwargs_) : validated_reg->shape_;
   // Endpoints are half-open ELEMENT coordinates relative to MemRef.base,
   // including both byte_offset / element_bytes and the TileView origin.
   // An absent root or endpoint means unknown, never an empty/zero access.
@@ -911,9 +926,9 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
       start += bytes->value_ / element_bytes;
     }
     if (start >= 0 && offset->value_ >= 0 && start <= std::numeric_limits<int64_t>::max() - offset->value_ &&
-        start + offset->value_ <= std::numeric_limits<int64_t>::max() - lanes) {
+        start + offset->value_ <= std::numeric_limits<int64_t>::max() - extent) {
       result.begin = start + offset->value_;
-      result.end = *result.begin + lanes;
+      result.end = *result.begin + extent;
     }
   }
   // TODO(reg-vmi-generalize): carry symbolic ranges for optional analysis of

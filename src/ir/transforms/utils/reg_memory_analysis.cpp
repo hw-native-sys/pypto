@@ -179,14 +179,27 @@ class InitializationChecker : public IRVisitor {
         CHECK_SPAN(Contains(effect.root.get(), begin, end), call->span_)
             << "reg.load reads an uninitialized interval";
       } else {
+        const auto reg = As<RegType>(call->args_[2]->GetType());
+        int64_t active = reg->shape_;
         if (effect.mask) {
           auto mask = AsVarLike(effect.mask);
           auto it = masks_.find(mask.get());
           // An unknown mask never initializes its false lanes. Known mask
           // generators prove only a prefix, not the entire register width.
-          end = it == masks_.end() ? begin : begin + it->second * bytes;
+          active = it == masks_.end() ? 0 : it->second;
         }
-        Add(effect.root.get(), begin, end);
+        const int64_t stride = GetKwargOr<int>(call->kwargs_, "block_stride", 1);
+        const int64_t block = 32 / bytes;
+        // Credit only written blocks; the enclosing interval contains gaps.
+        // Bounds inference has already checked this arithmetic for all lanes.
+        if (stride == 1) {
+          Add(effect.root.get(), begin, begin + active * bytes);
+        } else {
+          for (int64_t lane = 0; lane < active; lane += block) {
+            const int64_t start = begin + (lane / block) * stride * 32;
+            Add(effect.root.get(), start, start + std::min(block, active - lane) * bytes);
+          }
+        }
       }
     }
     IRVisitor::VisitExpr_(call);

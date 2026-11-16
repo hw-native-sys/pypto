@@ -1357,5 +1357,48 @@ def test_mx_quantize_compiles_with_vpto(tmp_path):
     assert "pto.vecscope" in output.read_text()
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("lanes", [128, 256])
+@pytest.mark.parametrize("active", [None, 0, 37, "full"])
+def test_bf16_block_stride_lowers_to_vsstb(lanes, active, tmp_path):
+    ib = IRBuilder()
+    with ib.function("strided_store", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = f.param("src", ir.TileType([lanes], DataType.BF16, memory_space=ir.MemorySpace.Vec), SPAN)
+        dst = f.param("dst", ir.TileType([4096], DataType.BF16, memory_space=ir.MemorySpace.Vec), SPAN)
+        with ib.reg_scope(SPAN):
+            value = ib.emit_reg("value", "reg.load", [src, integer(0)], {"lanes": lanes}, SPAN)
+            mask = None
+            if active == "full":
+                mask = ib.emit_reg("mask", "reg.full_mask", [], {"lanes": lanes}, SPAN)
+            elif active is not None:
+                mask = ib.emit_reg("mask", "reg.active_mask", [integer(active)], {"lanes": lanes}, SPAN)
+            ib.emit_reg_store("out", dst, value, offset=16, mask=mask, span=SPAN, block_stride=16)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "StridedStore", SPAN))
+    source = generate(program)
+    store = next(line for line in source.splitlines() if "pto.vmi.vstore " in line)
+    # VMI infers the stride's type from its operand position; spelling i16
+    # again in the custom type list makes PTOAS reject the generated store.
+    assert "reg_block_stride" in store.split(" : ")[0]
+    assert ", i16" not in store
+    assert "arith.constant 16 : i16" in source
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    path = tmp_path / "strided.pto"
+    path.write_text(source)
+    output = tmp_path / "strided.vpto"
+    result = subprocess.run(
+        [compiler, str(path), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lowered = output.read_text()
+    assert lowered.count("pto.vsstb ") == lanes // 128
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

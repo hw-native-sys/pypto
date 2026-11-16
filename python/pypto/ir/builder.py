@@ -24,7 +24,7 @@ from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 
 from .type import _merge_annotation_metadata
-from .utils import _get_span_or_capture, _normalize_expr
+from .utils import _get_span_or_capture, _normalize_expr, _normalize_reg_block_stride
 
 
 class IRBuilder:
@@ -97,11 +97,15 @@ class IRBuilder:
         offset: int | ir.Expr = 0,
         mask: ir.Expr | None = None,
         span: ir.Span | None = None,
+        *,
+        block_stride: int | None = None,
     ) -> ir.Var:
         """Assign a store result with the destination Tile type and storage."""
         span = span or self._capture_call_span()
         off = ir.ConstInt(offset, DataType.INDEX, span) if isinstance(offset, int) else offset
-        return self._builder.emit_reg_store(name, tile, off, value, mask, span)
+        return self._builder.emit_reg_store(
+            name, tile, off, value, mask, span, block_stride=_normalize_reg_block_stride(block_stride)
+        )
 
     # ========== Context Managers for Multi-line Constructs ==========
 

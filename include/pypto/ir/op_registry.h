@@ -382,7 +382,9 @@ struct RegMemoryEffect {
   // Shared allocation identity for alias analysis, or null before resolution.
   VarPtr root;
   ArgEffect access;
-  // Half-open element interval, not byte offsets; either endpoint may be unknown.
+  // Half-open bounding element interval, not byte offsets; endpoints may be unknown.
+  // Block-strided stores include unwritten gaps: this is conservative for
+  // dependence/lifetime queries, not proof of contiguous initialization.
   std::optional<int64_t> begin;
   std::optional<int64_t> end;
   // Memory predicate, or null for an unmasked access. A present mask does not

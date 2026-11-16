@@ -13,7 +13,7 @@ import inspect
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir
 from pypto.ir.printer import python_print
 from pypto.language.parser import ParserError
 
@@ -392,6 +392,31 @@ def test_group_broadcast_requires_divisible_result():
                 reduced = pl.reg.reduce_max(x, mask, group_size=32)
                 spread = pl.reg.group_broadcast(reduced, lanes=63)
                 _out = pl.reg.store(dst, value=spread)
+
+
+@pytest.mark.parametrize("stride", [True, 1.5, "16"])
+def test_store_rejects_non_integer_block_stride(stride):
+    dst = ir.Var(
+        "dst", ir.TileType([2048], DataType.BF16, memory_space=ir.MemorySpace.Vec), ir.Span.unknown()
+    )
+    value = ir.Var("value", ir.RegType(128, DataType.BF16, ir.RegKind.VecReg), ir.Span.unknown())
+    with pytest.raises(TypeError, match="block_stride"):
+        pl.reg.store(dst, value=value, block_stride=stride)
+
+
+def test_block_stride_store_round_trip():
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        src: pl.Tile[[128], pl.BF16, pl.MemorySpace.Vec],
+        dst: pl.InOut[pl.Tile[[2048], pl.BF16, pl.MemorySpace.Vec]],
+    ):
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=128)
+            _out = pl.reg.store(dst, 16, x, block_stride=16)
+
+    printed = python_print(kernel, format=False)
+    assert "block_stride=16" in printed
+    ir.assert_structural_equal(kernel, pl.parse(printed), enable_auto_mapping=True)
 
 
 if __name__ == "__main__":

@@ -381,10 +381,13 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
 }
 
 VarPtr IRBuilder::EmitRegStore(const std::string& name, const ExprPtr& tile, const ExprPtr& offset,
-                               const ExprPtr& value, const ExprPtr& mask, const Span& span) {
+                               const ExprPtr& value, const ExprPtr& mask, const Span& span,
+                               std::optional<int> block_stride) {
   std::vector<ExprPtr> args{tile, offset, value};
   if (mask) args.push_back(mask);
-  return EmitReg(name, "reg.store", args, {}, span);
+  std::vector<std::pair<std::string, std::any>> kwargs;
+  if (block_stride) kwargs.emplace_back("block_stride", *block_stride);
+  return EmitReg(name, "reg.store", args, kwargs, span);
 }
 
 // ========== Scope Building ==========

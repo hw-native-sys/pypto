@@ -84,10 +84,22 @@ API 表未列出的 dtype 均不代表已支持。
 | API 签名 | 参数与行为 | 返回值 | Dtype |
 | -------- | ---------- | ------ | ----- |
 | `load(tile, offset=0, *, lanes)` | `tile`：Vec UB 内存中的源 Tile。`offset`：起始元素索引，支持 INDEX Scalar 或整数字面量。读取连续 `lanes` 个元素。 | 与 Tile 同 dtype、包含 `lanes` 个元素的 VecReg | `T` |
-| `store(tile, offset=0, value=None, mask=None)` | `tile`：目标 Vec Tile。`offset`：起始元素索引。`value`：必需的 VecReg，虽然 Python 默认值为 None。`mask`：可选写掩码；仅写入激活 lane，保留目标其他元素。 | `tile` 的 Tile 别名 | `T`；value 与 Tile dtype 必须一致 |
+| `store(tile, offset=0, value=None, mask=None, *, block_stride=None)` | `tile`：目标 Vec Tile。`offset`：起始元素索引。`value`：必需的 VecReg，虽然 Python 默认值为 None。`mask`：可选写掩码；仅写入激活 lane，保留目标其他元素。 | `tile` 的 Tile 别名 | `T`；value 与 Tile dtype 必须一致 |
+
+`block_stride` 是可选的静态正整数，范围为 `[1, 32767]`，单位为 **32 字节块**；
+`offset` 的单位仍是元素。省略时保留连续写入行为。令元素字节数为 `E`、
+块宽为 `B = 32 / E`，活动 lane `i` 写入元素
+`offset + (i // B) * block_stride * B + i % B`。
+非活动 lane 和块间空隙保留原值。静态边界检查包含最后一个跨步块，初始化检查
+仅认可实际写入的活动块。动态 offset 的运行时安全由调用者保证。内存效果查询返回
+包含空隙的保守包围区间，用于依赖和生命周期分析。
+PTOAS 接收 i16 stride 操作数，将 BF16 写入降为 `vsstb`。例如
+`pl.reg.store(dst, 16, values, mask, block_stride=16)` 将 128 个 BF16 lane
+写入八个 NZ 面板，元素偏移为 `16, 272, ..., 1808`。首版不支持动态 stride 标量。
 
 offset 以**元素**计，不是字节。静态 offset 必须非负，完整的
-`[offset, offset + lanes)` 区间必须位于 Tile 容量内，masked store 也不放宽该限制。
+访问范围必须位于 Tile 容量内（连续写入为 `[offset, offset + lanes)`），
+masked store 也不放宽该限制。
 静态 load 必须位于已初始化的 `valid_shape` 内，后续 mask 不能保护未初始化读取。
 一维 Tile 可直接使用；多维 Tile 需要显式连续行优先 View，拒绝带 padding、boxed
 或 compact 的布局。View 起始 offset 计入地址计算和底层分配边界检查。
@@ -393,7 +405,7 @@ with pl.reg_scope():
 | --- | ---- |
 | `with ib.reg_scope(span=None):` | 在 Python IRBuilder 中打开寄存器区域。 |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | 构造命名操作。`op_name` 是如 `"reg.add"` 的注册名称；`args` 为 IR 操作数，`kwargs` 为操作属性。 |
-| `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None)` | 构造命名 store，返回目标 Tile 别名。 |
+| `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | 构造命名 store，返回目标 Tile 别名。 |
 | `ir.get_reg_op_spec(name)` | 查询操作的区域要求和 VMI emitter。 |
 | `ir.get_reg_memory_effect(call)` | 查询 load/store 的目标 Tile、已知根分配、读写类型、半开元素区间和可选 mask；未知根或区间端点仍表示未知。 |
 
