@@ -1313,8 +1313,9 @@ class SharedMatmulBranchMutator : public IRMutator {
 
   StmtPtr TryShare(const IfStmtPtr& op) const {
     if (!loop_ || loop_->kind_ != ForKind::Pipeline || loop_->iter_args_.size() != 1 ||
-        loop_->return_vars_.size() != 1 || !op->else_body_ || op->return_vars_.size() != 1)
+        loop_->return_vars_.size() != 1 || !op->else_body_ || op->return_vars_.size() != 1) {
       return nullptr;
+    }
     // The branch must directly feed this loop's yield. A single syntactic use
     // inside another loop is not a single dynamic use of the old accumulator.
     const auto body = As<SeqStmts>(loop_->body_);
@@ -1355,16 +1356,19 @@ class SharedMatmulBranchMutator : public IRMutator {
          {mm->GetType(), mac->GetType(), fresh->first->var_->GetType(), accum->first->var_->GetType(),
           op->return_vars_[0]->GetType(), acc->GetType(), init->GetType()}) {
       const auto tile = As<TileType>(type);
-      if (!tile || tile->memref_ || (tile->memory_space_ && tile->memory_space_ != MemorySpace::Acc))
+      if (!tile || tile->memref_ || (tile->memory_space_ && tile->memory_space_ != MemorySpace::Acc)) {
         return nullptr;
+      }
       // Tensor-to-tile lowering can leave the create/IterArg space uninferred.
       // Only that missing space may differ; layout, dtype and shape must agree.
       auto normalized = MutableCopy(tile);
       normalized->memory_space_ = MemorySpace::Acc;
       if (!structural_equal(normalized, mm->GetType())) return nullptr;
     }
-    if (!result_type || result_type->shape_.size() != 2 || result_type->GetMemorySpace() != MemorySpace::Acc)
+    if (!result_type || result_type->shape_.size() != 2 ||
+        result_type->GetMemorySpace() != MemorySpace::Acc) {
       return nullptr;
+    }
     for (const auto& operand : mm->args_) {
       const auto var = AsVarLike(operand);
       const auto tile = var ? As<TileType>(var->GetType()) : nullptr;

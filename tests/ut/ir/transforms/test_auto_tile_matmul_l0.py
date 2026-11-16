@@ -5897,6 +5897,42 @@ class TestSharedMatmulBranches:
             after = passes.auto_tile_matmul_l0()(before)
         assert "if " in after.as_python()
 
+    def test_initializer_capture_before_tail_branch_is_not_shared(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 32], pl.BF16, pl.Mem.Mat],
+                b: pl.Tile[[32, 16], pl.BF16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                init = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for i, (acc,) in pl.pipeline(3, stage=2, init_values=(init,)):
+                    # EvalStmt keeps the loop at one iter_arg: the rejection
+                    # must come from the extra initializer read, not loop shape.
+                    pl.tile.store(init, [0, 0], out)
+                    if i == 0:
+                        value = pl.tile.matmul(a, b)
+                    else:
+                        value = pl.tile.matmul_acc(acc, a, b)
+                    result = pl.yield_(value)
+                return result
+
+        before = passes.convert_to_ssa()(Before)
+        func = next(iter(before.functions.values()))
+        assert isinstance(func.body, ir.SeqStmts)
+        loop = func.body.stmts[1]
+        assert isinstance(loop, ir.ForStmt)
+        assert len(loop.iter_args) == 1
+        assert isinstance(loop.body, ir.SeqStmts)
+        assert isinstance(loop.body.stmts[0], ir.EvalStmt)
+        assert isinstance(loop.body.stmts[-2], ir.IfStmt)
+        assert isinstance(loop.body.stmts[-1], ir.YieldStmt)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            after = passes.auto_tile_matmul_l0()(before)
+        assert "if " in after.as_python()
+
     def test_already_predicated_accumulation_retains_branch(self):
         @pl.program
         class Before:
