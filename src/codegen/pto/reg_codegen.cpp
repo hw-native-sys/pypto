@@ -474,6 +474,10 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
         names[i] = typed;
       }
     }
+    // Masked reg.intlv/reg.dintlv keep their predicate: PTOAS >= 0.74 owns
+    // inactive-lane zeroing for both outputs without converting active BF16
+    // payloads. Bind native results directly, without PyPTO vsel/bitcast
+    // compensation. The independent small-VL placement issue is PTOAS #1659.
     reg_tuple_values_[result.get()] = std::move(names);
     return true;
   }

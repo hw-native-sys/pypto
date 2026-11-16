@@ -558,9 +558,9 @@ def kernel(base: pl.Scalar[pl.INDEX]):
 
 @pytest.mark.ptoas_compile
 def test_unmasked_deinterleave_fuses_bf16_load_and_grouped_reduction(tmp_path):
-    # Masked deinterleave needs result-clearing selects. They break the A5
-    # paired-load pattern and can exhaust the layout search for this chain.
-    # Omitting the mask allows PTOAS to pick DINTLV_B16 and EVEN/ODD conversions.
+    # Omitting the mask makes every lane active. This all-active chain must
+    # compile through PTOAS without an interleave_zero operation and retain
+    # the paired-load and EVEN/ODD conversion fusion opportunities.
     function = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def kernel():
