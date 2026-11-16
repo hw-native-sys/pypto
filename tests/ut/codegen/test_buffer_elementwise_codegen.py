@@ -40,7 +40,7 @@ _NATIVE = [
 ]
 
 
-def _public_program(high_precision):
+def _public_program(high_precision, preserve_added=False):
     return pl.parse_program(f"""
 @pl.program
 class VectorRecipes:
@@ -53,7 +53,7 @@ class VectorRecipes:
         subtracted = pl.tile.sub(added, rhs)
         multiplied = pl.tile.mul(subtracted, rhs)
         divided = pl.tile.div(multiplied, rhs, high_precision={high_precision})
-        maximum = pl.tile.maximum(divided, lhs)
+        maximum = pl.tile.maximum(divided, {"added" if preserve_added else "lhs"})
         minimum = pl.tile.minimum(maximum, rhs)
         negated = pl.tile.neg(minimum)
         magnitude = pl.tile.abs(negated)
@@ -184,8 +184,10 @@ def test_native_toolchain_accepts_the_actual_lowered_recipe_pipeline(
 _SCALAR_NATIVE = ("tadds", "tsubs", "tmuls", "tdivs", "tmaxs", "tmins", "tlrelu", "texpands")
 
 
-def _scalar_program(scalar_dtype, fill_value):
+def _scalar_program(scalar_dtype, fill_value, *, explicit_scalar_cast=False):
     operand = "pl.cast(factor, pl.INT64)" if scalar_dtype == "INDEX" else "factor"
+    if explicit_scalar_cast:
+        operand = f"pl.cast({operand}, pl.FP32)"
     return pl.parse_program(f"""
 @pl.program
 class ScalarRecipes:
@@ -261,6 +263,102 @@ def test_native_toolchain_accepts_explicit_scalar_recipe_types(
     level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
     _run_ptoas(str(source), str(output), [f"--pto-level={level}", f"--pto-arch={arch}"])
     assert output.is_file()
+
+
+@pytest.mark.parametrize("ascend_backend", _BACKENDS, indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("case", ["vector", "precision", "scalar_fp32", "scalar_index"])
+def test_tile_and_buffer_share_native_operand_and_attribute_contracts(
+    tmp_path, ascend_backend, planner, case
+):
+    # Run the same public program through both representations. This catches
+    # drift in mnemonics, operand counts/types and attribute placement, including
+    # scalar conversion and the precision selector after outs(...). Storage
+    # identities can differ legitimately, so compare native contracts modulo SSA
+    # names and independently compile each complete artifact.
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    if case.startswith("scalar"):
+        # Tile may leave integer element conversion to PTOAS, while Buffer
+        # makes it explicit. Supply an explicit cast here so the two adapters
+        # receive the same native operand contract; existing scalar tests cover
+        # Buffer's implicit-to-explicit conversion separately.
+        program = _scalar_program(
+            "INDEX" if case == "scalar_index" else "FP32",
+            "-1.25",
+            explicit_scalar_cast=case == "scalar_index",
+        )
+        mnemonics = ["tadd", *_SCALAR_NATIVE]
+    else:
+        # Keep both subtraction inputs live so its destination cannot alias either.
+        program = _public_program(case == "precision", preserve_added=True)
+        mnemonics = _NATIVE
+    pattern = re.compile(r"pto\.(" + "|".join(mnemonics) + r")\s+ins\(")
+    contracts = []
+    for buffer_enabled in (False, True):
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_enabled):
+            # Explicit recipe coverage includes A5 without widening default
+            # selection; the existing recipe suite uses this same pipeline.
+            lowered = buffer_recipe_pipeline().run(program)
+        if buffer_enabled:
+            assert all(f.ir_stage == ir.FunctionIRStage.Buffer for f in lowered.functions.values())
+        else:
+            assert all(f.ir_stage != ir.FunctionIRStage.Buffer for f in lowered.functions.values())
+        text = codegen.PTOCodegen().generate(
+            lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+        )
+        instructions = [line.strip() for line in text.splitlines() if pattern.search(line)]
+        assert Counter(match.group(1) for line in instructions if (match := pattern.search(line))) == Counter(
+            mnemonics
+        )
+        # Tile uses mutable valid fields initialized to this program's full
+        # rectangle; Buffer encodes the same rectangle statically. Prove the
+        # initialization before normalizing that representation difference.
+        constants = {
+            name: int(value)
+            for name, value in re.findall(r"(%[\w.$]+) = arith.constant (-?\d+) : index", text)
+        }
+        for line in text.splitlines():
+            if "= pto.alloc_tile" in line and "v_row=?, v_col=?" in line:
+                row = re.search(r"valid_row = (%[\w.$]+)", line)
+                col = re.search(r"valid_col = (%[\w.$]+)", line)
+                assert row and col
+                assert (constants[row.group(1)], constants[col.group(1)]) == (16, 32)
+        assert "pto.set_validshape" not in text
+        if case in ("vector", "precision"):
+            # Check dataflow before erasing SSA names: subtraction is ordered,
+            # and its destination must be the value consumed by multiplication.
+            # Resolve identities independently in each artifact because planners
+            # may assign different storage names to Tile and Buffer operations.
+            operands = {}
+            for mnemonic in ("tadd", "tsub", "tmul"):
+                line = next(line for line in instructions if f"pto.{mnemonic} ins(" in line)
+                match = re.search(r"ins\(([^:]+) :.*\) outs\((%[\w.$]+) :", line)
+                assert match
+                operands[mnemonic] = (
+                    [value.strip() for value in match.group(1).split(",")],
+                    match.group(2),
+                )
+            add_inputs, add_output = operands["tadd"]
+            sub_inputs, sub_output = operands["tsub"]
+            mul_inputs, _ = operands["tmul"]
+            assert len({add_output, add_inputs[1], sub_output}) == 3
+            assert sub_inputs == [add_output, add_inputs[1]]
+            assert sub_output == mul_inputs[0]
+        contracts.append(
+            [
+                re.sub(r"%[\w.$]+", "%value", line).replace("v_row=?, v_col=?", "v_row=16, v_col=32")
+                for line in instructions
+            ]
+        )
+        source = tmp_path / f"{'buffer' if buffer_enabled else 'tile'}.pto"
+        output = source.with_suffix(".cpp")
+        source.write_text(text)
+        arch = "a5" if ascend_backend == BackendType.Ascend950 else "a2"
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(source), str(output), [f"--pto-level={level}", f"--pto-arch={arch}"])
+        assert output.is_file()
+    assert contracts[0] == contracts[1]
 
 
 def _planned_scalar_program():

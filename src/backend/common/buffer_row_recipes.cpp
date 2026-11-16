@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/backend/common/pto_native_ops.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -28,10 +29,22 @@ namespace pypto::backend {
 
 const std::vector<BufferRowRecipe>& GetBufferRowRecipes() {
   static const std::vector<BufferRowRecipe> recipes = {
-      {"tile.row_max", "buffer.row_max", "pto.trowmax", true},
-      {"tile.row_sum", "buffer.row_sum", "pto.trowsum", true},
-      {"tile.row_expand_sub", "buffer.row_expand_sub", "pto.trowexpandsub", false},
-      {"tile.row_expand_div", "buffer.row_expand_div", "pto.trowexpanddiv", false},
+      {"tile.row_max", "buffer.row_max", GetPtoNativeOpSpec("tile.row_max").native_op, true},
+      {"tile.row_sum", "buffer.row_sum", GetPtoNativeOpSpec("tile.row_sum").native_op, true},
+      {"tile.row_min", "buffer.row_min", GetPtoNativeOpSpec("tile.row_min").native_op, true},
+      {"tile.row_prod", "buffer.row_prod", GetPtoNativeOpSpec("tile.row_prod").native_op, true},
+      {"tile.row_expand_add", "buffer.row_expand_add", GetPtoNativeOpSpec("tile.row_expand_add").native_op,
+       false},
+      {"tile.row_expand_sub", "buffer.row_expand_sub", GetPtoNativeOpSpec("tile.row_expand_sub").native_op,
+       false},
+      {"tile.row_expand_mul", "buffer.row_expand_mul", GetPtoNativeOpSpec("tile.row_expand_mul").native_op,
+       false},
+      {"tile.row_expand_div", "buffer.row_expand_div", GetPtoNativeOpSpec("tile.row_expand_div").native_op,
+       false},
+      {"tile.row_expand_max", "buffer.row_expand_max", GetPtoNativeOpSpec("tile.row_expand_max").native_op,
+       false},
+      {"tile.row_expand_min", "buffer.row_expand_min", GetPtoNativeOpSpec("tile.row_expand_min").native_op,
+       false},
   };
   return recipes;
 }
@@ -97,6 +110,8 @@ const char* OperandError(const BufferRowRecipe& recipe, const std::vector<ir::Bu
 }  // namespace
 
 bool SupportsLogicalBufferRow(const BufferRowRecipe& recipe, const ir::CallPtr& call) {
+  // The optional-scratch and packed-carrier row_expand_add overloads remain
+  // Tile; this recipe is the existing two-input contiguous-column form.
   if (call->args_.size() != 2 || !call->kwargs_.empty()) return false;
   std::vector<ir::BufferTypePtr> types;
   for (const auto& arg : call->args_) types.push_back(StaticLogicalBufferDescriptor(arg->GetType()));

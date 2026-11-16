@@ -22,10 +22,12 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/pto_native_ops.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -49,6 +51,47 @@ using ir::ExprPtr;
 using ir::ScalarType;
 using ir::TensorType;
 using ir::Var;
+
+const PtoNativeOpSpec& GetPtoNativeOpSpec(std::string_view logical_op) {
+  static const std::unordered_map<std::string_view, PtoNativeOpSpec> specs = {
+      {"tile.add", {"pto.tadd"}},
+      {"tile.mul", {"pto.tmul"}},
+      {"tile.sub", {"pto.tsub"}},
+      {"tile.div", {"pto.tdiv", "div_precision"}},
+      {"tile.maximum", {"pto.tmax"}},
+      {"tile.minimum", {"pto.tmin"}},
+      {"tile.abs", {"pto.tabs"}},
+      {"tile.exp", {"pto.texp"}},
+      {"tile.sqrt", {"pto.tsqrt"}},
+      {"tile.neg", {"pto.tneg"}},
+      {"tile.relu", {"pto.trelu"}},
+      {"tile.log", {"pto.tlog", "log_precision"}},
+      {"tile.recip", {"pto.trecip", "recip_precision"}},
+      {"tile.adds", {"pto.tadds"}},
+      {"tile.subs", {"pto.tsubs"}},
+      {"tile.muls", {"pto.tmuls"}},
+      {"tile.divs", {"pto.tdivs"}},
+      {"tile.maximums", {"pto.tmaxs"}},
+      {"tile.minimums", {"pto.tmins"}},
+      {"tile.lrelu", {"pto.tlrelu"}},
+      {"tile.full", {"pto.texpands"}},
+      {"tile.row_max", {"pto.trowmax"}},
+      {"tile.row_sum", {"pto.trowsum"}},
+      {"tile.row_min", {"pto.trowmin"}},
+      {"tile.row_prod", {"pto.trowprod"}},
+      {"tile.row_expand_add", {"pto.trowexpandadd"}},
+      {"tile.row_expand_sub", {"pto.trowexpandsub"}},
+      {"tile.row_expand_mul", {"pto.trowexpandmul"}},
+      {"tile.row_expand_div", {"pto.trowexpanddiv"}},
+      {"tile.row_expand_max", {"pto.trowexpandmax"}},
+      {"tile.row_expand_min", {"pto.trowexpandmin"}},
+      {"tile.transpose", {"pto.ttrans"}},
+  };
+  const auto found = specs.find(logical_op);
+  INTERNAL_CHECK(found != specs.end())
+      << "Internal error: missing shared PTO emission metadata for " << logical_op;
+  return found->second;
+}
 
 namespace pto_ops_detail {
 
@@ -318,48 +361,48 @@ std::string EmitFlatOffsetSSAFromValues(const std::vector<std::string>& indices,
 }
 
 // Helper function for input & output generation (with type annotations)
+std::string FormatInsOutsClause(const std::vector<std::pair<std::string, std::string>>& inputs,
+                                const std::vector<std::pair<std::string, std::string>>& outputs,
+                                const std::string& input_attributes) {
+  std::ostringstream clause;
+  const auto append_operands = [&](const auto& operands, const std::string& attributes) {
+    std::string types;
+    for (size_t i = 0; i < operands.size(); ++i) {
+      clause << (i == 0 ? "" : ", ") << operands[i].first;
+      if (!operands[i].second.empty()) {
+        if (!types.empty()) types += ", ";
+        types += operands[i].second;
+      }
+    }
+    if (!attributes.empty()) clause << " " << attributes;
+    if (!types.empty()) clause << " : " << types;
+  };
+  clause << "ins(";
+  append_operands(inputs, input_attributes);
+  clause << ") outs(";
+  append_operands(outputs, "");
+  clause << ")";
+  return clause.str();
+}
+
+std::string FormatPrecisionAttribute(std::string_view attribute_kind) {
+  // PTOAS 0.70 renamed division's HighPrecision selector to DiffCompensation.
+  // Keep this native enum spelling identical across both IR emission paths.
+  return " {precisionType = #pto<" + std::string(attribute_kind) +
+         (attribute_kind == "div_precision" ? " diff_compensation>}" : " high_precision>}");
+}
+
 std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
                                   const std::string& config_attr) {
-  size_t args_num = op->args_.size();
-  std::ostringstream oss;
-
-  // Build ins clause with operand names
-  oss << "ins(";
-  for (size_t input_idx = 0; input_idx < args_num; ++input_idx) {
-    std::string operand = codegen.GetExprAsCode(op->args_[input_idx]);
-    if (input_idx == 0) {
-      oss << operand;
-    } else {
-      oss << ", " << operand;
-    }
+  std::vector<std::pair<std::string, std::string>> inputs;
+  inputs.reserve(op->args_.size());
+  // Resolve all values before annotations, preserving native SSA emission order.
+  for (const auto& arg : op->args_) inputs.emplace_back(codegen.GetExprAsCode(arg), "");
+  for (size_t i = 0; i < op->args_.size(); ++i) {
+    inputs[i].second = codegen.GetExprTypeAnnotation(op->args_[i]);
   }
-
-  if (!config_attr.empty()) {
-    oss << " " << config_attr;
-  }
-
-  // Add type annotations after colon
-  std::string type_annot;
-  for (size_t input_idx = 0; input_idx < args_num; ++input_idx) {
-    std::string annot = codegen.GetExprTypeAnnotation(op->args_[input_idx]);
-    if (!annot.empty()) {
-      if (!type_annot.empty()) type_annot += ", ";
-      type_annot += annot;
-    }
-  }
-  if (!type_annot.empty()) {
-    oss << " : " << type_annot;
-  }
-
-  // Build outs clause with type annotation
-  std::string result_target = codegen.GetCurrentResultTarget();
-  std::string result_type = codegen.GetCurrentResultTileBufTypeString();
-  oss << ") outs(" << result_target;
-  if (!result_type.empty()) {
-    oss << " : " << result_type;
-  }
-  oss << ")";
-  return oss.str();
+  return FormatInsOutsClause(
+      inputs, {{codegen.GetCurrentResultTarget(), codegen.GetCurrentResultTileBufTypeString()}}, config_attr);
 }
 
 namespace {
@@ -431,63 +474,18 @@ void EmitInsOutsWithViewTypes(codegen::PTOCodegen& codegen, std::string_view pto
                               const std::string& result_ssa,
                               const std::shared_ptr<const ir::TileType>& result_tile_type,
                               const std::string& config_attr) {
-  std::ostringstream oss;
-  oss << pto_op_name << " ins(";
-  std::string type_annot;
-  for (size_t i = 0; i < ins.size(); ++i) {
-    if (i > 0) oss << ", ";
-    oss << ins[i].first;
-    if (!ins[i].second.empty()) {
-      if (!type_annot.empty()) type_annot += ", ";
-      type_annot += ins[i].second;
-    }
-  }
-  if (!config_attr.empty()) {
-    oss << " " << config_attr;
-  }
-  if (!type_annot.empty()) {
-    oss << " : " << type_annot;
-  }
   const std::string result_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
-  oss << ") outs(" << result_ssa;
-  if (!result_type.empty()) {
-    oss << " : " << result_type;
-  }
-  oss << ")";
-  codegen.Emit(oss.str());
+  codegen.Emit(std::string(pto_op_name) + " " +
+               FormatInsOutsClause(ins, {{result_ssa, result_type}}, config_attr));
 }
 
-// Emit `<pto_op> ins(<op0>, <op1>, ... [: <types>]) outs(<result> [: <result_type>])`
-// for handlers that build the operand list explicitly rather than mapping
-// op->args_ 1:1 (that case is GenerateInsOutsClause). Each `ins` entry is
-// (ssa, type_annotation); an empty type_annotation contributes no operand type,
-// and when every entry's type is empty the whole `: <types>` clause is omitted
-// (matching the hand-written `if (!type.empty())` idiom). The result target and
-// type come from the current AssignStmt context.
+// This adapter resolves the Tile destination from the current AssignStmt. The
+// formatter itself sees only explicit SSA/type pairs, just as on the Buffer path.
 void EmitInsOuts(codegen::PTOCodegen& codegen, std::string_view pto_op_name,
                  const std::vector<std::pair<std::string, std::string>>& ins) {
-  std::ostringstream oss;
-  oss << pto_op_name << " ins(";
-  std::string type_annot;
-  for (size_t i = 0; i < ins.size(); ++i) {
-    if (i > 0) oss << ", ";
-    oss << ins[i].first;
-    if (!ins[i].second.empty()) {
-      if (!type_annot.empty()) type_annot += ", ";
-      type_annot += ins[i].second;
-    }
-  }
-  if (!type_annot.empty()) {
-    oss << " : " << type_annot;
-  }
-  std::string result_target = codegen.GetCurrentResultTarget();
-  std::string result_type = codegen.GetCurrentResultTileBufTypeString();
-  oss << ") outs(" << result_target;
-  if (!result_type.empty()) {
-    oss << " : " << result_type;
-  }
-  oss << ")";
-  codegen.Emit(oss.str());
+  codegen.Emit(std::string(pto_op_name) + " " +
+               FormatInsOutsClause(
+                   ins, {{codegen.GetCurrentResultTarget(), codegen.GetCurrentResultTileBufTypeString()}}));
 }
 
 std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,

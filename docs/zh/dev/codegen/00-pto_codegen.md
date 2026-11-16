@@ -35,12 +35,9 @@ ISA 将 INT32 输入留在 FP32 表示；代码生成在后续使用前恢复 TR
 
 ### 核心特性
 
-- **自动 MLIR 生成**: 将 PyPTO IR 转换为 PTO-ISA MLIR 方言
-- **结构化代码生成 (CodeGen)**: 按顺序输出常量、张量 (Tensor) 视图和分配
 - **隐式降级**: 从 `tile.load`/`tile.store` 自动生成 `pto.partition_view`
 - **基于 Tile 变量的分配**: 为每个 Tile 变量生成带显式 `addr` 的 `pto.alloc_tile` 操作
 - **类型 (Type) 感知转换**: 从 TileType 元数据推导 tile_buf/tensor_view 类型
-- **PTOAS 类型标注**: 为所有操作生成带类型的 `ins`/`outs` 子句
 
 ### 生成顺序
 
@@ -121,6 +118,10 @@ Mat、Left、Right 和 Acc 描述符发射为 `loc=mat|left|right|acc`，并带�
 分别发射为 `pto.tmatmul` 和 `pto.tmatmul.acc`，累加形式按 PTOAS 要求把目标作为
 第一个输入。`buffer.extract` 发射为带 `index` 偏移的 `pto.textract`，
 Mat 到 Left/Right 的 `buffer.copy` 发射为 `pto.tmov`。
+
+### 共享原生发射
+
+Tile 与 Buffer 共用[原生元数据和格式化器](../passes/58-lower_tile_to_buffer.md#共享原生发射)。
 
 ### 类结构
 

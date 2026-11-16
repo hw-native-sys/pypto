@@ -84,7 +84,7 @@ class BufferValidAnalysis : public IRVisitor {
                    backend::FindLogicalBufferIndexedRecipe(call->op_->name_) != nullptr;
     if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") || IsOp(call, "tile.assemble") ||
         IsOp(call, "tile.move") || IsOp(call, "tile.extract") || IsOp(call, "tile.transpose_view") ||
-        IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {
+        IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.transpose")) {
       restricted_ = true;
     }
     if (IsOp(call, "tile.slice") && !call->args_.empty() &&

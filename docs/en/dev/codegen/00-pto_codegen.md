@@ -35,12 +35,9 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 
 ### Key Features
 
-- **Automatic MLIR Generation**: Converts PyPTO IR to PTO-ISA MLIR dialect
-- **Structured Code Generation**: Outputs constants, tensor views, allocations in order
 - **Implicit Lowering**: Automatically generates `pto.partition_view` from `tile.load`/`tile.store`
 - **MemRef-based Allocation**: Maps IR MemRef objects to `pto.alloc_tile` operations
 - **Type-aware Conversion**: Derives tile_buf/tensor_view types from TileType metadata
-- **PTOAS Type Annotations**: Emits typed `ins`/`outs` clauses for all operations
 
 ### Generation Order
 
@@ -142,6 +139,10 @@ the legacy path. `buffer.matmul` and `buffer.matmul_acc` render as
 destination as the first input, as PTOAS requires. `buffer.extract` renders as
 `pto.textract` with `index` offsets, and a Mat to Left/Right `buffer.copy` as
 `pto.tmov`.
+
+### Shared native emission
+
+Tile and Buffer share [native metadata and formatting](../passes/58-lower_tile_to_buffer.md#shared-native-emission).
 
 ### Class Structure
 

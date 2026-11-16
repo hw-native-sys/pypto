@@ -501,7 +501,7 @@ class TestMakeCacheKey:
         assert off != on
         assert off.compile_opts is not None and on.compile_opts is not None
         assert ("buffer_ir_version", 0) in off.compile_opts
-        assert ("buffer_ir_version", 12) in on.compile_opts
+        assert ("buffer_ir_version", 13) in on.compile_opts
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
     @pytest.mark.parametrize("enable_buffer_ir", [False, True])

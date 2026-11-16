@@ -218,6 +218,21 @@ class BufferIRVisitor : public IRVisitor {
           CheckWindowPair(op, op->args_[1], op->args_[2], false);
           if (row_recipe->reduction) CheckWindowPair(op, op->args_[0], op->args_[1], false);
         }
+        if (IsOp(op, "buffer.transpose")) {
+          // Equal shapes do not prove equal pitch: reject strided windows as
+          // well as every overlapping pair, including scratch versus source.
+          for (const auto& arg : op->args_) {
+            const auto window = windows_.find(AsVarLike(arg).get());
+            const auto type = As<BufferType>(arg->GetType());
+            const auto pitch = static_cast<uint64_t>(type->shape_[1]) * type->dtype_.GetByte();
+            if (window == windows_.end() || window->second.row_pitch != pitch) {
+              Error("Buffer transpose requires dense physical row pitch", op->span_);
+            }
+          }
+          CheckWindowPair(op, op->args_[0], op->args_[1], false);
+          CheckWindowPair(op, op->args_[0], op->args_[2], false);
+          CheckWindowPair(op, op->args_[1], op->args_[2], false);
+        }
         if (IsOp(op, "buffer.copy") && (view_handles_.count(AsVarLike(op->args_[0]).get()) ||
                                         view_handles_.count(AsVarLike(op->args_[1]).get()))) {
           CheckWindowPair(op, op->args_[0], op->args_[1], true);

@@ -16,7 +16,16 @@ from pypto import DataType, ir, passes
 from pypto.pypto_core import ir as _ir
 
 _SPAN = ir.Span.unknown()
-_RECIPES = ("row_max", "row_sum", "row_expand_sub", "row_expand_div")
+_REDUCTIONS = ("row_max", "row_sum", "row_min", "row_prod")
+_BROADCASTS = (
+    "row_expand_add",
+    "row_expand_sub",
+    "row_expand_mul",
+    "row_expand_div",
+    "row_expand_max",
+    "row_expand_min",
+)
+_RECIPES = (*_REDUCTIONS, *_BROADCASTS)
 
 
 def _buffer(name, column=False, **changes):
@@ -31,7 +40,7 @@ def _buffer(name, column=False, **changes):
 
 
 def _args(suffix):
-    reduction = suffix in ("row_max", "row_sum")
+    reduction = suffix in _REDUCTIONS
     return [_buffer("src"), _buffer("aux", column=not reduction), _buffer("dst", column=reduction)]
 
 
@@ -44,7 +53,7 @@ def test_row_recipe_effects_and_roundtrip(suffix):
     arguments = _args(suffix)
     call = _call(suffix, arguments)
     assert isinstance(call.type, ir.VoidType)
-    reduction = suffix in ("row_max", "row_sum")
+    reduction = suffix in _REDUCTIONS
     for index in range(3):
         effect = ir.get_op_buffer_arg_effect(call.op.name, index)
         writes = index == 2 or (reduction and index == 1)
@@ -75,7 +84,7 @@ def test_row_recipes_reject_dynamic_and_empty_reduction_domains(suffix, valid):
         _call(suffix, arguments)
 
 
-@pytest.mark.parametrize("suffix", ["row_max", "row_sum"])
+@pytest.mark.parametrize("suffix", _REDUCTIONS)
 @pytest.mark.parametrize("scratch_shape", [[8, 64], [16, 32]])
 def test_reduction_workspace_must_cover_every_physical_dimension(suffix, scratch_shape):
     arguments = _args(suffix)
@@ -87,7 +96,7 @@ def test_reduction_workspace_must_cover_every_physical_dimension(suffix, scratch
 @pytest.mark.parametrize("suffix", _RECIPES)
 def test_row_recipe_requires_matching_row_geometry(suffix):
     arguments = _args(suffix)
-    column_index = 2 if suffix in ("row_max", "row_sum") else 1
+    column_index = 2 if suffix in _REDUCTIONS else 1
     arguments[column_index] = _buffer("column", column=True, valid_shape=[15, 1])
     with pytest.raises(ValueError, match="preserve physical and valid rows"):
         _call(suffix, arguments)
@@ -125,14 +134,14 @@ def _verify_storage(suffix, addresses):
     return passes.PropertyVerifierRegistry.verify(properties, program)
 
 
-@pytest.mark.parametrize("suffix", ["row_max", "row_sum"])
+@pytest.mark.parametrize("suffix", _REDUCTIONS)
 @pytest.mark.parametrize("addresses", [(0, 0, 8192), (0, 4096, 0), (0, 4096, 4096)])
 def test_reduction_rejects_overlap_between_each_live_pair(suffix, addresses):
     diagnostics = _verify_storage(suffix, addresses)
     assert diagnostics and any("disjoint" in diagnostic.message for diagnostic in diagnostics)
 
 
-@pytest.mark.parametrize("suffix", ["row_expand_sub", "row_expand_div"])
+@pytest.mark.parametrize("suffix", _BROADCASTS)
 def test_broadcast_can_reuse_matrix_but_not_its_repeated_column(suffix):
     assert _verify_storage(suffix, (0, 4096, 0)) == []
     diagnostics = _verify_storage(suffix, (0, 4096, 4096))

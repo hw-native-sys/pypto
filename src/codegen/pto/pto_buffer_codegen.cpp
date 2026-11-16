@@ -26,6 +26,7 @@
 #include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/backend/common/pto_native_ops.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/error.h"
@@ -384,7 +385,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
                    ir::IsOp(call, "buffer.store") || ir::IsOp(call, "buffer.set_validshape") ||
                    ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num") ||
                    ir::IsOp(call, "buffer.get_subblock_idx") || ir::IsOp(call, "buffer.matmul") ||
-                   ir::IsOp(call, "buffer.matmul_acc") || ir::IsOp(call, "buffer.extract"),
+                   ir::IsOp(call, "buffer.matmul_acc") || ir::IsOp(call, "buffer.extract") ||
+                   ir::IsOp(call, "buffer.transpose"),
                call->span_)
         << "Operation '" << call->op_->name_ << "' is not supported by direct Buffer IR codegen";
     if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
@@ -574,26 +576,19 @@ std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inpu
 std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,
                                             const std::vector<ir::ExprPtr>& destinations,
                                             const std::string& attributes) {
-  std::ostringstream clause;
-  clause << "ins(";
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprAsCode(inputs[i]);
-  }
-  // TCVT/TCMP put configuration inside ins, before its type annotations.
-  clause << attributes << " : ";
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprTypeAnnotation(inputs[i]);
-  }
-  clause << ") outs(";
-  for (size_t i = 0; i < destinations.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprAsCode(destinations[i]);
-  }
-  clause << " : ";
-  for (size_t i = 0; i < destinations.size(); ++i) {
-    clause << (i == 0 ? "" : ", ") << GetExprTypeAnnotation(destinations[i]);
-  }
-  clause << ")";
-  return clause.str();
+  const auto resolve = [this](const std::vector<ir::ExprPtr>& operands) {
+    std::vector<std::pair<std::string, std::string>> values;
+    values.reserve(operands.size());
+    for (const auto& operand : operands) values.emplace_back(GetExprAsCode(operand), "");
+    for (size_t i = 0; i < operands.size(); ++i) {
+      values[i].second = GetExprTypeAnnotation(operands[i]);
+    }
+    return values;
+  };
+  // Resolve the two lists in order; formatting cannot discover or repair storage.
+  const auto ins = resolve(inputs);
+  const auto outs = resolve(destinations);
+  return backend::pto_ops_detail::FormatInsOutsClause(ins, outs, attributes);
 }
 
 bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& result) {
@@ -720,10 +715,10 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     using K = backend::BufferConversionKind;
     if (conversion->kind == K::Cast) {
       const auto mode = call->GetKwarg<int>("mode", 0);
-      attributes = " {rmode = #pto<round_mode " + backend::pto_ops_detail::round_modes.at(mode) +
+      attributes = "{rmode = #pto<round_mode " + backend::pto_ops_detail::round_modes.at(mode) +
                    ">, satmode = #pto<saturation_mode OFF>}";
     } else if (conversion->kind == K::Compare || conversion->kind == K::CompareScalar) {
-      attributes = " {cmpMode = #pto<cmp " +
+      attributes = "{cmpMode = #pto<cmp " +
                    backend::pto_ops_detail::cmp_modes.at(call->GetKwarg<int>("cmp_type")) + ">}";
     }
     Emit(std::string(conversion->native_op) + " " +
@@ -743,6 +738,9 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     Emit("pto.textract ins(" + GetExprAsCode(call->args_[0]) + ", " + row + ", " + col + " : " +
          GetExprTypeAnnotation(call->args_[0]) + ", index, index) outs(" + GetExprAsCode(call->args_[3]) +
          " : " + GetExprTypeAnnotation(call->args_[3]) + ")");
+  } else if (ir::IsOp(call, "buffer.transpose")) {
+    Emit(std::string(backend::GetPtoNativeOpSpec("tile.transpose").native_op) + " " +
+         BufferInsOutsClause({call->args_[0], call->args_[1]}, call->args_[2]));
   } else {
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
     const auto* row_recipe = backend::FindBufferRowRecipe(call->op_->name_);
@@ -759,9 +757,8 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
                 call->args_.back());
     if (recipe && recipe->precision != backend::BufferPrecisionKind::None &&
         call->GetKwarg<bool>("high_precision", false)) {
-      line << " {precisionType = #pto<" << backend::BufferPrecisionAttributeName(recipe->precision)
-           << (recipe->precision == backend::BufferPrecisionKind::Div ? " diff_compensation>}"
-                                                                      : " high_precision>}");
+      line << backend::pto_ops_detail::FormatPrecisionAttribute(
+          backend::BufferPrecisionAttributeName(recipe->precision));
       // Report the logical op, not `recipe->buffer_op`: the user wrote
       // `tile.div`, and lowering it through Buffer IR must not change what the
       // diagnostic names.

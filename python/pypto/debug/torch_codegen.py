@@ -1437,14 +1437,30 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["buffer.sel"] = lambda a, _kw: f"_buffer_select({a[0]}, {a[1]}, _buffer_active({a[2]}), {a[4]})"
     m["buffer.sels"] = lambda a, _kw: f"_buffer_select({a[0]}, {a[1]}, {a[3]}, {a[4]})"
 
-    for suffix, reduction in (("row_max", "amax"), ("row_sum", "sum")):
+    for suffix, reduction in (
+        ("row_max", "amax"),
+        ("row_sum", "sum"),
+        ("row_min", "amin"),
+        ("row_prod", "prod"),
+    ):
         m[f"buffer.{suffix}"] = lambda a, _kw, fn=reduction: (
             f"_buffer_write({a[2]}, torch.{fn}(_buffer_active({a[0]}), dim=-1, keepdim=True))"
         )
-    for suffix, operation in (("row_expand_sub", "-"), ("row_expand_div", "/")):
+    for suffix, operation in (
+        ("row_expand_add", "+"),
+        ("row_expand_sub", "-"),
+        ("row_expand_mul", "*"),
+        ("row_expand_div", "/"),
+    ):
         m[f"buffer.{suffix}"] = lambda a, _kw, op=operation: (
             f"_buffer_write({a[2]}, _buffer_active({a[0]}) {op} _buffer_active({a[1]}))"
         )
+
+    for suffix, operation in (("row_expand_max", "maximum"), ("row_expand_min", "minimum")):
+        m[f"buffer.{suffix}"] = lambda a, _kw, op=operation: (
+            f"_buffer_write({a[2]}, torch.{op}(_buffer_active({a[0]}), _buffer_active({a[1]})))"
+        )
+    m["buffer.transpose"] = lambda a, _kw: (f"_buffer_write({a[2]}, _buffer_active({a[0]}).transpose(0, 1))")
 
     m["buffer.get_block_idx"] = lambda _a, _kw: "0"
     m["buffer.get_block_num"] = lambda _a, _kw: "1"

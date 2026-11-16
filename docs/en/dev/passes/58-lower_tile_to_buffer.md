@@ -33,7 +33,9 @@ partition form before storage planning rather than failing during final lowering
 | add, mul | FP16, FP32, INT32 |
 | sub, div, maximum, minimum, abs, exp, sqrt, neg, relu, log, recip | FP32 |
 | adds, subs, muls, divs, maximums, minimums, lrelu, full | FP32 |
-| row_max, row_sum, row_expand_sub, row_expand_div | FP32, positive static valid |
+| row_max, row_sum, row_min, row_prod | FP32, positive static valid |
+| row_expand_add/sub/mul/div/max/min | FP32, positive static valid, contiguous column carrier |
+| transpose | FP32, full-valid dense rank-2 matrices |
 
 Scalar parameters use the existing scalar ABI; element operands receive explicit
 conversion during lowering. `full` followed by store also qualifies without a
@@ -65,6 +67,18 @@ This supports the complete `row_max -> row_expand_sub -> exp -> row_sum ->
 row_expand_div` softmax chain. Row recipes in kernels with runtime/empty valid
 state, window operands, other dtypes or other reduction operations retain Tile
 IR. Empty reduction axes do not inherit the elementwise no-data behavior.
+`row_expand_add` uses its two-input contiguous-column form; the optional scratch
+and packed row-major carrier forms remain on Tile IR.
+
+Dense FP32 `transpose` reuses the scratch created by `FlattenTileNdTo2D`.
+Lowering removes the logical axis operands and emits
+`buffer.transpose(source, scratch, destination)`. Every descriptor is full-valid
+and row-major, with 32-byte-aligned physical rows; destination dimensions swap
+the source dimensions, while scratch must match the source shape exactly.
+Scratch is write-only, and all three operands must occupy disjoint storage.
+Strided windows, partial/dynamic valid extents and other dtypes remain Tile.
+Both IR paths use the shared native `pto.ttrans` spelling and operand formatter;
+Buffer codegen performs no allocation or scratch sizing.
 
 Cast/compare/select chains also qualify with positive static valid extents and
 allocation-backed dense operands. `cast` supports FP16 to FP32 and FP32 to FP16
@@ -166,6 +180,21 @@ False:          all kernels                 => Tile
 Use `PassContext([], enable_buffer_ir=False)` for the legacy path. JIT keys
 include the bool and a Buffer semantics version; nested dump/profiling contexts,
 precompile workers and debug recompilation preserve the effective value.
+
+## Shared native emission
+
+Tile and Buffer resolve operands separately, then share
+`pto_ops_detail::FormatInsOutsClause` for explicit SSA/type pairs and ordered
+outputs. Conversion/compare attributes go inside `ins`; `FormatPrecisionAttribute`
+places precision selectors after `outs`. Neither formatter discovers storage,
+constructs views, allocates scratch or changes operand types. Tile callbacks
+still resolve those decisions first; Buffer operands arrive already explicit.
+
+`GetPtoNativeOpSpec` supplies common elementwise, row-compute and transpose
+instruction names plus precision attributes to both paths. It is emission metadata, not a support registry:
+target, dtype, layout, aliasing and default-selection checks remain separate.
+Adding a native spelling does not enable a new Buffer form. Other operator
+families retain their specialized emitters.
 
 ## Runtime-valid default selection
 
