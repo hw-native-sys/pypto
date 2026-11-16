@@ -135,3 +135,19 @@ SIMT 测试相同环境开关控制的 `build`/`persistent` pytest 变体，及
 JIT 循环归纳变量 (induction variable) 在循环体中遮蔽之前的标量别名和已折叠的 shape 值。循环边界使用进入循环前的绑定，嵌套循环退出后恢复外层绑定。A5 回归将 while 计数器名称复用为后续复制循环的索引，以验证这一作用域区别。
 
 `pl.while_` 使用 `for` 语法，但其目标全部是循环携带值 (loop-carried values)，没有归纳变量。赋值形式的 `pl.yield_` 左值定义循环后的输出，包括零次迭代的结果。循环体中遮蔽进入前的别名和已折叠 shape；仅当名称不是该循环的输出时，才恢复外层绑定。JIT 和 parser 共用 yield 归属规则：嵌套条件分支或真实循环中的 yield 属于对应结构。运行时作用域（`pl.scope` / `pl.manual_scope`）和 `pl.split_aiv` 是透明包装。A5 回归验证条件分支的 yield 不会替换外层标量别名。
+
+## 标量数学与转换验证
+
+显式标量接口降低为原生 `pto.absf/minf/maxf`、数学操作、`pto.prmt`、`pto.mulhi`
+与 `pto.ftoi/itof`。转换显式发射 signedness 和 `round(r/a/f/c/z)`，`ftoi` 始终
+发射 `sat`。首批矩阵覆盖 FP32 数学与 INT32 位载体，无需将工具链版本提升至 v0.72 以上。
+
+`tests/st/runtime/vpto/test_simt_math_onboard.py` 通过公开 JIT 覆盖全部 18 个 API，
+包括两种符号解释、五种舍入模式、饱和、NaN/Inf、负数整除/取模、融合算术和部分
+活跃线程块。build/persistent 变体沿用上述环境开关与设备排队要求。
+JIT 单元测试 `test_public_math_native_compile` 覆盖原生 LLVM 导出。
+编译与设备执行属于不同的验证阶段。
+
+LLVM 文本设备编译在调用 CANN Bisheng 前移除其不支持的 LLVM 内存效果属性，
+与 PTOAS 对象文件生成路径一致；保留指令、同步和其他属性。
+若清理后属性组为空，则同时移除该组及其引用，因为 LLVM 不接受空属性组。

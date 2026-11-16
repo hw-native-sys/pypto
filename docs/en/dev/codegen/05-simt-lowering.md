@@ -158,3 +158,23 @@ The condition regressions include unselected atomic tuple elements before and af
 JIT loop induction variables shadow prior scalar aliases and folded shape values within the loop body. Loop bounds use the incoming binding, and nested-loop exit restores the enclosing binding. The A5 regression reuses a while counter as a subsequent copy-loop index to verify this distinction.
 
 `pl.while_` uses `for` syntax but binds only loop-carried values, with no induction variable. Assignment-form `pl.yield_` targets define the post-loop outputs, including zero-iteration results. Incoming aliases and folded shapes are shadowed inside the loop; an outer binding is restored only when its name is not an output of that loop. JIT and the parser share yield ownership rules: yields in nested conditionals or real loops belong to those constructs. Runtime scopes (`pl.scope` / `pl.manual_scope`) and `pl.split_aiv` are transparent wrappers. The A5 regression checks that conditional yields do not replace an outer scalar alias.
+
+## Scalar math and conversion validation
+
+The explicit scalar APIs lower to native `pto.absf/minf/maxf`, math operations,
+`pto.prmt`, `pto.mulhi` and `pto.ftoi/itof`. Conversion emits explicit signedness
+and `round(r/a/f/c/z)`; `ftoi` always emits `sat`. The initial matrix is FP32
+math and INT32 bit carriers. No toolchain version change is required beyond v0.72.
+
+`tests/st/runtime/vpto/test_simt_math_onboard.py` exercises all 18 APIs through
+public JIT, including both signedness modes, five rounding modes, saturation,
+NaN/Inf, negative division/modulo, fused arithmetic and partial active blocks.
+Its build/persistent variants use the same gates and queue requirements above.
+Native LLVM export is covered by `test_public_math_native_compile` in the JIT
+unit tests. Compilation and device execution are separate validation stages.
+
+The LLVM-text device build removes unsupported LLVM memory-effect annotations,
+matching PTOAS object emission, before invoking CANN Bisheng. It preserves
+instructions, synchronization and other attributes.
+Groups left empty by this cleanup and their references are removed together,
+since LLVM rejects empty attribute groups.

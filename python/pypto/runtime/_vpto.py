@@ -9,6 +9,7 @@
 
 """Build contract for separately compiled, self-contained A5 VPTO helpers."""
 
+import re
 import struct
 from collections.abc import Sequence
 from pathlib import Path
@@ -42,6 +43,45 @@ DEVICE_FLAGS = (
     "-mllvm",
     "-cce-dyn-kernel-stack-size=true",
 )
+
+
+def prepare_llvm_for_bisheng(text: str) -> str:
+    """Drop newer memory-effect annotations, as PTOAS object emission does.
+
+    LLVM text export retains LLVM 19's memory(...) attribute, which CANN
+    Bisheng cannot parse. Removing an optimization annotation is conservative;
+    preserve instructions, other attributes and quoted attribute values.
+    """
+
+    empty_groups: set[str] = set()
+
+    def clean_group(group: re.Match[str]) -> str:
+        body = re.sub(
+            r'"(?:[^"\\]|\\.)*"|\bmemory\([^()\n]*\) *',
+            lambda token: token[0] if token[0].startswith('"') else "",
+            group["body"],
+        )
+        if not body.strip():
+            empty_groups.add(group["number"])
+            return ""
+        return f"attributes #{group['number']} = {{{body}}}"
+
+    text = re.sub(
+        r"^attributes #(?P<number>[0-9]+) = \{(?P<body>[^\n]*)\}$",
+        clean_group,
+        text,
+        flags=re.MULTILINE,
+    )
+    # LLVM rejects empty groups. Remove references only after collecting every
+    # empty group, since declarations and call sites usually precede definitions.
+    # Quoted names/strings and comments are not attribute-group references.
+    if empty_groups:
+        text = re.sub(
+            r'"(?:[^"\\]|\\.)*"|;[^\n]*|#(?P<number>[0-9]+)\b',
+            lambda token: "" if token["number"] in empty_groups else token[0],
+            text,
+        )
+    return text
 
 
 def source_paths(value: object) -> tuple[str, ...]:

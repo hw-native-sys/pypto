@@ -994,3 +994,6 @@ supported types and shuffle widths.
 Atomics `atomic_add/min/max/exch/cas` return the old INT32/FP32 value from
 initialized GM/UB storage. `syncthreads`, `threadfence` and `threadfence_block`
 return void. See [atomic and synchronization contracts](11-simt.md#atomics-and-synchronization).
+
+Scalar math, byte permutation, high multiplication and explicit saturated/rounded
+conversion are documented in the [SIMT math contract](11-simt.md#math-bit-operations-and-explicit-conversion).

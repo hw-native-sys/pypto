@@ -123,6 +123,7 @@ set(PYPTO_SOURCES
 
     # IR - Operators
     src/ir/op/simt_ops.cpp
+    src/ir/op/simt_math_ops.cpp
     src/ir/op/buffer_ops/conversion.cpp
     src/ir/op/buffer_ops/indexed.cpp
     src/ir/op/buffer_ops/elementwise.cpp

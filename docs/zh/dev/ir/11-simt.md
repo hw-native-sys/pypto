@@ -29,7 +29,7 @@ def copy(src: pl.Tensor[[1, 128], pl.FP32],
 `pl.simt.Axis` 与 `ir.SimtAxis` 是同一枚举。坐标查询必须传入类型化 axis，支持位置
 参数或 `axis=`；`lane_id()` 无参数。dims 是三个编译期正整数，描述线程维度，不分配
 元素或创建 grid；边界保护必须显式编写。GM Tensor 和 Vec/UB Tile 复用既有存储。
-初始 API 支持当前后端标量子集及下述 INT32/FP32 lane 协作、原子和同步操作；扩展数学仍属于后续里程碑。
+初始 API 支持当前后端标量子集及下述 INT32/FP32 lane 协作、原子和同步操作；标量数学和显式转换见下文。
 
 标量赋值属于线程私有绑定，包括对外层标量的遮蔽，scope 外不能读取私有值。store
 自动重新绑定外层存储句柄，每个可写捕获只产生一个结果。Tile 更新之前保存的别名
@@ -94,6 +94,54 @@ Tensor 表达直接 GM 访问，没有隐式 Tile 搬运。ND/DN 视图沿用已
 偏移元数据，不支持分形布局。显式非 Vec 的 Tile 被拒绝。
 GM 接受 PTOAS 的 `l1cache="cache"/"uncache"` 以及分别验证的 load/store
 `l2cache` 策略集合；UB 不接受 cache 属性。
+
+## 数学、位操作与显式转换
+
+下列操作同时提供 `pl.simt` 和 `pypto.ir.op.simt` 接口。
+它们在线程内独立执行，不增加同步。
+
+| API | 操作数 / 结果 | 契约 |
+| --- | ------------- | ---- |
+| `abs(x)` | FP32 → FP32 | 清除符号位 |
+| `min(x, y)`、`max(x, y)` | FP32 → FP32 | minNum/maxNum；只有一个 NaN 时返回数值操作数 |
+| `exp`、`log`、`sqrt`、`sin`、`cos` | FP32 → FP32 | 自然指数/对数；三角函数输入为弧度 |
+| `ceil`、`floor`、`rint`、`round` | FP32 → FP32 | 向 +∞ / −∞ / 最近偶数 / 最近且中点远离零；保留 FP32 |
+| `pow(x, y)`、`fma(x, y, z)` | FP32 → FP32 | 幂；只进行一次最终舍入的融合乘加 |
+| `prmt(x, y, selector)` | INT32 → INT32 | 使用选择器低四个半字节进行字节置换 |
+| `mulhi(x, y, *, unsigned=False)` | INT32 → INT32 | 有符号/无符号 64 位乘积的高 32 位 |
+| `ftoi(x, *, rounding="z", unsigned=False)` | FP32 → INT32 | 饱和浮点转整数 |
+| `itof(x, *, rounding="r", unsigned=False)` | INT32 → FP32 | 显式舍入的整数转浮点 |
+
+`rounding` 为编译期字符串：`r` = 最近且中点取偶；`a` = 最近且中点远离零；
+`f` = 向 −∞；`c` = 向 +∞；`z` = 向零。
+其他取值以及非布尔 `unsigned` 均拒绝。PTOAS 要求 FP32 转整数必须饱和：
+越界值截断到目标整数范围，A5 上 NaN 的饱和转换结果为零。`unsigned=True` 将 INT32
+载体解释为 32 个无符号位，IR 类型仍为 INT32，因此结果的普通算术和比较仍为
+有符号操作。该选项不启用 UINT32 存储或通用无符号算术。
+
+文本解析器对位置形式和关键字形式的标量操作数使用相同的解析规则。
+`math.pi`、`math.inf` 和 `-math.inf` 等求值后的数值属性，与数值字面量及闭包名称
+一样转换为带类型的 IR 常量。
+原始 IR 打印后重新解析会保留转换属性的省略状态；降低时采用默认值，
+不会向解析后的 IR 补入这些属性。
+
+`prmt` 的低四个选择半字节按从低到高顺序分别控制一个结果字节。每个选择值的
+低三位选择 `y` 的字节 0–3 或 `x` 的字节 4–7（右操作数提供组合源的低字节）。
+A5 忽略半字节的第 3 位及选择器的高 16 位。
+
+PTOAS sin/cos 使用 FP32 范围归约的软件数学实现。数值验收覆盖 `[-4, 4]` 弧度，
+不保证大角度输入的精度。
+
+不进行隐式类型提升。FP16/BF16、INT64、packed 值和其他转换组合不属于当前可执行
+子集；packed 支持归短向量里程碑。浮点函数遵循目标精度和特殊值行为，不保证
+可移植的 NaN payload。`pl.cast`、有符号向下整除/取模和标量 `**` 诊断维持既有
+语义；显式 FP32 幂运算使用 `pl.simt.pow`。
+
+```python
+# Inside pl.simt_scope; x is an FP32 scalar loaded from storage.
+y = pl.const(1.0, pl.FP32) / (pl.const(1.0, pl.FP32) + pl.simt.exp(-x))
+index = pl.simt.ftoi(y, rounding="f")
+```
 
 ## Warp 内协作操作
 
