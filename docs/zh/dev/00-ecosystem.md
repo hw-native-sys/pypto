@@ -110,11 +110,13 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 
 **编译器 CI 覆盖：** `pypto-lib-compile` job 只编译
 [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json)
-中列出的命名用例，按平台看护精选的独立算子：
+中列出的命名用例，按平台看护精选算子和显式列出的 decode 模块：
 
-- **A5：** `models/deepseek_v4_1_flash/` 下的 10 个入口：`compressor`、
+- **A5：** `models/deepseek_v4_1_flash/` 下的 13 个入口：`compressor`、
   `sparse_attention`、`gate`、`expert_routed`、`expert_shared`、`hc`、`o_proj`、
-  `engram`、`input_pack` 和 `lm_head`。
+  `engram`、`input_pack`、`lm_head`、`decode_c1a_full`、`decode_c2a_full` 和
+  `decode_moe`。MoE 用例显式传入 `--ep 2 -d 0,1`，按两个逻辑 rank 编译，
+  不申请或执行物理设备。
 - **A2/A3：** `models/deepseek_v4_flash_lowlat/` 下的 10 个入口：
   `decode_compressor_ratio128`、`decode_compressor_ratio4`、`decode_sparse_attn_swa`、
   `expert_routed`、`gate`、`hc_post`、`hc_pre`、`o_proj_tp`、`qkv_proj_rope` 和
@@ -122,7 +124,7 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
   `test_paged_attention_pypto` 和 `topk_select`。Qwen attention 使用可独立运行的
   原生 PyPTO 算子测试入口。
 
-名单不包含 layer、整网入口、组合 attention/MoE 模块、MTP、DSpark、vision 或草稿。
+名单不包含 layer、整网入口、MTP、DSpark、vision 或草稿。
 库中新增文件不会自动加入；后续按需显式添加算子入口或参数组合。
 辅助模块通过调用入口覆盖，编译不需要 NPU。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，

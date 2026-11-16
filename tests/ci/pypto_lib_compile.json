@@ -7,6 +7,33 @@
     ]
   },
   {
+    "name": "models-deepseek_v4_1_flash-decode_c1a_full",
+    "entry": "models/deepseek_v4_1_flash/decode_c1a_full.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_c2a_full",
+    "entry": "models/deepseek_v4_1_flash/decode_c2a_full.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_moe",
+    "entry": "models/deepseek_v4_1_flash/decode_moe.py",
+    "platforms": [
+      "a5"
+    ],
+    "args": [
+      "--ep",
+      "2",
+      "-d",
+      "0,1"
+    ]
+  },
+  {
     "name": "models-deepseek_v4_1_flash-engram",
     "entry": "models/deepseek_v4_1_flash/engram.py",
     "platforms": [

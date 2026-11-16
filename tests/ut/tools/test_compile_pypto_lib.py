@@ -736,7 +736,9 @@ def test_default_cases_cover_selected_operator_families():
         assert "layer" not in entry.stem and "fwd" not in entry.stem
         assert not entry.stem.endswith("_draft")
         assert not entry.stem.startswith("dspark_")
-        assert entry.stem not in {"decode_csa", "decode_hca", "decode_swa", "decode_moe", "moe", "vision"}
+        assert entry.stem not in {"decode_csa", "decode_hca", "decode_swa", "moe", "vision"}
+        if entry.stem == "decode_moe":
+            assert entry.as_posix() == "models/deepseek_v4_1_flash/decode_moe.py"
 
 
 def test_duplicate_case_name_fails(library, case_config):
