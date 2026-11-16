@@ -305,11 +305,13 @@ tile 调用 `set_validshape`。
 空窗口的既有限制仍然适用；若要跳过空的 phased 操作，应在源码中同时对生产者
 和 store 添加条件保护。
 
-动态有效尺寸视图要求 SSA 源可追溯至本地分配。对于 TPOP、subview 或控制流结果，
-代码生成会明确报告尚不支持；应先将数据物化到本地 tile，再创建视图。
-静态正数有效尺寸的 TPOP 视图仍受支持。`SplitVectorKernel` 将 lane-1 重放中
-结果被丢弃的 reshape/reinterpret/transpose 视图替换为空的本地 tile，
-同时保留 TPOP/TPUSH/TFREE 握手。Subview 初始化仍受
+动态有效尺寸视图的 SSA 源可以追溯至本地分配或 TPOP。
+PTOAS >= 0.74 支持初始化 TPOP 派生的描述符，无需分配或复制 FIFO 数据
+（[PTOAS #1724](https://github.com/hw-native-sys/PTOAS/issues/1724)）。
+`SplitVectorKernel` 保留重放 lane 上的 reshape/reinterpret/transpose 视图，
+将其有效尺寸设为零，并保留全部 TPOP/TPUSH/TFREE 握手。有效区域为空不会缩小
+物理分配，因此将这些别名替换为 `tile.create` 会浪费完整的数据缓冲区。
+Subview 和控制流来源仍需先物化到本地 tile，再创建动态视图；Subview 初始化仍受
 [PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706) 阻塞。
 
 ### 跨核操作到 PTO 指令
@@ -370,8 +372,7 @@ PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位�
   不一致，pop 的 stride 就会错位——这会静默破坏*有效*区域的数据，因为 ISA 中对应的
   断言在 release 构建里被编译掉了。所以部分有效的 Acc-to-Vec 传输无论是否切分，
   TPOP 以及 TPUSH 的**列**维度都使用完整物理 box，并在传输两侧立即恢复逻辑 valid
-  shape——消费侧通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地
-  绑定 tile，`pto.set_validshape` 无法就地修改它）。第一个例外是切分轴上的 extent：它必须保持
+  shape——消费侧通过纯元数据的 `pto.treshape` 恢复。第一个例外是切分轴上的 extent：它必须保持
   逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段起点——也正因如此，
   编译期无法核验的逐 lane extent 绝不能到达那里。显式 `pl.split_aiv` 中切分轴 extent 为运行期
   值的边界，会让被弹出的 tile 保留完整 box（`split_axis::WithFullSplitAxisValid`），使偶数

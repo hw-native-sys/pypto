@@ -1092,8 +1092,8 @@ class TestSplitVectorKernelStandaloneSetValidshape:
         ("pl.tile.transpose_view(popped)", [16, 16], "FP32"),
     ],
 )
-def test_replay_tpop_views_become_empty_local_tiles(expression, result_shape, result_dtype):
-    """Discarded lane-1 views need empty storage while all FIFO handshakes survive."""
+def test_replay_tpop_views_preserve_fifo_aliases(expression, result_shape, result_dtype):
+    """Empty lane-1 views keep their FIFO source and allocate no payload storage."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
     program = pl.parse(f"""
@@ -1117,15 +1117,26 @@ class Program:
     branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
     assert isinstance(branch.else_body, ir.SeqStmts)
     replay = branch.else_body
-    creates = [
-        stmt
+    calls = [
+        stmt.value
+        for stmt in replay.stmts
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+    ]
+    assert all(call.op.name != ir.get_op("tile.create").name for call in calls), python_print(transformed)
+    view_names = {
+        ir.get_op(name).name for name in ("tile.reshape", "tile.reinterpret_view", "tile.transpose_view")
+    }
+    views = [call for call in calls if call.op.name in view_names]
+    assert len(views) == 1, python_print(transformed)
+    popped = next(
+        stmt.var
         for stmt in replay.stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == ir.get_op("tile.create").name
-    ]
-    assert len(creates) == 1, python_print(transformed)
-    tile_type = creates[0].var.type
+        and stmt.value.op.name == ir.get_op("tile.tpop_from_aic").name
+    )
+    ir.assert_structural_equal(views[0].args[0], popped)
+    tile_type = views[0].type
     assert isinstance(tile_type, ir.TileType)
     assert len(tile_type.shape) == len(result_shape)
     for dim, expected in zip(tile_type.shape, result_shape):

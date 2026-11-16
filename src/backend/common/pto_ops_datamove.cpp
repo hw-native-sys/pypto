@@ -1118,9 +1118,9 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
     // A MemRef on the result does not prove that the emitted source is locally
     // bound: subviews and control-flow results may still inherit that MemRef.
     // Follow the actual SSA origin, including intervening static reshape views.
-    CHECK_SPAN(codegen.IsLocallyAllocatedTileName(src), result->span_)
-        << "A dynamic-valid tile view requires a locally allocated source; PTOAS cannot initialize "
-           "reshape/reinterpret/transpose views of tpop, subview, or control-flow handles. "
+    CHECK_SPAN(codegen.IsLocallyBoundTileName(src), result->span_)
+        << "A dynamic-valid tile view requires a local allocation or TPOP source; PTOAS cannot initialize "
+           "reshape/reinterpret/transpose views of subview or control-flow handles. "
            "Materialize the source into a local tile before taking the view.";
   }
   if (!result_type.empty()) {

@@ -2765,11 +2765,15 @@ bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
   return fs_.mutable_tile_names.count(ssa_name) > 0;
 }
 
-bool PTOCodegen::IsLocallyAllocatedTileName(const std::string& ssa_name) const {
+void PTOCodegen::RegisterTpopTileName(const std::string& ssa_name) { fs_.tpop_tile_names.insert(ssa_name); }
+
+bool PTOCodegen::IsLocallyBoundTileName(const std::string& ssa_name) const {
   const auto source = fs_.tile_view_names.find(ssa_name);
-  // RegisterTileViewName flattens full-span reshape chains but deliberately
-  // starts a distinct origin for subviews, matching PTOAS locally-bound rules.
-  return IsMutableTileName(source == fs_.tile_view_names.end() ? ssa_name : source->second);
+  // Full-span reshape chains share a root; subviews keep a distinct origin.
+  // PTOAS >= 0.74 also accepts function-local TPOP descriptors as roots, even
+  // though their payload belongs to the FIFO rather than a local allocation.
+  const auto& root = source == fs_.tile_view_names.end() ? ssa_name : source->second;
+  return IsMutableTileName(root) || fs_.tpop_tile_names.count(root) > 0;
 }
 
 std::string PTOCodegen::EnsureTileView(

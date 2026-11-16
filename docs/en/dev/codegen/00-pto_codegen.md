@@ -339,12 +339,15 @@ straight-line region as their `acc_phase=Final` producer to clear its unit flag.
 Their existing backend restrictions on empty windows still apply; when skipping
 an empty phased operation, guard the producer and store together in the source.
 
-Dynamic-valid views require an SSA source rooted in a local allocation. Codegen
-reports an unsupported-case error for TPOP, subview, and control-flow sources;
-materialize into a local tile before taking such a view. Static positive TPOP
-views remain supported. `SplitVectorKernel` replaces discarded lane-1 replay
-reshape/reinterpret/transpose views with empty local tiles, preserving the
-TPOP/TPUSH/TFREE handshakes. Subview initialization remains blocked by
+Dynamic-valid views accept an SSA source rooted in a local allocation or TPOP.
+PTOAS >= 0.74 supports initialization of TPOP-derived descriptors without
+allocating or copying their FIFO payload ([PTOAS #1724](https://github.com/hw-native-sys/PTOAS/issues/1724)).
+`SplitVectorKernel` preserves reshape/reinterpret/transpose views on the replay
+lane with zero valid extents and retains all TPOP/TPUSH/TFREE handshakes. Empty
+validity does not reduce physical allocation size, so replacing these aliases
+with `tile.create` would waste a full payload buffer. Subview and control-flow
+sources still require materialization into a local tile before taking a dynamic
+view; subview initialization remains blocked by
 [PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706).
 
 ### Cross-Core Operations → PTO Instructions
@@ -408,8 +411,8 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
   the *valid* region, since the ISA's matching assertion is compiled out in release builds. So a
   partial Acc-to-Vec transfer uses the full physical box for TPOP and for the TPUSH **columns**,
   whether the transfer is no-split or split, and restores the logical valid shape immediately on each
-  side of the transport — on the consumer side through a metadata-only `pto.treshape` (a frontend
-  tpop result is not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place).
+  side of the transport — on the consumer side through a metadata-only `pto.treshape` that
+  encodes the static logical extents without changing the transport descriptor.
   The split-axis extent is one exception: it stays per-lane on the TPOP operands, because that is
   what tells the ISA where lane 1's band begins — which is also why a per-lane extent the compiler
   could not verify must never get there. An explicit `pl.split_aiv` boundary whose split-axis extent is a
