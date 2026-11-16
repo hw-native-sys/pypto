@@ -17,8 +17,9 @@ current pinned PTO-ISA contract:
 * TFMOD/TFMODS: FP32;
 * TREM uses a same-dtype scratch tile with two valid rows;
 * TREMS uses a same-dtype scratch tile with one valid row.
-* TREM/TFMOD cover default and ``high_precision`` PTOAS attributes; A2/A3
-  accepts but ignores the high-precision selection, as specified by PTO-ISA.
+* TREM/TFMOD cover default and ``high_precision`` PTOAS attributes; A2/A3 and
+  A5 both implement the high-precision selection for FP32, and its scratch tile
+  needs many more columns than the default path (see ``_trem_hp_scratch_cols``).
 * For A2/A3 INT32 TREM/TREMS, every source element and scalar must stay in
   the inclusive PTO-ISA domain ``[-2**24, 2**24]``.
 * INT32 TREM/TREMS store their source tiles again after the instruction to
@@ -44,6 +45,28 @@ INT32_REMAINDER_LIMIT = 2**24
 ROW_TAIL = (11, N)
 COL_TAIL = (M, 47)
 COMBINED_TAIL = (11, 47)
+
+
+def _trem_hp_scratch_cols(cols: int) -> int:
+    """Columns TREM's HIGH_PRECISION scratch needs for a tile `cols` wide.
+
+    Keep in step with ``TremHighPrecisionScratchCols`` in
+    ``src/ir/op/tile_ops/elementwise.cpp``, which is the authoritative copy and
+    rejects an undersized tmp at IR construction. That one in turn mirrors
+    ``HpScratchRequiredColsV`` in pto-isa ``include/pto/npu/a2a3/TRem.hpp``; see
+    ``docs/isa/TREMS.md``. The duplication exists because this value is needed
+    to *allocate* the tile in Python, and the C++ copy is needed to *reject* a
+    bad one before codegen.
+
+    The contract constrains columns, not total elements: PTO-ISA asserts
+    ``tmp.GetValidCol() >= HpScratchRequiredColsV(...)`` with only one row
+    required.
+    """
+    cap_vecs = max(cols // 64, 1)
+    mask_bytes = cap_vecs * 8
+    mask_cols = ((mask_bytes + 31) // 32) * 8
+    return 192 * cap_vecs + mask_cols + 8 + (64 if cap_vecs == 1 else 0)
+
 
 _PL_DT = {
     DataType.FP32: pl.FP32,
@@ -109,6 +132,10 @@ def _make_program(
 ):
     pl_dtype = _PL_DT[dtype]
     valid = list(valid_shape)
+    # TREM's HIGH_PRECISION scratch contract is far larger than the default
+    # path's, and an undersized tmp corrupts the result instead of being
+    # rejected, so size it for the mode this kernel dispatches.
+    rem_tmp_cols = _trem_hp_scratch_cols(N) if high_precision else N
 
     if op_name == "rem":
         if dtype == DataType.INT32:
@@ -130,8 +157,8 @@ def _make_program(
                 ]:
                     lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
                     rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shape=valid)
-                    tmp: pl.Tile[[2, N], pl_dtype] = pl.tile.create(
-                        [2, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, rem_tmp_cols], pl_dtype] = pl.tile.create(
+                        [2, rem_tmp_cols], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     out = pl.store(result, [0, 0], out)
@@ -169,8 +196,8 @@ def _make_program(
             ) -> pl.Tensor[[M, N], pl_dtype]:
                 lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
                 rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shape=valid)
-                tmp: pl.Tile[[2, N], pl_dtype] = pl.tile.create(
-                    [2, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[2, rem_tmp_cols], pl_dtype] = pl.tile.create(
+                    [2, rem_tmp_cols], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                 )
                 result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                 return pl.store(result, [0, 0], out)

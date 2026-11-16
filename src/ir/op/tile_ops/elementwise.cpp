@@ -367,9 +367,35 @@ static void CheckRemainderTileContract(const std::shared_ptr<const TileType>& lh
   }
 }
 
+// Columns TREM's HIGH_PRECISION scratch occupies for a tile `valid_cols` wide.
+//
+// Authoritative mirror of `HpScratchRequiredColsV` in pto-isa
+// `include/pto/npu/a2a3/TRem.hpp`; see `docs/isa/TREMS.md`. The layout is three
+// 64-column regions per staged vector (`div`, `bTmp`, `k`), a 32-byte-aligned
+// compare mask, an 8-element address buffer, and -- only at one vector -- a
+// 64-column per-vector state row. The vector count comes from the *valid*
+// columns, matching the ISA's `dst.GetValidCol() / 64`, and is clamped to one.
+//
+// Monotonically non-decreasing in `valid_cols`, so sizing a tmp from a tile's
+// declared width is conservative when the valid width is narrower.
+//
+// PTO-ISA guards this contract with `PTO_ASSERT`, which expands to `((void)0)`
+// unless `_DEBUG` is set (`pto/common/debug.h`). Device kernels are built
+// without it, so an undersized tmp is not diagnosed there -- it silently reads
+// and writes outside the scratch window. This check is the only one a user gets.
+static int64_t TremHighPrecisionScratchCols(int64_t valid_cols) {
+  constexpr int64_t kElemsPerVector = 64;  // REPEAT_BYTE / sizeof(float)
+  constexpr int64_t kBlockBytes = 32;      // BLOCK_BYTE_SIZE
+  constexpr int64_t kBitToByte = 8;        // BIT_TO_BYTE
+  const int64_t cap_vecs = std::max<int64_t>(valid_cols / kElemsPerVector, 1);
+  const int64_t mask_bytes = cap_vecs * kBitToByte;
+  const int64_t mask_cols = ((mask_bytes + kBlockBytes - 1) / kBlockBytes) * kBitToByte;
+  return 192 * cap_vecs + mask_cols + kBitToByte + (cap_vecs == 1 ? kElemsPerVector : 0);
+}
+
 static void CheckRemainderTmpContract(const std::shared_ptr<const TileType>& src,
                                       const std::shared_ptr<const TileType>& tmp, int64_t required_rows,
-                                      const std::string& op_name) {
+                                      const std::string& op_name, bool high_precision) {
   CHECK(tmp->dtype_ == src->dtype_) << "The operator " << op_name
                                     << " requires tmp dtype to match the source dtype, but got "
                                     << tmp->dtype_.ToString() << " and " << src->dtype_.ToString();
@@ -387,6 +413,22 @@ static void CheckRemainderTmpContract(const std::shared_ptr<const TileType>& src
       << "The operator " << op_name
       << " requires tmp valid_shape columns to cover the source valid columns, but got source valid_shape "
       << FormatShape(src_valid) << " and tmp valid_shape " << FormatShape(tmp_valid);
+
+  // The high-precision scratch needs far more columns than the default path, so
+  // a tmp that satisfies the checks above can still be too small here. Only a
+  // constant source width pins the vector count; a symbolic width is left to
+  // PTO-ISA.
+  if (!high_precision) return;
+  auto src_cols = As<ConstInt>(src_valid[1]);
+  if (!src_cols) return;
+  const int64_t required_cols = TremHighPrecisionScratchCols(src_cols->value_);
+  CHECK(ProveValidExtentLessEqual(MakeIndexConst(required_cols), tmp_valid[1]) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " with high_precision=True requires tmp valid_shape to contain at least " << required_cols
+      << " column(s) for the PTO-ISA high-precision scratch layout, but got tmp valid_shape "
+      << FormatShape(tmp_valid)
+      << "; the default-precision path needs far fewer, so a tmp sized for it is "
+         "not sufficient here";
 }
 
 TypePtr DeduceTileRemainderType(const std::vector<ExprPtr>& args,
@@ -400,14 +442,15 @@ TypePtr DeduceTileRemainderType(const std::vector<ExprPtr>& args,
   CHECK(lhs) << "The operator " << op_name << " requires first argument to be a TileType";
   CHECK(rhs) << "The operator " << op_name << " requires second argument to be a TileType";
   CheckRemainderTileContract(lhs, rhs, op_name);
-  CHECK(!GetKwargOr<bool>(kwargs, "high_precision", false) || lhs->dtype_ == DataType::FP32)
+  const bool high_precision = GetKwargOr<bool>(kwargs, "high_precision", false);
+  CHECK(!high_precision || lhs->dtype_ == DataType::FP32)
       << "The operator " << op_name
       << " supports high_precision only for FP32 because the PTO-ISA high-precision algorithm is "
          "defined only for float";
   if (has_tmp) {
     auto tmp = As<TileType>(args[2]->GetType());
     CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType";
-    CheckRemainderTmpContract(lhs, tmp, 2, op_name);
+    CheckRemainderTmpContract(lhs, tmp, 2, op_name, high_precision);
   }
 
   TileView tile_view;
@@ -435,7 +478,11 @@ TypePtr DeduceTileScalarRemainderType(const std::vector<ExprPtr>& args,
   if (has_tmp) {
     auto tmp = As<TileType>(args[2]->GetType());
     CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType";
-    CheckRemainderTmpContract(src, tmp, 1, op_name);
+    // `tile.rems` carries no precision selector into PTO-ISA, so it always takes
+    // the default-precision path. TREMS's high-precision scratch is 128-column
+    // based rather than TREM's 192, so enabling it here would also need its own
+    // layout rather than `TremHighPrecisionScratchCols`.
+    CheckRemainderTmpContract(src, tmp, 1, op_name, /*high_precision=*/false);
   }
 
   TileView tile_view;

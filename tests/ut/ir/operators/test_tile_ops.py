@@ -4756,6 +4756,45 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.rem" in ir_str
 
+    def _rem_hp_program(self, tmp_cols: int):
+        """Build a tile.rem(high_precision=True) program with a tmp `tmp_cols` wide."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tile_a: pl.Tile[[32, 64], pl.FP32] = pl.load(a, [0, 0], [32, 64])
+                tile_b: pl.Tile[[32, 64], pl.FP32] = pl.load(b, [0, 0], [32, 64])
+                tmp: pl.Tile[[2, tmp_cols], pl.FP32] = pl.tile.create(
+                    [2, tmp_cols], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_c: pl.Tile[[32, 64], pl.FP32] = pl.rem(tile_a, tile_b, tmp, high_precision=True)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
+                return result
+
+        return Program
+
+    def test_tile_rem_high_precision_rejects_default_sized_tmp(self):
+        """An undersized high-precision scratch is rejected rather than silently corrupting.
+
+        PTO-ISA guards its own high-precision scratch contract with PTO_ASSERT,
+        which compiles to a no-op in device builds, so without this check the
+        kernel reads and writes outside the scratch window and returns wrong
+        numbers with no diagnostic. 64 columns satisfies the default-precision
+        contract and is far short of the high-precision one.
+        """
+        with pytest.raises(InvalidOperationError, match="high_precision=True requires tmp valid_shape"):
+            self._rem_hp_program(64)
+
+    def test_tile_rem_high_precision_accepts_conforming_tmp(self):
+        """272 columns is the high-precision contract at one 64-lane vector."""
+        assert "tile.rem" in str(self._rem_hp_program(272))
+
     def test_tile_rems(self):
         """Test tile.rems operator - element-wise remainder of tile and scalar."""
 
@@ -4814,7 +4853,10 @@ class TestTileBitwiseArithmeticOps:
         span = ir.Span("remainder_precision.py", 9, 4, 9, 29)
         src0 = ir.Var("src0", ir.TileType([8, 16], DataType.FP32), span)
         src1 = ir.Var("src1", ir.TileType([8, 16], DataType.FP32), span)
-        tmp = ir.Var("tmp", ir.TileType([2, 16], DataType.FP32), span)
+        # Wide enough for the high_precision call below: that path's scratch
+        # contract is 272 columns at one 64-lane vector, against 16 for the
+        # default path this tile would otherwise only need to cover.
+        tmp = ir.Var("tmp", ir.TileType([2, 272], DataType.FP32), span)
 
         default_call = op(src0, src1, tmp) if op is tile.rem else op(src0, src1)
         high_precision_call = (
