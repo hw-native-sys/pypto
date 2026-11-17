@@ -1052,3 +1052,55 @@ class TestMxANDScaleCodegen:
         assert "#pto.layout<mx_a_zz>" not in mlir
         assert "pto.tload" in mlir
         assert "pto.tmov" not in mlir
+
+
+@pytest.mark.parametrize(("side", "shape"), [("a", "[32, 4]"), ("b", "[4, 32]")])
+@pytest.mark.parametrize("source_type", ["pl.Tensor", "pld.DistributedTensor"])
+def test_dense_mx_scale_load_chains_on_destination(tmp_path, side, shape, source_type):
+    layout = "row_major" if side == "a" else "col_major"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def load(self, scales: {source_type}[[32, 4], pl.FP8E8M0]):
+        dst: pl.Tile[
+            {shape}, pl.FP8E8M0, pl.Mem.Mat,
+            pl.TileView(blayout=pl.TileLayout.{layout}, slayout=pl.TileLayout.{layout}, fractal=32),
+        ] = pl.tile.create({shape}, dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+        dst = pl.tile.load_mx_scale(scales, dst, [0, 0], [16, 4], side="{side}")
+        _ = pl.tile.load_mx_scale(scales, dst, [16, 0], [16, 4], side="{side}", dst_offset=16)
+""")
+    mlir = _emit_incore_mlir(program)
+    addresses = [
+        line.split("pto.tile_buf_addr ", 1)[1].split(" : ", 1)[0]
+        for line in mlir.splitlines()
+        if "pto.tile_buf_addr " in line
+    ]
+    assert len(addresses) == 2
+    assert addresses[0] == addresses[1]
+    assert "!pto.ptr<!pto.f8E8M0>, index -> !pto.ptr<!pto.f8E8M0>" in mlir
+    # Both writes must survive lowering, including the unused result of the second load.
+    cpp = _assemble_mx(mlir, tmp_path)
+    assert cpp.count("TLOAD(") == 2
+    assert f"pto::Layout::{'MX_A_ND' if side == 'a' else 'MX_B_DN'}" in cpp
+
+
+def test_dense_mx_scale_load_rejects_destination_subview():
+    program = pl.parse_program("""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def load(self, scales: pl.Tensor[[32, 2], pl.FP8E8M0]):
+        parent: pl.Tile[
+            [32, 4], pl.FP8E8M0, pl.Mem.Mat,
+            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+        ] = pl.tile.create([32, 4], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+        dst = pl.tile.slice(parent, [32, 2], [0, 0])
+        _ = pl.tile.load_mx_scale(scales, dst, [0, 0], [32, 2], side="a")
+""")
+    with pytest.raises(ValueError, match="destination must be a packed local Mat allocation"):
+        _emit_incore_mlir(program)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

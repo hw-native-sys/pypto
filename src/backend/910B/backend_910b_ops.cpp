@@ -32,7 +32,7 @@ static const bool kOpsRegistered = [] {
   // Only the A5 backend exposes these MX operations and row-wise dequantization.
   RegisterPTOOps(Backend910B::Instance(),
                  {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias", "tile.tget_scale_addr",
-                  "tile.tquant_mx_raw", "tile.tmov_x2zz", "tile.dequant"});
+                  "tile.tquant_mx_raw", "tile.tmov_x2zz", "tile.dequant", "tile.load_mx_scale"});
   return true;
 }();
 

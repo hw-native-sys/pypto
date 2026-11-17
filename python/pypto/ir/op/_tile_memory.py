@@ -1047,3 +1047,30 @@ def set_validshape(
         valid_cols if isinstance(valid_cols, Expr) else ConstInt(valid_cols, DataType.INDEX, actual_span)
     )
     return _ir_core.create_op_call("tile.set_validshape", [tile, vr_expr, vc_expr], {}, actual_span)
+
+
+def load_mx_scale(
+    tensor: Expr,
+    dst: Expr,
+    offsets: Sequence[int | Expr],
+    shape: Sequence[int | Expr],
+    *,
+    side: str,
+    dst_offset: int = 0,
+    span: Span | None = None,
+) -> Call:
+    """Load a dense FP8E8M0 window into an existing boxed L1 scale tile.
+
+    ``offsets`` and ``shape`` use the source's dense ``[row, group]``
+    coordinates for either side. Side ``"a"`` writes ``[row, group]`` A/ZZ
+    storage; side ``"b"`` writes ``[group, row]`` B/NN storage. The operation
+    updates and returns ``dst``; bytes outside the destination window are left
+    untouched. The first read of any such bytes must be preceded by a write.
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.load_mx_scale",
+        [tensor, dst, _to_make_tuple(offsets, actual_span), _to_make_tuple(shape, actual_span)],
+        {"side": side, "dst_offset": dst_offset},
+        actual_span,
+    )

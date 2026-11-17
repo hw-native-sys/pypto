@@ -1379,6 +1379,98 @@ REGISTER_OP("tile.create")
       return DeduceTileCreateTileType(args, kwargs, "tile.create");
     });
 
+REGISTER_OP("tile.load_mx_scale")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description("Load dense FP8E8M0 rows into a boxed L1 A/B scale region")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("tensor", "Dense row-major FP8E8M0 source [rows, groups]")
+    .add_argument("dst", "Boxed Mat scale storage, updated in place")
+    .add_argument("offsets", "Two source offsets in dense [row, group] coordinates")
+    .add_argument("shape", "Static source window [rows, groups]")
+    .set_attr<std::string>("side")
+    .set_attr<int>("dst_offset")
+    .set_input_memory(1, MemorySpace::Mat)
+    .set_output_memory(MemorySpace::Mat)
+    .set_output_reuses_input(1)
+    .set_arg_effect(0, ArgEffect::Read)
+    .set_arg_effect(1, ArgEffect::ReadWrite)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) -> TypePtr {
+      CHECK(args.size() == 4) << "load_mx_scale expects source, destination, offsets, and shape";
+      const auto source = AsTensorTypeLike(args[0]->GetType());
+      const auto destination = As<TileType>(args[1]->GetType());
+      const auto offsets = As<MakeTuple>(args[2]);
+      const auto shape = As<MakeTuple>(args[3]);
+      CHECK(source && source->dtype_ == DataType::FP8E8M0 && source->shape_.size() == 2)
+          << "load_mx_scale source must be a dense 2D FP8E8M0 tensor";
+      CHECK(!source->tensor_view_ || source->tensor_view_->layout == TensorLayout::ND)
+          << "load_mx_scale source must use dense ND [row, group] coordinates";
+      CHECK(tile_view_semantics::ShapeExprListsEquivalent(GetEffectiveTensorValidShape(*source),
+                                                          source->shape_))
+          << "load_mx_scale source must be fully valid";
+      CHECK(destination && destination->dtype_ == DataType::FP8E8M0 &&
+            destination->GetMemorySpace() == MemorySpace::Mat && destination->shape_.size() == 2)
+          << "load_mx_scale destination must be a 2D FP8E8M0 Mat scale tile";
+      CHECK(offsets && shape && offsets->elements_.size() == 2 && shape->elements_.size() == 2)
+          << "load_mx_scale requires two offsets and two static shape dimensions";
+      const auto side = GetKwarg<std::string>(kwargs, "side");
+      const int dst_offset = GetKwarg<int>(kwargs, "dst_offset", 0);
+      CHECK(side == "a" || side == "b") << "load_mx_scale side must be 'a' or 'b'";
+      CHECK(dst_offset >= 0 && dst_offset % 16 == 0)
+          << "load_mx_scale dst_offset must be a nonnegative multiple of 16";
+      std::vector<int64_t> window, capacity;
+      for (size_t i = 0; i < 2; ++i) {
+        const auto dim = As<ConstInt>(shape->elements_[i]);
+        const auto dst_dim = As<ConstInt>(destination->shape_[i]);
+        CHECK(dim && dim->value_ > 0 && dst_dim && dst_dim->value_ > 0)
+            << "load_mx_scale requires positive static window/destination shapes";
+        const auto scalar = As<ScalarType>(offsets->elements_[i]->GetType());
+        CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
+            << "load_mx_scale offsets must be integer scalars";
+        window.push_back(dim->value_);
+        capacity.push_back(dst_dim->value_);
+      }
+      const auto source_groups = As<ConstInt>(source->shape_[1]);
+      const auto group_origin = As<ConstInt>(offsets->elements_[1]);
+      CHECK(source_groups && source_groups->value_ == window[1] && group_origin && group_origin->value_ == 0)
+          << "load_mx_scale requires the full dense source group span at group offset zero";
+      if (source->tensor_view_ && !source->tensor_view_->stride.empty()) {
+        const auto& strides = source->tensor_view_->stride;
+        CHECK(strides.size() == 2) << "load_mx_scale source must have two dense strides";
+        const auto row_stride = As<ConstInt>(strides[0]);
+        const auto col_stride = As<ConstInt>(strides[1]);
+        CHECK(row_stride && col_stride && row_stride->value_ == window[1] && col_stride->value_ == 1)
+            << "load_mx_scale source must have dense row-major strides";
+      }
+      CHECK(window[0] % 16 == 0 && window[1] % 2 == 0)
+          << "load_mx_scale window requires complete 16x2 SFractal boxes";
+      const bool is_a = side == "a";
+      CHECK(window[1] == capacity[is_a ? 1 : 0] &&
+            static_cast<int64_t>(dst_offset) + window[0] <= capacity[is_a ? 0 : 1])
+          << "load_mx_scale window must span all scale groups and fit in destination";
+      const auto view = tile_view_semantics::GetEffectiveTileView(*destination);
+      const auto layout = is_a ? TileLayout::row_major : TileLayout::col_major;
+      CHECK(view.blayout == layout && view.slayout == layout && view.fractal == 32)
+          << "load_mx_scale destination requires the matching row/row/32 A or col/col/32 B layout";
+      CHECK(tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, destination->shape_))
+          << "load_mx_scale destination must be fully valid";
+      if (view.start_offset) {
+        const auto start = As<ConstInt>(view.start_offset);
+        CHECK(start && start->value_ == 0) << "load_mx_scale destination requires zero view origin";
+      }
+      for (size_t i = 0; i < 2; ++i) {
+        const auto start = As<ConstInt>(offsets->elements_[i]);
+        if (!start) continue;
+        CHECK(start->value_ >= 0) << "load_mx_scale source offsets must be nonnegative";
+        if (auto extent = As<ConstInt>(source->shape_[i])) {
+          CHECK(start->value_ <= extent->value_ && window[i] <= extent->value_ - start->value_)
+              << "load_mx_scale source window is outside the tensor";
+        }
+      }
+      return destination;
+    });
+
 REGISTER_OP("tile.load")
     .set_op_category("TileOp")
     .functional_execution_memory_access()

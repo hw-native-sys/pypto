@@ -286,6 +286,7 @@ MIGRATION_FAMILIES = (
     MigrationFamily(
         "G15: A5 quantization, MX and scale binding",
         (
+            "tile.load_mx_scale",
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
             "tile.matmul_mx_bias",

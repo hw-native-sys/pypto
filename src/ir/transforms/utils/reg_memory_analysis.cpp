@@ -154,8 +154,9 @@ class InitializationChecker : public IRVisitor {
         masks_[stmt->var_.get()] = active->value_;
       }
     }
-    if (IsOp(call, "tile.create") || IsOp(call, "reg.store") || IsOp(call, "reg.scatter") ||
-        IsOp(call, "reg.squeeze_store_flush") || op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+    if (IsOp(call, "tile.create") || IsOp(call, "tile.load_mx_scale") || IsOp(call, "reg.store") ||
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_flush") ||
+        op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
       return;
     }
     // An actual Tile-producing operation initializes its valid output region.

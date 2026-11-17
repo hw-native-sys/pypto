@@ -83,6 +83,8 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
         validated("tile.mark_remote_written"), validated("system.tfree_to_aic"),
         validated("system.tfree_to_aiv"), validated("system.reserve_buffer"),
         validated("system.import_peer_buffer"),
+        // DPS scale loads write destination storage even when their SSA alias is unused.
+        validated("tile.load_mx_scale"),
         // TPUSH reads quantization state outside the SSA use graph.
         validated("system.set_quant_scalar"), validated("system.set_quant_vector"),
         validated("system.aic_initialize_pipe"), validated("system.aiv_initialize_pipe"),

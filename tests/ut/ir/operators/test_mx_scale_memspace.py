@@ -503,5 +503,65 @@ class TestMxScaleMemSpaces:
         assert "{layout = #pto.layout<mx_a_zz>}" in pto
 
 
+def test_dense_mx_scale_load_accepts_distributed_gm_source():
+    span = ir.Span.unknown()
+    source = ir.Var("local", ir.DistributedTensorType([32, 4], DataType.FP8E8M0), span)
+    destination = _tile_var(
+        _const_shape(32, 4),
+        DataType.FP8E8M0,
+        memory=ir.MemorySpace.Mat,
+        view=ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.row_major, fractal=32),
+    )
+
+    result = tile.load_mx_scale(source, destination, [0, 0], [32, 4], side="a")
+
+    ir.assert_structural_equal(result.type, destination.type)
+
+
+def test_dense_mx_scale_load_rejects_partially_valid_source():
+    span = ir.Span.unknown()
+    source = ir.Var(
+        "partial",
+        ir.TensorType(
+            [32, 4],
+            DataType.FP8E8M0,
+            tensor_view=ir.TensorView(stride=[4, 1], layout=ir.TensorLayout.ND, valid_shape=[16, 4]),
+        ),
+        span,
+    )
+    destination = _tile_var(
+        _const_shape(32, 4),
+        DataType.FP8E8M0,
+        memory=ir.MemorySpace.Mat,
+        view=ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.row_major, fractal=32),
+    )
+
+    with pytest.raises(ValueError, match="load_mx_scale source must be fully valid"):
+        tile.load_mx_scale(source, destination, [0, 0], [32, 4], side="a")
+
+
+@pytest.mark.parametrize(
+    ("offsets", "shape", "dst_offset", "message"),
+    [
+        ([0, 0], [8, 4], 0, "requires complete 16x2 SFractal boxes"),
+        ([0, 0], [16, 2], 0, "requires the full dense source group span"),
+        ([16, 0], [32, 4], 0, "source window is outside the tensor"),
+        ([0, 0], [32, 4], 16, "window must span all scale groups and fit in destination"),
+    ],
+    ids=["partial-box", "partial-group-span", "source-overflow", "destination-overflow"],
+)
+def test_dense_mx_scale_load_rejects_invalid_geometry(offsets, shape, dst_offset, message):
+    source = ir.Var("source", ir.TensorType([32, 4], DataType.FP8E8M0), ir.Span.unknown())
+    destination = _tile_var(
+        _const_shape(32, 4),
+        DataType.FP8E8M0,
+        memory=ir.MemorySpace.Mat,
+        view=ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.row_major, fractal=32),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        tile.load_mx_scale(source, destination, offsets, shape, side="a", dst_offset=dst_offset)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

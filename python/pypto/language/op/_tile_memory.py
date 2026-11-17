@@ -80,7 +80,7 @@ def create(
         shape: Shape of the tile
         dtype: Data type of the tile
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right).
-            ``None`` (the default) leaves the space unset for the compiler to place.
+            ``None`` leaves the space unset.
         transpose: When True, allocate the transposed Mat (ZN) fractal layout for a
             matmul ``b_trans`` B-operand (the layout a DN-source ``gather_row`` fills).
             Default ``None`` keeps the canonical layout and is omitted from the op.
@@ -919,3 +919,34 @@ def set_validshape(tile: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile
     vc = valid_cols.unwrap() if isinstance(valid_cols, Scalar) else valid_cols
     call_expr = _ir_ops.set_validshape(tile_expr, vr, vc)
     return Tile(expr=call_expr)
+
+
+def load_mx_scale(
+    tensor: Tensor,
+    dst: Tile,
+    offsets: Sequence[IntLike],
+    shape: Sequence[IntLike],
+    *,
+    side: str,
+    dst_offset: int = 0,
+) -> Tile:
+    """Load dense FP8E8M0 scales directly into an existing L1 scale tile.
+
+    Source ``offsets`` and ``shape`` use dense ``[row, group]`` coordinates.
+    ``side="a"`` targets an A/ZZ tile shaped ``[rows, groups]``; ``side="b"``
+    targets a B/NN tile shaped ``[groups, rows]``. A window must span the full
+    group dimension and use complete MX scale boxes. ``dst_offset`` is the
+    destination row offset for A or destination column offset for B. The
+    returned tile aliases ``dst``; unwritten destination regions are preserved.
+    Requires A5.
+    """
+    return Tile(
+        expr=_ir_ops.load_mx_scale(
+            tensor.unwrap(),
+            dst.unwrap(),
+            _normalize_intlike(offsets),
+            _normalize_intlike(shape),
+            side=side,
+            dst_offset=dst_offset,
+        )
+    )

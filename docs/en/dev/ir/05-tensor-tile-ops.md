@@ -424,3 +424,38 @@ snapshot from this actual table. A listed name denotes the restricted recipe
 above, not every form of that logical operator. Tests exercise public lowering,
 binary round trips, BufferIR verification, explicit destination identities, and
 native compilation; they do not substitute for numerical device acceptance.
+
+## Direct dense MX scale loads
+
+`tile.load_mx_scale(src, dst, offsets, shape, *, side, dst_offset=0)` loads
+a dense ND FP8E8M0 window directly from GM into an existing boxed L1 scale
+tile. Source offsets and shape use `[row, group]` coordinates. Side `"a"`
+writes A/ZZ `[rows, groups]`; side `"b"` writes B/NN `[groups, rows]`.
+
+The first version requires a full source group span, complete 16x2 scale
+boxes, a statically sized window, and a fully valid source and destination.
+The destination must be a packed local allocation, such as one from `tile.create`. `dst_offset`
+is measured along the row axis for A or key axis for B; untouched destination
+regions are preserved. The returned tile aliases `dst`, so retain the result
+when chaining updates. Dynamic source offsets must still address a complete
+in-bounds window; the caller is responsible for that runtime condition. For
+example, load two K pages into one B/NN tile:
+
+```python
+import pypto.language as pl
+
+k_l1: pl.Tile[
+    [4, 256], pl.FP8E8M0, pl.Mem.Mat,
+    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.col_major, fractal=32),
+] = pl.tile.create([4, 256], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+k_l1 = pl.tile.load_mx_scale(k_scale, k_l1, [page0 * 128, 0], [128, 4], side="b")
+k_l1 = pl.tile.load_mx_scale(
+    k_scale, k_l1, [page1 * 128, 0], [128, 4], side="b", dst_offset=128,
+)
+right_scale = pl.tile.move(k_l1, target_memory=pl.Mem.RightScale)
+```
+
+This operation is A5-only. PTOAS must understand `MX_A_ND` / `MX_B_DN` source
+descriptors and the corresponding L1 scale destination layout. Correctness
+for parent-strided or partial-group MX views depends on the PTOAS MX partition
+semantics; this API does not broaden the supported source view beyond dense ND.

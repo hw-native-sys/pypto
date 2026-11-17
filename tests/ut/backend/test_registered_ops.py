@@ -43,6 +43,7 @@ def test_backend_inventory_preserves_architecture_exclusions():
     a5_only_ops = {
         ir.get_op(name).name
         for name in (
+            "tile.load_mx_scale",
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
             "tile.matmul_mx_bias",

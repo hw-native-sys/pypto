@@ -374,3 +374,34 @@ buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
 列出的名称仅代表上述受限配方，不代表逻辑算子的全部形式。测试覆盖公开流水线
 转换、二进制往返、BufferIR 验证、显式目标身份和原生编译；这些验证不替代设备
 数值验收。
+
+## 直接加载稠密 MX scale
+
+`tile.load_mx_scale(src, dst, offsets, shape, *, side, dst_offset=0)` 将
+稠密 ND FP8E8M0 窗口直接从 GM 加载到已有的盒装 L1 scale tile。源 offset 和
+shape 使用 `[row, group]` 坐标。`side="a"` 写入 A/ZZ `[rows, groups]`；
+`side="b"` 写入 B/NN `[groups, rows]`。
+
+第一版要求源窗口覆盖全部 group、符合完整 16x2 scale box、窗口大小静态，
+且源和目标 tile 完整有效。目标必须是连续的本地分配，例如由 `tile.create` 创建。`dst_offset` 对 A 按 row 轴计，对 B 按 key 轴计；
+未写入的目标区域保持原值。返回 tile 与 `dst` 别名，连续更新时应接住返回值。
+动态源 offset 也必须指向完整且不越界的窗口，该运行时条件由调用方保证。
+例如将两个 K 页面加载到同一个 B/NN tile：
+
+```python
+import pypto.language as pl
+
+k_l1: pl.Tile[
+    [4, 256], pl.FP8E8M0, pl.Mem.Mat,
+    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.col_major, fractal=32),
+] = pl.tile.create([4, 256], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+k_l1 = pl.tile.load_mx_scale(k_scale, k_l1, [page0 * 128, 0], [128, 4], side="b")
+k_l1 = pl.tile.load_mx_scale(
+    k_scale, k_l1, [page1 * 128, 0], [128, 4], side="b", dst_offset=128,
+)
+right_scale = pl.tile.move(k_l1, target_memory=pl.Mem.RightScale)
+```
+
+此操作仅支持 A5。PTOAS 需要识别 `MX_A_ND` / `MX_B_DN` 源描述符和对应的
+L1 scale 目标布局。父 stride 或 group 子窗口的正确性取决于 PTOAS MX 分区语义；
+此接口不扩展到普通稠密 ND 以外的源视图。

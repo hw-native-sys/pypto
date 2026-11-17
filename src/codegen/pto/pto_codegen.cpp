@@ -777,12 +777,12 @@ bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
 //
 // A declared index naming a non-tile argument (`tile.store` declares index 2,
 // a TensorType) drops out: GetTileTypeWithMemRef returns null.
-bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
+std::optional<size_t> ResultAliasInputIndex(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
-  if (!call || !call->op_) return false;
+  if (!call || !call->op_) return std::nullopt;
 
   auto result_tile_type = ir::GetTileTypeWithMemRef(stmt->var_->GetType());
-  if (!result_tile_type) return false;
+  if (!result_tile_type) return std::nullopt;
 
   auto input_tile_type_at = [&](size_t index) -> std::shared_ptr<const TileType> {
     if (index >= call->args_.size()) return nullptr;
@@ -792,19 +792,23 @@ bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
   // Legacy arm: shared base memref only, exactly as before.
   if (IsInPlaceInput0DpsOp(call->op_)) {
     auto input_tile_type = input_tile_type_at(0);
-    if (!input_tile_type) return false;
+    if (!input_tile_type) return std::nullopt;
     auto result_memref = ir::GetDefinedMemRef(result_tile_type);
     auto input_memref = ir::GetDefinedMemRef(input_tile_type);
-    return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
+    if (result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get()) return 0;
+    return std::nullopt;
   }
 
   auto declared = ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-  if (!declared.has_value()) return false;
+  if (!declared.has_value()) return std::nullopt;
   auto input_tile_type = input_tile_type_at(*declared);
-  if (!input_tile_type) return false;
-  return ShareOneMemRefWindow(result_tile_type, input_tile_type) &&
-         ir::TileBufSignature::FromTileType(*result_tile_type) ==
-             ir::TileBufSignature::FromTileType(*input_tile_type);
+  if (!input_tile_type) return std::nullopt;
+  if (ShareOneMemRefWindow(result_tile_type, input_tile_type) &&
+      ir::TileBufSignature::FromTileType(*result_tile_type) ==
+          ir::TileBufSignature::FromTileType(*input_tile_type)) {
+    return declared;
+  }
+  return std::nullopt;
 }
 
 // `array.update_element` is SSA-functional in the IR (returns a fresh
@@ -3015,7 +3019,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (TryEmitRegCall(call, op->var_)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
-  const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
+  const auto alias_result_to_in_place_input = ResultAliasInputIndex(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
   const auto multi_tile_alias = FindMultiTileInputAlias(op);
   if (multi_tile_alias) {
@@ -3056,7 +3060,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       std::shared_ptr<const TileType> result_tile_type;
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
         if (alias_result_to_in_place_input) {
-          result_buf = GetExprAsCode(call->args_[0]);
+          result_buf = GetExprAsCode(call->args_[*alias_result_to_in_place_input]);
           INTERNAL_CHECK(!result_buf.empty())
               << "Internal error: " << call->op_->name_ << " result must alias the input tile SSA";
           BindVarToMlir(op->var_, result_buf);
