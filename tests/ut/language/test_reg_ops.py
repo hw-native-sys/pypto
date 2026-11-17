@@ -499,5 +499,41 @@ def kernel():
 """)
 
 
+@pytest.mark.parametrize("form", ["positional", "mixed", "keyword", "reversed", "nested"])
+def test_direct_pair_projection_preserves_sibling_memory_order(form):
+    prefix = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(dst: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        ones = pl.reg.broadcast(1, lanes=64, dtype=pl.UINT32)
+        mask = pl.reg.full_mask(lanes=64)
+"""
+    read = "pl.reg.load(dst, lanes=64)"
+    pair = "pl.reg.mull(pl.reg.load(pl.reg.store(dst, value=ones), lanes=64), ones, mask)[0]"
+    expressions = {
+        "positional": f"pl.reg.add({read}, {pair})",
+        "mixed": f"pl.reg.add({read}, rhs={pair})",
+        "keyword": f"pl.reg.add(lhs={read}, rhs={pair})",
+        "reversed": f"pl.reg.add(rhs={read}, lhs={pair})",
+        "nested": f"pl.reg.add(pl.reg.add({read}, ones), {pair})",
+    }
+    direct = pl.parse(prefix + f"        result = {expressions[form]}\n")
+    expected = prefix + f"        before = {read}\n"
+    earlier = "before"
+    if form == "nested":
+        expected += "        nested = pl.reg.add(before, ones)\n"
+        earlier = "nested"
+    expected += """
+        written = pl.reg.store(dst, value=ones)
+        after = pl.reg.load(written, lanes=64)
+        pair = pl.reg.mull(after, ones, mask)
+"""
+    operands = f"pair[0], {earlier}" if form == "reversed" else f"{earlier}, pair[0]"
+    expected += f"        result = pl.reg.add({operands})\n"
+    # Keyword binding must not turn source evaluation order into signature order.
+    # The first load must observe the old buffer before the later store executes.
+    ir.assert_structural_equal(direct, pl.parse(expected), enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

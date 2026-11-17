@@ -59,6 +59,11 @@ CASES = (
     "unmasked_bf16",
     "block_stride128",
     "block_stride256",
+    "projection_order_positional",
+    "projection_order_mixed",
+    "projection_order_keyword",
+    "projection_order_reversed",
+    "projection_order_nested",
 )
 FLOAT_OPS = ("expdif", "axpy", "mula", "lrelu", "prelu")
 INTEGER_OPS = ("mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv")
@@ -331,6 +336,53 @@ def _unmasked_body(dtype):
     return body
 
 
+def _projection_order_body(case):
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], pl.UINT32],
+        out: pl.InOut[pl.Tensor[[1, 1024], pl.UINT32]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], pl.UINT32]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
+        active = pl.cast(n, pl.INDEX)
+        with pl.reg_scope():
+            x = pl.reg.load(a, lanes=64)
+            mask = pl.reg.active_mask(active, lanes=64)
+            # Each expression must read the old c before its later operand
+            # overwrites c. Keyword evaluation follows written, not signature, order.
+            if case == "projection_order_positional":
+                result = pl.reg.add(
+                    pl.reg.load(c, lanes=64),
+                    pl.reg.mull(pl.reg.load(pl.reg.store(c, value=x), lanes=64), x, mask)[0],
+                )
+            elif case == "projection_order_mixed":
+                result = pl.reg.add(
+                    pl.reg.load(c, lanes=64),
+                    rhs=pl.reg.mull(pl.reg.load(pl.reg.store(c, value=x), lanes=64), x, mask)[0],
+                )
+            elif case == "projection_order_keyword":
+                result = pl.reg.add(
+                    lhs=pl.reg.load(c, lanes=64),
+                    rhs=pl.reg.mull(pl.reg.load(pl.reg.store(c, value=x), lanes=64), x, mask)[0],
+                )
+            elif case == "projection_order_reversed":
+                result = pl.reg.add(
+                    rhs=pl.reg.load(c, lanes=64),
+                    lhs=pl.reg.mull(pl.reg.load(pl.reg.store(c, value=x), lanes=64), x, mask)[0],
+                )
+            else:
+                result = pl.reg.add(
+                    pl.reg.add(pl.reg.load(c, lanes=64), x),
+                    pl.reg.mull(pl.reg.load(pl.reg.store(c, value=x), lanes=64), x, mask)[0],
+                )
+            c = pl.reg.store(c, offset=128, value=result)
+        pl.store(pl.reshape(c, [1, 1024]), [0, 0], out)
+        return out
+
+    return body
+
+
 def _program(case, direct_index=False):
     if case.startswith("block_stride"):
         return _block_stride_program(int(case.removeprefix("block_stride")))
@@ -345,10 +397,11 @@ def _program(case, direct_index=False):
         "histogram256": pl.UINT8,
         "reinterpret": pl.UINT32,
         "unmasked_bf16": pl.UINT16,
-    }.get(case, pl.FP32)
+    }.get(case, pl.UINT32 if case.startswith("projection_order_") else pl.FP32)
     output_dtype = pl.UINT16 if case.startswith("histogram") else dtype
-    bins = 128 if case == "histogram128" else 256
-    if case == "float32":
+    if case.startswith("projection_order_"):
+        body = _projection_order_body(case)
+    elif case == "float32":
 
         @pl.jit.incore
         def body(
@@ -380,7 +433,7 @@ def _program(case, direct_index=False):
             pl.store(c, [0, 0], out)
             return out
     elif case.startswith("histogram"):
-        body = _histogram_body(bins)
+        body = _histogram_body(128 if case == "histogram128" else 256)
     elif case == "reinterpret":
         body = _reinterpret_body()
     elif case == "mx_quant":
@@ -511,6 +564,8 @@ def _build(output, cases=CASES, direct_index=False):
         ops = (
             FLOAT_OPS
             if case == "float32"
+            else ("mull", "add")
+            if case.startswith("projection_order_")
             else INTEGER_OPS
             if case.startswith("integer_")
             else ("chist", "dhist", "create_group_mask")
@@ -555,6 +610,8 @@ def _build(output, cases=CASES, direct_index=False):
 
 
 def _inputs(case, repeat):
+    if case.startswith("projection_order_"):
+        return np.random.default_rng(3474 + repeat).integers(1, 65536, 256, dtype=np.uint32)
     if case == "unmasked_bf16" or case.startswith("block_stride"):
         # Distinct finite BF16 bit patterns test lane ordering without rounding
         # or NaN equality obscuring a misplaced payload. UINT16 transports the
@@ -624,6 +681,14 @@ def _initial(case, data):
 
 def _golden(case, data, n):
     expected = _initial(case, data)
+    if case.startswith("projection_order_"):
+        before = expected[:64].copy()
+        if case == "projection_order_nested":
+            before += data[:64]
+        expected[:64] = data[:64]
+        before[:n] += data[:n] * data[:n]
+        expected[128:192] = before
+        return expected
     if case.startswith("block_stride"):
         # Independent ND -> NZ reference: [row, panel, column] is transposed
         # to [panel, row, column]. Row 1 matches the C++ producer's row*16

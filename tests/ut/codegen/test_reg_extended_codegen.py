@@ -293,6 +293,52 @@ def test_direct_paired_call_projection(name, dtype, statement):
     assert f"pto.vmi.{consumer} {pair.groups()[index]}," in source
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("form", ["positional", "mixed", "keyword", "reversed", "nested"])
+def test_direct_pair_projection_memory_order_compiles(form, tmp_path):
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    read = "pl.reg.load(dst, lanes=64)"
+    pair = "pl.reg.mull(pl.reg.load(pl.reg.store(dst, value=x), lanes=64), x, m)[0]"
+    expressions = {
+        "positional": f"pl.reg.add({read}, {pair})",
+        "mixed": f"pl.reg.add({read}, rhs={pair})",
+        "keyword": f"pl.reg.add(lhs={read}, rhs={pair})",
+        "reversed": f"pl.reg.add(rhs={read}, lhs={pair})",
+        "nested": f"pl.reg.add(pl.reg.add({read}, x), {pair})",
+    }
+    kernel = frontend("mull", "UINT32", f"y = {expressions[form]}", tensor_io=True)
+    with passes.PassContext([]):
+        ir.compile(
+            ir.Program([kernel], "ProjectionOrder", SPAN),
+            output_dir=str(tmp_path),
+            backend_type=backend.BackendType.Ascend950,
+            skip_ptoas=True,
+        )
+    pto = tmp_path / "kernels/aiv/kernel.pto"
+    source = pto.read_text()
+    memory_ops = re.findall(r"pto\.vmi\.(vload|vstore|vmull)\b", source)
+    # x load, old dst load, dst write, new dst load, multiply, final store.
+    assert memory_ops == ["vload", "vload", "vstore", "vload", "vmull", "vstore"]
+    result = subprocess.run(
+        [
+            compiler,
+            str(pto),
+            "--pto-arch=a5",
+            "--pto-level=level3",
+            "--emit-vpto",
+            "-o",
+            str(tmp_path / "order.vpto"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_unused_pair_projection_and_alias():
     function = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)

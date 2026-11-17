@@ -323,7 +323,10 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 `low = pl.reg.mull(a, b, mask)[0]`，也可以将其用作另一个寄存器操作的参数。
 每次调用只求值一次；解析器先绑定双结果，再取出指定分量。需要复用两个结果时，
 可以绑定 `pair = pl.reg.mull(a, b, mask)` 后使用 `pair[0]` / `pair[1]`，
-或直接拆包。分别写两次调用仍会求值两次。跨 `if` 合流或循环传递时，必须先拆包为独立
+或直接拆包。分别写两次调用仍会求值两次。
+嵌套寄存器调用的操作数从左到右求值：先处理位置参数，再按书写顺序处理关键字参数。
+即使后面的投影调用写入同一缓冲区，前面的 load 仍读取写入前的值。
+跨 `if` 合流或循环传递时，必须先拆包为独立
 寄存器，例如 `low, high = pl.reg.mull(a, b, mask)`；校验器拒绝元组类型的
 合流结果和循环携带值。`mull` 的两部分保留输入的符号性。
 减法的进位掩码以 **true 表示无借位**，与控制执行的 mask 是两个不同参数。
@@ -336,6 +339,10 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 执行阶段复用已保存的二进制产物，并拒绝编译。
 下文的 interleave 测试也支持在构建时添加 `--direct-index`，验证直接索引，
 包括 BF16 位保持和省略 mask 的路径。
+扩展测试中的 `projection_order_positional`、`projection_order_mixed`、
+`projection_order_keyword`、`projection_order_reversed` 和
+`projection_order_nested` 用例检查别名读取与写入的顺序。通过 `--cases` 选择这些
+用例，无需添加 `--direct-index`；它们始终使用直接投影。
 
 `intlv`/`dintlv` 两个输出的非活动 lane 均为零。当前固定及最低支持的 PTOAS v0.74
 已实现原生结果掩码（`b6945321`，

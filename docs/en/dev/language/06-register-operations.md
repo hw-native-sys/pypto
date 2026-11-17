@@ -357,6 +357,9 @@ as an argument to another register operation. Each call is evaluated once;
 the parser binds the pair before projecting the selected result. To reuse both
 results, bind `pair = pl.reg.mull(a, b, mask)` and index `pair[0]` / `pair[1]`,
 or unpack it. Writing two separate calls still evaluates two calls.
+Nested register-call operands are evaluated left to right: positional arguments
+first, then keyword arguments in their written order. An earlier load therefore
+reads the old buffer value even when a later projected call writes that buffer.
 Unpack paired results before carrying them through `if` joins or loops: pass
 individual registers (for example, `low, high = pl.reg.mull(a, b, mask)`),
 not the tuple itself. The verifier rejects tuple-valued joins and loop carries.
@@ -371,6 +374,10 @@ Run the build through `task-submit --no-device` and execution through
 `task-submit --device auto`; execution reuses saved binaries and rejects compilation.
 The interleave runner below also accepts `--direct-index` at build time to test
 direct projections, including BF16 bit preservation and omitted masks.
+The extended runner's `projection_order_positional`, `projection_order_mixed`,
+`projection_order_keyword`, `projection_order_reversed`, and
+`projection_order_nested` cases check aliased reads and writes. Select them with
+`--cases` without `--direct-index`; they always use direct projections.
 
 Both outputs of `intlv`/`dintlv` have zero in inactive lanes. The pinned/minimum
 PTOAS v0.74 implements native result masking (`b6945321`,
