@@ -783,8 +783,11 @@ DN/NZ 布局和 scalar/vector 量化使用结构化记录。
 row-major move 加真实 transpose 为正对照。覆盖两类整数输入和两种 Buffer IR 设置。
 CPU 模拟器按用户要求跳过。
 
-显式 AIC/AIV 用例使用 `@pl.program` 验证该 IR 契约，因为
-`jit.incore(level=AIC/AIV)` 不能声明这些函数类型；自动非方形回归使用 `@pl.jit`。
+显式 AIC/AIV 用例和自动非方形回归均使用 `@pl.jit` 系列。
+显式端点分别使用 `@pl.jit.incore(level=pl.Level.AIC)` 和
+`@pl.jit.incore(level=pl.Level.AIV)`，由
+`@pl.jit.incore(level=pl.Level.CORE_GROUP)` 包装函数共同调度，
+再通过 `@pl.jit` 入口调用。
 量化用例在两个 slot 上循环五轮，输入标签和 packed 控制字按列变化，
 负 scalar scale 区分前置 ReLU 顺序。NZ2NZ 用另一条普通 V2C pipe 将实际 NZ
 字节送回 Cube，再乘 identity 验证布局；不引入 GlobalTensor FIFO。
