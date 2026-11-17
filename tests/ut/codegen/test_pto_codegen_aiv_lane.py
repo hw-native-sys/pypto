@@ -213,10 +213,19 @@ def test_l1_to_ub_pipe_stays_rejected(ptoas_binary, arch, tmp_path):
 
 @pytest.mark.parametrize("arch", ["a3", "a5"])
 @pytest.mark.parametrize("split", [3, 4])
-def test_odd_c2v_pop_with_lane_and_valid_operands(ptoas_binary, arch, split, tmp_path):
+@pytest.mark.parametrize("swapped", [False, True])
+def test_odd_c2v_pop_with_lane_and_valid_operands(ptoas_binary, arch, split, swapped, tmp_path):
     """The i64 lane coexists with both index valid-shape operands."""
     axis_name = "up_down" if split == 3 else "left_right"
     source = (Path(__file__).parent / f"fixtures/aiv_lane_odd_{axis_name}.pto").read_text()
+    if swapped:
+        # Both the valid-extent predicate and the transport use the logical lane.
+        source = source.replace(
+            "%subblock_idx = pto.get_subblock_idx",
+            "%physical_idx = pto.get_subblock_idx\n"
+            "    %lane_one = arith.constant 1 : i64\n"
+            "    %subblock_idx = arith.subi %lane_one, %physical_idx : i64",
+        )
     cpp = _assemble(ptoas_binary, source, arch, tmp_path)
     axis = "UP_DOWN" if split == 3 else "LEFT_RIGHT"
     assert f"TileSplitAxis::TILE_{axis}_ODD" in cpp

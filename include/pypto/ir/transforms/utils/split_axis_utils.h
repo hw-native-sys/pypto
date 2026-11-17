@@ -226,6 +226,9 @@ struct TileInfo {
   ExprPtr logical_step = nullptr;
   // Tuple containers share immutable element facts through aliases and carries.
   std::shared_ptr<const std::vector<TileInfo>> tuple_elements = nullptr;
+  // A pop may select another logical band's valid extent. Consumers inherit
+  // that selection; memory offsets still use the executing physical lane.
+  ExprPtr validity_lane = nullptr;
 };
 
 /// Reject automatic reassembly when a value's logical partition does not match
