@@ -27,34 +27,35 @@ def _reset_backend_after_test():
     reset_for_testing()
 
 
-def _run_default_pipeline(program, backend_type=BackendType.Ascend950):
+def _run_default_pipeline(program, backend_type=BackendType.Ascend950, planner=passes.MemoryPlanner.PYPTO):
     """Run the Default pipeline for an explicitly selected backend."""
     reset_for_testing()
     set_backend_type(backend_type)
-    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+    with passes.PassContext([], memory_planner=planner):
         return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
 
-def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
+def _emit_incore_mlir(program, backend_type=BackendType.Ascend950, planner=passes.MemoryPlanner.PYPTO) -> str:
     """Run Default pipeline and concatenate AIC/AIV MLIR."""
-    optimized = _run_default_pipeline(program, backend_type)
+    optimized = _run_default_pipeline(program, backend_type, planner)
     parts: list[str] = []
     for func in optimized.functions.values():
         if func.func_type in (pl.FunctionType.Orchestration, pl.FunctionType.Group):
             continue
         single = ir.Program([func], func.name, optimized.span)
-        result = codegen.PTOCodegen().generate(single, emit_tile_addr=True)
+        result = codegen.PTOCodegen().generate(single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
         parts.append(result if isinstance(result, str) else "".join(result.values()))
     return "\n".join(parts)
 
 
-def _assemble_mx(mlir, tmp_path):
+def _assemble_mx(mlir, tmp_path, planner=passes.MemoryPlanner.PYPTO):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
     source = tmp_path / "mx.pto"
     output = tmp_path / "mx.cpp"
     source.write_text(mlir)
-    _run_ptoas(str(source), str(output), ["--pto-arch=a5", "--pto-level=level3"])
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), ["--pto-arch=a5", f"--pto-level={level}"])
     cpp = output.read_text()
     # Acceptance alone is insufficient: MX must retain its packed ISA layout,
     # rather than silently falling back to an ordinary ND GlobalTensor.
@@ -166,6 +167,50 @@ class TestMxMatmulCodegen:
             assert f"Tile<TileType::Left, {cpp_dtype}, 32, 128," in cpp
             assert f"Tile<TileType::Right, {cpp_dtype}, 128, 64," in cpp
             assert "Tile<TileType::Acc, float, 32, 64," in cpp
+
+    @pytest.mark.parametrize(
+        "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+    )
+    @pytest.mark.parametrize("m", [32, 64])
+    @pytest.mark.parametrize("lhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("rhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("lhs_layout", [pl.ND, pl.DN])
+    @pytest.mark.parametrize("rhs_layout", [pl.ND, pl.DN])
+    def test_tensor_native_fp4_matmul(
+        self, lhs_dtype, rhs_dtype, lhs_layout, rhs_layout, planner, m, tmp_path
+    ):
+        lhs_rows, lhs_cols = (m // 2, 128) if lhs_layout == pl.DN else (m, 64)
+        rhs_rows, rhs_cols = (64, 192) if rhs_layout == pl.DN else (128, 96)
+        lhs_s0, lhs_s1 = (1, lhs_rows) if lhs_layout == pl.DN else (lhs_cols, 1)
+        rhs_s0, rhs_s1 = (1, rhs_rows) if rhs_layout == pl.DN else (rhs_cols, 1)
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[
+                    [lhs_rows, lhs_cols], lhs_dtype, pl.TensorView(stride=[lhs_s0, lhs_s1], layout=lhs_layout)
+                ],
+                sa: pl.Tensor[[m, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[
+                    [rhs_rows, rhs_cols], rhs_dtype, pl.TensorView(stride=[rhs_s0, rhs_s1], layout=rhs_layout)
+                ],
+                sb: pl.Tensor[[4, 192], pl.FP8E8M0, pl.MX_B_NN],
+            ) -> pl.Tensor[[m, 192], pl.FP32]:
+                return pl.matmul_mx(a, sa, b, sb)
+
+        mlir = _emit_incore_mlir(Program, planner=planner)
+        lhs_token = "f4E2M1x2" if lhs_dtype == pl.FP4E2M1X2 else "f4E1M2x2"
+        rhs_token = "f4E2M1x2" if rhs_dtype == pl.FP4E2M1X2 else "f4E1M2x2"
+        assert "pto.tcvt" not in mlir
+        assert f"loc=left, dtype=!pto.{lhs_token}, rows={m}, cols=128" in mlir
+        assert f"loc=right, dtype=!pto.{rhs_token}, rows=128, cols=192" in mlir
+        assert f"loc=acc, dtype=f32, rows={m}, cols=192" in mlir
+        assert "pto.tmatmul.mx" in mlir
+        assert mlir.count("pto.tget_scale_addr") == 2
+        cpp = _assemble_mx(mlir, tmp_path, planner)
+        assert "TMATMUL_MX(" in cpp
 
     @pytest.mark.parametrize(
         "memory, physical, valid",

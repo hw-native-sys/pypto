@@ -67,7 +67,7 @@ below. Native MXFP4 quantization supports E2M1 only.
 | `fillpad`, `fillpad_expand`, `fillpad_inplace` | Both formats, ND Vec; zero/min/max padding preserves the valid carrier rectangle |
 | DN numerical casts | Full static dense 2D BF16↔packed or packed↔packed; PYPTO/DSA_RP static addresses; partial, padded, and boxed cases are rejected |
 | Direct packed `reshape` or `transpose` | Unsupported; reshape a byte alias where the existing alias contract permits it |
-| Native packed FP4 `matmul_mx` | Tile API: both formats and mixed E2M1/E1M2 pairs, FP32 accumulator; requires the PTOAS v0.72 logical Cube geometry contract |
+| Native packed FP4 `matmul_mx` | Tensor and Tile APIs: both formats and mixed E2M1/E1M2 pairs, FP32 accumulator; requires the PTOAS v0.72 logical Cube geometry contract |
 | MXFP4 `quant_mx` | E2M1 only, FP16/BF16 source, OCP or supported axis0 NV; PYPTO/DSA_RP static allocation |
 | `pl.tile.quant_mx_raw` | Native E2M1 payload (INT8 for MXFP8) and raw UINT8 exponents with explicit workspaces; static partial validity and axis0 interleaving |
 | Ascend910/A2A3 packed FP4 execution | Unsupported |
@@ -227,8 +227,11 @@ Static partial valid regions are supported; axis1 requires tight physical/valid
 columns and FP4 physical columns divisible by 64. Axis0 groups 32 valid rows;
 `interleave=True` requires FP16/BF16 physical and valid rows divisible by 64.
 See the [operator catalog](../user/ops/01-catalog.md) for the quantization entry
-points. Native FP4 matrix multiplication is available through the tile API;
-`tensor.matmul_mx` remains FP8-only. The generic mixed-core FP4 Vec-to-Mat
+points. Native FP4 matrix multiplication is available through Tensor and Tile APIs.
+`tensor.matmul_mx` consumes static oriented 2D ND/DN data: ND carriers are
+`[M,K/2]` / `[K,N/2]`, DN carriers are `[M/2,K]` / `[K/2,N]`. Scales use
+logical `[M,K/32]` / `[K/32,N]`, and the result is FP32 `[M,N]`. Logical
+M/K/N must be multiples of 32/64/64 (M fills the existing boxed carrier rows). Accumulation and bias remain Tile-only. The generic mixed-core FP4 Vec-to-Mat
 restriction still applies to quantization results.
 
 ## See also
