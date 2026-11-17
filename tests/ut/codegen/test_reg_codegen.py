@@ -1375,7 +1375,10 @@ def test_bf16_block_stride_lowers_to_vsstb(lanes, active, tmp_path):
             ib.emit_reg_store("out", dst, value, offset=16, mask=mask, span=SPAN, block_stride=16)
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "StridedStore", SPAN))
-    source = generate(program)
+        program = passes.allocate_memory_addr()(program)
+    # Caller-owned UB Tile parameters use PyPTO address planning, matching the
+    # level3 assembler invocation below; generate() selects PTOAS planning.
+    source = codegen.PTOCodegen().generate(program, emit_tile_addr=True, emit_source_loc=False)
     store = next(line for line in source.splitlines() if "pto.vmi.vstore " in line)
     # VMI infers the stride's type from its operand position; spelling i16
     # again in the custom type list makes PTOAS reject the generated store.
