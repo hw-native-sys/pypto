@@ -45,6 +45,7 @@ class ExternalTask:
     # Self-contained host code is retained with the task, including on artifact hits.
     preflight_source: str = ""
     preflight_symbol: str = ""
+    binary_policy: str = "ordinary"
 
 
 class RuntimeBridge(Protocol):

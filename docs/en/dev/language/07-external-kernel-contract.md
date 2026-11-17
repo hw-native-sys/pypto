@@ -142,18 +142,56 @@ its identity is explicitly incomplete because no complete Python closure/input
 snapshot exists. This provider is therefore not registered with the capture-only
 registry and does not claim preparation-cache reuse.
 
-**This stage does not enable calls from JIT programs or device execution.** The
-existing `c_pointer` TMR bridge rejects this descriptor ABI. Subsequent 34.5 work
-must implement a bridge that checks the complete manifest, lifetime-safe JIT
-binding, and the relevant compatibility regressions. In particular, resource and
-64-byte GM write-isolation requirements cannot be dropped when introducing the
-runtime path. Device completion, numerical and performance acceptance remain 34.7.
-The next runtime work must integrate batch cache-line ordering and
-validate compiler stack requirements and resource ownership, and connect the
-call adapter and ordered submission helper with validated runtime loading. The existing text-only ELF
-checks alone do not establish these guarantees.
-`test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
-when installed, the real public compiler export; it does not validate a binary.
+The A5 TMR bridge supports direct execution of the minimal single-block AIV
+subset described below. Automatic discovery and lifetime-safe binding in JIT
+programs remain follow-up work; device numerical and performance acceptance
+remain tracked separately. Preparation and binary compilation do not use caches.
+
+### Minimal A5 AIV runtime path
+
+`TMRBridge.lower(prepared, target)` accepts `cannbotdsl.device_callable` v1 for
+TMR v1 on `a5/ccec`. It requires exactly one AIV participant, no cooperative
+launch, no implicit workspace, no local allocations, and the exporter's exact
+resource, state, loading and completion declarations. Unknown or stronger
+requirements fail before compilation. Each submission must contain exactly one
+logical block without synchronized start.
+
+TMR's persistent executor calls kernels synchronously and serially on each
+physical core, including queued tasks. During the callback it does not use the
+kernel's local memory or synchronization events. That execution interval gives
+the kernel exclusive ownership; no global lock serializes independent cores.
+The wrapper drains inherited pipelines and scalar GM writes before entry and
+forces atomic-none. After the exported call it drains again, flushes scalar GM,
+executes a DDR barrier, restores ASC/DMA/padding/quantization/mask defaults and
+the saved CTRL, and returns with atomic-none. Only then may the executor publish
+FIN or execute the next callback. This is a single-participant guarantee, not a
+cross-core barrier.
+
+Use `pypto.backend.cannbotdsl_aiv.compile_aiv_task(task, compiler,
+pto_isa_root=...)` to produce text bytes for a `CoreCallable`. It takes C API
+headers from the compiler's selected CANN SDK, retains owned source through
+compilation, and requires text-only ELF admission and static zero-stack reports.
+The ordinary JIT `configure_context` route rejects this task's binary policy
+rather than compiling it without admission checks.
+
+`build_aiv_submitter(tasks, function_ids)` returns an owned orchestration header.
+Register each compiled kernel at its corresponding nonnegative, unique function
+ID. The generated function takes `std::array<CoreTaskArgs*, N>` and returns the
+submitted task IDs. Before any submission it checks all launches and bindings;
+it then uses the ordered batch helper to disable early dispatch and add
+completion-based `DEP_WAIT` edges for every conflicting 64-byte cache line.
+Actual submission uses `rt_submit_aiv_task`, with one AIV and no AIC participant.
+Materialize all header files for the orchestration build and retain callables,
+argument descriptors and tensor storage until execution completes. Calls outside
+this batch need their own dependencies or GM isolation, including PyPTO producers
+and consumers.
+
+Host tests exercise the wrapper's drain/restore order and actual TMR submission
+API; optional CCEC tests compile static/dynamic exports through admission.
+The focused runtime test `tests/st/runtime/external_kernel/test_cannbotdsl_aiv.py`
+builds a dependent AIV chain and checks repeated numerical results on A5.
+`--codegen-only` compiles this test without launching a device; that does not
+establish device completion visibility or performance acceptance.
 
 ### Text-only binary admission
 
@@ -215,8 +253,8 @@ to a valid C++ bool. TMR limits are 32 tensors, 16 scalars and tensor rank 1..5;
 FP16/BF16 scalar slots are not supported.
 
 This is a callable header, **not an `ExternalTask` or a loadable runtime entry**:
-it deliberately defines no `kernel_entry` and does not change `TMRBridge` ABI
-support. Its caller must run the binding checker on every invocation and meet
+it deliberately defines no `kernel_entry`. The AIV runtime bridge above supplies
+that entry and the required execution policy. Its caller must run the binding checker on every invocation and meet
 the retained resource, cache-line, stack, binary-loading and completion
 requirements. Host C++ tests execute packing and offset handling; optional
 CCEC tests compile real public exports. Neither establishes device execution
@@ -254,8 +292,8 @@ FP16/BF16 runtime scalars are unsupported.
 
 Passing this checker **does not authorize device execution**: byte-level
 non-overlap does not establish 64-byte cache-line isolation between tasks.
-Resource ownership, stack/loading validation, task completion and integration
-into the JIT/runtime submission path remain required.
+Resource ownership, stack/loading validation and task completion require the
+AIV runtime bridge above. Automatic JIT binding remains follow-up work.
 
 ### CANNBotDSL cross-invocation cache-line conflicts
 
@@ -540,7 +578,7 @@ Supported ABI entries must be `(str, int)` tuples in a frozenset, with nonempty
 names and positive integer versions; booleans and floats cannot authorize an ABI
 through Python's numeric equality. Runtime name and version must be nonempty.
 
-## TMR bridge (task 34.4)
+## TMR c_pointer bridge (task 34.4)
 
 `pypto.backend.tmr_bridge.TMRBridge` lowers `c_pointer` ABI version 1 for
 `RuntimeTarget(runtime="tmr", version="1", ...)`, targeting A5/CCEC. This is an
@@ -563,7 +601,8 @@ Compilation verifies native argument count, types, sizes and alignments.
 includes, contract and checker to an existing extern specialization. Keep that lease
 alive until the existing runtime has compiled/published its sources. AIC/AIV members,
 mixed Groups and vector lane count come from the execution contract. Registered-object
-discovery and CANNBotDSL migration remain task 34.5; persistent reuse remains task 34.6.
+discovery remains task 34.5; persistent reuse remains task 34.6. CANNBotDSL uses
+the dedicated direct AIV path documented above.
 
 Orchestration invokes the checker after building actual task arguments and before
 submission, including direct calls, explicit submits and reordered SPMD/Group wrappers.
@@ -577,7 +616,8 @@ inherited HF32 mode on AIC cores; AIV preserves that control bit. It drains pipe
 writes back caches and applies the DDR barrier before returning, then restores control
 state with atomics disabled.
 
-Unsupported cases fail explicitly: descriptor ABIs, non-ND layouts, ranks outside
+This c_pointer path rejects descriptor ABIs; the dedicated AIV path handles the
+supported CANNBotDSL subset. Other unsupported cases fail explicitly: non-ND layouts, ranks outside
 1–5, FP16/BF16 scalars, other architectures/runtimes, logical launch context,
 synchronized/full-resident launches, runtime-allocated output slots and recorded
 Graph replay. Allocate output storage before submitting. CPU tests compile and execute

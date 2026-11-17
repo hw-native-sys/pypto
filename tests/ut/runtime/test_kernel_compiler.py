@@ -630,6 +630,76 @@ def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, l
         assert any("kernel_entry" in names for names in functions)
 
 
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_real_cannbotdsl_aiv_bridge_compile(compiler_module, tmp_path, dynamic):
+    """Compile the actual resource/completion wrapper through strict binary admission."""
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+    ccec = shutil.which("ccec")
+    if ccec is None:
+        pytest.skip("CANN device compiler unavailable")
+    sdk = Path(ccec).resolve().parents[3]
+    if not (sdk / "asc/include/c_api/asc_simd.h").is_file():
+        pytest.skip("CANN C API headers unavailable")
+
+    from pypto import DataType  # noqa: PLC0415
+    from pypto.backend.cannbotdsl_aiv import compile_aiv_task  # noqa: PLC0415
+    from pypto.backend.external_bridge import RuntimeTarget  # noqa: PLC0415
+    from pypto.backend.tmr_bridge import TMRBridge  # noqa: PLC0415
+    from pypto.jit.external.contracts import (  # noqa: PLC0415
+        CompileTarget,
+        KernelRequest,
+        ParameterSpec,
+        TensorSpec,
+    )
+    from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider  # noqa: PLC0415
+
+    @cb.kernel
+    def copy_elements(x, out):
+        for i in cb.range(x.shape[0]):
+            out[i] = x[i] + 1.0
+
+    tensor = TensorSpec(("n" if dynamic else 32,), DataType.FP32, strides=(1,))
+    request = KernelRequest(
+        (ParameterSpec("x", tensor), ParameterSpec("out", tensor)), CompileTarget("a5", "ccec", "test")
+    )
+    prepared = CANNBotDSLProvider().prepare(copy_elements, request)
+    target = RuntimeTarget(
+        "tmr",
+        "1",
+        request.target,
+        frozenset({("cannbotdsl.device_callable", 1)}),
+        frozenset(
+            {
+                "core:aiv",
+                "aiv_lanes:1",
+                "completion:entry_return_visible",
+                "tensor_writeback",
+                "partial_write",
+            }
+        ),
+    )
+    task = TMRBridge().lower(prepared, target)
+    compiler = compiler_module.KernelCompiler("a5")
+    compiler.project_root = Path(__file__).resolve().parents[3] / "runtime"
+    compiler.sdk.ccec.get_compile_flags = lambda **kwargs: [
+        "-std=c++17",
+        "-O2",
+        "-DNDEBUG",
+        "-c",
+        "-x",
+        "cce",
+        "--cce-aicore-only",
+        "--cce-aicore-arch=dav-c310-vec",
+    ]
+    compiler.sdk.ccec.ascend_home_path = str(sdk)
+    compiler.sdk.ccec.cxx_path = ccec
+    compiler.sdk.ccec.linker_path = str(Path(ccec).resolve().with_name("ld.lld"))
+    binary = compile_aiv_task(task, compiler, pto_isa_root=str(tmp_path))
+    assert len(binary) > 0
+
+
 @pytest.mark.parametrize("platform,core", [("a5sim", "aiv"), ("a2a3", "aiv"), ("a5", "aic")])
 def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, core):
     compiler = compiler_module.KernelCompiler(platform)
