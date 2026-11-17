@@ -2547,14 +2547,21 @@ class DistributedWorker(Worker):
     # the private Orchestrator facade.
     # ------------------------------------------------------------------
 
-    def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
-        """Allocate ``nbytes`` on chip *worker_id*; returns a device pointer."""
+    def malloc(self, nbytes: int, *, worker_id: int = 0, exportable: bool = False) -> int:
+        """Allocate ``nbytes`` on chip *worker_id*; return its owner-local device pointer.
+
+        exportable=True requests onboard VMM storage for a same-host external consumer.
+        The returned pointer belongs to the chip owner; consumers import their own VA.
+        """
         self._require_open("malloc")
         if type(nbytes) is not int or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
         from simpler.task_interface import DataType  # noqa: PLC0415
 
-        handle = self._w.alloc_child_tensor(worker_id, (nbytes,), DataType.UINT8)
+        if exportable:
+            handle = self._w.alloc_child_tensor(worker_id, (nbytes,), DataType.UINT8, exportable=True)
+        else:
+            handle = self._w.alloc_child_tensor(worker_id, (nbytes,), DataType.UINT8)
         try:
             ptr = int(handle.base)
         except (AttributeError, TypeError, ValueError) as e:
@@ -3304,6 +3311,7 @@ class DistributedWorker(Worker):
         with self._dispatch_submit_mu:
             if self._close_complete or self._closing:
                 return
+            self._w.check_exports_retired()
             self._closing = True
             first_attempt = not self._closed
             if first_attempt:

@@ -309,6 +309,7 @@ class ChipWorker(Worker):
         if not self._initialized and not self._impl_close_pending:
             return
         if self._initialized:
+            self._impl.check_exports_retired()
             # Auto-free tracked DeviceTensors while public memory ops are still
             # admitted. Any failed free is logged by the shared helper and the
             # backend's own close journal remains the final reclamation owner.
@@ -363,18 +364,22 @@ class ChipWorker(Worker):
         if worker_id != 0:
             raise ValueError(f"ChipWorker.{op}() only supports worker_id=0, got {worker_id}")
 
-    def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
+    def malloc(self, nbytes: int, *, worker_id: int = 0, exportable: bool = False) -> int:
         """Allocate ``nbytes`` of device memory; returns an opaque pointer.
 
         The returned pointer lives in *worker_id*'s address space.  Pair every
         ``malloc()`` with a matching :meth:`free` before this ChipWorker is
-        closed, otherwise the device memory is leaked.
+        closed, otherwise the device memory is leaked. exportable=True requests onboard VMM
+        storage; external consumer leases must retire before free() or close().
         """
         self._require_initialized("malloc")
         self._require_local_worker_id(worker_id, "malloc")
         if type(nbytes) is not int or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
-        handle = self._impl.malloc(nbytes)
+        if exportable:
+            handle = self._impl.malloc(nbytes, exportable=True)
+        else:
+            handle = self._impl.malloc(nbytes)
         try:
             ptr = int(handle.base)
         except (AttributeError, TypeError, ValueError) as e:
@@ -407,10 +412,9 @@ class ChipWorker(Worker):
         self._require_initialized("free")
         handle = self._device_buffer(ptr, worker_id, "free")
         self._impl.free(handle)
-        # Keep the mapping until backend admission + free succeeds. An error
-        # before simpler's provenance commit barrier is safely retryable; an
-        # error after it is rejected by simpler on retry and ultimately cleaned
-        # by Worker.close().
+        # Retain the owner handle until cleanup succeeds. Simpler keeps a
+        # cleanup-only identity after partial VMM release; retrying free does
+        # not authorize the retired Buffer for computation or copying.
         del self._device_buffers[(worker_id, ptr)]
 
     def copy_to(

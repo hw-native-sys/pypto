@@ -150,6 +150,28 @@ def _alloc_by_worker(worker_mock, buffers):
     return buffers
 
 
+def test_exportable_allocation_and_retirement_preserve_distributed_owner(kernel_env, patched_setup):
+    runtime = DistributedWorker(_fake_compiled([], []))
+    backend = patched_setup["worker"]
+    tensor = runtime.alloc_tensor((64,), torch.float32, worker_id=1, exportable=True)
+    assert backend.alloc_child_tensor.call_args.kwargs == {"exportable": True}
+    exported = runtime.export_buffer(tensor, worker_id=1)
+    backend.export_buffer.assert_called_once_with(tensor.buffer)
+    backend.check_exports_retired.side_effect = RuntimeError("external exports")
+    with pytest.raises(RuntimeError, match="external"):
+        runtime.close()
+    assert not runtime._closed and (1, tensor.data_ptr) in runtime._owned_tensors
+    backend.free.assert_not_called()
+    backend.close.assert_not_called()
+    runtime.release_export(exported)
+    backend.release_export.assert_called_once_with(exported)
+    backend.check_exports_retired.side_effect = None
+    runtime.close()
+    assert runtime._closed
+    backend.free.assert_called_once_with(tensor.buffer)
+    backend.close.assert_called_once()
+
+
 @pytest.fixture
 def patched_setup():
     """Patch every setup helper so DistributedWorker() does no real work.
