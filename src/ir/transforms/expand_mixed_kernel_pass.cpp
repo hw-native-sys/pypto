@@ -1703,17 +1703,27 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                   tile_view_semantics::GetEffectiveTileView(*push_dest_type));
             }
 
-            auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
-                                                        fractal_view, MemorySpace::Vec);
-            std::string src_name = "tile";
-            if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-              src_name = sv->name_hint_;
+            const auto source_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+            // A fused producer can already write the boundary's NZ layout.
+            // Keep its handle intact and push it directly into the Mat FIFO,
+            // avoiding a redundant Vec layout conversion after decoding.
+            const bool already_fractal = source_view.blayout == fractal_view.blayout &&
+                                         source_view.slayout == fractal_view.slayout &&
+                                         source_view.fractal == fractal_view.fractal;
+            if (!already_fractal) {
+              auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
+                                                          fractal_view, MemorySpace::Vec);
+              std::string src_name = "tile";
+              if (auto sv = AsVarLike(bm.source_tile)) {
+                src_name = sv->name_hint_;
+              }
+              const bool is_nz = (fractal_view.blayout == TileLayout::col_major);
+              auto tmov_var =
+                  std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
+              auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
+              result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
+              push_source = tmov_var;
             }
-            bool is_nz = (fractal_view.blayout == TileLayout::col_major);
-            auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
-            auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
-            result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
-            push_source = tmov_var;
           }
           result.push_back(std::make_shared<EvalStmt>(
               CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride), stmt->span_));

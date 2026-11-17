@@ -294,22 +294,38 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 `pl.TensorLayout` is the enum those layout constants come from — `pl.ND` is
 `pl.TensorLayout.ND`.
 
-`pl.MX_A_ZZ` and `pl.MX_B_NN` are the two remaining layout constants. They tag the **GM
-scale tensor** of an MX (microscaling) operand on Ascend950 — `MX_A_ZZ` for the left/A
-scale pack, `MX_B_NN` for the right/B one — so that a Mat-to-scale `pl.move` can check the
-source layout instead of byte-copying incompatible data into `LeftScale` / `RightScale`.
+`pl.MX_A_ZZ`, `pl.MX_B_NN`, and `pl.MX_A_ND` tag the **GM scale tensor**
+of an MX (microscaling) operand on Ascend950. `MX_A_ZZ` describes the left/A
+scale pack and `MX_B_NN` the right/B pack; `MX_A_ND` describes row-major
+left/A scales. Mat-to-scale `pl.move` checks the resulting scale layout before
+moving data into `LeftScale` / `RightScale`.
+
+`MX_A_ND` is a load-only FP8E8M0 descriptor with logical `[rows, K/32]`
+dimensions. Its AIC `pl.load` converts ND scales into Mat ZZ directly, accepts
+dynamic compact row bases without 16-row alignment, and preserves valid-row
+tails. Scale groups and each load's group extent must be positive static even
+numbers; group offsets must be provably non-negative multiples of two.
+For example, `[rows,72]` scales support `pl.load(scales, [row_base,0], [16,72],
+valid_shape=[valid_rows,72])`. Omit `target_memory` or select `pl.Mem.Mat`.
+Write row-major scales through an ND tensor; `tensor.view(..., layout=pl.MX_A_ND)`
+then aliases the same bytes without repacking. `matmul_mx` scale semantics stay unchanged.
 They are the one case where a layout marker on a `pl.Tensor` annotation is required rather
 than discouraged. An MX `pl.load` may omit `target_memory`; the Python API selects
 `pl.Mem.Mat`, and `matmul_mx` operand placement inserts the required moves. Ordinary MX
 subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`) and MX `remote_load` are
 rejected. Exception: FP8E8M0 `pl.tensor.view` may alias packed ND
-backing to `MX_A_ZZ` / `MX_B_NN` as a logical rank-2 view (`layout=mx_*`; PTOAS v0.60 packs
-physically). The matmul itself is `pl.matmul_mx` and its `_acc` /
+backing to `MX_A_ZZ` / `MX_B_NN` / `MX_A_ND` as logical rank-2 views (`layout=mx_*`;
+PTOAS supplies the ISA descriptors). The matmul itself is `pl.matmul_mx` and its `_acc` /
 `_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
-the op must be `FP8E4M3FN`. Either packed FP4 format may supply the left operand
-after conversion to FP8: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
-legalization pass expands that request to packed FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
-reverse FP8×FP4 form are not supported. `pl.quant_mx` supports MXFP8 and native
+the op must either both be `FP8E4M3FN` or both be packed FP4. Mixed FP4/FP8
+operands require an explicit `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`.
+On A5, contiguous ND E2M1 tiles with physical carrier columns divisible by 32
+use one direct TCVT. Tile inputs also accept `layout=pl.NZ` to decode straight
+into cube-ready NZ using ordinary physical storage.
+NZ physical rows remain divisible by 16; express row tails with `valid_shape`.
+E1M2, FP8E5M2 destinations, and E2M1 source descriptors outside the direct
+path's constraints retain the BF16/FP32 chain. See [FP4](../../dev/fp4.md).
+`pl.quant_mx` supports MXFP8 and native
 E2M1 MXFP4, with `group_axis` matching PTOAS `grpAxis`. FP8 results can feed `matmul_mx` in one mixed InCore task
 through V2C, including the generated Vec-to-Mat-to-scale-memory path.
 

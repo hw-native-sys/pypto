@@ -55,6 +55,68 @@ def _expand_raw(program):
     return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(program)))
 
 
+def test_explicit_nz_gather_keeps_the_producer_tile():
+    """Fused NZ producers cross into ordinary Mat slots without a second TMOV."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            weight: pl.Tensor[[256, 128], pl.UINT8],
+        ):
+            # Model the InCore region provenance stamped by OutlineIncoreScopes.
+            pl.func_attr({"split_aiv": True})
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                packed = pl.reinterpret_view(pl.load(weight, [aiv_id * 128, 0], [128, 128]), pl.FP4E2M1X2)
+                weight_nz = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ)
+                gathered = pl.tile.aic_gather(weight_nz)
+            _placed = pl.tile.move(gathered, target_memory=pl.Mem.Right)
+
+    after = _expand_raw(Before)
+    aiv = after.get_function("main_aiv")
+    aic = after.get_function("main_aic")
+    assert aiv is not None and aic is not None
+    aiv_stmts = _flatten_top_level_stmts(aiv.body)
+    pushes = [
+        stmt.expr
+        for stmt in aiv_stmts
+        if isinstance(stmt, ir.EvalStmt)
+        and isinstance(stmt.expr, ir.Call)
+        and _get_stmt_op_name(stmt) == _TILE_TPUSH_TO_AIC
+    ]
+    assert len(pushes) == 1
+    source = pushes[0].args[0]
+    assert isinstance(source, ir.Var)
+    assert isinstance(source.type, ir.TileType)
+    assert source.name_hint.startswith("weight_nz")
+    assert source.type.get_effective_tile_view().compact == pl.CompactMode.null
+    assert not any(_get_stmt_op_name(stmt) == _TILE_MOVE for stmt in aiv_stmts)
+    pops = [
+        stmt.value
+        for stmt in _flatten_top_level_stmts(aic.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and _get_stmt_op_name(stmt) == _TILE_TPOP_FROM_AIV
+    ]
+    assert len(pops) == 1
+    assert isinstance(pops[0].type, ir.TileType)
+    assert pops[0].type.get_effective_tile_view().compact == pl.CompactMode.null
+    # Two logical [128,256] FP8 lane payloads fill one L1 [256,256] slot.
+    for function in (aiv, aic):
+        initializers = [
+            stmt.expr
+            for stmt in _flatten_top_level_stmts(function.body)
+            if isinstance(stmt, ir.EvalStmt)
+            and isinstance(stmt.expr, ir.Call)
+            and _get_stmt_op_name(stmt)
+            in {ir.get_op("system.aic_initialize_pipe").name, ir.get_op("system.aiv_initialize_pipe").name}
+        ]
+        assert len(initializers) == 1
+        assert initializers[0].kwargs["slot_size"] == 65536
+    ir.assert_structural_equal(after, passes.expand_mixed_kernel()(after))
+
+
 @pytest.mark.parametrize(
     ("layout", "out_rows", "out_cols"),
     [(pl.TileLayout.row_major, 64, 4), (pl.TileLayout.col_major, 4, 64)],

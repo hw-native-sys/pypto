@@ -113,7 +113,7 @@ from pypto.ir.utils import (
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, PadValue
+from pypto.pypto_core.ir import AtomicType, PadValue, TensorLayout
 
 from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -1646,6 +1646,7 @@ def cast(
     mode: str | int = "round",
     *,
     saturation_mode: str | int | None = None,
+    layout: TensorLayout | None = None,
 ) -> Tile: ...
 
 
@@ -1664,6 +1665,8 @@ def cast(
     target_type: int | DataType,
     mode: str | int = "round",
     saturation_mode: str | int | None = None,
+    *,
+    layout: TensorLayout | None = None,
 ) -> Tensor | Tile | Scalar:
     """Type casting, dispatched by input type.
 
@@ -1689,13 +1692,18 @@ def cast(
             input does not support this option, so passing it one is an error
             rather than a silent no-op.
 
+        layout: Tile-only output layout. ``pl.NZ`` selects the fused A5
+            E2M1-to-E4M3 decoder.
+
     Example:
         >>> quantized = pl.cast(rounded_fp16, pl.INT8, mode="trunc", saturation_mode="on")
     """
+    if not isinstance(input, Tile) and layout is not None:
+        raise TypeError("pl.cast: layout is supported only for Tile inputs")
     if isinstance(input, Tensor):
         return _tensor.cast(input, target_type, mode, saturation_mode=saturation_mode)
     if isinstance(input, Tile):
-        return _tile.cast(input, target_type, mode, saturation_mode=saturation_mode)
+        return _tile.cast(input, target_type, mode, saturation_mode=saturation_mode, layout=layout)
     if _is_scalar_like(input):
         # ``resolve_cast_mode`` runs first, so an invalid mode is still a ValueError;
         # only a *valid* mode this path cannot honour reaches the TypeError below.

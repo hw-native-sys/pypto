@@ -202,8 +202,8 @@ def test_a5_packed_fp4_encoding_keeps_lossless_bf16_bridges(source, target):
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
-    """Packed FP4→FP8 is legalized with a warning about the three-hop bridge."""
+def test_a5_packed_fp4_to_fp8_cast_warns_only_for_legalized_format(capfd, dtype):
+    """Only E1M2 needs the wide bridge; E2M1 uses the exact native decoder."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
@@ -225,15 +225,21 @@ def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
         after = _run(Before, BackendType.Ascend950)
     finally:
         set_log_level(prev)
-    assert _cast_pairs(after) == [
+    expected = [
         (str(dtype), "bfloat16"),
         ("bfloat16", "fp32"),
         ("fp32", "fp8e4m3fn"),
     ]
+    if dtype == pl.fp4e2m1x2:
+        expected = [(str(dtype), "fp8e4m3fn")]
+    assert _cast_pairs(after) == expected
     err = capfd.readouterr().err
-    assert "LegalizeTileCast" in err
-    assert "FP4→BF16→FP32→FP8" in err
-    assert "LUT" in err
+    if dtype == pl.fp4e2m1x2:
+        assert "LegalizeTileCast" not in err
+    else:
+        assert "LegalizeTileCast" in err
+        assert "FP4→BF16→FP32→FP8" in err
+        assert "LUT" in err
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
@@ -254,11 +260,15 @@ def test_a5_packed_fp4_cast_expands_last_dim_valid_shape(dtype):
 
     after = _run(Before, BackendType.Ascend950)
 
-    assert _cast_pairs(after) == [
+    expected = [
         (str(dtype), "bfloat16"),
         ("bfloat16", "fp32"),
         ("fp32", "fp8e4m3fn"),
     ]
+
+    if dtype == pl.fp4e2m1x2:
+        expected = [(str(dtype), "fp8e4m3fn")]
+    assert _cast_pairs(after) == expected
 
     class _ValidShapeCollector(ir.IRVisitor):
         def __init__(self) -> None:
@@ -773,7 +783,8 @@ def test_packed_fp4_cast_dn_rejects_partial_or_padded_extent(dtype, valid, tile_
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype):
+@pytest.mark.parametrize("target", [pl.FP32, pl.FP8E4M3FN])
+def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype, target):
     span = ir.Span.unknown()
     strided = ir.TileView(stride=[1, 64], blayout=ir.TileLayout.col_major)
     source = ir.Var("source", ir.TileType([32, 32], dtype, None, strided), span)
@@ -782,7 +793,7 @@ def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype):
     dense = ir.TileView(blayout=ir.TileLayout.col_major)
     source = ir.Var("source", ir.TileType([32, 32], dtype, None, dense), span)
     with pytest.raises(ValueError, match="supports only BF16 and packed FP4 endpoints"):
-        ir.op.tile.cast(source, pl.FP32)
+        ir.op.tile.cast(source, target)
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
@@ -861,6 +872,104 @@ def test_legalize_packed_dn_cast_preserves_loop_backedge(dtype, loop_kind):
     binding = packed_loop.body.stmts[0]
     assert isinstance(binding, ir.AssignStmt)
     assert binding.value is binder
+
+
+def test_direct_fp4_to_fp8_nz_layout_kwarg_round_trip():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, src: pl.Tensor[[32, 128], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [32, 128])
+            _decoded = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ)
+
+    # The destination layout kwarg and derived TileView must survive
+    # serialization, printing/reparsing, and pass re-deduction.
+    restored = ir.deserialize(ir.serialize(Before))
+    ir.assert_structural_equal(Before, restored)
+    reparsed = pl.parse_program(Before.as_python())
+    ir.assert_structural_equal(Before, reparsed)
+    ir.assert_structural_equal(Before, _run(Before, BackendType.Ascend950))
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.DSA_RP]
+)
+def test_direct_fp4_to_fp8_keeps_ptoas_planner_bridge(planner):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, src: pl.Tensor[[32, 128], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [32, 128])
+            _decoded = pl.cast(packed, pl.FP8E4M3FN)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    try:
+        with passes.PassContext([], memory_planner=planner):
+            after = passes.legalize_tile_cast()(Before)
+    finally:
+        backend.reset_for_testing()
+    expected = [("fp4e2m1x2", "fp8e4m3fn")]
+    if planner == passes.MemoryPlanner.PTOAS:
+        expected = [("fp4e2m1x2", "bfloat16"), ("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+    assert _cast_pairs(after) == expected
+
+
+@pytest.mark.parametrize("authored_per_lane", [False, True])
+def test_plain_nd_fp4_cast_preserves_bridge_before_standalone_lane_split(authored_per_lane):
+    @pl.program
+    class Before:
+        @pl.function(
+            type=pl.FunctionType.AIV,
+            attrs={"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": authored_per_lane},
+        )
+        def kernel(self, src: pl.Tensor[[16, 32], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [16, 32])
+            _decoded = pl.cast(packed, pl.FP8E4M3FN)
+
+    # Standalone splitting later narrows each lane to 16 carrier columns, which
+    # cannot use the direct decoder. Authored per-lane geometry is not halved.
+    pairs = _cast_pairs(_run(Before, BackendType.Ascend950))
+    if authored_per_lane:
+        assert pairs == [("fp4e2m1x2", "fp8e4m3fn")]
+    else:
+        assert pairs == [("fp4e2m1x2", "bfloat16"), ("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+
+
+@pytest.mark.parametrize("column", [1, 32])
+def test_plain_nd_fp4_slice_and_metadata_alias_retain_existing_bridge(column):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, src: pl.Tensor[[32, 512], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [32, 512])
+            window = pl.tile.slice(packed, [16, 256], [0, column], valid_shape=[16, 256])
+            alias = pl.tile.set_validshape(window, 16, 256)
+            _decoded = pl.cast(alias, pl.FP8E4M3FN)
+
+    # Both unaligned and aligned slices conservatively keep the old ND path;
+    # metadata aliases must not erase the source window's provenance.
+    assert _cast_pairs(_run(Before, BackendType.Ascend950)) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+
+
+def test_plain_nd_fp4_runtime_column_slice_retains_existing_bridge():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, src: pl.Tensor[[32, 512], pl.FP4E2M1X2], column: pl.Scalar[pl.INT64]):
+            packed = pl.load(src, [0, 0], [32, 512])
+            window = pl.tile.slice(packed, [16, 256], [0, column], valid_shape=[16, 256])
+            _decoded = pl.cast(window, pl.FP8E4M3FN)
+
+    assert _cast_pairs(_run(Before, BackendType.Ascend950)) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
 
 
 if __name__ == "__main__":

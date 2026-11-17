@@ -574,11 +574,14 @@ Pass BlockNzTensorViews();
  * Converts MX_A_ZZ ``[M, G]`` and MX_B_NN ``[G, N]`` TensorTypes and their
  * tile.load windows to ``[1, block/16, group/2, 16, 2]``. Symbolic offsets
  * are accepted only when their alignment and non-negativity can be proven.
+ * MX_A_ND instead retains its row-major rank-2 view and compact row offsets;
+ * TLOAD converts the source into ZZ Mat, with complete scale-group pairs.
  * Must run after FlattenTileNdTo2D and before MaterializeTensorStrides.
  */
 Pass BlockMxScaleTensorViews();
 
 /// Validate MX alignment and canonicalize load windows while retaining logical rank-2 views.
+/// MX_A_ND permits compact row bases and retains exact valid-row tails, with paired groups.
 /// PTOAS v0.74 performs the physical packing. Run before MaterializeTensorStrides.
 Pass LegalizeMxScaleTensorViews();
 

@@ -272,6 +272,9 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
     case ir::TensorLayout::MX_B_NN:
       layout_str = "mx_b_nn";
       break;
+    case ir::TensorLayout::MX_A_ND:
+      layout_str = "mx_a_nd";
+      break;
     case ir::TensorLayout::ND:
       break;
   }

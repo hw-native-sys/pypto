@@ -189,6 +189,8 @@ void BindBackend(nb::module_& m) {
       .def("get_l2_cache_line_bytes", &BackendHandler::GetL2CacheLineBytes, "L2 cache line size in bytes")
       .def("get_recommended_innermost_dim_bytes", &BackendHandler::GetRecommendedInnermostDimBytes,
            "Recommended minimum innermost-dim size, in bytes, for tile ops touching GM")
+      .def("supports_vec_fp8_nz_gm_store", &BackendHandler::SupportsVecFp8NzGmStore,
+           "Whether this backend supports plain FP8E4M3FN Vec NZ stores to matching NZ GM")
       .def("get_capacity_bytes", &BackendHandler::GetCapacityBytes, nb::arg("memory_space"),
            "Capacity of one memory component in the owning SoC, in bytes; 0 for an unmodeled space")
       .def("get_sync_resource_catalog", &BackendHandler::GetSyncResourceCatalog, nb::rv_policy::reference,

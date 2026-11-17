@@ -3558,6 +3558,7 @@ class TestTensorLayoutAnnotation:
     def test_layout_str_renders_dsl_constant(self):
         assert layout_str(ir.TensorLayout.NZ) == "pl.NZ"
         assert layout_str(ir.TensorLayout.MX_A_ZZ) == "pl.MX_A_ZZ"
+        assert layout_str(ir.TensorLayout.MX_A_ND) == "pl.MX_A_ND"
 
     def test_layout_str_omits_nd(self):
         """ND is what an absent slot already means — emitting it is noise."""

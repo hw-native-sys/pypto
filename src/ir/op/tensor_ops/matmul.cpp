@@ -354,7 +354,8 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       lhs_scale->tensor_view_.has_value() ? lhs_scale->tensor_view_->layout : TensorLayout::ND;
   const auto rhs_layout =
       rhs_scale->tensor_view_.has_value() ? rhs_scale->tensor_view_->layout : TensorLayout::ND;
-  CHECK_SPAN(lhs_layout == TensorLayout::MX_A_ZZ, span) << kOpName << " requires lhs_scale layout MX_A_ZZ";
+  CHECK_SPAN(lhs_layout == TensorLayout::MX_A_ZZ || lhs_layout == TensorLayout::MX_A_ND, span)
+      << kOpName << " requires lhs_scale layout MX_A_ZZ or MX_A_ND";
   CHECK_SPAN(rhs_layout == TensorLayout::MX_B_NN, span) << kOpName << " requires rhs_scale layout MX_B_NN";
 
   auto m = As<ConstInt>(lhs->shape_[0]);

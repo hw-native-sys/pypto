@@ -9,7 +9,9 @@
 1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换表（转录自 pto-isa `tcvt`
    Supported Conversions）。本 Pass 自身不含任何架构知识，新增后端只需提供自己的表，
    无需改动此处；未配置 backend 时本 Pass 不做任何事。
-2. 已原生：原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
+2. 已原生且描述符兼容：原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的
+   `FP32→BF16/FP16` + `rint`）。A5 E2M1→E4M3 的直接路径要求源为连续 ND，
+   物理载体列数为 32 的倍数；其他源描述符保留原有 BF16/FP32 转换链。
 3. 非原生：在邻接图上 BFS 求最短路径；等长路径优先「同字节转浮点 → 再调宽度」。
 
 典型结果（A5）：
@@ -18,6 +20,11 @@
 | --------- | ---- |
 | INT32→FP16 | INT32→FP32 → FP32→FP16 |
 | FP16→BF16 | FP16→FP32 → FP32→BF16 |
+
+A5 E2M1→E4M3 的 Tile 转换支持 `layout=pl.NZ`：直接生成 NZ，没有更宽中间结果，
+也不先写 FP8 ND。逻辑载体列仍按 2:1 展开，物理存储采用普通 NZ 布局。
+显式 NZ 请求不满足直接路径约束时会报错，不会静默插入独立布局转换。
+详见 [FP4](../fp4.md)。
 
 搜不到路径则硬失败（带 src/dst/arch）。
 

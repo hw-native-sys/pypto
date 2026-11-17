@@ -101,13 +101,12 @@ class TensorViewCanonicalVisitor : public IRVisitor {
       return;
     }
     if (IsMxTensorLayout(view.layout) &&
-        !tensor_view_semantics::IsLogicalMxShape(tensor_type->shape_, view.layout) &&
-        !tensor_view_semantics::IsBlockedMxShape(tensor_type->shape_)) {
+        !tensor_view_semantics::IsCanonicalMxShape(tensor_type->shape_, view.layout)) {
       Emit(
           span,
           "TensorType has a non-canonical MX layout (expected aligned logical rank-2 or blocked rank-5 shape "
           "[1, positive block count, positive group count, 16, 2] produced by "
-          "BlockMxScaleTensorViews)");
+          "BlockMxScaleTensorViews; MX_A_ND requires row-major [rows, positive even groups])");
       return;
     }
 

@@ -232,7 +232,7 @@ def load(
     """
     tensor_view = getattr(tensor.type, "tensor_view", None)
     source_layout = getattr(tensor_view, "layout", None)
-    is_mx = source_layout in (TensorLayout.MX_A_ZZ, TensorLayout.MX_B_NN)
+    is_mx = source_layout in (TensorLayout.MX_A_ZZ, TensorLayout.MX_B_NN, TensorLayout.MX_A_ND)
 
     if is_mx and target_memory is None:
         target_memory = MemorySpace.Mat

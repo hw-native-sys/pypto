@@ -8,7 +8,7 @@ that reads it or the supported `tile.store` that writes it.
 
 A `pl.Tensor[[R, C], dtype, pl.NZ]` annotation — or `[[B, R, C], ...]` — is a
 **declaration of the GM byte order**: a reader expects PTO-native NZ fractal
-bytes, and a supported accumulator store produces them. Adding the annotation
+bytes, and a supported accumulator or Vec store produces them. Adding the annotation
 does not convert existing bytes. The DSL keeps the logical shape and logical
 slicing; this pass supplies the physical description the backend needs.
 
@@ -114,6 +114,16 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
     pl.tile.load(w, [1, 16, 16, 0, 0], [1, 16, 16, 16, 32], target_memory=pl.Mem.Mat)
 ```
+
+### A5 vector FP8 stores
+
+A5 also supports plain FP8E4M3FN Vec NZ stores to matching `pl.NZ` GM tensors.
+The source uses standard 512-byte NZ panels with `compact=null` and static
+positive valid extents covering complete 16x32 boxes.
+Blocking uses FP8 C0=32: logical `[32,256]` becomes `[1,8,2,16,32]`.
+The store preserves the NZ box order and signed-zero FP8 bytes.
+Atomic, FIXPIPE epilogue, and explicit `st_phase` options are rejected. This
+path does not convert NZ into ND or enable Acc NZ stores on A5. See [FP4](../fp4.md).
 
 ### Accumulator stores
 
@@ -354,7 +364,7 @@ never be silently mis-addressed.
 | `tensor.slice` windowing the trailing `[R, C]` pair | rejected — the window is not contiguous |
 | `tensor.reshape` flattening the whole tensor to `[N]` | kept as written — see [Flattening an NZ tensor](#flattening-an-nz-tensor) |
 | `tensor.reshape` to any other shape | rejected — it reinterprets coordinates the blocked form does not carry |
-| `tile.store` to an NZ destination | supported under [Accumulator stores](#accumulator-stores) |
+| `tile.store` to an NZ destination | supported under [Accumulator stores](#accumulator-stores) or [A5 vector FP8 stores](#a5-vector-fp8-stores) |
 | consumer other than a supported load, store, slice, or whole-tensor flatten | rejected — unsupported NZ coordinates must not pass through unchanged |
 | explicit tensor stride or partial tensor `valid_shape` | rejected |
 | `tile.load` dynamic `valid_shape[-2]` provably a multiple of 16 (a ragged last tile) | blocked — the row-fractal count becomes `FloorDiv(rows, 16)` |

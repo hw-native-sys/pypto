@@ -19,6 +19,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Expr,
+    TensorLayout,
 )
 
 from ..typing import Scalar, Tile
@@ -337,6 +338,7 @@ def cast(
     *,
     tmp: Tile | None = None,
     saturation_mode: str | int | None = None,
+    layout: TensorLayout | None = None,
 ) -> Tile:
     """Cast tile to target data type (element-wise).
 
@@ -362,6 +364,9 @@ def cast(
              saturating narrowing cast needs no ``tmp``, so the compiler
              generates none; a caller-supplied ``tmp`` is still honored.
 
+        layout: Optional output layout. ``pl.NZ`` selects the fused A5
+            FP4E2M1X2-to-FP8E4M3FN NZ decoder.
+
     Returns:
         Tile wrapping the cast operation
 
@@ -369,7 +374,14 @@ def cast(
         >>> tile_fp32 = pl.tile.cast(tile_bf16, pl.FP32)
     """
     tmp_expr = None if tmp is None else tmp.unwrap()
-    call_expr = _ir_ops.cast(tile.unwrap(), target_type, mode, tmp=tmp_expr, saturation_mode=saturation_mode)
+    call_expr = _ir_ops.cast(
+        tile.unwrap(),
+        target_type,
+        mode,
+        tmp=tmp_expr,
+        saturation_mode=saturation_mode,
+        layout=layout,
+    )
     return Tile(expr=call_expr)
 
 

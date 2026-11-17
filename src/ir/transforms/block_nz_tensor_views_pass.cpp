@@ -67,9 +67,9 @@
  * ``NzOffsetFactStore`` below and ``DivideIndexExactly`` in
  * ``tensor_view_semantics.h``. Everything outside that is rejected with a
  * diagnostic naming the authoring fix — an NZ tensor must never be silently
- * mis-addressed. A2/A3 also supports plain FP32 Acc -> FP32 NZ stores over
- * complete parent rows and one batch panel; see ``BlockTileStoreArgs`` for
- * the stricter FIXPIPE geometry contract.
+ * mis-addressed. A2/A3 supports plain FP32 Acc -> FP32 NZ stores over complete
+ * parent rows and one batch panel. A5 supports complete-box FP8 Vec NZ stores.
+ * See ``BlockTileStoreArgs`` for both contracts.
  */
 
 #include <any>
@@ -110,6 +110,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
+#include "pypto/ir/transforms/utils/vec_nz_store.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -459,7 +460,7 @@ class BlockNzMutator : public IRMutator {
       CHECK_SPAN(is_store || ((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0),
                  op->span_)
           << "NZ layout currently supports only 'tile.load' and 'tensor.slice' reading the tensor as "
-          << "their source, a whole-tensor 'tensor.reshape' flatten, and supported FP32 Acc 'tile.store' "
+          << "their source, a whole-tensor 'tensor.reshape' flatten, and supported 'tile.store' "
           << "destinations, but it is used by '" << op->op_->name_ << "' at argument " << nz_args[0]
           << ". Use pl.ND for unsupported NZ consumers or writers.";
       auto logical_type = AsTensorTypeLike(op->args_[is_store ? 2 : 0]->GetType());
@@ -513,7 +514,7 @@ class BlockNzMutator : public IRMutator {
   }
 
  private:
-  /// Lower only a proven Acc -> NZ store. Reuse the existing fourth operand
+  /// Lower a proven Acc or supported Vec -> NZ store. Reuse the existing fourth operand
   /// for the physical partition; deriving it in the emitter from the 2-D tile
   /// would lose the NZ column-block / row-fractal axes.
   std::vector<ExprPtr> BlockTileStoreArgs(const CallPtr& op, std::vector<ExprPtr> args,
@@ -529,42 +530,47 @@ class BlockNzMutator : public IRMutator {
     auto tensor = AsTensorTypeLike(op->args_[2]->GetType());
     INTERNAL_CHECK_SPAN(tile && tensor, op->span_)
         << "Internal error: NZ tile.store requires a tile source and tensor destination";
-    CHECK_SPAN(tile->dtype_ == DataType::FP32 && tensor->dtype_ == DataType::FP32 &&
-                   tile->GetMemorySpace() == MemorySpace::Acc,
-               op->span_)
-        << "NZ tile.store supports only an FP32 Acc tile into an FP32 NZ tensor. "
-        << "Use an FP32 matmul accumulator, or store to pl.ND.";
-    CHECK_SPAN(handler && handler->GetAccToNzGmStoreMaxCols() > 0, op->span_)
-        << "NZ tile.store is supported only on A2/A3. Store to pl.ND on this backend.";
     const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
     const auto& valid = view.valid_shape;
-    CHECK_SPAN(tile->shape_.size() == 2 && valid.size() == 2, op->span_)
-        << "NZ tile.store requires a two-dimensional Acc tile.";
-    CHECK_SPAN(view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major &&
-                   view.fractal == tile_view_semantics::kAccFractal,
-               op->span_)
-        << "NZ tile.store requires the ordinary NZ-boxed Acc layout.";
-    // Validate authoring semantics here, before choosing physical Acc tiles.
-    // N and L0C capacity may exceed one instruction until automatic tiling;
-    // M stays whole and must already fit TStoreAccNz2nz's 16-bit row field.
-    constexpr auto max_rows = std::numeric_limits<uint16_t>::max();
-    for (size_t axis = 0; axis < 2; ++axis) {
-      auto physical = As<ConstInt>(tile->shape_[axis]);
-      auto extent = As<ConstInt>(valid[axis]);
-      CHECK_SPAN(physical && extent && physical->value_ == extent->value_ && extent->value_ > 0 &&
-                     extent->value_ % 16 == 0 && (axis != 0 || extent->value_ <= max_rows),
+    const bool vector_store = tile->GetMemorySpace() == MemorySpace::Vec;
+    if (vector_store) {
+      ValidateVecFp8NzStore(op, tile, tensor, handler);
+    } else {
+      CHECK_SPAN(tile->dtype_ == DataType::FP32 && tensor->dtype_ == DataType::FP32 &&
+                     tile->GetMemorySpace() == MemorySpace::Acc,
                  op->span_)
-          << "NZ tile.store requires a static, fully valid Acc tile with rows and columns divisible by 16, "
-          << "and rows <= " << max_rows << ". Partial or dynamic Acc tiles are not supported.";
+          << "NZ tile.store supports only an FP32 Acc tile into an FP32 NZ tensor. "
+          << "Use an FP32 matmul accumulator, or store to pl.ND.";
+      CHECK_SPAN(handler && handler->GetAccToNzGmStoreMaxCols() > 0, op->span_)
+          << "NZ tile.store is supported only on A2/A3. Store to pl.ND on this backend.";
+      CHECK_SPAN(tile->shape_.size() == 2 && valid.size() == 2, op->span_)
+          << "NZ tile.store requires a two-dimensional Acc tile.";
+      CHECK_SPAN(view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major &&
+                     view.fractal == tile_view_semantics::kAccFractal,
+                 op->span_)
+          << "NZ tile.store requires the ordinary NZ-boxed Acc layout.";
+      // Validate authoring semantics here, before choosing physical Acc tiles.
+      // N and L0C capacity may exceed one instruction until automatic tiling;
+      // M stays whole and must already fit TStoreAccNz2nz's 16-bit row field.
+      constexpr auto max_rows = std::numeric_limits<uint16_t>::max();
+      for (size_t axis = 0; axis < 2; ++axis) {
+        auto physical = As<ConstInt>(tile->shape_[axis]);
+        auto extent = As<ConstInt>(valid[axis]);
+        CHECK_SPAN(physical && extent && physical->value_ == extent->value_ && extent->value_ > 0 &&
+                       extent->value_ % 16 == 0 && (axis != 0 || extent->value_ <= max_rows),
+                   op->span_)
+            << "NZ tile.store requires a static, fully valid Acc tile with rows and columns divisible by 16, "
+            << "and rows <= " << max_rows << ". Partial or dynamic Acc tiles are not supported.";
+      }
+      CHECK_SPAN(op->GetKwarg<int>("atomic", 0) == static_cast<int>(AtomicType::kNone) &&
+                     !GetOptionalDoubleKwarg(op->kwargs_, "pre_quant").has_value() &&
+                     !op->GetKwarg<bool>("pre_relu", false),
+                 op->span_)
+          << "NZ tile.store does not support atomic, pre_quant, or pre_relu. Use a plain FP32 writeback.";
+      CHECK_SPAN(IsValidSTPhase(op->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified))),
+                 op->span_)
+          << "NZ tile.store st_phase must be STPhase.Unspecified or STPhase.Final.";
     }
-    CHECK_SPAN(op->GetKwarg<int>("atomic", 0) == static_cast<int>(AtomicType::kNone) &&
-                   !GetOptionalDoubleKwarg(op->kwargs_, "pre_quant").has_value() &&
-                   !op->GetKwarg<bool>("pre_relu", false),
-               op->span_)
-        << "NZ tile.store does not support atomic, pre_quant, or pre_relu. Use a plain FP32 writeback.";
-    CHECK_SPAN(IsValidSTPhase(op->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified))),
-               op->span_)
-        << "NZ tile.store st_phase must be STPhase.Unspecified or STPhase.Final.";
     auto offsets = As<MakeTuple>(args[1]);
     INTERNAL_CHECK_SPAN(offsets, op->span_) << "Internal error: tile.store offsets must be a MakeTuple";
     const size_t rank = logical_shape.size();
@@ -599,9 +605,9 @@ class BlockNzMutator : public IRMutator {
                  op->span_)
           << "NZ tile.store requires provably non-negative leading batch offsets.";
     }
-    args[1] = BlockTupleArg(args[1], logical_shape, DataType::FP32, op->span_, /*is_offsets=*/true, facts_);
+    args[1] = BlockTupleArg(args[1], logical_shape, tensor->dtype_, op->span_, /*is_offsets=*/true, facts_);
     auto sizes = std::make_shared<MakeTuple>(
-        tensor_view_semantics::BlockNzShape(window, DataType::FP32, op->span_), op->span_);
+        tensor_view_semantics::BlockNzShape(window, tensor->dtype_, op->span_), op->span_);
     if (args.size() == 4) {
       args[3] = sizes;
     } else {
@@ -616,15 +622,17 @@ class BlockNzMutator : public IRMutator {
         blocked_offsets && blocked_offsets->elements_.size() == tensor_view_semantics::kNzBlockedRank,
         op->span_)
         << "Internal error: blocked NZ store offsets must have rank 5";
-    auto row_offset = As<ConstInt>(blocked_offsets->elements_[2]);
-    auto parent_rows = As<ConstInt>(logical_shape[rank - 2]);
-    auto rows = As<ConstInt>(valid[0]);
-    CHECK_SPAN(
-        parent_rows && rows && parent_rows->value_ == rows->value_ && row_offset && row_offset->value_ == 0,
-        op->span_)
-        << "NZ tile.store must cover all rows of its destination at row offset 0: PTO-ISA's Acc NZ store "
-        << "uses the partition height as its column-block stride. Stack independent panels on a leading "
-        << "batch axis, or store to pl.ND.";
+    if (!vector_store) {
+      auto row_offset = As<ConstInt>(blocked_offsets->elements_[2]);
+      auto parent_rows = As<ConstInt>(logical_shape[rank - 2]);
+      auto rows = As<ConstInt>(valid[0]);
+      CHECK_SPAN(
+          parent_rows && rows && parent_rows->value_ == rows->value_ && row_offset && row_offset->value_ == 0,
+          op->span_)
+          << "NZ tile.store must cover all rows of its destination at row offset 0: PTO-ISA's Acc NZ store "
+          << "uses the partition height as its column-block stride. Stack independent panels on a leading "
+          << "batch axis, or store to pl.ND.";
+    }
     return args;
   }
 

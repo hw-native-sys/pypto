@@ -238,10 +238,34 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
     tile_view.stride = {std::make_shared<ConstInt>(1, DataType::INDEX, span), shape[0]};
   }
   InheritTileViewLayout(tile_view, tile_type);
+  std::optional<TensorLayout> requested_layout;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "layout") requested_layout = AnyCast<TensorLayout>(value, "tile.cast layout");
+  }
+  if (requested_layout.has_value()) {
+    CHECK_SPAN(*requested_layout == TensorLayout::ND || *requested_layout == TensorLayout::NZ, span)
+        << "tile.cast layout must be ND or NZ";
+    if (*requested_layout == TensorLayout::NZ) {
+      CHECK_SPAN(tile_type->shape_.size() == 2 && tile_type->dtype_ == DataType::FP4E2M1X2 &&
+                     target_dtype == DataType::FP8E4M3FN && src_view.blayout == TileLayout::row_major &&
+                     src_view.slayout == TileLayout::none_box,
+                 span)
+          << "tile.cast layout=NZ supports only an ND FP4E2M1X2 source and FP8E4M3FN destination on A5";
+      tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::row_major;
+      tile_view.fractal = 512;
+      // ND source element strides do not describe the destination's NZ panels.
+      tile_view.stride.clear();
+    } else {
+      CHECK_SPAN(src_view.blayout == TileLayout::row_major, span)
+          << "tile.cast layout=ND requires a row-major source";
+    }
+  }
   // Dense DN casts execute in Vec; recording that placement now keeps memory
   // inference from canonicalizing the BF16 intermediate back to row-major.
-  const std::optional<MemorySpace> memory =
-      packed_dn_cast ? std::make_optional(MemorySpace::Vec) : std::nullopt;
+  const std::optional<MemorySpace> memory = (packed_dn_cast || requested_layout == TensorLayout::NZ)
+                                                ? std::make_optional(MemorySpace::Vec)
+                                                : std::nullopt;
   return std::make_shared<TileType>(std::move(shape), target_dtype, std::nullopt, tile_view, memory);
 }
 
@@ -365,6 +389,7 @@ REGISTER_OP("tile.cast")
     // Optional destination saturation: OFF(0) / ON(1). Absent means "keep the
     // backend default" — see include/pypto/ir/cast_saturation.h.
     .set_attr<int>("saturation_mode")
+    .set_attr<TensorLayout>("layout")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)

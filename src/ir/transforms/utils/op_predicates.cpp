@@ -33,8 +33,11 @@ bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3) {
   const auto source = As<TileType>(call->args_[0]->GetType());
   const auto result = As<TileType>(call->GetType());
   if (!source || !result) return false;
-  const auto source_bits = source->dtype_.GetBit();
-  const auto result_bits = result->dtype_.GetBit();
+  // Packed FP4 reports eight storage bits per two-value carrier. A numerical
+  // cast to FP8 doubles its element count, so equal storage widths do not make
+  // that widening safe in place: early stores can overwrite unread carriers.
+  const auto source_bits = source->dtype_.IsPackedFp4() ? 4 : source->dtype_.GetBit();
+  const auto result_bits = result->dtype_.IsPackedFp4() ? 4 : result->dtype_.GetBit();
   return result_bits > source_bits || (is_a2a3 && result_bits < source_bits);
 }
 

@@ -100,6 +100,7 @@ def _mx_loads(program: ir.Program) -> list[ir.Call]:
         if view is not None and view.layout in {
             ir.TensorLayout.MX_A_ZZ,
             ir.TensorLayout.MX_B_NN,
+            ir.TensorLayout.MX_A_ND,
         }:
             loads.append(call)
     return loads
@@ -439,6 +440,135 @@ def test_logical_mx_preserves_windows_and_narrowed_tile_valid_shape():
     assert a.type.tile_view is not None
     assert _values(a.type.tile_view.valid_shape) == [16, 2]
     assert passes.legalize_mx_scale_tensor_views()(result) is result
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_a_nd_keeps_compact_rows_and_valid_row_tail(logical_views):
+    """An unaligned expert base and a 7-row tail must not become 16-row boxes."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            scales: pl.Tensor[[37, 72], pl.FP8E8M0, pl.MX_A_ND],
+            row_base: pl.Scalar[pl.INDEX],
+        ):
+            _ = pl.load(scales, [row_base, 2], [16, 70], valid_shape=[7, 70])
+
+    result = _run(Before, logical_views=logical_views)
+    scale_type = _layout_param(result, ir.TensorLayout.MX_A_ND)
+    assert _values(scale_type.shape) == [37, 72]
+    (load,) = _mx_loads(result)
+    offsets = _elements(load.args[1])
+    assert isinstance(offsets[0], ir.Var)
+    assert _const(offsets[1]) == 2
+    assert _values(_elements(load.args[2])) == [16, 70]
+    assert _values(_elements(load.args[3])) == [7, 70]
+    assert isinstance(load.type, ir.TileType)
+    assert load.type.tile_view is not None
+    assert load.type.memory_space == ir.MemorySpace.Mat
+    assert load.type.tile_view.blayout == ir.TileLayout.row_major
+    assert load.type.tile_view.slayout == ir.TileLayout.row_major
+    assert load.type.tile_view.fractal == 32
+    assert _values(load.type.tile_view.valid_shape) == [7, 70]
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_a_nd_accepts_dynamic_rows_and_materializes_row_major_strides(logical_views):
+    rows = pl.dynamic("compact_rows")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scales: pl.Tensor[[rows, 72], pl.FP8E8M0, pl.MX_A_ND]):
+            _ = pl.load(scales, [5, 0], [16, 72])
+
+    result = passes.materialize_tensor_strides()(_run(Before, logical_views=logical_views))
+    scale_type = _layout_param(result, ir.TensorLayout.MX_A_ND)
+    assert len(scale_type.shape) == 2
+    assert scale_type.tensor_view is not None
+    assert _values(scale_type.tensor_view.stride) == [72, 1]
+    restored = ir.deserialize(ir.serialize(result))
+    ir.assert_structural_equal(result, restored)
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+@pytest.mark.parametrize("row_offset", [0, 5])
+@pytest.mark.parametrize("explicit_valid", [False, True])
+@pytest.mark.parametrize("physical_rows", [19, 37])
+def test_mx_a_nd_clamps_dma_window_to_source_valid_rows(
+    logical_views, row_offset, explicit_valid, physical_rows
+):
+    """Authored 32-row requests must not survive as out-of-bounds DMA windows."""
+    requested_valid = [32, 72] if explicit_valid else None
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            scales: pl.Tensor[
+                [physical_rows, 72],
+                pl.FP8E8M0,
+                pl.TensorView(layout=pl.MX_A_ND, valid_shape=[19, 72]),
+            ],
+        ):
+            _ = pl.load(scales, [row_offset, 0], [32, 72], valid_shape=requested_valid, clamp=True)
+
+    (load,) = _mx_loads(_run(Before, logical_views=logical_views))
+    assert _values(_elements(load.args[2])) == [32, 72]
+    assert _values(_elements(load.args[3])) == [19 - row_offset, 72]
+    assert isinstance(load.type, ir.TileType)
+    assert _values(load.type.shape) == [32, 72]
+    assert load.type.tile_view is not None
+    assert _values(load.type.tile_view.valid_shape) == [19 - row_offset, 72]
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_a_nd_rejects_incomplete_clamped_scale_pair(logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            scales: pl.Tensor[
+                [19, 72],
+                pl.FP8E8M0,
+                pl.TensorView(layout=pl.MX_A_ND, valid_shape=[19, 71]),
+            ],
+        ):
+            _ = pl.load(scales, [0, 0], [32, 72], clamp=True)
+
+    # The request has 72 groups, but the valid GM source clips it to 71. Check
+    # the effective DMA extent rather than accepting the aligned request alone.
+    with pytest.raises(ValueError, match="MX_A_ND.*even group"):
+        _run(Before, logical_views=logical_views)
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+@pytest.mark.parametrize("groups", [1, 71])
+def test_mx_a_nd_rejects_incomplete_scale_pairs(groups, logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scales: pl.Tensor[[37, groups], pl.FP8E8M0, pl.MX_A_ND]):
+            _ = pl.load(scales, [5, 0], [16, groups])
+
+    with pytest.raises(ValueError, match="MX_A_ND.*even group"):
+        _run(Before, logical_views=logical_views)
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_a_nd_rejects_odd_group_offset(logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scales: pl.Tensor[[37, 72], pl.FP8E8M0, pl.MX_A_ND]):
+            _ = pl.load(scales, [5, 1], [16, 70])
+
+    with pytest.raises(ValueError, match="MX_A_ND.*group.*multiple of 2"):
+        _run(Before, logical_views=logical_views)
 
 
 if __name__ == "__main__":

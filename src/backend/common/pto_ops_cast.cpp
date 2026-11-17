@@ -23,6 +23,7 @@
 #include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
@@ -75,6 +76,70 @@ std::string EnsurePackedFp4DnStaticView(const ir::ExprPtr& expr, codegen::PTOCod
   const std::string address = codegen.GetOrEmitConstant(offset->value_, DataType::INT64);
   codegen.RegisterTileBufType(view, view_type, tile_type);
   codegen.Emit(view + " = pto.alloc_tile addr = " + address + " : " + view_type);
+  return view;
+}
+
+// PTOAS v0.74 verifies the direct decoder's packed-axis valid columns from
+// descriptor types, not alloc operands. Rebind the already-planned address
+// with static columns while retaining runtime valid rows and slot addresses.
+// No data is moved and the ordinary mutable allocation remains the owner.
+std::string EnsureDirectFp4CastView(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,
+                                    const std::string& name_hint) {
+  const auto tile = As<ir::TileType>(expr->GetType());
+  INTERNAL_CHECK_SPAN(tile, expr->span_) << "Internal error: direct FP4 cast view requires a TileType";
+  const auto memref = tile->memref_.value_or(nullptr);
+  CHECK_SPAN(codegen.EmitTileAddr() && memref && memref->byte_offset_, expr->span_)
+      << "Direct FP4 to FP8 casts require addressed PYPTO or DSA_RP tiles for static-column descriptors";
+  const auto valid = ir::GetValidShape(tile);
+  INTERNAL_CHECK_SPAN(valid.size() == 1 || valid.size() == 2, expr->span_)
+      << "Internal error: direct FP4 cast view must have rank one or two";
+  const auto columns = As<ir::ConstInt>(valid.back());
+  CHECK_SPAN(columns, expr->span_) << "Direct FP4 to FP8 casts require static valid columns; use the BF16 "
+                                      "cast explicitly for dynamic columns";
+  auto components = codegen::ExtractTileTypeInfo(*tile, codegen.GetTypeString(tile->dtype_));
+  components.v_col = columns->value_;
+  components.v_col_dynamic = false;
+  const auto rows = valid.size() == 1 ? std::make_shared<ir::ConstInt>(1, DataType::INDEX, expr->span_)
+                                      : As<ir::ConstInt>(valid[0]);
+  const bool static_rows = rows && rows->value_ > 0;
+  if (static_rows) {
+    components.v_row = rows->value_;
+    components.v_row_dynamic = false;
+  }
+  const auto type = codegen::FormatTileBufTypeString(
+      "vec", components.dtype_str, components.rows, components.cols, components.blayout, components.slayout,
+      components.fractal, components.pad, components.compact, components.v_row, components.v_col,
+      components.v_row_dynamic, components.v_col_dynamic);
+  const auto view = codegen.NewNamedTemp(name_hint);
+  const auto operand = codegen.GetExprAsCode(expr);
+  if (const auto* subview = codegen.GetSubviewMaterialization(operand)) {
+    if (tile->dtype_ == DataType::FP4E2M1X2) {
+      CHECK_SPAN(subview->byte_offset_mod_32 == 0, expr->span_)
+          << "Direct FP4 to FP8 conversion requires a provably 32-byte-aligned source subview; "
+             "use packed column offsets divisible by 32, or load the window into its own aligned tile";
+    }
+    // A slice's SSA preserves its parent pitch and runtime byte offset; its
+    // inherited MemRef can lose both. Keep that provenance through a zero-offset
+    // view while spelling the static valid columns required by the decoder.
+    const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    const auto row_value = static_rows ? codegen.GetOrEmitConstant(rows->value_, DataType::INDEX)
+                                       : codegen.EmitCastToIndex(valid[0], codegen.GetExprAsCode(valid[0]));
+    const auto col_value = codegen.GetOrEmitConstant(columns->value_, DataType::INDEX);
+    codegen.RegisterTileBufType(view, type, tile);
+    codegen.Emit(view + " = pto.subview " + operand + "[" + zero + ", " + zero + "] sizes [" +
+                 std::to_string(components.rows) + ", " + std::to_string(components.cols) + "] valid [" +
+                 row_value + ", " + col_value + "] : " + codegen.GetSSATileBufType(operand) + " -> " + type);
+    return view;
+  }
+  const auto address =
+      codegen.EmitCastToI64(memref->byte_offset_, codegen.GetExprAsCode(memref->byte_offset_));
+  std::string allocation = view + " = pto.alloc_tile addr = " + address;
+  if (!static_rows) {
+    const auto row_value = codegen.EmitCastToIndex(valid[0], codegen.GetExprAsCode(valid[0]));
+    allocation += " valid_row = " + row_value;
+  }
+  codegen.RegisterTileBufType(view, type, tile);
+  codegen.Emit(allocation + " : " + type);
   return view;
 }
 
@@ -222,6 +287,48 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
   INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.cast source must be TileType";
   const bool dense_fp4_dn = ir::IsDensePackedFp4DnCast(op);
   const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_type);
+  if (ir::IsDirectFp4E2M1ToFp8Cast(op)) {
+    CHECK_SPAN(target == CastTarget::A5, op->span_)
+        << "Direct FP4E2M1X2 to FP8E4M3FN conversion requires the A5 target";
+    const auto result = codegen.GetCurrentResultVar();
+    const auto dst_type = result ? As<ir::TileType>(result->GetType()) : nullptr;
+    INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: FP4 to FP8 cast requires a result TileType";
+    const auto dst_view = ir::tile_view_semantics::GetEffectiveTileView(*dst_type);
+    const bool dst_nz = dst_view.blayout == ir::TileLayout::col_major &&
+                        dst_view.slayout == ir::TileLayout::row_major && dst_view.fractal == 512;
+    const bool dst_nd =
+        dst_view.blayout == ir::TileLayout::row_major && dst_view.slayout == ir::TileLayout::none_box;
+    CHECK_SPAN((src_type->shape_.size() == 1 || src_type->shape_.size() == 2) &&
+                   src_view.blayout == ir::TileLayout::row_major &&
+                   src_view.slayout == ir::TileLayout::none_box && src_view.compact == ir::CompactMode::null,
+               op->span_)
+        << "Direct FP4E2M1X2 to FP8E4M3FN conversion requires a non-compact rank-one or rank-two ND source";
+    if (!src_view.stride.empty()) {
+      const auto column_stride = As<ir::ConstInt>(src_view.stride.back());
+      const auto columns = As<ir::ConstInt>(src_type->shape_.back());
+      const auto row_stride = src_view.stride.size() == 2 ? As<ir::ConstInt>(src_view.stride[0]) : nullptr;
+      const bool dense_row =
+          src_type->shape_.size() == 1 || (row_stride && columns && row_stride->value_ == columns->value_);
+      CHECK_SPAN(src_view.stride.size() == src_type->shape_.size() && dense_row && column_stride &&
+                     column_stride->value_ == 1,
+                 op->span_)
+          << "Direct FP4E2M1X2 to FP8E4M3FN conversion requires contiguous ND source strides";
+    }
+    const auto carrier_cols = As<ir::ConstInt>(src_type->shape_.back());
+    CHECK_SPAN(carrier_cols && carrier_cols->value_ >= 32 && carrier_cols->value_ % 32 == 0, op->span_)
+        << "Direct FP4E2M1X2 to FP8E4M3FN conversion requires physical carrier columns divisible by 32; "
+           "pad the source tile and use valid_shape for a narrower window";
+    CHECK_SPAN(dst_nd || dst_nz, op->span_)
+        << "Direct FP4E2M1X2 to FP8E4M3FN conversion supports ND or standard 512-byte NZ output";
+    CHECK_SPAN(dst_nz || dst_view.compact == ir::CompactMode::null, op->span_)
+        << "Direct FP4E2M1X2 to FP8E4M3FN ND output requires compact=null";
+    if (dst_nz) {
+      const auto rows = As<ir::ConstInt>(dst_type->shape_[0]);
+      CHECK_SPAN(rows && rows->value_ % 16 == 0, op->span_)
+          << "Direct FP4E2M1X2 to FP8E4M3FN NZ output requires physical rows divisible by 16; use "
+             "valid_shape for row tails";
+    }
+  }
   CHECK_SPAN(!(src_type->dtype_.IsPackedFp4() || op->GetKwarg<DataType>("target_type").IsPackedFp4()) ||
                  src_view.blayout != ir::TileLayout::col_major || dense_fp4_dn,
              op->span_)
@@ -237,6 +344,16 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
     EmitInsOutsWithViewTypes(codegen, "pto.tcvt",
                              {{src_ssa, codegen.GetViewTileBufTypeStringFromTileType(src_type)}}, dst_ssa,
                              dst_type, config_attr);
+    return "";
+  }
+  if (ir::IsDirectFp4E2M1ToFp8Cast(op)) {
+    const auto result = codegen.GetCurrentResultVar();
+    INTERNAL_CHECK_SPAN(result, op->span_) << "Internal error: direct FP4 cast requires a result variable";
+    const auto source_view = EnsureDirectFp4CastView(op->args_[0], codegen, "tcvt_fp4_src");
+    const auto result_view = EnsureDirectFp4CastView(result, codegen, "tcvt_fp8_dst");
+    codegen.Emit("pto.tcvt ins(" + source_view + " " + config_attr + " : " +
+                 codegen.GetSSATileBufType(source_view) + ") outs(" + result_view + " : " +
+                 codegen.GetSSATileBufType(result_view) + ")");
     return "";
   }
   const bool explicit_tmp = op->args_.size() == 2;
@@ -296,8 +413,8 @@ void RegisterCastOps(Backend& backend, BackendType backend_type) {
       INTERNAL_CHECK(false) << "Internal error: no cast rules for backend";
       return;
   }
-  // Ordinary TCVT needs ND. Layout resolution preserves only dense packed FP4
-  // DN casts, whose codegen above supplies the required static-valid views.
+  // Ordinary TCVT needs ND. Layout resolution preserves dense packed FP4 DN
+  // casts and the A5 register decoder's direct E2M1-to-E4M3 NZ output.
   backend.RegisterOp("tile.cast")
       .f_plan_scratch([target](const OpScratchRequest& request) { return PlanCastScratch(target, request); })
       .f_codegen([&backend, target](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

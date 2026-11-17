@@ -249,6 +249,8 @@ def test_nz_target_rejected():
         pytest.param(ir.TensorLayout.ND, [1, 128], ir.TensorLayout.MX_A_ZZ, [32, 4], id="nd-to-a"),
         pytest.param(ir.TensorLayout.MX_B_NN, [4, 32], ir.TensorLayout.ND, [1, 128], id="b-to-nd"),
         pytest.param(ir.TensorLayout.ND, [1, 128], ir.TensorLayout.MX_B_NN, [4, 32], id="nd-to-b"),
+        pytest.param(ir.TensorLayout.MX_A_ND, [37, 72], ir.TensorLayout.ND, [1, 2664], id="and-to-nd"),
+        pytest.param(ir.TensorLayout.ND, [1, 2664], ir.TensorLayout.MX_A_ND, [37, 72], id="nd-to-and"),
     ],
 )
 def test_shaped_nd_mx_backing_view_is_allowed(source_layout, source_shape, target_layout, target_shape):

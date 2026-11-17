@@ -490,7 +490,8 @@ class TestMxMatmulCodegen:
         assert len(stores) == 1
         assert "!pto.partition_tensor_view<16x2x!pto.f8E8M0>" in stores[0]
 
-    def test_mxfp4_times_mxfp8_uses_explicit_lhs_cast(self):
+    @pytest.mark.parametrize("cast_layout", [None, pl.NZ], ids=["nd", "fused-nz"])
+    def test_mxfp4_times_mxfp8_uses_explicit_lhs_cast(self, cast_layout):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
@@ -502,7 +503,7 @@ class TestMxMatmulCodegen:
                 b_s: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
                 out: pl.Tensor[[128, 64], pl.FP32],
             ):
-                ta = pl.cast(pl.load(a, [0, 0], [128, 32]), pl.FP8E4M3FN)
+                ta = pl.cast(pl.load(a, [0, 0], [128, 32]), pl.FP8E4M3FN, layout=cast_layout)
                 tas = pl.load(a_s, [0, 0], [128, 2])
                 tb = pl.load(b, [0, 0], [64, 64])
                 tbs = pl.load(b_s, [0, 0], [2, 64])
@@ -510,7 +511,15 @@ class TestMxMatmulCodegen:
 
         assert not uses_native_fp4_mx(_run_default_pipeline(Program))
         mlir = _emit_incore_mlir(Program)
-        assert mlir.count("pto.tcvt") == 3
+        # E2M1 now widens exactly in one pass. The explicit NZ destination
+        # also removes the layout-only Vec move before the MX peer transfer.
+        assert mlir.count("pto.tcvt") == 1
+        vec_allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line and "loc=vec" in line]
+        assert all("dtype=bf16" not in line and "dtype=f32" not in line for line in vec_allocs)
+        vec_layout_moves = [
+            line for line in mlir.splitlines() if "pto.tmov" in line and line.count("loc=vec") == 2
+        ]
+        assert len(vec_layout_moves) == (1 if cast_layout is None else 0)
         assert "dtype=!pto.f4E2M1x2, rows=128, cols=32" in mlir
         assert "pto.tmatmul.mx" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
@@ -674,3 +683,73 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         assert "pto.tmatmul.mx.bias" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
+
+
+class TestMxANDScaleCodegen:
+    @pytest.mark.parametrize("row_offset", [0, 5])
+    def test_clamped_source_rows_bound_the_dma_partition(self, row_offset):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, scales: pl.Tensor[[19, 72], pl.FP8E8M0, pl.MX_A_ND]):
+                _ = pl.load(scales, [row_offset, 0], [32, 72], clamp=True)
+
+        mlir = _emit_incore_mlir(Program)
+        (tload,) = [line for line in mlir.splitlines() if "pto.tload " in line]
+        # Allocating a 32-row tile is valid; transferring 32 rows from the
+        # 19-row source would overread, including when valid_shape was omitted.
+        assert f"!pto.partition_tensor_view<{19 - row_offset}x72x!pto.f8E8M0>" in tload
+        assert "!pto.partition_tensor_view<32x72x!pto.f8E8M0>" not in tload
+        assert "loc=mat, dtype=!pto.f8E8M0, rows=32, cols=72" in mlir
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_compact_a_scales_load_directly_to_zz_mat(self, tmp_path, planner):
+        """Keep row-major scale ABI and load the dynamic tail on AIC, without Vec packing."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a_s: pl.Tensor[[37, 72], pl.FP8E8M0, pl.MX_A_ND],
+                row_base: pl.Scalar[pl.INDEX],
+                valid_rows: pl.Scalar[pl.INDEX],
+            ):
+                scale = pl.load(a_s, [row_base, 0], [16, 72], valid_shape=[valid_rows, 72])
+                _ = pl.move(scale, pl.Mem.LeftScale)
+
+        reset_for_testing()
+        set_backend_type(BackendType.Ascend950)
+        with passes.PassContext([], memory_planner=planner):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
+        mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+        assert "#pto.layout<mx_a_nd>" in mlir
+        assert "loc=mat, dtype=!pto.f8E8M0, rows=16, cols=72" in mlir
+        assert "slayout=row_major, fractal=32" in mlir
+        assert "pto.tgather" not in mlir
+        assert "pto.tpush" not in mlir
+        assert "arith.floordivsi" not in mlir
+        assert "!pto.partition_tensor_view<?x72x!pto.f8E8M0>" in mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "mx_a_nd_compact", str(tmp_path), planner)
+        assert "pto::Layout::MX_A_ND" in cpp
+        assert "TLOAD(" in cpp
+        assert "TMOV(" in cpp
+        assert "ScaleLeft" in cpp
+        assert "TileShape2D<float8_e8m0_t" in cpp
+
+    def test_nd_backing_view_keeps_row_major_abi(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, backing: pl.Tensor[[1, 37 * 72], pl.FP8E8M0]):
+                scales = pl.tensor.view(backing, [37, 72], layout=pl.MX_A_ND)
+                _ = pl.load(scales, [5, 0], [16, 72], valid_shape=[7, 72])
+
+        mlir = _emit_incore_mlir(Program)
+        views = [line for line in mlir.splitlines() if "pto.make_tensor_view" in line]
+        assert any("#pto.layout<mx_a_nd>" in line for line in views)
+        assert "#pto.layout<mx_a_zz>" not in mlir
+        assert "pto.tload" in mlir
+        assert "pto.tmov" not in mlir

@@ -397,6 +397,9 @@ class TensorLayout(enum.Enum):
     MX_B_NN = ...
     """MX Right/B scale GM pack (NN)."""
 
+    MX_A_ND = ...
+    """Row-major MX Left/A scales; TLOAD converts to L1 ZZ."""
+
 class TileLayout(enum.Enum):
     """Tile layout enumeration (shared by blayout and slayout)."""
 
@@ -3207,7 +3210,10 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
 def create_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
+    kwargs: Mapping[
+        str,
+        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+    ],
     span: Span,
 ) -> Call:
     """Create a Call expression with args and kwargs.
@@ -3229,7 +3235,10 @@ def create_op_call(
 def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
+    kwargs: Mapping[
+        str,
+        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+    ],
     span: Span,
 ) -> Call:
     """Create a Call expression for a compiler-internal operator. **Private.**
@@ -3261,7 +3270,10 @@ def _create_internal_op_call(
 def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
+    kwargs: Mapping[
+        str,
+        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+    ],
     type: Type,
     span: Span,
 ) -> Call:
