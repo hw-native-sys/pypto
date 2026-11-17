@@ -208,7 +208,11 @@ tests compile static/dynamic AIC/AIV/MIX exports through admission.
 The focused runtime test `tests/st/runtime/external_kernel/test_cannbotdsl_runtime.py`
 builds dependent chains of each topology and an AIC → MIX → AIV chain, checking
 repeated numerical results on A5. MIX test participants write separate cache lines.
-`--codegen-only` compiles this test without launching a device; that does not
+`--codegen-only` compiles device and orchestration binaries and constructs
+callables without launching a device. Both modes require the pinned Simpler
+package and CANN toolchain: `KernelCompiler` uses `simpler_setup` even before
+callable construction. The `tests/st/codegen` CI job does not install Simpler or
+CANN and does not run this direct-runtime test. Compile-only results do not
 establish device completion visibility or performance acceptance.
 
 ### Text-only binary admission
@@ -382,8 +386,10 @@ consumers are submitted. Bindings must stay fixed and backing storage must
 survive execution. Every invocation recomputes conflicts; no address-dependent
 result is cached. The helper orders only this batch: other potentially concurrent
 calls need separate ordering or isolation. It does not prove intra-group safety,
-resource ownership, stack limits, binary loading or completion visibility, and
-is not yet connected to JIT discovery or `TMRBridge.lower`.
+resource ownership, stack limits, binary loading or completion visibility by
+itself. The direct runtime path described above composes this helper with
+`TMRBridge.lower`, checked compilation and actual TMR submission for the supported
+subset. Automatic JIT discovery and binding remain follow-up work.
 
 ## Requests and prepared kernels
 

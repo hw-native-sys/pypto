@@ -10,8 +10,10 @@
 """Direct A5 AIC/AIV/MIX chains: strict compilation, ordered submission and repeated visibility.
 
 Run with --platform=a5; --codegen-only builds both device and orchestration
-binaries without starting a Worker. This exercises the direct bridge, which is
-independent of automatic PyPTO JIT provider discovery.
+binaries and constructs callables without starting a Worker. Both modes require
+the pinned Simpler package and CANN toolchain: KernelCompiler uses simpler_setup.
+This tests the direct bridge under the external-kernel test policy exception,
+independently of automatic PyPTO JIT provider discovery.
 """
 
 import pytest

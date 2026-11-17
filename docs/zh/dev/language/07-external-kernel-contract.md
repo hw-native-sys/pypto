@@ -166,8 +166,10 @@ Host 测试验证 wrapper 排空/恢复顺序、真实 TMR 提交 API 和固定�
 导出通过完整准入流程。专项 runtime 测试
 `tests/st/runtime/external_kernel/test_cannbotdsl_runtime.py` 构建各拓扑的依赖链和
 AIC → MIX → AIV 链，MIX 测试参与者写入不同缓存行，
-在 A5 上检查重复执行的数值结果。`--codegen-only` 只编译该测试、不启动设备；
-不能据此宣称设备完成可见性或性能验收通过。
+在 A5 上检查重复执行的数值结果。`--codegen-only` 编译设备和编排二进制并构造 callable，
+但不启动设备。两种模式均需要固定版本的 Simpler 包和 CANN 工具链：在构造 callable
+之前，`KernelCompiler` 就已经依赖 `simpler_setup`。`tests/st/codegen` CI 任务不安装
+Simpler 或 CANN，也不运行该直接 runtime 测试。不能据仅编译结果宣称设备完成可见性或性能验收通过。
 
 ### 仅加载 text 的二进制准入
 
@@ -295,8 +297,9 @@ ID。辅助层不负责加载 kernel 或授权执行；回调所接入的 runtim
 消费者提交前，所有生产者必须在同一个有效 TMR scope 内保持可引用。绑定必须保持
 不变，底层存储必须存活到执行完成。每次调用重新计算冲突，不缓存依赖实际地址的
 结果。辅助层只约束本批次，其他可能并发的调用仍需独立的依赖或隔离策略。它不证明
-组内安全、资源所有权、栈限制、二进制加载或完成可见性，尚未接入 JIT 发现流程和
-`TMRBridge.lower`。
+组内安全、资源所有权、栈限制、二进制加载或完成可见性。上述直接 runtime 路径将
+该辅助层与 `TMRBridge.lower`、受检查的编译以及真实 TMR 提交组合，用于支持的子集。
+自动 JIT 发现和绑定仍属后续工作。
 
 ## 请求与编译结果
 
