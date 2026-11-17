@@ -319,12 +319,24 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 未知读取自身的安全。
 
 双结果通过一个返回元组的 IR Call 和两个 SSA 结果表达。元组、其投影和进借位掩码
-都只能在定义它们的 RegScope 中使用。索引双结果前必须先绑定调用，例如
-`pair = pl.reg.mull(a, b, mask)`，再取 `low = pair[0]`；不支持直接写
-`pl.reg.mull(a, b, mask)[0]`。跨 `if` 合流或循环传递时，必须先拆包为独立
+都只能在定义它们的 RegScope 中使用。只需要一个结果时，可以直接写
+`low = pl.reg.mull(a, b, mask)[0]`，也可以将其用作另一个寄存器操作的参数。
+每次调用只求值一次；解析器先绑定双结果，再取出指定分量。需要复用两个结果时，
+可以绑定 `pair = pl.reg.mull(a, b, mask)` 后使用 `pair[0]` / `pair[1]`，
+或直接拆包。分别写两次调用仍会求值两次。跨 `if` 合流或循环传递时，必须先拆包为独立
 寄存器，例如 `low, high = pl.reg.mull(a, b, mask)`；校验器拒绝元组类型的
 合流结果和循环携带值。`mull` 的两部分保留输入的符号性。
 减法的进位掩码以 **true 表示无借位**，与控制执行的 mask 是两个不同参数。
+
+验证直接索引的 A5 行为时，使用 `tests/st/runtime/vpto/test_reg_extended_onboard.py`
+的 `--build OUTPUT --cases integer_u32 integer_i32 --direct-index` 构建，再通过
+`--worker OUTPUT "$TASK_DEVICE"` 执行。该测试将七个双结果操作的两个索引、
+进位掩码、非活动 lane 和保护区域与 CPU 参考结果比较。构建通过
+`task-submit --no-device` 运行，执行通过 `task-submit --device auto` 运行；
+执行阶段复用已保存的二进制产物，并拒绝编译。
+下文的 interleave 测试也支持在构建时添加 `--direct-index`，验证直接索引，
+包括 BF16 位保持和省略 mask 的路径。
+
 `intlv`/`dintlv` 两个输出的非活动 lane 均为零。当前固定及最低支持的 PTOAS v0.74
 已实现原生结果掩码（`b6945321`，
 [PTOAS #1732](https://github.com/hw-native-sys/PTOAS/issues/1732)），因此 PyPTO

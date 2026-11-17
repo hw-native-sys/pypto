@@ -419,5 +419,85 @@ def test_block_stride_store_round_trip():
     ir.assert_structural_equal(kernel, pl.parse(printed), enable_auto_mapping=True)
 
 
+@pytest.mark.parametrize("placement", ["body", "if", "for"])
+def test_direct_pair_projection_stays_in_current_block(placement):
+    prefix = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec], count: pl.Scalar[pl.INDEX]):
+    with pl.reg_scope():
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+"""
+    indent = "        "
+    if placement == "if":
+        prefix += "        if count > 0:\n"
+        indent += "    "
+    elif placement == "for":
+        prefix += "        for i in pl.range(count):\n"
+        indent += "    "
+    direct = pl.parse(prefix + f"{indent}y = pl.reg.mull(x, x, m)[1]\n")
+    expected = pl.parse(prefix + f"{indent}pair = pl.reg.mull(x, x, m)\n{indent}y = pair[1]\n")
+    # The implicit definition must remain inside the same branch/iteration;
+    # hoisting it would change evaluation and register ownership.
+    ir.assert_structural_equal(direct, expected, enable_auto_mapping=True)
+
+
+def test_nested_pair_projections_keep_distinct_calls_and_user_binding():
+    prefix = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+        _tuple_tmp = pl.reg.broadcast(7, lanes=64, dtype=pl.UINT32)
+"""
+    direct = pl.parse(
+        prefix
+        + """
+        y = pl.reg.add(pl.reg.mull(x, x, m)[0], pl.reg.mull(x, _tuple_tmp, m)[1])
+        z = pl.reg.add(y, _tuple_tmp)
+"""
+    )
+    expected = pl.parse(
+        prefix
+        + """
+        first = pl.reg.mull(x, x, m)
+        second = pl.reg.mull(x, _tuple_tmp, m)
+        y = pl.reg.add(first[0], second[1])
+        z = pl.reg.add(y, _tuple_tmp)
+"""
+    )
+    # Generated temporaries must neither alias each other nor shadow a user's
+    # name. Two syntactic calls remain two calls, in left-to-right order.
+    ir.assert_structural_equal(direct, expected, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("index", ["2", "-1", "1.5", "i"])
+def test_direct_pair_projection_retains_tuple_index_checks(index):
+    with pytest.raises((ParserError, ValueError), match="index|indices|bounds"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    with pl.reg_scope():
+        x = pl.reg.broadcast(1, lanes=64, dtype=pl.UINT32)
+        m = pl.reg.full_mask(lanes=64)
+        i = 0
+        y = pl.reg.mull(x, x, m)[{index}]
+""")
+
+
+def test_direct_pair_projection_cannot_escape_reg_scope():
+    with pytest.raises((ParserError, ValueError), match="escape|outside|RegScope"):
+        pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    with pl.reg_scope():
+        x = pl.reg.broadcast(1, lanes=64, dtype=pl.UINT32)
+        m = pl.reg.full_mask(lanes=64)
+        y = pl.reg.mull(x, x, m)[0]
+    z = pl.reg.add(y, y)
+""")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

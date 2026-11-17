@@ -14,8 +14,12 @@ artifacts with --worker OUTPUT DEVICE in a task-submit --device auto job, using
 TASK_DEVICE. Compilation never reserves a device; execution never skips pin
 validation or substitutes simulator code. Inputs and outputs are CPU tensors
 transferred by the production ChipWorker, as in test_reg_scope_onboard.py.
+Use --cases integer_u32 integer_i32 --direct-index to validate direct projections
+of both results from every paired operation, including carry masks.
 """
 
+import argparse
+import importlib
 import json
 import os
 import runpy
@@ -327,7 +331,7 @@ def _unmasked_body(dtype):
     return body
 
 
-def _program(case):
+def _program(case, direct_index=False):
     if case.startswith("block_stride"):
         return _block_stride_program(int(case.removeprefix("block_stride")))
     dtype = {
@@ -406,13 +410,31 @@ def _program(case):
                 zero = pl.reg.broadcast(0, lanes=64, dtype=dtype)
                 one = pl.reg.broadcast(1, lanes=64, dtype=dtype)
                 carry_in = pl.reg.compare(ci, zero, seed, predicate="ne")
-                lo, hi = pl.reg.mull(x, y, mask)
-                add, ac = pl.reg.addc(x, y, mask)
-                sub, sc = pl.reg.subc(x, y, mask)
-                adds, asc = pl.reg.addcs(x, y, carry_in, mask)
-                subs, ssc = pl.reg.subcs(x, y, carry_in, mask)
-                il, ih = pl.reg.intlv(x, y, mask)
-                de, do = pl.reg.dintlv(x, y, mask)
+                if direct_index:
+                    # Each written call is evaluated once. Keep both indices
+                    # observable, including masks converted to vector bits below.
+                    lo = pl.reg.mull(x, y, mask)[0]
+                    hi = pl.reg.mull(x, y, mask)[1]
+                    add = pl.reg.addc(x, y, mask)[0]
+                    ac = pl.reg.addc(x, y, mask)[1]
+                    sub = pl.reg.subc(x, y, mask)[0]
+                    sc = pl.reg.subc(x, y, mask)[1]
+                    adds = pl.reg.addcs(x, y, carry_in, mask)[0]
+                    asc = pl.reg.addcs(x, y, carry_in, mask)[1]
+                    subs = pl.reg.subcs(x, y, carry_in, mask)[0]
+                    ssc = pl.reg.subcs(x, y, carry_in, mask)[1]
+                    il = pl.reg.intlv(x, y, mask)[0]
+                    ih = pl.reg.intlv(x, y, mask)[1]
+                    de = pl.reg.dintlv(x, y, mask)[0]
+                    do = pl.reg.dintlv(x, y, mask)[1]
+                else:
+                    lo, hi = pl.reg.mull(x, y, mask)
+                    add, ac = pl.reg.addc(x, y, mask)
+                    sub, sc = pl.reg.subc(x, y, mask)
+                    adds, asc = pl.reg.addcs(x, y, carry_in, mask)
+                    subs, ssc = pl.reg.subcs(x, y, carry_in, mask)
+                    il, ih = pl.reg.intlv(x, y, mask)
+                    de, do = pl.reg.dintlv(x, y, mask)
                 acv = pl.reg.select(ac, one, zero)
                 scv = pl.reg.select(sc, one, zero)
                 ascv = pl.reg.select(asc, one, zero)
@@ -459,14 +481,23 @@ def _environment():
     return pin
 
 
-def _build(output):
+def _build(output, cases=CASES, direct_index=False):
+    assert cases and len(set(cases)) == len(cases), "Select distinct nonempty cases"
+    assert not direct_index or all(case.startswith("integer_") for case in cases), (
+        "--direct-index requires integer cases"
+    )
     pin = _environment()
     output.mkdir(parents=True, exist_ok=True)
-    manifest = {"runtime_commit": pin.installed, "cases": []}
+    manifest = {
+        "runtime_commit": pin.installed,
+        "requested_cases": list(cases),
+        "direct_index": direct_index,
+        "cases": [],
+    }
     recorder = runpy.run_path(str(ROOT / "examples/runtime/vf_emitc_vpto.py"))["_record_compilation"]
-    for case in CASES:
+    for case in cases:
         directory = output / case
-        compiled = _program(case).compile(
+        compiled = _program(case, direct_index).compile(
             config=RunConfig(
                 backend_type=BackendType.Ascend950,
                 execution_mode=ExecutionMode.ONBOARD,
@@ -497,6 +528,8 @@ def _build(output):
         for op in ops:
             mnemonic = MNEMONICS.get(op, f"v{op}")
             assert any(f"pto.vmi.{mnemonic}" in helper for helper in helpers), (case, op)
+            if direct_index:
+                assert sum(helper.count(f"pto.vmi.{mnemonic} ") for helper in helpers) == 2, (case, op)
         if case == "mx_quant":
             # The grouped forms must carry the group COUNT, not the group width,
             # and the reduction result must be narrowed to one lane per group.
@@ -507,6 +540,8 @@ def _build(output):
         evidence = Path(tempfile.mkdtemp(prefix="compilation-", dir=directory))
         with recorder(evidence):
             compiled.load()  # Production PTOAS -> LLVM -> Bisheng -> linked .text, no device.
+        for repeat in range(2):
+            np.save(directory / f"input-{repeat}.npy", _inputs(case, repeat))
         manifest["cases"].append(
             {
                 "name": case,
@@ -557,8 +592,12 @@ def _inputs(case, repeat):
         patterns = np.array(
             [0, 1, 0xFFFFFFFF, 0x80000000, 0x7FFFFFFF, 123456789, 0xFFFFFFFE, 987654321], dtype=np.uint32
         )
-        data = np.resize(np.roll(patterns, repeat), 256)
-        data[64:128] = np.resize(np.roll(patterns, 3 + repeat), 64)
+        # A repeated eight-lane pattern makes the low/high interleave halves
+        # identical at VL64. Independent payloads expose swapped projections,
+        # while explicit edge lanes retain overflow and signed-product coverage.
+        data = np.random.default_rng(3262 + repeat).integers(0, 1 << 32, 256, dtype=np.uint32)
+        data[:8] = np.roll(patterns, repeat)
+        data[64:72] = np.roll(patterns, 3 + repeat)
         data[128:192] = (np.arange(64) + repeat) % 2
         return data.view(np.int32) if case == "integer_i32" else data
     if case == "indexed_u32":
@@ -710,19 +749,30 @@ def _run(output, device):
     pin = _environment()
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["runtime_commit"] == pin.installed
-    assert {case["name"] for case in manifest["cases"]} == set(CASES)
+    requested = manifest.get("requested_cases", list(CASES))
+    assert requested and set(requested) <= set(CASES)
+    assert {case["name"] for case in manifest["cases"]} == set(requested)
     config = RunConfig(
         backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, device_id=device
     )
     checks = []
     failures = []
-    with ChipWorker(config=config, runtime=manifest["cases"][0]["runtime"]) as worker:
+    compiler = importlib.import_module("pypto.runtime.kernel_compiler").KernelCompiler
+
+    def reject_compile(*args, **kwargs):
+        raise AssertionError("Device execution must reuse binaries built without a device")
+
+    with (
+        pytest.MonkeyPatch.context() as compiler_guard,
+        ChipWorker(config=config, runtime=manifest["cases"][0]["runtime"]) as worker,
+    ):
+        compiler_guard.setattr(compiler, "compile_incore", reject_compile)
         for entry in manifest["cases"]:
             case = entry["name"]
             compiled = CompiledProgram.from_dir(entry["directory"])
             handle = worker.register(compiled)
             for repeat in range(2):
-                data = _inputs(case, repeat)
+                data = np.load(Path(entry["directory"]) / f"input-{repeat}.npy")
                 src = torch.from_numpy(data.reshape(1, 256).copy())
                 strided = case.startswith("block_stride")
                 lengths = LENGTHS
@@ -779,6 +829,8 @@ def _run(output, device):
             {
                 "device_id": device,
                 "hardware_executed": True,
+                "incore_compilation_during_run": False,
+                "direct_index": manifest.get("direct_index", False),
                 "runtime_commit": pin.installed,
                 "numerical_checks": len(checks),
                 "checks": checks,
@@ -836,9 +888,17 @@ def _block_stride_program(lanes):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--build":
-        _build(Path(sys.argv[2]).resolve())
-    elif len(sys.argv) == 4 and sys.argv[1] == "--worker":
-        _run(Path(sys.argv[2]).resolve(), int(sys.argv[3]))
+    if "--build" in sys.argv or "--worker" in sys.argv:
+        parser = argparse.ArgumentParser(description=__doc__)
+        mode = parser.add_mutually_exclusive_group(required=True)
+        mode.add_argument("--build", type=Path)
+        mode.add_argument("--worker", nargs=2, metavar=("OUTPUT", "DEVICE"))
+        parser.add_argument("--cases", nargs="+", choices=CASES, default=CASES)
+        parser.add_argument("--direct-index", action="store_true")
+        args = parser.parse_args()
+        if args.build:
+            _build(args.build.resolve(), args.cases, args.direct_index)
+        else:
+            _run(Path(args.worker[0]).resolve(), int(args.worker[1]))
     else:
         pytest.main([__file__, "-v", *sys.argv[1:]])
