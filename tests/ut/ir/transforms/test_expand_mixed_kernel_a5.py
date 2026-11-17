@@ -5523,6 +5523,66 @@ class TestManualPipeVtoCFractalAdapt:
             )
             assert "__mx_scale_v2c_push" not in pushes[0].attrs
 
+    @pytest.mark.parametrize("lane_kind", ["constant", "dynamic"])
+    def test_mx_contract_prescan_includes_only_explicit_lane_pushes(self, lane_kind):
+        """No lane-less MX push may mask the two-operand pre-scan regression."""
+        lane = "1" if lane_kind == "constant" else "lane"
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIC)
+    def manual_aic(self, data: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ], lane: pl.Scalar[pl.INT64]):
+        buf = pl.reserve_buffer(name="mx", size=4096, base=pl.AUTO)
+        pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, id=3, dir_mask=2, slot_size=512)
+        scale: pl.Tile[
+            [32, 2], pl.FP8E8M0, pl.Mem.Mat,
+            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32)
+        ] = pl.tpop_from_aiv(split=1, id=3)
+        pl.tfree_to_aiv(scale, id=3)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def manual_aiv(self, data: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ], lane: pl.Scalar[pl.INT64]):
+        peer = pl.import_peer_buffer(name="mx", peer_func="manual_aic")
+        pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, id=3, dir_mask=2, slot_size=512)
+        mat = pl.load(data, [0, 0], [16, 2], target_memory=pl.Mem.Mat)
+        vec = pl.move(mat, target_memory=pl.Mem.Vec,
+                      blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major)
+        pl.tpush_to_aic(vec, split=1, id=3, aiv_subblockid={lane})
+
+    @pl.function(type=pl.FunctionType.Group)
+    def group(self, data: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ], lane: pl.Scalar[pl.INT64]):
+        self.manual_aic(data, lane)
+        self.manual_aiv(data, lane)
+""")
+        after = _expand_raw(before)
+        vector = after.get_function("manual_aiv")
+        assert vector is not None
+        pushes = [
+            stmt.expr
+            for stmt in _flatten_top_level_stmts(vector.body)
+            if isinstance(stmt, ir.EvalStmt)
+            and isinstance(stmt.expr, ir.Call)
+            and stmt.expr.op.name == _TILE_TPUSH_TO_AIC
+        ]
+        assert len(pushes) == 1
+        push = pushes[0]
+        assert push.kwargs["id"] == 3 and push.kwargs["split"] == 1
+        assert len(push.args) == 2
+        lane_arg = push.args[1]
+        assert isinstance(lane_arg.type, ir.ScalarType) and lane_arg.type.dtype == pl.INT64
+        carrier = push.args[0].type
+        assert isinstance(carrier, ir.TileType) and _const_tile_shape(carrier) == [16, 2]
+        view = carrier.get_effective_tile_view()
+        assert (view.blayout, view.slayout, view.fractal) == (
+            pl.TileLayout.row_major,
+            pl.TileLayout.row_major,
+            32,
+        )
+        if lane_kind == "constant":
+            assert isinstance(lane_arg, ir.ConstInt) and lane_arg.value == 1
+        else:
+            assert isinstance(lane_arg, ir.Var) and lane_arg.name_hint == vector.params[1].name_hint
+
     def test_mx_pairing_uses_pipe_id_and_consumer_layout(self):
         """Each MX push follows the consumer contract of its own V2C pipe id."""
 
