@@ -1189,62 +1189,33 @@ def test_reg_spill_policy_flags(compiler_module, monkeypatch, tmp_path, platform
 
 
 @pytest.mark.parametrize(
-    "diagnostic,spill",
+    "diagnostic",
     [
-        ("The total stack object size (704) exceeded vf stack size (0).\nTotal Spilled Byte Size: 704", True),
-        ("unknown command line argument", False),
-        ("The total stack object size (704) exceeded vf stack size (512).", False),
-        ("The total stack object size (704) exceeded  vf stack size (0).", True),
+        "The total stack object size (704) exceeded vf stack size (0).\nTotal Spilled Byte Size: 704",
+        "unknown command line argument",
+        "The total stack object size (704) exceeded vf stack size (512).",
+        "The total stack object size (704) exceeded\nvf stack size (0).\nPredicates: 0",
     ],
 )
-def test_reg_spill_diagnostic_preserves_details(compiler_module, monkeypatch, tmp_path, diagnostic, spill):
+def test_reg_spill_preserves_original_compiler_error(compiler_module, monkeypatch, tmp_path, diagnostic):
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
     helper = tmp_path / "helper.pto"
     helper.write_text("// pypto.reg_spill: deny\nmodule {}")
+    original_error = RuntimeError(diagnostic)
 
     def run(cmd, output, label):
         if cmd[0] == "ptoas":
             output.write_text("define void @helper() { ret void }")
             return b"llvm"
-        raise RuntimeError(diagnostic)
+        raise original_error
 
     monkeypatch.setattr(compiler, "_run", run)
     with pytest.raises(RuntimeError) as caught:
         compiler._compile_vpto_helpers((str(helper),), tmp_path)
-    assert isinstance(caught.value, compiler_module.RegisterSpillError) is spill
-    assert diagnostic.splitlines()[0] in str(caught.value)
-    report = tmp_path / "report/helper-spill.txt"
-    assert report.exists() is spill
-    if spill:
-        assert diagnostic in report.read_text()
-        assert "Command: bisheng" in report.read_text()
-        assert "allow_reg_spill=True" in str(caught.value)
-        assert report.with_suffix(".ll").exists()
-        assert caught.value.__suppress_context__
-        assert str(caught.value.__context__) == diagnostic
-
-
-def test_reg_spill_report_write_failure_preserves_diagnostic(compiler_module, monkeypatch, tmp_path):
-    compiler = compiler_module.KernelCompiler("a5")
-    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
-    helper = tmp_path / "helper.pto"
-    helper.write_text("// pypto.reg_spill: deny\nmodule {}")
-    # A file at the report directory path reproduces an unwritable destination.
-    (tmp_path / "report").write_text("occupied")
-    diagnostic = "The total stack object size (704) exceeded vf stack size (0).\nPredicates: 0"
-
-    def run(cmd, output, label):
-        if cmd[0] == "ptoas":
-            output.write_text("define void @helper() { ret void }")
-            return b"llvm"
-        raise RuntimeError(diagnostic)
-
-    monkeypatch.setattr(compiler, "_run", run)
-    with pytest.raises(compiler_module.RegisterSpillError) as caught:
-        compiler._compile_vpto_helpers((str(helper),), tmp_path)
-    assert diagnostic in str(caught.value)
-    assert "Could not save compiler diagnostics" in str(caught.value)
+    assert caught.value is original_error
+    assert str(caught.value) == diagnostic
+    assert not (tmp_path / "report").exists()
 
 
 def test_reg_spill_cache_tracks_source_policy(compiler_module, monkeypatch, tmp_path):
@@ -1282,10 +1253,10 @@ def test_reg_spill_real_bisheng(compiler_module, monkeypatch, tmp_path, case, po
     helper = tmp_path / f"{case}.pto"
     helper.write_text(f"// pypto.reg_spill: {policy}\n" + fixture.read_text())
     if case == "mask_spill" and policy == "deny":
-        with pytest.raises(compiler_module.RegisterSpillError, match="exceeded vf stack size"):
+        with pytest.raises(RuntimeError, match="exceeded vf stack size") as caught:
             compiler._compile_vpto_helpers((str(helper),), tmp_path)
-        report = tmp_path / "report/mask_spill-spill.txt"
-        assert "Total Spilled Byte Size:" in report.read_text()
+        assert "Total Spilled Byte Size:" in str(caught.value)
+        assert not (tmp_path / "report").exists()
     else:
         objects = compiler._compile_vpto_helpers((str(helper),), tmp_path)
         assert objects[0].read_bytes().startswith(b"\x7fELF")
