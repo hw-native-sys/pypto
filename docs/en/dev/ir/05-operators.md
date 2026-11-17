@@ -515,6 +515,29 @@ quantization alignment and memory-planner requirements.
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
 | Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md). |
 
+### Tile-only MX GEMV (Ascend950)
+
+`pl.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)` computes a single-row
+block-scaled product. `gemv_mx_acc(acc, ...)` accumulates in place, while
+`gemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias)` initializes with FP32 bias.
+All three lower to the corresponding `pto.tgemv.mx` operations on A5.
+
+The lhs has one physical and valid row. The result uses physical `[1, N]`
+and valid `[1, valid_N]` shapes. FP8E4M3FN and native packed FP4 E2M1/E1M2
+pairs are supported; FP4 row vectors keep their packed pairs along K even in
+L0A. Data K is a positive multiple of 64, and physical N is a multiple of 32
+(FP4: 64). FP8E8M0 scales use `[1, ceil(valid_K/32)]` and
+`[ceil(valid_K/32), physical_N]`, with RHS valid columns matching valid N.
+Single-row lhs scales use `MX_A_ND` in GM. Scale addresses are
+bound automatically before scale fills. Bias uses physical
+`[1, N]` and matching valid N. The accumulator must match the product's
+physical and valid shapes and FP32 dtype. GEMV results carry `compact=normal`
+so L0C readers use MAD's 16-row fractal pitch despite the single-row descriptor.
+Mat-to-Left row-vector extraction requires a 512-byte-aligned physical width;
+packed FP4 therefore uses a physical K multiple of 1024, with narrower valid K
+allowed. PTOAS 0.74's single-row `MX_A_ND` load supports two scale groups;
+larger GM scale transfers remain subject to downstream load support.
+
 ### Tile-only GEMV family (A2/A3)
 
 The tile-only GEMV family uses logical shape `[1, N]` but follows the Cube

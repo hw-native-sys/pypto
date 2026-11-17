@@ -830,3 +830,50 @@ class TestMxANDScaleCodegen:
         assert "#pto.layout<mx_a_zz>" not in mlir
         assert "pto.tload" in mlir
         assert "pto.tmov" not in mlir
+
+
+@pytest.mark.parametrize("dtype", [pl.FP8E4M3FN, pl.FP4E2M1X2, pl.FP4E1M2X2])
+def test_gemv_mx_pipeline(dtype, tmp_path):
+    packed = dtype in (pl.FP4E2M1X2, pl.FP4E1M2X2)
+    a_cols = 64 if packed else 128
+    b_cols = 32 if packed else 64
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[1, a_cols], dtype],
+            b: pl.Tensor[[128, b_cols], dtype],
+            sa: pl.Tensor[[1, 4], pl.FP8E8M0, pl.MX_A_ND],
+            sb: pl.Tensor[[4, 64], pl.FP8E8M0, pl.MX_B_NN],
+            bias: pl.Tensor[[1, 64], pl.FP32],
+            out: pl.Tensor[[1, 64], pl.FP32],
+        ):
+            lhs = pl.move(pl.load(a, [0, 0], [1, a_cols], target_memory=pl.Mem.Mat), pl.Mem.Left)
+            rhs = pl.move(
+                pl.load(b, [0, 0], [128, b_cols], target_memory=pl.Mem.Mat),
+                pl.Mem.Right,
+            )
+            lhs_scale = pl.move(pl.load(sa, [0, 0], [1, 4], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+            rhs_scale = pl.move(pl.load(sb, [0, 0], [4, 64], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+            result = pl.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)
+            pl.store(result, [0, 0], out)
+            accumulated = pl.tile.gemv_mx_acc(result, lhs, lhs_scale, rhs, rhs_scale)
+            pl.store(accumulated, [0, 0], out)
+            bias_tile = pl.move(pl.load(bias, [0, 0], [1, 64], target_memory=pl.Mem.Mat), pl.Mem.Bias)
+            biased = pl.tile.gemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias_tile)
+            pl.store(biased, [0, 0], out)
+
+    mlir = _emit_incore_mlir(Program)
+    cpp = _assemble_mx(mlir, tmp_path)
+    for suffix in ("", ".acc", ".bias"):
+        assert f"pto.tgemv.mx{suffix} ins(" in mlir
+    assert mlir.count("pto.tget_scale_addr") == 2
+    assert "loc=acc, dtype=f32, rows=1, cols=64" in mlir
+    assert uses_native_fp4_mx(_run_default_pipeline(Program)) == packed
+    assert "TGEMV_MX" in cpp
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

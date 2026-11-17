@@ -281,6 +281,9 @@ MIGRATION_FAMILIES = (
     MigrationFamily(
         "G15: A5 MX and scale binding",
         (
+            "tile.gemv_mx",
+            "tile.gemv_mx_acc",
+            "tile.gemv_mx_bias",
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
             "tile.matmul_mx_bias",

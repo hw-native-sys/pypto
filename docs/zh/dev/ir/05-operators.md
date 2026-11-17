@@ -456,6 +456,26 @@ FP4 结果需通过受支持的 Mat 和 Left/Right 放置路径供 tile 矩阵�
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；codegen 发射逻辑 rank-2 `make_tensor_view`（PTOAS v0.60 InferPTOLayout / EmitC 映射物理 pack） |
 | 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/15-lower_composite_ops.md) |
 
+### 仅 Tile 的 MX GEMV（Ascend950）
+
+`pl.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)` 计算单行块缩放矩阵乘。
+`gemv_mx_acc(acc, ...)` 原位累加；
+`gemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias)` 使用 FP32 偏置初始化。
+三个接口对应 A5 的 `pto.tgemv.mx` 系列操作。
+
+lhs 的物理行数和有效行数均为 1。结果物理形状为 `[1, N]`，有效形状为
+`[1, valid_N]`。支持 FP8E4M3FN 以及原生打包 FP4 E2M1/E1M2 输入对。
+FP4 行向量在 L0A 中仍沿 K 轴打包。物理 K 必须是 64 的正整数倍，
+物理 N 必须是 32 的倍数（FP4 为 64）。FP8E8M0 缩放形状分别为
+`[1, ceil(valid_K/32)]` 和 `[ceil(valid_K/32), physical_N]`，右侧缩放的
+有效列数与 valid N 一致。单行 GM 左侧缩放使用 `MX_A_ND` 布局。
+编译器在填充缩放数据前自动绑定地址。偏置形状为
+`[1, N]` 且有效 N 必须匹配；累加器必须匹配乘积的物理形状、有效形状及 FP32 类型。结果带有 `compact=normal`，
+使 L0C 读取按照 MAD 的 16 行分形间距寻址，而非描述符中的单行间距。
+Mat 到 Left 的行向量提取要求物理宽度按 512 字节对齐，因此打包 FP4 的物理 K
+使用 1024 的倍数，并可声明更小的有效 K。PTOAS 0.74 的单行 `MX_A_ND` 加载
+支持两个缩放组，更大的 GM 缩放传输仍取决于下游加载支持。
+
 ### 仅 Tile 的 GEMV 家族（A2/A3）
 
 仅 tile 的 GEMV 家族逻辑形状为 `[1, N]`，但物理形状遵循 Cube 指令的对齐契约：

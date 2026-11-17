@@ -23,7 +23,15 @@ from ._ptoas_config import get_ptoas_timeout
 from ._ptoas_locate import PTOAS_MIN_VERSION, check_ptoas_version, find_ptoas_binary
 
 _MX_OPS = frozenset(
-    ir.get_op(name).name for name in ("tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias")
+    ir.get_op(name).name
+    for name in (
+        "tile.matmul_mx",
+        "tile.matmul_mx_acc",
+        "tile.matmul_mx_bias",
+        "tile.gemv_mx",
+        "tile.gemv_mx_acc",
+        "tile.gemv_mx_bias",
+    )
 )
 _PACKED_DTYPES = (DataType.FP4E2M1X2, DataType.FP4E1M2X2)
 _probe_lock = threading.Lock()

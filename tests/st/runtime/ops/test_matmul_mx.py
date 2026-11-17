@@ -122,7 +122,7 @@ def _matmul_mx_golden(
     b_scale_codes: torch.Tensor,
 ) -> torch.Tensor:
     """Compute MX matmul from decoded values and logical per-group E8M0 scales."""
-    k_group = torch.arange(K) // MX_GROUP_SIZE
+    k_group = torch.arange(a.shape[1]) // MX_GROUP_SIZE
     a_scale = torch.pow(2.0, a_scale_codes.to(torch.float64) - 127)
     b_scale = torch.pow(2.0, b_scale_codes.to(torch.float64) - 127)
     a_scaled = a.to(torch.float64) * a_scale[:, k_group]
@@ -414,6 +414,110 @@ def _native_fp4_golden(lhs_dtype, rhs_dtype):
     ]
 )
 def test_native_fp4_matmul_mx(case_run):
+    case_run.assert_passed()
+
+
+def _gemv_mx_entry(dtype):
+    @pl.jit(auto_scope=False)
+    def entry(
+        a: pl.Tensor[[1, 512], pl.UINT8],
+        a_scale: pl.Tensor[[1, 2], pl.FP8E8M0, pl.MX_A_ND],
+        b: pl.Tensor[[64, 512], pl.UINT8],
+        b_scale: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
+        bias: pl.Tensor[[1, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        out_acc: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        out_bias: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ):
+        a_fp4 = pl.reinterpret_view(a, dtype)
+        b_fp4 = pl.reinterpret_view(b, dtype)
+        with pl.spmd(1):
+            row = pl.tile.get_block_idx()
+            lhs = pl.tile.move(
+                pl.tile.load(a_fp4, [row, 0], [1, 512], valid_shape=[1, 32], target_memory=pl.Mem.Mat),
+                pl.Mem.Left,
+            )
+            rhs_nk = pl.tile.load(b_fp4, [0, 0], [64, 512], valid_shape=[64, 32], target_memory=pl.Mem.Mat)
+            rhs = pl.tile.move(pl.tile.transpose_view(rhs_nk), pl.Mem.Right)
+            sa = pl.tile.move(
+                pl.tile.load(a_scale, [0, 0], [1, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale
+            )
+            sb = pl.tile.move(
+                pl.tile.load(b_scale, [0, 0], [2, 64], target_memory=pl.Mem.Mat), pl.Mem.RightScale
+            )
+            bias_tile = pl.tile.move(
+                pl.tile.load(bias, [0, 0], [1, 64], target_memory=pl.Mem.Mat), pl.Mem.Bias
+            )
+            base = pl.tile.gemv_mx(lhs, sa, rhs, sb)
+            accumulated = pl.tile.gemv_mx_acc(base, lhs, sa, rhs, sb)
+            pl.tile.store(accumulated, [row, 0], out_acc)
+            biased = pl.tile.gemv_mx_bias(lhs, sa, rhs, sb, bias_tile)
+            pl.tile.store(biased, [row, 0], out_bias)
+            plain = pl.tile.gemv_mx(lhs, sa, rhs, sb)
+            pl.tile.store(plain, [row, 0], out)
+        return out, out_acc, out_bias
+
+    return entry
+
+
+def _gemv_mx_specs():
+    gen = torch.Generator().manual_seed(79)
+    a = MatmulMxTestCase._make_fp4_data((1, 1024), gen).view(torch.uint8)
+    b = MatmulMxTestCase._make_fp4_data((64, 1024), gen).view(torch.uint8)
+    sa = torch.randint(126, 130, (1, 2), generator=gen).to(torch.uint8)
+    sb = _pack_b_scale(torch.randint(126, 130, (2, 64), generator=gen).to(torch.uint8))
+    bias = torch.randint(-4, 5, (1, 64), generator=gen).float()
+    return [
+        TensorSpec("a", [1, 512], DataType.UINT8, init_value=a),
+        TensorSpec("a_scale", [1, 2], DataType.FP8E8M0, init_value=sa.view(torch.float8_e8m0fnu)),
+        TensorSpec("b", [64, 512], DataType.UINT8, init_value=b),
+        TensorSpec("b_scale", [2, 64], DataType.FP8E8M0, init_value=sb.view(torch.float8_e8m0fnu)),
+        TensorSpec("bias", [1, 64], DataType.FP32, init_value=bias),
+        TensorSpec("out", [1, 64], DataType.FP32, is_output=True),
+        TensorSpec("out_acc", [1, 64], DataType.FP32, is_output=True),
+        TensorSpec("out_bias", [1, 64], DataType.FP32, is_output=True),
+    ]
+
+
+def _gemv_mx_golden(dtype):
+    def golden(tensors):
+        levels = (
+            [0, 0.5, 1, 1.5, 2, 3, 4, 6]
+            if dtype == pl.FP4E2M1X2
+            else [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75]
+        )
+        values = torch.tensor(levels + [-v for v in levels], dtype=torch.float64)
+
+        def decode(raw):
+            codes = torch.stack((raw & 15, raw >> 4), dim=-1).flatten(-2).long()
+            return values[codes]
+
+        base = _matmul_mx_golden(
+            decode(tensors["a"])[:, :64],
+            tensors["a_scale"].view(torch.uint8),
+            decode(tensors["b"])[:, :64].T,
+            _unpack_b_scale(tensors["b_scale"].view(torch.uint8)),
+        )
+        return {"out": base, "out_acc": 2 * base, "out_bias": base + tensors["bias"]}
+
+    return golden
+
+
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            _gemv_mx_entry(dtype),
+            tensors=_gemv_mx_specs(),
+            name=f"gemv_mx_{dtype}_base_acc_bias",
+            golden=_gemv_mx_golden(dtype),
+            rtol=0.0,
+            atol=0.0,
+        )
+        for dtype in (pl.FP4E2M1X2, pl.FP4E1M2X2)
+    ]
+)
+def test_native_fp4_gemv_mx(case_run):
     case_run.assert_passed()
 
 
