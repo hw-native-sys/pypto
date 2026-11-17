@@ -2565,9 +2565,15 @@ jobs:
             LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/urma_async/ascend"
             mkdir -p "$LOGDIR"
             export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
-            # Four cards select the P=4 cases. No --forked: JIT compilation can
-            # leave a child that pytest-forked waits on beyond its timeout.
-            task-submit --device auto --device-num 4 --timeout 3900 --max-time 1800 \
+            # This CI runner currently supports two-card URMA tests. The STs
+            # skip P=4 when fewer than four devices are allocated; usable card
+            # IDs and connectivity are configured by the runner.
+            # --timeout covers queueing plus execution. 3900 was sized for the
+            # four-card wait; two cards queue like every other two-card job
+            # here, so this uses their 3600. --max-time still caps execution.
+            # No --forked: JIT compilation can leave a child that
+            # pytest-forked waits on beyond its timeout.
+            task-submit --device auto --device-num 2 --timeout 3600 --max-time 1800 \
               --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
                 tests/st/distributed/test_l3_urma_async.py \
                 -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \

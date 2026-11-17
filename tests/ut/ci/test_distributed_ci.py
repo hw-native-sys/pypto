@@ -61,7 +61,7 @@ def test_distributed_job_routes_and_propagates_failure(
     assert result.returncode == exit_code, result.stderr
     executed = log.read_text()
     if has_suite:
-        assert "task-submit --device auto --device-num 4" in executed
+        assert "task-submit --device auto --device-num 2" in executed
         assert "tests/st/distributed/test_l3_urma_async.py" in executed
         assert "test_ci_placeholder.py" not in executed
     else:
