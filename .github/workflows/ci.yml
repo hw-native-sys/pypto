@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   changes:
+    if: github.head_ref != 'diag/a5-urma-mfe-3085'
     runs-on: ubuntu-latest
     permissions:
       # The classifier needs pull-requests: read. On dispatched full runs the

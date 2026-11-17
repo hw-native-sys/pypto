@@ -1,0 +1,122 @@
+name: A5 URMA MFEs (temporary)
+run-name: URMA PR/DT diagnostic @${{ github.event.pull_request.head.sha }}
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: urma-mfe-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  toolchain:
+    if: github.head_ref == 'diag/a5-urma-mfe-3085'
+    runs-on: ubuntu-latest
+    outputs:
+      pto_isa_commit: ${{ steps.pins.outputs.PTO_ISA_COMMIT }}
+      ptoas_version: ${{ steps.pins.outputs.PTOAS_VERSION }}
+      ptoas_sha256_aarch64: ${{ steps.pins.outputs.PTOAS_SHA256_AARCH64 }}
+      ptoas_sha256_x86_64: ${{ steps.pins.outputs.PTOAS_SHA256_X86_64 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: true
+          persist-credentials: false
+      - name: Read pinned toolchain
+        id: pins
+        shell: bash
+        run: |
+          grep -E '^[A-Z0-9_]+=' toolchain/versions.env >> "$GITHUB_OUTPUT"
+          commit="$(tr -d '[:space:]' < runtime/pto_isa.pin)"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          echo "PTO_ISA_COMMIT=$commit" >> "$GITHUB_OUTPUT"
+
+  onboard-a5-distributed:
+    needs: toolchain
+    name: onboard-a5-distributed-${{ matrix.soc }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - soc: PR
+            arch: x64
+          - soc: DT
+            arch: arm64
+    runs-on: [self-hosted, linux, npu-a5, "${{ matrix.arch }}"]
+    timeout-minutes: 110
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/urma-mfe-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+      TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+      # The distributed JIT key includes device IDs. Warm each discovered pair
+      # using one private persistent cache across fresh processes.
+      PYPTO_CACHE: '1'
+      PYPTO_CACHE_READONLY: '0'
+      PYPTO_CACHE_DIR: ${{ github.workspace }}/urma-mfe-checkout/.cache/urma-mfe
+      EXPECTED_SOC: ${{ matrix.soc }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Load build limits
+        shell: bash
+        run: |
+          source .claude/skills/testing/load-env.sh
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$PYPTO_BUILD_JOBS" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: urma-mfe-checkout
+          checkout-ref: ${{ github.event.pull_request.head.sha }}
+          needs-device: 'true'
+          pip-cache-name: pip-a5
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a5
+          unset-ring: 'true'
+          toolchain: bundle
+      - name: Warm standalone kernels outside device allocation
+        shell: bash
+        working-directory: urma-mfe-checkout
+        run: |
+          source activate.sh
+          source .claude/skills/testing/load-env.sh
+          cd runtime
+          python -m simpler_setup.tools.scene_test_compile \
+            tests/st/a5/tensormap_and_ringbuffer/urma_deferred_completion/test_urma_deferred_completion.py::TestUrmaGet \
+            tests/st/a5/tensormap_and_ringbuffer/urma_deferred_completion/test_urma_deferred_completion.py::TestUrmaPut \
+            --platform a5 --manual include --require-pto-isa --compile-workers "$PYPTO_BUILD_JOBS"
+      - name: Test every card in pairs, three independent attempts per MFE
+        shell: bash
+        working-directory: urma-mfe-checkout
+        run: |
+          source activate.sh
+          # Clear inherited short CI watchdogs; retain the product defaults.
+          unset SIMPLER_SCHEDULER_TIMEOUT_MS SIMPLER_OP_EXECUTE_TIMEOUT_US SIMPLER_STREAM_SYNC_TIMEOUT_MS
+          python tests/diagnostics/run_all_cards.py --expected-soc "$EXPECTED_SOC" --output outputs/urma-mfe
+      - name: Upload every attempt and device logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: urma-mfe-${{ matrix.soc }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            urma-mfe-checkout/outputs/urma-mfe/**
+      - name: Release orphaned queue tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: urma-mfe-checkout
