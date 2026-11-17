@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Direct A5 AIV chain: strict compilation, ordered submission and repeated visibility.
+"""Direct A5 AIC/AIV/MIX chains: strict compilation, ordered submission and repeated visibility.
 
 Run with --platform=a5; --codegen-only builds both device and orchestration
 binaries without starting a Worker. This exercises the direct bridge, which is
@@ -16,7 +16,7 @@ independent of automatic PyPTO JIT provider discovery.
 
 import pytest
 from pypto import DataType
-from pypto.backend.cannbotdsl_aiv import build_aiv_submitter, compile_aiv_task
+from pypto.backend.cannbotdsl_runtime import build_submitter, compile_task
 from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
 from pypto.jit.external.contracts import CompileTarget, KernelRequest, ParameterSpec, TensorSpec
@@ -24,8 +24,9 @@ from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
 
 
 @pytest.mark.platforms("a5", reason="CANNBotDSL direct bridge requires real A5 text-only loading")
+@pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed", "chain"])
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_cannbotdsl_aiv_chain(tmp_path, test_config, dynamic):
+def test_cannbotdsl_runtime_chain(tmp_path, test_config, dynamic, core_type):
     cb = pytest.importorskip("cannbotdsl")
     if not hasattr(cb, "export_device"):
         pytest.skip("installed CANNBotDSL lacks public device export")
@@ -35,33 +36,56 @@ def test_cannbotdsl_aiv_chain(tmp_path, test_config, dynamic):
     @cb.kernel
     def add_one(x, out):
         for i in cb.range(x.shape[0]):
-            out[i] = x[i] + 1.0
+            out[i] = x[i] + 1
 
-    tensor = TensorSpec(("n" if dynamic else 32,), DataType.FP32, strides=(1,))
+    @cb.kernel
+    def cube_add_one(x, out):
+        for i in cb.range(x.shape[0]):
+            cb.scalar.cube_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+
+    @cb.kernel
+    def mixed_add_one(x, out):
+        # Each participant owns whole, disjoint 64-byte cache lines.
+        for i in cb.range(x.shape[0]):
+            if (i // 16) % 3 == 0:
+                cb.scalar.cube_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+            if (i // 16) % 3 == cb.get_subblock_id() + 1:
+                cb.scalar.vec_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+
+    tensor = TensorSpec(("n" if dynamic else 96,), DataType.INT32, strides=(1,), alignment=64)
     request = KernelRequest(
         (ParameterSpec("x", tensor), ParameterSpec("out", tensor)),
         CompileTarget("a5", "ccec", "runtime-test"),
     )
-    prepared = CANNBotDSLProvider().prepare(add_one, request)
-    target = RuntimeTarget(
-        "tmr",
-        "1",
-        request.target,
-        frozenset({("cannbotdsl.device_callable", 1)}),
-        frozenset(
-            {
-                "core:aiv",
-                "aiv_lanes:1",
-                "completion:entry_return_visible",
-                "tensor_writeback",
-                "partial_write",
-            }
-        ),
-    )
-    task = TMRBridge().lower(prepared, target)
     compiler = KernelCompiler("a5")
-    kernel = compile_aiv_task(task, compiler, pto_isa_root=str(tmp_path))
-    submitter = build_aiv_submitter((task,) * 3, (0, 1, 2))
+    tasks, ids, images = [], [], []
+    kinds = ("aic", "mixed", "aiv") if core_type == "chain" else (core_type,) * 3
+    for kind in kinds:
+        prepared = CANNBotDSLProvider().prepare(
+            {"aic": cube_add_one, "aiv": add_one, "mixed": mixed_add_one}[kind], request
+        )
+        assert prepared.execution.aiv_lanes == {"aic": 0, "aiv": 1, "mixed": 2}[kind]
+        target = RuntimeTarget(
+            "tmr",
+            "1",
+            request.target,
+            frozenset({("cannbotdsl.device_callable", 1)}),
+            frozenset(
+                {
+                    *(f"core:{core.value}" for core in prepared.execution.cores),
+                    f"aiv_lanes:{prepared.execution.aiv_lanes}",
+                    "completion:entry_return_visible",
+                    "tensor_writeback",
+                    "partial_write",
+                }
+            ),
+        )
+        task = TMRBridge().lower(prepared, target)
+        binaries = compile_task(task, compiler, pto_isa_root=str(tmp_path))
+        tasks.append(task)
+        ids.append(tuple(range(len(images), len(images) + len(binaries))))
+        images.extend(binaries)
+    submitter = build_submitter(tuple(tasks), tuple(ids))
     for file in submitter.files:
         path = tmp_path / file.path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,11 +94,11 @@ def test_cannbotdsl_aiv_chain(tmp_path, test_config, dynamic):
     source.write_text(
         f'''#include "{submitter.entry}"
 extern "C" __attribute__((visibility("default")))
-OrchestrationConfig cann_aiv_chain_config(const ChipTaskArgs&) {{
+OrchestrationConfig cann_chain_config(const ChipTaskArgs&) {{
     return OrchestrationConfig{{.expected_arg_count = 4}};
 }}
 extern "C" __attribute__((visibility("default")))
-void cann_aiv_chain(const ChipTaskArgs& args) {{
+void cann_chain(const ChipTaskArgs& args) {{
     CoreTaskArgs calls[3];
     for (int i = 0; i < 3; ++i) {{
         calls[i].add_input(args.tensor(i).ref());
@@ -87,7 +111,7 @@ void cann_aiv_chain(const ChipTaskArgs& args) {{
     orchestration = compiler.compile_orchestration(
         runtime_name="tensormap_and_ringbuffer", source_path=str(source)
     )
-    assert kernel and orchestration
+    assert all(images) and orchestration
     import torch  # noqa: PLC0415
     from simpler.task_interface import (  # noqa: PLC0415
         ArgDirection,
@@ -103,12 +127,14 @@ void cann_aiv_chain(const ChipTaskArgs& args) {{
     )
     from simpler.worker import Worker  # noqa: PLC0415
 
-    core = CoreCallable.build(signature=[ArgDirection.IN, ArgDirection.OUT], binary=kernel)
+    cores = [
+        CoreCallable.build(signature=[ArgDirection.IN, ArgDirection.OUT], binary=image) for image in images
+    ]
     chip = ChipCallable.build(
         signature=[ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.OUT],
-        func_name="cann_aiv_chain",
+        func_name="cann_chain",
         binary=orchestration,
-        children=[(i, core) for i in range(3)],
+        children=list(enumerate(cores)),
     )
     if test_config.codegen_only:
         return
@@ -121,12 +147,12 @@ void cann_aiv_chain(const ChipTaskArgs& args) {{
         handle = worker.register(chip)
         worker.init()
         # Different shapes on successive dynamic runs also check fresh bindings.
-        for count in (32, 17, 64) if dynamic else (32, 32, 32):
+        for count in (96, 17, 192) if dynamic else (96, 96, 96):
             buffers = [worker.malloc(count * 4) for _ in range(4)]
             args = TaskArgs()
             for i, buffer in enumerate(buffers):
                 args.add_tensor(
-                    Tensor(buffer, shapes=(count,), dtype=RuntimeDType.FLOAT32),
+                    Tensor(buffer, shapes=(count,), dtype=RuntimeDType.INT32),
                     (
                         TensorArgType.INPUT,
                         TensorArgType.INOUT,
@@ -135,7 +161,7 @@ void cann_aiv_chain(const ChipTaskArgs& args) {{
                     )[i],
                 )
             for repeat in range(3):
-                x = torch.arange(count, dtype=torch.float32) + repeat
+                x = torch.arange(count, dtype=torch.int32) + repeat
                 worker.copy_to(buffers[0], x)
                 for buffer in buffers[1:]:
                     worker.copy_to(buffer, torch.full_like(x, -999.0))

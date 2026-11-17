@@ -142,17 +142,17 @@ its identity is explicitly incomplete because no complete Python closure/input
 snapshot exists. This provider is therefore not registered with the capture-only
 registry and does not claim preparation-cache reuse.
 
-The A5 TMR bridge supports direct execution of the minimal single-block AIV
+The A5 TMR bridge supports direct execution of the single-block AIC/AIV/MIX
 subset described below. Automatic discovery and lifetime-safe binding in JIT
 programs remain follow-up work; device numerical and performance acceptance
 remain tracked separately. Preparation and binary compilation do not use caches.
 
-### Minimal A5 AIV runtime path
+### A5 AIC/AIV/MIX runtime path
 
 `TMRBridge.lower(prepared, target)` accepts `cannbotdsl.device_callable` v1 for
-TMR v1 on `a5/ccec`. It requires exactly one AIV participant, no cooperative
-launch, no implicit workspace, no local allocations, and the exporter's exact
-resource, state, loading and completion declarations. Unknown or stronger
+TMR v1 on `a5/ccec`. It supports one AIC, one AIV, or one hardware-paired
+AIC + two AIV group (MIX). It requires no implicit workspace, no local allocations,
+and the exporter's exact resource, state, loading and completion declarations. Unknown or stronger
 requirements fail before compilation. Each submission must contain exactly one
 logical block without synchronized start.
 
@@ -164,32 +164,50 @@ The wrapper drains inherited pipelines and scalar GM writes before entry and
 forces atomic-none. After the exported call it drains again, flushes scalar GM,
 executes a DDR barrier, restores ASC/DMA/padding/quantization/mask defaults and
 the saved CTRL, and returns with atomic-none. Only then may the executor publish
-FIN or execute the next callback. This is a single-participant guarantee, not a
-cross-core barrier.
+a participant FIN or execute the next callback. AIC entry also clears inherited
+HF32 mode; both compiled variants restore the saved CTRL. TMR places a MIX task
+on one physical cluster and completes the task only after all three participant
+FINs. Its existing completion counter supplies the group join; a local pipe
+barrier is not treated as a cross-core barrier. The kernel author must still
+ensure intra-group synchronization and disjoint cache-line ownership for writes.
 
-Use `pypto.backend.cannbotdsl_aiv.compile_aiv_task(task, compiler,
-pto_isa_root=...)` to produce text bytes for a `CoreCallable`. It takes C API
+Use `pypto.backend.cannbotdsl_runtime.compile_task(task, compiler,
+pto_isa_root=...)` to produce a tuple of text images in `task.prepared.execution.cores`
+order: one image for AIC/AIV, or `(aic_image, aiv_image)` for MIX. Each image is
+registered as a `CoreCallable`; both AIV lanes reuse the MIX AIV image. Every image
+must pass admission before the tuple is returned. It takes C API
 headers from the compiler's selected CANN SDK, retains owned source through
 compilation, and requires text-only ELF admission and static zero-stack reports.
 The ordinary JIT `configure_context` route rejects this task's binary policy
 rather than compiling it without admission checks.
 
-`build_aiv_submitter(tasks, function_ids)` returns an owned orchestration header.
-Register each compiled kernel at its corresponding nonnegative, unique function
-ID. The generated function takes `std::array<CoreTaskArgs*, N>` and returns the
+`build_submitter(tasks, function_ids)` returns an owned orchestration header.
+Pass one function-ID tuple per task, in the same order as its compiled images;
+for example `((10,), (20, 21), (30,))` registers an AIC → MIX → AIV batch.
+IDs must be nonnegative and unique across distinct task/core images. Repeated
+occurrences of an equal `ExternalTask` may reuse the same ID for the same core;
+one ID mapped to different tasks or cores is rejected within the batch. Register
+each compiled kernel at its corresponding ID. The generated function takes `std::array<CoreTaskArgs*, N>` and returns the
 submitted task IDs. Before any submission it checks all launches and bindings;
 it then uses the ordered batch helper to disable early dispatch and add
 completion-based `DEP_WAIT` edges for every conflicting 64-byte cache line.
-Actual submission uses `rt_submit_aiv_task`, with one AIV and no AIC participant.
+Actual submission uses `rt_submit_task(MixedKernels, args)`. Unused slots are -1;
+MIX fills AIC with the first ID and both AIV slots with the second ID, yielding
+one task ID whose completion covers the whole group.
 Materialize all header files for the orchestration build and retain callables,
 argument descriptors and tensor storage until execution completes. Calls outside
 this batch need their own dependencies or GM isolation, including PyPTO producers
 and consumers.
+Include the returned `SourceArtifact.entry` rather than a fixed filename. Runtime
+entry filenames include a digest of the batch and registration IDs, so multiple
+submitters can share one materialization directory and translation unit.
 
 Host tests exercise the wrapper's drain/restore order and actual TMR submission
-API; optional CCEC tests compile static/dynamic exports through admission.
-The focused runtime test `tests/st/runtime/external_kernel/test_cannbotdsl_aiv.py`
-builds a dependent AIV chain and checks repeated numerical results on A5.
+API plus the pinned scheduler's whole-group completion counter; optional CCEC
+tests compile static/dynamic AIC/AIV/MIX exports through admission.
+The focused runtime test `tests/st/runtime/external_kernel/test_cannbotdsl_runtime.py`
+builds dependent chains of each topology and an AIC → MIX → AIV chain, checking
+repeated numerical results on A5. MIX test participants write separate cache lines.
 `--codegen-only` compiles this test without launching a device; that does not
 establish device completion visibility or performance acceptance.
 
@@ -253,7 +271,7 @@ to a valid C++ bool. TMR limits are 32 tensors, 16 scalars and tensor rank 1..5;
 FP16/BF16 scalar slots are not supported.
 
 This is a callable header, **not an `ExternalTask` or a loadable runtime entry**:
-it deliberately defines no `kernel_entry`. The AIV runtime bridge above supplies
+it deliberately defines no `kernel_entry`. The shared runtime bridge above supplies
 that entry and the required execution policy. Its caller must run the binding checker on every invocation and meet
 the retained resource, cache-line, stack, binary-loading and completion
 requirements. Host C++ tests execute packing and offset handling; optional
@@ -293,7 +311,7 @@ FP16/BF16 runtime scalars are unsupported.
 Passing this checker **does not authorize device execution**: byte-level
 non-overlap does not establish 64-byte cache-line isolation between tasks.
 Resource ownership, stack/loading validation and task completion require the
-AIV runtime bridge above. Automatic JIT binding remains follow-up work.
+shared runtime bridge above. Automatic JIT binding remains follow-up work.
 
 ### CANNBotDSL cross-invocation cache-line conflicts
 
@@ -334,7 +352,9 @@ these predicates into TMR dependencies; JIT integration remains follow-up work.
 ### CANNBotDSL ordered batch submission
 
 `pypto.backend.cannbotdsl_submit.build_ordered_submitter(prepared)` accepts a
-nonempty tuple of prepared kernels and produces an owned `ordered_submit.hpp`.
+nonempty tuple of prepared kernels and produces an owned header at
+`SourceArtifact.entry`. Its filename includes the batch identity so different
+batches do not overwrite one another; identical support headers can be shared.
 Its generated function takes `std::array<CoreTaskArgs*, N>` and a synchronous
 callback `(size_t index, CoreTaskArgs& args) -> TaskId`, returning the submitted
 IDs in batch order. The callback must submit exactly the indexed prepared
@@ -602,7 +622,7 @@ includes, contract and checker to an existing extern specialization. Keep that l
 alive until the existing runtime has compiled/published its sources. AIC/AIV members,
 mixed Groups and vector lane count come from the execution contract. Registered-object
 discovery remains task 34.5; persistent reuse remains task 34.6. CANNBotDSL uses
-the dedicated direct AIV path documented above.
+the dedicated direct runtime path documented above.
 
 Orchestration invokes the checker after building actual task arguments and before
 submission, including direct calls, explicit submits and reordered SPMD/Group wrappers.
@@ -616,7 +636,7 @@ inherited HF32 mode on AIC cores; AIV preserves that control bit. It drains pipe
 writes back caches and applies the DDR barrier before returning, then restores control
 state with atomics disabled.
 
-This c_pointer path rejects descriptor ABIs; the dedicated AIV path handles the
+This c_pointer path rejects descriptor ABIs; the dedicated runtime path handles the
 supported CANNBotDSL subset. Other unsupported cases fail explicitly: non-ND layouts, ranks outside
 1–5, FP16/BF16 scalars, other architectures/runtimes, logical launch context,
 synchronized/full-resident launches, runtime-allocated output slots and recorded

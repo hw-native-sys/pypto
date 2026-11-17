@@ -7,14 +7,16 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Single-block A5 AIV execution of owned CANNBotDSL exports on TMR.
+"""Single-block A5 AIC/AIV/MIX execution of owned CANNBotDSL exports on TMR.
 
 TMR executes callbacks serially on each physical core, including queued tasks.
 Local memory and sync resources belong to that callback until it returns. This
 bridge drains before entry and before return, restores the default device state,
-and only submits single-participant tasks with completion-based dependencies.
+and submits one hardware group with completion-based dependencies. MIX completion
+is published by TMR only after AIC, AIV0 and AIV1 have all returned.
 """
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
     from pypto.runtime.kernel_compiler import KernelCompiler
 
 
-_VERSION = "tmr-cannbotdsl-aiv-1"
+_VERSION = "tmr-cannbotdsl-2"
 _RESOURCES: dict[str, object] = {
     "allocations": [],
     "entry_requires_previous_task_complete": True,
@@ -68,28 +70,39 @@ def _validate(prepared: PreparedKernel, target: RuntimeTarget) -> None:
         target.compile_target.architecture,
         target.compile_target.compiler,
     ) != ("tmr", "1", "a5", "ccec"):
-        raise ContractError("CANNBotDSL AIV bridge requires TMR v1 on a5/ccec")
+        raise ContractError("CANNBotDSL bridge requires TMR v1 on a5/ccec")
     execution = prepared.execution
-    if (
-        execution.cores != (Core.AIV,)
-        or execution.aiv_lanes != 1
-        or any((execution.full_residency, execution.sync_start, execution.logical_launch_context))
-    ):
-        raise ContractError("CANNBotDSL AIV bridge requires one independent AIV participant")
+    if (execution.cores, execution.aiv_lanes) not in (
+        ((Core.AIC,), 0),
+        ((Core.AIV,), 1),
+        ((Core.AIC, Core.AIV), 2),
+    ) or any((execution.full_residency, execution.sync_start, execution.logical_launch_context)):
+        raise ContractError("CANNBotDSL bridge requires AIC, AIV, or one hardware-paired AIC/two-AIV group")
     if prepared.contract.required_capabilities - _CAPABILITIES:
-        raise ContractError("CANNBotDSL AIV bridge has unsupported required capabilities")
+        raise ContractError("CANNBotDSL bridge has unsupported required capabilities")
     manifest = _manifest(prepared)
     resources = manifest["resources"]
-    expected = {**_RESOURCES, "gm_write_isolation": resources.get("gm_write_isolation")}
+    mixed = execution.cores == (Core.AIC, Core.AIV)
+    expected = {
+        **_RESOURCES,
+        "topology": "hardware_paired_aic_and_two_aiv" if mixed else "single_core",
+        "gm_write_isolation": resources.get("gm_write_isolation"),
+    }
     build = manifest["build_requirements"]
     # Type-sensitive comparison rejects True in place of a byte count and
     # unknown fields. Do not silently accept a stronger exporter contract.
     from pypto.jit.external.providers.cannbotdsl import _expect_metadata  # noqa: PLC0415
 
+    source_includes = build.get("source_includes")
+    if source_includes not in (
+        ["c_api/asc_simd.h"],
+        ["c_api/asc_simd.h", "c_api/scalar_compute/scalar_compute.h"],
+    ):
+        raise ContractError("CANNBotDSL runtime: unsupported CANN source includes")
     for actual, required, label in (
-        (resources, expected, "AIV resources (no local allocations or workspace)"),
-        (manifest["state"], _STATE, "AIV state"),
-        (manifest["completion"], _COMPLETION, "AIV completion"),
+        (resources, expected, "runtime resources (no local allocations or workspace)"),
+        (manifest["state"], _STATE, "runtime state"),
+        (manifest["completion"], {**_COMPLETION, "wait_for_all_participants": mixed}, "runtime completion"),
         (
             build,
             {
@@ -99,16 +112,16 @@ def _validate(prepared: PreparedKernel, target: RuntimeTarget) -> None:
                 "dsl_headers_sha256": build.get("dsl_headers_sha256"),
                 "language": "AscendC",
                 "separate_translation_unit": True,
-                "source_includes": ["c_api/asc_simd.h"],
+                "source_includes": source_includes,
                 "standard": "c++17",
-                "targets": ["aiv"],
+                "targets": [core.value for core in execution.cores],
             },
-            "AIV build requirements",
+            "runtime build requirements",
         ),
         (
             manifest["loading"],
             {"host_runtime": False, "text_only": "requires_binary_validation"},
-            "AIV loading",
+            "runtime loading",
         ),
     ):
         _expect_metadata(actual, required, label)
@@ -117,7 +130,7 @@ def _validate(prepared: PreparedKernel, target: RuntimeTarget) -> None:
 
 
 def lower(prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
-    """Lower the supported descriptor ABI to a synchronous TMR AIV entry."""
+    """Lower the supported descriptor ABI to a synchronous TMR entry shared by AIC/AIV builds."""
     _validate(prepared, target)
     adapter = build_call_adapter(prepared)
     checker = build_binding_checker(prepared)
@@ -132,6 +145,9 @@ def lower(prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
         "    dsb(DSB_DDR);",
         "    set_atomic_none();",
         "    uint64_t saved_ctrl = asc_get_ctrl();",
+        "#if defined(__DAV_CUBE__)",
+        "    asc_set_ctrl(saved_ctrl & ~(1ULL << 46)); // Clear inherited HF32 on AIC.",
+        "#endif",
         f"    {adapter.symbol}(args);",
         # Return is the executor's permission to publish FIN and run the next
         # callback. No async operations or writes may outlive this point.
@@ -179,11 +195,12 @@ def lower(prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
     )
 
 
-def compile_aiv_task(task: ExternalTask, compiler: "KernelCompiler", *, pto_isa_root: str) -> bytes:
-    """Compile checked AIV task bytes for CoreCallable; sources live through compilation.
+def compile_task(task: ExternalTask, compiler: "KernelCompiler", *, pto_isa_root: str) -> tuple[bytes, ...]:
+    """Compile checked task images in execution.cores order (MIX: AIC then AIV).
 
-    The returned text owns its bytes. Register it at the function ID used by
-    build_aiv_submitter, and retain the callable and tensor storage through run.
+    Each returned text owns its bytes. MIX reuses its AIV image on both lanes.
+    Register each image at the corresponding function ID used by
+    build_submitter, and retain the callable and tensor storage through run.
     This direct path deliberately has no binary/preparation cache.
     """
     from pypto.runtime.elf_parser import extract_text_section  # noqa: PLC0415
@@ -191,31 +208,42 @@ def compile_aiv_task(task: ExternalTask, compiler: "KernelCompiler", *, pto_isa_
     from .tmr_bridge import materialize  # noqa: PLC0415
 
     if task != lower(task.prepared, task.target) or compiler.platform != "a5":
-        raise ContractError("CANNBotDSL AIV compilation requires unmodified bridge output and platform a5")
+        raise ContractError("CANNBotDSL compilation requires unmodified bridge output and platform a5")
     # Resolve C API headers from the same SDK that selected CCEC, never from
     # a provider directory or an unrelated installation found on PATH.
     sdk_root = getattr(compiler.sdk.ccec, "ascend_home_path", None)
     if not isinstance(sdk_root, str) or not sdk_root:
-        raise ContractError("CANNBotDSL AIV compilation requires a CCEC SDK root")
+        raise ContractError("CANNBotDSL compilation requires a CCEC SDK root")
     cann_include = Path(sdk_root) / "asc" / "include"
     if not (cann_include / "c_api" / "asc_simd.h").is_file():
-        raise ContractError(f"CANNBotDSL AIV compilation requires C API headers at {cann_include}")
+        raise ContractError(f"CANNBotDSL compilation requires C API headers at {cann_include}")
     with materialize(task) as source:
-        image = compiler.compile_incore(
-            source.source,
-            core_type="aiv",
-            pto_isa_root=pto_isa_root,
-            runtime_name="tensormap_and_ringbuffer",
-            extra_include_dirs=[*source.include_dirs, str(cann_include), str(cann_include.parent)],
-            text_only=True,
+        # Do not return a partial MIX build if either participant fails admission.
+        return tuple(
+            extract_text_section(
+                compiler.compile_incore(
+                    source.source,
+                    core_type=core.value,
+                    pto_isa_root=pto_isa_root,
+                    runtime_name="tensormap_and_ringbuffer",
+                    extra_include_dirs=[*source.include_dirs, str(cann_include), str(cann_include.parent)],
+                    text_only=True,
+                )
+            )
+            for core in task.prepared.execution.cores
         )
-    return extract_text_section(image)
 
 
-def build_aiv_submitter(tasks: tuple[ExternalTask, ...], function_ids: tuple[int, ...]) -> SourceArtifact:
-    """Bind checked tasks to real TMR submission, one block and one AIV per call.
+def build_submitter(
+    tasks: tuple[ExternalTask, ...], function_ids: tuple[tuple[int, ...], ...]
+) -> SourceArtifact:
+    """Bind checked tasks to one TMR block each, including hardware-paired MIX.
 
-    All IDs must refer to the corresponding compile_aiv_task output. Invoke in
+    Each ID tuple follows execution.cores order, matching compile_task output.
+    Repeated occurrences of an equal task may reuse the same ID for the same
+    core; an ID cannot identify a different task or core within this batch.
+
+    All IDs must refer to the corresponding compile_task output. Invoke in
     one active TMR scope; external concurrent calls require their own GM ordering.
     Tensor storage must remain alive until all returned task IDs complete.
     """
@@ -225,17 +253,40 @@ def build_aiv_submitter(tasks: tuple[ExternalTask, ...], function_ids: tuple[int
         or type(function_ids) is not tuple
         or len(tasks) != len(function_ids)
     ):
-        raise ContractError("CANNBotDSL AIV submitter requires matching nonempty task/ID tuples")
-    if any(type(i) is not int or not 0 <= i < 2**31 for i in function_ids):
-        raise ContractError("CANNBotDSL AIV function IDs must be nonnegative int32 values")
-    for task in tasks:
+        raise ContractError("CANNBotDSL submitter requires matching nonempty task/ID tuples")
+    if any(type(ids) is not tuple for ids in function_ids):
+        raise ContractError("CANNBotDSL function IDs require one tuple per task")
+    flat_ids = tuple(i for ids in function_ids for i in ids)
+    if any(type(i) is not int or not 0 <= i < 2**31 for i in flat_ids):
+        raise ContractError("CANNBotDSL function IDs must be nonnegative int32 values")
+    registered: dict[int, tuple[ExternalTask, Core]] = {}
+    for task, ids in zip(tasks, function_ids):
+        if len(ids) != len(task.prepared.execution.cores):
+            raise ContractError("CANNBotDSL function ID count must match execution.cores")
         if task != lower(task.prepared, task.target):
-            raise ContractError("CANNBotDSL AIV submitter requires unmodified bridge output")
-    if len(set(function_ids)) != len(function_ids):
-        raise ContractError("CANNBotDSL AIV function IDs must be unique")
+            raise ContractError("CANNBotDSL submitter requires unmodified bridge output")
+        for core, function_id in zip(task.prepared.execution.cores, ids):
+            # Function IDs identify registered images, not individual submissions.
+            # Keep the full checked task and core so reuse cannot alias another image.
+            image = (task, core)
+            if function_id in registered and registered[function_id] != image:
+                raise ContractError(
+                    f"CANNBotDSL function ID {function_id} refers to different task/core images"
+                )
+            registered[function_id] = image
     ordered = build_ordered_submitter(tuple(task.prepared for task in tasks))
     # Include IDs in the symbol to allow multiple registrations in one TU.
-    symbol = f"{ordered.symbol}_aiv_{'_'.join(str(i) for i in function_ids)}"
+    symbol = f"{ordered.symbol}_runtime_{'_'.join(str(i) for i in flat_ids)}"
+    # A digest avoids both bundle path collisions and filename length limits for
+    # long registration lists. Shared support headers already use content identities.
+    entry = f"runtime_submit_{hashlib.sha256(symbol.encode()).hexdigest()}.hpp"
+    kernels: list[str] = []
+    for task, ids in zip(tasks, function_ids):
+        mapping = dict(zip(task.prepared.execution.cores, ids))
+        aic = mapping.get(Core.AIC, -1)
+        aiv = mapping.get(Core.AIV, -1)
+        aiv1 = aiv if task.prepared.execution.aiv_lanes == 2 else -1
+        kernels.append(f"{{{aic}, {aiv}, {aiv1}}}")
     count = len(tasks)
     lines = [
         "#pragma once",
@@ -243,20 +294,20 @@ def build_aiv_submitter(tasks: tuple[ExternalTask, ...], function_ids: tuple[int
         f'#include "{ordered.entry}"',
         f"inline std::array<TaskId, {count}> {symbol}(const std::array<CoreTaskArgs*, {count}>& args) {{",
         "    for (auto* arg : args) {",
-        '        always_assert(arg != nullptr && "CANNBotDSL AIV: null binding");',
-        '        always_assert(arg->launch_spec.block_num() == 1 && "CANNBotDSL AIV: one block required");',
-        '        always_assert(!arg->launch_spec.require_sync_start() && "CANNBotDSL AIV: no sync start");',
+        '        always_assert(arg != nullptr && "CANNBotDSL: null binding");',
+        '        always_assert(arg->launch_spec.block_num() == 1 && "CANNBotDSL: one block required");',
+        '        always_assert(!arg->launch_spec.require_sync_start() && "CANNBotDSL: no sync start");',
         "    }",
-        f"    constexpr int32_t ids[] = {{{', '.join(str(i) for i in function_ids)}}};",
+        f"    const MixedKernels kernels[] = {{{', '.join(kernels)}}};",
         f"    return {ordered.symbol}(args, [&](size_t i, CoreTaskArgs& arg) {{",
-        "        return rt_submit_aiv_task(ids[i], arg).task_id();",
+        "        return rt_submit_task(kernels[i], arg).task_id();",
         "    });",
         "}",
         "",
     ]
     return replace(
         ordered,
-        files=(*ordered.files, _file("aiv_submit.hpp", "\n".join(lines).encode())),
-        entry="aiv_submit.hpp",
+        files=(*ordered.files, _file(entry, "\n".join(lines).encode())),
+        entry=entry,
         symbol=symbol,
     )

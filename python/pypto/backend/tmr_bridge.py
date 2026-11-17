@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 TMR bridges for ``c_pointer`` and the minimal CANNBotDSL AIV ABI.
+"""A5 TMR bridges for ``c_pointer`` and the CANNBotDSL AIC/AIV/MIX ABI.
 
 Physical arguments can reorder/repeat logical parameters. Metadata arguments
 are unsigned integers; pointers name allocation bases and the native function
@@ -396,7 +396,7 @@ class TMRBridge:
 
     def lower(self, prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
         if prepared.native_abi.name == "cannbotdsl.device_callable":
-            from .cannbotdsl_aiv import lower  # noqa: PLC0415
+            from .cannbotdsl_runtime import lower  # noqa: PLC0415
 
             return lower(prepared, target)
         _validate(prepared, target)
@@ -425,7 +425,7 @@ class MaterializedTask:
         if self.task.binary_policy != "ordinary":
             raise ContractError(
                 "TMR bridge: descriptor JIT integration is not supported; "
-                "use compile_aiv_task and build_aiv_submitter"
+                "use compile_task and build_submitter"
             )
         if ctx.func_type != "extern":
             raise ContractError("TMR bridge: configure_context requires an extern declaration")

@@ -630,8 +630,9 @@ def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, l
         assert any("kernel_entry" in names for names in functions)
 
 
+@pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed"])
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_real_cannbotdsl_aiv_bridge_compile(compiler_module, tmp_path, dynamic):
+def test_real_cannbotdsl_runtime_bridge_compile(compiler_module, tmp_path, dynamic, core_type):
     """Compile the actual resource/completion wrapper through strict binary admission."""
     cb = pytest.importorskip("cannbotdsl")
     if not hasattr(cb, "export_device"):
@@ -644,7 +645,7 @@ def test_real_cannbotdsl_aiv_bridge_compile(compiler_module, tmp_path, dynamic):
         pytest.skip("CANN C API headers unavailable")
 
     from pypto import DataType  # noqa: PLC0415
-    from pypto.backend.cannbotdsl_aiv import compile_aiv_task  # noqa: PLC0415
+    from pypto.backend.cannbotdsl_runtime import compile_task  # noqa: PLC0415
     from pypto.backend.external_bridge import RuntimeTarget  # noqa: PLC0415
     from pypto.backend.tmr_bridge import TMRBridge  # noqa: PLC0415
     from pypto.jit.external.contracts import (  # noqa: PLC0415
@@ -660,11 +661,28 @@ def test_real_cannbotdsl_aiv_bridge_compile(compiler_module, tmp_path, dynamic):
         for i in cb.range(x.shape[0]):
             out[i] = x[i] + 1.0
 
-    tensor = TensorSpec(("n" if dynamic else 32,), DataType.FP32, strides=(1,))
+    @cb.kernel
+    def cube_copy(x, out):
+        for i in cb.range(x.shape[0]):
+            cb.scalar.cube_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+
+    @cb.kernel
+    def mixed_copy(x, out):
+        for i in cb.range(x.shape[0]):
+            if (i // 16) % 3 == 0:
+                cb.scalar.cube_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+            if (i // 16) % 3 == cb.get_subblock_id() + 1:
+                cb.scalar.vec_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+
+    tensor = TensorSpec(
+        ("n" if dynamic else 96,), DataType.FP32 if core_type == "aiv" else DataType.INT32, strides=(1,)
+    )
     request = KernelRequest(
         (ParameterSpec("x", tensor), ParameterSpec("out", tensor)), CompileTarget("a5", "ccec", "test")
     )
-    prepared = CANNBotDSLProvider().prepare(copy_elements, request)
+    prepared = CANNBotDSLProvider().prepare(
+        {"aiv": copy_elements, "aic": cube_copy, "mixed": mixed_copy}[core_type], request
+    )
     target = RuntimeTarget(
         "tmr",
         "1",
@@ -672,8 +690,8 @@ def test_real_cannbotdsl_aiv_bridge_compile(compiler_module, tmp_path, dynamic):
         frozenset({("cannbotdsl.device_callable", 1)}),
         frozenset(
             {
-                "core:aiv",
-                "aiv_lanes:1",
+                *(f"core:{core.value}" for core in prepared.execution.cores),
+                f"aiv_lanes:{prepared.execution.aiv_lanes}",
                 "completion:entry_return_visible",
                 "tensor_writeback",
                 "partial_write",
@@ -691,13 +709,14 @@ def test_real_cannbotdsl_aiv_bridge_compile(compiler_module, tmp_path, dynamic):
         "-x",
         "cce",
         "--cce-aicore-only",
-        "--cce-aicore-arch=dav-c310-vec",
+        f"--cce-aicore-arch=dav-c310-{'cube' if kwargs['core_type'] == 'aic' else 'vec'}",
     ]
     compiler.sdk.ccec.ascend_home_path = str(sdk)
     compiler.sdk.ccec.cxx_path = ccec
     compiler.sdk.ccec.linker_path = str(Path(ccec).resolve().with_name("ld.lld"))
-    binary = compile_aiv_task(task, compiler, pto_isa_root=str(tmp_path))
-    assert len(binary) > 0
+    binary = compile_task(task, compiler, pto_isa_root=str(tmp_path))
+    assert len(binary) == (2 if core_type == "mixed" else 1)
+    assert all(binary)
 
 
 @pytest.mark.parametrize("platform,core", [("a5sim", "aiv"), ("a2a3", "aiv"), ("a5", "aic")])
