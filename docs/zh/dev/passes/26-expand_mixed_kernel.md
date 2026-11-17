@@ -175,19 +175,39 @@ V2C pipe `id` 及出现顺序配对 push/pop，从实际消费方 `tpop` 契约�
 该改写同时支持 FP8E8M0 MX scale 和普通 data tile，保留原 push 的 kwargs/attrs（包括 `id`），并且
 保持幂等：已经处于边界 view 的 push 不会再次改写。只有遇到手写 V→C push 时才查询后端能力。
 
-### 经 GM 中转的跨核依赖
+### store/load 跨核依赖
 
-`tile.move` 并非数据跨越 CV 边界的唯一途径。当一条 lane 用 `tile.store` 写入某个 GM 张量、另一条 lane 用 `tile.load` 读取同一张量时，数据是*经由 GM*跨核的。由于这两个算子都不是 `tile.move`，CV 边界检测无法识别该依赖；若不加栅栏，拆分后的两个内核会在共享 GM 区域上发生数据竞争（issue #1433）。
+在支持片上直接 C2V 传输的后端（A5）上，未使用的 FIFO 令牌不能保护独立的 GM 读取：
+C2V 等待位于 PIPE_V，而 GM load 位于 MTE2。因此本 Pass 将完整、静态二维的行分区写入阶段
+改写为真正的 C2V 数据传输。每个 Acc 分区通过普通跨核 move 的 lowering 生成 push/pop，
+随后组装到私有 Vec 存储。FIFO finalizer 在组装后释放该分区，分区数量不受环深度限制。
 
-`CollectGmCrossLaneSyncs` 检测此类 store/load 配对，并生成一个**纯同步**握手：数据仍照常经 GM 流动，同时由生产侧（store 之后）的 `tpush` 与消费侧（load 之前）的配对 `tpop` 建立缺失的 happens-before 关系。被 pop 出的 tile 仅作为栅栏令牌，随后由 `FinalizeTpopTfrees` 立即释放；`BuildAutomaticPipeSetup` 随后注入与 `tile.move` 边界相同的 pipe setup。
+消费者的 load（包括循环或分支内的 load）改为从完整 Vec 快照切片并复制。复制保留原 load
+独立存储及原 load 的布局（包括列主序的 `[N, 1]` 消费者），原地修改 tile 不会破坏快照。
+带 padding 的尾块仅切片正的静态有效区域，
+再插入保持原物理形状的新 tile，并恢复 valid-shape 元数据，使 padding 保持无效。动态或空的
+消费者有效区域需要显式 tile move。生产侧 GM store 保留，以维持调用方可见
+的张量写入；消费者的数据完全来自 C2V，不依赖这些 GM store。Pass 不插入流水线 barrier 或
+set/wait 指令。
 
-| 生产侧（写 GM） | AIC 侧 | AIV 侧 |
-| --------------- | ------ | ------ |
-| Cube store → Vector load | `tile.store ...; tpush_to_aiv(stored_tile)` | `tok = tpop_from_aic(); tfree_to_aic(tok); tile.load ...` |
+自动改写仅支持未分片的消费者，要求所有生产 store 位于顶层、按完整宽度写入不重叠的行分区，并覆盖静态 ND
+FP32/FP16/BF16 张量的全部元素，随后才发生 vector 读取。Atomic、quant、relu store 以及
+clamp load 不参与改写。已识别但不满足条件的交换会给出错误，建议使用显式 tile move 或独立任务。
+忽略返回值的裸 store 仍计入生产侧内存效果；参与跨核交换时会给出诊断。
+Vec 快照必须满足后端常规内存规划容量限制。自动改写拒绝既有 C2V/V2C 端点和跨核 move，
+包括通过 yield 或原地别名继续使用的值；它不证明这些 FIFO 的生命周期，也不向其协议增加令牌。
+未分片限制同时检查区域展开后函数上的 `split_aiv` 标记。循环和分支中保持分配不变的张量来源
+会继续追踪，防止逃逸的生产阶段通过返回别名绕过诊断；这些情况应使用显式 tile move。
+窄整数 load/store 坐标会扩展为 INDEX，以满足片上 slice/assemble 的约束；已有的 INT64、UINT64
+和 INDEX 保持不变。已识别的 cube 写入/vector 读取交换只要含用户跨核事件，即使写入
+阶段本身不满足自动改写条件，也会被拒绝：共享或
+复用 event ID 不能证明 GM 可见性，增加 FIFO 还可能与已有等待形成环。此时应使用显式 tile move
+或显式 AIC/AIV 内核。store 之前或 load 之后的事件不能豁免交换的诊断；本改写不证明手写
+事件是否覆盖该交换。
 
-为避免死锁，仅当满足以下条件时才生成握手：(1) 该 GM 源张量恰好只有一个生产侧 store；(2) 对侧 load 位于**同一结构化作用域**（同一循环/分支，使 `tpush`/`tpop` 执行次数一致）；(3) store 先于 load。跨越不同循环或分支的配对保持不变。
-
-仅对 **Cube→Vector** 方向（cube `tile.store` → vector `tile.load`）插入栅栏。AIC 侧的 `tpush` 直接发送被存储的 tile（与常规边界 C2V 推送在两种后端上的行为一致），AIV 侧 `tpop` 落在 `Vec`。反向的 Vector→Cube 方向需要 `tile.move` 边界路径在 `tpush_to_aic` 前所做的 V→C fractal 布局适配；在该方向发送未经适配的原始 tile 会破坏跨核传输契约，因此 V2C 的 GM 交换保持不加栅栏。
+A2/A3 保持现有 GM-backed pipe 行为：单个生产 store 与同一或嵌套作用域内后续 vector load
+之间加入 FIFO 握手。嵌套消费者的等待提到外层循环/分支之前，保证每个生产者只执行一次等待。
+本次 A5 改写不为 A2/A3 增加多 store GM 通知，也不增加新的限制。
 
 当拆分后的内核包含跨核 `tpush`/`tpop` 时，该 Pass 还会自动在函数前缀补齐前端 pipe setup：
 
@@ -346,9 +366,8 @@ program_expanded = expand_pass(program)
   1. 递归分类所有语句的亲和性（包括循环/条件内部）
   2. 检测 CV 边界移动：跨越 cube↔vector 内存空间的 tile.move 操作
      （记录在独立的 boundary_moves 映射中，而不是作为单独的亲和性枚举值）
-  2a. 检测经 GM 中转的跨核 store/load 配对（CollectGmCrossLaneSyncs）：
-      一条 lane 上的 tile.store 与另一条 lane 上读取同一 GM 张量来源的
-      tile.load，调度为 tpush/tpop 同步栅栏（见上文“经 GM 中转的跨核依赖”）
+  2a. A5 在收集边界前，将支持的 store/load 阶段改写为 C2V 数据传输和 Vec 快照。
+      A2/A3 保持原有单 store GM 依赖握手（CollectGmCrossLaneSyncs）。
   3. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作，且没有边界移动）：
      将 FunctionType 转换为 AIC（纯 Cube）或 AIV（纯 Vector / 仅共享操作）
   4. 构建 AIC 函数体：保留 CUBE + SHARED 语句，删除 VECTOR，递归处理 MIXED 循环

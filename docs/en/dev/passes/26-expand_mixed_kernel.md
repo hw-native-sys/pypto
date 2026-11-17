@@ -210,19 +210,55 @@ original push kwargs and attrs (including `id`), and is idempotent: a push alrea
 into the boundary view is left unchanged. The backend capability is consulted only after a
 manual V→C push is encountered.
 
-### GM-mediated cross-lane dependencies
+### Store/load cross-lane dependencies
 
-A `tile.move` is not the only way data crosses the CV boundary. When one lane writes a GM tensor with `tile.store` and the other lane reads the same tensor with `tile.load`, the data crosses *through GM*. Because neither op is a `tile.move`, CV-boundary detection misses the dependency, and without a fence the two split kernels race on the shared GM region (issue #1433).
+On backends with direct on-chip C2V transport (A5), an unused FIFO token cannot
+order an independent GM load: the C2V wait runs on PIPE_V, while GM loads run on
+MTE2. `ExpandMixedKernel` therefore promotes a complete static two-dimensional
+row-partition write phase to actual C2V data transfers. Each Acc partition is
+pushed and popped through the ordinary boundary-move lowering, then assembled
+into private Vec storage. The FIFO finalizer frees each payload after assembly,
+so the number of producer partitions is not limited by the ring depth.
 
-`CollectGmCrossLaneSyncs` detects these store/load pairs and emits a **pure-synchronisation** handshake: the data still flows through GM unchanged, while a `tpush` (producer, right after the store) and a matching `tpop` (consumer, right before the load) establish the missing happens-before edge. The popped tile is a fence token, freed immediately by `FinalizeTpopTfrees`; `BuildAutomaticPipeSetup` then injects the same pipe setup as for `tile.move` boundaries.
+Consumer loads, including loads inside loops or branches, become copies of
+slices of the completed Vec snapshot. Copies preserve the original load's
+independent storage and the original load layout, including column-major `[N, 1]`
+consumers, when tiles are modified in place. For a padded tail, only
+the positive static valid extent is sliced and inserted into a fresh tile with
+the original physical shape; valid-shape metadata keeps the padding invalid.
+Dynamic or empty consumer valid extents require explicit tile moves. Producer GM stores are
+retained to preserve caller-visible tensor writes; consumer data comes entirely
+from C2V rather than those GM stores. The pass inserts no pipeline barriers or
+set/wait flags.
 
-| Producer (writes GM) | AIC side | AIV side |
-| -------------------- | -------- | -------- |
-| Cube store → Vector load | `tile.store ...; tpush_to_aiv(stored_tile)` | `tok = tpop_from_aic(); tfree_to_aic(tok); tile.load ...` |
+Automatic promotion requires unsplit consumers and top-level, nonoverlapping, full-width row stores
+covering the complete static ND FP32/FP16/BF16 tensor, followed by vector reads.
+Atomic, quantized, activated, and clamped transfers are not promoted. Partially
+initialized, interleaved, dynamically partitioned, or otherwise unsupported
+recognized exchanges are diagnosed; use explicit tile moves or separate tasks.
+Bare stores with ignored results are still recorded as producer effects and
+diagnosed when they participate in a cross-core exchange.
+The Vec snapshot must fit the backend's ordinary memory-planning limits.
+Automatic promotion rejects existing C2V/V2C endpoints and boundary moves,
+including values retained through yields or in-place aliases; it does not prove
+those FIFO lifetimes or add tokens to their protocols. The unsplit restriction
+also checks the function's `split_aiv` marker after region flattening. Stable
+loop/branch tensor origins are traced so escaped producer phases cannot evade
+diagnosis through a returned alias. Use explicit tile moves for these cases.
+Narrow integer load/store coordinates are widened to INDEX for the stricter
+on-chip slice/assemble contract; existing INT64, UINT64 and INDEX widths remain.
+A recognized cube-write/vector-read exchange containing authored cross-core
+events is rejected even when its write phase is otherwise unsupported: shared or reused event IDs do not prove GM visibility, and adding a
+FIFO can introduce a cycle through those waits. Use explicit tile moves or
+explicit AIC/AIV kernels for such mixed protocols. Events before the stores or
+after the loads do not exempt an exchange from diagnosis; this promotion does
+not prove authored event coverage.
 
-To stay deadlock-free, a handshake is emitted only when (1) the GM origin tensor has exactly one producer-lane store, (2) the opposite-lane load lives in the **same structural body** (same loop/branch, so the `tpush`/`tpop` execute the same number of times), and (3) the store precedes the load. Pairs split across different loops or branches are left untouched.
-
-Only the **Cube→Vector** direction (cube `tile.store` → vector `tile.load`) is fenced. The AIC `tpush` sends the stored tile raw, exactly as the normal boundary C2V push does on both backends, and the AIV `tpop` lands in `Vec`. The reverse Vector→Cube direction would require the V→C fractal-layout adaptation that the `tile.move` boundary path applies before `tpush_to_aic`; emitting a raw-tile sync there would violate the cross-core transport contract, so V2C GM exchanges are left unfenced.
+A2/A3 retains its existing GM-backed pipe behavior: a single producer store and
+a later vector load in the same or a nested body receive a FIFO handshake. The
+nested consumer wait is hoisted before its enclosing loop/branch, so it executes
+once per producer. This A5 change does not add multi-store GM notification
+support or new restrictions to A2/A3.
 
 When split kernels contain cross-core `tpush`/`tpop`, the pass also prepends the required frontend pipe setup automatically:
 
@@ -404,10 +440,9 @@ Phase 2 — Expand each InCore function F:
   1. Recursively classify affinity of all statements (including inside loops/conditionals)
   2. Detect CV boundary moves: tile.move ops crossing cube↔vector memory spaces
      (recorded in a separate boundary_moves map, not as a distinct affinity)
-  2a. Detect GM-mediated cross-lane store/load pairs (CollectGmCrossLaneSyncs):
-      a tile.store on one lane + a tile.load on the other from the same GM
-      tensor origin, scheduled as a tpush/tpop sync fence (see "GM-mediated
-      cross-lane dependencies" above)
+  2a. On A5, promote supported store/load phases to C2V payload transfers and
+      Vec snapshots before boundary collection. On A2/A3, retain the existing
+      single-store GM dependency handshake (CollectGmCrossLaneSyncs).
   3. If not mixed (no CUBE ops or no VECTOR ops, and no boundary moves):
      convert FunctionType to AIC (pure Cube) or AIV (pure Vector / shared-only)
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops

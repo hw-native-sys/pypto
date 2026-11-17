@@ -5346,5 +5346,354 @@ class TestManualPipeVtoCFractalAdapt:
         ir.assert_structural_equal(passes.expand_mixed_kernel()(Once), Once)
 
 
+@pytest.mark.parametrize(
+    ("partitions", "invalid"),
+    [
+        (1, None),
+        (4, None),
+        (4, "gap"),
+        (4, "overlap"),
+        (4, "relu"),
+        (4, "clamp"),
+        (4, "events"),
+        (4, "shared_events"),
+        (4, "reverse_pipe"),
+        (4, "boundary_alias"),
+        (4, "boundary_yield"),
+        (4, "for_carry"),
+        (4, "while_carry"),
+        (4, "split_marker"),
+        (4, "bare_store"),
+    ],
+)
+@pytest.mark.parametrize("events_at", [None, "before", "after"])
+def test_direct_c2v_partition_snapshot(partitions, invalid, events_at):
+    """Each payload is consumed before freeing; loop loads copy from Vec storage."""
+    rows = partitions * 16
+    offsets = [i * 16 for i in range(partitions)]
+    if invalid == "gap":
+        offsets.pop()
+    elif invalid == "overlap":
+        offsets[-1] = 0
+    store_kwargs = ", pre_relu=True" if invalid == "relu" else ""
+    # Ignored results produce EvalStmt stores; their producer memory effects
+    # must still reach the unsupported-exchange diagnostic.
+    store_binding = "" if invalid == "bare_store" else "scratch = "
+    stores = "\n".join(
+        f"        {store_binding}pl.store(acc, [{offset}, 0], scratch{store_kwargs})" for offset in offsets
+    )
+    direct = "\n".join(
+        f"""        scratch = pl.store(acc, [{i * 16}, 0], scratch)
+        payload{i} = pl.move(acc, target_memory=pl.Mem.Vec,
+                            blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)
+        snapshot = pl.tile.assemble(snapshot, payload{i}, [{i * 16}, 0])"""
+        for i in range(partitions)
+    )
+    prefix = f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, a: pl.Tensor[[16, 16], pl.FP32], b: pl.Tensor[[16, 16], pl.FP32],
+             scratch: pl.InOut[pl.Tensor[[{rows}, 16], pl.FP32]],
+             out: pl.Out[pl.Tensor[[{rows}, 16], pl.FP32]]) -> pl.Tensor[[{rows}, 16], pl.FP32]:
+        lhs_mat = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+        rhs_mat = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+        acc = pl.matmul(lhs, rhs)
+"""
+    suffix = f"""
+        for i in pl.range(0, {rows}, 8):
+            value = pl.load(scratch, [i, 0], [8, 16])
+            result = pl.add(value, 1.0)
+            out = pl.store(result, [i, 0], out)
+        return out
+"""
+    if invalid == "clamp":
+        suffix = suffix.replace(
+            "pl.load(scratch, [i, 0], [8, 16])", "pl.load(scratch, [i, 0], [8, 16], clamp=True)"
+        )
+    if invalid in ("events", "shared_events"):
+        stores += """
+        pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+        pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+"""
+    if invalid == "shared_events":
+        # The pre-store shared set may satisfy the later typed wait; matching
+        # IDs are not evidence that the consumer sees the completed GM writes.
+        prefix += "        pl.system.sync_set(4, pipe=pl.PipeType.MTE2, ffts_mode=2)\n"
+        suffix = suffix.replace(
+            "        return out",
+            "        pl.system.sync_wait(4, pipe=pl.PipeType.MTE2)\n        return out",
+        )
+    if invalid == "reverse_pipe":
+        # This early AIC pop and late AIV push would form a cycle with a new
+        # C2V pop inserted at the intervening producer stores.
+        prefix += "        feedback_mat: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)\n"
+        suffix = suffix.replace(
+            "        return out",
+            "        feedback = pl.load(a, [0, 0], [16, 16])\n"
+            "        pl.tpush_to_aic(feedback, split=0)\n        return out",
+        )
+    if invalid in ("boundary_alias", "boundary_yield"):
+        if invalid == "boundary_alias":
+            prefix += """
+        live = pl.move(acc, target_memory=pl.Mem.Vec)
+        live_alias = pl.tile.fillpad_inplace(live)
+"""
+        else:
+            prefix += """
+        if pl.const(True, pl.BOOL):
+            live_alias = pl.move(acc, target_memory=pl.Mem.Vec)
+        else:
+            live_alias = pl.move(acc, target_memory=pl.Mem.Vec)
+"""
+        suffix = suffix.replace(
+            "        return out",
+            "        extra = pl.add(live_alias, 1.0)\n"
+            "        out = pl.store(extra, [0, 0], out)\n        return out",
+        )
+    if invalid in ("for_carry", "while_carry"):
+        # The if-phi and loop return preserve the original allocation. Losing
+        # their origin would split the store/load into two unmatched phases.
+        header = (
+            "        for step, (carry,) in pl.range(2, init_values=(scratch,)):\n"
+            if invalid == "for_carry"
+            else "        for carry, step in pl.while_(init_values=(scratch, 0)):\n"
+            "            pl.cond(step < 2)\n"
+        )
+        stores += (
+            "\n"
+            + header
+            + """            if step == 0:
+                merged = carry
+            else:
+                merged = carry
+"""
+        )
+        stores += (
+            "            scratch = pl.yield_(merged)\n"
+            if invalid == "for_carry"
+            else "            scratch, final_step = pl.yield_(merged, step + 1)\n"
+        )
+    if invalid == "split_marker":
+        # Custom pipelines can present a flattened split function with no
+        # SplitAivScopeStmt; the function attribute still marks two lanes.
+        prefix = prefix.replace(
+            "        lhs_mat =",
+            '        pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})\n        lhs_mat =',
+        )
+    if events_at:
+        # A completed pair outside the exchange does not order its GM reads.
+        # It must not exempt incomplete, activated, or clamped phases either.
+        events = """
+        pl.system.sync_set(5, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+        pl.system.sync_wait(5, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+"""
+        if events_at == "before":
+            prefix += events
+        else:
+            suffix = suffix.replace("        return out", events + "        return out")
+    before = pl.parse_program(prefix + stores + suffix)
+    if invalid or events_at:
+        # Incomplete or value-changing GM writes cannot be replaced by their
+        # raw Acc payload. A partial snapshot would silently change results.
+        with pytest.raises(ValueError, match="Direct C2V promotion"):
+            _expand_raw(before)
+        return
+    expected_prefix = prefix.replace("class Before:", "class Expected:")
+    expected_suffix = suffix.replace(
+        "value = pl.load(scratch, [i, 0], [8, 16])",
+        "view = pl.tile.slice(snapshot, [8, 16], [i, 0], [8, 16])\n"
+        "            value = pl.move(view, target_memory=pl.Mem.Vec)",
+    )
+    expected = pl.parse_program(
+        expected_prefix
+        + f"        snapshot = pl.create_tile([{rows}, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)\n"
+        + direct
+        + expected_suffix
+    )
+    after = _expand_raw(before)
+    ir.assert_structural_equal(after, _expand_raw(expected), enable_auto_mapping=True)
+    text = ir.python_print(after)
+    assert "_gm_sync" not in text
+    assert "system.bar" not in text
+    assert text.count("pl.tile.tpush_to_aiv(") == partitions
+    assert text.count("pl.tile.tpop_from_aic(") == partitions
+
+
+@pytest.mark.parametrize(
+    ("offset", "shape", "valid"),
+    [
+        ([24, 0], [16, 32], [8, 32]),
+        ([0, 24], [32, 16], [32, 8]),
+        ([24, 24], [16, 16], [8, 8]),
+        ([0, 0], [48, 48], [32, 32]),
+        ([24, 7], [16, 1], [8, 1]),
+    ],
+)
+def test_direct_c2v_padded_tail(offset, shape, valid):
+    """A padded GM load needs independent storage, not an overhanging tile view."""
+    valid_rows, valid_cols = valid
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[32, 32], pl.FP32],
+            b: pl.Tensor[[32, 32], pl.FP32],
+            scratch: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
+            out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            lhs_mat = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_mat = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+            acc = pl.matmul(lhs, rhs)
+            scratch = pl.store(acc, [0, 0], scratch)
+            value = pl.load(scratch, offset, shape, valid_shape=valid)
+            result = pl.add(value, 1.0)
+            out = pl.store(result, [0, 0], out)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[32, 32], pl.FP32],
+            b: pl.Tensor[[32, 32], pl.FP32],
+            scratch: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
+            out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            lhs_mat = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_mat = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+            acc = pl.matmul(lhs, rhs)
+            scratch = pl.store(acc, [0, 0], scratch)
+            snapshot = pl.create_tile([32, 32], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            payload = pl.move(
+                acc,
+                target_memory=pl.Mem.Vec,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            snapshot = pl.tile.assemble(snapshot, payload, [0, 0])
+            view = pl.tile.slice(snapshot, valid, offset, valid)
+            storage = pl.create_tile(shape, dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            copied = pl.tile.assemble(storage, view, [0, 0])
+            value = pl.set_validshape(copied, valid_rows, valid_cols)
+            result = pl.add(value, 1.0)
+            out = pl.store(result, [0, 0], out)
+            return out
+
+    after = _expand_raw(Before)
+    ir.assert_structural_equal(after, _expand_raw(Expected), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("dtype", ["INT32", "UINT32", "INT64", "INDEX"])
+def test_direct_c2v_integer_offsets(dtype):
+    """Load integer widths are widened for the stricter on-chip slice contract."""
+    prefix = f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, a: pl.Tensor[[16, 16], pl.FP32], b: pl.Tensor[[16, 16], pl.FP32],
+             scratch: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+             out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+             row: pl.Scalar[pl.{dtype}]) -> pl.Tensor[[8, 16], pl.FP32]:
+        lhs_mat = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+        rhs_mat = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+        acc = pl.matmul(lhs, rhs)
+        scratch = pl.store(acc, [pl.const(0, pl.{dtype}), 0], scratch)
+"""
+    before = pl.parse_program(
+        prefix + f"        value = pl.load(scratch, [row, pl.const(0, pl.{dtype})], [8, 16], "
+        f"valid_shape=[pl.const(8, pl.{dtype}), pl.const(16, pl.{dtype})])\n"
+        + "        out = pl.store(value, [0, 0], out)\n        return out\n"
+    )
+    row_expr = "pl.cast(row, pl.INDEX)" if dtype in ("INT32", "UINT32") else "row"
+    # Preserve already-supported scalar widths, including constant zero, just
+    # as promotion does. Narrow coordinates become INDEX constants/casts.
+    zero_expr = "0" if dtype in ("INT32", "UINT32") else f"pl.const(0, pl.{dtype})"
+    expected = pl.parse_program(
+        prefix.replace("class Before:", "class Expected:")
+        + "        snapshot = pl.create_tile([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)\n"
+        + "        payload = pl.move(acc, target_memory=pl.Mem.Vec, "
+        "blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)\n"
+        + f"        snapshot = pl.tile.assemble(snapshot, payload, [{zero_expr}, 0])\n"
+        + f"        view = pl.tile.slice(snapshot, [8, 16], [{row_expr}, {zero_expr}], [8, 16])\n"
+        + "        value = pl.move(view, target_memory=pl.Mem.Vec)\n"
+        + "        out = pl.store(value, [0, 0], out)\n        return out\n"
+    )
+    ir.assert_structural_equal(_expand_raw(before), _expand_raw(expected), enable_auto_mapping=True)
+
+
+def test_direct_c2v_column_copy():
+    """An unpadded column load must keep its column-major consumer layout."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[32, 32], pl.FP32],
+            b: pl.Tensor[[32, 32], pl.FP32],
+            scratch: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
+            out: pl.Out[pl.Tensor[[32, 1], pl.FP32]],
+        ) -> pl.Tensor[[32, 1], pl.FP32]:
+            lhs_mat = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_mat = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+            acc = pl.matmul(lhs, rhs)
+            scratch = pl.store(acc, [0, 0], scratch)
+            value = pl.load(scratch, [0, 7], [32, 1])
+            result = pl.add(value, 1.0)
+            out = pl.store(result, [0, 0], out)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[32, 32], pl.FP32],
+            b: pl.Tensor[[32, 32], pl.FP32],
+            scratch: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
+            out: pl.Out[pl.Tensor[[32, 1], pl.FP32]],
+        ) -> pl.Tensor[[32, 1], pl.FP32]:
+            lhs_mat = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_mat = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+            acc = pl.matmul(lhs, rhs)
+            scratch = pl.store(acc, [0, 0], scratch)
+            snapshot = pl.create_tile([32, 32], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            payload = pl.move(
+                acc,
+                target_memory=pl.Mem.Vec,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            snapshot = pl.tile.assemble(snapshot, payload, [0, 0])
+            view = pl.tile.slice(snapshot, [32, 1], [0, 7], [32, 1])
+            value = pl.move(
+                view,
+                target_memory=pl.Mem.Vec,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            result = pl.add(value, 1.0)
+            out = pl.store(result, [0, 0], out)
+            return out
+
+    ir.assert_structural_equal(_expand_raw(Before), _expand_raw(Expected), enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
