@@ -222,6 +222,10 @@ def test_all_attempts_run_and_an_earlier_failure_stays_red(tmp_path, monkeypatch
     def execute(command, cwd, directory, env):
         current = json.loads((output / "current.json").read_text())
         assert current["phase"] == "running" and current["case"] == directory.name
+        if directory.name.startswith("simpler"):
+            assert "--resource-child" in command
+            assert command[command.index("--runtime") + 1] == "tensormap_and_ringbuffer"
+            assert command[command.index("--level") + 1] == "3"
         directory.mkdir(parents=True)
         attempted.append(directory.name)
         passed = len(attempted) != 1

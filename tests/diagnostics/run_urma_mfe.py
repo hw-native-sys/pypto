@@ -212,7 +212,21 @@ def main() -> int:
                 f"--junitxml={directory / 'junit.xml'}",
             ]
             if name.startswith("simpler"):
-                command.extend(["--manual=include", "--require-pto-isa"])
+                # These L3 classes are resource jobs in runtime/conftest.py.
+                # The diagnostic owns an exact two-device pair already, so run
+                # the scheduled child directly; otherwise pytest dispatches a
+                # second process and writes a zero-test parent JUnit report.
+                command.extend(
+                    [
+                        "--resource-child",
+                        "--runtime",
+                        "tensormap_and_ringbuffer",
+                        "--level",
+                        "3",
+                        "--manual=include",
+                        "--require-pto-isa",
+                    ]
+                )
             progress(phase="running", case=name, attempt=attempt, devices=args.devices)
             started = time.monotonic()
             result = run_case(command, cwd, directory, dict(os.environ))
