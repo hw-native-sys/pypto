@@ -120,10 +120,10 @@ pass 运行之后：
 - 每个 `pld.tensor.window` 结果 Var 的类型是 `DistributedTensorType`，
   `window_buffer_` 字段指向对应的 `WindowBuffer`；定义它的 Call 带同一个类型——
   赋值两侧一致。
-- 每个携带 `window_buffer_` 的 `DistributedTensorType` 的连续布局字节数都不超过
-  该 slot 的逻辑大小。动态容量由 host codegen 在 window 声明处检查，与 dispatch
-  位置无关。host 操作支持在 codegen 中检查：slice/assemble 仅接受普通 Tensor，
-  view/reshape 没有注册 host lowering。
+- 每个 `pld.tensor.window` 声明都在物化时检查其连续布局字节数是否超过分配的
+  逻辑大小，前提是两者的大小在编译期已知。动态容量由 host codegen 在 window
+  声明处检查，与 dispatch 位置无关。host 操作支持在 codegen 中检查：
+  slice/assemble 仅接受普通 Tensor，view/reshape 没有注册 host lowering。
 - comm-domain 分析和 `LowerHostTensorCollectives` 看到的每个 host-level
   `pld.tensor.allreduce` 都已经有两个位置参数（在
   [`SynthesizeAllReduceSignals`](49-synthesize_allreduce_signals.md) 运行之后）。
@@ -134,6 +134,10 @@ pass 运行之后：
 - chip-orchestration 与 InCore 的形参类型 `window_buffer_` 仍是 `nullopt`。
   N7 codegen 在 *host_orch* 的 dispatch 处读取反向引用、再为 chip-orch 显式
   下发对应的 `CommContext` 指针。
+
+此 pass 在窗口声明处校验容量，不遍历整个 Program 的表达式类型或函数返回类型。
+属性验证器检查 comm-domain 结构：slot 列表非空、slot 非空指针，以及各 scope
+之间 slot 归属唯一。
 
 ## 文本 round-trip
 

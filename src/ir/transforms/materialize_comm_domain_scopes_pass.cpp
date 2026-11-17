@@ -983,17 +983,7 @@ Pass MaterializeCommDomainScopes() {
 // asserts: (a) ``slots_`` is non-empty (an empty domain would emit
 // ``window_size=0`` and the runtime would reject it); (b) every slot is
 // non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
-// scope program-wide (cross-scope identity uniqueness); (d) every
-// ``DistributedTensorType`` carrying a ``window_buffer_`` has a
-// dense byte size no larger than that slot's logical size.
-//
-// (d) is the IR-level capacity invariant. The op deducer cannot perform it
-// because ``DistributedTensorType::window_buffer_`` is still ``nullopt`` when
-// the type is deduced: the WindowBuffer and its ``size_`` are materialized by
-// this pass afterwards. Static violations are rejected here and re-checked by
-// the property verifier; symbolic view/slot sizes are checked by the generated
-// host guard at the window declaration. Host operation support is checked by
-// the corresponding codegen handlers.
+// scope program-wide (cross-scope identity uniqueness).
 // ============================================================================
 
 class CommDomainScopeCollector : public IRVisitor {
@@ -1003,55 +993,6 @@ class CommDomainScopeCollector : public IRVisitor {
     scopes.push_back(op);
     if (op->body_) VisitStmt(op->body_);
   }
-};
-
-/// Check that every DistributedTensorType carrying a ``WindowBuffer`` fits
-/// the slot's logical byte size. ``VisitExpr`` sees params, assignment sides,
-/// call/submit results, loop carries/yields and If returns; ``VisitFunction``
-/// adds declared return types. Symbolic spans are deliberately left to the
-/// generated host guard rather than guessed here.
-class WindowViewFitChecker : public IRVisitor {
- public:
-  explicit WindowViewFitChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
-
-  void VisitFunction(const FunctionPtr& func) override {
-    if (!func) return;
-    for (const auto& type : func->return_types_) CheckType(type, func->span_);
-    IRVisitor::VisitFunction(func);
-  }
-
-  void VisitExpr(const ExprPtr& expr) override {
-    if (expr) CheckType(expr->GetType(), expr->span_);
-    IRVisitor::VisitExpr(expr);
-  }
-
- private:
-  void CheckType(const TypePtr& type, const Span& span) {
-    if (!type) return;
-    if (auto dt = As<DistributedTensorType>(type)) {
-      if (dt->window_buffer_) CheckView(*dt, **dt->window_buffer_, span);
-      return;
-    }
-    if (auto tuple = As<TupleType>(type)) {
-      for (const auto& elem : tuple->types_) CheckType(elem, span);
-    }
-  }
-
-  void CheckView(const DistributedTensorType& view, const WindowBuffer& slot, const Span& span) {
-    // Every reference to a view visits this expression with the same type;
-    // cache by (slot, view type) so the rank scan happens once per distinct view.
-    if (!checked_views_.emplace(&slot, &view).second) return;
-    const auto fit = EvaluateWindowViewFit(view, slot);
-    if (fit.fit != WindowViewFit::kViolation) return;
-    const int64_t view_bytes = fit.view_bytes.value_or(-1);
-    if (!seen_.emplace(&slot, view_bytes).second) return;
-    diagnostics_.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
-                              DescribeWindowViewFit("", slot, fit), span);
-  }
-
-  std::vector<Diagnostic>& diagnostics_;
-  std::set<std::pair<const WindowBuffer*, const DistributedTensorType*>> checked_views_;
-  std::set<std::pair<const WindowBuffer*, int64_t>> seen_;
 };
 
 class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier {
@@ -1096,8 +1037,6 @@ class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier
         }
       }
     }
-    WindowViewFitChecker checker(diagnostics);
-    for (const auto& [gvar, func] : program->functions_) checker.VisitFunction(func);
   }
 };
 

@@ -147,11 +147,12 @@ After the pass:
 - Every `pld.tensor.window` result Var's type is a `DistributedTensorType` whose
   `window_buffer_` field points to the corresponding `WindowBuffer`, and the
   defining Call carries that same type — both sides of the assignment agree.
-- Every `DistributedTensorType` carrying a `window_buffer_` has a dense byte
-  size no larger than that slot's logical size. Dynamic capacity is checked
-  by host codegen at the window declaration, independently of dispatch sites.
-  Host operation support is checked in codegen: slice/assemble accept only
-  plain Tensor operands; view/reshape have no registered host lowering.
+- Each `pld.tensor.window` declaration is checked against its allocation's
+  logical byte size during materialization when both sizes are statically known.
+  Dynamic capacity is checked by host codegen at the window declaration,
+  independently of dispatch sites. Host operation support is checked in codegen:
+  slice/assemble accept only plain Tensor operands; view/reshape have no
+  registered host lowering.
 - Every host-level `pld.tensor.allreduce` call has two positional arguments
   after [`SynthesizeAllReduceSignals`](49-synthesize_allreduce_signals.md) runs.
   For an omitted user signal, the second argument is a synthesized Var produced
@@ -162,6 +163,11 @@ After the pass:
 - Chip-orchestration and InCore parameter types remain `nullopt` on
   `window_buffer_`. N7 codegen reads the back-reference at the *host_orch*
   dispatch site and threads the matching `CommContext` pointer explicitly.
+
+This pass validates capacity at window declarations rather than scanning
+expression or function return types across the Program. The property verifier checks
+comm-domain structure: nonempty slot lists, non-null slots, and unique slot
+ownership across scopes.
 
 ## Text round-trip
 

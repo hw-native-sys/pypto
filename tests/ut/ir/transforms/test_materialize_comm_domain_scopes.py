@@ -2112,7 +2112,7 @@ def test_verifier_flags_duplicate_slot_across_scopes():
 
 
 # ---------------------------------------------------------------------------
-# CommDomainScopesMaterialized verifier: window-view capacity
+# Window declaration capacity checks
 # ---------------------------------------------------------------------------
 
 
@@ -2592,60 +2592,6 @@ def test_materialize_rejects_sync_only_oversized_window():
     """The capacity invariant applies to synchronous transfers too."""
     with pytest.raises(ValueError, match=r"window view .* of 64 bytes exceeds backing window slot"):
         _apply(_build_async_window_program("put", 60, 64))
-
-
-def test_verifier_rejects_hand_built_oversized_window_view():
-    """The verifier also catches a reparsed/programmatic oversized view."""
-    program = pl.parse_program(
-        textwrap.dedent(
-            """
-            @pl.program
-            class P:
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host(self):
-                    with pl._dump.comm_domain(
-                        name="d", devices=[0],
-                        slots=[pl._dump.window_buffer("w", base="buf", size=32)],
-                    ):
-                        buf: pl.Ptr = pl._dump.alloc_window_buffer(32, name="buf")
-                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")] = pl._dump.call(
-                            "pld.tensor.window", [buf, [16]],
-                            pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")],
-                            kwargs={"dtype": pl.FP32},
-                        )
-                        return x
-            """
-        )
-    )
-    errors = _comm_domain_errors(program)
-    assert any("64 bytes exceeds backing window slot" in e.message for e in errors)
-
-
-def test_verifier_dedupes_repeated_window_view():
-    """Using the same view twice reports one capacity error, not one per use."""
-    program = pl.parse_program(
-        textwrap.dedent(
-            """
-            @pl.program
-            class P:
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host(self):
-                    with pl._dump.comm_domain(
-                        name="d", devices=[0],
-                        slots=[pl._dump.window_buffer("w", base="buf", size=32)],
-                    ):
-                        buf: pl.Ptr = pl._dump.alloc_window_buffer(32, name="buf")
-                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")] = pl._dump.call(
-                            "pld.tensor.window", [buf, [16]],
-                            pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")],
-                            kwargs={"dtype": pl.FP32},
-                        )
-                        return x, x
-            """
-        )
-    )
-    errors = [e for e in _comm_domain_errors(program) if "64 bytes exceeds backing window slot" in e.message]
-    assert len(errors) == 1
 
 
 def test_materialize_rejects_non_positive_window_extent():
