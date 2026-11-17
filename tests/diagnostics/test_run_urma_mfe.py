@@ -10,7 +10,10 @@
 
 import importlib.util
 import json
+import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,6 +43,52 @@ def test_missing_inventory_fails_instead_of_testing_no_cards():
         all_cards.card_pairs("query failed")
 
 
+def test_warmup_output_is_visible_before_process_finishes(tmp_path, monkeypatch):
+    gate = tmp_path / "gate"
+    os.mkfifo(gate)
+    ready = threading.Event()
+    messages = []
+
+    def emit(message):
+        messages.append(message)
+        if "stage ready" in message:
+            ready.set()
+
+    monkeypatch.setattr(all_cards, "emit", emit)
+    command = [
+        sys.executable,
+        "-u",
+        "-c",
+        f"print('stage ready', flush=True); open({str(gate)!r}).readline()",
+    ]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(all_cards.run_logged, command, tmp_path / "prepare.log", "pair=0,1 warmup", 5)
+        try:
+            assert ready.wait(4), "Warmup output was buffered until process exit"
+            assert not future.done()
+        finally:
+            try:
+                fd = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+                os.write(fd, b"continue\n")
+                os.close(fd)
+            except OSError:
+                pass
+        assert future.result(timeout=5) == 0
+    assert "stage ready" in (tmp_path / "prepare.log").read_text()
+    assert any("START" in message for message in messages)
+    assert any("END" in message for message in messages)
+
+
+def test_warmup_timeout_is_bounded_and_named(tmp_path, monkeypatch):
+    messages = []
+    monkeypatch.setattr(all_cards, "emit", messages.append)
+    code = all_cards.run_logged(
+        [sys.executable, "-c", "import time; time.sleep(60)"], tmp_path / "warm.log", "pair=2,3 warmup", 0.05
+    )
+    assert code == 124
+    assert any("TIMEOUT" in message and "pair=2,3" in message for message in messages)
+
+
 def test_all_pairs_are_submitted_and_failed_pair_keeps_job_red(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_all_cards.py", "--expected-soc", "PR", "--output", str(tmp_path)])
     submitted = []
@@ -56,13 +105,55 @@ def test_all_pairs_are_submitted_and_failed_pair_keeps_job_red(tmp_path, monkeyp
             assert str(all_cards.ROOT) in shell  # cancellation cleanup matches this absolute path
             assert "source activate.sh" not in shell  # preserve warmup's loader fingerprint
             return SimpleNamespace(returncode=1 if pair == "0,1" else 0)
-        assert command[1] == "tests/diagnostics/prepare_urma_mfe.py"
+        assert "tests/diagnostics/prepare_urma_mfe.py" in command
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(all_cards.subprocess, "run", execute)
+    monkeypatch.setattr(all_cards, "run_logged", lambda command, *args, **kwargs: execute(command).returncode)
     assert all_cards.main() == 1
     assert sorted(submitted) == ["0,1", "2,3"]
     assert len(json.loads((tmp_path / "pair-results.json").read_text())) == 2
+
+
+def test_first_pair_is_submitted_before_later_pair_warmup_finishes(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_all_cards.py", "--expected-soc", "PR", "--output", str(tmp_path)])
+    submitted = threading.Event()
+    monkeypatch.setattr(
+        all_cards.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout="\n".join(f"NPU ID : {i}" for i in range(4)), stderr=""
+        ),
+    )
+
+    def logged(command, *args):
+        if command[0] == "task-submit":
+            submitted.set()
+        elif command[-1] == "2,3":
+            assert submitted.wait(2), "First pair waited behind all-card preparation"
+        return 0
+
+    monkeypatch.setattr(all_cards, "run_logged", logged)
+    assert all_cards.main() == 0
+
+
+def test_shared_results_are_reported_while_queue_client_is_still_running(tmp_path, monkeypatch):
+    pair = tmp_path / "pair-0-1"
+    case = pair / "round-1" / "pypto-put"
+    case.mkdir(parents=True)
+    (pair / "current.json").write_text(json.dumps({"phase": "running", "case": "pypto-put"}))
+    (pair / "results.json").write_text(
+        json.dumps([{"attempt": 1, "case": "pypto-put", "passed": False, "timed_out": True}])
+    )
+    (case / "stderr.log").write_text("sched_error_code=100 SCHEDULER_TIMEOUT\n")
+    messages = []
+    stop = threading.Event()
+    monkeypatch.setattr(all_cards, "emit", messages.append)
+    stop.set()  # One polling pass, independent of queue completion.
+    all_cards.watch_results(tmp_path, stop)
+    assert any("FAIL timeout=True" in line for line in messages)
+    assert any("sched_error_code=100" in line for line in messages)
+    assert any("running" in line for line in messages)
 
 
 @pytest.mark.parametrize(
@@ -129,6 +220,8 @@ def test_all_attempts_run_and_an_earlier_failure_stays_red(tmp_path, monkeypatch
     attempted = []
 
     def execute(command, cwd, directory, env):
+        current = json.loads((output / "current.json").read_text())
+        assert current["phase"] == "running" and current["case"] == directory.name
         directory.mkdir(parents=True)
         attempted.append(directory.name)
         passed = len(attempted) != 1

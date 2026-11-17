@@ -19,6 +19,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -141,6 +142,15 @@ def main() -> int:
         parser.error("Run inside task-submit using its exact TASK_DEVICE pair")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+
+    def progress(**state):
+        state["updated_at"] = time.time()
+        temporary = output / "current.json.tmp"
+        temporary.write_text(json.dumps(state) + "\n")
+        temporary.replace(output / "current.json")
+        print(f"PROGRESS {state}", flush=True)
+
+    progress(phase="preflight", devices=args.devices)
     identity = {
         "runner": os.environ.get("RUNNER_NAME"),
         "host_arch": platform.machine(),
@@ -203,7 +213,10 @@ def main() -> int:
             ]
             if name.startswith("simpler"):
                 command.extend(["--manual=include", "--require-pto-isa"])
+            progress(phase="running", case=name, attempt=attempt, devices=args.devices)
+            started = time.monotonic()
             result = run_case(command, cwd, directory, dict(os.environ))
+            result["elapsed_seconds"] = round(time.monotonic() - started, 2)
             rows.append({"case": name, "attempt": attempt, **result})
             (output / "results.json").write_text(json.dumps(rows, indent=2) + "\n")
             (directory / "diagnostics.txt").write_text("\n".join(diagnostics(directory)) + "\n")
@@ -214,6 +227,7 @@ def main() -> int:
         summary.append(f"{name}: {passed}/3 passed")
     (output / "summary.txt").write_text("\n".join(summary) + "\n")
     print("\n".join(summary))
+    progress(phase="complete", passed=sum(row["passed"] for row in rows), total=len(rows))
     return 0 if all(row["passed"] for row in rows) else 1
 
 

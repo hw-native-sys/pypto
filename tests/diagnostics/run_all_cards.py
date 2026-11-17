@@ -6,18 +6,122 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Discover every host card, warm each pair, then queue independent pair diagnostics."""
+"""Warm and queue card pairs incrementally, streaming progress and attempt evidence."""
 
 import argparse
 import json
+import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def emit(message: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S', time.gmtime())} UTC] {message}", flush=True)
+
+
+def run_logged(command: list[str], log_path: Path, label: str, timeout: float) -> int:
+    """Tee output immediately; a silent child still gets a bounded wait and heartbeat."""
+    started = time.monotonic()
+    emit(f"START {label} timeout={timeout}s")
+    with log_path.open("w") as log:
+        child = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+
+        def forward():
+            for line in child.stdout:
+                log.write(line)
+                log.flush()
+                emit(f"{label}: {line.rstrip()}")
+
+        reader = threading.Thread(target=forward, daemon=True)
+        reader.start()
+        code = None
+        try:
+            while code is None:
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    emit(f"TIMEOUT {label} elapsed={time.monotonic() - started:.1f}s")
+                    code = 124
+                    break
+                try:
+                    code = child.wait(timeout=min(30, remaining))
+                except subprocess.TimeoutExpired:
+                    emit(f"HEARTBEAT {label} elapsed={time.monotonic() - started:.1f}s")
+        finally:
+            # Reap compiler descendants as well as the launcher before moving on.
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(child.pid, sig)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            reader.join(timeout=5)
+        emit(f"END {label} returncode={code} elapsed={time.monotonic() - started:.1f}s")
+        return code
+
+
+def watch_results(output: Path, stop: threading.Event) -> None:
+    # Queue clients may buffer their remote stdout. Read the shared files so a
+    # completed attempt and the active phase remain visible before queue exit.
+    seen = {}
+    heartbeat = time.monotonic()
+    offsets = {}
+    while True:
+        for path in sorted(output.glob("pair-*/current.json")) + sorted(output.glob("pair-*/results.json")):
+            try:
+                content = path.read_text()
+                if seen.get(path) == content:
+                    continue
+                data = json.loads(content)
+                old = json.loads(seen.get(path, "[]")) if path.name == "results.json" else []
+                seen[path] = content
+                if path.name == "current.json":
+                    emit(f"{path.parent.name} progress: {data}")
+                else:
+                    for row in data[len(old) :]:
+                        emit(
+                            f"{path.parent.name} round={row['attempt']} case={row['case']} "
+                            f"{'PASS' if row['passed'] else 'FAIL'} timeout={row['timed_out']}"
+                        )
+            except (OSError, ValueError):
+                continue
+        # Keep active pytest/device evidence visible even if task-submit only
+        # forwards its command's stdout after the entire allocation exits.
+        for path in sorted(output.glob("pair-*/round-*/*/*.log")):
+            try:
+                with path.open(errors="replace") as log:
+                    log.seek(offsets.get(path, 0))
+                    chunk = log.read(8192)
+                    offsets[path] = log.tell()
+                if chunk:
+                    emit(f"{path.relative_to(output)}: {chunk.rstrip()}")
+            except OSError:
+                continue
+        if time.monotonic() - heartbeat >= 30:
+            emit("HEARTBEAT all-card controller; queue/warmup labels and latest pair phases above")
+            heartbeat = time.monotonic()
+        if stop.wait(1):
+            return
 
 
 def card_pairs(text: str) -> list[list[int]]:
@@ -56,24 +160,7 @@ def main() -> int:
     pairs = card_pairs(query.stdout)
     (output / "coverage.json").write_text(json.dumps({"planned_pairs": pairs}, indent=2) + "\n")
     print(f"Testing all discovered cards in pairs: {pairs}", flush=True)
-    prepared = []
     results = []
-    for pair in pairs:
-        devices = ",".join(map(str, pair))
-        pair_output = output / f"pair-{devices.replace(',', '-')}"
-        pair_output.mkdir(parents=True, exist_ok=True)
-        with (pair_output / "prepare.log").open("w") as log:
-            result = subprocess.run(
-                [sys.executable, "tests/diagnostics/prepare_urma_mfe.py", "--devices", devices],
-                cwd=ROOT,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        if result.returncode == 0:
-            prepared.append((devices, pair_output))
-        else:
-            results.append({"devices": devices, "phase": "prepare", "returncode": result.returncode})
 
     def execute(pair):
         devices, pair_output = pair
@@ -87,32 +174,43 @@ def main() -> int:
             f'--devices "$TASK_DEVICE" --expected-soc {args.expected_soc} '
             f"--output {shlex.quote(str(pair_output))}"
         )
-        with (pair_output / "queue.log").open("w") as log:
-            result = subprocess.run(
-                [
-                    "task-submit",
-                    "--device",
-                    devices,
-                    "--timeout",
-                    "4800",
-                    "--max-time",
-                    "3300",
-                    "--run",
-                    command,
-                ],
-                cwd=ROOT,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        return {"devices": devices, "phase": "execute", "returncode": result.returncode}
+        code = run_logged(
+            ["task-submit", "--device", devices, "--timeout", "4800", "--max-time", "3300", "--run", command],
+            pair_output / "queue.log",
+            f"pair={devices} queue/allocation/execution",
+            4920,
+        )
+        return {"devices": devices, "phase": "execute", "returncode": code}
 
-    # Disjoint pairs may execute concurrently; task-submit owns all locks and
-    # arbitrates overlap or cards occupied by other users. No reset or eviction.
-    with ThreadPoolExecutor(max_workers=max(1, len(prepared))) as executor:
-        for result in executor.map(execute, prepared):
-            results.append(result)
-            (output / "pair-results.json").write_text(json.dumps(results, indent=2) + "\n")
+    stop = threading.Event()
+    monitor = threading.Thread(target=watch_results, args=(output, stop), daemon=True)
+    monitor.start()
+    try:
+        # Submit immediately after each warmup: first-pair evidence must not wait
+        # for every other pair's compilation. The queue still owns device locks.
+        with ThreadPoolExecutor(max_workers=len(pairs)) as executor:
+            futures = []
+            for pair in pairs:
+                devices = ",".join(map(str, pair))
+                pair_output = output / f"pair-{devices.replace(',', '-')}"
+                pair_output.mkdir(parents=True, exist_ok=True)
+                code = run_logged(
+                    [sys.executable, "-u", "tests/diagnostics/prepare_urma_mfe.py", "--devices", devices],
+                    pair_output / "prepare.log",
+                    f"pair={devices} warmup",
+                    600,
+                )
+                if code == 0:
+                    futures.append(executor.submit(execute, (devices, pair_output)))
+                else:
+                    results.append({"devices": devices, "phase": "prepare", "returncode": code})
+                (output / "pair-results.json").write_text(json.dumps(results, indent=2) + "\n")
+            for future in as_completed(futures):
+                results.append(future.result())
+                (output / "pair-results.json").write_text(json.dumps(results, indent=2) + "\n")
+    finally:
+        stop.set()
+        monitor.join(timeout=5)
     summaries = [path.read_text() for path in sorted(output.glob("pair-*/summary.txt"))]
     (output / "summary.txt").write_text("\n".join(summaries) + "\n" + json.dumps(results, indent=2) + "\n")
     print((output / "summary.txt").read_text(), flush=True)

@@ -13,6 +13,7 @@ import importlib.util
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -53,10 +54,16 @@ def main() -> None:
                 torch.zeros_like(inputs),
                 torch.zeros_like(inputs),
             ]
+        started = time.monotonic()
+        print(f"devices={options.devices} case={name} codegen START", flush=True)
         compiled = builder(2).compile(*args, config=config)
+        print(
+            f"case={name} codegen END elapsed={time.monotonic() - started:.1f}s; assembly START", flush=True
+        )
         # This is the same assembly used at dispatch, without Worker init or a
         # device allocation. Execution still enters the normal JIT/runtime path.
         _assemble_chip_callables(compiled)
+        print(f"case={name} assembly END total={time.monotonic() - started:.1f}s", flush=True)
         source_root = compiled.output_dir
         evidence = ROOT / "outputs/urma-mfe/prepared" / options.devices.replace(",", "-") / name
         for source in source_root.rglob("*"):
