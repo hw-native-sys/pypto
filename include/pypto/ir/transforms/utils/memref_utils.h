@@ -111,15 +111,19 @@ inline TypePtr CloneTypeWithoutMemRef(const TypePtr& root) {
   return strip(strip, root);
 }
 
-/// Keep newly inferred shape / dtype / view metadata, filling only missing storage metadata.
-/// Op type deduction may omit a declared MemRef or tile memory space. For a
-/// re-deduced assignment, carry them from the assigned Var's type: ConvertToSSA
-/// records allocation metadata there, not on the RHS Call.
-inline TypePtr WithCarriedMemRef(const TypePtr& deduced, const TypePtr& original) {
+/// Keep inferred shape / dtype / view metadata, filling missing storage metadata.
+/// When re-deducing a definition, preserve_declared_binding keeps its declaration
+/// even if inference supplies an operand's MemRef (gather_row), so InitMemRef can
+/// reject conflicting alias bindings. Do not enable it for control-flow result
+/// types: their old binding is inferred and must follow the new yield/init value.
+inline TypePtr WithCarriedMemRef(const TypePtr& deduced, const TypePtr& original,
+                                 bool preserve_declared_binding = false) {
   auto memref = GetTypeMemRef(deduced);
+  auto original_memref = GetTypeMemRef(original);
   bool changed = false;
-  if (!memref && GetTypeMemRef(original)) {
-    memref = GetTypeMemRef(original);
+  if (original_memref && (!memref || (preserve_declared_binding && (*original_memref)->is_pinned_)) &&
+      memref != original_memref) {
+    memref = original_memref;
     changed = true;
   }
   std::optional<MemorySpace> memory_space;
@@ -140,9 +144,10 @@ inline TypePtr GetAuthoritativeAssignmentType(const TypePtr& lhs_type, const Exp
                                                   As<TupleType>(value_type);
   auto chosen = value_type && !As<UnknownType>(value_type) && rhs_carries_authoritative_metadata ? value_type
                                                                                                  : lhs_type;
-  // The RHS wins on shape / dtype / view metadata. Op type deduction does not
-  // produce a MemRef, so an LHS MemRef supplies additional allocation metadata
-  // (an author-declared allocation or a re-parsed post-allocation dump).
+  // The RHS wins on shape / dtype / view metadata and inherited storage. An
+  // unannotated reassignment may follow a different source allocation; the
+  // mutable LHS's old inferred binding must not override that new definition.
+  // When inference omits storage, the LHS supplies its allocation metadata.
   if (!GetTypeMemRef(chosen).has_value() && GetTypeMemRef(lhs_type).has_value()) {
     chosen = CloneTypeWithMemRef(chosen, GetTypeMemRef(lhs_type));
   }

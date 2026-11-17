@@ -136,9 +136,31 @@ bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
 
 - A bound tile with a dynamic shape — a declared allocation must be sized at compile time.
 - Tiles on one allocation disagreeing on memory space.
-- Binding the output of a view / in-place op (`tile.reshape`, `tile.matmul_acc`, …).
-  Such a result lands in its source's allocation, so it cannot be placed elsewhere;
-  bind the source instead.
+- Binding the output of a view / in-place op (`tile.reshape`, `tile.gather_row`,
+  `tile.matmul_acc`, …) to storage different from the storage it inherits. An
+  inherited or explicit binding is accepted when it resolves to the same allocation
+  and byte offset, including the same slot of a multi-slot allocation. A different
+  allocation, a different slot, or symbolic offsets that cannot be proven equal
+  are rejected; bind the source instead. Views are checked at their derived offset,
+  so sharing only the allocation base is not sufficient.
+
+For example, annotating only a gather accumulator is legal; the unannotated
+result inherits the declaration through type deduction and loop SSA:
+
+```python
+seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+    [8, 32], dtype=pl.BF16, value=0.0
+)
+result = seed
+for row in pl.range(8):
+    result = pl.gather_row(result, x, [row, 0], [row, 0], [1, 32])
+```
+
+`InitMemRef` creates one pinned `stage` allocation and shares it across the seed,
+the loop-carried value, and the gather result.
+Explicit result annotations survive SSA and type re-inference until this check.
+An unannotated reassignment follows its new source's binding; an older inferred
+binding on the same variable name does not constrain the new definition.
 
 A fourth rule — tiles bound to **one slot** must not be live at the same time — needs
 lifetime information and is therefore checked in

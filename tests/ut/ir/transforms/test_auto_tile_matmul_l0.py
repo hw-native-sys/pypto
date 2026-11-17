@@ -5570,8 +5570,9 @@ def test_storage_mn_grid_does_not_discard_explicit_result_binding(planner):
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 @pytest.mark.parametrize("K", [64, 512])
-def test_storage_k_tiling_does_not_legalize_declared_inplace_result(planner, K):
-    """The existing InitMemRef policy rejects even matching output annotations."""
+@pytest.mark.parametrize("output_slot", [0, 1])
+def test_storage_inplace_result_binding_respects_address_and_tiling(planner, K, output_slot):
+    """Matching storage is legal; K rewriting still has its own declaration restriction."""
 
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
@@ -5591,17 +5592,32 @@ def test_storage_k_tiling_does_not_legalize_declared_inplace_result(planner, K):
             seed: pl.Tile[[16, 128], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
                 [16, 128], dtype=pl.FP32, target_memory=pl.Mem.Acc
             )
-            c: pl.Tile[[16, 128], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul_acc(seed, at, bt, True)
+            c: pl.Tile[[16, 128], pl.FP32, slots[output_slot], pl.Mem.Acc] = pl.tile.matmul_acc(
+                seed, at, bt, True
+            )
             result = pl.store(c, [0, 0], out)
             return result
 
     before = passes.convert_to_ssa()(Before)
     _storage_verify_source(before)
-    with (
-        passes.PassContext([], memory_planner=planner),
-        pytest.raises(ValueError, match="(Bind the source tile instead|bind its input accumulator instead)"),
-    ):
-        PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    with passes.PassContext([], memory_planner=planner):
+        if K == 64 and output_slot == 0:
+            # No K rewrite: InitMemRef can honor the matching declaration by
+            # sharing the accumulator, without a second allocation or copy.
+            after = _default_allocation_snapshot(before)
+            bindings = {
+                stmt.var.name_hint.split("__ssa_")[0]: stmt.var.type.memref
+                for stmt in _storage_assignments(after)
+                if isinstance(stmt.var.type, ir.TileType)
+            }
+            assert bindings["seed"] is bindings["c"]
+            assert bindings["c"] is not None
+            assert bindings["c"].base_.name_hint == "acc_slots"
+        else:
+            with pytest.raises(
+                ValueError, match="(Bind the source tile instead|bind its input accumulator instead)"
+            ):
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
 
 
 @pytest.mark.parametrize(

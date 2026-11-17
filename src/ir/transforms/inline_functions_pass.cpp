@@ -871,7 +871,7 @@ class InlineCallsMutator : public IRMutator {
     }
     // Some ops infer UnknownType and rely on an explicit result annotation.
     if (!type || As<UnknownType>(type)) return call;
-    type = WithCarriedMemRef(type, call->GetType());
+    type = WithCarriedMemRef(type, call->GetType(), /*preserve_declared_binding=*/true);
     if (structural_equal(type, call->GetType())) return call;
     return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, type, call->span_);
   }

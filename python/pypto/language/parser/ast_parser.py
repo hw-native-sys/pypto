@@ -931,6 +931,19 @@ class ASTParser:
                     }
                 )
                 or not types_match(value_expr.type, override_type)
+                # A storage annotation constrains this definition, whereas an
+                # inherited Call binding describes its source. Preserve the
+                # explicit constraint on the Call too: SSA takes the RHS type
+                # so stale inferred LHS bindings cannot affect reassignments.
+                # types_match deliberately ignores MemRefs and cannot detect
+                # this difference. InitMemRef validates the actual address.
+                or (
+                    isinstance(override_type, ir.TileType)
+                    and override_type.memref is not None
+                    and override_type.memref.is_pinned_
+                    and isinstance(value_expr.type, ir.TileType)
+                    and value_expr.type.memref is not None
+                )
             )
         ):
             # Carry attrs through the rebuild: a forward-referenced callee has no

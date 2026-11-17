@@ -121,8 +121,26 @@ ptoas 区域，ptoas 被禁止合并这些物理段，详见
 
 - 绑定的 tile 是动态 shape——声明式分配必须在编译期定型。
 - 同一 buffer 上的 tile 内存空间不一致。
-- 绑定 view / 原地算子（`tile.reshape`、`tile.matmul_acc` 等）的输出。这类结果物理上**就是**
-  其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
+- 将 view / 原地算子（`tile.reshape`、`tile.gather_row`、`tile.matmul_acc` 等）的输出
+  绑定到与其继承位置不同的存储。继承的绑定或显式绑定解析后若指向相同分配与字节偏移，
+  包括多槽位分配的同一槽位，则允许使用。不同分配、不同槽位，或无法证明相等的符号
+  偏移都会被拒绝；应改为绑定源 tile。view 按派生后的偏移校验，仅分配基址相同并不充分。
+
+例如，只为 gather 累加器添加绑定是合法的；未注解的结果通过类型推导与循环 SSA
+继承该声明：
+
+```python
+seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+    [8, 32], dtype=pl.BF16, value=0.0
+)
+result = seed
+for row in pl.range(8):
+    result = pl.gather_row(result, x, [row, 0], [row, 0], [1, 32])
+```
+
+`InitMemRef` 创建一块 pinned 的 `stage` 分配，由 seed、循环携带值与 gather 结果共享。
+显式结果注解会经过 SSA 与类型重新推导保留至此处校验。未注解的重新赋值跟随新源值的
+绑定；同一变量名之前推导出的绑定不会约束新的定义。
 
 第四条规则——绑定到**同一槽位**的 tile 生命周期不得重叠——需要生命周期信息，因此在
 [MemoryReuse](40-memory_reuse.md#声明式分配) 中检查。位于*不同*槽位的 tile 本来就应该同时
