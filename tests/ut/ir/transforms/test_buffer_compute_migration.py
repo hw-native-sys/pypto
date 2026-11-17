@@ -19,6 +19,7 @@ from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
 from pypto.debug import torch_codegen
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics.exceptions import InvalidOperationError
 from pypto.pypto_core import codegen
 
 pytestmark = pytest.mark.usefixtures("ascend_backend")
@@ -323,6 +324,110 @@ class ColumnReduction:
     namespace["kernel"](source, output)
     torch.testing.assert_close(output, expected)
     _native(tmp_path, lowered, planner, True)
+
+
+_INDEX_OPS = ("row_argmax", "row_argmin", "col_argmax", "col_argmin")
+
+
+def _index_program(operation, valid=(16, 128), dtype="FP32", preserve=True, strided_output=False):
+    rows, cols = valid
+    row = operation.startswith("row_")
+    shape = [32, 8 if strided_output else 1] if row else [2, 128]
+    offsets = [8, 0] if row else [1, 0]
+    scalar = "rows: pl.Scalar[pl.INDEX], " if isinstance(rows, str) else ""
+    old_store = "old = pl.store(source, [0, 0], old)" if preserve else ""
+    return pl.parse_program(f"""
+@pl.program
+class IndexReduction:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, {scalar}a: pl.Tensor[[16, 128], pl.{dtype}],
+               out: pl.InOut[pl.Tensor[{shape}, pl.INT32]],
+               old: pl.InOut[pl.Tensor[[16, 128], pl.{dtype}]]) -> pl.Tensor[{shape}, pl.INT32]:
+        source = pl.load(a, [0, 0], [16, 128], valid_shape=[{rows}, {cols}])
+        scratch = pl.create_tile([16, 128], dtype=pl.{dtype}, target_memory=pl.MemorySpace.Vec)
+        indices = pl.tile.{operation}(source, scratch)
+        out = pl.store(indices, {offsets}, out)
+        {old_store}
+        return out
+""")
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("operation", _INDEX_OPS)
+@pytest.mark.parametrize("valid", [(16, 128), (13, 72)])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_index_reduction_default_buffer_matches_tile_and_native(
+    tmp_path, planner, operation, valid, preserve
+):
+    # Distinct exactly representable inputs make every expected index unambiguous.
+    # The 72-column partial domain crosses the native 64-element repeat boundary.
+    source = torch.randperm(2048, generator=torch.Generator().manual_seed(37)).reshape(16, 128).float()
+    rows, cols = valid
+    row = operation.startswith("row_")
+    reduction = torch.argmax if operation.endswith("max") else torch.argmin
+    expected = torch.full((32, 1) if row else (2, 128), -777, dtype=torch.int32)
+    indices = reduction(source[:rows, :cols], dim=1 if row else 0, keepdim=True).to(torch.int32)
+    if row:
+        expected[8 : 8 + rows] = indices
+    else:
+        expected[1:2, :cols] = indices
+    for enabled in (False, True):
+        lowered = _lower(_index_program(operation, valid, preserve=preserve), planner, enabled)
+        kernel = lowered.get_function("kernel")
+        assert kernel is not None and (kernel.ir_stage == ir.FunctionIRStage.Buffer) == enabled
+        restored = ir.deserialize(ir.serialize(lowered))
+        assert isinstance(restored, ir.Program)
+        ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)
+        if enabled or valid == (16, 128):
+            namespace = {}
+            exec(torch_codegen(restored), namespace)  # noqa: S102
+            output = torch.full_like(expected, -777)
+            old = torch.full_like(source, -777)
+            namespace["kernel"](source, output, old)
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            old_expected = torch.full_like(source, -777)
+            if preserve:
+                old_expected[:rows, :cols] = source[:rows, :cols]
+            torch.testing.assert_close(old, old_expected, rtol=0, atol=0)
+        text = _native(tmp_path, restored, planner, enabled)
+        assert text.count(f"pto.t{operation.replace('_', '')} ins(") == 1
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("operation", _INDEX_OPS)
+@pytest.mark.parametrize("kind", ["fp16", "dynamic"])
+def test_index_reduction_retains_unverified_tile_forms(planner, operation, kind):
+    valid = ("rows", 128) if kind == "dynamic" else (16, 128)
+    program = _index_program(operation, valid, "FP16" if kind == "fp16" else "FP32")
+    kernel = _lower(program, planner, True).get_function("kernel")
+    assert kernel is not None and kernel.ir_stage != ir.FunctionIRStage.Buffer
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("operation", ["row_argmax", "row_argmin"])
+def test_index_column_store_keeps_strided_matrix_destination_on_tile(planner, operation):
+    kernel = _lower(_index_program(operation, strided_output=True), planner, True).get_function("kernel")
+    assert kernel is not None and kernel.ir_stage != ir.FunctionIRStage.Buffer
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("operation", _INDEX_OPS)
+def test_explicit_index_a5_native_preserves_default_boundary(tmp_path, ascend_backend, planner, operation):
+    assert ascend_backend == BackendType.Ascend950
+    program = _index_program(operation)
+    kernel = _lower(program, planner, True).get_function("kernel")
+    assert kernel is not None and kernel.ir_stage != ir.FunctionIRStage.Buffer
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        lowered = buffer_recipe_pipeline().run(program)
+    _native(tmp_path, lowered, planner, True, arch="a5")
+
+
+@pytest.mark.parametrize("operation", _INDEX_OPS)
+def test_index_reduction_preserves_frontend_empty_domain_rejection(operation):
+    # Empty index reductions are already invalid Tile IR, before selection.
+    with pytest.raises(InvalidOperationError, match="reduction has no real data"):
+        _index_program(operation, valid=(0, 128))
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ partition form before storage planning rather than failing during final lowering
 | adds, subs, muls, divs, maximums, minimums, lrelu, full | FP32 |
 | row_max, row_sum, row_min, row_prod | FP32, positive static valid |
 | row_expand_add/sub/mul/div/max/min | FP32, positive static valid, contiguous column carrier |
+| row_argmax/min, col_argmax/min | FP32 input, INT32 indices, positive static valid |
 | col_sum/max/min/prod | FP32, positive static valid, sequential reduction |
 | col_expand_add/sub/mul/div/max/min | FP32, positive static valid, single-row carrier |
 | transpose | FP32, full-valid dense rank-2 matrices |
@@ -61,9 +62,10 @@ must be disjoint. Broadcast may reuse its matrix exactly, but never its column
 vector. A column vector retains its typed descriptor when storage addresses are
 reused; it is not reinterpreted as a row-major window.
 
-Column vectors are on-chip reduction/broadcast operands only. Kernels that load
-or store them directly to GM remain on Tile IR until a column transfer recipe is
-validated; the ordinary dense transfer recipe does not cover strided columns.
+FP32 column vectors remain on-chip reduction/broadcast operands only. Their
+GM transfers retain Tile IR. INT32 index columns may be stored into packed
+single-column `[R,1]` GM tensors; loading columns and storing into a column of
+a wider tensor remain outside this transfer recipe.
 
 This supports the complete `row_max -> row_expand_sub -> exp -> row_sum ->
 row_expand_div` softmax chain. Row recipes in kernels with runtime/empty valid
@@ -81,6 +83,17 @@ Reduction output is disjoint from its source, while broadcasts may reuse their
 matrix exactly but never overwrite the carrier. These forms require dense FP32
 allocations and positive static valid extents. The optional-scratch binary-tree
 `col_sum`, window operands, dynamic/empty domains, and other dtypes remain Tile.
+
+Index reductions `row_argmax/min` and `col_argmax/min` consume FP32 matrices
+and return INT32 indices into the reduced axis. Both axes require explicit
+full-valid FP32 scratch with exactly the source physical shape, independent of
+the source's partial valid rectangle. Source, scratch and destination are
+pairwise disjoint. Row results use column-major `[R,1]` storage; column results
+use row-major `[1,C]` storage. The kept dimension preserves physical and valid
+extents. Native instruction semantics, including tie handling, are unchanged.
+Window operands, runtime valid extents and other input dtypes retain Tile.
+Statically empty domains retain the existing frontend rejection.
+The Buffer emitter consumes the planned operands without allocating workspace.
 
 Dense FP32 `transpose` reuses the scratch created by `FlattenTileNdTo2D`.
 Lowering removes the logical axis operands and emits
@@ -185,7 +198,7 @@ availability alone does not widen default acceptance.
 ```text
 Default / True: load -> add -> mul -> store  => Buffer
 Default / True: FP32 softmax with explicit scratch => Buffer
-Default / True: load -> col_sum -> store     => Tile (whole kernel)
+Default / True: load -> rsqrt -> store     => Tile (whole kernel)
 False:          all kernels                 => Tile
 ```
 

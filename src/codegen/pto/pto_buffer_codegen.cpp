@@ -58,7 +58,7 @@ namespace {
 using ir::As;
 
 // BufferType is already a physical descriptor; no logical shape, layout, or
-// packing is inferred. Vec descriptors are dense row-major or FP32 reduction
+// packing is inferred. Vec descriptors are dense row-major or FP32/INT32 reduction
 // column vectors; Mat/Left/Right/Acc
 // descriptors carry their resolved fractal layout and must be whole boxes.
 std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span) {
@@ -109,8 +109,10 @@ void CheckBufferTensorParameter(const ir::TensorTypePtr& tensor, const ir::Span&
       << "Direct Buffer IR GM parameters currently require rank-2 FP16/BF16/FP32/INT32/INT8 tensors";
   auto rows = As<ir::ConstInt>(tensor->shape_[0]);
   auto cols = As<ir::ConstInt>(tensor->shape_[1]);
-  CHECK_SPAN(rows && cols && rows->value_ > 0 && cols->value_ > 1, span)
-      << "Direct Buffer IR GM parameters currently require static physical shapes with columns > 1";
+  CHECK_SPAN(rows && cols && rows->value_ > 0 && (cols->value_ > 1 || backend::IsIndexColumnTensor(tensor)),
+             span)
+      << "Direct Buffer IR GM parameters require static physical shapes with columns > 1 or packed INT32 "
+         "columns";
   if (tensor->tensor_view_) {
     const auto& view = *tensor->tensor_view_;
     CHECK_SPAN(view.layout == ir::TensorLayout::ND && view.pad == ir::PadValue::null, span)
@@ -392,8 +394,12 @@ class BufferEmissionPreflight : public ir::IRVisitor {
     if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
       const bool load = ir::IsOp(call, "buffer.load");
       const auto buffer = As<ir::BufferType>(call->args_[load ? 3 : 0]->GetType());
-      CHECK_SPAN(!backend::IsColumnVectorBuffer(buffer), call->span_)
-          << "Direct Buffer IR GM transfers do not support reduction column vectors";
+      const auto tensor_type = As<ir::TensorType>(call->args_[load ? 0 : 3]->GetType());
+      CHECK_SPAN(!backend::IsColumnVectorBuffer(buffer) ||
+                     (!load && backend::SupportsIndexColumnStore(buffer, tensor_type)),
+                 call->span_)
+          << "Direct Buffer IR GM transfers do not support reduction column vectors except INT32 stores "
+             "to packed single-column tensors";
       auto tensor = ir::AsVarLike(call->args_[load ? 0 : 3]);
       auto parameter = tensor_parameters_.find(tensor.get());
       CHECK_SPAN(parameter != tensor_parameters_.end(), call->span_)

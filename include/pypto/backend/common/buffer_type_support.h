@@ -51,17 +51,32 @@ inline bool IsColumnVectorBufferTile(const ir::TileTypePtr& tile, const ir::Tile
   const auto rows = ir::As<ir::ConstInt>(tile->shape_[0]);
   const auto cols = ir::As<ir::ConstInt>(tile->shape_[1]);
   return rows && cols && rows->value_ > 0 && rows->value_ % 8 == 0 && cols->value_ == 1 &&
-         tile->dtype_ == DataType::FP32 && tile->GetMemorySpace() == ir::MemorySpace::Vec &&
-         view.blayout == ir::TileLayout::col_major && view.slayout == ir::TileLayout::none_box &&
-         view.fractal == 512 && view.pad == ir::PadValue::null && view.compact == ir::CompactMode::null;
+         (tile->dtype_ == DataType::FP32 || tile->dtype_ == DataType::INT32) &&
+         tile->GetMemorySpace() == ir::MemorySpace::Vec && view.blayout == ir::TileLayout::col_major &&
+         view.slayout == ir::TileLayout::none_box && view.fractal == 512 && view.pad == ir::PadValue::null &&
+         view.compact == ir::CompactMode::null;
 }
 
 inline bool IsColumnVectorBuffer(const ir::BufferTypePtr& type) {
   return type && type->shape_.size() == 2 && type->shape_[0] % 8 == 0 && type->shape_[1] == 1 &&
-         type->dtype_ == DataType::FP32 && type->memory_space_ == ir::MemorySpace::Vec &&
-         type->blayout_ == ir::TileLayout::col_major && type->slayout_ == ir::TileLayout::none_box &&
-         type->fractal_ == 512 && type->pad_ == ir::PadValue::null &&
-         type->compact_ == ir::CompactMode::null && type->valid_shape_[0] > 0 && type->valid_shape_[1] == 1;
+         (type->dtype_ == DataType::FP32 || type->dtype_ == DataType::INT32) &&
+         type->memory_space_ == ir::MemorySpace::Vec && type->blayout_ == ir::TileLayout::col_major &&
+         type->slayout_ == ir::TileLayout::none_box && type->fractal_ == 512 &&
+         type->pad_ == ir::PadValue::null && type->compact_ == ir::CompactMode::null &&
+         type->valid_shape_[0] > 0 && type->valid_shape_[1] == 1;
+}
+
+/// Packed single-column INT32 GM destinations for row index reductions. Other
+/// column transfers remain outside the validated native transfer contract.
+inline bool IsIndexColumnTensor(const ir::TensorTypePtr& tensor) {
+  if (!tensor || tensor->dtype_ != DataType::INT32 || tensor->shape_.size() != 2) return false;
+  const auto rows = ir::As<ir::ConstInt>(tensor->shape_[0]);
+  const auto cols = ir::As<ir::ConstInt>(tensor->shape_[1]);
+  return rows && rows->value_ > 0 && cols && cols->value_ == 1;
+}
+
+inline bool SupportsIndexColumnStore(const ir::BufferTypePtr& source, const ir::TensorTypePtr& tensor) {
+  return IsColumnVectorBuffer(source) && source->dtype_ == DataType::INT32 && IsIndexColumnTensor(tensor);
 }
 
 /// Dense allocation descriptors shared by heterogeneous native recipes.

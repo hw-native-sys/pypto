@@ -196,6 +196,10 @@ MIGRATION_FAMILIES = (
                 "tile.col_sum",
                 "tile.col_min",
                 "tile.col_prod",
+                "tile.row_argmax",
+                "tile.row_argmin",
+                "tile.col_argmax",
+                "tile.col_argmin",
             }
         ),
     ),

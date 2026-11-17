@@ -29,10 +29,18 @@ namespace pypto::backend {
 
 const std::vector<BufferAxisRecipe>& GetBufferAxisRecipes() {
   static const std::vector<BufferAxisRecipe> recipes = {
-      {"tile.row_max", "buffer.row_max", GetPtoNativeOpSpec("tile.row_max").native_op, true},
-      {"tile.row_sum", "buffer.row_sum", GetPtoNativeOpSpec("tile.row_sum").native_op, true},
-      {"tile.row_min", "buffer.row_min", GetPtoNativeOpSpec("tile.row_min").native_op, true},
-      {"tile.row_prod", "buffer.row_prod", GetPtoNativeOpSpec("tile.row_prod").native_op, true},
+      {"tile.row_max", "buffer.row_max", GetPtoNativeOpSpec("tile.row_max").native_op, true, 1, true},
+      {"tile.row_sum", "buffer.row_sum", GetPtoNativeOpSpec("tile.row_sum").native_op, true, 1, true},
+      {"tile.row_min", "buffer.row_min", GetPtoNativeOpSpec("tile.row_min").native_op, true, 1, true},
+      {"tile.row_prod", "buffer.row_prod", GetPtoNativeOpSpec("tile.row_prod").native_op, true, 1, true},
+      {"tile.row_argmax", "buffer.row_argmax", GetPtoNativeOpSpec("tile.row_argmax").native_op, true, 1, true,
+       true},
+      {"tile.row_argmin", "buffer.row_argmin", GetPtoNativeOpSpec("tile.row_argmin").native_op, true, 1, true,
+       true},
+      {"tile.col_argmax", "buffer.col_argmax", GetPtoNativeOpSpec("tile.col_argmax").native_op, true, 0, true,
+       true},
+      {"tile.col_argmin", "buffer.col_argmin", GetPtoNativeOpSpec("tile.col_argmin").native_op, true, 0, true,
+       true},
       {"tile.row_expand_add", "buffer.row_expand_add", GetPtoNativeOpSpec("tile.row_expand_add").native_op,
        false},
       {"tile.row_expand_sub", "buffer.row_expand_sub", GetPtoNativeOpSpec("tile.row_expand_sub").native_op,
@@ -92,14 +100,18 @@ namespace {
 const char* OperandError(const BufferAxisRecipe& recipe, const std::vector<ir::BufferTypePtr>& types) {
   for (size_t i = 0; i < types.size(); ++i) {
     const auto& type = types[i];
-    const bool column = recipe.axis == 1 && i == (recipe.reduction ? 2 : 1);
+    const auto expected_dtype =
+        recipe.index_result && i == recipe.InputCount() ? DataType::INT32 : DataType::FP32;
+    if (!type || type->dtype_ != expected_dtype) {
+      return "requires FP32 inputs and value results, or INT32 index results";
+    }
+    const bool column = recipe.axis == 1 && i == (recipe.reduction ? recipe.InputCount() : 1);
     if (column) {
-      if (!IsColumnVectorBuffer(type)) return "requires a static aligned FP32 column vector";
-    } else if (!type || type->shape_.size() != 2 || type->dtype_ != DataType::FP32 ||
-               type->memory_space_ != ir::MemorySpace::Vec || type->blayout_ != ir::TileLayout::row_major ||
-               type->slayout_ != ir::TileLayout::none_box || type->fractal_ != 512 ||
-               type->pad_ != ir::PadValue::null || type->compact_ != ir::CompactMode::null ||
-               type->shape_[1] % 8 != 0) {
+      if (!IsColumnVectorBuffer(type)) return "requires a static aligned column vector";
+    } else if (type->shape_.size() != 2 || type->memory_space_ != ir::MemorySpace::Vec ||
+               type->blayout_ != ir::TileLayout::row_major || type->slayout_ != ir::TileLayout::none_box ||
+               type->fractal_ != 512 || type->pad_ != ir::PadValue::null ||
+               type->compact_ != ir::CompactMode::null || type->shape_[1] % 8 != 0) {
       return "requires aligned rank-2 row-major Vec FP32 operands";
     }
     if (type->valid_shape_[0] <= 0 || type->valid_shape_[1] <= 0) {
@@ -107,8 +119,20 @@ const char* OperandError(const BufferAxisRecipe& recipe, const std::vector<ir::B
     }
   }
   const auto& source = types[0];
+  if (recipe.HasScratch()) {
+    const auto& workspace = types[1];
+    // Index instructions use the source geometry to index scratch. Extra rows
+    // or columns are not interchangeable with the exact native descriptor.
+    if (recipe.index_result && workspace->shape_ != source->shape_) {
+      return "requires index scratch to match the source physical shape exactly";
+    }
+    if (workspace->shape_[0] < source->shape_[0] || workspace->shape_[1] < source->shape_[1] ||
+        workspace->valid_shape_ != workspace->shape_) {
+      return "requires full-valid scratch covering the source physical shape";
+    }
+  }
   if (recipe.axis == 0) {
-    const auto& row = types[1];
+    const auto& row = types[recipe.reduction ? recipe.InputCount() : 1];
     if (row->shape_[0] != 1 || row->valid_shape_[0] != 1 || row->shape_[1] != source->shape_[1] ||
         row->valid_shape_[1] != source->valid_shape_[1]) {
       return "requires a single row preserving physical and valid columns";
@@ -123,13 +147,8 @@ const char* OperandError(const BufferAxisRecipe& recipe, const std::vector<ir::B
   if (column->shape_[0] != source->shape_[0] || column->valid_shape_[0] != source->valid_shape_[0]) {
     return "requires the column vector to preserve physical and valid rows";
   }
-  if (recipe.reduction) {
-    const auto& workspace = types[1];
-    if (workspace->shape_[0] < source->shape_[0] || workspace->shape_[1] < source->shape_[1] ||
-        workspace->valid_shape_ != workspace->shape_) {
-      return "requires full-valid scratch covering the source physical shape";
-    }
-  } else if (types[2]->shape_ != source->shape_ || types[2]->valid_shape_ != source->valid_shape_) {
+  if (!recipe.reduction &&
+      (types[2]->shape_ != source->shape_ || types[2]->valid_shape_ != source->valid_shape_)) {
     return "requires the broadcast destination to preserve source physical and valid shape";
   }
   return nullptr;

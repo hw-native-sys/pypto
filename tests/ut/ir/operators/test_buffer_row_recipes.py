@@ -16,6 +16,7 @@ from pypto import DataType, ir, passes
 from pypto.pypto_core import ir as _ir
 
 _SPAN = ir.Span.unknown()
+_INDEX_REDUCTIONS = tuple(f"{axis}_arg{op}" for axis in ("row", "col") for op in ("max", "min"))
 _REDUCTIONS = ("row_max", "row_sum", "row_min", "row_prod")
 _BROADCASTS = (
     "row_expand_add",
@@ -40,6 +41,13 @@ def _buffer(name, column=False, **changes):
 
 
 def _args(suffix):
+    if suffix in _INDEX_REDUCTIONS:
+        row = suffix.startswith("row_")
+        return [
+            _buffer("src"),
+            _buffer("scratch"),
+            _buffer("dst", column=row, shape=[16, 1] if row else [1, 64], dtype=DataType.INT32),
+        ]
     if suffix.startswith("col_"):
         row = _buffer("row", shape=[1, 64])
         return [_buffer("src"), row, _buffer("dst")] if "expand" in suffix else [_buffer("src"), row]
@@ -242,6 +250,70 @@ def test_column_recipes_reject_inherited_wide_pitch(suffix):
     addresses = (0, 16384) if suffix in _COLUMN_REDUCTIONS else (0, 16384, 32768)
     diagnostics = _verify_storage(suffix, addresses, source_window=True)
     assert diagnostics and any("dense physical row pitch" in item.message for item in diagnostics)
+
+
+@pytest.mark.parametrize("suffix", _INDEX_REDUCTIONS)
+def test_index_reduction_effects_and_roundtrip(suffix):
+    call = _call(suffix, _args(suffix))
+    assert isinstance(call.type, ir.VoidType)
+    for index in range(3):
+        effect = ir.get_op_buffer_arg_effect(call.op.name, index)
+        assert effect.data == (ir.BufferAccess.Read if index == 0 else ir.BufferAccess.Write)
+        assert effect.metadata == ir.BufferAccess.Read
+        assert ir.op_arg_is_workspace(call.op.name, index) == (index == 1)
+    statement = ir.EvalStmt(call, _SPAN)
+    ir.assert_structural_equal(statement, ir.deserialize(ir.serialize(statement)), enable_auto_mapping=True)
+    with pytest.raises(ValueError, match="two inputs and an explicit destination"):
+        _call(suffix, _args(suffix)[:2])
+
+
+@pytest.mark.parametrize("suffix", _INDEX_REDUCTIONS)
+@pytest.mark.parametrize("operand,dtype", [(0, DataType.FP16), (1, DataType.INT32), (2, DataType.FP32)])
+def test_index_reductions_require_fp32_inputs_and_int32_results(suffix, operand, dtype):
+    arguments = _args(suffix)
+    original = arguments[operand]
+    arguments[operand] = _buffer(
+        original.name_hint,
+        shape=original.type.shape,
+        column=original.type.blayout == ir.TileLayout.col_major,
+        dtype=dtype,
+    )
+    with pytest.raises(ValueError, match="FP32 inputs.*INT32 index"):
+        _call(suffix, arguments)
+
+
+@pytest.mark.parametrize("suffix", _INDEX_REDUCTIONS)
+@pytest.mark.parametrize(
+    "shape,valid", [([8, 64], None), ([32, 64], None), ([16, 128], None), ([16, 64], [13, 57])]
+)
+def test_index_scratch_has_exact_physical_shape_and_full_valid(suffix, shape, valid):
+    arguments = _args(suffix)
+    arguments[1] = _buffer("scratch", shape=shape, **({"valid_shape": valid} if valid else {}))
+    with pytest.raises(ValueError, match="scratch"):
+        _call(suffix, arguments)
+
+
+@pytest.mark.parametrize("suffix", _INDEX_REDUCTIONS)
+@pytest.mark.parametrize("addresses", [(0, 0, 8192), (0, 4096, 0), (0, 4096, 4096), (0, 4096, 32)])
+def test_index_reduction_requires_three_disjoint_operands(suffix, addresses):
+    diagnostics = _verify_storage(suffix, addresses)
+    assert diagnostics and any("disjoint" in diagnostic.message for diagnostic in diagnostics)
+    assert _verify_storage(suffix, (0, 4096, 8192)) == []
+
+
+@pytest.mark.parametrize("suffix", _INDEX_REDUCTIONS)
+@pytest.mark.parametrize("valid", [[-1, -1], [0, 64], [16, 0]])
+def test_index_reduction_rejects_dynamic_or_empty_domain(suffix, valid):
+    arguments = _args(suffix)
+    arguments[0] = _buffer("source", valid_shape=valid)
+    with pytest.raises(ValueError, match="nonempty static valid"):
+        _call(suffix, arguments)
+
+
+@pytest.mark.parametrize("suffix", _INDEX_REDUCTIONS)
+def test_index_reduction_rejects_inherited_wide_source_pitch(suffix):
+    diagnostics = _verify_storage(suffix, (0, 8192, 12288), source_window=True)
+    assert diagnostics and any("dense physical row pitch" in diagnostic.message for diagnostic in diagnostics)
 
 
 if __name__ == "__main__":

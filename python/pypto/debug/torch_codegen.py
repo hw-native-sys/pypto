@@ -1224,6 +1224,12 @@ def _register_reductions(m: dict[str, OpHandler], prefix: str) -> None:
     m[f"{prefix}.col_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-2, keepdim=True)"
     m[f"{prefix}.col_prod"] = lambda a, _kw: f"{a[0]}.prod(dim=-2, keepdim=True)"
 
+    for axis, dim in (("row", -1), ("col", -2)):
+        for reduction in ("argmax", "argmin"):
+            m[f"{prefix}.{axis}_{reduction}"] = lambda a, _kw, fn=reduction, dim=dim: (
+                f"torch.{fn}({a[0]}, dim={dim}, keepdim=True).to(torch.int32)"
+            )
+
 
 def _register_expands(m: dict[str, OpHandler], prefix: str) -> None:
     """Register row/col expand max/min/expdif handlers (torch broadcasting)."""
@@ -1456,6 +1462,11 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"buffer.{suffix}"] = lambda a, _kw, fn=reduction: (
             f"_buffer_write({a[1]}, torch.{fn}(_buffer_active({a[0]}), dim=0, keepdim=True))"
         )
+    for axis, dim in (("row", -1), ("col", 0)):
+        for reduction in ("argmax", "argmin"):
+            m[f"buffer.{axis}_{reduction}"] = lambda a, _kw, fn=reduction, dim=dim: (
+                f"_buffer_write({a[2]}, torch.{fn}(_buffer_active({a[0]}), dim={dim}, keepdim=True))"
+            )
     for suffix, operation in (
         ("col_expand_add", "+"),
         ("col_expand_sub", "-"),
@@ -1854,7 +1865,7 @@ class TorchCodegen(_ir.IRVisitor):
             # A single physical column is contiguous in both tensor views;
             # retaining its descriptor layout still matters to native codegen.
             column_vector = (
-                descriptor.dtype == DataType.FP32
+                descriptor.dtype in (DataType.FP32, DataType.INT32)
                 and len(descriptor.shape) == 2
                 and descriptor.shape[1] == 1
                 and descriptor.blayout == _ir.TileLayout.col_major
@@ -1863,7 +1874,7 @@ class TorchCodegen(_ir.IRVisitor):
                 descriptor.blayout != _ir.TileLayout.row_major and not column_vector
             ) or descriptor.slayout != _ir.TileLayout.none_box:
                 raise ValueError(
-                    "torch_codegen requires dense row-major Vec or FP32 column-vector descriptors"
+                    "torch_codegen requires dense row-major Vec or FP32/INT32 column-vector descriptors"
                 )
         elif (
             descriptor.memory_space

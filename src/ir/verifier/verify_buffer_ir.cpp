@@ -214,9 +214,9 @@ class BufferIRVisitor : public IRVisitor {
         if (const auto* axis_recipe = backend::FindBufferAxisRecipe(name)) {
           // Reduction destinations are disjoint from their inputs. Broadcasts
           // may reuse their matrix exactly, never their repeated vector.
-          if (axis_recipe->axis == 0) {
+          if (axis_recipe->axis == 0 || axis_recipe->index_result) {
             // A subview descriptor can hide its parent's wider row pitch.
-            // Native column recipes here consume dense allocation geometry.
+            // Column and index recipes consume dense allocation geometry.
             CheckDensePhysicalPitch(op);
           }
           const auto& destination = op->args_[axis_recipe->InputCount()];

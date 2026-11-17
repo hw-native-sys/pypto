@@ -143,7 +143,7 @@ class BufferKernelSupport : public IRVisitor {
         supported &= !memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_;
       }
     } else if (auto tensor = As<TensorType>(type)) {
-      supported &= StaticShape(tensor->shape_) &&
+      supported &= (StaticShape(tensor->shape_) || backend::IsIndexColumnTensor(tensor)) &&
                    (backend::IsDenseBufferTransferDtype(tensor->dtype_) || tensor->dtype_ == DataType::INT8);
       if (supported && tensor->tensor_view_) {
         const auto& view = *tensor->tensor_view_;
@@ -558,9 +558,11 @@ class BufferKernelSupport : public IRVisitor {
       return;
     }
     const auto space = tile->GetMemorySpace();
-    // Reduction columns are on-chip operands only. The ordinary GM recipe
-    // cannot transfer a contiguous column into a strided row-major tensor.
-    supported &= !backend::IsColumnVectorBufferTile(tile, tile_view_semantics::GetEffectiveTileView(*tile));
+    // Index columns may drain into a packed [R,1] output. Keep strided matrix
+    // columns and FP32 reduction columns outside this narrow transfer recipe.
+    supported &=
+        !backend::IsColumnVectorBufferTile(tile, tile_view_semantics::GetEffectiveTileView(*tile)) ||
+        (!load && backend::SupportsIndexColumnStore(backend::StaticLogicalBufferDescriptor(tile), tensor));
     if (space == MemorySpace::Vec || (load && space == MemorySpace::Mat)) {
       supported &= tile->dtype_ == tensor->dtype_;
     } else {

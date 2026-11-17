@@ -21,8 +21,8 @@
 namespace pypto::backend {
 
 /// Axis reductions and broadcasts share explicit destination handling. Row
-/// reductions additionally write scratch; column reductions here are sequential
-/// and take no scratch. The axis is the reduced/broadcast matrix dimension.
+/// reductions and index reductions write explicit scratch. The axis describes
+/// geometry independently of workspace needs and the result element type.
 struct BufferAxisRecipe {
   const char* logical_op;
   const char* buffer_op;
@@ -30,8 +30,11 @@ struct BufferAxisRecipe {
   bool reduction;
   int axis = 1;
 
-  [[nodiscard]] bool HasScratch() const { return reduction && axis == 1; }
-  [[nodiscard]] size_t InputCount() const { return reduction && axis == 0 ? 1 : 2; }
+  bool scratch = false;
+  bool index_result = false;  // INT32 indices; value results retain FP32.
+
+  [[nodiscard]] bool HasScratch() const { return scratch; }
+  [[nodiscard]] size_t InputCount() const { return reduction && !scratch ? 1 : 2; }
 };
 
 const std::vector<BufferAxisRecipe>& GetBufferAxisRecipes();

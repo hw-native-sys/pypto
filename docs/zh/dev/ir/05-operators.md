@@ -37,6 +37,7 @@
 | `buffer.scatter` | 源、INT32 索引、完整有效的目的地（索引写入前清零） | Void |
 | `buffer.row_max`、`buffer.row_sum` | FP32 矩阵、显式 scratch、列向量目的地 | Void |
 | `buffer.row_expand_sub`、`buffer.row_expand_div` | FP32 矩阵、列向量、矩阵目的地 | Void |
+| `buffer.row_argmax/min`、`buffer.col_argmax/min` | FP32 矩阵、同形状全有效 FP32 scratch、INT32 索引目的地 | Void |
 | `buffer.col_sum/max/min/prod` | FP32 矩阵、单行目的地 | Void |
 | `buffer.col_expand_add/sub/mul/div/max/min` | FP32 矩阵、单行载体、矩阵目的地 | Void |
 

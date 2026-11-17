@@ -1006,5 +1006,65 @@ def test_default_column_compute(case_run, request):
     _assert_buffer_result(case_run, request)
 
 
+def _index_reduction_entry(valid):
+    rows, cols = valid
+
+    @pl.jit
+    def entry(
+        a: pl.Tensor, row_out: pl.InOut[pl.Tensor], col_out: pl.InOut[pl.Tensor], old: pl.InOut[pl.Tensor]
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            source = pl.load(a, [0, 0], [16, 128], valid_shape=[rows, cols])
+            scratch = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+            row_max = pl.tile.row_argmax(source, scratch)
+            row_min = pl.tile.row_argmin(source, scratch)
+            col_max = pl.tile.col_argmax(source, scratch)
+            col_min = pl.tile.col_argmin(source, scratch)
+            row_out = pl.store(row_max, [0, 0], row_out)
+            row_out = pl.store(row_min, [16, 0], row_out)
+            col_out = pl.store(col_max, [0, 0], col_out)
+            col_out = pl.store(col_min, [1, 0], col_out)
+            old = pl.store(source, [0, 0], old)
+        return row_out, col_out, old
+
+    return entry
+
+
+def _index_reduction_golden(tensors, valid):
+    rows, cols = valid
+    active = tensors["a"][:rows, :cols]
+    row_out, col_out, old = (tensors[name].clone() for name in ("row_out", "col_out", "old"))
+    row_out[:rows] = active.argmax(dim=1, keepdim=True).to(torch.int32)
+    row_out[16 : 16 + rows] = active.argmin(dim=1, keepdim=True).to(torch.int32)
+    col_out[0:1, :cols] = active.argmax(dim=0, keepdim=True).to(torch.int32)
+    col_out[1:2, :cols] = active.argmin(dim=0, keepdim=True).to(torch.int32)
+    old[:rows, :cols] = active
+    return {"row_out": row_out, "col_out": col_out, "old": old}
+
+
+@st.cases(
+    *[
+        st.case(
+            _index_reduction_entry(valid),
+            torch.randperm(2048, generator=torch.Generator().manual_seed(37)).reshape(16, 128).float(),
+            torch.full((32, 1), -777, dtype=torch.int32),
+            torch.full((2, 128), -777, dtype=torch.int32),
+            torch.full((16, 128), -777.0),
+            name=f"buffer_index_reductions_{valid[0]}_{valid[1]}_{planner.name.lower()}_{enabled}",
+            golden=lambda tensors, valid=valid: _index_reduction_golden(tensors, valid),
+            memory_planner=planner,
+            enable_buffer_ir=enabled,
+            rtol=0,
+            atol=0,
+        )
+        for valid in ((16, 128), (13, 72))
+        for planner in _PLANNERS
+        for enabled in (False, True)
+    ]
+)
+def test_default_index_reductions(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

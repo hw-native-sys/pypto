@@ -37,6 +37,7 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.scatter` | source, INT32 indices, full-valid destination (cleared before indexed writes) | Void |
 | `buffer.row_max`, `buffer.row_sum` | FP32 matrix, explicit scratch, column-vector destination | Void |
 | `buffer.row_expand_sub`, `buffer.row_expand_div` | FP32 matrix, column vector, matrix destination | Void |
+| `buffer.row_argmax/min`, `buffer.col_argmax/min` | FP32 matrix, exact full-valid FP32 scratch, INT32 index destination | Void |
 | `buffer.col_sum/max/min/prod` | FP32 matrix, single-row destination | Void |
 | `buffer.col_expand_add/sub/mul/div/max/min` | FP32 matrix, single-row carrier, matrix destination | Void |
 

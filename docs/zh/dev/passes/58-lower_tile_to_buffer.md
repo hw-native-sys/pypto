@@ -28,6 +28,7 @@ PTO codegen 直接接收分配句柄和目标操作数。
 | adds、subs、muls、divs、maximums、minimums、lrelu、full | FP32 |
 | row_max、row_sum、row_min、row_prod | FP32，正静态 valid |
 | row_expand_add/sub/mul/div/max/min | FP32，正静态 valid，连续列向量 |
+| row_argmax/min、col_argmax/min | FP32 输入、INT32 索引、正静态有效范围 |
 | col_sum/max/min/prod | FP32，正静态 valid，顺序归约 |
 | col_expand_add/sub/mul/div/max/min | FP32，正静态 valid，单行载体 |
 | transpose | FP32，full-valid 稠密二维矩阵 |
@@ -47,8 +48,8 @@ FP32 行配方支持 allocation-backed 的稠密矩阵和正静态 valid。归�
 显式操作数，Buffer IR 声明其写效果。归约的源、scratch 和目的地须互不重叠。广播可以精确复用
 矩阵输入，但不能复用列向量。地址复用时列向量保留带类型描述符，不被解释成行优先窗口。
 
-列向量仅用作片上归约和广播操作数。直接从 GM 加载列向量或将其写入 GM 的内核
-保留在 Tile IR，等待列向量传输 recipe 的验证；普通稠密传输 recipe 不覆盖跨步列。
+FP32 列向量仍仅用作片上归约和广播操作数，其 GM 传输保留 Tile IR。INT32 索引列向量
+可以写入紧密的单列 `[R,1]` GM 张量；列向量加载和写入较宽张量中的一列仍不在此传输配方范围内。
 
 支持完整的 `row_max -> row_expand_sub -> exp -> row_sum -> row_expand_div` softmax
 链。包含运行时/空 valid 状态、窗口操作数、其他 dtype 或其他归约操作的行配方 kernel
@@ -61,6 +62,14 @@ FP32 行配方支持 allocation-backed 的稠密矩阵和正静态 valid。归�
 物理列按 32 字节对齐，载体保留源的物理列数和有效列数。归约输出须与源分离；
 广播可精确复用矩阵，但不能覆盖载体。这些形式要求稠密 FP32 分配和正静态 valid。
 带可选 scratch 的二叉树 `col_sum`、窗口操作数、动态或空有效域及其他 dtype 仍走 Tile。
+
+索引归约（index reduction）`row_argmax/min` 和 `col_argmax/min` 读取 FP32 矩阵，
+输出归约轴上的 INT32 索引。两个方向都需要显式、全有效的 FP32 scratch，其物理形状
+必须与输入完全一致，不随输入的部分有效矩形缩小。输入、scratch 与目的地两两不重叠。
+行归约结果采用列优先 `[R,1]` 存储，列归约结果采用行优先 `[1,C]` 存储；保留维度的
+物理范围与有效范围保持不变。原生指令语义（包括相等极值的索引选择）保持不变。
+窗口操作数、动态有效域以及其他输入 dtype 仍走 Tile；静态空有效域保留既有前端拒绝行为。
+Buffer 发射器只使用已规划的操作数，不分配工作空间。
 
 稠密 FP32 `transpose` 复用 `FlattenTileNdTo2D` 已创建的 scratch。
 Lowering 去除逻辑轴参数，生成 `buffer.transpose(source, scratch, destination)`。
@@ -133,7 +142,7 @@ assemble、槽位、helper ABI 和跨核资源在正常流水线保持 Tile。�
 ```text
 默认 / True: load -> add -> mul -> store  => Buffer
 默认 / True: 带显式 scratch 的 FP32 softmax => Buffer
-默认 / True: load -> col_sum -> store     => Tile（整个 kernel）
+默认 / True: load -> rsqrt -> store     => Tile（整个 kernel）
 False:       所有 kernel                 => Tile
 ```
 

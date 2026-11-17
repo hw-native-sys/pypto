@@ -29,8 +29,8 @@ def _scalar(name, dtype=DataType.INDEX):
     return ir.Var(name, ir.ScalarType(dtype), SPAN)
 
 
-def _type(shape=(16, 32), valid=(), **kwargs):
-    return ir.BufferType(list(shape), DataType.FP32, ir.MemorySpace.Vec, list(valid), **kwargs)
+def _type(shape=(16, 32), valid=(), dtype=DataType.FP32, **kwargs):
+    return ir.BufferType(list(shape), dtype, ir.MemorySpace.Vec, list(valid), **kwargs)
 
 
 def _call(name, args, result=None, kwargs=None):
@@ -261,9 +261,10 @@ def test_gm_transfers_reject_incompatible_parameter_directions(name, direction):
 
 
 @pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
-def test_gm_transfers_reject_reduction_columns(name):
-    tensor = ir.Var("tensor", ir.TensorType([16, 64], DataType.FP32), SPAN)
-    buffer, allocation = _alloc("column", _type((16, 1), blayout=ir.TileLayout.col_major))
+@pytest.mark.parametrize("dtype", [DataType.FP32, DataType.INT32])
+def test_gm_transfers_reject_reduction_columns(name, dtype):
+    tensor = ir.Var("tensor", ir.TensorType([16, 64], dtype), SPAN)
+    buffer, allocation = _alloc("column", _type((16, 1), dtype=dtype, blayout=ir.TileLayout.col_major))
     source, destination = (tensor, buffer) if name == "buffer.load" else (buffer, tensor)
     program = _program(
         [allocation, _eval(name, source, _window(0, 0), _window(16, 1), destination)],
@@ -873,6 +874,19 @@ def test_matrix_descriptor_rejects_types_the_cube_cannot_hold():
     _, allocation = _alloc("operand", _matrix_type(ir.MemorySpace.Acc, (32, 64), DataType.FP16))
     with pytest.raises(ValueError, match="cube operands or FP32/INT32 accumulators in Acc"):
         _emit(_program([allocation], ir_stage=ir.FunctionIRStage.Buffer))
+
+
+def test_index_column_load_remains_outside_native_transfer_contract():
+    tensor = ir.Var("tensor", ir.TensorType([16, 1], DataType.INT32), SPAN)
+    buffer, allocation = _alloc(
+        "column", _type((16, 1), dtype=DataType.INT32, blayout=ir.TileLayout.col_major)
+    )
+    program = _program(
+        [allocation, _eval("buffer.load", tensor, _window(0, 0), _window(16, 1), buffer)],
+        [(tensor, ir.ParamDirection.In)],
+    )
+    with pytest.raises(ValueError, match="GM transfers do not support reduction column vectors"):
+        _emit(program)
 
 
 if __name__ == "__main__":
