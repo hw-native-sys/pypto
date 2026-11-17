@@ -9,6 +9,7 @@
 
 """Extended register APIs through parsing, passes and VMI lowering."""
 
+import re
 import subprocess
 
 import pypto.language as pl
@@ -142,13 +143,10 @@ def test_roundtrip_and_codegen(name, dtype, statement):
         assert "pmode" not in line
         assert "xpred>" in line.split(" -> ", 1)[1]
     if name in ("intlv", "dintlv"):
-        masked = ", m)" in statement
-        # PTOAS drops the rearrangement mask. Only explicitly masked calls
-        # require result zeroing; all-active calls keep the load-fusion pattern.
-        assert source.count("pto.vmi.vsel") == (2 if masked else 0)
-        assert ("interleave_zero" in source) == masked
-        if dtype == "BF16":
-            assert source.count("pto.vmi.vinterpret_cast") == (4 if masked else 0)
+        # PTOAS >= 0.74 clears both results natively, including BF16.
+        assert "pto.vmi.vsel" not in source
+        assert "interleave_zero" not in source
+        assert "pto.vmi.vinterpret_cast" not in source
     if name == "expdif":
         assert line.endswith("!pto.vmi.vreg<64xf32>")
     if name == "scatter":
@@ -184,6 +182,52 @@ def test_extended_ops_compile_with_ptoas(name, dtype, statement, tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("op", ["intlv", "dintlv"])
+@pytest.mark.parametrize(
+    "dtype", ["INT8", "UINT8", "INT16", "UINT16", "INT32", "UINT32", "FP16", "BF16", "FP32"]
+)
+@pytest.mark.parametrize("lanes", [8, 64, 128, 256])
+@pytest.mark.parametrize("mask", ["empty", "partial", "full", "omitted"])
+def test_interleave_results_reach_both_unmasked_stores(op, dtype, lanes, mask):
+    active = {"empty": 0, "partial": lanes // 2, "full": lanes, "omitted": lanes}[mask]
+    arguments = "lhs, rhs" if mask == "omitted" else "lhs, rhs, mask"
+    function = pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    src = pl.tile.full([1024], pl.{dtype}, 1)
+    dst = pl.tile.full([1024], pl.{dtype}, 2)
+    with pl.reg_scope():
+        lhs = pl.reg.load(src, lanes={lanes})
+        rhs = pl.reg.load(src, offset=512, lanes={lanes})
+        mask = pl.reg.active_mask({active}, lanes={lanes})
+        low, high = pl.reg.{op}({arguments})
+        dst = pl.reg.store(dst, value=low)
+        dst = pl.reg.store(dst, offset=512, value=high)
+    result = pl.tile.add(dst, dst)
+""")
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    stores = [line for line in source.splitlines() if "pto.vmi.vstore " in line]
+    assert len(stores) == 2
+    # Observing complete results is essential: a store using the governing
+    # mask would hide a missing clear on either result.
+    assert all("!pto.vmi.mask" not in line for line in stores)
+    assert "pto.vmi.vsel " not in source
+    assert "pto.vmi.vinterpret_cast " not in source
+    values = [line.split("vstore ", 1)[1].split(",", 1)[0] for line in stores]
+    pair = re.search(rf"(%[\w]+), (%[\w]+) = pto.vmi.v{op} ", source)
+    assert pair is not None
+    assert tuple(values) == pair.groups()
+    operation = next(line for line in source.splitlines() if f"pto.vmi.v{op} " in line)
+    assert "!pto.vmi.mask" in operation
+    assert 'pmode = "zero"' in operation
+    predicate = operation.split(" = ", 1)[1].split(" {", 1)[0].split(", ")[-1]
+    definitions = dict(re.findall(r"(%[\w]+) = (.*)", source))
+    # Omitted-mask calls keep their existing all-active mask, which enables
+    # PTOAS fusion. Explicit calls must retain the user's governing mask.
+    producer = 'pto.vmi.pset "PAT_ALL"' if mask == "omitted" else "pto.vmi.create_mask "
+    assert definitions[predicate].startswith(producer)
 
 
 @pytest.mark.parametrize(
@@ -514,9 +558,9 @@ def kernel(base: pl.Scalar[pl.INDEX]):
 
 @pytest.mark.ptoas_compile
 def test_unmasked_deinterleave_fuses_bf16_load_and_grouped_reduction(tmp_path):
-    # Masked deinterleave needs result-clearing selects. They break the A5
-    # paired-load pattern and can exhaust the layout search for this chain.
-    # Omitting the mask allows PTOAS to pick DINTLV_B16 and EVEN/ODD conversions.
+    # Omitting the mask makes every lane active. This all-active chain must
+    # compile through PTOAS without an interleave_zero operation and retain
+    # the paired-load and EVEN/ODD conversion fusion opportunities.
     function = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def kernel():

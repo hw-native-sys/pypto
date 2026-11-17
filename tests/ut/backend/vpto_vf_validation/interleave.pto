@@ -1,0 +1,29 @@
+// Copyright (c) PyPTO Contributors.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Native masked interleave: no frontend vsel and no masked stores.
+// Both result pointers are independent so load/store fusion cannot hide a result.
+// Default: #1659 reproducer, FP32 VL8, full mask. High must interleave
+// lhs[4:8] and rhs[4:8]; v0.74 instead takes the physical 64-lane high half.
+// The parameterized compiler test also covers empty/partial masks and BF16.
+module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
+  func.func @interleave(%lhs: !pto.ptr<f32, ub>, %rhs: !pto.ptr<f32, ub>,
+                        %out0: !pto.ptr<f32, ub>, %out1: !pto.ptr<f32, ub>) attributes {pto.aiv} {
+    %zero = arith.constant 0 : index
+    %active = arith.constant 8 : index
+    pto.vecscope {
+      %a = pto.vmi.vload %lhs[%zero] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<8xf32>
+      %b = pto.vmi.vload %rhs[%zero] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<8xf32>
+      %mask = pto.vmi.create_mask %active : index -> !pto.vmi.mask<8xpred>
+      %low, %high = pto.vmi.vintlv %a, %b, %mask {pmode = "zero"} : !pto.vmi.vreg<8xf32>, !pto.vmi.vreg<8xf32>, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xf32>, !pto.vmi.vreg<8xf32>
+      pto.vmi.vstore %low, %out0[%zero] : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>
+      pto.vmi.vstore %high, %out1[%zero] : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>
+    }
+    return
+  }
+}

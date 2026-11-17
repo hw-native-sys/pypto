@@ -373,8 +373,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
   }
   if (unmasked_interleave) {
     // VMI requires a predicate even for an all-active public call. Generate it
-    // locally and omit the result-clearing selects below: there are no inactive
-    // lanes, and the direct load/rearrangement chain remains fusible by PTOAS.
+    // locally so PTOAS can recognize the all-active load/rearrangement chain
+    // and preserve its fusion opportunities.
     auto source = ir::As<ir::RegType>(args[0]->GetType());
     auto mask_type =
         GetRegTypeString(std::make_shared<ir::RegType>(source->shape_, DataType::BOOL, ir::RegKind::MaskReg));
@@ -474,37 +474,10 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
         names[i] = typed;
       }
     }
-    if ((ir::IsOp(call, "reg.intlv") || ir::IsOp(call, "reg.dintlv")) && !unmasked_interleave) {
-      // PTOAS 0.71 emits unmasked interleave instructions even with pmode=zero.
-      // Enforce the public inactive-lane contract on both independent results.
-      auto type = ir::As<ir::RegType>(tuple->types_[0]);
-      const bool bfloat = type->dtype_ == DataType::BF16;
-      auto select_reg =
-          bfloat ? std::make_shared<ir::RegType>(type->shape_, DataType::UINT16, ir::RegKind::VecReg) : type;
-      const auto select_type = GetRegTypeString(select_reg);
-      const auto original_type = GetRegTypeString(type);
-      auto zero = NewNamedTemp("interleave_zero");
-      Emit(zero + " = \"pto.vmi.constant\"() {value = dense<" + (select_reg->dtype_.IsFloat() ? "0.0" : "0") +
-           "> : tensor<" + std::to_string(type->shape_) + "x" + RegisterElement(select_reg->dtype_) +
-           ">} : () -> " + select_type);
-      for (auto& value : names) {
-        if (bfloat) {
-          auto bits = NewNamedTemp("interleave_bits");
-          Emit(bits + " = pto.vmi.vinterpret_cast " + value + " : " + original_type + " -> " + select_type);
-          value = bits;
-        }
-        auto masked = NewNamedTemp("interleave_masked");
-        Emit(masked + " = pto.vmi.vsel " + GetExprAsCode(args.back()) + ", " + value + ", " + zero + " : " +
-             operand_type(args.back()) + ", " + select_type + ", " + select_type + " -> " + select_type);
-        value = masked;
-        if (bfloat) {
-          auto restored = NewNamedTemp("interleave_bfloat");
-          Emit(restored + " = pto.vmi.vinterpret_cast " + value + " : " + select_type + " -> " +
-               original_type);
-          value = restored;
-        }
-      }
-    }
+    // Masked reg.intlv/reg.dintlv keep their predicate: PTOAS >= 0.74 owns
+    // inactive-lane zeroing for both outputs without converting active BF16
+    // payloads. Bind native results directly, without PyPTO vsel/bitcast
+    // compensation. The independent small-VL placement issue is PTOAS #1659.
     reg_tuple_values_[result.get()] = std::move(names);
     return true;
   }
