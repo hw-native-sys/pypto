@@ -116,10 +116,13 @@ instead. A multi-slot declaration is accepted — its slots become a ptoas regio
 segments ptoas is forbidden to merge — see
 [Python syntax](../language/00-python_syntax.md#under-the-ptoas-memory-planner).
 
-The declaration lives on the assigned `Var`, not on the RHS `Call` — `ConvertToSSA` merges
-it into the Var's type and op type deduction never produces a MemRef — so any pass that
-rebuilds a type from the Call must carry it over explicitly. `ConvertToSSA` does the
-merge; `FlattenTileNdTo2D` carries it through all four of its rebuilds (ND flatten,
+The declaration is carried by the assigned `Var`; the parser also preserves an explicit
+pinned annotation on the RHS `Call`, so reassignment can distinguish it from the Var's
+older inferred binding. Op type deduction does not allocate storage, but can inherit an
+input MemRef (`tile.gather_row` returns its destination's type). Passes that rebuild types
+must preserve explicit constraints even when deduction omits or inherits a MemRef.
+`ConvertToSSA` selects each definition's metadata; `FlattenTileNdTo2D` carries it through
+all four of its rebuilds (ND flatten,
 ≤2D `tile.load`, rank>2 `tile.create`/`tile.full`, generic tile op); `InferTileMemorySpace` keeps it when syncing the Var
 type to a rebuilt Call. Passes that clone rather than rebuild (including the per-stage
 bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.

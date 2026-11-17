@@ -103,9 +103,11 @@ pass 被 ptoas 整体替换，ptoas 侧也没有对应概念来接管。多槽�
 ptoas 区域，ptoas 被禁止合并这些物理段，详见
 [Python 语法](../language/00-python_syntax.md#在-ptoas-内存规划器下)。
 
-声明位于被赋值的 `Var` 上而非 RHS `Call` 上——`ConvertToSSA` 只把它合并进 Var 的类型，而算子类型
-推导永远不产生 MemRef——因此任何从 Call 重建类型的 pass 都必须显式携带它。`ConvertToSSA` 负责
-合并；`FlattenTileNdTo2D` 在四处重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；
+声明由被赋值的 `Var` 携带；解析器也在 RHS `Call` 上保留显式的 pinned 注解，使重新赋值时能将
+它与 Var 之前推导出的绑定区分开。算子类型推导不分配存储，但可能继承输入的 MemRef
+（`tile.gather_row` 直接返回目标累加器的类型）。重建类型的 pass 必须保留显式约束，即使类型
+推导省略或继承了 MemRef。`ConvertToSSA` 选择每次定义的元数据；`FlattenTileNdTo2D` 在四处
+重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；
 `InferTileMemorySpace` 在把 Var 类型同步到重建后的 Call 时保留它。只克隆而不重建的 pass（包括
 `LowerPipelineLoops` 产出的各流水级 body）经由 `MemRef` 的克隆路径保留它。
 

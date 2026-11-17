@@ -553,6 +553,30 @@ class Before:
         ]
         assert bases == ["first", "second"]
 
+    def test_plain_alias_reassignment_to_unbound_source(self, ascend_backend):
+        """A plain alias can leave a pinned source for a compiler-managed tile."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]) -> pl.Tensor[[8, 32], pl.BF16]:
+                first: pl.Tile[[8, 32], pl.BF16, pl.MemRef("first"), pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                second = pl.tile.full([8, 32], dtype=pl.BF16, value=1.0)
+                result = first
+                pl.store(result, [0, 0], out)
+                result = second
+                return pl.store(result, [0, 0], out)
+
+        refs = _tile_memrefs(_run_full_pipeline(Before, "InitMemRef"))
+        results = [ref for name, ref in refs.items() if name.startswith("result")]
+        assert len(results) == 2
+        assert results[0].base_.name_hint == "first"
+        second = next(ref for name, ref in refs.items() if name.startswith("second"))
+        assert results[1] is second
+        assert results[1].base_ is not results[0].base_
+
     @pytest.mark.parametrize("different_slot", [False, True])
     def test_runtime_slot_gather_binding(self, different_slot):
         """Equal symbolic indices need structural comparison, not pointer equality."""
