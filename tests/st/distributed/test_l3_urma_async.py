@@ -49,12 +49,33 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 import torch
+from harness import cards
 from pypto.ir import DistributedConfig
 from pypto.runtime import RunConfig
 from pypto.runtime._artifact_runtime import runtime_output_directory
 
 SIZE = 4096
 REPEATS = 3
+
+# P=4 needs four mutually reachable cards. On the A5 CI server {0,1,2,3}
+# contains card 0 and {4,5,6,7} contains card 5, both of which cannot do URMA,
+# so no such set exists. The cases are not run rather than left to hang until
+# the scheduler times out.
+_P4_XFAIL = pytest.mark.xfail(
+    reason="A5 CI server has no 4-rank URMA set: cards 0 and 5 are unusable and 0-3 does not reach 4-7",
+    run=False,
+)
+
+
+def _urma_devices(device_ids: list[int], n_ranks: int) -> list[int]:
+    """Return ``n_ranks`` mutually reachable, URMA-capable cards, or skip."""
+    chosen = cards.urma_group(device_ids, n_ranks)
+    if chosen is None:
+        pytest.skip(
+            f"needs {n_ranks} URMA-capable cards inside one full-mesh group "
+            f"(excluding {sorted(cards.URMA_BROKEN_DEVICES)}); allocated {device_ids}"
+        )
+    return chosen
 
 
 @pytest.fixture
@@ -1208,10 +1229,9 @@ class TestL3UrmaAsync:
     state. A scheduler-side trace is the direct evidence and is not wired.
     """
 
-    @pytest.mark.parametrize("n_ranks", [2, 4])
+    @pytest.mark.parametrize("n_ranks", [2, pytest.param(4, marks=_P4_XFAIL)])
     def test_exchange_values(self, test_config, device_ids, n_ranks):
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async exchange P={n_ranks} needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs_put, outputs_get = _run(test_config, device_ids, n_ranks, round_index=0)
 
@@ -1224,11 +1244,10 @@ class TestL3UrmaAsync:
             f"GET P={n_ranks} mismatch: max diff = {(outputs_get - expected_get).abs().max().item()}"
         )
 
-    @pytest.mark.parametrize("n_ranks", [2, 4])
+    @pytest.mark.parametrize("n_ranks", [2, pytest.param(4, marks=_P4_XFAIL)])
     def test_put_only(self, test_config, device_ids, n_ranks):
         """A single URMA PUT per peer, with no GET and a minimal handshake."""
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async PUT P={n_ranks} needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs = _run_single_output(test_config, device_ids, n_ranks, _build_put_only)
         expected = _expected_exchange(n_ranks)
@@ -1239,8 +1258,7 @@ class TestL3UrmaAsync:
     def test_put_get_no_handshake(self, test_config, device_ids):
         """PUT and GET without a notification: only local rows are deterministic."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async PUT/GET needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs_put, outputs_get = _run_two_outputs(
             test_config, device_ids, n_ranks, _build_put_get_no_handshake
@@ -1261,8 +1279,7 @@ class TestL3UrmaAsync:
     def test_exchange_repeated(self, test_config, device_ids):
         """Repeated calls must each observe their own payload."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async repeated exchange needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         compiled = _compile(test_config, device_ids, n_ranks)
         for round_index in range(REPEATS):
@@ -1278,7 +1295,7 @@ class TestL3UrmaAsync:
                 f"max diff = {(outputs_get - expected_get).abs().max().item()}"
             )
 
-    @pytest.mark.parametrize("n_ranks", [2, 4])
+    @pytest.mark.parametrize("n_ranks", [2, pytest.param(4, marks=_P4_XFAIL)])
     def test_put_only_fp16(self, test_config, device_ids, n_ranks):
         """A second element type crosses the same PUT path.
 
@@ -1287,8 +1304,7 @@ class TestL3UrmaAsync:
         arithmetic, so this checks the transfer path bit-exactly rather than
         acting as an independent FP16 math oracle.
         """
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async FP16 PUT P={n_ranks} needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs = _run_put_only_typed(test_config, device_ids, n_ranks, pl.FP16, torch.float16)
         expected = _typed_expected(n_ranks, torch.float16, step=100)
@@ -1300,24 +1316,21 @@ class TestL3UrmaAsync:
     def test_invalid_peer_fails_loudly(self, test_config, device_ids, capfd):
         """A runtime peer equal to the domain's rank count is rejected."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async invalid-peer case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         _assert_invalid(test_config, device_ids, n_ranks, _build_bad_peer, capfd)
 
     def test_out_of_range_region_fails_loudly(self, test_config, device_ids, capfd):
         """A runtime subregion past the tensor's own extent is rejected."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async out-of-range case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         _assert_invalid(test_config, device_ids, n_ranks, _build_out_of_range, capfd)
 
-    @pytest.mark.parametrize("n_ranks", [2, 4])
+    @pytest.mark.parametrize("n_ranks", [2, pytest.param(4, marks=_P4_XFAIL)])
     def test_get_only(self, test_config, device_ids, n_ranks):
         """GET on its own: every rank pulls every peer's row into recv."""
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async GET-only P={n_ranks} needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs = _run_single_output(test_config, device_ids, n_ranks, _build_get_only)
         expected = _expected_exchange(n_ranks)
@@ -1325,7 +1338,7 @@ class TestL3UrmaAsync:
             f"GET-only P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
-    @pytest.mark.parametrize("n_ranks", [2, 4])
+    @pytest.mark.parametrize("n_ranks", [2, pytest.param(4, marks=_P4_XFAIL)])
     def test_dynamic_subregion(self, test_config, device_ids, n_ranks):
         """A half-row transferred at a runtime column offset.
 
@@ -1333,8 +1346,7 @@ class TestL3UrmaAsync:
         that is not a compile-time constant. Only the transferred half of each
         row is written; the rest of the window stays zero.
         """
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async dynamic subregion P={n_ranks} needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs = _run_single_output(test_config, device_ids, n_ranks, _build_dynamic_subregion)
 
@@ -1356,8 +1368,7 @@ class TestL3UrmaAsync:
     def test_burst_submissions(self, test_config, device_ids):
         """Eight transfers submitted from one task share the completion slab."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async burst case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs = _run_single_output(test_config, device_ids, n_ranks, _build_burst)
         expected = _expected_exchange(n_ranks)
@@ -1368,8 +1379,7 @@ class TestL3UrmaAsync:
     def test_put_only_int32(self, test_config, device_ids):
         """A third element type crosses the PUT path."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async INT32 PUT needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         outputs = _run_put_only_typed(test_config, device_ids, n_ranks, pl.INT32, torch.int32)
         expected = _typed_expected(n_ranks, torch.int32, step=100)
@@ -1380,32 +1390,28 @@ class TestL3UrmaAsync:
     def test_self_peer_fails_loudly(self, test_config, device_ids, capfd):
         """A PUT addressed to the issuing rank is rejected."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async self-peer case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         _assert_invalid(test_config, device_ids, n_ranks, _build_self_peer, capfd)
 
     def test_zero_length_fails_loudly(self, test_config, device_ids, capfd):
         """A runtime transfer extent of zero is rejected."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async zero-length case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         _assert_invalid(test_config, device_ids, n_ranks, _build_zero_length, capfd)
 
     def test_negative_offset_fails_loudly(self, test_config, device_ids, capfd):
         """A negative runtime column offset is rejected."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async negative-offset case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         _assert_invalid(test_config, device_ids, n_ranks, _build_negative_offset, capfd)
 
     def test_capacity_overflow_fails_loudly(self, test_config, device_ids, capfd):
         """More than 64 registered submissions from one task is rejected."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async capacity case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         _assert_invalid(
             test_config,
@@ -1419,8 +1425,7 @@ class TestL3UrmaAsync:
     def test_undersized_window_fails_at_compile_time(self, test_config, device_ids):
         """A window view larger than its backing allocation is rejected before codegen."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async capacity case needs {n_ranks} devices")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         with pytest.raises(ValueError, match="exceeds backing window slot"):
             _compile_invalid(test_config, device_ids, n_ranks, _build_undersized_window)
@@ -1547,8 +1552,7 @@ class TestL3UrmaAsyncEarlyResolve:
     def test_early_resolve_does_not_release_early(self, test_config, device_ids):
         """A17: early dispatch must not let the consumer enter its body early."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA early-resolve needs {n_ranks} devices, got {device_ids}")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         inputs = _rank_inputs(n_ranks)
         inputs2 = _rank_inputs(n_ranks, round_index=1)
@@ -1697,8 +1701,7 @@ class TestL3UrmaAsyncProducerCompute:
     def test_producer_compute_before_and_after_submission(self, test_config, device_ids):
         """A15: compute before and after the async submission stays correct."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA producer-compute case needs {n_ranks} devices, got {device_ids}")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         inputs = _rank_inputs(n_ranks)
         outputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
@@ -1847,8 +1850,7 @@ class TestL3UrmaAsyncChunking:
     def test_put_above_urma_chunk_limit(self, test_config, device_ids):
         """A16: a >256 MiB PUT is chunked by the runtime and arrives intact."""
         n_ranks = 2
-        if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA chunking case needs {n_ranks} devices, got {device_ids}")
+        device_ids = _urma_devices(device_ids, n_ranks)
 
         inputs = _chunk_inputs(n_ranks)
         outputs = torch.zeros((n_ranks, CHUNK_ROWS, CHUNK_COLS), dtype=torch.float32)
