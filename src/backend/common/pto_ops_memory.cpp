@@ -69,6 +69,88 @@ using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
 using pto_ops_detail::MakePartitionTensorViewType;
 
+// Dense source coordinates are independent of the destination's SFractal.
+// Each load writes a complete group span, making its packed L1 byte interval
+// contiguous even when it fills just one page of a larger B/NN allocation.
+static std::string MakeMxScaleLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, "tile.load_mx_scale", 4);
+  CHECK_SPAN(codegen.GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_)
+      << "tile.load_mx_scale requires A5";
+  const auto source = AsVarLike(op->args_[0]);
+  const auto destination = AsVarLike(op->args_[1]);
+  INTERNAL_CHECK_SPAN(source && destination, op->span_)
+      << "Internal error: MX scale source/destination must be named variables";
+  const auto source_type = AsTensorTypeLike(source->GetType());
+  const auto offsets = As<ir::MakeTuple>(op->args_[2]);
+  const auto shape = As<ir::MakeTuple>(op->args_[3]);
+  const bool is_a = op->GetKwarg<std::string>("side", "a") == "a";
+  const int64_t rows = As<ir::ConstInt>(shape->elements_[0])->value_;
+  const int64_t groups = As<ir::ConstInt>(shape->elements_[1])->value_;
+  const int64_t destination_offset = op->GetKwarg<int>("dst_offset", 0);
+  const auto group_stride = EmitIndexOperand(codegen, source_type->shape_[1], "MX source group stride");
+  const auto row_offset = EmitIndexOperand(codegen, offsets->elements_[0], "MX source row offset");
+  const auto group_offset = EmitIndexOperand(codegen, offsets->elements_[1], "MX source group offset");
+  const auto row_bytes = codegen.NewNamedTemp("mx_row_bytes");
+  const auto offset = codegen.NewNamedTemp("mx_source_offset");
+  const auto pointer = codegen.NewNamedTemp("mx_source_pointer");
+  codegen.Emit(row_bytes + " = arith.muli " + row_offset + ", " + group_stride + " : index");
+  codegen.Emit(offset + " = arith.addi " + row_bytes + ", " + group_offset + " : index");
+  codegen.Emit(pointer + " = pto.addptr " + codegen.GetTensorBasePtr(source) + ", " + offset +
+               " : <!pto.f8E8M0> -> <!pto.f8E8M0>");
+  const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+  const auto one = codegen.GetOrEmitConstant(int64_t{1}, DataType::INDEX);
+  const auto row_count = codegen.GetOrEmitConstant(rows, DataType::INDEX);
+  const auto group_count = codegen.GetOrEmitConstant(groups, DataType::INDEX);
+  const auto layout = is_a ? std::string("mx_a_nd") : std::string("mx_b_dn");
+  const auto view = codegen.NewNamedTemp("mx_dense_window");
+  // The source window starts at its dense row-major byte origin. PTOAS
+  // constructs exactly the same 3D scale descriptor as native GM<...,MX_*_ND/DN>.
+  codegen.Emit(view + " = pto.make_tensor_view " + pointer + " , shape = [" +
+               (is_a ? row_count : group_count) + ", " + (is_a ? group_count : row_count) + "], strides = [" +
+               (is_a ? group_stride : one) + ", " + (is_a ? one : group_stride) + "] {layout = #pto.layout<" +
+               layout + ">} : !pto.tensor_view<?x?x!pto.f8E8M0>");
+  const std::vector<std::string> sizes = is_a ? std::vector<std::string>{row_count, group_count}
+                                              : std::vector<std::string>{group_count, row_count};
+  const std::vector<std::string> dimensions =
+      is_a ? std::vector<std::string>{std::to_string(rows), std::to_string(groups)}
+           : std::vector<std::string>{std::to_string(groups), std::to_string(rows)};
+  const auto partition_type = MakePartitionTensorViewType(dimensions, "!pto.f8E8M0");
+  const auto partition = EmitPartitionViewPTO("mx_scale", view, "!pto.tensor_view<?x?x!pto.f8E8M0>",
+                                              partition_type, {zero, zero}, sizes, codegen);
+  const auto target = codegen.GetExprAsCode(destination);
+  const auto target_type = codegen.GetExprTypeAnnotation(destination);
+  const auto target_pointer = codegen.NewNamedTemp("mx_l1_pointer");
+  const auto target_address = codegen.NewNamedTemp("mx_l1_address");
+  const auto sub_address = codegen.NewNamedTemp("mx_l1_sub_address");
+  codegen.Emit(target_pointer + " = pto.tile_buf_addr " + target + " : " + target_type +
+               " -> !pto.ptr<!pto.f8E8M0, mat>");
+  codegen.Emit(target_address + " = pto.castptr " + target_pointer + " : !pto.ptr<!pto.f8E8M0, mat> -> i64");
+  codegen.Emit(sub_address + " = arith.addi " + target_address + ", " +
+               codegen.GetOrEmitConstant(destination_offset * groups, DataType::INT64) + " : i64");
+  std::vector<ir::ExprPtr> output_shape =
+      is_a ? std::vector<ir::ExprPtr>{shape->elements_[0], shape->elements_[1]}
+           : std::vector<ir::ExprPtr>{shape->elements_[1], shape->elements_[0]};
+  ir::TileView output_view;
+  output_view.valid_shape = output_shape;
+  output_view.blayout = is_a ? ir::TileLayout::row_major : ir::TileLayout::col_major;
+  output_view.slayout = output_view.blayout;
+  output_view.fractal = 32;
+  const auto tile_type = std::make_shared<ir::TileType>(output_shape, DataType::FP8E8M0, std::nullopt,
+                                                        output_view, ir::MemorySpace::Mat);
+  const auto tile_string = codegen.GetTileBufTypeStringFromTileType(tile_type);
+  const auto sub_tile = codegen.NewNamedTemp("mx_scale_subtile");
+  std::string allocation = sub_tile + " = pto.alloc_tile addr = " + sub_address;
+  if (tile_string.find("v_row=?") != std::string::npos) allocation += " valid_row = " + sizes[0];
+  if (tile_string.find("v_col=?") != std::string::npos) allocation += " valid_col = " + sizes[1];
+  codegen.Emit(allocation + " : " + tile_string);
+  codegen.Emit("pto.tload ins(" + partition + " : " + partition_type + ") outs(" + sub_tile + " : " +
+               tile_string + ") {layout = #pto.layout<" + layout + ">}");
+  // The registry's writeback contract already binds the result to dst.
+  // Returning an SSA token here would emit it as a standalone instruction.
+  return "";
+}
+
 // Helper function for StoreFP
 static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
@@ -998,6 +1080,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     if (!ShouldRegister(exclude_ops, op_name)) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
+
+  reg("tile.load_mx_scale", MakeMxScaleLoadCodegenPTO);
 
   // On-core arrays (ArrayType) -> PTOAS stack-local arrays. The IR's
   // SSA-functional update_element semantics are realized in place: PTOCodegen's
