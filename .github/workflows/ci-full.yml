@@ -50,7 +50,7 @@ jobs:
   # Dispatched PR full runs deliberately disable the docs-only exemption for
   # core tests. docs-examples and serving-guard retain their applicability gates.
   changes:
-    if: github.head_ref != 'diag/a5-urma-mfe-3085'
+    if: github.event.pull_request.number != 3476
     runs-on: ubuntu-latest
     permissions:
       # The classifier needs pull-requests: read. On dispatched full runs the

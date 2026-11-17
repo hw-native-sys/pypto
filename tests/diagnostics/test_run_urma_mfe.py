@@ -237,13 +237,69 @@ def test_all_attempts_run_and_an_earlier_failure_stays_red(tmp_path, monkeypatch
     assert "pypto-put: 2/3 passed" in (output / "summary.txt").read_text()
 
 
-def test_only_diagnostic_branch_suppresses_normal_ci():
+def test_only_diagnostic_pr_suppresses_normal_ci():
     root = SCRIPT.parents[2]
-    branch = "diag/a5-urma-mfe-3085"
     for file, job in [("ci.yml", "changes"), ("ci-full.yml", "changes"), ("docs.yml", "build")]:
         workflow = yaml.safe_load((root / ".github/workflows" / file).read_text())
-        assert workflow["jobs"][job]["if"] == f"github.head_ref != '{branch}'"
+        assert workflow["jobs"][job]["if"] == "github.event.pull_request.number != 3476"
     workflow = yaml.safe_load((root / ".github/workflows/urma-mfe.yml").read_text())
-    assert workflow["jobs"]["toolchain"]["if"] == f"github.head_ref == '{branch}'"
+    assert workflow["jobs"]["toolchain"]["if"] == "github.event.pull_request.number == 3476"
     matrix = workflow["jobs"]["onboard-a5-distributed"]["strategy"]["matrix"]["include"]
     assert matrix == [{"soc": "PR", "arch": "x64"}, {"soc": "DT", "arch": "arm64"}]
+
+
+def test_control_runtime_links_real_metadata_without_replacing_existing_build(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "prepare_controls", SCRIPT.with_name("prepare_control_runtime.py")
+    )
+    controls = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controls)
+    installed = tmp_path / "wheel/build/lib"
+    installed.mkdir(parents=True)
+    source = tmp_path / "checkout/runtime/build/lib"
+    with pytest.raises(RuntimeError, match="metadata is missing"):
+        controls.link_control_binaries(installed, source)
+    assert not source.exists()
+    (installed / "pto_isa_build.json").write_text('{"actual_checkout_commit":"verified"}')
+    controls.link_control_binaries(installed, source)
+    assert source.is_symlink() and source.resolve() == installed.resolve()
+    controls.link_control_binaries(installed, source)  # idempotent, no replacement
+    other = tmp_path / "existing/build/lib"
+    other.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="Refusing to replace"):
+        controls.link_control_binaries(installed, other)
+
+
+def test_control_preparation_preserves_a_valid_cold_source_build(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "prepare_controls", SCRIPT.with_name("prepare_control_runtime.py")
+    )
+    controls = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controls)
+    root = tmp_path / "checkout"
+    runtime = root / "runtime"
+    source_lib = runtime / "build/lib"
+    source_lib.mkdir(parents=True)
+    installed_root = tmp_path / "wheel"
+    installed_root.mkdir()
+    (installed_root / "pto_isa.pin").write_text("isa-revision")
+    (runtime / "pto_isa.pin").write_text("isa-revision")
+    validated = []
+    modules = {
+        "_task_interface": SimpleNamespace(__build_commit__="runtime-revision"),
+        "simpler_setup.environment": SimpleNamespace(PROJECT_ROOT=installed_root),
+        "simpler_setup.pto_isa": SimpleNamespace(
+            validate_runtime_pto_isa_current_pin=lambda path, runtime_key: validated.append(
+                (path, runtime_key)
+            )
+        ),
+    }
+    monkeypatch.setattr(controls, "ROOT", root)
+    monkeypatch.setattr(controls.importlib, "import_module", modules.__getitem__)
+    monkeypatch.setattr(controls.subprocess, "check_output", lambda *a, **k: "runtime-revision\n")
+    controls.main()
+    assert validated == [
+        (installed_root / "build/lib", "a5/onboard/tensormap_and_ringbuffer"),
+        (source_lib, "a5/onboard/tensormap_and_ringbuffer"),
+    ]
+    assert source_lib.is_dir() and not source_lib.is_symlink()

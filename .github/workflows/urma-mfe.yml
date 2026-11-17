@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   toolchain:
-    if: github.head_ref == 'diag/a5-urma-mfe-3085'
+    if: github.event.pull_request.number == 3476
     runs-on: ubuntu-latest
     outputs:
       pto_isa_commit: ${{ steps.pins.outputs.PTO_ISA_COMMIT }}
@@ -94,6 +94,7 @@ jobs:
         run: |
           source activate.sh
           source .claude/skills/testing/load-env.sh
+          python tests/diagnostics/prepare_control_runtime.py
           cd runtime
           python -m simpler_setup.tools.scene_test_compile \
             tests/st/a5/tensormap_and_ringbuffer/urma_deferred_completion/test_urma_deferred_completion.py::TestUrmaGet \
