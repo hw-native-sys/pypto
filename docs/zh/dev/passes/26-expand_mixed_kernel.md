@@ -795,8 +795,9 @@ CPU 模拟器按用户要求跳过。
 单向流水回归逐次改变 scalar scale，ND/DN 和两种 scalar quant 模式都使用独立的
 零容差 golden。即使词法状态检查通过，该用例也能发现 setter 被提升越过 TPUSH 的错误。
 
-`tests/st/runtime/ops/test_c2v_fixpipe_legacy.py` 只移除发射的 DN epilogue 属性，
-保留正确的独立转置 golden；诊断回放必须观测到精确的旧 row-major 字节模式，
+`tests/st/runtime/ops/test_c2v_fixpipe_legacy.py` 的编译钩子仅改写独立产物目录中的
+DN epilogue 属性，其他后台 ND/DN 编译请求原样转发。
+回放保留正确的独立转置 golden；诊断回放必须观测到精确的旧 row-major 字节模式，
 并由 golden 验证拒绝该结果。正常用例均断言 harness 返回的执行结果。
 ST harness 向 `ir.compile()` 传递解析后的 execution mode；真机产物 manifest
 必须标明 `a5`，原生对象与 task-submit 设备日志构成执行证据。
@@ -819,8 +820,8 @@ CPU 模拟器按用户要求跳过。
 source .claude/skills/testing/load-env.sh
 export PYTHONPATH="$PWD/python:$PWD/runtime/python:$PWD/runtime:$PWD/tests/st"
 python -m pytest tests/ut/codegen/test_c2v_fixpipe.py -n "$PYPTO_TEST_JOBS" -v
-python -m pytest tests/st/runtime/ops/test_c2v_fixpipe.py \
-  tests/st/runtime/ops/test_c2v_fixpipe_legacy.py --platform a5 \
+python -m pytest tests/st/runtime/ops/test_c2v_fixpipe_legacy.py \
+  tests/st/runtime/ops/test_c2v_fixpipe.py --platform a5 \
   --precompile-workers "$PYPTO_BUILD_JOBS" --execute-workers "$PYPTO_TEST_JOBS" \
   --execute-via-task-submit --task-submit-device auto \
   --task-max-time 120 --task-queue-timeout 30 --save-kernels \
