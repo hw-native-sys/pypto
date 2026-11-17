@@ -89,7 +89,7 @@ def test_no_mat_to_mat_tmov():
     # before that.
     compile_error: Exception | None = None
     try:
-        batch_matmul_pipeline_repro(x, w, out, config=cfg)
+        batch_matmul_pipeline_repro.compile(x, w, out, config=cfg)
     except Exception as e:  # noqa: BLE001 - see comment above
         compile_error = e
 

@@ -57,7 +57,8 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     a = torch.randn(64, 64, dtype=torch.float32)
     out = torch.zeros_like(a)
-    tile_softmax(a, out, config=RunConfig())
+    compiled = tile_softmax.compile(a, out, config=RunConfig())
+    compiled(a, out, config=RunConfig())
     expected = torch.softmax(a, dim=-1)
     assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
         f"tile_softmax failed: max diff = {(out - expected).abs().max().item()}"

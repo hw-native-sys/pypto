@@ -34,7 +34,8 @@ torch.manual_seed(0)
 a = torch.randn(128, 128, dtype=torch.float16)
 b = torch.randn(128, 128, dtype=torch.float16)
 c = torch.zeros(128, 128, dtype=torch.float32)
-matmul_small(a, b, c, config=RunConfig(platform="a2a3sim"))
+compiled = matmul_small.compile(a, b, c, config=RunConfig(platform="a2a3sim"))
+compiled(a, b, c, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(c, a.float() @ b.float(), rtol=1e-2, atol=1e-2)
 ```
 

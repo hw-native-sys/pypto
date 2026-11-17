@@ -9,19 +9,23 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-// Optional lifecycle bridge. No Simpler SDK implementation or submission ABI is linked.
+// Optional Torch queue bridge using Simpler's same-build native submission interface.
 #include <acl/acl.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 #include <torch/csrc/autograd/python_variable.h>
+#include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.h>
+#include <torch_npu/csrc/framework/OpCommand.h>
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 
 #include "pypto/core/error.h"
+#include "worker/native_submission.h"
 
 namespace nb = nanobind;
 namespace {
@@ -59,9 +63,48 @@ c10_npu::NPUStream CallStream(int64_t stream_id, int32_t device_id) {
   return stream;
 }
 
+// Python owners stay in PendingTicket. Queue copies and destruction own only
+// NativeSubmissionRef, whose entire lifetime is independent of Python/GIL.
+void Enqueue(nb::list objects, int64_t stream_id, int32_t device_id, uintptr_t context,
+             nb::handle native_handle) {
+  auto* api = static_cast<SimplerNativeSubmission*>(
+      PyCapsule_GetPointer(native_handle.ptr(), SIMPLER_NATIVE_SUBMISSION_CAPSULE));
+  if (api == nullptr) throw nb::python_error();
+  NativeSubmissionRef submission(*api);
+  auto stream = CallStream(stream_id, device_id);
+  Require(BorrowContext(device_id) == context, "Kernel borrowed context changed before enqueue");
+  std::unordered_set<const c10::StorageImpl*> recorded;
+  for (auto object : objects) {
+    Require(THPVariable_Check(object.ptr()), "Kernel arguments must be torch tensors");
+    const at::Tensor& tensor = THPVariable_Unpack(object.ptr());
+    Require(tensor.device().type() == c10::DeviceType::PrivateUse1 && tensor.device().index() == device_id &&
+                tensor.is_contiguous(),
+            "Kernel tensors must be contiguous on the current NPU device");
+    const auto& storage = tensor.storage();
+    if (recorded.insert(storage.unsafeGetStorageImpl()).second) {
+      c10_npu::NPUCachingAllocator::recordStream(storage.data_ptr(), stream);
+    }
+  }
+  nb::gil_scoped_release release;
+  at_npu::native::OpCommand::RunOpApiV2("PyPTOKernel", [submission]() -> int {
+    try {
+      submission.submit();
+    } catch (...) {
+      // Preserve Torch's operator-failure channel: discard later consumers of
+      // unwritten outputs. Simpler retains the original error for retirement.
+      return -1;
+    }
+    return 0;
+  });
+}
 }  // namespace
 
 NB_MODULE(_torch_npu, m) {
+  m.def("enqueue", &Enqueue);
+  m.def("caller_stream", [](int64_t stream_id, int32_t device_id) {
+    // false avoids draining the host queue before preparation/admission.
+    return reinterpret_cast<uintptr_t>(CallStream(stream_id, device_id).stream(false));
+  });
   m.def("framework_alive", &FrameworkAlive);
   m.def("borrow_context", &BorrowContext);
   m.def("bind_context", &BindContext);

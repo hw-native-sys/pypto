@@ -109,11 +109,18 @@ want when the question is "which pass changed this".
 
 ### `JITFunction.compile`
 
-`@pl.jit` normally fuses specialize + compile + dispatch into one `kernel(*args)` call.
-`compile(*sample_args)` stops after compilation and returns the `CompiledProgram` the JIT
-cache holds — so a later call with the same specialization key gets the identical object.
+`kernel.compile(*sample_args, config=cfg)` specializes and compiles for the PROGRAM
+contract without dispatching. It returns a cached `CompiledProgram`; repeated explicit
+`.compile()` calls with the same specialization and compile configuration return the
+identical object. Run it with `compiled(*args, config=cfg)` or an explicit worker.
 
-It exposes the whole extraction surface, which is what a harness driving the runtime
+Direct `kernel(*args)` calls instead require `pypto.torch.init()` and real NPU tensors.
+They specialize, compile and submit through the eager KERNEL contract, whose cache entry
+is separate from PROGRAM compilation. Their optional `config` is `CompileOptions`, not
+`RunConfig`; host tensors and simulator execution use the explicit program path above.
+See [kernel mode](../../dev/runtime/kernel-mode.md) for the full eager contract.
+
+The PROGRAM artifact exposes the whole extraction surface, which a harness driving the runtime
 directly needs: `chip_callable`, `runtime_name`, `runtime_config`, `output_dir`,
 `platform`, `output_indices`, `param_names`, `orchestration_names`, `has_return`.
 Argument marshalling is not part of that surface — dispatch through

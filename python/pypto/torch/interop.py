@@ -183,6 +183,11 @@ def _describe_tensor(
         raise ValueError(
             f"Parameter {info.name!r} requires base format NCHW (0) or ND (2), got {tensor_format}"
         )
+    if info.layout == "NZ" and not native_nz:
+        raise ValueError(
+            f"Parameter {info.name!r} declares NZ but has format {tensor_format}; "
+            "borrowed execution requires native NZ storage and never converts layouts"
+        )
     storage = tensor.untyped_storage()
     pointer, base = tensor.data_ptr(), storage.data_ptr()
     offset, itemsize = int(tensor.storage_offset()), tensor.element_size()

@@ -78,7 +78,8 @@ def test_mte_barriers_order_load_compute_store_on_device(test_config, tmp_path):
     x = torch.randn(ROWS, COLS, dtype=torch.float32)
     out = torch.zeros_like(x)
 
-    mte_barrier_double(x, out, config=config)
+    compiled = mte_barrier_double.compile(x, out, config=config)
+    compiled(x, out, config=config)
 
     assert torch.equal(out, x + x)
     pto = _saved_pto(tmp_path)
@@ -102,7 +103,8 @@ def test_all_barrier_orders_load_compute_store_on_device(test_config, tmp_path):
     x = torch.randn(ROWS, COLS, dtype=torch.float32)
     out = torch.zeros_like(x)
 
-    all_barrier_double(x, out, config=config)
+    compiled = all_barrier_double.compile(x, out, config=config)
+    compiled(x, out, config=config)
 
     assert torch.equal(out, x + x)
     assert _saved_pto(tmp_path).count("pto.barrier <PIPE_ALL>") == 2
@@ -152,7 +154,8 @@ def test_cube_pinned_barrier_stays_off_the_vector_kernel(test_config, tmp_path):
     w = torch.randn(N_TILE, K_TILE, dtype=torch.float16)
     out = torch.zeros(M_TILE, N_TILE, dtype=torch.float32)
 
-    cube_pinned_fix_barrier(x, w, out, config=config)
+    compiled = cube_pinned_fix_barrier.compile(x, w, out, config=config)
+    compiled(x, w, out, config=config)
 
     expected = (x.to(torch.float32) @ w.to(torch.float32).T) * 2
     torch.testing.assert_close(out, expected, rtol=2e-2, atol=2e-2)

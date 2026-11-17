@@ -25,7 +25,8 @@ def _run_pipeline(kernel, args, test_config, software):
     # variants so numerical differences isolate scheduling and slot reuse.
     config = replace(test_config, enable_software_pipeline=None)
     with passes.PassContext([], enable_buffer_ir=False, enable_software_pipeline=software):
-        kernel(*args, config=config)
+        compiled = kernel.compile(*args, config=config)
+        compiled(*args, config=config)
 
 
 @pl.jit
@@ -49,7 +50,9 @@ def test_runtime_pipeline_preserves_unwritten_rows(test_config, trips):
     expected = y.clone()
     stop = 2 + trips * 2
     expected[2:stop:2] = x[2:stop:2] + 0.25
-    dynamic_pipeline(x, stop, y, config=replace(test_config, enable_software_pipeline=True))
+    config = replace(test_config, enable_software_pipeline=True)
+    compiled = dynamic_pipeline.compile(x, stop, y, config=config)
+    compiled(x, stop, y, config=config)
     torch.testing.assert_close(y, expected, rtol=0, atol=0)
 
 

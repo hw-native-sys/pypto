@@ -140,7 +140,8 @@ def dump_tag_run(test_config):
     config = dataclasses.replace(test_config, save_kernels_dir=str(_DUMP_TAG_WORK_DIR))
 
     a, c, expected = _make_inputs()
-    add_mul_with_dump_tags(a, c, config=config)
+    compiled = add_mul_with_dump_tags.compile(a, c, config=config)
+    compiled(a, c, config=config)
     return _DUMP_TAG_WORK_DIR, c, expected
 
 

@@ -24,6 +24,7 @@ from typing import Any
 
 from pypto.runtime.runtime_pin import check_runtime_pin
 
+from .arguments import SourcePool
 from .owner import _OwnerThread
 
 
@@ -104,15 +105,30 @@ def require_runtime() -> Any:
     interface = importlib.import_module("simpler.task_interface")
     workers = importlib.import_module("simpler.worker")
     worker = getattr(simpler, "Worker", None)
-    for name in ("init", "register", "unregister", "submit", "close", "flush_diagnostics"):
+    for name in (
+        "init",
+        "register",
+        "unregister",
+        "prepare_submission",
+        "release_buffer",
+        "close",
+        "flush_diagnostics",
+    ):
         _require_method(worker, name, "Worker")
-    for method, keyword in (("init", "borrowed_context_generation"), ("submit", "caller_stream")):
+    for method, keyword in (
+        ("init", "borrowed_context_generation"),
+        ("prepare_submission", "caller_stream"),
+        ("prepare_submission", "keepalive"),
+    ):
         if keyword not in inspect.signature(getattr(worker, method)).parameters:
             raise NotImplementedError(f"Torch kernel runtime requires Worker.{method}(..., {keyword}=...)")
     if not hasattr(worker, "device_location") or not hasattr(getattr(workers, "RunHandle", None), "done"):
         raise NotImplementedError("Torch kernel runtime requires Worker.device_location and RunHandle.done")
+    for name in ("native_handle", "safe_to_release", "done"):
+        if not hasattr(getattr(workers, "PreparedSubmission", None), name):
+            raise NotImplementedError(f"Torch kernel runtime requires PreparedSubmission.{name}")
     for owner, label, methods in (
-        (getattr(workers, "RunHandle", None), "RunHandle", ("wait",)),
+        (getattr(workers, "PreparedSubmission", None), "PreparedSubmission", ("wait", "cancel")),
         (getattr(interface, "Buffer", None), "Buffer", ("wrap", "close")),
         (getattr(interface, "TaskArgs", None), "TaskArgs", ("add_tensor", "add_scalar")),
         (getattr(interface, "CallConfig", None), "CallConfig", ("validate",)),
@@ -150,6 +166,7 @@ class _BorrowedWorkerSession:
     def __init__(self, config: KernelConfig, state: Any) -> None:
         from pypto.torch.shutdown import install_shutdown  # noqa: PLC0415
 
+        self.sources = SourcePool(lambda buffer: self.worker.release_buffer(buffer))
         self._api = require_runtime()
         self._native = install_shutdown(state)
         self._context = self._native.borrow_context(config.device_id)
@@ -208,6 +225,7 @@ class _BorrowedWorkerSession:
     def close(self) -> None:
         def finalize() -> None:
             self._native.bind_context(self._context)
+            self.sources.close()
             if self.worker is not None:
                 self.worker.close()
 

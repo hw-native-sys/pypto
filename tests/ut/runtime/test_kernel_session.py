@@ -53,11 +53,14 @@ def public_runtime(monkeypatch):
         def unregister(self, handle):
             raise AssertionError("no eager slot eviction")
 
-        def submit(self, target, args=None, config=None, *, caller_stream=None):
+        def prepare_submission(self, target, args=None, config=None, *, caller_stream=None, keepalive=()):
             raise AssertionError("lifecycle does not submit")
 
         def flush_diagnostics(self):
             raise AssertionError("DFX windows are a later step")
+
+        def release_buffer(self, buffer):
+            buffer.close()
 
         def close(self):
             events.append(("close", threading.get_ident()))
@@ -67,6 +70,13 @@ def public_runtime(monkeypatch):
 
         def wait(self):
             pass
+
+    class PreparedSubmission(RunHandle):
+        native_handle = property(lambda self: None)
+        safe_to_release = property(lambda self: True)
+
+        def cancel(self):
+            return True
 
     class Buffer:
         @classmethod
@@ -90,6 +100,7 @@ def public_runtime(monkeypatch):
         TaskArgs=TaskArgs,
         Tensor=object,
         RunHandle=RunHandle,
+        PreparedSubmission=PreparedSubmission,
         events=events,
         handles=handles,
     )
@@ -171,14 +182,14 @@ def test_context_mismatch_and_register_error_keep_original_semantics(public_runt
 
 
 @pytest.mark.parametrize(
-    "missing", ["init_keyword", "submit_keyword", "register", "done", "buffer", "scalar", "dfx"]
+    "missing", ["init_keyword", "submit_keyword", "register", "done", "buffer", "scalar", "release", "dfx"]
 )
 def test_capability_guard_rejects_missing_public_contract(public_runtime, monkeypatch, missing):
     api, _ = public_runtime
     if missing == "init_keyword":
         monkeypatch.setattr(api.Worker, "init", lambda self: None)
     elif missing == "submit_keyword":
-        monkeypatch.setattr(api.Worker, "submit", lambda self: None)
+        monkeypatch.setattr(api.Worker, "prepare_submission", lambda self: None)
     elif missing == "register":
         monkeypatch.delattr(api.Worker, "register")
     elif missing == "done":
@@ -187,6 +198,8 @@ def test_capability_guard_rejects_missing_public_contract(public_runtime, monkey
         monkeypatch.delattr(api.Buffer, "wrap")
     elif missing == "scalar":
         monkeypatch.delattr(api.TaskArgs, "add_scalar")
+    elif missing == "release":
+        monkeypatch.delattr(api.Worker, "release_buffer")
     else:
         monkeypatch.delattr(api.Worker, "flush_diagnostics")
     with pytest.raises(NotImplementedError):
