@@ -937,7 +937,7 @@ MxV2CContracts BuildMxV2CContracts(const std::vector<FunctionPtr>& functions) {
     collector.VisitStmt(function->body_);
     auto facts = collector.Take();
     for (const auto& push : facts.v2c_pushes) {
-      if (push->args_.size() == 1) {
+      if (!push->args_.empty()) {
         auto source_type = As<TileType>(push->args_[0]->GetType());
         has_mx_push = has_mx_push || (source_type && IsMxScaleView(*source_type));
       }
