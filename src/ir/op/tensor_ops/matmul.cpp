@@ -373,9 +373,6 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires lhs_scale layout MX_A_ZZ or MX_A_ND";
   CHECK_SPAN(rhs_layout == TensorLayout::MX_B_NN, span) << kOpName << " requires rhs_scale layout MX_B_NN";
 
-  // GM shapes count byte carriers along the contiguous ND/DN axis. The
-  // existing Mat load retargets that packing axis; infer arithmetic and scale
-  // extents in value units here, without changing the public tensor ABI.
   auto logical_shape = [span, kOpName](const TensorTypePtr& type) {
     auto shape = type->shape_;
     if (!type->dtype_.IsPackedFp4()) return shape;
@@ -400,8 +397,6 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires matching K dimensions, but got " << k_lhs->value_ << " and " << k_rhs->value_;
   CHECK_SPAN(m->value_ % 16 == 0 && n->value_ % 32 == 0 && k_lhs->value_ % 64 == 0, span)
       << kOpName << " requires M divisible by 16, N divisible by 32, and K divisible by 64";
-  // Mat/Left carrier rows must fill the existing 16-row boxed tile. Since
-  // FP4 packs two logical rows per carrier here, the Tensor bridge needs M%32.
   CHECK_SPAN(!packed || m->value_ % 32 == 0, span)
       << kOpName << " requires FP4 logical M divisible by 32 for boxed carrier rows";
   CHECK_SPAN(!packed || n->value_ % 64 == 0, span)

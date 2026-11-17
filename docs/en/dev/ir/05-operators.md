@@ -451,7 +451,7 @@ later unrolls the batched form into per-batch 2D ops.
 ### MX block-scale matmul (Ascend950)
 
 MX uses dedicated `LeftScale` / `RightScale` memory spaces and the `FP8E8M0`
-scale dtype. PyPTO supports host-prequant MXFP8 and an explicit FP4×FP8 conversion path on Ascend950 through
+scale dtype. PyPTO supports host-prequant MXFP8 and native packed MXFP4 on Ascend950 through
 the `matmul_mx` family. `InsertMxScaleAddr` (after `InferTileMemorySpace`)
 inserts the internal `tile.tget_scale_addr` bindings once operand memory
 spaces are resolved.
@@ -469,8 +469,13 @@ spaces are resolved.
 
 The canonical shape is `M=128, K=64, N=64`, with FP8E4M3FN data,
 FP8E8M0 scales shaped `[128,2]` and `[2,64]`, and `mx_a_zz` / `mx_b_nn`
-host layouts. The left input may use either packed FP4 format when explicitly cast to FP8 first.
-Align M↑16, K↑64, and N↑32.
+host layouts. FP8 aligns M↑16, K↑64, and N↑32.
+
+For native FP4 with the same logical M/K/N, ND Tensor data shapes are
+`[128,32]` / `[64,32]`; scales and the FP32 `[128,64]` result keep logical
+extents. Both data operands may independently use E2M1x2 or E1M2x2, without
+an FP8 cast. The Tensor path requires M↑32, K↑64, and N↑64. Combining FP4
+and FP8 operands instead requires explicitly casting the FP4 operand to FP8.
 
 MX tensor subviews are a legacy limitation. `tensor.slice`, `tensor.reshape`,
 `tensor.transpose`, `tensor.reinterpret_view`, and ordinary MX `tensor.view`
@@ -485,9 +490,10 @@ Packed FP4 Tensor/Tile shapes, `valid_shape`, strides, and offsets count byte
 carriers. Torch E2M1 x2 tensors and explicitly annotated UINT8 carriers retain
 these dimensions through JIT and compiled calls without unit conversion.
 
-Explicit casts from either packed FP4 format to FP8 are legalized on A5 through
-BF16 and FP32. Scale values are unchanged because this numerically converts
-only the data operand. Native packed-FP4 tile matmul retains both packed operands.
+A5 can cast E2M1 directly to E4M3 for supported descriptors; other packed-FP4
+to FP8 casts use the BF16/FP32 bridge. Scale values are unchanged because this
+numerically converts only the data operand. Native packed-FP4 Tensor and Tile
+matmul retain both packed operands.
 `pl.quant_mx` quantizes to MXFP8 from FP16, BF16 or FP32, and to E2M1 MXFP4 from FP16 or BF16;
 FP4 results require supported placement into Mat and Left/Right before tile matmul.
 See [FP4](../fp4.md) for

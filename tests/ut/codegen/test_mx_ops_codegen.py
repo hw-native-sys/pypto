@@ -282,6 +282,7 @@ class TestMxMatmulCodegen:
             assert f"Tile<TileType::Right, {cpp_dtype}, 128, 64," in cpp
             assert "Tile<TileType::Acc, float, 32, 64," in cpp
 
+    @pytest.mark.ptoas_compile
     @pytest.mark.parametrize(
         "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
     )

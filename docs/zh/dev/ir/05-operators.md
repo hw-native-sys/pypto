@@ -400,7 +400,7 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 ### MX block-scale matmul（Ascend950）
 
 MX 使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` scale
-dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant MXFP8，以及显式转换后的 FP4×FP8 路径。
+dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant MXFP8 和原生打包 MXFP4。
 `InsertMxScaleAddr`（在 `InferTileMemorySpace` 之后）在操作数内存空间解析完成后插入内部 `tile.tget_scale_addr` 绑定。
 
 | IR / DSL | 说明 |
@@ -415,7 +415,12 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
 
 规范样例：`M=128,K=64,N=64`，进入算子的 A/B 均为 `FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
-GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。左侧输入可使用任一打包 FP4 格式，但必须先显式转换为 FP8；对齐 M↑16、K↑64、N↑32。
+GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。FP8 对齐要求为 M↑16、K↑64、N↑32。
+
+相同逻辑 M/K/N 下，原生 FP4 的 ND Tensor 数据形状为 `[128,32]` / `[64,32]`；
+scale 和 FP32 `[128,64]` 输出保留逻辑维度。两侧数据可分别选择 E2M1x2 或 E1M2x2，
+无需转换为 FP8。Tensor 路径要求 M↑32、K↑64、N↑64。若组合 FP4 与 FP8 操作数，
+则需先将 FP4 操作数显式转换为 FP8。
 
 MX tensor subview 是当前遗留限制。由于硬件路径无法表达 subview base
 offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose`、
@@ -429,8 +434,9 @@ FP8E8M0 shaped alias（用于 GM 分核暂存）。在完整的 scale layout con
 Torch E2M1 x2 张量与显式标注的 UINT8 载体在 JIT 和编译后调用中保留这些维度，
 不进行单位换算。
 
-两种打包 FP4 格式到 FP8 的显式转换均在 A5 上经 BF16 和 FP32 合法化。
-它仅对数据操作数进行数值转换，因此缩放因子不变。原生 FP4 tile 矩阵乘保持两侧打包格式。
+A5 对满足描述符条件的 E2M1→E4M3 使用直接转换；其他打包 FP4→FP8 转换经
+BF16/FP32 桥接。它仅对数据操作数进行数值转换，因此缩放因子不变。
+原生 FP4 Tensor 和 Tile 矩阵乘保持两侧打包格式。
 `pl.quant_mx` 可将 FP16/BF16/FP32 源量化为 MXFP8，将 FP16/BF16 源量化为 E2M1 MXFP4；
 FP4 结果需通过受支持的 Mat 和 Left/Right 放置路径供 tile 矩阵乘使用。量化对齐与内存规划器要求见 [FP4](../fp4.md)。
 
