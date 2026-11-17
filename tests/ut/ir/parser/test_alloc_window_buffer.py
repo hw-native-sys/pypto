@@ -365,5 +365,44 @@ def test_alloc_window_buffer_shaped_dynamic():
     assert byte_size.type.dtype == DataType.INT64
 
 
+def test_import_window_buffer_preserves_slot_name_and_canonical_ir():
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.import_window_buffer([2, 32], dtype=pl.FP16)
+            return data_buf
+
+    stmt = _find_alloc_assignment(_get_host_orch(P))
+    assert isinstance(stmt.value, ir.Call)
+    assert stmt.value.kwargs["name"] == "data_buf"
+    assert isinstance(stmt.value.args[0], ir.ConstInt)
+    assert stmt.value.args[0].value == 128
+
+
+def test_import_window_buffer_annotated_long_form():
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf: pl.Ptr = pld.tensor.import_window_buffer(128)
+            return data_buf
+
+    stmt = _find_alloc_assignment(_get_host_orch(P))
+    assert isinstance(stmt.value, ir.Call)
+    assert stmt.value.kwargs["name"] == "data_buf"
+    assert isinstance(stmt.var.type, ir.PtrType)
+
+
+def test_import_window_buffer_rejects_unnamed_use():
+    with pytest.raises(ParserSyntaxError, match="import_window_buffer must appear"):
+
+        @pl.program
+        class P:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                return pld.import_window_buffer(128)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

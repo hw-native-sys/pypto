@@ -31,6 +31,7 @@ from . import tile_ops as tile
 from .unified_ops import (
     alloc_window_buffer,
     get_comm_ctx,
+    import_window_buffer,
     nranks,
     rank,
     remote_load,
@@ -42,6 +43,7 @@ from .unified_ops import (
 __all__ = [
     "alloc_window_buffer",
     "get_comm_ctx",
+    "import_window_buffer",
     "nranks",
     "rank",
     "remote_load",

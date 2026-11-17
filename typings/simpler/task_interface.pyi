@@ -13,6 +13,9 @@ Mirrors the real module's re-exports: the nanobind wire types from
 ``simpler.buffer``.
 """
 
+from collections.abc import Callable
+from dataclasses import dataclass
+
 from _task_interface import (
     ArgDirection,
     CallConfig,
@@ -33,6 +36,9 @@ __all__ = [
     "Buffer",
     "CallConfig",
     "ChipCallable",
+    "ChipDomainContext",
+    "CommDomainHandle",
+    "CommBufferSpec",
     "ChipStorageTaskArgs",
     "ChipTensor",
     "CoreCallable",
@@ -43,3 +49,40 @@ __all__ = [
     "TensorTransfer",
     "scalar_to_uint64",
 ]
+
+@dataclass
+class CommBufferSpec:
+    name: str
+    dtype: str
+    count: int
+    nbytes: int
+    load_from_host: bool = ...
+    store_to_host: bool = ...
+
+@dataclass
+class ChipDomainContext:
+    name: str
+    domain_rank: int
+    domain_size: int
+    device_ctx: int
+    local_window_base: int
+    actual_window_size: int
+    buffers: dict[str, Buffer]
+
+class CommDomainHandle:
+    contexts: dict[int, ChipDomainContext]
+    def __init__(
+        self,
+        *,
+        name: str,
+        workers: tuple[int, ...] = ...,
+        contexts: dict[int, ChipDomainContext] | None = ...,
+        allocation_id: int = ...,
+        _release_fn: Callable[[CommDomainHandle], None],
+        _domain_size: int | None = ...,
+        _domain_ranks: dict[int, int] | None = ...,
+    ) -> None: ...
+    def __getitem__(self, chip_idx: int) -> ChipDomainContext: ...
+    def __enter__(self) -> CommDomainHandle: ...
+    def __exit__(self, *args: object) -> None: ...
+    def release(self) -> None: ...

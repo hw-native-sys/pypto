@@ -265,6 +265,39 @@ def alloc_window_buffer(  # type: ignore[no-redef]
     return Ptr(expr=call)
 
 
+@overload
+def import_window_buffer(size: IntLike, *, name: str = "") -> Ptr: ...
+
+
+@overload
+def import_window_buffer(shape: Sequence[IntLike], *, dtype: DataType, name: str = "") -> Ptr: ...
+
+
+def import_window_buffer(  # type: ignore[no-redef]
+    size: IntLike | Sequence[IntLike], *, dtype: DataType | None = None, name: str = ""
+) -> Ptr:
+    """Declare a window-buffer slot backed by an external address at runtime.
+
+    Compile-time this is the same IR marker as :func:`alloc_window_buffer`
+    (so ``MaterializeCommDomainScopes`` still builds the domain). Runtime
+    backing must come from ``RunConfig.domain_provider`` — typically
+    :func:`pypto.runtime.shmem_gloo.make_shmem_domain_provider` over a
+    torch_npu symmetric-memory window in the same process. SHMEM providers
+    cannot be used by L3 fork children; use the direct ChipWorker example for
+    that transport. Setting a provider replaces ``orch.allocate_domain``.
+
+    The assignment LHS name must match a key in the provider's buffer
+    layout (same parser injection as ``alloc_window_buffer``).
+    """
+    if isinstance(size, Sequence):
+        if dtype is None:
+            raise ValueError("pld.import_window_buffer requires dtype= for a shape")
+        return alloc_window_buffer(list(size), dtype=dtype, name=name)
+    if dtype is not None:
+        raise ValueError("pld.import_window_buffer dtype= is only valid for a shape")
+    return alloc_window_buffer(size, name=name)
+
+
 def window(
     buf: Ptr,
     shape: Sequence[IntLike],
@@ -1281,6 +1314,7 @@ __all__ = [
     "all_to_all_v",
     "indexed_all_to_all_v",
     "alloc_window_buffer",
+    "import_window_buffer",
     "allgather",
     "allreduce",
     "barrier",

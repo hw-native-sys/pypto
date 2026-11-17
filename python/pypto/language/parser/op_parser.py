@@ -1035,13 +1035,12 @@ class OpParser:
         """
         span = self.services.span_tracker.get_span(call)
 
-        if op_name == "alloc_window_buffer":
+        if op_name in ("alloc_window_buffer", "import_window_buffer"):
             raise ParserSyntaxError(
-                "pld.tensor.alloc_window_buffer must appear as the RHS of a simple assignment "
+                f"pld.tensor.{op_name} must appear as the RHS of a simple assignment "
                 "(its result must be bound to a named variable)",
                 span=span,
-                hint="Write 'buf = pld.tensor.alloc_window_buffer(N)' "
-                "(or the short form 'buf = pld.alloc_window_buffer(N)')",
+                hint=f"Write 'buf = pld.tensor.{op_name}(N)' (or the short form 'buf = pld.{op_name}(N)')",
             )
 
         if op_name == "world_size":

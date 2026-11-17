@@ -774,7 +774,9 @@ class ASTParser:
         # annotated form through the same dedicated alloc parser as the
         # unannotated form.
         if is_ptr_type_annotation and (
-            is_pld_call(stmt.value, "alloc_window_buffer") or _is_dump_call(stmt.value, "alloc_window_buffer")
+            is_pld_call(stmt.value, "alloc_window_buffer")
+            or is_pld_call(stmt.value, "import_window_buffer")
+            or _is_dump_call(stmt.value, "alloc_window_buffer")
         ):
             self._parse_alloc_window_buffer_assignment(stmt.target, stmt.value)
             return
@@ -1071,7 +1073,9 @@ class ASTParser:
         # op derives its ``name`` kwarg from the LHS, and the LHS name must be
         # globally unique within the @pl.program.
         if len(stmt.targets) == 1 and (
-            is_pld_call(stmt.value, "alloc_window_buffer") or _is_dump_call(stmt.value, "alloc_window_buffer")
+            is_pld_call(stmt.value, "alloc_window_buffer")
+            or is_pld_call(stmt.value, "import_window_buffer")
+            or _is_dump_call(stmt.value, "alloc_window_buffer")
         ):
             self._parse_alloc_window_buffer_assignment(stmt.targets[0], stmt.value)
             return
@@ -1307,8 +1311,13 @@ class ASTParser:
                 span,
             )
         else:
+            dsl_fn = (
+                _dsl_pld.import_window_buffer
+                if is_pld_call(value, "import_window_buffer")
+                else _dsl_pld.alloc_window_buffer
+            )
             alloc_call = invoke_dsl(
-                _dsl_pld.alloc_window_buffer,
+                dsl_fn,
                 args,
                 {"name": name, **user_kwargs},
                 span,
