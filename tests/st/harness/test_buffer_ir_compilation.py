@@ -9,7 +9,10 @@
 
 """Device-free checks of Buffer mode in the real inline and pool compile paths."""
 
+import importlib
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
 
 import pypto.language as pl
 import pytest
@@ -143,6 +146,56 @@ def test_compile_paths_forward_execution_mode(tmp_path, monkeypatch, target_plat
     assert captured["execution_mode"] == (
         ExecutionMode.SIM if target_platform.endswith("sim") else ExecutionMode.ONBOARD
     )
+
+
+@pytest.mark.parametrize("background_layout", ["nz2nd", "nz2dn"])
+def test_legacy_fixpipe_hook_does_not_rewrite_other_compile_threads(tmp_path, monkeypatch, background_layout):
+    # Import the actual replay hook; its sibling JIT fixture is loaded by name.
+    ops_dir = Path(__file__).resolve().parents[1] / "runtime" / "ops"
+    monkeypatch.syspath_prepend(str(ops_dir))
+    replay = importlib.import_module("test_c2v_fixpipe_legacy")
+    replay_root = tmp_path / "replay"
+    background_root = tmp_path / "replay_unrelated"
+
+    def make_source(root, layout):
+        path = root / "ptoas" / "kernel.pto"
+        path.parent.mkdir(parents=True)
+        attr = (
+            f", acc_push_epilogue = #pto.acc_push_epilogue<layout = {layout}, "
+            "quant = no_convert, relu = no_relu>"
+        )
+        path.write_text(f"producer{attr}\nconsumer{attr}\n")
+        return path
+
+    own = make_source(replay_root, "nz2dn")
+    background = make_source(background_root, background_layout)
+    original_background = background.read_bytes()
+    flags = ["--pto-arch=a5"]
+    compiled = {}
+
+    def compiler(source, output, ptoas_flags=None):
+        compiled[source] = (Path(source).read_text(), output, ptoas_flags)
+
+    hook = replay._legacy_compiler(compiler, replay_root)
+    start = Barrier(2)
+
+    def compile_source(source):
+        start.wait(timeout=10)
+        hook(str(source), str(source.with_suffix(".cpp")), flags)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(compile_source, path) for path in (own, background)]
+        for future in futures:
+            future.result(timeout=15)
+
+    assert background.read_bytes() == original_background
+    assert compiled[str(background)] == (
+        original_background.decode(),
+        str(background.with_suffix(".cpp")),
+        flags,
+    )
+    assert "acc_push_epilogue" not in compiled[str(own)][0]
+    assert compiled[str(own)][1:] == (str(own.with_suffix(".cpp")), flags)
 
 
 if __name__ == "__main__":

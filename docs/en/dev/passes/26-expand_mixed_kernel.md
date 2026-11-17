@@ -922,8 +922,9 @@ ND/DN and both scalar quant modes use independent zero-tolerance goldens. This
 detects setters hoisted across a stage's TPUSH even when lexical state checks pass.
 
 `tests/st/runtime/ops/test_c2v_fixpipe_legacy.py` removes only the emitted DN
-epilogue attributes for a diagnostic replay. It keeps the correct independent
-transpose golden, requires the exact legacy row-major byte pattern, and requires
+epilogue attributes for a diagnostic replay. Its compiler hook rewrites only
+its dedicated artifact root and forwards background ND/DN compilations unchanged.
+It keeps the correct independent transpose golden, requires the exact legacy row-major byte pattern, and requires
 golden validation to reject that result. Normal cases always assert the harness
 result. The ST harness forwards the resolved execution mode to `ir.compile()`;
 onboard manifests must identify `a5`, and native objects plus task-submit device
@@ -949,8 +950,8 @@ PTOAS environment, while holding the site's shared build/device locks:
 source .claude/skills/testing/load-env.sh
 export PYTHONPATH="$PWD/python:$PWD/runtime/python:$PWD/runtime:$PWD/tests/st"
 python -m pytest tests/ut/codegen/test_c2v_fixpipe.py -n "$PYPTO_TEST_JOBS" -v
-python -m pytest tests/st/runtime/ops/test_c2v_fixpipe.py \
-  tests/st/runtime/ops/test_c2v_fixpipe_legacy.py --platform a5 \
+python -m pytest tests/st/runtime/ops/test_c2v_fixpipe_legacy.py \
+  tests/st/runtime/ops/test_c2v_fixpipe.py --platform a5 \
   --precompile-workers "$PYPTO_BUILD_JOBS" --execute-workers "$PYPTO_TEST_JOBS" \
   --execute-via-task-submit --task-submit-device auto \
   --task-max-time 120 --task-queue-timeout 30 --save-kernels \
