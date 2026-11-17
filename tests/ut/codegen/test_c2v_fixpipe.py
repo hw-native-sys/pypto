@@ -108,9 +108,10 @@ class _PipeBufferAliases(ir.IRMutator):
     def __init__(self, producer_depth: int, consumer_depth: int, offset: int = 0):
         super().__init__()
         self._offset = offset
+        # Validate names once so renamed operators cannot silently skip aliases.
         self._depths = {
-            "system.aic_initialize_pipe": producer_depth,
-            "system.aiv_initialize_pipe": consumer_depth,
+            ir.get_op("system.aic_initialize_pipe").name: producer_depth,
+            ir.get_op("system.aiv_initialize_pipe").name: consumer_depth,
         }
 
     def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:

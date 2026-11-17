@@ -907,10 +907,12 @@ an independent integer golden with zero tolerance; row-major plus a real
 transpose is the control. Both integer input families and both default Buffer
 IR settings are included. CPU simulation is intentionally skipped.
 
-The explicit AIC/AIV cases use `@pl.program` to exercise that IR contract;
-`jit.incore(level=AIC/AIV)` does not declare those function types. The automatic
-non-square regression uses `@pl.jit`. Quantization cases reuse two slots for five
-iterations, vary input tags and per-channel packed controls, and include negative
+The explicit AIC/AIV cases and automatic non-square regression use the
+`@pl.jit` family. Explicit endpoints use `@pl.jit.incore(level=pl.Level.AIC)`
+and `@pl.jit.incore(level=pl.Level.AIV)`, co-scheduled by an
+`@pl.jit.incore(level=pl.Level.CORE_GROUP)` wrapper called from an `@pl.jit`
+entry. Quantization cases reuse two slots for five iterations, vary input tags
+and per-channel packed controls, and include negative
 scalar scales to distinguish pre-ReLU ordering. NZ2NZ is checked by returning the
 physical NZ tile through an ordinary separate V2C pipe and multiplying by an
 identity matrix on Cube. This does not introduce a GlobalTensor FIFO.
