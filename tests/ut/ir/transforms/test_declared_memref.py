@@ -511,27 +511,43 @@ class TestInheritedBinding:
         with pytest.raises(ValueError, match="lands in its source tile's allocation"):
             self._initialize(Before, through_pipeline)
 
-    def test_unannotated_reassignment_follows_new_source(self, ascend_backend):
-        """An old inferred LHS binding must not become an explicit constraint."""
+    @pytest.mark.parametrize(
+        "replacement",
+        [
+            "pl.gather_row(second, x, [1, 0], [1, 0], [1, 32])",
+            "pl.reshape(second, [8, 32])",
+            "pl.tile.slice(second, [8, 32], [0, 0])",
+        ],
+    )
+    @pytest.mark.parametrize("binding", [None, "first", "second"])
+    def test_reassignment_follows_new_source(self, ascend_backend, replacement, binding):
+        """Only an explicit annotation may constrain the new definition's binding."""
+        annotation = f': pl.Tile[[8, 32], pl.BF16, pl.MemRef("{binding}"), pl.Mem.Vec]' if binding else ""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
-            ) -> pl.Tensor[[8, 32], pl.BF16]:
-                first: pl.Tile[[8, 32], pl.BF16, pl.MemRef("first"), pl.Mem.Vec] = pl.tile.full(
-                    [8, 32], dtype=pl.BF16, value=0.0
-                )
-                second: pl.Tile[[8, 32], pl.BF16, pl.MemRef("second"), pl.Mem.Vec] = pl.tile.full(
-                    [8, 32], dtype=pl.BF16, value=0.0
-                )
-                result = pl.gather_row(first, x, [0, 0], [0, 0], [1, 32])
-                pl.store(result, [0, 0], out)
-                result = pl.gather_row(second, x, [1, 0], [1, 0], [1, 32])
-                return pl.store(result, [0, 0], out)
-
-        after = _run_full_pipeline(Before, "InitMemRef")
+        before = pl.parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+    ) -> pl.Tensor[[8, 32], pl.BF16]:
+        first: pl.Tile[[8, 32], pl.BF16, pl.MemRef("first"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        second: pl.Tile[[8, 32], pl.BF16, pl.MemRef("second"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        result = pl.gather_row(first, x, [0, 0], [0, 0], [1, 32])
+        pl.store(result, [0, 0], out)
+        result{annotation} = {replacement}
+        return pl.store(result, [0, 0], out)
+""")
+        assert isinstance(before, ir.Program)
+        if binding == "first":
+            with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+                _run_full_pipeline(before, "InitMemRef")
+            return
+        after = _run_full_pipeline(before, "InitMemRef")
         bases = [
             ref.base_.name_hint for name, ref in _tile_memrefs(after).items() if name.startswith("result")
         ]

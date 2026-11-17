@@ -941,8 +941,6 @@ class ASTParser:
                     isinstance(override_type, ir.TileType)
                     and override_type.memref is not None
                     and override_type.memref.is_pinned_
-                    and isinstance(value_expr.type, ir.TileType)
-                    and value_expr.type.memref is not None
                 )
             )
         ):
@@ -1045,11 +1043,12 @@ class ASTParser:
                         span=span,
                         hint="Use a different variable name for tensors with different shapes or dtypes",
                     )
-                # Compatible: one side just has not been placed yet. Keep the
-                # binding on the Var's own type so the AssignStmt stays
-                # symmetric; InferTileMemorySpace resolves both sides together.
+                # Compatible: one side just has not been placed yet. Carry
+                # only the resolved space; this definition's metadata must not
+                # inherit a stale binding from the mutable Var's first value.
                 if (
                     isinstance(value_expr, ir.Call)
+                    and isinstance(value_type, ir.TileType)
                     and isinstance(existing_var.type, ir.TileType)
                     and existing_var.type.memory_space is not None
                 ):
@@ -1058,7 +1057,13 @@ class ASTParser:
                         value_expr.args,
                         value_expr.kwargs,
                         value_expr.attrs,
-                        existing_var.type,
+                        ir.TileType(
+                            value_type.shape,
+                            value_type.dtype,
+                            value_type.memref,
+                            value_type.tile_view,
+                            existing_var.type.memory_space,
+                        ),
                         value_expr.span,
                     )
             self.function.shape_dim_aliases.pop(existing_var.unique_id, None)
