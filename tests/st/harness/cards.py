@@ -55,26 +55,3 @@ def group_for_worker(device_ids: Sequence[int], group_size: int) -> list[int]:
     """Return the cards this worker owns; the whole list when grouping is off."""
     groups = partition(device_ids, group_size)
     return groups[worker_index() % len(groups)]
-
-
-# A5 CI server topology, confirmed 2026-11-17: cards 0 and 5 cannot do URMA, and
-# the fabric is full-mesh only within 0-3 and 4-7 — the two halves do not
-# connect. A URMA test must therefore stay inside one half and avoid both bad
-# cards, which leaves at most three usable ranks per half.
-URMA_BROKEN_DEVICES = frozenset({0, 5})
-URMA_MESH_GROUPS = (frozenset({0, 1, 2, 3}), frozenset({4, 5, 6, 7}))
-
-
-def urma_group(device_ids: Sequence[int], n_ranks: int) -> list[int] | None:
-    """Return *n_ranks* mutually reachable, URMA-capable cards, or None.
-
-    Taking the first *n_ranks* allocated ids instead would pick sets that
-    cannot transfer: (0, 1) includes a card that cannot do URMA, and (3, 4)
-    straddles the mesh boundary. Both surface as a device timeout rather than a
-    clear error, so the selection happens here.
-    """
-    for group in URMA_MESH_GROUPS:
-        usable = [d for d in device_ids if d in group and d not in URMA_BROKEN_DEVICES]
-        if len(usable) >= n_ranks:
-            return usable[:n_ranks]
-    return None

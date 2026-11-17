@@ -20,7 +20,6 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 import torch
-from harness import cards
 from pypto.ir import DistributedConfig
 from pypto.runtime import DistributedWorker, RunConfig
 
@@ -69,25 +68,10 @@ def test_config(test_config: RunConfig, _st_platform: str) -> RunConfig:
     return dataclasses.replace(test_config, platform=_st_platform)
 
 
-def _domain_devices(device_ids: list[int], n_ranks: int = 2) -> list[int]:
-    """Return *n_ranks* URMA-capable cards from one full-mesh group, or skip.
-
-    Domain creation establishes URMA resources on every card, so the A5 CI
-    server's unusable cards and its split fabric apply here too even though
-    this suite issues no peer read.
-    """
-    chosen = cards.urma_group(device_ids, n_ranks)
-    if chosen is None:
-        pytest.skip(
-            f"needs {n_ranks} URMA-capable cards inside one full-mesh group "
-            f"(excluding {sorted(cards.URMA_BROKEN_DEVICES)}); allocated {device_ids}"
-        )
-    return chosen
-
-
 @pytest.mark.platforms("a5")
 def test_host_domain_local_mte(test_config, device_ids):
-    device_ids = _domain_devices(device_ids)
+    if len(device_ids) < 2:
+        pytest.skip("Host domain smoke test requires two A5 devices")
     inputs = torch.arange(128, dtype=torch.float32).reshape(2, 1, 64)
     outputs = torch.zeros_like(inputs)
     compiled = host_table_program.compile(
@@ -127,7 +111,8 @@ def initialized_host_program(
 @pytest.mark.parametrize("source_kind", ["file", "tensor"])
 @pytest.mark.parametrize("reset", [None, False, True])
 def test_host_domain_runtime_file_initialization(test_config, device_ids, tmp_path, source_kind, reset):
-    device_ids = _domain_devices(device_ids)
+    if len(device_ids) < 2:
+        pytest.skip("Host initialization smoke test requires two A5 devices")
     expected = torch.arange(128, dtype=torch.float32).reshape(2, 1, 64)
     outputs = torch.zeros_like(expected).share_memory_()
     compiled = initialized_host_program.compile(
