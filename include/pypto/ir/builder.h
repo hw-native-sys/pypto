@@ -312,7 +312,8 @@ class IRBuilder {
   VarPtr EmitReg(const std::string& name, const std::string& op_name, const std::vector<ExprPtr>& args,
                  const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span);
   VarPtr EmitRegStore(const std::string& name, const ExprPtr& tile, const ExprPtr& offset,
-                      const ExprPtr& value, const ExprPtr& mask, const Span& span);
+                      const ExprPtr& value, const ExprPtr& mask, const Span& span,
+                      std::optional<int> block_stride = std::nullopt);
 
   // ========== Scope Building ==========
 

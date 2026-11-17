@@ -26,6 +26,20 @@ from pypto.pypto_core import ir as _ir
 _PARSER_SPAN: ContextVar[_ir.Span | None] = ContextVar("_PARSER_SPAN", default=None)
 
 
+def _normalize_reg_block_stride(value: object) -> int | None:
+    """Normalize a literal 32-byte store stride; dynamic scalars are unsupported."""
+    # The DSL parser wraps literals in ConstInt, unlike direct Python calls.
+    if isinstance(value, _ir.ConstInt):
+        value = value.value
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("block_stride must be a positive static integer")
+    if not 1 <= value <= 32767:
+        raise ValueError("block_stride must be a positive i16 integer (1..32767)")
+    return value
+
+
 @contextmanager
 def use_parser_span(span: _ir.Span) -> Iterator[None]:
     """Temporarily pin the parser span seen by ``_get_span_or_capture``."""
@@ -657,6 +671,7 @@ __all__ = [
     "_get_span_or_capture",
     "_normalize_const_to_dtype",
     "_normalize_expr",
+    "_normalize_reg_block_stride",
     "_normalize_scalar_operand",
     "_normalize_shape",
     "_normalize_signless_same_width_scalar_operand",

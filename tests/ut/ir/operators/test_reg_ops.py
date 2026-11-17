@@ -502,5 +502,41 @@ def test_memory_generator_dtype_matrix_before_codegen(name, dtype):
         assert result_type.dtype == dtype
 
 
+@pytest.mark.parametrize("stride", [0, -1, 32768])
+def test_store_rejects_invalid_block_stride(stride):
+    with pytest.raises(ValueError, match="block_stride"):
+        call("store", [tile(4096), integer(0), vec()], block_stride=stride)
+
+
+@pytest.mark.parametrize("offset,size", [(0, 119), (9, 128)])
+def test_store_checks_strided_extent(offset, size):
+    # 64 FP32 lanes occupy eight blocks: stride=2 reaches element 119.
+    with pytest.raises(ValueError, match="capacity bounds"):
+        call("store", [tile(size), integer(offset), vec()], block_stride=2)
+
+
+def test_store_effect_includes_strided_tail():
+    result = call("store", [tile(128), integer(3), vec()], block_stride=2)
+    effect = ir.get_reg_memory_effect(result)
+    assert (effect["begin"], effect["end"]) == (3, 123)
+
+
+@pytest.mark.parametrize("root_elements,valid", [(143, False), (144, True)])
+def test_strided_store_respects_view_and_root_offset(root_elements, valid):
+    base = ir.Var("base", ir.PtrType(), SPAN)
+    memref = ir.MemRef(base, 64, root_elements * 4, SPAN)
+    view = ir.TileView([128], [1], integer(16))
+    target = ir.Var("dst", ir.TileType([128], DataType.FP32, memref, view, ir.MemorySpace.Vec), SPAN)
+    # Within the view, offset 8 + extent 120 fits. Relative to the MemRef,
+    # the view origin makes the end 144; byte_offset belongs to the root effect.
+    if not valid:
+        with pytest.raises(ValueError, match="root capacity"):
+            call("store", [target, integer(8), vec()], block_stride=2)
+    else:
+        effect = ir.get_reg_memory_effect(call("store", [target, integer(8), vec()], block_stride=2))
+        assert effect["root"] is base
+        assert (effect["begin"], effect["end"]) == (40, 160)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

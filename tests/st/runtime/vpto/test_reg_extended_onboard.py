@@ -53,6 +53,8 @@ CASES = (
     "mx_quant",
     "unmasked_f32",
     "unmasked_bf16",
+    "block_stride128",
+    "block_stride256",
 )
 FLOAT_OPS = ("expdif", "axpy", "mula", "lrelu", "prelu")
 INTEGER_OPS = ("mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv")
@@ -326,6 +328,8 @@ def _unmasked_body(dtype):
 
 
 def _program(case):
+    if case.startswith("block_stride"):
+        return _block_stride_program(int(case.removeprefix("block_stride")))
     dtype = {
         "integer_u32": pl.UINT32,
         "integer_i32": pl.INT32,
@@ -484,6 +488,8 @@ def _build(output):
             if case == "reinterpret"
             else MX_OPS
             if case == "mx_quant"
+            else ("mul", "store")
+            if case.startswith("block_stride")
             else ("intlv", "dintlv")
             if case.startswith("unmasked_")
             else ("gather", "scatter")
@@ -514,7 +520,7 @@ def _build(output):
 
 
 def _inputs(case, repeat):
-    if case == "unmasked_bf16":
+    if case == "unmasked_bf16" or case.startswith("block_stride"):
         # Distinct finite BF16 bit patterns test lane ordering without rounding
         # or NaN equality obscuring a misplaced payload. UINT16 transports the
         # bits through NumPy; the kernel reinterprets them as BF16 registers.
@@ -565,6 +571,8 @@ def _inputs(case, repeat):
 
 
 def _initial(case, data):
+    if case.startswith("block_stride"):
+        return np.full(4096, 0xA55A, dtype=np.uint16)
     if case == "unmasked_bf16":
         return np.full(1024, 0xA55A, dtype=np.uint16)
     if case.startswith("histogram"):
@@ -577,6 +585,14 @@ def _initial(case, data):
 
 def _golden(case, data, n):
     expected = _initial(case, data)
+    if case.startswith("block_stride"):
+        # Independent ND -> NZ reference: [row, panel, column] is transposed
+        # to [panel, row, column]. Row 1 matches the C++ producer's row*16
+        # base and eight 32B blocks per vsstb at nz_rows=16. These finite normal
+        # BF16 words scale exactly by 2 via incrementing the exponent by one.
+        nd = expected.reshape(16, 256).copy()
+        nd[1, :n] = data[:n] + np.uint16(0x80)
+        return nd.reshape(16, 16, 16).transpose(1, 0, 2).copy().reshape(-1)
     if case.startswith("unmasked_"):
         x, y = data[:128], data[128:]
         interleaved = np.column_stack((x, y)).reshape(-1)
@@ -708,14 +724,22 @@ def _run(output, device):
             for repeat in range(2):
                 data = _inputs(case, repeat)
                 src = torch.from_numpy(data.reshape(1, 256).copy())
-                for n in LENGTHS:
+                strided = case.startswith("block_stride")
+                lengths = LENGTHS
+                if strided:
+                    lanes = int(case.removeprefix("block_stride"))
+                    lengths = tuple(n for n in (0, 1, 15, 16, 17, 37, 127, 128, 129, 255, 256) if n <= lanes)
+                for n in lengths:
                     expected = _golden(case, data, n)
-                    actual = torch.from_numpy(_initial(case, data).reshape(1, 1024))
+                    actual = torch.from_numpy(_initial(case, data).reshape(1, -1))
+                    if strided:
+                        actual = actual.view(torch.bfloat16)
                     handle(src, actual, n)
+                    actual_array = actual.view(torch.uint16).numpy()[0] if strided else actual.numpy()[0]
                     try:
                         if case == "float32":
                             np.testing.assert_allclose(
-                                actual.numpy()[0],
+                                actual_array,
                                 expected,
                                 rtol=3e-5,
                                 atol=2e-6,
@@ -723,13 +747,13 @@ def _run(output, device):
                             )
                         else:
                             np.testing.assert_array_equal(
-                                actual.numpy()[0], expected, err_msg=f"{case}, repeat={repeat}, n={n}"
+                                actual_array, expected, err_msg=f"{case}, repeat={repeat}, n={n}"
                             )
                     except AssertionError as error:
                         mismatches = (
-                            np.flatnonzero(~np.isclose(actual.numpy()[0], expected, rtol=3e-5, atol=2e-6))
+                            np.flatnonzero(~np.isclose(actual_array, expected, rtol=3e-5, atol=2e-6))
                             if case == "float32"
-                            else np.flatnonzero(actual.numpy()[0] != expected)
+                            else np.flatnonzero(actual_array != expected)
                         )
                         failures.append(
                             {
@@ -738,7 +762,7 @@ def _run(output, device):
                                 "active_lanes": n,
                                 "error": str(error),
                                 "offsets": mismatches[:16].tolist(),
-                                "actual": actual.numpy()[0][mismatches[:16]].tolist(),
+                                "actual": actual_array[mismatches[:16]].tolist(),
                                 "expected": expected[mismatches[:16]].tolist(),
                             }
                         )
@@ -777,6 +801,38 @@ def test_reg_extended_onboard(vpto_onboard_session: Path | None):
     # precompiled acceptance consumes the original session artifact directory.
     assert vpto_onboard_session is not None
     _run(vpto_onboard_session, int(os.environ["PYPTO_VPTO_DEVICE_ID"]))
+
+
+def _block_stride_program(lanes):
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], pl.UINT16],
+        out: pl.InOut[pl.Tensor[[1, 4096], pl.BF16]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 4096], pl.BF16]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 4096], target_memory=pl.MemorySpace.Vec), [4096])
+        active = pl.cast(n, pl.INDEX)
+        with pl.reg_scope():
+            raw = pl.reg.load(a, lanes=lanes)
+            decoded = pl.reg.interpret_cast(raw, dtype=pl.BF16)
+            scale = pl.reg.broadcast(2.0, lanes=lanes, dtype=pl.BF16)
+            values = pl.reg.mul(decoded, scale)
+            mask = pl.reg.active_mask(active, lanes=lanes)
+            c = pl.reg.store(c, 16, values, mask, block_stride=16)
+        c = pl.reshape(c, [1, 4096])
+        pl.store(c, [0, 0], out)
+        return out
+
+    @pl.jit
+    def dispatch(
+        src: pl.Tensor[[1, 256], pl.UINT16],
+        out: pl.InOut[pl.Tensor[[1, 4096], pl.BF16]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 4096], pl.BF16]:
+        return body(src, out, n)
+
+    return dispatch
 
 
 if __name__ == "__main__":

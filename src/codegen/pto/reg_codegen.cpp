@@ -310,11 +310,19 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     if (store) {
       std::string line =
           spec->emitter + " " + GetExprAsCode(args[2]) + ", " + addr->second + "[" + offset + "]";
+      const auto stride = ir::GetKwargOr<int>(call->kwargs_, "block_stride", 0);
+      if (stride) {
+        auto scalar = NewNamedTemp("reg_block_stride");
+        Emit(scalar + " = arith.constant " + std::to_string(stride) + " : i16");
+        line += ", " + scalar;
+      }
       if (args.size() == 4) line += ", " + GetExprAsCode(args[3]);
-      // A masked store changes only active lanes; preserve the destination
-      // in inactive lanes rather than accepting VMI's zero-mode default.
-      if (args.size() == 4) line += " {pmode = \"merge\"}";
+      // Preserve the existing contiguous-store spelling. Block-stride stores
+      // intrinsically preserve inactive lanes and do not accept a pmode flag.
+      if (args.size() == 4 && !stride) line += " {pmode = \"merge\"}";
       line += " : " + operand_type(args[2]) + ", " + ptr_type;
+      // The custom VMI parser infers the stride's i16 type. Its type list
+      // contains only the vector, destination and optional predicate types.
       if (args.size() == 4) line += ", " + operand_type(args[3]);
       Emit(line);
       // VMI stores have no SSA result. The IR's updated Tile version denotes

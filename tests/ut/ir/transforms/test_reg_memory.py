@@ -35,6 +35,7 @@ def memory_program(
     view=False,
     branch_writes=None,
     dynamic_mask=False,
+    block_stride=None,
 ):
     ib = IRBuilder()
     with ib.function("memory", span=SPAN, type=ir.FunctionType.AIV) as f:
@@ -71,7 +72,15 @@ def memory_program(
                         ib.emit_reg_store("else_out", target, value, offset=offset, span=SPAN)
             elif loop_stop is None:
                 for offset in writes:
-                    ib.emit_reg_store("updated", target, value, offset=offset, mask=mask, span=SPAN)
+                    ib.emit_reg_store(
+                        "updated",
+                        target,
+                        value,
+                        offset=offset,
+                        mask=mask,
+                        span=SPAN,
+                        block_stride=block_stride,
+                    )
             else:
                 i = ib.var("i", ir.ScalarType(DataType.INDEX), SPAN)
                 with ib.for_loop(i, 0, loop_stop, 1, span=SPAN):
@@ -230,6 +239,73 @@ def test_unknown_read_preserves_static_initialization_checks(read_kind, unknown_
     # Unknown reads cannot hide a static read, even one preceding the gather,
     # and do not initialize storage. A proven store still permits the read.
     if initialized:
+        initialize(program)
+    else:
+        with pytest.raises(ValueError, match="uninitialized"):
+            initialize(program)
+
+
+@pytest.mark.parametrize("write_offset", [0, 1])
+@pytest.mark.parametrize(
+    "read_offset,active,valid",
+    [
+        (0, None, True),
+        (8, None, False),
+        (119, None, True),
+        (120, None, False),
+        (16, 9, True),
+        (17, 9, False),
+        (0, 0, False),
+    ],
+)
+def test_strided_store_initializes_blocks_without_gaps(write_offset, read_offset, active, valid):
+    program = memory_program(
+        writes=(write_offset,),
+        block_stride=2,
+        active=active,
+        read_offset=read_offset + write_offset,
+        read_lanes=1,
+    )
+    if valid:
+        initialize(program)
+    else:
+        with pytest.raises(ValueError, match="uninitialized"):
+            initialize(program)
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+@pytest.mark.parametrize("read_offset", [0, 8, 4096, 2 * ((1 << 27) - 8)])
+def test_huge_strided_store_keeps_analysis_bounded_and_conservative(initialized, read_offset):
+    # One IR store has 2**24 blocks. Expanding it would exhaust time/memory;
+    # the bounded prefix must also leave gaps and the omitted tail unproved.
+    lanes = 1 << 27
+    ib = IRBuilder()
+    with ib.function("huge_strided", span=SPAN, type=ir.FunctionType.AIV) as f:
+        size = lanes * 2
+        storage = ib.let(
+            "storage",
+            tile.full([size], dtype=DataType.FP32, value=0)
+            if initialized
+            else tile.create([size], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec),
+        )
+        with ib.reg_scope(SPAN):
+            value = ib.emit_reg(
+                "value",
+                "reg.broadcast",
+                [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                {"lanes": lanes, "dtype": DataType.FP32},
+                SPAN,
+            )
+            ib.emit_reg_store("updated", storage, value, span=SPAN, block_stride=2)
+            ib.emit_reg(
+                "read",
+                "reg.load",
+                [storage, ir.ConstInt(read_offset, DataType.INDEX, SPAN)],
+                {"lanes": 1},
+                SPAN,
+            )
+    program = ir.Program([f.get_result()], "BoundedStridedStore", SPAN)
+    if initialized or read_offset == 0:
         initialize(program)
     else:
         with pytest.raises(ValueError, match="uninitialized"):

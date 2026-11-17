@@ -92,11 +92,29 @@ and active-lane counts. No table entry implies support for other dtypes.
 | API signature | Parameters and behavior | Result | Dtypes |
 | ------------- | ----------------------- | ------ | ------ |
 | `load(tile, offset=0, *, lanes)` | `tile`: source Tile in Vec UB memory. `offset`: starting element index (INDEX Scalar or integer literal). Reads `lanes` consecutive elements. | VecReg with `lanes` and Tile dtype | `T` |
-| `store(tile, offset=0, value=None, mask=None)` | `tile`: destination Vec Tile. `offset`: starting element index. `value`: required VecReg despite the Python default. `mask`: optional write mask. Only active lanes are written; other destination elements are preserved. | Tile alias of `tile` | `T`; value and Tile dtype must match |
+| `store(tile, offset=0, value=None, mask=None, *, block_stride=None)` | `tile`: destination Vec Tile. `offset`: starting element index. `value`: required VecReg despite the Python default. `mask`: optional write mask. Only active lanes are written; other destination elements are preserved. | Tile alias of `tile` | `T`; value and Tile dtype must match |
+
+`block_stride` is an optional positive static integer in `[1, 32767]`, measured
+in **32-byte blocks**; `offset` remains in elements. Omission preserves the
+contiguous store. For element size `E`, block width `B = 32 / E`, active lane
+`i` writes element `offset + (i // B) * block_stride * B + i % B`.
+Inactive lanes and gaps retain their prior contents. Static bounds include the
+last strided block; initialization checks credit only active written blocks.
+Dynamic offsets remain caller-managed. The memory-effect query returns the
+conservative bounding interval, including gaps, for dependency/lifetime analysis.
+PTOAS receives an i16 stride operand and lowers BF16 stores to `vsstb`.
+For example, `pl.reg.store(dst, 16, values, mask, block_stride=16)` writes
+128 BF16 lanes into eight NZ panels at element offsets `16, 272, ..., 1808`.
+Dynamic stride scalars are not exposed in this initial API.
+Static initialization analysis records at most the first 256 blocks of each
+strided store to bound compile-time work independently of the lane count.
+Later blocks are not proved initialized by that store; initialize the destination
+first when subsequent register loads need that larger region. This analysis
+budget does not restrict the store's lane count or change its generated writes.
 
 Offsets count **elements**, not bytes. Static offsets must be nonnegative and the
-whole interval `[offset, offset + lanes)` must fit the Tile capacity, including
-for masked stores. Static loads must lie inside initialized `valid_shape`; a later
+whole accessed footprint must fit the Tile capacity, including for masked
+stores (`[offset, offset + lanes)` for contiguous stores). Static loads must lie inside initialized `valid_shape`; a later
 mask cannot protect an uninitialized load. One-dimensional Tiles are directly
 supported. Multidimensional Tiles require an explicit contiguous row-major View;
 padded, boxed or compact layouts are rejected. View start offsets are included in
@@ -436,7 +454,7 @@ with pl.reg_scope():
 | --- | ------- |
 | `with ib.reg_scope(span=None):` | Open a register region in Python IRBuilder. |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | Create a named register operation. `op_name` is the registered name such as `"reg.add"`; `args` contains IR operands, `kwargs` operation attributes. |
-| `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None)` | Emit a named store and return the destination Tile alias. |
+| `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | Emit a named store and return the destination Tile alias. |
 | `ir.get_reg_op_spec(name)` | Inspect the operation's region requirement and VMI emitter. |
 | `ir.get_reg_memory_effect(call)` | Inspect a load/store's target Tile, known root allocation, read/write access, half-open element interval and optional mask. Unknown roots or interval endpoints remain unknown. |
 

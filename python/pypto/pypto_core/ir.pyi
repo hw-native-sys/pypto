@@ -3666,7 +3666,15 @@ class IRBuilder:
         """Infer, validate and assign a register operation inside the open RegScope."""
 
     def emit_reg_store(
-        self, name: str, tile: Expr, offset: Expr, value: Expr, mask: Expr | None, span: Span
+        self,
+        name: str,
+        tile: Expr,
+        offset: Expr,
+        value: Expr,
+        mask: Expr | None,
+        span: Span,
+        *,
+        block_stride: int | None = None,
     ) -> Var:
         """Assign a register store's Tile alias result."""
 
@@ -4586,7 +4594,7 @@ def returned_param_indices(func: Function, program: Program) -> list[int | None]
     ...
 
 def get_reg_memory_effect(call: Call) -> dict[str, Any]:
-    """Get load/store/gather/scatter effects; indexed begin/end are unknown."""
+    """Get memory effects; strided begin/end bound gaps, indexed endpoints are unknown."""
     ...
 
 def get_reg_op_spec(op_name: str) -> dict[str, Any]:
