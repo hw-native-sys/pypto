@@ -29,7 +29,7 @@ from pypto._environment import toolchain_probe_env
 from pypto._external_source import external_source_digest
 from pypto.backend._ptoas_locate import check_ptoas_version, find_ptoas_binary
 
-from . import _vpto
+from . import _device_image, _stack_usage, _vpto
 
 # `check_runtime_pin()` has to run before the simpler imports it guards, so the imports
 # below are deliberately not at the top of the file (E402 is ignored in pyproject.toml).
@@ -179,6 +179,7 @@ class KernelCompiler:
         build_dir: str | None = None,
         *,
         vpto_sources: list[str] | tuple[str, ...] | None = None,
+        text_only: bool = False,
     ) -> bytes:
         """Compile a simulator SO or linked device ELF in a private build directory.
 
@@ -188,9 +189,15 @@ class KernelCompiler:
         ``vpto_sources`` supplies self-contained A5 AIV device functions. They
         are compiled to device objects and linked before .text extraction;
         Host fatobjs and C++ Bridge dependencies are not supported here.
+        ``text_only=True`` admits only A5 compiler-produced, static zero-stack
+        callees. It discards unreachable sections and validates the final ELF
+        and compiler stack report before returning bytes. It does not establish
+        resource ownership, submission ordering or device completion semantics.
         """
         source = self._source_path(source_path)
         helpers = _vpto.source_paths(vpto_sources)
+        if text_only and (self.platform != "a5" or helpers):
+            raise ValueError("text_only requires platform='a5' without separately compiled VPTO helpers")
         if helpers:
             _vpto.validate_target(self.platform, core_type)
             helpers = tuple(str(self._source_path(path)) for path in helpers)
@@ -224,7 +231,8 @@ class KernelCompiler:
             cmd = [
                 toolchain.cxx_path,
                 *compile_flags,
-                *(_vpto.CALLER_FLAGS if helpers else ()),
+                *(_vpto.CALLER_FLAGS if helpers or text_only else ()),
+                *(("-fdata-sections", "-fstack-usage") if text_only else ()),
                 *self._sanitizer_flags(toolchain),
                 *self._include_flags(includes),
                 "-o",
@@ -238,10 +246,15 @@ class KernelCompiler:
             linked = output.with_suffix(".elf")
             helper_objects = self._compile_vpto_helpers(helpers, Path(directory)) if helpers else []
             link_flags: list[str] = []
-            if helpers:
+            if helpers or text_only:
                 order = Path(directory) / "entry.order"
                 order.write_text("\n".join(_vpto.LINK_SYMBOL_ORDER) + "\n")
                 link_flags.append(f"--symbol-ordering-file={order}")
+            if text_only:
+                # CANN headers may define unused allocated data (g_tilingKey).
+                # GC removes only unreachable sections. Any surviving data
+                # remains an error: the persistent loader retains only .text.
+                link_flags.append("--gc-sections")
             binary = self._run(
                 [
                     self.sdk.ccec.linker_path,
@@ -258,6 +271,9 @@ class KernelCompiler:
             )
             if helpers:
                 _vpto.validate_device_image(binary)
+            if text_only:
+                functions = _device_image.validate_device_image(binary, entry_symbol="kernel_entry")
+                _stack_usage.validate_stack_usage(output.with_suffix(".su"), functions)
             return binary
 
     def _vpto_toolchain(self) -> tuple[str, str]:

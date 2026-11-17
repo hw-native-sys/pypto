@@ -10,10 +10,11 @@
 """Build contract for separately compiled, self-contained A5 VPTO helpers."""
 
 import re
-import struct
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
+
+from . import _device_image
 
 # These options are also included in the binary cache identity. Keep LLVM
 # compilation separate from the C++ flags and retain PTOAS's validated device
@@ -116,40 +117,4 @@ def validate_device_image(data: bytes) -> None:
     relocation metadata. This structural check does not prove arbitrary code
     position-independent; helper authors must still obey the device-call ABI.
     """
-    if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
-        raise ValueError("VPTO linking requires a little-endian ELF64 device image")
-    elf_type, machine = struct.unpack_from("<HH", data, 16)
-    if elf_type != 2 or machine != 0x1029:
-        raise ValueError("VPTO linking requires an executable AI Core ELF, not a host fatobj")
-    (entry,) = struct.unpack_from("<Q", data, 24)
-    (offset,) = struct.unpack_from("<Q", data, 40)
-    size, count, names_index = cast(tuple[int, int, int], struct.unpack_from("<HHH", data, 58))
-    if size != 64 or not count or names_index >= count or offset + count * size > len(data):
-        raise ValueError("VPTO linked image has an invalid section table")
-    sections: list[tuple[int, ...]] = [
-        struct.unpack_from("<IIQQQQIIQQ", data, offset + i * size) for i in range(count)
-    ]
-    names = sections[names_index]
-    strings = data[names[4] : names[4] + names[5]]
-    found_text = False
-    for name_offset, kind, flags, address, start, length, _, _, _, stride in sections:
-        name = strings[name_offset:].split(b"\x00", 1)[0]
-        if kind != 8 and start + length > len(data):  # SHT_NOBITS has no file payload.
-            raise ValueError("VPTO linked image has a truncated section")
-        if name == b".text":
-            found_text = bool(length)
-            if entry != address:
-                raise ValueError("VPTO kernel_entry must be at the start of .text")
-        if flags & 2 and length and name != b".text":  # SHF_ALLOC
-            raise ValueError(f"VPTO linked image needs unsupported allocated section {name!r}")
-        if kind in (4, 9) and length:  # SHT_RELA / SHT_REL
-            raise ValueError("VPTO linked image must have no remaining relocations")
-        if kind in (2, 11):  # SHT_SYMTAB / SHT_DYNSYM
-            if stride != 24 or length % stride:
-                raise ValueError("VPTO linked image has an invalid symbol table")
-            for position in range(start, start + length, stride):
-                symbol, _, _, section = struct.unpack_from("<IBBH", data, position)
-                if symbol and section == 0:
-                    raise ValueError("VPTO linked image has an unresolved symbol")
-    if not found_text:
-        raise ValueError("VPTO linked image requires a nonempty .text section")
+    _device_image.validate_device_image(data)
