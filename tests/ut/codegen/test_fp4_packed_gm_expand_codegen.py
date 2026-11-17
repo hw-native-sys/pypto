@@ -1262,7 +1262,12 @@ def test_direct_fp4_to_fp8_static_columns_preserve_runtime_slot_address(tmp_path
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 @pytest.mark.parametrize("dynamic_offset", [False, True])
-def test_direct_fp4_to_fp8_slice_preserves_parent_pitch_and_offset(tmp_path, planner, dynamic_offset):
+@pytest.mark.parametrize("offset_dtype", [pl.INT32, pl.INT64, pl.INDEX])
+def test_direct_fp4_to_fp8_slice_preserves_parent_pitch_and_offset(
+    tmp_path, planner, dynamic_offset, offset_dtype
+):
+    # Integer scalar offsets, including constants folded from their arithmetic,
+    # must become index operands before PTOAS can parse the slice's subview.
     offset_scale, offset_base = (1, 0) if dynamic_offset else (0, 8)
 
     @pl.program
@@ -1271,7 +1276,7 @@ def test_direct_fp4_to_fp8_slice_preserves_parent_pitch_and_offset(tmp_path, pla
         def main(
             self,
             src: pl.Tensor[[32, 128], pl.FP4E2M1X2],
-            start: pl.Scalar[pl.INT64],
+            start: pl.Scalar[offset_dtype],
             out: pl.Out[pl.Tensor[[16, 128], pl.FP8E4M3FN, pl.NZ]],
         ) -> pl.Tensor[[16, 128], pl.FP8E4M3FN, pl.NZ]:
             packed = pl.load(src, [0, 0], [32, 128])

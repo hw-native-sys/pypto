@@ -1364,8 +1364,12 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         << "tile.slice offset tuple must have at least 2 elements (row, col), got "
         << offset_tuple->elements_.size();
     const auto pto_offsets = codegen::GetPtoTileCoordinates(*source_tile_type, offset_tuple->elements_);
-    std::string row_off = codegen.GetExprAsCode(pto_offsets[0]);
-    std::string col_off = codegen.GetExprAsCode(pto_offsets[1]);
+    // Subview offsets are index-typed even when scalar arithmetic leaves an
+    // integer-typed constant or runtime value in the IR. Preserve constants as
+    // constants and cast runtime offsets through the shared index coercion.
+    const auto offset_codes = GetSizeCodes(pto_offsets, codegen);
+    const std::string& row_off = offset_codes[0];
+    const std::string& col_off = offset_codes[1];
 
     auto shape_tuple = ir::As<ir::MakeTuple>(op->args_[1]);
     INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "tile.slice shape must be a literal tuple";
