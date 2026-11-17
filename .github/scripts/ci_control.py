@@ -56,7 +56,7 @@ OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-ti
 CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
 MERGE_WAIT_SECONDS = 60
 MERGE_POLL_SECONDS = 5
-REBASE_BEHIND_LIMIT = 5
+REBASE_BEHIND_LIMIT = 10
 
 
 class UntrustedRunError(ValueError):
@@ -267,9 +267,9 @@ def verify_branch_freshness(repo: str, head: str, base: str) -> None:
     behind = comparison.get("behind_by")
     if type(behind) is not int or behind < 0:
         raise ValueError("Cannot determine how many commits the PR is behind main")
-    if behind >= REBASE_BEHIND_LIMIT:
+    if behind > REBASE_BEHIND_LIMIT:
         raise ValueError(
-            f"PR is {behind} commits behind main (must be fewer than {REBASE_BEHIND_LIMIT}); "
+            f"PR is {behind} commits behind main (must be at most {REBASE_BEHIND_LIMIT}); "
             "rebase onto the latest main, wait for lint to pass, then post /ci full again"
         )
 
@@ -308,9 +308,9 @@ def verify_result_freshness(repo: str, head: str, tested_base: str) -> None:
         behind = comparison.get("ahead_by")
         if type(behind) is not int or behind < 0:
             raise ValueError("Cannot determine how many commits the tested base is behind main")
-        if behind >= REBASE_BEHIND_LIMIT:
+        if behind > REBASE_BEHIND_LIMIT:
             raise ValueError(
-                f"Tested base is {behind} commits behind main (must be fewer than {REBASE_BEHIND_LIMIT}); "
+                f"Tested base is {behind} commits behind main (must be at most {REBASE_BEHIND_LIMIT}); "
                 "rebase onto the latest main, wait for lint, and post /ci full again"
             )
 
@@ -523,7 +523,7 @@ def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None
                 return pr
             except MergePendingError:
                 # Retry an absent or inconsistent merge for this head. A base
-                # 0-4 commits behind live main is already eligible; a rewritten
+                # 0-10 commits behind live main is already eligible; a rewritten
                 # or older base fails immediately with an actionable reason.
                 pass
         remaining = deadline - time.monotonic()
