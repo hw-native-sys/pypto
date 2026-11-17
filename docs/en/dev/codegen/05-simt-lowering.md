@@ -287,7 +287,7 @@ all inactive elements and surrounding guards, and an unchanged source.
 Compilation also verifies each linked SIMT launch length.
 
 The 2026-11-16 A5 run passed all 126 checks with PTOAS v0.74, CANN 9.3.0,
-and pinned runtime `c1c234667d54f4aea1582249448b24f9a08753f6`. Prepare artifacts
+and pinned runtime `27fe21756a5230cc4cfe7e44fa360d07d782a111`. Prepare artifacts
 without reserving a device, then execute them on a queued device:
 
 ```bash

@@ -80,14 +80,48 @@ Refined input view types also propagate through local aliases, tuple constructio
 
 Explicit AIV callees also receive physical strides for sliced `In`, `InOut`, and
 caller-supplied `Out` arguments, including `Submit` calls. Analysis follows nested
-slices, aliases, tuple projections, and explicit dropped axes. It preserves the
-parent's ND/DN strides rather than recomputing them from the window's logical
-shape. Refined types propagate through SIMT launch arguments and their SSA results.
+slices, aliases (including host `tensor.write`, `tensor.assemble`, and `tensor.expand_clone` results),
+nested tuple projections, returned parameter writebacks, and explicit
+dropped axes. Both literal and tuple-valued slice shapes are accepted. Distributed
+tensor parameters retain their kind and window-buffer identity. Non-inlined Graph
+parameters receive storage metadata from their first caller; subsequent callers
+constrain the same records. Cached return storage preserves views created inside
+Graph helpers without rescanning their bodies. Graph-to-AIV forwarding and returned
+views therefore enforce consistent physical strides across callers. Forwarded tuples
+follow the declared return slots, and slice provenance from later callers reaches
+previously analyzed consumers. Parameter
+references in function attributes (including external return contracts) are remapped
+with the refined parameters. The analysis preserves the
+parent's ND/DN layout and strides rather than recomputing them from the window's
+logical shape. Removing a trailing layout axis (or reinterpreting rank) resets
+the resolved layout to ND, matching slice type deduction; dropping only leading
+axes preserves DN. Metadata-only transpose and view operations derive storage from
+their source, including non-trailing axis swaps. Shape/dtype reinterprets must
+meet the operator's packed-storage contract after slice strides are resolved.
+In orchestration, the additional reshape constraint is checked only when its result reaches an AIV
+operand; unrelated InCore and unused reshape paths retain their existing behavior.
+Refined types propagate through AIV For/While carries (including nested tuples), loop results, matching branch joins, and SIMT launch arguments and their
+SSA results. Metadata views inside AIV bodies and result-alias operations re-deduce their result types from the refined
+arguments while preserving call attributes. Loop backedges and branch yields must agree with the refined storage
+types before SIMT helper specialization. Join checks compare effective physical
+strides, so implicit packed types and equivalent explicit packed views agree.
+Tuple carries allocate constraints lazily for projected elements; reusing a wide
+tuple across loops does not eagerly copy every tensor leaf.
 For example, an `[8, 256]` window of a `[10, 288]` parent retains `[288, 1]`.
 
 This AIV refinement requires static physical strides consistent across every
 call to the same parameter. Mixed dense/sliced calls with different pitches,
-dynamic pitches, and conflicting explicit parameter strides are diagnosed.
+dynamic pitches, and conflicting explicit parameter strides or layouts are diagnosed.
+A layout-only declaration is still a storage contract: runtime-allocated ND outputs
+cannot satisfy a DN formal, even when it declares no stride.
+Loop-carried and branch-merged tensors must agree on physical strides at every
+yield, including when the AIV call is inside the loop. Returning an `Out` or
+`InOut` argument forwards its caller-side strides to subsequent consumers;
+`Submit` retains its allocated-output gap, context suffix, and task ID. Runtime-allocated
+outputs contribute packed strides to consensus, retaining known strides even when a
+leading extent is dynamic; mixing them with incompatible pitched outputs is rejected. Conditional arms use independent incoming bindings, including
+before SSA conversion, and merge updates to incoming bindings for subsequent uses.
+Branch-local definitions escape only through explicit yields, keeping nested joins linear.
 Pass the full parent and use parent-relative indices when different calls need
 different physical layouts; this pass does not add a runtime stride ABI.
 

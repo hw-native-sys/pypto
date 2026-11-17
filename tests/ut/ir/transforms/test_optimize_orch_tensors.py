@@ -21,7 +21,7 @@ import time
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -993,6 +993,1369 @@ class TestAssembleLoopRewrite:
         stores = _calls_named(After, "tile.store")
         assert len(stores) == 1, "the store must survive rather than be folded into the loop"
         assert dict(stores[0].kwargs)["pre_relu"] is True
+
+
+class TestAivSliceStrideDataflow:
+    """Physical storage survives dataflow edges independently of logical types."""
+
+    @pytest.mark.parametrize(
+        "shape, dropped, result_shape, strides, layout",
+        [
+            ([1, 32], [0], [32], [1], "ND"),
+            ([32, 1], [1], [32], [1], "ND"),
+            ([2, 1, 32], [1], [2, 32], [32, 1], "ND"),
+            ([2, 32, 1], [2], [2, 32], [32, 1], "ND"),
+            ([1, 4, 32], [0], [4, 32], [1, 4], "DN"),
+        ],
+    )
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    def test_dn_slice_dropped_plane_updates_layout(
+        self, shape, dropped, result_shape, strides, layout, submit
+    ):
+        dispatch = "self.kernel(chunk)"
+        if submit:
+            dispatch = "with pl.manual_scope():\n            tid = pl.submit(self.kernel, chunk)"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[{result_shape}, pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[{shape}, pl.FP32, pl.TensorView(layout=pl.TensorLayout.DN)]):
+        chunk = pl.tensor.slice(parent, {shape}, {[0] * len(shape)}, drop_dims={dropped})
+        {dispatch}
+"""
+        expected = pl.parse_program(
+            source.replace(
+                f"x: pl.Tensor[{result_shape}, pl.FP32]",
+                f"x: pl.Tensor[{result_shape}, pl.FP32, "
+                f"pl.TensorView(stride={strides}, layout=pl.TensorLayout.{layout})]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    def test_aiv_infers_dn_layout_from_caller(self, submit):
+        dispatch = "self.kernel(chunk)"
+        if submit:
+            dispatch = "with pl.manual_scope():\n            tid = pl.submit(self.kernel, chunk)"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32, pl.TensorView(layout=pl.TensorLayout.DN)]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        {dispatch}
+"""
+        expected = pl.parse_program(
+            source.replace(
+                "x: pl.Tensor[[8, 256], pl.FP32]",
+                "x: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[1, 10], layout=pl.TensorLayout.DN)]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.mark.parametrize(
+        "view, shape, strides, layout",
+        [
+            ("pl.tensor.transpose(chunk, 0, 1)", [3, 2, 256], [288, 2304, 1], "ND"),
+            ("pl.tensor.transpose(chunk, -2, -1)", [2, 256, 3], [2304, 1, 288], "DN"),
+            ("pl.tensor.view(chunk, layout=pl.DN)", [2, 256, 3], [2304, 1, 288], "DN"),
+        ],
+    )
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    def test_metadata_views_preserve_slice_storage(self, view, shape, strides, layout, submit):
+        dispatch = "self.kernel(viewed)"
+        if submit:
+            dispatch = "with pl.manual_scope():\n            tid = pl.submit(self.kernel, viewed)"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[{shape}, pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[4, 8, 288], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [2, 3, 256], [1, 2, 7])
+        viewed = {view}
+        {dispatch}
+"""
+        expected = pl.parse_program(
+            source.replace(
+                f"x: pl.Tensor[{shape}, pl.FP32]",
+                f"x: pl.Tensor[{shape}, pl.FP32, "
+                f"pl.TensorView(stride={strides}, layout=pl.TensorLayout.{layout})]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.mark.parametrize(
+        "view, shape",
+        [
+            ("pl.tensor.transpose(x, 0, 1)", [3, 2, 256]),
+            ("pl.tensor.transpose(x, -2, -1)", [2, 256, 3]),
+            ("pl.tensor.view(x, layout=pl.DN)", [2, 256, 3]),
+            ("pl.tensor.slice(x, [2, 2, 128], [0, 1, 4])", [2, 2, 128]),
+            (
+                "pl.tensor.set_validshape(pl.tensor.slice(x, [1, 3, 256], [0, 0, 0], drop_dims=[0]), 2, 128)",
+                [3, 256],
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    def test_aiv_body_metadata_views_use_refined_strides(self, view, shape, submit):
+        # The golden deduces every local type from the physical parameter view;
+        # checking the whole body catches stale assignments and tile operands.
+        dispatch = "self.kernel(chunk)"
+        if submit:
+            dispatch = "with pl.manual_scope():\n            tid = pl.submit(self.kernel, chunk)"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[2, 3, 256], pl.FP32]):
+        viewed = {view}
+        tile = pl.tile.load(viewed, {[0] * len(shape)}, {shape})
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[4, 8, 288], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [2, 3, 256], [1, 2, 7])
+        {dispatch}
+"""
+        expected = pl.parse_program(
+            source.replace(
+                "x: pl.Tensor[[2, 3, 256], pl.FP32]",
+                "x: pl.Tensor[[2, 3, 256], pl.FP32, pl.TensorView(stride=[2304, 288, 1])]",
+            )
+        )
+        before = pl.parse_program(source)
+        # Isolate parameter substitution, including metadata forms normally
+        # rewritten by ConvertTensorToTileOps before this pass.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, expected)
+
+    @pytest.mark.parametrize("operation", ["view", "reshape", "reinterpret_view"])
+    @pytest.mark.parametrize("pitch", [256, 288])
+    def test_aiv_body_shaped_views_check_refined_storage(self, operation, pitch):
+        viewed = f"pl.tensor.{operation}(x, [4, 512])"
+        if operation == "reinterpret_view":
+            viewed = "pl.tensor.reinterpret_view(x, pl.INT32, shape=[4, 512])"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32]):
+        viewed = {viewed}
+        tile = pl.tile.load(viewed, [0, 0], [4, 512])
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, {pitch}], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 0])
+        self.kernel(chunk)
+"""
+        before = pl.parse_program(source)
+        if pitch != 256:
+            with passes.PassContext([], passes.VerificationLevel.NONE):
+                with pytest.raises(ValueError, match="packed"):
+                    passes.optimize_orch_tensors()(before)
+        else:
+            expected = pl.parse_program(
+                source.replace(
+                    "x: pl.Tensor[[8, 256], pl.FP32]",
+                    "x: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[256, 1])]",
+                )
+            )
+            with passes.PassContext([], passes.VerificationLevel.NONE):
+                after = passes.optimize_orch_tensors()(before)
+            ir.assert_structural_equal(after, expected)
+
+    @pytest.mark.parametrize("caller_layout", ["ND", "DN"])
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    def test_aiv_layout_only_declaration_checks_caller(self, caller_layout, submit):
+        dispatch = "self.kernel(chunk)"
+        if submit:
+            dispatch = "with pl.manual_scope():\n            tid = pl.submit(self.kernel, chunk)"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(layout=pl.DN)]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32, pl.TensorView(layout=pl.{caller_layout})]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        {dispatch}
+"""
+        before = pl.parse_program(source)
+        if caller_layout == "ND":
+            with pytest.raises(ValueError, match="explicit layout"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            expected = pl.parse_program(
+                source.replace(
+                    "pl.TensorView(layout=pl.DN)]):",
+                    "pl.TensorView(stride=[1, 10], layout=pl.DN)]):",
+                    1,
+                )
+            )
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), expected)
+
+    @pytest.mark.parametrize("operation", ["view", "reshape", "reinterpret_view"])
+    @pytest.mark.parametrize("pitch", [256, 288])
+    def test_shaped_views_require_effectively_packed_source(self, operation, pitch):
+        dtype = "INT32" if operation == "reinterpret_view" else "FP32"
+        viewed = f"pl.tensor.{operation}(chunk, [4, 512])"
+        if operation == "reinterpret_view":
+            viewed = "pl.tensor.reinterpret_view(chunk, pl.INT32, shape=[4, 512])"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[4, 512], pl.{dtype}]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, {pitch}], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 0])
+        viewed = {viewed}
+        self.kernel(viewed)
+"""
+        before = pl.parse_program(source)
+        if pitch != 256:
+            with pytest.raises(ValueError, match="packed"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            expected = pl.parse_program(
+                source.replace(
+                    f"x: pl.Tensor[[4, 512], pl.{dtype}]",
+                    f"x: pl.Tensor[[4, 512], pl.{dtype}, pl.TensorView(stride=[512, 1])]",
+                )
+            )
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), expected)
+
+    @pytest.mark.parametrize("consumer", ["unused", "incore", "aiv"])
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    def test_pitched_reshape_constraint_only_checks_aiv_consumers(self, consumer, submit):
+        # An unrelated AIV call must not impose the new stride contract on
+        # legacy InCore or unused reshape results in the same orchestration.
+        consume = ""
+        if consumer != "unused":
+            consume = f"self.{consumer}(viewed)"
+            if submit:
+                consume = f"with pl.manual_scope():\n            tid = pl.submit(self.{consumer}, viewed)"
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def aiv(self, x: pl.Tensor[[4, 512], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def incore(self, x: pl.Tensor[[4, 512], pl.FP32]):
+        tile = pl.tile.load(x, [0, 0], [4, 512])
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32], dense: pl.Tensor[[4, 512], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 0])
+        viewed = pl.tensor.reshape(chunk, [4, 512])
+        {consume}
+        self.aiv(dense)
+""")
+        if consumer == "aiv":
+            with pytest.raises(ValueError, match="tensor.reshape requires packed ND storage"):
+                passes.optimize_orch_tensors()(program)
+        else:
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(program), program)
+
+    @pytest.mark.parametrize("control", ["if", "for", "while"])
+    @pytest.mark.parametrize("tuple_carry", [False, True])
+    def test_aiv_joins_accept_equivalent_packed_views(self, control, tuple_carry):
+        initial = "(x, (x,))" if tuple_carry else "x"
+        other = "(dense, (dense,))" if tuple_carry else "dense"
+        if control == "if":
+            body = f"""if keep:
+            result = pl.yield_({initial})
+        else:
+            result = pl.yield_({other})"""
+        elif control == "for":
+            body = f"""for i, (carried,) in pl.range(2, init_values=({initial},)):
+            result = pl.yield_({other})"""
+        else:
+            body = f"""for (carried,) in pl.while_(init_values=({initial},)):
+            pl.cond(keep)
+            result = pl.yield_({other})"""
+        target = "result[1][0]" if tuple_carry else "result"
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32], dense: pl.Tensor[[8, 256], pl.FP32],
+               keep: pl.Scalar[pl.BOOL]):
+        {body}
+        tile = pl.tile.load({target}, [0, 0], [8, 256])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 256], pl.FP32], dense: pl.Tensor[[8, 256], pl.FP32],
+             keep: pl.Scalar[pl.BOOL]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 0])
+        self.kernel(chunk, dense, keep)
+""")
+        after = passes.optimize_orch_tensors()(program)
+        load = _calls_named(after, "tile.load")[0]
+        tensor = load.args[0].type
+        assert isinstance(tensor, ir.TensorType) and tensor.tensor_view is not None
+        for dim, expected in zip(tensor.tensor_view.stride, [256, 1], strict=True):
+            assert isinstance(dim, ir.ConstInt) and dim.value == expected
+        ir.verify_structural_bindings(after)
+        ir.assert_structural_equal(after, pl.parse_program(ir.python_print(after)))
+
+    @pytest.mark.parametrize("consume_conflict", [False, True])
+    def test_lazy_tuple_constraints_stay_local_to_each_loop(self, consume_conflict):
+        operand = "bad[0]" if consume_conflict else "good[0]"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32], dense: pl.Tensor[[8, 256], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        pair = (chunk, dense)
+        for i, (first,) in pl.range(2, init_values=(pair,)):
+            bad = pl.yield_((dense, dense))
+        for j, (second,) in pl.range(2, init_values=(pair,)):
+            good = pl.yield_(second)
+        self.kernel({operand})
+"""
+        before = pl.parse_program(source)
+        if consume_conflict:
+            with pytest.raises(ValueError, match="consistent physical strides"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            expected = pl.parse_program(
+                source.replace(
+                    "x: pl.Tensor[[8, 256], pl.FP32]",
+                    "x: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+                )
+            )
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), expected)
+
+    def test_unused_wide_tuple_loop_carries_scale_linearly(self):
+        def elapsed(size):
+            span = ir.Span.unknown()
+            tensor = ir.TensorType([8, 256], DataType.FP32)
+            args = [ir.Var(f"x{i}", tensor, span) for i in range(size)]
+            value = ir.MakeTuple(args, span)
+            initial = ir.Var("initial", value.type, span)
+            stmts: list[ir.Stmt] = [ir.AssignStmt(initial, value, span)]
+            for i in range(size):
+                carry = ir.IterArg(f"carry{i}", value.type, initial, span)
+                result = ir.Var(f"result{i}", value.type, span)
+                stmts.append(
+                    ir.ForStmt(
+                        ir.Var(f"i{i}", ir.ScalarType(DataType.INDEX), span),
+                        ir.ConstInt(0, DataType.INDEX, span),
+                        ir.ConstInt(2, DataType.INDEX, span),
+                        ir.ConstInt(1, DataType.INDEX, span),
+                        [carry],
+                        ir.YieldStmt([carry], span),
+                        [result],
+                        span,
+                    )
+                )
+            func = ir.Function(
+                "main", args, [], ir.SeqStmts(stmts, span), span, ir.FunctionType.Orchestration
+            )
+            before = ir.Program([func], "Wide", span)
+            # Time only the pass; printing every carry's wide type measures the
+            # instrumentation instead of the analyzer's shared metadata graph.
+            with passes.PassContext([], passes.VerificationLevel.NONE):
+                start = time.perf_counter()
+                after = passes.optimize_orch_tensors()(before)
+                duration = time.perf_counter() - start
+            ir.assert_structural_equal(after, before)
+            return duration
+
+        elapsed(32)
+        small = min(elapsed(96) for _ in range(2))
+        large = min(elapsed(768) for _ in range(2))
+        assert large < small * 24 + 0.1, (small, large)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("tuple_carry", [False, True], ids=["tensor", "nested-tuple"])
+    @pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested-loop-and-branch"])
+    def test_aiv_loop_carries_reach_simt_specialization(self, loop_kind, tuple_carry, nested):
+        initial = "(dst, (dst,))" if tuple_carry else "dst"
+        capture = "carried[1][0]" if tuple_carry else "carried"
+        yielded = "(updated, (updated,))" if tuple_carry else "updated"
+        final = "result[1][0]" if tuple_carry else "result"
+        loop = (
+            f"for i, (carried,) in pl.range(2, init_values=({initial},)):"
+            if loop_kind == "for"
+            else f"for carried, i in pl.while_(init_values=({initial}, 0)):\n            pl.cond(i < 2)"
+        )
+        results = "result" if loop_kind == "for" else "result, final_i"
+        values = yielded if loop_kind == "for" else f"{yielded}, i + 1"
+        body = (
+            "updated = pl.simt.launch(self.update, target, block_dims=(64, 1, 1), result_param_indices=(0,))"
+        )
+        if nested:
+            body = """for j, (inner,) in pl.range(2, init_values=(target,)):
+                written = pl.simt.launch(self.update, inner, block_dims=(64, 1, 1), result_param_indices=(0,))
+                if i > 0:
+                    joined = pl.yield_(written)
+                else:
+                    joined = pl.yield_(inner)
+                updated = pl.yield_(joined)"""
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def update(self, dst: pl.InOut[pl.Tensor[[8, 256], pl.FP32]]):
+        pl.simt.store(dst, (1, 0), pl.const(9.0, pl.FP32))
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, dst: pl.InOut[pl.Tensor[[8, 256], pl.FP32]]):
+        {loop}
+            target = {capture}
+            {body}
+            {results} = pl.yield_({values})
+        final_target = {final}
+        final_updated = pl.simt.launch(
+            self.update, final_target, block_dims=(64, 1, 1), result_param_indices=(0,))
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, dst: pl.InOut[pl.Tensor[[10, 288], pl.FP32]]):
+        chunk = pl.tensor.slice(dst, [8, 256], [1, 7])
+        self.kernel(chunk)
+""")
+        after = passes.specialize_simt_helpers()(passes.optimize_orch_tensors()(program))
+        launches: list[ir.SimtLaunchStmt] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_simt_launch_stmt(self, op: ir.SimtLaunchStmt) -> None:
+                launches.append(op)
+
+        kernel = after.get_function("kernel")
+        assert kernel is not None
+        Collector().visit_stmt(kernel.body)
+        assert len(launches) == 2
+        for launch in launches:
+            helper = after.get_function(launch.callee.name)
+            assert helper is not None
+            for tensor in [launch.args[0], *launch.results, helper.params[0]]:
+                assert isinstance(tensor.type, ir.TensorType)
+                assert tensor.type.tensor_view is not None
+                for dim, expected in zip(tensor.type.tensor_view.stride, [288, 1], strict=True):
+                    assert isinstance(dim, ir.ConstInt) and dim.value == expected
+        ir.verify_structural_bindings(after)
+        ir.assert_structural_equal(after, pl.parse_program(ir.python_print(after)))
+
+    @pytest.mark.parametrize("branch", [False, True], ids=["backedge", "branch-join"])
+    def test_aiv_loop_rejects_inconsistent_refined_storage(self, branch):
+        body = "result = pl.yield_(dense)"
+        if branch:
+            body = """if i > 0:
+                joined = pl.yield_(carried)
+            else:
+                joined = pl.yield_(dense)
+            result = pl.yield_(joined)"""
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, dst: pl.Tensor[[8, 256], pl.FP32], dense: pl.Tensor[[8, 256], pl.FP32]):
+        for i, (carried,) in pl.range(2, init_values=(dst,)):
+            {body}
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, dst: pl.Tensor[[10, 288], pl.FP32], dense: pl.Tensor[[8, 256], pl.FP32]):
+        chunk = pl.tensor.slice(dst, [8, 256], [1, 7])
+        self.kernel(chunk, dense)
+""")
+        with pytest.raises(ValueError, match="after physical stride refinement"):
+            passes.optimize_orch_tensors()(program)
+
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    @pytest.mark.parametrize("multiple", [False, True], ids=["single", "tuple"])
+    @pytest.mark.parametrize("writer", ["store", "write"])
+    def test_returned_writeback_feeds_next_aiv(self, submit, multiple, writer):
+        writes = {
+            "store": (
+                "tile = pl.tile.load(x, [0, 0], [8, 256])\n        written = pl.tile.store(tile, [0, 0], dst)"
+            ),
+            "write": (
+                "scalar = pl.tensor.read(x, [0, 0])\n        written = pl.tensor.write(dst, [0, 0], scalar)"
+            ),
+        }
+        returns = "pl.Tensor[[8, 256], pl.FP32]"
+        returned = "written"
+        unpack = "result"
+        if multiple:
+            returns = f"tuple[{returns}, {returns}]"
+            returned = "x, written"
+            unpack = "unchanged, result"
+        dispatch = f"{unpack} = self.writer(chunk, target)"
+        if submit:
+            dispatch = (
+                "with pl.manual_scope():\n"
+                f"            ({unpack}), tid = pl.submit(self.writer, chunk, target)"
+            )
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def writer(self, x: pl.Tensor[[8, 256], pl.FP32],
+               dst: pl.InOut[pl.Tensor[[8, 256], pl.FP32]]) -> {returns}:
+        {writes[writer]}
+        scalar_after = pl.tensor.read(written, [1, 0])
+        return {returned}
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def reader(self, value: pl.Tensor[[8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[10, 288], pl.FP32],
+             dst: pl.InOut[pl.Tensor[[12, 320], pl.FP32]]):
+        chunk = pl.tensor.slice(x, [8, 256], [1, 7])
+        target = pl.tensor.slice(dst, [8, 256], [2, 11])
+        {dispatch}
+        self.reader(result)
+"""
+        expected = pl.parse_program(
+            source.replace(
+                "x: pl.Tensor[[8, 256], pl.FP32]",
+                "x: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+            )
+            .replace(
+                "dst: pl.InOut[pl.Tensor[[8, 256], pl.FP32]]",
+                "dst: pl.InOut[pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[320, 1])]]",
+            )
+            .replace(
+                "value: pl.Tensor[[8, 256], pl.FP32]",
+                "value: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[320, 1])]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    @pytest.mark.parametrize("writer", ["write", "assemble", "expand_clone"])
+    def test_host_writeback_alias_preserves_pitch(self, submit, writer):
+        writes = {
+            "write": (
+                "scalar = pl.tensor.read(chunk, [0, 0, 0])\n"
+                "        updated = pl.tensor.write(chunk, [0, 0, 0], scalar)"
+            ),
+            "assemble": "updated = pl.tensor.assemble(chunk, dense, [0, 0, 0])",
+            "expand_clone": "updated = pl.tensor.expand_clone(dense, chunk)",
+        }
+        dispatch = "self.kernel(updated)"
+        if submit:
+            dispatch = "with pl.manual_scope():\n            tid = pl.submit(self.kernel, updated)"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, value: pl.Tensor[[2, 8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[2, 10, 288], pl.FP32], dense: pl.Tensor[[2, 8, 256], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [2, 8, 256], [0, 1, 7])
+        {writes[writer]}
+        {dispatch}
+"""
+        expected = pl.parse_program(
+            source.replace(
+                "value: pl.Tensor[[2, 8, 256], pl.FP32]",
+                "value: pl.Tensor[[2, 8, 256], pl.FP32, pl.TensorView(stride=[2880, 288, 1])]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.fixture
+    def storage_ir(self):
+        span = ir.Span.unknown()
+        tensor = ir.TensorType([8, 256], DataType.FP32)
+        parent = ir.Var("parent", ir.TensorType([10, 288], DataType.FP32), span)
+        dense = ir.Var("dense", tensor, span)
+        shape = ir.MakeTuple([ir.ConstInt(n, DataType.INDEX, span) for n in (8, 256)], span)
+        offset = ir.MakeTuple([ir.ConstInt(n, DataType.INDEX, span) for n in (1, 7)], span)
+        sliced = ir.Call(ir.Op("tensor.slice"), [parent, shape, offset], tensor, span)
+        chunk = ir.Var("chunk", tensor, span)
+        param = ir.Var("value", tensor, span)
+        kernel = ir.Function("kernel", [param], [], ir.ReturnStmt([], span), span, type=ir.FunctionType.AIV)
+        return span, tensor, parent, dense, shape, offset, sliced, chunk, kernel
+
+    @staticmethod
+    def run_program(kernel, params, statements, span, extra_functions=()):
+        main = ir.Function(
+            "main",
+            params,
+            [],
+            ir.SeqStmts(statements, span) if len(statements) > 1 else statements[0],
+            span,
+            type=ir.FunctionType.Orchestration,
+        )
+        return passes.optimize_orch_tensors()(ir.Program([kernel, main, *extra_functions], "Program", span))
+
+    @staticmethod
+    def assert_stride(program, stride):
+        tensor = program.get_function("kernel").params[0].type
+        if stride is None:
+            assert tensor.tensor_view is None or not tensor.tensor_view.stride
+        else:
+            assert [dim.value for dim in tensor.tensor_view.stride] == stride
+
+    @pytest.mark.parametrize("helper", [False, True], ids=["shape_var", "shape_call"])
+    def test_tuple_typed_slice_shape(self, storage_ir, helper):
+        span, tensor, parent, _, shape, offset, _, chunk, kernel = storage_ir
+        shape_var = ir.Var("shape", shape.type, span)
+        operand = ir.Call(ir.GlobalVar("shape_helper"), [], shape.type, span) if helper else shape_var
+        sliced = ir.Call(ir.Op("tensor.slice"), [parent, operand, offset], tensor, span)
+        statements = [
+            ir.AssignStmt(shape_var, shape, span),
+            ir.AssignStmt(chunk, sliced, span),
+            ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [chunk], ir.UnknownType(), span), span),
+        ]
+        helper_function = ir.Function(
+            "shape_helper",
+            [],
+            [shape.type],
+            ir.ReturnStmt([shape], span),
+            span,
+            type=ir.FunctionType.Orchestration,
+        )
+        # Tuple-valued shape operands are legal core IR; the DSL slice wrapper
+        # currently accepts only Python sequences, so retain property checks
+        # without the unrelated print/parse instrument for this regression.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = self.run_program(kernel, [parent], statements, span, [helper_function])
+        self.assert_stride(after, [288, 1])
+
+    def test_distributed_parameter_preserves_window(self, storage_ir):
+        span, tensor, parent, _, _, _, sliced, chunk, _ = storage_ir
+        window = ir.WindowBuffer(
+            ir.Var("buffer", ir.PtrType(), span), ir.ConstInt(4096, DataType.INDEX, span)
+        )
+        distributed = ir.DistributedTensorType(tensor.shape, DataType.FP32, window)
+        param = ir.Var("value", distributed, span)
+        kernel = ir.Function("kernel", [param], [], ir.ReturnStmt([], span), span, type=ir.FunctionType.AIV)
+        distributed_parent = ir.Var(
+            "parent", ir.DistributedTensorType(parent.type.shape, DataType.FP32, window), span
+        )
+        distributed_chunk = ir.Var(chunk.name_hint, distributed, span)
+        sliced = ir.Call(sliced.op, [distributed_parent, *sliced.args[1:]], distributed, span)
+        statements = [
+            ir.AssignStmt(distributed_chunk, sliced, span),
+            ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [distributed_chunk], ir.UnknownType(), span), span),
+        ]
+        # This standalone parameter retains an external window reference whose
+        # defining communication scope is intentionally outside this pass test.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = self.run_program(kernel, [distributed_parent], statements, span)
+        self.assert_stride(after, [288, 1])
+        refined_kernel = after.get_function("kernel")
+        assert refined_kernel is not None
+        refined = refined_kernel.params[0].type
+        assert isinstance(refined, ir.DistributedTensorType)
+        assert refined.window_buffer is window
+
+    def test_assignment_reads_old_storage_before_rebinding(self, storage_ir):
+        span, tensor, parent, dense, _, _, sliced, chunk, _ = storage_ir
+        source = ir.Var("source", tensor, span)
+        target = ir.Var("target", tensor, span)
+        kernel = ir.Function(
+            "kernel",
+            [source, (target, ir.ParamDirection.InOut)],
+            [tensor],
+            ir.ReturnStmt([target], span),
+            span,
+            type=ir.FunctionType.AIV,
+        )
+        call = ir.Call(ir.GlobalVar("kernel"), [chunk, dense], tensor, span)
+        after = self.run_program(
+            kernel,
+            [parent, dense],
+            [ir.AssignStmt(chunk, sliced, span), ir.AssignStmt(chunk, call, span)],
+            span,
+        )
+        self.assert_stride(after, [288, 1])
+        refined_kernel = after.get_function("kernel")
+        assert refined_kernel is not None
+        target_type = refined_kernel.params[1].type
+        assert isinstance(target_type, ir.TensorType)
+        assert target_type.tensor_view is None
+
+    @pytest.mark.parametrize("dense_start", [False, True], ids=["sliced_init", "dense_init"])
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("consumer", ["body", "result"])
+    @pytest.mark.parametrize("backedge", ["same", "writeback", "dense", "branch"])
+    def test_loop_stride_consensus(self, storage_ir, loop_kind, consumer, backedge, dense_start):
+        span, tensor, parent, dense, _, _, sliced, chunk, kernel = storage_ir
+        carried = ir.IterArg("carried", tensor, dense if dense_start else chunk, span)
+        result = ir.Var("result", tensor, span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+        condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+
+        def call(value):
+            return ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [value], ir.UnknownType(), span), span)
+
+        body: list[ir.Stmt] = [call(carried)] if consumer == "body" else []
+        other = chunk if dense_start else dense
+        yielded = carried if backedge == "same" else other
+        if backedge == "branch":
+            yielded = ir.Var("merged", tensor, span)
+            body.append(
+                ir.IfStmt(
+                    condition, ir.YieldStmt([carried], span), ir.YieldStmt([other], span), [yielded], span
+                )
+            )
+        if backedge == "writeback":
+            offset = ir.MakeTuple([ir.ConstInt(0, DataType.INDEX, span)] * 2, span)
+            assembled = ir.Call(ir.Op("tensor.assemble"), [carried, chunk, offset], tensor, span)
+            yielded = ir.Var("assembled", tensor, span)
+            body.append(ir.AssignStmt(yielded, assembled, span))
+        body.append(ir.YieldStmt([yielded], span))
+        loop_body = ir.SeqStmts(body, span) if len(body) > 1 else body[0]
+        if loop_kind == "for":
+            loop = ir.ForStmt(
+                ir.Var("i", ir.ScalarType(DataType.INDEX), span),
+                ir.ConstInt(0, DataType.INDEX, span),
+                ir.ConstInt(2, DataType.INDEX, span),
+                one,
+                [carried],
+                loop_body,
+                [result],
+                span,
+            )
+        else:
+            loop = ir.WhileStmt(condition, [carried], loop_body, [result], span)
+        statements: list[ir.Stmt] = [ir.AssignStmt(chunk, sliced, span), loop]
+        if consumer == "result":
+            statements.append(call(result))
+        if backedge in ("same", "writeback"):
+            self.assert_stride(
+                self.run_program(kernel, [parent, dense, condition], statements, span),
+                None if dense_start else [288, 1],
+            )
+        else:
+            with pytest.raises(
+                ValueError, match="consistent physical strides across loop carries and branches"
+            ):
+                self.run_program(kernel, [parent, dense, condition], statements, span)
+
+    def test_submit_return_alias_with_allocated_out_and_context_suffix(self, storage_ir):
+        span, tensor, parent, _, _, _, sliced, chunk, kernel = storage_ir
+        source = ir.Var("source", tensor, span)
+        allocated = ir.Var("allocated", tensor, span)
+        context = ir.Var("context", ir.CommCtxType(), span)
+        writer = ir.Function(
+            "writer",
+            [source, (allocated, ir.ParamDirection.Out), context],
+            [tensor, tensor],
+            ir.ReturnStmt([source, allocated], span),
+            span,
+            type=ir.FunctionType.AIV,
+        )
+        task_id = ir.ScalarType(DataType.TASK_ID)
+        result_type = ir.TupleType([tensor, tensor, task_id])
+        submit = ir.Submit(ir.GlobalVar("writer"), [chunk, context], [], result_type, span)
+        outputs = ir.Var("outputs", result_type, span)
+        read = ir.Call(
+            ir.GlobalVar("kernel"), [ir.TupleGetItemExpr(outputs, 0, span)], ir.UnknownType(), span
+        )
+        statements = [
+            ir.AssignStmt(chunk, sliced, span),
+            ir.AssignStmt(outputs, submit, span),
+            ir.EvalStmt(read, span),
+        ]
+        after = self.run_program(kernel, [parent, context], statements, span, [writer])
+        self.assert_stride(after, [288, 1])
+        refined_writer = after.get_function("writer")
+        assert refined_writer is not None
+        allocated_type = refined_writer.params[1].type
+        assert isinstance(allocated_type, ir.TensorType)
+        assert allocated_type.tensor_view is None
+        main = after.get_function("main")
+        assert main is not None and isinstance(main.body, ir.SeqStmts)
+        assignment = main.body.stmts[1]
+        assert isinstance(assignment, ir.AssignStmt)
+        launch = assignment.value
+        assert isinstance(launch, ir.Submit)
+        assert len(launch.args) == 2
+        assert launch.args[1] is context
+        assert isinstance(launch.type, ir.TupleType)
+        ir.assert_structural_equal(launch.type.types[-1], task_id)
+
+    @pytest.mark.parametrize("pitch", [256, 320])
+    @pytest.mark.parametrize("allocated_first", [False, True])
+    @pytest.mark.parametrize("context_suffix", [False, True])
+    def test_submit_allocated_out_stride_consensus(self, pitch, allocated_first, context_suffix):
+        span = ir.Span.unknown()
+        tensor = ir.TensorType([8, 256], DataType.FP32)
+        parent = ir.Var("parent", ir.TensorType([10, pitch], DataType.FP32), span)
+        dst = ir.Var("dst", tensor, span)
+        context = ir.Var("context", ir.CommCtxType(), span)
+        contexts = [context] if context_suffix else []
+        kernel = ir.Function(
+            "kernel",
+            [(dst, ir.ParamDirection.Out), *contexts],
+            [tensor],
+            ir.ReturnStmt([dst], span),
+            span,
+            type=ir.FunctionType.AIV,
+        )
+        shape = ir.MakeTuple([ir.ConstInt(n, DataType.INDEX, span) for n in (8, 256)], span)
+        offset = ir.MakeTuple([ir.ConstInt(n, DataType.INDEX, span) for n in (1, 0)], span)
+        chunk = ir.Var("chunk", tensor, span)
+        sliced = ir.Call(ir.Op("tensor.slice"), [parent, shape, offset], tensor, span)
+        result_type = ir.TupleType([tensor, ir.ScalarType(DataType.TASK_ID)])
+        supplied = ir.AssignStmt(
+            ir.Var("supplied", result_type, span),
+            ir.Submit(ir.GlobalVar("kernel"), [chunk, *contexts], [], result_type, span),
+            span,
+        )
+        allocated = ir.AssignStmt(
+            ir.Var("allocated", result_type, span),
+            ir.Submit(ir.GlobalVar("kernel"), contexts, [], result_type, span),
+            span,
+        )
+        calls = [allocated, supplied] if allocated_first else [supplied, allocated]
+        statements = [ir.AssignStmt(chunk, sliced, span), *calls]
+        if pitch != 256:
+            with pytest.raises(ValueError, match="one consistent static stride"):
+                self.run_program(kernel, [parent, *contexts], statements, span)
+        else:
+            self.assert_stride(self.run_program(kernel, [parent, *contexts], statements, span), [256, 1])
+
+    @pytest.mark.parametrize("pitch", [256, 320])
+    def test_submit_allocated_out_checks_explicit_stride(self, pitch):
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, dst: pl.Out[pl.Tensor[[8, 256], pl.FP32,
+               pl.TensorView(stride=[{pitch}, 1])]]) -> pl.Tensor[[8, 256], pl.FP32]:
+        return dst
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self):
+        result, tid = pl.submit(self.kernel)
+"""
+        before = pl.parse_program(source)
+        if pitch != 256:
+            with pytest.raises(ValueError, match="explicit physical strides"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            self.assert_stride(passes.optimize_orch_tensors()(before), [256, 1])
+
+    @pytest.mark.parametrize("layout", ["ND", "DN"])
+    def test_submit_allocated_out_checks_layout_only_declaration(self, layout):
+        # Runtime outputs are packed ND, regardless of the formal's view.
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, dst: pl.Out[pl.Tensor[[8, 256], pl.FP32,
+               pl.TensorView(layout=pl.{layout})]]) -> pl.Tensor[[8, 256], pl.FP32]:
+        return dst
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self):
+        result, tid = pl.submit(self.kernel)
+"""
+        before = pl.parse_program(source)
+        if layout == "DN":
+            with pytest.raises(ValueError, match="explicit layout"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), before)
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_conditional_parameter_rebinding_joins_following_use(self, storage_ir, nested):
+        # A parameter has an incoming binding even without an AssignStmt.
+        span, _, parent, dense, _, _, sliced, _, kernel = storage_ir
+        condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+        write = ir.AssignStmt(dense, sliced, span)
+        if nested:
+            write = ir.IfStmt(condition, write, None, [], span)
+        statements = [
+            ir.IfStmt(condition, write, None, [], span),
+            ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [dense], ir.UnknownType(), span), span),
+        ]
+        with pytest.raises(ValueError, match="consistent physical strides"):
+            self.run_program(kernel, [parent, dense, condition], statements, span)
+
+    def test_nested_branch_local_bindings_scale_linearly(self):
+        def elapsed(depth):
+            span = ir.Span.unknown()
+            tensor = ir.TensorType([8, 256], DataType.FP32)
+            value = ir.Var("value", tensor, span)
+            condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+            body = ir.ReturnStmt([], span)
+            for level in range(depth):
+                # Each local definition must be removed at its own branch exit,
+                # rather than repeatedly joined at every enclosing branch.
+                locals_ = [
+                    ir.AssignStmt(ir.Var(f"local{level}_{i}", tensor, span), value, span) for i in range(32)
+                ]
+                body = ir.IfStmt(condition, ir.SeqStmts([*locals_, body], span), None, [], span)
+            func = ir.Function("main", [value, condition], [], body, span, ir.FunctionType.Orchestration)
+            before = ir.Program([func], "Nested", span)
+            with passes.PassContext([], passes.VerificationLevel.NONE):
+                start = time.perf_counter()
+                after = passes.optimize_orch_tensors()(before)
+                duration = time.perf_counter() - start
+            # Compare one level at a time to avoid the comparator's recursion
+            # limit; this check is outside the timed pass invocation.
+            after_main = after.get_function("main")
+            assert after_main is not None
+            actual = after_main.body
+            expected = body
+            for _ in range(depth):
+                assert isinstance(actual, ir.IfStmt)
+                assert isinstance(expected, ir.IfStmt)
+                ir.assert_structural_equal(actual.condition, expected.condition)
+                assert isinstance(actual.then_body, ir.SeqStmts)
+                assert isinstance(expected.then_body, ir.SeqStmts)
+                for got, want in zip(actual.then_body.stmts[:-1], expected.then_body.stmts[:-1], strict=True):
+                    ir.assert_structural_equal(got, want)
+                actual = actual.then_body.stmts[-1]
+                expected = expected.then_body.stmts[-1]
+            ir.assert_structural_equal(actual, expected)
+            return duration
+
+        elapsed(8)
+        small = min(elapsed(32) for _ in range(3))
+        large = min(elapsed(256) for _ in range(3))
+        assert large < small * 24 + 0.01, (small, large)
+
+    @pytest.mark.parametrize("tuple_alias", [False, True])
+    @pytest.mark.parametrize("write_then", [False, True])
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_conditional_rebinding_does_not_leak_to_sibling(
+        self, storage_ir, tuple_alias, write_then, nested
+    ):
+        span, tensor, parent, dense, _, _, sliced, _, kernel = storage_ir
+        condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+        statements = []
+        value = dense
+        operand = dense
+        replacement = sliced
+        if tuple_alias:
+            initial = ir.MakeTuple([dense], span)
+            value = ir.Var("values", initial.type, span)
+            statements.append(ir.AssignStmt(value, initial, span))
+            operand = ir.TupleGetItemExpr(value, 0, span)
+            replacement = ir.MakeTuple([sliced], span)
+        write = ir.AssignStmt(value, replacement, span)
+        if nested:
+            write = ir.IfStmt(condition, write, None, [], span)
+        read = ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [operand], ir.UnknownType(), span), span)
+        statements.append(
+            ir.IfStmt(condition, write if write_then else read, read if write_then else write, [], span)
+        )
+        self.assert_stride(self.run_program(kernel, [parent, dense, condition], statements, span), None)
+
+    @pytest.mark.parametrize("same_pitch", [False, True])
+    @pytest.mark.parametrize("has_else", [False, True])
+    def test_conditional_rebinding_joins_following_use(self, storage_ir, same_pitch, has_else):
+        span, tensor, parent, dense, _, _, sliced, chunk, kernel = storage_ir
+        condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+        initial = sliced if same_pitch else dense
+        statements: list[ir.Stmt] = [ir.AssignStmt(chunk, initial, span)]
+        then_body = ir.AssignStmt(chunk, sliced, span)
+        else_body = ir.AssignStmt(chunk, initial, span) if has_else else None
+        statements.append(ir.IfStmt(condition, then_body, else_body, [], span))
+        statements.append(ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [chunk], ir.UnknownType(), span), span))
+        if same_pitch:
+            self.assert_stride(
+                self.run_program(kernel, [parent, dense, condition], statements, span), [288, 1]
+            )
+        else:
+            with pytest.raises(ValueError, match="consistent physical strides"):
+                self.run_program(kernel, [parent, dense, condition], statements, span)
+
+    @pytest.mark.parametrize("depth", [2, 5])
+    @pytest.mark.parametrize("alias", [False, True], ids=["projection", "tuple_alias"])
+    def test_nested_tuple_storage(self, depth, alias):
+        bindings = "inner0 = (chunk,)"
+        for level in range(1, depth):
+            bindings += f"\n        inner{level} = (inner{level - 1},)"
+        operand = f"inner{depth - 1}"
+        if alias:
+            bindings += f"\n        alias = {operand}[0]"
+            operand = "alias"
+            depth -= 1
+        operand += "[0]" * depth
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, value: pl.Tensor[[8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        {bindings}
+        self.kernel({operand})
+"""
+        expected = pl.parse_program(
+            source.replace(
+                "value: pl.Tensor[[8, 256], pl.FP32]",
+                "value: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("conflict", [False, True])
+    def test_nested_tuple_loop_storage(self, loop_kind, conflict):
+        loop = "for i, (carried,) in pl.range(2, init_values=(outer,)):"
+        condition = ""
+        if loop_kind == "while":
+            loop = "for (carried,) in pl.while_(init_values=(outer,)):"
+            condition = "pl.cond(keep)"
+        yielded = "((dense,),)" if conflict else "carried"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, value: pl.Tensor[[8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32],
+             dense: pl.Tensor[[8, 256], pl.FP32], keep: pl.Scalar[pl.BOOL]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        outer = ((chunk,),)
+        {loop}
+            {condition}
+            self.kernel(carried[0][0])
+            result = pl.yield_({yielded})
+"""
+        before = pl.parse_program(source)
+        if conflict:
+            with pytest.raises(ValueError, match="consistent physical strides"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            expected = pl.parse_program(
+                source.replace(
+                    "value: pl.Tensor[[8, 256], pl.FP32]",
+                    "value: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+                )
+            )
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), expected)
+
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    @pytest.mark.parametrize("conflict", [False, True])
+    def test_graph_parameter_stride_consensus(self, submit, conflict):
+        first = "first = self.outer(chunk)"
+        second = "second = self.outer(dense)" if conflict else "second = self.outer(chunk)"
+        if submit:
+            first = "first, first_id = pl.submit(self.outer, chunk)"
+            second = f"second, second_id = pl.submit(self.outer, {'dense' if conflict else 'chunk'})"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, value: pl.Tensor[[8, 256], pl.FP32]) -> pl.Tensor[[8, 256], pl.FP32]:
+        return value
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(self, x: pl.Tensor[[8, 256], pl.FP32]) -> pl.Tensor[[8, 256], pl.FP32]:
+        result = self.kernel(x)
+        return result
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def outer(self, x: pl.Tensor[[8, 256], pl.FP32]) -> pl.Tensor[[8, 256], pl.FP32]:
+        result = self.layer(x)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32], dense: pl.Tensor[[8, 256], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        {first}
+        {second}
+"""
+        before = pl.parse_program(source)
+        if conflict:
+            with pytest.raises(ValueError, match="consistent physical strides"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            expected = pl.parse_program(
+                source.replace(
+                    "value: pl.Tensor[[8, 256], pl.FP32]",
+                    "value: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+                )
+            )
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), expected)
+
+    @pytest.mark.parametrize("submit", [False, True])
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("tuple_result", [False, True])
+    def test_graph_created_view_return_preserves_stride(self, submit, nested, tuple_result):
+        result_type = "pl.Tensor[[8, 256], pl.FP32]"
+        returned = "chunk"
+        if tuple_result:
+            result_type = f"tuple[{result_type}, {result_type}]"
+            returned = "chunk, chunk"
+        make = "chunk = pl.tensor.slice(parent, [8, 256], [1, 7])"
+        inner = ""
+        if nested:
+            inner = f"""
+    @pl.function(type=pl.FunctionType.Graph)
+    def inner(self, parent: pl.Tensor[[10, 288], pl.FP32]) -> pl.Tensor[[8, 256], pl.FP32]:
+        {make}
+        return chunk
+"""
+            make = "chunk = self.inner(parent)"
+        call = "result = self.window(parent)"
+        if submit:
+            call = "result, tid = pl.submit(self.window, parent)"
+        operand = "result[0]" if tuple_result else "result"
+        if submit and tuple_result:
+            call = "(result, other), tid = pl.submit(self.window, parent)"
+            operand = "result"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, value: pl.Tensor[[8, 256], pl.FP32]):
+        return
+{inner}
+    @pl.function(type=pl.FunctionType.Graph)
+    def window(self, parent: pl.Tensor[[10, 288], pl.FP32]) -> {result_type}:
+        {make}
+        return {returned}
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32]):
+        {call}
+        self.kernel({operand})
+"""
+        expected = pl.parse_program(
+            source.replace(
+                "value: pl.Tensor[[8, 256], pl.FP32]",
+                "value: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.mark.parametrize("pitch", [288, 320])
+    @pytest.mark.parametrize("window_first", [False, True])
+    def test_graph_return_stride_consensus_includes_later_calls(self, pitch, window_first):
+        first, second = ("parent_window", "dense") if window_first else ("dense", "parent_window")
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, value: pl.Tensor[[8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def window(self, parent: pl.Tensor[[10, 288], pl.FP32]) -> pl.Tensor[[8, 256], pl.FP32]:
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        return chunk
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, dense: pl.Tensor[[10, 288], pl.FP32], big: pl.Tensor[[12, {pitch}], pl.FP32]):
+        parent_window = pl.tensor.slice(big, [10, 288], [1, 0])
+        first = self.window({first})
+        self.kernel(first)
+        second = self.window({second})
+"""
+        before = pl.parse_program(source)
+        if pitch != 288:
+            with pytest.raises(ValueError, match="consistent physical strides"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            self.assert_stride(passes.optimize_orch_tensors()(before), [288, 1])
+
+    @pytest.mark.parametrize("single_tuple", [False, True])
+    @pytest.mark.parametrize("submit", [False, True])
+    @pytest.mark.parametrize("index", [0, 1])
+    def test_graph_forwarded_tuple_return_signature(self, storage_ir, single_tuple, submit, index):
+        span, tensor, parent, _, _, _, sliced, chunk, kernel = storage_ir
+        pair_type = ir.TupleType([tensor, tensor])
+        pair = ir.Var("pair", pair_type, span)
+        returns = [pair_type] if single_tuple else [tensor, tensor]
+        window = ir.Function(
+            "window",
+            [parent],
+            returns,
+            ir.SeqStmts(
+                [
+                    ir.AssignStmt(chunk, sliced, span),
+                    ir.AssignStmt(pair, ir.MakeTuple([chunk, chunk], span), span),
+                    ir.ReturnStmt([pair], span),
+                ],
+                span,
+            ),
+            span,
+            type=ir.FunctionType.Graph,
+        )
+        result_type = ir.TupleType([*returns, ir.ScalarType(DataType.TASK_ID)]) if submit else pair_type
+        result = ir.Var("result", result_type, span)
+        launch = (
+            ir.Submit(ir.GlobalVar("window"), [parent], [], result_type, span)
+            if submit
+            else ir.Call(ir.GlobalVar("window"), [parent], result_type, span)
+        )
+        container = ir.TupleGetItemExpr(result, 0, span) if submit and single_tuple else result
+        value = ir.TupleGetItemExpr(container, index, span)
+        statements = [
+            ir.AssignStmt(result, launch, span),
+            ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [value], ir.UnknownType(), span), span),
+        ]
+        self.assert_stride(self.run_program(kernel, [parent], statements, span, [window]), [288, 1])
+
+    @pytest.mark.parametrize("two_helpers", [False, True])
+    @pytest.mark.parametrize("submit", [False, True])
+    def test_later_graph_call_propagates_slice_provenance(self, two_helpers, submit):
+        second = "forward2" if two_helpers else "forward1"
+        helper = (
+            """
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward2(self, x: pl.Tensor[[8, 256], pl.FP32]):
+        self.kernel(x)
+"""
+            if two_helpers
+            else ""
+        )
+        calls = ["self.forward1(whole)"]
+        if two_helpers:
+            calls.append("self.forward2(whole)")
+        calls.append(f"self.{second}(chunk)")
+        if submit:
+            calls = [f"tid{i} = pl.submit({call[:-1].replace('(', ', ', 1)})" for i, call in enumerate(calls)]
+        body = "\n        ".join(calls)
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, value: pl.Tensor[[8, 256], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward1(self, x: pl.Tensor[[8, 256], pl.FP32]):
+        self.kernel(x)
+{helper}
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, whole: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])],
+             parent: pl.Tensor[[10, 288], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        {body}
+"""
+        expected = pl.parse_program(
+            source.replace(
+                "value: pl.Tensor[[8, 256], pl.FP32]",
+                "value: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    @pytest.mark.parametrize("rank", [2, 3])
+    @pytest.mark.parametrize("mixed", [False, True])
+    def test_allocated_out_dynamic_leading_extent_keeps_static_strides(self, rank, mixed):
+        dims = "N, 256" if rank == 2 else "N, 8, 256"
+        strides = [256, 1] if rank == 2 else [2048, 256, 1]
+        tensor = f"pl.Tensor[[{dims}], pl.FP32, pl.TensorView(stride={strides})]"
+        supplied = "supplied, first_tid = pl.submit(self.kernel, whole)" if mixed else ""
+        source = f"""
+N = pl.dynamic("N")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, dst: pl.Out[{tensor}]) -> {tensor}:
+        return dst
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, whole: {tensor}):
+        {supplied}
+        allocated, tid = pl.submit(self.kernel)
+"""
+        before = pl.parse_program(source)
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(before), before)
+
+    def test_external_return_attribute_follows_refined_parameter(self, tmp_path):
+        cpp = tmp_path / "external.cpp"
+        cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        source = """
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV, external_source="external.cpp")
+    def kernel(self, dst: pl.Out[pl.Tensor[[8, 256], pl.FP32]]) -> pl.Tensor[[8, 256], pl.FP32]:
+        pl.func_attr({"external_return_params": [dst]})
+        ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        result = self.kernel(chunk)
+"""
+        source = source.replace('"external.cpp"', repr(str(cpp)))
+        after = passes.optimize_orch_tensors()(pl.parse_program(source))
+        expected = pl.parse_program(
+            source.replace(
+                "dst: pl.Out[pl.Tensor[[8, 256], pl.FP32]]",
+                "dst: pl.Out[pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]]",
+            )
+        )
+        ir.assert_structural_equal(after, expected)
+        function = after.get_function("kernel")
+        assert function is not None
+        assert function.attrs["external_return_params"][0] is function.params[0]
+        passes.normalize_return_order()(after)
+
+    def test_refined_tile_store_preserves_attrs(self):
+        program = pl.parse_program("""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, dst: pl.InOut[pl.Tensor[[8, 256], pl.FP32]]):
+        tile = pl.tile.load(dst, [0, 0], [8, 256])
+        result = pl.tile.store(tile, [0, 0], dst)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        self.kernel(chunk)
+""")
+        directions = [ir.ArgDirection.Input, ir.ArgDirection.Scalar, ir.ArgDirection.InOut]
+
+        class TagStore(ir.IRMutator):
+            def visit_call(self, op):
+                if op.op.name == ir.get_op("tile.store").name:
+                    return ir.Call(
+                        op.op, op.args, op.kwargs, {"arg_directions": directions}, op.type, op.span
+                    )
+                return super().visit_call(op)
+
+        program = TagStore().visit_program(program)
+        after = passes.optimize_orch_tensors()(program)
+        store = _calls_named(after, "tile.store")[0]
+        assert list(store.arg_directions) == directions
+        refined_kernel = after.get_function("kernel")
+        assert refined_kernel is not None
+        assert store.args[2] is refined_kernel.params[0]
 
 
 class TestSliceInputStrides:
