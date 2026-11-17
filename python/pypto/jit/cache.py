@@ -142,6 +142,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     enable_buffer_ir: bool = True,
     enable_software_pipeline: bool = False,
+    allow_reg_spill: bool = False,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -205,6 +206,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             artifact's ``kernel_config.py`` and decides which worker can bind
             the program; without it a ``host_build_graph`` call would silently
             reuse a ``tensormap_and_ringbuffer`` artifact.
+        allow_reg_spill: A5 RegScope spill policy; separates guarded and opt-out artifacts.
         enable_buffer_ir: Whole-kernel Buffer IR selection from the active
             ``PassContext``. It changes storage legalization and separates
             artifacts from explicit Off mode under every memory planner.
@@ -250,6 +252,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         # backing, even when Buffer IR is disabled. Invalidate pre-contract kernels.
         ("gather_compare_scratch_version", 2),
         ("enable_software_pipeline", enable_software_pipeline),
+        ("allow_reg_spill", allow_reg_spill),
     )
     return CacheKey(
         source_hash,

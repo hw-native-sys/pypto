@@ -20,6 +20,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,21 @@ from simpler_setup.compile_paths import compiler_visible_path
 from simpler_setup.toolchain import GxxToolchain
 
 logger = logging.getLogger(__name__)
+
+
+class RegisterSpillError(RuntimeError):
+    """Bisheng rejected an A5 VF helper because spilling needs VF stack space."""
+
+    def __init__(self, source: str, diagnostic: str) -> None:
+        super().__init__(
+            "RegisterSpillError [PYPTO-REG-SPILL]\n"
+            "A5 reg_scope compilation requires register spilling, "
+            "but register spilling is disabled by default.\n\n"
+            f"Helper: {source}\nStage: Bisheng device compilation\n\n"
+            f"Bisheng diagnostic:\n{diagnostic}\n\n"
+            "Reduce simultaneously live vector/predicate values or split the reg_scope.\n"
+            "To allow spilling, set allow_reg_spill=True in RunConfig or CompileOptions."
+        )
 
 
 class KernelCompiler:
@@ -324,6 +340,8 @@ class KernelCompiler:
             "reg-auto-sync-v1",
             repr(effective_flags),
             "intrinsic-simt-abi-v1",
+            "reg-spill-policy-v1",
+            _vpto.REG_SPILL_GUARD_FLAG,
             "bisheng-memory-attrs-v1",
             check_ptoas_version(ptoas),
             result.stdout,
@@ -383,8 +401,39 @@ class KernelCompiler:
             llvm.write_text(_vpto.prepare_llvm_for_bisheng(llvm_text))
             # PTOAS owns VF dependency analysis, including ordering through SSA
             # values. Do not re-infer synchronization from emitted LLVM text.
-            command = [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)]
-            self._run(command, obj, "VPTO device compilation")
+            # Only generated RegScope helpers carry this policy. SIMT and manually
+            # supplied device sources retain their existing compilation contract.
+            guarded = (
+                self.platform == "a5" and _vpto.REG_SPILL_DENY_MARKER in source_text.splitlines()
+            )
+            device_flags: list[str] = list(_vpto.DEVICE_FLAGS)
+            if guarded:
+                device_flags.append(_vpto.REG_SPILL_GUARD_FLAG)
+            command = [bisheng, *device_flags, "-c", "-x", "ir", str(llvm), "-o", str(obj)]
+            try:
+                self._run(command, obj, "VPTO device compilation")
+            except RuntimeError as exc:
+                if guarded and re.search(r"exceeded\s+vf stack size\s*\(0\)", str(exc), re.IGNORECASE):
+                    # This file lives beside the packaged helper, not in the
+                    # TemporaryDirectory removed when compile_incore unwinds.
+                    report = Path(source).parent / "report" / (Path(source).stem + "-spill.txt")
+                    detail = f"Command: {shlex.join(command)}\n\n{exc}"
+                    try:
+                        report.parent.mkdir(parents=True, exist_ok=True)
+                        report.write_text(detail)
+                        report.with_suffix(".ll").write_text(llvm.read_text())
+                        guard_line = next(
+                            line.strip()
+                            for line in str(exc).splitlines()
+                            if re.search(r"exceeded\s+vf stack size\s*\(0\)", line, re.IGNORECASE)
+                        )
+                        detail = f"{guard_line}\n\nFull compiler diagnostics: {report}"
+                    except OSError as report_error:
+                        detail += f"\nCould not save compiler diagnostics: {report_error}"
+                    # The report (or fallback detail) already preserves the
+                    # compiler output. Do not print it twice via traceback chaining.
+                    raise RegisterSpillError(source, detail) from None
+                raise
             objects.append(obj)
         return objects
 

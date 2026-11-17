@@ -1167,5 +1167,129 @@ def test_reg_auto_sync_accepts_vf_name_containing_simt_entry(compiler_module):
     assert "--enable-vecscope-mem-bar=false" in compiler_module._vpto.ptoas_flags_for_source(source)
 
 
+@pytest.mark.parametrize(
+    "platform,policy,guard",
+    [("a5", "deny", True), ("a5", "allow", False), ("a5", None, False), ("a2a3", "deny", False)],
+)
+def test_reg_spill_policy_flags(compiler_module, monkeypatch, tmp_path, platform, policy, guard):
+    compiler = compiler_module.KernelCompiler(platform)
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    helper = tmp_path / "helper.pto"
+    helper.write_text(f"// pypto.reg_spill: {policy}\nmodule {{}}")
+    commands = []
+
+    def run(cmd, output, label):
+        commands.append(cmd)
+        output.write_text("define void @helper() { ret void }")
+        return b"object"
+
+    monkeypatch.setattr(compiler, "_run", run)
+    compiler._compile_vpto_helpers((str(helper),), tmp_path)
+    assert ("--cce-disable-vf-stack-reserved-ubuf" in commands[1]) is guard
+
+
+@pytest.mark.parametrize(
+    "diagnostic,spill",
+    [
+        ("The total stack object size (704) exceeded vf stack size (0).\nTotal Spilled Byte Size: 704", True),
+        ("unknown command line argument", False),
+        ("The total stack object size (704) exceeded vf stack size (512).", False),
+        ("The total stack object size (704) exceeded  vf stack size (0).", True),
+    ],
+)
+def test_reg_spill_diagnostic_preserves_details(compiler_module, monkeypatch, tmp_path, diagnostic, spill):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    helper = tmp_path / "helper.pto"
+    helper.write_text("// pypto.reg_spill: deny\nmodule {}")
+
+    def run(cmd, output, label):
+        if cmd[0] == "ptoas":
+            output.write_text("define void @helper() { ret void }")
+            return b"llvm"
+        raise RuntimeError(diagnostic)
+
+    monkeypatch.setattr(compiler, "_run", run)
+    with pytest.raises(RuntimeError) as caught:
+        compiler._compile_vpto_helpers((str(helper),), tmp_path)
+    assert isinstance(caught.value, compiler_module.RegisterSpillError) is spill
+    assert diagnostic.splitlines()[0] in str(caught.value)
+    report = tmp_path / "report/helper-spill.txt"
+    assert report.exists() is spill
+    if spill:
+        assert diagnostic in report.read_text()
+        assert "Command: bisheng" in report.read_text()
+        assert "allow_reg_spill=True" in str(caught.value)
+        assert report.with_suffix(".ll").exists()
+        assert caught.value.__suppress_context__
+        assert str(caught.value.__context__) == diagnostic
+
+
+def test_reg_spill_report_write_failure_preserves_diagnostic(compiler_module, monkeypatch, tmp_path):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    helper = tmp_path / "helper.pto"
+    helper.write_text("// pypto.reg_spill: deny\nmodule {}")
+    # A file at the report directory path reproduces an unwritable destination.
+    (tmp_path / "report").write_text("occupied")
+    diagnostic = "The total stack object size (704) exceeded vf stack size (0).\nPredicates: 0"
+
+    def run(cmd, output, label):
+        if cmd[0] == "ptoas":
+            output.write_text("define void @helper() { ret void }")
+            return b"llvm"
+        raise RuntimeError(diagnostic)
+
+    monkeypatch.setattr(compiler, "_run", run)
+    with pytest.raises(compiler_module.RegisterSpillError) as caught:
+        compiler._compile_vpto_helpers((str(helper),), tmp_path)
+    assert diagnostic in str(caught.value)
+    assert "Could not save compiler diagnostics" in str(caught.value)
+
+
+def test_reg_spill_cache_tracks_source_policy(compiler_module, monkeypatch, tmp_path):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    monkeypatch.setattr(compiler_module, "check_ptoas_version", lambda _: "ptoas 0.74")
+    monkeypatch.setattr(
+        compiler_module.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="bisheng", stderr="")
+    )
+    helper = tmp_path / "helper.pto"
+    helper.write_text("// pypto.reg_spill: deny\nmodule {}")
+    denied = compiler.vpto_cache_identity((str(helper),), "aiv")
+    with monkeypatch.context() as guard_patch:
+        guard_patch.setattr(compiler_module._vpto, "REG_SPILL_GUARD_FLAG", "--different-spill-guard")
+        assert compiler.vpto_cache_identity((str(helper),), "aiv") != denied
+    helper.write_text("// pypto.reg_spill: allow\nmodule {}")
+    assert compiler.vpto_cache_identity((str(helper),), "aiv") != denied
+
+
+@pytest.mark.parametrize(
+    "case,policy", [("mask_spill", "deny"), ("mask_spill", "allow"), ("no_spill", "deny")]
+)
+def test_reg_spill_real_bisheng(compiler_module, monkeypatch, tmp_path, case, policy):
+    """Opt-in compile-only acceptance through the production helper build path."""
+    bisheng = os.environ.get("PYPTO_SPILL_TEST_BISHENG")
+    ptoas = compiler_module.find_ptoas_binary()
+    if not bisheng or not ptoas:
+        pytest.skip("Set PYPTO_SPILL_TEST_BISHENG to enable real A5 spill compilation")
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: (ptoas, bisheng))
+    monkeypatch.setattr(
+        compiler_module._vpto, "PTOAS_FLAGS", (*compiler_module._vpto.PTOAS_FLAGS, "--vpto-scheduler=off")
+    )
+    fixture = Path(__file__).parents[1] / "backend/vpto_vf_validation" / f"{case}.pto"
+    helper = tmp_path / f"{case}.pto"
+    helper.write_text(f"// pypto.reg_spill: {policy}\n" + fixture.read_text())
+    if case == "mask_spill" and policy == "deny":
+        with pytest.raises(compiler_module.RegisterSpillError, match="exceeded vf stack size"):
+            compiler._compile_vpto_helpers((str(helper),), tmp_path)
+        report = tmp_path / "report/mask_spill-spill.txt"
+        assert "Total Spilled Byte Size:" in report.read_text()
+    else:
+        objects = compiler._compile_vpto_helpers((str(helper),), tmp_path)
+        assert objects[0].read_bytes().startswith(b"\x7fELF")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

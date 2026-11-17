@@ -44,6 +44,8 @@ DEVICE_FLAGS = (
     "-mllvm",
     "-cce-dyn-kernel-stack-size=true",
 )
+REG_SPILL_DENY_MARKER = "// pypto.reg_spill: deny"
+REG_SPILL_GUARD_FLAG = "--cce-disable-vf-stack-reserved-ubuf"
 
 REG_AUTO_SYNC_PREFIX = "// pypto.reg_auto_sync:"
 
