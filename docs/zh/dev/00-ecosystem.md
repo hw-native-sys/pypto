@@ -132,7 +132,12 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 当实际解析参数的解析器声明 `--compile-only` 时，适配器为该解析器提供此标志。
 其他解析器保留原始参数，兼容辅助解析器和组件解析器，
 同时阻止编译完成后进入设备执行分支。
-不构建设备二进制，也不验证数值结果；`pypto-lib-model` 提供独立的设备冒烟测试。
+仅编译看护不构建设备二进制，也不验证数值结果。独立的上板 job 提供这部分看护：
+`pypto-lib-model-a2a3` 保留 Qwen3-14B 和 DeepSeek-V4-Flash 模型检查；
+`pypto-lib-model-a5` 运行 `models/deepseek_v4_1_flash/decode_c1a_full.py`、
+`decode_c2a_full.py` 和 `decode_moe.py`。A5 的两个 attention 用例各从 TaskQueue
+申请 1 卡，MoE 申请 2 卡并传入 `--ep 2`。三个用例均使用队列分配的物理设备 ID，
+不传 `--compile-only`。两个模型 job 都是完整 CI 结果门禁的必需项。
 
 为已配置的任一平台增加算子覆盖时，只需在 JSON 列表中追加用例，
 无需修改 workflow 或编译脚本。

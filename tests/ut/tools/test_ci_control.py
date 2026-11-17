@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,7 +94,10 @@ def needs(control):
     return result
 
 
-@pytest.mark.parametrize("job", ["system-tests", "onboard-tests-a5-distributed"])
+@pytest.mark.parametrize(
+    "job",
+    ["system-tests", "onboard-tests-a5-distributed", "pypto-lib-model-a2a3", "pypto-lib-model-a5"],
+)
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_required_core_results_block_merge(control, needs, job, result):
     # Moving the new A5 lane out of ci.yml must preserve its required status,
@@ -2433,6 +2437,73 @@ def test_effective_jobs_preserves_successful_dependencies(control, monkeypatch):
     monkeypatch.setattr(control, "pages", pages)
     jobs = control.effective_jobs(REPO, {"id": 40, "run_attempt": 2})
     assert {job["name"]: job["id"] for job in jobs} == {"pre-commit": 1, "clang-tidy": 3}
+
+
+@pytest.mark.parametrize(
+    "entry,devices",
+    [("decode_c1a_full", "7"), ("decode_c2a_full", "7"), ("decode_moe", "7,9")],
+)
+@pytest.mark.parametrize("exit_code", [0, 17])
+def test_a5_model_steps_use_allocated_devices_and_propagate_failure(tmp_path, entry, devices, exit_code):
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())["jobs"]
+    job = jobs["pypto-lib-model-a5"]
+    step = next(step for step in job["steps"] if f"{entry} example" in step["name"])
+    workspace = tmp_path / "workspace with spaces"
+    checkout = workspace / job["defaults"]["run"]["working-directory"]
+    checkout.mkdir(parents=True)
+    (checkout / "activate.sh").write_text("")
+    (workspace / "pypto-lib-a5").mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # Run the actual workflow shell through a fake queue. It assigns physical IDs
+    # different from the compile-only ranks and executes the submitted command.
+    queue = bin_dir / "task-submit"
+    queue.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "Path(os.environ['QUEUE_LOG']).write_text(json.dumps(args))\n"
+        "env = dict(os.environ, TASK_DEVICE=os.environ['ALLOCATED_DEVICES'])\n"
+        "result = subprocess.run(['bash', '-e', '-c', args[args.index('--run') + 1]], env=env)\n"
+        "sys.exit(result.returncode)\n"
+    )
+    python = bin_dir / "python"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['MODEL_LOG']).write_text(json.dumps(sys.argv[1:]))\n"
+        "sys.exit(int(os.environ['MODEL_EXIT_CODE']))\n"
+    )
+    queue.chmod(0o755)
+    python.chmod(0o755)
+    queue_log, model_log = tmp_path / "queue.json", tmp_path / "model.json"
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=checkout,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "GITHUB_WORKSPACE": str(workspace),
+            "TASK_DEVICE": "stale-parent-value",
+            "ALLOCATED_DEVICES": devices,
+            "QUEUE_LOG": str(queue_log),
+            "MODEL_LOG": str(model_log),
+            "MODEL_EXIT_CODE": str(exit_code),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == exit_code, result.stderr
+    queue_args = json.loads(queue_log.read_text())
+    assert queue_args[queue_args.index("--device") + 1] == "auto"
+    assert queue_args[queue_args.index("--device-num") + 1] == str(len(devices.split(",")))
+    expected = [f"models/deepseek_v4_1_flash/{entry}.py", "-p", "a5", "-d", devices]
+    if entry == "decode_moe":
+        expected += ["--ep", "2"]
+    assert json.loads(model_log.read_text()) == expected
 
 
 def test_every_downstream_job_explicitly_tolerates_skipped_lint_ancestors():

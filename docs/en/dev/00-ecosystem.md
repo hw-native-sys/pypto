@@ -135,8 +135,14 @@ codegen, and PTOAS.
 When an active argument parser declares `--compile-only`, the adapter supplies
 that flag to that parser. Other parsers keep their original arguments, preserving
 helper/component parsing while disabling post-compilation execution branches.
-This does not build device binaries or check numerical results; `pypto-lib-model`
-provides the separate device smoke tests.
+This does not build device binaries or check numerical results. Separate on-device
+jobs provide that coverage: `pypto-lib-model-a2a3` retains the Qwen3-14B and
+DeepSeek-V4-Flash model checks, while `pypto-lib-model-a5` runs
+`models/deepseek_v4_1_flash/decode_c1a_full.py`, `decode_c2a_full.py`, and
+`decode_moe.py`. The A5 attention cases each borrow one card from TaskQueue;
+MoE borrows two cards and uses `--ep 2`. All three receive the queue-assigned
+physical device IDs and run without `--compile-only`. Both model jobs are
+required by the full-CI result gate.
 
 To add operator coverage on either configured platform, append a case to the
 JSON list; no workflow or runner edit is needed. Save the list as UTF-8.

@@ -903,7 +903,7 @@ jobs:
     # material cannot silently rot.
     #
     # No container: runs host-native on the shared CPU pool through the same
-    # setup-ci-job as codegen-tests / pypto-lib-model, so the ptoas / pto-isa /
+    # setup-ci-job as codegen-tests / pypto-lib-model-a2a3, so the ptoas / pto-isa /
     # simpler builds reuse the persistent host caches (ccache, pip, ptoas)
     # instead of rebuilding in an ephemeral container on every PR.
     needs: [changes, toolchain, lint-gate]
@@ -1152,7 +1152,7 @@ jobs:
     #
     # Unpinned: takes whichever half of the `npu` pool is free. This job used to
     # carry an `x64` pin, and its only purpose was to keep the aarch64 npu box
-    # free for `dist-system-tests` / `pypto-lib-model`, which were pinned to it.
+    # free for `dist-system-tests` / `pypto-lib-model-a2a3`, which were pinned to it.
     # Those pins are gone (the x86_64 npu host has been repaired), so the
     # reservation has nothing left to reserve.
     #
@@ -1297,7 +1297,7 @@ jobs:
     #
     # Unpinned: takes whichever half of the `npu` pool is free. This job used to
     # carry an `x64` pin, and its only purpose was to keep the aarch64 npu box
-    # free for `dist-system-tests` / `pypto-lib-model`, which were pinned to it.
+    # free for `dist-system-tests` / `pypto-lib-model-a2a3`, which were pinned to it.
     # Those pins are gone (the x86_64 npu host has been repaired), so the
     # reservation has nothing left to reserve.
     #
@@ -1562,7 +1562,7 @@ jobs:
     # (`system-tests` 32/2, `system-tests-direct` 30/3), and the reds are
     # scattered rather than clustered -- none of the host-wide failure waves that
     # went with the wedging. What that window does NOT contain is a MULTI-CARD
-    # run there: this job and `pypto-lib-model` were pinned to aarch64 for all 43
+    # run there: this job and `pypto-lib-model-a2a3` were pinned to aarch64 for all 43
     # of them, so the first two-card runs on x86_64 are the ones that follow this
     # change. Watch them.
     #
@@ -1781,7 +1781,7 @@ jobs:
             lib-compile-checkout/build/lib-compile-results/**/compilations.json
           retention-days: 7
 
-  pypto-lib-model:
+  pypto-lib-model-a2a3:
     # No container: each model run borrows an NPU from the host-level
     # `task-submit --device auto` queue (mechanism B — the whole `python
     # models/...` invocation, which compiles + runs in one process, is wrapped).
@@ -1980,10 +1980,98 @@ jobs:
         with:
           checkout-path: lib-checkout
 
+  pypto-lib-model-a5:
+    # These CLIs compile and run in one process, so queue the whole invocation.
+    # C1A/C2A borrow one card each; MoE requires two physical cards for EP=2.
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, npu-a5, pr]
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: lib-a5-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/lib-a5-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+      TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: lib-a5-checkout
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
+          needs-device: 'true'
+          pip-cache-name: pip-lib-a5
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a5
+          unset-ring: 'true'
+          toolchain: bundle
+
+      - name: Clone pypto-lib (DeepSeek-V4.1-Flash models)
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/pypto-lib-a5"
+          git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$GITHUB_WORKSPACE/pypto-lib-a5"
+
+      - name: Run pypto-lib DeepSeek-V4.1-Flash decode_c1a_full example
+        timeout-minutes: 65
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib-a5
+        run: |
+          source activate.sh
+          task-submit --device auto --device-num 1 --timeout 3600 --max-time 1800 \
+            --run "source \"$GITHUB_WORKSPACE/lib-a5-checkout/activate.sh\" && cd \"$GITHUB_WORKSPACE/pypto-lib-a5\" && python models/deepseek_v4_1_flash/decode_c1a_full.py -p a5 -d \"\$TASK_DEVICE\""
+
+      - name: Run pypto-lib DeepSeek-V4.1-Flash decode_c2a_full example
+        timeout-minutes: 65
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib-a5
+        run: |
+          source activate.sh
+          task-submit --device auto --device-num 1 --timeout 3600 --max-time 1800 \
+            --run "source \"$GITHUB_WORKSPACE/lib-a5-checkout/activate.sh\" && cd \"$GITHUB_WORKSPACE/pypto-lib-a5\" && python models/deepseek_v4_1_flash/decode_c2a_full.py -p a5 -d \"\$TASK_DEVICE\""
+
+      - name: Run pypto-lib DeepSeek-V4.1-Flash decode_moe example
+        timeout-minutes: 65
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib-a5
+        run: |
+          source activate.sh
+          task-submit --device auto --device-num 2 --timeout 3600 --max-time 1800 \
+            --run "source \"$GITHUB_WORKSPACE/lib-a5-checkout/activate.sh\" && cd \"$GITHUB_WORKSPACE/pypto-lib-a5\" && python models/deepseek_v4_1_flash/decode_moe.py -p a5 -d \"\$TASK_DEVICE\" --ep 2"
+
+      - name: Kill orphaned task-submit tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: lib-a5-checkout
+
   serving-guard:
     # Does a toolchain bump break generation in pypto-serving?
     #
-    # `pypto-lib-model` proves the models still compile and run; it does not
+    # `pypto-lib-model-a2a3` proves the models still compile and run; it does not
     # prove the tokens come out right end to end. An assembler change can leave
     # every kernel compiling and still corrupt what the model emits, and the
     # first place that shows is serving's accuracy guards.
@@ -1992,7 +2080,7 @@ jobs:
     # job clones pypto from `origin HEAD` -- it always tests against pypto main,
     # so it cannot see an unmerged pin. Running it from this side instead builds
     # THIS pull request's pypto and points serving at it, which is the same
-    # inversion `pypto-lib-model` already does for pypto-lib.
+    # inversion `pypto-lib-model-a2a3` already does for pypto-lib.
     #
     # SKIPPED BY DEFAULT. Gated on a changed `PTOAS_VERSION` assignment in
     # toolchain/versions.env, the pin that selects the assembler release. It
@@ -2036,11 +2124,11 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_MAXSIZE: 30G
-      # See pypto-lib-model: the shared ci-cache still holds root-owned entries.
+      # See pypto-lib-model-a2a3: the shared ci-cache still holds root-owned entries.
       CCACHE_UMASK: '000'
     steps:
       - name: Fetch composite action definitions
-        # Same bootstrap as pypto-lib-model: local `uses: ./...` resolves against
+        # Same bootstrap as pypto-lib-model-a2a3: local `uses: ./...` resolves against
         # $GITHUB_WORKSPACE, but the repo is checked out into ./serving-checkout.
         uses: actions/checkout@v4
         with:
@@ -2100,7 +2188,7 @@ jobs:
       - name: Setup CI job
         # pypto's own setup, not serving's: this builds the pull request under
         # test. `pip-cache-name` is distinct so this job never shares a pip dir
-        # with `pypto-lib-model` or the system-test jobs.
+        # with `pypto-lib-model-a2a3` or the system-test jobs.
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
@@ -2114,7 +2202,7 @@ jobs:
       - name: Clone pypto-serving
         # A sibling of serving-checkout, so actions/checkout leaves it alone on
         # this persistent runner — and a leftover dir would make `git clone`
-        # fail, so remove it first (mirrors pypto-lib-model).
+        # fail, so remove it first (mirrors pypto-lib-model-a2a3).
         #
         # WITH SUBMODULES. pypto-lib is a submodule of pypto-serving, and the
         # Qwen3-14B kernels the executor loads come from it. A non-recursive
@@ -2759,7 +2847,8 @@ jobs:
       - prebuild-wheels
       - prebuild-wheels-github
       - pypto-lib-compile
-      - pypto-lib-model
+      - pypto-lib-model-a2a3
+      - pypto-lib-model-a5
       - serving-guard
       - system-tests
       - system-tests-a5sim
