@@ -135,6 +135,71 @@ class TestTensorMatmulMx:
         with pytest.raises(ValueError, match="lhs_scale layout MX_A_ZZ"):
             ir.op.tensor.matmul_mx(lhs, bad_scale, rhs, rhs_scale)
 
+    @staticmethod
+    def _packed_operands(
+        lhs_dtype=pl.FP4E2M1X2,
+        rhs_dtype=pl.FP4E2M1X2,
+        lhs_layout=ir.TensorLayout.ND,
+        rhs_layout=ir.TensorLayout.ND,
+    ):
+        span = ir.Span.unknown()
+
+        def tensor(name, shape, dtype, layout):
+            return ir.Var(name, ir.TensorType(shape, dtype, tensor_view=ir.TensorView([], layout)), span)
+
+        # Logical [32, 128] @ [128, 192], independent of the carrier axis.
+        lhs_shape = [16, 128] if lhs_layout == ir.TensorLayout.DN else [32, 64]
+        rhs_shape = [64, 192] if rhs_layout == ir.TensorLayout.DN else [128, 96]
+        return [
+            tensor("lhs", lhs_shape, lhs_dtype, lhs_layout),
+            tensor("sa", [32, 4], pl.FP8E8M0, ir.TensorLayout.MX_A_ZZ),
+            tensor("rhs", rhs_shape, rhs_dtype, rhs_layout),
+            tensor("sb", [4, 192], pl.FP8E8M0, ir.TensorLayout.MX_B_NN),
+        ]
+
+    @pytest.mark.parametrize("lhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("rhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("lhs_layout", [ir.TensorLayout.ND, ir.TensorLayout.DN])
+    @pytest.mark.parametrize("rhs_layout", [ir.TensorLayout.ND, ir.TensorLayout.DN])
+    def test_packed_logical_geometry(self, lhs_dtype, rhs_dtype, lhs_layout, rhs_layout):
+        args = self._packed_operands(lhs_dtype, rhs_dtype, lhs_layout, rhs_layout)
+        call = ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == pl.FP32
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [32, 192]
+
+    @pytest.mark.parametrize("side", [0, 2])
+    def test_rejects_mixed_fp4_fp8(self, side):
+        args = self._packed_operands()
+        args[side] = ir.Var(
+            "fp8", ir.TensorType([32, 128] if side == 0 else [128, 192], pl.FP8E4M3FN), ir.Span.unknown()
+        )
+        with pytest.raises(ValueError, match="mixed FP4/FP8"):
+            ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+
+    @pytest.mark.parametrize(
+        "operand,shape,message",
+        [
+            (2, [64, 96], "matching K"),
+            (2, [128, 48], "logical N divisible by 64"),
+            (1, [32, 2], "lhs_scale shape"),
+            (3, [4, 96], "rhs_scale shape"),
+            (0, [24, 64], "M divisible by 16"),
+            (0, [16, 64], "logical M divisible by 32"),
+            (0, [32, 48], "matching K"),
+        ],
+    )
+    def test_rejects_invalid_packed_geometry(self, operand, shape, message):
+        args = self._packed_operands()
+        old = args[operand]
+        args[operand] = ir.Var(
+            old.name_hint,
+            ir.TensorType(shape, old.type.dtype, tensor_view=old.type.tensor_view),
+            ir.Span.unknown(),
+        )
+        with pytest.raises(ValueError, match=message):
+            ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+
 
 class TestPackedFp4Shape:
     @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])

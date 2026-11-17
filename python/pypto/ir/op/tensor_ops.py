@@ -503,13 +503,17 @@ def matmul_mx(
     rhs_scale: Expr,
     span: Span | None = None,
 ) -> Call:
-    """MXFP8 matrix multiplication of oriented GM data and scale tensors.
+    """MXFP8/MXFP4 matrix multiplication of oriented GM data and scale tensors.
+
+    Both data tensors are FP8E4M3FN or both packed FP4 (either format).
+    FP4 ND data uses carrier shapes ``[M,K/2]`` / ``[K,N/2]``; DN uses
+    ``[M/2,K]`` / ``[K/2,N]``. Scales and results use logical dimensions.
 
     Args:
-        lhs: A-side quantized data tensor with shape ``[M, K]``.
+        lhs: A-side quantized data tensor (logical shape ``[M, K]``).
         lhs_scale: A-side ``MX_A_ZZ`` or row-major ``MX_A_ND`` FP8E8M0 scale tensor with shape
             ``[M, K/32]``.
-        rhs: B-side quantized data tensor with shape ``[K, N]``.
+        rhs: B-side quantized data tensor (logical shape ``[K, N]``).
         rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
             ``[K/32, N]``.
         span: Optional source span for debugging (auto-captured if not provided).
@@ -519,8 +523,8 @@ def matmul_mx(
 
     Raises:
         ValueError: If data tensors are not static 2D MX data tensors, the inner
-            dimensions do not agree, M is not divisible by 16, N is not
-            divisible by 32, K is not divisible by 64, or either scale tensor
+            dimensions do not agree, M is not divisible by 16 (32 for FP4), N is not
+            divisible by 32 (64 for FP4), K is not divisible by 64, or either scale tensor
             has the wrong dtype, shape, or MX layout.
     """
     actual_span = _get_span_or_capture(span)

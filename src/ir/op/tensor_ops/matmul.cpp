@@ -339,7 +339,7 @@ TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
-// tensor.matmul_mx: oriented MXFP8 matrix multiplication
+// tensor.matmul_mx: oriented MXFP8/MXFP4 matrix multiplication
 // ============================================================================
 
 TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
@@ -358,12 +358,11 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
                  rhs_scale->shape_.size() == 2,
              span)
       << kOpName << " requires oriented 2D data and scale tensors";
-  CHECK_SPAN(!lhs->dtype_.IsPackedFp4() && !rhs->dtype_.IsPackedFp4(), span)
+  const bool packed = lhs->dtype_.IsPackedFp4() && rhs->dtype_.IsPackedFp4();
+  CHECK_SPAN(packed || (lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN), span)
       << kOpName
-      << " native FP4 matmul requires the tile API; load packed operands into Mat and use "
-         "pl.tile.matmul_mx with explicit Left/Right placement";
-  CHECK_SPAN(lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN, span)
-      << kOpName << " requires FP8E4M3FN data tensors";
+      << " requires two FP8E4M3FN data tensors or two packed FP4 data tensors; "
+         "mixed FP4/FP8 operands require an explicit cast";
   CHECK_SPAN(lhs_scale->dtype_ == DataType::FP8E8M0 && rhs_scale->dtype_ == DataType::FP8E8M0, span)
       << kOpName << " requires FP8E8M0 scale tensors";
   const auto lhs_layout =
@@ -374,10 +373,25 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires lhs_scale layout MX_A_ZZ or MX_A_ND";
   CHECK_SPAN(rhs_layout == TensorLayout::MX_B_NN, span) << kOpName << " requires rhs_scale layout MX_B_NN";
 
-  auto m = As<ConstInt>(lhs->shape_[0]);
-  auto k_lhs = As<ConstInt>(lhs->shape_[1]);
-  auto k_rhs = As<ConstInt>(rhs->shape_[0]);
-  auto n = As<ConstInt>(rhs->shape_[1]);
+  // GM shapes count byte carriers along the contiguous ND/DN axis. The
+  // existing Mat load retargets that packing axis; infer arithmetic and scale
+  // extents in value units here, without changing the public tensor ABI.
+  auto logical_shape = [span, kOpName](const TensorTypePtr& type) {
+    auto shape = type->shape_;
+    if (!type->dtype_.IsPackedFp4()) return shape;
+    const auto layout = type->tensor_view_.value_or(TensorView{}).layout;
+    CHECK_SPAN(layout == TensorLayout::ND || layout == TensorLayout::DN, span)
+        << kOpName << " requires ND or DN packed FP4 data tensors";
+    const size_t axis = layout == TensorLayout::DN ? 0 : 1;
+    shape[axis] = AdjustPackedFp4CastLastDim({shape[axis]}, type->dtype_, DataType::FP32, span)[0];
+    return shape;
+  };
+  const auto lhs_shape = logical_shape(lhs);
+  const auto rhs_shape = logical_shape(rhs);
+  auto m = As<ConstInt>(lhs_shape[0]);
+  auto k_lhs = As<ConstInt>(lhs_shape[1]);
+  auto k_rhs = As<ConstInt>(rhs_shape[0]);
+  auto n = As<ConstInt>(rhs_shape[1]);
   CHECK_SPAN(
       m && k_lhs && k_rhs && n && m->value_ > 0 && k_lhs->value_ > 0 && k_rhs->value_ > 0 && n->value_ > 0,
       span)
@@ -386,6 +400,12 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires matching K dimensions, but got " << k_lhs->value_ << " and " << k_rhs->value_;
   CHECK_SPAN(m->value_ % 16 == 0 && n->value_ % 32 == 0 && k_lhs->value_ % 64 == 0, span)
       << kOpName << " requires M divisible by 16, N divisible by 32, and K divisible by 64";
+  // Mat/Left carrier rows must fill the existing 16-row boxed tile. Since
+  // FP4 packs two logical rows per carrier here, the Tensor bridge needs M%32.
+  CHECK_SPAN(!packed || m->value_ % 32 == 0, span)
+      << kOpName << " requires FP4 logical M divisible by 32 for boxed carrier rows";
+  CHECK_SPAN(!packed || n->value_ % 64 == 0, span)
+      << kOpName << " requires FP4 logical N divisible by 64 for a 32-byte carrier row";
   const int64_t groups = k_lhs->value_ / 32;
   auto check_shape = [span, kOpName](const std::vector<ExprPtr>& shape, int64_t dim0, int64_t dim1,
                                      const char* operand) {
@@ -396,7 +416,7 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
   };
   check_shape(lhs_scale->shape_, m->value_, groups, "lhs_scale");
   check_shape(rhs_scale->shape_, groups, n->value_, "rhs_scale");
-  return std::make_shared<TensorType>(std::vector<ExprPtr>{lhs->shape_[0], rhs->shape_[1]}, DataType::FP32);
+  return std::make_shared<TensorType>(std::vector<ExprPtr>{lhs_shape[0], rhs_shape[1]}, DataType::FP32);
 }
 
 // ============================================================================
@@ -434,10 +454,10 @@ REGISTER_OP("tensor.quant_mx")
 
 REGISTER_OP("tensor.matmul_mx")
     .set_op_category("TensorOp")
-    .set_description("MXFP8 matrix multiplication of oriented data and scale tensors")
-    .add_argument("lhs", "Left FP8E4M3FN tensor [M, K]")
+    .set_description("MXFP8/MXFP4 matrix multiplication of oriented data and scale tensors")
+    .add_argument("lhs", "Left FP8E4M3FN or packed FP4 tensor (logical [M, K])")
     .add_argument("lhs_scale", "Left FP8E8M0 MX_A_ZZ scale tensor [M, K/32]")
-    .add_argument("rhs", "Right FP8E4M3FN tensor [K, N]")
+    .add_argument("rhs", "Right FP8E4M3FN or packed FP4 tensor (logical [K, N])")
     .add_argument("rhs_scale", "Right FP8E8M0 MX_B_NN scale tensor [K/32, N]")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
