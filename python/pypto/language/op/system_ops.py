@@ -372,7 +372,7 @@ def tpush_to_aic(
             which the two AIV lanes divide the tile; 0 sends it whole.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
-            the logical AIV lane. Requires split=1/2/3/4 and a Vec Tile entry.
+            the logical AIV lane. Requires split=1/2 and a Vec Tile entry.
             Dynamic values must be 0 or 1 at runtime; the author must pair both
             lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
