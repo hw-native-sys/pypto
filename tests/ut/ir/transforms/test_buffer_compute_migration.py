@@ -354,7 +354,7 @@ class IndexReduction:
 
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("operation", _INDEX_OPS)
-@pytest.mark.parametrize("valid", [(16, 128), (13, 72)])
+@pytest.mark.parametrize("valid", [(16, 128), (13, 128), (16, 72), (13, 72)])
 @pytest.mark.parametrize("preserve", [False, True])
 def test_index_reduction_default_buffer_matches_tile_and_native(
     tmp_path, planner, operation, valid, preserve
@@ -362,6 +362,9 @@ def test_index_reduction_default_buffer_matches_tile_and_native(
     # Distinct exactly representable inputs make every expected index unambiguous.
     # The 72-column partial domain crosses the native 64-element repeat boundary.
     source = torch.randperm(2048, generator=torch.Generator().manual_seed(37)).reshape(16, 128).float()
+    # Zero padding would win over every valid input without valid-domain slicing.
+    source = -(source + 1) if operation.endswith("max") else source + 1
+    source_snapshot = source.clone()
     rows, cols = valid
     row = operation.startswith("row_")
     reduction = torch.argmax if operation.endswith("max") else torch.argmin
@@ -378,17 +381,17 @@ def test_index_reduction_default_buffer_matches_tile_and_native(
         restored = ir.deserialize(ir.serialize(lowered))
         assert isinstance(restored, ir.Program)
         ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)
-        if enabled or valid == (16, 128):
-            namespace = {}
-            exec(torch_codegen(restored), namespace)  # noqa: S102
-            output = torch.full_like(expected, -777)
-            old = torch.full_like(source, -777)
-            namespace["kernel"](source, output, old)
-            torch.testing.assert_close(output, expected, rtol=0, atol=0)
-            old_expected = torch.full_like(source, -777)
-            if preserve:
-                old_expected[:rows, :cols] = source[:rows, :cols]
-            torch.testing.assert_close(old, old_expected, rtol=0, atol=0)
+        namespace = {}
+        exec(torch_codegen(restored), namespace)  # noqa: S102
+        output = torch.full_like(expected, -777)
+        old = torch.full_like(source, -777)
+        namespace["kernel"](source, output, old)
+        torch.testing.assert_close(source, source_snapshot, rtol=0, atol=0)
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+        old_expected = torch.full_like(source_snapshot, -777)
+        if preserve:
+            old_expected[:rows, :cols] = source_snapshot[:rows, :cols]
+        torch.testing.assert_close(old, old_expected, rtol=0, atol=0)
         text = _native(tmp_path, restored, planner, enabled)
         assert text.count(f"pto.t{operation.replace('_', '')} ins(") == 1
 

@@ -1940,6 +1940,62 @@ def test_tile_load_valid_shape_masks_invalid():
     assert result[7, 7] == 0.0
 
 
+@pytest.mark.parametrize("operation", ["row_argmax", "row_argmin", "col_argmax", "col_argmin"])
+@pytest.mark.parametrize("valid", [(16, 128), (13, 128), (16, 72), (13, 72)])
+@pytest.mark.parametrize("dtype", ["FP16", "FP32"])
+@pytest.mark.parametrize("computed", [False, True])
+@pytest.mark.parametrize("runtime_valid", [False, True])
+def test_tile_index_reduction_preserves_valid_and_physical_shapes(
+    operation, valid, dtype, computed, runtime_valid
+):
+    rows, cols = valid
+    row = operation.startswith("row_")
+    result_shape = (16, 1) if row else (1, 128)
+    result_valid = (rows, 1) if row else (1, cols)
+    scalar_params = ", rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]" if runtime_valid else ""
+    valid_dims = "rows, cols" if runtime_valid else f"{rows}, {cols}"
+    compute = "source = pl.neg(source)" if computed else ""
+    program = pl.parse_program(f"""
+@pl.program
+class IndexReduction:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, a: pl.Tensor[[16, 128], pl.{dtype}],
+        out: pl.InOut[pl.Tensor[{list(result_shape)}, pl.INT32]]{scalar_params}
+    ) -> pl.Tile[{list(result_shape)}, pl.INT32]:
+        source = pl.load(a, [0, 0], [16, 128], valid_shape=[{valid_dims}])
+        {compute}
+        scratch = pl.create_tile([16, 128], dtype=pl.{dtype}, target_memory=pl.MemorySpace.Vec)
+        indices = pl.tile.{operation}(source, scratch)
+        out = pl.store(indices, [0, 0], out)
+        return indices
+""")
+    namespace = {}
+    exec(torch_codegen(program), namespace)  # noqa: S102
+    source = torch.randperm(2048, generator=torch.Generator().manual_seed(37)).reshape(16, 128) + 1
+    source = source.to(torch.float16 if dtype == "FP16" else torch.float32)
+    # Both signs expose zero padding winning the reduction. All values remain
+    # distinct and exactly representable in FP16, including the endpoint 2048.
+    if operation.endswith("max"):
+        source = -source
+    expected = (torch.argmax if operation.endswith("max") else torch.argmin)(
+        source[:rows, :cols], dim=1 if row else 0, keepdim=True
+    ).to(torch.int32)
+    # neg produces a fresh Torch tensor without the load's validity attributes.
+    # The reduction must instead use the source validity carried by the IR.
+    input_tensor = -source if computed else source
+    output = torch.full(result_shape, -777, dtype=torch.int32)
+    args = (input_tensor, output, rows, cols) if runtime_valid else (input_tensor, output)
+    result = namespace["kernel"](*args)
+    assert result.dtype == torch.int32
+    assert tuple(result.shape) == result_shape
+    assert result._pypto_valid_shape == result_valid
+    torch.testing.assert_close(result[: result_valid[0], : result_valid[1]], expected, rtol=0, atol=0)
+    expected_output = torch.full_like(output, -777)
+    expected_output[: result_valid[0], : result_valid[1]] = expected
+    torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
+
+
 def test_tile_load_passes_valid_shape():
     """tile.load codegen should pass valid_shape as 4th arg to _tile_load."""
     tensor = _tensor_var("t", [64, 64])

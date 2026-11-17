@@ -583,6 +583,19 @@ def _tile_store(tile, offsets, output_tensor, atomic=0):
         output_tensor[slices] = tile[valid_slices]
     return output_tensor
 
+def _tile_index_reduce(tile, valid_shape, dim, reduction):
+    valid_shape = _coerce_shape(valid_shape)
+    valid_slices = tuple(slice(0, s) for s in valid_shape)
+    # Padding must not compete with real values for an index, even when every
+    # valid value is positive (argmin) or negative (argmax).
+    indices = getattr(torch, reduction)(tile[valid_slices], dim=dim, keepdim=True).to(torch.int32)
+    full_shape = list(tile.shape)
+    result_valid_shape = list(valid_shape)
+    full_shape[dim] = result_valid_shape[dim] = 1
+    # Keep physical storage while limiting subsequent stores to the valid part
+    # of the kept axis, just as the Tile result type does.
+    return _mask_valid_region(indices, full_shape, result_valid_shape)
+
 def _buffer_set_valid(buffer, valid_shape):
     buffer._pypto_valid_shape = tuple(int(s) for s in valid_shape)
     return buffer
@@ -1211,6 +1224,11 @@ def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
 
 # Build the dispatch table
 _OP_MAP: dict[str, OpHandler] = {}
+_TILE_INDEX_REDUCTIONS = frozenset(
+    _ir.get_op(f"tile.{axis}_{reduction}").name
+    for axis in ("row", "col")
+    for reduction in ("argmax", "argmin")
+)
 
 
 def _register_reductions(m: dict[str, OpHandler], prefix: str) -> None:
@@ -1226,8 +1244,10 @@ def _register_reductions(m: dict[str, OpHandler], prefix: str) -> None:
 
     for axis, dim in (("row", -1), ("col", -2)):
         for reduction in ("argmax", "argmin"):
-            m[f"{prefix}.{axis}_{reduction}"] = lambda a, _kw, fn=reduction, dim=dim: (
-                f"torch.{fn}({a[0]}, dim={dim}, keepdim=True).to(torch.int32)"
+            m[f"{prefix}.{axis}_{reduction}"] = lambda a, kw, fn=reduction, dim=dim: (
+                f"_tile_index_reduce({a[0]}, {kw['_source_valid_shape']}, {dim}, {fn!r})"
+                if prefix == "tile"
+                else f"torch.{fn}({a[0]}, dim={dim}, keepdim=True).to(torch.int32)"
             )
 
 
@@ -1944,6 +1964,13 @@ class TorchCodegen(_ir.IRVisitor):
 
         if self._visit_buffer_call(op, arg_strs):
             return
+        if op_name in _TILE_INDEX_REDUCTIONS:
+            source_type = cast(_ir.TileType, op.args[0].type)
+            # Torch arithmetic drops tensor attributes, while the IR retains
+            # the operand's valid domain. Emit it explicitly, including runtime
+            # extents, so computed Tiles obey the same contract as loaded Tiles.
+            valid_shape = source_type.get_effective_tile_view().valid_shape
+            kw["_source_valid_shape"] = self._visit_expr_str(_ir.MakeTuple(valid_shape, op.span))
         if op_name == _ir.get_op("tensor.view").name:
             if len(arg_strs) >= 2:
                 result_view = getattr(op.type, "tensor_view", None)
