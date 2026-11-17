@@ -2736,6 +2736,49 @@ class TestGenerateKernelWrapper:
         assert "int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);" in wrapper
         assert "split_vec(__pypto_spmd_subblock_idx);" in wrapper
 
+    @pytest.mark.parametrize("explicit_push,explicit_pop", [(True, True), (True, False), (False, True)])
+    @pytest.mark.parametrize("runtime_lane_param", [False, True])
+    def test_split_fifo_bridge_preserves_authored_lanes(
+        self, explicit_push, explicit_pop, runtime_lane_param
+    ):
+        """Mixed calls bridge only omitted lanes; authored third operands survive."""
+        lane_op = "pl.tile.get_subblock_idx()" if runtime_lane_param else ""
+        push_kw = ", aiv_subblockid=1" if explicit_push else ""
+        pop_kw = ", aiv_subblockid=1" if explicit_pop else ""
+        program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def split_vec(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+        pl.func_attr({{"split": pl.SplitMode.UP_DOWN}})
+        {lane_op}
+        buf = pl.reserve_buffer(name="pipe", size=4096, base=0x1000)
+        pl.aiv_initialize_pipe(buf, buf, dir_mask=3, slot_size=1024)
+        popped: pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=1{pop_kw})
+        pl.tpush_to_aic(popped, split=1{push_kw})
+        pl.tfree_to_aic(popped)
+""")
+        func = program.get_function("split_vec")
+        assert func is not None
+        source = _split_ptoas_output_for(
+            func.name, runtime_lane_param=runtime_lane_param, direction="DIR_BOTH", include_push=True
+        )
+        pipe, popped, produced = ("v3", "v4", "v5") if runtime_lane_param else ("v2", "v3", "v4")
+        lane = "static_cast<int64_t>(1)"
+        for tile_name, explicit in ((popped, explicit_pop), (produced, explicit_push)):
+            if explicit:
+                source = source.replace(f">({pipe}, {tile_name});", f">({pipe}, {tile_name}, {lane});")
+        wrapper = _generate_kernel_wrapper(func, source)
+        for tile_name, explicit in ((popped, explicit_pop), (produced, explicit_push)):
+            if explicit:
+                assert f">({pipe}, {tile_name}, {lane});" in wrapper
+                assert f"{tile_name} PYPTO_SPLIT_RUNTIME_LANE_ARG" not in wrapper
+            else:
+                assert f">({pipe}, {tile_name} PYPTO_SPLIT_RUNTIME_LANE_ARG(" in wrapper
+        if explicit_push and explicit_pop:
+            assert "PYPTO_SPLIT_RUNTIME_LANE_ARG" not in wrapper
+            assert "__pypto_runtime_subblock_idx" not in wrapper
+
     def test_legacy_fixed_lane_wrapper_keeps_compile_time_subblock_id(self):
         """Legacy lane-specialized AIV wrappers retain their fixed lane override."""
 
