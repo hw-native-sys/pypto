@@ -1184,7 +1184,7 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile: .
 
 
 def matmul_mx(lhs: object, lhs_scale: object, rhs: object, rhs_scale: object) -> Tensor | Tile:
-    """MXFP8 matrix multiplication, dispatched for tensors and tiles."""
+    """MXFP8/MXFP4 matrix multiplication, dispatched for tensors and tiles."""
     if (
         isinstance(lhs, Tensor)
         and isinstance(lhs_scale, Tensor)
