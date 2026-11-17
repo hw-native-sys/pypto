@@ -2,7 +2,7 @@ name: Setup CI job
 description: >-
   Shared setup for every self-hosted pypto job — the CPU ones (ci.yml
   `codegen-tests`) and the on-device ones (ci.yml `system-tests`,
-  `system-tests-direct`, `dist-system-tests`, `pypto-lib-model`; daily_ci.yml
+  `system-tests-direct`, `dist-system-tests`, `pypto-lib-model-a2a3`, `pypto-lib-model-a5`; daily_ci.yml
   `qwen3-perf`). All of them run directly on the host, as the same user, through
   this one action: resilient submodule checkout into a per-job dir, a ptoas
   install, a per-job conda venv + activate.sh, and a from-source

@@ -110,11 +110,13 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 
 **编译器 CI 覆盖：** `pypto-lib-compile` job 只编译
 [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json)
-中列出的命名用例，按平台看护精选的独立算子：
+中列出的命名用例，按平台看护精选算子和显式列出的 decode 模块：
 
-- **A5：** `models/deepseek_v4_1_flash/` 下的 10 个入口：`compressor`、
+- **A5：** `models/deepseek_v4_1_flash/` 下的 13 个入口：`compressor`、
   `sparse_attention`、`gate`、`expert_routed`、`expert_shared`、`hc`、`o_proj`、
-  `engram`、`input_pack` 和 `lm_head`。
+  `engram`、`input_pack`、`lm_head`、`decode_c1a_full`、`decode_c2a_full` 和
+  `decode_moe`。MoE 用例显式传入 `--ep 2 -d 0,1`，按两个逻辑 rank 编译，
+  不申请或执行物理设备。
 - **A2/A3：** `models/deepseek_v4_flash_lowlat/` 下的 10 个入口：
   `decode_compressor_ratio128`、`decode_compressor_ratio4`、`decode_sparse_attn_swa`、
   `expert_routed`、`gate`、`hc_post`、`hc_pre`、`o_proj_tp`、`qkv_proj_rope` 和
@@ -122,7 +124,7 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
   `test_paged_attention_pypto` 和 `topk_select`。Qwen attention 使用可独立运行的
   原生 PyPTO 算子测试入口。
 
-名单不包含 layer、整网入口、组合 attention/MoE 模块、MTP、DSpark、vision 或草稿。
+名单不包含 layer、整网入口、MTP、DSpark、vision 或草稿。
 库中新增文件不会自动加入；后续按需显式添加算子入口或参数组合。
 辅助模块通过调用入口覆盖，编译不需要 NPU。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
@@ -130,7 +132,12 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 当实际解析参数的解析器声明 `--compile-only` 时，适配器为该解析器提供此标志。
 其他解析器保留原始参数，兼容辅助解析器和组件解析器，
 同时阻止编译完成后进入设备执行分支。
-不构建设备二进制，也不验证数值结果；`pypto-lib-model` 提供独立的设备冒烟测试。
+仅编译看护不构建设备二进制，也不验证数值结果。独立的上板 job 提供这部分看护：
+`pypto-lib-model-a2a3` 保留 Qwen3-14B 和 DeepSeek-V4-Flash 模型检查；
+`pypto-lib-model-a5` 运行 `models/deepseek_v4_1_flash/decode_c1a_full.py`、
+`decode_c2a_full.py` 和 `decode_moe.py`。A5 的两个 attention 用例各从 TaskQueue
+申请 1 卡，MoE 申请 2 卡并传入 `--ep 2`。三个用例均使用队列分配的物理设备 ID，
+不传 `--compile-only`。两个模型 job 都是完整 CI 结果门禁的必需项。
 
 为已配置的任一平台增加算子覆盖时，只需在 JSON 列表中追加用例，
 无需修改 workflow 或编译脚本。

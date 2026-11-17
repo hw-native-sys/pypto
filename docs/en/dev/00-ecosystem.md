@@ -110,11 +110,14 @@ A library of real-world models and primitive tensor functions built **on top of*
 
 **Compiler CI coverage:** The `pypto-lib-compile` job compiles only the named
 cases in [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json).
-Coverage focuses on selected standalone operators, split by platform:
+Coverage includes selected operators and explicitly listed decode blocks, split
+by platform:
 
-- **A5:** 10 entries under `models/deepseek_v4_1_flash/`: `compressor`,
+- **A5:** 13 entries under `models/deepseek_v4_1_flash/`: `compressor`,
   `sparse_attention`, `gate`, `expert_routed`, `expert_shared`, `hc`, `o_proj`,
-  `engram`, `input_pack`, and `lm_head`.
+  `engram`, `input_pack`, `lm_head`, `decode_c1a_full`, `decode_c2a_full`, and
+  `decode_moe`. The MoE case explicitly uses `--ep 2 -d 0,1` to compile for
+  two logical ranks; it does not reserve or execute on physical devices.
 - **A2/A3:** 10 entries under `models/deepseek_v4_flash_lowlat/`:
   `decode_compressor_ratio128`, `decode_compressor_ratio4`, `decode_sparse_attn_swa`,
   `expert_routed`, `gate`, `hc_post`, `hc_pre`, `o_proj_tp`, `qkv_proj_rope`, and
@@ -122,8 +125,8 @@ Coverage focuses on selected standalone operators, split by platform:
   `test_paged_attention_pypto`, and `topk_select`. The Qwen attention case uses
   the runnable native PyPTO operator driver.
 
-Layer and full-model entries, composed attention/MoE blocks, MTP, DSpark, vision,
-and drafts are outside this list. New library files do not join automatically;
+Layer and full-model entries, MTP, DSpark, vision, and drafts are outside this
+list. New library files do not join automatically;
 add selected operator entries or parameter variants explicitly as coverage needs
 grow. Helpers are covered through their callers. Compilation needs no NPU.
 The adapter forces `golden.run` into compile-only mode, records direct compile
@@ -132,8 +135,14 @@ codegen, and PTOAS.
 When an active argument parser declares `--compile-only`, the adapter supplies
 that flag to that parser. Other parsers keep their original arguments, preserving
 helper/component parsing while disabling post-compilation execution branches.
-This does not build device binaries or check numerical results; `pypto-lib-model`
-provides the separate device smoke tests.
+This does not build device binaries or check numerical results. Separate on-device
+jobs provide that coverage: `pypto-lib-model-a2a3` retains the Qwen3-14B and
+DeepSeek-V4-Flash model checks, while `pypto-lib-model-a5` runs
+`models/deepseek_v4_1_flash/decode_c1a_full.py`, `decode_c2a_full.py`, and
+`decode_moe.py`. The A5 attention cases each borrow one card from TaskQueue;
+MoE borrows two cards and uses `--ep 2`. All three receive the queue-assigned
+physical device IDs and run without `--compile-only`. Both model jobs are
+required by the full-CI result gate.
 
 To add operator coverage on either configured platform, append a case to the
 JSON list; no workflow or runner edit is needed. Save the list as UTF-8.
