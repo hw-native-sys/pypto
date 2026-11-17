@@ -46,7 +46,7 @@ failed, the request ends before device scheduling. Post the command again after 
 Repeated commands for the same PR head reuse an active or successful run. After failure or cancellation,
 post the command again to retry. When retrying publication, the workflow completes the pending check.
 Only the dedicated comment requests this job. When the PR contains
-`tests/st/distributed/test_l3_urma_async.py`, it runs the four-card A5 suite.
+`tests/st/distributed/test_l3_urma_async.py`, it runs the suite on two A5 cards. Four-rank cases are skipped.
 Otherwise it runs the bootstrap placeholder. A passing placeholder does not
 verify hardware behavior.
 
