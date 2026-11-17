@@ -41,6 +41,7 @@ coverage lives in ``tests/ut/codegen/distributed/``. A skip on a non-A5 host or
 in codegen-only mode is not evidence of runtime correctness.
 """
 
+import dataclasses
 import json
 import sys
 
@@ -54,6 +55,12 @@ from pypto.runtime._artifact_runtime import runtime_output_directory
 
 SIZE = 4096
 REPEATS = 3
+
+
+@pytest.fixture
+def test_config(test_config: RunConfig, _st_platform: str) -> RunConfig:
+    """Target the item's resolved platform, not the session's first ``--platform`` id."""
+    return dataclasses.replace(test_config, platform=_st_platform)
 
 
 @pytest.fixture(autouse=True)

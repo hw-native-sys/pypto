@@ -13,6 +13,7 @@ No peer read is issued: allocation must establish the URMA resources, and each
 rank writes then reads its own mapped Host window through separate tasks.
 """
 
+import dataclasses
 from contextlib import ExitStack
 
 import pypto.language as pl
@@ -61,6 +62,12 @@ def host_table_program(
     return outputs
 
 
+@pytest.fixture
+def test_config(test_config: RunConfig, _st_platform: str) -> RunConfig:
+    """Target the item's resolved platform, not the session's first ``--platform`` id."""
+    return dataclasses.replace(test_config, platform=_st_platform)
+
+
 @pytest.mark.platforms("a5")
 def test_host_domain_local_mte(test_config, device_ids):
     if len(device_ids) < 2:
@@ -75,6 +82,8 @@ def test_host_domain_local_mte(test_config, device_ids):
             distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
         ),
     )
+    if test_config.codegen_only:
+        pytest.skip("--codegen-only disables distributed runtime execution")
     compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
     assert torch.equal(outputs, inputs)
 
