@@ -447,6 +447,38 @@ class TestMemRefSharing:
             After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
+    def test_register_writes_to_tpop_keep_pipe_storage(self):
+        """Store/scatter SSA results must not allocate disconnected UB storage."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(self):
+                received = pl.tpop_from_aic(shape=[16, 16], dtype=pl.FP32, split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    x = pl.reg.load(flat, 0, lanes=64)
+                    stored = pl.reg.store(flat, 0, x)
+                    indices = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+                    mask = pl.reg.full_mask(lanes=64)
+                    scattered = pl.reg.scatter(stored, indices, x, mask)
+                result = pl.reshape(scattered, [16, 16])
+                return result
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.init_mem_ref()(Before)
+        found = {}
+
+        class Tiles(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                if isinstance(op.var.type, ir.TileType):
+                    found[op.var.name_hint] = op.var.type.memref
+                super().visit_assign_stmt(op)
+
+        Tiles().visit_stmt(next(iter(after.functions.values())).body)
+        assert set(found) == {"received", "flat", "stored", "scattered", "result"}
+        assert all(memref is None for memref in found.values())
+
     def test_matmul_acc_shares_memref_with_accumulator(self):
         """tile.matmul_acc output shares MemRef with its accumulator input (arg[0])."""
 

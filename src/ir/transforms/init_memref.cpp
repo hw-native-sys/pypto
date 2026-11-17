@@ -86,6 +86,12 @@ bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source
       auto in = AsVarLike(call->args_[0]);
       return in && source_buffer_less(in.get());
     }
+    // A writeback result still names the pipe slot. Falling through to a
+    // fresh MemRef disconnects subsequent views from the bytes just written.
+    if (auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+      auto in = AsVarLike(call->args_[*index]);
+      return in && source_buffer_less(in.get());
+    }
     return false;
   }
   auto v = AsVarLike(value);

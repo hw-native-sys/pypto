@@ -193,11 +193,16 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
         break;
       }
       auto call = std::dynamic_pointer_cast<const Call>(alias_src);
-      if (!call || !call->op_ || call->args_.empty() ||
-          !op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+      if (!call || !call->op_ || call->args_.empty()) break;
+      if (op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        alias_src = call->args_[0];
+      } else if (auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+        // In-place writes return the same slot, including reg.store/scatter.
+        // A later use of their result must extend the received Tile's lifetime.
+        alias_src = call->args_[*index];
+      } else {
         break;
       }
-      alias_src = call->args_[0];
     }
     if (!src_var) {
       return false;
@@ -291,6 +296,12 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
   };
 
   propagate_stmt_aliases_into = [&](const StmtPtr& stmt, TpopVarRemap& remap) {
+    if (auto scope = As<RegScopeStmt>(stmt)) {
+      // Register scopes introduce no Tile storage. Their writeback aliases can
+      // be used by the surrounding Tile code after the helper returns.
+      for (const auto& child : FlattenBody(scope->body_)) propagate_stmt_aliases_into(child, remap);
+      return;
+    }
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       propagate_alias_into(assign->var_, assign->value_, remap);
       return;
