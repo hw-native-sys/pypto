@@ -113,11 +113,6 @@ std::string EnsureDirectFp4CastView(const ir::ExprPtr& expr, codegen::PTOCodegen
   const auto view = codegen.NewNamedTemp(name_hint);
   const auto operand = codegen.GetExprAsCode(expr);
   if (const auto* subview = codegen.GetSubviewMaterialization(operand)) {
-    if (tile->dtype_ == DataType::FP4E2M1X2) {
-      CHECK_SPAN(subview->byte_offset_mod_32 == 0, expr->span_)
-          << "Direct FP4 to FP8 conversion requires a provably 32-byte-aligned source subview; "
-             "use packed column offsets divisible by 32, or load the window into its own aligned tile";
-    }
     // A slice's SSA preserves its parent pitch and runtime byte offset; its
     // inherited MemRef can lose both. Keep that provenance through a zero-offset
     // view while spelling the static valid columns required by the decoder.
@@ -285,6 +280,16 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
 
   auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.cast source must be TileType";
+  if (src_type->dtype_.IsPackedFp4()) {
+    const auto source = codegen.GetExprAsCode(op->args_[0]);
+    if (const auto* subview = codegen.GetSubviewMaterialization(source)) {
+      // A BF16/FP32 bridge still reads the packed source in its first TCVT.
+      // Changing the conversion route cannot make an unaligned view valid.
+      CHECK_SPAN(subview->byte_offset_mod_32 == 0, op->span_)
+          << "Packed FP4 conversion requires a provably 32-byte-aligned source subview; "
+             "use packed column offsets divisible by 32, or load the window into its own aligned tile";
+    }
+  }
   const bool dense_fp4_dn = ir::IsDensePackedFp4DnCast(op);
   const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_type);
   if (ir::IsDirectFp4E2M1ToFp8Cast(op)) {

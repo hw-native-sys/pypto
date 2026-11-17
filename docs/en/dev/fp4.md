@@ -128,6 +128,8 @@ Its UB address must be provably 32-byte aligned: use static packed column
 offsets divisible by 32. Runtime row offsets remain aligned when the parent
 row pitch is a multiple of 32 bytes. Unknown runtime column offsets are
 rejected; load that packed window into its own aligned tile instead.
+This source alignment requirement also applies to plain ND casts through the
+BF16/FP32 bridge: its first conversion still reads the same packed source.
 
 Use `tpush_to_aic` to transfer the NZ result to the Cube without another
 ND-to-NZ move. On A5, a plain Vec store can also copy it to a matching `pl.NZ`

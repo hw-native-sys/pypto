@@ -1370,9 +1370,10 @@ def test_standalone_left_right_fp4_nd_cast_keeps_bridge_after_split(tmp_path):
         assert cpp.read_text().count("TCVT(") == 3
 
 
-@pytest.mark.parametrize("dynamic_column", [False, True])
-def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path, dynamic_column):
-    column_scale, column_base = (1, 0) if dynamic_column else (0, 1)
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("column_offset", [1, 32, None])
+def test_plain_nd_fp4_slice_bridge_obeys_source_alignment(tmp_path, planner, column_offset):
+    column_scale, column_base = (1, 0) if column_offset is None else (0, column_offset)
 
     @pl.program
     class SliceNdDecode:
@@ -1388,7 +1389,14 @@ def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path
             window = pl.tile.slice(packed, [16, 256], [0, start], valid_shape=[16, 256])
             return pl.store(pl.cast(window, pl.FP8E4M3FN), [0, 0], out)
 
-    mlir = _emit_incore_mlir(SliceNdDecode)
+    # The bridge's first conversion still consumes the packed source. Reject
+    # both a known one-byte misalignment and an unknown runtime column before
+    # invoking PTOAS; a 32-byte-aligned slice retains the three-hop bridge.
+    if column_offset != 32:
+        with pytest.raises(ValueError, match="32-byte-aligned source subview"):
+            _emit_incore_mlir(SliceNdDecode, planner)
+        return
+    mlir = _emit_incore_mlir(SliceNdDecode, planner)
     assert mlir.count("pto.tcvt ") == 3, mlir
     assert "dtype=bf16" in mlir and "dtype=f32" in mlir, mlir
     if find_ptoas_binary() is not None:
