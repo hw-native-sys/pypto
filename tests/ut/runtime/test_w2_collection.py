@@ -23,6 +23,9 @@ from pypto.runtime.tensor_spec import TensorSpec
 @pytest.fixture
 def w2_module(monkeypatch: pytest.MonkeyPatch, pytestconfig: pytest.Config) -> ModuleType:
     pytestconfig.addinivalue_line("markers", "platforms(*names): supported system-test platforms")
+    pytestconfig.addinivalue_line(
+        "markers", "platform_xfail(*names, reason, strict=True): expected platform failures"
+    )
     st_dir = Path(__file__).resolve().parents[2] / "st"
     monkeypatch.syspath_prepend(str(st_dir))
     path = st_dir / "runtime" / "cross_core" / "test_w2_fp4_nz_mx_scale.py"
