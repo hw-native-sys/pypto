@@ -186,7 +186,18 @@ MIGRATION_FAMILIES = (
             "tile.col_argmax",
             "tile.col_argmin",
         ),
-        restricted=frozenset({"tile.row_max", "tile.row_sum", "tile.row_min", "tile.row_prod"}),
+        restricted=frozenset(
+            {
+                "tile.row_max",
+                "tile.row_sum",
+                "tile.row_min",
+                "tile.row_prod",
+                "tile.col_max",
+                "tile.col_sum",
+                "tile.col_min",
+                "tile.col_prod",
+            }
+        ),
     ),
     MigrationFamily(
         "G10: Axis expansion and broadcast",
@@ -210,6 +221,12 @@ MIGRATION_FAMILIES = (
         ),
         restricted=frozenset(
             {
+                "tile.col_expand_add",
+                "tile.col_expand_sub",
+                "tile.col_expand_mul",
+                "tile.col_expand_div",
+                "tile.col_expand_max",
+                "tile.col_expand_min",
                 "tile.row_expand_add",
                 "tile.row_expand_sub",
                 "tile.row_expand_mul",

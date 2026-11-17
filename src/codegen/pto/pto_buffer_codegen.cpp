@@ -21,10 +21,10 @@
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_axis_recipes.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_indexed_recipes.h"
-#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/pto_native_ops.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -377,7 +377,7 @@ class BufferEmissionPreflight : public ir::IRVisitor {
           << "Direct Buffer cast/compare/select and indexed operations currently supports A2/A3 only";
     }
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
-    CHECK_SPAN(recipe || backend::FindBufferRowRecipe(call->op_->name_) ||
+    CHECK_SPAN(recipe || backend::FindBufferAxisRecipe(call->op_->name_) ||
                    backend::FindBufferConversionRecipe(call->op_->name_) ||
                    backend::FindBufferIndexedRecipe(call->op_->name_) || ir::IsOp(call, "buffer.alloc") ||
                    ir::IsOp(call, "buffer.copy") || ir::IsOp(call, "buffer.subview") ||
@@ -743,14 +743,14 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
          BufferInsOutsClause({call->args_[0], call->args_[1]}, call->args_[2]));
   } else {
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
-    const auto* row_recipe = backend::FindBufferRowRecipe(call->op_->name_);
-    INTERNAL_CHECK_SPAN(recipe || row_recipe || ir::IsOp(call, "buffer.copy"), call->span_)
+    const auto* axis_recipe = backend::FindBufferAxisRecipe(call->op_->name_);
+    INTERNAL_CHECK_SPAN(recipe || axis_recipe || ir::IsOp(call, "buffer.copy"), call->span_)
         << "Internal error: missing preflighted buffer emitter for " << call->op_->name_;
-    const size_t input_count = recipe ? recipe->inputs.size() : row_recipe ? 2 : 1;
+    const size_t input_count = recipe ? recipe->inputs.size() : axis_recipe ? axis_recipe->InputCount() : 1;
     std::ostringstream line;
-    line << (recipe       ? recipe->native_op
-             : row_recipe ? row_recipe->native_op
-                          : "pto.tmov")
+    line << (recipe        ? recipe->native_op
+             : axis_recipe ? axis_recipe->native_op
+                           : "pto.tmov")
          << " "
          << BufferInsOutsClause(
                 {call->args_.begin(), call->args_.begin() + static_cast<std::ptrdiff_t>(input_count)},

@@ -118,6 +118,93 @@ def test_new_row_selection_preserves_unverified_forms(planner, kind):
     assert kernel is not None and kernel.ir_stage != ir.FunctionIRStage.Buffer
 
 
+_COLUMNS = (("sum", "add"), ("max", "sub"), ("min", "mul"), ("prod", "div"), ("max", "max"), ("min", "min"))
+
+
+def _column_program(reduction, broadcast, valid=(16, 64), dtype="FP32", extra_scratch=False, preserve=True):
+    rows, cols = valid
+    scalar = "rows: pl.Scalar[pl.INDEX], " if isinstance(rows, str) else ""
+    scratch = (
+        f"scratch = pl.create_tile([16, 64], dtype=pl.{dtype}, target_memory=pl.MemorySpace.Vec)"
+        if extra_scratch
+        else ""
+    )
+    extra = ", scratch" if extra_scratch else ""
+    old = "out = pl.store(source, [16, 0], out)" if preserve else ""
+    return pl.parse_program(f"""
+@pl.program
+class ColumnCompute:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, {scalar}a: pl.Tensor[[16, 64], pl.{dtype}],
+               out: pl.InOut[pl.Tensor[[32, 64], pl.{dtype}]]) -> pl.Tensor[[32, 64], pl.{dtype}]:
+        source = pl.load(a, [0, 0], [16, 64], valid_shape=[{rows}, {cols}])
+        {scratch}
+        row = pl.tile.col_{reduction}(source{extra})
+        result = pl.tile.col_expand_{broadcast}(source, row)
+        out = pl.store(result, [0, 0], out)
+        {old}
+        return out
+""")
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("valid", [(16, 64), (13, 57)])
+@pytest.mark.parametrize("reduction,broadcast", _COLUMNS)
+@pytest.mark.parametrize("preserve", [False, True])
+def test_default_column_compute_matches_tile_and_native(
+    tmp_path, planner, valid, reduction, broadcast, preserve
+):
+    source = torch.rand((16, 64), generator=torch.Generator().manual_seed(29)) * 0.02 + 0.99
+    rows, cols = valid
+    active = source[:rows, :cols]
+    row = {"min": torch.amin, "prod": torch.prod, "sum": torch.sum, "max": torch.amax}[reduction](
+        active, dim=0, keepdim=True
+    )
+    expected = torch.full((32, 64), -777.0)
+    expected[:rows, :cols] = {
+        "add": torch.add,
+        "sub": torch.sub,
+        "mul": torch.mul,
+        "div": torch.div,
+        "max": torch.maximum,
+        "min": torch.minimum,
+    }[broadcast](active, row)
+    if preserve:
+        expected[16 : 16 + rows, :cols] = active
+    for enabled in (False, True):
+        lowered = _lower(_column_program(reduction, broadcast, valid, preserve=preserve), planner, enabled)
+        kernel = lowered.get_function("kernel")
+        assert kernel is not None and (kernel.ir_stage == ir.FunctionIRStage.Buffer) == enabled
+        restored = ir.deserialize(ir.serialize(lowered))
+        assert isinstance(restored, ir.Program)
+        ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)
+        # Buffer replay tracks valid rectangles. Legacy Tile replay does not;
+        # partial Tile inputs are checked through native compilation and devices.
+        if enabled or valid == (16, 64):
+            namespace = {}
+            exec(torch_codegen(restored), namespace)  # noqa: S102
+            output = torch.full_like(expected, -777.0)
+            namespace["kernel"](source, output)
+            torch.testing.assert_close(output, expected)
+        text = _native(tmp_path, restored, planner, enabled)
+        assert text.count(f"pto.tcol{reduction} ins(") == 1
+        assert text.count(f"pto.tcolexpand{broadcast} ins(") == 1
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["fp16", "dynamic", "optional_scratch"])
+def test_column_selection_preserves_unverified_forms(planner, kind):
+    program = _column_program(
+        "sum",
+        "add",
+        ("rows" if kind == "dynamic" else 16, 64),
+        "FP16" if kind == "fp16" else "FP32",
+        extra_scratch=kind == "optional_scratch",
+    )
+    kernel = _lower(program, planner, True).get_function("kernel")
+    assert kernel is not None and kernel.ir_stage != ir.FunctionIRStage.Buffer
+
+
 def _transpose_program(shape=(16, 32), dtype="FP32", partial=False):
     rows, cols = shape
     return pl.parse_program(f"""
@@ -186,3 +273,57 @@ def test_explicit_compute_a5_native_keeps_default_boundary(tmp_path, ascend_back
     kernel = lowered.get_function("kernel")
     assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
     _native(tmp_path, lowered, planner, True, arch="a5")
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("reduction,broadcast", _COLUMNS)
+def test_explicit_column_a5_native_keeps_default_boundary(
+    tmp_path, ascend_backend, planner, reduction, broadcast
+):
+    assert ascend_backend == BackendType.Ascend950
+    program = _column_program(reduction, broadcast)
+    kernel = _lower(program, planner, True).get_function("kernel")
+    assert kernel is not None and kernel.ir_stage != ir.FunctionIRStage.Buffer
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        lowered = buffer_recipe_pipeline().run(program)
+    kernel = lowered.get_function("kernel")
+    assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
+    _native(tmp_path, lowered, planner, True, arch="a5")
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("reduction", ["sum", "max", "min", "prod"])
+@pytest.mark.parametrize("valid", [(16, 64), (13, 57)])
+def test_column_reduction_dead_source_uses_disjoint_destination(tmp_path, planner, reduction, valid):
+    rows, cols = valid
+    program = pl.parse_program(f"""
+@pl.program
+class ColumnReduction:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 64], pl.FP32],
+               out: pl.InOut[pl.Tensor[[1, 64], pl.FP32]]) -> pl.Tensor[[1, 64], pl.FP32]:
+        source = pl.load(a, [0, 0], [16, 64], valid_shape=[{rows}, {cols}])
+        row = pl.tile.col_{reduction}(source)
+        return pl.store(row, [0, 0], out)
+""")
+    # With no later source use, an unconstrained planner could reuse a prefix of
+    # its allocation. Buffer requires disjoint reduction storage before lowering.
+    lowered = _lower(program, planner, True)
+    kernel = lowered.get_function("kernel")
+    assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
+    source = torch.rand((16, 64), generator=torch.Generator().manual_seed(30)) * 0.02 + 0.99
+    output = torch.full((1, 64), -777.0)
+    expected = output.clone()
+    expected[:, :cols] = {"sum": torch.sum, "max": torch.amax, "min": torch.amin, "prod": torch.prod}[
+        reduction
+    ](source[:rows, :cols], dim=0, keepdim=True)
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    namespace["kernel"](source, output)
+    torch.testing.assert_close(output, expected)
+    _native(tmp_path, lowered, planner, True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -129,7 +129,7 @@ set(PYPTO_SOURCES
     src/ir/op/buffer_ops/elementwise.cpp
     src/ir/op/buffer_ops/matrix.cpp
     src/ir/op/buffer_ops/memory.cpp
-    src/ir/op/buffer_ops/row.cpp
+    src/ir/op/buffer_ops/axis.cpp
     src/ir/op/buffer_ops/transpose.cpp
     src/ir/op/buffer_ops/view.cpp
     src/ir/op/reg_ops/reg_ops.cpp
@@ -439,7 +439,7 @@ set(PYPTO_SOURCES
     src/backend/common/buffer_conversion_recipes.cpp
     src/backend/common/buffer_indexed_recipes.cpp
     src/backend/common/buffer_elementwise_recipes.cpp
-    src/backend/common/buffer_row_recipes.cpp
+    src/backend/common/buffer_axis_recipes.cpp
     src/backend/common/buffer_transpose_recipe.cpp
     src/backend/common/buffer_view_semantics.cpp
     src/backend/common/pto_ops_common.cpp

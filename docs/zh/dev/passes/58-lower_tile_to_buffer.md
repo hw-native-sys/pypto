@@ -28,6 +28,8 @@ PTO codegen 直接接收分配句柄和目标操作数。
 | adds、subs、muls、divs、maximums、minimums、lrelu、full | FP32 |
 | row_max、row_sum、row_min、row_prod | FP32，正静态 valid |
 | row_expand_add/sub/mul/div/max/min | FP32，正静态 valid，连续列向量 |
+| col_sum/max/min/prod | FP32，正静态 valid，顺序归约 |
+| col_expand_add/sub/mul/div/max/min | FP32，正静态 valid，单行载体 |
 | transpose | FP32，full-valid 稠密二维矩阵 |
 
 标量参数遵循已有 scalar ABI，元素标量在 lowering 中显式转换。
@@ -52,6 +54,13 @@ FP32 行配方支持 allocation-backed 的稠密矩阵和正静态 valid。归�
 链。包含运行时/空 valid 状态、窗口操作数、其他 dtype 或其他归约操作的行配方 kernel
 继续 Tile。空归约轴不沿用逐元素操作的无数据路径语义。
 `row_expand_add` 使用双输入的连续列向量形式；带可选 scratch 或行优先打包载体的形式仍走 Tile。
+
+列配方沿第一维归约，生成行优先 `[1,C]` 目的地，再将该单行广播到矩阵。
+例如 `col_sum(source)` 接 `col_expand_add(source, row)` 会降低为
+`buffer.col_sum(source, row)` 和 `buffer.col_expand_add(source, row, destination)`。
+物理列按 32 字节对齐，载体保留源的物理列数和有效列数。归约输出须与源分离；
+广播可精确复用矩阵，但不能覆盖载体。这些形式要求稠密 FP32 分配和正静态 valid。
+带可选 scratch 的二叉树 `col_sum`、窗口操作数、动态或空有效域及其他 dtype 仍走 Tile。
 
 稠密 FP32 `transpose` 复用 `FlattenTileNdTo2D` 已创建的 scratch。
 Lowering 去除逻辑轴参数，生成 `buffer.transpose(source, scratch, destination)`。
@@ -140,7 +149,7 @@ Tile 与 Buffer 适配层分别解析操作数，再使用
 scratch，也不改变操作数类型。仍需这些决策的 Tile callback 在调用格式化器
 之前完成处理；Buffer 路径接收的操作数已经显式化。
 
-`GetPtoNativeOpSpec` 向 Tile 注册和 Buffer 配方提供共用的逐元素、行计算和转置
+`GetPtoNativeOpSpec` 向 Tile 注册和 Buffer 配方提供共用的逐元素、轴计算和转置
 指令名，以及精度属性名。这是发射元数据，不是支持能力注册表：目标、dtype、布局、
 别名和默认选择条件仍由各路径检查。增加原生名称不会开放新的 Buffer 形态。
 其他算子族继续使用现有专用发射器。

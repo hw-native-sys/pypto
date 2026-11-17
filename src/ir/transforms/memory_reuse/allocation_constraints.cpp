@@ -27,6 +27,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_axis_recipes.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/core/logging.h"
@@ -333,6 +334,12 @@ class ForbidAliasCollector : public IRVisitor {
         // Buffer conversion contracts constrain packing before lowering. This
         // is scoped to selected kernels, preserving legacy Tile allocation.
         if (views_) {
+          if (const auto* axis = backend::FindLogicalBufferAxisRecipe(call->op_->name_);
+              axis && axis->reduction) {
+            // Buffer reduction results have a different physical extent. Keep
+            // them disjoint instead of treating a source prefix as an exact alias.
+            forbid_arg(0);
+          }
           if (const auto* indexed = backend::FindLogicalBufferIndexedRecipe(call->op_->name_)) {
             // Gather already forbids every input alias. Scatter's destination
             // aliases input zero, but must not share either indexed read.
