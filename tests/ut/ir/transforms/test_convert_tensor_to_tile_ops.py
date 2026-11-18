@@ -8671,8 +8671,8 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(after, Expected)
 
-    @pytest.mark.parametrize("use_input_return", [False, True])
-    def test_return_matching_retains_actual_backing_parameters(self, use_input_return):
+    @pytest.mark.parametrize("return_mode", ["unknown_output", "input", "reshaped_input"])
+    def test_return_matching_retains_actual_backing_parameters(self, return_mode):
         """Unknown outputs retain ambiguity, and a returned input keeps its own storage."""
 
         @pl.program
@@ -8790,15 +8790,22 @@ class TestCalleeDirectionPropagationThroughCarries:
                 result = self.write(x, flat, b, middle)
                 self.consume(result)
 
-        def return_input(program):
+        def select_return(program):
+            if return_mode == "unknown_output":
+                return program
             source = ir.python_print(program)
-            old = "self.first(x, first_flat, alias)"
-            assert old in source
-            return pl.parse_program(source.replace(old, "self.forward(x, b, first_flat)"))
+            old_call = "self.first(x, first_flat, alias)"
+            assert old_call in source
+            source = source.replace(old_call, "self.forward(x, b, first_flat)")
+            if return_mode == "reshaped_input":
+                old_return = "        return value"
+                assert old_return in source
+                source = source.replace(
+                    old_return, "        view = pl.reshape(value, [2, 64])\n        return view"
+                )
+            return pl.parse_program(source)
 
-        before, expected = (
-            (return_input(Before), return_input(Expected)) if use_input_return else (Before, Expected)
-        )
+        before, expected = select_return(Before), select_return(Expected)
         after = passes.convert_tensor_to_tile_ops()(before)
         ir.assert_structural_equal(after, expected)
 

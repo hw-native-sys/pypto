@@ -302,11 +302,9 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
                                                 const std::vector<OutputRoot>& out_roots,
                                                 const CallPtr& call) {
   if (out_roots.empty()) return;
-  const auto record_output = [&](const OutputRoot& output) {
-    BindRootCandidates(result, output.roots, output.ambiguous);
-  };
+  const bool track_tensor_return = follow_reshape_ && As<TensorType>(call->GetType());
   ExprPtr returned_arg;
-  if (follow_reshape_ && As<TensorType>(call->GetType())) {
+  if (track_tensor_return) {
     const auto callee = program_->GetFunction(call->op_->name_);
     if (callee && callee->return_types_.size() == 1) {
       const auto param = return_lineage::ReturnedParamIndex(callee, program_);
@@ -321,6 +319,12 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
       }
     }
   }
+  const auto record_output = [&](const OutputRoot& output) {
+    // A shape match supplies a candidate. When tracing could not prove the
+    // return (for example, a view of an input), it cannot prove its storage.
+    const bool unproven = track_tensor_return && returned_arg.get() != output.argument.get();
+    BindRootCandidates(result, output.roots, output.ambiguous || unproven);
+  };
   if (out_roots.size() == 1 && (!returned_arg || returned_arg.get() == out_roots.front().argument.get())) {
     record_output(out_roots.front());
     return;
