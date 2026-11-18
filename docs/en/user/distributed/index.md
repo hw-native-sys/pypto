@@ -82,4 +82,6 @@ The distributed chapter covers L3. L2 is covered in the
 ## See Also
 
 - [Getting Started](../00-getting_started.md) — `ir.compile()`, `CompiledProgram`, `DeviceTensor`, `RunConfig`
+- [API Reference: `pld`](../../api/distributed.md) — generated signatures for every public `pld.*` symbol
+- [Distributed Operators](../../dev/distributed_ops.md) — IR-level op semantics, ABI enums, and codegen notes
 - [Simpler Runtime](https://hw-native-sys.github.io/simpler/) — Runtime internals (scheduler, graph building, tensormap)

@@ -76,4 +76,6 @@ PyPTO 的分布式模型建立在**对称内存与信号**之上——完整说�
 ## 相关链接
 
 - [入门指南](../00-getting_started.md) — `ir.compile()`、`CompiledProgram`、`DeviceTensor`、`RunConfig`
+- [API 参考：`pld`](../../api/distributed.md) — 每个公开 `pld.*` 符号的生成签名
+- [Distributed Operators](../../dev/distributed_ops.md) — IR 层算子语义、ABI 枚举与代码生成说明
 - [Simpler 运行时](https://hw-native-sys.github.io/simpler/) — 运行时内部机制（调度器、图构建、tensormap）

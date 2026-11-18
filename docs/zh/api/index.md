@@ -11,6 +11,7 @@
 | [`pl.array`](array.md) | 定长数组，主要用于 `pl.TASK_ID` 扇入 |
 | [`pl.prefetch`](prefetch.md) | GM 到 L2 的异步预取 |
 | [`pl.optimizations`](optimizations.md) | `pl.at(..., optimizations=[...])` 接受的条目 |
+| [`pld`](distributed.md) | 跨 rank 命名空间 —— 集合通信、窗口缓冲区、点对点传输 |
 
 ## 怎么用
 

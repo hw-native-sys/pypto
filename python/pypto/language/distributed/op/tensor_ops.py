@@ -205,9 +205,14 @@ def alloc_window_buffer(  # type: ignore[no-redef]
     ``window()`` views across loop iterations.
 
     Args:
-        size: (Canonical form) Per-rank allocation size in **bytes**.
-        shape: (Convenience form) Per-rank shape as a sequence of per-dimension
-            sizes — ``int``, DSL ``Scalar``, or raw :class:`ir.Expr`.
+        size: Per-rank allocation. In the **canonical byte form**, the
+            allocation size in bytes — an ``int`` literal, a DSL ``Scalar``,
+            or a raw :class:`ir.Expr`. In the **shape+dtype convenience
+            form**, a ``list`` or ``tuple`` of per-dimension sizes (other
+            sequence types, such as ``range``, are not recognized and fall
+            through to the canonical-form branch); the byte size is then
+            computed automatically as ``product(size) x dtype.get_byte()``
+            and the call normalizes to the canonical byte form.
         dtype: (Convenience form, required) Element data type. Must be
             ``None`` (default) in the canonical byte form.
         name: Unique buffer identifier. The parser injects this from the LHS
@@ -235,7 +240,7 @@ def alloc_window_buffer(  # type: ignore[no-redef]
 
     Raises:
         ValueError: If ``name`` is empty (the parser must have injected it).
-        ValueError: If ``shape`` is a sequence but ``dtype`` is not provided.
+        ValueError: If ``size`` is a sequence but ``dtype`` is not provided.
         ValueError: If ``size`` is scalar but ``dtype`` is provided.
     """
     if not name:
@@ -607,6 +612,14 @@ def put_async(
     when supplied, must be provided together and describe a contiguous GM
     range: skip leading singleton transfer dimensions, then require every
     dimension after the first non-singleton to span its full extent.
+
+    .. warning::
+
+       This dependency gate does not yet enforce completion: task-completion
+       integration (the enclosing task releasing the consumer) is still
+       pending (see ``docs/en/dev/distributed_ops.md``). A consumer scheduled
+       this way may run before the transfer lands. Do not rely on this
+       pattern for correctness until that integration ships.
     """
     dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.put_async", dst=dst, src=src)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
@@ -656,6 +669,14 @@ def get_async(
     when supplied, must be provided together and describe a contiguous GM
     range: skip leading singleton transfer dimensions, then require every
     dimension after the first non-singleton to span its full extent.
+
+    .. warning::
+
+       This dependency gate does not yet enforce completion: task-completion
+       integration (the enclosing task releasing the consumer) is still
+       pending (see ``docs/en/dev/distributed_ops.md``). A consumer scheduled
+       this way may run before the transfer lands. Do not rely on this
+       pattern for correctness until that integration ships.
     """
     dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.get_async", dst=dst, src=src)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None

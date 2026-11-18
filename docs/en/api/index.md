@@ -11,6 +11,7 @@ Generated from the source docstrings, so it cannot drift from the code.
 | [`pl.array`](array.md) | Fixed-length arrays, mainly for `pl.TASK_ID` fan-in |
 | [`pl.prefetch`](prefetch.md) | Asynchronous GM to L2 prefetch |
 | [`pl.optimizations`](optimizations.md) | The entries that `pl.at(..., optimizations=[...])` accepts |
+| [`pld`](distributed.md) | The cross-rank namespace — collectives, window buffers, P2P transfers |
 
 ## How to use it
 
