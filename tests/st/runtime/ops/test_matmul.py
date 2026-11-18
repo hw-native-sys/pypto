@@ -207,8 +207,9 @@ def test_explicit_valid_shape_matmul_carry(test_config):
 
 
 @pytest.mark.platforms("a2a3", "a2a3sim")
-def test_predicated_split_k_runtime_valid_rows(test_config):
-    """One compact carry must use the correct L0C pitch at each runtime row count."""
+@pytest.mark.parametrize("valid_columns", [32, 24], ids=["runtime-rows", "column-tail"])
+def test_predicated_split_k_valid_extents(test_config, valid_columns):
+    """Predicated carries preserve row pitch and the product's valid rectangle."""
 
     @pl.jit
     def split_k(
@@ -218,12 +219,15 @@ def test_predicated_split_k_runtime_valid_rows(test_config):
         out: pl.InOut[pl.Tensor[[64, 32], pl.FP32]],
     ):
         for _ in pl.spmd(1, name_hint="predicated_narrow_acc"):
-            valid_rows = pl.min(64, rows)
+            if valid_columns == 32:
+                valid_rows = pl.min(64, rows)
+            else:
+                valid_rows = 64
             acc = pl.create_tensor([64, 32], dtype=pl.FP32)
             for kb in pl.pipeline(0, 2, stage=2):
                 k0 = kb * 256
                 lhs = pl.slice(a, [64, 256], [0, k0], valid_shape=[valid_rows, 256])
-                rhs = pl.slice(w, [32, 256], [0, k0])
+                rhs = pl.slice(w, [32, 256], [0, k0], valid_shape=[valid_columns, 256])
                 acc = pl.matmul_acc(acc, lhs, rhs, b_trans=True, init_cond=(kb == 0))
             out[0:64, 0:32] = acc
         return out
@@ -234,13 +238,14 @@ def test_predicated_split_k_runtime_valid_rows(test_config):
     out = torch.empty((64, 32), dtype=torch.float32)
     compiled = split_k.compile(a, w, 64, out, config=test_config)
     # 16 and 17 straddle the first N-fractal pitch change. The untouched GM
-    # tail checks that the store also uses the runtime extent.
-    for rows in (7, 16, 17, 64):
+    # tail checks that the store uses the product extent on each axis.
+    row_counts = (7, 16, 17, 64) if valid_columns == 32 else (64,)
+    for rows in row_counts:
         out.fill_(-777)
         compiled(a, w, rows, out, config=test_config)
         if not test_config.codegen_only:
             expected = torch.full_like(out, -777)
-            expected[:rows] = product[:rows]
+            expected[:rows, :valid_columns] = product[:rows, :valid_columns]
             torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 

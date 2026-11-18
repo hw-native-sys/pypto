@@ -779,7 +779,8 @@ through the loop to the store. See [#3475](https://github.com/hw-native-sys/pypt
 A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
 single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
 rows — unless an already-narrowed seed needs its compact metadata aligned with the
-yield. Repair also leaves a carry alone when the narrowed extent is only computed inside the loop body, where the
+yield or a predicated update has a narrower valid N. A column-only tail keeps the
+full-height Acc layout and carries the narrower valid N to the store. Repair also leaves a carry alone when the narrowed extent is only computed inside the loop body, where the
 re-declared seed could not name it.
 
 ## Implementation

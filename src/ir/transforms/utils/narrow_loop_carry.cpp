@@ -362,9 +362,11 @@ class CarryAnalyzer : public IRVisitor {
       // A conditional is typed from its then branch, which may still inherit
       // the seed's non-compact layout. Inspect the fresh product in either arm.
       auto product_tile = As<TileType>(index_.MatmulProductType(yields[i]));
+      bool predicated_product = false;
       if (!product_tile && predicated_update) {
         product_tile =
             PredicatedProductType(predicated_update, iter_args[i], yields[i], loop->return_vars_[i]);
+        predicated_product = product_tile != nullptr;
       }
       auto yield_tile = product_tile ? product_tile : As<TileType>(yields[i]->GetType());
       auto narrowed = NarrowedValidShape(init_tile, yield_tile);
@@ -382,12 +384,16 @@ class CarryAnalyzer : public IRVisitor {
       // Only an L0C carry is re-declared, and `tile.set_validshape` is 2D.
       if (narrowed->size() != 2) continue;
       if (yield_tile->GetMemorySpace() != MemorySpace::Acc) continue;
-      // Nothing to reconcile when both readings of the buffer land on the same pitch --
-      // notably a single-fractal-block box, where `ceil(validRow/16)*16` is the physical
-      // row count whatever the valid rows are. The same predicate `AccCompactValid` uses,
-      // so a carry this declines is also a carry the verifier does not ask about, and a
-      // `[16, N]` accumulator keeps the exact form it has today.
-      if (!needs_compact_repair && AccPitchesCoincide(narrowed->at(0), init_tile->shape_[0])) continue;
+      // A predicated update with a narrower N must carry that extent to the
+      // store even when the L0C row pitches coincide. For row-only narrowing,
+      // the same pitch test as AccCompactValid keeps the single-fractal case.
+      const bool narrows_predicated_columns =
+          predicated_product &&
+          ProveValidExtentEqual(narrowed->at(1), GetValidShape(init_tile)[1]) != ProofResult::kTrue;
+      if (!needs_compact_repair && !narrows_predicated_columns &&
+          AccPitchesCoincide(narrowed->at(0), init_tile->shape_[0])) {
+        continue;
+      }
       if (!ExtentsAreVisibleBefore(*narrowed, loop)) continue;
       // Only a `tile.create` seed can be re-declared as a narrowed box.
       auto seed = AsVarLike(iter_args[i]->initValue_);

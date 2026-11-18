@@ -464,6 +464,31 @@ def test_predicated_split_k_repairs_the_seed_when_pitches_can_differ(rows_per_ti
     )
 
 
+def test_predicated_split_k_narrows_columns_at_full_height():
+    """The L0C row pitch is unchanged while the store still needs a narrowed N."""
+
+    @pl.jit
+    def column_tail(
+        x: pl.Tensor[[64, 512], pl.FP32],
+        w: pl.Tensor[[32, 512], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(1, name_hint="predicated_acc_column_tail"):
+            acc = pl.create_tensor([64, 32], dtype=pl.FP32)
+            for kb in pl.pipeline(0, 2, stage=2):
+                k0 = kb * 256
+                lhs = pl.slice(x, [64, 256], [0, k0])
+                rhs = pl.slice(w, [32, 256], [0, k0], valid_shape=[24, 256])
+                acc = pl.matmul_acc(acc, lhs, rhs, b_trans=True, init_cond=(kb == 0))
+            y[0:64, 0:32] = acc
+        return y
+
+    lowered = _lower(column_tail, stop_after="convert_tensor_to_tile_ops")
+    view = _tile_view(_stored_tile_type(lowered))
+    assert view.compact == ir.CompactMode.null
+    assert [dim.value for dim in view.valid_shape] == [64, 24]
+
+
 @pytest.mark.parametrize(
     "options",
     [

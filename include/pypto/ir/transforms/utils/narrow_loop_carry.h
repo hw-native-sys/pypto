@@ -60,6 +60,7 @@ namespace narrow_loop_carry {
  *     single-fractal-block box packs to its physical rows whatever its valid rows, so a
  *     ``[16, N]`` accumulator keeps the exact form it has today. An already-narrowed
  *     seed also gets repaired when its compact metadata differs from the yield's.
+ *     A predicated update preserves a narrower valid N even at the same row pitch.
  *   * only where the narrowed extents are visible *before* the loop. The re-declared seed
  *     sits there, and the common spelling puts the row count next to the slice it bounds,
  *     inside the body -- hoisting that would leave codegen with a symbol it cannot bind.
