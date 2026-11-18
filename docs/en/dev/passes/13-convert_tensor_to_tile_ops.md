@@ -773,15 +773,14 @@ For a loop such as `pl.pipeline(0, 2, stage=2)`, the same repair supports a dire
 `pl.matmul_acc(acc, lhs, rhs, init_cond=(kb == 0))` update. It derives the valid M/N
 from the operands when the accumulator is a private, unbound allocation, the loop
 is statically nonempty, and the update overwrites on the first iteration. The valid
-extents must be visible at loop entry. The compact seed then carries those extents
-through the loop to the store. See [#3475](https://github.com/hw-native-sys/pypto/issues/3475).
+extents must be visible at loop entry. The seed carries both valid extents through the
+loop to the store and retains its compact mode when the row pitches coincide. For
+example, a single-fractal `[16, N]` allocation can store seven valid rows at the physical
+row pitch. See [#3475](https://github.com/hw-native-sys/pypto/issues/3475).
 
-A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
-single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
-rows — unless an already-narrowed seed needs its compact metadata aligned with the
-yield or a predicated update has a narrower valid N. A column-only tail keeps the
-full-height Acc layout and carries the narrower valid N to the store. Repair also leaves a carry alone when the narrowed extent is only computed inside the loop body, where the
-re-declared seed could not name it.
+For other carry repairs, a pitch match skips the rewrite unless an already-narrowed seed
+needs its compact metadata aligned with the yield. The repair also requires the narrowed
+extent at the seed declaration, before the loop body.
 
 ## Implementation
 

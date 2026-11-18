@@ -13,6 +13,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -47,7 +48,8 @@ AssignStmtPtr BuildAccStorage(const std::vector<ExprPtr>& shape, const DataType&
 }
 
 AccInit BuildNarrowedAccInit(const std::vector<ExprPtr>& shape, const std::vector<ExprPtr>& valid,
-                             const DataType& dtype, const std::string& name_hint, const Span& span) {
+                             const DataType& dtype, const std::string& name_hint, const Span& span,
+                             std::optional<bool> compact_override) {
   INTERNAL_CHECK_SPAN(shape.size() == 2 && valid.size() == 2, span)
       << "Internal error: a narrowed Acc accumulator is 2D; got shape rank " << shape.size()
       << " and valid rank " << valid.size();
@@ -61,19 +63,20 @@ AccInit BuildNarrowedAccInit(const std::vector<ExprPtr>& shape, const std::vecto
   auto cols_const = As<ConstInt>(shape[1]);
   if (valid_rows_const && valid_cols_const && rows_const && cols_const &&
       valid_rows_const->value_ == rows_const->value_ && valid_cols_const->value_ == cols_const->value_) {
-    auto init = BuildAccStorage(shape, dtype, name_hint, span);
+    auto init = BuildAccStorage(shape, dtype, name_hint, span, compact_override.value_or(false));
     return AccInit{{init}, init->var_};
   }
   const bool rows_fill_box = ProveValidExtentEqual(valid[0], shape[0]) == ProofResult::kTrue;
 
-  // Declare the buffer compact when its valid rows are not provably its physical rows -- the same
+  // By default, declare the buffer compact when its valid rows may differ from its physical rows, the same
   // predicate `StampCompactForNarrowedAccRows` applies to a matmul result, because the `mad` that
   // writes this buffer takes M from the L0A operand's valid rows. `tile.set_validshape` below
   // inherits the mode, so the iter_arg, every `tile.matmul_acc` that accumulates into it (the op
   // inherits its accumulator's compact mode) and the reader after the loop all agree with the pitch
   // the hardware used. Leaving the seed non-compact silently skews every N-fractal above the first
   // (#2470, #2510).
-  auto storage = BuildAccStorage(shape, dtype, name_hint + "_storage", span, !rows_fill_box);
+  auto storage =
+      BuildAccStorage(shape, dtype, name_hint + "_storage", span, compact_override.value_or(!rows_fill_box));
   auto& reg = OpRegistry::GetInstance();
   auto narrowed_call = reg.Create("tile.set_validshape", {storage->var_, valid[0], valid[1]}, span);
   auto narrowed_var = std::make_shared<Var>(name_hint, narrowed_call->GetType(), span);

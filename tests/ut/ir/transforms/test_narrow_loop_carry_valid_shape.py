@@ -450,15 +450,14 @@ def test_convert_tensor_to_tile_ops_repairs_a_2d_seeded_carry():
 
 
 @pytest.mark.parametrize("rows_per_tile", [16, 64])
-def test_predicated_split_k_repairs_the_seed_when_pitches_can_differ(rows_per_tile):
-    """Only the multi-fractal accumulator needs a compact seed and dynamic store extent."""
+def test_predicated_split_k_preserves_valid_rows(rows_per_tile):
+    """Both tiles store the runtime extent, and only the larger one needs compact storage."""
     kernel = _predicated_tensor_acc_kernel(rows_per_tile)
     lowered = _lower(kernel, stop_after="convert_tensor_to_tile_ops")
     mode = ir.CompactMode.normal if rows_per_tile == 64 else ir.CompactMode.null
     stored = _stored_tile_type(lowered)
-    actual_mode = stored.tile_view.compact if stored.tile_view is not None else ir.CompactMode.null
-    assert actual_mode == mode
-    assert _is_const(_valid_rows(stored), rows_per_tile) == (rows_per_tile == 16)
+    assert _tile_view(stored).compact == mode
+    assert not _is_const(_valid_rows(stored), rows_per_tile)
     assert len([call for call in _calls(lowered, _TILE_CREATE_OP) if call.kwargs.get("compact")]) == (
         rows_per_tile == 64
     )

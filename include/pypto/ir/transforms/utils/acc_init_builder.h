@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_ACC_INIT_BUILDER_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_ACC_INIT_BUILDER_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -64,10 +65,12 @@ AssignStmtPtr BuildAccStorage(const std::vector<ExprPtr>& shape, const DataType&
  * @param dtype Accumulator element type
  * @param name_hint Name for the value the caller reads the accumulator through
  * @param span Source location to attribute the declaration to
+ * @param compact_override Optional compact mode when both pitches are proven equivalent
  * @return The declaring statements and the value to use
  */
 AccInit BuildNarrowedAccInit(const std::vector<ExprPtr>& shape, const std::vector<ExprPtr>& valid,
-                             const DataType& dtype, const std::string& name_hint, const Span& span);
+                             const DataType& dtype, const std::string& name_hint, const Span& span,
+                             std::optional<bool> compact_override = std::nullopt);
 
 }  // namespace acc_init
 }  // namespace ir

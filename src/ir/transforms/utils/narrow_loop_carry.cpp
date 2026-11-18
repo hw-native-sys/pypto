@@ -286,8 +286,12 @@ class ScopeIndex : public IRVisitor {
   std::map<const Var*, size_t> tile_uses_;
 };
 
-/// The valid shape to declare for a carry, keyed by the ``IterArg`` that carries it.
-using CarryDecisions = std::map<const Var*, std::vector<ExprPtr>>;
+struct CarryDecision {
+  std::vector<ExprPtr> valid_shape;
+  std::optional<bool> compact;
+};
+
+using CarryDecisions = std::map<const Var*, CarryDecision>;
 
 /// Decides which carries to re-declare. Reads types; rewrites nothing.
 class CarryAnalyzer : public IRVisitor {
@@ -354,7 +358,7 @@ class CarryAnalyzer : public IRVisitor {
         auto seed = AsVarLike(iter_args[i]->initValue_);
         if (narrowed && seed && IsOp(index_.DefiningCall(seed.get()), "tensor.create") &&
             index_.IsMatmulResult(yields[i]) && ExtentsAreVisibleBefore(*narrowed, loop)) {
-          decisions_[static_cast<const Var*>(iter_args[i].get())] = std::move(*narrowed);
+          decisions_[static_cast<const Var*>(iter_args[i].get())] = {std::move(*narrowed), std::nullopt};
         }
         continue;
       }
@@ -384,22 +388,20 @@ class CarryAnalyzer : public IRVisitor {
       // Only an L0C carry is re-declared, and `tile.set_validshape` is 2D.
       if (narrowed->size() != 2) continue;
       if (yield_tile->GetMemorySpace() != MemorySpace::Acc) continue;
-      // A predicated update with a narrower N must carry that extent to the
-      // store even when the L0C row pitches coincide. For row-only narrowing,
-      // the same pitch test as AccCompactValid keeps the single-fractal case.
-      const bool narrows_predicated_columns =
-          predicated_product &&
-          ProveValidExtentEqual(narrowed->at(1), GetValidShape(init_tile)[1]) != ProofResult::kTrue;
-      if (!needs_compact_repair && !narrows_predicated_columns &&
-          AccPitchesCoincide(narrowed->at(0), init_tile->shape_[0])) {
-        continue;
-      }
+      const bool pitches_coincide = AccPitchesCoincide(narrowed->at(0), init_tile->shape_[0]);
+      if (!needs_compact_repair && !predicated_product && pitches_coincide) continue;
       if (!ExtentsAreVisibleBefore(*narrowed, loop)) continue;
       // Only a `tile.create` seed can be re-declared as a narrowed box.
       auto seed = AsVarLike(iter_args[i]->initValue_);
       if (!seed || !index_.IsFreshTileSeed(seed.get())) continue;
 
-      decisions_[static_cast<const Var*>(iter_args[i].get())] = std::move(*narrowed);
+      // The predicate proves the fresh carry's valid rectangle. Even with an
+      // unchanged row pitch, the store needs that rectangle on both axes.
+      std::optional<bool> compact;
+      if (predicated_product && pitches_coincide) {
+        compact = tile_view_semantics::GetEffectiveTileView(*init_tile).compact == CompactMode::normal;
+      }
+      decisions_[static_cast<const Var*>(iter_args[i].get())] = {std::move(*narrowed), compact};
     }
   }
 
@@ -699,7 +701,7 @@ class CarryRewriter : public IRMutator {
   /// accumulator advertising the physical row pitch. Declaring the box lets
   /// ``tile.create``'s own deducer derive the Acc layout for the box it declares.
   /// Returns null when the seed is not one this repair can re-declare.
-  ExprPtr BuildNarrowedInit(const IterArgPtr& iter_arg, const std::vector<ExprPtr>& valid,
+  ExprPtr BuildNarrowedInit(const IterArgPtr& iter_arg, const CarryDecision& decision,
                             std::vector<StmtPtr>* prologue) {
     auto seed = AsVarLike(iter_arg->initValue_);
     if (!seed) return nullptr;
@@ -707,8 +709,8 @@ class CarryRewriter : public IRMutator {
     // The extents were chosen against the types as the analyzer found them; an enclosing
     // rewrite may since have replaced the vars they name.
     std::vector<ExprPtr> visited_valid;
-    visited_valid.reserve(valid.size());
-    for (const auto& extent : valid) visited_valid.push_back(VisitExpr(extent));
+    visited_valid.reserve(decision.valid_shape.size());
+    for (const auto& extent : decision.valid_shape) visited_valid.push_back(VisitExpr(extent));
 
     if (tensor_mode_) {
       if (!IsOp(index_.DefiningCall(seed.get()), "tensor.create")) return nullptr;
@@ -723,8 +725,9 @@ class CarryRewriter : public IRMutator {
     auto init_tile = As<TileType>(iter_arg->GetType());
     if (!init_tile || !index_.IsFreshTileSeed(seed.get())) return nullptr;
 
-    auto narrowed = acc_init::BuildNarrowedAccInit(init_tile->shape_, visited_valid, init_tile->dtype_,
-                                                   seed->name_hint_ + "_narrowed", iter_arg->span_);
+    auto narrowed =
+        acc_init::BuildNarrowedAccInit(init_tile->shape_, visited_valid, init_tile->dtype_,
+                                       seed->name_hint_ + "_narrowed", iter_arg->span_, decision.compact);
     for (auto& stmt : narrowed.stmts) prologue->push_back(std::move(stmt));
     return narrowed.value;
   }
