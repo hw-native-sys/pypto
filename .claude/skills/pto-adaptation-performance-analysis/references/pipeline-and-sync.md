@@ -41,3 +41,32 @@ identify the waits around those gaps before attributing them to DMA.
   for missing or mismatched signal/wait pairs.
 - Correlate both sides in the trace when available. A single-side simulator
   run can support static findings but cannot verify cross-core timing.
+
+## Per-task evidence before instruction tuning
+
+For every dynamic MTE2, VF and MTE3 task, record version, core/block/subblock,
+batch, initialization/main/tail role, PC/symbol, issue/start/end, duration, bytes
+or work, previous gap and predecessor. Mark unobservable issue/ready timestamps
+N/A. Keep original timestamps and align entry-relative windows separately.
+
+Per pipe report dynamic count, summed execution duration, interval union,
+first-start-to-last-end span, active fraction and cross-pipe overlap. Do not add
+VF call duration to its internal VLD/EXEC/VST durations. Compare first-batch
+startup, steady state, batch gaps and drain before investigating individual
+instruction latency.
+
+For each suspected stall record producer completion, notification/set, wait
+release and consumer issue/start, with flag direction, PC, batch, UB read/write
+ranges and reuse lifetime. Label readiness, reuse, overly broad wait, proven
+redundancy, resource contention or insufficient evidence. Determine whether the
+stall changes kernel completion or overlaps independent work. A long MTE span
+with unchanged per-transfer execution can be a scheduling gap rather than slow DMA.
+
+Only after cross-pipe dependencies are explained, compare transfer bytes/strides,
+batching/tails and VF VLD/EXEC/VST overlap, gather/reorder, spill and membar.
+Single-variable experiments need equivalent workload and preserved necessary
+ordering; baseline synchronization omissions must be audited as well.
+
+| Difference ID | Baseline/current code, PC, trace | Target and edit layer | Compile/precision/boundaries | Incremental/cumulative time | Keep/revert and remaining evidence |
+| ------------- | -------------------------------- | --------------------- | ---------------------------- | --------------------------- | ---------------------------------- |
+| N/A | N/A | N/A | N/A | N/A | N/A |
