@@ -443,7 +443,22 @@ def test_sampled_window_dn_and_odd_tail():
     assert _values_of(nested_descriptor.stride) == [2, 5]
 
 
-@pytest.mark.parametrize("field", ["shape", "steps", "valid_shape"])
+@pytest.mark.parametrize("layout", [ir.TensorLayout.ND, ir.TensorLayout.DN])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_tile_dma_requires_unit_physical_inner_stride(layout, dynamic):
+    parent = _tensor_var([8, 8], view=ir.TensorView(layout=layout))
+    step = ir.Var("step", ir.ScalarType(DataType.INDEX), _span()) if dynamic else 2
+    steps = [1, step] if layout == ir.TensorLayout.ND else [step, 1]
+    sampled = ir.op.tensor.view(parent, [4, 4], steps=steps)
+    nested = ir.op.tensor.view(sampled, [2, 2], offsets=[1, 1])
+    tile = ir.op.tile.load(parent, [0, 0], [2, 2])
+    with pytest.raises(ValueError, match="tile.load: PTO-ISA.*inner stride"):
+        ir.op.tile.load(nested, [0, 0], [2, 2])
+    with pytest.raises(ValueError, match="tile.store: PTO-ISA.*inner stride"):
+        ir.op.tile.store(tile, [0, 0], nested)
+
+
+@pytest.mark.parametrize("field", ["shape", "offsets", "steps", "valid_shape"])
 def test_window_type_geometry_requires_bound_payload_reads(field):
     source = _tensor_var([8], name="source")
     indices = _tensor_var([1], dtype=DataType.INT32, name="indices")
@@ -453,6 +468,7 @@ def test_window_type_geometry_requires_bound_payload_reads(field):
         ir.op.tensor.view(
             source,
             dimension if field == "shape" else [1],
+            offsets=dimension if field == "offsets" else None,
             steps=dimension if field == "steps" else [1],
             valid_shape=dimension if field == "valid_shape" else None,
         )

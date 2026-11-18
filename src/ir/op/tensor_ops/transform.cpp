@@ -153,9 +153,8 @@ bool WindowExceedsBound(const ExprPtr& count, const ExprPtr& offset, const ExprP
   return analyzer.CanProve(MakeGe(last, bound));
 }
 
-// Shape, stride and validity are embedded in the descriptor type. Later users
-// can evaluate these expressions independently of the window's defining call.
-class WindowTypeExprChecker : public IRVisitor {
+// Window geometry consumes scalar values. Bind payload reads before constructing the descriptor.
+class WindowGeometryChecker : public IRVisitor {
  protected:
   void VisitExpr_(const VarPtr&) override {}
   void VisitExpr_(const IterArgPtr&) override {}
@@ -165,13 +164,13 @@ class WindowTypeExprChecker : public IRVisitor {
     CHECK_SPAN(entry && entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess,
                call->span_)
         << "tensor.view: bind the result of " << call->op_->name_
-        << " to a scalar variable before using it in window shape, steps or valid_shape";
+        << " to a scalar variable before using it in window shape, offsets, steps or valid_shape";
     IRVisitor::VisitExpr_(call);
   }
 
   void VisitExpr_(const SubmitPtr& submit) override {
     CHECK_SPAN(false, submit->span_) << "tensor.view: bind a submit result to a scalar variable before using "
-                                        "it in window shape, steps or valid_shape";
+                                        "it in window shape, offsets, steps or valid_shape";
   }
 };
 
@@ -188,7 +187,7 @@ TypePtr DeduceTensorWindowView(const std::vector<ExprPtr>& args, TensorLayout ne
   CHECK(view.layout != TensorLayout::DN || rank >= 2) << "tensor.view DN window requires rank >= 2";
   CHECK(!source->dtype_.IsPackedFp4() && storage_size::GetStorageBitWidth(source->dtype_) % 8 == 0)
       << "tensor.view window requires a byte-addressable scalar element";
-  WindowTypeExprChecker type_expr_checker;
+  WindowGeometryChecker geometry_checker;
   auto geometry = [&](size_t operand) {
     auto tuple = As<MakeTuple>(args[operand]);
     CHECK(tuple && tuple->elements_.size() == rank) << "tensor.view window geometry must match parent rank";
@@ -196,7 +195,7 @@ TypePtr DeduceTensorWindowView(const std::vector<ExprPtr>& args, TensorLayout ne
       auto scalar = As<ScalarType>(dim->GetType());
       CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
           << "tensor.view window geometry must contain integers";
-      if (operand != 2) type_expr_checker.VisitExpr(dim);
+      geometry_checker.VisitExpr(dim);
     }
     return tuple->elements_;
   };
