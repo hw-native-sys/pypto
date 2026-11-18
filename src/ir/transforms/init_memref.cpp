@@ -68,6 +68,7 @@
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -722,7 +723,7 @@ class InitMemRefMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(!As<TileType>(type) || static_size.has_value(), err_span)
         << "InitMemRef cannot represent the physical allocation size for static tile variable '" << var_name
         << "' without overflowing 64-bit bytes";
-    if (const auto tensor = As<TensorType>(type); tensor && tensor->tensor_view_) {
+    if (const auto tensor = AsTensorTypeLike(type); tensor && tensor->tensor_view_) {
       const auto& view = *tensor->tensor_view_;
       if (!view.stride.empty() && (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)) {
         static_size = StaticTensorViewSpanBytes(tensor, tensor->shape_);
@@ -1052,20 +1053,12 @@ class InitMemRefMutator : public IRMutator {
         }
       }
 
-      // Handle ops whose output lands in a specific input arg's MemRef.
-      //
-      // The registry's `set_output_reuses_input` slot, NOT the broader
-      // `ResultAliasedArgIndex`. The two answer different questions.  This pass
-      // asks a *physical* one — which argument's buffer does this result
-      // occupy, so the LHS can be bound to it — and only the registry
-      // declaration states that.  `ResultAliasedArgIndex` additionally covers
-      // host-level ops whose result names an argument for *lineage* purposes
-      // (`tensor.write`, and the `pld.tensor.*` collectives, whose result is
-      // the window they reduced or gathered into).  A window's storage belongs
-      // to the distributed runtime and is materialized later by
-      // LowerHostTensorCollectives, so binding the SSA result to it here
-      // rewrites a buffer this pass does not own.
-      auto reuse_arg_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+      // An InCore scalar write returns the destination descriptor at the same
+      // GM origin. Elsewhere, use explicit storage reuse: host collectives
+      // acquire their physical storage later in LowerHostTensorCollectives.
+      const auto reuse_arg_idx = IsInCoreType(func_type_) && IsOp(call, "tensor.write")
+                                     ? ResultAliasedArgIndex(call)
+                                     : op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
       if (reuse_arg_idx.has_value()) {
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call && *reuse_arg_idx < new_call->args_.size()) {
@@ -1084,7 +1077,7 @@ class InitMemRefMutator : public IRMutator {
     // breaking IfStmt return_vars that inherit the alias's empty MemRef.
     if (auto value_var = AsVarLike(new_value)) {
       if (As<TileType>(op->var_->GetType()) ||
-          (IsInCoreType(func_type_) && As<TensorType>(op->var_->GetType()))) {
+          (IsInCoreType(func_type_) && AsTensorTypeLike(op->var_->GetType()))) {
         auto result = ShareMemRefFrom(value_var, op, new_value);
         if (result) return result;
       }
@@ -1232,7 +1225,7 @@ class InitMemRefMutator : public IRMutator {
           else_yield && i < else_yield->value_.size() ? AsVarLike(else_yield->value_[i]) : nullptr;
       // A GM phi aliases its source descriptor only when both paths yield
       // that storage. PTO checks the corresponding descriptor SSA at emission.
-      if (As<TensorType>(new_if->return_vars_[i]->GetType()) &&
+      if (AsTensorTypeLike(new_if->return_vars_[i]->GetType()) &&
           (!then_var || !else_var ||
            GetTypeMemRef(then_var->GetType()) != GetTypeMemRef(else_var->GetType()))) {
         return nullptr;
@@ -1273,7 +1266,7 @@ class InitMemRefMutator : public IRMutator {
       const auto& result_type = new_return_vars[i]->GetType();
       const bool share =
           (As<TileType>(result_type) && yield_var && As<TileType>(yield_var->GetType())) ||
-          (IsInCoreType(func_type_) && As<TensorType>(result_type) && source && source->memref_);
+          (IsInCoreType(func_type_) && AsTensorTypeLike(result_type) && source && source->memref_);
       if (share) {
         auto new_type = CloneTypeWithMemRef(result_type, source->memref_, source->GetMemorySpace());
         auto new_rv =

@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -381,6 +382,20 @@ class ConstantScalarFillLoopCanonicalizer : public IRMutator {
         if (!extent || extent->value_ != 1 || !offset || offset->value_ != 0) {
           return nullptr;
         }
+      }
+
+      // An aligned fill can still step across holes in a sampled GM window.
+      // Prove that successive scalar stores advance by one physical element
+      // before replacing them with a single transfer. Bare tensors are ND
+      // packed; the singleton trailing extents above already prove that case.
+      if (const auto& view = target_type->tensor_view_) {
+        if (view->layout != TensorLayout::ND && view->layout != TensorLayout::DN) return nullptr;
+        const auto strides = view->stride.empty() ? tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                        target_type->shape_, view->layout)
+                                                  : view->stride;
+        if (strides.size() != target_type->shape_.size()) return nullptr;
+        auto pitch = As<ConstInt>(strides[*varying_axis]);
+        if (!pitch || pitch->value_ != 1) return nullptr;
       }
 
       std::vector<ExprPtr> logical_shape;

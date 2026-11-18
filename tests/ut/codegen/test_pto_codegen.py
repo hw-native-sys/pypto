@@ -4502,17 +4502,28 @@ def test_pto_codegen_tensor_view_default_pipeline_variants():
         assert any(f"pto.partition_view {view_ssa}" in line for line in _get_mlir_lines(body))
 
 
-@pytest.mark.parametrize("dynamic", [False, True])
-def test_nested_sampled_tensor_views_share_storage_and_compose_offsets(tmp_path, dynamic):
+@pytest.mark.parametrize(("dynamic", "distributed"), [(False, False), (True, False), (False, True)])
+def test_nested_sampled_tensor_views_share_storage_and_compose_offsets(tmp_path, dynamic, distributed):
     # Direct descriptor emission keeps even an unused view visible. Codegen
     # and MemRef analysis must agree on origins for both static and runtime
     # geometry without any load or store being present.
     span = ir.Span.unknown()
     ib = IRBuilder()
     with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-        root = f.param("source", ir.TensorType([12, 16], DataType.FP32))
+        # A distributed parameter with row padding exposes any lost root stride.
+        row_pitch = 32 if distributed else 16
+        root_tensor = (
+            ir.DistributedTensorType(
+                [12, 16], DataType.FP32, tensor_view=ir.TensorView([32, 1], ir.TensorLayout.ND)
+            )
+            if distributed
+            else ir.TensorType([12, 16], DataType.FP32)
+        )
+        root = f.param("source", root_tensor)
         origin = f.param("row", ir.ScalarType(DataType.INDEX)) if dynamic else 1
         pitch = f.param("step", ir.ScalarType(DataType.INDEX)) if dynamic else 3
+        if distributed:
+            f.param("source_ctx", ir.CommCtxType.get())
         outer = ib.let("outer", tensor_ops.view(root, [3, 8], offsets=[origin, 0], steps=[pitch, 2]))
         row = ib.var("i", ir.ScalarType(DataType.INDEX))
         with ib.for_loop(row, 0, 2, 1) as loop:
@@ -4527,6 +4538,7 @@ def test_nested_sampled_tensor_views_share_storage_and_compose_offsets(tmp_path,
     func = next(iter(initialized.functions.values()))
     root_type = func.params[0].type
     assert isinstance(root_type, ir.TensorType) and root_type.memref is not None
+    assert root_type.memref.size_ == (11 * row_pitch + 16) * 4
     root_base = root_type.memref.base_
     windows = []
 
@@ -4534,6 +4546,7 @@ def test_nested_sampled_tensor_views_share_storage_and_compose_offsets(tmp_path,
         def visit_assign_stmt(self, op):
             if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tensor.view").name:
                 assert isinstance(op.var.type, ir.TensorType) and op.var.type.memref is not None
+                assert isinstance(op.var.type, ir.DistributedTensorType) == distributed
                 memref = op.var.type.memref
                 assert memref.base_.same_as(root_base)
                 windows.append(memref)
@@ -4544,13 +4557,16 @@ def test_nested_sampled_tensor_views_share_storage_and_compose_offsets(tmp_path,
     if dynamic:
         assert all(not isinstance(window.byte_offset_, ir.ConstInt) for window in windows)
     else:
-        # Relative offsets (16, 52) are accumulated in bytes on the MemRef.
-        assert [(w.byte_offset_.value, w.size_) for w in windows] == [(16 * 4, 111 * 4), (68 * 4, 5 * 4)]
+        # Relative offsets compose through the loop-carried alias.
+        assert [(w.byte_offset_.value, w.size_) for w in windows] == [
+            (row_pitch * 4, (6 * row_pitch + 15) * 4),
+            ((4 * row_pitch + 4) * 4, 5 * 4),
+        ]
 
     mlir = _generate_mlir(initialized)
     lines = _get_mlir_lines(mlir)
-    first_delta = "%" if dynamic else "%c16_index"
-    last_delta = "%" if dynamic else "%c52_index"
+    first_delta = "%" if dynamic else f"%c{row_pitch}_index"
+    last_delta = "%" if dynamic else f"%c{3 * row_pitch + 4}_index"
     outer_ptr = _single_line(lines, f"pto.addptr %arg0, {first_delta}").split(" = ")[0]
     inner_ptr = _single_line(lines, f"pto.addptr {outer_ptr}, {last_delta}").split(" = ")[0]
     inner_descriptor = _single_line(lines, f"pto.make_tensor_view {inner_ptr},")

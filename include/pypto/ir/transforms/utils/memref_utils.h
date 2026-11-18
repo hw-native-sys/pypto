@@ -740,8 +740,8 @@ inline bool IsWindowTensorView(const CallPtr& call) {
 /// Dispatches: slice ops → stride-based offset, others → zero offset.
 inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type) {
   if (IsWindowTensorView(call)) {
-    auto parent = As<TensorType>(parent_type);
-    INTERNAL_CHECK_SPAN(parent, call->span_) << "tensor.view window source must be a Tensor";
+    auto parent = AsTensorTypeLike(parent_type);
+    INTERNAL_CHECK_SPAN(parent, call->span_) << "tensor.view window source must be a GM tensor";
     auto elements = TensorElementOffset(parent, As<MakeTuple>(call->args_[2]));
     const auto bits = storage_size::GetStorageBitWidth(parent->dtype_);
     CHECK_SPAN(bits > 0 && bits % 8 == 0, call->span_)

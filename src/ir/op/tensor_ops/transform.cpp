@@ -178,8 +178,8 @@ class WindowTypeExprChecker : public IRVisitor {
 // A sampled window preserves the source layout. All geometry operands use the
 // immediate parent's coordinates, including when that parent is itself sampled.
 TypePtr DeduceTensorWindowView(const std::vector<ExprPtr>& args, TensorLayout new_layout) {
-  auto source = As<TensorType>(args[0]->GetType());
-  CHECK(source) << "tensor.view window requires an ordinary GM tensor";
+  auto source = AsTensorTypeLike(args[0]->GetType());
+  CHECK(source) << "tensor.view window requires a GM tensor";
   const auto rank = source->shape_.size();
   CHECK(rank > 0) << "tensor.view window requires rank >= 1";
   TensorView view = source->tensor_view_.value_or(TensorView{});
@@ -232,7 +232,11 @@ TypePtr DeduceTensorWindowView(const std::vector<ExprPtr>& args, TensorLayout ne
     view.stride[i] = std::move(child_stride);
   }
   view.valid_shape = args.size() == 5 ? valid_shape : std::vector<ExprPtr>{};
-  return std::make_shared<TensorType>(shape, source->dtype_, std::nullopt, view);
+  if (auto dist = As<DistributedTensorType>(source)) {
+    return std::make_shared<DistributedTensorType>(shape, dist->dtype_, std::nullopt, std::move(view),
+                                                   dist->window_buffer_);
+  }
+  return std::make_shared<TensorType>(shape, source->dtype_, std::nullopt, std::move(view));
 }
 
 }  // anonymous namespace

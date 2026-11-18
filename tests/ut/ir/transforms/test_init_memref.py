@@ -292,6 +292,28 @@ class TestBasic:
 class TestMemRefSharing:
     """MemRef sharing: tile.store shares with output param, view ops share with input."""
 
+    def test_scalar_write_result_shares_window_origin_and_span(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tensor[[8, 8], pl.FP32]):
+                window = pl.tensor.view(x, [2, 2], offsets=[1, 1], steps=[2, 2])
+                updated = pl.tensor.write(window, [1, 1], pl.const(1.0, pl.FP32))
+                return updated
+
+        func = next(iter(passes.init_mem_ref()(Before).functions.values()))
+        assert isinstance(func.body, ir.SeqStmts)
+        refs = {
+            stmt.var.name_hint: stmt.var.type.memref
+            for stmt in func.body
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TensorType)
+        }
+        window, updated = refs["window"], refs["updated"]
+        assert window is not None and updated is not None
+        assert updated.same_as(window)
+        assert isinstance(window.byte_offset_, ir.ConstInt) and window.byte_offset_.value == 9 * 4
+        assert window.size_ == 19 * 4
+
     def test_store_shares_memref_with_output_param(self):
         """tile.store result shares MemRef with the output tensor parameter."""
 

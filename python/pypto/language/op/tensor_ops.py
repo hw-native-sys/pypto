@@ -2174,8 +2174,9 @@ def view(
     parent valid region. Dynamic geometry must obey these bounds at runtime.
     When a shape, step or valid extent comes from a memory read, bind the
     result to a scalar before constructing the window.
-    Window creation only describes addresses. Native ND tile DMA requires a
-    contiguous inner axis, and scalar tensor reads and writes assume packed indexing.
+    Window creation only describes addresses. A distributed tensor keeps its
+    window buffer. Scalar tensor reads and writes address elements using the
+    window strides. Native ND tile DMA requires a contiguous inner axis.
     The source layout is preserved. Without window geometry, the following
     shape/layout reinterpretation rules apply.
 

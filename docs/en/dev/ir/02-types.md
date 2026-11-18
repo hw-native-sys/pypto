@@ -449,10 +449,11 @@ offset is measured in the immediate parent's coordinates. Creating the
 descriptor has no payload memory effect. Bounds that depend on device values
 must hold at execution time. When a shape, step or valid extent comes from a
 memory read, assign the read to a scalar before constructing the view.
-Ordinary ND tile DMA on A2/A3 and A5 requires a
-contiguous inner axis. A sampled-column descriptor alone does not implement
-a sampled transfer. Scalar tensor reads and writes also assume packed indexing
-in the current PTO backend.
+If the source is a distributed tensor, the view retains its distributed type
+and its original window buffer. Scalar `tensor.read` and `tensor.write` use
+the view's physical strides. In the example above, index `[1, 1]` addresses
+`x[503, 2]`. Ordinary ND tile DMA on A2/A3 and A5 requires a contiguous
+inner axis.
 
 The packed canonical formulas (`BuildLogicalStridesFromLayout` in
 [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h)):
