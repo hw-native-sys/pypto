@@ -36,8 +36,9 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 
 ## 按需运行 A5 分布式 CI
 
-在以 `main` 为目标的开放 PR 对话区新发一条 `/ci a5-distributed` 评论，
+在以 `main` 为目标的开放 PR 中，等当前提交的自动 lint 通过后，在对话区新发一条 `/ci a5-distributed` 评论，
 即可对该 PR 的临时合并版本单独运行 `onboard-tests-a5-distributed`。
+若 lint 尚无运行记录、正在运行或已失败，请求会在设备排队前结束。lint 通过后需重新发送命令。
 PR 最新提交上的 `ci/a5-distributed` 检查链接到运行记录和测试产物。
 此任务仅由该评论命令触发。如果 PR 包含 `tests/st/distributed/test_l3_urma_async.py`，
 则运行四卡 A5 测试；否则运行占位测试。占位测试通过不代表已验证硬件行为。

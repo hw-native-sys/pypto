@@ -39,7 +39,9 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 ## Run A5 distributed CI on demand
 
 On an open PR targeting `main`, post `/ci a5-distributed` as a new conversation
-comment to run `onboard-tests-a5-distributed` on the PR's test merge. The
+comment after automatic lint passes for the current PR head to run
+`onboard-tests-a5-distributed` on its test merge. If lint is missing, running or
+failed, the request ends before device scheduling. Post the command again after lint passes. The
 `ci/a5-distributed` check on the PR head links to the run and its artifacts.
 Only the dedicated comment requests this job. When the PR contains
 `tests/st/distributed/test_l3_urma_async.py`, it runs the four-card A5 suite.

@@ -24,6 +24,7 @@ from ci_control import (
     MERGE_WAIT_SECONDS,
     api,
     current_base,
+    matching_lint_run,
     output,
     pages,
     pull,
@@ -157,6 +158,9 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
         if remaining <= 0:
             raise ValueError(f"GitHub test merge is not ready; retry {COMMAND} later")
         time.sleep(min(MERGE_POLL_SECONDS, remaining))
+    lint = matching_lint_run(repo, pr, COMMAND)
+    if lint["conclusion"] != "success":
+        raise ValueError(f"PR lint workflow did not pass; fix or rerun lint before {COMMAND}")
     latest = pull(repo, number)
     if latest["head"]["sha"] != head or latest.get("merge_commit_sha") != merge or current_base(repo) != base:
         raise ValueError(f"PR head or base changed during validation; post {COMMAND} again")

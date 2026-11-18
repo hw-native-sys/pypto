@@ -2917,6 +2917,7 @@ def a5_request(a5_control, monkeypatch, pr, event):
 
     monkeypatch.setattr(a5_control, "api", api)
     monkeypatch.setattr(a5_control, "output", outputs.update)
+    monkeypatch.setattr(a5_control, "matching_lint_run", lambda *_: {"conclusion": "success"})
     # The shared main-branch validators call the controller API directly.
     monkeypatch.setattr(sys.modules["ci_control"], "api", api)
     return pr, event, writes, outputs
@@ -2935,6 +2936,22 @@ def test_a5_command_pins_merge_and_creates_independent_check(a5_control, a5_requ
     assert payload["head_sha"] == HEAD
     assert payload["status"] == "in_progress"
     assert payload["details_url"].endswith("/runs/1234/attempts/1")
+
+
+@pytest.mark.parametrize("status", ["missing", "in_progress", "failure", "cancelled"])
+def test_a5_requires_passing_lint_before_publishing_outputs(a5_control, a5_request, monkeypatch, status):
+    pr, event, writes, outputs = a5_request
+
+    def lint(repo, candidate, command):
+        assert repo == REPO and candidate == pr and command == "/ci a5-distributed"
+        if status in {"missing", "in_progress"}:
+            raise ValueError(f"Lint {status} before {command}")
+        return {"conclusion": status}
+
+    monkeypatch.setattr(a5_control, "matching_lint_run", lint)
+    with pytest.raises(ValueError, match="/ci a5-distributed"):
+        a5_control.prepare(REPO, event)
+    assert not writes and not outputs
 
 
 @pytest.mark.parametrize("case", ["suffix", "full", "edited", "issue"])
@@ -3136,6 +3153,7 @@ def test_a5_distributed_requires_its_own_comment(control):
     assert set(workflow[True]) == {"issue_comment"}
     assert "github.event.issue.number" in workflow["run-name"]
     assert "contains(" in jobs["changes"]["if"]
+    assert jobs["changes"]["permissions"]["actions"] == "read"
     assert "concurrency" not in workflow
     assert jobs[job]["concurrency"]["cancel-in-progress"] is False
     assert workflow["permissions"] == {}

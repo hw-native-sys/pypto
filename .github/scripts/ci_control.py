@@ -362,7 +362,7 @@ def effective_jobs(repo: str, run: dict[str, Any]) -> list[dict[str, Any]]:
     return list(latest.values())
 
 
-def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
+def matching_lint_run(repo: str, pr: dict[str, Any], command: str = "/ci full") -> dict[str, Any]:
     """Reuse the latest automatic run for this PR head across event base snapshots."""
     # PR metadata and separate pull_request events can name different bases for
     # the same head. Filtering by base can select a cancelled run over its newer
@@ -399,16 +399,16 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
             run = candidate
             break
     if run is None:
-        raise ValueError("No matching PR lint run; update the PR branch and wait for lint before /ci full")
+        raise ValueError(f"No matching PR lint run; update the PR branch and wait for lint before {command}")
     # Wait for the attempt to finish so not-yet-indexed rerun jobs cannot make
     # an earlier success look reusable while that check is actually rerunning.
     if run["status"] != "completed":
-        raise ValueError("PR lint run is still running; wait before /ci full")
+        raise ValueError(f"PR lint run is still running; wait before {command}")
     jobs = effective_jobs(repo, run)
     for name in ("changes", "pre-commit", "clang-tidy"):
         selected = [job for job in jobs if job["name"] == name]
         if len(selected) != 1 or selected[0]["status"] != "completed":
-            raise ValueError(f"PR lint job {name} is missing or still running; wait before /ci full")
+            raise ValueError(f"PR lint job {name} is missing or still running; wait before {command}")
         result = selected[0]["conclusion"]
         if name == "clang-tidy" and result == "skipped":
             files = pages(f"repos/{repo}/pulls/{pr['number']}/files")
@@ -429,7 +429,7 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
             ):
                 continue
         if result != "success":
-            raise ValueError(f"PR lint job {name} did not pass; fix or rerun lint before /ci full")
+            raise ValueError(f"PR lint job {name} did not pass; fix or rerun lint before {command}")
     report(f"Reusing lint from https://github.com/{repo}/actions/runs/{run['id']}")
     return run
 
