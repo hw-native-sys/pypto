@@ -68,14 +68,22 @@ void BufferRootCollector::VisitStmt_(const IfStmtPtr& if_stmt) {
   for (size_t i = 0;
        i < if_stmt->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
        ++i) {
-    auto roots = ResolveRootCandidates(then_yield->value_[i]);
-    auto else_roots = ResolveRootCandidates(else_yield->value_[i]);
+    const auto& then_value = then_yield->value_[i];
+    const auto& else_value = else_yield->value_[i];
+    const auto& then_roots = ResolveRootCandidates(then_value);
+    const auto& else_roots = ResolveRootCandidates(else_value);
+    const bool then_ambiguous = IsAmbiguous(then_value);
+    const bool else_ambiguous = IsAmbiguous(else_value);
+    if (follow_reshape_ && !then_roots.empty() && &then_roots == &else_roots &&
+        then_ambiguous == else_ambiguous) {
+      ShareRootCandidates(if_stmt->return_vars_[i], then_value);
+      continue;
+    }
+    auto roots = then_roots;
     for (const Var* root : else_roots) {
       if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
     }
-    const bool unresolved = roots.empty() || IsAmbiguous(then_yield->value_[i]) ||
-                            IsAmbiguous(else_yield->value_[i]) ||
-                            ResolveRootCandidates(then_yield->value_[i]).empty() || else_roots.empty();
+    const bool unresolved = then_roots.empty() || else_roots.empty() || then_ambiguous || else_ambiguous;
     RecordRootCandidates(if_stmt->return_vars_[i], roots, unresolved);
   }
 }
