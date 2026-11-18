@@ -20,6 +20,8 @@ signature and directions, the argument order, and the absence of any residual
 public collective.
 """
 
+from typing import TypeGuard
+
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -111,7 +113,7 @@ def _assert_no_nested_call_like(stmt: ir.Stmt) -> None:
     """
     nested: list[ir.Call | ir.Submit] = []
 
-    def _is_call_like(value: object) -> bool:
+    def _is_call_like(value: object) -> TypeGuard[ir.Call | ir.Submit]:
         return isinstance(value, (ir.Call, ir.Submit))
 
     class _Walker(ir.IRVisitor):
