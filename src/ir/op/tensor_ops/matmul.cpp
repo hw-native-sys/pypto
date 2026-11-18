@@ -430,6 +430,36 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(ProveValidExtentEqual(lhs_valid[1], rhs_valid[0]) != ProofResult::kFalse, span)
       << kOpName << " requires matching logical valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
       << " and rhs K=" << PythonPrint(rhs_valid[0]);
+  if (packed) {
+    // A fixed-size scale tile must satisfy both the physical-K matmul and valid-K binding.
+    const auto check_valid_k = [&](const ExprPtr& extent, const char* side) {
+      const auto valid = GetConstantDimension(extent);
+      if (!valid) return;
+      const int64_t physical = k_lhs->value_;
+      CHECK_SPAN(*valid > 0, span) << kOpName << " requires positive logical valid K, but got " << side
+                                   << " K=" << *valid;
+      CHECK_SPAN(*valid > physical - 32 && *valid <= physical, span)
+          << kOpName << " requires " << side
+          << " logical valid K to use the same scale-group count as physical K, but got physical K="
+          << physical << " and valid K=" << *valid;
+    };
+    check_valid_k(lhs_valid[1], "lhs");
+    check_valid_k(rhs_valid[0], "rhs");
+
+    const auto check_scale_valid = [&](const TensorTypePtr& scale, const ExprPtr& rows, const ExprPtr& cols,
+                                       const char* name, bool allow_partial) {
+      CHECK_SPAN(allow_partial || scale->tensor_view_->valid_shape.empty(), span)
+          << kOpName << " requires " << name << " to be fully valid for a packed MX scale layout";
+      const auto& valid = GetEffectiveTensorValidShape(*scale);
+      CHECK_SPAN(valid.size() == 2 && DimensionsEqual(valid[0], rows) && DimensionsEqual(valid[1], cols),
+                 span)
+          << kOpName << " requires " << name << " valid shape to match logical data validity ["
+          << PythonPrint(rows) << ", " << PythonPrint(cols) << "]";
+    };
+    check_scale_valid(lhs_scale, lhs_valid[0], lhs_scale->shape_[1], "lhs_scale",
+                      lhs_layout == TensorLayout::MX_A_ND);
+    check_scale_valid(rhs_scale, rhs_scale->shape_[0], rhs_valid[1], "rhs_scale", false);
+  }
   std::vector<ExprPtr> output_shape{lhs_shape[0], rhs_shape[1]};
   TensorView view;
   view.valid_shape = {lhs_valid[0], rhs_valid[1]};

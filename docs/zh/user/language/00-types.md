@@ -262,6 +262,8 @@ FP16/BF16、区域完全有效、`K%64==0`、axis1 的 `M%16==0` 及 axis0 的 `
 默认采用 OCP；FP16/BF16 的 NV 仅支持 axis0。不支持 E1M2 量化。
 打包输出需要 PYPTO/DSA_RP 静态分配。`pl.tile.quant_mx_raw` 提供原始 UINT8 指数和显式工作区。
 Tensor `pl.matmul_mx` 接受两个 FP8E4M3FN 操作数或两个打包 FP4 操作数，使用 FP8E8M0 缩放因子，返回二维 FP32 张量。
+打包 FP4 的两侧逻辑有效 K 必须为正且相同，所用的 32 元素缩放分组数须与物理 K 一致。
+`MX_A_ZZ` 和 `MX_B_NN` 分别要求 M 和 N 完全有效，`MX_A_ND` 可匹配部分有效的 M。
 仍不支持 tensor MX 累加、bias、transpose 标志、批处理和动态 shape。
 
 ### 动态 shape

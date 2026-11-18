@@ -340,8 +340,12 @@ OCP is the default; NV FP16/BF16 is limited to axis0. E1M2 quantization is
 unsupported. PYPTO/DSA_RP static allocation is required for packed output.
 `pl.tile.quant_mx_raw` exposes raw UINT8 exponents and explicit workspaces.
 Tensor `pl.matmul_mx` accepts two FP8E4M3FN operands or two packed FP4 operands
-with FP8E8M0 scales and returns a 2-D FP32 tensor. Tensor MX accumulation,
-bias, transpose flags, batches, and dynamic shapes remain unsupported.
+with FP8E8M0 scales and returns a 2-D FP32 tensor. For packed FP4, valid K
+must be positive, agree across both operands, and span the same number of
+32-element scale groups as physical K. `MX_A_ZZ` and `MX_B_NN` require fully
+valid M and N respectively. `MX_A_ND` can match a partial M. Tensor MX
+accumulation, bias, transpose flags, batches, and dynamic shapes remain
+unsupported.
 
 ### Dynamic shapes
 

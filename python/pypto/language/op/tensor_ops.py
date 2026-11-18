@@ -820,9 +820,13 @@ def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) ->
     and ``[K, N/2]``; DN carriers have ``[M/2, K]`` and ``[K/2, N]``.
     Each operand may independently use ND or DN. Scale shapes always count
     logical values: ``[M, K/32]`` and ``[K/32, N]``. Both operands must have
-    matching logical valid K extents. Native FP4 requires Ascend950 and
-    PTOAS v0.74. To form complete pairs during the Mat load,
-    the valid extent on axis 0 (ND) or axis 1 (DN) must be provably even.
+    matching logical valid K extents. For packed FP4, valid K must be
+    positive and use the same number of 32-element scale groups as physical K.
+    Packed A and B scale layouts require fully valid M and N respectively.
+    Row-major MX_A_ND scales may match a partial logical M. To form complete
+    pairs during the Mat load, the valid extent on axis 0 (ND) or axis 1 (DN)
+    must be provably even. Native FP4 requires Ascend950 and PTOAS v0.74 or a
+    compatible newer build.
 
     Args:
         lhs: A-side quantized data tensor (logical shape ``[M, K]``).

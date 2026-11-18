@@ -214,6 +214,59 @@ class TestTensorMatmulMx:
         with pytest.raises(ValueError, match="matching logical valid K.*lhs K=126 and rhs K=124"):
             ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs_mismatched, rhs_scale)
 
+    @staticmethod
+    def _with_valid_shape(operand: ir.Var, layout, valid: list[int]) -> ir.Var:
+        assert isinstance(operand.type, ir.TensorType)
+        view = ir.TensorView(layout=layout, valid_shape=valid)
+        return ir.Var(
+            operand.name_hint,
+            ir.TensorType(operand.type.shape, operand.type.dtype, tensor_view=view),
+            operand.span,
+        )
+
+    @pytest.mark.parametrize(
+        "valid_k,message",
+        [(0, "requires positive logical valid K"), (64, "same scale-group count as physical K")],
+    )
+    def test_packed_rejects_invalid_scale_group_count(self, valid_k, message):
+        lhs, lhs_scale, rhs, rhs_scale = self._packed_operands()
+        lhs = self._with_valid_shape(lhs, pl.ND, [32, valid_k // 2])
+        rhs = self._with_valid_shape(rhs, pl.ND, [valid_k, 96])
+        with pytest.raises(ValueError, match=message):
+            ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+
+    @pytest.mark.parametrize(
+        "index,layout,valid,scale",
+        [
+            (0, pl.DN, [8, 128], "lhs_scale"),
+            (2, pl.ND, [128, 64], "rhs_scale"),
+        ],
+    )
+    def test_packed_rejects_partial_data_with_full_packed_scales(self, index, layout, valid, scale):
+        operands = self._packed_operands(lhs_layout=pl.DN)
+        operands[index] = self._with_valid_shape(operands[index], layout, valid)
+        with pytest.raises(ValueError, match=f"requires {scale} valid shape to match logical data validity"):
+            ir.op.tensor.matmul_mx(*operands)
+
+    @pytest.mark.parametrize(
+        "index,layout,valid,scale",
+        [
+            (1, pl.MX_A_ZZ, [16, 4], "lhs_scale"),
+            (3, pl.MX_B_NN, [4, 128], "rhs_scale"),
+        ],
+    )
+    def test_packed_rejects_partial_packed_scales(self, index, layout, valid, scale):
+        operands = self._packed_operands()
+        operands[index] = self._with_valid_shape(operands[index], layout, valid)
+        with pytest.raises(ValueError, match=f"requires {scale} to be fully valid"):
+            ir.op.tensor.matmul_mx(*operands)
+
+    def test_packed_mx_a_nd_requires_all_scale_groups(self):
+        lhs, lhs_scale, rhs, rhs_scale = self._packed_operands()
+        lhs_scale = self._with_valid_shape(lhs_scale, pl.MX_A_ND, [32, 2])
+        with pytest.raises(ValueError, match="requires lhs_scale valid shape to match logical data validity"):
+            ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+
     @pytest.mark.parametrize(
         "side,layout,valid,message",
         [

@@ -67,7 +67,7 @@ below. Native MXFP4 quantization supports E2M1 only.
 | `fillpad`, `fillpad_expand`, `fillpad_inplace` | Both formats, ND Vec; zero/min/max padding preserves the valid carrier rectangle |
 | DN numerical casts | Full static dense 2D BF16↔packed or packed↔packed; PYPTO/DSA_RP static addresses; partial, padded, and boxed cases are rejected |
 | Direct packed `reshape` or `transpose` | Unsupported; reshape a byte alias where the existing alias contract permits it |
-| Native packed FP4 `matmul_mx` | Tensor and Tile APIs: both formats and mixed E2M1/E1M2 pairs, FP32 accumulator; requires PTOAS v0.74 |
+| Native packed FP4 `matmul_mx` | Tensor and Tile APIs: both formats and mixed E2M1/E1M2 pairs, FP32 accumulator; requires PTOAS v0.74 or a compatible newer build |
 | MXFP4 `quant_mx` | E2M1 only, FP16/BF16 source, OCP or supported axis0 NV; PYPTO/DSA_RP static allocation |
 | `pl.tile.quant_mx_raw` | Native E2M1 payload (INT8 for MXFP8) and raw UINT8 exponents with explicit workspaces; static partial validity and axis0 interleaving |
 | Ascend910/A2A3 packed FP4 execution | Unsupported |
@@ -90,7 +90,8 @@ PyPTO keeps the carrier ABI above and expands the packed axis of Mat/Left/Right
 physical and valid dimensions when emitting PTO. GM and Vec descriptors retain
 carrier dimensions; allocation byte sizes are unchanged. Executable generation
 probes the selected assembler's logical operand, accumulator, and scale geometry
-before enabling native FP4 MX. Select the official PTOAS v0.74 release via `PTOAS_ROOT`. IR-only generation (`skip_ptoas=True`) remains available.
+before enabling native FP4 MX. Select PTOAS v0.74 or a compatible newer build
+via `PTOAS_ROOT`. IR-only generation (`skip_ptoas=True`) remains available.
 
 ## Numerical cast constraints
 
