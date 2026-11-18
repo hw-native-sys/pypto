@@ -752,20 +752,18 @@ Pass CanonicalizeTileSlice();
 Pass InferTileMemorySpace();
 
 /**
- * @brief Insert tile.tget_scale_addr bindings before MX matmul consumers
+ * @brief Insert tile.tget_scale_addr bindings before MX matmul and MX GEMV consumers
  *
  * After InferTileMemorySpace has resolved Left/LeftScale and Right/RightScale
  * operand spaces, inserts compiler-generated ``tile.tget_scale_addr(scale, data)``
- * immediately before each ``tile.matmul_mx`` / ``_acc`` / ``_bias`` and rewrites
- * the matmul to consume the bound scale SSA values.
+ * for the base, accumulation, and bias variants of ``tile.matmul_mx`` and
+ * ``tile.gemv_mx``. Rewrites the consumers to use the bound scale SSA values.
  *
  * Applies to all InCore-variant functions (``InCore``, ``AIC``, ``AIV``), including
  * mixed-kernel cube/vector bodies written directly as AIC/AIV.
  *
- * Bindings are not reused across consumers because tget mutates a shared
- * physical scale buffer whose aliases cannot be represented by SSA identity.
- * The pass therefore inserts a fresh binding at every consumer even when its
- * scale operand is already the result of an earlier binding.
+ * A straight-line consumer can reuse the latest same-side binding if both
+ * operands have the same SSA identity and no invalidating operation intervenes.
  *
  * Requirements:
  * - Tile memory spaces must already be inferred (``TileMemoryInferred``)

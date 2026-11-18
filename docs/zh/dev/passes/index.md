@@ -51,7 +51,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 20 | [AutoTileMatmulL0](20-auto_tile_matmul_l0.md) | 依据后端 L0 容量选择 L0 tile 形状 `(m, n, k)` 并据此分块 matmul |
 | 21 | [CanonicalizeTileSlice](21-canonicalize_tile_slice.md) | 把 `tile.slice` 下降为规范的 `tile.extract` 形式 |
 | 22 | [InferTileMemorySpace](22-infer_tile_memory_space.md) | 推断每个 tile 的片上 `MemorySpace`，并插入 `tile.move` 消解残留不匹配 |
-| 23 | [InsertMxScaleAddr](23-insert_mx_scale_addr.md) | 在 memory space 解析完成后，于 MX matmul 消费者前插入 `tile.tget_scale_addr` |
+| 23 | [InsertMxScaleAddr](23-insert_mx_scale_addr.md) | 在存储空间解析完成后，于 MX matmul 和 MX GEMV 消费者前插入 `tile.tget_scale_addr` |
 | 24 | [ResolveBackendOpLayouts](24-resolve_backend_op_layouts.md) | 修正逐元素算子所需的后端 tile layout |
 | 25 | [LowerAutoVectorSplit](25-lower_auto_vector_split.md) | 准备用户编写的 `split_aiv` 区域，并拒绝混合 kernel 的隐式拆半 |
 | 26 | [ExpandMixedKernel](26-expand_mixed_kernel.md) | 把混合 InCore 函数拆分为独立的 AIC（Cube）与 AIV（Vector）kernel |

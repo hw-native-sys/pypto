@@ -1,6 +1,6 @@
 # InsertMxScaleAddr Pass
 
-在每个 MX matmul 消费者之前插入编译器生成的 `tile.tget_scale_addr` 绑定；前提是操作数 memory space 已经全部确定。
+操作数的存储空间全部确定后，在 MX matmul 和 MX GEMV 消费者之前插入编译器生成的 `tile.tget_scale_addr` 绑定。
 
 ## 概述
 
@@ -11,7 +11,7 @@ bound_scale = tile.tget_scale_addr(scale, data)
 matmul_mx(..., bound_scale, ...)
 ```
 
-`tile.tget_scale_addr` 有意不暴露在公共 `pypto.language` API 中。用户只编写高层 `matmul_mx` 算子族；编译器根据 matmul 操作数位置推导左右侧。低层 `ir.op.tile.tget_scale_addr` 仍供编译器构造与 IR 解析使用，且只接受已解析的 `(LeftScale, Left)` 与 `(RightScale, Right)` 配对，data tile 支持 FP8E4M3FN、FP8E5M2 或打包 FP4。
+用户调用公开的 `matmul_mx` 或 `gemv_mx` 算子族。编译器根据操作数位置推导左右侧。低层 `ir.op.tile.tget_scale_addr` 供编译器构造与 IR 解析使用，接受已解析的 `(LeftScale, Left)` 和 `(RightScale, Right)` 配对，数据使用FP8E4M3FN、FP8E5M2 或原生打包 FP4，缩放使用 FP8E8M0。
 
 **流水线位置**：紧接在 [`InferTileMemorySpace`](22-infer_tile_memory_space.md) 之后，[`ResolveBackendOpLayouts`](24-resolve_backend_op_layouts.md) 之前。
 
@@ -35,11 +35,11 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 
 ## 算法
 
-遍历每个 InCore 变体函数体。对每个 `tile.matmul_mx` / `tile.matmul_mx_acc` / `tile.matmul_mx_bias` 赋值：
+遍历每个 InCore 变体函数体，处理 `tile.matmul_mx`、`tile.matmul_mx_acc`、`tile.matmul_mx_bias`、`tile.gemv_mx`、`tile.gemv_mx_acc` 和 `tile.gemv_mx_bias` 赋值。
 
-1. 按算子配对 data/scale 操作数下标（`matmul_mx` / `_bias` 为 `(0,1)/(2,3)`；`_acc` 为 `(1,2)/(3,4)`）。
+1. 配对数据和缩放操作数下标。两个算子族的基础和偏置形式均为 `(0,1)/(2,3)`，累加形式为 `(1,2)/(3,4)`。
 2. 要求操作数为 Var-like（`Var` 或 `IterArg`），且 memory space 已构成合法的 LeftScale↔Left 或 RightScale↔Right 配对。
-3. 只有两个 SSA 操作数均未变化、且中间没有使绑定失效的操作时，才复用该侧最近的绑定；否则在 matmul 前插入 `tile.tget_scale_addr(scale, data)`。把 matmul 改写为使用绑定后的 scale SSA。
+3. 只有两个 SSA 操作数均未变化、且中间没有使绑定失效的操作时，才复用该侧最近的绑定。否则在消费者前插入 `tile.tget_scale_addr(scale, data)`，并将消费者改写为使用绑定后的 scale SSA。
 
 `NormalizedStmtStructure` 可能 unwrap 单语句 `SeqStmts`，使 `if` / `for` / `while`（或函数）body 成为裸 `AssignStmt`。插入绑定时，pass 会把该 body 包成 `SeqStmts`，处理方式与 `InsertCommFence` 的裸 body 逻辑一致。
 
