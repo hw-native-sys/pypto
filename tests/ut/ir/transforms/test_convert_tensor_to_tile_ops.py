@@ -8549,21 +8549,50 @@ class TestCalleeDirectionPropagationThroughCarries:
                 returned = self.write(x, flat, b)
                 self.consume(returned)
 
-        before = Before
-        if inline_return:
-            source = ir.python_print(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                pl.tile.store(value, [0, 0], first)
+                pl.tile.store(value, [0, 0], second)
+                return second
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(buf, [1, 0], [1, 64], [1, 64]), [0, 0], buf)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.InOut[pl.Tensor[[128], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[2, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                returned = self.write(x, flat, b)
+                self.consume(returned)
+
+        def inline_store_return(program):
+            source = ir.python_print(program)
             old = "        pl.tile.store(value, [0, 0], second)\n        return second"
             assert old in source
-            before = pl.parse_program(
-                source.replace(old, "        return pl.tile.store(value, [0, 0], second)")
-            )
-        after = passes.convert_tensor_to_tile_ops()(before)["main"]
-        assert after is not None
-        assert list(after.param_directions) == [
-            ir.ParamDirection.In,
-            ir.ParamDirection.InOut,
-            ir.ParamDirection.InOut,
-        ]
+            new = "        return pl.tile.store(value, [0, 0], second)"
+            return pl.parse_program(source.replace(old, new))
+
+        before, expected = (
+            (inline_store_return(Before), inline_store_return(Expected))
+            if inline_return
+            else (Before, Expected)
+        )
+        after = passes.convert_tensor_to_tile_ops()(before)
+        ir.assert_structural_equal(after, expected)
 
 
 class TestTensorCastConversion:

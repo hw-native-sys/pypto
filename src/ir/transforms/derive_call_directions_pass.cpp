@@ -157,22 +157,34 @@ class PriorWriterCollector {
     if (candidates.size() == 1) {
       const auto* root = candidates.front();
       if (seen_roots_.insert(root).second) root_history_.push_back(root);
-    } else if (indexed_candidates_.insert(&candidates).second) {
-      for (const auto* root : candidates) candidate_writers_[root].push_back(&candidates);
+    } else {
+      active_candidate_state_ = ++next_candidate_state_;
+      if (indexed_candidates_.insert(&candidates).second) {
+        for (const auto* root : candidates) candidate_writers_[root].push_back(&candidates);
+      }
     }
   }
 
-  bool HasPriorWriter(const Var* root) const {
+  bool HasPriorWriter(const Var* root) {
     if (seen_roots_.count(root) != 0) return true;
+    if (active_candidate_state_ == 0) return false;
     auto candidates = candidate_writers_.find(root);
     if (candidates == candidate_writers_.end()) return false;
-    return std::any_of(candidates->second.begin(), candidates->second.end(),
-                       [&](const auto* set) { return seen_candidates_.count(set) != 0; });
+    // Opposite branches can query the same root from the same snapshot. The
+    // indexed sets may grow, but a new set is inactive for older snapshots.
+    auto& reads = candidate_queries_[active_candidate_state_];
+    const auto [query, inserted] = reads.try_emplace(root, false);
+    if (inserted) {
+      query->second = std::any_of(candidates->second.begin(), candidates->second.end(),
+                                  [&](const auto* set) { return seen_candidates_.count(set) != 0; });
+    }
+    return query->second;
   }
 
   void AnalyzeIf(const IfStmtPtr& stmt) {
     const auto prior_candidates = candidate_history_.size();
     const auto prior_roots = root_history_.size();
+    const auto prior_candidate_state = active_candidate_state_;
     AnalyzeScope(stmt->then_body_);
     if (!stmt->else_body_.has_value() || !stmt->else_body_.value()) return;
 
@@ -188,6 +200,7 @@ class PriorWriterCollector {
       seen_roots_.erase(root_history_.back());
       root_history_.pop_back();
     }
+    active_candidate_state_ = prior_candidate_state;
     AnalyzeScope(stmt->else_body_.value());
     for (const auto* candidates : then_writes) RememberWrites(*candidates);
   }
@@ -246,6 +259,9 @@ class PriorWriterCollector {
   std::unordered_set<const RootCandidates*> seen_candidates_;
   std::unordered_set<const RootCandidates*> indexed_candidates_;
   std::unordered_map<const Var*, std::vector<const RootCandidates*>> candidate_writers_;
+  size_t active_candidate_state_ = 0;
+  size_t next_candidate_state_ = 0;
+  std::unordered_map<size_t, std::unordered_map<const Var*, bool>> candidate_queries_;
   std::vector<const Var*> root_history_;
   std::vector<const RootCandidates*> candidate_history_;
 };
