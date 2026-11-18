@@ -52,7 +52,7 @@ Other dtypes receive a diagnostic rather than an invalid floating-point literal.
 The codegen generates MLIR in the following fixed order:
 
 1. **Constants**: `arith.constant` for index and float values
-2. **Tensor Views**: `pto.make_tensor_view` for all tensor parameters
+2. **Tensor Views**: `pto.make_tensor_view` for referenced GM tensor parameters that need views
 3. **Allocations**: `pto.alloc_tile` for all tile buffers (based on MemRef)
 4. **Operations**: Function body with load, compute, store operations
 
@@ -443,7 +443,8 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
 
 ### Tensor View Generation
 
-For each `TensorType` parameter, the codegen generates:
+Tile and Buffer codegen prepare entry views for referenced GM tensors, excluding raw workspace pointers.
+The emitter materializes `pto.make_tensor_view` operands from the prepared shape, strides, and layout:
 
 ```mlir
 %0 = pto.make_tensor_view %arg0,
@@ -456,7 +457,7 @@ For each `TensorType` parameter, the codegen generates:
 **Key aspects**:
 
 - Shape from `TensorType.shape_`
-- Strides computed as row-major: `[dim1, 1]` for 2D tensors
+- Explicit strides take precedence. A packed 2D ND view uses `[dim1, 1]`.
 - Constants (`%c32_index`, `%c1_index`) auto-generated, including any that appear only inside a composite shape/stride expression
 - Composite dims lower to arithmetic, e.g. `M * 2` → `arith.muli %M, %c2_index`
 - Tensor view type uses `?` for each dimension (e.g., `?x?xf32` for 2D)
@@ -464,13 +465,12 @@ For each `TensorType` parameter, the codegen generates:
 #### Layout Handling for 2D Tensors
 
 The `layout` attribute on `make_tensor_view` tells PTOAS the memory layout
-convention. The codegen determines shape, strides, and layout based on the
-tensor's IR type and shape:
+convention. View preparation uses the tensor's IR type and shape:
 
 | Case | Shape emitted | Strides emitted | Layout | Notes |
 | ---- | ------------- | --------------- | ------ | ----- |
 | ND `[R, C]` | `[R, C]` | `[C, 1]` | `nd` | Standard row-major |
-| DN `[R, C]` (both > 1) | `[C, R]` | `[1, C]` | `dn` | Shape swapped for PTOAS column-major convention |
+| DN `[R, C]` (both > 1) | `[R, C]` | `[1, R]` | `dn` | Packed column-major |
 | Column vector `[M, 1]` | `[M, 1]` | `[1, M]` | `dn` | Auto-detected, no DN annotation needed |
 
 **Column vector auto-DN**: Any 2D tensor whose last dimension is a compile-time
