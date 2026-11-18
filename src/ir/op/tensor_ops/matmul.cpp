@@ -396,6 +396,7 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires matching K dimensions, but got " << k_lhs->value_ << " and " << k_rhs->value_;
   CHECK_SPAN(m->value_ % 16 == 0 && n->value_ % 32 == 0 && k_lhs->value_ % 64 == 0, span)
       << kOpName << " requires M divisible by 16, N divisible by 32, and K divisible by 64";
+  // A 16-row Left box holds 32 logical FP4 rows because the bridge packs two rows per carrier row.
   CHECK_SPAN(!packed || m->value_ % 32 == 0, span)
       << kOpName << " requires FP4 logical M divisible by 32 for boxed carrier rows";
   CHECK_SPAN(!packed || n->value_ % 64 == 0, span)
