@@ -64,6 +64,45 @@ def update_check(repo: str, check_id: str, payload: dict[str, Any]) -> None:
             time.sleep(2**retry)
 
 
+def head_checks(repo: str, head: str) -> list[dict[str, Any]]:
+    path = f"repos/{repo}/commits/{head}/check-runs?check_name=ci%2Fa5-distributed&filter=all"
+    return sorted(pages(path, "check_runs"), key=lambda check: check["id"], reverse=True)
+
+
+def reusable_request(repo: str, number: int, checks: list[dict[str, Any]], run_id: str) -> str | None:
+    """Look up the owning workflow so cancelled or failed publishers never block a retry."""
+    owners: dict[str, list[dict[str, Any]]] = {}
+    for check in checks:
+        owner = re.fullmatch(r"([1-9][0-9]*)(?::[1-9][0-9]*:[1-9][0-9]*)?", check["external_id"] or "")
+        if owner and owner[1] != run_id and check["app"]["slug"] == "github-actions":
+            owners.setdefault(owner[1], []).append(check)
+    for owner_id, owned in owners.items():
+        try:
+            run = api(f"repos/{repo}/actions/runs/{owner_id}")
+        except subprocess.CalledProcessError as error:
+            if "HTTP 404" in (error.stderr or ""):
+                continue  # The historical workflow run has been deleted.
+            raise
+        if (
+            run["path"] != ".github/workflows/ci-a5-distributed.yml"
+            or run["event"] != "issue_comment"
+            or run["head_branch"] != "main"
+            or not re.fullmatch(rf"A5 distributed PR #{number} \(comment [1-9][0-9]*\)", run["display_title"])
+        ):
+            continue
+        url = attempt_url(repo, owner_id, str(run["run_attempt"]))
+        if run["status"] != "completed" or (
+            run["conclusion"] == "success"
+            and any(check["conclusion"] == "success" and same_attempt(check, url) for check in owned)
+        ):
+            return url
+    return None
+
+
+def same_attempt(check: dict[str, Any], url: str) -> bool:
+    return (check["output"]["summary"] or "").startswith(f"[Workflow attempt]({url})\n")
+
+
 def attempt_check(repo: str, original_id: str, run_id: str, attempt: str) -> str:
     """Select or create the check for a rerun under the shared writer queue."""
     if attempt == "1":
@@ -72,17 +111,29 @@ def attempt_check(repo: str, original_id: str, run_id: str, attempt: str) -> str
     if original["name"] != "ci/a5-distributed" or original["external_id"] != run_id:
         raise ValueError("Unexpected A5 check ownership")
     url = attempt_url(repo, run_id, attempt)
-    if (original["output"]["summary"] or "").startswith(f"[Workflow attempt]({url})\n"):
-        # A full rerun executed prepare and already supplied a new check ID.
-        return original_id
-    # GitHub retains the conclusion of a completed Actions check even after
-    # accepting an in_progress PATCH. Publish a fresh check for this attempt.
-    key = f"{run_id}:{attempt}:{original_id}"
     head = sha(original["head_sha"])
-    path = f"repos/{repo}/commits/{head}/check-runs?check_name=ci%2Fa5-distributed&filter=all"
-    for check in pages(path, "check_runs"):
-        if check["app"]["id"] == original["app"]["id"] and check["external_id"] == key:
-            return str(check["id"])
+    key = f"{run_id}:{attempt}:{original_id}"
+    family = [
+        check
+        for check in head_checks(repo, head)
+        if check["app"]["id"] == original["app"]["id"]
+        and re.fullmatch(rf"{run_id}:[1-9][0-9]*:{original_id}", check["external_id"] or "")
+    ]
+    family.append(original)
+    current = next((c for c in family if c["external_id"] == key or same_attempt(c, url)), None)
+    pending = [c for c in family if c["status"] != "completed"]
+    if current or pending:
+        selected = current or pending[0]
+        for check in pending:
+            if check["id"] != selected["id"]:
+                # Earlier versions could strand multiple checks after repeated
+                # publisher outages. Retire only siblings of this exact request.
+                update_check(repo, str(check["id"]), {"status": "completed", "conclusion": "cancelled"})
+        if current is None:
+            update_check(repo, str(selected["id"]), attempt_fields(url, "Retrying the distributed check."))
+        return str(selected["id"])
+    # GitHub retains the conclusion of a completed check after an in_progress
+    # PATCH. Only a rerun with no unfinished check needs a fresh one.
     created = api(
         f"repos/{repo}/check-runs",
         {
@@ -127,15 +178,8 @@ def reopen(repo: str, run: dict[str, Any]) -> None:
     raise ValueError("Could not identify the A5 rerun job")
 
 
-def prepare(repo: str, event: dict[str, Any]) -> None:
-    """Accept an exact new PR command and freeze its current head/base/merge."""
-    if (
-        event.get("action") != "created"
-        or "pull_request" not in event.get("issue", {})
-        or event.get("comment", {}).get("body", "").strip() != COMMAND
-    ):
-        return
-    number = int(event["issue"]["number"])
+def pinned_merge(repo: str, number: int) -> tuple[dict[str, Any], str, str, str]:
+    """Wait for GitHub to publish the test merge for the first head/base observed."""
     deadline = time.monotonic() + MERGE_WAIT_SECONDS
     pinned = None
     while True:
@@ -151,21 +195,45 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             merge = sha(pr["merge_commit_sha"])
             commit = api(f"repos/{repo}/git/commits/{merge}")
             if [parent["sha"] for parent in commit["parents"]] == [base, head]:
-                break
+                return pr, head, base, merge
         # GitHub can briefly return an old synthetic merge after a base update.
         # Retry only that eventual consistency; never switch to a newer head.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ValueError(f"GitHub test merge is not ready; retry {COMMAND} later")
         time.sleep(min(MERGE_POLL_SECONDS, remaining))
+
+
+def prepare(repo: str, event: dict[str, Any]) -> None:
+    """Accept an exact new PR command and freeze its current head/base/merge."""
+    if (
+        event.get("action") != "created"
+        or "pull_request" not in event.get("issue", {})
+        or event.get("comment", {}).get("body", "").strip() != COMMAND
+    ):
+        return
+    number = int(event["issue"]["number"])
+    pr, head, base, merge = pinned_merge(repo, number)
     lint = matching_lint_run(repo, pr, COMMAND)
     if lint["conclusion"] != "success":
         raise ValueError(f"PR lint workflow did not pass; fix or rerun lint before {COMMAND}")
+    run_id = os.environ["GITHUB_RUN_ID"]
+    checks = head_checks(repo, head)
+    existing = reusable_request(repo, number, checks, run_id)
+    if existing:
+        report(f"Reusing the A5 distributed run for PR #{number} at {head}. [Run]({existing})")
+        return
     latest = pull(repo, number)
     if latest["head"]["sha"] != head or latest.get("merge_commit_sha") != merge or current_base(repo) != base:
         raise ValueError(f"PR head or base changed during validation; post {COMMAND} again")
-    run_id = os.environ["GITHUB_RUN_ID"]
     url = attempt_url(repo, run_id, os.environ["GITHUB_RUN_ATTEMPT"])
+    for previous in checks:
+        if previous["external_id"] == run_id and previous["app"]["slug"] == "github-actions":
+            # Re-running all jobs also retries prepare. Pass its original ID to
+            # the serialized observer and publisher, just like a job-only rerun.
+            output({"checkout_sha": merge, "check_id": str(previous["id"])})
+            report(f"Retrying A5 distributed tests for PR #{number} at {head}. [Run]({url})")
+            return
     # Each request owns its own check ID, so a late result cannot overwrite a
     # newer request. No ci/full status is written by this partial test run.
     check = api(

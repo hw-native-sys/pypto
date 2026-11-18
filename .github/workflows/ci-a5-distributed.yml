@@ -14,6 +14,11 @@ jobs:
     if: >-
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '/ci a5-distributed')
+    # Serialize the check lookup and creation before any device job can queue.
+    concurrency:
+      group: ci-a5-admission-${{ github.event.issue.number }}
+      queue: max
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
