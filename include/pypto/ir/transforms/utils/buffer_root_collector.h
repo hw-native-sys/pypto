@@ -12,6 +12,8 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
+#include <cstddef>
+#include <deque>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -84,10 +86,8 @@ class BufferRootCollector : public IRVisitor {
   /// single unambiguous answer or (under `kFirstOutput`) an arbitrary pick.
   [[nodiscard]] const std::vector<const Var*>& RootCandidatesOf(const Var* var) const {
     static const std::vector<const Var*> kNone;
-    auto alias = candidate_sources_.find(var);
-    if (alias != candidate_sources_.end()) var = alias->second;
-    auto it = root_candidates_.find(var);
-    return it == root_candidates_.end() ? kNone : it->second;
+    auto it = candidate_sources_.find(var);
+    return it == candidate_sources_.end() ? kNone : *it->second;
   }
 
  protected:
@@ -112,6 +112,8 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] const RootCandidates& ResolveRootCandidates(const ExprPtr& expr) const;
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
+  void BindRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved);
+  void MergeRootCandidates(const VarPtr& var, std::vector<const RootCandidates*> inputs, bool unresolved);
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
   void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args);
   void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
@@ -135,8 +137,13 @@ class BufferRootCollector : public IRVisitor {
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
   bool follow_reshape_;
-  std::unordered_map<const Var*, RootCandidates> root_candidates_;
-  std::unordered_map<const Var*, const Var*> candidate_sources_;
+  std::deque<RootCandidates> root_candidates_;
+  struct CandidateInputsHash {
+    size_t operator()(const std::vector<const RootCandidates*>& inputs) const;
+  };
+  std::unordered_map<const Var*, const RootCandidates*> candidate_sources_;
+  std::unordered_map<std::vector<const RootCandidates*>, const RootCandidates*, CandidateInputsHash>
+      merged_candidates_;
   std::unordered_map<const Var*, std::shared_ptr<const std::vector<OutputRoot>>> tuple_output_roots_;
 };
 

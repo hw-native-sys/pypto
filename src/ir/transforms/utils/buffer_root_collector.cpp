@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/hash.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -75,16 +76,15 @@ void BufferRootCollector::VisitStmt_(const IfStmtPtr& if_stmt) {
     const auto& else_roots = ResolveRootCandidates(else_value);
     const bool then_ambiguous = IsAmbiguous(then_value);
     const bool else_ambiguous = IsAmbiguous(else_value);
-    if (follow_reshape_ && !then_roots.empty() && &then_roots == &else_roots &&
-        then_ambiguous == else_ambiguous) {
-      ShareRootCandidates(if_stmt->return_vars_[i], then_value);
+    const bool unresolved = then_roots.empty() || else_roots.empty() || then_ambiguous || else_ambiguous;
+    if (follow_reshape_) {
+      MergeRootCandidates(if_stmt->return_vars_[i], {&then_roots, &else_roots}, unresolved);
       continue;
     }
     auto roots = then_roots;
     for (const Var* root : else_roots) {
       if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
     }
-    const bool unresolved = then_roots.empty() || else_roots.empty() || then_ambiguous || else_ambiguous;
     RecordRootCandidates(if_stmt->return_vars_[i], roots, unresolved);
   }
 }
@@ -126,19 +126,22 @@ void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::
 
   for (size_t i = 0; i < return_vars.size() && i < yield->value_.size(); ++i) {
     const auto& value = yield->value_[i];
-    const auto yielded_var = AsVarLike(value);
-    if (follow_reshape_ && yielded_var &&
-        (guaranteed_to_run || (i < iter_args.size() && &RootCandidatesOf(yielded_var.get()) ==
-                                                           &RootCandidatesOf(iter_args[i].get())))) {
-      // An identity carry retains the same roots even when the loop is skipped.
-      ShareRootCandidates(return_vars[i], value);
+    const auto& yielded_roots = ResolveRootCandidates(value);
+    bool unresolved = yielded_roots.empty() || IsAmbiguous(value);
+    if (follow_reshape_) {
+      if (!guaranteed_to_run && i < iter_args.size()) {
+        const auto& init_roots = RootCandidatesOf(iter_args[i].get());
+        unresolved = unresolved || init_roots.empty() || IsAmbiguous(iter_args[i]);
+        MergeRootCandidates(return_vars[i], {&yielded_roots, &init_roots}, unresolved);
+      } else {
+        ShareRootCandidates(return_vars[i], value);
+      }
       continue;
     }
-    auto roots = ResolveRootCandidates(value);
-    bool unresolved = roots.empty() || IsAmbiguous(value);
+    auto roots = yielded_roots;
     if (!guaranteed_to_run && i < iter_args.size()) {
       const auto& init_roots = RootCandidatesOf(iter_args[i].get());
-      unresolved = unresolved || init_roots.empty() || (follow_reshape_ && IsAmbiguous(iter_args[i]));
+      unresolved = unresolved || init_roots.empty();
       for (const Var* root : init_roots) {
         if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
       }
@@ -233,16 +236,7 @@ const BufferRootCollector::RootCandidates& BufferRootCollector::ResolveRootCandi
 }
 
 void BufferRootCollector::ShareRootCandidates(const VarPtr& var, const ExprPtr& source) {
-  auto source_var = AsVarLike(source);
-  if (!var || !source_var) return;
-  const Var* key = source_var.get();
-  auto alias = candidate_sources_.find(key);
-  if (alias != candidate_sources_.end()) key = alias->second;
-  if (root_candidates_.find(key) == root_candidates_.end()) return;
-  candidate_sources_[var.get()] = key;
-  auto root = buffer_roots.find(source_var.get());
-  if (root != buffer_roots.end()) buffer_roots[var.get()] = root->second;
-  if (ambiguous_buffer_vars.count(source_var.get())) ambiguous_buffer_vars.insert(var.get());
+  BindRootCandidates(var, ResolveRootCandidates(source), IsAmbiguous(source));
 }
 
 bool BufferRootCollector::IsAmbiguous(const ExprPtr& expr) const {
@@ -261,19 +255,65 @@ void BufferRootCollector::RecordRootCandidates(const VarPtr& var, const RootCand
   }
   if (unique.empty()) return;
 
-  root_candidates_[var.get()] = unique;
-  const bool ambiguous = unresolved || unique.size() > 1;
-  if (ambiguous) {
+  root_candidates_.push_back(std::move(unique));
+  BindRootCandidates(var, root_candidates_.back(), unresolved);
+}
+
+void BufferRootCollector::BindRootCandidates(const VarPtr& var, const RootCandidates& roots,
+                                             bool unresolved) {
+  if (!var || roots.empty()) return;
+  candidate_sources_[var.get()] = &roots;
+  if (unresolved || roots.size() > 1) {
     ambiguous_buffer_vars.insert(var.get());
     if (ambiguous_policy_ == AmbiguousRootPolicy::kFirstOutput) {
-      buffer_roots[var.get()] = unique.front();
+      buffer_roots[var.get()] = roots.front();
     } else {
       buffer_roots.erase(var.get());
     }
   } else {
     ambiguous_buffer_vars.erase(var.get());
-    buffer_roots[var.get()] = unique.front();
+    buffer_roots[var.get()] = roots.front();
   }
+}
+
+size_t BufferRootCollector::CandidateInputsHash::operator()(
+    const std::vector<const RootCandidates*>& inputs) const {
+  size_t result = 0;
+  for (const auto* roots : inputs) result = hash_combine(result, std::hash<const RootCandidates*>{}(roots));
+  return result;
+}
+
+void BufferRootCollector::MergeRootCandidates(const VarPtr& var, std::vector<const RootCandidates*> inputs,
+                                              bool unresolved) {
+  std::unordered_set<const RootCandidates*> unique_inputs;
+  inputs.erase(std::remove_if(
+                   inputs.begin(), inputs.end(),
+                   [&](const auto* roots) { return roots->empty() || !unique_inputs.insert(roots).second; }),
+               inputs.end());
+  if (inputs.empty()) return;
+  if (inputs.size() == 1) {
+    BindRootCandidates(var, *inputs.front(), unresolved);
+    return;
+  }
+  auto cached = merged_candidates_.find(inputs);
+  if (cached != merged_candidates_.end()) {
+    BindRootCandidates(var, *cached->second, unresolved);
+    return;
+  }
+
+  // Preserve first-output order while sharing the immutable root list across
+  // joins and call results with the same inputs.
+  RootCandidates merged;
+  std::unordered_set<const Var*> seen;
+  for (const auto* roots : inputs) {
+    for (const auto* root : *roots) {
+      if (seen.insert(root).second) merged.push_back(root);
+    }
+  }
+  root_candidates_.push_back(std::move(merged));
+  const auto& roots = root_candidates_.back();
+  merged_candidates_.emplace(std::move(inputs), &roots);
+  BindRootCandidates(var, roots, unresolved);
 }
 
 std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOutputRoots(
@@ -344,15 +384,13 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
     }
     // A consumer may read or write whichever compatible buffer was returned.
     // Retain every compatible root when the return proof is unavailable.
-    RootCandidates possible;
-    std::unordered_set<const Var*> seen;
+    std::vector<const RootCandidates*> inputs;
     for (const auto& candidate : out_roots) {
-      if (!TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) continue;
-      for (const auto* root : candidate.roots) {
-        if (seen.insert(root).second) possible.push_back(root);
+      if (TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
+        inputs.push_back(&candidate.roots);
       }
     }
-    RecordRootCandidates(result, possible, /*unresolved=*/true);
+    MergeRootCandidates(result, std::move(inputs), /*unresolved=*/true);
     return;
   }
   // No provable unambiguous type match (0 matches, or >1 distinct candidates).

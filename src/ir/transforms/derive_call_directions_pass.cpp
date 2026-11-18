@@ -128,8 +128,8 @@ const Var* ResolveAnyRoot(const ExprPtr& arg,
 /// function parameters; either kind needs WAW chaining when a prior sibling
 /// already wrote to the same root.
 ///
-/// Expand each candidate set once along the active scope path. Branches start
-/// with the same prior writes and their possible writes are combined on exit.
+/// Index each candidate set once. Branches only snapshot which sets are
+/// active, and combine their possible writes on exit.
 class PriorWriterCollector {
  public:
   PriorWriterCollector(ProgramPtr program, const BufferRootCollector& buffer_roots)
@@ -154,9 +154,20 @@ class PriorWriterCollector {
   void RememberWrites(const RootCandidates& candidates) {
     if (candidates.empty() || !seen_candidates_.insert(&candidates).second) return;
     candidate_history_.push_back(&candidates);
-    for (const auto* root : candidates) {
+    if (candidates.size() == 1) {
+      const auto* root = candidates.front();
       if (seen_roots_.insert(root).second) root_history_.push_back(root);
+    } else if (indexed_candidates_.insert(&candidates).second) {
+      for (const auto* root : candidates) candidate_writers_[root].push_back(&candidates);
     }
+  }
+
+  bool HasPriorWriter(const Var* root) const {
+    if (seen_roots_.count(root) != 0) return true;
+    auto candidates = candidate_writers_.find(root);
+    if (candidates == candidate_writers_.end()) return false;
+    return std::any_of(candidates->second.begin(), candidates->second.end(),
+                       [&](const auto* set) { return seen_candidates_.count(set) != 0; });
   }
 
   void AnalyzeIf(const IfStmtPtr& stmt) {
@@ -220,7 +231,7 @@ class PriorWriterCollector {
       const auto& candidates = buffer_roots_.RootCandidatesOf(var.get());
       if (candidates.empty()) continue;
       if (dirs[i] == ParamDirection::Out && buffer_roots_.ambiguous_buffer_vars.count(var.get()) == 0 &&
-          seen_roots_.count(candidates.front()) == 0) {
+          !HasPriorWriter(candidates.front())) {
         first_writer_roots[expr.get()].insert(candidates.front());
       }
       writes.push_back(&candidates);
@@ -233,6 +244,8 @@ class PriorWriterCollector {
   const BufferRootCollector& buffer_roots_;
   std::unordered_set<const Var*> seen_roots_;
   std::unordered_set<const RootCandidates*> seen_candidates_;
+  std::unordered_set<const RootCandidates*> indexed_candidates_;
+  std::unordered_map<const Var*, std::vector<const RootCandidates*>> candidate_writers_;
   std::vector<const Var*> root_history_;
   std::vector<const RootCandidates*> candidate_history_;
 };
