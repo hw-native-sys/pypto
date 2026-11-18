@@ -248,9 +248,8 @@ Pass ConvertTensorToTileOps() {
         constexpr unsigned kReshaped = 1U;
         constexpr unsigned kWrite = 2U;
         constexpr unsigned kExplicitInOut = 4U;
-        using Candidates = std::vector<const Var*>;
-        std::unordered_map<const Candidates*, size_t> candidate_access_indices;
-        std::vector<std::pair<const Candidates*, unsigned>> candidate_accesses;
+        const auto& sets = roots.RootSets();
+        std::vector<unsigned> accesses(sets.size(), 0U);
         const auto record_access = [&](const Var* root, unsigned access) {
           const auto param = facts.param_idx.find(root);
           if (param == facts.param_idx.end()) return;
@@ -260,18 +259,11 @@ Pass ConvertTensorToTileOps() {
           if ((access & kExplicitInOut) != 0) new_dirs[i] = ParamDirection::InOut;
         };
         const auto record_arg = [&](const Var* arg, unsigned access) {
-          if (roots.ambiguous_buffer_vars.count(arg)) {
-            // The collector is complete and returns stable shared sets.
-            // Accumulate before expanding so repeated reads and writes do not
-            // revisit the same vector of possible roots for each call.
-            const auto* candidates = &roots.RootCandidatesOf(arg);
-            const auto [slot, inserted] =
-                candidate_access_indices.try_emplace(candidates, candidate_accesses.size());
-            if (inserted) candidate_accesses.emplace_back(candidates, 0U);
-            candidate_accesses[slot->second].second |= access;
+          const auto set = roots.RootSetOf(arg);
+          if (set == 0) {
+            record_access(arg, access);
           } else {
-            const auto root = roots.buffer_roots.find(arg);
-            record_access(root == roots.buffer_roots.end() ? arg : root->second, access);
+            accesses[set] |= access;
           }
         };
         for (const auto& source : facts.reshape_sources) {
@@ -289,8 +281,19 @@ Pass ConvertTensorToTileOps() {
             record_arg(arg.get(), access);
           }
         }
-        for (const auto& [candidates, access] : candidate_accesses) {
-          for (const auto* root : *candidates) record_access(root, access);
+        // Push access facts through each shared set node once. Node IDs
+        // increase from children to parents, so one reverse pass reaches the
+        // underlying buffers without materializing the candidate lists.
+        for (size_t id = sets.size(); --id > 0;) {
+          const auto access = accesses[id];
+          if (access == 0) continue;
+          const auto& node = sets[id];
+          if (node.root) {
+            record_access(node.root, access);
+          } else {
+            accesses[node.zero] |= access;
+            accesses[node.one] |= access;
+          }
         }
         for (size_t i = 0; i < new_dirs.size(); ++i) {
           if (new_dirs[i] == ParamDirection::In && writes[i]) {

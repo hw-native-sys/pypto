@@ -21,7 +21,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/hash.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -133,13 +132,8 @@ const Var* ResolveAnyRoot(const ExprPtr& arg,
 /// share their incoming trie and merge their writes at the join.
 class PriorWriterCollector {
  public:
-  PriorWriterCollector(ProgramPtr program, const BufferRootCollector& buffer_roots)
-      : program_(std::move(program)), buffer_roots_(buffer_roots) {
-    // Every owning storage Var has an entry in buffer_roots. The number of
-    // mapped vars bounds the number of roots the writer scan can encounter.
-    const auto root_bound = buffer_roots_.buffer_roots.size();
-    while (root_mask_ <= root_bound / 2) root_mask_ <<= 1;
-  }
+  PriorWriterCollector(ProgramPtr program, BufferRootCollector& buffer_roots)
+      : program_(std::move(program)), buffer_roots_(buffer_roots) {}
 
   void Run(const StmtPtr& body) { AnalyzeScope(body); }
 
@@ -155,82 +149,10 @@ class PriorWriterCollector {
   std::unordered_map<const Expr*, std::unordered_set<const Var*>> first_writer_roots;
 
  private:
-  using RootCandidates = std::vector<const Var*>;
-  using WriteSet = size_t;
-  using NodePair = std::pair<WriteSet, WriteSet>;
+  using RootSetId = BufferRootCollector::RootSetId;
 
-  static constexpr WriteSet kEmpty = 0;
-  static constexpr WriteSet kLeaf = 1;
-
-  struct NodePairHash {
-    size_t operator()(const NodePair& pair) const { return hash_combine(pair.first, pair.second); }
-  };
-
-  struct RootLocation {
-    size_t offset;
-    WriteSet singleton;
-  };
-
-  WriteSet InternNode(NodePair children) {
-    const auto [node, inserted] = trie_nodes_.try_emplace(children, trie_children_.size());
-    if (inserted) trie_children_.push_back(children);
-    return node->second;
-  }
-
-  WriteSet MergeWrites(WriteSet left, WriteSet right) {
-    if (left == kEmpty || left == right) return right;
-    if (right == kEmpty) return left;
-    if (left > right) std::swap(left, right);
-
-    const NodePair inputs{left, right};
-    const auto cached = trie_unions_.find(inputs);
-    if (cached != trie_unions_.end()) return cached->second;
-
-    // Copy the child IDs: recursively interning nodes can reallocate the table.
-    const auto [left_zero, left_one] = trie_children_[left];
-    const auto [right_zero, right_one] = trie_children_[right];
-    const auto zero = MergeWrites(left_zero, right_zero);
-    const auto one = MergeWrites(left_one, right_one);
-    const auto merged = InternNode({zero, one});
-    trie_unions_.emplace(inputs, merged);
-    return merged;
-  }
-
-  WriteSet Singleton(const Var* root) {
-    const auto [entry, inserted] =
-        root_locations_.try_emplace(root, RootLocation{root_locations_.size(), kLeaf});
-    auto& location = entry->second;
-    if (inserted) {
-      INTERNAL_CHECK(location.offset / root_mask_ < 2) << "Prior-writer root is outside the trie";
-      for (size_t bit = 1; bit <= root_mask_; bit <<= 1) {
-        const auto child = location.singleton;
-        location.singleton =
-            (location.offset & bit) ? InternNode({kEmpty, child}) : InternNode({child, kEmpty});
-      }
-    }
-    return location.singleton;
-  }
-
-  void RememberWrites(const RootCandidates& candidates) {
-    if (candidates.empty()) return;
-    const auto [footprint, inserted] = write_footprints_.try_emplace(&candidates, kEmpty);
-    if (inserted) {
-      for (const auto* root : candidates) {
-        footprint->second = MergeWrites(footprint->second, Singleton(root));
-      }
-    }
-    active_writes_ = MergeWrites(active_writes_, footprint->second);
-  }
-
-  bool HasPriorWriter(const Var* root) const {
-    const auto location = root_locations_.find(root);
-    if (location == root_locations_.end()) return false;
-    auto node = active_writes_;
-    for (size_t bit = root_mask_; bit != 0 && node != kEmpty; bit >>= 1) {
-      const auto& [zero, one] = trie_children_[node];
-      node = (location->second.offset & bit) ? one : zero;
-    }
-    return node == kLeaf;
+  void RememberWrites(RootSetId candidates) {
+    active_writes_ = buffer_roots_.UnionRootSets(active_writes_, candidates);
   }
 
   void AnalyzeIf(const IfStmtPtr& stmt) {
@@ -241,7 +163,7 @@ class PriorWriterCollector {
     const auto then_writes = active_writes_;
     active_writes_ = prior_writes;
     AnalyzeScope(stmt->else_body_.value());
-    active_writes_ = MergeWrites(then_writes, active_writes_);
+    active_writes_ = buffer_roots_.UnionRootSets(then_writes, active_writes_);
   }
 
   void AnalyzeScope(const StmtPtr& stmt) {
@@ -263,7 +185,7 @@ class PriorWriterCollector {
     } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
       for (int index : launch->result_param_indices_) {
         auto var = AsVarLike(launch->args_[index]);
-        if (var) RememberWrites(buffer_roots_.RootCandidatesOf(var.get()));
+        if (var) RememberWrites(buffer_roots_.RootSetOf(var.get()));
       }
     }
   }
@@ -275,33 +197,26 @@ class PriorWriterCollector {
     if (!callee) return;
 
     const auto& dirs = callee->param_directions_;
-    std::vector<const RootCandidates*> writes;
+    std::vector<RootSetId> writes;
     for (size_t i = 0; i < cl->args.size() && i < dirs.size(); ++i) {
       if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
       auto var = AsVarLike(cl->args[i]);
       if (!var) continue;
-      const auto& candidates = buffer_roots_.RootCandidatesOf(var.get());
-      if (candidates.empty()) continue;
-      if (dirs[i] == ParamDirection::Out && buffer_roots_.ambiguous_buffer_vars.count(var.get()) == 0 &&
-          !HasPriorWriter(candidates.front())) {
-        first_writer_roots[expr.get()].insert(candidates.front());
+      const auto candidates = buffer_roots_.RootSetOf(var.get());
+      if (candidates == 0) continue;
+      if (dirs[i] == ParamDirection::Out && buffer_roots_.ambiguous_buffer_vars.count(var.get()) == 0) {
+        const auto* root = buffer_roots_.RootSets()[candidates].root;
+        if (!buffer_roots_.RootSetContains(active_writes_, root)) first_writer_roots[expr.get()].insert(root);
       }
-      writes.push_back(&candidates);
+      writes.push_back(candidates);
     }
     // Arguments of the same call are concurrent with respect to this analysis.
-    for (const auto* candidates : writes) RememberWrites(*candidates);
+    for (const auto candidates : writes) RememberWrites(candidates);
   }
 
   ProgramPtr program_;
-  const BufferRootCollector& buffer_roots_;
-  size_t root_mask_ = 1;
-  WriteSet active_writes_ = kEmpty;
-  std::unordered_map<const Var*, RootLocation> root_locations_;
-  std::unordered_map<const RootCandidates*, WriteSet> write_footprints_;
-  // Index 0 is empty at any depth. Index 1 is an occupied leaf.
-  std::vector<NodePair> trie_children_{2};
-  std::unordered_map<NodePair, WriteSet, NodePairHash> trie_nodes_;
-  std::unordered_map<NodePair, WriteSet, NodePairHash> trie_unions_;
+  BufferRootCollector& buffer_roots_;
+  RootSetId active_writes_ = 0;
 };
 
 /// IRMutator that rewrites every non-builtin Call in a function body and writes

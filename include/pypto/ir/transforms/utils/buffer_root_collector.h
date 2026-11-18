@@ -13,10 +13,10 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
 #include <cstddef>
-#include <deque>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -76,19 +76,24 @@ class BufferRootCollector : public IRVisitor {
   /// these vars conservatively; aliasing optimizations leave them unmapped.
   std::unordered_set<const Var*> ambiguous_buffer_vars;
 
-  /// Every owning-buffer-root candidate recorded for @p var, empty when the var
-  /// has no lineage. This is what "conservatively" above means in practice: a
-  /// write through an ambiguous var may land on *any* candidate, so a consumer
-  /// deriving dependencies has to account for all of them rather than skip the
-  /// var — skipping drops the dependency for every candidate at once.
-  ///
-  /// `buffer_roots` cannot express this: it holds one root, which is either the
-  /// single unambiguous answer or (under `kFirstOutput`) an arbitrary pick.
-  [[nodiscard]] const std::vector<const Var*>& RootCandidatesOf(const Var* var) const {
-    static const std::vector<const Var*> kNone;
-    auto it = candidate_sources_.find(var);
-    return it == candidate_sources_.end() ? kNone : *it->second;
-  }
+  using RootSetId = size_t;
+
+  // A compressed binary trie of owning roots. Leaves name a buffer. Interior
+  // nodes reference smaller IDs, allowing consumers to propagate facts to all
+  // members in one reverse pass across the shared nodes.
+  struct RootSetNode {
+    const Var* root = nullptr;
+    RootSetId zero = 0;
+    RootSetId one = 0;
+    size_t offset = 0;
+    size_t split = 0;
+  };
+
+  /// Zero represents the empty set.
+  [[nodiscard]] RootSetId RootSetOf(const Var* var) const;
+  [[nodiscard]] const std::vector<RootSetNode>& RootSets() const { return root_sets_; }
+  [[nodiscard]] RootSetId UnionRootSets(RootSetId left, RootSetId right);
+  [[nodiscard]] bool RootSetContains(RootSetId set, const Var* var) const;
 
  protected:
   void VisitStmt_(const IfStmtPtr& if_stmt) override;
@@ -98,14 +103,19 @@ class BufferRootCollector : public IRVisitor {
   void VisitStmt_(const SimtLaunchStmtPtr& launch) override;
 
  private:
-  using RootCandidates = std::vector<const Var*>;
+  struct RootCandidates {
+    RootSetId set = 0;
+    // The first output is a property of this SSA value, independent of the
+    // membership shared with other values.
+    const Var* first = nullptr;
+  };
 
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
   // with that arg's type so a single return value can be matched to the param
   // it actually aliases (see RecordCallReturnRoots).
   struct OutputRoot {
     ExprPtr argument;
-    const RootCandidates& roots;
+    RootCandidates roots;
     bool ambiguous;
   };
 
@@ -113,7 +123,8 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
   void BindRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved);
-  void MergeRootCandidates(const VarPtr& var, std::vector<const RootCandidates*> inputs, bool unresolved);
+  void MergeRootCandidates(const VarPtr& var, const std::vector<RootCandidates>& inputs, bool unresolved);
+  [[nodiscard]] RootSetId InternRootSet(RootSetId zero, RootSetId one, size_t split);
   void RecordOwningRoot(const VarPtr& var);
   void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
                                 bool may_repeat);
@@ -138,13 +149,16 @@ class BufferRootCollector : public IRVisitor {
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
   bool follow_reshape_;
-  std::deque<RootCandidates> root_candidates_;
-  struct CandidateInputsHash {
-    size_t operator()(const std::vector<const RootCandidates*>& inputs) const;
+  using RootSetPair = std::pair<RootSetId, RootSetId>;
+  struct RootSetPairHash {
+    size_t operator()(const RootSetPair& pair) const;
   };
-  std::unordered_map<const Var*, const RootCandidates*> candidate_sources_;
-  std::unordered_map<std::vector<const RootCandidates*>, const RootCandidates*, CandidateInputsHash>
-      merged_candidates_;
+
+  std::vector<RootSetNode> root_sets_{1};
+  std::unordered_map<const Var*, RootSetId> owning_sets_;
+  std::unordered_map<RootSetPair, RootSetId, RootSetPairHash> interned_sets_;
+  std::unordered_map<RootSetPair, RootSetId, RootSetPairHash> set_unions_;
+  std::unordered_map<const Var*, RootCandidates> root_candidates_;
   std::unordered_map<const Var*, std::shared_ptr<const std::vector<OutputRoot>>> tuple_output_roots_;
 };
 
