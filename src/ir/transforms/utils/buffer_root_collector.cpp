@@ -163,7 +163,7 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
           roots.push_back({alias, ResolveRootCandidates(alias), IsAmbiguous(alias)});
         }
         tuple_output_roots_[assign->var_.get()] =
-            std::make_shared<const TupleOutputRoots>(TupleOutputRoots{nullptr, std::move(roots)});
+            std::make_shared<const TupleOutputRoots>(TupleOutputRoots{nullptr, std::move(roots), {}});
       } else if (!aliases.empty()) {
         ShareRootCandidates(assign->var_, aliases[0]);
       }
@@ -178,8 +178,18 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
     } else if (!IsBuiltinOp(op_name)) {
       auto out_roots = CollectCallOutputRoots(call);
       if (As<TupleType>(call->GetType())) {
-        tuple_output_roots_[assign->var_.get()] = std::make_shared<const TupleOutputRoots>(
-            TupleOutputRoots{follow_reshape_ ? call : nullptr, std::move(out_roots)});
+        TupleOutputRoots tuple;
+        if (follow_reshape_) {
+          tuple.call = call;
+          // Collect a single fallback for all projections. The return type's
+          // arity does not affect the cost of recording a call.
+          for (const auto& output : out_roots) {
+            tuple.writable_roots = UnionCandidates(tuple.writable_roots, output.roots);
+          }
+        } else {
+          tuple.outputs = std::move(out_roots);
+        }
+        tuple_output_roots_[assign->var_.get()] = std::make_shared<const TupleOutputRoots>(std::move(tuple));
       } else {
         RecordCallReturnRoots(assign->var_, out_roots, call);
       }
@@ -261,12 +271,15 @@ void BufferRootCollector::BindRootCandidates(const VarPtr& var, const RootCandid
 void BufferRootCollector::MergeRootCandidates(const VarPtr& var, const std::vector<RootCandidates>& inputs,
                                               bool unresolved) {
   RootCandidates merged;
-  for (const auto& input : inputs) {
-    if (input.set == 0) continue;
-    if (merged.set == 0) merged.first = input.first;
-    merged.set = UnionRootSets(merged.set, input.set);
-  }
+  for (const auto& input : inputs) merged = UnionCandidates(merged, input);
   BindRootCandidates(var, merged, unresolved);
+}
+
+BufferRootCollector::RootCandidates BufferRootCollector::UnionCandidates(RootCandidates left,
+                                                                         const RootCandidates& right) {
+  if (left.set == 0) return right;
+  left.set = UnionRootSets(left.set, right.set);
+  return left;
 }
 
 BufferRootCollector::RootSetId BufferRootCollector::RootSetOf(const Var* var) const {
@@ -326,12 +339,12 @@ BufferRootCollector::OutputRoot BufferRootCollector::ResolveTupleOutputRoot(cons
         index < returned_params.size() ? returned_params[index].value_or(arg_count) : arg_count;
     if (param < arg_count) {
       const auto& arg = tuple.call->args_[param];
-      return {arg, ResolveRootCandidates(arg), !HasStorageProof(arg)};
+      const auto& roots = ResolveRootCandidates(arg);
+      if (HasStorageProof(arg)) return {arg, roots, false};
+      return {arg, UnionCandidates(roots, tuple.writable_roots), true};
     }
   }
-  auto fallback = index < tuple.outputs.size() ? tuple.outputs[index] : OutputRoot{};
-  fallback.ambiguous = true;
-  return fallback;
+  return {nullptr, tuple.writable_roots, true};
 }
 
 void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,

@@ -121,6 +121,7 @@ class BufferRootCollector : public IRVisitor {
   struct TupleOutputRoots {
     CallPtr call;
     std::vector<OutputRoot> outputs;
+    RootCandidates writable_roots;
   };
 
   [[nodiscard]] const RootCandidates& ResolveRootCandidates(const ExprPtr& expr) const;
@@ -129,6 +130,7 @@ class BufferRootCollector : public IRVisitor {
   void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
   void BindRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved);
   void MergeRootCandidates(const VarPtr& var, const std::vector<RootCandidates>& inputs, bool unresolved);
+  [[nodiscard]] RootCandidates UnionCandidates(RootCandidates left, const RootCandidates& right);
   [[nodiscard]] RootSetId UnionRootSets(RootSetId left, RootSetId right);
   void RecordOwningRoot(const VarPtr& var, bool region_only = false);
   void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,

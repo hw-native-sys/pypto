@@ -1149,7 +1149,8 @@ class TestDeriveDirectionMatrix:
         After = passes.derive_call_directions()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_return_with_no_shape_matched_root_preserves_prior_write(self):
+    @pytest.mark.parametrize("tuple_return", [False, True])
+    def test_return_with_no_shape_matched_root_preserves_prior_write(self, tuple_return):
         """A view return keeps ordering even when its known root has a different shape."""
 
         @pl.program
@@ -1198,8 +1199,24 @@ class TestDeriveDirectionMatrix:
                 )
                 self.write(returned, attrs={"arg_directions": [pl.adir.inout]})
 
-        after = passes.derive_call_directions()(Before)
-        ir.assert_structural_equal(after, Expected)
+        def with_tuple_return(program):
+            source = ir.python_print(program)
+            begin = source.index("    def forward(")
+            end = source.index("\n    @pl.function(", begin)
+            forward = source[begin:end]
+            tensor = "pl.Tensor[[1, 128], pl.FP32]"
+            forward = forward.replace(f"-> {tensor}:", f"-> tuple[{tensor}, pl.Scalar[pl.INT64]]:")
+            forward = forward.replace("        return view", "        return view, 1")
+            source = source[:begin] + forward + source[end:]
+            return pl.parse_program(
+                source.replace(f"        returned: {tensor} =", "        returned, _marker =")
+            )
+
+        before, expected = (
+            (with_tuple_return(Before), with_tuple_return(Expected)) if tuple_return else (Before, Expected)
+        )
+        after = passes.derive_call_directions()(before)
+        ir.assert_structural_equal(after, expected)
 
     def test_out_param_enclosing_inout_declaration_promoted(self):
         """R-enclosing: explicit ``pl.InOut`` on the enclosing param promotes to ``InOut``.
