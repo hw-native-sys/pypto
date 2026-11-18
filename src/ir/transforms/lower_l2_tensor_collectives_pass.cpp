@@ -102,6 +102,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
@@ -515,13 +516,21 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
       for (auto& stmt : preludes[i]) stmts.push_back(std::move(stmt));
       if (!needs_lift[i]) continue;
       // A lifted expression can itself contain a Call or Submit (for example
-      // a tuple projection of a kernel call). Bind those first: the result
-      // assignment must not carry a nested call-like node, which
-      // LegalizeSpmdLaunches rejects. A direct Call/Submit is already a
-      // top-level RHS and needs no unwrapping.
-      if (!As<Call>(values[i]) && !As<Submit>(values[i]) &&
-          transform_utils::ExprContainsCallLike(values[i])) {
-        values[i] = HoistCallSubexpressions(values[i], op->span_);
+      // a tuple projection of a kernel call, or a direct call whose own
+      // argument is another call such as ``self.outer(self.inner(...))``).
+      // Hoist those first: the result assignment must not carry a nested
+      // call-like node anywhere in it, which LegalizeSpmdLaunches rejects. A
+      // direct Call/Submit becomes the top-level RHS as written and must not
+      // be re-bound itself (that would double-bind it) -- but its OWN
+      // arguments still need hoisting, since they are nested relative to it.
+      if (transform_utils::ExprContainsCallLike(values[i])) {
+        if (auto as_call = As<Call>(values[i])) {
+          values[i] = HoistCallLikeArguments(as_call, op->span_);
+        } else if (auto as_submit = As<Submit>(values[i])) {
+          values[i] = HoistCallLikeArguments(as_submit, op->span_);
+        } else {
+          values[i] = HoistCallSubexpressions(values[i], op->span_);
+        }
         for (auto& stmt : pending_prefix_) stmts.push_back(std::move(stmt));
         pending_prefix_.clear();
       }
@@ -540,12 +549,41 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   }
 
   /// @p original is the call as written: its operands name Vars of the body the
-  /// ValueSourceIndex was built from, whereas @p call's may be rewritten ones.
-  [[nodiscard]] CallPtr LowerCollective(const CallPtr& call, const CallPtr& original) {
-    const bool indexed = IsOp(call, "pld.tensor.indexed_all_to_all_v");
-    INTERNAL_CHECK_SPAN(call->args_.size() == (indexed ? 7 : 6), call->span_)
-        << "LowerL2TensorCollectives: " << call->op_->name_
-        << " has an unexpected operand count: " << call->args_.size();
+  /// ValueSourceIndex was built from, whereas @p call_in's may be rewritten ones.
+  [[nodiscard]] CallPtr LowerCollective(const CallPtr& call_in, const CallPtr& original) {
+    const bool indexed = IsOp(call_in, "pld.tensor.indexed_all_to_all_v");
+    INTERNAL_CHECK_SPAN(call_in->args_.size() == (indexed ? 7 : 6), call_in->span_)
+        << "LowerL2TensorCollectives: " << call_in->op_->name_
+        << " has an unexpected operand count: " << call_in->args_.size();
+
+    // A caller invoking this pass directly on unflattened IR (the normal
+    // pipeline already runs FlattenCallExpr around this pass, but the public
+    // pass itself only requires ReturnParamsExplicit) may pass an operand
+    // that is, or contains, a nested call -- e.g. ``self.make_input(...)`` as
+    // the target operand. Hoist every call-like subexpression out of every
+    // operand except the trailing core_num (handled separately below, via
+    // EmitRuntimeLaunchWidth or the literal-ConstInt path) before deriving
+    // any operand's type or assembling the kernel's own argument list: the
+    // kernel call built at the end of this function becomes the top-level RHS
+    // of an AssignStmt/EvalStmt/lifted-ReturnStmt value, so none of ITS
+    // arguments may themselves be, or contain, a call -- the same
+    // NoNestedCalls prerequisite LegalizeSpmdLaunches enforces next.
+    CallPtr call = call_in;
+    {
+      std::vector<ExprPtr> hoisted_args = call->args_;
+      bool hoisted_any = false;
+      for (size_t i = 0; i + 1 < hoisted_args.size(); ++i) {
+        if (transform_utils::ExprContainsCallLike(hoisted_args[i])) {
+          hoisted_args[i] = HoistCallSubexpressions(hoisted_args[i], call->span_);
+          hoisted_any = true;
+        }
+      }
+      if (hoisted_any) {
+        auto new_call = MutableCopy(call);
+        new_call->args_ = std::move(hoisted_args);
+        call = new_call;
+      }
+    }
 
     // core_num (args_[5]) is the requested block limit L, carried as a
     // Scalar[INDEX] argument. It is consumed here and then dropped from the
@@ -913,6 +951,33 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     BindCallsToVars hoister(
         [this, &span](const ExprPtr& call) { return BindPrefix("a2av_width_", call, span); });
     return hoister.VisitExpr(request);
+  }
+
+  /// Hoist call-like subexpressions out of ``call_like``'s own argument list,
+  /// leaving ``call_like`` itself (and every other field: attrs, kwargs, and
+  /// for a Submit its deps/core_num/sync_start) unchanged. Use this where
+  /// ``call_like`` is itself about to become the literal RHS of a generated
+  /// statement -- re-hoisting it with ``HoistCallSubexpressions`` would bind
+  /// it to a second, redundant Var -- but a caller invoking this pass directly
+  /// on unflattened IR may still have left a nested call inside one of its own
+  /// arguments (e.g. ``self.outer(self.inner(...))``, or a collective operand
+  /// such as ``self.make_input(...)``). A Var request passes through
+  /// unchanged.
+  template <typename CallLikeT>
+  [[nodiscard]] std::shared_ptr<const CallLikeT> HoistCallLikeArguments(
+      const std::shared_ptr<const CallLikeT>& call_like, const Span& span) {
+    std::vector<ExprPtr> args = call_like->args_;
+    bool changed = false;
+    for (auto& arg : args) {
+      if (transform_utils::ExprContainsCallLike(arg)) {
+        arg = HoistCallSubexpressions(arg, span);
+        changed = true;
+      }
+    }
+    if (!changed) return call_like;
+    auto result = MutableCopy(call_like);
+    result->args_ = std::move(args);
+    return result;
   }
 
   /// Splice the pending prefix in front of ``stmt`` and clear it.

@@ -101,6 +101,41 @@ def _callee_names(func: ir.Function) -> list[str]:
     return [c.op.name for c in _collect_calls(func.body)]
 
 
+def _assert_no_nested_call_like(stmt: ir.Stmt) -> None:
+    """Fail if any Call/Submit argument or operand is itself a Call/Submit.
+
+    ``LegalizeSpmdLaunches``'s ``NoNestedCalls`` prerequisite requires every
+    Call/Submit to be a top-level statement value (an AssignStmt/EvalStmt RHS,
+    or a ReturnStmt value bound to one first); this walks binary/unary operands
+    and call-like arguments looking for a violation anywhere in ``stmt``.
+    """
+    nested: list[ir.Call | ir.Submit] = []
+
+    def _is_call_like(value: object) -> bool:
+        return isinstance(value, (ir.Call, ir.Submit))
+
+    class _Walker(ir.IRVisitor):
+        def visit_binary_expr(self, op: ir.BinaryExpr) -> None:
+            nested.extend(o for o in (op.left, op.right) if _is_call_like(o))
+            super().visit_binary_expr(op)
+
+        def visit_unary_expr(self, op: ir.UnaryExpr) -> None:
+            if _is_call_like(op.operand):
+                nested.append(op.operand)
+            super().visit_unary_expr(op)
+
+        def visit_call(self, op: ir.Call) -> None:
+            nested.extend(a for a in op.args if _is_call_like(a))
+            super().visit_call(op)
+
+        def visit_submit(self, op: ir.Submit) -> None:
+            nested.extend(a for a in op.args if _is_call_like(a))
+            super().visit_submit(op)
+
+    _Walker().visit_stmt(stmt)
+    assert not nested, [getattr(c, "op", c) for c in nested]
+
+
 def test_collective_becomes_a_local_builtin_kernel_call():
     """The public collective is replaced by a call to the synthesized kernel."""
     result = passes.lower_l2_tensor_collectives()(_build_program())
@@ -923,24 +958,7 @@ def test_compound_call_valued_core_num_hoists_the_call():
     assert isinstance(width, ir.Var), width
     assert width.name_hint.startswith("a2av_blocks_"), width.name_hint
 
-    nested: list[ir.Call] = []
-
-    class _NoNestedCall(ir.IRVisitor):
-        def visit_binary_expr(self, op: ir.BinaryExpr) -> None:
-            nested.extend(o for o in (op.left, op.right) if isinstance(o, ir.Call))
-            super().visit_binary_expr(op)
-
-        def visit_unary_expr(self, op: ir.UnaryExpr) -> None:
-            if isinstance(op.operand, ir.Call):
-                nested.append(op.operand)
-            super().visit_unary_expr(op)
-
-        def visit_call(self, op: ir.Call) -> None:
-            nested.extend(a for a in op.args if isinstance(a, ir.Call))
-            super().visit_call(op)
-
-    _NoNestedCall().visit_stmt(pipeline.body)
-    assert not nested, [c.op.name for c in nested]
+    _assert_no_nested_call_like(pipeline.body)
     # End-to-end gate: the launch legalizer requires NoNestedCalls.
     passes.legalize_spmd_launches()(after)
 
@@ -1226,6 +1244,126 @@ def test_tuple_projected_call_is_lifted_before_a_runtime_collective():
     assert all(isinstance(value, ir.Var) for value in returned.value), returned.value
     # The lifted projection must not leave a Call under the TupleGetItemExpr;
     # the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
+
+
+def test_nested_call_under_a_lifted_direct_call_is_hoisted_too():
+    """A direct-Call return value's OWN argument may itself be a call.
+
+    ``return self.outer(self.inner(...)), all_to_all_v(..., core_num=n)`` has a
+    direct ``Call`` as its first returned value, so the lift logic must not
+    skip it outright (that would double-bind it) -- but ``inner`` is nested
+    inside ``outer``'s own argument and still needs hoisting on its own.
+    Leaving it inline would carry a Call under the generated AssignStmt's RHS,
+    which ``LegalizeSpmdLaunches``'s ``NoNestedCalls`` prerequisite rejects.
+    """
+
+    @pl.program
+    class NestedDirectCall:
+        @pl.function(type=pl.FunctionType.InCore)
+        def inner_step(
+            self,
+            data: pld.DistributedTensor[[TOTAL, SIZE], pl.FP32],
+            tmp: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[TOTAL, SIZE], pl.FP32]:
+            chunk = pl.load(data, [0, 0], [TOTAL, SIZE])
+            tmp = pl.store(chunk, [0, 0], tmp)
+            return tmp
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def outer_step(
+            self,
+            x: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[TOTAL, SIZE], pl.FP32]:
+            chunk = pl.load(x, [0, 0], [TOTAL, SIZE])
+            out = pl.store(chunk, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+            tmp: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[TOTAL, SIZE], pl.FP32], pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]]:
+            # Written inline, not pre-bound: the first value is a direct Call
+            # (outer_step) whose own argument is another direct Call
+            # (inner_step) -- the unflattened shape the lift logic must handle.
+            return (
+                self.outer_step(self.inner_step(data, tmp), out),
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n),
+            )
+
+    after = passes.lower_l2_tensor_collectives()(NestedDirectCall)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    # Source order preserved: both ordinary calls run before the exchange.
+    assert names.index("inner_step") < names.index("outer_step") < names.index(_KERNEL_NAME), names
+    _assert_no_nested_call_like(pipeline.body)
+    # End-to-end gate: the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
+
+
+def test_call_like_collective_operand_is_hoisted_before_the_width_prelude():
+    """A collective operand that is itself a call must be hoisted too.
+
+    ``all_to_all_v(self.make_input(...), ..., core_num=n)`` with a runtime
+    width emits an arithmetic prelude for ``core_num`` -- but the ``input``
+    operand is ALSO, independently, a direct call that was left untouched by
+    that prelude logic. Leaving it inline carries a Call under the kernel
+    call's own argument list, which ``LegalizeSpmdLaunches``'s
+    ``NoNestedCalls`` prerequisite rejects.
+    """
+
+    @pl.program
+    class CallLikeOperand:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            for row in pl.range(TOTAL):
+                chunk = pl.load(inp, [row, 0], [1, SIZE])
+                stage = pl.store(chunk, [row, 0], stage)
+            return stage
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            # The ``input`` operand is written inline as a direct call, not
+            # pre-bound to a Var -- the unflattened shape the operand-hoist
+            # logic in LowerCollective must handle, alongside the runtime
+            # ``core_num`` width prelude.
+            return pld.tensor.all_to_all_v(
+                self.stage_step(inp, stage), data, signal, counts, recv, core_num=n
+            )
+
+    after = passes.lower_l2_tensor_collectives()(CallLikeOperand)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    # The operand's own producer must run before the kernel it feeds.
+    assert names.index("stage_step") < names.index(_KERNEL_NAME), names
+    _assert_no_nested_call_like(pipeline.body)
+    kernel_args = list(_kernel_call(after).args)
+    assert isinstance(kernel_args[0], ir.Var), kernel_args[0]
+    # End-to-end gate: the launch legalizer requires NoNestedCalls.
     passes.legalize_spmd_launches()(after)
 
 
