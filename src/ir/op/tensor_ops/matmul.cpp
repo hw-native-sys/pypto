@@ -424,9 +424,15 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
     }
     return logical_shape(type, valid);
   };
+  const auto lhs_valid = logical_valid_shape(lhs);
+  const auto rhs_valid = logical_valid_shape(rhs);
+  // Match Tile MX inference after converting each carrier's valid extent.
+  CHECK_SPAN(ProveValidExtentEqual(lhs_valid[1], rhs_valid[0]) != ProofResult::kFalse, span)
+      << kOpName << " requires matching logical valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
+      << " and rhs K=" << PythonPrint(rhs_valid[0]);
   std::vector<ExprPtr> output_shape{lhs_shape[0], rhs_shape[1]};
   TensorView view;
-  view.valid_shape = {logical_valid_shape(lhs)[0], logical_valid_shape(rhs)[1]};
+  view.valid_shape = {lhs_valid[0], rhs_valid[1]};
   return std::make_shared<TensorType>(output_shape, DataType::FP32, std::nullopt, std::move(view));
 }
 

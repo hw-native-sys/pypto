@@ -184,6 +184,36 @@ class TestTensorMatmulMx:
             192,
         ]
 
+    def test_packed_valid_k_compares_logical_extents(self):
+        lhs, lhs_scale, rhs, rhs_scale = self._packed_operands()
+        assert isinstance(lhs.type, ir.TensorType) and isinstance(rhs.type, ir.TensorType)
+        # ND halves the lhs contraction extent but leaves the rhs K in values.
+        lhs = ir.Var(
+            "lhs",
+            ir.TensorType(
+                lhs.type.shape, lhs.type.dtype, tensor_view=ir.TensorView(layout=pl.ND, valid_shape=[32, 63])
+            ),
+            lhs.span,
+        )
+        rhs_matching = ir.Var(
+            "rhs",
+            ir.TensorType(
+                rhs.type.shape, rhs.type.dtype, tensor_view=ir.TensorView(layout=pl.ND, valid_shape=[126, 96])
+            ),
+            rhs.span,
+        )
+        assert isinstance(ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs_matching, rhs_scale).type, ir.TensorType)
+
+        rhs_mismatched = ir.Var(
+            "rhs",
+            ir.TensorType(
+                rhs.type.shape, rhs.type.dtype, tensor_view=ir.TensorView(layout=pl.ND, valid_shape=[124, 96])
+            ),
+            rhs.span,
+        )
+        with pytest.raises(ValueError, match="matching logical valid K.*lhs K=126 and rhs K=124"):
+            ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs_mismatched, rhs_scale)
+
     @pytest.mark.parametrize(
         "side,layout,valid,message",
         [
