@@ -26,6 +26,7 @@ from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_
 if TYPE_CHECKING:
     from pypto.ir.distributed_compiled_program import ClusterConfig
     from pypto.ir.pass_manager import OptimizationStrategy
+    from pypto.ir.rank_placement import RankConfig
     from pypto.pypto_core.ir import TensorLayout
 
 # Stable PyPTO version stamp included in every cache key so that upgrading
@@ -145,6 +146,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     enable_buffer_ir: bool = True,
     enable_software_pipeline: bool = False,
     cluster_config: "ClusterConfig | None" = None,
+    rank_config: "RankConfig | None" = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -215,6 +217,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         enable_buffer_ir: Whole-kernel Buffer IR selection from the active
             ``PassContext``. It changes storage legalization and separates
             artifacts from explicit Off mode under every memory planner.
+        rank_config: Validated global-rank placement snapshot, including rank order.
         enable_software_pipeline: Effective software pipeline opt-in. Separates
             rotating-slot kernels from kernels produced by unroll lowering.
 
@@ -258,6 +261,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("buffer_ir_version", 10 if enable_buffer_ir else 0),
         ("enable_software_pipeline", enable_software_pipeline),
     )
+    if rank_config is not None:
+        compile_opts += (("rank_placement", _freeze(rank_config)),)
     return CacheKey(
         source_hash,
         platform,

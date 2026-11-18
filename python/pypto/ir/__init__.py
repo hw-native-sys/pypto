@@ -52,6 +52,7 @@ from .distributed_compiled_program import (
     ClusterNodeSpec,
     DistributedCompiledProgram,
     DistributedConfig,
+    SharedDomainBinding,
 )
 
 # Import roundtrip instrument factory
@@ -65,6 +66,7 @@ from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
 
 # Import python_print utility
 from .printer import python_print
+from .rank_placement import RankConfig, RankPlacement
 
 # Import TensorType and TileType with enhanced __init__ that supports integer shapes
 # This patches the native TensorType and TileType classes to accept integer shapes
@@ -115,7 +117,10 @@ __all__ = [
     "DistributedCompiledProgram",
     "DistributedConfig",
     "ClusterConfig",
+    "RankConfig",
+    "RankPlacement",
     "ClusterNodeSpec",
+    "SharedDomainBinding",
     "PassManager",
     "OptimizationStrategy",
     "PassDumpLevel",

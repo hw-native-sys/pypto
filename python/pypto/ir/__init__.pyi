@@ -48,6 +48,8 @@ from .instruments import make_roundtrip_instrument
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
 from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
 from .printer import python_print
+from .rank_placement import RankConfig as RankConfig
+from .rank_placement import RankPlacement as RankPlacement
 
 # Per-call-site direction aliases re-exported at the top level.
 input: ArgDirection
@@ -95,6 +97,8 @@ __all__ = [
     "CompiledProgram",
     "DistributedCompiledProgram",
     "DistributedConfig",
+    "RankConfig",
+    "RankPlacement",
     "PassManager",
     "OptimizationStrategy",
     "PassDumpLevel",

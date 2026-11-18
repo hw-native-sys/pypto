@@ -77,3 +77,5 @@ PyPTO 的分布式模型建立在**对称内存与信号**之上——完整说�
 
 - [入门指南](../00-getting_started.md) — `ir.compile()`、`CompiledProgram`、`DeviceTensor`、`RunConfig`
 - [Simpler 运行时](https://hw-native-sys.github.io/simpler/) — 运行时内部机制（调度器、图构建、tensormap）
+
+- [按 rank 分配自动选择 L3 / L4](22-automatic-placement.md)

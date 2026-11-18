@@ -332,6 +332,12 @@ after successful completion. L4 tensors do not require `.share_memory_()` or
 allocation before `prepare()`. Cross-node overlapping ordinary accesses with
 a writer require explicit transfer and fences and are rejected by this path.
 
+`persistent=True`, `reset_persistent_windows`, and explicit `shared_domains`
+retain their session behavior: windows are retained across runs, reset before
+reuse by default, and shared across programs only through compatible explicit
+bindings. Callback overrides, inherited host buffers and resident-tensor
+allocation APIs are not available through `ClusterWorker`.
+
 ### Launch requirements
 
 Run the caller on the first configured node. Rank 0 is placed on that host and

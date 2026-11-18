@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     # here would risk a partially-initialised ``pypto.runtime`` package at import
     # time. The field is plumbed through to ``ir.compile()`` lazily anyway.
     from pypto.ir.distributed_compiled_program import ClusterConfig, DistributedConfig
+    from pypto.ir.rank_placement import RankConfig
 
 
 def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
@@ -343,6 +344,10 @@ class RunConfig:
             :meth:`compile_kwargs` forwards it too, so a ``@pl.program``
             compiled via ``ir.compile(prog, **config.compile_kwargs())`` picks
             up the same distributed target.
+        rank_config: Ordered global-rank allocation for automatic L3/L4 selection.
+            A single host generates a HOST entry; multiple hosts lower rank dispatch
+            through a POD controller. Cannot be combined with explicit distributed
+            or cluster configuration.
         cluster_config: Optional POD/CLUSTER_0 launch configuration, forwarded
             through :meth:`compile_options` and :meth:`compile_kwargs` as a
             validated snapshot of the nested node/device lists. Cannot be
@@ -404,6 +409,7 @@ class RunConfig:
     cache_config: CacheConfig | None = None
     distributed_config: "DistributedConfig | None" = None
     cluster_config: "ClusterConfig | None" = None
+    rank_config: "RankConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
     dump_ptoas_passes: bool = False
@@ -453,6 +459,7 @@ class RunConfig:
             cache_config: CacheConfig | None = ...,
             distributed_config: "DistributedConfig | None" = ...,
             cluster_config: "ClusterConfig | None" = ...,
+            rank_config: "RankConfig | None" = ...,
             analyze_auto_scopes_for_deps: bool = ...,
             memory_planner: MemoryPlanner | None = ...,
             dump_ptoas_passes: bool = ...,
@@ -460,6 +467,10 @@ class RunConfig:
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.rank_config is not None and (
+            self.cluster_config is not None or self.distributed_config is not None
+        ):
+            raise ValueError("rank_config cannot be combined with explicit distributed/cluster config")
         if self.cluster_config is not None and self.distributed_config is not None:
             raise ValueError("RunConfig.cluster_config and distributed_config cannot both be supplied")
         # The two axes replace what used to be a membership test on the packed
@@ -617,6 +628,7 @@ class RunConfig:
             enable_software_pipeline=self.enable_software_pipeline,
             distributed_config=self.distributed_config,
             cluster_config=self.cluster_config,
+            rank_config=self.rank_config,
         )
 
     def run_options(self) -> "RunOptions":
@@ -934,9 +946,14 @@ class CompileOptions:
     memory_planner: MemoryPlanner | None = None
     distributed_config: "DistributedConfig | None" = None
     cluster_config: "ClusterConfig | None" = None
+    rank_config: "RankConfig | None" = None
     enable_software_pipeline: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.rank_config is not None and (
+            self.cluster_config is not None or self.distributed_config is not None
+        ):
+            raise ValueError("rank_config cannot be combined with explicit distributed/cluster config")
         if self.cluster_config is not None and self.distributed_config is not None:
             raise ValueError("CompileOptions.cluster_config and distributed_config cannot both be supplied")
         if type(self.execution_mode) is not ExecutionMode:
@@ -975,6 +992,15 @@ class CompileOptions:
             # Revalidate and detach nested device lists once per request. The
             # JIT uses this same snapshot for its key and subsequent compiler call.
             kwargs["cluster_config"] = replace(self.cluster_config)
+        if self.rank_config is not None:
+            from pypto.ir.rank_placement import resolve_rank_request  # noqa: PLC0415
+
+            snapshot, distributed, cluster = resolve_rank_request(self.rank_config)
+            kwargs["rank_config"] = snapshot
+            if distributed is not None:
+                kwargs["distributed_config"] = distributed
+            if cluster is not None:
+                kwargs["cluster_config"] = cluster
         return kwargs
 
 

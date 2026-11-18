@@ -155,18 +155,37 @@ def _io_arg(binding: tuple[_InvocationIO, int], tensor: torch.Tensor, tag: Any) 
     return binding[0].argument(binding[1], tensor, tag)
 
 
+class _RetainedDomainLease:
+    """Context-manager view that keeps its physical CommDomain alive."""
+
+    def __init__(self, handle: Any) -> None:
+        """Wrap a retained CommDomain handle without taking release ownership."""
+        self._handle = handle
+
+    def __enter__(self) -> Any:
+        """Return the retained CommDomain handle to generated orchestration."""
+        return self._handle
+
+    def __exit__(self, *_exc: Any) -> bool:
+        """Leave the generated scope without releasing the retained handle."""
+        return False
+
+
 class ClusterController:
-    """Runtime-only root owned by the static direct controller rank."""
+    """Persistent runtime-only root owned by the static direct controller rank."""
 
     def __init__(self, context: Any, spec: dict[str, Any]) -> None:
         from simpler.worker import RemoteCallable  # noqa: PLC0415
 
         self._spec = spec
+        self._persistent = bool(spec["persistent"])
+        self._reset = bool(spec["reset"])
         self._closed = False
         self._closing = False
         self._lock = threading.RLock()
         self._active_io = None
         self._keep = []
+        self._domains = {}
         self._states = {}
         self._nodes = tuple(executor.worker_id for executor in context.topology.executors)
         self._worker = None
@@ -193,16 +212,101 @@ class ClusterController:
                 }
                 module = importlib.import_module(program["module_prefix"] + ".orchestration.cluster_orch")
                 module._io_arg = _io_arg
+                plans = [dict(plan, pool_key=tuple(plan["pool_key"])) for plan in program["plans"]]
                 self._states[index] = {
                     "entry": getattr(module, program["entry_name"]),
                     "allocate": getattr(module, "_alloc_intermediates", None),
                     "callables": callables,
+                    "plans": plans,
                     "param_names": program["param_names"],
                 }
             self._worker.init()
         except BaseException:
             self.close()
             raise
+
+    def _domain_provider(self, state: dict[str, Any], orch: Any) -> Any:
+        """Prepare current root scopes before submission, then validate native requests."""
+        from simpler.task_interface import CommBufferSpec  # noqa: PLC0415
+
+        by_name = {plan["domain"]["generated_name"]: plan for plan in state["plans"]}
+
+        def signature(kwargs):
+            return (
+                tuple(tuple(member) for member in kwargs["members"]),
+                int(kwargs["window_size"]),
+                tuple(
+                    (buffer.name, buffer.dtype, int(buffer.count), int(buffer.nbytes))
+                    for buffer in kwargs["buffers"]
+                ),
+            )
+
+        def acquire(plan, kwargs):
+            key = plan["pool_key"]
+            handle = self._domains.get(key)
+            if handle is not None:
+                if handle.released or handle.freed:
+                    raise ValueError("Retained global domain was released before reuse")
+                return handle
+            handle = orch.allocate_global_domain(**kwargs)
+            expected = [
+                (node, local_worker, rank, i)
+                for i, (node, local_worker, rank) in enumerate(
+                    (self._nodes[node], local_worker, rank) for node, local_worker, rank in plan["members"]
+                )
+            ]
+            actual = [
+                (member.node_worker_id, member.local_worker_id, member.global_device_rank, member.domain_rank)
+                for member in handle.members
+            ]
+            if actual != expected or handle.mapping_size < kwargs["window_size"]:
+                # R1 still owns the new handle in its run journal on this path.
+                raise ValueError("Allocated global domain differs from requested ordered members/window")
+            self._domains[key] = handle
+            return handle
+
+        requests = {}
+        reset = set(self._domains) if self._reset else set()
+        for plan in state["plans"]:
+            kwargs = {
+                "name": plan["name"],
+                "members": [(self._nodes[node], local_worker) for node, local_worker, _ in plan["members"]],
+                "window_size": sum(slot[2] for slot in plan["canonical"]),
+                "buffers": [
+                    CommBufferSpec(name=name, dtype="opaque", count=size, nbytes=allocated)
+                    for name, size, allocated, _ in plan["canonical"]
+                ],
+                "retain_after_run": True,
+            }
+            handle = acquire(plan, kwargs)
+            requests[plan["domain"]["generated_name"]] = handle
+            if plan["pool_key"] in reset:
+                zero = bytes(min(handle.mapping_size, 8 * 1024 * 1024))
+                for rank in range(len(handle.members)):
+                    for offset in range(0, handle.mapping_size, len(zero)):
+                        orch.copy_to_global_domain(
+                            handle, rank, zero[: min(len(zero), handle.mapping_size - offset)], offset=offset
+                        )
+                reset.remove(plan["pool_key"])
+
+        def provide(**kwargs):
+            name = kwargs["name"]
+            if name not in by_name:
+                raise ValueError(f"Native global domain request {name!r} is absent from cold metadata")
+            plan = by_name[name]
+            expected = (
+                tuple((self._nodes[node], local_worker) for node, local_worker, _ in plan["members"]),
+                sum(slot["allocated_nbytes"] for slot in plan["domain"]["slots"]),
+                tuple(
+                    (slot["generated_name"], "opaque", slot["logical_nbytes"], slot["allocated_nbytes"])
+                    for slot in plan["domain"]["slots"]
+                ),
+            )
+            if signature(kwargs) != expected or not kwargs.get("retain_after_run", False):
+                raise ValueError(f"Native global domain {name!r} request differs from cold specification")
+            return _RetainedDomainLease(requests[name])
+
+        return provide
 
     def run(self, program_index: int, values: list[Any], call_config: dict[str, Any]) -> None:
         """Publish ordinary outputs only after the direct worker's run fence."""
@@ -228,6 +332,7 @@ class ClusterController:
             self._active_io = io
 
             def orchestration(orch: Any, unused: Any, unused_config: Any) -> None:
+                provider = self._domain_provider(state, orch) if self._persistent else None
                 state["entry"](
                     orch,
                     unused,
@@ -238,7 +343,8 @@ class ClusterController:
                     node_sizes=self._spec["node_sizes"],
                     node_bindings=[(io, node) for node in self._nodes],
                     _keep=self._keep,
-                    _retain=False,
+                    _retain=self._persistent,
+                    _domain_provider=provider,
                 )
 
             released = False
@@ -264,14 +370,26 @@ class ClusterController:
             if self._closed:
                 return
             self._closing = True
+            first_error = None
+            if self._active_io is None:
+                for handle in reversed(tuple(self._domains.values())):
+                    if not handle.freed:
+                        try:
+                            handle.release()
+                        except BaseException as error:
+                            if first_error is None:
+                                first_error = error
             if self._worker is not None:
                 self._worker.close()
             if self._active_io is not None:
                 self._active_io.clear()
                 self._active_io = None
             self._keep.clear()
+            self._domains.clear()
             self._states.clear()
             self._closed = True
+            if first_error is not None:
+                raise first_error
 
 
 def main(context: Any) -> None:

@@ -83,3 +83,5 @@ The distributed chapter covers L3. L2 is covered in the
 
 - [Getting Started](../00-getting_started.md) — `ir.compile()`, `CompiledProgram`, `DeviceTensor`, `RunConfig`
 - [Simpler Runtime](https://hw-native-sys.github.io/simpler/) — Runtime internals (scheduler, graph building, tensormap)
+
+- [Automatic L3 / L4 placement](22-automatic-placement.md)

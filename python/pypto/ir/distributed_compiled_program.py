@@ -18,7 +18,7 @@ through simpler's distributed runtime (Worker level=3)::
 
 import math
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
@@ -370,6 +370,20 @@ def _validate_compiled_entry(compiled: Any, cluster_config: ClusterConfig | None
         raise ValueError("Cluster artifact requires ClusterConfig; missing cluster_config request")
 
 
+@dataclass(frozen=True)
+class SharedDomainBinding:
+    """Bind a compiled program's domain/slot ordinals to a session sharing key.
+
+    Inspect ``program.comm_domains`` for ordinals. ``prepare`` snapshots the
+    slot map; equal layouts alone never opt a domain into sharing.
+    """
+
+    program: "DistributedCompiledProgram"
+    domain: int
+    key: str
+    slots: Mapping[int, str]
+
+
 class DistributedCompiledProgram:
     """A compiled L3+ distributed program that executes via simpler Worker(level=3).
 
@@ -421,6 +435,7 @@ class DistributedCompiledProgram:
         _return_types: list[Any] | None = None,
         _execution_capabilities: ExecutionCapabilities = ExecutionCapabilities(),
         _l3_entries: dict[str, Any] | None = None,
+        _cluster_domains: dict[str, Any] | None = None,
     ) -> None:
         # ``program`` is the post-pass IR. The runtime needs post-pass IR for
         # orchestrator metadata (post-SSA names that match the generated
@@ -472,6 +487,7 @@ class DistributedCompiledProgram:
         self._output_indices = _output_indices
         self._return_types = _return_types
         self._l3_entries = _l3_entries
+        self._cluster_domains = _cluster_domains
 
         # Only the fresh-compile path (live IR) writes artifacts. The reload
         # path must not clobber a user's hand-edited debug/run.py or the
@@ -532,6 +548,7 @@ class DistributedCompiledProgram:
         if self._entry_kind == "cluster":
             from ._cluster_artifacts import (  # noqa: PLC0415
                 host_entries,
+                make_domain_records,
                 make_entry_records,
             )
 
@@ -551,6 +568,10 @@ class DistributedCompiledProgram:
                     self._program, self._cluster_config.node_device_counts()[0]
                 )
                 meta["l3_entries"] = self._l3_entries
+                self._cluster_domains = make_domain_records(
+                    self._program, self._l3_entries, len(self._cluster_config.nodes)
+                )
+                meta["cluster_domains"] = self._cluster_domains
         _write_meta_atomically(self._output_dir / _DISTRIBUTED_META_FILENAME, meta)
 
     @classmethod
@@ -621,6 +642,7 @@ class DistributedCompiledProgram:
         entry_kind = "host"
         entry_name = None
         l3_entries = None
+        cluster_domains = None
         if raw["schema"] == _CLUSTER_META_SCHEMA:
             known = {
                 "schema",
@@ -639,11 +661,12 @@ class DistributedCompiledProgram:
                     meta_path,
                     f"schema 4 missing cluster metadata fields {sorted(known - set(raw))}",
                 )
-            if set(raw) - known - {"l3_entries"}:
+            if set(raw) - known - {"l3_entries", "cluster_domains"}:
                 raise _meta_error(
                     _DISTRIBUTED_META_FILENAME,
                     meta_path,
-                    f"unknown cluster metadata fields {sorted(set(raw) - known - {'l3_entries'})}",
+                    "unknown cluster metadata fields "
+                    f"{sorted(set(raw) - known - {'l3_entries', 'cluster_domains'})}",
                 )
             if raw.get("entry_kind") != "cluster":
                 raise _meta_error(
@@ -665,6 +688,14 @@ class DistributedCompiledProgram:
                     raise _meta_error(
                         _DISTRIBUTED_META_FILENAME, meta_path, f"invalid l3_entries: {error}"
                     ) from error
+            from ._cluster_artifacts import restore_domain_records  # noqa: PLC0415
+
+            try:
+                cluster_domains = restore_domain_records(raw, l3_entries, len(saved_cluster.nodes))
+            except (ValueError, TypeError, KeyError, IndexError) as error:
+                raise _meta_error(
+                    _DISTRIBUTED_META_FILENAME, meta_path, f"invalid cluster_domains: {error}"
+                ) from error
             if distributed_config is not None:
                 raise ValueError("Cluster metadata cannot use distributed_config")
             if cluster_config is not None:
@@ -672,7 +703,12 @@ class DistributedCompiledProgram:
                     raise ValueError("cluster_config override must match the stored cluster topology/config")
             cluster_config = saved_cluster
             entry_kind = "cluster"
-        elif "cluster_config" in raw or "l3_entries" in raw or raw.get("entry_kind", "host") != "host":
+        elif (
+            "cluster_config" in raw
+            or "l3_entries" in raw
+            or "cluster_domains" in raw
+            or raw.get("entry_kind", "host") != "host"
+        ):
             raise _meta_error(
                 _DISTRIBUTED_META_FILENAME,
                 meta_path,
@@ -711,6 +747,7 @@ class DistributedCompiledProgram:
             _return_types=return_types,
             _execution_capabilities=meta["execution_capabilities"],
             _l3_entries=l3_entries,
+            _cluster_domains=cluster_domains,
         )
 
     @property
@@ -735,6 +772,13 @@ class DistributedCompiledProgram:
 
         return copy.deepcopy(self._l3_entries)
 
+    @property
+    def comm_domains(self) -> tuple[Mapping[str, Any], ...]:
+        """Immutable root-domain descriptors; empty for legacy/ordinary HOST artifacts."""
+        from ._cluster_artifacts import freeze_domains  # noqa: PLC0415
+
+        return freeze_domains(self._cluster_domains["domains"]) if self._cluster_domains is not None else ()
+
     def _require_artifact_ready(self) -> None:
         """Allow parent-side generation/loading only for complete L4 contracts."""
         if self._entry_kind == "cluster" and self._l3_entries is None:
@@ -746,7 +790,8 @@ class DistributedCompiledProgram:
     def _require_supported_execution(self) -> None:
         if self._entry_kind == "cluster":
             raise NotImplementedError(
-                "Cluster/POD (L4) execution requires compiled.prepare() and its Direct MPI session"
+                "Cluster/POD (L4) execution is unsupported by this HOST executor; "
+                "use compiled.prepare() to construct its ClusterWorker"
             )
 
     @property
@@ -896,12 +941,18 @@ class DistributedCompiledProgram:
         extra_compiled: Sequence["DistributedCompiledProgram"] = (),
         persistent: bool = False,
         reset_persistent_windows: bool | None = None,
+        shared_domains: Sequence[SharedDomainBinding] = (),
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
         startup_timeout_s: float | None = None,
     ) -> "DistributedWorker | ClusterWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
+
+        CLUSTER_0 entries return :class:`ClusterWorker`, whose synchronous
+        ``run`` accepts ordinary contiguous CPU tensors allocated after this
+        call. Explicit ``shared_domains`` bind program-local domain/slot
+        ordinals to session keys when ``persistent=True``.
 
         Runs the expensive setup (``_compile_and_assemble``, generated-module
         loading, simpler ``Worker(level=3)`` construction + registration +
@@ -946,6 +997,10 @@ class DistributedCompiledProgram:
                 enables reset in persistent mode. Set to ``False`` only when
                 the caller manually clears or otherwise manages all reused
                 communication-buffer state.
+            shared_domains: Explicit CLUSTER domain/slot mappings to session
+                keys. Requires persistent mode; omitted domains stay isolated
+                by program. This configuration is snapshotted at preparation
+                and does not affect compilation or JIT identity.
             callbacks: Bind a callable to a SubWorker by name — e.g. a real
                 sampling closure. Abstract SubWorkers (declared with a ``...``
                 body) are runtime-bound callback points and MUST be supplied
@@ -979,16 +1034,23 @@ class DistributedCompiledProgram:
         """
         if self._entry_kind == "cluster":
             self._require_artifact_ready()
-            if persistent or reset_persistent_windows is not None:
-                raise NotImplementedError("Persistent cluster domains are not available in this runtime")
             if callbacks or sub_worker_overrides or inherited_host_tensors:
                 raise NotImplementedError(
-                    "ClusterWorker supports synchronous Tensor/Scalar execution without callback overrides "
-                    "or inherited host buffers"
+                    "ClusterWorker currently supports synchronous ordinary Tensor/Scalar execution; "
+                    "callback overrides and inherited host buffers are unsupported"
                 )
             from pypto.runtime.cluster_runner import ClusterWorker  # noqa: PLC0415
 
-            return ClusterWorker([self, *extra_compiled], config, startup_timeout_s=startup_timeout_s)
+            return ClusterWorker(
+                [self, *extra_compiled],
+                config,
+                startup_timeout_s=startup_timeout_s,
+                persistent=persistent,
+                reset_persistent_windows=reset_persistent_windows,
+                shared_domains=shared_domains,
+            )
+        if shared_domains:
+            raise ValueError("shared_domains requires CLUSTER_0 compiled programs")
         self._require_supported_execution()
         for compiled in extra_compiled:
             compiled._require_supported_execution()

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from .compiled_program import CompiledProgram
     from .distributed_compiled_program import ClusterConfig, DistributedCompiledProgram
     from .param_info import ParamInfo
+    from .rank_placement import RankConfig
 
 
 def _highest_orchestration_level(program: _ir_core.Program) -> _ir_core.Level | None:
@@ -388,6 +389,7 @@ def compile(  # noqa: PLR0913
     execution_mode: ExecutionMode | None = None,
     distributed_config: Any = None,
     cluster_config: "ClusterConfig | None" = None,
+    rank_config: "RankConfig | None" = None,
     analyze_auto_scopes_for_deps: bool = False,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
@@ -474,6 +476,8 @@ def compile(  # noqa: PLR0913
         execution_mode: Simulator or onboard execution. Defaults to SIM when
             platform is absent, otherwise inherits the legacy platform. An
             explicit mode must agree with an explicit platform.
+        rank_config: Optional ordered global-rank placement. A HOST entry is
+            lowered to the assigned L3 or L4 topology before the normal passes.
         distributed_config: Optional :class:`DistributedConfig` for L3+
             distributed programs.  When ``None`` (default), auto-detected
             from the program: if L3+ functions are found, a default
@@ -513,6 +517,13 @@ def compile(  # noqa: PLR0913
     from .compiled_program import CompiledProgram  # noqa: PLC0415
     from .param_info import _extract_func_param_infos  # noqa: PLC0415
 
+    if rank_config is not None:
+        from .rank_placement import lower_rank_placement, resolve_rank_request  # noqa: PLC0415
+
+        rank_config, distributed_config, cluster_config = resolve_rank_request(
+            rank_config, distributed_config, cluster_config
+        )
+        program = lower_rank_placement(program, rank_config)
     highest_level = _highest_orchestration_level(program)
     if cluster_config is not None:
         if distributed_config is not None:
