@@ -145,7 +145,7 @@ void BindPass(nb::module_& m) {
              "backend store pipe can combine; a bf16 destination requires the Ascend910 (A2/A3) "
              "profile")
       .value("AccCompactValid", IRProperty::AccCompactValid,
-             "Every tile.matmul_acc / tile.matmul_mx_acc accumulates into a CompactMode.normal "
+             "Every tile.matmul_acc, tile.matmul_mx_acc, or tile.gemv_mx_acc uses a CompactMode.normal "
              "buffer when mad's pitch (ceil(lhs validRow/16)*16) differs from the accumulator's "
              "physical row count, and no tile outside Left/Right/Acc carries a compact mode")
       .value("GraphBoundaryLegalized", IRProperty::GraphBoundaryLegalized,

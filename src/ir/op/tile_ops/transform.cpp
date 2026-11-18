@@ -101,6 +101,12 @@ void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::strin
   }
 }
 
+bool IsLeftRowVector(const std::vector<ExprPtr>& shape, std::optional<MemorySpace> space) {
+  if (space != MemorySpace::Left || shape.size() != 2) return false;
+  const auto rows = As<ConstInt>(shape[0]);
+  return rows && rows->value_ == 1;
+}
+
 }  // anonymous namespace
 
 // ============================================================================
@@ -228,6 +234,14 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
       valid_shape.insert(valid_shape.begin(), unit_axes.begin(), unit_axes.end());
     }
   }
+
+  // An L0A row vector packs pairs along K, while a multi-row L0A FP4 tile
+  // packs pairs along M. A subview preserves the original bytes.
+  CHECK_SPAN(
+      !tile_type->dtype_.IsPackedFp4() || IsLeftRowVector(tile_type->shape_, tile_type->GetMemorySpace()) ==
+                                              IsLeftRowVector(new_shape, tile_type->GetMemorySpace()),
+      args[0]->span_)
+      << "tile.slice: cannot change packed FP4 pairs at the Left row-vector boundary";
 
   // Slice produces a window over the source tile.  PTO's pto.subview semantics
   // require the result tile_buf to share dtype, memory space, and the five
@@ -514,6 +528,15 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
 
   std::vector<ExprPtr> new_shape = tile_type->shape_;
   std::swap(new_shape[ndim - 2], new_shape[ndim - 1]);
+
+  // The layout dual follows the transpose for ordinary FP4 tiles. A Left
+  // row vector packs along K independently of its layout, so it has no dual
+  // that preserves its byte pairs in Left memory.
+  CHECK_SPAN(
+      !tile_type->dtype_.IsPackedFp4() || (!IsLeftRowVector(tile_type->shape_, tile_type->GetMemorySpace()) &&
+                                           !IsLeftRowVector(new_shape, tile_type->GetMemorySpace())),
+      args[0]->span_)
+      << "tile.transpose_view: cannot change packed FP4 pairs at the Left row-vector boundary";
 
   // The transpose dual flips the major-ness of *each* of blayout and slayout
   // independently (row_major <-> col_major); none_box (the non-fractal ND/DN
@@ -885,7 +908,12 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
         args[0]->span_)
         << "tile.extract: PTOAS v0.67 cannot change the packed FP4 packing axis or convert Vec layout; "
            "load or convert the source to the destination layout first";
-    const size_t packed_axis = src_view.blayout == TileLayout::col_major ? 0 : 1;
+    // A column-major carrier row may hold two logical M values. Only a
+    // genuine L0A row vector already packs its pairs along K.
+    const bool source_row_vector = IsLeftRowVector(src_type->shape_, src_type->GetMemorySpace());
+    CHECK_SPAN(source_row_vector == IsLeftRowVector(dst_shape, target), args[0]->span_)
+        << "tile.extract: cannot change packed FP4 pairs at the Left row-vector boundary";
+    const size_t packed_axis = src_view.blayout == TileLayout::col_major && !source_row_vector ? 0 : 1;
     const auto packed_offset = As<ConstInt>(args[packed_axis + 1]);
     CHECK_SPAN(packed_offset && packed_offset->value_ == 0, args[packed_axis + 1]->span_)
         << "tile.extract: PTOAS v0.67 packed FP4 extraction requires zero offset on the packed axis; "

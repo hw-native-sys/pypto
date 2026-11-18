@@ -533,7 +533,11 @@ bound automatically before scale fills. Bias uses physical
 `[1, N]` and matching valid N. The accumulator must match the product's
 physical and valid shapes, FP32 dtype, and `compact=normal`. GEMV results also carry this mode
 so L0C readers use MAD's 16-row fractal pitch despite the single-row descriptor.
-Mat-to-Left row-vector extraction requires a 512-byte-aligned physical width.
+`tile.move` from a single-row Mat tile to Left requires a 512-byte-aligned
+physical width. For packed FP4, `tile.extract` and `tile.slice` preserve the
+source's packing axis, so a carrier row containing two logical M values cannot
+be used as a K-packed Left row vector. `tile.transpose_view` also requires both
+its source and result to lie outside the packed FP4 Left row-vector case.
 Physical K is a multiple of 512 for FP8 or 1024 for FP4, with narrower valid K
 allowed. PTOAS 0.74's single-row `MX_A_ND` load supports two scale groups;
 larger GM scale transfers remain subject to downstream load support.

@@ -783,8 +783,9 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
       // L0A interprets a one-row descriptor as a K-packed row vector. A
       // column-major Mat carrier row already holds two logical M values.
       const auto input_rows = As<ConstInt>(input_shape[0]);
-      CHECK_SPAN(tile_type->GetMemorySpace() == MemorySpace::Left ||
-                     (source_view.blayout == TileLayout::row_major && input_rows && input_rows->value_ == 1),
+      CHECK_SPAN(input_rows && input_rows->value_ == 1 &&
+                     (tile_type->GetMemorySpace() == MemorySpace::Left ||
+                      source_view.blayout == TileLayout::row_major),
                  args[0]->span_)
           << op_name << ": packed FP4 Left row vectors require one logical source row";
     }
