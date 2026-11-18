@@ -151,8 +151,13 @@ remain tracked separately. Preparation and binary compilation do not use caches.
 
 `TMRBridge.lower(prepared, target)` accepts `cannbotdsl.device_callable` v1 for
 TMR v1 on `a5/ccec`. It supports one AIC, one AIV, or one hardware-paired
-AIC + two AIV group (MIX). It requires no implicit workspace, no local allocations,
-and the exporter's exact resource, state, loading and completion declarations. Unknown or stronger
+AIC + two AIV group (MIX). It requires no implicit workspace and the exporter's exact resource, state,
+loading and completion declarations. Static, disjoint allocations in AIV UB and
+AIC L1/L0A/L0B/L0C are supported. The bridge validates integer sizes and offsets,
+space/core ownership, alignment (32 bytes for UB, 512 for Cube spaces), capacity,
+and exact per-space high-water marks. Limits are 248 KiB UB, 512 KiB L1,
+64 KiB each L0A/L0B, and 256 KiB L0C. Dynamic allocations, overlapping allocation
+records, shared SSBUF and other memory spaces remain unsupported. Unknown or stronger
 requirements fail before compilation. Each submission must contain exactly one
 logical block without synchronized start.
 
@@ -178,8 +183,19 @@ registered as a `CoreCallable`; both AIV lanes reuse the MIX AIV image. Every im
 must pass admission before the tuple is returned. It takes C API
 headers from the compiler's selected CANN SDK, retains owned source through
 compilation, and requires text-only ELF admission and static zero-stack reports.
+Text-only compilation omits optional frame-pointer bookkeeping so spill-free
+SIMD VF calls can satisfy the same zero-stack check; actual stack use remains rejected.
 The ordinary JIT `configure_context` route rejects this task's binary policy
 rather than compiling it without admission checks.
+
+The direct runtime system tests include FP16 Cube matmul with FP32 accumulation,
+SIMD FP32 `(x + y) * x`, and a MIX task executing both pipelines. Each AIV owns
+128 vector elements; a dependent AIV consumes both MIX outputs after whole-group
+completion. Repeated runs change inputs and poison outputs to expose stale data.
+These cases exercise allocated on-chip buffers and real compute instructions;
+they do not yet test intra-group Cube-to-vector buffer handoffs. Compile-only
+mode builds both device and orchestration binaries; numerical acceptance requires
+running the same tests on an A5 device.
 
 `build_submitter(tasks, function_ids)` returns an owned orchestration header.
 Pass one function-ID tuple per task, in the same order as its compiled images;

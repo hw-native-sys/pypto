@@ -1825,6 +1825,68 @@ def test_aiv_bridge_rejects_unsupported_resource_contracts(compiler, section, ke
         TMRBridge().lower(prepared, _aiv_target(prepared))
 
 
+def _local_allocation(*, name="UB", space=1, core="aiv", offset=0, size=512):
+    return {
+        "memory_space_name": name,
+        "memory_space": space,
+        "core": core,
+        "byte_offset": offset,
+        "bytes": size,
+        "max_bytes": size,
+    }
+
+
+def test_runtime_admits_static_local_memory(compiler):
+    _aiv_runtime_manifest(compiler)
+    compiler.manifest["resources"].update(
+        allocations=[_local_allocation(), _local_allocation(offset=1024)],
+        local_memory_bytes=[{"core": "aiv", "memory_space_name": "UB", "bytes": 1536}],
+    )
+    prepared = _prepare_call(compiler)
+    assert TMRBridge().lower(prepared, _aiv_target(prepared)).binary_policy == "a5-text-only"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"byte_offset": -32},
+        {"byte_offset": 1},
+        {"byte_offset": True},
+        {"bytes": 0},
+        {"bytes": 512.0},
+        {"max_bytes": 1024},
+        {"max_bytes": True},
+        {"memory_space": True},
+        {"memory_space": 2},
+        {"core": "aic"},
+        {"memory_space_name": "SSBUF"},
+        {"bytes": 256 * 1024, "max_bytes": 256 * 1024},
+        {"unknown": 0},
+    ],
+)
+def test_runtime_rejects_invalid_local_allocation(compiler, change):
+    _aiv_runtime_manifest(compiler)
+    compiler.manifest["resources"].update(
+        allocations=[{**_local_allocation(), **change}],
+        local_memory_bytes=[{"core": "aiv", "memory_space_name": "UB", "bytes": 512}],
+    )
+    prepared = _prepare_call(compiler)
+    with pytest.raises(ContractError, match="runtime"):
+        TMRBridge().lower(prepared, _aiv_target(prepared))
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_runtime_rejects_inconsistent_local_ranges(compiler, overlap):
+    _aiv_runtime_manifest(compiler)
+    compiler.manifest["resources"].update(
+        allocations=[_local_allocation(), _local_allocation(offset=256 if overlap else 1024)],
+        local_memory_bytes=[{"core": "aiv", "memory_space_name": "UB", "bytes": 1024}],
+    )
+    prepared = _prepare_call(compiler)
+    with pytest.raises(ContractError, match="runtime"):
+        TMRBridge().lower(prepared, _aiv_target(prepared))
+
+
 def test_aiv_bridge_owns_checked_source_and_requires_strict_compilation(compiler):
     from pypto.backend.tmr_bridge import materialize  # noqa: PLC0415
 
