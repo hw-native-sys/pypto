@@ -2172,11 +2172,12 @@ def view(
     parent GM tensor. Coordinates and sampling steps are in parent elements.
     Each window axis must fit the parent shape, and valid samples must fit the
     parent valid region. Dynamic geometry must obey these bounds at runtime.
-    When a shape, step or valid extent comes from a memory read, bind the
+    When a shape, offset, step or valid extent comes from a memory read, bind the
     result to a scalar before constructing the window.
     Window creation only describes addresses. A distributed tensor keeps its
     window buffer. Scalar tensor reads and writes address elements using the
-    window strides. Native ND tile DMA requires a contiguous inner axis.
+    window strides. Tile load/store require a provable unit physical inner
+    stride (last axis for ND, penultimate for DN).
     The source layout is preserved. Without window geometry, the following
     shape/layout reinterpretation rules apply.
 

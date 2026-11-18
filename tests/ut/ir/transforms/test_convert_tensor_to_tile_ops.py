@@ -8167,14 +8167,15 @@ class ViewDirections:
         expected = ir.ParamDirection.InOut if read_destination else ir.ParamDirection.Out
         assert self._directions(program)["dst"] == expected
 
-    def test_nested_window_offset_read_contributes_to_direction(self):
+    def test_bound_window_offset_read_contributes_to_direction(self):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self, indices: pl.Tensor[[1], pl.INT32], dst: pl.Tensor[[8, 4], pl.FP32]
             ) -> pl.Tensor[[1], pl.INT32]:
-                v = pl.tensor.view(dst, [1, 4], offsets=[pl.tensor.read(indices, [0]) + 1, 0])
+                row = pl.tensor.read(indices, [0])
+                v = pl.tensor.view(dst, [1, 4], offsets=[row + 1, 0])
                 pl.tensor.write(v, [0, 0], pl.const(0.0, pl.FP32))
                 pl.tensor.write(indices, [0], pl.const(0, pl.INT32))
                 return indices

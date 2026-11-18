@@ -32,6 +32,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -65,6 +66,21 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
 }
 
 namespace {
+
+void ValidateDmaInnerStride(const TensorTypePtr& tensor, const Span& span, const std::string& op_name) {
+  if (!tensor->tensor_view_) return;
+  const auto& view = *tensor->tensor_view_;
+  if (view.stride.empty() || (view.layout != TensorLayout::ND && view.layout != TensorLayout::DN)) return;
+  const size_t trailing_axes = view.layout == TensorLayout::DN ? 2 : 1;
+  CHECK_SPAN(view.stride.size() == tensor->shape_.size() && view.stride.size() >= trailing_axes, span)
+      << op_name << ": invalid tensor stride rank";
+  const auto& stride = view.stride[view.stride.size() - trailing_axes];
+  auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  CHECK_SPAN(arith::Analyzer().CanProveEqual(stride, one), span)
+      << op_name
+      << ": PTO-ISA native tile DMA does not support a non-unit physical inner stride; "
+         "the inner stride must be provably 1";
+}
 
 /// Validate that every element of a window-geometry tuple is an integer scalar.
 ///
@@ -179,6 +195,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   CHECK(tensor_type) << "The operator " << op_name
                      << " requires first argument to be a TensorType or DistributedTensorType, but got "
                      << args[0]->GetType()->TypeName();
+
+  ValidateDmaInnerStride(tensor_type, args[0]->span_, op_name);
 
   // Second argument must be TupleType (offsets)
   auto offsets_tuple = As<MakeTuple>(args[1]);
@@ -454,6 +472,7 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name
       << " requires third argument to be a TensorType or DistributedTensorType, but got "
       << args[2]->GetType()->TypeName();
+  ValidateDmaInnerStride(output_tensor_type, args[2]->span_, op_name);
   // MX scale tensors are written in their logical 2-D coordinates here. The
   // LegalizeMxScaleTensorViews validates alignment while preserving these
   // coordinates; PTOAS v0.74 constructs the packed physical SFractal descriptor.
