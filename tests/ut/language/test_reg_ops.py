@@ -419,5 +419,121 @@ def test_block_stride_store_round_trip():
     ir.assert_structural_equal(kernel, pl.parse(printed), enable_auto_mapping=True)
 
 
+@pytest.mark.parametrize("placement", ["body", "if", "for"])
+def test_direct_pair_projection_stays_in_current_block(placement):
+    prefix = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec], count: pl.Scalar[pl.INDEX]):
+    with pl.reg_scope():
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+"""
+    indent = "        "
+    if placement == "if":
+        prefix += "        if count > 0:\n"
+        indent += "    "
+    elif placement == "for":
+        prefix += "        for i in pl.range(count):\n"
+        indent += "    "
+    direct = pl.parse(prefix + f"{indent}y = pl.reg.mull(x, x, m)[1]\n")
+    expected = pl.parse(prefix + f"{indent}pair = pl.reg.mull(x, x, m)\n{indent}y = pair[1]\n")
+    # The implicit definition must remain inside the same branch/iteration;
+    # hoisting it would change evaluation and register ownership.
+    ir.assert_structural_equal(direct, expected, enable_auto_mapping=True)
+
+
+def test_nested_pair_projections_keep_distinct_calls_and_user_binding():
+    prefix = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+        _tuple_tmp = pl.reg.broadcast(7, lanes=64, dtype=pl.UINT32)
+"""
+    direct = pl.parse(
+        prefix
+        + """
+        y = pl.reg.add(pl.reg.mull(x, x, m)[0], pl.reg.mull(x, _tuple_tmp, m)[1])
+        z = pl.reg.add(y, _tuple_tmp)
+"""
+    )
+    expected = pl.parse(
+        prefix
+        + """
+        first = pl.reg.mull(x, x, m)
+        second = pl.reg.mull(x, _tuple_tmp, m)
+        y = pl.reg.add(first[0], second[1])
+        z = pl.reg.add(y, _tuple_tmp)
+"""
+    )
+    # Generated temporaries must neither alias each other nor shadow a user's
+    # name. Two syntactic calls remain two calls, in left-to-right order.
+    ir.assert_structural_equal(direct, expected, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("index", ["2", "-1", "1.5", "i"])
+def test_direct_pair_projection_retains_tuple_index_checks(index):
+    with pytest.raises((ParserError, ValueError), match="index|indices|bounds"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    with pl.reg_scope():
+        x = pl.reg.broadcast(1, lanes=64, dtype=pl.UINT32)
+        m = pl.reg.full_mask(lanes=64)
+        i = 0
+        y = pl.reg.mull(x, x, m)[{index}]
+""")
+
+
+def test_direct_pair_projection_cannot_escape_reg_scope():
+    with pytest.raises((ParserError, ValueError), match="escape|outside|RegScope"):
+        pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    with pl.reg_scope():
+        x = pl.reg.broadcast(1, lanes=64, dtype=pl.UINT32)
+        m = pl.reg.full_mask(lanes=64)
+        y = pl.reg.mull(x, x, m)[0]
+    z = pl.reg.add(y, y)
+""")
+
+
+@pytest.mark.parametrize("form", ["positional", "mixed", "keyword", "reversed", "nested"])
+def test_direct_pair_projection_preserves_sibling_memory_order(form):
+    prefix = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(dst: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        ones = pl.reg.broadcast(1, lanes=64, dtype=pl.UINT32)
+        mask = pl.reg.full_mask(lanes=64)
+"""
+    read = "pl.reg.load(dst, lanes=64)"
+    pair = "pl.reg.mull(pl.reg.load(pl.reg.store(dst, value=ones), lanes=64), ones, mask)[0]"
+    expressions = {
+        "positional": f"pl.reg.add({read}, {pair})",
+        "mixed": f"pl.reg.add({read}, rhs={pair})",
+        "keyword": f"pl.reg.add(lhs={read}, rhs={pair})",
+        "reversed": f"pl.reg.add(rhs={read}, lhs={pair})",
+        "nested": f"pl.reg.add(pl.reg.add({read}, ones), {pair})",
+    }
+    direct = pl.parse(prefix + f"        result = {expressions[form]}\n")
+    expected = prefix + f"        before = {read}\n"
+    earlier = "before"
+    if form == "nested":
+        expected += "        nested = pl.reg.add(before, ones)\n"
+        earlier = "nested"
+    expected += """
+        written = pl.reg.store(dst, value=ones)
+        after = pl.reg.load(written, lanes=64)
+        pair = pl.reg.mull(after, ones, mask)
+"""
+    operands = f"pair[0], {earlier}" if form == "reversed" else f"{earlier}, pair[0]"
+    expected += f"        result = pl.reg.add({operands})\n"
+    # Keyword binding must not turn source evaluation order into signature order.
+    # The first load must observe the old buffer before the later store executes.
+    ir.assert_structural_equal(direct, pl.parse(expected), enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

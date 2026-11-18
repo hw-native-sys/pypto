@@ -83,7 +83,7 @@ class OpParser:
                 "reg operations require RegScope; values cannot escape outside",
                 span=self.services.span_tracker.get_span(call),
             )
-        return self.dispatch_op(_dsl_reg, "pl.reg", name, call)
+        return self.dispatch_op(_dsl_reg, "pl.reg", name, call, bind_call_args=True)
 
     def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:
         """Parse the public and canonical SIMT operation spellings."""
@@ -533,7 +533,11 @@ class OpParser:
         return constant.value
 
     def parse_op_kwargs(
-        self, call: ast.Call, *, expression_keywords: frozenset[str] = frozenset()
+        self,
+        call: ast.Call,
+        *,
+        expression_keywords: frozenset[str] = frozenset(),
+        bind_call_args: bool = False,
     ) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
@@ -542,6 +546,7 @@ class OpParser:
         Args:
             call: Call AST node
             expression_keywords: Operand names that use positional expression parsing.
+            bind_call_args: Bind nested calls before parsing the next operand.
 
         Returns:
             Dictionary of keyword argument names to values
@@ -581,7 +586,18 @@ class OpParser:
                 kwargs[key] = self.resolve_list_kwarg(value)
             else:
                 kwargs[key] = self.callbacks.expression(value)
+            if bind_call_args:
+                kwargs[key] = self.bind_call_arg(kwargs[key])
         return kwargs
+
+    def bind_call_arg(self, value: Any) -> Any:
+        """Evaluate a nested register operand before parsing its next sibling."""
+        if isinstance(value, ir.Call):
+            # A later tuple projection can emit a statement while parsing.
+            # Bind earlier reads (and Tile-valued stores) now so that emission
+            # cannot reorder them. Named operands and projections need no copy.
+            return self.services.builder.let("_reg_arg", value, span=value.span)
+        return value
 
     def resolve_unary_kwarg(self, value: ast.UnaryOp) -> Any:
         """Resolve a unary op kwarg value (e.g., -1)."""
@@ -686,6 +702,7 @@ class OpParser:
         expression_args: bool = False,
         expression_keywords: frozenset[str] = frozenset(),
         preserve_omitted_kwargs: bool = False,
+        bind_call_args: bool = False,
     ) -> ir.Expr:
         """Dispatch an op call to a DSL wrapper module.
 
@@ -703,6 +720,7 @@ class OpParser:
             expression_args: Parse all positional operands as typed IR expressions.
             expression_keywords: Keyword operands parsed as typed IR expressions.
             preserve_omitted_kwargs: Preserve implicit IR defaults during text round trips.
+            bind_call_args: Evaluate nested register operands in source order.
 
         Returns:
             IR expression from the operation.
@@ -717,8 +735,13 @@ class OpParser:
         # Python numeric values for slots such as full/padding and choose their
         # own literal dtype, so keep the two argument contracts explicit.
         parse_arg = self.callbacks.expression if expression_args else self.parse_op_positional_arg
-        args = [parse_arg(arg) for arg in call.args]
-        kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
+        args: list[Any] = []
+        for arg in call.args:
+            value = parse_arg(arg)
+            args.append(self.bind_call_arg(value) if bind_call_args else value)
+        kwargs = self.parse_op_kwargs(
+            call, expression_keywords=expression_keywords, bind_call_args=bind_call_args
+        )
         attrs = self.attrs.parse_op_attrs(call)
         op_func = getattr(module, op_name)
         span = self.services.span_tracker.get_span(call)
