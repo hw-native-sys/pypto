@@ -399,7 +399,33 @@ class BindCallsToVars : public IRMutator {
  protected:
   ExprPtr VisitExpr_(const CallPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
 
-  ExprPtr VisitExpr_(const SubmitPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
+  // The inherited IRMutator::VisitExpr_(SubmitPtr) also remaps core_num_ and
+  // predicate_ -- declarative SSA fields evaluated at dispatch time, not
+  // operands to extract eagerly. Visiting predicate_ with this mutator would
+  // hoist its own Call (e.g. the tensor.read of a ``pl.spmd_submit(...,
+  // predicate=(t[i] > 0))`` guard) into a prefix assignment, turning a
+  // deliberately deferred read into an eager one: EmitPredicateHint requires
+  // the original tensor.read expression shape, and the extra read can stall a
+  // dispatch that should be skipped entirely. Mirror
+  // FlattenCallExprMutator::VisitExpr_(SubmitPtr): visit only args_, leave
+  // deps_/core_num_/predicate_/attrs_/kwargs_ untouched.
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(op->args_.size());
+    bool changed = false;
+    for (const auto& arg : op->args_) {
+      auto visited = VisitExpr(arg);
+      changed = changed || visited.get() != arg.get();
+      new_args.push_back(std::move(visited));
+    }
+    ExprPtr result = op;
+    if (changed) {
+      result = std::make_shared<Submit>(op->op_, std::move(new_args), op->deps_, op->kwargs_, op->attrs_,
+                                        op->GetType(), op->span_, op->core_num_, op->sync_start_,
+                                        op->allow_early_resolve_, op->predicate_);
+    }
+    return bind_(result);
+  }
 
   // A Var's type may carry metadata calls (e.g. ``tensor.dim`` in a dynamic
   // shape). Rewriting that type would return a fresh Var and break the SSA

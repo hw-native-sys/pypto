@@ -7,7 +7,15 @@ rewrites a `pld.tensor.*` collective written in a **CHIP orchestration body**
 into a call to a compiler-synthesized AIV kernel, so the collective becomes one
 ordinary task inside the caller's own pipeline.
 
-Today it handles `pld.tensor.all_to_all_v` with either a compile-time or a runtime `core_num`.
+Today it handles `pld.tensor.all_to_all_v` with either a compile-time or a
+runtime `core_num` -- **except inside a `FunctionType::Graph` body**, where
+`core_num` must still be a compile-time constant. `IsChipOrch` intentionally
+routes a Graph-body collective through this rail too (a Graph derives
+`Level::CHIP`), but a runtime width becomes a non-literal launch attribute,
+and `LegalizeGraphBoundary`'s `LaunchSpecChecker` rejects every non-constant
+launch there: Graph recording copies the launch spec into the replay node and
+restores it unchanged on every later call, so a runtime width would silently
+replay the first call's block count for every subsequent one.
 
 The HOST rail ([`LowerHostTensorCollectives`](51-lower_host_tensor_collectives.md))
 solves the same problem one level up, and differently: it fans the collective

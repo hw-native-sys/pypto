@@ -6,7 +6,13 @@
 它把写在 **CHIP orchestration 函数体**里的 `pld.tensor.*` 集合通信改写成对编译器
 合成的 AIV kernel 的调用，使该集合通信成为调用方自身 pipeline 里的一个普通 task。
 
-目前支持 `pld.tensor.all_to_all_v`，`core_num` 可以是编译期常量，也可以是运行期值。
+目前支持 `pld.tensor.all_to_all_v`，`core_num` 可以是编译期常量，也可以是运行期值——
+**但 `FunctionType::Graph` 函数体内例外**：那里 `core_num` 仍必须是编译期常量。
+`IsChipOrch` 特意把 Graph 函数体内的集合通信也路由到这条通路（Graph 也派生
+`Level::CHIP`），但运行期宽度会变成一个非字面量的 launch attribute，而
+`LegalizeGraphBoundary` 的 `LaunchSpecChecker` 会拒绝那里任何非常量的 launch：
+Graph 录制会把 launch spec 原样拷贝进 replay 节点并在每次调用时原样恢复，
+所以运行期宽度会悄悄把第一次调用的 block count 重放到之后的每一次调用上。
 
 HOST 通路（[`LowerHostTensorCollectives`](51-lower_host_tensor_collectives.md)）
 在上一层解决同一问题，做法不同：它把集合通信按设备扇出成**每个设备一次**

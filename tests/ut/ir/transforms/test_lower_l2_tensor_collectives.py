@@ -1369,6 +1369,130 @@ def test_call_like_collective_operand_is_hoisted_before_the_width_prelude():
     passes.legalize_spmd_launches()(after)
 
 
+def test_submit_predicate_is_preserved_when_hoisting_a_collective_operand():
+    """A Submit's dispatch predicate must not be hoisted like an operand.
+
+    ``predicate_`` is a declarative field the scheduler reads at dispatch
+    time, not an SSA operand to extract eagerly. The inherited Submit mutator
+    also remaps it, so hoisting a Submit nested in a collective operand would
+    otherwise extract its own ``tensor.read`` guard into a prefix assignment,
+    turning a deferred read into an eager one and changing the predicate's
+    structure -- ``EmitPredicateHint`` requires the original expression shape.
+
+    The DSL always destructures a submit's result into vars (``out, tid =
+    pl.spmd_submit(...)``), so it cannot write the unflattened shape directly.
+    Parse a normal, flattened program and manually inline the submit's 0th
+    projection back into the collective operand -- the shape a caller
+    invoking this pass directly on hand-built IR could still produce.
+    """
+
+    @pl.program
+    class PredicatedSubmitOperand:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            for row in pl.range(TOTAL):
+                chunk = pl.load(inp, [row, 0], [1, SIZE])
+                stage = pl.store(chunk, [row, 0], stage)
+            return stage
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            rc: pl.Tensor[[1, 1], pl.INT32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            with pl.manual_scope():
+                staged, tid = pl.spmd_submit(
+                    self.stage_step, inp, stage, core_num=1, predicate=(rc[0, 0] > 0)
+                )
+            return pld.tensor.all_to_all_v(staged, data, signal, counts, recv, core_num=n)
+
+    before = PredicatedSubmitOperand
+    pipeline = _get_func(before, "chip_pipeline")
+    assert pipeline is not None
+
+    submits: list[ir.Submit] = []
+
+    class _SubmitCollector(ir.IRVisitor):
+        def visit_submit(self, op: ir.Submit) -> None:
+            submits.append(op)
+            super().visit_submit(op)
+
+    _SubmitCollector().visit_stmt(pipeline.body)
+    assert len(submits) == 1, submits
+    submit = submits[0]
+    assert submit.predicate is not None, submit
+    original_predicate = submit.predicate
+
+    returns: list[ir.ReturnStmt] = []
+
+    class _ReturnCollector(ir.IRVisitor):
+        def visit_return_stmt(self, op: ir.ReturnStmt) -> None:
+            returns.append(op)
+
+    _ReturnCollector().visit_stmt(pipeline.body)
+    assert len(returns) == 1, returns
+    collective = returns[0].value[0]
+    assert isinstance(collective, ir.Call), collective
+
+    # Inline the submit's 0th projection directly as the collective's first
+    # operand, dropping the manual-scope assignment -- an unflattened return
+    # with the Submit itself (predicate intact) nested in a collective operand.
+    projected = ir.TupleGetItemExpr(submit, 0, submit.span)
+    new_args = [projected, *list(collective.args)[1:]]
+    new_collective = ir.Call(
+        collective.op,
+        new_args,
+        kwargs=collective.kwargs,
+        attrs=collective.attrs,
+        type=collective.type,
+        span=collective.span,
+    )
+    new_body = ir.ReturnStmt([new_collective], returns[0].span)
+    rewritten = ir.Function(
+        pipeline.name,
+        list(zip(pipeline.params, pipeline.param_directions)),
+        pipeline.return_types,
+        new_body,
+        pipeline.span,
+        type=ir.FunctionType.Orchestration,
+    )
+    stage_fn = _get_func(before, "stage_step")
+    assert stage_fn is not None
+    before = ir.Program([stage_fn, rewritten], before.name, before.span)
+
+    after = passes.lower_l2_tensor_collectives()(before)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    submits_after: list[ir.Submit] = []
+
+    class _SubmitCollectorAfter(ir.IRVisitor):
+        def visit_submit(self, op: ir.Submit) -> None:
+            submits_after.append(op)
+            super().visit_submit(op)
+
+    _SubmitCollectorAfter().visit_stmt(pipeline.body)
+    assert len(submits_after) == 1, submits_after
+    assert submits_after[0].predicate is not None, submits_after[0]
+    # Structurally unchanged -- hoisting must not have replaced any Call
+    # inside the predicate (e.g. its tensor.read) with a bound Var.
+    ir.assert_structural_equal(submits_after[0].predicate, original_predicate)
+    # End-to-end gate: the launch legalizer's NoNestedCalls check deliberately
+    # does not consult predicate_ (it is declarative, not an operand), so this
+    # must still succeed with the predicate's own Call intact.
+    passes.legalize_spmd_launches()(after)
+
+
 def _build_indexed_runtime_return():
     @pl.program
     class IndexedRuntime:
