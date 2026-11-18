@@ -8836,8 +8836,8 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(before)
         ir.assert_structural_equal(after, expected)
 
-    @pytest.mark.parametrize("through_forward", [False, True])
-    def test_distributed_return_preserves_inout_backing_parameter(self, through_forward):
+    @pytest.mark.parametrize("return_mode", ["tuple", "single", "fallback"])
+    def test_distributed_return_preserves_inout_backing_parameter(self, return_mode):
         """A write through a projected DistributedTensor upgrades its caller parameter."""
 
         @pl.program
@@ -8865,6 +8865,14 @@ class TestCalleeDirectionPropagationThroughCarries:
                 return value
 
             @pl.function(type=pl.FunctionType.Orchestration)
+            def forward_distributed(
+                self,
+                out: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                value: pld.DistributedTensor[[64], pl.FP32],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
                 a: pld.DistributedTensor[[64], pl.FP32],
@@ -8875,21 +8883,29 @@ class TestCalleeDirectionPropagationThroughCarries:
                 self.consume(u)
 
         before = Before
-        if through_forward:
+        if return_mode != "tuple":
             source = ir.python_print(Before)
             body_start = source.index("\n", source.index("    def main("))
-            before = pl.parse_program(
-                source[:body_start]
-                + "\n        flat = pl.reshape(scratch, [64])"
-                + "\n        middle = self.forward(a, flat)"
-                + "\n        _unused, u = self.produce(a, middle)"
-                + "\n        self.consume(u)\n"
-            )
+            if return_mode == "single":
+                body = (
+                    "\n        flat = pl.reshape(scratch, [64])"
+                    "\n        middle = self.forward(a, flat)"
+                    "\n        _unused, u = self.produce(a, middle)"
+                    "\n        self.consume(u)\n"
+                )
+            else:
+                body = (
+                    "\n        pair = (a, a)"
+                    "\n        alias = pair[0]"
+                    "\n        returned = self.forward_distributed(a, alias)"
+                    "\n        self.consume(returned)\n"
+                )
+            before = pl.parse_program(source[:body_start] + body)
 
         main = _require_function(before, "main")
         a, b, scratch = main.params
-        b_dir = ir.ParamDirection.In if through_forward else ir.ParamDirection.Out
-        scratch_dir = ir.ParamDirection.InOut if through_forward else ir.ParamDirection.In
+        b_dir = ir.ParamDirection.Out if return_mode == "tuple" else ir.ParamDirection.In
+        scratch_dir = ir.ParamDirection.InOut if return_mode == "single" else ir.ParamDirection.In
         expected_main = ir.Function(
             "main",
             [(a, ir.ParamDirection.InOut), (b, b_dir), (scratch, scratch_dir)],
@@ -8906,6 +8922,7 @@ class TestCalleeDirectionPropagationThroughCarries:
                 _require_function(before, "produce"),
                 _require_function(before, "consume"),
                 _require_function(before, "forward"),
+                _require_function(before, "forward_distributed"),
                 expected_main,
             ],
             before.name,

@@ -14,12 +14,14 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -113,7 +115,12 @@ class BufferRootCollector : public IRVisitor {
   struct OutputRoot {
     ExprPtr argument;
     RootCandidates roots;
-    bool ambiguous;
+    bool ambiguous = false;
+  };
+
+  struct TupleOutputRoots {
+    CallPtr call;
+    std::vector<OutputRoot> outputs;
   };
 
   [[nodiscard]] const RootCandidates& ResolveRootCandidates(const ExprPtr& expr) const;
@@ -129,6 +136,8 @@ class BufferRootCollector : public IRVisitor {
   void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
                              const std::vector<IterArgPtr>& iter_args, bool guaranteed_to_run);
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
+  [[nodiscard]] const std::vector<std::optional<size_t>>& ReturnedParams(const FunctionPtr& callee);
+  [[nodiscard]] OutputRoot ResolveTupleOutputRoot(const TupleOutputRoots& tuple, size_t index);
 
   // Pick the buffer root for a call's single (non-tuple) return value. A
   // SubWorker group may take an InOut scratch (e.g. a matmul's kv_final)
@@ -156,7 +165,8 @@ class BufferRootCollector : public IRVisitor {
   std::unordered_map<const Var*, RootSetId> owning_sets_;
   std::unordered_map<RootSetPair, RootSetId, RootSetPairHash> interned_sets_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
-  std::unordered_map<const Var*, std::shared_ptr<const std::vector<OutputRoot>>> tuple_output_roots_;
+  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_params_;
+  std::unordered_map<const Var*, std::shared_ptr<const TupleOutputRoots>> tuple_output_roots_;
 };
 
 }  // namespace buffer_root

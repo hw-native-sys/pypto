@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -162,7 +163,7 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
           roots.push_back({alias, ResolveRootCandidates(alias), IsAmbiguous(alias)});
         }
         tuple_output_roots_[assign->var_.get()] =
-            std::make_shared<const std::vector<OutputRoot>>(std::move(roots));
+            std::make_shared<const TupleOutputRoots>(TupleOutputRoots{nullptr, std::move(roots)});
       } else if (!aliases.empty()) {
         ShareRootCandidates(assign->var_, aliases[0]);
       }
@@ -177,8 +178,8 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
     } else if (!IsBuiltinOp(op_name)) {
       auto out_roots = CollectCallOutputRoots(call);
       if (As<TupleType>(call->GetType())) {
-        tuple_output_roots_[assign->var_.get()] =
-            std::make_shared<const std::vector<OutputRoot>>(std::move(out_roots));
+        tuple_output_roots_[assign->var_.get()] = std::make_shared<const TupleOutputRoots>(
+            TupleOutputRoots{follow_reshape_ ? call : nullptr, std::move(out_roots)});
       } else {
         RecordCallReturnRoots(assign->var_, out_roots, call);
       }
@@ -186,9 +187,8 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
   } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
     if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
       auto it = tuple_output_roots_.find(tuple_var.get());
-      if (it != tuple_output_roots_.end() && tuple_get->index_ >= 0 &&
-          tuple_get->index_ < static_cast<int>(it->second->size())) {
-        const auto& info = (*it->second)[tuple_get->index_];
+      if (it != tuple_output_roots_.end() && tuple_get->index_ >= 0) {
+        const auto info = ResolveTupleOutputRoot(*it->second, static_cast<size_t>(tuple_get->index_));
         BindRootCandidates(assign->var_, info.roots, info.ambiguous);
       }
     }
@@ -301,24 +301,37 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
     const auto& arg = call->args_[i];
     roots.push_back({arg, ResolveRootCandidates(arg), IsAmbiguous(arg)});
   }
-  const auto tuple = follow_reshape_ ? As<TupleType>(call->GetType()) : nullptr;
-  if (!tuple) return roots;
+  return roots;
+}
 
-  const auto returned_params = return_lineage::ReturnedParamIndices(callee, program_);
-  std::vector<OutputRoot> projections(tuple->types_.size());
-  for (size_t i = 0; i < projections.size(); ++i) {
-    if (!AsTensorTypeLike(tuple->types_[i])) continue;
-    const auto arg_count = call->args_.size();
-    const auto param = i < returned_params.size() ? returned_params[i].value_or(arg_count) : arg_count;
+const std::vector<std::optional<size_t>>& BufferRootCollector::ReturnedParams(const FunctionPtr& callee) {
+  const auto [entry, inserted] = returned_params_.try_emplace(callee.get());
+  if (inserted) entry->second = return_lineage::ReturnedParamIndices(callee, program_);
+  return entry->second;
+}
+
+BufferRootCollector::OutputRoot BufferRootCollector::ResolveTupleOutputRoot(const TupleOutputRoots& tuple,
+                                                                            size_t index) {
+  if (!tuple.call) return index < tuple.outputs.size() ? tuple.outputs[index] : OutputRoot{};
+
+  // Wide return types can be shared by many calls. Keep only their actual
+  // arguments and resolve a position when a projection is seen.
+  const auto type = As<TupleType>(tuple.call->GetType());
+  if (!type || index >= type->types_.size() || !AsTensorTypeLike(type->types_[index])) return {};
+  const auto callee = program_->GetFunction(tuple.call->op_->name_);
+  if (callee) {
+    const auto& returned_params = ReturnedParams(callee);
+    const auto arg_count = tuple.call->args_.size();
+    const auto param =
+        index < returned_params.size() ? returned_params[index].value_or(arg_count) : arg_count;
     if (param < arg_count) {
-      const auto& arg = call->args_[param];
-      projections[i] = {arg, ResolveRootCandidates(arg), !HasStorageProof(arg)};
-    } else if (i < roots.size()) {
-      projections[i] = roots[i];
-      projections[i].ambiguous = true;
+      const auto& arg = tuple.call->args_[param];
+      return {arg, ResolveRootCandidates(arg), !HasStorageProof(arg)};
     }
   }
-  return projections;
+  auto fallback = index < tuple.outputs.size() ? tuple.outputs[index] : OutputRoot{};
+  fallback.ambiguous = true;
+  return fallback;
 }
 
 void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
@@ -330,9 +343,11 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
   if (track_tensor_return) {
     const auto callee = program_->GetFunction(call->op_->name_);
     if (callee && callee->return_types_.size() == 1) {
-      const auto param = return_lineage::ReturnedParamIndex(callee, program_);
-      if (param && *param < call->args_.size()) {
-        returned_arg = call->args_[*param];
+      const auto& returned_params = ReturnedParams(callee);
+      const auto arg_count = call->args_.size();
+      const auto param = returned_params.empty() ? arg_count : returned_params.front().value_or(arg_count);
+      if (param < arg_count) {
+        returned_arg = call->args_[param];
         // A helper can write a scratch output and still return an input.
         // Its proven return storage takes precedence over output matching.
         if (HasStorageProof(returned_arg)) {
@@ -403,9 +418,9 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
 }
 
 bool BufferRootCollector::TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b) {
-  auto ta = As<TensorType>(a);
-  auto tb = As<TensorType>(b);
-  if (!ta || !tb) return false;
+  const auto ta = AsTensorTypeLike(a);
+  const auto tb = AsTensorTypeLike(b);
+  if (!ta || !tb || ta->GetKind() != tb->GetKind()) return false;
   if (ta->dtype_ != tb->dtype_) return false;
   if (ta->shape_.size() != tb->shape_.size()) return false;
   for (size_t i = 0; i < ta->shape_.size(); ++i) {
