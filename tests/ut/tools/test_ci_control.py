@@ -3161,6 +3161,8 @@ def test_a5_duplicate_command_admission(
     _, event, writes, outputs = a5_request
     url = a5_control.attempt_url(REPO, "44", "2")
     check = {
+        "id": 88,
+        "status": "completed" if conclusion else "in_progress",
         "external_id": "44:2:33",
         "app": {"slug": "github-actions"},
         "conclusion": conclusion,
@@ -3182,6 +3184,49 @@ def test_a5_duplicate_command_admission(
     )
     a5_control.prepare(REPO, event)
     assert bool(writes) == bool(outputs) == (not reuse)
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_a5_fresh_command_retires_interrupted_publisher(
+    a5_control, a5_request, monkeypatch, conclusion, cleanup_fails
+):
+    _, event, writes, outputs = a5_request
+    stale = {"id": 88, "external_id": "44", "app": {"slug": "github-actions"}, "status": "in_progress"}
+    checks = [stale, {**stale, "id": 89, "external_id": "44:2:88", "status": "completed"}]
+    run = {
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "event": "issue_comment",
+        "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 12)",
+        "run_attempt": 2,
+        "status": "completed",
+        "conclusion": conclusion,
+    }
+    api = a5_control.api
+
+    def retry_api(path, *args, **kwargs):
+        if path.endswith("/actions/runs/44"):
+            return run
+        if cleanup_fails and path.endswith("/check-runs/88"):
+            raise ValueError("Cleanup unavailable")
+        return api(path, *args, **kwargs)
+
+    monkeypatch.setattr(a5_control, "api", retry_api)
+    monkeypatch.setattr(a5_control, "head_checks", lambda repo, head: checks if head == HEAD else [])
+    if cleanup_fails:
+        with pytest.raises(ValueError, match="Cleanup unavailable"):
+            a5_control.prepare(REPO, event)
+        assert not writes and not outputs
+    else:
+        a5_control.prepare(REPO, event)
+        assert writes[0] == (
+            f"repos/{REPO}/check-runs/88",
+            {"status": "completed", "conclusion": "cancelled"},
+            {"method": "PATCH"},
+        )
+        assert len(writes) == 2 and writes[1][0] == f"repos/{REPO}/check-runs"
+        assert outputs == {"checkout_sha": MERGE, "check_id": "987"}
 
 
 @pytest.mark.parametrize("unfinished", ["original", "rerun", "both"])
@@ -3240,6 +3285,10 @@ def test_a5_distributed_requires_its_own_comment(control):
         "cancel-in-progress": False,
     }
     assert "concurrency" not in workflow
+    assert jobs["result"]["concurrency"] == jobs["changes"]["concurrency"]
+    observer = yaml.safe_load((ROOT / ".github/workflows/ci-a5-rerun.yml").read_text())["jobs"]
+    assert observer["progress"]["needs"] == "route"
+    assert observer["progress"]["concurrency"]["group"] == "ci-a5-admission-${{ needs.route.outputs.number }}"
     assert jobs[job]["concurrency"]["cancel-in-progress"] is False
     assert workflow["permissions"] == {}
     for name in ("toolchain", "onboard-tests-a5-distributed"):

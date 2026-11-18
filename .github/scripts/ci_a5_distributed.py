@@ -69,6 +69,17 @@ def head_checks(repo: str, head: str) -> list[dict[str, Any]]:
     return sorted(pages(path, "check_runs"), key=lambda check: check["id"], reverse=True)
 
 
+def request_number(run: dict[str, Any]) -> str:
+    if (
+        run["path"] != ".github/workflows/ci-a5-distributed.yml"
+        or run["event"] != "issue_comment"
+        or run["head_branch"] != "main"
+    ):
+        return ""
+    match = re.fullmatch(r"A5 distributed PR #([1-9][0-9]*) \(comment [1-9][0-9]*\)", run["display_title"])
+    return match[1] if match else ""
+
+
 def reusable_request(repo: str, number: int, checks: list[dict[str, Any]], run_id: str) -> str | None:
     """Look up the owning workflow so cancelled or failed publishers never block a retry."""
     owners: dict[str, list[dict[str, Any]]] = {}
@@ -76,6 +87,7 @@ def reusable_request(repo: str, number: int, checks: list[dict[str, Any]], run_i
         owner = re.fullmatch(r"([1-9][0-9]*)(?::[1-9][0-9]*:[1-9][0-9]*)?", check["external_id"] or "")
         if owner and owner[1] != run_id and check["app"]["slug"] == "github-actions":
             owners.setdefault(owner[1], []).append(check)
+    reusable = None
     for owner_id, owned in owners.items():
         try:
             run = api(f"repos/{repo}/actions/runs/{owner_id}")
@@ -83,20 +95,19 @@ def reusable_request(repo: str, number: int, checks: list[dict[str, Any]], run_i
             if "HTTP 404" in (error.stderr or ""):
                 continue  # The historical workflow run has been deleted.
             raise
-        if (
-            run["path"] != ".github/workflows/ci-a5-distributed.yml"
-            or run["event"] != "issue_comment"
-            or run["head_branch"] != "main"
-            or not re.fullmatch(rf"A5 distributed PR #{number} \(comment [1-9][0-9]*\)", run["display_title"])
-        ):
+        if request_number(run) != str(number):
             continue
         url = attempt_url(repo, owner_id, str(run["run_attempt"]))
         if run["status"] != "completed" or (
             run["conclusion"] == "success"
             and any(check["conclusion"] == "success" and same_attempt(check, url) for check in owned)
         ):
-            return url
-    return None
+            reusable = reusable or url
+        elif run["conclusion"] in {"failure", "cancelled"}:
+            for check in owned:
+                if check["status"] != "completed":
+                    update_check(repo, str(check["id"]), {"status": "completed", "conclusion": "cancelled"})
+    return reusable
 
 
 def same_attempt(check: dict[str, Any], url: str) -> bool:
@@ -299,12 +310,15 @@ def main() -> None:
     repo = os.environ["GITHUB_REPOSITORY"]
     if sys.argv[1] == "prepare":
         prepare(repo, json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()))
+    elif sys.argv[1] == "route-rerun":
+        run = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"]
+        output({"number": request_number(run)})
     elif sys.argv[1] == "reopen":
         reopen(repo, json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"])
     elif sys.argv[1] == "finish":
         finish(repo, json.loads(os.environ["CI_NEEDS"]))
     else:
-        raise ValueError("Expected prepare or finish")
+        raise ValueError("Expected prepare, route-rerun, reopen or finish")
 
 
 if __name__ == "__main__":

@@ -189,7 +189,8 @@ jobs:
 
   result:
     concurrency:
-      group: ci-a5-check-${{ github.run_id }}
+      group: ci-a5-admission-${{ github.event.issue.number }}
+      queue: max
       cancel-in-progress: false
     if: always() && needs.changes.outputs.check_id != ''
     needs: [changes, toolchain, onboard-tests-a5-distributed]

@@ -8,17 +8,35 @@ on:
 permissions: {}
 
 jobs:
-  progress:
+  route:
     if: >-
       github.event.workflow_run.event == 'issue_comment' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.run_attempt > 1
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Serialize with the terminal publisher so a delayed observer cannot
-    # overwrite the result of a completed attempt.
+    permissions:
+      contents: read
+    outputs:
+      number: ${{ steps.route.outputs.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - id: route
+        run: python .github/scripts/ci_a5_distributed.py route-rerun
+
+  progress:
+    needs: route
+    if: needs.route.outputs.number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Fresh commands can retire older checks. Serialize all writers for this PR.
     concurrency:
-      group: ci-a5-check-${{ github.event.workflow_run.id }}
+      group: ci-a5-admission-${{ needs.route.outputs.number }}
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read
