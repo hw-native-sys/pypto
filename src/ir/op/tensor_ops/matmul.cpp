@@ -373,8 +373,7 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires lhs_scale layout MX_A_ZZ or MX_A_ND";
   CHECK_SPAN(rhs_layout == TensorLayout::MX_B_NN, span) << kOpName << " requires rhs_scale layout MX_B_NN";
 
-  auto logical_shape = [span, kOpName](const TensorTypePtr& type) {
-    auto shape = type->shape_;
+  auto logical_shape = [span, kOpName](const TensorTypePtr& type, std::vector<ExprPtr> shape) {
     if (!type->dtype_.IsPackedFp4()) return shape;
     const auto layout = type->tensor_view_.value_or(TensorView{}).layout;
     CHECK_SPAN(layout == TensorLayout::ND || layout == TensorLayout::DN, span)
@@ -383,8 +382,8 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
     shape[axis] = AdjustPackedFp4CastLastDim({shape[axis]}, type->dtype_, DataType::FP32, span)[0];
     return shape;
   };
-  const auto lhs_shape = logical_shape(lhs);
-  const auto rhs_shape = logical_shape(rhs);
+  const auto lhs_shape = logical_shape(lhs, lhs->shape_);
+  const auto rhs_shape = logical_shape(rhs, rhs->shape_);
   auto m = As<ConstInt>(lhs_shape[0]);
   auto k_lhs = As<ConstInt>(lhs_shape[1]);
   auto k_rhs = As<ConstInt>(rhs_shape[0]);
@@ -411,7 +410,11 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
   };
   check_shape(lhs_scale->shape_, m->value_, groups, "lhs_scale");
   check_shape(rhs_scale->shape_, groups, n->value_, "rhs_scale");
-  return std::make_shared<TensorType>(std::vector<ExprPtr>{lhs_shape[0], rhs_shape[1]}, DataType::FP32);
+  std::vector<ExprPtr> output_shape{lhs_shape[0], rhs_shape[1]};
+  TensorView view;
+  view.valid_shape = {logical_shape(lhs, GetEffectiveTensorValidShape(*lhs))[0],
+                      logical_shape(rhs, GetEffectiveTensorValidShape(*rhs))[1]};
+  return std::make_shared<TensorType>(output_shape, DataType::FP32, std::nullopt, std::move(view));
 }
 
 // ============================================================================
