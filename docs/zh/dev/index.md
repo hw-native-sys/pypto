@@ -34,6 +34,14 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 | [PTOAS 算子状态矩阵](ptoas-op-status.md) | 编译器当前会发射哪些 PTOAS 公开与兼容算子 |
 | [FP4](fp4.md) | 打包 E2M1x2/E1M2x2 类型、字节载体 ABI 与现有 E2M1 算子支持 |
 
+## 按需运行 A5 分布式 CI
+
+在以 `main` 为目标的开放 PR 对话区新发一条 `/ci a5-distributed` 评论，
+即可对该 PR 的临时合并版本单独运行 `onboard-tests-a5-distributed`。
+PR 最新提交上的 `ci/a5-distributed` 检查链接到运行记录和测试产物。
+测试选择与完整 CI 一致：如果 PR 包含 `tests/st/distributed/test_l3_urma_async.py`，
+则运行四卡 A5 测试；否则运行占位测试。占位测试通过不代表已验证硬件行为。
+
 ## 评论触发完整 CI
 
 PR 专用 `CI` 工作流（`ci.yml`）在创建或更新时自动运行 `changes`、`toolchain`、`pre-commit` 和

@@ -36,6 +36,16 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 | [PTOAS Op Status Matrix](ptoas-op-status.md) | Which public and compatibility PTOAS ops the compiler currently emits |
 | [FP4](fp4.md) | Packed E2M1x2/E1M2x2 types, byte-carrier ABI, and existing E2M1 operator support |
 
+## Run A5 distributed CI on demand
+
+On an open PR targeting `main`, post `/ci a5-distributed` as a new conversation
+comment to run `onboard-tests-a5-distributed` on the PR's test merge. The
+`ci/a5-distributed` check on the PR head links to the run and its artifacts.
+The job uses the same test selection as full CI. When the PR contains
+`tests/st/distributed/test_l3_urma_async.py`, it runs the four-card A5 suite.
+Otherwise it runs the bootstrap placeholder. A passing placeholder does not
+verify hardware behavior.
+
 ## Comment-triggered full CI
 
 The PR-only `CI` workflow (`ci.yml`) runs `changes`, `toolchain`, `pre-commit`
