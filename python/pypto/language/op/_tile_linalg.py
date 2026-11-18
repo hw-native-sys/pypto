@@ -374,17 +374,18 @@ def gemv_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     FP8E8M0 dtype. Physical N is divisible by 32 for FP8 or 64 for FP4.
     This operation requires Ascend950.
 
-    Both data tiles must either both be FP8E4M3FN or both be packed FP4 (either E2M1x2 or
+    Both data tiles must be FP8E4M3FN or both must be packed FP4 (either E2M1x2 or
     E1M2x2). FP4 carrier extents expand along the contiguous axis; scales
     and the FP32 accumulator use logical value dimensions. Mixed FP4/FP8
     operands require an explicit FP4-to-FP8 cast. Native FP4 requires the
     PTOAS logical Cube geometry contract (issue #1700).
 
     Results use compact accumulator storage so readers retain MAD's 16-row
-    fractal pitch. Mat-to-Left row-vector extraction requires a 512-byte
-    physical width alignment. Physical K is divisible by 512 for FP8 or
-    1024 for FP4. Valid K may be smaller. PTOAS 0.74 single-row ``MX_A_ND`` GM scale loads support
-    two scale groups; larger loads require downstream support.
+    fractal pitch. Physical K width must be a positive multiple of 512 bytes,
+    equivalent to 512 FP8 or 1024 logical FP4 values per block. The lhs and rhs
+    have matching physical and valid K. Valid K may be smaller than physical K.
+    PTOAS 0.74 single-row ``MX_A_ND`` GM
+    scale loads support two scale groups; larger loads require downstream support.
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
@@ -400,13 +401,14 @@ def gemv_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
 
 
 def gemv_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
-    """MX block-scale matmul with accumulation.
+    """MX block-scale GEMV with in-place accumulation.
 
     Data operands follow [`gemv_mx`][pypto.language.tile.gemv_mx]: both operands
     are FP8E4M3FN or both are packed FP4, with logical scale and accumulator shapes.
 
     Args:
-        acc: Compact FP32 accumulator tile
+        acc: FP32 accumulator tile with normal compact mode and the same
+            physical and valid shapes as the result.
         lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
         rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
@@ -422,7 +424,7 @@ def gemv_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Til
 
 
 def gemv_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
-    """MX block-scale matmul with bias.
+    """MX block-scale GEMV with FP32 bias.
 
     Data operands follow [`gemv_mx`][pypto.language.tile.gemv_mx]: both operands
     are FP8E4M3FN or both are packed FP4, with logical scale and accumulator shapes.
@@ -432,7 +434,8 @@ def gemv_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: T
         lhs_scale: Left-hand side scale tile (FP8E8M0)
         rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
-        bias: Bias tile
+        bias: FP32 bias tile with physical shape ``[1, N]`` and valid shape
+            ``[1, valid_N]``.
 
     Returns:
         Tile wrapping the gemv_mx_bias operation

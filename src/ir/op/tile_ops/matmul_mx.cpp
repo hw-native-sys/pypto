@@ -413,19 +413,27 @@ REGISTER_OP("tile.matmul_mx_bias")
       return DeduceTileMatMulMxBiasType(args, kwargs, "tile.matmul_mx_bias");
     });
 
+static constexpr char kGemvMxLhsDescription[] =
+    "Left-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4) with one physical and valid row. "
+    "Physical K width is a positive multiple of 512 bytes (512 FP8 or 1024 logical FP4 values)";
+static constexpr char kGemvMxRhsDescription[] =
+    "Right-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4) with the same physical and valid K as lhs. "
+    "Physical K width is a positive multiple of 512 bytes (512 FP8 or 1024 logical FP4 values). "
+    "Physical N is a positive multiple of 32 (64 for FP4)";
+static constexpr char kGemvMxLhsScaleDescription[] =
+    "Left scale tile (TileType, 2D, FP8E8M0) with physical and valid shape [1, ceil(valid_K/32)]";
+static constexpr char kGemvMxRhsScaleDescription[] =
+    "Right scale tile (TileType, 2D, FP8E8M0) with physical shape [ceil(valid_K/32), N] "
+    "and valid shape [ceil(valid_K/32), valid_N]";
+
 REGISTER_OP("tile.gemv_mx")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("MX block-scale matrix-vector multiplication: C = gemv_mx(A, A_scale, B, B_scale)")
-    .add_argument("lhs",
-                  "Left-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4); physical M == 1, K % 64 == 0")
-    .add_argument("lhs_scale",
-                  "Left scale tile (TileType, 2D, FP8E8M0); physical/valid [1, ceil(valid_K/32)]")
-    .add_argument("rhs",
-                  "Right-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4); physical K % 64 == 0, N % 32 "
-                  "== 0 (64 for FP4)")
-    .add_argument("rhs_scale",
-                  "Right scale tile (TileType, 2D, FP8E8M0); physical/valid [ceil(valid_K/32), N]")
+    .add_argument("lhs", kGemvMxLhsDescription)
+    .add_argument("lhs_scale", kGemvMxLhsScaleDescription)
+    .add_argument("rhs", kGemvMxRhsDescription)
+    .add_argument("rhs_scale", kGemvMxRhsScaleDescription)
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::LeftScale)
     .set_input_memory(2, MemorySpace::Right)
@@ -440,11 +448,13 @@ REGISTER_OP("tile.gemv_mx_acc")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("MX block-scale GEMV with accumulation: acc += gemv_mx(...)")
-    .add_argument("acc", "Accumulator tile (TileType, 2D, FP32)")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4)")
-    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4)")
-    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("acc",
+                  "Accumulator tile (TileType, 2D, FP32, CompactMode::normal) with the same physical "
+                  "and valid shapes as the output")
+    .add_argument("lhs", kGemvMxLhsDescription)
+    .add_argument("lhs_scale", kGemvMxLhsScaleDescription)
+    .add_argument("rhs", kGemvMxRhsDescription)
+    .add_argument("rhs_scale", kGemvMxRhsScaleDescription)
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)
     .set_input_memory(2, MemorySpace::LeftScale)
@@ -463,11 +473,12 @@ REGISTER_OP("tile.gemv_mx_bias")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("MX block-scale GEMV with bias: C = gemv_mx(...) + bias")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4)")
-    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4)")
-    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
-    .add_argument("bias", "Bias tile (TileType, [1, N], FP32)")
+    .add_argument("lhs", kGemvMxLhsDescription)
+    .add_argument("lhs_scale", kGemvMxLhsScaleDescription)
+    .add_argument("rhs", kGemvMxRhsDescription)
+    .add_argument("rhs_scale", kGemvMxRhsScaleDescription)
+    .add_argument("bias",
+                  "Bias tile (TileType, FP32) with physical shape [1, N] and valid shape [1, valid_N]")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::LeftScale)
     .set_input_memory(2, MemorySpace::Right)
