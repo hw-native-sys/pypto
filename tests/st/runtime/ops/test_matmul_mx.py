@@ -13,6 +13,7 @@ The mixed FP4×FP8 case explicitly casts FP4 to FP8. Native FP4 cases retain
 both packed formats through GM loading, L0 placement, and MX instructions.
 """
 
+from functools import cache
 from typing import Any
 
 import pypto.language as pl
@@ -464,18 +465,24 @@ def _gemv_mx_entry(dtype):
 
 
 def _gemv_mx_specs():
-    gen = torch.Generator().manual_seed(79)
-    a = MatmulMxTestCase._make_fp4_data((1, 1024), gen).view(torch.uint8)
-    b = MatmulMxTestCase._make_fp4_data((64, 1024), gen).view(torch.uint8)
-    sa = torch.randint(126, 130, (1, 2), generator=gen).to(torch.uint8)
-    sb = _pack_b_scale(torch.randint(126, 130, (2, 64), generator=gen).to(torch.uint8))
-    bias = torch.randint(-4, 5, (1, 64), generator=gen).float()
+    # Large Torch operations can start OpenMP threads at collection time.
+    # Defer input creation until the case runs, after pytest-forked forks.
+    @cache
+    def inputs():
+        gen = torch.Generator().manual_seed(79)
+        a = MatmulMxTestCase._make_fp4_data((1, 1024), gen).view(torch.uint8)
+        b = MatmulMxTestCase._make_fp4_data((64, 1024), gen).view(torch.uint8)
+        sa = torch.randint(126, 130, (1, 2), generator=gen).to(torch.uint8)
+        sb = _pack_b_scale(torch.randint(126, 130, (2, 64), generator=gen).to(torch.uint8))
+        bias = torch.randint(-4, 5, (1, 64), generator=gen).float()
+        return a, sa.view(torch.float8_e8m0fnu), b, sb.view(torch.float8_e8m0fnu), bias
+
     return [
-        TensorSpec("a", [1, 512], DataType.UINT8, init_value=a),
-        TensorSpec("a_scale", [1, 2], DataType.FP8E8M0, init_value=sa.view(torch.float8_e8m0fnu)),
-        TensorSpec("b", [64, 512], DataType.UINT8, init_value=b),
-        TensorSpec("b_scale", [2, 64], DataType.FP8E8M0, init_value=sb.view(torch.float8_e8m0fnu)),
-        TensorSpec("bias", [1, 64], DataType.FP32, init_value=bias),
+        TensorSpec("a", [1, 512], DataType.UINT8, init_value=lambda: inputs()[0]),
+        TensorSpec("a_scale", [1, 2], DataType.FP8E8M0, init_value=lambda: inputs()[1]),
+        TensorSpec("b", [64, 512], DataType.UINT8, init_value=lambda: inputs()[2]),
+        TensorSpec("b_scale", [2, 64], DataType.FP8E8M0, init_value=lambda: inputs()[3]),
+        TensorSpec("bias", [1, 64], DataType.FP32, init_value=lambda: inputs()[4]),
         TensorSpec("out", [1, 64], DataType.FP32, is_output=True),
         TensorSpec("out_acc", [1, 64], DataType.FP32, is_output=True),
         TensorSpec("out_bias", [1, 64], DataType.FP32, is_output=True),
