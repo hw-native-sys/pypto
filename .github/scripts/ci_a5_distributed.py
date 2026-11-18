@@ -63,6 +63,40 @@ def update_check(repo: str, check_id: str, payload: dict[str, Any]) -> None:
             time.sleep(2**retry)
 
 
+def attempt_check(repo: str, original_id: str, run_id: str, attempt: str) -> str:
+    """Select or create the check for a rerun under the shared writer queue."""
+    if attempt == "1":
+        return original_id
+    original = api(f"repos/{repo}/check-runs/{original_id}")
+    if original["name"] != "ci/a5-distributed" or original["external_id"] != run_id:
+        raise ValueError("Unexpected A5 check ownership")
+    url = attempt_url(repo, run_id, attempt)
+    if (original["output"]["summary"] or "").startswith(f"[Workflow attempt]({url})\n"):
+        # A full rerun executed prepare and already supplied a new check ID.
+        return original_id
+    # GitHub retains the conclusion of a completed Actions check even after
+    # accepting an in_progress PATCH. Publish a fresh check for this attempt.
+    key = f"{run_id}:{attempt}:{original_id}"
+    head = sha(original["head_sha"])
+    path = f"repos/{repo}/commits/{head}/check-runs?check_name=ci%2Fa5-distributed&filter=all"
+    for check in pages(path, "check_runs"):
+        if check["app"]["id"] == original["app"]["id"] and check["external_id"] == key:
+            return str(check["id"])
+    created = api(
+        f"repos/{repo}/check-runs",
+        {
+            "name": original["name"],
+            "head_sha": head,
+            "external_id": key,
+            "status": "in_progress",
+            **attempt_fields(url, "Rerunning the distributed check."),
+        },
+    )
+    if type(created.get("id")) is not int or created["id"] <= 0:
+        raise ValueError("GitHub did not return a valid rerun check ID")
+    return str(created["id"])
+
+
 def reopen(repo: str, run: dict[str, Any]) -> None:
     """Refresh a carried-over PR check when GitHub reruns the device job alone."""
     if (
@@ -73,7 +107,6 @@ def reopen(repo: str, run: dict[str, Any]) -> None:
     ):
         return
     run_id, attempt = str(run["id"]), str(run["run_attempt"])
-    url = attempt_url(repo, run_id, attempt)
     # The source workflow puts the trusted prepare output in the device job
     # name. Never derive a check ID from a PR comment or a test artifact.
     for _ in range(12):
@@ -85,19 +118,9 @@ def reopen(repo: str, run: dict[str, Any]) -> None:
             match = re.fullmatch(r"onboard-tests-a5-distributed / check ([1-9][0-9]*)", job["name"])
             if not match or job["run_attempt"] != run["run_attempt"]:
                 continue
-            check_id = match[1]
-            check = api(f"repos/{repo}/check-runs/{check_id}")
-            if check["name"] != "ci/a5-distributed" or check["external_id"] != run_id:
-                raise ValueError("Unexpected A5 check ownership")
-            if not (check["output"]["summary"] or "").startswith(f"[Workflow attempt]({url})\n"):
-                update_check(
-                    repo,
-                    check_id,
-                    {"status": "in_progress", **attempt_fields(url, "Rerunning the distributed check.")},
-                )
+            attempt_check(repo, match[1], run_id, attempt)
             return
-        # A fresh prepare publishes its own in-progress check.
-        if any(job["name"] == "changes" and job["run_attempt"] == run["run_attempt"] for job in jobs):
+        if all(job["status"] == "completed" for job in jobs) and any(job["name"] == "result" for job in jobs):
             return
         time.sleep(5)
     raise ValueError("Could not identify the A5 rerun job")
@@ -182,6 +205,7 @@ def finish(repo: str, needs: dict[str, Any]) -> None:
     expected = {"changes", "toolchain", JOB}
     if set(needs) != expected:
         raise ValueError("Unexpected A5 distributed dependency set")
+    check_id = attempt_check(repo, check_id, os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"])
     failed = [name for name in sorted(expected) if needs[name]["result"] != "success"]
     summary = ", ".join(f"{name}: {needs[name]['result']}" for name in sorted(expected))
     update_check(

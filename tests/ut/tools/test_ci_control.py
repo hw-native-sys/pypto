@@ -3087,39 +3087,41 @@ def test_a5_device_rerun_refreshes_previous_attempt(a5_control, monkeypatch):
         "path": ".github/workflows/ci-a5-distributed.yml",
         "status": "in_progress",
     }
-    check = {
+    original = {
         "name": "ci/a5-distributed",
         "external_id": "1234",
-        "details_url": "native",
         "output": {"summary": None},
+        "head_sha": HEAD,
+        "app": {"id": 42},
     }
-    writes = []
+    created = []
 
     def api(path, payload=None, **kwargs):
         if payload:
-            writes.append((path, payload))
-            check.update(payload)
-            return None
+            assert path.endswith("/check-runs")
+            created.append({**payload, "id": 988, "app": {"id": 42}})
+            return created[-1]
         if path.endswith("/runs/1234"):
             return run
         assert path.endswith("/check-runs/987")
-        return check
+        return original
 
     monkeypatch.setattr(a5_control, "api", api)
     monkeypatch.setattr(
         a5_control,
         "pages",
-        lambda *_: [{"name": "onboard-tests-a5-distributed / check 987", "run_attempt": 2}],
+        lambda _, key: [{"name": "onboard-tests-a5-distributed / check 987", "run_attempt": 2}]
+        if key == "jobs"
+        else created,
     )
     a5_control.reopen(REPO, run)
-    # If completion won the writer queue, a delayed observer must leave it terminal.
-    check["details_url"] = "native"
-    check["status"] = "completed"
-    a5_control.reopen(REPO, run)
-    assert len(writes) == 1
-    assert writes[0][1]["status"] == "in_progress"
-    assert writes[0][1]["details_url"].endswith("/runs/1234/attempts/2")
-    assert writes[0][1]["details_url"] in writes[0][1]["output"]["summary"]
+    assert len(created) == 1 and created[0]["status"] == "in_progress"
+    assert created[0]["details_url"].endswith("/runs/1234/attempts/2")
+    assert created[0]["details_url"] in created[0]["output"]["summary"]
+    # A late observer or finalizer reuses the new attempt check, even after it completed.
+    created[0]["status"] = "completed"
+    assert a5_control.attempt_check(REPO, "987", "1234", "2") == "988"
+    assert len(created) == 1
 
 
 def test_a5_distributed_requires_its_own_comment(control):
