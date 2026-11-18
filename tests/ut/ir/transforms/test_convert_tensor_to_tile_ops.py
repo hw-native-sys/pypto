@@ -8836,7 +8836,8 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(before)
         ir.assert_structural_equal(after, expected)
 
-    def test_distributed_tuple_return_preserves_inout_backing_parameter(self):
+    @pytest.mark.parametrize("through_forward", [False, True])
+    def test_distributed_return_preserves_inout_backing_parameter(self, through_forward):
         """A write through a projected DistributedTensor upgrades its caller parameter."""
 
         @pl.program
@@ -8856,15 +8857,42 @@ class TestCalleeDirectionPropagationThroughCarries:
                 return value
 
             @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, a: pld.DistributedTensor[[64], pl.FP32], b: pld.DistributedTensor[[64], pl.FP32]):
+            def forward(
+                self,
+                value: pld.DistributedTensor[[64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pld.DistributedTensor[[64], pl.FP32],
+                b: pld.DistributedTensor[[64], pl.FP32],
+                scratch: pl.Tensor[[1, 64], pl.FP32],
+            ):
                 u, _unused = self.produce(a, b)
                 self.consume(u)
 
-        main = _require_function(Before, "main")
-        a, b = main.params
+        before = Before
+        if through_forward:
+            source = ir.python_print(Before)
+            body_start = source.index("\n", source.index("    def main("))
+            before = pl.parse_program(
+                source[:body_start]
+                + "\n        flat = pl.reshape(scratch, [64])"
+                + "\n        middle = self.forward(a, flat)"
+                + "\n        _unused, u = self.produce(a, middle)"
+                + "\n        self.consume(u)\n"
+            )
+
+        main = _require_function(before, "main")
+        a, b, scratch = main.params
+        b_dir = ir.ParamDirection.In if through_forward else ir.ParamDirection.Out
+        scratch_dir = ir.ParamDirection.InOut if through_forward else ir.ParamDirection.In
         expected_main = ir.Function(
             "main",
-            [(a, ir.ParamDirection.InOut), (b, ir.ParamDirection.Out)],
+            [(a, ir.ParamDirection.InOut), (b, b_dir), (scratch, scratch_dir)],
             main.return_types,
             main.body,
             main.span,
@@ -8874,11 +8902,16 @@ class TestCalleeDirectionPropagationThroughCarries:
             main.attrs,
         )
         Expected = ir.Program(
-            [_require_function(Before, "produce"), _require_function(Before, "consume"), expected_main],
-            Before.name,
-            Before.span,
+            [
+                _require_function(before, "produce"),
+                _require_function(before, "consume"),
+                _require_function(before, "forward"),
+                expected_main,
+            ],
+            before.name,
+            before.span,
         )
-        after = passes.convert_tensor_to_tile_ops()(Before)
+        after = passes.convert_tensor_to_tile_ops()(before)
         ir.assert_structural_equal(after, Expected)
 
 

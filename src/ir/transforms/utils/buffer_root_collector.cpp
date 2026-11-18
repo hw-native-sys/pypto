@@ -325,7 +325,7 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
                                                 const std::vector<OutputRoot>& out_roots,
                                                 const CallPtr& call) {
   if (out_roots.empty()) return;
-  const bool track_tensor_return = follow_reshape_ && As<TensorType>(call->GetType());
+  const bool track_tensor_return = follow_reshape_ && AsTensorTypeLike(call->GetType());
   ExprPtr returned_arg;
   if (track_tensor_return) {
     const auto callee = program_->GetFunction(call->op_->name_);
