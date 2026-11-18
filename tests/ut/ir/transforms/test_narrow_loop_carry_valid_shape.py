@@ -486,7 +486,9 @@ def test_predicated_split_k_narrows_columns_at_full_height():
     lowered = _lower(column_tail, stop_after="convert_tensor_to_tile_ops")
     view = _tile_view(_stored_tile_type(lowered))
     assert view.compact == ir.CompactMode.null
-    assert [dim.value for dim in view.valid_shape] == [64, 24]
+    valid_rows, valid_columns = view.valid_shape
+    assert _is_const(valid_rows, 64)
+    assert _is_const(valid_columns, 24)
 
 
 @pytest.mark.parametrize(
