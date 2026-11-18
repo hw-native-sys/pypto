@@ -112,9 +112,9 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json)
 中列出的命名用例，按平台看护精选的独立算子：
 
-- **A5：** `models/deepseek_v4_1_flash/` 下的 10 个入口：`compressor`、
+- **A5：** `models/deepseek_v4_1_flash/` 下的 9 个入口：`compressor`、
   `sparse_attention`、`gate`、`expert_routed`、`expert_shared`、`hc`、`o_proj`、
-  `engram`、`input_pack` 和 `lm_head`。
+  `engram` 和 `lm_head`。
 - **A2/A3：** `models/deepseek_v4_flash_lowlat/` 下的 10 个入口：
   `decode_compressor_ratio128`、`decode_compressor_ratio4`、`decode_sparse_attn_swa`、
   `expert_routed`、`gate`、`hc_post`、`hc_pre`、`o_proj_tp`、`qkv_proj_rope` 和
@@ -124,7 +124,8 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 
 名单不包含 layer、整网入口、组合 attention/MoE 模块、MTP、DSpark、vision 或草稿。
 库中新增文件不会自动加入；后续按需显式添加算子入口或参数组合。
-辅助模块通过调用入口覆盖，编译不需要 NPU。
+辅助模块通过调用入口覆盖。`input_pack.py` 是辅助模块，没有独立编译入口。
+编译不需要 NPU。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
 并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
 当实际解析参数的解析器声明 `--compile-only` 时，适配器为该解析器提供此标志。

@@ -112,9 +112,9 @@ A library of real-world models and primitive tensor functions built **on top of*
 cases in [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json).
 Coverage focuses on selected standalone operators, split by platform:
 
-- **A5:** 10 entries under `models/deepseek_v4_1_flash/`: `compressor`,
+- **A5:** 9 entries under `models/deepseek_v4_1_flash/`: `compressor`,
   `sparse_attention`, `gate`, `expert_routed`, `expert_shared`, `hc`, `o_proj`,
-  `engram`, `input_pack`, and `lm_head`.
+  `engram`, and `lm_head`.
 - **A2/A3:** 10 entries under `models/deepseek_v4_flash_lowlat/`:
   `decode_compressor_ratio128`, `decode_compressor_ratio4`, `decode_sparse_attn_swa`,
   `expert_routed`, `gate`, `hc_post`, `hc_pre`, `o_proj_tp`, `qkv_proj_rope`, and
@@ -125,7 +125,8 @@ Coverage focuses on selected standalone operators, split by platform:
 Layer and full-model entries, composed attention/MoE blocks, MTP, DSpark, vision,
 and drafts are outside this list. New library files do not join automatically;
 add selected operator entries or parameter variants explicitly as coverage needs
-grow. Helpers are covered through their callers. Compilation needs no NPU.
+grow. Helpers are covered through their callers. `input_pack.py` is a helper
+module without a standalone compilation entry. Compilation needs no NPU.
 The adapter forces `golden.run` into compile-only mode, records direct compile
 calls, and requires PTOAS. Coverage includes frontend, passes, verification,
 codegen, and PTOAS.
