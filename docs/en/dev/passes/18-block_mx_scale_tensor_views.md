@@ -17,8 +17,22 @@ static positive extents aligned to 16 rows / 2 groups and provably non-negative
 aligned offsets. Distributed MX tensors remain unsupported; partial tensor
 valid shapes remain unsupported for ZZ/NN. A narrowed ZZ/NN load valid shape does not shrink the DMA box: the pass uses the full
 aligned logical load window while preserving the tile result's active extents.
-Direct stores from fractal-32 Vec scale tiles remain unsupported by PTOAS; a
-logical destination view does not make that source layout legal.
+
+### Writing packed scales from Vec to GM
+
+`tile.store` writes a fully valid, statically allocated Vec scale tile into
+`MX_A_ZZ` or `MX_B_NN`. The store must cover every scale group in the
+destination, starting at group offset 0, and start on a 16-row boundary
+(A-ZZ) or a 16-column boundary (B-NN). An explicit store shape must match the
+source tile's logical shape. Use the tile produced by `quant_mx` directly.
+Only a whole-tile window is allowed when slicing a packed MX scale tile.
+
+With the PYPTO or DSA_RP planner, codegen describes the source allocation as a
+flat ND row and writes through a separate ND view of the destination pointer.
+Both descriptors address bytes already in SFractal order. Cube loads still
+use the logical MX view.
+
+### Reading compact MX_A_ND scales
 
 `MX_A_ND` preserves row-major GM storage and converts directly to ZZ Mat during
 TLOAD. Rows and row offsets may be dynamic and need not be multiples of 16;

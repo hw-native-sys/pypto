@@ -17,6 +17,7 @@
  * slice, reshape and transpose operations.
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -245,6 +246,19 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     tile_view.fractal = src_v.fractal;
     tile_view.pad = src_v.pad;
     tile_view.compact = src_v.compact;
+    // InitMemRef uses logical element offsets for slices. That cannot describe
+    // a proper window into packed SFractal storage, even when its logical span
+    // equals its own byte count. Reject it here, before aliases lose the parent.
+    if (src_v.fractal == tile_view_semantics::kMXScaleFractal && src_v.slayout != TileLayout::none_box) {
+      const bool origin = std::all_of(offsets.begin(), offsets.end(), [](const ExprPtr& offset) {
+        const auto value = As<ConstInt>(offset);
+        return value && value->value_ == 0;
+      });
+      CHECK_SPAN(origin && tile_view_semantics::ShapeExprListsEquivalent(new_shape, tile_type->shape_),
+                 args[2]->span_)
+          << "tile.slice of an MX scale tile must select the whole tile at offset zero. "
+             "Store or move the whole scale tile, or stage it through a plain FP8E8M0 tensor.";
+    }
   } else {
     tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
   }
