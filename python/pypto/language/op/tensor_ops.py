@@ -820,7 +820,7 @@ def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) ->
     and ``[K, N/2]``; DN carriers have ``[M/2, K]`` and ``[K/2, N]``.
     Each operand may independently use ND or DN. Scale shapes always count
     logical values: ``[M, K/32]`` and ``[K/32, N]``. Native FP4 requires
-    Ascend950 and PTOAS v0.74 or a compatible newer build.
+    Ascend950 and PTOAS v0.74.
 
     Args:
         lhs: A-side quantized data tensor (logical shape ``[M, K]``).
