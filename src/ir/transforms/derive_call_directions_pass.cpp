@@ -137,7 +137,16 @@ class PriorWriterCollector {
       : program_(std::move(program)), buffer_roots_(buffer_roots) {
     const auto bound = buffer_roots_.RootSets().size();
     coverage_.resize(bound, kEmpty);
-    while (root_mask_ <= bound / 2) root_mask_ <<= 1;
+    size_t levels = 1;
+    while (root_mask_ <= bound / 2) {
+      root_mask_ <<= 1;
+      ++levels;
+    }
+    // Bound the exact first-writer optimization by candidate IR size and
+    // trie depth. Unanalysed outputs retain their conservative InOut ordering.
+    constexpr size_t kMinTrieWork = 65536;
+    constexpr size_t kWorkPerNodePerLevel = 2;
+    work_remaining_ = std::max(kMinTrieWork, kWorkPerNodePerLevel * bound * levels);
   }
 
   void Run(const StmtPtr& body) { AnalyzeScope(body); }
@@ -173,6 +182,8 @@ class PriorWriterCollector {
 
   WriteSet InsertWrite(WriteSet writes, RootSetId id, size_t bit) {
     if (bit == 0) return kLeaf;
+    if (work_remaining_ == 0) return writes;
+    --work_remaining_;
     auto [zero, one] = trie_children_[writes];
     if (id & bit) {
       one = InsertWrite(one, id, bit >> 1);
@@ -189,6 +200,8 @@ class PriorWriterCollector {
     const NodePair key{left, right};
     const auto cached = trie_unions_.find(key);
     if (cached != trie_unions_.end()) return cached->second;
+    if (work_remaining_ == 0) return left;
+    --work_remaining_;
 
     const auto [left_zero, left_one] = trie_children_[left];
     const auto [right_zero, right_one] = trie_children_[right];
@@ -215,7 +228,7 @@ class PriorWriterCollector {
     // Visits are postorder so shared operands are materialized once, and a
     // long chain of unions does not need a deep native call stack.
     std::vector<RootSetId> pending{id};
-    while (!pending.empty()) {
+    while (!pending.empty() && work_remaining_ != 0) {
       const auto current = pending.back();
       const auto& set = sets[current];
       if (coverage_[current] != kEmpty) {
@@ -238,7 +251,7 @@ class PriorWriterCollector {
 
     const auto& sets = buffer_roots_.RootSets();
     std::vector<RootSetId> pending{candidates};
-    while (!pending.empty()) {
+    while (!pending.empty() && work_remaining_ != 0) {
       const auto id = pending.back();
       pending.pop_back();
       if (HasWritten(id)) continue;
@@ -261,7 +274,7 @@ class PriorWriterCollector {
   void AnalyzeIf(const IfStmtPtr& stmt) {
     const auto prior_writes = active_writes_;
     AnalyzeScope(stmt->then_body_);
-    if (!stmt->else_body_.has_value() || !stmt->else_body_.value()) return;
+    if (work_remaining_ == 0 || !stmt->else_body_.has_value() || !stmt->else_body_.value()) return;
 
     const auto then_writes = active_writes_;
     active_writes_ = prior_writes;
@@ -270,7 +283,7 @@ class PriorWriterCollector {
   }
 
   void AnalyzeScope(const StmtPtr& stmt) {
-    if (!stmt) return;
+    if (!stmt || work_remaining_ == 0) return;
     if (auto seq = As<SeqStmts>(stmt)) {
       for (const auto& child : seq->stmts_) AnalyzeScope(child);
     } else if (auto for_stmt = As<ForStmt>(stmt)) {
@@ -320,6 +333,7 @@ class PriorWriterCollector {
   ProgramPtr program_;
   const BufferRootCollector& buffer_roots_;
   size_t root_mask_ = 1;
+  size_t work_remaining_ = 0;
   WriteSet active_writes_ = kEmpty;
   // Index 0 is empty at any depth. Index 1 is an occupied leaf.
   std::vector<NodePair> trie_children_{2};
