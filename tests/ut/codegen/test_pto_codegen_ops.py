@@ -6691,8 +6691,8 @@ class TestB03TriAndGatherCodegen:
 class TestA5MixedFp8MatmulCodegen:
     """`pto.tmatmul` family with the A5 mixed FP8 operand pairs.
 
-    PTOAS v0.72 accepts any (E4M3FN | E5M2) operand pair with an f32 destination
-    on A5 (`verifyMatmulTypeTriple`), and rejects every FP8 operand on A2/A3. The
+    PTOAS v0.74 accepts any (E4M3FN | E5M2) operand pair and HiF8 x HiF8
+    with an f32 destination on A5 (`verifyMatmulTypeTriple`). The
     operand dtypes therefore have to reach the emitted instruction unchanged, and
     the target-dependent half of the contract is enforced at codegen.
 
@@ -6701,10 +6701,12 @@ class TestA5MixedFp8MatmulCodegen:
     """
 
     # (lhs, rhs) -> emitted PTOAS dtype spellings
-    _MIXED_PAIRS = [
+    _A5_PAIRS = [
+        (pl.FP8E4M3FN, pl.FP8E4M3FN, "f8E4M3FN", "f8E4M3FN"),
         (pl.FP8E4M3FN, pl.FP8E5M2, "f8E4M3FN", "f8E5M2"),
         (pl.FP8E5M2, pl.FP8E4M3FN, "f8E5M2", "f8E4M3FN"),
         (pl.FP8E5M2, pl.FP8E5M2, "f8E5M2", "f8E5M2"),
+        (pl.HF8, pl.HF8, "!pto.hif8", "!pto.hif8"),
     ]
 
     def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend950) -> str:
@@ -6794,7 +6796,7 @@ class TestA5MixedFp8MatmulCodegen:
 
         return Bias
 
-    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _MIXED_PAIRS)
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _A5_PAIRS)
     @pytest.mark.parametrize(
         "form,pto_op", [("base", "pto.tmatmul "), ("acc", "pto.tmatmul.acc"), ("bias", "pto.tmatmul.bias")]
     )
@@ -6809,7 +6811,7 @@ class TestA5MixedFp8MatmulCodegen:
         assert f"loc=right, dtype={rhs_text}" in line
         assert "loc=acc, dtype=f32" in line
 
-    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _MIXED_PAIRS)
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _A5_PAIRS)
     @pytest.mark.parametrize(
         "form,isa_macro",
         [("base", "TMATMUL("), ("acc", "TMATMUL_ACC("), ("bias", "TMATMUL_BIAS(")],

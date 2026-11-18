@@ -9,7 +9,7 @@
 
 """A5 device coverage for ordinary matmul over mixed FP8 operand pairs.
 
-PTOAS v0.72 accepts any (E4M3FN | E5M2) operand pair with an f32 destination on
+PTOAS v0.74 accepts any (E4M3FN | E5M2) operand pair with an f32 destination on
 A5 -- including the two mixed orders -- for ``pto.tmatmul``, ``.acc`` and
 ``.bias`` (``verifyMatmulTypeTriple``; pto-isa ``npu/a5/TMatmul.hpp``). These
 cases run all three Tile forms and both Tensor forms on device.
@@ -39,9 +39,7 @@ Physical K is a multiple of 32 throughout: a 1-byte Left/Right fractal packs 32
 bytes along K and PTOAS rejects an FP8 operand whose physical K is not. Valid K
 carries no such restriction, which the tail case exercises.
 
-E5M2 host tensors reach the device through the runtime's UINT8 byte carrier
-(``pypto.runtime.tensor_arg.runtime_host_tensor``); ``test_fp8e5m2_transfer.py``
-covers that path on its own.
+E5M2 host tensors use ``torch.float8_e5m2`` and the runtime's FP8E5M2 dtype.
 """
 
 from typing import Any

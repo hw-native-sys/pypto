@@ -457,7 +457,7 @@ def _torch_dtype_str(dtype: torch.dtype) -> str:
         torch.int64: "torch.int64",
         torch.bool: "torch.bool",
     }
-    for optional_name in ("float8_e4m3fn", "float8_e8m0fnu", "float4_e2m1fn_x2"):
+    for optional_name in ("float8_e4m3fn", "float8_e5m2", "float8_e8m0fnu", "float4_e2m1fn_x2"):
         optional_dtype = getattr(torch, optional_name, None)
         if isinstance(optional_dtype, torch.dtype):
             _map[optional_dtype] = f"torch.{optional_name}"

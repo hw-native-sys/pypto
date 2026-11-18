@@ -147,9 +147,9 @@ std::string CodegenBase::GetRuntimeDataTypeString(const DataType& dtype) const {
   if (dtype == DataType::FP8E5M2) return "DataType::FP8E5M2";
   if (dtype == DataType::FP8E8M0) return "DataType::FP8E8M0";
   if (dtype == DataType::FP4E2M1X2) return "DataType::FP4E2M1";
-  // The runtime has no E1M2 enum; both descriptors and Torch use byte carriers.
-  // The in-core pointer keeps its FP4E1M2X2 type for numerical operations.
-  if (dtype == DataType::FP4E1M2X2) return "DataType::UINT8";
+  // The runtime lacks E1M2 and HiF8 enums. Their descriptors carry bytes
+  // while in-core pointers preserve the element types used by the Cube.
+  if (dtype == DataType::FP4E1M2X2 || dtype == DataType::HF8) return "DataType::UINT8";
   // INDEX is a semantic type in the IR; the runtime represents it as INT64
   if (dtype == DataType::INDEX) return "DataType::INT64";
   if (dtype == DataType::INT64) return "DataType::INT64";

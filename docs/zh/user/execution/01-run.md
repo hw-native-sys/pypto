@@ -134,6 +134,12 @@ endpoint；应关闭该 worker 并创建新实例。分配回执未决时 close 
 不代表目标进程授权。同一 backing 应复用一个消费者 mapping；重复导入同一 shareable
 handle 受 CANN 自身约束。
 
+### 低精度张量分配的数据类型
+
+运行时用 `FP8E5M2` 表示 E5M2 张量。如果所安装的 PyTorch 提供
+`torch.float8_e5m2`，主机端可直接使用它。编排代码将 `pl.HF8` 和
+`pl.FP4E1M2X2` 的分配描述为 `UINT8` 字节缓冲区，核内代码保留声明的元素类型。
+
 ### 影响派发的 `RunConfig` 字段
 
 `RunConfig` 同时携带编译侧与运行时侧设置；编译侧那些见[上一页](00-compile.md)。派发时要紧的是：
