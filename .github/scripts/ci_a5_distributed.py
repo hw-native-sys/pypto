@@ -98,12 +98,12 @@ def reusable_request(repo: str, number: int, checks: list[dict[str, Any]], run_i
         if request_number(run) != str(number):
             continue
         url = attempt_url(repo, owner_id, str(run["run_attempt"]))
-        if run["status"] != "completed" or (
-            run["conclusion"] == "success"
-            and any(check["conclusion"] == "success" and same_attempt(check, url) for check in owned)
-        ):
+        if run["status"] != "completed" or not run["conclusion"]:
             reusable = reusable or url
-        elif run["conclusion"] in {"failure", "cancelled"}:
+        elif run["conclusion"] == "success":
+            if any(check["conclusion"] == "success" and same_attempt(check, url) for check in owned):
+                reusable = reusable or url
+        else:
             for check in owned:
                 if check["status"] != "completed":
                     update_check(repo, str(check["id"]), {"status": "completed", "conclusion": "cancelled"})
@@ -177,6 +177,10 @@ def reopen(repo: str, run: dict[str, Any]) -> None:
         if live["status"] == "completed" or live["run_attempt"] != run["run_attempt"]:
             return
         jobs = pages(f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+        # A full rerun publishes progress in prepare. Release its writer lock
+        # even when the hosted changes job has only just entered the queue.
+        if any(job["name"] == "changes" and job["status"] != "completed" for job in jobs):
+            return
         for job in jobs:
             match = re.fullmatch(r"onboard-tests-a5-distributed / check ([1-9][0-9]*)", job["name"])
             if not match or job["run_attempt"] != run["run_attempt"]:
@@ -237,29 +241,29 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
     latest = pull(repo, number)
     if latest["head"]["sha"] != head or latest.get("merge_commit_sha") != merge or current_base(repo) != base:
         raise ValueError(f"PR head or base changed during validation; post {COMMAND} again")
-    url = attempt_url(repo, run_id, os.environ["GITHUB_RUN_ATTEMPT"])
+    attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+    url = attempt_url(repo, run_id, attempt)
     for previous in checks:
         if previous["external_id"] == run_id and previous["app"]["slug"] == "github-actions":
-            # Re-running all jobs also retries prepare. Pass its original ID to
-            # the serialized observer and publisher, just like a job-only rerun.
-            output({"checkout_sha": merge, "check_id": str(previous["id"])})
-            report(f"Retrying A5 distributed tests for PR #{number} at {head}. [Run]({url})")
-            return
-    # Each request owns its own check ID, so a late result cannot overwrite a
-    # newer request. No ci/full status is written by this partial test run.
-    check = api(
-        f"repos/{repo}/check-runs",
-        {
-            "name": "ci/a5-distributed",
-            "head_sha": head,
-            "external_id": run_id,
-            "status": "in_progress",
-            **attempt_fields(url, "Preparing the distributed check."),
-        },
-    )
-    if type(check.get("id")) is not int or check["id"] <= 0:
-        raise ValueError("GitHub did not return a valid check ID")
-    check_id = str(check["id"])
+            # Keep the original ID in job outputs so finish can find the whole
+            # family, but publish the active attempt before scheduling any jobs.
+            check_id = str(previous["id"])
+            active_id = attempt_check(repo, check_id, run_id, attempt)
+            break
+    else:
+        check = api(
+            f"repos/{repo}/check-runs",
+            {
+                "name": "ci/a5-distributed",
+                "head_sha": head,
+                "external_id": run_id,
+                "status": "in_progress",
+                **attempt_fields(url, "Preparing the distributed check."),
+            },
+        )
+        if type(check.get("id")) is not int or check["id"] <= 0:
+            raise ValueError("GitHub did not return a valid check ID")
+        check_id = active_id = str(check["id"])
     try:
         output({"checkout_sha": merge, "check_id": check_id})
     except (OSError, ValueError):
@@ -267,7 +271,7 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
         try:
             update_check(
                 repo,
-                check_id,
+                active_id,
                 {
                     "status": "completed",
                     "conclusion": "failure",
@@ -275,7 +279,7 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
                 },
             )
         except subprocess.CalledProcessError as cleanup_error:
-            report(f"Could not complete check {check_id}: {cleanup_error}")
+            report(f"Could not complete check {active_id}: {cleanup_error}")
         raise
     report(f"A5 distributed tests for PR #{number}: head {head}, base {base}, merge {merge}. [Run]({url})")
 

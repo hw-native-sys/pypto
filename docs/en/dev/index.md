@@ -43,8 +43,10 @@ comment after automatic lint passes for the current PR head to run
 `onboard-tests-a5-distributed` on its test merge. If lint is missing, running or
 failed, the request ends before device scheduling. Post the command again after lint passes. The
 `ci/a5-distributed` check on the PR head links to the run and its artifacts.
-Repeated commands for the same PR head reuse an active or successful run. After failure or cancellation,
-post the command again to retry. When retrying publication, the workflow completes the pending check.
+Repeated commands for the same PR head reuse an active or successful run. If a run ends without
+success, including a timeout, post the command again. The new request closes any unfinished checks
+from that run. Rerunning the entire workflow publishes the current attempt's check before device
+scheduling. Retrying publication completes the pending check.
 Only the dedicated comment requests this job. When the PR contains
 `tests/st/distributed/test_l3_urma_async.py`, it runs the suite on two A5 cards. Four-rank cases are skipped.
 Otherwise it runs the bootstrap placeholder. A passing placeholder does not

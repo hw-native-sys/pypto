@@ -3079,6 +3079,62 @@ def test_a5_output_failure_closes_orphan_check(a5_control, a5_request, monkeypat
     assert payload["conclusion"] == "failure"
 
 
+@pytest.mark.parametrize("output_fails", [False, True])
+def test_a5_full_rerun_admission_publishes_progress(a5_control, a5_request, monkeypatch, output_fails):
+    _, event, writes, outputs = a5_request
+    original = {
+        "name": "ci/a5-distributed",
+        "id": 41,
+        "external_id": "1234",
+        "app": {"slug": "github-actions", "id": 42},
+        "head_sha": HEAD,
+        "status": "completed",
+        "output": {"summary": None},
+    }
+    api = a5_control.api
+
+    def publish(values):
+        # prepare must create the current check before downstream jobs get the original ID.
+        assert len(writes) == 1 and writes[0][1]["status"] == "in_progress"
+        if output_fails:
+            raise OSError("outputs unavailable")
+        outputs.update(values)
+
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setattr(a5_control, "head_checks", lambda *_: [original])
+    monkeypatch.setattr(
+        a5_control, "api", lambda path, *a, **k: original if path.endswith("/41") else api(path, *a, **k)
+    )
+    monkeypatch.setattr(a5_control, "output", publish)
+    if output_fails:
+        with pytest.raises(OSError, match="outputs unavailable"):
+            a5_control.prepare(REPO, event)
+        path, payload, options = writes[1]
+        assert path.endswith("/check-runs/987") and options == {"method": "PATCH"}
+        assert payload["conclusion"] == "failure"
+    else:
+        a5_control.prepare(REPO, event)
+        assert outputs == {"checkout_sha": MERGE, "check_id": "41"}
+    assert writes[0][1]["external_id"] == "1234:2:41"
+    assert writes[0][1]["details_url"].endswith("/attempts/2")
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress"])
+def test_a5_observer_yields_to_full_rerun_admission(a5_control, monkeypatch, state):
+    run = {
+        "id": 1234,
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "event": "issue_comment",
+        "head_branch": "main",
+        "run_attempt": 2,
+        "status": "in_progress",
+    }
+    monkeypatch.setattr(a5_control, "api", lambda path: run)
+    monkeypatch.setattr(a5_control, "pages", lambda *_: [{"name": "changes", "status": state}])
+    monkeypatch.setattr(a5_control.time, "sleep", lambda _: pytest.fail("observer held the admission lock"))
+    a5_control.reopen(REPO, run)
+
+
 @pytest.mark.parametrize("status, attempts", [(503, 3), (403, 1)])
 def test_a5_check_update_has_bounded_retries(a5_control, monkeypatch, status, attempts):
     calls = []
@@ -3186,7 +3242,19 @@ def test_a5_duplicate_command_admission(
     assert bool(writes) == bool(outputs) == (not reuse)
 
 
-@pytest.mark.parametrize("conclusion", ["failure", "cancelled"])
+@pytest.mark.parametrize(
+    "conclusion",
+    [
+        "failure",
+        "cancelled",
+        "timed_out",
+        "stale",
+        "action_required",
+        "neutral",
+        "skipped",
+        "startup_failure",
+    ],
+)
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 def test_a5_fresh_command_retires_interrupted_publisher(
     a5_control, a5_request, monkeypatch, conclusion, cleanup_fails
