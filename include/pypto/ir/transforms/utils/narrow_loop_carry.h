@@ -65,6 +65,9 @@ namespace narrow_loop_carry {
  *     inside the body -- hoisting that would leave codegen with a symbol it cannot bind.
  *     Such a carry is declined; where its pitches genuinely differ, ``AccCompactValid``
  *     then reports it as a compile error rather than letting it corrupt data.
+ *   * a predicated ``tile.matmul_acc`` can supply the product's shape when it directly
+ *     updates and yields a private carry, the seed has no declared storage, and the
+ *     predicate provably overwrites on the first iteration of a nonempty loop.
  *
  * Cost is O(N log N) in the size of the function: three linear sweeps -- a scope index, a
  * decision pass over types, and one top-down rewrite -- over ordered-map lookups. The

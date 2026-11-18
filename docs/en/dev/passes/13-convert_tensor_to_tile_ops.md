@@ -769,6 +769,13 @@ diagnostic and the `AccCompactValid` property verifier reject. `FlattenTileNdTo2
 the same helper, for an ND seed whose narrowing only appears when `tile.batch_matmul` is
 unrolled into 2D matmuls.
 
+For a loop such as `pl.pipeline(0, 2, stage=2)`, the same repair supports a direct
+`pl.matmul_acc(acc, lhs, rhs, init_cond=(kb == 0))` update. It derives the valid M/N
+from the operands when the accumulator is a private, unbound allocation, the loop
+is statically nonempty, and the update overwrites on the first iteration. The valid
+extents must be visible at loop entry. The compact seed then carries those extents
+through the loop to the store. See [#3475](https://github.com/hw-native-sys/pypto/issues/3475).
+
 A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
 single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
 rows — unless an already-narrowed seed needs its compact metadata aligned with the

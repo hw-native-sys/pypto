@@ -206,6 +206,44 @@ def test_explicit_valid_shape_matmul_carry(test_config):
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
+@pytest.mark.platforms("a2a3", "a2a3sim")
+def test_predicated_split_k_runtime_valid_rows(test_config):
+    """One compact carry must use the correct L0C pitch at each runtime row count."""
+
+    @pl.jit
+    def split_k(
+        a: pl.Tensor[[64, 512], pl.FP32],
+        w: pl.Tensor[[32, 512], pl.FP32],
+        rows: pl.Scalar[pl.INDEX],
+        out: pl.InOut[pl.Tensor[[64, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(1, name_hint="predicated_narrow_acc"):
+            valid_rows = pl.min(64, rows)
+            acc = pl.create_tensor([64, 32], dtype=pl.FP32)
+            for kb in pl.pipeline(0, 2, stage=2):
+                k0 = kb * 256
+                lhs = pl.slice(a, [64, 256], [0, k0], valid_shape=[valid_rows, 256])
+                rhs = pl.slice(w, [32, 256], [0, k0])
+                acc = pl.matmul_acc(acc, lhs, rhs, b_trans=True, init_cond=(kb == 0))
+            out[0:64, 0:32] = acc
+        return out
+
+    a = (torch.arange(64 * 512, dtype=torch.float32).reshape(64, 512) % 5) - 2
+    w = (torch.arange(32 * 512, dtype=torch.float32).reshape(32, 512) % 7) - 3
+    product = a @ w.T
+    out = torch.empty((64, 32), dtype=torch.float32)
+    compiled = split_k.compile(a, w, 64, out, config=test_config)
+    # 16 and 17 straddle the first N-fractal pitch change. The untouched GM
+    # tail checks that the store also uses the runtime extent.
+    for rows in (7, 16, 17, 64):
+        out.fill_(-777)
+        compiled(a, w, rows, out, config=test_config)
+        if not test_config.codegen_only:
+            expected = torch.full_like(out, -777)
+            expected[:rows] = product[:rows]
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 def _planner_tag(planner: MemoryPlanner) -> str:
     return {
         MemoryPlanner.PYPTO: "pypto",
