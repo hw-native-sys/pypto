@@ -255,8 +255,9 @@ std::vector<StmtPtr> FinalizeTpopTfreesImpl(const std::vector<StmtPtr>& stmts, c
         auto tuple = AsVarLike(item->tuple_);
         auto it = tuple_roots.find(tuple.get());
         if (it == tuple_roots.end() || item->index_ < 0 ||
-            static_cast<size_t>(item->index_) >= it->second.size())
+            static_cast<size_t>(item->index_) >= it->second.size()) {
           break;
+        }
         alias_src = it->second[item->index_];
         continue;
       }

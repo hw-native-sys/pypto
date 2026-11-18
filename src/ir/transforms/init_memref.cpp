@@ -86,13 +86,13 @@ namespace {
 // the identity of the receive to distinguish two MemRef-less branch inputs.
 class BorrowedTileRoots {
  public:
-  const Var* Find(const ExprPtr& value) const {
+  [[nodiscard]] const Var* Find(const ExprPtr& value) const {
     auto var = AsVarLike(value);
     auto it = roots_.find(var.get());
     return it == roots_.end() ? nullptr : it->second;
   }
 
-  const Var* Definition(const VarPtr& result, const ExprPtr& value) const {
+  [[nodiscard]] const Var* Definition(const VarPtr& result, const ExprPtr& value) const {
     if (op_predicates::IsTPop(As<Call>(value))) return result.get();
     return Find(op_predicates::GetBufferAliasSource(value));
   }
@@ -124,7 +124,7 @@ class VFReturnTuples {
     for (const auto& arg : args) fields.push_back({arg->GetType(), borrowed.Find(arg)});
   }
 
-  const std::vector<Storage>* Find(const ExprPtr& value) const {
+  [[nodiscard]] const std::vector<Storage>* Find(const ExprPtr& value) const {
     auto var = AsVarLike(value);
     auto it = fields_.find(var.get());
     return it == fields_.end() ? nullptr : &it->second;
@@ -134,7 +134,7 @@ class VFReturnTuples {
     if (const auto* fields = Find(source)) fields_[result.get()] = *fields;
   }
 
-  const Storage* Project(const ExprPtr& value) const {
+  [[nodiscard]] const Storage* Project(const ExprPtr& value) const {
     auto item = As<TupleGetItemExpr>(value);
     if (!item) return nullptr;
     const auto* fields = Find(item->tuple_);
