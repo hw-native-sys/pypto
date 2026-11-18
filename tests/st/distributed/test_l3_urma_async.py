@@ -43,12 +43,13 @@ in codegen-only mode is not evidence of runtime correctness.
 
 import json
 import sys
+from pathlib import Path
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 import torch
-from pypto.ir import DistributedConfig
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
 from pypto.runtime import RunConfig
 from pypto.runtime._artifact_runtime import runtime_output_directory
 
@@ -1860,6 +1861,164 @@ class TestL3UrmaAsyncChunking:
             assert torch.equal(outputs[r], inputs[peer]), (
                 f"rank {r}: chunked PUT mismatch against rank {peer}"
             )
+
+
+def _build_plain_local_async(is_put: bool):
+    """Use ordinary dispatch tensors for the local URMA endpoint on two ranks."""
+
+    @pl.jit.incore
+    def fill(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+        return pl.store(pl.load(inp, [0, 0], [1, SIZE]), [0, 0], data)
+
+    @pl.jit.incore
+    def rendezvous(
+        dep: pl.Tensor[[1, SIZE], pl.FP32],
+        signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[2, 1], pl.INT32]:
+        # dep orders publication after its producer's asynchronous completion.
+        rank = pld.rank(pld.get_comm_ctx(signal))
+        peer = 1 - rank
+        pld.system.notify(signal, peer=peer, offsets=[rank, 0], value=1, op=pld.NotifyOp.Set)
+        pld.system.wait(signal, offsets=[peer, 0], expected=1, cmp=pld.WaitCmp.Ge)
+        return signal
+
+    @pl.jit.incore
+    def put_local(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        ready: pld.DistributedTensor[[2, 1], pl.INT32],
+    ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+        peer = 1 - pld.rank(pld.get_comm_ctx(data))
+        # inp is a normal device allocation, never a communication-window view.
+        return pld.tensor.put_async(data, peer, inp)
+
+    @pl.jit.incore
+    def get_local(
+        data: pld.DistributedTensor[[1, SIZE], pl.FP32],
+        scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
+        ready: pld.DistributedTensor[[2, 1], pl.INT32],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        peer = 1 - pld.rank(pld.get_comm_ctx(data))
+        # scratch is a normal device allocation, never a communication-window view.
+        return pld.tensor.get_async(scratch, peer, data)
+
+    @pl.jit.incore
+    def readback(
+        data: pl.Tensor[[1, SIZE], pl.FP32],
+        done: pld.DistributedTensor[[2, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        return pl.store(pl.load(data, [0, 0], [1, SIZE]), [0, 0], out)
+
+    @pl.jit
+    def chip_put(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        ready: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        done: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        initialized = fill(inp, data)
+        ready_signal = rendezvous(initialized, ready)
+        transferred = put_local(inp, initialized, ready_signal)
+        done_signal = rendezvous(transferred, done)
+        return readback(transferred, done_signal, out)
+
+    @pl.jit
+    def chip_get(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        ready: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        done: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        initialized = fill(inp, data)
+        ready_signal = rendezvous(initialized, ready)
+        transferred = get_local(initialized, scratch, ready_signal)
+        done_signal = rendezvous(transferred, done)
+        return readback(transferred, done_signal, out)
+
+    chip_orch = chip_put if is_put else chip_get
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
+        scratch: pl.InOut[pl.Tensor[[2, 1, SIZE], pl.FP32]],
+        outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+        ready_buf = pld.alloc_window_buffer(64)
+        done_buf = pld.alloc_window_buffer(64)
+        for rank in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+            ready = pld.window(ready_buf, [2, 1], dtype=pl.INT32)
+            done = pld.window(done_buf, [2, 1], dtype=pl.INT32)
+            chip_orch(inputs[rank], scratch[rank], outputs[rank], data, ready, done, device=rank)
+        return outputs
+
+    return host_orch
+
+
+@pytest.mark.platforms("a5", reason="URMA async transfers require the A5 backend")
+@pytest.mark.parametrize("is_put", [True, False], ids=["put_plain_src", "get_plain_dst"])
+def test_plain_local_async_endpoint(test_config, device_ids, is_put):
+    """Plain local endpoints transfer peer data and order a later consumer task."""
+    if len(device_ids) < 2:
+        pytest.skip("Plain local async transfer needs two devices")
+    inputs = torch.arange(2 * SIZE, dtype=torch.float32).reshape(2, 1, SIZE)
+    scratch = torch.full_like(inputs, -17)
+    outputs = torch.zeros_like(inputs)
+    compiled = _build_plain_local_async(is_put).compile(
+        inputs,
+        scratch,
+        outputs,
+        config=RunConfig(
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
+        ),
+    )
+    for round_index in range(REPEATS):
+        inputs.add_(10000)
+        scratch.fill_(-17)
+        outputs.zero_()
+        compiled(inputs, scratch, outputs, config=RunConfig(platform=test_config.platform))
+        assert torch.equal(outputs, inputs.flip(0)), f"round {round_index}: plain local endpoint mismatch"
+        if not is_put:
+            assert torch.equal(scratch, inputs.flip(0)), f"round {round_index}: GET destination mismatch"
+
+
+def _replay_plain_local_async(output_dir: str, device_ids: list[int]) -> None:
+    """Replay card-free prebuilt artifacts and inputs under a two-device allocation."""
+    root = Path(output_dir)
+    results = []
+    for name in ("put_plain_src", "get_plain_dst"):
+        compiled = DistributedCompiledProgram.from_dir(
+            root / name,
+            distributed_config=DistributedConfig(device_ids=device_ids, num_sub_workers=0),
+        )
+        for round_index, (inputs, scratch, outputs, expected) in enumerate(
+            torch.load(root / "inputs.pt", weights_only=True)
+        ):
+            compiled(inputs, scratch, outputs, config=RunConfig(platform="a5"))
+            assert torch.equal(outputs, expected), f"{name} round {round_index}: output mismatch"
+            if name == "get_plain_dst":
+                assert torch.equal(scratch, expected), f"GET round {round_index}: destination mismatch"
+            result = dict(
+                case=name,
+                round=round_index,
+                ranks=2,
+                bytes_per_rank=SIZE * 4,
+                max_abs_error=float((outputs - expected).abs().max()),
+                passed=True,
+            )
+            results.append(result)
+            print(json.dumps(result), flush=True)
+    (root / "results.json").write_text(json.dumps(dict(devices=device_ids, results=results), indent=2) + "\n")
 
 
 if __name__ == "__main__":

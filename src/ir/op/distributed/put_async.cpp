@@ -36,11 +36,8 @@
  *
  * Verifier:
  *
- * * ``dst`` must be a :class:`DistributedTensorType` — the peer needs a window
- *   slot to receive into.
- * * ``src`` must be a :class:`DistributedTensorType` — both endpoints are
- *   registered-window views. A plain tensor would require automatic MR
- *   registration, which is outside the V1 interface.
+ * * ``dst`` must be a window-bound :class:`DistributedTensorType`.
+ * * ``src`` may be a plain :class:`TensorType` or a distributed tensor.
  * * ``peer`` must be a scalar integer rank expression; constants must be non-negative.
  * * ``dst`` / ``src`` share element type and rank; static dims are positive.
  *   Full-slice transfers require matching shapes; subregions supply
@@ -86,15 +83,13 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
   CHECK(dst_type) << kOpName << " dst must be a DistributedTensor (window-bound), got "
                   << args[0]->GetType()->TypeName();
   comm_op::ValidateAsyncPeer(args[1], kOpName);
-  auto src_type = As<DistributedTensorType>(args[2]->GetType());
-  CHECK(src_type) << kOpName << " src must be a DistributedTensor (window-bound), got "
-                  << args[2]->GetType()->TypeName();
+  auto src_type = AsTensorTypeLike(args[2]->GetType());
+  CHECK(src_type) << kOpName << " src must be a Tensor, got " << args[2]->GetType()->TypeName();
   CHECK(dst_type->dtype_ == src_type->dtype_)
       << kOpName << " dst and src must have the same element type, got dst " << args[0]->GetType()->TypeName()
       << " vs src " << args[2]->GetType()->TypeName();
 
-  // Both endpoints are registered-window views, and V1 provides no packing or
-  // staging, so the physical views must be dense row-major as well.
+  // No packing or staging is provided, so both physical views must be dense row-major.
   comm_op::ValidateAsyncEndpointView(dst_type, kOpName, "dst");
   comm_op::ValidateAsyncEndpointView(src_type, kOpName, "src");
 
@@ -138,7 +133,7 @@ REGISTER_OP("pld.tensor.put_async")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
-    .add_argument("src", "Local source — window-bound DistributedTensor (same dtype as dst)")
+    .add_argument("src", "Local source — Tensor or DistributedTensor (same dtype as dst)")
     .add_argument("dst_offsets",
                   "Optional per-dim offsets (MakeTuple) into the peer's dst slice; present only in the "
                   "subregion form (all three region args supplied together)")
