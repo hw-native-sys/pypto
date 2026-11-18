@@ -1937,6 +1937,47 @@ def test_same_or_older_attempt_url_cannot_preserve_success(control, monkeypatch,
     assert not control.newer_status_exists(REPO, 123, HEAD, run)
 
 
+@pytest.mark.parametrize("http_status", [404, 403, 503])
+def test_a5_missing_owner_requires_persisted_pr_identity(a5_control, a5_request, monkeypatch, http_status):
+    _, event, writes, outputs = a5_request
+
+    def check(check_id, key, status="in_progress", slug="github-actions"):
+        return {"id": check_id, "external_id": key, "status": status, "app": {"slug": slug}}
+
+    checks = [
+        check(81, "a5-pr-123:44"),
+        check(82, "a5-pr-123:44:2:81"),
+        check(83, "44:3:81"),
+        check(84, "a5-pr-124:44"),
+        check(85, "44"),
+        check(86, "a5-pr-123:44:4:81", "completed"),
+        check(87, "a5-pr-123:44", slug="other-app"),
+        check(88, "a5-pr-123:44:bad"),
+    ]
+    api = a5_control.api
+
+    def missing(path, *args, **kwargs):
+        if path.endswith("/actions/runs/44"):
+            raise subprocess.CalledProcessError(1, "gh", stderr=f"gh: error (HTTP {http_status})")
+        return api(path, *args, **kwargs)
+
+    monkeypatch.setattr(a5_control, "api", missing)
+    monkeypatch.setattr(
+        a5_control, "head_checks", lambda repo, head: checks if repo == REPO and head == HEAD else []
+    )
+    if http_status != 404:
+        with pytest.raises(subprocess.CalledProcessError):
+            a5_control.prepare(REPO, event)
+        assert not writes and not outputs
+        return
+    a5_control.prepare(REPO, event)
+    assert [(path, payload["conclusion"], kwargs["method"]) for path, payload, kwargs in writes[:-1]] == [
+        (f"repos/{REPO}/check-runs/{i}", "cancelled", "PATCH") for i in (81, 82)
+    ]
+    assert writes[-1][1]["external_id"] == "a5-pr-123:1234"
+    assert outputs == {"checkout_sha": MERGE, "check_id": "987"}
+
+
 @pytest.mark.parametrize("unfinished", [False, True])
 def test_duplicate_scan_splits_large_history_without_losing_old_reruns(control, monkeypatch, unfinished):
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -3079,13 +3120,16 @@ def test_a5_output_failure_closes_orphan_check(a5_control, a5_request, monkeypat
     assert payload["conclusion"] == "failure"
 
 
+@pytest.mark.parametrize("owner_key", ["1234", "a5-pr-123:1234"])
 @pytest.mark.parametrize("output_fails", [False, True])
-def test_a5_full_rerun_admission_publishes_progress(a5_control, a5_request, monkeypatch, output_fails):
+def test_a5_full_rerun_admission_publishes_progress(
+    a5_control, a5_request, monkeypatch, output_fails, owner_key
+):
     _, event, writes, outputs = a5_request
     original = {
         "name": "ci/a5-distributed",
         "id": 41,
-        "external_id": "1234",
+        "external_id": owner_key,
         "app": {"slug": "github-actions", "id": 42},
         "head_sha": HEAD,
         "status": "completed",
@@ -3115,7 +3159,7 @@ def test_a5_full_rerun_admission_publishes_progress(a5_control, a5_request, monk
     else:
         a5_control.prepare(REPO, event)
         assert outputs == {"checkout_sha": MERGE, "check_id": "41"}
-    assert writes[0][1]["external_id"] == "1234:2:41"
+    assert writes[0][1]["external_id"] == f"{owner_key}:2:41"
     assert writes[0][1]["details_url"].endswith("/attempts/2")
 
 
@@ -3126,13 +3170,39 @@ def test_a5_observer_yields_to_full_rerun_admission(a5_control, monkeypatch, sta
         "path": ".github/workflows/ci-a5-distributed.yml",
         "event": "issue_comment",
         "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 17)",
         "run_attempt": 2,
         "status": "in_progress",
     }
     monkeypatch.setattr(a5_control, "api", lambda path: run)
     monkeypatch.setattr(a5_control, "pages", lambda *_: [{"name": "changes", "status": state}])
     monkeypatch.setattr(a5_control.time, "sleep", lambda _: pytest.fail("observer held the admission lock"))
+    a5_control.route_rerun(REPO, run)
     a5_control.reopen(REPO, run)
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress", "completed"])
+@pytest.mark.parametrize("carried_device", [False, True])
+def test_a5_result_retry_does_not_request_the_writer_lock(a5_control, monkeypatch, state, carried_device):
+    run = {
+        "id": 1234,
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "event": "issue_comment",
+        "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 99)",
+        "run_attempt": 2,
+        "status": "in_progress",
+    }
+    jobs = [{"name": "result", "run_attempt": 2, "status": state}]
+    if carried_device:
+        jobs.append(
+            {"name": "onboard-tests-a5-distributed / check 41", "run_attempt": 2, "status": "completed"}
+        )
+    monkeypatch.setattr(a5_control, "api", lambda path: run)
+    monkeypatch.setattr(a5_control, "pages", lambda *_: jobs)
+    monkeypatch.setattr(a5_control.time, "sleep", lambda _: pytest.fail("waited for result"))
+    monkeypatch.setattr(a5_control, "output", lambda _: pytest.fail("requested the writer lock"))
+    a5_control.route_rerun(REPO, run)
 
 
 @pytest.mark.parametrize("status, attempts", [(503, 3), (403, 1)])
@@ -3158,6 +3228,7 @@ def test_a5_device_rerun_refreshes_previous_attempt(a5_control, monkeypatch):
         "run_attempt": 2,
         "event": "issue_comment",
         "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 17)",
         "path": ".github/workflows/ci-a5-distributed.yml",
         "status": "in_progress",
     }
@@ -3186,10 +3257,16 @@ def test_a5_device_rerun_refreshes_previous_attempt(a5_control, monkeypatch):
     monkeypatch.setattr(
         a5_control,
         "pages",
-        lambda _, key: [{"name": "onboard-tests-a5-distributed / check 987", "run_attempt": 2}]
+        lambda _, key: [
+            {"name": "onboard-tests-a5-distributed / check 987", "run_attempt": 2, "status": "queued"}
+        ]
         if key == "jobs"
         else created,
     )
+    routed = {}
+    monkeypatch.setattr(a5_control, "output", routed.update)
+    a5_control.route_rerun(REPO, run)
+    assert routed == {"number": "123"}
     a5_control.reopen(REPO, run)
     assert len(created) == 1 and created[0]["status"] == "in_progress"
     assert created[0]["details_url"].endswith("/runs/1234/attempts/2")

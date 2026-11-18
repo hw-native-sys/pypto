@@ -45,8 +45,9 @@ failed, the request ends before device scheduling. Post the command again after 
 `ci/a5-distributed` check on the PR head links to the run and its artifacts.
 Repeated commands for the same PR head reuse an active or successful run. If a run ends without
 success, including a timeout, post the command again. The new request closes any unfinished checks
-from that run. Rerunning the entire workflow publishes the current attempt's check before device
-scheduling. Retrying publication completes the pending check.
+from that run. New checks record their PR number so the command can also retire a pending check
+after its workflow run is deleted. Rerunning the entire workflow publishes the current attempt's
+check before device scheduling. A result-only retry completes the pending check directly.
 Only the dedicated comment requests this job. When the PR contains
 `tests/st/distributed/test_l3_urma_async.py`, it runs the suite on two A5 cards. Four-rank cases are skipped.
 Otherwise it runs the bootstrap placeholder. A passing placeholder does not

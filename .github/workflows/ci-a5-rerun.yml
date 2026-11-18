@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read
     outputs:
       number: ${{ steps.route.outputs.number }}
     steps:
@@ -26,6 +27,8 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
       - id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/ci_a5_distributed.py route-rerun
 
   progress:

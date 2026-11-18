@@ -34,6 +34,8 @@ from ci_control import (
 
 COMMAND = "/ci a5-distributed"
 JOB = "onboard-tests-a5-distributed"
+# Legacy checks have no PR prefix. An attempt check adds :attempt:original_id.
+CHECK_OWNER = re.compile(r"(?:a5-pr-(?P<pr>[1-9][0-9]*):)?(?P<run>[1-9][0-9]*)(?::[1-9][0-9]*:[1-9][0-9]*)?")
 
 
 def attempt_url(repo: str, run_id: str, attempt: str) -> str:
@@ -84,17 +86,25 @@ def reusable_request(repo: str, number: int, checks: list[dict[str, Any]], run_i
     """Look up the owning workflow so cancelled or failed publishers never block a retry."""
     owners: dict[str, list[dict[str, Any]]] = {}
     for check in checks:
-        owner = re.fullmatch(r"([1-9][0-9]*)(?::[1-9][0-9]*:[1-9][0-9]*)?", check["external_id"] or "")
-        if owner and owner[1] != run_id and check["app"]["slug"] == "github-actions":
-            owners.setdefault(owner[1], []).append(check)
+        owner = CHECK_OWNER.fullmatch(check["external_id"] or "")
+        if (
+            owner
+            and owner["pr"] in (None, str(number))
+            and owner["run"] != run_id
+            and check["app"]["slug"] == "github-actions"
+        ):
+            owners.setdefault(owner["run"], []).append(check)
     reusable = None
     for owner_id, owned in owners.items():
         try:
             run = api(f"repos/{repo}/actions/runs/{owner_id}")
         except subprocess.CalledProcessError as error:
-            if "HTTP 404" in (error.stderr or ""):
-                continue  # The historical workflow run has been deleted.
-            raise
+            if not re.search(r"\bHTTP 404\b", error.stderr or ""):
+                raise
+            # Only scoped checks on this head carry enough identity after deletion.
+            scoped = [check for check in owned if check["external_id"].startswith(f"a5-pr-{number}:")]
+            retire_unfinished(repo, scoped)
+            continue
         if request_number(run) != str(number):
             continue
         url = attempt_url(repo, owner_id, str(run["run_attempt"]))
@@ -104,10 +114,14 @@ def reusable_request(repo: str, number: int, checks: list[dict[str, Any]], run_i
             if any(check["conclusion"] == "success" and same_attempt(check, url) for check in owned):
                 reusable = reusable or url
         else:
-            for check in owned:
-                if check["status"] != "completed":
-                    update_check(repo, str(check["id"]), {"status": "completed", "conclusion": "cancelled"})
+            retire_unfinished(repo, owned)
     return reusable
+
+
+def retire_unfinished(repo: str, checks: list[dict[str, Any]]) -> None:
+    for check in checks:
+        if check["status"] != "completed":
+            update_check(repo, str(check["id"]), {"status": "completed", "conclusion": "cancelled"})
 
 
 def same_attempt(check: dict[str, Any], url: str) -> bool:
@@ -119,16 +133,19 @@ def attempt_check(repo: str, original_id: str, run_id: str, attempt: str) -> str
     if attempt == "1":
         return original_id
     original = api(f"repos/{repo}/check-runs/{original_id}")
-    if original["name"] != "ci/a5-distributed" or original["external_id"] != run_id:
+    owner_key = original["external_id"]
+    if original["name"] != "ci/a5-distributed" or not re.fullmatch(
+        rf"(?:a5-pr-[1-9][0-9]*:)?{run_id}", owner_key or ""
+    ):
         raise ValueError("Unexpected A5 check ownership")
     url = attempt_url(repo, run_id, attempt)
     head = sha(original["head_sha"])
-    key = f"{run_id}:{attempt}:{original_id}"
+    key = f"{owner_key}:{attempt}:{original_id}"
     family = [
         check
         for check in head_checks(repo, head)
         if check["app"]["id"] == original["app"]["id"]
-        and re.fullmatch(rf"{run_id}:[1-9][0-9]*:{original_id}", check["external_id"] or "")
+        and re.fullmatch(rf"{owner_key}:[1-9][0-9]*:{original_id}", check["external_id"] or "")
     ]
     family.append(original)
     current = next((c for c in family if c["external_id"] == key or same_attempt(c, url)), None)
@@ -160,37 +177,45 @@ def attempt_check(repo: str, original_id: str, run_id: str, attempt: str) -> str
     return str(created["id"])
 
 
-def reopen(repo: str, run: dict[str, Any]) -> None:
-    """Refresh a carried-over PR check when GitHub reruns the device job alone."""
-    if (
-        run["path"] != ".github/workflows/ci-a5-distributed.yml"
-        or run["event"] != "issue_comment"
-        or run["head_branch"] != "main"
-        or run["run_attempt"] < 2
-    ):
+def rerun_device_check(repo: str, run: dict[str, Any]) -> str | None:
+    """Return an active device check ID, an empty handoff, or None while jobs are unlisted."""
+    live = api(f"repos/{repo}/actions/runs/{run['id']}")
+    attempt = run["run_attempt"]
+    if live["status"] == "completed" or live["run_attempt"] != attempt:
+        return ""
+    jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs")
+    if any(job["name"] == "changes" and job["status"] != "completed" for job in jobs):
+        return ""  # Full reruns publish progress in prepare.
+    for job in jobs:
+        match = re.fullmatch(r"onboard-tests-a5-distributed / check ([1-9][0-9]*)", job["name"])
+        if match and job["run_attempt"] == attempt and job["status"] != "completed":
+            return match[1]
+    if any(job["name"] == "result" and job["run_attempt"] == attempt for job in jobs):
+        return ""  # The publisher can now finish or recover its own check.
+    return None
+
+
+def route_rerun(repo: str, run: dict[str, Any]) -> None:
+    number = request_number(run)
+    if not number or run["run_attempt"] < 2:
         return
-    run_id, attempt = str(run["id"]), str(run["run_attempt"])
-    # The source workflow puts the trusted prepare output in the device job
-    # name. Never derive a check ID from a PR comment or a test artifact.
+    # Wait for job metadata in the read-only job, outside the PR writer queue.
     for _ in range(12):
-        live = api(f"repos/{repo}/actions/runs/{run_id}")
-        if live["status"] == "completed" or live["run_attempt"] != run["run_attempt"]:
-            return
-        jobs = pages(f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
-        # A full rerun publishes progress in prepare. Release its writer lock
-        # even when the hosted changes job has only just entered the queue.
-        if any(job["name"] == "changes" and job["status"] != "completed" for job in jobs):
-            return
-        for job in jobs:
-            match = re.fullmatch(r"onboard-tests-a5-distributed / check ([1-9][0-9]*)", job["name"])
-            if not match or job["run_attempt"] != run["run_attempt"]:
-                continue
-            attempt_check(repo, match[1], run_id, attempt)
-            return
-        if all(job["status"] == "completed" for job in jobs) and any(job["name"] == "result" for job in jobs):
+        check = rerun_device_check(repo, run)
+        if check is not None:
+            if check:
+                output({"number": number})
             return
         time.sleep(5)
     raise ValueError("Could not identify the A5 rerun job")
+
+
+def reopen(repo: str, run: dict[str, Any]) -> None:
+    """Recheck the current attempt once after acquiring the shared writer lock."""
+    if request_number(run) and run["run_attempt"] >= 2:
+        check = rerun_device_check(repo, run)
+        if check:
+            attempt_check(repo, check, str(run["id"]), str(run["run_attempt"]))
 
 
 def pinned_merge(repo: str, number: int) -> tuple[dict[str, Any], str, str, str]:
@@ -243,8 +268,9 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
         raise ValueError(f"PR head or base changed during validation; post {COMMAND} again")
     attempt = os.environ["GITHUB_RUN_ATTEMPT"]
     url = attempt_url(repo, run_id, attempt)
+    owner_key = f"a5-pr-{number}:{run_id}"
     for previous in checks:
-        if previous["external_id"] == run_id and previous["app"]["slug"] == "github-actions":
+        if previous["external_id"] in (run_id, owner_key) and previous["app"]["slug"] == "github-actions":
             # Keep the original ID in job outputs so finish can find the whole
             # family, but publish the active attempt before scheduling any jobs.
             check_id = str(previous["id"])
@@ -256,7 +282,7 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             {
                 "name": "ci/a5-distributed",
                 "head_sha": head,
-                "external_id": run_id,
+                "external_id": owner_key,
                 "status": "in_progress",
                 **attempt_fields(url, "Preparing the distributed check."),
             },
@@ -316,7 +342,7 @@ def main() -> None:
         prepare(repo, json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()))
     elif sys.argv[1] == "route-rerun":
         run = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"]
-        output({"number": request_number(run)})
+        route_rerun(repo, run)
     elif sys.argv[1] == "reopen":
         reopen(repo, json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"])
     elif sys.argv[1] == "finish":
