@@ -411,10 +411,22 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
   };
   check_shape(lhs_scale->shape_, m->value_, groups, "lhs_scale");
   check_shape(rhs_scale->shape_, groups, n->value_, "rhs_scale");
+  auto logical_valid_shape = [&](const TensorTypePtr& type) {
+    const auto& valid = GetEffectiveTensorValidShape(*type);
+    CHECK_SPAN(valid.size() == 2, span) << kOpName << " requires valid_shape rank to match the 2D data shape";
+    if (packed) {
+      // Loading into Mat repacks the axis that is unpacked in GM.
+      const size_t axis = type->tensor_view_.value_or(TensorView{}).layout == TensorLayout::DN ? 1 : 0;
+      auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
+      auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+      CHECK_SPAN(DimensionsEqual(MakeFloorMod(valid[axis], two, span), zero), span)
+          << kOpName << " requires an even FP4 valid extent on dimension " << axis << " for the Mat load";
+    }
+    return logical_shape(type, valid);
+  };
   std::vector<ExprPtr> output_shape{lhs_shape[0], rhs_shape[1]};
   TensorView view;
-  view.valid_shape = {logical_shape(lhs, GetEffectiveTensorValidShape(*lhs))[0],
-                      logical_shape(rhs, GetEffectiveTensorValidShape(*rhs))[1]};
+  view.valid_shape = {logical_valid_shape(lhs)[0], logical_valid_shape(rhs)[1]};
   return std::make_shared<TensorType>(output_shape, DataType::FP32, std::nullopt, std::move(view));
 }
 
