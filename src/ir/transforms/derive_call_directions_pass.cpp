@@ -128,23 +128,14 @@ const Var* ResolveAnyRoot(const ExprPtr& arg,
 /// function parameters; either kind needs WAW chaining when a prior sibling
 /// already wrote to the same root.
 ///
-/// Two phases:
-///   1. PrecomputeWrittenRoots: bottom-up cache of the union of local roots
-///      written by any non-builtin call inside each subtree.
-///   2. AnalyzeScope: top-down scan that maintains a `seen_roots` set of roots
-///      already written by prior siblings; for each Call, every Out-param arg
-///      whose root is *not* in `seen_roots` is recorded as "first writer".
+/// Expand each candidate set once along the active scope path. Branches start
+/// with the same prior writes and their possible writes are combined on exit.
 class PriorWriterCollector {
  public:
-  PriorWriterCollector(ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots)
+  PriorWriterCollector(ProgramPtr program, const BufferRootCollector& buffer_roots)
       : program_(std::move(program)), buffer_roots_(buffer_roots) {}
 
-  void Run(const StmtPtr& body) {
-    if (!body) return;
-    PrecomputeWrittenRoots(body);
-    std::unordered_set<const Var*> seen;
-    AnalyzeScope(body, seen);
-  }
+  void Run(const StmtPtr& body) { AnalyzeScope(body); }
 
   /// Per-call-like set of roots for which the call (or submit) is the first
   /// writer in its scope. Roots not in the set (or call-like exprs absent
@@ -158,153 +149,92 @@ class PriorWriterCollector {
   std::unordered_map<const Expr*, std::unordered_set<const Var*>> first_writer_roots;
 
  private:
-  /// Compute (and cache) the set of local roots written by any non-builtin Call
-  /// inside the subtree rooted at `stmt`. The result is treated as the "writer
-  /// footprint" of the stmt when it appears as a sibling in an outer scope.
-  const std::unordered_set<const Var*>& PrecomputeWrittenRoots(const StmtPtr& stmt) {
-    auto cached = written_roots_.find(stmt.get());
-    if (cached != written_roots_.end()) return cached->second;
-    auto& result = written_roots_[stmt.get()];
-    if (!stmt) return result;
+  using RootCandidates = std::vector<const Var*>;
 
-    if (auto seq = As<SeqStmts>(stmt)) {
-      for (const auto& s : seq->stmts_) {
-        const auto& child = PrecomputeWrittenRoots(s);
-        result.insert(child.begin(), child.end());
-      }
-    } else if (auto for_stmt = As<ForStmt>(stmt)) {
-      const auto& body_roots = PrecomputeWrittenRoots(for_stmt->body_);
-      result.insert(body_roots.begin(), body_roots.end());
-    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-      const auto& body_roots = PrecomputeWrittenRoots(while_stmt->body_);
-      result.insert(body_roots.begin(), body_roots.end());
-    } else if (auto if_stmt = As<IfStmt>(stmt)) {
-      const auto& then_roots = PrecomputeWrittenRoots(if_stmt->then_body_);
-      result.insert(then_roots.begin(), then_roots.end());
-      if (if_stmt->else_body_.has_value() && if_stmt->else_body_.value()) {
-        const auto& else_roots = PrecomputeWrittenRoots(if_stmt->else_body_.value());
-        result.insert(else_roots.begin(), else_roots.end());
-      }
-    } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
-      const auto& body_roots = PrecomputeWrittenRoots(scope->body_);
-      result.insert(body_roots.begin(), body_roots.end());
-    } else if (auto assign = As<AssignStmt>(stmt)) {
-      CollectCallWrittenRoots(assign->value_, result);
-    } else if (auto eval = As<EvalStmt>(stmt)) {
-      CollectCallWrittenRoots(eval->expr_, result);
-    } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
-      for (int index : launch->result_param_indices_) {
-        if (const Var* root = ResolveAnyRoot(launch->args_[index], buffer_roots_)) result.insert(root);
-      }
-    }
-    // YieldStmt / ReturnStmt / BreakStmt / ContinueStmt: no writes.
-    return result;
-  }
-
-  /// If `expr` is a non-builtin Call or Submit, add every Out/InOut root it
-  /// writes (local or enclosing-param-rooted) into `out`. args_[i] ↔
-  /// params_[i] is identity for both kinds; the loop is bounded by the args
-  /// actually carried, so a Submit's uncovered callee params (if any) are not
-  /// reached. Those are runtime-allocated outputs with no caller-side root to
-  /// record — skipping them is correct, not a gap.
-  void CollectCallWrittenRoots(const ExprPtr& expr, std::unordered_set<const Var*>& out) {
-    auto cl = BuildCallLikeArgs(expr);
-    if (!cl) return;
-    if (IsBuiltinOp(cl->op->name_)) return;
-    auto callee = program_ ? program_->GetFunction(cl->op->name_) : nullptr;
-    if (!callee) return;
-
-    const auto& dirs = callee->param_directions_;
-    for (size_t i = 0; i < cl->args.size() && i < dirs.size(); ++i) {
-      if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
-      if (const Var* root = ResolveAnyRoot(cl->args[i], buffer_roots_)) {
-        out.insert(root);
-      }
+  void RememberWrites(const RootCandidates& candidates) {
+    if (candidates.empty() || !seen_candidates_.insert(&candidates).second) return;
+    candidate_history_.push_back(&candidates);
+    for (const auto* root : candidates) {
+      if (seen_roots_.insert(root).second) root_history_.push_back(root);
     }
   }
 
-  /// Top-down analysis. `seen` carries the set of local roots already written by
-  /// prior siblings (or ancestors' prior siblings) in the surrounding scope.
-  /// For/While/If subtrees are entered with a *snapshot copy* of `seen`, so that
-  /// writes within the subtree do not leak into the outer scope's sibling tracking.
-  /// The unit's pre-computed `written_roots` is then merged into the outer `seen`.
-  /// ScopeStmt and SeqStmts are transparent and share the same `seen`.
-  void AnalyzeScope(const StmtPtr& stmt, std::unordered_set<const Var*>& seen) {
+  void AnalyzeIf(const IfStmtPtr& stmt) {
+    const auto prior_candidates = candidate_history_.size();
+    const auto prior_roots = root_history_.size();
+    AnalyzeScope(stmt->then_body_);
+    if (!stmt->else_body_.has_value() || !stmt->else_body_.value()) return;
+
+    // Roll back only insertions made by the then branch. Keep its candidate
+    // sets so its potential writes can be merged after analyzing the else.
+    const std::vector<const RootCandidates*> then_writes(candidate_history_.begin() + prior_candidates,
+                                                         candidate_history_.end());
+    while (candidate_history_.size() > prior_candidates) {
+      seen_candidates_.erase(candidate_history_.back());
+      candidate_history_.pop_back();
+    }
+    while (root_history_.size() > prior_roots) {
+      seen_roots_.erase(root_history_.back());
+      root_history_.pop_back();
+    }
+    AnalyzeScope(stmt->else_body_.value());
+    for (const auto* candidates : then_writes) RememberWrites(*candidates);
+  }
+
+  void AnalyzeScope(const StmtPtr& stmt) {
     if (!stmt) return;
     if (auto seq = As<SeqStmts>(stmt)) {
-      for (const auto& s : seq->stmts_) {
-        AnalyzeScope(s, seen);
-      }
+      for (const auto& child : seq->stmts_) AnalyzeScope(child);
     } else if (auto for_stmt = As<ForStmt>(stmt)) {
-      auto inner = seen;
-      AnalyzeScope(for_stmt->body_, inner);
-      const auto& written = PrecomputeWrittenRoots(for_stmt->body_);
-      seen.insert(written.begin(), written.end());
+      AnalyzeScope(for_stmt->body_);
     } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-      auto inner = seen;
-      AnalyzeScope(while_stmt->body_, inner);
-      const auto& written = PrecomputeWrittenRoots(while_stmt->body_);
-      seen.insert(written.begin(), written.end());
+      AnalyzeScope(while_stmt->body_);
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
-      auto then_seen = seen;
-      AnalyzeScope(if_stmt->then_body_, then_seen);
-      if (if_stmt->else_body_.has_value() && if_stmt->else_body_.value()) {
-        auto else_seen = seen;
-        AnalyzeScope(if_stmt->else_body_.value(), else_seen);
-      }
-      const auto& written_then = PrecomputeWrittenRoots(if_stmt->then_body_);
-      seen.insert(written_then.begin(), written_then.end());
-      if (if_stmt->else_body_.has_value() && if_stmt->else_body_.value()) {
-        const auto& written_else = PrecomputeWrittenRoots(if_stmt->else_body_.value());
-        seen.insert(written_else.begin(), written_else.end());
-      }
+      AnalyzeIf(if_stmt);
     } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
-      AnalyzeScope(scope->body_, seen);
+      AnalyzeScope(scope->body_);
     } else if (auto assign = As<AssignStmt>(stmt)) {
-      AnalyzeCall(assign->value_, seen);
+      AnalyzeCall(assign->value_);
     } else if (auto eval = As<EvalStmt>(stmt)) {
-      AnalyzeCall(eval->expr_, seen);
-    } else if (As<SimtLaunchStmt>(stmt)) {
-      const auto& written = PrecomputeWrittenRoots(stmt);
-      seen.insert(written.begin(), written.end());
+      AnalyzeCall(eval->expr_);
+    } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+      for (int index : launch->result_param_indices_) {
+        auto var = AsVarLike(launch->args_[index]);
+        if (var) RememberWrites(buffer_roots_.RootCandidatesOf(var.get()));
+      }
     }
-    // Other stmts (Yield/Return/Break/Continue): no Calls to analyze.
   }
 
-  /// For a single Call or Submit expression, mark "first writer" roots and
-  /// update `seen`. Both kinds use positional identity mapping over the args
-  /// they actually carry (a Submit may cover fewer callee params; the
-  /// uncovered ones are runtime-allocated and have no caller-side root).
-  /// First-writer is registered
-  /// under the original expression's stable pointer (`expr.get()`) so the
-  /// CallDirectionMutator can look it up regardless of kind.
-  void AnalyzeCall(const ExprPtr& expr, std::unordered_set<const Var*>& seen) {
+  void AnalyzeCall(const ExprPtr& expr) {
     auto cl = BuildCallLikeArgs(expr);
-    if (!cl) return;
-    if (IsBuiltinOp(cl->op->name_)) return;
+    if (!cl || IsBuiltinOp(cl->op->name_)) return;
     auto callee = program_ ? program_->GetFunction(cl->op->name_) : nullptr;
     if (!callee) return;
 
     const auto& dirs = callee->param_directions_;
-    std::unordered_set<const Var*> roots_this_call;
+    std::vector<const RootCandidates*> writes;
     for (size_t i = 0; i < cl->args.size() && i < dirs.size(); ++i) {
-      // Only Out is decision-relevant for promotion (InOut is already InOut).
-      // We still register InOut roots into `roots_this_call` so subsequent
-      // siblings see them as prior writers.
       if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
-      const Var* root = ResolveAnyRoot(cl->args[i], buffer_roots_);
-      if (!root) continue;
-      if (dirs[i] == ParamDirection::Out && seen.count(root) == 0) {
-        first_writer_roots[expr.get()].insert(root);
+      auto var = AsVarLike(cl->args[i]);
+      if (!var) continue;
+      const auto& candidates = buffer_roots_.RootCandidatesOf(var.get());
+      if (candidates.empty()) continue;
+      if (dirs[i] == ParamDirection::Out && buffer_roots_.ambiguous_buffer_vars.count(var.get()) == 0 &&
+          seen_roots_.count(candidates.front()) == 0) {
+        first_writer_roots[expr.get()].insert(candidates.front());
       }
-      roots_this_call.insert(root);
+      writes.push_back(&candidates);
     }
-    seen.insert(roots_this_call.begin(), roots_this_call.end());
+    // Arguments of the same call are concurrent with respect to this analysis.
+    for (const auto* candidates : writes) RememberWrites(*candidates);
   }
 
   ProgramPtr program_;
-  const std::unordered_map<const Var*, const Var*>& buffer_roots_;
-  std::unordered_map<const Stmt*, std::unordered_set<const Var*>> written_roots_;
+  const BufferRootCollector& buffer_roots_;
+  std::unordered_set<const Var*> seen_roots_;
+  std::unordered_set<const RootCandidates*> seen_candidates_;
+  std::vector<const Var*> root_history_;
+  std::vector<const RootCandidates*> candidate_history_;
 };
 
 /// IRMutator that rewrites every non-builtin Call in a function body and writes
@@ -599,7 +529,7 @@ Pass DeriveCallDirections() {
         enclosing_param_dir_by_root.emplace(func->params_[i].get(), func->param_directions_[i]);
       }
 
-      PriorWriterCollector pw_collector(program, br_collector.buffer_roots);
+      PriorWriterCollector pw_collector(program, br_collector);
       pw_collector.Run(func->body_);
 
       CallDirectionMutator mutator(program, br_collector.buffer_roots, br_collector.ambiguous_buffer_vars,
