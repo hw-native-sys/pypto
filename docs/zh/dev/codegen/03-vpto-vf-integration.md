@@ -59,7 +59,7 @@ Tile 参数及其派生 view 会被拒绝：它们的运行时 UB 指针关系�
 | 边界 | PyPTO 提供的信息 | PTOAS 完成的工作 |
 | ---- | ---------------- | ---------------- |
 | Caller | SIMD adapter 上的 Tile 参数与 `pto.tileop.effects` | 为搬运和调用插入 MTE2 → V、V → MTE3 事件 |
-| VF body | 公共 UB 指针基址、常量偏移与 VMI 内存操作 | 为重叠的 WR、RW、WW 访问插入屏障 |
+| VF body | 公共 UB 指针基址、常量偏移、VMI 内存操作及作用域策略 | 自动模式下为重叠的 WR、RW、WW 访问插入屏障 |
 
 Caller adapter 在依赖分析期间保留 Tile，只有 adapter 函数体才通过
 `pto.tile_buf_addr` 取出 UB 指针并调用 helper。Tile 捕获项标记为 `read`；只要有
@@ -70,12 +70,21 @@ Masked store 使用 `readwrite`，表示未激活 lane 的内容需要保留，�
 PyPTO 不在调用前后添加固定的 `pipe_barrier(PIPE_ALL)`，正常的 kernel 尾部同步仍
 保留。调用边界契约依赖 A5 VF 完成语义，因此当前限定为 AIV helper。
 
-PTOAS 负责 VF 依赖分析与屏障插入，包括通过 SSA 数据依赖证明的执行顺序。
+默认 `pl.reg_scope(auto_sync=True)` 模式下，PTOAS 负责 VF 依赖分析与屏障
+插入，包括通过 SSA 数据依赖证明的执行顺序。`pl.reg_scope(auto_sync=False)`
+为该 helper 传入 `--enable-vecscope-mem-bar=false`，由作者通过仅语句形式的
+`pl.reg.mem_bar(kind)` 提供所需的作用域内 UB 屏障。PyPTO 不覆盖其他插入
+设置，其默认值由所选工具链决定。每个生成的 helper 源码头部携带
+`// pypto.reg_auto_sync: true` 或 `false`，运行时编译与缓存身份从同一源码
+快照解析策略，因此独立 helper 的混合策略及产物搬迁均保留策略。旧的无标记
+helper 保持自动同步。合并诊断输出 `generate()`（含 `skip_ptoas=True`）
+拒绝手动作用域，须用 `generate_bundle()` 编译。调用方 effects、DMA 与 kernel
+尾部同步继续生效。
 PyPTO 将生成的 LLVM 交给 Bisheng，不再重新推导访存依赖或施加 LLVM 指令白名单。
 PTOAS/Bisheng 的错误会传递给调用者。下述独立的外部符号与设备镜像检查负责
 保证 helper 的打包契约。
 
-索引 gather/scatter 依赖固定的 PTOAS v0.74 或更新版本，对同一 vecscope 内
+自动模式下，索引 gather/scatter 依赖固定的 PTOAS v0.74 或更新版本，对同一 vecscope 内
 未知访存范围的 RAW/WAR/WAW 依赖进行保守同步。该版本包含
 [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 的修复，
 PyPTO 不再为每次索引访问添加 `VV_ALL` 屏障。Caller/helper 边界与 GM 同步

@@ -47,6 +47,18 @@ def _lanes(value: object, name: str = "lanes") -> int:
     return value
 
 
+def mem_bar(kind: str) -> ir.Call:
+    """Order UB memory accesses within the enclosing register scope.
+
+    ``kind`` is an exact PTO barrier type, such as ``VST_VLD``. This is a
+    statement-only DSL operation; its IR carrier has no usable result.
+    It does not provide DMA, cross-scope, GM or cross-core synchronization.
+    """
+    if type(kind) is not str:
+        raise TypeError("reg.mem_bar kind must be a compile-time string")
+    return _call("mem_bar", [], kind=kind)
+
+
 def load(tile: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0, *, lanes: int) -> Reg:
     """Read lanes consecutive initialized elements from a Vec Tile."""
     return Reg(_call("load", [_expr(tile), _expr(offset)], lanes=_lanes(lanes)))

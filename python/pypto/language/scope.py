@@ -268,7 +268,13 @@ class reg_scope:
     """Implicitly capture inputs for a non-nested A5 register region.
 
     Register and local scalar values cannot escape; store results can.
+    ``auto_sync=False`` disables PTOAS automatic intra-scope memory barriers;
+    callers must supply necessary ordering with ``pl.reg.mem_bar``.
     """
+
+    def __init__(self, *, auto_sync: bool = True) -> None:
+        if type(auto_sync) is not bool:
+            raise TypeError("reg_scope auto_sync must be a compile-time bool")
 
     def __enter__(self) -> None:
         raise RuntimeError("pl.reg_scope() is only valid inside a parsed PyPTO function")

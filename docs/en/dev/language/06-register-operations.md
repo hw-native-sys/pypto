@@ -27,13 +27,46 @@ def kernel(
     z = pl.tile.add(out, out)
 ```
 
-`pl.reg_scope()` has no arguments, captures, result list or yield. Scopes cannot
+`pl.reg_scope(*, auto_sync=True)` has no captures, result list or yield.
+`auto_sync` must be a compile-time bool; omitted or `True` retains automatic
+UB barrier insertion, while `False` selects explicit synchronization. Scopes cannot
 nest. The frontend accepts InCore and AIV device contexts, including an explicit
 InCore scope inside an Opaque, Orchestration or Graph function before outlining.
 After `ExpandMixedKernel`, the region must belong to an AIV function. Direct use
 in orchestration code and orchestration scopes inside RegScope are rejected.
 Explicit non-A5 targets are rejected; target checks wait until compilation if no
 target has been selected.
+
+### Explicit UB barriers
+
+`pl.reg.mem_bar(kind: str) -> None` is a statement-only operation inside a
+register scope. It emits exactly `pto.mem_bar "KIND"`; it cannot be assigned,
+returned or used as an expression. `kind` is a case-sensitive compile-time
+string with no default:
+
+| Family | Accepted kinds |
+| ------ | -------------- |
+| VV | `VV_ALL`, `VST_VLD`, `VLD_VST`, `VST_VST` |
+| VS | `VS_ALL`, `VST_LD`, `VLD_ST`, `VST_ST` |
+| SV | `SV_ALL`, `ST_VLD`, `LD_VST`, `ST_VST` |
+| SS | `SS_ALL`, `ST_LD`, `LD_ST`, `ST_ST` |
+
+```python
+# tile is initialized local Vec storage captured from outside the scope.
+with pl.reg_scope(auto_sync=False):
+    value = pl.reg.load(tile, lanes=64)
+    pl.reg.mem_bar("VLD_VST")
+    tile = pl.reg.store(tile, value=value)
+    pl.reg.mem_bar("VST_VLD")
+    value = pl.reg.load(tile, lanes=64)
+```
+
+Manual scopes require the author to provide all necessary RAW/WAR/WAW and
+loop-carried barriers. Explicit barriers are also allowed in automatic scopes.
+`ALL` covers only its family: `VV_ALL` does not cover scalar memory operations.
+These barriers order UB accesses within one vecscope; they do not replace
+cross-scope, DMA, GM or cross-core synchronization. See the
+[VF compilation contract](../codegen/03-vpto-vf-integration.md).
 
 Inline helpers may contain `reg_scope` and accept explicitly typed Vec Tiles.
 They inherit their caller's execution context when expanded; final placement
@@ -457,8 +490,9 @@ with pl.reg_scope():
 
 | API | Meaning |
 | --- | ------- |
-| `with ib.reg_scope(span=None):` | Open a register region in Python IRBuilder. |
+| `with ib.reg_scope(span=None, *, auto_sync=True):` | Open a register region in Python IRBuilder. |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | Create a named register operation. `op_name` is the registered name such as `"reg.add"`; `args` contains IR operands, `kwargs` operation attributes. |
+| `ib.emit_reg_mem_bar(kind, span=None)` | Emit a statement-only explicit UB barrier. |
 | `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | Emit a named store and return the destination Tile alias. |
 | `ir.get_reg_op_spec(name)` | Inspect the operation's region requirement and VMI emitter. |
 | `ir.get_reg_memory_effect(call)` | Inspect a load/store's target Tile, known root allocation, read/write access, half-open element interval and optional mask. Unknown roots or interval endpoints remain unknown. |
@@ -469,8 +503,8 @@ function validates ownership; `RegScopeValid` validates manually constructed IR,
 and `MixedKernelExpanded` checks final AIV placement. Memory-effect inspection
 preserves masks without claiming full-buffer initialization or disjointness.
 
-Python text syntax does not accept scope metadata. Printing a manually constructed
-RegScope with nonempty `name_hint` or `attrs` raises an error to avoid losing
+Python printing emits `pl.reg_scope(auto_sync=False)` for a manual scope.
+Other nonempty attributes and nonempty `name_hint` raise an error to avoid losing
 metadata; binary serialization preserves those fields. Empty scopes print as
 `pass`. The API list above describes the supported frontend surface; PTOAS
 instructions without a corresponding listed API are not exposed through `pl.reg`.

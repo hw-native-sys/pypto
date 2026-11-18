@@ -317,11 +317,12 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     types += artifact.caller_parameter_types[i];
     values += arguments[i];
   }
-  artifact.source =
-      "module attributes {pto.target_arch = \"a5\", pto.backend = \"vpto\"} {\n"
-      "  func.func @" +
-      artifact.symbol + "(" + signature + ") attributes {pto.aiv} {\n" + helper.fs_.constants_section.str() +
-      helper.stream_.str() + "  }\n}\n";
+  // Runtime reads this header to select PTOAS flags during artifact replay.
+  artifact.source = std::string("// pypto.reg_auto_sync: ") + (scope->AutoSync() ? "true\n" : "false\n") +
+                    "module attributes {pto.target_arch = \"a5\", pto.backend = \"vpto\"} {\n"
+                    "  func.func @" +
+                    artifact.symbol + "(" + signature + ") attributes {pto.aiv} {\n" +
+                    helper.fs_.constants_section.str() + helper.stream_.str() + "  }\n}\n";
   // The adapter's PIPE_V/effect contract lets PTOAS place dependencies here.
   // The A5 VF exits after its register instructions complete; this models the
   // caller boundary, not VF-internal UB hazards. Kernel-tail sync stays enabled.

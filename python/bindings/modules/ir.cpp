@@ -1929,6 +1929,8 @@ void BindIR(nb::module_& m) {
   reg_scope_stmt_class.def_prop_ro(
       "attrs", [kwargs_to_pydict](const RegScopeStmtPtr& self) { return kwargs_to_pydict(self->attrs_); },
       scope_attrs_doc);
+  reg_scope_stmt_class.def_prop_ro("auto_sync", &RegScopeStmt::AutoSync,
+                                   "Whether PTOAS automatic vecscope synchronization is enabled");
 
   // GraphScopeStmt
   auto graph_scope_stmt_class = nb::class_<GraphScopeStmt, ScopeStmt>(

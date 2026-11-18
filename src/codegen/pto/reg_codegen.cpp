@@ -132,6 +132,9 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
     EmitVFHelperCall(scope);
     return;
   }
+  CHECK_SPAN(scope->AutoSync(), scope->span_)
+      << "Manual RegScope synchronization requires generate_bundle(); combined diagnostic output "
+         "and skip_ptoas=True cannot encode per-helper compilation policy";
   ScopeOperands operands;
   // A plain Tile alias may have been defined before this RegScope. Preserve
   // that handle provenance so equivalent external names compare identically.
