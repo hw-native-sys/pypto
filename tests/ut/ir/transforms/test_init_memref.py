@@ -721,6 +721,65 @@ class TestSliceView:
     """tile.slice is a view op: output shares the input's base Ptr with an
     accumulated byte offset and a smaller view size."""
 
+    @pytest.mark.parametrize("row_step", [1, 2])
+    def test_tensor_slices_preserve_gm_window_strides(self, row_step):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[8, 8], pl.BF16]):
+                window = pl.tensor.view(x, [4, 8], steps=[row_step, 1])
+                rows = pl.tensor.slice(window, [2, 3], [1, 0])
+                last = pl.tensor.slice(rows, [1, 3], [1, 0], drop_dims=[0])
+                tail = pl.tensor.slice(window, [2, 3], [3, 0], clamp=True)
+                empty = pl.tensor.slice(window, [2, 3], [4, 0], clamp=True)
+                return last, tail, empty
+
+        after = passes.init_mem_ref()(Before)
+        func = next(iter(after.functions.values()))
+        refs = []
+        strides = []
+
+        class Slices(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tensor.slice").name:
+                    tensor = op.var.type
+                    assert isinstance(tensor, ir.TensorType) and tensor.memref is not None
+                    assert tensor.tensor_view is not None
+                    refs.append(tensor.memref)
+                    strides.append([cast(ir.ConstInt, axis).value for axis in tensor.tensor_view.stride])
+                super().visit_assign_stmt(op)
+
+        Slices().visit_stmt(func.body)
+        source = func.params[0].type
+        assert isinstance(source, ir.TensorType) and source.memref is not None
+        assert all(ref.base_.same_as(source.memref.base_) for ref in refs)
+        pitch = 8 * row_step
+        assert strides == [[pitch, 1], [1], [pitch, 1], [pitch, 1]]
+        assert [(ref.byte_offset_.value, ref.size_) for ref in refs] == [
+            (2 * pitch, 2 * (pitch + 3)),
+            (4 * pitch, 6),
+            (6 * pitch, 6),
+            (8 * pitch, 0),  # An empty clamp uses the conservative unknown-span sentinel.
+        ]
+
+    @pytest.mark.parametrize("row", [0, 1])
+    def test_packed_gm_slice_checks_dn_physical_nibble_offset(self, row):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[8, 8], pl.INT4, pl.TensorView(stride=[1, 16], layout=pl.DN)]):
+                window = pl.tensor.slice(x, [3, 2], [row, 1])
+                return window
+
+        if row:
+            with pytest.raises(ValueError, match="Packed 4-bit slice origins must be byte-aligned"):
+                passes.init_mem_ref()(Before)
+        else:
+            printed = ir.python_print(passes.init_mem_ref()(Before))
+            assert re.search(
+                r'window: .*pl\.MemRef\("mem_ddr_0", pl\.const\(8, pl\.INDEX\), 10\)', printed
+            ), printed
+
     @pytest.mark.parametrize("run_simplify", [False, True])
     def test_nested_constant_origin_folds_without_freezing_loop_metadata(self, run_simplify):
         """Constant SSA origins fold while loop-carried and indexed origins stay dynamic."""

@@ -236,12 +236,13 @@ std::optional<uint64_t> StaticAccSliceViewSpanBytes(
 
 // The positive-stride descriptor covers a byte envelope, including its gaps.
 // Only the individual addresses selected by the descriptor are read/written.
-std::optional<uint64_t> StaticTensorViewSpanBytes(const TensorTypePtr& tensor) {
+std::optional<uint64_t> StaticTensorViewSpanBytes(const TensorTypePtr& tensor,
+                                                  const std::vector<ExprPtr>& shape) {
   const auto& view = tensor->tensor_view_;
-  INTERNAL_CHECK(view && view->stride.size() == tensor->shape_.size()) << "Tensor view stride rank mismatch";
+  INTERNAL_CHECK(view && view->stride.size() == shape.size()) << "Tensor view stride rank mismatch";
   uint64_t elements = 1;
-  for (size_t i = 0; i < tensor->shape_.size(); ++i) {
-    const auto extent = As<ConstInt>(tensor->shape_[i]);
+  for (size_t i = 0; i < shape.size(); ++i) {
+    const auto extent = As<ConstInt>(shape[i]);
     const auto stride = As<ConstInt>(view->stride[i]);
     if (!extent || !stride || extent->value_ <= 0 || stride->value_ <= 0) return std::nullopt;
     uint64_t term;
@@ -261,13 +262,33 @@ std::optional<uint64_t> StaticTensorViewSpanBytes(const TensorTypePtr& tensor) {
 std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const ShapedTypePtr& parent,
                                                  const ShapedTypePtr& view) {
   if (!call || (!IsOp(call, "tensor.slice") && !IsOp(call, "tile.slice"))) return std::nullopt;
-  if (!parent || !view || call->args_.size() < 2) return std::nullopt;
+  if (!parent || !view || call->args_.size() < 3) return std::nullopt;
   // Use the requested pre-drop shape rather than the result rank so
   // tile.slice(..., drop_dims=...) keeps the parent strides of dimensions that
   // disappear from the result type.
   auto requested_shape = As<MakeTuple>(call->args_[1]);
   if (!requested_shape || parent->shape_.size() != requested_shape->elements_.size()) {
     return std::nullopt;
+  }
+
+  auto tensor = AsTensorTypeLike(parent);
+  auto indices = As<TupleType>(call->args_[2]->GetType());
+  if (indices &&
+      HasRectangularSliceStrides(tensor, requested_shape->elements_.size(), indices->types_.size())) {
+    auto extents = requested_shape->elements_;
+    const auto offsets = ExtractTupleElements(call->args_[2], indices->types_.size());
+    // A padded or clamped rectangle can extend past the parent; its GM
+    // envelope ends at the final physical element available on each axis.
+    for (size_t i = 0; i < extents.size(); ++i) {
+      auto bound = As<ConstInt>(parent->shape_[i]);
+      auto start = As<ConstInt>(offsets[i]);
+      auto extent = As<ConstInt>(extents[i]);
+      if (bound && start && extent && start->value_ >= 0 && bound->value_ >= 0) {
+        const int64_t available = bound->value_ - start->value_;
+        if (available < extent->value_) extents[i] = MakeIndexConst(std::max<int64_t>(0, available));
+      }
+    }
+    return StaticTensorViewSpanBytes(tensor, extents).value_or(0);
   }
 
   // Keep the span in the same layout model as the byte offset that
@@ -704,7 +725,7 @@ class InitMemRefMutator : public IRMutator {
     if (const auto tensor = As<TensorType>(type); tensor && tensor->tensor_view_) {
       const auto& view = *tensor->tensor_view_;
       if (!view.stride.empty() && (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)) {
-        static_size = StaticTensorViewSpanBytes(tensor);
+        static_size = StaticTensorViewSpanBytes(tensor, tensor->shape_);
       }
     }
     const uint64_t size_bytes = static_size.value_or(0);
@@ -901,15 +922,15 @@ class InitMemRefMutator : public IRMutator {
     // slice beginning at row 16 of a 32-row INT32 allocation must end at the
     // root boundary, not acquire another 32 rows of L0C padding. The envelope
     // is measured in the same layout model as the byte offset just computed —
-    // NZ boxes for the accumulator windows GetSliceAccumulatorGeometry accepts,
-    // row-major-dense elements for every other slice — so offset + span stays
-    // inside the root either way.
+    // physical strides for rectangular GM slices, NZ boxes for eligible
+    // accumulator windows, and row-major elements for packed slices.
     uint64_t view_size = parent_memref->size_;  // default: same size as parent
     if (auto call = As<Call>(new_value)) {
       auto parent_shaped = std::dynamic_pointer_cast<const ShapedType>(source->GetType());
       auto out_shaped = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
       if (IsWindowTensorView(call)) {
-        view_size = StaticTensorViewSpanBytes(AsTensorTypeLike(op->var_->GetType())).value_or(0);
+        auto tensor = AsTensorTypeLike(op->var_->GetType());
+        view_size = StaticTensorViewSpanBytes(tensor, tensor->shape_).value_or(0);
       } else if (auto slice_span = StaticSliceViewSpanBytes(call, parent_shaped, out_shaped)) {
         view_size = *slice_span;
       }

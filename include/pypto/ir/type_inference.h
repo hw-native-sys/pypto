@@ -420,6 +420,10 @@ const char* DescribeCubeWritebackScaledConversion(DataType accumulator, DataType
  */
 std::vector<ExprPtr> ExtractTupleElements(const ExprPtr& tuple_expr, size_t rank);
 
+/// A rectangular slice preserves the parent's physical stride on every retained
+/// axis. Rank-changing reinterprets and blocked layouts have other addressing rules.
+bool HasRectangularSliceStrides(const TensorTypePtr& parent, size_t window_rank, size_t offset_rank);
+
 /**
  * @brief Whether the substrate under a window read trims an over-extent window
  *
