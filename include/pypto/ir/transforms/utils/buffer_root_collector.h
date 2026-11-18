@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -141,7 +142,7 @@ class BufferRootCollector : public IRVisitor {
   bool follow_reshape_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
   std::unordered_map<const Var*, const Var*> candidate_sources_;
-  std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
+  std::unordered_map<const Var*, std::shared_ptr<const std::vector<OutputRoot>>> tuple_output_roots_;
 };
 
 }  // namespace buffer_root

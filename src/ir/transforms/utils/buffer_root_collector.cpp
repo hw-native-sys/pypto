@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -159,10 +160,13 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
     if (auto helper = ResolveVFCall(call, program_)) {
       auto aliases = VFReturnedArguments(helper, call);
       if (As<TupleType>(call->GetType())) {
-        std::vector<RootInfo> roots;
+        std::vector<OutputRoot> roots;
         roots.reserve(aliases.size());
-        for (const auto& alias : aliases) roots.push_back({ResolveRootCandidates(alias), IsAmbiguous(alias)});
-        tuple_output_roots_[assign->var_.get()] = std::move(roots);
+        for (const auto& alias : aliases) {
+          roots.push_back({alias, ResolveRootCandidates(alias), IsAmbiguous(alias)});
+        }
+        tuple_output_roots_[assign->var_.get()] =
+            std::make_shared<const std::vector<OutputRoot>>(std::move(roots));
       } else if (!aliases.empty()) {
         RecordRootCandidates(assign->var_, ResolveRootCandidates(aliases[0]), IsAmbiguous(aliases[0]));
       }
@@ -178,10 +182,8 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
     } else if (!IsBuiltinOp(op_name)) {
       auto out_roots = CollectCallOutputRoots(call);
       if (As<TupleType>(call->GetType())) {
-        std::vector<RootInfo> roots;
-        roots.reserve(out_roots.size());
-        for (const auto& entry : out_roots) roots.push_back({entry.roots, entry.ambiguous});
-        tuple_output_roots_[assign->var_.get()] = std::move(roots);
+        tuple_output_roots_[assign->var_.get()] =
+            std::make_shared<const std::vector<OutputRoot>>(std::move(out_roots));
       } else if (follow_reshape_ && out_roots.size() == 1) {
         ShareRootCandidates(assign->var_, out_roots.front().argument);
       } else {
@@ -194,10 +196,16 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
   } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
     if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
       auto it = tuple_output_roots_.find(tuple_var.get());
-      if (it != tuple_output_roots_.end() && tuple_get->index_ < static_cast<int>(it->second.size()) &&
-          !it->second[tuple_get->index_].roots.empty()) {
-        const auto& info = it->second[tuple_get->index_];
-        RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
+      if (it != tuple_output_roots_.end() && tuple_get->index_ >= 0 &&
+          tuple_get->index_ < static_cast<int>(it->second->size())) {
+        const auto& info = (*it->second)[tuple_get->index_];
+        if (!info.roots.empty()) {
+          if (follow_reshape_) {
+            ShareRootCandidates(assign->var_, info.argument);
+          } else {
+            RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
+          }
+        }
       }
     }
   } else if (auto source = AsVarLike(assign->value_)) {
