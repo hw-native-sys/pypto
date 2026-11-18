@@ -819,8 +819,9 @@ def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) ->
     E1M2x2, or one of each). FP4 ND carriers have shapes ``[M, K/2]``
     and ``[K, N/2]``; DN carriers have ``[M/2, K]`` and ``[K/2, N]``.
     Each operand may independently use ND or DN. Scale shapes always count
-    logical values: ``[M, K/32]`` and ``[K/32, N]``. Native FP4 requires
-    Ascend950 and PTOAS v0.77. To form complete pairs during the Mat load,
+    logical values: ``[M, K/32]`` and ``[K/32, N]``. Both operands must have
+    matching logical valid K extents. Native FP4 requires Ascend950 and
+    PTOAS v0.77. To form complete pairs during the Mat load,
     the valid extent on axis 0 (ND) or axis 1 (DN) must be provably even.
 
     Args:

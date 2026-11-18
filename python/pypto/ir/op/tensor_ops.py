@@ -507,7 +507,8 @@ def matmul_mx(
 
     Both data tensors are FP8E4M3FN or both packed FP4 (either format).
     FP4 ND data uses carrier shapes ``[M,K/2]`` / ``[K,N/2]``; DN uses
-    ``[M/2,K]`` / ``[K/2,N]``. Scales and results use logical dimensions.
+    ``[M/2,K]`` / ``[K/2,N]``. Scales and results use logical dimensions,
+    and the operands must have matching logical valid K extents.
 
     Args:
         lhs: A-side quantized data tensor (logical shape ``[M, K]``).
