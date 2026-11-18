@@ -291,8 +291,8 @@ Pass ConvertTensorToTileOps() {
           if (node.root) {
             record_access(node.root, access);
           } else {
-            accesses[node.zero] |= access;
-            accesses[node.one] |= access;
+            accesses[node.left] |= access;
+            accesses[node.right] |= access;
           }
         }
         for (size_t i = 0; i < new_dirs.size(); ++i) {

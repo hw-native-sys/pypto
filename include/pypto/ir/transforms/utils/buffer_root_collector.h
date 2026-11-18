@@ -78,22 +78,18 @@ class BufferRootCollector : public IRVisitor {
 
   using RootSetId = size_t;
 
-  // A compressed binary trie of owning roots. Leaves name a buffer. Interior
-  // nodes reference smaller IDs, allowing consumers to propagate facts to all
-  // members in one reverse pass across the shared nodes.
+  // Shared candidate unions. Leaves name a buffer. Interior nodes hold two
+  // operands with smaller IDs, so access facts can flow to the roots once.
+  // Keeping operands avoids expanding either set at each control-flow join.
   struct RootSetNode {
     const Var* root = nullptr;
-    RootSetId zero = 0;
-    RootSetId one = 0;
-    size_t offset = 0;
-    size_t split = 0;
+    RootSetId left = 0;
+    RootSetId right = 0;
   };
 
   /// Zero represents the empty set.
   [[nodiscard]] RootSetId RootSetOf(const Var* var) const;
   [[nodiscard]] const std::vector<RootSetNode>& RootSets() const { return root_sets_; }
-  [[nodiscard]] RootSetId UnionRootSets(RootSetId left, RootSetId right);
-  [[nodiscard]] bool RootSetContains(RootSetId set, const Var* var) const;
 
  protected:
   void VisitStmt_(const IfStmtPtr& if_stmt) override;
@@ -124,7 +120,7 @@ class BufferRootCollector : public IRVisitor {
   void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
   void BindRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved);
   void MergeRootCandidates(const VarPtr& var, const std::vector<RootCandidates>& inputs, bool unresolved);
-  [[nodiscard]] RootSetId InternRootSet(RootSetId zero, RootSetId one, size_t split);
+  [[nodiscard]] RootSetId UnionRootSets(RootSetId left, RootSetId right);
   void RecordOwningRoot(const VarPtr& var);
   void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
                                 bool may_repeat);
@@ -157,7 +153,6 @@ class BufferRootCollector : public IRVisitor {
   std::vector<RootSetNode> root_sets_{1};
   std::unordered_map<const Var*, RootSetId> owning_sets_;
   std::unordered_map<RootSetPair, RootSetId, RootSetPairHash> interned_sets_;
-  std::unordered_map<RootSetPair, RootSetId, RootSetPairHash> set_unions_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
   std::unordered_map<const Var*, std::shared_ptr<const std::vector<OutputRoot>>> tuple_output_roots_;
 };

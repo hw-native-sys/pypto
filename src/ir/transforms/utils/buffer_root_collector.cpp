@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -39,13 +38,6 @@ namespace buffer_root {
 namespace {
 
 using op_predicates::IsBuiltinOp;
-
-size_t HighestBit(size_t value) {
-  for (size_t shift = 1; shift < std::numeric_limits<size_t>::digits; shift <<= 1) {
-    value |= value >> shift;
-  }
-  return value - (value >> 1);
-}
 
 }  // namespace
 
@@ -239,7 +231,7 @@ bool BufferRootCollector::IsAmbiguous(const ExprPtr& expr) const {
 void BufferRootCollector::RecordOwningRoot(const VarPtr& var) {
   if (!var) return;
   const auto [entry, inserted] = owning_sets_.try_emplace(var.get(), root_sets_.size());
-  if (inserted) root_sets_.push_back({var.get(), 0, 0, owning_sets_.size() - 1, 0});
+  if (inserted) root_sets_.push_back({var.get(), 0, 0});
   BindRootCandidates(var, {entry->second, var.get()}, false);
 }
 
@@ -280,56 +272,13 @@ size_t BufferRootCollector::RootSetPairHash::operator()(const RootSetPair& pair)
   return hash_combine(pair.first, pair.second);
 }
 
-BufferRootCollector::RootSetId BufferRootCollector::InternRootSet(RootSetId zero, RootSetId one,
-                                                                  size_t split) {
-  const auto [entry, inserted] = interned_sets_.try_emplace(RootSetPair{zero, one}, root_sets_.size());
-  if (inserted) root_sets_.push_back({nullptr, zero, one, root_sets_[zero].offset, split});
-  return entry->second;
-}
-
 BufferRootCollector::RootSetId BufferRootCollector::UnionRootSets(RootSetId left, RootSetId right) {
   if (left == 0 || left == right) return right;
   if (right == 0) return left;
   if (left > right) std::swap(left, right);
-  const RootSetPair key{left, right};
-  const auto cached = set_unions_.find(key);
-  if (cached != set_unions_.end()) return cached->second;
-
-  // All nodes below a split agree on every more significant bit of the
-  // root offset. Unions therefore visit only overlapping trie prefixes.
-  const auto a = root_sets_[left];
-  const auto b = root_sets_[right];
-  const auto cross = HighestBit(a.offset ^ b.offset);
-  RootSetId result;
-  if (cross > std::max(a.split, b.split)) {
-    result = (a.offset & cross) ? InternRootSet(right, left, cross) : InternRootSet(left, right, cross);
-  } else if (a.split == b.split) {
-    const auto zero = UnionRootSets(a.zero, b.zero);
-    const auto one = UnionRootSets(a.one, b.one);
-    result = InternRootSet(zero, one, a.split);
-  } else {
-    const auto& outer = a.split > b.split ? a : b;
-    const auto& inner = a.split > b.split ? b : a;
-    const auto nested = a.split > b.split ? right : left;
-    if (inner.offset & outer.split) {
-      result = InternRootSet(outer.zero, UnionRootSets(outer.one, nested), outer.split);
-    } else {
-      result = InternRootSet(UnionRootSets(outer.zero, nested), outer.one, outer.split);
-    }
-  }
-  set_unions_.emplace(key, result);
-  return result;
-}
-
-bool BufferRootCollector::RootSetContains(RootSetId set, const Var* var) const {
-  const auto root = owning_sets_.find(var);
-  if (root == owning_sets_.end()) return false;
-  const auto offset = root_sets_[root->second].offset;
-  while (root_sets_[set].split != 0) {
-    const auto& node = root_sets_[set];
-    set = (offset & node.split) ? node.one : node.zero;
-  }
-  return set == root->second;
+  const auto [entry, inserted] = interned_sets_.try_emplace(RootSetPair{left, right}, root_sets_.size());
+  if (inserted) root_sets_.push_back({nullptr, left, right});
+  return entry->second;
 }
 
 std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOutputRoots(
@@ -364,13 +313,16 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
   const OutputRoot* match = nullptr;
   bool ambiguous = false;
   for (const auto& candidate : out_roots) {
-    if (candidate.roots.set != 0 && TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
-      if (match == nullptr) {
-        match = &candidate;
-      } else if (match->roots.set != candidate.roots.set || match->roots.first != candidate.roots.first ||
-                 match->ambiguous != candidate.ambiguous) {
-        ambiguous = true;
-      }
+    if (!TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) continue;
+    if (candidate.roots.set == 0) {
+      // A compatible output with unknown storage could be the result.
+      // Its absence from the root map does not prove the other match.
+      ambiguous = ambiguous || follow_reshape_;
+    } else if (!match) {
+      match = &candidate;
+    } else if (match->roots.set != candidate.roots.set || match->roots.first != candidate.roots.first ||
+               match->ambiguous != candidate.ambiguous) {
+      ambiguous = true;
     }
   }
   if (match && !ambiguous) {

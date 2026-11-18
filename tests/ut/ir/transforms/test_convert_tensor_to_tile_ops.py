@@ -8671,6 +8671,107 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_unknown_output_cannot_prove_a_different_return_root(self):
+        """A same-shaped output with unknown lineage keeps the return ambiguous."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def first(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                b: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.load(x, [0, 0], [1, 64])
+                pl.store(value, [0, 0], a)
+                pl.store(value, [0, 0], b)
+                return b
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                third: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.load(x, [0, 0], [1, 64])
+                pl.store(value, [0, 0], first)
+                pl.store(value, [0, 0], second)
+                pl.store(value, [0, 0], third)
+                return third
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.store(pl.load(buf, [1, 0], [1, 64]), [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Tensor[[128], pl.FP32],
+                b: pl.Tensor[[2, 64], pl.FP32],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                pair = (b, b)
+                alias = pair[0]
+                first_flat = flat
+                middle = self.first(x, first_flat, alias)
+                result = self.write(x, flat, b, middle)
+                self.consume(result)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def first(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                b: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                pl.tile.store(value, [0, 0], a)
+                pl.tile.store(value, [0, 0], b)
+                return b
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                third: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                pl.tile.store(value, [0, 0], first)
+                pl.tile.store(value, [0, 0], second)
+                pl.tile.store(value, [0, 0], third)
+                return third
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(buf, [1, 0], [1, 64], [1, 64]), [0, 0], buf)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.InOut[pl.Tensor[[128], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[2, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                pair = (b, b)
+                alias = pair[0]
+                first_flat = flat
+                middle = self.first(x, first_flat, alias)
+                result = self.write(x, flat, b, middle)
+                self.consume(result)
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(after, Expected)
+
 
 class TestTensorCastConversion:
     def test_saturation_mode_survives_tensor_to_tile_lowering(self):
