@@ -833,22 +833,35 @@ class TestMxANDScaleCodegen:
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("dtype", [pl.FP8E4M3FN, pl.FP4E2M1X2, pl.FP4E1M2X2])
-def test_gemv_mx_pipeline(dtype, tmp_path):
-    packed = dtype in (pl.FP4E2M1X2, pl.FP4E1M2X2)
+@pytest.mark.parametrize(
+    ("lhs_dtype", "rhs_dtype"),
+    [
+        (pl.FP8E4M3FN, pl.FP8E4M3FN),
+        (pl.FP8E4M3FN, pl.FP8E5M2),
+        (pl.FP8E5M2, pl.FP8E4M3FN),
+        (pl.FP8E5M2, pl.FP8E5M2),
+        (pl.FP4E2M1X2, pl.FP4E2M1X2),
+        (pl.FP4E1M2X2, pl.FP4E1M2X2),
+    ],
+)
+def test_gemv_mx_pipeline(lhs_dtype, rhs_dtype, tmp_path):
+    packed = lhs_dtype in (pl.FP4E2M1X2, pl.FP4E1M2X2)
     physical_k = 1024 if packed else 512
-    a_valid_cols = 32 if packed else 64
+    valid_k = 64 if packed else physical_k
+    a_valid_cols = valid_k // 2 if packed else valid_k
     b_cols = 32 if packed else 64
+    scale_groups = valid_k // 32
+    lhs_scale_layout = pl.MX_A_ND if packed else pl.ND
 
     @pl.program
     class Program:
         @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
-            a: pl.Tensor[[1, 512], dtype],
-            b: pl.Tensor[[physical_k, b_cols], dtype],
-            sa: pl.Tensor[[1, 2], pl.FP8E8M0, pl.MX_A_ND],
-            sb: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
+            a: pl.Tensor[[1, 512], lhs_dtype],
+            b: pl.Tensor[[physical_k, b_cols], rhs_dtype],
+            sa: pl.Tensor[[1, scale_groups], pl.FP8E8M0, lhs_scale_layout],
+            sb: pl.Tensor[[scale_groups, 64], pl.FP8E8M0, pl.MX_B_NN],
             bias: pl.Tensor[[1, 64], pl.FP32],
             out: pl.Tensor[[1, 64], pl.FP32],
         ):
@@ -857,27 +870,72 @@ def test_gemv_mx_pipeline(dtype, tmp_path):
                 pl.Mem.Left,
             )
             rhs = pl.move(
-                pl.load(b, [0, 0], [physical_k, b_cols], valid_shape=[64, b_cols], target_memory=pl.Mem.Mat),
+                pl.load(
+                    b, [0, 0], [physical_k, b_cols], valid_shape=[valid_k, b_cols], target_memory=pl.Mem.Mat
+                ),
                 pl.Mem.Right,
             )
-            lhs_scale = pl.move(pl.load(sa, [0, 0], [1, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
-            rhs_scale = pl.move(pl.load(sb, [0, 0], [2, 64], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
-            result = pl.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)
-            pl.store(result, [0, 0], out)
-            accumulated = pl.tile.gemv_mx_acc(result, lhs, lhs_scale, rhs, rhs_scale)
-            pl.store(accumulated, [0, 0], out)
+            lhs_scale = pl.move(
+                pl.load(sa, [0, 0], [1, scale_groups], target_memory=pl.Mem.Mat), pl.Mem.LeftScale
+            )
+            rhs_scale = pl.move(
+                pl.load(sb, [0, 0], [scale_groups, 64], target_memory=pl.Mem.Mat), pl.Mem.RightScale
+            )
+            result = pl.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Partial)
+            accumulated = pl.tile.gemv_mx_acc(
+                result, lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Final
+            )
+            pl.store(accumulated, [0, 0], out, st_phase=pl.STPhase.Final)
             bias_tile = pl.move(pl.load(bias, [0, 0], [1, 64], target_memory=pl.Mem.Mat), pl.Mem.Bias)
             biased = pl.tile.gemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias_tile)
             pl.store(biased, [0, 0], out)
 
     mlir = _emit_incore_mlir(Program)
     cpp = _assemble_mx(mlir, tmp_path)
-    for suffix in ("", ".acc", ".bias"):
-        assert f"pto.tgemv.mx{suffix} ins(" in mlir
+    for suffix, phase in (("", "partial"), (".acc", "final"), (".bias", None)):
+        line = next(line for line in mlir.splitlines() if f"pto.tgemv.mx{suffix} ins(" in line)
+        if phase is None:
+            assert "accPhase" not in line
+        else:
+            assert f"accPhase = #pto<acc_phase {phase}>" in line
+        if not packed:
+            lhs_name = "f8E5M2" if lhs_dtype == pl.FP8E5M2 else "f8E4M3FN"
+            rhs_name = "f8E5M2" if rhs_dtype == pl.FP8E5M2 else "f8E4M3FN"
+            assert f"loc=left, dtype={lhs_name}," in line
+            assert f"loc=right, dtype={rhs_name}," in line
     assert mlir.count("pto.tget_scale_addr") == 2
     assert "loc=acc, dtype=f32, rows=1, cols=64" in mlir
     assert native_fp4_mx_families(_run_default_pipeline(Program)) == ({"gemv"} if packed else set())
-    assert "TGEMV_MX" in cpp
+    assert cpp.count("TGEMV_MX<pto::AccPhase::Partial>(") == 1
+    assert cpp.count("TGEMV_MX<pto::AccPhase::Final>(") == 1
+    assert cpp.count("TGEMV_MX(") == 1
+
+
+def test_fp8_gemv_mx_rejects_new_scale_binding_after_consumer():
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            first: pl.Tensor[[1, 512], pl.FP8E4M3FN],
+            second: pl.Tensor[[1, 512], pl.FP8E4M3FN],
+            first_scale: pl.Tensor[[1, 16], pl.FP8E8M0],
+            second_scale: pl.Tensor[[1, 16], pl.FP8E8M0],
+            b: pl.Tensor[[512, 64], pl.FP8E5M2],
+            sb: pl.Tensor[[16, 64], pl.FP8E8M0, pl.MX_B_NN],
+            out: pl.Tensor[[1, 64], pl.FP32],
+        ):
+            lhs_first = pl.load(first, [0, 0], [1, 512], target_memory=pl.Mem.Mat)
+            scale_first = pl.load(first_scale, [0, 0], [1, 16], target_memory=pl.Mem.Mat)
+            rhs = pl.load(b, [0, 0], [512, 64], target_memory=pl.Mem.Mat)
+            scale_rhs = pl.load(sb, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+            acc = pl.tile.gemv_mx(lhs_first, scale_first, rhs, scale_rhs)
+            lhs_second = pl.load(second, [0, 0], [1, 512], target_memory=pl.Mem.Mat)
+            scale_second = pl.load(second_scale, [0, 0], [1, 16], target_memory=pl.Mem.Mat)
+            pl.store(pl.tile.gemv_mx_acc(acc, lhs_second, scale_second, rhs, scale_rhs), [0, 0], out)
+
+    with pytest.raises(ValueError, match="one FP8 MX scale binding per side"):
+        _emit_incore_mlir(Program)
 
 
 if __name__ == "__main__":

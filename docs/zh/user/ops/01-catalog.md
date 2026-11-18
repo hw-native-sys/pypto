@@ -135,7 +135,7 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | 带 bias 操作数的乘法。操作数配对同 `matmul`；bias 与累加器类型一致 |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式 |
-| `pl.gemv_mx`, `pl.gemv_mx_acc`, `pl.gemv_mx_bias` | `pl.` (t) | Ascend950 单行块缩放矩阵乘、原位累加和 FP32 偏置。支持 FP8E4M3FN 或打包 FP4 输入对及 FP8E8M0 缩放。物理 K 宽度为 512 字节的倍数，即 512 个 FP8 值或 1024 个逻辑 FP4 值的倍数。FP32 结果的物理形状为 `[1, physical_N]`，有效形状为 `[1, valid_N]`。单行 GM 左侧缩放使用 `MX_A_ND` 布局。 |
+| `pl.gemv_mx`, `pl.gemv_mx_acc`, `pl.gemv_mx_bias` | `pl.` (t) | Ascend950 单行块缩放矩阵乘、原位累加和 FP32 偏置。支持 FP8E4M3FN 与 FP8E5M2 的全部配对或打包 FP4 输入对及 FP8E8M0 缩放。物理 K 宽度为 512 字节的倍数，即 512 个 FP8 值或 1024 个逻辑 FP4 值的倍数。FP32 结果的物理形状为 `[1, physical_N]`，有效形状为 `[1, valid_N]`。单行 GM 左侧缩放在 FP8 使用 ND 布局，在 FP4 使用 `MX_A_ND`。 |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor，两侧 data 必须为 FP8E4M3FN，返回 FP32。Tile API 及其专有的 `_acc` 和 `_bias` 形式支持 FP8E4M3FN/FP8E5M2 的四种组合和两侧均为打包 FP4 的组合 |
 
 `pl.tile.matmul`、`pl.tile.matmul_acc` 和 GEMV 家族通过

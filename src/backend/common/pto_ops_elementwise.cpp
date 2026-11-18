@@ -989,7 +989,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
-    {"tile.gemv_mx", "pto.tgemv.mx", 4},
     {"tile.gemv_mx_bias", "pto.tgemv.mx.bias", 5},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
     {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
@@ -1477,6 +1476,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       acc_inst << ") outs(" << dst;
       if (!dst_type.empty()) acc_inst << " : " << dst_type;
       acc_inst << ")";
+      if (ir::IsOp(op, "tile.gemv_mx_acc")) acc_inst << AccPhaseAttr(op);
       codegen.Emit(acc_inst.str());
       return "";
     };
@@ -1490,6 +1490,9 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return MakePhasedMatmulCodegenPTO("pto.tgemv", 2, op, codegen);
   });
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv"));
+  reg("tile.gemv_mx", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePhasedMatmulCodegenPTO("pto.tgemv.mx", 4, op, codegen);
+  });
   reg("tile.gemv_mx_acc", make_mx_acc_codegen("pto.tgemv.mx.acc"));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

@@ -310,7 +310,11 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // ``tile.load`` of a DN source produces the transposed (ZN) Mat layout.
   // A transposed matmul operand is realised by a zero-copy ``tile.transpose_view``
   // at the matmul site, not by the load.
-  bool source_is_dn = tensor_type->tensor_view_.value_or(TensorView{}).layout == TensorLayout::DN;
+  const auto source_layout = tensor_type->tensor_view_.value_or(TensorView{}).layout;
+  const bool source_is_dn = source_layout == TensorLayout::DN;
+  const auto& shape = shapes_tuple->elements_;
+  const auto rows = shape.size() == 2 ? As<ConstInt>(shape[source_is_dn ? 1 : 0]) : nullptr;
+  const bool is_row = rows && rows->value_ == 1;
   TileView tile_view;
   if (is_mx_load) {
     // A5 TLoadMxCubeCheck: MX_A_* → row-major ZZ (SFractal=32); MX_B_* → col-major NN.
@@ -336,11 +340,14 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     // rows==1 vector path instead of the regular extraction path, whose row
     // alignment excludes M=1. In a rank-3+ Mat load, shape[0] is a batch
     // dimension, so keep the canonical NZ view.
-    const auto& shape = shapes_tuple->elements_;
-    if (shape.size() == 2) {
-      const ExprPtr& row_dim = source_is_dn ? shape[1] : shape[0];
-      if (auto rows = As<ConstInt>(row_dim); rows && rows->value_ == 1) {
-        tile_view.blayout = TileLayout::row_major;
+    if (is_row) {
+      tile_view.blayout = TileLayout::row_major;
+      if (source_layout == TensorLayout::ND && tensor_type->dtype_ == DataType::FP8E8M0) {
+        // GEMV reads its one-row A scale as contiguous bytes. Keep the ND
+        // load but give the Mat result the box needed by the LeftScale move.
+        tile_view.slayout = TileLayout::row_major;
+        tile_view.fractal = tile_view_semantics::kMXScaleFractal;
+      } else {
         tile_view.slayout = TileLayout::none_box;
       }
     }

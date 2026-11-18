@@ -515,15 +515,28 @@ class TestTGetScaleAddr:
             ir.op.tile.tget_scale_addr(dst, src, span)
 
 
-@pytest.mark.parametrize("dtype", [DataType.FP8E4M3FN, DataType.FP4E2M1X2, DataType.FP4E1M2X2])
-def test_gemv_mx_single_row_and_variants(dtype):
+@pytest.mark.parametrize(
+    ("lhs_dtype", "rhs_dtype"),
+    [
+        (DataType.FP8E4M3FN, DataType.FP8E4M3FN),
+        (DataType.FP8E4M3FN, DataType.FP8E5M2),
+        (DataType.FP8E5M2, DataType.FP8E4M3FN),
+        (DataType.FP8E5M2, DataType.FP8E5M2),
+        (DataType.FP4E2M1X2, DataType.FP4E2M1X2),
+        (DataType.FP4E1M2X2, DataType.FP4E1M2X2),
+    ],
+)
+def test_gemv_mx_single_row_and_variants(lhs_dtype, rhs_dtype):
     span = ir.Span.unknown()
-    packed = dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2)
+    packed = lhs_dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2)
     physical_k = 1024 if packed else 512
-    lhs = _tile("lhs", [1, 512], dtype, valid_shape=[1, 64 if packed else 128])
-    rhs = _tile("rhs", [physical_k, 32 if packed else 64], dtype, valid_shape=[128, 32 if packed else 64])
-    sa = _tile("sa", [1, 4], DataType.FP8E8M0)
-    sb = _tile("sb", [4, 64], DataType.FP8E8M0)
+    valid_k = 128 if packed else physical_k
+    n_carriers = 32 if packed else 64
+    groups = valid_k // 32
+    lhs = _tile("lhs", [1, 512], lhs_dtype, valid_shape=[1, valid_k // 2 if packed else valid_k])
+    rhs = _tile("rhs", [physical_k, n_carriers], rhs_dtype, valid_shape=[valid_k, n_carriers])
+    sa = _tile("sa", [1, groups], DataType.FP8E8M0)
+    sb = _tile("sb", [groups, 64], DataType.FP8E8M0)
     product = ir.op.tile.gemv_mx(lhs, sa, rhs, sb)
     assert isinstance(product.type, ir.TileType)
     assert all(isinstance(d, ir.ConstInt) for d in product.type.shape)
@@ -543,11 +556,13 @@ def test_gemv_mx_single_row_and_variants(dtype):
     with pytest.raises(ValueError, match="requires a compact accumulator"):
         ir.op.tile.gemv_mx_acc(_tile("bad_acc", [1, 64], DataType.FP32), lhs, sa, rhs, sb)
     with pytest.raises(ValueError, match="512-byte row-vector alignment"):
-        ir.op.tile.gemv_mx(_tile("short_lhs", [1, 128], dtype), sa, rhs, sb)
+        ir.op.tile.gemv_mx(_tile("short_lhs", [1, 128], lhs_dtype), sa, rhs, sb)
     with pytest.raises(ValueError, match="physical M exactly 1"):
-        ir.op.tile.gemv_mx(_tile("bad_lhs", [16, 128], dtype), sa, rhs, sb)
+        ir.op.tile.gemv_mx(_tile("bad_lhs", [16, 128], lhs_dtype), sa, rhs, sb)
     with pytest.raises(ValueError, match="lhs_scale"):
-        ir.op.tile.gemv_mx(lhs, _tile("bad_scale", [16, 4], DataType.FP8E8M0), rhs, sb)
+        ir.op.tile.gemv_mx(lhs, _tile("bad_scale", [16, groups], DataType.FP8E8M0), rhs, sb)
+    with pytest.raises(ValueError, match="does not accept keyword arguments"):
+        ir.create_op_call("tile.gemv_mx_bias", [lhs, sa, rhs, sb, bias], {"acc_phase": 3}, span)
 
 
 @pytest.mark.parametrize("name", ["gemv_mx", "gemv_mx_acc", "gemv_mx_bias"])
@@ -570,14 +585,37 @@ def test_gemv_mx_public_exports_and_memory_contract(name):
 
 
 def test_gemv_mx_scales_follow_valid_k():
-    lhs = _tile("lhs", [1, 512], DataType.FP8E4M3FN, valid_shape=[1, 32])
-    rhs = _tile("rhs", [512, 64], DataType.FP8E4M3FN, valid_shape=[32, 20])
-    sa = _tile("sa", [1, 1], DataType.FP8E8M0)
-    sb = _tile("sb", [1, 64], DataType.FP8E8M0, valid_shape=[1, 20])
+    lhs = _tile("lhs", [1, 512], DataType.FP4E2M1X2, valid_shape=[1, 32])
+    rhs = _tile("rhs", [1024, 32], DataType.FP4E2M1X2, valid_shape=[64, 10])
+    sa = _tile("sa", [1, 2], DataType.FP8E8M0)
+    sb = _tile("sb", [2, 64], DataType.FP8E8M0, valid_shape=[2, 20])
     call = ir.op.tile.gemv_mx(lhs, sa, rhs, sb)
     assert isinstance(call.type, ir.TileType)
     assert call.type.tile_view is not None
     assert [d.value for d in call.type.tile_view.valid_shape if isinstance(d, ir.ConstInt)] == [1, 20]
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_fp8_gemv_mx_rejects_non_full_valid_k(dynamic):
+    span = ir.Span.unknown()
+    valid_k = ir.Var("valid_k", ir.ScalarType(DataType.INDEX), span) if dynamic else 481
+    lhs = _tile("lhs", [1, 512], DataType.FP8E4M3FN, valid_shape=[1, valid_k])
+    rhs = _tile("rhs", [512, 64], DataType.FP8E5M2, valid_shape=[valid_k, 64])
+    sa = _tile("sa", [1, 16], DataType.FP8E8M0)
+    sb = _tile("sb", [16, 64], DataType.FP8E8M0)
+    bias = _tile("bias", [1, 64], DataType.FP32)
+    acc = ir.op.tile.gemv_mx(
+        _tile("full_lhs", [1, 512], DataType.FP8E4M3FN),
+        sa,
+        _tile("full_rhs", [512, 64], DataType.FP8E5M2),
+        sb,
+    )
+    with pytest.raises(ValueError, match="requires static full valid K"):
+        ir.op.tile.gemv_mx(lhs, sa, rhs, sb)
+    with pytest.raises(ValueError, match="requires static full valid K"):
+        ir.op.tile.gemv_mx_acc(acc, lhs, sa, rhs, sb)
+    with pytest.raises(ValueError, match="requires static full valid K"):
+        ir.op.tile.gemv_mx_bias(lhs, sa, rhs, sb, bias)
 
 
 @pytest.mark.parametrize("load_column_major", [False, True])

@@ -90,7 +90,8 @@ struct FinalProducer {
 
 bool IsPhasedAccumulatorProducer(const CallPtr& call) {
   return IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.gemv") ||
-         IsOp(call, "tile.gemv_acc") || IsOp(call, "tile.gemv_bias");
+         IsOp(call, "tile.gemv_acc") || IsOp(call, "tile.gemv_bias") || IsOp(call, "tile.gemv_mx") ||
+         IsOp(call, "tile.gemv_mx_acc");
 }
 
 bool IsFinalAccumulatorProducer(const CallPtr& call) {

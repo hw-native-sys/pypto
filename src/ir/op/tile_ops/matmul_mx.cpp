@@ -28,6 +28,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -90,6 +91,11 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 4) << "The operator " << op_name
                           << " requires exactly 4 arguments (lhs, lhs_scale, rhs, rhs_scale), but got "
                           << args.size();
+  if (is_gemv) {
+    const int acc_phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
+    CHECK(IsValidAccPhase(acc_phase))
+        << "The operator " << op_name << " requires a valid AccPhase, but got " << acc_phase;
+  }
   CHECK(args[1].get() != args[3].get())
       << "The operator " << op_name << " requires distinct lhs_scale and rhs_scale tiles";
 
@@ -174,6 +180,13 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
 
   auto k_valid_lhs_c = As<ConstInt>(k_valid_lhs);
   auto k_valid_rhs_c = As<ConstInt>(k_valid_rhs);
+  if (is_gemv && !lhs_type->dtype_.IsPackedFp4()) {
+    // FP8 GEMV faults on narrowed contraction windows even when valid and
+    // physical K consume the same number of scale groups.
+    CHECK(k_phys_lhs_c && k_valid_lhs_c && k_phys_rhs_c && k_valid_rhs_c &&
+          k_phys_lhs_c->value_ == k_valid_lhs_c->value_ && k_phys_rhs_c->value_ == k_valid_rhs_c->value_)
+        << "The operator " << op_name << " requires static full valid K for FP8 GEMV";
+  }
   if (k_valid_lhs_c && k_valid_rhs_c) {
     CHECK(k_valid_lhs_c->value_ == k_valid_rhs_c->value_)
         << "The operator " << op_name
@@ -414,10 +427,11 @@ REGISTER_OP("tile.matmul_mx_bias")
     });
 
 static constexpr char kGemvMxLhsDescription[] =
-    "Left-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4) with one physical and valid row. "
+    "Left-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4) with one physical and valid row. "
     "Physical K width is a positive multiple of 512 bytes (512 FP8 or 1024 logical FP4 values)";
 static constexpr char kGemvMxRhsDescription[] =
-    "Right-hand side tile (TileType, 2D, FP8 E4M3 or packed FP4) with the same physical and valid K as lhs. "
+    "Right-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4) with the same physical and valid K "
+    "as lhs. "
     "Physical K width is a positive multiple of 512 bytes (512 FP8 or 1024 logical FP4 values). "
     "Physical N is a positive multiple of 32 (64 for FP4)";
 static constexpr char kGemvMxLhsScaleDescription[] =
@@ -438,6 +452,7 @@ REGISTER_OP("tile.gemv_mx")
     .set_input_memory(1, MemorySpace::LeftScale)
     .set_input_memory(2, MemorySpace::Right)
     .set_input_memory(3, MemorySpace::RightScale)
+    .set_attr<int>("acc_phase")
     .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -460,6 +475,7 @@ REGISTER_OP("tile.gemv_mx_acc")
     .set_input_memory(2, MemorySpace::LeftScale)
     .set_input_memory(3, MemorySpace::Right)
     .set_input_memory(4, MemorySpace::RightScale)
+    .set_attr<int>("acc_phase")
     .set_output_memory(MemorySpace::Acc)
     .set_output_reuses_input(0)
     // Accumulates into `acc`, same as tile.matmul_acc.
@@ -487,6 +503,7 @@ REGISTER_OP("tile.gemv_mx_bias")
     .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(kwargs.empty()) << "tile.gemv_mx_bias does not accept keyword arguments such as acc_phase";
       return DeduceTileMatMulMxBiasType(args, kwargs, "tile.gemv_mx_bias", true);
     });
 

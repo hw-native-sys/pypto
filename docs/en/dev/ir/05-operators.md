@@ -523,12 +523,13 @@ block-scaled product. `gemv_mx_acc(acc, ...)` accumulates in place, while
 All three lower to the corresponding `pto.tgemv.mx` operations on A5.
 
 The lhs has one physical and valid row. The result uses physical `[1, N]`
-and valid `[1, valid_N]` shapes. FP8E4M3FN and native packed FP4 E2M1/E1M2
-pairs are supported; FP4 row vectors keep their packed pairs along K even in
+and valid `[1, valid_N]` shapes. FP8 operands independently accept
+FP8E4M3FN or FP8E5M2. Native packed FP4 operands independently accept
+E2M1 and E1M2. FP4 row vectors keep their packed pairs along K even in
 L0A. Physical N is a multiple of 32
 (FP4: 64). FP8E8M0 scales use `[1, ceil(valid_K/32)]` and
 `[ceil(valid_K/32), physical_N]`, with RHS valid columns matching valid N.
-Single-row lhs scales use `MX_A_ND` in GM. Scale addresses are
+Single-row lhs scales use contiguous ND in GM for FP8 and `MX_A_ND` for FP4. Scale addresses are
 bound automatically before scale fills. Bias uses physical
 `[1, N]` and matching valid N. The accumulator must match the product's
 physical and valid shapes, FP32 dtype, and `compact=normal`. GEMV results also carry this mode
@@ -538,9 +539,12 @@ physical width. For packed FP4, `tile.extract` and `tile.slice` preserve the
 source's packing axis, so a carrier row containing two logical M values cannot
 be used as a K-packed Left row vector. `tile.transpose_view` also requires both
 its source and result to lie outside the packed FP4 Left row-vector case.
-Physical K is a multiple of 512 for FP8 or 1024 for FP4, with narrower valid K
-allowed. PTOAS 0.74's single-row `MX_A_ND` load supports two scale groups;
-larger GM scale transfers remain subject to downstream load support.
+Physical K is a multiple of 512 for FP8 or 1024 for FP4. FP8 requires static
+valid K equal to physical K and one data/scale binding per side in a
+straight-line region. FP4 allows narrower valid K. PTOAS 0.74's single-row
+`MX_A_ND` load supports two scale groups. Larger GM scale transfers remain
+subject to downstream load support. Base and accumulating calls accept
+`acc_phase`, and a Final producer requires a matching Final store.
 
 ### Tile-only GEMV family (A2/A3)
 
