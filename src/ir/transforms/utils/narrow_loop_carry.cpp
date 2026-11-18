@@ -43,6 +43,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -308,8 +309,8 @@ class CarryAnalyzer : public IRVisitor {
   }
 
  private:
-  TileTypePtr PredicatedProductType(const AssignStmtPtr& update, const IterArgPtr& iter_arg,
-                                    const ExprPtr& yielded, const VarPtr& result) const {
+  [[nodiscard]] TileTypePtr PredicatedProductType(const AssignStmtPtr& update, const IterArgPtr& iter_arg,
+                                                  const ExprPtr& yielded, const VarPtr& result) const {
     if (!update || yielded.get() != update->var_.get()) return nullptr;
     auto call = As<Call>(update->value_);
     if (call->args_[0].get() != iter_arg.get() || !index_.HasOneTileUse(iter_arg.get())) return nullptr;
