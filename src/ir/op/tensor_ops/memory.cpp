@@ -296,8 +296,9 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   const TensorLayout result_layout = trailing_plane_intact ? source_layout : TensorLayout::ND;
 
   std::vector<ExprPtr> result_strides;
-  if (HasRectangularSliceStrides(tensor_type, full_shape.size(), offsets.size())) {
-    result_strides = ApplyDropDims(tensor_type->tensor_view_->stride, drop_dims);
+  if (const auto& view = tensor_type->tensor_view_;
+      view && HasRectangularSliceStrides(tensor_type, full_shape.size(), offsets.size())) {
+    result_strides = ApplyDropDims(view->stride, drop_dims);
   }
   std::optional<TensorView> result_tv;
   if (!result_strides.empty() || result_layout != TensorLayout::ND ||

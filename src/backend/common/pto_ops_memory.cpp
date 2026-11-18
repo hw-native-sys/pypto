@@ -861,6 +861,18 @@ static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
+// Scalar GM access uses coordinates relative to the tensor's current base
+// pointer. ND/DN views carry physical element strides, including row gaps.
+static std::string GetTensorElementOffsetSSA(const ir::MakeTuplePtr& indices, const ir::TensorTypePtr& type,
+                                             codegen::PTOCodegen& codegen) {
+  const auto& view = type->tensor_view_;
+  if (!view || (view->layout != ir::TensorLayout::ND && view->layout != ir::TensorLayout::DN)) {
+    return GetFlatOffsetSSA(indices, type->shape_, codegen);
+  }
+  const auto offset = ir::TensorElementOffset(type, indices);
+  return codegen.EmitCastToIndex(offset, codegen.GetExprAsCode(offset));
+}
+
 static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
@@ -886,7 +898,7 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
     src_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
   }
 
-  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+  std::string off = GetTensorElementOffsetSSA(indices_tuple, tensor_type_ptr, codegen);
 
   std::ostringstream oss;
   oss << result << " = pto.load " << src << "[" << off << "]";
@@ -911,7 +923,8 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
 
   // pto.store needs the base !pto.ptr; resolve via the tensor var even after
   // a prior slice-assign rebound it to a tensor_view (issue #1493).
-  std::string tensor = codegen.GetTensorBasePtr(AsVarLike(op->args_[0]));
+  const auto dest_var = AsVarLike(op->args_[0]);
+  std::string tensor = codegen.GetTensorBasePtr(dest_var);
   std::string tensor_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string value = codegen.GetExprAsCode(op->args_[2]);
   std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
@@ -920,7 +933,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
     tensor_type_str = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
   }
 
-  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+  std::string off = GetTensorElementOffsetSSA(indices_tuple, tensor_type_ptr, codegen);
 
   std::ostringstream oss;
   oss << "pto.store " << value << ", " << tensor << "[" << off << "]";
@@ -934,10 +947,11 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
 
   auto result_var = codegen.GetCurrentResultVar();
   if (result_var != nullptr) {
-    codegen.RegisterTensorView(result_var, tensor);
-    codegen.RegisterVarToMlir(result_var, tensor);
+    const auto view = codegen.TryGetTensorView(dest_var);
+    if (!view.empty()) codegen.RegisterTensorView(result_var, view);
+    codegen.RegisterVarToMlir(result_var, view.empty() ? tensor : view);
     codegen.RegisterBasePtr(result_var, tensor);
-    codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(AsVarLike(op->args_[0]).get()));
+    codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(dest_var.get()));
   }
   return "";
 }

@@ -4347,6 +4347,34 @@ class TestGmLocalTensorConversion:
         assert len(_find_calls_to(kernel, "tile.reshape")) == 2
         assert _find_first_call_to(kernel, "tensor.write") is None
 
+    @pytest.mark.parametrize(
+        ("layout", "source_shape", "shape", "steps", "indices", "promote"),
+        [
+            ("ND", [32, 64], [16, 32], "[1, 2]", "[0, i]", False),
+            ("ND", [32, 64], [16, 32], "[1, pitch]", "[0, i]", False),
+            ("ND", [32, 64], [16, 32], "[2, 1]", "[0, i]", True),
+            ("ND", [32, 1], [16, 1], "[2, 1]", "[i, 0]", False),
+            ("DN", [32, 64], [16, 32], "[1, 1]", "[0, i]", False),
+            ("DN", [32, 64], [16, 1], "[1, 1]", "[i, 0]", True),
+        ],
+    )
+    def test_window_constant_fill_requires_unit_physical_stride(
+        self, layout, source_shape, shape, steps, indices, promote
+    ):
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, dst: pl.Tensor[{source_shape}, pl.FP32, pl.TensorView(layout=pl.{layout})],
+               pitch: pl.Scalar[pl.INDEX]):
+        window = pl.tensor.view(dst, {shape}, steps={steps})
+        for i in pl.range(16):
+            pl.tensor.write(window, {indices}, pl.const(1.0, pl.FP32))
+""")
+        kernel = _require_function(passes.convert_tensor_to_tile_ops()(before), "kernel")
+        assert len(_find_calls_to(kernel, "tensor.write")) == int(not promote)
+        assert len(_find_calls_to(kernel, "tile.store")) == int(promote)
+
     @pytest.mark.parametrize("target", ["dst", "viewed"])
     def test_constant_fill_with_dynamic_scalar_overrides_keeps_scalar_stores(self, target):
         """Folding a cast must not turn two scalar-write loops into mixed stores."""

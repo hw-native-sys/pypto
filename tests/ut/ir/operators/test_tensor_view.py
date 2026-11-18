@@ -216,6 +216,21 @@ def test_distributed_tensor_kind_is_preserved():
     assert _values_of(view.stride) == [1]
 
 
+def test_distributed_sampled_window_preserves_binding_and_stride():
+    base = ir.Var("buffer", ir.PtrType(), _span())
+    window = ir.WindowBuffer(base, _const(256), span=_span())
+    source_type = ir.DistributedTensorType([_const(4), _const(16)], DataType.FP32, window)
+    source = DistributedTensor(expr=ir.Var("source", source_type, _span()))
+
+    view = dsl_tensor_ops.view(source, [2, 3], offsets=[1, 2], steps=[2, 3])
+    assert isinstance(view, DistributedTensor)
+    view_type = view.unwrap().type
+    assert isinstance(view_type, ir.DistributedTensorType)
+    assert view_type.window_buffer is window
+    assert view_type.tensor_view is not None
+    assert _values_of(view_type.tensor_view.stride) == [32, 3]
+
+
 def test_dsl_view_preserves_distributed_tensor_wrapper():
     """The DSL wrapper retains the concrete DistributedTensor class."""
     span = _span()
@@ -354,6 +369,39 @@ def test_sampled_window_dsl_roundtrip():
     code = Window.as_python()
     assert "offsets=" in code and "steps=" in code and "valid_shape=" in code
     assert ir.structural_equal(Window, pl.parse_program(code))
+
+
+def test_distributed_sampled_window_annotation_preserves_parent_slot():
+    source = """
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def sample(self, x: pld.DistributedTensor[
+        [4, 8], pl.FP32, pl._dump.window_buffer("first", base="buf0", size=128)
+    ]):
+        v: pld.DistributedTensor[[2, 3], pl.FP32, pl.TensorView(stride=[16, 2])] = (
+            pl.tensor.view(x, [2, 3], offsets=[1, 0], steps=[2, 2])
+        )
+        return v
+"""
+    program = pl.parse_program(source)
+    func = next(iter(program.functions.values()))
+    param_type = func.params[0].type
+    assert isinstance(param_type, ir.DistributedTensorType) and param_type.window_buffer is not None
+    assert isinstance(func.body, ir.SeqStmts) and isinstance(func.body.stmts[0], ir.AssignStmt)
+    assign = func.body.stmts[0]
+    for result_type in (assign.var.type, assign.value.type):
+        assert isinstance(result_type, ir.DistributedTensorType)
+        assert result_type.window_buffer is param_type.window_buffer
+    bad_slot = source.replace(
+        "stride=[16, 2])]", 'stride=[16, 2]), pl._dump.window_buffer("other", base="buf1", size=128)]'
+    )
+    with pytest.raises(ParserTypeError, match="conflicts with the parent window"):
+        pl.parse_program(bad_slot)
+    with pytest.raises(ParserTypeError, match="conflicts with the sampled window"):
+        pl.parse_program(source.replace("stride=[16, 2]", "stride=[16, 3]"))
+    unbound = pl.parse_program(source.replace(', pl._dump.window_buffer("first", base="buf0", size=128)', ""))
+    ir.assert_structural_equal(unbound, pl.parse_program(unbound.as_python()))
 
 
 def test_sampled_window_rejects_conflicting_descriptor_annotation():

@@ -900,6 +900,7 @@ class ASTParser:
                 view = inferred.tensor_view
                 assert view is not None
                 ann_view = resolved.tensor_view
+                annotated_view = view
                 if ann_view is not None:
                     annotated_view = ir.TensorView(
                         ann_view.stride or view.stride,
@@ -907,14 +908,27 @@ class ASTParser:
                         ann_view.valid_shape or view.valid_shape,
                         ann_view.pad if ann_view.pad != ir.PadValue.null else view.pad,
                     )
-                    annotated = ir.TensorType(inferred.shape, inferred.dtype, tensor_view=annotated_view)
-                    if not types_match(annotated, inferred):
+                if isinstance(inferred, ir.DistributedTensorType):
+                    assert isinstance(resolved, ir.DistributedTensorType)
+                    window = inferred.window_buffer
+                    if resolved.window_buffer is not None and resolved.window_buffer is not window:
                         raise ParserTypeError(
-                            f"TensorView annotation for '{var_name}' conflicts with the sampled window",
+                            f"WindowBuffer annotation for '{var_name}' conflicts with the parent window",
                             span=span,
-                            hint=f"Use the inferred descriptor: {ir.python_print_type(inferred)}",
                         )
-                override_type = ir.TensorType(inferred.shape, inferred.dtype, resolved.memref, view)
+                    override_type = ir.DistributedTensorType(
+                        inferred.shape, inferred.dtype, resolved.memref, annotated_view, window
+                    )
+                else:
+                    override_type = ir.TensorType(
+                        inferred.shape, inferred.dtype, resolved.memref, annotated_view
+                    )
+                if not types_match(override_type, inferred):
+                    raise ParserTypeError(
+                        f"TensorView annotation for '{var_name}' conflicts with the sampled window",
+                        span=span,
+                        hint=f"Use the inferred descriptor: {ir.python_print_type(inferred)}",
+                    )
             elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
                 override_type = resolved
             elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
