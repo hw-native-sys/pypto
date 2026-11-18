@@ -1836,8 +1836,7 @@ void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& vie
         const auto& lhs =
             lhs_dim ? shape_dim_names[lhs_dim->axis] : stride_names[std::get<size_t>(product.lhs)];
         result = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride.axis));
-        Emit(result + " = arith.muli " + lhs + ", " + shape_dim_names[product.rhs_shape_axis] +
-             " : index");
+        Emit(result + " = arith.muli " + lhs + ", " + shape_dim_names[product.rhs_shape_axis] + " : index");
       }
     }
 

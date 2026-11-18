@@ -11,15 +11,19 @@
 
 #include "src/codegen/pto/pto_tensor_view_plan.h"
 
+#include <cstddef>
 #include <memory>
 #include <set>
 #include <vector>
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::codegen {
 namespace {
