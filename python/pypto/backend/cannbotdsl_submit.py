@@ -134,7 +134,8 @@ def build_ordered_submitter(prepared: tuple[PreparedKernel, ...]) -> SourceArtif
         "#endif",
         "",
     ]
-    files["ordered_submit.hpp"] = "\n".join(lines).encode()
-    return SourceArtifact(
-        tuple(_file(path, content) for path, content in files.items()), "ordered_submit.hpp", symbol
-    )
+    # Different batches must coexist when their owned bundles are materialized
+    # into one orchestration directory, just like the shared checker headers.
+    entry = f"{symbol}.hpp"
+    files[entry] = "\n".join(lines).encode()
+    return SourceArtifact(tuple(_file(path, content) for path, content in files.items()), entry, symbol)

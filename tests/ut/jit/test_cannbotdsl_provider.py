@@ -20,6 +20,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from pypto.backend.cannbotdsl_abi import build_binding_checker, build_call_adapter, build_conflict_checker
@@ -43,6 +44,10 @@ from pypto.jit.external.providers import cannbotdsl as adapter
 from pypto.jit.external.validation import ContractError
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
+
+if TYPE_CHECKING:
+    from pypto.jit.specializer import SpecializeContext
+    from pypto.runtime.kernel_compiler import KernelCompiler
 
 
 def _kernel(alpha, x, out):
@@ -723,7 +728,7 @@ def _prepare_call(compiler, source=_CALL_SOURCE, request=None):
     return adapter.CANNBotDSLProvider().prepare(_kernel, _request() if request is None else request)
 
 
-def _compile_call(artifact, tmp_path, main, *, device=False, orchestration=False):
+def _compile_call(artifact, tmp_path, main, *, device=False, orchestration=False, extra_includes=()):
     compiler = shutil.which("ccec") if device else shutil.which("g++-15") or shutil.which("g++")
     if compiler is None:
         pytest.skip("CANN device compiler unavailable" if device else "C++ compiler unavailable")
@@ -740,7 +745,13 @@ def _compile_call(artifact, tmp_path, main, *, device=False, orchestration=False
         runtime = src / "a5/runtime/tensormap_and_ringbuffer"
         config = runpy.run_path(str(runtime / "build_config.py"))["BUILD_CONFIG"]["orchestration"]
         includes = [runtime / p for p in config["include_dirs"]] + includes
-        includes += [src / "a5/platform/include", src / "common/platform/include", src]
+        includes += [
+            src / "a5/platform/include",
+            src / "common/platform/include",
+            src / "common/log/include",
+            src,
+        ]
+    includes.extend(extra_includes)
     includes.extend(tmp_path / path for path in artifact.include_dirs)
     source = tmp_path / "caller.cpp"
     source.write_text(
@@ -955,8 +966,8 @@ def test_real_export_call_adapter_compiles_with_ccec(tmp_path, dynamic):
             parameters=(request.parameters[0], ParameterSpec("x", tensor), ParameterSpec("out", tensor)),
         )
     artifact = build_call_adapter(adapter.CANNBotDSLProvider().prepare(scaled, request))
-    # Only the test supplies a global entry. Production output intentionally
-    # stops at a device-callable function until runtime guarantees are implemented.
+    # The standalone adapter remains a callable header. Its caller supplies
+    # an entry; the production AIV bridge adds its resource/completion policy.
     main = f'extern "C" __aicore__ void test_entry(__gm__ int64_t* args) {{ {artifact.symbol}(args); }}'
     result, binary = _compile_call(artifact, tmp_path, main, device=True)
     assert result.returncode == 0, result.stderr
@@ -1414,7 +1425,8 @@ def test_conflict_checker_rejects_unknown_cache_line_policy(compiler, isolation,
         build_conflict_checker(*pair)
 
 
-def _run_ordered_submitter(artifact, tmp_path, body, *, prefix=""):
+def _run_ordered_submitter(artifact, tmp_path, body, *, prefix="", direct=False):
+    invoke = f"{artifact.symbol}(bindings" + (")" if direct else ", submit)")
     main = f"""
 {prefix}
 #include <cstring>
@@ -1442,7 +1454,7 @@ int main() {{
         }}
         return TaskId::make(0, 100 + int(i));
     }};
-    auto run = [&]() {{ return {artifact.symbol}(bindings, submit); }};
+    auto run = [&]() {{ return {invoke}; }};
 {body}
 }}
 """
@@ -1721,6 +1733,474 @@ RuntimeContext* test_runtime = nullptr;
 RuntimeContext* framework_current_runtime() { return test_runtime; }
 """,
     )
+
+
+def _aiv_runtime_manifest(compiler, core_type="aiv"):
+    compiler.manifest["core_type"] = core_type
+    compiler.manifest["participants"] = {
+        "aic": int(core_type != "aiv"),
+        "aiv": 2 if core_type == "mixed" else int(core_type == "aiv"),
+    }
+    compiler.manifest["build_requirements"].update(
+        dsl_headers_sha256="0" * 64,
+        cann_headers="consumer_resolved_sdk",
+        device_function_mode=True,
+        language="AscendC",
+        separate_translation_unit=True,
+        source_includes=["c_api/asc_simd.h"],
+        standard="c++17",
+        targets=["aic", "aiv"] if core_type == "mixed" else [core_type],
+    )
+    compiler.manifest["resources"].update(
+        allocations=[],
+        entry_requires_previous_task_complete=True,
+        exclusive_local_memory=True,
+        exclusive_sync_resources=True,
+        implicit_workspace_bytes=0,
+        local_memory_bytes=[],
+        reentrant=False,
+        stack="consumer_must_validate_compiler_requirement",
+        subblock_id="physical_aiv_lane",
+        topology="hardware_paired_aic_and_two_aiv" if core_type == "mixed" else "single_core",
+    )
+    compiler.manifest["state"] = {
+        "clobbered": ["DMA", "padding", "quantization", "mask", "local_memory", "sync_resources"],
+        "entry": "asc_init_and_default_dma_state_atomic_none",
+        "exit_atomic": "none",
+        "preserved": ["CTRL"],
+    }
+    compiler.manifest["completion"].update(
+        pipe_barrier_is_cross_core=False, wait_for_all_participants=core_type == "mixed"
+    )
+    compiler.manifest["loading"]["host_runtime"] = False
+
+
+def _aiv_target(prepared):
+    return RuntimeTarget(
+        "tmr",
+        "1",
+        prepared.request.target,
+        frozenset({(adapter.ABI_NAME, 1)}),
+        frozenset(
+            {
+                *(f"core:{core.value}" for core in prepared.execution.cores),
+                f"aiv_lanes:{prepared.execution.aiv_lanes}",
+                "completion:entry_return_visible",
+                "tensor_writeback",
+                "partial_write",
+            }
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("resources", "exclusive_local_memory", False),
+        ("resources", "exclusive_sync_resources", False),
+        ("resources", "entry_requires_previous_task_complete", False),
+        ("resources", "implicit_workspace_bytes", True),
+        ("resources", "implicit_workspace_bytes", 64),
+        ("resources", "local_memory_bytes", [64]),
+        ("resources", "allocations", [{"space": "UB", "bytes": 64}]),
+        ("resources", "reentrant", True),
+        ("resources", "topology", "cluster"),
+        ("resources", "unknown_requirement", True),
+        ("state", "preserved", []),
+        ("state", "clobbered", ["CTRL"]),
+        ("state", "exit_atomic", "add"),
+        ("completion", "pipe_barrier_is_cross_core", True),
+        ("completion", "wait_for_all_participants", True),
+        ("loading", "host_runtime", True),
+        ("build_requirements", "standard", "c++20"),
+        ("build_requirements", "targets", ["aic", "aiv"]),
+        ("build_requirements", "unknown_link_flag", True),
+    ],
+)
+def test_aiv_bridge_rejects_unsupported_resource_contracts(compiler, section, key, value):
+    _aiv_runtime_manifest(compiler)
+    compiler.manifest[section][key] = value
+    prepared = _prepare_call(compiler)
+    with pytest.raises(ContractError, match="runtime"):
+        TMRBridge().lower(prepared, _aiv_target(prepared))
+
+
+def test_aiv_bridge_owns_checked_source_and_requires_strict_compilation(compiler):
+    from pypto.backend.tmr_bridge import materialize  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler)
+    prepared = _prepare_call(compiler)
+    task = TMRBridge().lower(prepared, _aiv_target(prepared))
+    assert task.binary_policy == "a5-text-only"
+    assert task.source.symbol == "kernel_entry"
+    with materialize(task) as source:
+        assert Path(source.source).is_file()
+        with pytest.raises(ContractError, match="descriptor JIT integration"):
+            source.configure_context(cast("SpecializeContext", SimpleNamespace()))
+    assert not Path(source.source).exists()
+    with pytest.raises(ContractError, match="unmodified bridge output"):
+        with materialize(replace(task, binary_policy="ordinary")):
+            pass
+
+
+@pytest.mark.parametrize("core_type", ["aiv", "mixed"])
+def test_compile_enforces_policy_and_cleans_source_on_failure(compiler, tmp_path, monkeypatch, core_type):
+    from pypto.backend.cannbotdsl_runtime import compile_task  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler, core_type)
+    prepared = _prepare_call(compiler)
+    task = TMRBridge().lower(prepared, _aiv_target(prepared))
+    header = tmp_path / "asc/include/c_api/asc_simd.h"
+    header.parent.mkdir(parents=True)
+    header.touch()
+    observed = []
+    cores = []
+    monkeypatch.setattr("pypto.runtime.elf_parser.extract_text_section", lambda image: image)
+
+    def fail_compile(source, **kwargs):
+        observed.append(Path(source))
+        assert Path(source).is_file()
+        assert kwargs["text_only"] is True
+        cores.append(kwargs["core_type"])
+        assert kwargs["runtime_name"] == "tensormap_and_ringbuffer"
+        assert str(header.parents[1]) in kwargs["extra_include_dirs"]
+        if kwargs["core_type"] == "aic":
+            return b"validated aic image"
+        raise RuntimeError("compiler rejected stack usage")
+
+    native = SimpleNamespace(
+        platform="a5",
+        sdk=SimpleNamespace(ccec=SimpleNamespace(ascend_home_path=str(tmp_path))),
+        compile_incore=fail_compile,
+    )
+    with pytest.raises(ContractError, match="unmodified bridge output"):
+        compile_task(
+            replace(task, binary_policy="ordinary"),
+            cast("KernelCompiler", native),
+            pto_isa_root=str(tmp_path),
+        )
+    assert not observed
+    with pytest.raises(RuntimeError, match="stack usage"):
+        compile_task(task, cast("KernelCompiler", native), pto_isa_root=str(tmp_path))
+    assert cores == (["aic", "aiv"] if core_type == "mixed" else ["aiv"])
+    assert all(not path.exists() for path in observed)
+
+
+@pytest.mark.parametrize("cube", [False, True])
+def test_wrapper_drains_and_restores_before_return(compiler, tmp_path, cube):
+    _aiv_runtime_manifest(compiler, "aic" if cube else "aiv")
+    native = _CALL_SOURCE.replace(
+        "    for (int64_t row",
+        f"    if (ctrl != {0x1008 if cube else 0x400000001008}ULL || !defaults) throw 1;\n"
+        "    events.push_back(9); ctrl = 0xffff; defaults = false;\n    for (int64_t row",
+    )
+    prepared = _prepare_call(compiler, source=native)
+    task = TMRBridge().lower(prepared, _aiv_target(prepared))
+    header = tmp_path / "c_api/asc_simd.h"
+    header.parent.mkdir()
+    header.write_text(
+        ("#define __DAV_CUBE__ 1\n" if cube else "")
+        + """
+#pragma once
+#include <cstdint>
+#include <vector>
+static std::vector<int> events;
+static uint64_t ctrl = 0x400000001008;
+static bool defaults = true;
+constexpr int PIPE_ALL = 0, DSB_DDR = 0;
+inline void pipe_barrier(int) { events.push_back(1); }
+inline void asc_dcci_entire_out() { events.push_back(2); }
+inline void dsb(int) { events.push_back(3); }
+inline void set_atomic_none() { events.push_back(4); ctrl &= ~0x1c0ULL; }
+inline uint64_t asc_get_ctrl() { events.push_back(5); return ctrl; }
+inline void asc_set_ctrl(uint64_t value) { events.push_back(8); ctrl = value; }
+inline void asc_init() { events.push_back(6); defaults = true; ctrl = 8; }
+"""
+        + "\n".join(
+            f"template<class... T> inline void {name}(T...) {{}}"
+            for name in (
+                "asc_set_gm2l1_loop_size",
+                "asc_set_gm2ub_loop_size",
+                "asc_set_ub2gm_loop_size",
+                "asc_set_l0c2gm_config",
+                "asc_set_l0c2gm_nz2nd",
+                "asc_set_l0c_copy_prequant",
+                "asc_set_l0c2gm_quant_post",
+                "asc_set_l0c2gm_relu_alpha",
+                "asc_set_l0c2gm_lrelu_alpha",
+                "asc_set_l0c2gm_channel_para",
+                "asc_set_copy_pad_val",
+                "asc_set_ndim_pad_value",
+                "asc_set_gm2l1_pad",
+                "asc_set_l13d_padding",
+                "asc_set_l12l0_padding_val",
+            )
+        )
+    )
+    main = """
+int main() {
+    float x[32]{}, out[32]{};
+    simpler::tmr::Tensor tx{}, ty{};
+    tx.buffer.addr = reinterpret_cast<uint64_t>(x); tx.shapes[0] = 1; tx.strides[0] = 32;
+    ty = tx; ty.buffer.addr = reinterpret_cast<uint64_t>(out);
+    int64_t args[] = {reinterpret_cast<int64_t>(&tx), reinterpret_cast<int64_t>(&ty), 0x3f800000};
+    for (int i = 0; i < 2; ++i) {
+        kernel_entry(args);
+        // The executor is allowed to publish FIN only after entry return.
+        if (ctrl != 0x400000001008 || !defaults || out[0] != 1.0f) return 1;
+        events.push_back(10);
+    }
+    const std::vector<int> one{1,2,3,4,5,9,1,2,3,6,4,8,10};
+    std::vector<int> expected(one); expected.insert(expected.end(), one.begin(), one.end());
+    return events == expected ? 0 : 2;
+}
+"""
+    if cube:
+        main = main.replace("{1,2,3,4,5,9", "{1,2,3,4,5,8,9")
+    result, binary = _compile_call(task.source, tmp_path, main)
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed"])
+@pytest.mark.parametrize("bad_launch", ["none", "blocks", "sync", "null"])
+@pytest.mark.parametrize("reuse_ids", [False, True])
+def test_submitter_calls_tmr_with_checked_single_block_bindings(
+    compiler, tmp_path, bad_launch, core_type, reuse_ids
+):
+    from pypto.backend.cannbotdsl_runtime import build_submitter  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler, core_type)
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    task = TMRBridge().lower(prepared, _aiv_target(prepared))
+    ids = tuple((10 + i, 20 + i) if core_type == "mixed" else (10 + i,) for i in range(3))
+    if reuse_ids:
+        ids = (ids[0],) * 3
+    # Equal task records may reuse an image even when they are distinct Python objects.
+    artifact = build_submitter((task, replace(task), replace(task)), ids)
+    offset = "0" if reuse_ids else "i"
+    expected_aic = f"int(10 + {offset})" if core_type != "aiv" else "-1"
+    expected_aiv = (
+        f"int(20 + {offset})"
+        if core_type == "mixed"
+        else f"int(10 + {offset})"
+        if core_type == "aiv"
+        else "-1"
+    )
+    expected_aiv1 = expected_aiv if core_type == "mixed" else "-1"
+    invalid_launch = {
+        "none": "",
+        "blocks": "bindings[2]->launch_spec.set_block_num(2);",
+        "sync": "bindings[2]->launch_spec.set_require_sync_start(true);",
+        "null": "bindings[2] = nullptr;",
+    }[bad_launch]
+    body = f"""
+    static unsigned dispatches = 0;
+    RuntimeOps ops{{}};
+    ops.is_fatal = [](RuntimeContext*) {{ return false; }};
+    ops.submit_task = [](RuntimeContext*, const MixedKernels& kernels, const CoreTaskArgs& arg) {{
+        unsigned i = dispatches++;
+        if (kernels.aic_kernel_id != {expected_aic} || kernels.aiv0_kernel_id != {expected_aiv} ||
+            kernels.aiv1_kernel_id != {expected_aiv1} || arg.allow_early_resolve() ||
+            arg.launch_spec.block_num() != 1) throw "dispatch contract";
+        if (arg.explicit_dep_count() != (i == 2 ? 1U : 0U)) throw "dependency count";
+        if (i == 2 && arg.explicit_dep_kind(0) != DEP_WAIT) throw "completion dependency";
+        TaskOutputTensors result;
+        result.set_task_id(TaskId::make(0, 100 + int(i)));
+        return result;
+    }};
+    RuntimeContext runtime{{&ops, ScopeMode::AUTO}};
+    test_runtime = &runtime;
+    if ({str(bad_launch != "none").lower()}) {{
+        {invalid_launch}
+        try {{ {artifact.symbol}(bindings); return 1; }} catch (const char*) {{}}
+        return dispatches == 0 ? 0 : 2;
+    }}
+    auto ids = {artifact.symbol}(bindings);
+    return dispatches == 3 && ids[2] == TaskId::make(0, 102) ? 0 : 3;
+"""
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        body,
+        direct=True,
+        prefix="""
+#include "orchestration_api.h"
+RuntimeContext* test_runtime = nullptr;
+RuntimeContext* framework_current_runtime() { return test_runtime; }
+""",
+    )
+
+
+@pytest.mark.parametrize("core_type", ["aic", "mixed"])
+def test_real_export_cube_and_mixed_topology(tmp_path, core_type):
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    @cb.kernel
+    def cube_copy(x, out):
+        for i in cb.range(x.shape[0]):
+            cb.scalar.cube_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+
+    @cb.kernel
+    def mixed_copy(x, out):
+        for i in cb.range(x.shape[0]):
+            if (i // 16) % 3 == 0:
+                cb.scalar.cube_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+            if (i // 16) % 3 == cb.get_subblock_id() + 1:
+                cb.scalar.vec_store_bypass(out.ptr(i), cb.scalar.load_bypass(x.ptr(i)) + 1)
+
+    tensor = TensorSpec((96,), DataType.INT32, strides=(1,))
+    request = KernelRequest(
+        (ParameterSpec("x", tensor), ParameterSpec("out", tensor)), CompileTarget("a5", "ccec", "test")
+    )
+    prepared = adapter.CANNBotDSLProvider().prepare(cube_copy if core_type == "aic" else mixed_copy, request)
+    manifest = json.loads(
+        next(f.content for f in prepared.artifact.files if f.path == "device_manifest.json")
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    assert manifest["core_type"] == core_type
+    assert prepared.execution.cores == ((Core.AIC,) if core_type == "aic" else (Core.AIC, Core.AIV))
+
+
+@pytest.mark.parametrize("ids", [((1,),), ((1, 1),), ((-1, 2),), ((True, 2),), ((1, 2, 3),)])
+def test_mixed_submitter_rejects_incomplete_or_ambiguous_registration(compiler, ids):
+    from pypto.backend.cannbotdsl_runtime import build_submitter  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler, "mixed")
+    prepared = _prepare_call(compiler)
+    task = TMRBridge().lower(prepared, _aiv_target(prepared))
+    with pytest.raises(ContractError, match="function ID"):
+        build_submitter((task,), ids)
+
+
+@pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed"])
+def test_submitter_rejects_reused_id_for_different_task_images(compiler, core_type):
+    from pypto.backend.cannbotdsl_runtime import build_submitter  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler, core_type)
+    first = _prepare_call(compiler)
+    second = _prepare_call(compiler, _CALL_SOURCE.replace("= alpha;", "= alpha + 1.0f;"))
+    tasks = tuple(TMRBridge().lower(p, _aiv_target(p)) for p in (first, second))
+    ids = ((10, 20), (10, 21)) if core_type == "mixed" else ((10,), (10,))
+    with pytest.raises(ContractError, match="function ID 10.*different task/core images"):
+        build_submitter(tasks, ids)
+
+
+@pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed"])
+@pytest.mark.parametrize("scenario", ["registration", "batch"])
+def test_runtime_submitter_bundles_compose_in_one_translation_unit(compiler, tmp_path, core_type, scenario):
+    from pypto.backend.cannbotdsl_runtime import build_submitter  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler, core_type)
+    prepared = _prepare_binding(compiler, TensorSpec(("rows", 1), DataType.FP32, strides=("pitch", 1)))
+    task = TMRBridge().lower(prepared, _aiv_target(prepared))
+    ids = (10, 11) if core_type == "mixed" else (10,)
+    first = build_submitter((task,) * 3, (ids,) * 3)
+    # Exercise both different registrations of the same batch and a different
+    # batch reusing the same images. Each used to overwrite a fixed header path.
+    count = 3 if scenario == "registration" else 2
+    second_ids = tuple(i + 10 for i in ids) if scenario == "registration" else ids
+    second = build_submitter((task,) * count, (second_ids,) * count)
+    files = {f.path: f for f in first.files}
+    for file in second.files:
+        if file.path in files:
+            assert files[file.path] == file, f"conflicting bundle path: {file.path}"
+        files[file.path] = file
+    artifact = replace(first, files=tuple(files.values()))
+    expected = (
+        f"{{{base}, {base + 1}, {base + 1}}}"
+        if core_type == "mixed"
+        else f"{{{base}, -1, -1}}"
+        if core_type == "aic"
+        else f"{{-1, {base}, -1}}"
+        for base in (10, second_ids[0])
+    )
+    body = f"""
+    static unsigned dispatches = 0;
+    RuntimeOps ops{{}};
+    ops.is_fatal = [](RuntimeContext*) {{ return false; }};
+    ops.submit_task = [](RuntimeContext*, const MixedKernels& kernels, const CoreTaskArgs&) {{
+        const MixedKernels expected[] = {{{", ".join(expected)}}};
+        const auto& want = expected[dispatches < 3 ? 0 : 1];
+        if (kernels.aic_kernel_id != want.aic_kernel_id ||
+            kernels.aiv0_kernel_id != want.aiv0_kernel_id ||
+            kernels.aiv1_kernel_id != want.aiv1_kernel_id) throw "wrong registration";
+        TaskOutputTensors result;
+        result.set_task_id(TaskId::make(0, 100 + int(dispatches++)));
+        return result;
+    }};
+    RuntimeContext runtime{{&ops, ScopeMode::AUTO}};
+    test_runtime = &runtime;
+    auto first = {first.symbol}(bindings);
+    std::array<CoreTaskArgs*, {count}> next{{{", ".join(f"bindings[{i}]" for i in range(count))}}};
+    auto second = {second.symbol}(next);
+    return dispatches == {3 + count} && first[2] == TaskId::make(0, 102) &&
+        second.back() == TaskId::make(0, {102 + count}) ? 0 : 1;
+"""
+    _run_ordered_submitter(
+        artifact,
+        tmp_path,
+        body,
+        direct=True,
+        prefix=f"""
+#include "{first.entry}"
+#include "{second.entry}"
+RuntimeContext* test_runtime = nullptr;
+RuntimeContext* framework_current_runtime() {{ return test_runtime; }}
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("resources", "topology", "single_core"),
+        ("completion", "wait_for_all_participants", False),
+        ("build_requirements", "targets", ["aiv"]),
+    ],
+)
+def test_mixed_bridge_requires_whole_group_contract(compiler, section, key, value):
+    _aiv_runtime_manifest(compiler, "mixed")
+    compiler.manifest[section][key] = value
+    prepared = _prepare_call(compiler)
+    with pytest.raises(ContractError, match="runtime"):
+        TMRBridge().lower(prepared, _aiv_target(prepared))
+
+
+def test_mixed_submission_uses_whole_group_completion(compiler, tmp_path):
+    from pypto.backend.cannbotdsl_runtime import build_submitter  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parents[3]
+    isa = root / "runtime/build/pto-isa/include"
+    if not (isa / "pto/comm/async/urma/urma_types.hpp").is_file():
+        pytest.skip("pinned scheduler test needs runtime's managed PTO-ISA headers")
+    _aiv_runtime_manifest(compiler, "mixed")
+    prepared = _prepare_call(compiler)
+    task = TMRBridge().lower(prepared, _aiv_target(prepared))
+    artifact = build_submitter((task,), ((10, 11),))
+    main = """
+#include "scheduler/scheduler.h"
+int main() {
+    static SchedulerState scheduler{};
+    ChipTaskSlotState slot{};
+    slot.total_required_subtasks = 3;
+    // Reuse the same slot to detect stale completion counters as well.
+    for (int batch = 0; batch < 3; ++batch) {
+        slot.completed_subtasks.store(0);
+        if (scheduler.on_subtask_complete(slot)) return 1; // first lane FIN
+        if (scheduler.on_subtask_complete(slot)) return 2; // second lane FIN
+        if (!scheduler.on_subtask_complete(slot)) return 3; // whole group FIN
+    }
+    return 0;
+}
+"""
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True, extra_includes=(isa,))
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 if __name__ == "__main__":

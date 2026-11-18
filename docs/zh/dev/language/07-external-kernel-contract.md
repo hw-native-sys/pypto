@@ -115,15 +115,61 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 每次准备都重新导出；由于尚未建立完整的 Python 闭包/输入快照，身份明确标记为不完整。
 因此该 provider 尚未注册到仅支持 capture 的 registry，也不声明 preparation 缓存复用。
 
-**本阶段尚未启用 JIT 程序中的调用或设备执行。** 现有 `c_pointer` TMR bridge 会拒绝
-该描述符 ABI。34.5 的后续工作需要实现检查完整 manifest 的 bridge、正确管理产物
-生命周期的 JIT 绑定及相关兼容回归。尤其不能在接入 runtime 时丢弃资源和 64 字节 GM
-写隔离要求。设备完成可见性、数值和性能验收仍由 34.7 跟踪。
-下一阶段 runtime 工作还须接入批次缓存行排序、校验编译器栈需求和资源所有权，
-并将调用适配器和有序提交辅助层与经过校验的 runtime 加载流程连接起来；
-现有仅加载 text 的 ELF 检查本身不能提供这些保证。
-`test_cannbotdsl_provider.py` 使用 fake 公开导出器验证交接边界，并在安装了可选包时
-使用真实公开编译器导出验证；这些测试不代表二进制验收。
+A5 TMR bridge 支持下述单 block AIC/AIV/MIX 子集的直接执行。JIT 程序中的自动发现和
+生命周期安全绑定仍属后续工作；设备数值及性能验收单独跟踪。准备和二进制编译不使用缓存。
+
+### A5 AIC/AIV/MIX runtime 路径
+
+`TMRBridge.lower(prepared, target)` 在 `a5/ccec` 的 TMR v1 上支持
+`cannbotdsl.device_callable` v1。支持单 AIC、单 AIV，或一个硬件配对的 AIC + 两个
+AIV 组（MIX）。要求无隐式 workspace、无本地分配，以及与导出器完全一致的资源、
+状态、加载和完成声明。
+未知或更强的要求在编译前被拒绝。每次提交只能包含一个逻辑 block，且不得同步启动。
+
+TMR 持久化 executor 在每个物理核上同步、串行调用 kernel，排队任务也不例外。
+回调执行期间，executor 不使用 kernel 的本地内存或同步事件，因此该执行区间提供
+资源独占；不同核之间不通过全局锁串行化。Wrapper 在入口前排空继承的流水线和标量
+GM 写入，并设置 atomic-none。导出函数返回后，再次排空流水线、刷新标量 GM、执行
+DDR barrier，恢复 ASC/DMA/padding/quantization/mask 默认状态和保存的 CTRL，
+以 atomic-none 状态返回。此后 executor 才能发布该参与者的 FIN 或执行下一个回调。
+AIC 入口还会清除继承的 HF32 模式；两个编译版本均恢复保存的 CTRL。
+TMR 将 MIX 任务放入同一物理 cluster，仅在三个参与者的 FIN 全部到达后完成任务。
+复用现有完成计数器实现整组汇合，不把本地 pipe barrier 当作跨核 barrier。
+Kernel 作者仍须保证组内同步和写入缓存行的独占。
+
+使用 `pypto.backend.cannbotdsl_runtime.compile_task(task, compiler,
+pto_isa_root=...)` 按 `task.prepared.execution.cores` 顺序返回 text 镜像元组：AIC/AIV
+返回一个镜像，MIX 返回 `(aic_image, aiv_image)`。每个镜像注册为 `CoreCallable`，
+MIX 的两个 AIV lane 复用 AIV 镜像。所有镜像均通过准入后才返回元组。它从编译器选定的 CANN SDK
+获取 C API 头文件，在编译期间保留拥有所有权的源码，并强制执行 text-only ELF 准入和
+静态零栈报告检查。普通 JIT `configure_context` 路径会拒绝该任务的二进制策略，
+防止绕过准入检查。
+
+`build_submitter(tasks, function_ids)` 返回拥有所有权的编排头文件。每个任务对应一个
+function-ID 元组，顺序与编译镜像一致；例如 `((10,), (20, 21), (30,))` 表示
+AIC → MIX → AIV 批次。ID 必须非负，不同 task/core 镜像的 ID 必须互不重复。
+相等的 `ExternalTask` 重复出现时，同一个 core 可以复用相同 ID；批次内同一 ID
+映射到不同 task 或 core 会被拒绝。每个编译镜像需注册到对应 ID。
+生成函数接收
+`std::array<CoreTaskArgs*, N>` 并返回已提交任务的 ID。在任何提交前，它校验所有 launch
+和绑定；然后通过有序批次辅助层关闭提前派发，并为每对冲突的 64 字节缓存行增加基于
+完成的 `DEP_WAIT` 依赖。实际提交使用 `rt_submit_task(MixedKernels, args)`，未使用的
+槽位设为 -1；MIX 的第一个 ID 填入 AIC 槽位，第二个 ID 同时填入两个 AIV 槽位，
+返回的单个任务 ID 覆盖整组完成。
+编排构建必须物化全部头文件，并将 callable、参数描述符和 tensor 存储保留到执行完成。
+批次外的调用，包括 PyPTO 生产者和消费者，仍须自行建立依赖或 GM 隔离。
+应包含返回的 `SourceArtifact.entry`，不要使用固定文件名。Runtime 入口文件名包含
+批次与注册 ID 的摘要，因此多个 submitter 可以共享物化目录和翻译单元。
+
+Host 测试验证 wrapper 排空/恢复顺序、真实 TMR 提交 API 和固定版本 scheduler 的整组完成计数器；
+可选 CCEC 测试将静态及动态 AIC/AIV/MIX
+导出通过完整准入流程。专项 runtime 测试
+`tests/st/runtime/external_kernel/test_cannbotdsl_runtime.py` 构建各拓扑的依赖链和
+AIC → MIX → AIV 链，MIX 测试参与者写入不同缓存行，
+在 A5 上检查重复执行的数值结果。`--codegen-only` 编译设备和编排二进制并构造 callable，
+但不启动设备。两种模式均需要固定版本的 Simpler 包和 CANN 工具链：在构造 callable
+之前，`KernelCompiler` 就已经依赖 `simpler_setup`。`tests/st/codegen` CI 任务不安装
+Simpler 或 CANN，也不运行该直接 runtime 测试。不能据仅编译结果宣称设备完成可见性或性能验收通过。
 
 ### 仅加载 text 的二进制准入
 
@@ -168,7 +214,7 @@ manifest 与 prepared contract、原生 ABI、执行元数据及源码/头文件
 最多 32 个 tensor、16 个 scalar，以及 1..5 维 tensor；不支持 FP16/BF16 scalar 槽位。
 
 这是可调用头文件，**不是 `ExternalTask` 或可加载的 runtime 入口**：它有意不定义
-`kernel_entry`，也不改变 `TMRBridge` 支持的 ABI。调用方必须在每次调用时运行绑定
+`kernel_entry`；上面的公共 runtime bridge 提供入口和执行策略。调用方必须在每次调用时运行绑定
 校验器，并落实保留的资源、缓存行、栈、二进制加载及完成条件。Host C++ 测试实际执行
 参数组装及 offset 处理，可选 CCEC 测试编译真实公开导出；两者均不代表设备执行或
 runtime 完成正确性验收。
@@ -230,7 +276,8 @@ TMR 依赖；接入 JIT 仍是后续工作。
 ### CANNBotDSL 有序批量提交
 
 `pypto.backend.cannbotdsl_submit.build_ordered_submitter(prepared)` 接受非空的
-prepared kernel tuple，生成自持有的 `ordered_submit.hpp`。生成函数接受
+prepared kernel tuple，在 `SourceArtifact.entry` 指定的位置生成自持有头文件。
+文件名包含批次身份，避免不同批次互相覆盖；相同的支持头文件可以共享。生成函数接受
 `std::array<CoreTaskArgs*, N>` 和同步回调
 `(size_t index, CoreTaskArgs& args) -> TaskId`，按批次顺序返回提交得到的 ID。
 回调必须提交对应位置的 prepared kernel，同步消费传入的参数和依赖，并返回新任务
@@ -250,8 +297,9 @@ ID。辅助层不负责加载 kernel 或授权执行；回调所接入的 runtim
 消费者提交前，所有生产者必须在同一个有效 TMR scope 内保持可引用。绑定必须保持
 不变，底层存储必须存活到执行完成。每次调用重新计算冲突，不缓存依赖实际地址的
 结果。辅助层只约束本批次，其他可能并发的调用仍需独立的依赖或隔离策略。它不证明
-组内安全、资源所有权、栈限制、二进制加载或完成可见性，尚未接入 JIT 发现流程和
-`TMRBridge.lower`。
+组内安全、资源所有权、栈限制、二进制加载或完成可见性。上述直接 runtime 路径将
+该辅助层与 `TMRBridge.lower`、受检查的编译以及真实 TMR 提交组合，用于支持的子集。
+自动 JIT 发现和绑定仍属后续工作。
 
 ## 请求与编译结果
 
@@ -449,7 +497,7 @@ inline helper 直接返回 extern 调用时,保留与先绑定局部变量再返
 编译器验证，不代表设备数值正确性或安全重叠执行。任意注册对象与可执行 wrapper 的
 连接、原生 ABI 和运行时检查仍由后续任务 34.4/34.5 完成。
 
-## TMR 桥接（任务 34.4）
+## TMR c_pointer 桥接（任务 34.4）
 
 `pypto.backend.tmr_bridge.TMRBridge` 将 `c_pointer` ABI v1 转为 A5/CCEC 的 TMR
 任务入口。目标使用 `RuntimeTarget(runtime="tmr", version="1", ...)`；版本是内部
@@ -466,8 +514,8 @@ C++ 类型须匹配声明。维度、stride 和 offset 使用 1/2/4/8 字节无�
 `with materialize(task) as native:` 建立私有源码租约；
 `native.configure_context(context)` 校验请求，并给既有 extern 特化附加源码、include、
 契约及检查器。保持租约直到既有 runtime 完成源码编译/发布。AIC/AIV、mixed Group
-和向量 lane 数来自执行契约。注册对象接入与 CANNBotDSL 迁移仍属任务 34.5，持久化
-复用属任务 34.6。
+和向量 lane 数来自执行契约。注册对象接入仍属任务 34.5，持久化
+复用属任务 34.6。CANNBotDSL 使用上文的专用 runtime 直接执行路径。
 
 每次调用都在实际参数打包后、提交前检查 rank/dtype、固定及共享维度、正 stride、
 offset、对齐、存储/地址边界和原生元数据位宽，支持普通调用、显式 submit 及参数重排的
@@ -477,7 +525,8 @@ CTRL，确保恢复控制状态不会重新启用继承的 atomic 模式；并�
 上清除继承的 HF32 模式；AIV 保留该控制位。设备入口返回前排空流水线、回写缓存并执行
 DDR 屏障，然后恢复控制状态并关闭 atomic 模式。
 
-明确拒绝 descriptor ABI、非 ND 布局、1–5 之外的 rank、FP16/BF16 scalar、其他
+此 c_pointer 路径拒绝 descriptor ABI；专用 runtime 路径处理支持的 CANNBotDSL 子集。
+其他明确拒绝的情况包括非 ND 布局、1–5 之外的 rank、FP16/BF16 scalar、其他
 架构/runtime、逻辑 launch context、同步/全驻留启动、runtime 新分配的输出槽及
 录制 Graph 的重放。输出须在提交前已有存储。CPU 测试用固定 runtime 头文件编译并
 执行参数转换和检查；mock 完成指令仅验证顺序，不证明设备可见性，设备验收仍属任务 34.7。
