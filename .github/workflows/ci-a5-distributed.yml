@@ -9,12 +9,6 @@ on:
 permissions: {}
 cache-mode: read
 
-# Independent from CI Full. Keep each request's check alive until its finalizer runs.
-concurrency:
-  group: ci-a5-distributed-${{ github.event.issue.number }}
-  queue: max
-  cancel-in-progress: false
-
 jobs:
   changes:
     if: >-
@@ -101,6 +95,11 @@ jobs:
           exit $status
 
   onboard-tests-a5-distributed:
+    name: onboard-tests-a5-distributed / check ${{ needs.changes.outputs.check_id }}
+    concurrency:
+      group: ci-a5-distributed-device-${{ github.event.issue.number }}
+      queue: max
+      cancel-in-progress: false
     timeout-minutes: 110
     needs: [changes, toolchain]
     if: needs.changes.outputs.checkout_sha != ''
@@ -144,6 +143,7 @@ jobs:
           toolchain: bundle
 
       - name: Run distributed tests
+        id: distributed
         timeout-minutes: 70
         run: |
           source activate.sh
@@ -165,7 +165,7 @@ jobs:
           fi
 
       - name: Upload distributed test results
-        if: always()
+        if: always() && (steps.distributed.outcome == 'success' || steps.distributed.outcome == 'failure')
         uses: actions/upload-artifact@v4
         with:
           name: a5-distributed-${{ github.run_id }}-${{ github.run_attempt }}
@@ -181,6 +181,9 @@ jobs:
           checkout-path: a5-dist-checkout
 
   result:
+    concurrency:
+      group: ci-a5-check-${{ github.run_id }}
+      cancel-in-progress: false
     if: always() && needs.changes.outputs.check_id != ''
     needs: [changes, toolchain, onboard-tests-a5-distributed]
     runs-on: ubuntu-latest

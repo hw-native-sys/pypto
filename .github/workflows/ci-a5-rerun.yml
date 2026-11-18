@@ -1,0 +1,36 @@
+name: CI A5 Rerun Progress
+
+on:
+  workflow_run:
+    workflows: [CI A5 Distributed]
+    types: [in_progress]
+
+permissions: {}
+
+jobs:
+  progress:
+    if: >-
+      github.event.workflow_run.event == 'issue_comment' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.run_attempt > 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Serialize with the terminal publisher so a delayed observer cannot
+    # overwrite the result of a completed attempt.
+    concurrency:
+      group: ci-a5-check-${{ github.event.workflow_run.id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Update the check for the current attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/ci_a5_distributed.py reopen

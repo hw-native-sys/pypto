@@ -2973,7 +2973,9 @@ def test_a5_rejects_invalid_pr_before_writes(a5_control, a5_request, case):
     assert not writes and not outputs
 
 
-@pytest.mark.parametrize("case", ["recovers", "head-changed", "base-changed", "timeout", "api-failure"])
+@pytest.mark.parametrize(
+    "case", ["recovers", "head-changed", "base-changed", "during-lookup", "timeout", "api-failure"]
+)
 def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch, case):
     pr, event, writes, outputs = a5_request
     api = a5_control.api
@@ -2993,7 +2995,9 @@ def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch,
         if path.endswith(f"/git/commits/{MERGE}"):
             if case == "api-failure":
                 raise RuntimeError("API unavailable")
-            if not elapsed[0] or case == "timeout":
+            if case == "during-lookup":
+                pr["head"]["sha"] = "e" * 40
+            elif not elapsed[0] or case == "timeout":
                 result["parents"][0]["sha"] = "d" * 40
         if elapsed[0] and case == "head-changed" and path.endswith("/pulls/123"):
             result["head"]["sha"] = "e" * 40
@@ -3008,10 +3012,18 @@ def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch,
         assert elapsed[0] == 5
         assert outputs["checkout_sha"] == MERGE
     else:
-        with pytest.raises((ValueError, RuntimeError)):
+        # Pin changes abort at the first observation. Only a stale merge waits until timeout.
+        error, message, seconds = {
+            "head-changed": (ValueError, "head or base changed", 5),
+            "base-changed": (ValueError, "head or base changed", 5),
+            "during-lookup": (ValueError, "changed during validation", 0),
+            "timeout": (ValueError, "test merge is not ready", 60),
+            "api-failure": (RuntimeError, "API unavailable", 0),
+        }[case]
+        with pytest.raises(error, match=message):
             a5_control.prepare(REPO, event)
         assert not writes and not outputs
-        assert elapsed[0] <= 60
+        assert elapsed[0] == seconds
 
 
 @pytest.mark.parametrize("result", ["success", "failure", "skipped", "cancelled"])
@@ -3030,8 +3042,77 @@ def test_a5_result_requires_every_dependency(a5_control, monkeypatch, result, jo
     (path, payload), kwargs = writes[0]
     assert path == f"repos/{REPO}/check-runs/987"
     assert kwargs == {"method": "PATCH"}
+    assert payload["details_url"].endswith("/attempts/1")
     assert payload["status"] == "completed"
     assert payload["conclusion"] == ("success" if result == "success" else "failure")
+
+
+def test_a5_output_failure_closes_orphan_check(a5_control, a5_request, monkeypatch):
+    _, event, writes, _ = a5_request
+
+    def broken_output(_):
+        raise OSError("outputs unavailable")
+
+    monkeypatch.setattr(a5_control, "output", broken_output)
+    with pytest.raises(OSError, match="outputs unavailable"):
+        a5_control.prepare(REPO, event)
+    path, payload, options = writes[-1]
+    assert path.endswith("/check-runs/987") and options == {"method": "PATCH"}
+    assert payload["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize("status, attempts", [(503, 3), (403, 1)])
+def test_a5_check_update_has_bounded_retries(a5_control, monkeypatch, status, attempts):
+    calls = []
+
+    def unavailable(path, payload, **options):
+        calls.append((path, payload, options))
+        raise subprocess.CalledProcessError(1, "gh", stderr=f"request failed (HTTP {status})")
+
+    monkeypatch.setattr(a5_control, "api", unavailable)
+    monkeypatch.setattr(a5_control.time, "sleep", lambda _: None)
+    with pytest.raises(subprocess.CalledProcessError):
+        a5_control.update_check(REPO, "123", {"status": "completed"})
+    assert (
+        calls == [(f"repos/{REPO}/check-runs/123", {"status": "completed"}, {"method": "PATCH"})] * attempts
+    )
+
+
+def test_a5_device_rerun_refreshes_previous_attempt(a5_control, monkeypatch):
+    run = {
+        "id": 1234,
+        "run_attempt": 2,
+        "event": "issue_comment",
+        "head_branch": "main",
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "status": "in_progress",
+    }
+    check = {"name": "ci/a5-distributed", "external_id": "1234", "details_url": "old"}
+    writes = []
+
+    def api(path, payload=None, **kwargs):
+        if payload:
+            writes.append((path, payload))
+            check.update(payload)
+            return None
+        if path.endswith("/runs/1234"):
+            return run
+        assert path.endswith("/check-runs/987")
+        return check
+
+    monkeypatch.setattr(a5_control, "api", api)
+    monkeypatch.setattr(
+        a5_control,
+        "pages",
+        lambda *_: [{"name": "onboard-tests-a5-distributed / check 987", "run_attempt": 2}],
+    )
+    a5_control.reopen(REPO, run)
+    # If completion won the writer queue, a delayed observer must leave it terminal.
+    check["status"] = "completed"
+    a5_control.reopen(REPO, run)
+    assert len(writes) == 1
+    assert writes[0][1]["status"] == "in_progress"
+    assert writes[0][1]["details_url"].endswith("/runs/1234/attempts/2")
 
 
 def test_a5_distributed_requires_its_own_comment(control):
@@ -3046,7 +3127,8 @@ def test_a5_distributed_requires_its_own_comment(control):
     assert set(workflow[True]) == {"issue_comment"}
     assert "github.event.issue.number" in workflow["run-name"]
     assert "contains(" in jobs["changes"]["if"]
-    assert workflow["concurrency"]["cancel-in-progress"] is False
+    assert "concurrency" not in workflow
+    assert jobs[job]["concurrency"]["cancel-in-progress"] is False
     assert workflow["permissions"] == {}
     for name in ("toolchain", "onboard-tests-a5-distributed"):
         assert jobs[name]["permissions"] == {"contents": "read"}
