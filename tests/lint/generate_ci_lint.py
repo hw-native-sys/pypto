@@ -42,19 +42,14 @@ jobs:
 """
 
 
-def job_blocks(source: str) -> dict[str, str]:
+def render(source: str) -> str:
     """Select complete top-level job blocks without rewriting their YAML or shell."""
     jobs = source.split("\njobs:\n", 1)[1]
     matches = list(re.finditer(r"(?m)^  ([a-z][a-z0-9-]*):\n", jobs))
-    return {
+    blocks = {
         match[1]: jobs[match.start() : matches[index + 1].start() if index + 1 < len(matches) else len(jobs)]
         for index, match in enumerate(matches)
     }
-
-
-def render(source: str) -> str:
-    """Render the automatic lint workflow."""
-    blocks = job_blocks(source)
     # The allowlist is deliberate: adding a full test never adds a skipped PR job.
     return HEADER + "".join(blocks[name] for name in LINT_JOBS).rstrip() + "\n"
 

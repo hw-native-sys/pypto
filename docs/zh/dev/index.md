@@ -39,7 +39,7 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 在以 `main` 为目标的开放 PR 对话区新发一条 `/ci a5-distributed` 评论，
 即可对该 PR 的临时合并版本单独运行 `onboard-tests-a5-distributed`。
 PR 最新提交上的 `ci/a5-distributed` 检查链接到运行记录和测试产物。
-测试选择与完整 CI 一致：如果 PR 包含 `tests/st/distributed/test_l3_urma_async.py`，
+此任务仅由该评论命令触发。如果 PR 包含 `tests/st/distributed/test_l3_urma_async.py`，
 则运行四卡 A5 测试；否则运行占位测试。占位测试通过不代表已验证硬件行为。
 
 ## 评论触发完整 CI
@@ -115,7 +115,7 @@ head 未变时不会重新运行 lint；full 测试固定的主线合并版本�
 
 后续运行跳过两个 lint 任务，轻量门禁确认复用有效后再启动测试；版本校验和工具链
 准备仍会执行。Full 包括复用的 lint 结果、wheel 预热、单元、示例、代码生成、系统、分布式、pypto-lib
-以及 A5（含分布式）/模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
+以及 A5 板上测试及模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
 时适用；`serving-guard` 仅在 `PTOAS_VERSION` 变更时适用。Wheel 预热失败不单独
 阻止合入，因为测试任务可以自行构建；所有适用测试都必须成功。
 

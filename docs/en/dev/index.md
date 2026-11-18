@@ -41,7 +41,7 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 On an open PR targeting `main`, post `/ci a5-distributed` as a new conversation
 comment to run `onboard-tests-a5-distributed` on the PR's test merge. The
 `ci/a5-distributed` check on the PR head links to the run and its artifacts.
-The job uses the same test selection as full CI. When the PR contains
+Only the dedicated comment requests this job. When the PR contains
 `tests/st/distributed/test_l3_urma_async.py`, it runs the four-card A5 suite.
 Otherwise it runs the bootstrap placeholder. A passing placeholder does not
 verify hardware behavior.
@@ -151,7 +151,7 @@ while reusing lint for that head.
 The downstream run skips both lint jobs. A lightweight gate verifies their
 reuse before tests start; revision checks and toolchain preparation still run.
 Full includes the reused lint result, wheel warm-up, unit, example, codegen, system, distributed,
-pypto-lib and A5 tests (including the distributed lane), plus simulator tests. Core tests execute even for documentation-only
+pypto-lib and A5 onboard tests, plus simulator tests. Core tests execute even for documentation-only
 PRs. `docs-examples` applies when documentation changes; `serving-guard` applies
 when `PTOAS_VERSION` changes. A failed wheel warm-up is advisory because test
 jobs build locally if necessary; every applicable test must succeed.

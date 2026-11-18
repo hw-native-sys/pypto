@@ -94,11 +94,10 @@ def needs(control):
     return result
 
 
-@pytest.mark.parametrize("job", ["system-tests", "onboard-tests-a5-distributed"])
+@pytest.mark.parametrize("job", ["system-tests", "onboard-tests-a5"])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_required_core_results_block_merge(control, needs, job, result):
-    # Moving the new A5 lane out of ci.yml must preserve its required status,
-    # including a skipped job: GitHub alone would treat that as satisfied.
+    # A skipped required job must still block the aggregate merge check.
     assert job in control.REQUIRED
     needs[job]["result"] = result
     with pytest.raises(ValueError, match=job):
@@ -3035,15 +3034,13 @@ def test_a5_result_requires_every_dependency(a5_control, monkeypatch, result, jo
     assert payload["conclusion"] == ("success" if result == "success" else "failure")
 
 
-def test_a5_workflow_is_independent_and_reuses_full_device_steps(monkeypatch):
-    monkeypatch.syspath_prepend(str(ROOT / "tests/lint"))
-    generator = importlib.import_module("generate_ci_a5_distributed")
-
-    source = (ROOT / ".github/workflows/ci-full.yml").read_text()
-    target = (ROOT / ".github/workflows/ci-a5-distributed.yml").read_text()
-    assert generator.render(source) == target
-    full = yaml.safe_load(source)["jobs"]
-    workflow = yaml.safe_load(target)
+def test_a5_distributed_requires_its_own_comment(control):
+    job = "onboard-tests-a5-distributed"
+    full = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())["jobs"]
+    assert job not in full
+    assert job not in full["full-result"]["needs"]
+    assert job not in control.REQUIRED
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-a5-distributed.yml").read_text())
     jobs = workflow["jobs"]
     assert set(jobs) == {"changes", "toolchain", "onboard-tests-a5-distributed", "result"}
     assert set(workflow[True]) == {"issue_comment"}
@@ -3052,14 +3049,10 @@ def test_a5_workflow_is_independent_and_reuses_full_device_steps(monkeypatch):
     assert workflow["concurrency"]["cancel-in-progress"] is False
     assert workflow["permissions"] == {}
     for name in ("toolchain", "onboard-tests-a5-distributed"):
-        assert jobs[name]["steps"] == full[name]["steps"]
         assert jobs[name]["permissions"] == {"contents": "read"}
         assert "checkout_sha != ''" in jobs[name]["if"]
     assert jobs["onboard-tests-a5-distributed"]["needs"] == ["changes", "toolchain"]
-    assert (
-        jobs["onboard-tests-a5-distributed"]["timeout-minutes"]
-        == full["onboard-tests-a5-distributed"]["timeout-minutes"]
-    )
+    assert jobs["toolchain"]["steps"] == full["toolchain"]["steps"]
     for name in ("changes", "result"):
         checkout = jobs[name]["steps"][0]["with"]
         assert checkout["ref"] == "${{ github.workflow_sha }}"
