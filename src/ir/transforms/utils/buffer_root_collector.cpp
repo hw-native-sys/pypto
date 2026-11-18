@@ -307,7 +307,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
   const auto returned_params = return_lineage::ReturnedParamIndices(callee, program_);
   std::vector<OutputRoot> projections(tuple->types_.size());
   for (size_t i = 0; i < projections.size(); ++i) {
-    if (!As<TensorType>(tuple->types_[i])) continue;
+    if (!AsTensorTypeLike(tuple->types_[i])) continue;
     const auto arg_count = call->args_.size();
     const auto param = i < returned_params.size() ? returned_params[i].value_or(arg_count) : arg_count;
     if (param < arg_count) {

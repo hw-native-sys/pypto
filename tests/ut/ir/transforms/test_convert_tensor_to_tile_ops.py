@@ -8836,6 +8836,51 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(before)
         ir.assert_structural_equal(after, expected)
 
+    def test_distributed_tuple_return_preserves_inout_backing_parameter(self):
+        """A write through a projected DistributedTensor upgrades its caller parameter."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def produce(
+                self,
+                a: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                b: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+            ) -> tuple[pld.DistributedTensor[[64], pl.FP32], pld.DistributedTensor[[64], pl.FP32]]:
+                return a, b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def consume(
+                self, value: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, a: pld.DistributedTensor[[64], pl.FP32], b: pld.DistributedTensor[[64], pl.FP32]):
+                u, _unused = self.produce(a, b)
+                self.consume(u)
+
+        main = _require_function(Before, "main")
+        a, b = main.params
+        expected_main = ir.Function(
+            "main",
+            [(a, ir.ParamDirection.InOut), (b, ir.ParamDirection.Out)],
+            main.return_types,
+            main.body,
+            main.span,
+            main.func_type,
+            main.level,
+            main.role,
+            main.attrs,
+        )
+        Expected = ir.Program(
+            [_require_function(Before, "produce"), _require_function(Before, "consume"), expected_main],
+            Before.name,
+            Before.span,
+        )
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(after, Expected)
+
 
 class TestTensorCastConversion:
     def test_saturation_mode_survives_tensor_to_tile_lowering(self):
