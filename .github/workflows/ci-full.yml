@@ -2247,8 +2247,9 @@ jobs:
     # because the job also runs ordinary and MX matmul ST on the same
     # npu-a5 card. The steps share one checkout and install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
-    #   2. mx-tests-a5           — ordinary and MX matmul plus on-board quantization
-    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
+    #   2. gemv-tests-a5         — ordinary GEMV across FP8 and wide operands
+    #   3. mx-tests-a5           — ordinary and MX matmul plus on-board quantization
+    #   4. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2403,6 +2404,19 @@ jobs:
               tests/st/runtime/cross_core/test_w2_fp4_nz_mx_scale.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               tests/st/runtime/ops/test_rsqrt.py::test_a5_rsqrt_precision_ulp \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: gemv-tests-a5
+        timeout-minutes: 35
+        # Prevent pytest-forked workers from inheriting a Torch thread pool
+        # whose threads stay with the parent after fork.
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 900 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              OMP_NUM_THREADS=1 python -m pytest \
+              tests/st/runtime/ops/test_gemv_a5.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5
