@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/hash.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -128,12 +129,17 @@ const Var* ResolveAnyRoot(const ExprPtr& arg,
 /// function parameters; either kind needs WAW chaining when a prior sibling
 /// already wrote to the same root.
 ///
-/// Index each candidate set once. Branches only snapshot which sets are
-/// active, and combine their possible writes on exit.
+/// A persistent bit trie records the storage roots already written. Branches
+/// share their incoming trie and merge their writes at the join.
 class PriorWriterCollector {
  public:
   PriorWriterCollector(ProgramPtr program, const BufferRootCollector& buffer_roots)
-      : program_(std::move(program)), buffer_roots_(buffer_roots) {}
+      : program_(std::move(program)), buffer_roots_(buffer_roots) {
+    // Every owning storage Var has an entry in buffer_roots. The number of
+    // mapped vars bounds the number of roots the writer scan can encounter.
+    const auto root_bound = buffer_roots_.buffer_roots.size();
+    while (root_mask_ <= root_bound / 2) root_mask_ <<= 1;
+  }
 
   void Run(const StmtPtr& body) { AnalyzeScope(body); }
 
@@ -150,74 +156,92 @@ class PriorWriterCollector {
 
  private:
   using RootCandidates = std::vector<const Var*>;
-  using CandidateSets = std::unordered_set<const RootCandidates*>;
+  using WriteSet = size_t;
+  using NodePair = std::pair<WriteSet, WriteSet>;
 
-  struct CandidateState {
-    std::unordered_map<const RootCandidates*, size_t> successors;
-    std::unordered_map<const Var*, bool> prior_writers;
+  static constexpr WriteSet kEmpty = 0;
+  static constexpr WriteSet kLeaf = 1;
+
+  struct NodePairHash {
+    size_t operator()(const NodePair& pair) const { return hash_combine(pair.first, pair.second); }
   };
+
+  struct RootLocation {
+    size_t offset;
+    WriteSet singleton;
+  };
+
+  WriteSet InternNode(NodePair children) {
+    const auto [node, inserted] = trie_nodes_.try_emplace(children, trie_children_.size());
+    if (inserted) trie_children_.push_back(children);
+    return node->second;
+  }
+
+  WriteSet MergeWrites(WriteSet left, WriteSet right) {
+    if (left == kEmpty || left == right) return right;
+    if (right == kEmpty) return left;
+    if (left > right) std::swap(left, right);
+
+    const NodePair inputs{left, right};
+    const auto cached = trie_unions_.find(inputs);
+    if (cached != trie_unions_.end()) return cached->second;
+
+    // Copy the child IDs: recursively interning nodes can reallocate the table.
+    const auto [left_zero, left_one] = trie_children_[left];
+    const auto [right_zero, right_one] = trie_children_[right];
+    const auto zero = MergeWrites(left_zero, right_zero);
+    const auto one = MergeWrites(left_one, right_one);
+    const auto merged = InternNode({zero, one});
+    trie_unions_.emplace(inputs, merged);
+    return merged;
+  }
+
+  WriteSet Singleton(const Var* root) {
+    const auto [entry, inserted] =
+        root_locations_.try_emplace(root, RootLocation{root_locations_.size(), kLeaf});
+    auto& location = entry->second;
+    if (inserted) {
+      INTERNAL_CHECK(location.offset / root_mask_ < 2) << "Prior-writer root is outside the trie";
+      for (size_t bit = 1; bit <= root_mask_; bit <<= 1) {
+        const auto child = location.singleton;
+        location.singleton =
+            (location.offset & bit) ? InternNode({kEmpty, child}) : InternNode({child, kEmpty});
+      }
+    }
+    return location.singleton;
+  }
 
   void RememberWrites(const RootCandidates& candidates) {
     if (candidates.empty()) return;
-    if (candidates.size() == 1) {
-      if (!seen_roots_.insert(candidates.front()).second) return;
-    } else {
-      if (!active_candidate_sets_.insert(&candidates).second) return;
-      // The same set activated from the same snapshot has the same successor,
-      // including when a sibling replays the activation after a rollback.
-      auto& successors = candidate_states_[active_candidate_state_].successors;
-      const auto [state, inserted] = successors.try_emplace(&candidates, candidate_states_.size());
-      active_candidate_state_ = state->second;
-      if (inserted) candidate_states_.emplace_back();
-      if (indexed_candidates_.insert(&candidates).second) {
-        for (const auto* root : candidates) candidate_writers_[root].insert(&candidates);
+    const auto [footprint, inserted] = write_footprints_.try_emplace(&candidates, kEmpty);
+    if (inserted) {
+      for (const auto* root : candidates) {
+        footprint->second = MergeWrites(footprint->second, Singleton(root));
       }
     }
-    write_history_.push_back(&candidates);
+    active_writes_ = MergeWrites(active_writes_, footprint->second);
   }
 
-  bool HasPriorWriter(const Var* root) {
-    if (seen_roots_.count(root) != 0) return true;
-    if (active_candidate_sets_.empty()) return false;
-    const auto candidates = candidate_writers_.find(root);
-    if (candidates == candidate_writers_.end()) return false;
-    auto& reads = candidate_states_[active_candidate_state_].prior_writers;
-    const auto [query, inserted] = reads.try_emplace(root, false);
-    if (inserted) {
-      // Iterate over active sets when there are fewer of those. A sibling
-      // with one active set should not pay for a long history of inactive sets.
-      const auto& incident = candidates->second;
-      const bool scan_active = active_candidate_sets_.size() < incident.size();
-      const auto& smaller = scan_active ? active_candidate_sets_ : incident;
-      const auto& larger = scan_active ? incident : active_candidate_sets_;
-      query->second = std::any_of(smaller.begin(), smaller.end(),
-                                  [&](const auto* set) { return larger.count(set) != 0; });
+  bool HasPriorWriter(const Var* root) const {
+    const auto location = root_locations_.find(root);
+    if (location == root_locations_.end()) return false;
+    auto node = active_writes_;
+    for (size_t bit = root_mask_; bit != 0 && node != kEmpty; bit >>= 1) {
+      const auto& [zero, one] = trie_children_[node];
+      node = (location->second.offset & bit) ? one : zero;
     }
-    return query->second;
+    return node == kLeaf;
   }
 
   void AnalyzeIf(const IfStmtPtr& stmt) {
-    const auto prior_writes = write_history_.size();
-    const auto prior_candidate_state = active_candidate_state_;
+    const auto prior_writes = active_writes_;
     AnalyzeScope(stmt->then_body_);
     if (!stmt->else_body_.has_value() || !stmt->else_body_.value()) return;
 
-    // Roll back only insertions made by the then branch. Keep its potential
-    // writes so they can be merged after analyzing the else.
-    const auto then_begin = write_history_.cbegin() + static_cast<std::ptrdiff_t>(prior_writes);
-    const std::vector<const RootCandidates*> then_writes(then_begin, write_history_.cend());
-    while (write_history_.size() > prior_writes) {
-      const auto* candidates = write_history_.back();
-      if (candidates->size() == 1) {
-        seen_roots_.erase(candidates->front());
-      } else {
-        active_candidate_sets_.erase(candidates);
-      }
-      write_history_.pop_back();
-    }
-    active_candidate_state_ = prior_candidate_state;
+    const auto then_writes = active_writes_;
+    active_writes_ = prior_writes;
     AnalyzeScope(stmt->else_body_.value());
-    for (const auto* candidates : then_writes) RememberWrites(*candidates);
+    active_writes_ = MergeWrites(then_writes, active_writes_);
   }
 
   void AnalyzeScope(const StmtPtr& stmt) {
@@ -270,13 +294,14 @@ class PriorWriterCollector {
 
   ProgramPtr program_;
   const BufferRootCollector& buffer_roots_;
-  std::unordered_set<const Var*> seen_roots_;
-  CandidateSets active_candidate_sets_;
-  CandidateSets indexed_candidates_;
-  std::unordered_map<const Var*, CandidateSets> candidate_writers_;
-  size_t active_candidate_state_ = 0;
-  std::vector<CandidateState> candidate_states_{1};
-  std::vector<const RootCandidates*> write_history_;
+  size_t root_mask_ = 1;
+  WriteSet active_writes_ = kEmpty;
+  std::unordered_map<const Var*, RootLocation> root_locations_;
+  std::unordered_map<const RootCandidates*, WriteSet> write_footprints_;
+  // Index 0 is empty at any depth. Index 1 is an occupied leaf.
+  std::vector<NodePair> trie_children_{2};
+  std::unordered_map<NodePair, WriteSet, NodePairHash> trie_nodes_;
+  std::unordered_map<NodePair, WriteSet, NodePairHash> trie_unions_;
 };
 
 /// IRMutator that rewrites every non-builtin Call in a function body and writes

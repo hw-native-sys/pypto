@@ -266,10 +266,15 @@ void BufferRootCollector::MergeRootCandidates(const VarPtr& var, std::vector<con
       if (seen.insert(root).second) merged.push_back(root);
     }
   }
-  root_candidates_.push_back(std::move(merged));
-  const auto& roots = root_candidates_.back();
-  merged_candidates_.emplace(std::move(inputs), &roots);
-  BindRootCandidates(var, roots, unresolved);
+  // The merge preserves the first list's order. If it added no roots,
+  // keep that identity so a chain of equivalent joins can reuse the union.
+  const auto* roots = inputs.front();
+  if (merged.size() != roots->size()) {
+    root_candidates_.push_back(std::move(merged));
+    roots = &root_candidates_.back();
+  }
+  merged_candidates_.emplace(std::move(inputs), roots);
+  BindRootCandidates(var, *roots, unresolved);
 }
 
 std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOutputRoots(
