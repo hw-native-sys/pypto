@@ -136,6 +136,7 @@ class PriorWriterCollector {
   PriorWriterCollector(ProgramPtr program, const BufferRootCollector& buffer_roots)
       : program_(std::move(program)), buffer_roots_(buffer_roots) {
     const auto bound = buffer_roots_.RootSets().size();
+    coverage_.resize(bound, kEmpty);
     while (root_mask_ <= bound / 2) root_mask_ <<= 1;
   }
 
@@ -207,37 +208,54 @@ class PriorWriterCollector {
     return node == kLeaf;
   }
 
+  WriteSet CandidateCoverage(RootSetId id) {
+    if (coverage_[id] != kEmpty) return coverage_[id];
+
+    const auto& sets = buffer_roots_.RootSets();
+    // Visits are postorder so shared operands are materialized once, and a
+    // long chain of unions does not need a deep native call stack.
+    std::vector<RootSetId> pending{id};
+    while (!pending.empty()) {
+      const auto current = pending.back();
+      const auto& set = sets[current];
+      if (coverage_[current] != kEmpty) {
+        pending.pop_back();
+      } else if (!set.root && coverage_[set.left] == kEmpty) {
+        pending.push_back(set.left);
+      } else if (!set.root && coverage_[set.right] == kEmpty) {
+        pending.push_back(set.right);
+      } else {
+        const auto operands = set.root ? kEmpty : MergeWrites(coverage_[set.left], coverage_[set.right]);
+        coverage_[current] = InsertWrite(operands, current, root_mask_);
+        pending.pop_back();
+      }
+    }
+    return coverage_[id];
+  }
+
   void RememberWrites(RootSetId candidates) {
     if (candidates == 0 || HasWritten(candidates)) return;
+
     const auto& sets = buffer_roots_.RootSets();
-    if (sets[candidates].root) {
-      active_writes_ = InsertWrite(active_writes_, candidates, root_mask_);
-      return;
-    }
-
-    const NodePair key{active_writes_, candidates};
-    const auto cached = applied_writes_.find(key);
-    if (cached != applied_writes_.end()) {
-      active_writes_ = cached->second;
-      return;
-    }
-
-    // Mark a union as covered along with its leaves. Separate unions sharing
-    // operands can reuse the same coverage instead of enumerating their roots
-    // again. Use an explicit worklist for long chains of joins.
     std::vector<RootSetId> pending{candidates};
     while (!pending.empty()) {
       const auto id = pending.back();
       pending.pop_back();
       if (HasWritten(id)) continue;
-      active_writes_ = InsertWrite(active_writes_, id, root_mask_);
       const auto& set = sets[id];
-      if (!set.root) {
+      if (set.root) {
+        active_writes_ = InsertWrite(active_writes_, id, root_mask_);
+      } else if (coverage_[id] != kEmpty || (!HasWritten(set.left) && !HasWritten(set.right))) {
+        // A saved summary is independent of writes already active in this arm.
+        active_writes_ = MergeWrites(active_writes_, CandidateCoverage(id));
+      } else {
+        // Keep a partially covered join lazy. In particular, pairs of
+        // already-covered, interleaved groups need only record the parent.
+        active_writes_ = InsertWrite(active_writes_, id, root_mask_);
         pending.push_back(set.left);
         pending.push_back(set.right);
       }
     }
-    applied_writes_.emplace(key, active_writes_);
   }
 
   void AnalyzeIf(const IfStmtPtr& stmt) {
@@ -307,7 +325,7 @@ class PriorWriterCollector {
   std::vector<NodePair> trie_children_{2};
   std::unordered_map<NodePair, WriteSet, NodePairHash> trie_nodes_;
   std::unordered_map<NodePair, WriteSet, NodePairHash> trie_unions_;
-  std::unordered_map<NodePair, WriteSet, NodePairHash> applied_writes_;
+  std::vector<WriteSet> coverage_;
 };
 
 /// IRMutator that rewrites every non-builtin Call in a function body and writes
