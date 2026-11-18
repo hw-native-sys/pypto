@@ -246,7 +246,7 @@ class TestTensorMatmulMx:
         operands = self._packed_operands(lhs_layout=pl.DN)
         operands[index] = self._with_valid_shape(operands[index], layout, valid)
         with pytest.raises(ValueError, match=f"requires {scale} valid shape to match logical data validity"):
-            ir.op.tensor.matmul_mx(*operands)
+            ir.op.tensor.matmul_mx(operands[0], operands[1], operands[2], operands[3])
 
     @pytest.mark.parametrize(
         "index,layout,valid,scale",
@@ -259,7 +259,7 @@ class TestTensorMatmulMx:
         operands = self._packed_operands()
         operands[index] = self._with_valid_shape(operands[index], layout, valid)
         with pytest.raises(ValueError, match=f"requires {scale} to be fully valid"):
-            ir.op.tensor.matmul_mx(*operands)
+            ir.op.tensor.matmul_mx(operands[0], operands[1], operands[2], operands[3])
 
     def test_packed_mx_a_nd_requires_all_scale_groups(self):
         lhs, lhs_scale, rhs, rhs_scale = self._packed_operands()
