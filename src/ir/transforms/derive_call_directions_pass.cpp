@@ -167,8 +167,8 @@ class PriorWriterCollector {
 
     // Roll back only insertions made by the then branch. Keep its candidate
     // sets so its potential writes can be merged after analyzing the else.
-    const std::vector<const RootCandidates*> then_writes(candidate_history_.begin() + prior_candidates,
-                                                         candidate_history_.end());
+    const auto then_begin = candidate_history_.cbegin() + static_cast<std::ptrdiff_t>(prior_candidates);
+    const std::vector<const RootCandidates*> then_writes(then_begin, candidate_history_.cend());
     while (candidate_history_.size() > prior_candidates) {
       seen_candidates_.erase(candidate_history_.back());
       candidate_history_.pop_back();
