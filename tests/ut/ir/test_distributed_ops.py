@@ -35,6 +35,7 @@ from pypto.language.distributed.op import tensor_ops as dsl_tensor_ops
 from pypto.language.distributed.op import unified_ops as dsl_unified
 from pypto.language.distributed.op.tensor_ops import _validate_chunk, _validate_pipeline
 from pypto.language.distributed.typing.distributed_tensor import DistributedTensor
+from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import ir as _ir
 
 
@@ -2874,26 +2875,32 @@ def test_put_async_returns_dst_type():
     ir.assert_structural_equal(call.type, dst.type)
 
 
-def test_put_async_rejects_plain_tensor_src():
-    """Both async endpoints are window-bound; a plain Tensor src is rejected."""
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize("surface", ["raw", "ir", "dsl"])
+@pytest.mark.parametrize("region", [False, True])
+def test_async_transfer_accepts_plain_local_tensor(op_name, surface, region):
+    """Local tensors are accepted through every API and preserve dst's type."""
     span = ir.Span.unknown()
-    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
-    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
-    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
-
-    with pytest.raises(ValueError, match="window-bound"):
-        ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
-
-
-def test_get_async_rejects_plain_tensor_dst():
-    """GET also requires a window-bound destination in V1."""
-    span = ir.Span.unknown()
-    dst = _make_tensor_var("dst", [16, 64], DataType.FP16, span)
-    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
-    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
-
-    with pytest.raises(ValueError, match="window-bound"):
-        ir.create_op_call("pld.tensor.get_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+    local = _make_tensor_var("local", [16, 64], DataType.FP16, span)
+    remote = _make_distributed_tensor_var("remote", [16, 64], DataType.FP16, span)
+    dst, src = (remote, local) if op_name == "put_async" else (local, remote)
+    kwargs = dict(dst_offsets=[1, 0], src_offsets=[2, 0], shape=[1, 64]) if region else {}
+    if surface == "raw":
+        args: list[ir.Expr] = [dst, ir.ConstInt(1, DataType.INT32, span), src]
+        args.extend(_make_shape_tuple(values, span) for values in kwargs.values())
+        call = ir.create_op_call(f"pld.tensor.{op_name}", args, {"engine": int(ir.CommEngine.URMA)}, span)
+    elif surface == "ir":
+        call = getattr(dist_tensor_ops, op_name)(dst, 1, src, **kwargs)
+    else:
+        local_wrapper = Tensor(expr=local)
+        remote_wrapper = DistributedTensor(expr=remote)
+        dst_wrapper, src_wrapper = (
+            (remote_wrapper, local_wrapper) if op_name == "put_async" else (local_wrapper, remote_wrapper)
+        )
+        result = getattr(dsl_tensor_ops, op_name)(dst_wrapper, 1, src_wrapper, **kwargs)
+        assert isinstance(result, DistributedTensor) == (op_name == "put_async")
+        call = result.unwrap()
+    ir.assert_structural_equal(call.type, dst.type)
 
 
 def test_async_transfer_requires_urma_engine():
@@ -3005,7 +3012,8 @@ def test_put_async_accepts_leading_dimension_subregion():
     ir.assert_structural_equal(call.type, dst.type)
 
 
-def test_put_async_rejects_non_dense_endpoint_view():
+@pytest.mark.parametrize("tensor_type", [ir.TensorType, ir.DistributedTensorType])
+def test_put_async_rejects_non_dense_endpoint_view(tensor_type):
     """A strided view is not one contiguous GM range; V1 has no packing."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", [2, 64], DataType.FP16, span)
@@ -3015,7 +3023,7 @@ def test_put_async_rejects_non_dense_endpoint_view():
     view = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
     src = ir.Var(
         "src",
-        ir.DistributedTensorType(shape, DataType.FP16, tensor_view=view),
+        tensor_type(shape, DataType.FP16, tensor_view=view),
         span,
     )
 
@@ -3023,7 +3031,8 @@ def test_put_async_rejects_non_dense_endpoint_view():
         ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
 
 
-def test_put_async_rejects_non_nd_implicit_layout():
+@pytest.mark.parametrize("tensor_type", [ir.TensorType, ir.DistributedTensorType])
+def test_put_async_rejects_non_nd_implicit_layout(tensor_type):
     """An implicit (empty-stride) DN/NZ view is not dense row-major."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
@@ -3032,7 +3041,7 @@ def test_put_async_rejects_non_nd_implicit_layout():
     view = ir.TensorView(layout=ir.TensorLayout.DN)
     src = ir.Var(
         "src",
-        ir.DistributedTensorType(shape, DataType.FP16, tensor_view=view),
+        tensor_type(shape, DataType.FP16, tensor_view=view),
         span,
     )
 
@@ -3218,6 +3227,7 @@ def test_get_async_requires_region_args_together():
 
 
 @pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize("plain_local", [False, True])
 @pytest.mark.parametrize(
     "dst_shape, src_shape, dst_dtype, src_dtype, region, match",
     [
@@ -3230,12 +3240,17 @@ def test_get_async_requires_region_args_together():
     ],
 )
 def test_async_transfer_rejects_invalid_shape_or_region(
-    op_name, dst_shape, src_shape, dst_dtype, src_dtype, region, match
+    op_name, plain_local, dst_shape, src_shape, dst_dtype, src_dtype, region, match
 ):
     """Dtype/rank/full-slice shape and static-region bounds share the transfer validators."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", dst_shape, dst_dtype, span)
     src = _make_distributed_tensor_var("src", src_shape, src_dtype, span)
+    if plain_local:
+        if op_name == "put_async":
+            src = _make_tensor_var("src", src_shape, src_dtype, span)
+        else:
+            dst = _make_tensor_var("dst", dst_shape, dst_dtype, span)
     peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
     args: list[ir.Expr] = [dst, peer, src]
     if region is not None:

@@ -45,7 +45,7 @@ from typing import overload
 
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
 from pypto.language.typing import IntLike, Ptr
-from pypto.language.typing.tensor import Tensor
+from pypto.language.typing.tensor import Tensor, TensorT
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, CommEngine, Expr, ReduceOp
@@ -604,7 +604,7 @@ def get(
 def put_async(
     dst: DistributedTensor,
     peer: IntLike,
-    src: DistributedTensor,
+    src: Tensor | DistributedTensor,
     dst_offsets: Sequence[IntLike] | None = None,
     src_offsets: Sequence[IntLike] | None = None,
     shape: Sequence[IntLike] | None = None,
@@ -613,8 +613,9 @@ def put_async(
 ) -> DistributedTensor:
     """Asynchronously write the local ``src`` into the peer rank's ``dst`` slice.
 
-    Both ``dst`` and ``src`` must be window-bound :class:`DistributedTensor`s;
-    V1 does not register ordinary tensors or stage through UB.
+    ``dst`` must be a window-bound :class:`DistributedTensor`; ``src`` may be
+    a plain :class:`Tensor` or a distributed tensor from another domain.
+    The caller supplies memory accessible to URMA; no registration or staging is added.
 
     Returns ``dst`` (the result aliases the destination). Returning does **not**
     mean the transfer completed: completion is owned by the enclosing task and
@@ -629,7 +630,8 @@ def put_async(
     range: skip leading singleton transfer dimensions, then require every
     dimension after the first non-singleton to span its full extent.
     """
-    dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.put_async", dst=dst, src=src)
+    (dst_expr,) = _unwrap_distributed_tensors("pld.tensor.put_async", dst=dst)
+    src_expr = _unwrap(src)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tensor.put_async dst_offsets, src_offsets, and shape must be provided together")
@@ -652,7 +654,7 @@ def put_async(
 
 
 def get_async(
-    dst: DistributedTensor,
+    dst: TensorT,
     peer: IntLike,
     src: DistributedTensor,
     dst_offsets: Sequence[IntLike] | None = None,
@@ -660,11 +662,12 @@ def get_async(
     shape: Sequence[IntLike] | None = None,
     *,
     engine: CommEngine = CommEngine.URMA,
-) -> DistributedTensor:
+) -> TensorT:
     """Asynchronously read the peer rank's ``src`` slice into local ``dst``.
 
-    Both ``dst`` and ``src`` must be window-bound :class:`DistributedTensor`s;
-    V1 does not register ordinary tensors or stage through UB.
+    ``src`` must be a window-bound :class:`DistributedTensor`; ``dst`` may be
+    a plain :class:`Tensor` or a distributed tensor from another domain.
+    The caller supplies memory accessible to URMA; no registration or staging is added.
 
     Returns ``dst`` (the result aliases the destination). Returning does **not**
     mean the data has arrived: completion is owned by the enclosing task and
@@ -678,7 +681,8 @@ def get_async(
     range: skip leading singleton transfer dimensions, then require every
     dimension after the first non-singleton to span its full extent.
     """
-    dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.get_async", dst=dst, src=src)
+    (src_expr,) = _unwrap_distributed_tensors("pld.tensor.get_async", src=src)
+    dst_expr = _unwrap(dst)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tensor.get_async dst_offsets, src_offsets, and shape must be provided together")
@@ -697,7 +701,7 @@ def get_async(
             _normalize_intlike(shape),
             engine=engine,
         )
-    return DistributedTensor(expr=call)
+    return dst.__class__(expr=call)
 
 
 @overload
