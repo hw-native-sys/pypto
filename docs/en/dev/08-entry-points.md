@@ -51,7 +51,8 @@ accepted by direct calls; process initialization owns runtime settings.
 no kernel initialization. Use its returned `CompiledProgram` for explicit program
 execution, including host tensors, simulation or distributed execution. PROGRAM
 and KERNEL share the compiler/cache implementation but have distinct capability
-keys. Capture/replay is unsupported even after warmup. See
+keys. Capture/replay requires eager warmup of each specialization; the original
+Torch graph context owns recording and replay. See
 [Torch eager kernel execution](runtime/kernel-mode.md) for queue ordering,
 resource lifetime and verification boundaries.
 

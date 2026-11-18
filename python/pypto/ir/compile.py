@@ -669,8 +669,10 @@ def _compile_to_files(  # noqa: PLR0913
         effective_backend_type = pipeline.backend_type
         effective_runtime = pipeline.runtime
 
+        kernel_scalar_count = 0
         if contract is ArtifactExecutionMode.KERNEL:
             lowered, _, _ = _extract_func_param_infos(entry_function(transformed_program))
+            kernel_scalar_count = sum(param.shape is None for param in lowered)
             assert logical is not None
             lowered = external_parameter_names(logical, lowered)
             validate_lowered_signature(logical, lowered)
@@ -689,6 +691,7 @@ def _compile_to_files(  # noqa: PLR0913
                     emit_source_loc=emit_source_loc,
                     dump_ptoas_passes=dump_ptoas_passes,
                     runtime=effective_runtime,
+                    **({"kernel_entry_scalar_count": kernel_scalar_count} if kernel_scalar_count else {}),
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

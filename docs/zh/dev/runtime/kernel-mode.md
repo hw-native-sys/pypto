@@ -80,6 +80,10 @@ typed scalar 接口传入，由 Simpler 完成 ABI 编码。
 Runtime 能力检查在显式 Torch kernel 初始化时执行。生命周期层支持 Worker 初始化和
 callable 注册及 eager 提交；公开算子注册和 DFX 窗口留待后续迁移。
 
+KERNEL orchestration callable 的 signature 在 tensor direction 后追加 SCALAR 项，
+使 Simpler 能校验两个参数池的数量。PROGRAM 与 per-core 依赖 signature 仍保持仅含
+tensor 的约定。
+
 ## 进程初始化与生命周期
 
 内部 `runtime/kernel` 包按资源归属组织：
@@ -107,7 +111,7 @@ session 是生命周期适配层，不是独立执行引擎。Simpler 负责 cal
 Worker 的最小 1024 字节要求，不包含借用的 Tensor 存储。
 
 runtime submodule 跟随 upstream 的 Simpler revision
-`31f9e72ee6832cd198b77df18c1c305e7fd83676`。实际 native binding 的身份仍由既有
+`27fe21756a5230cc4cfe7e44fa360d07d782a111`。实际 native binding 的身份仍由既有
 `check_runtime_pin` 检查，包括身份缺失和显式跳过规则。能力检查要求公开 borrowed init、
 caller-stream prepare、Buffer/TaskArgs、PreparedSubmission 和 `flush_diagnostics` 接口；
 不查询旧 kernel supported bit 或私有 slot。接口检查和 UT 不构成设备执行正确性验证。
@@ -170,8 +174,8 @@ result = op(x, out, config=CompileOptions(execution_mode=ExecutionMode.ONBOARD))
 
 首次 eager 调用完成 specialization、逻辑签名校验、公共 passes/codegen、产物加载及
 assembly、callable 注册。后续调用复用兼容产物和 handle，runtime Scalar 改变不重编译。
-返回值为调用方 Tensor 的别名，允许重复别名，不分配业务输出。即使已 eager 预热，
-capture/replay 也在编译或注册前抛出 `NotImplementedError`。
+返回值为调用方 Tensor 的别名，允许重复别名，不分配业务输出。
+capture/replay 要求每个 specialization 已执行 eager 预热并完成注册；冷缓存 miss 会被拒绝。
 
 kernel 调用通过 `runtime.kernel.arguments.BorrowedArguments`，从校验后的 NPU
 CallFrame 构造 TaskArgs，并管理本次调用的 storage 租用，不进入 program 的
@@ -199,8 +203,9 @@ adapter 与 Simpler 必须一同构建：头文件从已安装包的
 `simpler_setup.environment.PROJECT_ROOT / "src/common/worker"` 获取，也支持 wheel assets。
 capsule 是同构建接口，不提供独立版本化 ABI。
 
-外层 JIT 返回、原生提交和设备完成是不同阶段。普通调用不排空 host 队列；done ticket
-仍需有界 `wait` 观察及 `safe_to_release` 证明才能释放外部所有者。入队抛异常时尝试取消，
+外层 JIT 返回、原生提交和设备完成是不同阶段。普通 eager ticket 仍需有界 `wait` 观察及
+`safe_to_release` 证明才能释放外部所有者。capture 外回收已销毁 graph 时可能同步历史工作，
+但新调用仍在入队后返回，不等待自身回调。入队抛异常时尝试取消，
 但取消本身不代表清理完成；已消费或清理未完成的 ticket 继续跟踪。显式 shutdown 等待剩余工作，
 Simpler 提交保留原有容量背压。
 
@@ -208,6 +213,64 @@ UT 使用真实初始化状态转换、JIT passes/codegen、公共产物发布/�
 仅模拟外部编译器输出和 native/framework 边界。UT 不证明可选 adapter 真实编译、
 实际 taskQueue/GIL/锁行为、allocator 安全或 NPU 数值正确性。下述依赖设备的 ST
 覆盖数值执行和队列排空回归；跳过的用例不能证明设备执行正确。
+
+## 原生 Torch graph capture
+
+每个 specialization 都必须先执行 eager 调用并同步，再进入 capture。`compile()` 和
+`warmup()` 使用 PROGRAM contract，不能代替 Kernel 注册。capture 只查找已有 KERNEL
+specialization 和 callable，不编译、不加载新 binary、不初始化 Worker。初始化时须关闭诊断。
+
+```python
+import torch
+import torch_npu
+import pypto.torch
+
+pypto.torch.init()
+op(x, out)  # Existing @pl.jit kernel, with caller-owned NPU input/output tensors.
+torch_npu.npu.synchronize()
+# Restore any InOut state changed by eager warmup before recording.
+graph = torch_npu.npu.NPUGraph()
+with torch_npu.npu.graph(graph):
+    op(x, out)
+graph.replay()
+torch_npu.npu.synchronize()
+graph.reset()
+op(x, out)  # Automatically reclaim the destroyed graph before enqueueing this call.
+torch_npu.npu.synchronize()
+```
+
+PyPTO 在每次调用时，通过不排空队列的 stream 查询获取当前 ACL model。session 按 model
+分组，使用 Simpler 同构建版本的 `_retain_model_resources(anchor)` 共享 model 销毁通知。
+每次调用仍独立持有 preparation、参数快照和资源。收到旧 model 的销毁通知后，其地址可被
+新 model 复用。PyPTO 不持有 Python graph 对象，也不修改或包装任何 `NPUGraph` 方法；
+capture begin/end、replay 和 reset 全由原生 torch_npu graph 上下文管理。
+
+capture 与 eager 使用相同的无 GIL native submit 回调，入队后返回输出别名，不等待回调。
+原生框架的 capture-end 边界负责在 RTS 结束录制前排空 host queue。replay 不进入 Python
+JIT。地址、scalar 值和 Host 决定的结构固定；按流顺序修改固定地址上的设备数据会影响
+后续 replay。并发 replay 未获验证。
+
+结束 capture 或同步一次 replay 均不代表 graph 不会再使用资源。captured ticket 持有
+Tensor/storage、stream 和 callable，直到收到 native model 销毁通知并完成受检清理。
+后续普通 `op()` 在自身回调入队前自动回收已销毁 graph 的资源。由于 replay 可使用不同于
+录制的 stream，这一步可能同步整个设备上的历史工作。尚存活的 graph 保持资源并可继续回放。
+
+录制另一个 graph 时推迟回收，包括新 model 复用已销毁 model 地址的情形；在 capture 外的
+下一次普通调用时恢复清理。capture 内可以轮询已完成的 eager 预热并将其移出 native
+执行队列，但 finalization 推迟到录制结束后。最终仍以 Simpler 的 `safe_to_release` 为
+释放 owner 的条件。
+清理失败时保留 owner 并拒绝新提交。若之后没有 op 调用，则在 shutdown 时尝试清理。
+不提供公开 `drain()` API，没有后台回收线程，用户无需额外调用清理接口。
+
+已有 shutdown hook 不会 reset 或禁止用户 graph。Worker close 时若 graph 仍存活，立即
+拒绝清理并保留资源。进程退出前应 reset 或销毁 graph。销毁失败、部分录制、同步失败、
+native release 失败均保留 owner，以便重试清理。
+
+`tests/st/runtime/kernel/test_torch_capture.py` 覆盖 HBG/TMR、task queue 0/1：冷调用拒绝、
+三个存活 graph 中交错的多个 Torch/PyPTO 节点、其他 stream 上修改输入后的 replay、固定
+scalar 快照、独立 model 释放、其余 graph 继续 replay，以及随后复用 eager 路径。
+单测还覆盖排队回调、model 地址复用、retention 失败、清理重试和 graph 方法保持原样。
+CPU 测试不能代表硬件验证。
 
 ## 调用元数据与所有权
 
@@ -321,7 +384,7 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 公共编译、metadata/缓存加载、调用 frame 所有权、进程初始化和 eager 提交均已实现。
 直接 JIT 调用使用 Torch 队列桥接，显式 `compile()` 保留 program 执行语义。
 单元测试通过模拟执行边界验证队列顺序和资源生命周期。native adapter 构建、真实设备
-数值正确性及 allocator 安全仍需设备验证；ACLGraph capture/replay 仍不支持。
+数值正确性、allocator 安全以及目标框架版本上的 capture/replay 仍需设备验证。
 
 ## 验证
 

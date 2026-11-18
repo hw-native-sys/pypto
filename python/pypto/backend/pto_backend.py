@@ -1462,11 +1462,12 @@ def _generate_config_file(
 
     Each registration carries a final tensor signature and a code name. Several
     registrations may reference the same generated source with different tensor
-    directions. Scalars are excluded from runtime tensor signatures.
+    directions. Scalars are excluded from per-core tensor signatures.
 
     ``orchestration_signature`` is the orchestration entry's per-tensor
     ``ArgDirection`` names ("IN"/"OUT"/"INOUT"), in ``orch_args`` tensor order
-    (scalars excluded). When present, the ``ORCHESTRATION`` dict gains a
+    followed by SCALAR slots for KERNEL entry validation. PROGRAM signatures
+    exclude scalars. When present, the ``ORCHESTRATION`` dict gains a
     ``"signature"`` field so the runtime builds a non-empty ChipCallable
     signature, indexed by the orch tensor index in
     ``bind_callable_to_runtime_impl``. This lets read-only IN tensors skip the
@@ -2150,6 +2151,7 @@ def generate(
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    kernel_entry_scalar_count: int = 0,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -2178,6 +2180,8 @@ def generate(
         runtime: Simpler runtime ABI to target; its wire name is written to
             ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``.
             None uses ``RuntimeKind.TENSORMAP_AND_RINGBUFFER``.
+        kernel_entry_scalar_count: Runtime scalar slots for a KERNEL entry's
+            callable identity. PROGRAM keeps its tensor-only signature.
 
     Returns:
         Dict mapping relative file paths to their content.
@@ -2229,6 +2233,7 @@ def generate(
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
+        kernel_entry_scalar_count=kernel_entry_scalar_count,
     )
 
 
@@ -2605,6 +2610,7 @@ def _generate_single_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    kernel_entry_scalar_count: int = 0,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -2804,7 +2810,7 @@ def _generate_single_chip(
                 result_files["kernel_config.py"] = _generate_config_file(
                     orch_func.name,
                     orch_result.kernel_registrations,
-                    orch_result.orchestration_signature,
+                    [*orch_result.orchestration_signature, *(["SCALAR"] * kernel_entry_scalar_count)],
                     func_name_to_external_source,
                     func_name_to_external_include_dirs,
                     enable_sdma=any(_uses_sdma_workspace(func) for func in emitted_incore_funcs),
