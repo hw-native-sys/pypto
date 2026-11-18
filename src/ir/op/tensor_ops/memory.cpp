@@ -295,10 +295,14 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
       full_shape.size() == source_rank && new_shape.size() >= 2 && only_leading_axes_dropped;
   const TensorLayout result_layout = trailing_plane_intact ? source_layout : TensorLayout::ND;
 
+  std::vector<ExprPtr> result_strides;
+  if (HasRectangularSliceStrides(tensor_type, full_shape.size(), offsets.size())) {
+    result_strides = ApplyDropDims(tensor_type->tensor_view_->stride, drop_dims);
+  }
   std::optional<TensorView> result_tv;
-  if (result_layout != TensorLayout::ND || !AreExprVectorsEqual(valid_shape, new_shape) ||
-      result_pad != PadValue::null) {
-    result_tv = TensorView({}, result_layout, valid_shape, result_pad);
+  if (!result_strides.empty() || result_layout != TensorLayout::ND ||
+      !AreExprVectorsEqual(valid_shape, new_shape) || result_pad != PadValue::null) {
+    result_tv = TensorView(std::move(result_strides), result_layout, valid_shape, result_pad);
   }
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
     return std::make_shared<DistributedTensorType>(new_shape, tensor_type->dtype_, std::nullopt,

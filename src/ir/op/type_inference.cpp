@@ -844,6 +844,15 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
   return result;
 }
 
+bool HasRectangularSliceStrides(const TensorTypePtr& parent, size_t window_rank, size_t offset_rank) {
+  if (!parent || !parent->tensor_view_ || window_rank == 0 || parent->shape_.size() != window_rank ||
+      offset_rank != window_rank)
+    return false;
+  const auto& view = *parent->tensor_view_;
+  return (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN) &&
+         view.stride.size() == window_rank;
+}
+
 std::vector<ExprPtr> InferTensorSliceFullValidShape(const TensorType& source_type,
                                                     const std::vector<ExprPtr>& full_shape,
                                                     const std::vector<ExprPtr>& offsets,
