@@ -1162,8 +1162,14 @@ std::optional<size_t> ExplicitReturnedParamIndex(const FunctionPtr& func) {
 }
 
 std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramPtr& program) {
-  auto indices = ReturnedParamIndicesImpl(func, program);
-  return indices.empty() ? std::nullopt : indices[0];
+  return ReturnedParamIndexAt(func, program, 0);
+}
+
+std::optional<size_t> ReturnedParamIndexAt(const FunctionPtr& func, const ProgramPtr& program,
+                                           size_t position) {
+  TraceQueryGuard guard;
+  const auto& indices = CachedReturnedParamIndices(func, program);
+  return position < indices.size() ? indices[position] : std::nullopt;
 }
 
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program) {

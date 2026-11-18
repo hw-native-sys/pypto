@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <memory>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -317,12 +316,6 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
   return roots;
 }
 
-const std::vector<std::optional<size_t>>& BufferRootCollector::ReturnedParams(const FunctionPtr& callee) {
-  const auto [entry, inserted] = returned_params_.try_emplace(callee.get());
-  if (inserted) entry->second = return_lineage::ReturnedParamIndices(callee, program_);
-  return entry->second;
-}
-
 BufferRootCollector::OutputRoot BufferRootCollector::ResolveTupleOutputRoot(const TupleOutputRoots& tuple,
                                                                             size_t index) {
   if (!tuple.call) return index < tuple.outputs.size() ? tuple.outputs[index] : OutputRoot{};
@@ -333,10 +326,8 @@ BufferRootCollector::OutputRoot BufferRootCollector::ResolveTupleOutputRoot(cons
   if (!type || index >= type->types_.size() || !AsTensorTypeLike(type->types_[index])) return {};
   const auto callee = program_->GetFunction(tuple.call->op_->name_);
   if (callee) {
-    const auto& returned_params = ReturnedParams(callee);
     const auto arg_count = tuple.call->args_.size();
-    const auto param =
-        index < returned_params.size() ? returned_params[index].value_or(arg_count) : arg_count;
+    const auto param = return_lineage::ReturnedParamIndexAt(callee, program_, index).value_or(arg_count);
     if (param < arg_count) {
       const auto& arg = tuple.call->args_[param];
       const auto& roots = ResolveRootCandidates(arg);
@@ -356,9 +347,8 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
   if (track_tensor_return) {
     const auto callee = program_->GetFunction(call->op_->name_);
     if (callee && callee->return_types_.size() == 1) {
-      const auto& returned_params = ReturnedParams(callee);
       const auto arg_count = call->args_.size();
-      const auto param = returned_params.empty() ? arg_count : returned_params.front().value_or(arg_count);
+      const auto param = return_lineage::ReturnedParamIndex(callee, program_).value_or(arg_count);
       if (param < arg_count) {
         returned_arg = call->args_[param];
         // A helper can write a scratch output and still return an input.
