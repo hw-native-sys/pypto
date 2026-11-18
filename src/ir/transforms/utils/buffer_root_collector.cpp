@@ -83,14 +83,15 @@ void BufferRootCollector::VisitStmt_(const IfStmtPtr& if_stmt) {
 }
 
 void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
-  InitializeLoopCarryRoots(for_stmt->iter_args_);
+  const auto trip_count = transform_utils::EvalConstTripCount(for_stmt);
+  InitializeLoopCarryRoots(for_stmt->iter_args_, for_stmt->body_, trip_count.value_or(2) > 1);
   IRVisitor::VisitStmt_(for_stmt);
   RecordLoopReturnRoots(for_stmt->body_, for_stmt->return_vars_, for_stmt->iter_args_,
-                        transform_utils::EvalConstTripCount(for_stmt).value_or(0) > 0);
+                        trip_count.value_or(0) > 0);
 }
 
 void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
-  InitializeLoopCarryRoots(while_stmt->iter_args_);
+  InitializeLoopCarryRoots(while_stmt->iter_args_, while_stmt->body_, /*may_repeat=*/true);
   IRVisitor::VisitStmt_(while_stmt);
   // A while condition may be false before the first iteration, so both the
   // initial and yielded roots remain possible.
@@ -98,9 +99,27 @@ void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
                         /*guaranteed_to_run=*/false);
 }
 
-void BufferRootCollector::InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args) {
-  for (const auto& iter_arg : iter_args) {
-    ShareRootCandidates(iter_arg, iter_arg->initValue_);
+void BufferRootCollector::InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args,
+                                                   const StmtPtr& body, bool may_repeat) {
+  const auto yield =
+      follow_reshape_ && may_repeat && !iter_args.empty() ? transform_utils::GetLastYieldStmt(body) : nullptr;
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    const auto& iter_arg = iter_args[i];
+    const auto& init = iter_arg->initValue_;
+    if (!yield || i >= yield->value_.size() || yield->value_[i].get() == iter_arg.get()) {
+      ShareRootCandidates(iter_arg, init);
+      continue;
+    }
+
+    // An external yield can already be resolved before visiting the body.
+    // For an unresolved body value, the initializer alone does not prove
+    // that later iterations refer to the same storage.
+    const auto& next = yield->value_[i];
+    const auto& initial_roots = ResolveRootCandidates(init);
+    const auto& next_roots = ResolveRootCandidates(next);
+    const bool unresolved =
+        initial_roots.empty() || next_roots.empty() || IsAmbiguous(init) || IsAmbiguous(next);
+    MergeRootCandidates(iter_arg, {&initial_roots, &next_roots}, unresolved);
   }
 }
 
@@ -266,10 +285,14 @@ void BufferRootCollector::MergeRootCandidates(const VarPtr& var, std::vector<con
       if (seen.insert(root).second) merged.push_back(root);
     }
   }
-  // The merge preserves the first list's order. If it added no roots,
-  // keep that identity so a chain of equivalent joins can reuse the union.
-  const auto* roots = inputs.front();
-  if (merged.size() != roots->size()) {
+  // Covering inputs can share the merge's identity, provided that
+  // they preserve the first-output order used by kFirstOutput.
+  const auto equivalent =
+      std::find_if(inputs.begin(), inputs.end(), [&](const auto* input) { return merged == *input; });
+  const RootCandidates* roots;
+  if (equivalent != inputs.end()) {
+    roots = *equivalent;
+  } else {
     root_candidates_.push_back(std::move(merged));
     roots = &root_candidates_.back();
   }
