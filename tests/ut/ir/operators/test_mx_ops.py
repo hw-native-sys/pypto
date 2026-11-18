@@ -184,6 +184,30 @@ class TestTensorMatmulMx:
             192,
         ]
 
+    @pytest.mark.parametrize(
+        "side,layout,valid,message",
+        [
+            (0, pl.ND, [15, 64], "even FP4 valid extent"),
+            (0, pl.DN, [16, 127], "even FP4 valid extent"),
+            (2, pl.ND, [127, 96], "even FP4 valid extent"),
+            (2, pl.DN, [64, 191], "even FP4 valid extent"),
+            (0, pl.ND, [32], "valid_shape rank"),
+            (2, pl.DN, [64, 192, 1], "valid_shape rank"),
+        ],
+    )
+    def test_rejects_invalid_data_valid_shape(self, side, layout, valid, message):
+        args = self._packed_operands(lhs_layout=layout, rhs_layout=layout)
+        operand = args[side]
+        assert isinstance(operand.type, ir.TensorType)
+        view = ir.TensorView(layout=layout, valid_shape=valid)
+        args[side] = ir.Var(
+            operand.name_hint,
+            ir.TensorType(operand.type.shape, operand.type.dtype, tensor_view=view),
+            operand.span,
+        )
+        with pytest.raises(ValueError, match=message):
+            ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+
     @pytest.mark.parametrize("side", [0, 2])
     def test_rejects_mixed_fp4_fp8(self, side):
         args = self._packed_operands()
