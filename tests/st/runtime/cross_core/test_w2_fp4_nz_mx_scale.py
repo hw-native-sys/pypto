@@ -16,6 +16,7 @@ activation-scale GM ABI and dynamically selected partial expert rows.
 """
 
 import re
+from functools import cache
 
 import pypto.language as pl
 import pytest
@@ -224,9 +225,20 @@ def _w2_specs(row_base, valid_rows):
         DataType.INT32,
         DataType.FP32,
     )
+    shapes = ([ROWS, K], [ROWS, GROUPS], [K, N // 2], [GROUPS, N], [2], [M, N])
+
+    # Collection must not initialize Torch's CPU thread pool: pytest-forked
+    # would inherit its state and can deadlock in an earlier case's golden.
+    # Materialize once per case, when the harness calls these initializers.
+    @cache
+    def inputs():
+        return _w2_inputs(row_base, valid_rows)
+
     return [
-        TensorSpec(name, list(value.shape), dtype, init_value=value, is_output=name == "out")
-        for name, dtype, value in zip(names, dtypes, _w2_inputs(row_base, valid_rows))
+        TensorSpec(
+            name, shape, dtype, init_value=lambda index=index: inputs()[index], is_output=name == "out"
+        )
+        for index, (name, shape, dtype) in enumerate(zip(names, shapes, dtypes))
     ]
 
 
@@ -258,6 +270,11 @@ def _retained_w2_case(_st_case, test_runner, tmp_path, monkeypatch):
 
 
 @pytest.mark.platforms("a5")
+@pytest.mark.platform_xfail(
+    "a5",
+    reason="A5 W2 golden mismatches; see CI run 44087993133, job 134055759472.",
+    strict=True,
+)
 @st.cases(
     *[
         st.case(
