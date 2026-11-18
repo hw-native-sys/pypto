@@ -153,8 +153,8 @@ class PriorWriterCollector {
 
   /// Per-call-like set of roots for which the call (or submit) is the first
   /// writer in its scope. Roots not in the set (or call-like exprs absent
-  /// from the map) are by definition preceded by another writer-unit and
-  /// therefore subject to R-prior promotion. Includes both locally-allocated
+  /// from the map) have no first-writer proof and therefore retain R-prior
+  /// ordering. This includes calls beyond the exact analysis work limit. Includes both locally-allocated
   /// roots and enclosing-param-rooted ones. Keyed by the original Expr*
   /// pointer so both Call and Submit nodes get tracked under their stable
   /// identity (Submit IRs are folded to Call via SubmitToCallView for the
@@ -348,7 +348,7 @@ class PriorWriterCollector {
 ///
 /// Promotion rules for callee Out (apply uniformly to local and enclosing-param roots):
 ///   - R-seq:        any sequential ancestor (For{Sequential,Unroll,Pipeline} or While) → InOut
-///   - R-prior:      a prior writer-unit in the same scope wrote to the same root      → InOut
+///   - R-prior:      a known root lacks a first-writer proof                         → InOut
 ///   - R-enclosing:  the root is the enclosing function's param and that param is
 ///                   declared InOut by the user                                         → InOut
 ///   - default:      OutputExisting (write into a pre-allocated buffer that the
@@ -537,7 +537,7 @@ class CallDirectionMutator : public IRMutator {
           dirs.push_back(ArgDirection::InOut);
           continue;
         }
-        // R-prior: a prior writer-unit in this scope already wrote to this root → InOut.
+        // R-prior: keep InOut ordering for known roots without a first-writer proof.
         if (root) {
           bool is_first_writer = first_writer_set != nullptr && first_writer_set->count(root) > 0;
           if (!is_first_writer) {

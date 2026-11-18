@@ -305,13 +305,29 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
   const auto record_output = [&](const OutputRoot& output) {
     BindRootCandidates(result, output.roots, output.ambiguous);
   };
-  if (out_roots.size() == 1) {
+  ExprPtr returned_arg;
+  if (follow_reshape_ && As<TensorType>(call->GetType())) {
+    const auto callee = program_->GetFunction(call->op_->name_);
+    if (callee && callee->return_types_.size() == 1) {
+      const auto param = return_lineage::ReturnedParamIndex(callee, program_);
+      if (param && *param < call->args_.size()) {
+        returned_arg = call->args_[*param];
+        // A helper can write a scratch output and still return an input.
+        // Its proven return storage takes precedence over output matching.
+        if (ResolveRootCandidates(returned_arg).set != 0 && !IsAmbiguous(returned_arg)) {
+          ShareRootCandidates(result, returned_arg);
+          return;
+        }
+      }
+    }
+  }
+  if (out_roots.size() == 1 && (!returned_arg || returned_arg.get() == out_roots.front().argument.get())) {
     record_output(out_roots.front());
     return;
   }
 
   const OutputRoot* match = nullptr;
-  bool ambiguous = false;
+  bool ambiguous = returned_arg != nullptr;
   for (const auto& candidate : out_roots) {
     if (!TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) continue;
     if (candidate.roots.set == 0) {
@@ -331,24 +347,10 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
   }
 
   if (follow_reshape_ && ambiguous) {
-    // Resolve a tie between same-shaped outputs from the callee's actual
-    // return. Following reshape can expose a second compatible buffer.
-    const auto callee = program_->GetFunction(call->op_->name_);
-    if (callee && callee->return_types_.size() == 1) {
-      const auto param = return_lineage::ReturnedParamIndex(callee, program_);
-      if (param && *param < call->args_.size() && callee->param_directions_[*param] != ParamDirection::In) {
-        const auto& arg = call->args_[*param];
-        // Callee identity is useful only if the actual argument has one
-        // proven root. A partial set still needs the compatible candidates.
-        if (ResolveRootCandidates(arg).set != 0 && !IsAmbiguous(arg)) {
-          ShareRootCandidates(result, arg);
-          return;
-        }
-      }
-    }
-    // A consumer may read or write whichever compatible buffer was returned.
-    // Retain every compatible root when the return proof is unavailable.
+    // A partially resolved return can still share storage with any compatible
+    // candidate, so retain those dependencies until its root is proven.
     std::vector<RootCandidates> inputs;
+    if (returned_arg) inputs.push_back(ResolveRootCandidates(returned_arg));
     for (const auto& candidate : out_roots) {
       if (TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
         inputs.push_back(candidate.roots);

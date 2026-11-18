@@ -70,14 +70,13 @@ Group/Spmd wrapper 把自己的形参 1:1 转发给内层 kernel 调用，但它
 
 ### 1. 缓冲区根收集
 
-`BufferRootCollector`（定义于 `include/pypto/codegen/orchestration/orchestration_analysis.h`）遍历函数 body，将每个 `Var*` 映射到拥有其底层缓冲区的 `Var*`，并通过赋值、循环和 call 输出传播根标识。该 pass 还从函数的形参构建 `param_vars` 集合，用于快速判断 *"根是否落在某个函数形参上？"*。
+`BufferRootCollector`（定义于 `include/pypto/ir/transforms/utils/buffer_root_collector.h`）遍历函数 body，将每个 `Var*` 映射到拥有其底层缓冲区的 `Var*`，并通过赋值、循环和 call 输出传播根标识。该 pass 还从函数的形参构建 `param_vars` 集合，用于快速判断 *"根是否落在某个函数形参上？"*。
 
 ### 2. 先前 writer 分析
 
-`PriorWriterCollector` 按 `(Call, local-root)` 判断该 call 是否是该根在其所属作用域内的*首个 writer*。它分两阶段运行：
+`PriorWriterCollector` 按语句顺序遍历函数，对存储根已知的 Call 和 Submit 记录首写证明。`IfStmt` 的各分支共享进入时的不可变写入快照，合流时归并各分支可能发生的写入。循环的可能写入计入外层作用域，顺序循环通过 R-seq 保留跨迭代的写入顺序。
 
-1. **自底向上缓存**（`PrecomputeWrittenRoots`）：对每个子树，缓存其中任意非 builtin `Call` 所写的本地分配根的并集。当该子树作为外层作用域的兄弟节点出现时，此结果即为它的 *writer footprint*。
-2. **自顶向下扫描**（`AnalyzeScope`）：遍历 IR，维护一个 `seen_roots` 集合记录已被先前兄弟写过的根。对每个 `Call`，每个根*不*在 `seen_roots` 中的被调用方 `Out` 参数都记为首个 writer。每个 `ForStmt`（无论 `ForKind`）/ `WhileStmt` / `IfStmt` 进入时使用 `seen_roots` 的*快照拷贝*（使单元内部的写不泄漏到兄弟跟踪），并视作不透明的 writer 单元；`ScopeStmt` 和 `SeqStmts` 共享同一个 `seen_roots`。
+精确分析的工作量上限按函数的候选节点数和快照深度计算。达到上限后，后续对已知根的写入缺少首写证明。R-prior 用 `InOut` 保留这些调用的写入顺序，因此实际运行中的首个写入也可能使用 `InOut`。
 
 ### 3. 方向重写
 
@@ -85,17 +84,18 @@ Group/Spmd wrapper 把自己的形参 1:1 转发给内层 kernel 调用，但它
 
 对每个位置参数，mutator 按下表挑选方向。被调用方的 `Out` 依次尝试三条提升规则——R-seq → R-prior → R-enclosing；都不触发时保持 `OutputExisting`：
 
-| 被调用方 `ParamDirection` | 实参 | `sequential_depth > 0`？ | 作用域内有先前 writer？ | 所根植的外层参数为 `InOut`？ | 结果 |
+| 被调用方 `ParamDirection` | 实参 | `sequential_depth > 0`？ | 有首写证明？ | 所根植的外层参数为 `InOut`？ | 结果 |
 | ------------------------- | ---- | ------------------------ | ----------------------- | ---------------------------- | ---- |
 | any | 非 tensor | — | — | — | `Scalar` |
 | `In` | tensor | — | — | — | `Input` |
 | `InOut` | tensor | — | — | — | `InOut` |
 | `Out` | tensor | 是 (R-seq) | — | — | `InOut` |
-| `Out` | tensor | 否 | 是 (R-prior) | — | `InOut` |
-| `Out` | tensor | 否 | 否 | 是 (R-enclosing) | `InOut` |
-| `Out` | tensor | 否 | 否 | 否 | `OutputExisting` |
+| `Out` | 存储根有歧义的 tensor | 否 | — | — | `InOut` |
+| `Out` | 存储根已知的 tensor | 否 | 缺少 (R-prior) | — | `InOut` |
+| `Out` | 存储根已知的 tensor | 否 | 是 | 是 (R-enclosing) | `InOut` |
+| `Out` | tensor | 否 | 是或未记录存储根 | 否 | `OutputExisting` |
 
-**R-seq** 在顺序循环内保持跨迭代的 write-after-write 链：只要被调用方的 `Out` 处于任意顺序祖先之下，就**无条件**提升为 `InOut`。早期曾有一个"变 offset store 视为不相交"的例外——当被调用方的 `tile.store` offset 依赖某个参数时，把这类调用保留为 `OutputExisting`——该例外已被移除：要 sound 地证明跨迭代写入互不相交，需要一套真正的依赖分析（仿射 offset 抽取、步长与 tile extent 对比、offset 单射性、跨过程组合），而它当时用的廉价语法检查可能悄悄丢掉真实的 WAW 边。**R-prior** 在同一作用域内某个更早的 writer 单元已触碰过同一根时，保持跨兄弟的 WAW 依赖。**R-enclosing** 当实参根植的外层函数参数被显式声明为 `pl.InOut` 时，遵从该声明。
+**R-seq** 在顺序循环内保持跨迭代的 write-after-write 链：只要被调用方的 `Out` 处于任意顺序祖先之下，就**无条件**提升为 `InOut`。早期曾有一个"变 offset store 视为不相交"的例外——当被调用方的 `tile.store` offset 依赖某个参数时，把这类调用保留为 `OutputExisting`——该例外已被移除：要 sound 地证明跨迭代写入互不相交，需要一套真正的依赖分析（仿射 offset 抽取、步长与 tile extent 对比、offset 单射性、跨过程组合），而它当时用的廉价语法检查可能悄悄丢掉真实的 WAW 边。**R-prior** 在已知存储根缺少首写证明时，保留写入顺序。**R-enclosing** 当实参根植的外层函数参数被显式声明为 `pl.InOut` 时，遵从该声明。
 
 预填充的 `Call.attrs["arg_directions"]` 被视作权威并保持不动（某些方向如 `NoDep` 无法从结构上推导）。`Call` / `Submit` 构造函数的 `ValidateArgDirectionsAttr` 仅在向量非空时强制 arity。`CallDirectionsResolved` verifier 要求**带实参**的每个 call-like 节点都有已填充的 `arg_directions` 向量；零实参的派发（例如 callee 不接收任何位置 tensor 实参的 `pl.submit(self.kernel)`）的空向量是合法的，会被接受。
 
@@ -157,9 +157,9 @@ inline const PassProperties kDeriveCallDirectionsProperties{
 **实现**：`src/ir/transforms/derive_call_directions_pass.cpp`
 
 - `MaterializeWrapperDirections` —— 阶段 0：把 Group/Spmd 的有效方向写回 `Function::param_directions_`
-- `PriorWriterCollector` —— 每作用域的首 writer 分析（自底向上缓存 + 自顶向下扫描）
+- `PriorWriterCollector` —— 基于共享分支快照的有界首写分析
 - `CallDirectionMutator` —— `IRMutator`，用解析后的 `arg_directions` 向量重写每个非 builtin `Call`
-- 复用 `include/pypto/ir/transforms/utils/wrapper_call_utils.h` 中的 `ComputeWrapperEffectiveDirections`，以及 `include/pypto/codegen/orchestration/orchestration_analysis.h` 中的 `BufferRootCollector`
+- 复用 `include/pypto/ir/transforms/utils/wrapper_call_utils.h` 中的 `ComputeWrapperEffectiveDirections`，以及 `include/pypto/ir/transforms/utils/buffer_root_collector.h` 中的 `BufferRootCollector`
 
 **Property verifier**：`src/ir/verifier/verify_call_directions.cpp`（工厂位于 `include/pypto/ir/verifier/verifier.h`）
 

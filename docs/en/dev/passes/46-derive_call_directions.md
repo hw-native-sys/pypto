@@ -72,14 +72,13 @@ This establishes the invariant that **`callee->param_directions_` is the single 
 
 ### 1. Buffer-root collection
 
-`BufferRootCollector` (defined in `include/pypto/codegen/orchestration/orchestration_analysis.h`) walks the function body and maps every `Var*` to the `Var*` that owns its underlying buffer, propagating root identity through assignments, loops, and call outputs. The pass also builds a `param_vars` set from the function's formal parameters for fast *"rooted at a function param?"* lookups.
+`BufferRootCollector` (defined in `include/pypto/ir/transforms/utils/buffer_root_collector.h`) walks the function body and maps every `Var*` to the `Var*` that owns its underlying buffer, propagating root identity through assignments, loops, and call outputs. The pass also builds a `param_vars` set from the function's formal parameters for fast *"rooted at a function param?"* lookups.
 
 ### 2. Prior-writer analysis
 
-`PriorWriterCollector` decides, per `(Call, local-root)`, whether the call is the *first writer* of that root within its enclosing scope. It runs in two phases:
+`PriorWriterCollector` walks the function in statement order and records first-writer proofs for calls and submits to known storage roots. It shares immutable snapshots between arms of an `IfStmt` and combines their possible writes at the join. Loops contribute their possible writes to the enclosing scope, and sequential loops retain cross-iteration ordering through R-seq.
 
-1. **Bottom-up cache** (`PrecomputeWrittenRoots`): for every subtree, cache the union of locally allocated roots written by any non-builtin `Call` inside it. The result becomes the *writer footprint* of that subtree when it appears as a sibling in an outer scope.
-2. **Top-down scan** (`AnalyzeScope`): walk the IR maintaining a `seen_roots` set of roots already written by prior siblings. For each `Call`, every callee-`Out` argument whose root is *not* in `seen_roots` is recorded as a first writer. Every `ForStmt` (regardless of `ForKind`) / `WhileStmt` / `IfStmt` is entered with a *snapshot copy* of `seen_roots` (so writes inside the unit do not leak into sibling tracking) and treated as an opaque writer-unit; `ScopeStmt` and `SeqStmts` share the same `seen_roots`.
+The exact scan has a per-function work limit based on the number of candidate nodes and the snapshot depth. Once the limit is reached, later writes to known roots have unknown first-writer status. R-prior preserves their ordering with `InOut`. A call can therefore use `InOut` even when it is the first writer at runtime.
 
 ### 3. Direction rewrite
 
@@ -87,17 +86,18 @@ This establishes the invariant that **`callee->param_directions_` is the single 
 
 For each positional argument the mutator picks a direction by this table. A callee `Out` is resolved by trying three promotion rules in order — R-seq → R-prior → R-enclosing; if none fires it stays `OutputExisting`:
 
-| Callee `ParamDirection` | Argument | `sequential_depth > 0`? | Prior writer in scope? | Enclosing param `InOut`? | Result |
+| Callee `ParamDirection` | Argument | `sequential_depth > 0`? | First-writer proof? | Enclosing param `InOut`? | Result |
 | ----------------------- | -------- | ----------------------- | ---------------------- | ------------------------ | ------ |
 | any | non-tensor | — | — | — | `Scalar` |
 | `In` | tensor | — | — | — | `Input` |
 | `InOut` | tensor | — | — | — | `InOut` |
 | `Out` | tensor | yes (R-seq) | — | — | `InOut` |
-| `Out` | tensor | no | yes (R-prior) | — | `InOut` |
-| `Out` | tensor | no | no | yes (R-enclosing) | `InOut` |
-| `Out` | tensor | no | no | no | `OutputExisting` |
+| `Out` | tensor with ambiguous storage | no | — | — | `InOut` |
+| `Out` | tensor with known root | no | unavailable (R-prior) | — | `InOut` |
+| `Out` | tensor with known root | no | yes | yes (R-enclosing) | `InOut` |
+| `Out` | tensor | no | yes or no recorded root | no | `OutputExisting` |
 
-**R-seq** keeps cross-iteration write-after-write chains correct inside sequential loops: a callee `Out` under any sequential ancestor is promoted to `InOut` **unconditionally**. An earlier "disjoint variable-offset store" exception — which kept such a call as `OutputExisting` when the callee's `tile.store` offset depended on a parameter — was removed: soundly proving that cross-iteration writes are disjoint needs a real dependence analysis (affine offset extraction, stride-vs-tile-extent, offset injectivity, cross-procedural composition), and the cheap syntactic check it used could silently drop real WAW edges. **R-prior** preserves the cross-sibling WAW dependency when an earlier writer-unit in the same scope already touched the same root. **R-enclosing** honours an explicit `pl.InOut` declaration on the enclosing function parameter that the argument is rooted at.
+**R-seq** keeps cross-iteration write-after-write chains correct inside sequential loops: a callee `Out` under any sequential ancestor is promoted to `InOut` **unconditionally**. An earlier "disjoint variable-offset store" exception — which kept such a call as `OutputExisting` when the callee's `tile.store` offset depended on a parameter — was removed: soundly proving that cross-iteration writes are disjoint needs a real dependence analysis (affine offset extraction, stride-vs-tile-extent, offset injectivity, cross-procedural composition), and the cheap syntactic check it used could silently drop real WAW edges. **R-prior** preserves write ordering when a known root has no first-writer proof. **R-enclosing** honours an explicit `pl.InOut` declaration on the enclosing function parameter that the argument is rooted at.
 
 A pre-populated `Call.attrs["arg_directions"]` is treated as authoritative and left untouched (some directions like `NoDep` are not derivable structurally). The `Call` / `Submit` constructor's `ValidateArgDirectionsAttr` only enforces arity when the vector is non-empty. The `CallDirectionsResolved` verifier requires a populated `arg_directions` vector for every call-like node **with arguments**; a 0-arg dispatch (e.g. a bare `pl.submit(self.kernel)` whose callee takes no positional tensor args) legitimately has an empty vector and is accepted.
 
@@ -159,9 +159,9 @@ inline const PassProperties kDeriveCallDirectionsProperties{
 **Implementation**: `src/ir/transforms/derive_call_directions_pass.cpp`
 
 - `MaterializeWrapperDirections` — phase 0: writes effective Group/Spmd directions into `Function::param_directions_`
-- `PriorWriterCollector` — per-scope first-writer analysis (bottom-up cache + top-down scan)
+- `PriorWriterCollector` — bounded first-writer analysis with shared branch snapshots
 - `CallDirectionMutator` — `IRMutator` that rewrites every non-builtin `Call` with the resolved `arg_directions` vector
-- Reuses `ComputeWrapperEffectiveDirections` from `include/pypto/ir/transforms/utils/wrapper_call_utils.h` and `BufferRootCollector` from `include/pypto/codegen/orchestration/orchestration_analysis.h`
+- Reuses `ComputeWrapperEffectiveDirections` from `include/pypto/ir/transforms/utils/wrapper_call_utils.h` and `BufferRootCollector` from `include/pypto/ir/transforms/utils/buffer_root_collector.h`
 
 **Property verifier**: `src/ir/verifier/verify_call_directions.cpp` (factory in `include/pypto/ir/verifier/verifier.h`)
 

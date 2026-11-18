@@ -8671,8 +8671,9 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(after, Expected)
 
-    def test_unknown_output_cannot_prove_a_different_return_root(self):
-        """A same-shaped output with unknown lineage keeps the return ambiguous."""
+    @pytest.mark.parametrize("use_input_return", [False, True])
+    def test_return_matching_retains_actual_backing_parameters(self, use_input_return):
+        """Unknown outputs retain ambiguity, and a returned input keeps its own storage."""
 
         @pl.program
         class Before:
@@ -8705,6 +8706,16 @@ class TestCalleeDirectionPropagationThroughCarries:
             @pl.function(type=pl.FunctionType.InCore)
             def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
                 pl.store(pl.load(buf, [1, 0], [1, 64]), [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                value: pl.Tensor[[2, 64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                self.write(x, scratch, scratch, scratch)
+                return value
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -8755,6 +8766,16 @@ class TestCalleeDirectionPropagationThroughCarries:
                 return  # noqa: PLR1711 - lowering materializes a void return in the IR.
 
             @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                value: pl.Tensor[[2, 64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                self.write(x, scratch, scratch, scratch)
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
                 x: pl.Tensor[[1, 64], pl.FP32],
@@ -8769,8 +8790,17 @@ class TestCalleeDirectionPropagationThroughCarries:
                 result = self.write(x, flat, b, middle)
                 self.consume(result)
 
-        after = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(after, Expected)
+        def return_input(program):
+            source = ir.python_print(program)
+            old = "self.first(x, first_flat, alias)"
+            assert old in source
+            return pl.parse_program(source.replace(old, "self.forward(x, b, first_flat)"))
+
+        before, expected = (
+            (return_input(Before), return_input(Expected)) if use_input_return else (Before, Expected)
+        )
+        after = passes.convert_tensor_to_tile_ops()(before)
+        ir.assert_structural_equal(after, expected)
 
 
 class TestTensorCastConversion:
