@@ -45,8 +45,8 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 
 `kernel.compile(..., config=RunConfig(...))` 保留 program 语义，不要求 kernel 初始化。
 通过返回的 `CompiledProgram` 显式执行 program，可使用 host Tensor、模拟器或分布式
-执行。PROGRAM 与 KERNEL 共用编译/缓存实现，能力 key 不同。capture/replay 即使预热
-也不支持。队列顺序、资源生命周期和验证边界见
+执行。PROGRAM 与 KERNEL 共用编译/缓存实现，能力 key 不同。capture/replay 要求先对各 specialization 执行 eager 预热；
+录制和回放由原生 Torch graph 上下文管理。队列顺序、资源生命周期和验证边界见
 [Torch eager kernel 执行](runtime/kernel-mode.md)。
 
 ## 编译

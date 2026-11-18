@@ -9,11 +9,13 @@
 
 """Python owner retention around Simpler's GIL-free prepared submissions."""
 
+import importlib
 import threading
 from collections.abc import Callable
 from typing import Any
 
 from .callable import KernelRegistration
+from .capture import CaptureResources
 
 
 class PendingTicket:
@@ -34,6 +36,8 @@ class PendingTicket:
     ) -> None:
         self.registration = registration
         self.submission: Any = None
+        self.capture: CaptureResources | None = None
+        self._enqueue_error: BaseException | None = None
         self._enqueue: Callable[[PendingTicket], None] | None = enqueue
         self._synchronize: Callable[[], None] | None = synchronize
         self._release: Callable[[], None] | None = release
@@ -50,6 +54,7 @@ class PendingTicket:
         try:
             self._enqueue(self)
         except BaseException as error:
+            self._enqueue_error = error
             try:
                 self._cancel()
             except BaseException as cleanup_error:
@@ -61,7 +66,12 @@ class PendingTicket:
             if self.submission is not None:
                 # False means already consumed/cancelled. Cancellation may
                 # also raise after establishing safe retirement.
-                self.submission.cancel()
+                if self.capture is None:
+                    self.submission.cancel()
+                else:
+                    # Cancellation does not retire a captured model. Keep native
+                    # preparation and external owners for checked graph cleanup.
+                    self.capture.native.cancel()
         finally:
             self._release_if_safe()
 
@@ -70,6 +80,9 @@ class PendingTicket:
             return
         assert self._release is not None
         self._release()
+        if self.capture is not None:
+            self.capture.forget()
+            self.capture = None
         self._owners = ()
         self._enqueue = None
         self._synchronize = None
@@ -92,9 +105,26 @@ class PendingTicket:
                 raise
             self._release_if_safe()
 
+    def poll_capture(self) -> None:
+        """Advance completed eager execution without finalizing it during capture.
+
+        Simpler must remove completed warmup from its execution lane before
+        capture preparation. Its full wait/finalize can synchronize streams,
+        so retain the Python ticket and defer that observation until later.
+        """
+        if not self.retired and self.capture is None and self.submission is not None:
+            _ = self.submission.done
+
     def done(self) -> bool:
         if self.retired:
             return True
+        if self.capture is not None:
+            if not self.capture.retained or not self.capture.native._model_destroyed():
+                return False
+            # Called by admission only outside capture, before the new callback
+            # is enqueued. Reclaim prior graph work without waiting for this call.
+            self.wait()
+            return self.retired
         if self.submission is None or not self.submission.done:
             return False
         try:
@@ -108,6 +138,20 @@ class PendingTicket:
 
     def wait(self) -> None:
         if self.retired:
+            return
+        if self.capture is not None:
+            cancelled = self.capture.release()
+            try:
+                self._retire(timeout=0)
+            except BaseException as error:
+                refused = importlib.import_module("simpler.task_interface").RunPreparationRefused
+
+                if not (cancelled and self.retired and isinstance(error, refused)):
+                    raise
+            if self._enqueue_error is not None:
+                raise self._enqueue_error
+            if not self.retired:
+                raise RuntimeError("Kernel capture cleanup is incomplete; owners retained")
             return
         if self.submission is not None and not self.submission.done:
             assert self._synchronize is not None

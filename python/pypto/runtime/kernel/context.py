@@ -23,6 +23,7 @@ from pypto.ir.compiled_artifact import CompiledArtifact
 from pypto.runtime._execution_mode import claim_kernel_mode
 
 from .callable import KernelRegistration, artifact_identity
+from .capture import CaptureInUseError
 from .session import KernelConfig, _BorrowedWorkerSession
 
 
@@ -246,7 +247,9 @@ class _ProcessKernelState:
             if self.state is not KernelState.CLOSING:
                 self.state = KernelState.FAILED
 
-    def submit(self, registration: KernelRegistration, prepare: Callable[[Any], Any]) -> None:
+    def submit(
+        self, registration: KernelRegistration, prepare: Callable[[Any], Any], *, capturing: bool = False
+    ) -> None:
         """Serialize admission and retain native tickets before any enqueue can fail."""
         self._check_pid()
         with self._submission_lock:
@@ -255,7 +258,12 @@ class _ProcessKernelState:
             try:
                 pending: list[Any] = []
                 for ticket in self._submissions:
-                    if not ticket.done():
+                    if capturing:
+                        # Advance completed warmup out of the native execution
+                        # lane, but defer all finalization until outside capture.
+                        ticket.poll_capture()
+                        pending.append(ticket)
+                    elif not ticket.done():
                         pending.append(ticket)
                 self._submissions = pending
             except BaseException as exc:
@@ -274,7 +282,7 @@ class _ProcessKernelState:
                 self._fail_admission(exc)
                 raise
 
-    def _wait_submissions(self) -> None:
+    def _wait_submissions(self, *, allow_live_captures: bool = False) -> None:
         pending: list[Any] = []
         error = None
         for ticket in self._submissions:
@@ -283,18 +291,20 @@ class _ProcessKernelState:
             except BaseException as exc:
                 if not getattr(ticket, "retired", False):
                     pending.append(ticket)
-                if error is None:
+                if error is None and not (allow_live_captures and isinstance(exc, CaptureInUseError)):
                     error = exc
         self._submissions = pending
         if error is not None:
             raise error
 
     def drain(self) -> None:
-        """Observe all admitted work, retaining only tickets without safe retirement."""
+        """Wait eager work and reclaim destroyed graphs, retaining live graph owners."""
         self._check_pid()
         with self._submission_lock:
+            if self._worker is not None:
+                self._worker.check_context()
             try:
-                self._wait_submissions()
+                self._wait_submissions(allow_live_captures=True)
             except BaseException as exc:
                 self._fail_admission(exc)
                 raise
