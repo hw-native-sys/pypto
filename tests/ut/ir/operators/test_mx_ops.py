@@ -168,6 +168,22 @@ class TestTensorMatmulMx:
         assert call.type.dtype == pl.FP32
         assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [32, 192]
 
+    def test_packed_partial_rows_preserved(self):
+        lhs, scale, rhs, rhs_scale = self._packed_operands(lhs_layout=ir.TensorLayout.DN)
+        assert isinstance(lhs.type, ir.TensorType) and isinstance(scale.type, ir.TensorType)
+        lhs_view = ir.TensorView(layout=ir.TensorLayout.DN, valid_shape=[8, 128])
+        scale_view = ir.TensorView(layout=ir.TensorLayout.MX_A_ND, valid_shape=[16, 4])
+        lhs = ir.Var("lhs", ir.TensorType(lhs.type.shape, lhs.type.dtype, tensor_view=lhs_view), lhs.span)
+        scale = ir.Var(
+            "sa", ir.TensorType(scale.type.shape, scale.type.dtype, tensor_view=scale_view), scale.span
+        )
+        result = ir.op.tensor.matmul_mx(lhs, scale, rhs, rhs_scale).type
+        assert isinstance(result, ir.TensorType) and result.tensor_view is not None
+        assert [dim.value for dim in result.tensor_view.valid_shape if isinstance(dim, ir.ConstInt)] == [
+            16,
+            192,
+        ]
+
     @pytest.mark.parametrize("side", [0, 2])
     def test_rejects_mixed_fp4_fp8(self, side):
         args = self._packed_operands()
