@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -39,11 +40,32 @@ namespace {
 
 using op_predicates::IsBuiltinOp;
 
+bool MatchLogicalShape(const TypePtr& a, const TypePtr& b) {
+  const auto ta = AsTensorTypeLike(a);
+  const auto tb = AsTensorTypeLike(b);
+  return ta && tb && ta->GetKind() == tb->GetKind() && ta->dtype_ == tb->dtype_ &&
+         (a == b || AreExprVectorsEqual(ta->shape_, tb->shape_));
+}
+
 }  // namespace
 
+size_t ShapeMatchCache::TypePairHash::operator()(const TypePair& types) const {
+  return hash_combine(std::hash<TypePtr>{}(types.first), std::hash<TypePtr>{}(types.second));
+}
+
+bool ShapeMatchCache::Matches(const TypePtr& a, const TypePtr& b) {
+  if (a == b) return AsTensorTypeLike(a) != nullptr;
+  const auto [it, inserted] = matches_.try_emplace({a, b}, false);
+  if (inserted) it->second = MatchLogicalShape(a, b);
+  return it->second;
+}
+
 BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy ambiguous_policy,
-                                         bool follow_reshape)
-    : program_(std::move(program)), ambiguous_policy_(ambiguous_policy), follow_reshape_(follow_reshape) {}
+                                         bool follow_reshape, ShapeMatchCache* shape_matches)
+    : program_(std::move(program)),
+      ambiguous_policy_(ambiguous_policy),
+      follow_reshape_(follow_reshape),
+      shape_matches_(shape_matches) {}
 
 void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
@@ -430,15 +452,7 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
 }
 
 bool BufferRootCollector::TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b) {
-  const auto ta = AsTensorTypeLike(a);
-  const auto tb = AsTensorTypeLike(b);
-  if (!ta || !tb || ta->GetKind() != tb->GetKind()) return false;
-  if (ta->dtype_ != tb->dtype_) return false;
-  if (ta->shape_.size() != tb->shape_.size()) return false;
-  for (size_t i = 0; i < ta->shape_.size(); ++i) {
-    if (!AreExprsEqual(ta->shape_[i], tb->shape_[i])) return false;
-  }
-  return true;
+  return shape_matches_ ? shape_matches_->Matches(a, b) : MatchLogicalShape(a, b);
 }
 
 }  // namespace buffer_root

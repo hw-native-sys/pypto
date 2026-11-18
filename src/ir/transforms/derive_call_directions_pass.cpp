@@ -612,6 +612,7 @@ Pass DeriveCallDirections() {
     // We need a non-const handle to rewrite functions with new bodies.
     auto new_functions = program->functions_;
     return_lineage::ScopedTraceCache return_cache;
+    buffer_root::ShapeMatchCache shape_matches;
 
     for (auto& [gvar, func] : new_functions) {
       if (!func || !func->body_) continue;
@@ -621,7 +622,7 @@ Pass DeriveCallDirections() {
       // skips the R-prior / enclosing-param InOut promotion and silently drops
       // the WAW/InOut dependency. Preserves the naive pre-dedup behavior.
       BufferRootCollector br_collector(program, AmbiguousRootPolicy::kFirstOutput,
-                                       /*follow_reshape=*/true);
+                                       /*follow_reshape=*/true, &shape_matches);
       br_collector.Initialize(func->params_);
       br_collector.VisitStmt(func->body_);
 

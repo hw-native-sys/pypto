@@ -222,6 +222,7 @@ Pass ConvertTensorToTileOps() {
       }
 
       return_lineage::ScopedTraceCache return_cache;
+      buffer_root::ShapeMatchCache shape_matches;
       std::vector<bool> visiting(functions_phase2b.size(), false);
       std::vector<bool> resolved(functions_phase2b.size(), false);
       const auto infer = [&](auto&& self, size_t index) -> void {
@@ -239,7 +240,7 @@ Pass ConvertTensorToTileOps() {
         // Use the original program for call-result bindings. Inferred writes
         // must not change the declared output positions used by the collector.
         buffer_root::BufferRootCollector roots(program, buffer_root::AmbiguousRootPolicy::kSkip,
-                                               /*follow_reshape=*/true);
+                                               /*follow_reshape=*/true, &shape_matches);
         roots.Initialize(func->params_);
         roots.VisitStmt(func->body_);
         std::vector<bool> reshaped(func->params_.size(), false);

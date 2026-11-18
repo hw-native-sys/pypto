@@ -8836,9 +8836,8 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(before)
         ir.assert_structural_equal(after, expected)
 
-    @pytest.mark.parametrize("return_mode", ["tuple", "single", "fallback"])
-    def test_distributed_return_preserves_inout_backing_parameter(self, return_mode):
-        """A write through a projected DistributedTensor upgrades its caller parameter."""
+    def test_distributed_return_preserves_inout_backing_parameter(self):
+        """A write through a distributed return upgrades its backing parameter."""
 
         @pl.program
         class Before:
@@ -8873,62 +8872,98 @@ class TestCalleeDirectionPropagationThroughCarries:
                 return value
 
             @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
+            def tuple_result(
                 self,
                 a: pld.DistributedTensor[[64], pl.FP32],
                 b: pld.DistributedTensor[[64], pl.FP32],
-                scratch: pl.Tensor[[1, 64], pl.FP32],
             ):
                 u, _unused = self.produce(a, b)
                 self.consume(u)
 
-        before = Before
-        if return_mode != "tuple":
-            source = ir.python_print(Before)
-            body_start = source.index("\n", source.index("    def main("))
-            if return_mode == "single":
-                body = (
-                    "\n        flat = pl.reshape(scratch, [64])"
-                    "\n        middle = self.forward(a, flat)"
-                    "\n        _unused, u = self.produce(a, middle)"
-                    "\n        self.consume(u)\n"
-                )
-            else:
-                body = (
-                    "\n        pair = (a, a)"
-                    "\n        alias = pair[0]"
-                    "\n        returned = self.forward_distributed(a, alias)"
-                    "\n        self.consume(returned)\n"
-                )
-            before = pl.parse_program(source[:body_start] + body)
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def single_result(
+                self,
+                a: pld.DistributedTensor[[64], pl.FP32],
+                scratch: pl.Tensor[[1, 64], pl.FP32],
+            ):
+                flat = pl.reshape(scratch, [64])
+                middle = self.forward(a, flat)
+                _unused, u = self.produce(a, middle)
+                self.consume(u)
 
-        main = _require_function(before, "main")
-        a, b, scratch = main.params
-        b_dir = ir.ParamDirection.Out if return_mode == "tuple" else ir.ParamDirection.In
-        scratch_dir = ir.ParamDirection.InOut if return_mode == "single" else ir.ParamDirection.In
-        expected_main = ir.Function(
-            "main",
-            [(a, ir.ParamDirection.InOut), (b, b_dir), (scratch, scratch_dir)],
-            main.return_types,
-            main.body,
-            main.span,
-            main.func_type,
-            main.level,
-            main.role,
-            main.attrs,
-        )
-        Expected = ir.Program(
-            [
-                _require_function(before, "produce"),
-                _require_function(before, "consume"),
-                _require_function(before, "forward"),
-                _require_function(before, "forward_distributed"),
-                expected_main,
-            ],
-            before.name,
-            before.span,
-        )
-        after = passes.convert_tensor_to_tile_ops()(before)
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def fallback_result(
+                self,
+                a: pld.DistributedTensor[[64], pl.FP32],
+            ):
+                pair = (a, a)
+                alias = pair[0]
+                returned = self.forward_distributed(a, alias)
+                self.consume(returned)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def produce(
+                self,
+                a: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                b: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+            ) -> tuple[pld.DistributedTensor[[64], pl.FP32], pld.DistributedTensor[[64], pl.FP32]]:
+                return a, b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def consume(
+                self, value: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                value: pld.DistributedTensor[[64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward_distributed(
+                self,
+                out: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                value: pld.DistributedTensor[[64], pl.FP32],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def tuple_result(
+                self,
+                a: pl.InOut[pld.DistributedTensor[[64], pl.FP32]],
+                b: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+            ):
+                u, _unused = self.produce(a, b)
+                self.consume(u)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def single_result(
+                self,
+                a: pl.InOut[pld.DistributedTensor[[64], pl.FP32]],
+                scratch: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(scratch, [64])
+                middle = self.forward(a, flat)
+                _unused, u = self.produce(a, middle)
+                self.consume(u)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def fallback_result(
+                self,
+                a: pl.InOut[pld.DistributedTensor[[64], pl.FP32]],
+            ):
+                pair = (a, a)
+                alias = pair[0]
+                returned = self.forward_distributed(a, alias)
+                self.consume(returned)
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(after, Expected)
 
 

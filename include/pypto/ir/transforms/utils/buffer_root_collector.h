@@ -29,6 +29,19 @@ namespace pypto {
 namespace ir {
 namespace buffer_root {
 
+/// Reuse logical shape comparisons across collectors for one immutable program.
+class ShapeMatchCache {
+ public:
+  [[nodiscard]] bool Matches(const TypePtr& a, const TypePtr& b);
+
+ private:
+  using TypePair = std::pair<TypePtr, TypePtr>;
+  struct TypePairHash {
+    size_t operator()(const TypePair& types) const;
+  };
+  std::unordered_map<TypePair, bool, TypePairHash> matches_;
+};
+
 /// What RecordCallReturnRoots does for a single-return call when the owning buffer
 /// cannot be pinned to one Out/InOut arg by shape+dtype (no match, or two+
 /// distinct same-typed candidates). The right choice depends on the consumer:
@@ -62,7 +75,7 @@ class BufferRootCollector : public IRVisitor {
  public:
   explicit BufferRootCollector(ProgramPtr program,
                                AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip,
-                               bool follow_reshape = false);
+                               bool follow_reshape = false, ShapeMatchCache* shape_matches = nullptr);
 
   void Initialize(const std::vector<VarPtr>& params);
 
@@ -150,11 +163,12 @@ class BufferRootCollector : public IRVisitor {
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
   // value aliases its source buffer with the same logical shape and dtype.
-  [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
+  [[nodiscard]] bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
 
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
   bool follow_reshape_;
+  ShapeMatchCache* shape_matches_;
   using RootSetPair = std::pair<RootSetId, RootSetId>;
   struct RootSetPairHash {
     size_t operator()(const RootSetPair& pair) const;
