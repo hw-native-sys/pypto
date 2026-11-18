@@ -87,7 +87,7 @@ The exact scan has a per-function work limit based on the number of candidate no
 For each positional argument the mutator picks a direction by this table. A callee `Out` is resolved by trying three promotion rules in order — R-seq → R-prior → R-enclosing; if none fires it stays `OutputExisting`:
 
 | Callee `ParamDirection` | Argument | `sequential_depth > 0`? | First-writer proof? | Enclosing param `InOut`? | Result |
-| ----------------------- | -------- | ----------------------- | ---------------------- | ------------------------ | ------ |
+| ----------------------- | -------- | ----------------------- | ------------------- | ------------------------ | ------ |
 | any | non-tensor | — | — | — | `Scalar` |
 | `In` | tensor | — | — | — | `Input` |
 | `InOut` | tensor | — | — | — | `InOut` |
