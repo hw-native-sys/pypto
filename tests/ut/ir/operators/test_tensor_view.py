@@ -19,10 +19,12 @@ Simplify-pass identity-elimination rule is covered in
 ``tests/ut/ir/transforms/test_simplify_pass.py``.
 """
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.language.distributed import DistributedTensor
 from pypto.language.op import tensor_ops as dsl_tensor_ops
+from pypto.language.parser.diagnostics import ParserTypeError
 
 
 def _span():
@@ -341,12 +343,98 @@ def test_strided_source_flips_inheriting_stride():
     assert _values_of(view.stride) == [1, 16]
 
 
+def test_sampled_window_dsl_roundtrip():
+    @pl.program
+    class Window:
+        @pl.function(type=pl.FunctionType.InCore)
+        def sample(self, x: pl.Tensor[[16, 32], pl.BF16]):
+            v = pl.tensor.view(x, [2, 8], valid_shape=[2, 5], offsets=[3, 2], steps=[7, 2])
+            return v
+
+    code = Window.as_python()
+    assert "offsets=" in code and "steps=" in code and "valid_shape=" in code
+    assert ir.structural_equal(Window, pl.parse_program(code))
+
+
+def test_sampled_window_rejects_conflicting_descriptor_annotation():
+    with pytest.raises(ParserTypeError, match="conflicts with the sampled window"):
+
+        @pl.function
+        def sample(x: pl.Tensor[[2, 4], pl.FP32]):
+            v: pl.Tensor[[1, 2], pl.FP32, pl.TensorView(stride=[800, 100], layout=pl.TensorLayout.ND)] = (
+                pl.tensor.view(x, [1, 2], steps=[2, 2])
+            )
+            return v
+
+
+def test_sampled_window_preserves_parent_strides_and_validity():
+    parent = _tensor_var([2000, 1024], dtype=DataType.BF16)
+    view = ir.op.tensor.view(parent, [2, 512], valid_shape=[2, 128], offsets=[3, 0], steps=[500, 2])
+    descriptor = _result_view(view)
+    assert descriptor is not None
+    assert _values_of(descriptor.stride) == [512000, 2]
+    assert _values_of(descriptor.valid_shape) == [2, 128]
+    nested = ir.op.tensor.view(view, [1, 2], offsets=[1, 1])
+    nested_descriptor = _result_view(nested)
+    assert nested_descriptor is not None
+    assert _values_of(nested_descriptor.stride) == [512000, 2]
+    with pytest.raises(ValueError, match="exceeds parent validity"):
+        ir.op.tensor.view(view, [1, 2], offsets=[1, 127])
+
+
+def test_sampled_window_dn_and_odd_tail():
+    # Rows 0, 2, 4 of a five-row DN tensor. Adjacent columns start 5 elements apart.
+    parent = _tensor_var([5, 8], view=ir.TensorView(layout=ir.TensorLayout.DN))
+    view = ir.op.tensor.view(parent, [3, 8], steps=[2, 1])
+    descriptor = _result_view(view)
+    assert descriptor is not None
+    assert _values_of(descriptor.stride) == [2, 5]
+    nested = ir.op.tensor.view(view, [2, 1], offsets=[1, 2])
+    nested_descriptor = _result_view(nested)
+    assert nested_descriptor is not None
+    assert _values_of(nested_descriptor.stride) == [2, 5]
+
+
+@pytest.mark.parametrize("field", ["shape", "steps", "valid_shape"])
+def test_window_type_geometry_requires_bound_payload_reads(field):
+    source = _tensor_var([8], name="source")
+    indices = _tensor_var([1], dtype=DataType.INT32, name="indices")
+    read = ir.op.tensor.read(indices, [0])
+    dimension = [read + 1]
+    with pytest.raises(ValueError, match="bind the result of tensor.read to a scalar variable"):
+        ir.op.tensor.view(
+            source,
+            dimension if field == "shape" else [1],
+            steps=dimension if field == "steps" else [1],
+            valid_shape=dimension if field == "valid_shape" else None,
+        )
+
+    step = ir.Var("step", read.type, ir.Span.unknown())
+    window = ir.op.tensor.view(source, [1], steps=[step])
+    descriptor = _result_view(window)
+    assert descriptor is not None and descriptor.stride[0].same_as(step)
+
+
+@pytest.mark.parametrize(
+    ("shape", "offsets", "steps", "error"),
+    [
+        ([2, 512], [0, 2], [1, 2], "exceeds parent shape"),
+        ([2, 512], [0, 0], [1, 2**62], "exceeds parent shape"),
+        ([1, 1], [0, 0], [2**62, 1], "stride overflows"),
+        ([2, 512], [-1, 0], [1, 2], "offsets must be nonnegative"),
+        ([2, 512], [0, 0], [1, 0], "steps must be positive"),
+        ([0, 512], [0, 0], [1, 2], "shape must be positive"),
+        ([2, 512], [0], [1, 2], "match parent rank"),
+    ],
+)
+def test_sampled_window_invalid_geometry(shape, offsets, steps, error):
+    with pytest.raises(ValueError, match=error):
+        ir.op.tensor.view(_tensor_var([2, 1024]), shape, offsets=offsets, steps=steps)
+
+
 def test_non_canonical_source_rejected():
-    """Source views that fail the canonical-family invariants (e.g. ND with
-    non-unit innermost stride) are still rejected — they don't describe a
-    well-defined memory pattern."""
-    # ND requires stride[-1] == 1; a stride of [16, 2] violates that.
-    src_view = ir.TensorView([_const(16), _const(2)], ir.TensorLayout.ND)
+    """A second row beginning inside the first sampled row is invalid."""
+    src_view = ir.TensorView([_const(8), _const(2)], ir.TensorLayout.ND)
     src = _tensor_var([4, 8], view=src_view, name="malformed")
     with pytest.raises(ValueError, match="not canonical"):
         ir.op.tensor.view(src, layout=ir.TensorLayout.DN)

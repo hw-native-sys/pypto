@@ -39,6 +39,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -499,8 +500,10 @@ inline ExprPtr AddByteOffsets(const ExprPtr& lhs, const ExprPtr& rhs) {
   auto const_lhs = As<ConstInt>(lhs);
   auto const_rhs = As<ConstInt>(rhs);
   if (const_lhs && const_rhs) {
-    return std::make_shared<ConstInt>(const_lhs->value_ + const_rhs->value_, DataType::INDEX,
-                                      Span::unknown());
+    int64_t sum;
+    CHECK(!__builtin_add_overflow(const_lhs->value_, const_rhs->value_, &sum))
+        << "View address addition exceeds int64";
+    return MakeIndexConst(sum);
   }
   if (const_rhs && const_rhs->value_ == 0) return lhs;
   if (const_lhs && const_lhs->value_ == 0) return rhs;
@@ -524,8 +527,10 @@ inline ExprPtr MulByteOffsets(const ExprPtr& lhs, const ExprPtr& rhs) {
   auto const_lhs = As<ConstInt>(lhs);
   auto const_rhs = As<ConstInt>(rhs);
   if (const_lhs && const_rhs) {
-    return std::make_shared<ConstInt>(const_lhs->value_ * const_rhs->value_, DataType::INDEX,
-                                      Span::unknown());
+    int64_t product;
+    CHECK(!__builtin_mul_overflow(const_lhs->value_, const_rhs->value_, &product))
+        << "View address multiplication exceeds int64";
+    return MakeIndexConst(product);
   }
   if (const_rhs && const_rhs->value_ == 1) return lhs;
   if (const_lhs && const_lhs->value_ == 1) return rhs;
@@ -698,10 +703,40 @@ inline ExprPtr ComputeSliceByteOffset(
   return std::make_shared<ConstInt>(static_cast<int64_t>(*byte_offset), DataType::INDEX, Span::unknown());
 }
 
+/// Displacement in elements from the immediate tensor origin. Nested GM
+/// windows use their parent descriptor's physical strides.
+inline ExprPtr TensorElementOffset(const TensorTypePtr& tensor, const MakeTuplePtr& indices) {
+  INTERNAL_CHECK(indices && indices->elements_.size() == tensor->shape_.size())
+      << "Tensor index rank must match its descriptor";
+  const auto& view = tensor->tensor_view_;
+  const auto strides = view && !view->stride.empty()
+                           ? view->stride
+                           : tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                 tensor->shape_, view ? view->layout : TensorLayout::ND);
+  INTERNAL_CHECK(strides.size() == indices->elements_.size()) << "Tensor stride rank mismatch";
+  auto offset = MakeZeroByteOffset();
+  for (size_t i = 0; i < strides.size(); ++i) {
+    offset = AddByteOffsets(offset, MulByteOffsets(indices->elements_[i], strides[i]));
+  }
+  return offset;
+}
+
+inline bool IsWindowTensorView(const CallPtr& call) {
+  return IsOp(call, "tensor.view") && call->args_.size() >= 4;
+}
+
 /// Compute additional byte offset for a view operation.
 /// Dispatches: slice ops → stride-based offset, others → zero offset.
 inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type) {
-  const std::string& op_name = call->op_->name_;
+  if (IsWindowTensorView(call)) {
+    auto parent = As<TensorType>(parent_type);
+    INTERNAL_CHECK_SPAN(parent, call->span_) << "tensor.view window source must be a Tensor";
+    auto elements = TensorElementOffset(parent, As<MakeTuple>(call->args_[2]));
+    const auto bits = storage_size::GetStorageBitWidth(parent->dtype_);
+    CHECK_SPAN(bits > 0 && bits % 8 == 0, call->span_)
+        << "tensor.view window requires byte-addressable storage";
+    return MulByteOffsets(elements, MakeIndexConst(static_cast<int64_t>(bits / 8), call->span_));
+  }
 
   if (IsOp(call, "tensor.slice") || IsOp(call, "tile.slice")) {
     auto shaped = std::dynamic_pointer_cast<const ShapedType>(parent_type);
@@ -711,7 +746,7 @@ inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_
     // tile.slice(input, shape, offset[, valid_shape]) → offset is args[2]
     size_t offset_arg_idx = 2;
     INTERNAL_CHECK_SPAN(offset_arg_idx < call->args_.size(), call->span_)
-        << "Internal error: " << op_name << " missing offset argument";
+        << "Internal error: " << call->op_->name_ << " missing offset argument";
 
     // Extract individual offset elements from the MakeTuple expression
     std::vector<ExprPtr> offsets;

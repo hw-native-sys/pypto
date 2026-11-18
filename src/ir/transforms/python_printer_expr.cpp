@@ -905,6 +905,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const bool mgather_kw_valid = mgather && ((mgather_coalesce == 0 && op->args_.size() == 3) ||
                                             (mgather_coalesce == 1 && op->args_.size() == 4));
 
+  const bool window_view = IsOp(op, "tensor.view") && (op->args_.size() == 4 || op->args_.size() == 5);
+
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (gather_row_kw_valid && i == 5) continue;
@@ -915,6 +917,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (a2av_kw_core_num && i + 1 == op->args_.size()) continue;
     if (mgather && i >= 2) continue;
     if (i > 0) stream_ << ", ";
+
+    if (window_view && i >= 2) {
+      constexpr const char* kWindowKeywords[] = {"offsets", "steps", "valid_shape"};
+      stream_ << kWindowKeywords[i - 2] << "=";
+    }
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
     if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {

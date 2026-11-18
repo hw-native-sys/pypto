@@ -658,7 +658,8 @@ def test_dsa_rp_keeps_logically_ordered_cross_pipe_handoff():
     assert not _overlap(ranges["prior"], ranges["next_value"])
 
 
-def test_no_access_operation_has_no_exact_pipe(ascend_backend):
+@pytest.mark.parametrize("op_name", ["tile.create", "tensor.view"])
+def test_no_access_operation_has_no_exact_pipe(ascend_backend, op_name):
     """Declarations cannot acquire a synthetic execution resource."""
 
     @pl.program
@@ -669,10 +670,11 @@ def test_no_access_operation_has_no_exact_pipe(ascend_backend):
             output: pl.Tensor[[16, 16], pl.FP32],
         ) -> pl.Tensor[[16, 16], pl.FP32]:
             created = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-            return pl.store(created, [0, 0], output)
+            viewed = pl.tensor.view(output, [16, 16])
+            return pl.store(created, [0, 0], viewed)
 
-    call = _find_call(Before, "tile.create")
-    assert testing.get_execution_memory_access_evidence("tile.create") == "no_access"
+    call = _find_call(Before, op_name)
+    assert testing.get_execution_memory_access_evidence(op_name) == "no_access"
     assert testing.try_infer_pipe(call) is None
 
 

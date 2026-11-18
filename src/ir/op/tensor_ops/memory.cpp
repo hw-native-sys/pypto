@@ -853,6 +853,7 @@ REGISTER_OP("tensor.dim")
     .set_description("Extract a shape dimension from a tensor as a scalar value")
     .add_argument("tensor", "Input tensor (TensorType)")
     .add_argument("axis", "Dimension index (ConstInt, supports negative indexing)")
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorDimType(args, kwargs);

@@ -4369,7 +4369,7 @@ class Before:
         kernel = _require_function(after, "main_incore_0")
         assert len(_find_calls_to(kernel, "tensor.write")) == 2
         assert _find_first_call_to(kernel, "tile.store") is None
-        assert kernel.param_directions[0] == ir.ParamDirection.InOut
+        assert kernel.param_directions[0] == ir.ParamDirection.Out
 
     def test_constant_fill_and_scalar_update_to_distinct_tensors_keeps_bulk_fill(self):
         """Scalar updates to a different GM root do not prevent fill promotion."""
@@ -8123,6 +8123,47 @@ class TestRegistryDrivenParamDirections:
         after = passes.convert_tensor_to_tile_ops()(program)[func_name]
         assert before is not None and after is not None
         return {param.name_hint: after.param_directions[i] for i, param in enumerate(before.params)}
+
+    @pytest.mark.parametrize("read_destination", [False, True])
+    def test_write_through_view_tracks_only_payload_reads(self, read_destination):
+        load_source = "v" if read_destination else "src"
+        program = pl.parse_program(f"""
+@pl.program
+class ViewDirections:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, src: pl.Tensor[[2, 4], pl.FP32], dst: pl.Tensor[[4, 4], pl.FP32]):
+        v = pl.tensor.view(dst, [2, 4], offsets=[1, 0])
+        tile = pl.load({load_source}, [0, 0], [2, 4])
+        pl.store(tile, [0, 0], v)
+""")
+        expected = ir.ParamDirection.InOut if read_destination else ir.ParamDirection.Out
+        assert self._directions(program)["dst"] == expected
+
+    def test_nested_window_offset_read_contributes_to_direction(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, indices: pl.Tensor[[1], pl.INT32], dst: pl.Tensor[[8, 4], pl.FP32]
+            ) -> pl.Tensor[[1], pl.INT32]:
+                v = pl.tensor.view(dst, [1, 4], offsets=[pl.tensor.read(indices, [0]) + 1, 0])
+                pl.tensor.write(v, [0, 0], pl.const(0.0, pl.FP32))
+                pl.tensor.write(indices, [0], pl.const(0, pl.INT32))
+                return indices
+
+        directions = self._directions(Program)
+        assert directions["indices"] == ir.ParamDirection.InOut
+        assert directions["dst"] == ir.ParamDirection.Out
+
+    def test_window_offset_from_destination_shape_keeps_output_direction(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, dst: pl.Tensor[[8, 4], pl.FP32]):
+                v = pl.tensor.view(dst, [1, 4], offsets=[pl.tensor.dim(dst, 0) - 1, 0])
+                pl.tensor.write(v, [0, 0], pl.const(1.0, pl.FP32))
+
+        assert self._directions(Program)["dst"] == ir.ParamDirection.Out
 
     def test_mscatter_destination_is_out(self):
         """A GM tensor written only by ``pl.mscatter`` is an output.

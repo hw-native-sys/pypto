@@ -170,6 +170,29 @@ def test_tensor_view_explicit_valid_shape_codegen_and_execution():
     assert actual._pypto_full_shape == (32, 128)
 
 
+def test_window_view_preserves_parent_origin_and_disjoint_columns():
+    src = _tensor_var("src", [8, 16])
+    row = _scalar("row", DataType.INDEX)
+    window = ir.op.tensor.view(src, [2, 4], offsets=[row, 1], steps=[3, 2])
+    v = ir.Var("v", window.type, _span())
+    inner = ir.op.tensor.view(v, [1, 2], offsets=[1, 1], steps=[1, 2])
+    w = ir.Var("w", inner.type, _span())
+    body = ir.SeqStmts(
+        [ir.AssignStmt(v, window, _span()), ir.AssignStmt(w, inner, _span()), ir.ReturnStmt([w], _span())],
+        _span(),
+    )
+    func = _simple_function("nested_window", [src, row], body, [w.type])
+    ns: dict = {}
+    exec(torch_codegen(func), ns)  # noqa: S102
+    x = torch.arange(128, dtype=torch.float32).reshape(8, 16)
+    expected = x.clone()
+    result = ns["nested_window"](x, 2)
+    assert torch.equal(result, x[5:6, 3:8:4])
+    result.fill_(-1)
+    expected[5:6, 3:8:4] = -1
+    assert torch.equal(x, expected)
+
+
 def test_tensor_view_same_layout_is_identity():
     """A layout-only view targeting the current layout should be an identity."""
     src = _tensor_var("src", [2, 4])

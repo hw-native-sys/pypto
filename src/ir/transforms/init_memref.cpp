@@ -234,6 +234,26 @@ std::optional<uint64_t> StaticAccSliceViewSpanBytes(
   return storage_size::StaticStorageBytes(last_box_start + box_elements, dtype);
 }
 
+// The positive-stride descriptor covers a byte envelope, including its gaps.
+// Only the individual addresses selected by the descriptor are read/written.
+std::optional<uint64_t> StaticTensorViewSpanBytes(const TensorTypePtr& tensor) {
+  const auto& view = tensor->tensor_view_;
+  INTERNAL_CHECK(view && view->stride.size() == tensor->shape_.size()) << "Tensor view stride rank mismatch";
+  uint64_t elements = 1;
+  for (size_t i = 0; i < tensor->shape_.size(); ++i) {
+    const auto extent = As<ConstInt>(tensor->shape_[i]);
+    const auto stride = As<ConstInt>(view->stride[i]);
+    if (!extent || !stride || extent->value_ <= 0 || stride->value_ <= 0) return std::nullopt;
+    uint64_t term;
+    if (__builtin_mul_overflow(static_cast<uint64_t>(extent->value_ - 1),
+                               static_cast<uint64_t>(stride->value_), &term) ||
+        __builtin_add_overflow(elements, term, &elements)) {
+      return std::nullopt;
+    }
+  }
+  return storage_size::StaticStorageBytes(elements, tensor->dtype_);
+}
+
 /// Byte envelope touched by a static packed slice, relative to its first
 /// element. This is deliberately distinct from the physical allocation size:
 /// L0C row padding belongs to the root allocation and must not be applied again
@@ -681,6 +701,12 @@ class InitMemRefMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(!As<TileType>(type) || static_size.has_value(), err_span)
         << "InitMemRef cannot represent the physical allocation size for static tile variable '" << var_name
         << "' without overflowing 64-bit bytes";
+    if (const auto tensor = As<TensorType>(type); tensor && tensor->tensor_view_) {
+      const auto& view = *tensor->tensor_view_;
+      if (!view.stride.empty() && (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)) {
+        static_size = StaticTensorViewSpanBytes(tensor);
+      }
+    }
     const uint64_t size_bytes = static_size.value_or(0);
 
     auto base =
@@ -882,7 +908,9 @@ class InitMemRefMutator : public IRMutator {
     if (auto call = As<Call>(new_value)) {
       auto parent_shaped = std::dynamic_pointer_cast<const ShapedType>(source->GetType());
       auto out_shaped = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
-      if (auto slice_span = StaticSliceViewSpanBytes(call, parent_shaped, out_shaped)) {
+      if (IsWindowTensorView(call)) {
+        view_size = StaticTensorViewSpanBytes(AsTensorTypeLike(op->var_->GetType())).value_or(0);
+      } else if (auto slice_span = StaticSliceViewSpanBytes(call, parent_shaped, out_shaped)) {
         view_size = *slice_span;
       }
     }
@@ -1030,11 +1058,12 @@ class InitMemRefMutator : public IRMutator {
       }
     }
 
-    // Tile alias: a = b where b is a tile Var — share b's MemRef.
+    // Plain tile and InCore GM tensor aliases share the source MemRef.
     // Without this, the alias gets a fresh MemRef that is never written to,
     // breaking IfStmt return_vars that inherit the alias's empty MemRef.
-    if (auto value_var = As<Var>(new_value)) {
-      if (As<TileType>(op->var_->GetType())) {
+    if (auto value_var = AsVarLike(new_value)) {
+      if (As<TileType>(op->var_->GetType()) ||
+          (IsInCoreType(func_type_) && As<TensorType>(op->var_->GetType()))) {
         auto result = ShareMemRefFrom(value_var, op, new_value);
         if (result) return result;
       }
@@ -1180,6 +1209,13 @@ class InitMemRefMutator : public IRMutator {
           then_yield && i < then_yield->value_.size() ? AsVarLike(then_yield->value_[i]) : nullptr;
       auto else_var =
           else_yield && i < else_yield->value_.size() ? AsVarLike(else_yield->value_[i]) : nullptr;
+      // A GM phi aliases its source descriptor only when both paths yield
+      // that storage. PTO checks the corresponding descriptor SSA at emission.
+      if (As<TensorType>(new_if->return_vars_[i]->GetType()) &&
+          (!then_var || !else_var ||
+           GetTypeMemRef(then_var->GetType()) != GetTypeMemRef(else_var->GetType()))) {
+        return nullptr;
+      }
       auto var = then_var ? then_var : else_var;
       if (auto tile = var ? As<TileType>(var->GetType()) : nullptr; tile && !tile->memref_) {
         // Only a single borrowed slot can remain an alias after the join.
@@ -1212,12 +1248,13 @@ class InitMemRefMutator : public IRMutator {
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
       auto yield_var = get_yield_var(i);
-      // A borrowed FIFO value deliberately has no MemRef. Control-flow results
-      // must inherit that absence too, rather than keep a fresh allocation.
-      auto yield_tile = yield_var ? As<TileType>(yield_var->GetType()) : nullptr;
-      if (As<TileType>(new_return_vars[i]->GetType()) && yield_tile) {
-        auto new_type = CloneTypeWithMemRef(new_return_vars[i]->GetType(), yield_tile->memref_,
-                                            yield_tile->GetMemorySpace());
+      auto source = yield_var ? std::dynamic_pointer_cast<const ShapedType>(yield_var->GetType()) : nullptr;
+      const auto& result_type = new_return_vars[i]->GetType();
+      const bool share =
+          (As<TileType>(result_type) && yield_var && As<TileType>(yield_var->GetType())) ||
+          (IsInCoreType(func_type_) && As<TensorType>(result_type) && source && source->memref_);
+      if (share) {
+        auto new_type = CloneTypeWithMemRef(result_type, source->memref_, source->GetMemorySpace());
         auto new_rv =
             std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
         borrowed_.BindAlias(new_rv, yield_var);

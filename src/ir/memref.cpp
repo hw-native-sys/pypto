@@ -178,12 +178,15 @@ MemRef::MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size
 bool MemRef::MayAlias(const MemRefPtr& a, const MemRefPtr& b) {
   if (a->base_.get() != b->base_.get()) return false;
 
+  // InitMemRef uses zero when a GM extent or pitch is known only at runtime.
+  // An unknown extent cannot prove two windows of the same storage disjoint.
+  if (a->size_ == 0 || b->size_ == 0) return true;
   auto off_a = As<ConstInt>(a->byte_offset_);
   auto off_b = As<ConstInt>(b->byte_offset_);
   if (off_a && off_b) {
-    int64_t end_a = off_a->value_ + static_cast<int64_t>(a->size_);
-    int64_t end_b = off_b->value_ + static_cast<int64_t>(b->size_);
-    return off_a->value_ < end_b && off_b->value_ < end_a;
+    const auto ua = static_cast<uint64_t>(off_a->value_);
+    const auto ub = static_cast<uint64_t>(off_b->value_);
+    return off_a->value_ <= off_b->value_ ? ub - ua < a->size_ : ua - ub < b->size_;
   }
   return true;  // same base, symbolic offsets → conservatively alias
 }

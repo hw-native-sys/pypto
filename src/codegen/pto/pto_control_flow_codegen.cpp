@@ -129,6 +129,25 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
   fs_.yield_buffer = yielded_values;
 }
 
+// Tensor loop carries are lowered as in-place references bound to the loop
+// initializer. Reject a rebind to a different GM window before discarding
+// tensor yields; otherwise the next iteration would silently use the old origin.
+void PTOCodegen::CheckLoopTensorYields(const std::vector<ir::IterArgPtr>& iter_args,
+                                       const ir::Span& span) const {
+  if (fs_.window_origins.empty()) return;
+  for (size_t i = 0; i < iter_args.size() && i < fs_.yield_buffer.size(); ++i) {
+    if (!ir::AsTensorTypeLike(iter_args[i]->GetType())) continue;
+    const auto yielded = fs_.view_ssa_to_base_ptr.find(fs_.yield_buffer[i]);
+    if (yielded != fs_.view_ssa_to_base_ptr.end()) {
+      const auto init = GetTensorBasePtr(iter_args[i]);
+      if (!fs_.window_origins.count(init) && !fs_.window_origins.count(yielded->second)) continue;
+      CHECK_SPAN(yielded->second == init, span)
+          << "An InCore loop-carried tensor must keep its GM origin; construct the window inside each "
+             "iteration";
+    }
+  }
+}
+
 std::string PTOCodegen::GetScalarIterArgTypeString(
     const std::shared_ptr<const ScalarType>& scalar_type) const {
   CHECK(scalar_type) << "PTOCodegen requires a valid ScalarType for iter_arg/result emission";
@@ -772,6 +791,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
     fs_.yield_buffer.clear();
     VisitStmt(op->body_);
+    CheckLoopTensorYields(op->iter_args_, op->span_);
     fs_.yield_buffer.clear();
 
     DecreaseIndent();
@@ -816,6 +836,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
     fs_.yield_buffer.clear();
     VisitStmt(op->body_);
+    CheckLoopTensorYields(op->iter_args_, op->span_);
 
     // Filter yield_buffer to keep only SSA value iter_arg entries
     std::vector<std::string> ssa_yields;
@@ -931,6 +952,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
 
     fs_.yield_buffer.clear();
     VisitStmt(op->body_);
+    CheckLoopTensorYields(op->iter_args_, op->span_);
 
     Emit("scf.yield");
     fs_.yield_buffer.clear();
@@ -1011,6 +1033,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     // Visit body
     fs_.yield_buffer.clear();
     VisitStmt(op->body_);
+    CheckLoopTensorYields(op->iter_args_, op->span_);
 
     // Filter yield_buffer to keep only SSA value iter_arg entries
     std::vector<std::string> ssa_yields;
