@@ -1067,6 +1067,18 @@ class ASTParser:
                         value_expr.span,
                     )
             self.function.shape_dim_aliases.pop(existing_var.unique_id, None)
+            if (
+                isinstance(override_type, ir.TileType)
+                and override_type.memref is not None
+                and override_type.memref.is_pinned_
+                and not isinstance(value_expr, ir.Call)
+            ):
+                # A plain alias has no Call on which to carry this definition's
+                # annotation. Bind it separately so SSA sees the constraint
+                # without retyping the source or the reused mutable Var.
+                value_expr = self.builder.let(
+                    f"_{var_name}_binding", value_expr, type=override_type, span=span
+                )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
         var = self.builder.let(var_name, value_expr, type=override_type, span=span)

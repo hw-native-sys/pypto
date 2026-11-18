@@ -118,7 +118,9 @@ segments ptoas is forbidden to merge — see
 
 The declaration is carried by the assigned `Var`; the parser also preserves an explicit
 pinned annotation on the RHS `Call`, so reassignment can distinguish it from the Var's
-older inferred binding. Op type deduction does not allocate storage, but can inherit an
+older inferred binding. A plain-alias reannotation uses a separate typed binding before
+updating the mutable variable, preserving the constraint without retyping its source.
+Op type deduction does not allocate storage, but can inherit an
 input MemRef (`tile.gather_row` returns its destination's type). Passes that rebuild types
 must preserve explicit constraints even when deduction omits or inherits a MemRef.
 `ConvertToSSA` selects each definition's metadata; `FlattenTileNdTo2D` carries it through

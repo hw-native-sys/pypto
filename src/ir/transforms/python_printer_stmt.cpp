@@ -106,8 +106,14 @@ bool SpmdInlineBodyRebuildsCarrier(const InCoreScopeStmtPtr& incore) {
 void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
   // Print with type annotation: var: type = value
   // In concise mode, omit the type annotation: var = value
+  const bool reassignment = !printed_assignment_vars_.insert(op->var_.get()).second;
+  auto tile = As<TileType>(op->var_->GetType());
+  // A reused Var retains its first definition's binding. Printing that as a
+  // fresh alias annotation would constrain the new source on reparsing.
+  const bool stale_alias_binding =
+      reassignment && !As<Call>(op->value_) && tile && tile->memref_ && (*tile->memref_)->is_pinned_;
   VisitExpr(op->var_);
-  if (!concise_) {
+  if (!concise_ && !stale_alias_binding) {
     stream_ << ": " << Print(op->var_->GetType());
   }
   stream_ << " = ";

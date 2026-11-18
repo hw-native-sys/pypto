@@ -144,12 +144,13 @@ inline TypePtr GetAuthoritativeAssignmentType(const TypePtr& lhs_type, const Exp
                                                   As<TupleType>(value_type);
   auto chosen = value_type && !As<UnknownType>(value_type) && rhs_carries_authoritative_metadata ? value_type
                                                                                                  : lhs_type;
-  // The RHS wins on shape / dtype / view metadata and inherited storage. An
-  // unannotated reassignment may follow a different source allocation; the
-  // mutable LHS's old inferred binding must not override that new definition.
-  // When inference omits storage, the LHS supplies its allocation metadata.
-  if (!GetTypeMemRef(chosen).has_value() && GetTypeMemRef(lhs_type).has_value()) {
-    chosen = CloneTypeWithMemRef(chosen, GetTypeMemRef(lhs_type));
+  // The RHS wins on shape / dtype / view metadata, but a fresh definition's
+  // pinned LHS constrains even a plain alias with inherited storage. Callers
+  // must clear stale LHS storage on mutable redefinitions before selecting
+  // their type; explicit alias reannotations use a separate fresh binding.
+  auto lhs_memref = GetTypeMemRef(lhs_type);
+  if (lhs_memref && (!GetTypeMemRef(chosen) || (*lhs_memref)->is_pinned_)) {
+    chosen = CloneTypeWithMemRef(chosen, lhs_memref);
   }
   return chosen;
 }

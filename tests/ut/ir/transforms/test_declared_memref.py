@@ -514,6 +514,7 @@ class TestInheritedBinding:
     @pytest.mark.parametrize(
         "replacement",
         [
+            "second",
             "pl.gather_row(second, x, [1, 0], [1, 0], [1, 32])",
             "pl.reshape(second, [8, 32])",
             "pl.tile.slice(second, [8, 32], [0, 0])",
@@ -552,6 +553,29 @@ class Before:
             ref.base_.name_hint for name, ref in _tile_memrefs(after).items() if name.startswith("result")
         ]
         assert bases == ["first", "second"]
+
+    @pytest.mark.parametrize("binding", ["source", "other"])
+    def test_plain_alias_definition_keeps_explicit_binding(self, ascend_backend, binding):
+        """A fresh alias's explicit constraint must also survive inlining and SSA."""
+        before = pl.parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]) -> pl.Tensor[[8, 32], pl.BF16]:
+        source: pl.Tile[[8, 32], pl.BF16, pl.MemRef("source"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        result: pl.Tile[[8, 32], pl.BF16, pl.MemRef("{binding}"), pl.Mem.Vec] = source
+        return pl.store(result, [0, 0], out)
+""")
+        assert isinstance(before, ir.Program)
+        if binding == "other":
+            with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+                _run_full_pipeline(before, "InitMemRef")
+            return
+        refs = _tile_memrefs(_run_full_pipeline(before, "InitMemRef"))
+        # Canonicalization may eliminate this single-use alias entirely.
+        assert {ref.base_.name_hint for ref in refs.values()} == {"source"}
 
     def test_plain_alias_reassignment_to_unbound_source(self, ascend_backend):
         """A plain alias can leave a pinned source for a compiler-managed tile."""
