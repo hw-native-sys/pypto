@@ -138,7 +138,7 @@ void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::
     bool unresolved = roots.empty() || IsAmbiguous(value);
     if (!guaranteed_to_run && i < iter_args.size()) {
       const auto& init_roots = RootCandidatesOf(iter_args[i].get());
-      if (init_roots.empty()) unresolved = true;
+      unresolved = unresolved || init_roots.empty() || (follow_reshape_ && IsAmbiguous(iter_args[i]));
       for (const Var* root : init_roots) {
         if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
       }
@@ -184,13 +184,8 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
       if (As<TupleType>(call->GetType())) {
         tuple_output_roots_[assign->var_.get()] =
             std::make_shared<const std::vector<OutputRoot>>(std::move(out_roots));
-      } else if (follow_reshape_ && out_roots.size() == 1) {
-        ShareRootCandidates(assign->var_, out_roots.front().argument);
       } else {
-        auto info = SelectReturnRootInfo(out_roots, call);
-        if (!info.roots.empty()) {
-          RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
-        }
+        RecordCallReturnRoots(assign->var_, out_roots, call);
       }
     }
   } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
@@ -298,10 +293,21 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
   return roots;
 }
 
-BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
-    const std::vector<OutputRoot>& out_roots, const CallPtr& call) const {
-  if (out_roots.empty()) return RootInfo{{}, false};
-  if (out_roots.size() == 1) return {out_roots.front().roots, out_roots.front().ambiguous};
+void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
+                                                const std::vector<OutputRoot>& out_roots,
+                                                const CallPtr& call) {
+  if (out_roots.empty()) return;
+  const auto record_output = [&](const OutputRoot& output) {
+    if (follow_reshape_) {
+      ShareRootCandidates(result, output.argument);
+    } else if (!output.roots.empty()) {
+      RecordRootCandidates(result, output.roots, output.ambiguous);
+    }
+  };
+  if (out_roots.size() == 1) {
+    record_output(out_roots.front());
+    return;
+  }
 
   const OutputRoot* match = nullptr;
   bool ambiguous = false;
@@ -309,12 +315,16 @@ BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
     if (!candidate.roots.empty() && TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
       if (match == nullptr) {
         match = &candidate;
-      } else if (match->roots != candidate.roots || match->ambiguous != candidate.ambiguous) {
+      } else if ((&match->roots != &candidate.roots && match->roots != candidate.roots) ||
+                 match->ambiguous != candidate.ambiguous) {
         ambiguous = true;
       }
     }
   }
-  if (match && !ambiguous) return {match->roots, match->ambiguous};
+  if (match && !ambiguous) {
+    record_output(*match);
+    return;
+  }
 
   if (follow_reshape_ && ambiguous) {
     // Resolve a tie between same-shaped outputs from the callee's actual
@@ -324,25 +334,26 @@ BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
       const auto param = return_lineage::ReturnedParamIndex(callee, program_);
       if (param && *param < call->args_.size() && callee->param_directions_[*param] != ParamDirection::In) {
         const auto& arg = call->args_[*param];
-        auto roots = ResolveRootCandidates(arg);
         // Callee identity is useful only if the actual argument has one
         // proven root. A partial set still needs the compatible candidates.
-        if (!roots.empty() && !IsAmbiguous(arg)) {
-          return RootInfo{std::move(roots), false};
+        if (!ResolveRootCandidates(arg).empty() && !IsAmbiguous(arg)) {
+          ShareRootCandidates(result, arg);
+          return;
         }
       }
     }
     // A consumer may read or write whichever compatible buffer was returned.
     // Retain every compatible root when the return proof is unavailable.
-    RootInfo possible{{}, true};
+    RootCandidates possible;
     std::unordered_set<const Var*> seen;
     for (const auto& candidate : out_roots) {
       if (!TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) continue;
       for (const auto* root : candidate.roots) {
-        if (seen.insert(root).second) possible.roots.push_back(root);
+        if (seen.insert(root).second) possible.push_back(root);
       }
     }
-    return possible;
+    RecordRootCandidates(result, possible, /*unresolved=*/true);
+    return;
   }
   // No provable unambiguous type match (0 matches, or >1 distinct candidates).
   // The fallback depends on what the consumer needs when the owning buffer
@@ -355,9 +366,8 @@ BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
   //                  so a later write to the returned var still promotes to
   //                  InOut; a null root would silently drop the WAW/InOut dep.
   if (ambiguous_policy_ == AmbiguousRootPolicy::kFirstOutput) {
-    return {out_roots.front().roots, out_roots.front().ambiguous};
+    record_output(out_roots.front());
   }
-  return RootInfo{{}, false};
 }
 
 bool BufferRootCollector::TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b) {

@@ -27,7 +27,7 @@ namespace pypto {
 namespace ir {
 namespace buffer_root {
 
-/// What SelectReturnRoot does for a single-return call when the owning buffer
+/// What RecordCallReturnRoots does for a single-return call when the owning buffer
 /// cannot be pinned to one Out/InOut arg by shape+dtype (no match, or two+
 /// distinct same-typed candidates). The right choice depends on the consumer:
 enum class AmbiguousRootPolicy {
@@ -51,7 +51,7 @@ enum class AmbiguousRootPolicy {
  *
  * For a call's single (non-tuple) return value the owning root is selected by
  * matching the return type's shape+dtype against the callee's Out/InOut args
- * (see SelectReturnRootInfo), so a differently-typed InOut scratch is never
+ * (see RecordCallReturnRoots), so a differently-typed InOut scratch is never
  * mistaken for the real output buffer (issue #1564 / #1580). When that match is
  * ambiguous, the fallback is governed by @p ambiguous_policy (see
  * AmbiguousRootPolicy).
@@ -100,14 +100,9 @@ class BufferRootCollector : public IRVisitor {
  private:
   using RootCandidates = std::vector<const Var*>;
 
-  struct RootInfo {
-    RootCandidates roots;
-    bool ambiguous;
-  };
-
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
   // with that arg's type so a single return value can be matched to the param
-  // it actually aliases (see SelectReturnRoot).
+  // it actually aliases (see RecordCallReturnRoots).
   struct OutputRoot {
     ExprPtr argument;
     const RootCandidates& roots;
@@ -130,8 +125,8 @@ class BufferRootCollector : public IRVisitor {
   // Issue #1564: without this, the FP32 scratch was fused onto the BF16 output,
   // making tensor.create -> tensor.slice(output) alias and corrupt the result.
   // When no unambiguous match exists, the fallback follows ambiguous_policy_.
-  [[nodiscard]] RootInfo SelectReturnRootInfo(const std::vector<OutputRoot>& out_roots,
-                                              const CallPtr& call) const;
+  void RecordCallReturnRoots(const VarPtr& result, const std::vector<OutputRoot>& out_roots,
+                             const CallPtr& call);
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
   // value aliases its source buffer with the same logical shape and dtype.
