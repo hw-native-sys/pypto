@@ -23,6 +23,7 @@ from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.compile_profiling import StageRecord
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
+from pypto.runtime._vpto import PTOAS_FLAGS
 
 SPAN = ir.Span("register_kernel.py", 10, 1, 10, 60)
 
@@ -1443,9 +1444,30 @@ def test_reg_spill_policy_only_stamps_vf_helpers(tmp_path, monkeypatch, allowed)
 
 
 @pytest.mark.parametrize("allowed", [None, False, True], ids=["default", "deny", "allow"])
-def test_reg_spill_policy_on_generated_reg_scope_helper(tmp_path, monkeypatch, allowed):
+@pytest.mark.parametrize(
+    "compile_ptoas",
+    [False, pytest.param(True, marks=pytest.mark.ptoas_compile)],
+    ids=["codegen", "ptoas"],
+)
+def test_reg_spill_policy_on_generated_reg_scope_helper(tmp_path, monkeypatch, allowed, compile_ptoas):
+    compiler = find_ptoas_binary() if compile_ptoas else None
+    if compile_ptoas and compiler is None:
+        pytest.skip("PTOAS is unavailable")
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def register_policy_kernel():
+        src = pl.tile.full([128], pl.FP32, 1.0)
+        dst = pl.tile.full([128], pl.FP32, 0.0)
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=64)
+            y = pl.reg.add(x, x)
+            out = pl.reg.store(dst, value=y)
+        _consumer = pl.tile.add(out, src)
+
     with passes.PassContext([]):
-        program = passes.allocate_memory_addr()(build_kernel(masked=True))
+        program = passes.flatten_tile_nd_to_2d()(ir.Program([register_policy_kernel], "Policy", SPAN))
+        program = passes.init_mem_ref()(program)
+        program = passes.allocate_memory_addr()(program)
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
     assert len(bundle.helpers) == 1
     helper = bundle.helpers[0]
@@ -1472,6 +1494,24 @@ def test_reg_spill_policy_on_generated_reg_scope_helper(tmp_path, monkeypatch, a
     assert source == f"// pypto.reg_spill: {policy}\n" + helper.source
     manifest = json.loads(result.files["vpto/register_kernel/manifest.json"])
     assert manifest["helpers"][0]["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+    if compile_ptoas:
+        helper_path = tmp_path / f"{helper.symbol}.pto"
+        helper_path.write_text(source)
+        llvm_path = helper_path.with_suffix(".ll")
+        # Production exports LLVM through PTOAS; the spill guard is applied
+        # by the subsequent Bisheng invocation, not this lowering stage.
+        assert compiler is not None
+        lowered = subprocess.run(
+            [compiler, str(helper_path), *PTOAS_FLAGS, "-o", str(llvm_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert lowered.returncode == 0, lowered.stderr
+        llvm = llvm_path.read_text()
+        assert f"@{helper.symbol}(" in llvm
+        assert "llvm.hivm." in llvm
 
 
 if __name__ == "__main__":
