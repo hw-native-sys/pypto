@@ -239,7 +239,7 @@ def test_layout_tag_mismatch_caught():
     t = ir.TensorType(_shape(4, 8), DataType.FP32, None, view)
     diags = _verify(_program_with_param_type(t))
     assert len(diags) == 1
-    assert "innermost" in diags[0].message
+    assert "inner storage span" in diags[0].message
 
 
 def test_too_small_outer_stride_caught():
@@ -248,7 +248,7 @@ def test_too_small_outer_stride_caught():
     t = ir.TensorType(_shape(4, 8), DataType.FP32, None, view)
     diags = _verify(_program_with_param_type(t))
     assert len(diags) == 1
-    assert "smaller than packed" in diags[0].message
+    assert "smaller than the inner storage span" in diags[0].message
 
 
 def test_diagnostic_includes_function_name():

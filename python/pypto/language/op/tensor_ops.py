@@ -2162,9 +2162,22 @@ def view(
     shape: Sequence[IntLike] | None = None,
     valid_shape: Sequence[IntLike] | None = None,
     *,
+    offsets: Sequence[IntLike] | None = None,
+    steps: Sequence[IntLike] | None = None,
     layout: TensorLayout | None = None,
 ) -> _TensorT:
     """Reinterpret a tensor over the same physical memory.
+
+    With ``offsets`` or ``steps``, select a same-rank window in the immediate
+    parent GM tensor. Coordinates and sampling steps are in parent elements.
+    Each window axis must fit the parent shape, and valid samples must fit the
+    parent valid region. Dynamic geometry must obey these bounds at runtime.
+    When a shape, step or valid extent comes from a memory read, bind the
+    result to a scalar before constructing the window.
+    Window creation only describes addresses. Native ND tile DMA requires a
+    contiguous inner axis, and scalar tensor reads and writes assume packed indexing.
+    The source layout is preserved. Without window geometry, the following
+    shape/layout reinterpretation rules apply.
 
     At least one of ``shape`` or ``layout`` must be provided: ``shape`` derives
     canonical strides for the requested shape, ``layout`` derives the canonical
@@ -2173,12 +2186,15 @@ def view(
 
     Args:
         tensor: Source tensor.
-        shape: New shape for the view. Must be product-preserving unless
-            symbolic dimensions are present. Rank-zero views are not supported.
-        valid_shape: Explicit valid dimensions for a packed ND
+        shape: Window extents or new shape for a reinterpretation.
+            Static reinterpretation preserves the element count. The result must have at least one axis.
+        valid_shape: Window valid extents, or explicit valid dimensions for a packed ND
             leading-dimension collapse to 2D or contiguous-prefix linear
             collapse to ``[1, product(shape)]``. Required when either supported
             collapse reinterprets a source with partial validity.
+        offsets: Per-axis starting indices for an InCore ND/DN GM window.
+            Omitted offsets default to zero when steps are given.
+        steps: Positive per-axis sampling steps for the window. Defaults to one.
         layout: Target ``TensorLayout`` (ND or DN); DN requires rank at least 2.
             Orchestration supports ND shape reinterprets and shaped
             ND/MX_A_ZZ/MX_B_NN/MX_A_ND backing and consumer views for dynamic FP8E8M0
@@ -2196,6 +2212,8 @@ def view(
         tensor.unwrap(),
         None if shape is None else _normalize_intlike(shape),
         None if valid_shape is None else _normalize_intlike(valid_shape),
+        offsets=None if offsets is None else _normalize_intlike(offsets),
+        steps=None if steps is None else _normalize_intlike(steps),
         layout=layout,
     )
     return tensor.__class__(expr=call_expr)

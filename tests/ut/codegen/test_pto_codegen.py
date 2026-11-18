@@ -4502,6 +4502,84 @@ def test_pto_codegen_tensor_view_default_pipeline_variants():
         assert any(f"pto.partition_view {view_ssa}" in line for line in _get_mlir_lines(body))
 
 
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_nested_sampled_tensor_views_share_storage_and_compose_offsets(tmp_path, dynamic):
+    # Direct descriptor emission keeps even an unused view visible. Codegen
+    # and MemRef analysis must agree on origins for both static and runtime
+    # geometry without any load or store being present.
+    span = ir.Span.unknown()
+    ib = IRBuilder()
+    with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+        root = f.param("source", ir.TensorType([12, 16], DataType.FP32))
+        origin = f.param("row", ir.ScalarType(DataType.INDEX)) if dynamic else 1
+        pitch = f.param("step", ir.ScalarType(DataType.INDEX)) if dynamic else 3
+        outer = ib.let("outer", tensor_ops.view(root, [3, 8], offsets=[origin, 0], steps=[pitch, 2]))
+        row = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(row, 0, 2, 1) as loop:
+            carry = loop.iter_arg("carry", outer)
+            carried = loop.return_var("carried")
+            alias = ib.let("alias", carry)
+            ib.emit(ir.YieldStmt([alias], span))
+        ib.let("inner", tensor_ops.view(carried, [1, 3], offsets=[1, 2]))
+        ib.return_stmt()
+    program = ir.Program([f.get_result()], "SampledWindows", span)
+    initialized = passes.init_mem_ref()(program)
+    func = next(iter(initialized.functions.values()))
+    root_type = func.params[0].type
+    assert isinstance(root_type, ir.TensorType) and root_type.memref is not None
+    root_base = root_type.memref.base_
+    windows = []
+
+    class WindowRanges(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tensor.view").name:
+                assert isinstance(op.var.type, ir.TensorType) and op.var.type.memref is not None
+                memref = op.var.type.memref
+                assert memref.base_.same_as(root_base)
+                windows.append(memref)
+            super().visit_assign_stmt(op)
+
+    WindowRanges().visit_stmt(func.body)
+    assert len(windows) == 2
+    if dynamic:
+        assert all(not isinstance(window.byte_offset_, ir.ConstInt) for window in windows)
+    else:
+        # Relative offsets (16, 52) are accumulated in bytes on the MemRef.
+        assert [(w.byte_offset_.value, w.size_) for w in windows] == [(16 * 4, 111 * 4), (68 * 4, 5 * 4)]
+
+    mlir = _generate_mlir(initialized)
+    lines = _get_mlir_lines(mlir)
+    first_delta = "%" if dynamic else "%c16_index"
+    last_delta = "%" if dynamic else "%c52_index"
+    outer_ptr = _single_line(lines, f"pto.addptr %arg0, {first_delta}").split(" = ")[0]
+    inner_ptr = _single_line(lines, f"pto.addptr {outer_ptr}, {last_delta}").split(" = ")[0]
+    inner_descriptor = _single_line(lines, f"pto.make_tensor_view {inner_ptr},")
+    assert re.search(r"strides = \[%(?:\w+), %c2_index\]", inner_descriptor)
+    assert "pto.tload" not in mlir and "pto.alloc_tile" not in mlir
+    if dynamic:
+        assert "arith.muli" in mlir
+    if find_ptoas_binary() is not None:
+        pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+
+
+def test_sampled_tensor_view_rejects_loop_carried_origin_change():
+    ib = IRBuilder()
+    span = ir.Span.unknown()
+    with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+        source = f.param("source", ir.TensorType([8, 4], DataType.FP32))
+        seed = ib.let("seed", tensor_ops.view(source, [1, 4], offsets=[0, 0]))
+        row = ib.var("row", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(row, 0, 8, 1) as loop:
+            loop.iter_arg("carry", seed)
+            loop.return_var("last")
+            next_window = ib.let("next", tensor_ops.view(source, [1, 4], offsets=[row, 0]))
+            ib.emit(ir.YieldStmt([next_window], span))
+        ib.return_stmt()
+    program = ir.Program([f.get_result()], "WindowCarry", span)
+    with pytest.raises(ValueError, match="loop-carried tensor must keep its GM origin"):
+        _generate_mlir(program)
+
+
 def test_pto_codegen_tensor_view_with_tile_scalar_shape_default_pipeline():
     """A runtime GM view keeps its definition through the default pipeline (#3046)."""
 

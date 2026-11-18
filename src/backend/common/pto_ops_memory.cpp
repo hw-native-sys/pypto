@@ -42,6 +42,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/vec_nz_store.h"
 #include "pypto/ir/type.h"
@@ -1118,8 +1119,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   // original storage.
   reg("tensor.view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 3, op->span_)
-        << "tensor.view requires 1 to 3 args (input[, shape[, valid_shape]])";
+    INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 5, op->span_)
+        << "tensor.view requires 1 to 5 operands";
     auto input_var = AsVarLike(op->args_[0]);
     INTERNAL_CHECK_SPAN(input_var, op->span_) << "tensor.view input must be a Var/IterArg";
 
@@ -1143,7 +1144,19 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     std::string result_buf = codegen.GetCurrentResultTarget();
     INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << "Internal error: result buf must be set";
     std::string input_base_ptr = codegen.GetTensorBasePtr(input_var);
-    codegen.RegisterBasePtr(lhs_var, input_base_ptr);
+    if (ir::IsWindowTensorView(op)) {
+      // input_base_ptr already includes the parent window's origin. Only
+      // apply this edge, even when InitMemRef has recorded a cumulative offset.
+      auto offset =
+          ir::TensorElementOffset(AsTensorTypeLike(input_var->GetType()), As<ir::MakeTuple>(op->args_[2]));
+      auto offset_value = codegen.EmitCastToIndex(offset, codegen.GetExprAsCode(offset));
+      auto ptr_type = "!pto.ptr<" + codegen.GetTypeString(lhs_type->dtype_) + ">";
+      auto ptr = codegen.NewTemp();
+      codegen.Emit(ptr + " = pto.addptr " + input_base_ptr + ", " + offset_value + " : " + ptr_type +
+                   ", index -> " + ptr_type);
+      input_base_ptr = ptr;
+    }
+    codegen.RegisterBasePtr(lhs_var, input_base_ptr, ir::IsWindowTensorView(op));
     codegen.RegisterCommCtxFor(lhs_var, codegen.GetCommCtxSSAFor(input_var.get()));
 
     auto input_type = ir::AsTensorTypeLike(input_var->GetType());

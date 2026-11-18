@@ -1956,10 +1956,21 @@ def view(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     *,
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    steps: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     layout: TensorLayout | None = None,
     span: Span | None = None,
 ) -> Call:
     """Reinterpret ``tensor`` over the same physical memory.
+
+    With ``offsets`` or ``steps``, select a same-rank window in the immediate
+    parent GM tensor. Coordinates and sampling steps are in parent elements.
+    Each window axis must fit the parent shape, and valid samples must fit the
+    parent valid region. Dynamic geometry must obey these bounds at runtime.
+    When a shape, step or valid extent comes from a memory read, bind the
+    result to a scalar before constructing the window.
+    The source layout is preserved. Without window geometry, the following
+    shape/layout reinterpretation rules apply.
 
     At least one of ``shape`` or ``layout`` must be provided. ``shape`` derives
     canonical strides for the requested shape; ``layout`` derives the canonical
@@ -1985,15 +1996,18 @@ def view(
 
     Args:
         tensor: Input tensor expression.
-        shape: New shape for the view. Must be product-preserving unless
-            symbolic dimensions are present. May introduce or remove unit
-            dimensions (RFC #1300 P4). Must be a sequence of ints or
+        shape: Window extents or new shape for a reinterpretation.
+            Reinterpretation preserves the static element count and may introduce or remove unit dimensions
+            (RFC #1300 P4). Must be a sequence of ints or
             Expr values, or a ``MakeTuple``. In an InCore function, the source
             must remain a GM Tensor through tensor-to-tile conversion.
-        valid_shape: Explicit valid dimensions for a packed ND
+        valid_shape: Window valid extents, or explicit valid dimensions for a packed ND
             leading-dimension collapse to 2D or contiguous-prefix linear
             collapse to ``[1, product(shape)]``. Required when either supported
             collapse reinterprets a source with partial validity.
+        offsets: Per-axis starting indices for an InCore ND/DN GM window.
+            Omitted offsets default to zero when steps are given.
+        steps: Positive per-axis sampling steps for the window. Defaults to one.
         layout: Target ``TensorLayout`` (ND or DN). Must not be ``NZ``.
             When provided without ``shape``, performs a layout-only flip.
             Orchestration also permits shaped ND/MX_A_ZZ/MX_B_NN/MX_A_ND backing and
@@ -2013,10 +2027,18 @@ def view(
         raise ValueError("tensor.view requires at least one of shape or layout")
     if valid_shape is not None and shape is None:
         raise ValueError("tensor.view valid_shape requires shape")
+    window = offsets is not None or steps is not None
+    if window and shape is None:
+        raise ValueError("tensor.view offsets/steps require a window shape")
     actual_span = _get_span_or_capture(span)
     args = [tensor]
     if shape is not None:
-        args.append(_to_make_tuple(shape, actual_span))
+        shape_tuple = _to_make_tuple(shape, actual_span)
+        args.append(shape_tuple)
+        if window:
+            rank = len(shape_tuple.elements)
+            args.append(_to_make_tuple([0] * rank if offsets is None else offsets, actual_span))
+            args.append(_to_make_tuple([1] * rank if steps is None else steps, actual_span))
     if valid_shape is not None:
         args.append(_to_make_tuple(valid_shape, actual_span))
     kwargs: dict[str, Any] = {}

@@ -915,6 +915,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // keyword too whenever `dim` is present so the call reparses.
   const bool gather_kw_index = IsOp(op, "tensor.gather") && op->HasKwarg("dim") && op->args_.size() == 2;
 
+  const bool window_view = IsOp(op, "tensor.view") && (op->args_.size() == 4 || op->args_.size() == 5);
+
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (gather_row_kw_valid && i == 5) continue;
@@ -926,6 +928,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (mgather && i >= 2) continue;
     if (gather_kw_index && i == 1) continue;
     if (i > 0) stream_ << ", ";
+
+    if (window_view && i >= 2) {
+      constexpr const char* kWindowKeywords[] = {"offsets", "steps", "valid_shape"};
+      stream_ << kWindowKeywords[i - 2] << "=";
+    }
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
     if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {

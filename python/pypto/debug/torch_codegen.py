@@ -774,6 +774,17 @@ def _tensor_slice(tensor, offsets, shapes, valid_shape=None):
         sliced._pypto_full_shape = shapes_t
     return sliced
 
+def _tensor_window(tensor, shape, offsets, steps, valid_shape=None):
+    shape = _coerce_shape(shape)
+    offsets = _coerce_shape(offsets)
+    steps = _coerce_shape(steps)
+    slices = tuple(slice(o, o + n * s, s) for o, n, s in zip(offsets, shape, steps))
+    result = tensor[slices]
+    if valid_shape is not None:
+        result._pypto_valid_shape = _coerce_shape(valid_shape)
+        result._pypto_full_shape = shape
+    return result
+
 def _tensor_view(tensor, shape, is_dn, valid_shape=None):
     shape = _coerce_shape(shape)
     strides = [1] * len(shape)
@@ -1957,7 +1968,9 @@ class TorchCodegen(_ir.IRVisitor):
         if self._visit_buffer_call(op, arg_strs):
             return
         if op_name == _ir.get_op("tensor.view").name:
-            if len(arg_strs) >= 2:
+            if len(arg_strs) >= 4:
+                self._expr_result = f"_tensor_window({', '.join(arg_strs)})"
+            elif len(arg_strs) >= 2:
                 result_view = getattr(op.type, "tensor_view", None)
                 is_dn = result_view is not None and result_view.layout == _ir.TensorLayout.DN
                 valid_shape = f", {arg_strs[2]}" if len(arg_strs) == 3 else ""

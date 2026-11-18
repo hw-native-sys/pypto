@@ -571,6 +571,18 @@ ParamOrigins CollectReferencedOrigins(const ExprPtr& expr, const AliasOriginMap&
   return origins;
 }
 
+// Descriptor construction has no payload effect, but evaluating its operands
+// can still access GM (for example, a tensor.read in a dynamic offset).
+class OperandCallCollector : public IRVisitor {
+ public:
+  std::vector<CallPtr> calls;
+
+ protected:
+  void VisitExpr_(const CallPtr& call) override { calls.push_back(call); }
+  void VisitExpr_(const VarPtr&) override {}
+  void VisitExpr_(const IterArgPtr&) override {}
+};
+
 /// Mark the parameter origins each argument of @p call reads and writes.
 ///
 /// Which argument a call writes is a property of the operator, declared once on
@@ -594,6 +606,16 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   // registry entry. Its writes are propagated separately, from the callee's
   // declared param directions; every operand counts as a read here.
   const auto* entry = LookupOpEntry(call->op_);
+
+  if (entry && entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess) {
+    OperandCallCollector operands;
+    for (const auto& arg : call->args_) operands.VisitExpr(arg);
+    for (const auto& nested : operands.calls) {
+      AnalyzeCallAccess(nested, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
+    }
+    return;
+  }
 
   for (size_t i = 0; i < call->args_.size(); ++i) {
     const auto effect = entry ? entry->GetArgEffect(i, call->kwargs_) : ArgEffect::Read;

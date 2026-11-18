@@ -886,6 +886,35 @@ class ASTParser:
                     override_type = ir.TileType(
                         resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
                     )
+            elif (
+                isinstance(resolved, ir.TensorType)
+                and isinstance(value_expr, ir.Call)
+                and value_expr.op.name == ir.get_op("tensor.view").name
+                and len(value_expr.args) >= 4
+                and isinstance(value_expr.type, ir.TensorType)
+            ):
+                # The parent and window operands determine the address map. A
+                # printed allocation may contribute a MemRef, but an annotation
+                # must never replace the computed strides or valid region.
+                inferred = value_expr.type
+                view = inferred.tensor_view
+                assert view is not None
+                ann_view = resolved.tensor_view
+                if ann_view is not None:
+                    annotated_view = ir.TensorView(
+                        ann_view.stride or view.stride,
+                        ann_view.layout,
+                        ann_view.valid_shape or view.valid_shape,
+                        ann_view.pad if ann_view.pad != ir.PadValue.null else view.pad,
+                    )
+                    annotated = ir.TensorType(inferred.shape, inferred.dtype, tensor_view=annotated_view)
+                    if not types_match(annotated, inferred):
+                        raise ParserTypeError(
+                            f"TensorView annotation for '{var_name}' conflicts with the sampled window",
+                            span=span,
+                            hint=f"Use the inferred descriptor: {ir.python_print_type(inferred)}",
+                        )
+                override_type = ir.TensorType(inferred.shape, inferred.dtype, resolved.memref, view)
             elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
                 override_type = resolved
             elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:

@@ -3486,7 +3486,8 @@ void PTOCodegen::RegisterTensorView(const VarPtr& var, const std::string& tensor
   BindTensorView(var, tensor_view_name);
 }
 
-void PTOCodegen::RegisterBasePtr(const VarPtr& var, const std::string& ptr_name) {
+void PTOCodegen::RegisterBasePtr(const VarPtr& var, const std::string& ptr_name, bool window_origin) {
+  if (window_origin) fs_.window_origins.insert(ptr_name);
   if (var && !ptr_name.empty()) fs_.tensor_to_base_ptr[GetVarKey(var)] = ptr_name;
 }
 

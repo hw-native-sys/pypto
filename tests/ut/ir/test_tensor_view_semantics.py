@@ -226,32 +226,31 @@ def test_check_rejects_rank_mismatch():
 
 
 def test_check_rejects_layout_tag_mismatch_nd_with_dn_stride():
-    # stride [1, 4] is DN-shaped, but layout tag claims ND -> innermost stride
-    # is not 1, so ND check fails.
+    # The first logical axis must cover the span of the inner axis.
     ok, reason = tvs.check_canonical_view(_shape(4, 8), _stride(1, 4), ir.TensorLayout.ND)
     assert not ok
-    assert "ND" in reason and "innermost" in reason
+    assert "ND" in reason and "span" in reason
 
 
 def test_check_rejects_layout_tag_mismatch_dn_with_nd_stride():
-    # stride [16, 1] is ND-shaped, layout tag claims DN -> stride[-2] not 1.
+    # For DN the last logical axis must cover the span of the penultimate axis.
     ok, reason = tvs.check_canonical_view(_shape(8, 16), _stride(16, 1), ir.TensorLayout.DN)
     assert not ok
-    assert "DN" in reason and "stride[-2]" in reason
+    assert "DN" in reason and "span" in reason
 
 
 def test_check_rejects_too_small_outer_stride_nd():
     # ND with shape [4, 8]: packed stride is [8, 1]. stride [4, 1] is too small.
     ok, reason = tvs.check_canonical_view(_shape(4, 8), _stride(4, 1), ir.TensorLayout.ND)
     assert not ok
-    assert "smaller than packed" in reason
+    assert "smaller than the inner storage span" in reason
 
 
 def test_check_rejects_dn_trailing_stride_too_small():
     # DN with shape [4, 8]: trailing stride must be >= shape[-2] = 4.
     ok, reason = tvs.check_canonical_view(_shape(4, 8), _stride(1, 2), ir.TensorLayout.DN)
     assert not ok
-    assert "DN" in reason and "shape[-2]" in reason
+    assert "DN" in reason and "span" in reason
 
 
 def test_check_zero_rank_canonical():
@@ -267,6 +266,11 @@ def test_check_zero_rank_canonical():
 def _sym(name: str):
     """Build a symbolic shape variable (Var of ScalarType INDEX)."""
     return ir.Var(name, ir.ScalarType(DataType.INDEX), _span())
+
+
+def test_check_rejects_zero_outer_stride_with_symbolic_inner_extent():
+    ok, reason = tvs.check_canonical_view([_const(2), _sym("N")], _stride(0, 2), ir.TensorLayout.ND)
+    assert not ok and "positive" in reason
 
 
 def test_check_relaxed_symbolic_dn_passes():
