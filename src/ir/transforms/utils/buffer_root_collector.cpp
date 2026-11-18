@@ -393,10 +393,19 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
     // A partially resolved return can still share storage with any compatible
     // candidate, so retain those dependencies until its root is proven.
     std::vector<RootCandidates> inputs;
-    if (returned_arg) inputs.push_back(ResolveRootCandidates(returned_arg));
+    if (const auto& returned = ResolveRootCandidates(returned_arg); returned.set != 0) {
+      inputs.push_back(returned);
+    }
     for (const auto& candidate : out_roots) {
-      if (TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
+      if (candidate.roots.set != 0 && TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
         inputs.push_back(candidate.roots);
+      }
+    }
+    if (inputs.empty()) {
+      // Shapes can differ for views of one buffer. Keep the known writable
+      // roots as a conservative fallback when shape matching proves nothing.
+      for (const auto& candidate : out_roots) {
+        if (candidate.roots.set != 0) inputs.push_back(candidate.roots);
       }
     }
     MergeRootCandidates(result, inputs, /*unresolved=*/true);

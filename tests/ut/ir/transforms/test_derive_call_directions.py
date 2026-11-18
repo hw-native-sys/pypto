@@ -1149,6 +1149,58 @@ class TestDeriveDirectionMatrix:
         After = passes.derive_call_directions()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_return_with_no_shape_matched_root_preserves_prior_write(self):
+        """A view return keeps ordering even when its known root has a different shape."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                base: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                view: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return view
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def write(self, value: pl.Out[pl.Tensor[[1, 128], pl.FP32]]) -> pl.Tensor[[1, 128], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, b: pl.Tensor[[2, 64], pl.FP32]):
+                flat = pl.reshape(b, [1, 128])
+                pair = (flat, flat)
+                alias = pair[0]
+                returned = self.forward(b, alias)
+                self.write(returned)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                base: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                view: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return view
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def write(self, value: pl.Out[pl.Tensor[[1, 128], pl.FP32]]) -> pl.Tensor[[1, 128], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, b: pl.Tensor[[2, 64], pl.FP32]):
+                flat = pl.reshape(b, [1, 128])
+                pair = (flat, flat)
+                alias = pair[0]
+                returned = self.forward(
+                    b, alias, attrs={"arg_directions": [pl.adir.output_existing, pl.adir.output_existing]}
+                )
+                self.write(returned, attrs={"arg_directions": [pl.adir.inout]})
+
+        after = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_out_param_enclosing_inout_declaration_promoted(self):
         """R-enclosing: explicit ``pl.InOut`` on the enclosing param promotes to ``InOut``.
 
