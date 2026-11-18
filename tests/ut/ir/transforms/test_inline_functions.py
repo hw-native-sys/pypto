@@ -2223,7 +2223,7 @@ class TestInlineFunctionsDynamicTypes:
                 source: pl.Tile[[4, 8], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.load(
                     data, [0, 0], [4, 8], target_memory=pl.Mem.Vec
                 )
-                _alias = source
+                _alias: pl.Tile[[4, 8], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = source
 
         after = passes.inline_functions()(Before)
         for actual, expected in (

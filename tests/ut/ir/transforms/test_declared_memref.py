@@ -577,6 +577,41 @@ class Before:
         # Canonicalization may eliminate this single-use alias entirely.
         assert {ref.base_.name_hint for ref in refs.values()} == {"source"}
 
+    @pytest.mark.parametrize("initial", ["first", "pl.gather_row(first, x, [0, 0], [0, 0], [1, 32])"])
+    def test_fresh_alias_follows_reassigned_source(self, ascend_backend, initial):
+        """An inferred LHS binding must not constrain an alias of a mutable Var."""
+        before = pl.parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+    ) -> pl.Tensor[[8, 32], pl.BF16]:
+        first: pl.Tile[[8, 32], pl.BF16, pl.MemRef("first"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        second: pl.Tile[[8, 32], pl.BF16, pl.MemRef("second"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=1.0
+        )
+        current = {initial}
+        pl.store(current, [0, 0], out)
+        current = second
+        alias = current
+        return pl.store(alias, [0, 0], out)
+""")
+        assert isinstance(before, ir.Program)
+        after = _run_full_pipeline(before, "InitMemRef")
+        stored_bases = []
+
+        class StoreVisitor(ir.IRVisitor):
+            def visit_call(self, call):
+                if call.op.name == ir.get_op("tile.store").name:
+                    stored_bases.append(call.args[0].type.memref.base_.name_hint)
+                super().visit_call(call)
+
+        StoreVisitor().visit_program(after)
+        assert stored_bases == ["first", "second"]
+
     def test_plain_alias_reassignment_to_unbound_source(self, ascend_backend):
         """A plain alias can leave a pinned source for a compiler-managed tile."""
 

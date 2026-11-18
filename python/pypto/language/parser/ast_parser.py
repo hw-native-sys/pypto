@@ -1081,6 +1081,20 @@ class ASTParser:
                 )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
+        if (
+            override_type is None
+            and not isinstance(value_expr, ir.Call)
+            and isinstance(value_expr.type, ir.TileType)
+            and value_expr.type.memref is not None
+            and value_expr.type.memref.is_pinned_
+        ):
+            # The source may be a mutable Var whose parser type still describes
+            # its first value. Only explicit annotations constrain a fresh LHS;
+            # SSA will supply this alias's binding from the substituted RHS.
+            inferred = value_expr.type
+            override_type = ir.TileType(
+                inferred.shape, inferred.dtype, None, inferred.tile_view, inferred.memory_space
+            )
         var = self.builder.let(var_name, value_expr, type=override_type, span=span)
         if isinstance(value_expr, ir.Call) and value_expr.op.name == ir.get_op("tensor.dim").name:
             self.function.shape_dim_aliases[var.unique_id] = value_expr
