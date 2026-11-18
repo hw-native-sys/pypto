@@ -120,8 +120,8 @@ The declaration is carried by the assigned `Var`; the parser also preserves an e
 pinned annotation on the RHS `Call`, so reassignment can distinguish it from the Var's
 older inferred binding. A plain-alias reannotation uses a separate typed binding before
 updating the mutable variable, preserving the constraint without retyping its source.
-An unannotated fresh alias leaves its LHS storage unbound until SSA substitutes the
-current source, so an older parser type cannot become an explicit constraint.
+An unannotated fresh alias leaves its LHS storage unbound through inlining, until SSA
+substitutes the current source, so an older parser type cannot become an explicit constraint.
 Op type deduction does not allocate storage, but can inherit an
 input MemRef (`tile.gather_row` returns its destination's type). Passes that rebuild types
 must preserve explicit constraints even when deduction omits or inherits a MemRef.

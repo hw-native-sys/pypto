@@ -578,11 +578,23 @@ class Before:
         assert {ref.base_.name_hint for ref in refs.values()} == {"source"}
 
     @pytest.mark.parametrize("initial", ["first", "pl.gather_row(first, x, [0, 0], [0, 0], [1, 32])"])
-    def test_fresh_alias_follows_reassigned_source(self, ascend_backend, initial):
+    @pytest.mark.parametrize("through_inline", [False, True])
+    def test_fresh_alias_follows_reassigned_source(self, ascend_backend, initial, through_inline):
         """An inferred LHS binding must not constrain an alias of a mutable Var."""
+        helper = (
+            """
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, value: pl.Tile[[8, 32], pl.BF16, pl.Mem.Vec]):
+        return value
+"""
+            if through_inline
+            else ""
+        )
+        inline_call = "self.helper(first)" if through_inline else ""
         before = pl.parse(f"""
 @pl.program
 class Before:
+{helper}
     @pl.function(type=pl.FunctionType.InCore)
     def main(
         self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
@@ -593,6 +605,7 @@ class Before:
         second: pl.Tile[[8, 32], pl.BF16, pl.MemRef("second"), pl.Mem.Vec] = pl.tile.full(
             [8, 32], dtype=pl.BF16, value=1.0
         )
+        {inline_call}
         current = {initial}
         pl.store(current, [0, 0], out)
         current = second
@@ -604,10 +617,13 @@ class Before:
         stored_bases = []
 
         class StoreVisitor(ir.IRVisitor):
-            def visit_call(self, call):
-                if call.op.name == ir.get_op("tile.store").name:
-                    stored_bases.append(call.args[0].type.memref.base_.name_hint)
-                super().visit_call(call)
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name == ir.get_op("tile.store").name:
+                    tile_type = op.args[0].type
+                    assert isinstance(tile_type, ir.TileType)
+                    assert tile_type.memref is not None
+                    stored_bases.append(tile_type.memref.base_.name_hint)
+                super().visit_call(op)
 
         StoreVisitor().visit_program(after)
         assert stored_bases == ["first", "second"]
