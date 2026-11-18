@@ -420,6 +420,8 @@ PropertyVerifierPtr CreateArrayNotEscapedPropertyVerifier();
  */
 PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
 PropertyVerifierPtr CreateRegScopePropertyVerifier();
+/// Verify logical completion schemas, local ownership, and strict token SSA.
+PropertyVerifierPtr CreateLogicalSyncPropertyVerifier();
 PropertyVerifierPtr CreateHardwareLoopContractPropertyVerifier();
 
 /**

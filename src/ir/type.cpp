@@ -29,12 +29,17 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 
 namespace pypto {
 namespace ir {
+
+SyncTokenType::SyncTokenType(PipeType pipe) : pipe_(pipe) {
+  CHECK(pipe >= PipeType::MTE1 && pipe < PipeType::ALL) << "SyncTokenType pipe must be a concrete PipeType";
+}
 
 RegType::RegType(int64_t shape, DataType dtype, RegKind kind) : shape_(shape), dtype_(dtype), kind_(kind) {
   CHECK(shape > 0) << "RegType shape must be a positive integer";

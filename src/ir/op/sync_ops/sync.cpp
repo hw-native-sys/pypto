@@ -9,7 +9,13 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include "pypto/ir/sync.h"
+
 #include <any>
+#include <array>
+#include <cstddef>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +26,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -82,7 +89,174 @@ TypePtr DeducePipelineFlagType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
+/// Construct a pipe-local completion type from the complete low-level schema.
+TypePtr DeduceSyncTokenType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs, const char* name) {
+  CHECK(args.empty()) << name << " takes no operands";
+  // Execution-instance ownership comes from the enclosing device function,
+  // rather than a duplicated core attribute with a potentially wrong default.
+  CHECK(kwargs.size() == 1 && kwargs[0].first == "pipe") << name << " requires only the pipe attribute";
+  const int pipe = AnyCast<int>(kwargs[0].second, "pipe");
+  CHECK(pipe >= static_cast<int>(PipeType::MTE1) && pipe < static_cast<int>(PipeType::ALL))
+      << name << " pipe must be a concrete PipeType, got " << pipe;
+  return std::make_shared<SyncTokenType>(static_cast<PipeType>(pipe));
+}
+
+/// Resolve only storage types whose values carry a runtime data address.
+/// PtrType and MemRef identify allocations; neither promises such a pointer.
+std::optional<MemorySpace> StorageAddressSpace(const TypePtr& type) {
+  if (AsTensorTypeLike(type)) return MemorySpace::DDR;
+  if (const auto tile = As<TileType>(type)) return tile->GetMemorySpace();
+  if (const auto buffer = As<BufferType>(type)) return buffer->memory_space_;
+  return std::nullopt;
+}
+
+/// Validate INDEX-valued interval bounds and reject statically reversed ranges.
+/// Dynamic callers retain the precondition begin <= end; this predicate is not
+/// a recovery mechanism for overflow in expressions that compute the bounds.
+void ValidateByteInterval(const ExprPtr& begin, const ExprPtr& end) {
+  for (const auto& bound : {begin, end}) {
+    CHECK(bound) << "sync.memory_overlaps interval bounds must not be null";
+    const auto scalar = As<ScalarType>(bound->GetType());
+    CHECK_SPAN(scalar && scalar->dtype_ == DataType::INDEX, bound->span_)
+        << "sync.memory_overlaps interval bounds must have ScalarType(INDEX)";
+  }
+  const auto begin_constant = As<ConstInt>(begin);
+  const auto end_constant = As<ConstInt>(end);
+  CHECK_SPAN(!begin_constant || !end_constant || begin_constant->value_ <= end_constant->value_, begin->span_)
+      << "sync.memory_overlaps requires half-open byte intervals with begin <= end";
+}
+
 }  // namespace
+
+LogicalSyncKind GetLogicalSyncKind(const OpPtr& op) {
+  if (!op) return LogicalSyncKind::None;
+
+  // Validate the names once through the registry, then compare canonical names:
+  // deserialization may construct a different Op object for the same operator.
+  static const std::array<std::pair<OpPtr, LogicalSyncKind>, 6> logical_ops = {{
+      {OpRegistry::GetInstance().GetOp("sync.record"), LogicalSyncKind::Record},
+      {OpRegistry::GetInstance().GetOp("sync.completed"), LogicalSyncKind::Completed},
+      {OpRegistry::GetInstance().GetOp("sync.join"), LogicalSyncKind::Join},
+      {OpRegistry::GetInstance().GetOp("sync.wait"), LogicalSyncKind::Wait},
+      {OpRegistry::GetInstance().GetOp("sync.memory_overlaps"), LogicalSyncKind::MemoryOverlaps},
+      {OpRegistry::GetInstance().GetOp("sync.vf_barrier"), LogicalSyncKind::VFBarrier},
+  }};
+  for (const auto& [registered_op, kind] : logical_ops) {
+    if (op->name_ == registered_op->name_) return kind;
+  }
+  return LogicalSyncKind::None;
+}
+
+// Capture the entire source command prefix, including earlier imported waits,
+// without blocking or allocating a flag. Its position is semantically relevant:
+// capture cannot be CSE'd or moved merely because another record has this pipe.
+REGISTER_OP("sync.record")
+    .set_description("Capture completion of a source-pipeline command prefix, including prior waits")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .set_attr<int>("pipe")
+    .no_execution_memory_access()
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceSyncTokenType(args, kwargs, "sync.record");
+    });
+
+REGISTER_OP("sync.completed")
+    .set_description("Create an already-completed token for an initial value or empty path")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .set_attr<int>("pipe")
+    .no_execution_memory_access()
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceSyncTokenType(args, kwargs, "sync.completed");
+    });
+
+// A pure conjunction keeps merged dependency frontiers compact. Keeping joins
+// within one source pipeline preserves a precise type for later flag lowering.
+REGISTER_OP("sync.join")
+    .set_description("Complete after both same-pipeline completion tokens have completed")
+    .set_op_category("SyncOp")
+    .add_argument("first", "First immutable completion token")
+    .add_argument("second", "Second immutable completion token with the same source pipe")
+    .no_execution_memory_access()
+    .f_deduce_type([](const auto& args, const auto& kwargs) -> TypePtr {
+      CHECK(args.size() == 2) << "sync.join requires exactly two completion tokens";
+      CHECK(kwargs.empty()) << "sync.join takes no attributes";
+      CHECK(args[0] && args[1]) << "sync.join tokens must not be null";
+      auto first = As<SyncTokenType>(args[0]->GetType());
+      auto second = As<SyncTokenType>(args[1]->GetType());
+      CHECK(first && second) << "sync.join requires SyncTokenType operands";
+      CHECK(first->pipe_ == second->pipe_) << "sync.join requires tokens with the same source pipe";
+      return first;
+    });
+
+// The operands name actual storage handles, not the compiler's MemRef metadata
+// objects. Bounds are signed INDEX byte offsets from each runtime data address.
+// Empty intervals are disjoint. Lowering must compare mathematical addresses
+// without wrapping, and must not turn this pure predicate into a payload read,
+// allocation-bounds check, or implicit wait.
+REGISTER_OP("sync.memory_overlaps")
+    .set_description("Test whether two runtime storage byte intervals overlap")
+    .set_op_category("SyncOp")
+    .add_argument("first", "First Tensor, Tile, or Buffer runtime storage handle")
+    .add_argument("second", "Second Tensor, Tile, or Buffer in the same known address space")
+    .add_argument("first_begin", "INDEX byte offset of the first interval's inclusive beginning")
+    .add_argument("first_end", "INDEX byte offset of the first interval's exclusive end")
+    .add_argument("second_begin", "INDEX byte offset of the second interval's inclusive beginning")
+    .add_argument("second_end", "INDEX byte offset of the second interval's exclusive end")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const auto& args, const auto& kwargs) -> TypePtr {
+      CHECK(args.size() == 6) << "sync.memory_overlaps requires two storage handles and four INDEX bounds";
+      CHECK(kwargs.empty()) << "sync.memory_overlaps takes interval bounds as operands, not attributes";
+      for (size_t i = 0; i < 2; ++i) {
+        const auto& value = args[i];
+        CHECK(value) << "sync.memory_overlaps storage handles must not be null";
+        const auto& type = value->GetType();
+        CHECK_SPAN(AsTensorTypeLike(type) || As<TileType>(type) || As<BufferType>(type), value->span_)
+            << "sync.memory_overlaps requires Tensor, Tile, or Buffer storage handles; "
+               "Ptr and MemRef allocation identities are not runtime data pointers";
+      }
+      const auto first_space = StorageAddressSpace(args[0]->GetType());
+      const auto second_space = StorageAddressSpace(args[1]->GetType());
+      CHECK(first_space && second_space && first_space == second_space)
+          << "sync.memory_overlaps requires storage handles in the same known memory space";
+      ValidateByteInterval(args[2], args[3]);
+      ValidateByteInterval(args[4], args[5]);
+      return std::make_shared<ScalarType>(DataType::BOOL);
+    });
+
+// This is a non-consuming order constraint. A same-source/destination wait can
+// still require an intra-pipeline completion boundary and is not inherently dead.
+REGISTER_OP("sync.wait")
+    .set_description("Order subsequent destination-pipeline work after an SSA completion token")
+    .set_op_category("SyncOp")
+    .set_output_arity(0)
+    .add_argument("token", "Immutable completion token; it may have multiple wait users")
+    .set_attr<int>("dst_pipe")
+    .no_execution_memory_access()
+    .f_deduce_type([](const auto& args, const auto& kwargs) -> TypePtr {
+      CHECK(args.size() == 1) << "sync.wait requires exactly one completion token";
+      CHECK(args[0]) << "sync.wait token must not be null";
+      CHECK(As<SyncTokenType>(args[0]->GetType())) << "sync.wait requires a SyncTokenType token";
+      CHECK(kwargs.size() == 1 && kwargs[0].first == "dst_pipe") << "sync.wait requires dst_pipe";
+      int dst = AnyCast<int>(kwargs[0].second, "dst_pipe");
+      CHECK(dst >= PipeType::MTE1 && dst < PipeType::ALL) << "sync.wait dst_pipe must be a concrete PipeType";
+      return GetVoidType();
+    });
+
+// VF executes a register/VMEM instruction stream inside one vector-function
+// region. Its internal completion boundary is distinct from an outer pipe flag.
+REGISTER_OP("sync.vf_barrier")
+    .set_description("Complete preceding VF work before subsequent VF instructions")
+    .set_op_category("SyncOp")
+    .set_output_arity(0)
+    .no_argument()
+    .no_execution_memory_access()
+    .f_deduce_type([](const auto& args, const auto& kwargs) -> TypePtr {
+      CHECK(args.empty() && kwargs.empty()) << "sync.vf_barrier takes no operands or attributes";
+      return GetVoidType();
+    });
 
 // ============================================================================
 // Registration Function for Sync Operations

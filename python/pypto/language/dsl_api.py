@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast, overload
 
 if TYPE_CHECKING:
-    from pypto.language.typing import Array, Tensor, Tile
+    from pypto.language.typing import Array, SyncToken, Tensor, Tile
     from pypto.pypto_core import ir
 
 from pypto.language.typing.scalar import Scalar
@@ -37,18 +37,18 @@ CondArg = Union[bool, "Scalar"]
 # ``wait`` had to over-widen their signal parameter. Same rationale as
 # ``unified_ops.T``. ``int`` / ``float`` stay in the bound so ``yield_(1)`` and
 # scalar-literal init values remain valid in the DSL.
-ExprType = TypeVar("ExprType", bound="int | float | Scalar | Tensor | Tile | Array")
+ExprType = TypeVar("ExprType", bound="int | float | Scalar | Tensor | Tile | Array | SyncToken")
 
 
 T = TypeVar("T")
 W = TypeVar("W")
 
 # TypeVars for overloads (see the bound-vs-constrained note on ExprType above)
-T1 = TypeVar("T1", bound="int | float | Scalar | Tensor | Tile | Array")
-T2 = TypeVar("T2", bound="int | float | Scalar | Tensor | Tile | Array")
-T3 = TypeVar("T3", bound="int | float | Scalar | Tensor | Tile | Array")
-T4 = TypeVar("T4", bound="int | float | Scalar | Tensor | Tile | Array")
-T5 = TypeVar("T5", bound="int | float | Scalar | Tensor | Tile | Array")
+T1 = TypeVar("T1", bound="int | float | Scalar | Tensor | Tile | Array | SyncToken")
+T2 = TypeVar("T2", bound="int | float | Scalar | Tensor | Tile | Array | SyncToken")
+T3 = TypeVar("T3", bound="int | float | Scalar | Tensor | Tile | Array | SyncToken")
+T4 = TypeVar("T4", bound="int | float | Scalar | Tensor | Tile | Array | SyncToken")
+T5 = TypeVar("T5", bound="int | float | Scalar | Tensor | Tile | Array | SyncToken")
 
 
 class RangeIterator(Generic[T]):

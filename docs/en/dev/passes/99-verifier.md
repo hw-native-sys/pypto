@@ -15,7 +15,7 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 
 - **Pluggable Rule System**: Extend with custom verification rules
 - **Property-Based Verification**: Opt-in property sets — verify exactly what you need
-- **Structural Properties**: TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, and AssignTypeSymmetry are verified before/after each pass by `VerificationInstrument`; at pipeline start `PassPipeline` verifies only the lightweight subset shared with `GetVerifiedProperties()`
+- **Structural Properties**: TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, and AssignTypeSymmetry are verified before/after each pass by `VerificationInstrument`; at pipeline start `PassPipeline` verifies only the lightweight subset shared with `GetVerifiedProperties()`
 - **Dual Verification Modes**: Collect diagnostics or throw on first error
 - **Pass Integration**: Use as a Pass in optimization pipelines
 - **Comprehensive Diagnostics**: Collect all issues with source locations
@@ -26,10 +26,10 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 
 | Category | Examples | Behavior |
 | -------- | -------- | -------- |
-| **Structural** | TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry | Always true. Verified before/after each pass by `VerificationInstrument`; the subset shared with `GetVerifiedProperties()` is also checked at pipeline start. Never in PassProperties. |
+| **Structural** | TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry | Always true. Verified before/after each pass by `VerificationInstrument`; the subset shared with `GetVerifiedProperties()` is also checked at pipeline start. Never in PassProperties. |
 | **Pipeline** | SSAForm, NoNestedCalls, HasMemRefs, ... | Produced/invalidated by passes. Verified per pass-declared contracts. |
 
-`GetStructuralProperties()` returns `{TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}`. These are verified **before/after each pass** by `VerificationInstrument`. At **pipeline start**, `PassPipeline::Run()` verifies only the lightweight subset shared with `GetVerifiedProperties()` (`GetStructuralProperties().Intersection(GetVerifiedProperties())`) — so e.g. `ArrayNotEscaped` is checked before/after each pass but not at pipeline start. Since no pass declares them in `required`/`produced`/`invalidated`, `VerificationInstrument` unions them with the pass's declared properties to ensure no pass breaks these fundamental invariants.
+`GetStructuralProperties()` returns `{TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}`. These are verified **before/after each pass** by `VerificationInstrument`. At **pipeline start**, `PassPipeline::Run()` verifies only the lightweight subset shared with `GetVerifiedProperties()` (`GetStructuralProperties().Intersection(GetVerifiedProperties())`) — so e.g. `ArrayNotEscaped` is checked before/after each pass but not at pipeline start. Since no pass declares them in `required`/`produced`/`invalidated`, `VerificationInstrument` unions them with the pass's declared properties to ensure no pass breaks these fundamental invariants.
 
 ### Verification Rule System
 
@@ -65,6 +65,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **SimtValid** | SimtValid | Checks canonical SIMT helper signatures, borrowed storage accesses, launch domains and InOut result mappings. See [scalar SIMT IR](../ir/11-simt.md). |
 | **SimtOutputsMaterialized** | SimtOutputsMaterialized | Each writable Tile uses a dedicated initialized SIMT output seed. |
 | **SimtSpecialized** | SimtSpecialized | Each launched helper has derived resources matching its block dimensions and target. |
+| **LogicalSyncValid** | LogicalSyncValid | Completion tokens stay in their specialized leaf AIC/AIV function and lexical SSA scope. Validates six logical sync schemas, statement placement, branch/loop carries, token escape restrictions, and VF boundaries. It does not allocate events or prove hardware implementability. See [Logical Synchronization](../ir/12-logical-sync.md). |
 | **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency; call-boundary layout agreement |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
@@ -380,6 +381,7 @@ buffer lifetime verifiers remain separate obligations.
 | 111 | `TILE_VIEW_MISMATCH` | Effective TileView metadata mismatch |
 | 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer descriptor or multi-buffer slot count mismatch |
 | 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit argument layout differs from the callee parameter's (DN exempt — a parameter cannot declare it; an ND argument of a `device=` dispatch exempt — the device program's parameter is the claim — but only when it traces, within the dispatching function, to a host parameter through `tensor.slice`s keeping the last two axes whole (following loop-carried and `if` result values); a window inside the matrix, or a value from any other producer, is rejected) |
+| 114 | `SYNC_TOKEN_SOURCE_MISMATCH` | Completion tokens refer to different source pipelines |
 
 ### NoNestedCall
 
@@ -438,9 +440,9 @@ Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. 
 
 | Function | Returns | Description |
 | -------- | ------- | ----------- |
-| `GetStructuralProperties()` | `{TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}` | Invariants verified before/after each pass by `VerificationInstrument` (the subset shared with `GetVerifiedProperties()` is also checked at pipeline start) |
-| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | Default set for `run_verifier()` |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid}` | Lightweight set for `PassPipeline` auto-verify |
+| `GetStructuralProperties()` | `{TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}` | Invariants verified before/after each pass by `VerificationInstrument` (the subset shared with `GetVerifiedProperties()` is also checked at pipeline start) |
+| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | Default set for `run_verifier()` |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid}` | Lightweight set for `PassPipeline` auto-verify |
 
 ### RunVerifier Pass Factory
 

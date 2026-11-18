@@ -133,6 +133,7 @@ DEFINE_KIND_TRAIT(CommCtxType, ObjectKind::CommCtxType)
 DEFINE_KIND_TRAIT(PrefetchAsyncContextType, ObjectKind::PrefetchAsyncContextType)
 DEFINE_KIND_TRAIT(AsyncEventType, ObjectKind::AsyncEventType)
 DEFINE_KIND_TRAIT(AsyncSessionType, ObjectKind::AsyncSessionType)
+DEFINE_KIND_TRAIT(SyncTokenType, ObjectKind::SyncTokenType)
 
 // Other IR node types
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)
@@ -249,7 +250,8 @@ struct KindTrait<Type> {
                                          ObjectKind::CommCtxType,
                                          ObjectKind::PrefetchAsyncContextType,
                                          ObjectKind::AsyncEventType,
-                                         ObjectKind::AsyncSessionType};
+                                         ObjectKind::AsyncSessionType,
+                                         ObjectKind::SyncTokenType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 

@@ -33,6 +33,7 @@ from pypto.language.typing.scalar import (
     Scalar,
     predicate_to_expr,
 )
+from pypto.language.typing.sync_token import SyncToken
 from pypto.language.typing.tensor import Tensor
 from pypto.language.typing.tile import Tile
 from pypto.language.typing.tuple import Tuple
@@ -57,6 +58,7 @@ __all__ = [
     "Ptr",
     "Reg",
     "RuntimeScalarMarker",
+    "SyncToken",
     "Scalar",
     "Tensor",
     "Tile",
