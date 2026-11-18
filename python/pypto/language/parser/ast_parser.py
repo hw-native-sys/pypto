@@ -931,6 +931,17 @@ class ASTParser:
                     }
                 )
                 or not types_match(value_expr.type, override_type)
+                # A storage annotation constrains this definition, whereas an
+                # inherited Call binding describes its source. Preserve the
+                # explicit constraint on the Call too: SSA takes the RHS type
+                # so stale inferred LHS bindings cannot affect reassignments.
+                # types_match deliberately ignores MemRefs and cannot detect
+                # this difference. InitMemRef validates the actual address.
+                or (
+                    isinstance(override_type, ir.TileType)
+                    and override_type.memref is not None
+                    and override_type.memref.is_pinned_
+                )
             )
         ):
             # Carry attrs through the rebuild: a forward-referenced callee has no
@@ -1032,11 +1043,12 @@ class ASTParser:
                         span=span,
                         hint="Use a different variable name for tensors with different shapes or dtypes",
                     )
-                # Compatible: one side just has not been placed yet. Keep the
-                # binding on the Var's own type so the AssignStmt stays
-                # symmetric; InferTileMemorySpace resolves both sides together.
+                # Compatible: one side just has not been placed yet. Carry
+                # only the resolved space; this definition's metadata must not
+                # inherit a stale binding from the mutable Var's first value.
                 if (
                     isinstance(value_expr, ir.Call)
+                    and isinstance(value_type, ir.TileType)
                     and isinstance(existing_var.type, ir.TileType)
                     and existing_var.type.memory_space is not None
                 ):
@@ -1045,12 +1057,44 @@ class ASTParser:
                         value_expr.args,
                         value_expr.kwargs,
                         value_expr.attrs,
-                        existing_var.type,
+                        ir.TileType(
+                            value_type.shape,
+                            value_type.dtype,
+                            value_type.memref,
+                            value_type.tile_view,
+                            existing_var.type.memory_space,
+                        ),
                         value_expr.span,
                     )
             self.function.shape_dim_aliases.pop(existing_var.unique_id, None)
+            if (
+                isinstance(override_type, ir.TileType)
+                and override_type.memref is not None
+                and override_type.memref.is_pinned_
+                and not isinstance(value_expr, ir.Call)
+            ):
+                # A plain alias has no Call on which to carry this definition's
+                # annotation. Bind it separately so SSA sees the constraint
+                # without retyping the source or the reused mutable Var.
+                value_expr = self.builder.let(
+                    f"_{var_name}_binding", value_expr, type=override_type, span=span
+                )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
+        if (
+            override_type is None
+            and not isinstance(value_expr, ir.Call)
+            and isinstance(value_expr.type, ir.TileType)
+            and value_expr.type.memref is not None
+            and value_expr.type.memref.is_pinned_
+        ):
+            # The source may be a mutable Var whose parser type still describes
+            # its first value. Only explicit annotations constrain a fresh LHS;
+            # SSA will supply this alias's binding from the substituted RHS.
+            inferred = value_expr.type
+            override_type = ir.TileType(
+                inferred.shape, inferred.dtype, None, inferred.tile_view, inferred.memory_space
+            )
         var = self.builder.let(var_name, value_expr, type=override_type, span=span)
         if isinstance(value_expr, ir.Call) and value_expr.op.name == ir.get_op("tensor.dim").name:
             self.function.shape_dim_aliases[var.unique_id] = value_expr

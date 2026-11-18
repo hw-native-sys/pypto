@@ -72,7 +72,8 @@ TypePtr RemapTypeReferences(const TypePtr& type, const FlattenContext& ctx) {
 
 TypePtr WithRemappedAllocation(const TypePtr& value_type, const TypePtr& original_type,
                                const FlattenContext& ctx) {
-  return RemapTypeReferences(WithCarriedMemRef(value_type, original_type), ctx);
+  return RemapTypeReferences(WithCarriedMemRef(value_type, original_type, /*preserve_declared_binding=*/true),
+                             ctx);
 }
 
 CallPtr WithRemappedResultAllocation(const CallPtr& value, const AssignStmtPtr& original,

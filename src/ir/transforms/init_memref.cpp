@@ -494,13 +494,6 @@ class InitMemRefMutator : public IRMutator {
         func_type_(func_type),
         program_(std::move(program)) {}
 
-  /// Whether `type` is bound to one of this function's declared allocations.
-  [[nodiscard]] bool HasUserBinding(const TypePtr& type) const {
-    if (declared_allocs_.empty()) return false;
-    auto binding = GetDeclaredAlloc(type);
-    return binding && declared_allocs_.count(binding->base_.get()) > 0;
-  }
-
   /// The MemRef a user binding asks for, sized to the slot it selects.
   /// Returns nullopt when `type` carries no binding.
   std::optional<MemRefPtr> UserBoundMemRef(const TypePtr& type) const {
@@ -723,6 +716,22 @@ class InitMemRefMutator : public IRMutator {
     return std::static_pointer_cast<const Expr>(GetNewVar(var_ptr));
   }
 
+  /// Validate a declaration against the storage an alias actually inherits.
+  /// Type deduction and SSA can carry the source's pinned declaration onto an
+  /// unannotated result (notably gather_row). Its presence alone is therefore
+  /// not a request for another buffer. Resolve it to a byte address before
+  /// comparing: base identity alone would also accept a different slot, while
+  /// MemRef pointer equality would reject independently rebuilt equal indices.
+  void CheckAliasBinding(const AssignStmtPtr& op, const MemRefPtr& inherited) const {
+    auto requested = UserBoundMemRef(op->var_->GetType());
+    if (!requested) return;
+    CHECK_SPAN(inherited && CompareBaseAddress(*requested, inherited) == AddressRelation::kSame,
+               op->var_->span_)
+        << "Tile '" << op->var_->name_hint_
+        << "' lands in its source tile's allocation, but its binding selects a different or "
+           "unproven address. Bind the source tile instead.";
+  }
+
   /**
    * @brief Create a view MemRef from a source expression for the LHS variable of an assignment.
    *
@@ -732,7 +741,10 @@ class InitMemRefMutator : public IRMutator {
    */
   StmtPtr ShareMemRefFrom(const ExprPtr& source, const AssignStmtPtr& op, const ExprPtr& new_value) {
     auto parent_memref_opt = GetTypeMemRef(source->GetType());
-    if (!parent_memref_opt.has_value()) return nullptr;
+    if (!parent_memref_opt.has_value()) {
+      CheckAliasBinding(op, nullptr);
+      return nullptr;
+    }
     const auto& parent_memref = *parent_memref_opt;
 
     // A nested slice can narrow a strided window's byte envelope back to its
@@ -786,6 +798,7 @@ class InitMemRefMutator : public IRMutator {
     // Full aliases share the exact MemRef; subviews retain the source's slots
     // while narrowing the window. Later reanchoring uses the same construction.
     MemRefPtr view_memref = MakeAliasingMemRef(parent_memref, additional_offset, view_size, op->span_);
+    CheckAliasBinding(op, view_memref);
     if (non_dense_source) non_dense_view_memrefs_.insert(view_memref);
 
     std::optional<MemRefPtr> view_opt = view_memref;
@@ -883,16 +896,6 @@ class InitMemRefMutator : public IRMutator {
     if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
       LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_hint_ << " with call to "
                 << call->op_->name_;
-
-      // A view / in-place result physically IS its source's buffer, so binding
-      // it to a different one cannot be honored. Say so instead of silently
-      // dropping the binding — the user asked for something impossible.
-      CHECK_SPAN(!op_predicates::OutputInheritsSourceBuffer(call->op_->name_) ||
-                     !HasUserBinding(op->var_->GetType()),
-                 op->var_->span_)
-          << "Tile '" << op->var_->name_hint_ << "' is produced by '" << call->op_->name_
-          << "', which lands in its source tile's allocation, so it cannot be given one of its own. "
-             "Bind the source tile instead.";
 
       // Handle view operations: output should share MemRef with input tile.
       // A pure metadata view (slice/reshape/...) inherits its input's buffer.  A

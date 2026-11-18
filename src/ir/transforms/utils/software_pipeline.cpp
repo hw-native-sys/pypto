@@ -573,13 +573,13 @@ class SoftwarePipelineMutator : public IRMutator {
         auto type = As<TileType>(assign->var_->GetType());
         const auto& span = assign->span_;
         auto shape = std::make_shared<MakeTuple>(type->shape_, span);
-        // tile.create names existing storage through the bound variable; its
-        // expression result retains the ordinary unallocated value descriptor.
+        // Keep the selected slot on both the variable and the Call, matching
+        // an explicit pinned annotation after a print/parse roundtrip.
         auto call = std::make_shared<Call>(OpRegistry::GetInstance().GetOp("tile.create"),
                                            std::vector<ExprPtr>{shape},
                                            std::vector<std::pair<std::string, std::any>>{
                                                {"dtype", type->dtype_}, {"target_memory", MemorySpace::Vec}},
-                                           CloneTypeWithoutMemRef(type), span);
+                                           type, span);
         auto marked = call;
         marked->attrs_.emplace_back(kSoftwarePipelineSlotsAttr, true);
         return std::make_shared<AssignStmt>(assign->var_, marked, span);

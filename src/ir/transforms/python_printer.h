@@ -169,6 +169,10 @@ class IRPythonPrinter : public IRVisitor {
   // Vars defined in the current function body (for PrintMemRef formatting).
   std::unordered_set<const Var*> body_defined_vars_;
 
+  // Definitions already emitted: a mutable Var's pinned type describes its
+  // first definition, not a new constraint on each later alias assignment.
+  std::unordered_set<const Var*> printed_assignment_vars_;
+
   // True while printing a function signature (parameter annotations and return
   // types). Body definitions are not in scope there, so a MemRef whose base Ptr
   // is allocated in the body must print as a string literal rather than a bare

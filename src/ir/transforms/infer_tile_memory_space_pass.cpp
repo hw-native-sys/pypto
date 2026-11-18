@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -985,11 +986,12 @@ class TileMemorySpaceMutator : public IRMutator {
     if ((new_call || AsVarLike(new_value)) && old_tile_type) {
       auto new_tile_type = As<TileType>(new_value->GetType());
       if (new_tile_type && new_tile_type.get() != old_tile_type.get()) {
-        // Preserve the Var's memory_space (set by VisitExpr_(VarPtr) based on var_memory_)
-        // and, for the same reason, its MemRef: a re-deduced Call type carries neither,
-        // and the MemRef is what a declared allocation rides on to InitMemRef.
-        auto synced_memref =
-            new_tile_type->memref_.has_value() ? new_tile_type->memref_ : old_tile_type->memref_;
+        // Preserve the resolved space and this definition's declared storage.
+        // Re-deduction can inherit the input's MemRef (gather_row); letting it
+        // override an explicit result constraint would hide a conflicting
+        // binding before InitMemRef can compare the actual addresses.
+        auto synced_memref = GetTypeMemRef(
+            WithCarriedMemRef(new_tile_type, old_tile_type, /*preserve_declared_binding=*/true));
         auto synced_type =
             std::make_shared<TileType>(new_tile_type->shape_, new_tile_type->dtype_, synced_memref,
                                        new_tile_type->tile_view_, old_tile_type->memory_space_);
@@ -1002,7 +1004,10 @@ class TileMemorySpaceMutator : public IRMutator {
         // the Call does not, so a print->parse roundtrip — which re-derives the
         // Call type from the LHS annotation — sees a memory_space presence
         // mismatch on body[*].value.type.
-        if (new_call && new_tile_type->memory_space_ != old_tile_type->memory_space_) {
+        // Keep the constraint on the Call as well, so later re-inference does
+        // not mistake the operand's binding for the result's declaration.
+        if (new_call && (new_tile_type->memory_space_ != old_tile_type->memory_space_ ||
+                         new_tile_type->memref_ != synced_memref)) {
           new_value = std::make_shared<Call>(new_call->op_, new_call->args_, new_call->kwargs_,
                                              new_call->attrs_, synced_type, new_call->span_);
         }

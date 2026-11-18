@@ -393,6 +393,328 @@ class Zero:
         ir.assert_structural_equal(after, reparsed)
 
 
+class TestInheritedBinding:
+    """An in-place result may carry its source's declaration without rebinding it."""
+
+    @staticmethod
+    def _initialize(program: ir.Program, through_pipeline: bool) -> ir.Program:
+        # Full lowering exercises both SSA and later type re-deduction; neither
+        # may replace an explicit output constraint with the input's binding.
+        if through_pipeline:
+            return _run_full_pipeline(program, "InitMemRef")
+        return passes.init_mem_ref()(program)
+
+    def test_gather_inherits_seed_binding(self):
+        """Type deduction copies the binding even without a loop or result annotation."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tensor[[8, 32], pl.BF16]) -> pl.Tile[[8, 32], pl.BF16]:
+                seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                result = pl.gather_row(seed, x, [0, 0], [0, 0], [1, 32])
+                return result
+
+        after = _run_memory_pipeline(Before)
+        refs = _tile_memrefs(after)
+        assert refs["result"] is refs["seed"]
+        assert refs["result"].base_.name_hint == "stage"
+        assert refs["result"].size_ == 512
+        assert _alloc_lines(after) == ["stage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512, pinned=True)"]
+
+    def test_gather_loop_preserves_binding(self, ascend_backend, tmp_path):
+        """Issue #3439: only the owning seed is annotated, including through SSA."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+            ) -> pl.Tensor[[8, 32], pl.BF16]:
+                seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                result = seed
+                for row in pl.range(8):
+                    result = pl.gather_row(result, x, [row, 0], [row, 0], [1, 32])
+                return pl.store(result, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+            ) -> pl.Tensor[[8, 32], pl.BF16]:
+                return self.kernel(x, out)
+
+        after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        refs = list(_tile_memrefs(after).values())
+        assert len(refs) >= 3  # seed, its alias, and the gather definition
+        assert all(ref.base_ is refs[0].base_ and _const_offset(ref) == 0 for ref in refs)
+        assert refs[0].base_.name_hint == "stage"
+        assert len(_alloc_lines(after)) == 1
+        assert "pinned=True" in _alloc_lines(after)[0]
+        # Exercise codegen as well; assembly and device execution are unnecessary
+        # for checking the storage contract and require a separate PTOAS install.
+        ir.compile(Before, output_dir=str(tmp_path), backend_type=ascend_backend, skip_ptoas=True)
+        assert list(tmp_path.rglob("*.pto"))
+
+    @pytest.mark.parametrize("through_pipeline", [False, True])
+    @pytest.mark.parametrize("result_slot", [0, 1])
+    def test_explicit_gather_binding(self, result_slot, through_pipeline, ascend_backend):
+        """Compatible annotations are legal, but a different slot is not."""
+        stage = pl.MemRef("stage", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+            ) -> pl.Tensor[[8, 32], pl.BF16]:
+                seed: pl.Tile[[8, 32], pl.BF16, stage[1], pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                result: pl.Tile[[8, 32], pl.BF16, stage[result_slot], pl.Mem.Vec] = pl.gather_row(
+                    seed, x, [0, 0], [0, 0], [1, 32]
+                )
+                return pl.store(result, [0, 0], out)
+
+        if result_slot != 1:
+            with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+                self._initialize(Before, through_pipeline)
+            return
+        after = self._initialize(Before, through_pipeline)
+        refs = list(_tile_memrefs(after).values())
+        assert len(refs) == 2
+        assert refs[0] is refs[1]
+        assert _const_offset(refs[1]) == 512
+        assert refs[1].slot_count_ == 2
+
+    @pytest.mark.parametrize("through_pipeline", [False, True])
+    def test_rejects_gather_binding_to_other_allocation(self, through_pipeline, ascend_backend):
+        """An inferred result binding must not hide a conflicting annotation."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+            ) -> pl.Tensor[[8, 32], pl.BF16]:
+                seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                result: pl.Tile[[8, 32], pl.BF16, pl.MemRef("elsewhere"), pl.Mem.Vec] = pl.gather_row(
+                    seed, x, [0, 0], [0, 0], [1, 32]
+                )
+                return pl.store(result, [0, 0], out)
+
+        with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+            self._initialize(Before, through_pipeline)
+
+    @pytest.mark.parametrize(
+        "replacement",
+        [
+            "second",
+            "pl.gather_row(second, x, [1, 0], [1, 0], [1, 32])",
+            "pl.reshape(second, [8, 32])",
+            "pl.tile.slice(second, [8, 32], [0, 0])",
+        ],
+    )
+    @pytest.mark.parametrize("binding", [None, "first", "second"])
+    def test_reassignment_follows_new_source(self, ascend_backend, replacement, binding):
+        """Only an explicit annotation may constrain the new definition's binding."""
+        annotation = f': pl.Tile[[8, 32], pl.BF16, pl.MemRef("{binding}"), pl.Mem.Vec]' if binding else ""
+
+        before = pl.parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+    ) -> pl.Tensor[[8, 32], pl.BF16]:
+        first: pl.Tile[[8, 32], pl.BF16, pl.MemRef("first"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        second: pl.Tile[[8, 32], pl.BF16, pl.MemRef("second"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        result = pl.gather_row(first, x, [0, 0], [0, 0], [1, 32])
+        pl.store(result, [0, 0], out)
+        result{annotation} = {replacement}
+        return pl.store(result, [0, 0], out)
+""")
+        assert isinstance(before, ir.Program)
+        if binding == "first":
+            with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+                _run_full_pipeline(before, "InitMemRef")
+            return
+        after = _run_full_pipeline(before, "InitMemRef")
+        bases = [
+            ref.base_.name_hint for name, ref in _tile_memrefs(after).items() if name.startswith("result")
+        ]
+        assert bases == ["first", "second"]
+
+    @pytest.mark.parametrize("binding", ["source", "other"])
+    def test_plain_alias_definition_keeps_explicit_binding(self, ascend_backend, binding):
+        """A fresh alias's explicit constraint must also survive inlining and SSA."""
+        before = pl.parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]) -> pl.Tensor[[8, 32], pl.BF16]:
+        source: pl.Tile[[8, 32], pl.BF16, pl.MemRef("source"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        result: pl.Tile[[8, 32], pl.BF16, pl.MemRef("{binding}"), pl.Mem.Vec] = source
+        return pl.store(result, [0, 0], out)
+""")
+        assert isinstance(before, ir.Program)
+        if binding == "other":
+            with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+                _run_full_pipeline(before, "InitMemRef")
+            return
+        refs = _tile_memrefs(_run_full_pipeline(before, "InitMemRef"))
+        # Canonicalization may eliminate this single-use alias entirely.
+        assert {ref.base_.name_hint for ref in refs.values()} == {"source"}
+
+    @pytest.mark.parametrize("initial", ["first", "pl.gather_row(first, x, [0, 0], [0, 0], [1, 32])"])
+    @pytest.mark.parametrize("through_inline", [False, True])
+    def test_fresh_alias_follows_reassigned_source(self, ascend_backend, initial, through_inline):
+        """An inferred LHS binding must not constrain an alias of a mutable Var."""
+        helper = (
+            """
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, value: pl.Tile[[8, 32], pl.BF16, pl.Mem.Vec]):
+        return value
+"""
+            if through_inline
+            else ""
+        )
+        inline_call = "self.helper(first)" if through_inline else ""
+        before = pl.parse(f"""
+@pl.program
+class Before:
+{helper}
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]
+    ) -> pl.Tensor[[8, 32], pl.BF16]:
+        first: pl.Tile[[8, 32], pl.BF16, pl.MemRef("first"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=0.0
+        )
+        second: pl.Tile[[8, 32], pl.BF16, pl.MemRef("second"), pl.Mem.Vec] = pl.tile.full(
+            [8, 32], dtype=pl.BF16, value=1.0
+        )
+        {inline_call}
+        current = {initial}
+        pl.store(current, [0, 0], out)
+        current = second
+        alias = current
+        return pl.store(alias, [0, 0], out)
+""")
+        assert isinstance(before, ir.Program)
+        after = _run_full_pipeline(before, "InitMemRef")
+        stored_bases = []
+
+        class StoreVisitor(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name == ir.get_op("tile.store").name:
+                    tile_type = op.args[0].type
+                    assert isinstance(tile_type, ir.TileType)
+                    assert tile_type.memref is not None
+                    stored_bases.append(tile_type.memref.base_.name_hint)
+                super().visit_call(op)
+
+        StoreVisitor().visit_program(after)
+        assert stored_bases == ["first", "second"]
+
+    def test_plain_alias_reassignment_to_unbound_source(self, ascend_backend):
+        """A plain alias can leave a pinned source for a compiler-managed tile."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]) -> pl.Tensor[[8, 32], pl.BF16]:
+                first: pl.Tile[[8, 32], pl.BF16, pl.MemRef("first"), pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                second = pl.tile.full([8, 32], dtype=pl.BF16, value=1.0)
+                result = first
+                pl.store(result, [0, 0], out)
+                result = second
+                return pl.store(result, [0, 0], out)
+
+        refs = _tile_memrefs(_run_full_pipeline(Before, "InitMemRef"))
+        results = [ref for name, ref in refs.items() if name.startswith("result")]
+        assert len(results) == 2
+        assert results[0].base_.name_hint == "first"
+        second = next(ref for name, ref in refs.items() if name.startswith("second"))
+        assert results[1] is second
+        assert results[1].base_ is not results[0].base_
+
+    @pytest.mark.parametrize("different_slot", [False, True])
+    def test_runtime_slot_gather_binding(self, different_slot):
+        """Equal symbolic indices need structural comparison, not pointer equality."""
+        result_index = "(i + 1) % 2" if different_slot else "i % 2"
+        source = f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, x: pl.Tensor[[8, 32], pl.BF16], out: pl.Out[pl.Tensor[[8, 32], pl.BF16]]):
+        for i in pl.range(8):
+            seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage", slots=2)[i % 2], pl.Mem.Vec] = pl.tile.full(
+                [8, 32], dtype=pl.BF16, value=0.0
+            )
+            result: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage", slots=2)[{result_index}], pl.Mem.Vec] = (
+                pl.gather_row(seed, x, [0, 0], [0, 0], [1, 32])
+            )
+            pl.store(result, [0, 0], out)
+"""
+        before = pl.parse(source)
+        assert isinstance(before, ir.Program)
+        if different_slot:
+            with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+                passes.init_mem_ref()(before)
+            return
+        refs = _tile_memrefs(passes.init_mem_ref()(before))
+        assert refs["result"] is refs["seed"]
+        assert not isinstance(refs["result"].byte_offset_, ir.ConstInt)
+
+    def test_matching_reshape_binding(self):
+        """A full view may restate its source's binding without owning a new buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self) -> pl.Tile[[4, 64], pl.BF16]:
+                seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                result: pl.Tile[[4, 64], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.reshape(seed, [4, 64])
+                return result
+
+        refs = _tile_memrefs(passes.init_mem_ref()(Before))
+        assert refs["result"] is refs["seed"]
+
+    def test_rejects_slice_binding_at_wrong_offset(self):
+        """A view's base may match while its derived address differs from slot zero."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self) -> pl.Tile[[4, 32], pl.BF16]:
+                seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+                    [8, 32], dtype=pl.BF16, value=0.0
+                )
+                result: pl.Tile[[4, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.slice(
+                    seed, [4, 32], [4, 0]
+                )
+                return result
+
+        with pytest.raises(ValueError, match="lands in its source tile's allocation"):
+            passes.init_mem_ref()(Before)
+
+
 class TestSlots:
     """A declaration may hold N equally-sized slots, selected by subscript.
 

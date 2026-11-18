@@ -85,7 +85,11 @@ class TypeCollector : public IRVisitor {
     for (const auto& result : op->results_) types[result.get()] = result->GetType();
   }
   void VisitStmt_(const AssignStmtPtr& op) override {
-    types[op->var_.get()] = GetAuthoritativeAssignmentType(op->var_->GetType(), op->value_);
+    auto lhs_type = op->var_->GetType();
+    if (types.count(op->var_.get()) && GetTypeMemRef(lhs_type)) {
+      lhs_type = CloneTypeWithMemRef(lhs_type, std::nullopt);
+    }
+    types[op->var_.get()] = GetAuthoritativeAssignmentType(lhs_type, op->value_);
   }
   void VisitStmt_(const ForStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const WhileStmtPtr& op) override { VisitStmt(op->body_); }
@@ -499,7 +503,14 @@ class SSAConverter {
   StmtPtr ConvertAssign(const AssignStmtPtr& op) {
     auto val = SubstExpr(op->value_);
     auto key = op->var_.get();
-    auto authoritative_type = GetAuthoritativeAssignmentType(op->var_->GetType(), val);
+    // A reused Var still has its first definition's type. Missing storage on
+    // the new RHS is not a request to reuse that old binding (views commonly
+    // omit MemRefs). Explicit annotations travel on the RHS Call instead.
+    auto lhs_type = op->var_->GetType();
+    if (cur_.count(key) && GetTypeMemRef(lhs_type)) {
+      lhs_type = CloneTypeWithMemRef(lhs_type, std::nullopt);
+    }
+    auto authoritative_type = GetAuthoritativeAssignmentType(lhs_type, val);
     auto var = AllocVersion(key, authoritative_type, op->var_->span_);
     auto result = MutableCopy(op);
     result->var_ = var;

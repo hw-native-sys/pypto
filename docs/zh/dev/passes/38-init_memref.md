@@ -103,9 +103,13 @@ pass 被 ptoas 整体替换，ptoas 侧也没有对应概念来接管。多槽�
 ptoas 区域，ptoas 被禁止合并这些物理段，详见
 [Python 语法](../language/00-python_syntax.md#在-ptoas-内存规划器下)。
 
-声明位于被赋值的 `Var` 上而非 RHS `Call` 上——`ConvertToSSA` 只把它合并进 Var 的类型，而算子类型
-推导永远不产生 MemRef——因此任何从 Call 重建类型的 pass 都必须显式携带它。`ConvertToSSA` 负责
-合并；`FlattenTileNdTo2D` 在四处重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；
+普通别名重新注解时，解析器先建立独立的带类型绑定，再更新可变变量，以保留约束而不修改源变量的类型。
+未注解的新别名在内联期间也保持 LHS 存储未绑定，直到 SSA 替换为当前源变量，避免把旧类型误作显式约束。
+声明由被赋值的 `Var` 携带；解析器也在 RHS `Call` 上保留显式的 pinned 注解，使重新赋值时能将
+它与 Var 之前推导出的绑定区分开。算子类型推导不分配存储，但可能继承输入的 MemRef
+（`tile.gather_row` 直接返回目标累加器的类型）。重建类型的 pass 必须保留显式约束，即使类型
+推导省略或继承了 MemRef。`ConvertToSSA` 选择每次定义的元数据；`FlattenTileNdTo2D` 在四处
+重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；
 `InferTileMemorySpace` 在把 Var 类型同步到重建后的 Call 时保留它。只克隆而不重建的 pass（包括
 `LowerPipelineLoops` 产出的各流水级 body）经由 `MemRef` 的克隆路径保留它。
 
@@ -121,8 +125,26 @@ ptoas 区域，ptoas 被禁止合并这些物理段，详见
 
 - 绑定的 tile 是动态 shape——声明式分配必须在编译期定型。
 - 同一 buffer 上的 tile 内存空间不一致。
-- 绑定 view / 原地算子（`tile.reshape`、`tile.matmul_acc` 等）的输出。这类结果物理上**就是**
-  其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
+- 将 view / 原地算子（`tile.reshape`、`tile.gather_row`、`tile.matmul_acc` 等）的输出
+  绑定到与其继承位置不同的存储。继承的绑定或显式绑定解析后若指向相同分配与字节偏移，
+  包括多槽位分配的同一槽位，则允许使用。不同分配、不同槽位，或无法证明相等的符号
+  偏移都会被拒绝；应改为绑定源 tile。view 按派生后的偏移校验，仅分配基址相同并不充分。
+
+例如，只为 gather 累加器添加绑定是合法的；未注解的结果通过类型推导与循环 SSA
+继承该声明：
+
+```python
+seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+    [8, 32], dtype=pl.BF16, value=0.0
+)
+result = seed
+for row in pl.range(8):
+    result = pl.gather_row(result, x, [row, 0], [row, 0], [1, 32])
+```
+
+`InitMemRef` 创建一块 pinned 的 `stage` 分配，由 seed、循环携带值与 gather 结果共享。
+显式结果注解会经过 SSA 与类型重新推导保留至此处校验。未注解的重新赋值跟随新源值的
+绑定；同一变量名之前推导出的绑定不会约束新的定义。
 
 第四条规则——绑定到**同一槽位**的 tile 生命周期不得重叠——需要生命周期信息，因此在
 [MemoryReuse](40-memory_reuse.md#声明式分配) 中检查。位于*不同*槽位的 tile 本来就应该同时

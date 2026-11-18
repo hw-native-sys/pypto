@@ -872,7 +872,7 @@ class InlineCallsMutator : public IRMutator {
     }
     // Some ops infer UnknownType and rely on an explicit result annotation.
     if (!type || As<UnknownType>(type)) return call;
-    type = WithCarriedMemRef(type, call->GetType());
+    type = WithCarriedMemRef(type, call->GetType(), /*preserve_declared_binding=*/true);
     if (structural_equal(type, call->GetType())) return call;
     return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, type, call->span_);
   }
@@ -968,7 +968,14 @@ class InlineCallsMutator : public IRMutator {
     // a different Var. Fresh definitions use the same type selection as SSA.
     auto [definition, inserted] = definitions_.emplace(op->var_.get(), var);
     if (inserted) {
-      definition->second = Retype(op->var_, var, GetAuthoritativeAssignmentType(var->GetType(), value));
+      auto type = GetAuthoritativeAssignmentType(var->GetType(), value);
+      if (!As<Call>(op->value_) && As<TileType>(type) && !GetTypeMemRef(op->var_->GetType())) {
+        // An unannotated alias stays unbound until SSA substitutes the current
+        // RHS version. The mutable source's pre-SSA type may still name its
+        // initial allocation; propagating that binding invents a constraint.
+        type = CloneTypeWithMemRef(type, std::nullopt);
+      }
+      definition->second = Retype(op->var_, var, type);
     }
     var = definition->second;
     if (var.get() == op->var_.get() && value.get() == op->value_.get()) return op;
