@@ -148,8 +148,8 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
   // route it through the Call-shaped view so a task launch's Out/InOut roots are
   // tracked identically to a plain Call (results keyed on the stable binding
   // Var). The view preserves args_ and the TASK_ID-augmented return type, so the
-  // tuple path maps the submit-result projections to the callee's Out roots and
-  // leaves the trailing TASK_ID element unmapped
+  // tuple path maps tensor projections and leaves the trailing TASK_ID
+  // element unmapped
   // (see .claude/rules/pass-submit-awareness.md).
   if (auto call = transform_utils::AsCallOrSubmitView(assign->value_)) {
     const std::string& op_name = call->op_->name_;
@@ -169,7 +169,7 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
     } else if (follow_reshape_ && IsOp(call, "tensor.reshape") && !call->args_.empty()) {
       ShareRootCandidates(assign->var_, call->args_[0]);
     } else if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
-      RecordOwningRoot(assign->var_);
+      RecordOwningRoot(assign->var_, /*region_only=*/IsOp(call, "tensor.slice"));
     } else if (IsOp(call, "tensor.assemble")) {
       if (call->args_.size() == 3) {
         ShareRootCandidates(assign->var_, call->args_[0]);
@@ -228,10 +228,16 @@ bool BufferRootCollector::IsAmbiguous(const ExprPtr& expr) const {
   return var && ambiguous_buffer_vars.count(var.get()) != 0;
 }
 
-void BufferRootCollector::RecordOwningRoot(const VarPtr& var) {
+bool BufferRootCollector::HasStorageProof(const ExprPtr& expr) const {
+  const auto set = ResolveRootCandidates(expr).set;
+  // A slice root describes a dependency region, not its owning allocation.
+  return set != 0 && !IsAmbiguous(expr) && !root_sets_[set].region_only;
+}
+
+void BufferRootCollector::RecordOwningRoot(const VarPtr& var, bool region_only) {
   if (!var) return;
   const auto [entry, inserted] = owning_sets_.try_emplace(var.get(), root_sets_.size());
-  if (inserted) root_sets_.push_back({var.get(), 0, 0});
+  if (inserted) root_sets_.push_back({var.get(), 0, 0, region_only});
   BindRootCandidates(var, {entry->second, var.get()}, false);
 }
 
@@ -295,7 +301,22 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
     const auto& arg = call->args_[i];
     roots.push_back({arg, ResolveRootCandidates(arg), IsAmbiguous(arg)});
   }
-  return roots;
+  const auto tuple = follow_reshape_ ? As<TupleType>(call->GetType()) : nullptr;
+  if (!tuple) return roots;
+
+  const auto returned_params = return_lineage::ReturnedParamIndices(callee, program_);
+  std::vector<OutputRoot> projections(tuple->types_.size());
+  for (size_t i = 0; i < projections.size(); ++i) {
+    if (!As<TensorType>(tuple->types_[i])) continue;
+    if (i < returned_params.size() && returned_params[i] && *returned_params[i] < call->args_.size()) {
+      const auto& arg = call->args_[*returned_params[i]];
+      projections[i] = {arg, ResolveRootCandidates(arg), !HasStorageProof(arg)};
+    } else if (i < roots.size()) {
+      projections[i] = roots[i];
+      projections[i].ambiguous = true;
+    }
+  }
+  return projections;
 }
 
 void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
@@ -312,7 +333,7 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
         returned_arg = call->args_[*param];
         // A helper can write a scratch output and still return an input.
         // Its proven return storage takes precedence over output matching.
-        if (ResolveRootCandidates(returned_arg).set != 0 && !IsAmbiguous(returned_arg)) {
+        if (HasStorageProof(returned_arg)) {
           ShareRootCandidates(result, returned_arg);
           return;
         }
@@ -322,7 +343,8 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
   const auto record_output = [&](const OutputRoot& output) {
     // A shape match supplies a candidate. When tracing could not prove the
     // return (for example, a view of an input), it cannot prove its storage.
-    const bool unproven = track_tensor_return && returned_arg.get() != output.argument.get();
+    const bool unproven = track_tensor_return &&
+                          (returned_arg.get() != output.argument.get() || !HasStorageProof(returned_arg));
     BindRootCandidates(result, output.roots, output.ambiguous || unproven);
   };
   if (out_roots.size() == 1 && (!returned_arg || returned_arg.get() == out_roots.front().argument.get())) {

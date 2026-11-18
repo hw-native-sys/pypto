@@ -8671,9 +8671,11 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(after, Expected)
 
-    @pytest.mark.parametrize("return_mode", ["unknown_output", "input", "reshaped_input"])
+    @pytest.mark.parametrize(
+        "return_mode", ["unknown_output", "input", "reshaped_input", "reversed_tuple", "slice"]
+    )
     def test_return_matching_retains_actual_backing_parameters(self, return_mode):
-        """Unknown outputs retain ambiguity, and a returned input keeps its own storage."""
+        """Return bindings preserve backing parameters and remain conservative for unknown storage."""
 
         @pl.program
         class Before:
@@ -8794,6 +8796,31 @@ class TestCalleeDirectionPropagationThroughCarries:
             if return_mode == "unknown_output":
                 return program
             source = ir.python_print(program)
+            if return_mode == "reversed_tuple":
+                start = source.index("    def first(")
+                end = source.index("\n    @pl.function(", start)
+                first = source[start:end]
+                tensor = "pl.Tensor[[2, 64], pl.FP32]"
+                first = first.replace(f"-> {tensor}:", f"-> tuple[{tensor}, {tensor}]:")
+                first = first.replace("        return b", "        return b, a")
+                source = source[:start] + first + source[end:]
+                source = source.replace(
+                    "        middle: " + tensor + " = self.first(x, first_flat, alias)",
+                    "        first_b = b\n        middle, _unused = self.first(x, first_flat, first_b)",
+                )
+                return pl.parse_program(source)
+            if return_mode == "slice":
+                end = source.index("\n", source.index("    def main("))
+                signature = source[:end].replace(
+                    "a: pl.InOut[pl.Tensor[[128], pl.FP32]]", "a: pl.Tensor[[128], pl.FP32]"
+                )
+                return pl.parse_program(
+                    signature
+                    + "\n        part = pl.slice(b, [2, 64], [0, 0])"
+                    + "\n        flat = pl.reshape(part, [2, 64])"
+                    + "\n        result = self.first(x, b, flat)"
+                    + "\n        self.consume(result)\n"
+                )
             old_call = "self.first(x, first_flat, alias)"
             assert old_call in source
             source = source.replace(old_call, "self.forward(x, b, first_flat)")

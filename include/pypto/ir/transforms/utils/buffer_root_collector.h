@@ -85,6 +85,7 @@ class BufferRootCollector : public IRVisitor {
     const Var* root = nullptr;
     RootSetId left = 0;
     RootSetId right = 0;
+    bool region_only = false;
   };
 
   /// Zero represents the empty set.
@@ -117,11 +118,12 @@ class BufferRootCollector : public IRVisitor {
 
   [[nodiscard]] const RootCandidates& ResolveRootCandidates(const ExprPtr& expr) const;
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
+  [[nodiscard]] bool HasStorageProof(const ExprPtr& expr) const;
   void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
   void BindRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved);
   void MergeRootCandidates(const VarPtr& var, const std::vector<RootCandidates>& inputs, bool unresolved);
   [[nodiscard]] RootSetId UnionRootSets(RootSetId left, RootSetId right);
-  void RecordOwningRoot(const VarPtr& var);
+  void RecordOwningRoot(const VarPtr& var, bool region_only = false);
   void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
                                 bool may_repeat);
   void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
