@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -24,11 +25,13 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
+#include "pypto/ir/transforms/utils/unroll_loops.h"
 
 namespace pypto {
 namespace ir {
@@ -58,6 +61,8 @@ int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
  */
 class LoopUnrollMutator : public IRMutator {
  public:
+  explicit LoopUnrollMutator(const std::unordered_set<const ForStmt*>* ancestors = nullptr)
+      : ancestors_(ancestors) {}
   /// Unroll a single ForStmt with ForKind::Unroll.
   StmtPtr UnrollForStmt(const ForStmtPtr& op) {
     // Validate: no iter_args for unroll loops
@@ -141,20 +146,29 @@ class LoopUnrollMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    if (op->kind_ != ForKind::Unroll) {
+    if (op->kind_ != ForKind::Unroll || (ancestors_ && !ancestors_->count(op.get()))) {
       return IRMutator::VisitStmt_(op);
     }
     CHECK_SPAN(op->hardware_loop_policy_ == HardwareLoopPolicy::Auto, op->span_)
         << "UnrollLoops cannot erase HardwareLoopPolicy.Require; hardware loop qualification is not "
            "supported yet";
-    return UnrollForStmt(op);
+    // Cloned descendants have new statement identities. Once an enclosing
+    // loop is selected, perform ordinary recursive substitution in its body.
+    auto saved = ancestors_;
+    ancestors_ = nullptr;
+    auto result = UnrollForStmt(op);
+    ancestors_ = saved;
+    return result;
   }
+
+ private:
+  const std::unordered_set<const ForStmt*>* ancestors_;
 };
 
-/**
- * @brief Transform a function by unrolling ForKind::Unroll loops.
- */
-FunctionPtr TransformUnrollLoops(const FunctionPtr& func) {
+}  // namespace
+
+namespace transform_utils {
+FunctionPtr UnrollFunction(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "UnrollLoops cannot run on null function";
 
   LoopUnrollMutator mutator;
@@ -169,11 +183,40 @@ FunctionPtr TransformUnrollLoops(const FunctionPtr& func) {
   return new_func;
 }
 
-}  // namespace
+FunctionPtr UnrollRegScopeAncestors(const FunctionPtr& func) {
+  class Ancestors : public IRVisitor {
+   public:
+    std::unordered_set<const ForStmt*> loops;
+
+   protected:
+    void VisitStmt_(const RegScopeStmtPtr&) override { contains_scope_ = true; }
+    void VisitStmt_(const ForStmtPtr& loop) override {
+      bool previous = contains_scope_;
+      contains_scope_ = false;
+      IRVisitor::VisitStmt_(loop);
+      if (contains_scope_ && loop->kind_ == ForKind::Unroll) loops.insert(loop.get());
+      contains_scope_ = contains_scope_ || previous;
+    }
+
+   private:
+    bool contains_scope_ = false;
+  };
+  Ancestors ancestors;
+  ancestors.VisitStmt(func->body_);
+  if (ancestors.loops.empty()) return func;
+  LoopUnrollMutator mutator(&ancestors.loops);
+  auto result = MutableCopy(func);
+  result->body_ = mutator.VisitStmt(func->body_);
+  return result;
+}
+
+}  // namespace transform_utils
 
 // Factory function
 namespace pass {
-Pass UnrollLoops() { return CreateFunctionPass(TransformUnrollLoops, "UnrollLoops", kUnrollLoopsProperties); }
+Pass UnrollLoops() {
+  return CreateFunctionPass(transform_utils::UnrollFunction, "UnrollLoops", kUnrollLoopsProperties);
+}
 }  // namespace pass
 
 }  // namespace ir

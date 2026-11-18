@@ -2,6 +2,10 @@
 
 用于组织和执行中间表示 (IR) 变换 Pass 的框架，支持属性 (Property) 跟踪、插桩和基于策略的优化流水线，作用于 Program。
 
+初始作用域提取阶段依次运行 `OutlineSimtScopes` 和 `OutlineRegScopes`，早于
+内联、SSA 转换和 mixed-kernel 拆分。两者都在 Program 中显式生成设备辅助函数；
+VF 辅助函数使用同步调用以及现有参数和返回契约。
+
 ## 概述
 
 | 组件 | 描述 |
@@ -108,6 +112,7 @@ struct PassProperties {
 | Pass | 所需 | 产生 | 失效 |
 | ---- | ---- | ---- | ---- |
 | OutlineSimtScopes | — | — | SSAForm |
+| OutlineRegScopes | — | — | SSAForm |
 | InlineFunctions | — | InlineFunctionsEliminated | — |
 | UnrollLoops | — | UnrollResolved | — |
 | CtrlFlowTransform | — | StructuredCtrlFlow | — |

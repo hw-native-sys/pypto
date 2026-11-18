@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
+#include "pypto/ir/transforms/utils/ssa_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -1256,6 +1257,8 @@ FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+FunctionPtr ConvertFunctionToSSA(const FunctionPtr& function) { return TransformConvertToSSA(function); }
 
 namespace pass {
 Pass ConvertToSSA() {

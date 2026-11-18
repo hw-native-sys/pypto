@@ -168,6 +168,7 @@ class PassManager:
             raise ValueError(f"Unsupported optimization strategy: {strategy!r}")
         tensor_prefix_passes: tuple[PassFactory, ...] = (
             passes.outline_simt_scopes,
+            passes.outline_reg_scopes,
             # Eliminate FunctionType.Inline functions by splicing their bodies at
             # every call site after SIMT region semantics are made explicit. No later pass observes Inline
             # functions or Calls to them.

@@ -28,6 +28,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::codegen {
@@ -81,6 +82,35 @@ class VFOperands : public var_collectors::VarDefUseCollector {
 };
 
 }  // namespace
+
+bool PTOCodegen::TryEmitVFCall(const ir::CallPtr& call, const ir::VarPtr& result) {
+  auto function = ir::ResolveVFCall(call, vf_program_);
+  if (!function) return false;
+  std::vector<std::pair<ir::VarPtr, ir::ExprPtr>> borrowed_args;
+  auto scope = ir::BindVFRegion(function, call, &borrowed_args);
+  bound_vf_regions_.push_back(scope);
+  for (const auto& [borrowed, actual] : borrowed_args) {
+    BindVarToMlir(borrowed, GetExprAsCode(actual));
+    if (auto var = ir::AsVarLike(actual)) fs_.tile_aliases[borrowed.get()] = var;
+  }
+  // Logical capture discovery belongs to OutlineRegScopes. The existing VMI
+  // emitter now sees declaration arguments bound to the final caller storage.
+  VisitStmt_(scope);
+  // Unused Tile captures may have no owner in the retained region. Erase their
+  // raw-pointer keys before borrowed_args dies and an allocator can reuse them.
+  for (const auto& [borrowed, actual] : borrowed_args) {
+    fs_.tile_aliases.erase(borrowed.get());
+    fs_.var_to_mlir.erase(borrowed.get());
+  }
+  auto aliases = ir::VFReturnedArguments(function, call);
+  if (result && aliases.size() == 1) {
+    BindVarToMlir(result, GetExprAsCode(aliases[0]));
+    if (auto source = ir::AsVarLike(aliases[0])) fs_.tile_aliases[result.get()] = source;
+  } else if (result) {
+    vf_return_aliases_[result.get()] = std::move(aliases);
+  }
+  return true;
+}
 
 void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   CHECK_SPAN(backend_->GetHandler()->GetPtoTargetArch() == "a5" &&

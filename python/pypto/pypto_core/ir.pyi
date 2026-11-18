@@ -862,6 +862,9 @@ class FunctionType(enum.Enum):
     SIMT = ...
     """Per-thread device helper launched inside an AIV task, returning void."""
 
+    VF = ...
+    """Synchronous register helper borrowing Tile storage; may return Tile aliases."""
+
 class SimtParamAccess:
     reads: bool
     writes: bool
@@ -3300,7 +3303,7 @@ def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
     """
 
 def is_device_function_type(func_type: FunctionType) -> bool:
-    """Whether this function executes device IR, including a SIMT helper."""
+    """Whether this function executes device IR, including SIMT and VF helpers."""
     ...
 
 def is_incore_type(func_type: FunctionType) -> bool:

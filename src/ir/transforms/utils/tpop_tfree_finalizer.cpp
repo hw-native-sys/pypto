@@ -30,6 +30,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
@@ -37,8 +38,11 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -48,7 +52,8 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 const auto& GetLastYieldStmt = transform_utils::GetLastYieldStmt;
 
 StmtPtr FinalizeNestedTpopTfrees(const StmtPtr& stmt, core_affinity::CoreSide side,
-                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
+                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                 const ProgramPtr& program);
 
 }  // namespace
 
@@ -151,11 +156,13 @@ const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Va
 }
 
 std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
-                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                        const ProgramPtr& program) {
+  return_lineage::ScopedTraceCache lineage_cache;
   std::vector<StmtPtr> normalized_inputs;
   normalized_inputs.reserve(stmts.size());
   for (const auto& stmt : stmts) {
-    normalized_inputs.push_back(FinalizeNestedTpopTfrees(stmt, side, tpop_var_remap));
+    normalized_inputs.push_back(FinalizeNestedTpopTfrees(stmt, side, tpop_var_remap, program));
   }
 
   std::map<const Var*, TpopLifetime> chains;
@@ -193,6 +200,12 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
         break;
       }
       auto call = std::dynamic_pointer_cast<const Call>(alias_src);
+      if (auto helper = ResolveVFCall(call, program)) {
+        auto args = VFReturnedArguments(helper, call);
+        if (args.size() != 1) break;
+        alias_src = args[0];
+        continue;
+      }
       if (!call || !call->op_ || call->args_.empty() ||
           !op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
         break;
@@ -224,6 +237,7 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
     remap[alias_var.get()] = canonical_var;
   };
 
+  std::unordered_map<const Var*, std::vector<ExprPtr>> vf_tuple_aliases;
   auto propagate_if_return_aliases_into = [&](const IfStmtPtr& if_stmt, TpopVarRemap& remap) {
     auto then_map = build_body_alias_map(FlattenBody(if_stmt->then_body_), remap);
     auto then_yield = GetLastYieldStmt(if_stmt->then_body_);
@@ -235,6 +249,25 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
     }
 
     for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
+      if (As<TupleType>(if_stmt->return_vars_[i]->GetType()) && then_yield && else_yield &&
+          i < then_yield->value_.size() && i < else_yield->value_.size()) {
+        auto lhs = AsVarLike(then_yield->value_[i]);
+        auto rhs = AsVarLike(else_yield->value_[i]);
+        if (lhs && rhs && vf_tuple_aliases.count(lhs.get()) && vf_tuple_aliases.count(rhs.get())) {
+          const auto& left = vf_tuple_aliases.at(lhs.get());
+          const auto& right = vf_tuple_aliases.at(rhs.get());
+          std::vector<ExprPtr> merged;
+          bool matches = left.size() == right.size();
+          for (size_t j = 0; matches && j < left.size(); ++j) {
+            auto a = canonicalize_var(AsVarLike(left[j]), then_map);
+            auto b = canonicalize_var(AsVarLike(right[j]), *else_map);
+            matches = a && b && a.get() == b.get();
+            merged.push_back(a);
+          }
+          if (matches) vf_tuple_aliases[if_stmt->return_vars_[i].get()] = std::move(merged);
+        }
+        continue;
+      }
       VarPtr canonical_var;
       bool has_canonical = false;
       bool consistent = true;
@@ -292,6 +325,25 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 
   propagate_stmt_aliases_into = [&](const StmtPtr& stmt, TpopVarRemap& remap) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (auto call = As<Call>(assign->value_); As<TupleType>(assign->var_->GetType())) {
+        if (auto helper = ResolveVFCall(call, program)) {
+          vf_tuple_aliases[assign->var_.get()] = VFReturnedArguments(helper, call);
+        }
+      }
+      if (auto source = AsVarLike(assign->value_)) {
+        if (auto it = vf_tuple_aliases.find(source.get()); it != vf_tuple_aliases.end()) {
+          vf_tuple_aliases[assign->var_.get()] = it->second;
+        }
+      }
+      if (auto item = As<TupleGetItemExpr>(assign->value_)) {
+        if (auto tuple = AsVarLike(item->tuple_); tuple && vf_tuple_aliases.count(tuple.get())) {
+          const auto& args = vf_tuple_aliases.at(tuple.get());
+          if (item->index_ >= 0 && static_cast<size_t>(item->index_) < args.size()) {
+            propagate_alias_into(assign->var_, args[item->index_], remap);
+          }
+          return;
+        }
+      }
       propagate_alias_into(assign->var_, assign->value_, remap);
       return;
     }
@@ -369,6 +421,17 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 
     const auto refs = CollectCallArgVarRefs(normalized_inputs[i]);
     for (const auto* ref : var_collectors::GetSortedVarRefs(refs)) {
+      // A nested projection still references the outer tuple even before its
+      // branch-local alias is propagated. Keep all borrowed tuple components
+      // alive through the containing statement; never free before the branch.
+      if (auto tuple = vf_tuple_aliases.find(ref); tuple != vf_tuple_aliases.end()) {
+        for (const auto& value : tuple->second) {
+          VarPtr canonical;
+          if (try_resolve_canonical_tpop(value, local_tpop_var_remap, &canonical)) {
+            chains.at(canonical.get()).last_use_idx = i;
+          }
+        }
+      }
       const Var* canonical_ref = CanonicalizeTpopRef(ref, local_tpop_var_remap);
       auto chain_it = chains.find(canonical_ref);
       if (chain_it == chains.end()) {
@@ -441,21 +504,25 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 namespace {
 
 StmtPtr FinalizeNestedTpopTfrees(const StmtPtr& stmt, core_affinity::CoreSide side,
-                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+                                 const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                 const ProgramPtr& program) {
   if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    auto new_body = tpop_tfree::FinalizeTpopTfrees(FlattenBody(for_stmt->body_), side, tpop_var_remap);
+    auto new_body =
+        tpop_tfree::FinalizeTpopTfrees(FlattenBody(for_stmt->body_), side, tpop_var_remap, program);
     return loop_repair::RebuildForStmt(for_stmt, loop_repair::MakeBody(new_body, for_stmt->span_));
   }
   if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    auto new_then = tpop_tfree::FinalizeTpopTfrees(FlattenBody(if_stmt->then_body_), side, tpop_var_remap);
+    auto new_then =
+        tpop_tfree::FinalizeTpopTfrees(FlattenBody(if_stmt->then_body_), side, tpop_var_remap, program);
     std::optional<std::vector<StmtPtr>> new_else;
     if (const auto& else_body = if_stmt->else_body_) {
-      new_else = tpop_tfree::FinalizeTpopTfrees(FlattenBody(*else_body), side, tpop_var_remap);
+      new_else = tpop_tfree::FinalizeTpopTfrees(FlattenBody(*else_body), side, tpop_var_remap, program);
     }
     return loop_repair::RebuildIfStmt(if_stmt, new_then, new_else);
   }
   if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    auto new_body = tpop_tfree::FinalizeTpopTfrees(FlattenBody(while_stmt->body_), side, tpop_var_remap);
+    auto new_body =
+        tpop_tfree::FinalizeTpopTfrees(FlattenBody(while_stmt->body_), side, tpop_var_remap, program);
     return loop_repair::RebuildWhileStmt(while_stmt, loop_repair::MakeBody(new_body, while_stmt->span_));
   }
   return stmt;

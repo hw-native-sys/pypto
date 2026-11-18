@@ -29,7 +29,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 
 | 序号 | Pass | 作用 |
 | ---- | ---- | ---- |
-| 01 | [OutlineSimtScopes](01-outline_simt_scopes.md) | 在 SSA 前将每线程 scope 提取为规范 helper 和 launch |
+| 01 | [OutlineSimtScopes / OutlineRegScopes](01-outline_simt_scopes.md) | 在调用方 SSA 转换前将 SIMT 和寄存器作用域提取为设备 helper |
 | 02 | [InlineFunctions](02-inline_functions.md) | 把 `FunctionType.Inline` 函数体展开到每个调用点 |
 | 03 | [UnrollLoops](03-unroll_loops.md) | 在编译期展开 `ForKind::Unroll` 循环 |
 | 04 | [CtrlFlowTransform](04-ctrl_flow_transform.md) | 把 `break` / `continue` 改写为结构化控制流 |

@@ -110,10 +110,13 @@ std::vector<Diagnostic> CollectInOutUseDisciplineDiagnostics(const StmtPtr& regi
  * @param program The program used by the discipline check to resolve callees.
  *                If null, the discipline check is skipped — useful only for
  *                self-contained analyses where no user-function calls exist.
+ * @param check_discipline Skip only when already checked at function scope.
+ *                         Program context still resolves VF storage effects.
  * @return Dependency graph with nodes and predecessor edges.
  * @throws pypto::VerificationError if the discipline check rejects the region.
  */
-StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const ProgramPtr& program = nullptr);
+StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const ProgramPtr& program = nullptr,
+                                             bool check_discipline = true);
 
 }  // namespace stmt_dep
 }  // namespace ir

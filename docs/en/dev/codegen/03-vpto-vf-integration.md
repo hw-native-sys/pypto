@@ -1,5 +1,10 @@
 # EmitC and VPTO VF execution
 
+The default pipeline outlines register regions into `FunctionType.VF` helpers
+next to SIMT outlining, before SSA and mixed-kernel expansion. Codegen consumes
+the explicit calls and helper definitions; physical UB offsets are bound only
+after caller memory planning. See [scope outlining](../passes/01-outline_simt_scopes.md#outlineregscopes).
+
 Explicit `pl.reg_scope()` bodies can execute inside an A5 AIV kernel through
 the persistent runtime. Ordinary Tile operations use EmitC; each register
 scope becomes a separately compiled VPTO helper. This extends the typed VMI

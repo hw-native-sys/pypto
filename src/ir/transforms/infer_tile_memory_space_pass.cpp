@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 #include "src/ir/transforms/loop_invariant_mat_residency.h"
@@ -208,8 +209,8 @@ class DemandCollector : public IRVisitor {
 class TileMemorySpaceAnalyzer : public IRVisitor {
  public:
   TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params, const std::map<VarPtr, MemorySpace>& demands,
-                          FunctionType func_type)
-      : demands_(demands) {
+                          FunctionType func_type, ProgramPtr program)
+      : demands_(demands), program_(std::move(program)) {
     for (const auto& var : params) {
       auto tile_type = As<TileType>(var->GetType());
       if (!tile_type) continue;
@@ -239,6 +240,31 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
   [[nodiscard]] const std::map<VarPtr, MemorySpace>& GetVarMemory() const { return var_memory_; }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
+    std::vector<ExprPtr> aliases;
+    if (auto call = As<Call>(op->value_); auto helper = ResolveVFCall(call, program_)) {
+      aliases = VFReturnedArguments(helper, call);
+      if (As<TupleType>(op->var_->GetType())) vf_returns_[op->var_.get()] = aliases;
+    } else if (auto source = AsVarLike(op->value_)) {
+      if (auto it = vf_returns_.find(source.get()); it != vf_returns_.end()) {
+        vf_returns_[op->var_.get()] = it->second;
+      }
+    } else if (auto item = As<TupleGetItemExpr>(op->value_)) {
+      auto tuple = AsVarLike(item->tuple_);
+      if (tuple && vf_returns_.count(tuple.get())) {
+        const auto& values = vf_returns_.at(tuple.get());
+        INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < values.size(), op->span_)
+            << "Internal error: VF tuple projection out of bounds";
+        aliases = {values[item->index_]};
+      }
+    }
+    if (As<TileType>(op->var_->GetType()) && aliases.size() == 1) {
+      auto source = AsVarLike(aliases[0]);
+      INTERNAL_CHECK_SPAN(source && var_memory_.count(source), op->span_)
+          << "Internal error: VF result source has no inferred memory space";
+      var_memory_[op->var_] = var_memory_.at(source);
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
     if (!op->var_ || !As<TileType>(op->var_->GetType())) {
       IRVisitor::VisitStmt_(op);
       return;
@@ -435,6 +461,8 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
  private:
   const std::map<VarPtr, MemorySpace>& demands_;
+  ProgramPtr program_;
+  std::map<const Var*, std::vector<ExprPtr>> vf_returns_;
   std::map<VarPtr, MemorySpace> var_memory_;
 
   /// Memory space of `yield`'s value at position `i`: the analyzed space when the
@@ -1228,7 +1256,7 @@ class TileMemorySpaceMutator : public IRMutator {
 // Transform: combine analysis, move collection, and mutation
 // ============================================================================
 
-FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
+FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func, const ProgramPtr& program) {
   // Phase 0: Collect backward demand from op input_constraints; propagate
   // through OutputMemoryInheritsInput() ops so demand reaches retargetable
   // producers (tile.load/tile.create) even through view chains (slice/fillpad).
@@ -1238,7 +1266,7 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
 
   // Phase 1: Analyze — infer memory space for each tile variable, using Phase-0
   // demand as fallback for retargetable producers whose target_memory is absent.
-  TileMemorySpaceAnalyzer analyzer(func->params_, demand_collector.GetDemands(), func->func_type_);
+  TileMemorySpaceAnalyzer analyzer(func->params_, demand_collector.GetDemands(), func->func_type_, program);
   analyzer.VisitStmt(func->body_);
 
   const auto& var_memory = analyzer.GetVarMemory();
@@ -1282,8 +1310,8 @@ Pass InferTileMemorySpace() {
       // must have its tiles placed here too. Gating on InCore alone left those
       // tiles unset, and InitMemRef then defaulted them to DDR -- yielding a
       // vector op reading a DDR operand, which no hardware does.
-      if (IsInCoreType(func->func_type_)) {
-        new_functions[gvar] = TransformInferTileMemorySpace(func);
+      if (IsInCoreType(func->func_type_) || func->func_type_ == FunctionType::VF) {
+        new_functions[gvar] = TransformInferTileMemorySpace(func, program);
       } else {
         new_functions[gvar] = func;
       }
@@ -1384,7 +1412,7 @@ class TileMemoryInferredPropertyVerifierImpl : public PropertyVerifier {
       if (!func || !func->body_) continue;
       // Must mirror the pass's own gate above: verifying a narrower set than
       // the pass transforms is how the AIC/AIV miss stayed invisible.
-      if (!IsInCoreType(func->func_type_)) continue;
+      if (!IsInCoreType(func->func_type_) && func->func_type_ != FunctionType::VF) continue;
       TileMemoryInferredVerifier verifier(diagnostics, func->name_);
       verifier.VisitStmt(func->body_);
     }

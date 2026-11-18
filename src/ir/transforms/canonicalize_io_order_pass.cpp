@@ -172,7 +172,8 @@ bool IsTerminator(const StmtPtr& stmt) {
  */
 class CanonicalizeIOOrderMutator : public IRMutator {
  public:
-  CanonicalizeIOOrderMutator() : io_ops_(IOCategoryOps::Build()) {}
+  explicit CanonicalizeIOOrderMutator(ProgramPtr program)
+      : io_ops_(IOCategoryOps::Build()), program_(std::move(program)) {}
 
   /// Scope the IO reorder to bodies of `ForKind::Pipeline` loops. Non-pipelined
   /// code is visited recursively but its SeqStmts are left as-is.
@@ -264,8 +265,8 @@ class CanonicalizeIOOrderMutator : public IRMutator {
   /// unreachable / semantically dropped).
   StmtPtr ReorderRegion(const SeqStmtsPtr& seq) {
     // The driver already validated the InOut-use discipline at function scope,
-    // so passing `nullptr` here skips a redundant check inside the builder.
-    auto graph = stmt_dep::BuildStmtDependencyGraph(seq, /*program=*/nullptr);
+    // but callee context is still required to preserve VF storage effects.
+    auto graph = stmt_dep::BuildStmtDependencyGraph(seq, program_, /*check_discipline=*/false);
 
     const auto& stmts = seq->stmts_;
     const size_t N = stmts.size();
@@ -436,6 +437,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
   }
 
   IOCategoryOps io_ops_;
+  ProgramPtr program_;
 };
 
 }  // namespace
@@ -460,7 +462,7 @@ Pass CanonicalizeIOOrder() {
         new_functions.emplace(gvar, func);
         continue;
       }
-      CanonicalizeIOOrderMutator mutator;
+      CanonicalizeIOOrderMutator mutator(program);
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) {
         new_functions.emplace(gvar, func);

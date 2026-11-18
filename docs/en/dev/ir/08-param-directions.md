@@ -208,3 +208,13 @@ pinned as a passing test.
 - [Convert Tensor to Tile Ops](../passes/13-convert_tensor_to_tile_ops.md) — stage 2.
 - [Derive Call Directions](../passes/46-derive_call_directions.md) — stage 3.
 - [IR Verifier](../passes/99-verifier.md) — stage 4.
+
+## VF storage borrowing
+
+Early register outlining uses the same parameter direction declarations:
+read-only captures are `In`, and store/scatter destinations are conservatively
+`InOut`, including masked writes. VF calls borrow existing Tile storage; they
+do not consume the caller's original handles under the ordinary task-call
+InOut discipline. Tile returns alias parameters through the existing return
+lineage contract. Initialization is checked against the actual caller storage,
+not assumed from the parameter's `InOut` direction.

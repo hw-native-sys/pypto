@@ -398,6 +398,8 @@ inline const PassProperties kSplitVectorKernelProperties{
 
 // -- Memory / codegen passes --------------------------------------------------
 
+inline const PassProperties kOutlineRegScopesProperties{.invalidated = {IRProperty::SSAForm}};
+
 inline const PassProperties kOutlineSimtScopesProperties{.invalidated = {IRProperty::SSAForm}};
 
 inline const PassProperties kSpecializeSimtHelpersProperties{.required = {IRProperty::SSAForm},

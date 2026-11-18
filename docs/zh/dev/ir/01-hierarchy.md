@@ -613,6 +613,7 @@ def sample(logits: pl.Tensor[[B, V], pl.FP32]) -> pl.Tensor[[B], pl.INT32]:
 | `Inline` | 在每个调用点整体替换函数体；由 `InlineFunctions` 在其它 pass 之前消除 |
 | `Graph` | 可调用的编排片段，由 `host_build_graph` runtime 录制一次、之后回放 |
 | `SIMT` | 仅由 `SimtLaunchStmt` 启动的无返回值设备 helper，不携带运行时任务元数据 |
+| `VF` | 同步寄存器设备辅助函数；使用 Tile/Scalar 参数和 Tile 别名返回值，无运行时任务元数据 |
 
 `IsInCoreType(type)` / `ir.is_incore_type(type)` 对 `InCore`、`AIC` 和 `AIV` 返回 `True`。
 

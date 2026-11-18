@@ -62,6 +62,8 @@ class BufferRootCollector : public IRVisitor {
 
   void Initialize(const std::vector<VarPtr>& params);
 
+  void VisitStmt(const StmtPtr& stmt) override;
+
   /// Var* -> owning buffer-root Var*. Populated by Initialize + VisitStmt.
   std::unordered_map<const Var*, const Var*> buffer_roots;
 
