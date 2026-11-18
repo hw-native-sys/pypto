@@ -150,55 +150,70 @@ class PriorWriterCollector {
 
  private:
   using RootCandidates = std::vector<const Var*>;
+  using CandidateSets = std::unordered_set<const RootCandidates*>;
+
+  struct CandidateState {
+    std::unordered_map<const RootCandidates*, size_t> successors;
+    std::unordered_map<const Var*, bool> prior_writers;
+  };
 
   void RememberWrites(const RootCandidates& candidates) {
-    if (candidates.empty() || !seen_candidates_.insert(&candidates).second) return;
-    candidate_history_.push_back(&candidates);
+    if (candidates.empty()) return;
     if (candidates.size() == 1) {
-      const auto* root = candidates.front();
-      if (seen_roots_.insert(root).second) root_history_.push_back(root);
+      if (!seen_roots_.insert(candidates.front()).second) return;
     } else {
-      active_candidate_state_ = ++next_candidate_state_;
+      if (!active_candidate_sets_.insert(&candidates).second) return;
+      // The same set activated from the same snapshot has the same successor,
+      // including when a sibling replays the activation after a rollback.
+      auto& successors = candidate_states_[active_candidate_state_].successors;
+      const auto [state, inserted] = successors.try_emplace(&candidates, candidate_states_.size());
+      active_candidate_state_ = state->second;
+      if (inserted) candidate_states_.emplace_back();
       if (indexed_candidates_.insert(&candidates).second) {
-        for (const auto* root : candidates) candidate_writers_[root].push_back(&candidates);
+        for (const auto* root : candidates) candidate_writers_[root].insert(&candidates);
       }
     }
+    write_history_.push_back(&candidates);
   }
 
   bool HasPriorWriter(const Var* root) {
     if (seen_roots_.count(root) != 0) return true;
-    if (active_candidate_state_ == 0) return false;
-    auto candidates = candidate_writers_.find(root);
+    if (active_candidate_sets_.empty()) return false;
+    const auto candidates = candidate_writers_.find(root);
     if (candidates == candidate_writers_.end()) return false;
-    // Opposite branches can query the same root from the same snapshot. The
-    // indexed sets may grow, but a new set is inactive for older snapshots.
-    auto& reads = candidate_queries_[active_candidate_state_];
+    auto& reads = candidate_states_[active_candidate_state_].prior_writers;
     const auto [query, inserted] = reads.try_emplace(root, false);
     if (inserted) {
-      query->second = std::any_of(candidates->second.begin(), candidates->second.end(),
-                                  [&](const auto* set) { return seen_candidates_.count(set) != 0; });
+      // Iterate over active sets when there are fewer of those. A sibling
+      // with one active set should not pay for a long history of inactive sets.
+      const auto& incident = candidates->second;
+      const bool scan_active = active_candidate_sets_.size() < incident.size();
+      const auto& smaller = scan_active ? active_candidate_sets_ : incident;
+      const auto& larger = scan_active ? incident : active_candidate_sets_;
+      query->second = std::any_of(smaller.begin(), smaller.end(),
+                                  [&](const auto* set) { return larger.count(set) != 0; });
     }
     return query->second;
   }
 
   void AnalyzeIf(const IfStmtPtr& stmt) {
-    const auto prior_candidates = candidate_history_.size();
-    const auto prior_roots = root_history_.size();
+    const auto prior_writes = write_history_.size();
     const auto prior_candidate_state = active_candidate_state_;
     AnalyzeScope(stmt->then_body_);
     if (!stmt->else_body_.has_value() || !stmt->else_body_.value()) return;
 
-    // Roll back only insertions made by the then branch. Keep its candidate
-    // sets so its potential writes can be merged after analyzing the else.
-    const auto then_begin = candidate_history_.cbegin() + static_cast<std::ptrdiff_t>(prior_candidates);
-    const std::vector<const RootCandidates*> then_writes(then_begin, candidate_history_.cend());
-    while (candidate_history_.size() > prior_candidates) {
-      seen_candidates_.erase(candidate_history_.back());
-      candidate_history_.pop_back();
-    }
-    while (root_history_.size() > prior_roots) {
-      seen_roots_.erase(root_history_.back());
-      root_history_.pop_back();
+    // Roll back only insertions made by the then branch. Keep its potential
+    // writes so they can be merged after analyzing the else.
+    const auto then_begin = write_history_.cbegin() + static_cast<std::ptrdiff_t>(prior_writes);
+    const std::vector<const RootCandidates*> then_writes(then_begin, write_history_.cend());
+    while (write_history_.size() > prior_writes) {
+      const auto* candidates = write_history_.back();
+      if (candidates->size() == 1) {
+        seen_roots_.erase(candidates->front());
+      } else {
+        active_candidate_sets_.erase(candidates);
+      }
+      write_history_.pop_back();
     }
     active_candidate_state_ = prior_candidate_state;
     AnalyzeScope(stmt->else_body_.value());
@@ -256,14 +271,12 @@ class PriorWriterCollector {
   ProgramPtr program_;
   const BufferRootCollector& buffer_roots_;
   std::unordered_set<const Var*> seen_roots_;
-  std::unordered_set<const RootCandidates*> seen_candidates_;
-  std::unordered_set<const RootCandidates*> indexed_candidates_;
-  std::unordered_map<const Var*, std::vector<const RootCandidates*>> candidate_writers_;
+  CandidateSets active_candidate_sets_;
+  CandidateSets indexed_candidates_;
+  std::unordered_map<const Var*, CandidateSets> candidate_writers_;
   size_t active_candidate_state_ = 0;
-  size_t next_candidate_state_ = 0;
-  std::unordered_map<size_t, std::unordered_map<const Var*, bool>> candidate_queries_;
-  std::vector<const Var*> root_history_;
-  std::vector<const RootCandidates*> candidate_history_;
+  std::vector<CandidateState> candidate_states_{1};
+  std::vector<const RootCandidates*> write_history_;
 };
 
 /// IRMutator that rewrites every non-builtin Call in a function body and writes

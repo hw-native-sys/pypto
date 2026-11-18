@@ -114,7 +114,7 @@ class BufferRootCollector : public IRVisitor {
   void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
   void BindRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved);
   void MergeRootCandidates(const VarPtr& var, std::vector<const RootCandidates*> inputs, bool unresolved);
-  void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
+  void RecordOwningRoot(const VarPtr& var);
   void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args);
   void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
                              const std::vector<IterArgPtr>& iter_args, bool guaranteed_to_run);
