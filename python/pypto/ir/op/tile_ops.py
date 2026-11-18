@@ -167,6 +167,7 @@ from ._tile_memory import fillpad_inplace as fillpad_inplace
 from ._tile_memory import full as full
 from ._tile_memory import gather_row as gather_row
 from ._tile_memory import load as load
+from ._tile_memory import load_mx_scale as load_mx_scale
 from ._tile_memory import move as move
 from ._tile_memory import random as random
 from ._tile_memory import read as read
