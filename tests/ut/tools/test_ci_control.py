@@ -3087,7 +3087,12 @@ def test_a5_device_rerun_refreshes_previous_attempt(a5_control, monkeypatch):
         "path": ".github/workflows/ci-a5-distributed.yml",
         "status": "in_progress",
     }
-    check = {"name": "ci/a5-distributed", "external_id": "1234", "details_url": "old"}
+    check = {
+        "name": "ci/a5-distributed",
+        "external_id": "1234",
+        "details_url": "native",
+        "output": {"summary": None},
+    }
     writes = []
 
     def api(path, payload=None, **kwargs):
@@ -3108,11 +3113,13 @@ def test_a5_device_rerun_refreshes_previous_attempt(a5_control, monkeypatch):
     )
     a5_control.reopen(REPO, run)
     # If completion won the writer queue, a delayed observer must leave it terminal.
+    check["details_url"] = "native"
     check["status"] = "completed"
     a5_control.reopen(REPO, run)
     assert len(writes) == 1
     assert writes[0][1]["status"] == "in_progress"
     assert writes[0][1]["details_url"].endswith("/runs/1234/attempts/2")
+    assert writes[0][1]["details_url"] in writes[0][1]["output"]["summary"]
 
 
 def test_a5_distributed_requires_its_own_comment(control):

@@ -39,6 +39,15 @@ def attempt_url(repo: str, run_id: str, attempt: str) -> str:
     return f"https://github.com/{repo}/actions/runs/{run_id}/attempts/{attempt}"
 
 
+def attempt_fields(url: str, summary: str) -> dict[str, Any]:
+    # GitHub Actions may replace details_url with its native check page. The
+    # first summary line remains both clickable and an exact attempt marker.
+    return {
+        "details_url": url,
+        "output": {"title": "A5 distributed tests", "summary": f"[Workflow attempt]({url})\n\n{summary}"},
+    }
+
+
 def update_check(repo: str, check_id: str, payload: dict[str, Any]) -> None:
     """Retry an idempotent PATCH on transient service/transport errors only."""
     for retry in range(3):
@@ -80,8 +89,12 @@ def reopen(repo: str, run: dict[str, Any]) -> None:
             check = api(f"repos/{repo}/check-runs/{check_id}")
             if check["name"] != "ci/a5-distributed" or check["external_id"] != run_id:
                 raise ValueError("Unexpected A5 check ownership")
-            if check["details_url"] != url:
-                update_check(repo, check_id, {"status": "in_progress", "details_url": url})
+            if not (check["output"]["summary"] or "").startswith(f"[Workflow attempt]({url})\n"):
+                update_check(
+                    repo,
+                    check_id,
+                    {"status": "in_progress", **attempt_fields(url, "Rerunning the distributed check.")},
+                )
             return
         # A fresh prepare publishes its own in-progress check.
         if any(job["name"] == "changes" and job["run_attempt"] == run["run_attempt"] for job in jobs):
@@ -135,7 +148,7 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             "head_sha": head,
             "external_id": run_id,
             "status": "in_progress",
-            "details_url": url,
+            **attempt_fields(url, "Preparing the distributed check."),
         },
     )
     if type(check.get("id")) is not int or check["id"] <= 0:
@@ -146,7 +159,15 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
     except (OSError, ValueError):
         # Without these outputs the normal finalizer cannot find the check.
         try:
-            update_check(repo, check_id, {"status": "completed", "conclusion": "failure", "details_url": url})
+            update_check(
+                repo,
+                check_id,
+                {
+                    "status": "completed",
+                    "conclusion": "failure",
+                    **attempt_fields(url, "Could not publish job outputs."),
+                },
+            )
         except subprocess.CalledProcessError as cleanup_error:
             report(f"Could not complete check {check_id}: {cleanup_error}")
         raise
@@ -168,9 +189,10 @@ def finish(repo: str, needs: dict[str, Any]) -> None:
         check_id,
         {
             "status": "completed",
-            "details_url": attempt_url(repo, os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]),
+            **attempt_fields(
+                attempt_url(repo, os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]), summary
+            ),
             "conclusion": "failure" if failed else "success",
-            "output": {"title": "A5 distributed test results", "summary": summary},
         },
     )
     if failed:
