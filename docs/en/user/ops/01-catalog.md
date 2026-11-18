@@ -144,7 +144,7 @@ Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compil
 | [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | Multiply with a bias operand. Same operand pairs as `matmul`; the bias matches the accumulator dtype |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | Batched multiply, **tile operands only**. For tensors call `pl.matmul` — rank > 2 dispatches to `tile.batch_matmul` during lowering |
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | Matrix-vector forms |
-| `pl.gemv_mx`, `pl.gemv_mx_acc`, `pl.gemv_mx_bias` | `pl.` (t) | Ascend950 block-scaled single-row multiply, in-place accumulation, and FP32 bias. Accepts FP8E4M3FN or packed FP4 pairs and FP8E8M0 scales; the FP32 result has physical and valid shape `[1, N]`. Single-row lhs scales use `MX_A_ND` in GM. |
+| `pl.gemv_mx`, `pl.gemv_mx_acc`, `pl.gemv_mx_bias` | `pl.` (t) | Ascend950 block-scaled single-row multiply, in-place accumulation, and FP32 bias. Accepts FP8E4M3FN or packed FP4 pairs and FP8E8M0 scales; the FP32 result has physical shape `[1, physical_N]` and valid shape `[1, valid_N]`. Single-row lhs scales use `MX_A_ND` in GM. |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX block-scale multiply. Tensor `matmul_mx` uses oriented 2D data/scale tensors with FP8E4M3FN on both sides and returns FP32. The Tile API supports all four FP8E4M3FN/FP8E5M2 pairs and packed FP4 pairs, including the Tile-only `_acc` and `_bias` forms |
 
 `pl.tile.matmul`, `pl.tile.matmul_acc`, and the ordinary GEMV family accept producer

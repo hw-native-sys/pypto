@@ -132,7 +132,10 @@ class AccCompactVisitor : public IRVisitor {
   /// `args = (accumulator, lhs, rhs)`. The lhs is the L0A operand whose valid
   /// rows `mad` takes M from; the accumulator is the L0C buffer it writes.
   void CheckAccumulate(const CallPtr& call) {
-    if (!IsOp(call, "tile.matmul_acc") && !IsOp(call, "tile.matmul_mx_acc")) return;
+    if (!IsOp(call, "tile.matmul_acc") && !IsOp(call, "tile.matmul_mx_acc") &&
+        !IsOp(call, "tile.gemv_mx_acc")) {
+      return;
+    }
     if (call->args_.size() < 2 || !call->args_[0] || !call->args_[1]) return;
 
     auto acc_type = As<TileType>(call->args_[0]->GetType());

@@ -135,6 +135,11 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires physical M exactly 1";
     auto m_valid_c = As<ConstInt>(m_valid);
     CHECK(m_valid_c && m_valid_c->value_ == 1) << "The operator " << op_name << " requires valid M exactly 1";
+    // Mat-to-Left uses the ISA row-vector extract, which transfers 512-byte blocks.
+    const int64_t k_align = lhs_type->dtype_.IsPackedFp4() ? 1024 : 512;
+    CHECK(k_phys_lhs_c && k_phys_lhs_c->value_ > 0 && k_phys_lhs_c->value_ % k_align == 0)
+        << "The operator " << op_name << " requires physical K divisible by " << k_align
+        << " for the 512-byte row-vector alignment";
   } else if (m_phys_c) {
     CHECK(m_phys_c->value_ > 0 && m_phys_c->value_ % 16 == 0)
         << "The operator " << op_name
@@ -236,6 +241,8 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
     rhs_scale_k_valid = rhs_scale_k_phys;
   }
   if (is_gemv) {
+    // Use the groups consumed by MAD. A padded physical width can describe
+    // more groups than the two supported by PTOAS 0.74's single-row MX_A_ND load.
     lhs_scale_k_phys = lhs_scale_k_valid;
     rhs_scale_k_phys = rhs_scale_k_valid;
   }
@@ -291,6 +298,11 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires acc cols to match output N";
   }
 
+  if (is_gemv) {
+    // The output aliases this accumulator and uses MAD's 16-row pitch.
+    CHECK(tile_view_semantics::GetEffectiveTileView(*acc_type).compact == CompactMode::normal)
+        << "The operator " << op_name << " requires a compact accumulator";
+  }
   const auto out_valid = GetValidShape(out_tile);
   CheckDimMatch(out_valid[0], acc_valid[0], op_name, "acc", "valid", "rows");
   CheckDimMatch(out_valid[1], acc_valid[1], op_name, "acc", "valid", "cols");

@@ -777,6 +777,18 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
       << op_name << ": packed FP4 Mat layout conversion requires a Left or Right destination";
   RetargetPackedFp4Geometry(out_dtype, source_view.blayout, tile_view.blayout, output_shape, tile_view,
                             args[0]->span_, op_name, space == MemorySpace::Left);
+  if (out_dtype.IsPackedFp4() && space == MemorySpace::Left && output_shape.size() == 2) {
+    const auto output_rows = As<ConstInt>(output_shape[0]);
+    if (output_rows && output_rows->value_ == 1) {
+      // L0A interprets a one-row descriptor as a K-packed row vector. A
+      // column-major Mat carrier row already holds two logical M values.
+      const auto input_rows = As<ConstInt>(input_shape[0]);
+      CHECK_SPAN(tile_type->GetMemorySpace() == MemorySpace::Left ||
+                     (source_view.blayout == TileLayout::row_major && input_rows && input_rows->value_ == 1),
+                 args[0]->span_)
+          << op_name << ": packed FP4 Left row vectors require one logical source row";
+    }
+  }
 
   // Stamp memory_space_ for every destination so the view is canonicalized once,
   // against the space it is actually a view of (same contract as tile.load).

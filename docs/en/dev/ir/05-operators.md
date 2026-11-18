@@ -525,16 +525,16 @@ All three lower to the corresponding `pto.tgemv.mx` operations on A5.
 The lhs has one physical and valid row. The result uses physical `[1, N]`
 and valid `[1, valid_N]` shapes. FP8E4M3FN and native packed FP4 E2M1/E1M2
 pairs are supported; FP4 row vectors keep their packed pairs along K even in
-L0A. Data K is a positive multiple of 64, and physical N is a multiple of 32
+L0A. Physical N is a multiple of 32
 (FP4: 64). FP8E8M0 scales use `[1, ceil(valid_K/32)]` and
 `[ceil(valid_K/32), physical_N]`, with RHS valid columns matching valid N.
 Single-row lhs scales use `MX_A_ND` in GM. Scale addresses are
 bound automatically before scale fills. Bias uses physical
 `[1, N]` and matching valid N. The accumulator must match the product's
-physical and valid shapes and FP32 dtype. GEMV results carry `compact=normal`
+physical and valid shapes, FP32 dtype, and `compact=normal`. GEMV results also carry this mode
 so L0C readers use MAD's 16-row fractal pitch despite the single-row descriptor.
-Mat-to-Left row-vector extraction requires a 512-byte-aligned physical width;
-packed FP4 therefore uses a physical K multiple of 1024, with narrower valid K
+Mat-to-Left row-vector extraction requires a 512-byte-aligned physical width.
+Physical K is a multiple of 512 for FP8 or 1024 for FP4, with narrower valid K
 allowed. PTOAS 0.74's single-row `MX_A_ND` load supports two scale groups;
 larger GM scale transfers remain subject to downstream load support.
 

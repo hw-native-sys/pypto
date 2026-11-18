@@ -433,12 +433,15 @@ def _gemv_mx_entry(dtype):
         b_fp4 = pl.reinterpret_view(b, dtype)
         with pl.spmd(1):
             row = pl.tile.get_block_idx()
+            # The 512-byte row satisfies the L0A alignment. Its 32 valid bytes
+            # represent K=64 and consume two groups. N=64 exercises later Acc fractals.
             lhs = pl.tile.move(
                 pl.tile.load(a_fp4, [row, 0], [1, 512], valid_shape=[1, 32], target_memory=pl.Mem.Mat),
                 pl.Mem.Left,
             )
             rhs_nk = pl.tile.load(b_fp4, [0, 0], [64, 512], valid_shape=[64, 32], target_memory=pl.Mem.Mat)
             rhs = pl.tile.move(pl.tile.transpose_view(rhs_nk), pl.Mem.Right)
+            # Use complete, zero-offset scale views to avoid PTOAS issue #1763.
             sa = pl.tile.move(
                 pl.tile.load(a_scale, [0, 0], [1, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale
             )

@@ -13,7 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.backend import BackendType, pto_backend, reset_for_testing, set_backend_type
-from pypto.backend._ptoas_fp4 import uses_native_fp4_mx
+from pypto.backend._ptoas_fp4 import native_fp4_mx_families
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -137,7 +137,7 @@ class TestMxMatmulCodegen:
         assert mlir.count("pto.tget_scale_addr") == 2
 
         optimized = _run_default_pipeline(Program)
-        assert uses_native_fp4_mx(optimized)
+        assert native_fp4_mx_families(optimized) == {"matmul"}
 
         def unsupported():
             raise RuntimeError("missing native FP4 capability")
@@ -521,7 +521,7 @@ class TestMxMatmulCodegen:
                 tbs = pl.load(b_s, [0, 0], [2, 64])
                 pl.store(pl.matmul_mx(ta, tas, tb, tbs), [0, 0], out)
 
-        assert not uses_native_fp4_mx(_run_default_pipeline(Program))
+        assert not native_fp4_mx_families(_run_default_pipeline(Program))
         mlir = _emit_incore_mlir(Program)
         # E2M1 now widens exactly in one pass. The explicit NZ destination
         # also removes the layout-only Vec move before the MX peer transfer.
@@ -832,10 +832,12 @@ class TestMxANDScaleCodegen:
         assert "pto.tmov" not in mlir
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("dtype", [pl.FP8E4M3FN, pl.FP4E2M1X2, pl.FP4E1M2X2])
 def test_gemv_mx_pipeline(dtype, tmp_path):
     packed = dtype in (pl.FP4E2M1X2, pl.FP4E1M2X2)
-    a_cols = 64 if packed else 128
+    physical_k = 1024 if packed else 512
+    a_valid_cols = 32 if packed else 64
     b_cols = 32 if packed else 64
 
     @pl.program
@@ -843,20 +845,23 @@ def test_gemv_mx_pipeline(dtype, tmp_path):
         @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
-            a: pl.Tensor[[1, a_cols], dtype],
-            b: pl.Tensor[[128, b_cols], dtype],
-            sa: pl.Tensor[[1, 4], pl.FP8E8M0, pl.MX_A_ND],
-            sb: pl.Tensor[[4, 64], pl.FP8E8M0, pl.MX_B_NN],
+            a: pl.Tensor[[1, 512], dtype],
+            b: pl.Tensor[[physical_k, b_cols], dtype],
+            sa: pl.Tensor[[1, 2], pl.FP8E8M0, pl.MX_A_ND],
+            sb: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
             bias: pl.Tensor[[1, 64], pl.FP32],
             out: pl.Tensor[[1, 64], pl.FP32],
         ):
-            lhs = pl.move(pl.load(a, [0, 0], [1, a_cols], target_memory=pl.Mem.Mat), pl.Mem.Left)
+            lhs = pl.move(
+                pl.load(a, [0, 0], [1, 512], valid_shape=[1, a_valid_cols], target_memory=pl.Mem.Mat),
+                pl.Mem.Left,
+            )
             rhs = pl.move(
-                pl.load(b, [0, 0], [128, b_cols], target_memory=pl.Mem.Mat),
+                pl.load(b, [0, 0], [physical_k, b_cols], valid_shape=[64, b_cols], target_memory=pl.Mem.Mat),
                 pl.Mem.Right,
             )
-            lhs_scale = pl.move(pl.load(sa, [0, 0], [1, 4], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
-            rhs_scale = pl.move(pl.load(sb, [0, 0], [4, 64], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+            lhs_scale = pl.move(pl.load(sa, [0, 0], [1, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+            rhs_scale = pl.move(pl.load(sb, [0, 0], [2, 64], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
             result = pl.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)
             pl.store(result, [0, 0], out)
             accumulated = pl.tile.gemv_mx_acc(result, lhs, lhs_scale, rhs, rhs_scale)
@@ -871,7 +876,7 @@ def test_gemv_mx_pipeline(dtype, tmp_path):
         assert f"pto.tgemv.mx{suffix} ins(" in mlir
     assert mlir.count("pto.tget_scale_addr") == 2
     assert "loc=acc, dtype=f32, rows=1, cols=64" in mlir
-    assert uses_native_fp4_mx(_run_default_pipeline(Program)) == packed
+    assert native_fp4_mx_families(_run_default_pipeline(Program)) == ({"gemv"} if packed else set())
     assert "TGEMV_MX" in cpp
 
 
