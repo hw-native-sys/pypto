@@ -308,8 +308,10 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
   std::vector<OutputRoot> projections(tuple->types_.size());
   for (size_t i = 0; i < projections.size(); ++i) {
     if (!As<TensorType>(tuple->types_[i])) continue;
-    if (i < returned_params.size() && returned_params[i] && *returned_params[i] < call->args_.size()) {
-      const auto& arg = call->args_[*returned_params[i]];
+    const auto arg_count = call->args_.size();
+    const auto param = i < returned_params.size() ? returned_params[i].value_or(arg_count) : arg_count;
+    if (param < arg_count) {
+      const auto& arg = call->args_[param];
       projections[i] = {arg, ResolveRootCandidates(arg), !HasStorageProof(arg)};
     } else if (i < roots.size()) {
       projections[i] = roots[i];
