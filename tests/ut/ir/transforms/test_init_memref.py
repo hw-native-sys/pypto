@@ -447,6 +447,202 @@ class TestMemRefSharing:
             After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
+    def test_register_writeback_of_tpop_keeps_borrowed_storage(self):
+        """Masked register writes and their views must not allocate FIFO copies."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    mask = pl.reg.active_mask(32, lanes=64)
+                    updated = pl.reg.store(flat, value=value, mask=mask)
+                    offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+                    scattered = pl.reg.scatter(updated, offsets, value, mask)
+                view = pl.reshape(scattered, [16, 16])
+                out = pl.mul(view, 2.0)
+                pl.tfree_to_aic(received)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+                # Only the independent multiply result owns an allocation.
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 1024)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    mask = pl.reg.active_mask(32, lanes=64)
+                    updated = pl.reg.store(flat, value=value, mask=mask)
+                    offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+                    scattered = pl.reg.scatter(updated, offsets, value, mask)
+                view = pl.reshape(scattered, [16, 16])
+                out: pl.Tile[[16, 16], pl.FP32, pl.MemRef(mem_vec_0, 0, 1024), pl.Mem.Vec] = pl.mul(view, 2.0)
+                pl.tfree_to_aic(received)
+                return out
+
+        with passes.PassContext(
+            [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)],
+        ):
+            after = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Expected))
+
+    def test_register_writeback_loop_result_keeps_borrowed_storage(self):
+        """The carry, writeback, loop result and its view retain FIFO storage."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, count: pl.Scalar[pl.INDEX]) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                for _, (carried,) in pl.range(count, init_values=(received,)):
+                    with pl.reg_scope():
+                        value = pl.reg.load(carried, lanes=64)
+                        updated = pl.reg.store(carried, value=value)
+                    result = pl.yield_(updated)
+                view = pl.reshape(result, [16, 16])
+                out = pl.mul(view, 2.0)
+                pl.tfree_to_aic(received)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, count: pl.Scalar[pl.INDEX]) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+                storage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 1024)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                for _, (carried,) in pl.range(count, init_values=(received,)):
+                    with pl.reg_scope():
+                        value = pl.reg.load(carried, lanes=64)
+                        updated = pl.reg.store(carried, value=value)
+                    result = pl.yield_(updated)
+                view = pl.reshape(result, [16, 16])
+                out: pl.Tile[[16, 16], pl.FP32, pl.MemRef(storage, 0, 1024), pl.Mem.Vec] = pl.mul(view, 2.0)
+                pl.tfree_to_aic(received)
+                return out
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Expected))
+
+    def test_register_writeback_branch_result_keeps_borrowed_storage(self):
+        """Both versions of one borrowed slot remain MemRef-less after a join."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                if condition:
+                    with pl.reg_scope():
+                        value = pl.reg.load(received, lanes=64)
+                        updated = pl.reg.store(received, value=value)
+                    selected = pl.yield_(updated)
+                else:
+                    selected = pl.yield_(received)
+                out = pl.mul(selected, 2.0)
+                pl.tfree_to_aic(received)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                storage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 1024)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                if condition:
+                    with pl.reg_scope():
+                        value = pl.reg.load(received, lanes=64)
+                        updated = pl.reg.store(received, value=value)
+                    selected = pl.yield_(updated)
+                else:
+                    selected = pl.yield_(received)
+                out: pl.Tile[[256], pl.FP32, pl.MemRef(storage, 0, 1024), pl.Mem.Vec] = pl.mul(selected, 2.0)
+                pl.tfree_to_aic(received)
+                return out
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Expected))
+
+    def test_borrowed_if_result_inside_loop_retains_storage(self):
+        """An IterArg and its view refer to the same borrowed slot at a branch join."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, count: pl.Scalar[pl.INDEX], flag: pl.Scalar[pl.BOOL]):
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                for _, (carried,) in pl.range(count, init_values=(received,)):
+                    if flag:
+                        view = pl.reshape(carried, [16, 16])
+                        selected = pl.yield_(view)
+                    else:
+                        selected = pl.yield_(carried)
+                    result = pl.yield_(selected)
+                pl.tfree_to_aic(result)
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Before))
+
+    @pytest.mark.parametrize("result_slot", [0, 1])
+    def test_vf_return_binding_must_match_actual_slot(self, result_slot):
+        stage = pl.MemRef("stage", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.VF)
+            def identity(self, x: pl.Tile[[128], pl.FP32, pl.Mem.Vec]) -> pl.Tile[[128], pl.FP32, pl.Mem.Vec]:
+                with pl.reg_scope():
+                    _ = pl.reg.load(x, lanes=64)
+                return x
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self) -> pl.Tile[[128], pl.FP32, pl.Mem.Vec]:
+                source: pl.Tile[[128], pl.FP32, stage[1], pl.Mem.Vec] = pl.tile.full([128], pl.FP32, 1.0)
+                result: pl.Tile[[128], pl.FP32, stage[result_slot], pl.Mem.Vec] = self.identity(source)
+                return result
+
+        if result_slot != 1:
+            with pytest.raises(ValueError, match="different or unproven address"):
+                passes.init_mem_ref()(Before)
+            return
+        caller = passes.init_mem_ref()(Before).get_function("kernel")
+        assert caller is not None and isinstance(caller.body, ir.SeqStmts)
+        (call,) = (
+            s
+            for s in caller.body.stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and isinstance(s.value.op, ir.GlobalVar)
+        )
+        assert isinstance(call.value, ir.Call)
+        source_type, result_type = call.value.args[0].type, call.var.type
+        assert isinstance(source_type, ir.TileType) and isinstance(result_type, ir.TileType)
+        assert source_type.memref is not None and result_type.memref is source_type.memref
+
+    def test_fifo_writeback_rejects_independent_declared_allocation(self):
+        """The MemRef-less shortcut must not silently discard a user binding."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self) -> pl.Tile[[128], pl.FP32, pl.Mem.Vec]:
+                received: pl.Tile[[128], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                updated: pl.Tile[[128], pl.FP32, pl.MemRef("unrelated"), pl.Mem.Vec] = (
+                    pl.tile.fillpad_inplace(received, pad_value=pl.PadValue.zero)
+                )
+                return updated
+
+        with pytest.raises(ValueError, match="different or unproven address"):
+            passes.init_mem_ref()(Before)
+
     def test_matmul_acc_shares_memref_with_accumulator(self):
         """tile.matmul_acc output shares MemRef with its accumulator input (arg[0])."""
 
