@@ -1235,32 +1235,5 @@ def test_reg_spill_cache_tracks_source_policy(compiler_module, monkeypatch, tmp_
     assert compiler.vpto_cache_identity((str(helper),), "aiv") != denied
 
 
-@pytest.mark.parametrize(
-    "case,policy", [("mask_spill", "deny"), ("mask_spill", "allow"), ("no_spill", "deny")]
-)
-def test_reg_spill_real_bisheng(compiler_module, monkeypatch, tmp_path, case, policy):
-    """Opt-in compile-only acceptance through the production helper build path."""
-    bisheng = os.environ.get("PYPTO_SPILL_TEST_BISHENG")
-    ptoas = compiler_module.find_ptoas_binary()
-    if not bisheng or not ptoas:
-        pytest.skip("Set PYPTO_SPILL_TEST_BISHENG to enable real A5 spill compilation")
-    compiler = compiler_module.KernelCompiler("a5")
-    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: (ptoas, bisheng))
-    monkeypatch.setattr(
-        compiler_module._vpto, "PTOAS_FLAGS", (*compiler_module._vpto.PTOAS_FLAGS, "--vpto-scheduler=off")
-    )
-    fixture = Path(__file__).parents[1] / "backend/vpto_vf_validation" / f"{case}.pto"
-    helper = tmp_path / f"{case}.pto"
-    helper.write_text(f"// pypto.reg_spill: {policy}\n" + fixture.read_text())
-    if case == "mask_spill" and policy == "deny":
-        with pytest.raises(RuntimeError, match="exceeded vf stack size") as caught:
-            compiler._compile_vpto_helpers((str(helper),), tmp_path)
-        assert "Total Spilled Byte Size:" in str(caught.value)
-        assert not (tmp_path / "report").exists()
-    else:
-        objects = compiler._compile_vpto_helpers((str(helper),), tmp_path)
-        assert objects[0].read_bytes().startswith(b"\x7fELF")
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

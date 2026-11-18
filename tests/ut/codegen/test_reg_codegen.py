@@ -1442,5 +1442,37 @@ def test_reg_spill_policy_only_stamps_vf_helpers(tmp_path, monkeypatch, allowed)
     assert manifest["helpers"][0]["source_sha256"] == hashlib.sha256(vf.encode()).hexdigest()
 
 
+@pytest.mark.parametrize("allowed", [None, False, True], ids=["default", "deny", "allow"])
+def test_reg_spill_policy_on_generated_reg_scope_helper(tmp_path, monkeypatch, allowed):
+    with passes.PassContext([]):
+        program = passes.allocate_memory_addr()(build_kernel(masked=True))
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert len(bundle.helpers) == 1
+    helper = bundle.helpers[0]
+    assert helper.kind == "vf"
+    assert "pto.vmi.vadd" in helper.source
+    assert "pto.vmi.vstore" in helper.source
+
+    monkeypatch.setattr(pto_backend, "_emit_single_function_output", lambda *args: None)
+    unit = pto_backend._CodegenUnit(
+        name="register_kernel",
+        pto_code=bundle.caller_source,
+        funcs=list(program.functions.values()),
+        is_group=False,
+        stage_record=StageRecord(name="test", start=0),
+        helpers=tuple(bundle.helpers),
+        entry_helpers=bundle.entry_helpers,
+    )
+    if allowed is not None:
+        unit.allow_reg_spill = allowed
+    result = pto_backend._emit_unit(unit, str(tmp_path), skip_ptoas=True)
+    assert result.error is None
+    source = result.files[f"vpto/register_kernel/{helper.symbol}.pto"]
+    policy = "allow" if allowed else "deny"
+    assert source == f"// pypto.reg_spill: {policy}\n" + helper.source
+    manifest = json.loads(result.files["vpto/register_kernel/manifest.json"])
+    assert manifest["helpers"][0]["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
