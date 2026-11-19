@@ -73,6 +73,14 @@ static std::string JoinPairs(const std::vector<std::string>& lhs, const std::str
 void PTOCodegen::VisitStmt_(const EvalStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
   INTERNAL_CHECK_SPAN(op->expr_ != nullptr, op->span_) << "Internal error: EvalStmt has null expression";
+  if (auto call = As<ir::Call>(op->expr_); call && ir::IsOp(call, "reg.mem_bar")) {
+    INTERNAL_CHECK_SPAN(inside_reg_scope_, op->span_) << "reg.mem_bar requires RegScope";
+    // Validate raw/deserialized calls too; barriers have no SSA result.
+    const auto validated =
+        ir::OpRegistry::GetInstance().Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
+    Emit("pto.mem_bar \"" + validated->GetKwarg<std::string>("kind") + "\"");
+    return;
+  }
   VisitExpr(op->expr_);
 }
 

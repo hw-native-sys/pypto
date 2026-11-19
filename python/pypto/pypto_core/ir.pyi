@@ -2497,6 +2497,9 @@ class RegScopeStmt(ScopeStmt):
     ) -> None:
         """Create a register lexical scope statement."""
 
+    @property
+    def auto_sync(self) -> bool: ...
+
 class HierarchyScopeStmt(ScopeStmt):
     """Hierarchy scope: distributed-hierarchy region."""
 
@@ -3657,8 +3660,11 @@ class IRBuilder:
     def end_simt_scope(self, span: Span, private_scalars: Sequence[Var] = ()) -> SimtScopeStmt:
         """End the transient SIMT region."""
 
-    def begin_reg_scope(self, span: Span) -> None:
+    def begin_reg_scope(self, span: Span, auto_sync: bool = True) -> None:
         """Begin an implicit-capture register region."""
+
+    def emit_reg_mem_bar(self, kind: str, span: Span) -> None:
+        """Emit an explicit UB ordering barrier in the current register scope."""
 
     def end_reg_scope(self, span: Span) -> Stmt:
         """End a register region and return the built RegScopeStmt."""

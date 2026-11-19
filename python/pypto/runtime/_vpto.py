@@ -45,6 +45,42 @@ DEVICE_FLAGS = (
     "-cce-dyn-kernel-stack-size=true",
 )
 
+REG_AUTO_SYNC_PREFIX = "// pypto.reg_auto_sync:"
+
+
+def snapshot_sources(sources: tuple[str, ...]) -> tuple[str, ...]:
+    """Capture helper contents for one cache lookup or compilation."""
+    return tuple(Path(source).read_text() for source in sources)
+
+
+def ptoas_flags_for_source(source_text: str) -> tuple[str, ...]:
+    """Resolve one helper's policy; legacy/unmarked sources stay automatic.
+
+    Reserved markers must be exact standalone comments in the file header.
+    Reject misplaced or malformed markers rather than silently compiling a
+    manual helper with a different synchronization policy.
+    """
+    markers: list[str] = []
+    in_header = True
+    for line in source_text.splitlines():
+        if "pypto.reg_auto_sync" in line:
+            if not in_header or line not in (REG_AUTO_SYNC_PREFIX + " true", REG_AUTO_SYNC_PREFIX + " false"):
+                raise ValueError("Invalid pypto.reg_auto_sync header marker")
+            markers.append(line)
+        if line.strip() and not line.lstrip().startswith("//"):
+            in_header = False
+    if len(markers) > 1:
+        raise ValueError("Duplicate pypto.reg_auto_sync header markers")
+    # Match the actual PTO entry attribute, not user function names, comments
+    # or string attributes that happen to mention the same spelling.
+    code_tokens = re.sub(r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/', "", source_text, flags=re.DOTALL)
+    if markers and re.search(r"(?<![\w.])pto\.simt_entry\b", code_tokens):
+        raise ValueError("pypto.reg_auto_sync is not valid for SIMT helpers")
+    enabled = not markers or markers[0].endswith(" true")
+    # Keep exactly one effective option even if a caller customizes base flags.
+    base = tuple(flag for flag in PTOAS_FLAGS if not flag.startswith("--enable-vecscope-mem-bar="))
+    return (*base, f"--enable-vecscope-mem-bar={str(enabled).lower()}")
+
 
 def prepare_llvm_for_bisheng(text: str) -> str:
     """Drop newer memory-effect annotations, as PTOAS object emission does.

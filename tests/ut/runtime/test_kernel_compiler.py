@@ -15,6 +15,8 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -945,6 +947,148 @@ def test_bisheng_removes_empty_attribute_groups_and_references():
     )
     assert prepare_llvm_for_bisheng(text) == expected
     assert prepare_llvm_for_bisheng(expected) == expected
+
+
+@pytest.mark.parametrize("policy", [None, "true", "false"])
+def test_reg_auto_sync_flags(compiler_module, monkeypatch, tmp_path, policy):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    helper = tmp_path / "helper.pto"
+    helper.write_text((f"// pypto.reg_auto_sync: {policy}\n" if policy else "") + "module {}")
+    commands = []
+
+    def run(command, output, label):
+        commands.append(command)
+        output.write_text("define void @helper() { ret void }")
+        return b"object"
+
+    monkeypatch.setattr(compiler, "_run", run)
+    compiler._compile_vpto_helpers((str(helper),), tmp_path)
+    flags = [flag for flag in commands[0] if flag.startswith("--enable-vecscope-mem-bar=")]
+    assert flags == [f"--enable-vecscope-mem-bar={'false' if policy == 'false' else 'true'}"]
+    assert not any("mem-bar-all" in flag for flag in commands[0])
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "// pypto.reg_auto_sync: yes\n",
+        "// pypto.reg_auto_sync:false\n",
+        "// pypto.reg_auto_sync: false\n// pypto.reg_auto_sync: true\n",
+        "module {}\n// pypto.reg_auto_sync: false\n",
+    ],
+)
+def test_reg_auto_sync_rejects_invalid_markers(compiler_module, header):
+    with pytest.raises(ValueError, match="reg_auto_sync"):
+        compiler_module._vpto.ptoas_flags_for_source(header)
+
+
+def test_reg_auto_sync_identity_and_compilation_share_snapshot(compiler_module, monkeypatch, tmp_path):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    monkeypatch.setattr(compiler_module, "check_ptoas_version", lambda _: "ptoas 0.74")
+    monkeypatch.setattr(
+        compiler_module.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="bisheng", stderr="")
+    )
+    helper = tmp_path / "helper.pto"
+    manual = "// pypto.reg_auto_sync: false\nmodule {}"
+    helper.write_text(manual)
+    snapshot = compiler_module._vpto.snapshot_sources((str(helper),))
+    key = compiler.vpto_cache_identity((str(helper),), "aiv", snapshot=snapshot)
+    helper.unlink()
+    replacement = tmp_path / "replacement.pto"
+    replacement.write_text("module {}")
+    helper.symlink_to(replacement)
+    commands = []
+    compiled_sources = []
+
+    def run(command, output, label):
+        commands.append(command)
+        if command[0] == "ptoas":
+            compiled_sources.append(Path(command[1]).read_text())
+        output.write_text("define void @helper() { ret void }")
+        return b"object"
+
+    monkeypatch.setattr(compiler, "_run", run)
+    compiler._compile_vpto_helpers((str(helper),), tmp_path, snapshot)
+    assert compiled_sources == [manual]
+    assert "--enable-vecscope-mem-bar=false" in commands[0]
+    # Identity snapshots are consumed once: a direct second compile sees edits.
+    compiler._compile_vpto_helpers((str(helper),), tmp_path)
+    assert compiled_sources[-1] == "module {}"
+    assert "--enable-vecscope-mem-bar=true" in commands[2]
+    assert compiler.vpto_cache_identity((str(helper),), "aiv") != key
+    helper.write_text("// pypto.reg_auto_sync: invalid\nmodule {}")
+    with pytest.raises(ValueError, match="reg_auto_sync"):
+        compiler.vpto_cache_identity((str(helper),), "aiv")
+
+
+def test_reg_auto_sync_snapshots_are_operation_local(compiler_module, monkeypatch, tmp_path):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    monkeypatch.setattr(compiler_module, "check_ptoas_version", lambda _: "ptoas 0.74")
+    monkeypatch.setattr(
+        compiler_module.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="bisheng", stderr="")
+    )
+    helper = tmp_path / "shared.pto"
+    first = "// pypto.reg_auto_sync: false\nmodule {}"
+    second = "// pypto.reg_auto_sync: true\nmodule {}"
+    first_identity_done = threading.Event()
+    second_identity_done = threading.Event()
+    compiled = {}
+
+    def run(command, output, label):
+        if command[0] == "ptoas":
+            compiled[output.parent.name] = (Path(command[1]).read_text(), command)
+        output.write_text("define void @helper() { ret void }")
+        return b"object"
+
+    monkeypatch.setattr(compiler, "_run", run)
+
+    def compile_first():
+        helper.write_text(first)
+        snapshot = compiler_module._vpto.snapshot_sources((str(helper),))
+        compiler.vpto_cache_identity((str(helper),), "aiv", snapshot=snapshot)
+        first_identity_done.set()
+        assert second_identity_done.wait(10)
+        directory = tmp_path / "first"
+        directory.mkdir()
+        compiler._compile_vpto_helpers((str(helper),), directory, snapshot)
+
+    def compile_second():
+        assert first_identity_done.wait(10)
+        helper.write_text(second)
+        snapshot = compiler_module._vpto.snapshot_sources((str(helper),))
+        compiler.vpto_cache_identity((str(helper),), "aiv", snapshot=snapshot)
+        second_identity_done.set()
+        directory = tmp_path / "second"
+        directory.mkdir()
+        compiler._compile_vpto_helpers((str(helper),), directory, snapshot)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(compile_first), executor.submit(compile_second)]
+        for future in futures:
+            future.result(timeout=20)
+    # Both requests use the same path and compiler, but retain their own identity snapshot.
+    assert compiled["first"][0] == first
+    assert "--enable-vecscope-mem-bar=false" in compiled["first"][1]
+    assert compiled["second"][0] == second
+    assert "--enable-vecscope-mem-bar=true" in compiled["second"][1]
+
+
+def test_reg_auto_sync_rejects_actual_simt_entry(compiler_module):
+    source = "// pypto.reg_auto_sync: false\nmodule { func.func @helper() attributes {pto.simt_entry} {} }"
+    with pytest.raises(ValueError, match="SIMT helpers"):
+        compiler_module._vpto.ptoas_flags_for_source(source)
+
+
+def test_reg_auto_sync_accepts_vf_name_containing_simt_entry(compiler_module):
+    source = (
+        "// pypto.reg_auto_sync: false\n"
+        "// A comment mentioning pto.simt_entry is not an entry attribute.\n"
+        'module { func.func @__pypto_vf_simt_entry_0() attributes {note = "pto.simt_entry"} {} }'
+    )
+    assert "--enable-vecscope-mem-bar=false" in compiler_module._vpto.ptoas_flags_for_source(source)
 
 
 if __name__ == "__main__":

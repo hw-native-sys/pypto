@@ -14,6 +14,7 @@ only its toolchain/include/source queries; no SDK compile method runs here.
 Commands, temporary outputs, linking and returned bytes belong to PyPTO.
 """
 
+import hashlib
 import importlib.util
 import logging
 import math
@@ -26,7 +27,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from pypto._environment import toolchain_probe_env
-from pypto._external_source import external_source_digest
 from pypto.backend._ptoas_locate import check_ptoas_version, find_ptoas_binary
 
 from . import _device_image, _stack_usage, _vpto
@@ -180,6 +180,7 @@ class KernelCompiler:
         *,
         vpto_sources: list[str] | tuple[str, ...] | None = None,
         text_only: bool = False,
+        _vpto_snapshot: tuple[str, ...] | None = None,
     ) -> bytes:
         """Compile a simulator SO or linked device ELF in a private build directory.
 
@@ -200,7 +201,8 @@ class KernelCompiler:
             raise ValueError("text_only requires platform='a5' without separately compiled VPTO helpers")
         if helpers:
             _vpto.validate_target(self.platform, core_type)
-            helpers = tuple(str(self._source_path(path)) for path in helpers)
+            if _vpto_snapshot is None:
+                _vpto_snapshot = _vpto.snapshot_sources(helpers)
         if core_type not in ("aic", "aiv"):
             raise ValueError(f"Unknown core_type: {core_type!r}; expected 'aic' or 'aiv'")
         simulation = self.platform.endswith("sim")
@@ -244,7 +246,9 @@ class KernelCompiler:
                 return binary
             assert self.sdk.ccec is not None, "Device linking requires the CCEC toolchain"
             linked = output.with_suffix(".elf")
-            helper_objects = self._compile_vpto_helpers(helpers, Path(directory)) if helpers else []
+            helper_objects = (
+                self._compile_vpto_helpers(helpers, Path(directory), _vpto_snapshot) if helpers else []
+            )
             link_flags: list[str] = []
             if helpers or text_only:
                 order = Path(directory) / "entry.order"
@@ -289,7 +293,9 @@ class KernelCompiler:
         bisheng = str(Path(self.sdk.ccec.cxx_path).with_name("bisheng"))
         return ptoas, bisheng
 
-    def vpto_cache_identity(self, sources: tuple[str, ...], core_type: str) -> str:
+    def vpto_cache_identity(
+        self, sources: tuple[str, ...], core_type: str, *, snapshot: tuple[str, ...] | None = None
+    ) -> str:
         """Hash helper contents, lowering options, and the selected compiler versions.
 
         As with the JIT's PTOAS identity, published compiler versions are
@@ -297,6 +303,8 @@ class KernelCompiler:
         outside this version-based identity contract.
         """
         _vpto.validate_target(self.platform, core_type)
+        snapshots = snapshot if snapshot is not None else _vpto.snapshot_sources(sources)
+        effective_flags = tuple(_vpto.ptoas_flags_for_source(text) for text in snapshots)
         ptoas, bisheng = self._vpto_toolchain()
         result = subprocess.run(
             [bisheng, "--version"],
@@ -307,31 +315,48 @@ class KernelCompiler:
             timeout=self._timeout_s,
         )
         assert self.sdk.ccec is not None
-        return external_source_digest(
-            sources,
-            metadata=(
-                # Revalidate binaries admitted before the SIMT inline-asm check.
-                "intrinsic-simt-abi-v1",
-                "bisheng-memory-attrs-v1",
-                check_ptoas_version(ptoas),
-                result.stdout,
-                result.stderr,
-                repr(_vpto.PTOAS_FLAGS),
-                repr(_vpto.DEVICE_FLAGS),
-                repr(_vpto.CALLER_FLAGS),
-                repr(_vpto.LINK_SYMBOL_ORDER),
-                repr(self.sdk.ccec.get_compile_flags(core_type=core_type)),
-            ),
+        # Hash the exact snapshots later written to compiler inputs. Helpers are
+        # self-contained PTO modules, with no C/C++ include closure.
+        digest = hashlib.sha256()
+        metadata = (
+            # Revalidate binaries admitted before the SIMT inline-asm check.
+            "reg-auto-sync-v1",
+            repr(effective_flags),
+            "intrinsic-simt-abi-v1",
+            "bisheng-memory-attrs-v1",
+            check_ptoas_version(ptoas),
+            result.stdout,
+            result.stderr,
+            repr(_vpto.PTOAS_FLAGS),
+            repr(_vpto.DEVICE_FLAGS),
+            repr(_vpto.CALLER_FLAGS),
+            repr(_vpto.LINK_SYMBOL_ORDER),
+            repr(self.sdk.ccec.get_compile_flags(core_type=core_type)),
         )
+        for item in metadata:
+            payload = item.encode()
+            digest.update(len(payload).to_bytes(8, "little"))
+            digest.update(payload)
+        for source, text in zip(sources, snapshots, strict=True):
+            for payload in (Path(source).name.encode(), text.encode()):
+                digest.update(len(payload).to_bytes(8, "little"))
+                digest.update(payload)
+        return digest.hexdigest()
 
-    def _compile_vpto_helpers(self, sources: tuple[str, ...], directory: Path) -> list[Path]:
+    def _compile_vpto_helpers(
+        self, sources: tuple[str, ...], directory: Path, snapshot: tuple[str, ...] | None = None
+    ) -> list[Path]:
         """Keep all helper outputs in the caller's bounded, temporary build."""
         ptoas, bisheng = self._vpto_toolchain()
         objects: list[Path] = []
-        for index, source in enumerate(sources):
+        snapshots = snapshot if snapshot is not None else _vpto.snapshot_sources(sources)
+        for index, (source, source_text) in enumerate(zip(sources, snapshots, strict=True)):
+            flags = _vpto.ptoas_flags_for_source(source_text)
+            snapshot_path = directory / f"vpto_{index}.pto"
+            snapshot_path.write_text(source_text)
             llvm = directory / f"vpto_{index}.ll"
             obj = directory / f"vpto_{index}.o"
-            self._run([ptoas, source, *_vpto.PTOAS_FLAGS, "-o", str(llvm)], llvm, "VPTO lowering")
+            self._run([ptoas, str(snapshot_path), *flags, "-o", str(llvm)], llvm, "VPTO lowering")
             llvm_text = llvm.read_text()
             # LLVM export bypasses PTOAS's object-level VF_SIMT size patcher.
             # Bisheng computes intrinsic-only bodies correctly, but inline asm
@@ -357,11 +382,8 @@ class KernelCompiler:
             llvm.write_text(_vpto.prepare_llvm_for_bisheng(llvm_text))
             # PTOAS owns VF dependency analysis, including ordering through SSA
             # values. Do not re-infer synchronization from emitted LLVM text.
-            self._run(
-                [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)],
-                obj,
-                "VPTO device compilation",
-            )
+            command = [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)]
+            self._run(command, obj, "VPTO device compilation")
             objects.append(obj)
         return objects
 

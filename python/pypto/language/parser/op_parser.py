@@ -83,6 +83,22 @@ class OpParser:
                 "reg operations require RegScope; values cannot escape outside",
                 span=self.services.span_tracker.get_span(call),
             )
+        if name == "mem_bar":
+            span = self.services.span_tracker.get_span(call)
+            if len(call.args) == 1 and not call.keywords:
+                node = call.args[0]
+            elif not call.args and len(call.keywords) == 1 and call.keywords[0].arg == "kind":
+                node = call.keywords[0].value
+            else:
+                raise ParserSyntaxError("reg.mem_bar requires exactly one kind", span=span)
+            if references_ir_binding(node, self.services.scope_manager.lookup_var):
+                raise ParserSyntaxError("reg.mem_bar kind must be a compile-time string", span=span)
+            success, kind = self.services.expr_evaluator.try_eval_expr(node)
+            if not success or not isinstance(kind, str):
+                raise ParserSyntaxError("reg.mem_bar kind must be a compile-time string", span=span)
+            # String operands are attributes, not scalar IR expressions. Keep
+            # positional and printer-emitted keyword spellings equivalent.
+            return ir.create_op_call("reg.mem_bar", [], {"kind": kind}, span)
         return self.dispatch_op(_dsl_reg, "pl.reg", name, call)
 
     def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:

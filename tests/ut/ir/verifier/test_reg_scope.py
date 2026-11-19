@@ -781,5 +781,13 @@ def test_invalid_auto_ancestor_literals_do_not_hide_hardware_limits(start, step)
     assert any("65535" in d.message for d in verify(outer))
 
 
+def test_mem_bar_only_allowed_as_scope_statement():
+    barrier = ir.create_op_call("reg.mem_bar", [], {"kind": "VST_VLD"}, SPAN)
+    assert verify(region(ir.EvalStmt(barrier, SPAN))) == []
+    assert any("RegScope" in d.message for d in verify(ir.EvalStmt(barrier, SPAN)))
+    assigned = ir.AssignStmt(ir.Var("invalid", barrier.type, SPAN), barrier, SPAN)
+    assert any("statement-only" in d.message for d in verify(region(assigned)))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -412,6 +412,24 @@ TileTypePtr IndexedMemory(const Args& a, bool read) {
 }
 }  // namespace
 
+// Zero-operand fences are observable ordering effects, handled explicitly by DCE.
+REGISTER_OP("reg.mem_bar")
+    .set_op_category("RegOp")
+    .set_reg_op("pto.mem_bar")
+    .set_description("Order UB memory operations within a register scope")
+    .no_argument()
+    .set_attr<std::string>("kind")
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.empty()) << "reg.mem_bar expects no operands";
+      const auto kind = GetRequiredKwarg<std::string>(k, "kind", "reg.mem_bar");
+      static const std::vector<std::string> kinds{
+          "VV_ALL", "VST_VLD", "VLD_VST", "VST_VST", "VS_ALL", "VST_LD", "VLD_ST", "VST_ST",
+          "SV_ALL", "ST_VLD",  "LD_VST",  "ST_VST",  "SS_ALL", "ST_LD",  "LD_ST",  "ST_ST"};
+      CHECK(std::find(kinds.begin(), kinds.end(), kind) != kinds.end())
+          << "Invalid reg.mem_bar kind: " << kind;
+      return GetUnknownType();
+    });
+
 REGISTER_OP("reg.load")
     .set_op_category("RegOp")
     .set_description("Read a continuous initialized Vec UB interval")

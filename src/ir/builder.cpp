@@ -337,7 +337,24 @@ StmtPtr IRBuilder::EndSimtScope(const Span& end_span, const std::vector<VarPtr>&
   return scope;
 }
 
-void IRBuilder::BeginRegScope(const Span& span) { BeginScope(ScopeKind::Reg, span); }
+void IRBuilder::BeginRegScope(const Span& span, bool auto_sync) {
+  BeginScope(ScopeKind::Reg, span, std::nullopt, std::nullopt, std::nullopt, "", nullptr, std::nullopt,
+             std::nullopt, {{"auto_sync", auto_sync}});
+}
+
+void IRBuilder::EmitRegMemBar(const std::string& kind, const Span& span) {
+  bool inside = false;
+  for (const auto& context : context_stack_) {
+    if (context->GetType() == BuildContext::Type::SCOPE &&
+        static_cast<ScopeContext*>(context.get())->GetScopeKind() == ScopeKind::Reg) {
+      inside = true;
+      break;
+    }
+  }
+  CHECK_SPAN(inside, span) << "EmitRegMemBar requires RegScope";
+  auto call = OpRegistry::GetInstance().Create("reg.mem_bar", {}, {{"kind", kind}}, span);
+  Emit(std::make_shared<EvalStmt>(call, span));
+}
 
 StmtPtr IRBuilder::EndRegScope(const Span& span) {
   CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE &&
@@ -350,6 +367,8 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
                           const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span) {
   CHECK(op_name.rfind("reg.", 0) == 0) << "EmitReg expects a reg operation";
+  CHECK(!IsOp(OpRegistry::GetInstance().GetOp(op_name), "reg.mem_bar"))
+      << "reg.mem_bar is statement-only; use EmitRegMemBar";
   bool inside = false;
   for (const auto& context : context_stack_) {
     if (context->GetType() == BuildContext::Type::SCOPE &&

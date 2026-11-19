@@ -70,13 +70,19 @@ class IRBuilder:
             self._builder.end_simt_scope(span, private_scalars)
 
     @contextmanager
-    def reg_scope(self, span: ir.Span | None = None) -> Iterator[None]:
+    def reg_scope(self, span: ir.Span | None = None, *, auto_sync: bool = True) -> Iterator[None]:
         """Build a register region with implicit captures and no yields."""
         # The generator starts in contextlib.__enter__, one frame beyond the
         # usual wrapper caller. Skip that frame to retain the user's with line.
         begin_span = _get_span_or_capture(span, frame_offset=2)
-        with self.scope(ir.ScopeKind.Reg, begin_span):
+        if type(auto_sync) is not bool:
+            raise TypeError("reg_scope auto_sync must be a compile-time bool")
+        with self.scope(ir.ScopeKind.Reg, begin_span, attrs=[("auto_sync", False)] if not auto_sync else []):
             yield
+
+    def emit_reg_mem_bar(self, kind: str, span: ir.Span | None = None) -> None:
+        """Emit an explicit UB ordering statement inside a register scope."""
+        self._builder.emit_reg_mem_bar(kind, span or self._capture_call_span())
 
     def emit_reg(
         self,

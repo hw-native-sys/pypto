@@ -538,5 +538,42 @@ def test_strided_store_respects_view_and_root_offset(root_elements, valid):
         assert (effect["begin"], effect["end"]) == (40, 160)
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "VV_ALL",
+        "VST_VLD",
+        "VLD_VST",
+        "VST_VST",
+        "VS_ALL",
+        "VST_LD",
+        "VLD_ST",
+        "VST_ST",
+        "SV_ALL",
+        "ST_VLD",
+        "LD_VST",
+        "ST_VST",
+        "SS_ALL",
+        "ST_LD",
+        "LD_ST",
+        "ST_ST",
+    ],
+)
+def test_mem_bar_accepts_exact_pto_kinds(kind):
+    barrier = call("mem_bar", kind=kind)
+    assert isinstance(barrier.type, ir.UnknownType)
+
+
+@pytest.mark.parametrize("kind", ["vv_all", "PIPE_ALL", "", "INVALID"])
+def test_mem_bar_rejects_unknown_kind(kind):
+    with pytest.raises(ValueError, match="kind"):
+        call("mem_bar", kind=kind)
+
+
+def test_mem_bar_rejects_operands():
+    with pytest.raises(ValueError):
+        call("mem_bar", [integer(0)], kind="VV_ALL")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

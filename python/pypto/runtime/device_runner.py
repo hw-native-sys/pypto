@@ -141,6 +141,8 @@ def _kernel_cache_file(
     pto_isa_root: str,
     runtime_name: str,
     compiler: KernelCompiler,
+    *,
+    helper_snapshot: tuple[str, ...] | None = None,
 ) -> Path:
     """Return a collision-free cache path for one compiled kernel binary."""
     include_dirs = []
@@ -165,7 +167,7 @@ def _kernel_cache_file(
         include_dirs=include_dirs,
     )
     if helpers:
-        identity = compiler.vpto_cache_identity(helpers, kernel["core_type"])
+        identity = compiler.vpto_cache_identity(helpers, kernel["core_type"], snapshot=helper_snapshot)
         path = path.with_name(f"{path.stem}_vpto_{identity[:24]}{path.suffix}")
     return path
 
@@ -344,9 +346,22 @@ def _compile_single_kernel(
     if helpers:
         output_file = None
 
+    # Resolve the publication key before compilation. For VF helpers this also
+    # freezes the source snapshots consumed by KernelCompiler; re-reading paths
+    # after compilation could publish old code under a newly edited policy.
+    helper_snapshot = _vpto.snapshot_sources(helpers) if helpers else None
+    cache_file = (
+        _kernel_cache_file(
+            cache_dir, kernel, platform, pto_isa_root, runtime_name, compiler, helper_snapshot=helper_snapshot
+        )
+        if cache_dir is not None
+        else None
+    )
     raw = None if force_rebuild or output_file is None else _load_binary(output_file)
     if raw is None:
-        helper_options: dict[str, Any] = {"vpto_sources": helpers} if helpers else {}
+        helper_options: dict[str, Any] = (
+            {"vpto_sources": helpers, "_vpto_snapshot": helper_snapshot} if helpers else {}
+        )
         raw = compiler.compile_incore(
             kernel["source"],
             core_type=core_type,
@@ -360,8 +375,7 @@ def _compile_single_kernel(
 
     kernel_bin = raw if platform.endswith("sim") else extract_text_section(raw)
 
-    if cache_dir is not None:
-        cache_file = _kernel_cache_file(cache_dir, kernel, platform, pto_isa_root, runtime_name, compiler)
+    if cache_file is not None:
         _save_binary(kernel_bin, cache_file)
 
     return raw, kernel_bin
