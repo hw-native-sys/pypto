@@ -60,6 +60,25 @@ namespace detail {
 
 std::string CleanName(const std::string& name_hint) { return auto_name::GetBaseName(name_hint); }
 
+std::string TileLayoutPrefix(const ProgramPtr& program, const std::string& function, bool qualify_function,
+                             std::optional<size_t> site) {
+  const bool plain_name =
+      !function.empty() && function.front() != '$' && function.find('.') == std::string::npos;
+  if (site.has_value()) {
+    const std::string index = std::to_string(*site);
+    if (plain_name) {
+      const std::string candidate = function + "_" + index;
+      if (!program->GetFunction(candidate)) return candidate + ".";
+    }
+    // A length-prefixed name keeps the reserved namespace unambiguous even
+    // for IR function names containing separators.
+    return "$site." + std::to_string(function.size()) + "." + function + "." + index + ".";
+  }
+  if (!qualify_function) return {};
+  if (plain_name) return function + ".";
+  return "$func." + std::to_string(function.size()) + "." + function + ".";
+}
+
 TensorLayout TensorTypeLayout(const TensorTypePtr& tensor_type) {
   if (!tensor_type || !tensor_type->tensor_view_.has_value()) {
     return TensorLayout::ND;
@@ -3466,7 +3485,7 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const Lay
     if (sites_it != orch.call_sites.end() && sites_it->second.size() > 1) {
       for (size_t site_idx = 0; site_idx < sites_it->second.size(); ++site_idx) {
         const auto& site = sites_it->second[site_idx];
-        const std::string prefix = func->name_ + "_" + std::to_string(site_idx) + ".";
+        const std::string prefix = detail::TileLayoutPrefix(program, func->name_, multi_incore, site_idx);
         PostInferInstanceExtractor ext(
             resolved_model, be, reusable_tensors, orch.external_outputs, orch.reshaped_names,
             orch.nz_ineligible_names, orch.dn_ineligible_names, orch.internal_buffers, instance,
@@ -3476,7 +3495,7 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const Lay
       continue;
     }
 
-    const std::string prefix = multi_incore ? (func->name_ + ".") : "";
+    const std::string prefix = detail::TileLayoutPrefix(program, func->name_, multi_incore);
     auto cnt_it = orch.call_counts.find(func->name_);
     const int64_t call_mult = (cnt_it != orch.call_counts.end()) ? cnt_it->second : 1;
     PostInferInstanceExtractor ext(resolved_model, be, reusable_tensors, orch.external_outputs,

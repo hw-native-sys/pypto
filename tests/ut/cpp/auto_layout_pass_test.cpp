@@ -72,6 +72,99 @@ void TestDistinctTileDefinitionsWithRepeatedHints() {
   assert(instance.operations[1].output != instance.operations[2].output);
 }
 
+void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts() {
+  const auto span = ir::Span::unknown();
+  const auto tensor =
+      std::make_shared<ir::TensorType>(std::vector<int64_t>{32, 32}, DataType::FP32, std::nullopt);
+  const auto shape = std::make_shared<ir::MakeTuple>(tensor->shape_, span);
+  const auto zero = std::make_shared<ir::ConstInt>(0, DataType::INDEX, span);
+  const auto offsets = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{zero, zero}, span);
+  const auto& registry = ir::OpRegistry::GetInstance();
+  auto make_kernel = [&](const std::string& name) {
+    auto input = std::make_shared<ir::Var>("input", tensor, span);
+    auto load = registry.Create("tile.load", {input, offsets, shape, shape},
+                                {{"target_memory", ir::MemorySpace::Vec}}, span);
+    auto loaded = std::make_shared<ir::Var>("loaded", load->GetType(), span);
+    auto body = std::make_shared<ir::SeqStmts>(
+        std::vector<ir::StmtPtr>{std::make_shared<ir::AssignStmt>(loaded, load, span),
+                                 std::make_shared<ir::ReturnStmt>(span)},
+        span);
+    return std::make_shared<ir::Function>(name, std::vector<ir::VarPtr>{input},
+                                          std::vector<ir::ParamDirection>{ir::ParamDirection::In},
+                                          std::vector<ir::TypePtr>{}, body, span, ir::FunctionType::InCore);
+  };
+  const auto kernel = make_kernel("kernel");
+  const auto other_kernel = make_kernel("kernel_2");
+  const auto reserved_symbol = make_kernel("kernel_site2");
+  std::vector<ir::StmtPtr> stmts;
+  auto add_site = [&](const std::string& callee, const std::string& allocation) {
+    auto create = registry.Create("tensor.create", {shape}, {{"dtype", DataType::FP32}}, span);
+    auto buffer = std::make_shared<ir::Var>(allocation, create->GetType(), span);
+    stmts.push_back(std::make_shared<ir::AssignStmt>(buffer, create, span));
+    auto call = std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>(callee),
+                                           std::vector<ir::ExprPtr>{buffer}, span);
+    stmts.push_back(std::make_shared<ir::EvalStmt>(call, span));
+  };
+  add_site("kernel", "first");
+  add_site("kernel", "second");
+  add_site("kernel", "column_source");
+  add_site("kernel_2", "independent");
+  add_site("kernel_site2", "reserved");
+  stmts.push_back(std::make_shared<ir::ReturnStmt>(span));
+  const auto entry = std::make_shared<ir::Function>(
+      "entry", std::vector<ir::VarPtr>{}, std::vector<ir::ParamDirection>{}, std::vector<ir::TypePtr>{},
+      std::make_shared<ir::SeqStmts>(stmts, span), span, ir::FunctionType::Orchestration);
+  const auto program = std::make_shared<ir::Program>(
+      std::vector<ir::FunctionPtr>{kernel, other_kernel, reserved_symbol, entry}, "call_sites", span);
+  const auto instance = al::ExtractLayoutInstance(program);
+
+  // Select different legal configurations with the same assignment hint at
+  // site 2 of "kernel" and in the separately declared "kernel_2".
+  assert(instance.operations.size() == 5);
+  al::LayoutAssignment assignment;
+  const auto row = al::LayoutSpec::RowMajorFlat();
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  for (const auto& op : instance.operations) {
+    assert(op.op_name == "tile.load" && op.inputs.size() == 1);
+    const auto& source = op.inputs.front();
+    const bool column = source == "column_source";
+    const auto input = column ? al::LayoutSpec::DN() : al::LayoutSpec::ND();
+    const auto output = column ? col : row;
+    const auto config = std::find_if(op.configs.begin(), op.configs.end(), [&](const auto& cfg) {
+      return cfg.input_layouts.front() == input && cfg.output_layout == output;
+    });
+    assert(config != op.configs.end());
+    assignment.op_configs.emplace(op.op_id, *config);
+    assignment.value_layouts.emplace(source, input);
+    assignment.value_layouts.emplace(op.output, output);
+  }
+  const auto rewritten = al::ApplyLayoutAssignment(program, assignment);
+  const auto body = ir::As<ir::SeqStmts>(rewritten->GetFunction("entry")->body_);
+  std::vector<std::string> callees;
+  callees.reserve(5);
+  for (const auto& stmt : body->stmts_) {
+    if (auto eval = ir::As<ir::EvalStmt>(stmt)) {
+      auto call = ir::As<ir::Call>(eval->expr_);
+      callees.push_back(ir::As<ir::GlobalVar>(call->op_)->name_);
+    }
+  }
+  assert(callees.size() == 5);
+  assert(callees[0] == "kernel" && callees[1] == "kernel");
+  assert(callees[2] != "kernel" && callees[2] != "kernel_2" && callees[2] != "kernel_site2");
+  assert(callees[3] == "kernel_2" && callees[4] == "kernel_site2");
+
+  auto load_layout = [&](const std::string& callee) {
+    const auto seq = ir::As<ir::SeqStmts>(rewritten->GetFunction(callee)->body_);
+    const auto load = ir::As<ir::AssignStmt>(seq->stmts_.front());
+    assert(ir::IsOp(ir::As<ir::Call>(load->value_), "tile.load"));
+    return al::EffectiveTileLayout(ir::As<ir::TileType>(load->var_->GetType()));
+  };
+  assert(load_layout(callees[0]) == row);
+  assert(load_layout(callees[2]) == col);
+  assert(load_layout(callees[3]) == row);
+  assert(load_layout(callees[4]) == row);
+}
+
 void TestVecConversionPressure() {
   const auto span = ir::Span::unknown();
   const auto tensor =
@@ -346,6 +439,7 @@ int main() {
   const auto blocked = ir::pass::BlockNzTensorViews()(rewritten);
   assert(weight_type(blocked)->shape_.size() == 5);
   TestDistinctTileDefinitionsWithRepeatedHints();
+  TestCallSiteAndFunctionNamesKeepTheirOwnLayouts();
   TestVecConversionPressure();
   TestSubviewStore(true);
   TestSubviewStore(false);

@@ -37,6 +37,10 @@ namespace detail {
 /// Strip compiler SSA suffixes from a variable name hint.
 std::string CleanName(const std::string& name_hint);
 
+/// Prefix for a kernel's tile and operator keys, keyed by the original callee and optional call site.
+std::string TileLayoutPrefix(const ProgramPtr& program, const std::string& function, bool qualify_function,
+                             std::optional<size_t> site = std::nullopt);
+
 /// Extract static integer dimensions from a shape vector, or nullopt if any dim is dynamic.
 std::optional<std::vector<int64_t>> StaticShape(const std::vector<ExprPtr>& exprs);
 

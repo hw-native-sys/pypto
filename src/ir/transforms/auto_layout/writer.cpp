@@ -519,6 +519,10 @@ class LayoutAssignmentWriter : public IRMutator {
       }
     }
 
+    const bool multi_incore = incore_funcs.size() > 1;
+    for (const auto& fn : incore_funcs) {
+      tile_prefixes_.emplace(fn->name_, detail::TileLayoutPrefix(program, fn->name_, multi_incore));
+    }
     std::vector<FunctionPtr> extra_incore;
     OrchCallAnalysis orch = AnalyzeOrchestration(program);
     gm_names_ = std::move(orch.gm_names);
@@ -531,10 +535,9 @@ class LayoutAssignmentWriter : public IRMutator {
         const size_t ob = it_b != orch.call_order.end() ? it_b->second : std::numeric_limits<size_t>::max();
         return oa < ob;
       });
-      extra_incore = RegisterCalleeSpecializations(func_by_name, orch);
+      extra_incore = RegisterCalleeSpecializations(program, func_by_name, orch);
     }
 
-    multi_incore_ = incore_funcs.size() > 1;
     std::unordered_map<std::string, FunctionPtr> rewritten_by_name;
 
     auto visit_all = [&](const std::vector<FunctionPtr>& list) {
@@ -1265,22 +1268,16 @@ class LayoutAssignmentWriter : public IRMutator {
   }
 
   std::optional<LayoutSpec> LookupTileDesc(const std::string& name_hint) const {
+    const auto prefix = tile_prefixes_.find(current_func_name_);
+    if (prefix == tile_prefixes_.end()) return std::nullopt;
     const std::string clean_name = detail::CleanName(name_hint);
-    if (!current_func_name_.empty()) {
-      if (auto ov = tile_prefix_override_.find(current_func_name_); ov != tile_prefix_override_.end()) {
-        if (auto it = tile_layouts_.find(ov->second + "." + clean_name); it != tile_layouts_.end()) {
-          return it->second;
-        }
-      }
-      if (auto it = tile_layouts_.find(current_func_name_ + "." + clean_name); it != tile_layouts_.end()) {
+    if (auto it = tile_layouts_.find(prefix->second + clean_name); it != tile_layouts_.end()) {
+      return it->second;
+    }
+    if (name_hint != clean_name) {
+      if (auto it = tile_layouts_.find(prefix->second + name_hint); it != tile_layouts_.end()) {
         return it->second;
       }
-    }
-    if (auto it = tile_layouts_.find(clean_name); it != tile_layouts_.end()) {
-      return it->second;
-    }
-    if (auto it = tile_layouts_.find(name_hint); it != tile_layouts_.end()) {
-      return it->second;
     }
     return std::nullopt;
   }
@@ -1309,7 +1306,8 @@ class LayoutAssignmentWriter : public IRMutator {
   }
 
   std::vector<FunctionPtr> RegisterCalleeSpecializations(
-      const std::unordered_map<std::string, FunctionPtr>& func_by_name, const OrchCallAnalysis& orch) {
+      const ProgramPtr& program, const std::unordered_map<std::string, FunctionPtr>& func_by_name,
+      const OrchCallAnalysis& orch) {
     std::vector<FunctionPtr> extra_incore;
     std::unordered_set<std::string> used_names;
     for (const auto& [name, fn] : func_by_name) {
@@ -1362,7 +1360,6 @@ class LayoutAssignmentWriter : public IRMutator {
         }
         if (site_idx == 0) {
           spec_name = callee_name;
-          tile_prefix_override_[spec_name] = callee_name + "_0";
           specialized_callees_.emplace(std::make_pair(callee_name, sig), spec_name);
         } else {
           size_t suffix = site_idx;
@@ -1372,7 +1369,6 @@ class LayoutAssignmentWriter : public IRMutator {
             spec_name = callee_name + "_site" + std::to_string(suffix);
           }
           used_names.insert(spec_name);
-          tile_prefix_override_[spec_name] = callee_name + "_" + std::to_string(site_idx);
           specialized_callees_.emplace(std::make_pair(callee_name, sig), spec_name);
           for (size_t p_idx = 0; p_idx < callee->params_.size(); ++p_idx) {
             if (auto step_it = param_steps_.find({callee_name, p_idx}); step_it != param_steps_.end()) {
@@ -1418,6 +1414,8 @@ class LayoutAssignmentWriter : public IRMutator {
               std::move(cloned.cloned_body), callee->span_, callee->func_type_, callee->level_, callee->role_,
               std::move(cloned_attrs), callee->requires_runtime_binding_, callee->ir_stage_));
         }
+        tile_prefixes_.insert_or_assign(
+            spec_name, detail::TileLayoutPrefix(program, callee_name, /*qualify_function=*/true, site_idx));
         for (const auto* call : site.calls) specialized_calls_.emplace(call, spec_name);
       }
     }
@@ -1447,13 +1445,8 @@ class LayoutAssignmentWriter : public IRMutator {
   }
 
   std::string FuncTilePrefix(const std::string& func_name) const {
-    if (auto it = tile_prefix_override_.find(func_name); it != tile_prefix_override_.end()) {
-      return it->second + ".";
-    }
-    if (multi_incore_) {
-      return func_name + ".";
-    }
-    return "";
+    auto it = tile_prefixes_.find(func_name);
+    return it != tile_prefixes_.end() ? it->second : std::string{};
   }
 
   std::vector<std::pair<std::string, OperatorConfig>> CollectFuncOpConfigs(
@@ -2727,7 +2720,7 @@ class LayoutAssignmentWriter : public IRMutator {
   const std::unordered_map<std::string, OperatorConfig>& op_configs_;
 
   OrchCallAnalysis::GmNames gm_names_;
-  std::unordered_map<std::string, std::string> tile_prefix_override_;
+  std::unordered_map<std::string, std::string> tile_prefixes_;
   std::unordered_map<std::pair<std::string, ParamSig>, std::string, ParamSigHash> specialized_callees_;
   std::unordered_map<const Expr*, std::string> specialized_calls_;
   std::unordered_map<std::string, std::vector<VarPtr>> callee_formal_params_;
@@ -2736,7 +2729,6 @@ class LayoutAssignmentWriter : public IRMutator {
   std::unordered_map<std::string, std::vector<TypePtr>> func_return_types_;
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> wrapper_returns_;
   std::string current_func_name_;
-  bool multi_incore_ = false;
 
   // Per-function prescan state.
   std::unordered_map<const Var*, OperatorConfig> assign_op_cfg_;
