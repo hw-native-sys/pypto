@@ -48,6 +48,8 @@ class BackendHandler;
 
 namespace codegen {
 
+struct TensorParameterView;
+
 /**
  * @brief Collect Vars referenced by a tensor-shape expression, in first-seen DFS order.
  *
@@ -1042,9 +1044,9 @@ class PTOCodegen : public CodegenBase {
   void BindVarToMemRef(const ir::VarPtr& var, const ir::Var* base_ptr);
 
   /**
-   * @brief Emit make_tensor_view for all tensor parameters
+   * @brief Emit make_tensor_view from prepared GM parameter views
    */
-  void EmitMakeTensorViews(const ir::FunctionPtr& func);
+  void EmitMakeTensorViews(const std::vector<TensorParameterView>& views);
 
   /**
    * @brief Bundle of fields needed to emit a `pto.alloc_tile` op.
@@ -1316,7 +1318,6 @@ class PTOCodegen : public CodegenBase {
     DataType gm_slot_buffer_dtype = DataType::FP32;
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
     std::map<int, DataType> c2v_payload_dtypes;
-    std::set<const ir::Var*> ffts_workspace_vars;
 
     /// SSA name of the synthetic runtime-owned SDMA workspace pointer param.
     /// Empty when the current function does not use prefetch.make_context.
@@ -1413,7 +1414,6 @@ class PTOCodegen : public CodegenBase {
       gm_slot_buffer_dtype = DataType::FP32;
       gm_slot_buffer_region_by_pipe.clear();
       c2v_payload_dtypes.clear();
-      ffts_workspace_vars.clear();
 
       sdma_workspace_arg_ssa.clear();
       l2_cache_offset_arg.clear();

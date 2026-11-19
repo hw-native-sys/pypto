@@ -50,6 +50,7 @@
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 #include "src/backend/common/pto_ops_internal.h"
+#include "src/codegen/pto/pto_tensor_view_plan.h"
 
 namespace pypto {
 namespace codegen {
@@ -464,6 +465,7 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   BufferEmissionPreflight preflight(func, GetBackendHandler()->GetPtoTargetArch() == "a2a3");
   preflight.VisitFunction(func);
   preflight.CheckReturns();
+  const auto tensor_views = PrepareTensorParameterViews(*func, /*buffer_ir=*/true, {});
 
   fs_.Reset();
   fs_.buffer_ir = true;
@@ -526,9 +528,7 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   fs_.constants_indent = GetIndent();
   auto saved_stream = std::move(stream_);
   stream_ = std::move(fs_.body_section);
-  // This shared GM prologue renders tensor shape/stride metadata only. No
-  // legacy on-chip allocation or handle-discovery helper runs on this path.
-  EmitMakeTensorViews(func);
+  EmitMakeTensorViews(tensor_views);
   if (func->body_) VisitStmt(func->body_);
   const std::string body = stream_.str();
   stream_ = std::move(saved_stream);

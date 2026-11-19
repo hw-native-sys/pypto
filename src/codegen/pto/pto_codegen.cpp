@@ -30,6 +30,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -68,6 +69,7 @@
 #include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "src/codegen/pto/pto_tensor_view_plan.h"
 
 namespace pypto {
 namespace codegen {
@@ -1407,7 +1409,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // distance, so the parameter would be unfillable there.
   const bool uses_l2_cache_offset =
       collector.UsesL2BypassLoad() && backend_->GetHandler()->GetPtoTargetArch() == "a2a3";
-  fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
+  const auto& ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
+  const auto tensor_views = PrepareTensorParameterViews(*func, /*buffer_ir=*/false, ffts_workspace_vars);
   if (uses_sdma_workspace) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
   }
@@ -1530,7 +1533,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     first_param = false;
     const auto& param = func->params_[tensor_param_indices[j]];
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
-    if (fs_.ffts_workspace_vars.count(param.get()) > 0) {
+    if (ffts_workspace_vars.count(param.get()) > 0) {
       auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
       INTERNAL_CHECK_SPAN(extent && tensor_type->dtype_ == DataType::INT64, param->span_)
           << "FFTS workspace must be a statically sized INT64 tensor";
@@ -1667,7 +1670,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         RecordGMSlotBufferSSA(GetVarName(var), tensor_type->dtype_);
         continue;
       }
-      if (fs_.ffts_workspace_vars.count(var.get()) > 0) continue;
+      if (ffts_workspace_vars.count(var.get()) > 0) continue;
       // LegalizeMxScaleTensorViews keeps MX TensorTypes in logical rank-2 form;
       // bind a parameter view like NZ so EmitMakeTensorViews / tile.load share
       // the same make_tensor_view (no hand-rolled EmitMxPhysicalView).
@@ -1741,7 +1744,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // shape/stride expression (e.g. the 2 in M * 2) are declared before use.
   stream_.str("");
   stream_.clear();
-  EmitMakeTensorViews(func);
+  EmitMakeTensorViews(tensor_views);
   EmitExtraAllocTiles();
   std::string prologue_content = stream_.str();
 
@@ -1801,160 +1804,39 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   }
 }
 
-void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
-  // RFC #1300 P7 (canonical codegen).
-  //
-  // Emit ``pto.make_tensor_view`` directly from the IR's canonical
-  // ``(shape, stride, layout)`` triple. There are no implicit swaps or
-  // post-emit dn_swap path here — every layout-aware transform (RFC §3.3
-  // canonical promotion, ``MaterializeTensorStrides``) has already run by the
-  // time codegen executes, so the IR's TensorView fields can be transcribed
-  // verbatim.
-  //
-  // The one exception is the ordinary ``[M, 1]`` column-vector special case:
-  // PTOAS *infers* DN for shape ``[M, 1]`` with degenerate strides regardless
-  // of an ND declaration, so codegen forces DN + ``[1, M]`` strides. MX
-  // layouts are explicit hardware contracts and bypass this legacy override.
-  ir::var_collectors::VarDefUseCollector body_vars;
-  if (func->body_) body_vars.VisitStmt(func->body_);
-
-  for (const auto& param : func->params_) {
-    auto tensor_type = ir::AsTensorTypeLike(param->GetType());
-    if (!tensor_type) continue;
-    // Core-group outlining keeps the complete public signature on both the
-    // AIC and AIV functions.  Do not materialize a view for a tensor that the
-    // outlined body does not reference: PTOAS cannot infer a non-ND layout for
-    // such an unused view (notably the MX scale tensors on the AIV cast side).
-    if (body_vars.var_uses.count(param.get()) == 0) continue;
-    if (!fs_.buffer_ir && param->name_hint_ == "__gm_pipe_buffer") continue;  // Legacy GM slot buffer
-    if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a raw pointer
-
-    // ptoas rejects a malformed view (bad strides / layout) on this line, so
-    // attribute it to the parameter that declared the tensor.
+void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& views) {
+  for (const auto& view : views) {
+    const auto& param = view.parameter;
+    const auto& tensor_type = view.type;
     SpanScope param_loc(this, &param->span_);
-    std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
+    const auto& tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
-
-    // ``[..., M, 1]`` column-vector legacy path: PTOAS infers DN for any
-    // shape whose innermost dim is constant 1, so the codegen forces DN to
-    // match what ``tile.load`` produces (memory.cpp DeduceTileLoadType emits
-    // a ColMajor BLayout tile whenever the load shape ends with a constant 1
-    // — see test_tensor_expand_clone[broadcast_dim=2] where input
-    // ``[B, N, 1]`` is loaded into a ColMajor tile and PTOAS TLoad enforces
-    // ``tile.BLayout == tensor.Layout``).
-    // Packed FP4 dimensions count byte carriers. Preserve the declared ND/DN
-    // layout instead of interpreting a one-carrier width as a logical vector.
-    bool is_column_vector = false;
-    if (rank >= 2) {
-      auto last_dim = As<ir::ConstInt>(tensor_type->shape_.back());
-      if (last_dim && last_dim->value_ == 1) {
-        is_column_vector = true;
+    auto emit_index = [&](const ExprPtr& expr) {
+      if (const auto constant = As<ir::ConstInt>(expr)) {
+        return GetOrEmitConstant(constant->value_, DataType::INDEX);
       }
-    }
-
-    ir::TensorLayout layout = ir::TensorLayout::ND;
-    if (tensor_type->tensor_view_.has_value()) {
-      layout = tensor_type->tensor_view_->layout;
-    }
-    const bool force_column_vector_dn =
-        is_column_vector && !IsMxTensorLayout(layout) && !tensor_type->dtype_.IsPackedFp4();
-    if (force_column_vector_dn) layout = ir::TensorLayout::DN;
-
-    // Materialize one shape dimension as an MLIR SSA value.
-    auto get_shape_dim_mlir = [&](size_t dim_idx) -> std::string {
-      const auto& dim_expr = tensor_type->shape_[dim_idx];
-      if (auto const_int = As<ir::ConstInt>(dim_expr)) {
-        return GetOrEmitConstant(const_int->value_, DataType::INDEX);
-      }
-      return EmitCastToIndex(dim_expr, GetExprAsCode(dim_expr));
-    };
-    // Materialize a stride ExprPtr as an MLIR SSA value.
-    auto get_stride_mlir = [&](const ir::ExprPtr& stride_expr) -> std::string {
-      if (auto const_int = As<ir::ConstInt>(stride_expr)) {
-        return GetOrEmitConstant(const_int->value_, DataType::INDEX);
-      }
-      return EmitCastToIndex(stride_expr, GetExprAsCode(stride_expr));
-    };
-    // Precompute shape dim SSA names. Dynamic shape exprs may need cast SSA
-    // ops (``EmitCastToIndex``) emitted before the ``pto.make_tensor_view``
-    // line — materialize them all up-front so the main statement is a single
-    // contiguous line.
-    std::vector<std::string> shape_dim_names(rank);
-    for (size_t j = 0; j < rank; ++j) {
-      shape_dim_names[j] = get_shape_dim_mlir(j);
-    }
-
-    // Emit one stride multiply ``lhs * shape_dim_names[dim_idx]`` and return
-    // the resulting SSA, used for fallback stride derivation when
-    // ``tensor_view_->stride`` is empty.
-    auto emit_stride_mul = [&](const std::string& lhs, size_t dim_idx, size_t stride_slot) -> std::string {
-      std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride_slot));
-      Emit(mul_name + " = arith.muli " + lhs + ", " + shape_dim_names[dim_idx] + " : index");
-      return mul_name;
+      return EmitCastToIndex(expr, GetExprAsCode(expr));
     };
 
-    // Build the stride SSA names. Prefer explicit ``tensor_view_->stride``;
-    // fall back to canonical derivation per ``layout`` when absent
-    // (``MaterializeTensorStrides`` should normally have populated it by now,
-    // but the codegen tolerates absent strides for any path that constructs
-    // IR ad-hoc and skips the pipeline).
+    std::vector<std::string> shape_dim_names;
+    shape_dim_names.reserve(rank);
+    for (const auto& dim : tensor_type->shape_) shape_dim_names.push_back(emit_index(dim));
+
     std::vector<std::string> stride_names(rank);
-    const std::vector<ir::ExprPtr>* explicit_strides = nullptr;
-    if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
-      explicit_strides = &tensor_type->tensor_view_->stride;
-    }
-    if (explicit_strides != nullptr) {
-      CHECK(explicit_strides->size() == rank)
-          << "EmitMakeTensorViews: explicit stride rank " << explicit_strides->size()
-          << " does not match tensor shape rank " << rank;
-      for (size_t j = 0; j < rank; ++j) {
-        stride_names[j] = get_stride_mlir((*explicit_strides)[j]);
-      }
-    } else if (force_column_vector_dn) {
-      // Forced-DN ``[..., M, 1]`` legacy stride pattern (PTOAS column-vector
-      // convention): trailing pair degenerates to ``stride[rank-2]=1`` and
-      // ``stride[rank-1]=shape[rank-1]=1``; outer dims walk row-major over the
-      // ``M`` extent (``stride[rank-3]=shape[rank-2]``, ``stride[k-1]=stride[k]*shape[k]``).
-      // For rank 2 this collapses to the legacy ``[1, shape[0]]``.
-      stride_names[rank - 2] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      if (rank == 2) {
-        stride_names[rank - 1] = shape_dim_names[0];
+    using ShapeDim = TensorParameterView::ShapeDim;
+    for (const auto& stride : view.strides) {
+      auto& result = stride_names[stride.axis];
+      if (const auto* expr = std::get_if<ExprPtr>(&stride.value)) {
+        result = emit_index(*expr);
+      } else if (const auto* dim = std::get_if<ShapeDim>(&stride.value)) {
+        result = shape_dim_names[dim->axis];
       } else {
-        // rank >= 3: stride[rank-1] = shape[rank-1] (= 1), stride[rank-3] = shape[rank-2].
-        stride_names[rank - 1] = shape_dim_names[rank - 1];
-        stride_names[rank - 3] = shape_dim_names[rank - 2];
-        for (int j = static_cast<int>(rank) - 4; j >= 0; --j) {
-          size_t dim = static_cast<size_t>(j);
-          stride_names[dim] = emit_stride_mul(stride_names[dim + 1], dim + 1, dim);
-        }
-      }
-    } else if (layout == ir::TensorLayout::DN) {
-      CHECK(rank >= 2) << "EmitMakeTensorViews: DN layout requires rank >= 2, got " << rank;
-      // RFC §2.3 canonical DN: stride[-2]=1, stride[-1]=shape[-2], outer
-      // strides walk row-major over the DN-block volume. Use direct shape
-      // references for the trailing pair so 2D DN avoids a spurious
-      // ``arith.muli %c1, shape`` step.
-      stride_names[rank - 2] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      stride_names[rank - 1] = shape_dim_names[rank - 2];
-      if (rank >= 3) {
-        // stride[n-3] = shape[n-2] * shape[n-1] (one full DN-block volume).
-        stride_names[rank - 3] = emit_stride_mul(shape_dim_names[rank - 2], rank - 1, rank - 3);
-        for (int j = static_cast<int>(rank) - 4; j >= 0; --j) {
-          size_t dim = static_cast<size_t>(j);
-          stride_names[dim] = emit_stride_mul(stride_names[dim + 1], dim + 1, dim);
-        }
-      }
-    } else {
-      // Canonical ND (row-major): stride[-1]=1, stride[k]=stride[k+1]*shape[k+1].
-      // For rank 2 specifically, stride[0] = shape[1] directly (avoids a
-      // spurious ``arith.muli %c1, shape[1]`` step).
-      stride_names[rank - 1] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      if (rank >= 2) {
-        stride_names[rank - 2] = shape_dim_names[rank - 1];
-        for (int j = static_cast<int>(rank) - 3; j >= 0; --j) {
-          size_t dim = static_cast<size_t>(j);
-          stride_names[dim] = emit_stride_mul(stride_names[dim + 1], dim + 1, dim);
-        }
+        const auto& product = std::get<TensorParameterView::Product>(stride.value);
+        const auto* lhs_dim = std::get_if<ShapeDim>(&product.lhs);
+        const auto& lhs =
+            lhs_dim ? shape_dim_names[lhs_dim->axis] : stride_names[std::get<size_t>(product.lhs)];
+        result = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride.axis));
+        Emit(result + " = arith.muli " + lhs + ", " + shape_dim_names[product.rhs_shape_axis] + " : index");
       }
     }
 
@@ -1982,7 +1864,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     view_line << "]";
 
     std::string layout_str = "nd";
-    switch (layout) {
+    switch (view.layout) {
       case ir::TensorLayout::DN:
         layout_str = "dn";
         break;
