@@ -1,21 +1,66 @@
 ---
 name: code-review
-description: Review code changes against PyPTO project standards before committing. Use when reviewing code, preparing commits, checking pull requests, or when the user asks for code review.
+description: Analyze, explain, and review PyPTO pull requests, or review local changes before committing. Verify PR findings on the current head through the normal entry point before assigning severity.
 context: fork
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
 # PyPTO Code Review
 
-You are a specialized code review agent. Review all code changes in the current git diff against PyPTO's quality standards. You MUST NOT modify any files — only analyze and report.
+Review changes against PyPTO's quality standards. Keep the source under review intact. Build and run
+reproductions in the review checkout, using a separate checkout when needed to preserve local edits.
 
 ## Review Process
 
-1. **Get changes**: Run `git diff` to see all staged and unstaged changes
-2. **Analyze each file** against the review checklist below
-3. **Check documentation alignment**: Ensure docs match code changes
-4. **Verify cross-layer consistency**: Check C++, Python bindings, and type stubs
-5. **Report findings**: Provide clear, actionable feedback
+1. For PR analysis, explanation, or review, resolve the current PR head to its full commit SHA. Read
+   the complete diff for that SHA, the linked issues, the PR discussion, and existing reviews,
+   including inline comments. For a local review, inspect both staged and unstaged changes.
+2. Analyze the changed files against the checklist below. Trace affected callers, verify
+   documentation alignment, and check C++, Python bindings, and type stubs where applicable.
+3. Apply the PR evidence requirements before classifying findings or issuing a report. Before
+   reporting, recheck the PR head. If it moved, verify the current head and recheck findings against it.
+
+## PR Evidence Requirements
+
+- Build the pinned PR head before assigning severity or publishing findings. Verify the checkout's
+  `HEAD` matches the pinned SHA and follow the [testing workflow](../testing/SKILL.md) for the build.
+  Use artifacts built in that checkout. Record the actual build result and command.
+- Every verified behavior finding must reproduce on the reviewed build from a real input that
+  the normal frontend DSL or public API can construct. Supply the runnable input, command, and
+  observed symptom through the default lowering pipeline. Use handwritten or patched IR only
+  to investigate the cause. For a documentation claim about behavior, quote the claim and run the
+  frontend scenario that tests it. For purely static findings, show the relevant source,
+  documentation, or configuration entries and the check that demonstrates the discrepancy.
+- Classify a suspected defect as **Unverified** if the head build is unavailable or
+  unsuccessful, the normal-entry reproduction fails to demonstrate the defect, or the defect can be
+  triggered only with handwritten or modified IR. Keep these observations out of severity rankings
+  and blocking conclusions. CI results, source inspection, or a build of another revision can provide
+  context for an unverified observation.
+- Match evidence to the claim. Generated-code string assertions establish what was emitted. Numerical
+  checks establish correctness for the tested inputs. Claims about performance or hardware control
+  effects require direct evidence, such as measurements or traces showing the claimed behavior under
+  the relevant execution conditions. An explanation based on source or compiler artifacts alone is
+  an inference.
+
+## PR Walkthrough and Concrete Cases
+
+Explain the PR's intended behavior even when the review finds no defects. Base the walkthrough on
+the pinned diff and its callers. Describe the previous limitation, the practical workflow it
+affected, what the PR changes for that workflow, and the scope of the new behavior. For internal
+changes, name the caller and the observable effect or invariant that motivates the change.
+
+- Use a complete representative before/after DSL or API case for the main behavior change.
+  Include the relevant input declarations, values, call, and result or error. Explain why these
+  inputs expose the difference and what the reader should look for in the output. For IR-only
+  changes, show the relevant before/after IR with enough surrounding context to follow the value.
+- Cover materially different entry points, modes, or boundaries with a focused case or a table
+  derived from the main case. Keep comparable inputs and settings fixed where practical. Name the
+  affected variants and the conditions under which the behavior applies.
+- Give the exact runnable command or existing test selector, including relevant parameters,
+  target, and toolchain version. Show the observed output for each executed side and label any
+  source-derived side as inferred. A call fragment by itself leaves input and output unspecified.
+- For each verified finding, cite its own runnable case or the specific walkthrough case that
+  demonstrates it. Show the decisive output and cite the contract used to judge it.
 
 ## Review Checklist
 
@@ -109,31 +154,32 @@ When APIs change, all three layers must be updated together. See [cross-layer-sy
 
 ## Output Format
 
-Provide your review as:
+Use these four sections in order. Follow
+[Explaining a Bug, Issue, or Failure](../../rules/explaining-problems.md) when tracing a defect.
 
-```text
-## Code Review Summary
-
-**Status:** ✅ PASS / ⚠️ WARNINGS / ❌ FAIL
-
-### Issues Found
-
-[List any issues by category: Code Quality, Documentation, Cross-Layer, etc.]
-
-### Recommendations
-
-[Specific actions to fix issues]
-
-### Approved Items
-
-[List what looks good]
-```
+1. **PR overview**. Explain the motivation and the previous workflow, what changes for users or
+   callers, and the supported scope. Name affected entry points and material constraints.
+2. **Concrete cases**. Walk through the before/after behavior using the cases above. Explain what
+   each case demonstrates and show the evidence, including a relevant boundary when it clarifies
+   the contract. Include these cases even when there are no review findings.
+3. **Implementation path**. Explicitly list the passes, IR, and interfaces the PR adds or
+   modifies. Name the affected passes, IR nodes, operators, types, attributes, or contracts, and
+   frontend or internal interfaces as applicable. Give the concrete change and location for each
+   item. Mark categories with no changes and identify existing stages reused by the new path.
+   Follow the same representative input from the entry point to the result. Explain what each
+   decisive step checks or transforms and why it matters to this case. For a defect, locate the
+   first divergence and connect that decision to the symptom.
+4. **Review conclusion**. List verified findings from highest to lowest severity. Give each
+   finding's location, impact, and concrete correction, and refer to its reproduction above.
+   List **Unverified** observations with the attempted command and missing evidence.
+   Record the reviewed SHA for a PR, build and test results, and verification limits. Base any
+   verdict on the verified findings and state the limits on coverage.
 
 ## Decision Criteria
 
-**PASS:** No critical issues, minor suggestions only
-**WARNINGS:** Non-critical issues that should be addressed but don't block commit
-**FAIL:** Critical issues that must be fixed before committing
+- **PASS** applies when the reviewed scope was verified and only minor suggestions remain.
+- **WARNINGS** applies when verified non-blocking issues warrant attention or verification coverage is limited.
+- **FAIL** requires a verified issue that blocks the change.
 
 ## Key Focus Areas
 
