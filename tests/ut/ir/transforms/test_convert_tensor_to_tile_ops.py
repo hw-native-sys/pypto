@@ -8385,6 +8385,676 @@ class TestCalleeDirectionPropagationThroughCarries:
         }
         assert directions["dst"] == ir.ParamDirection.Out
 
+    def test_partial_write_and_history_read_through_reshape(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write(self, x: pl.Tensor[[1, 64], pl.FP32], cache: pl.Out[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.store(pl.load(x, [0, 0], [1, 64]), [0, 0], cache)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read(self, cache: pl.Tensor[[2, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+                pl.store(pl.load(cache, [1, 0], [1, 64]), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                cache: pl.Tensor[[128], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(cache, [2, 64])
+                self.read(flat, out)
+                self.write(x, flat)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def write(self, x: pl.Tensor[[1, 64], pl.FP32], cache: pl.Out[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(x, [0, 0], [1, 64], [1, 64]), [0, 0], cache)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def read(self, cache: pl.Tensor[[2, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(cache, [1, 0], [1, 64], [1, 64]), [0, 0], out)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                cache: pl.InOut[pl.Tensor[[128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(cache, [2, 64])
+                self.read(flat, out)
+                self.write(x, flat)
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    @pytest.mark.parametrize("use_submit", [False, True])
+    def test_read_returned_alias_from_reshape_write_keeps_inout(self, use_submit):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write(
+                self, x: pl.Tensor[[1, 64], pl.FP32], cache: pl.Out[pl.Tensor[[2, 64], pl.FP32]]
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                return pl.store(pl.load(x, [0, 0], [1, 64]), [0, 0], cache)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def update(
+                self, x: pl.Tensor[[1, 64], pl.FP32], cache: pl.Tensor[[2, 64], pl.FP32]
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                return self.write(x, cache)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read(self, cache: pl.Tensor[[2, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+                pl.store(pl.load(cache, [1, 0], [1, 64]), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                cache: pl.Tensor[[128], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(cache, [2, 64])
+                updated = self.update(x, flat)
+                self.read(updated, out)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def write(
+                self, x: pl.Tensor[[1, 64], pl.FP32], cache: pl.Out[pl.Tensor[[2, 64], pl.FP32]]
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                return pl.tile.store(pl.tile.load(x, [0, 0], [1, 64], [1, 64]), [0, 0], cache)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def update(
+                self, x: pl.Tensor[[1, 64], pl.FP32], cache: pl.Out[pl.Tensor[[2, 64], pl.FP32]]
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                return self.write(x, cache)
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def read(self, cache: pl.Tensor[[2, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(cache, [1, 0], [1, 64], [1, 64]), [0, 0], out)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                cache: pl.InOut[pl.Tensor[[128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(cache, [2, 64])
+                updated = self.update(x, flat)
+                self.read(updated, out)
+
+        def with_submit(program):
+            source = ir.python_print(program)
+            old = (
+                "        updated: pl.Tensor[[2, 64], pl.FP32] = self.update(x, flat)\n"
+                "        self.read(updated, out)"
+            )
+            assert old in source
+            return pl.parse_program(
+                source.replace(
+                    old,
+                    "        with pl.manual_scope():\n"
+                    "            updated, tid = pl.submit(self.update, x, flat)\n"
+                    "            self.read(updated, out)",
+                )
+            )
+
+        before, expected = (with_submit(Before), with_submit(Expected)) if use_submit else (Before, Expected)
+        after = passes.convert_tensor_to_tile_ops()(before)
+        ir.assert_structural_equal(after, expected)
+        update = after["update"]
+        main = after["main"]
+        assert update is not None and main is not None
+        assert update.param_directions[1] == ir.ParamDirection.Out
+        assert main.param_directions[1] == ir.ParamDirection.InOut
+
+    @pytest.mark.parametrize("inline_return", [False, True])
+    def test_unreshaped_output_return_keeps_inout_when_other_output_reshaped(self, inline_return):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.load(x, [0, 0], [1, 64])
+                pl.store(value, [0, 0], first)
+                pl.store(value, [0, 0], second)
+                return second
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.store(pl.load(buf, [1, 0], [1, 64]), [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Tensor[[128], pl.FP32],
+                b: pl.Tensor[[2, 64], pl.FP32],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                returned = self.write(x, flat, b)
+                self.consume(returned)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                pl.tile.store(value, [0, 0], first)
+                pl.tile.store(value, [0, 0], second)
+                return second
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(buf, [1, 0], [1, 64], [1, 64]), [0, 0], buf)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.InOut[pl.Tensor[[128], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[2, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                returned = self.write(x, flat, b)
+                self.consume(returned)
+
+        def inline_store_return(program):
+            source = ir.python_print(program)
+            old = "        pl.tile.store(value, [0, 0], second)\n        return second"
+            assert old in source
+            new = "        return pl.tile.store(value, [0, 0], second)"
+            return pl.parse_program(source.replace(old, new))
+
+        before, expected = (
+            (inline_store_return(Before), inline_store_return(Expected))
+            if inline_return
+            else (Before, Expected)
+        )
+        after = passes.convert_tensor_to_tile_ops()(before)
+        ir.assert_structural_equal(after, expected)
+
+    def test_two_trip_reshape_carry_preserves_both_backing_parameters(self):
+        """The second iteration can return a different caller-owned buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                third: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.load(x, [0, 0], [1, 64])
+                pl.store(value, [0, 0], first)
+                pl.store(value, [0, 0], second)
+                pl.store(value, [0, 0], third)
+                return third
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.store(pl.load(buf, [1, 0], [1, 64]), [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Tensor[[128], pl.FP32],
+                b: pl.Tensor[[2, 64], pl.FP32],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                for _i, (carry,) in pl.range(2, init_values=(flat,)):
+                    flat_arg = flat
+                    b_arg = b
+                    result = self.write(x, flat_arg, b_arg, carry)
+                    self.consume(result)
+                    _next = pl.yield_(b)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                third: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                pl.tile.store(value, [0, 0], first)
+                pl.tile.store(value, [0, 0], second)
+                pl.tile.store(value, [0, 0], third)
+                return third
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(buf, [1, 0], [1, 64], [1, 64]), [0, 0], buf)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.InOut[pl.Tensor[[128], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[2, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                for _i, (carry,) in pl.range(2, init_values=(flat,)):
+                    flat_arg = flat
+                    b_arg = b
+                    result = self.write(x, flat_arg, b_arg, carry)
+                    self.consume(result)
+                    _next = pl.yield_(b)
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_graph_loop_writes_through_body_local_reshape_backedge(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def update(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.store(pl.load(buf, [1, 0], [1, 64]), [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def graph(self, a: pl.Tensor[[1, 128], pl.FP32], b: pl.Tensor[[1, 128], pl.FP32]):
+                first = pl.reshape(a, [2, 64])
+                for _i, (carry,) in pl.range(2, init_values=(first,)):
+                    self.update(carry)
+                    next_buf = pl.reshape(b, [2, 64])
+                    _result = pl.yield_(next_buf)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def update(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(buf, [1, 0], [1, 64], [1, 64]), [0, 0], buf)
+                return  # noqa: PLR1711 - lowering materializes the void return.
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def graph(
+                self,
+                a: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+            ):
+                first = pl.reshape(a, [2, 64])
+                for _i, (carry,) in pl.range(2, init_values=(first,)):
+                    self.update(carry)
+                    next_buf = pl.reshape(b, [2, 64])
+                    _result = pl.yield_(next_buf)
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    def test_reshape_inout_in_child_graph_preserves_explicit_outer_out(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def initialize(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def overwrite(self, dst: pl.Out[pl.Tensor[[2, 64], pl.FP32]]) -> pl.Tensor[[2, 64], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def child(self, dst: pl.Tensor[[1, 128], pl.FP32]):
+                view = pl.reshape(dst, [2, 64])
+                self.overwrite(view)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                ready = self.initialize(seed, dst)
+                self.child(ready)
+                return ready
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def initialize(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def overwrite(self, dst: pl.Out[pl.Tensor[[2, 64], pl.FP32]]) -> pl.Tensor[[2, 64], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def child(self, dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]]):
+                view = pl.reshape(dst, [2, 64])
+                self.overwrite(view)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                ready = self.initialize(seed, dst)
+                self.child(ready)
+                return ready
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    @pytest.mark.parametrize(
+        "return_mode", ["unknown_output", "input", "reshaped_input", "reversed_tuple", "slice"]
+    )
+    def test_return_matching_retains_actual_backing_parameters(self, return_mode):
+        """Return bindings preserve backing parameters and remain conservative for unknown storage."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def first(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                b: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.load(x, [0, 0], [1, 64])
+                pl.store(value, [0, 0], a)
+                pl.store(value, [0, 0], b)
+                return b
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                third: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.load(x, [0, 0], [1, 64])
+                pl.store(value, [0, 0], first)
+                pl.store(value, [0, 0], second)
+                pl.store(value, [0, 0], third)
+                return third
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.store(pl.load(buf, [1, 0], [1, 64]), [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                value: pl.Tensor[[2, 64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                self.write(x, scratch, scratch, scratch)
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Tensor[[128], pl.FP32],
+                b: pl.Tensor[[2, 64], pl.FP32],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                pair = (b, b)
+                alias = pair[0]
+                first_flat = flat
+                middle = self.first(x, first_flat, alias)
+                result = self.write(x, flat, b, middle)
+                self.consume(result)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def first(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                b: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                pl.tile.store(value, [0, 0], a)
+                pl.tile.store(value, [0, 0], b)
+                return b
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def write(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                first: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                second: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                third: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                value = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                pl.tile.store(value, [0, 0], first)
+                pl.tile.store(value, [0, 0], second)
+                pl.tile.store(value, [0, 0], third)
+                return third
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(buf, [1, 0], [1, 64], [1, 64]), [0, 0], buf)
+                return  # noqa: PLR1711 - lowering materializes a void return in the IR.
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                value: pl.Tensor[[2, 64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                self.write(x, scratch, scratch, scratch)
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                a: pl.InOut[pl.Tensor[[128], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[2, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(a, [2, 64])
+                pair = (b, b)
+                alias = pair[0]
+                first_flat = flat
+                middle = self.first(x, first_flat, alias)
+                result = self.write(x, flat, b, middle)
+                self.consume(result)
+
+        def select_return(program):
+            if return_mode == "unknown_output":
+                return program
+            source = ir.python_print(program)
+            if return_mode == "reversed_tuple":
+                start = source.index("    def first(")
+                end = source.index("\n    @pl.function(", start)
+                first = source[start:end]
+                tensor = "pl.Tensor[[2, 64], pl.FP32]"
+                first = first.replace(f"-> {tensor}:", f"-> tuple[{tensor}, {tensor}]:")
+                first = first.replace("        return b", "        return b, a")
+                source = source[:start] + first + source[end:]
+                source = source.replace(
+                    "        middle: " + tensor + " = self.first(x, first_flat, alias)",
+                    "        first_b = b\n        middle, _unused = self.first(x, first_flat, first_b)",
+                )
+                return pl.parse_program(source)
+            if return_mode == "slice":
+                end = source.index("\n", source.index("    def main("))
+                signature = source[:end].replace(
+                    "a: pl.InOut[pl.Tensor[[128], pl.FP32]]", "a: pl.Tensor[[128], pl.FP32]"
+                )
+                return pl.parse_program(
+                    signature
+                    + "\n        part = pl.slice(b, [2, 64], [0, 0])"
+                    + "\n        flat = pl.reshape(part, [2, 64])"
+                    + "\n        result = self.first(x, b, flat)"
+                    + "\n        self.consume(result)\n"
+                )
+            old_call = "self.first(x, first_flat, alias)"
+            assert old_call in source
+            source = source.replace(old_call, "self.forward(x, b, first_flat)")
+            if return_mode == "reshaped_input":
+                old_return = "        return value"
+                assert old_return in source
+                source = source.replace(
+                    old_return, "        view = pl.reshape(value, [2, 64])\n        return view"
+                )
+            return pl.parse_program(source)
+
+        before, expected = select_return(Before), select_return(Expected)
+        after = passes.convert_tensor_to_tile_ops()(before)
+        ir.assert_structural_equal(after, expected)
+
+    def test_distributed_return_preserves_inout_backing_parameter(self):
+        """A write through a distributed return upgrades its backing parameter."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def produce(
+                self,
+                a: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                b: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+            ) -> tuple[pld.DistributedTensor[[64], pl.FP32], pld.DistributedTensor[[64], pl.FP32]]:
+                return a, b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def consume(
+                self, value: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                value: pld.DistributedTensor[[64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward_distributed(
+                self,
+                out: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                value: pld.DistributedTensor[[64], pl.FP32],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def tuple_result(
+                self,
+                a: pld.DistributedTensor[[64], pl.FP32],
+                b: pld.DistributedTensor[[64], pl.FP32],
+            ):
+                u, _unused = self.produce(a, b)
+                self.consume(u)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def single_result(
+                self,
+                a: pld.DistributedTensor[[64], pl.FP32],
+                scratch: pl.Tensor[[1, 64], pl.FP32],
+            ):
+                flat = pl.reshape(scratch, [64])
+                middle = self.forward(a, flat)
+                _unused, u = self.produce(a, middle)
+                self.consume(u)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def fallback_result(
+                self,
+                a: pld.DistributedTensor[[64], pl.FP32],
+            ):
+                pair = (a, a)
+                alias = pair[0]
+                returned = self.forward_distributed(a, alias)
+                self.consume(returned)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def produce(
+                self,
+                a: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                b: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+            ) -> tuple[pld.DistributedTensor[[64], pl.FP32], pld.DistributedTensor[[64], pl.FP32]]:
+                return a, b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def consume(
+                self, value: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                value: pld.DistributedTensor[[64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward_distributed(
+                self,
+                out: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+                value: pld.DistributedTensor[[64], pl.FP32],
+            ) -> pld.DistributedTensor[[64], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def tuple_result(
+                self,
+                a: pl.InOut[pld.DistributedTensor[[64], pl.FP32]],
+                b: pl.Out[pld.DistributedTensor[[64], pl.FP32]],
+            ):
+                u, _unused = self.produce(a, b)
+                self.consume(u)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def single_result(
+                self,
+                a: pl.InOut[pld.DistributedTensor[[64], pl.FP32]],
+                scratch: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                flat = pl.reshape(scratch, [64])
+                middle = self.forward(a, flat)
+                _unused, u = self.produce(a, middle)
+                self.consume(u)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def fallback_result(
+                self,
+                a: pl.InOut[pld.DistributedTensor[[64], pl.FP32]],
+            ):
+                pair = (a, a)
+                alias = pair[0]
+                returned = self.forward_distributed(a, alias)
+                self.consume(returned)
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(after, Expected)
+
 
 class TestTensorCastConversion:
     def test_saturation_mode_survives_tensor_to_tile_lowering(self):

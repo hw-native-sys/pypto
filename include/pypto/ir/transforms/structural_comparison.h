@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_STRUCTURAL_COMPARISON_H_
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -47,6 +48,24 @@ class StructuralComparisonUnsupported : public pypto::TypeError {
   std::string reason_;
   std::string field_path_;
 };
+
+namespace structural_comparison_detail {
+
+/// Compare standalone types with free-variable identity in one analysis scope.
+/// Each distinct immutable type is projected once into a shared exact arena.
+class TypeComparisonCache {
+ public:
+  TypeComparisonCache();
+  ~TypeComparisonCache();
+
+  [[nodiscard]] bool Equal(const TypePtr& lhs, const TypePtr& rhs);
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace structural_comparison_detail
 
 /// Verify local binding visibility and unique definitions independently of comparison.
 /// Open captures are allowed; closure/effect checks belong to the caller.

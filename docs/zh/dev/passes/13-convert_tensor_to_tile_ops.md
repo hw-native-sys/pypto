@@ -194,6 +194,12 @@ pass 抵达 codegen。参见 [GM 缓存访问策略](../language/05-cache-policy
 
 InCore、AIC、AIV、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 / 二a 中被改写。
 
+### 阶段三：传播参数方向
+
+该 Pass 先推导被调用函数的方向。零拷贝 reshape 与原张量共用缓冲区。
+当初始方向为 In 的参数支撑 reshape 且子调用写入这块缓冲区时，
+编译器推导为 InOut，以保留输入内容。显式 Out 声明仍表示仅输出。
+
 ## 桥接 load 落在哪个空间
 
 被列入某条 conversion 的 `input_reqs` 的操作数，必须以 tile 的形式抵达 converter：

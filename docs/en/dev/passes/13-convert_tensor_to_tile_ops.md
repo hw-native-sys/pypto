@@ -224,6 +224,14 @@ function or a wrapper that absorbed output params in Phase 2a:
 InCore, AIC, AIV, Spmd, and Group functions are skipped from this phase — they were
 already rewritten in Phase 1 / 2a.
 
+### Phase 3: Propagate Parameter Directions
+
+The pass resolves callees before callers. A zero-copy tensor reshape shares
+the original buffer. When a parameter initially marked as input backs a
+reshape and a child writes to that buffer, the pass infers InOut to retain
+the incoming data. An explicit Out declaration still describes output-only
+storage.
+
 ## Where a Bridged Load Lands
 
 An operand listed in a conversion's `input_reqs` reaches the converter as a tile:
