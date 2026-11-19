@@ -2024,12 +2024,9 @@ def _preview_static_expressions(
     )
     emitted: list[ast.stmt] = []
     try:
-        for stmt in copy.deepcopy(func_def.body):
-            rewritten = transformer.visit(stmt)
-            if summarize_return and rewritten is not None:
-                emitted.extend(
-                    cast("list[ast.stmt]", rewritten) if isinstance(rewritten, list) else [rewritten]
-                )
+        rewritten = transformer.transform_body(copy.deepcopy(func_def.body))
+        if summarize_return:
+            emitted = rewritten
     except (IndexError, KeyError, TypeError, ValueError):
         # Invalid source still belongs to the normal specializer/parser path.
         return _StaticPreview({}, {}, {}, None)

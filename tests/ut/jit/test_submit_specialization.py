@@ -470,7 +470,8 @@ def test_ordinary_expression_return_keeps_annotation_only_factory_captures(captu
     program = entry.specialize(*samples)
     main = program.get_function("entry")
     assert main is not None
-    assert not main.return_types
+    assert len(main.return_types) == 1
+    assert ir.structural_equal(main.return_types[0], ir.TensorType([32, 64], pl.FP32))
     _assert_codegen_artifacts(entry, samples, tmp_path)
 
 
@@ -880,9 +881,10 @@ def test_ordinary_jit_store_uses_rebound_destination():
     program = entry.specialize(torch.empty(16, 32), torch.empty(32, 64))
     kernel_ir = program.get_function("kernel")
     assert kernel_ir is not None
-    # Ordinary calls retain parser inference instead of publishing the
-    # parameter's stale shape as a declared return contract.
-    assert not kernel_ir.return_types
+    # Publish the returned view's type, preserving the rebound destination
+    # instead of the parameter's original extent.
+    assert len(kernel_ir.return_types) == 1
+    assert ir.structural_equal(kernel_ir.return_types[0], ir.TensorType([16, 32], pl.FP32))
 
 
 def test_whole_shape_slice_preserves_distributed_kind():

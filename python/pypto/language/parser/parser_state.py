@@ -26,6 +26,9 @@ from .type_resolver import (
 )
 
 JIT_SUBMIT_RETURNS_ATTR = "__pypto_jit_submit_returns__"
+# The same private JIT handoff publishes ordinary inferred return contracts.
+# This sentinel preserves the body's result packing when no arity was planned.
+JIT_INFERRED_RETURN_ARITY = -1
 JIT_GRAPH_REBINDS_ATTR = "__pypto_jit_graph_rebinds__"
 
 

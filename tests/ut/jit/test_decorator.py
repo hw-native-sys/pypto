@@ -56,7 +56,7 @@ from pypto.jit.decorator import (
     _rewrite_jit_error,
     jit,
 )
-from pypto.jit.specializer import DynDim, Specializer, TensorMeta
+from pypto.jit.specializer import DynDim, Specializer, TensorMeta, build_specialize_context
 from pypto.language.parser.diagnostics.exceptions import (
     InvalidOperationError,
     ParserTypeError,
@@ -6505,7 +6505,6 @@ class TestRuntimeSizedLocalExtents:
             "transitive_shape_alias",
             "annotated_shape_alias",
             "rebound_shape_alias",
-            "rebound_source_shape_alias",
         ],
     )
     def test_descriptor_reshape_local_integer_unary_plus_stays_unknown(self, source):
@@ -6528,7 +6527,24 @@ class TestRuntimeSizedLocalExtents:
             flat = pl.reshape(src, [+width])
             return flat
 
-        def rebound_source_shape_alias(src, other):
+        seed = {
+            "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+            "other": TensorMeta(shape=(1, 64), dtype=DataType.INT8),
+        }
+        bodies = {
+            "transitive_shape_alias": transitive_shape_alias,
+            "annotated_shape_alias": annotated_shape_alias,
+            "rebound_shape_alias": rebound_shape_alias,
+        }
+        metas = extract_local_tensor_metas(
+            bodies[source], seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
+        assert "flat" not in metas
+
+    def test_descriptor_reshape_rebound_known_tensor_keeps_static_extent(self):
+        """A known tensor alias folds its shape before unary plus reaches the parser."""
+
+        def body(src, other):
             src = other
             width = src.shape[1]
             flat = pl.reshape(src, [+width])
@@ -6538,16 +6554,27 @@ class TestRuntimeSizedLocalExtents:
             "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
             "other": TensorMeta(shape=(1, 64), dtype=DataType.INT8),
         }
-        bodies = {
-            "transitive_shape_alias": transitive_shape_alias,
-            "annotated_shape_alias": annotated_shape_alias,
-            "rebound_shape_alias": rebound_shape_alias,
-            "rebound_source_shape_alias": rebound_source_shape_alias,
-        }
-        metas = extract_local_tensor_metas(
-            bodies[source], seed_meta=seed, discover_deps=_discover_dep_bindings
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["flat"] == TensorMeta(shape=(64,), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
+        ctx = build_specialize_context(body, "body", "orchestration", None, seed, {}, [])
+        # Keep the inference probe untyped, and provide the parser's tensor
+        # annotations explicitly; the seed supplies both concrete shapes.
+        ctx.source = ctx.source.replace(
+            "def body(src, other):", "def body(src: pl.Tensor, other: pl.Tensor):"
         )
-        assert "flat" not in metas
+        program = pl.parse_program(Specializer("KnownTensorAlias", [ctx]).specialize())
+        function = program.get_function("body")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        result_type = returned.value[0].type
+        assert isinstance(result_type, ir.TensorType)
+        assert len(result_type.shape) == 1
+        assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 64
+        converted = passes.convert_to_ssa()(program)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        passes.run_verifier(properties)(converted)
 
     @pytest.mark.parametrize(
         "rows_expr,total_expr,error",
@@ -8477,6 +8504,118 @@ def test_constexpr_branch_preserves_multiple_yield_results(mode):
     widths = [64, 128] if mode else [128, 64]
     for value, width in zip(returned.value, widths, strict=True):
         ir.assert_structural_equal(value.type, ir.TensorType([8, width], DataType.FP32))
+
+
+@pytest.mark.parametrize(
+    ("payload_dtype", "expected_dtype"), [(pl.FP32, DataType.FP32), (pl.INT8, DataType.INT8)]
+)
+def test_tuple_return_preserves_annotation_only_factory_fields(payload_dtype, expected_dtype):
+    def make_kernel(total, payload_dtype):
+        @jit.incore
+        def factory_tuple(
+            inp: pl.Tensor[[total, 32], payload_dtype],
+            first: pl.InOut[pl.Tensor[[total, 32], payload_dtype]],
+            second: pl.InOut[pld.DistributedTensor[[total, 32], payload_dtype]],
+        ) -> tuple[pl.Tensor[[total, 32], payload_dtype], pld.DistributedTensor[[total, 32], payload_dtype]]:
+            for row in pl.range(4):
+                value = pl.load(inp, [row, 0], [1, 32])
+                first = pl.store(value, [row, 0], first)
+                second = pl.store(value, [row, 0], second)
+            return first, second
+
+        return factory_tuple
+
+    factory_tuple = make_kernel(4, payload_dtype)
+    assert {"total", "payload_dtype"}.isdisjoint(factory_tuple._func.__code__.co_freevars)
+
+    @jit
+    def entry(
+        inp: pl.Tensor[[4, 32], payload_dtype],
+        first: pl.InOut[pl.Tensor[[4, 32], payload_dtype]],
+        second: pl.InOut[pld.DistributedTensor[[4, 32], payload_dtype]],
+    ):
+        return factory_tuple(inp, first, second)
+
+    program = entry.specialize()
+    expected = (
+        ir.TensorType([4, 32], expected_dtype),
+        ir.DistributedTensorType([4, 32], expected_dtype),
+    )
+    for name, result_types in (
+        ("factory_tuple", expected),
+        ("entry", (ir.TupleType(list(expected)),)),
+    ):
+        function = program.get_function(name)
+        assert function is not None and len(function.return_types) == len(result_types)
+        for actual, result_type in zip(function.return_types, result_types, strict=True):
+            ir.assert_structural_equal(actual, result_type)
+
+
+def test_known_tuple_returns_ignore_unused_factory_annotation_fields():
+    def make_kernel():
+        ROWS = 4
+        padding = 1
+
+        @jit.inline
+        def known_tuple(
+            a: pl.Tensor, b: pl.Tensor, ROWS: pl.constexpr
+        ) -> tuple[pl.Tensor[[ROWS + padding, 32], pl.FP32], pl.Tensor[[ROWS + padding, 32], pl.FP32]]:
+            return a, b
+
+        return known_tuple
+
+    known_tuple = make_kernel()
+
+    @jit
+    def entry(a: pl.Tensor[[4, 32], pl.FP32], b: pl.Tensor[[4, 32], pl.FP32]):
+        return known_tuple(a, b, ROWS=8)
+
+    function = entry.specialize().get_function("known_tuple")
+    assert function is not None and len(function.return_types) == 2
+    for result_type in function.return_types:
+        ir.assert_structural_equal(result_type, ir.TensorType([4, 32], DataType.FP32))
+
+
+def test_tuple_factory_return_annotation_resolves_call_owned_constexpr():
+    def make_kernel(total):
+        WIDTH = 8
+
+        @jit.incore
+        def factory_tuple(
+            inp: pl.Tensor[[total, WIDTH], pl.FP32],
+            first: pl.InOut[pl.Tensor[[total, WIDTH], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[total, WIDTH], pl.FP32]],
+            WIDTH: pl.constexpr,
+        ) -> tuple[pl.Tensor[[total, WIDTH], pl.FP32], pl.Tensor[[total, WIDTH], pl.FP32]]:
+            for row in pl.range(4):
+                value = pl.load(inp, [row, 0], [1, WIDTH])
+                first = pl.store(value, [row, 0], first)
+                second = pl.store(value, [row, 0], second)
+            return first, second
+
+        return factory_tuple
+
+    factory_tuple = make_kernel(4)
+    assert "total" not in factory_tuple._func.__code__.co_freevars
+
+    @jit
+    def entry(
+        inp: pl.Tensor[[4, 64], pl.FP32],
+        first: pl.InOut[pl.Tensor[[4, 64], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[4, 64], pl.FP32]],
+    ):
+        return factory_tuple(inp, first, second, WIDTH=64)
+
+    program = entry.specialize()
+    expected = (ir.TensorType([4, 64], DataType.FP32),) * 2
+    for name, result_types in (
+        ("factory_tuple", expected),
+        ("entry", (ir.TupleType(list(expected)),)),
+    ):
+        function = program.get_function(name)
+        assert function is not None and len(function.return_types) == len(result_types)
+        for actual, result_type in zip(function.return_types, result_types, strict=True):
+            ir.assert_structural_equal(actual, result_type)
 
 
 if __name__ == "__main__":
