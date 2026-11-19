@@ -4791,33 +4791,86 @@ def test_chained_cast_preserves_declared_slot(planner, m, n):
     """The whole-cast and output-grid folds must preserve an explicit cast destination."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
-    source = f"""@pl.program
-class Before:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[{m}, 64], pl.BF16],
-        b: pl.Tensor[[64, {n}], pl.BF16],
-        e: pl.Tensor[[{n}, 16], pl.BF16],
-        out: pl.Out[pl.Tensor[[{m}, 16], pl.FP32]],
-    ) -> pl.Tensor[[{m}, 16], pl.FP32]:
-        at = pl.load(a, [0, 0], [{m}, 64], target_memory=pl.Mem.Mat)
-        bt = pl.load(b, [0, 0], [64, {n}], target_memory=pl.Mem.Mat)
-        et = pl.load(e, [0, 0], [{n}, 16], target_memory=pl.Mem.Mat)
-        c = pl.tile.matmul(at, bt)
-        cb: pl.Tile[[{m}, {n}], pl.BF16, pl.MemRef("cast_slots", slots=2)[0], pl.Mem.Vec] = (
-            pl.cast(c, pl.BF16, mode="rint")
-        )
-        result = pl.tile.matmul(cb, et)
-        return pl.store(result, [0, 0], out)
-"""
-    before = passes.convert_to_ssa()(pl.parse_program(source))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[m, 64], pl.BF16],
+            b: pl.Tensor[[64, n], pl.BF16],
+            e: pl.Tensor[[n, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[m, 16], pl.FP32]],
+        ) -> pl.Tensor[[m, 16], pl.FP32]:
+            at = pl.load(a, [0, 0], [m, 64], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [64, n], target_memory=pl.Mem.Mat)
+            et = pl.load(e, [0, 0], [n, 16], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(at, bt)
+            cb: pl.Tile[[m, n], pl.BF16, pl.MemRef("cast_slots", slots=2)[0], pl.Mem.Vec] = pl.cast(
+                c, pl.BF16, mode="rint"
+            )
+            result = pl.tile.matmul(cb, et)
+            return pl.store(result, [0, 0], out)
+
+    if m == 16:
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[m, 64], pl.BF16],
+                b: pl.Tensor[[64, n], pl.BF16],
+                e: pl.Tensor[[n, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[m, 16], pl.FP32]],
+            ) -> pl.Tensor[[m, 16], pl.FP32]:
+                at = pl.load(a, [0, 0], [m, 64], target_memory=pl.Mem.Mat)
+                bt = pl.load(b, [0, 0], [64, n], target_memory=pl.Mem.Mat)
+                et = pl.load(e, [0, 0], [n, 16], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(at, bt)
+                cb: pl.Tile[[m, n], pl.BF16, pl.MemRef("cast_slots", slots=2)[0], pl.Mem.Vec] = pl.cast(
+                    c, pl.BF16, mode="rint"
+                )
+                result = pl.tile.matmul(cb, et)
+                return pl.store(result, [0, 0], out)
+
+    else:
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[m, 64], pl.BF16],
+                b: pl.Tensor[[64, n], pl.BF16],
+                e: pl.Tensor[[n, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[m, 16], pl.FP32]],
+            ) -> pl.Tensor[[m, 16], pl.FP32]:
+                at = pl.load(a, [0, 0], [m, 64], target_memory=pl.Mem.Mat)
+                bt = pl.load(b, [0, 0], [64, n], target_memory=pl.Mem.Mat)
+                et = pl.load(e, [0, 0], [n, 16], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(at, bt)
+                cb: pl.Tile[[m, n], pl.BF16, pl.MemRef("cast_slots", slots=2)[0], pl.Mem.Vec] = pl.cast(
+                    c, pl.BF16, mode="rint"
+                )
+                seed = pl.tile.create([m, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                staged = pl.tile.move(cb, target_memory=pl.Mem.Mat)
+                for k, (acc,) in pl.pipeline(0, n, 64, stage=2, init_values=(seed,)):
+                    lhs = pl.tile.extract(staged, 0, k, [m, 64], target_memory=pl.Mem.Left)
+                    rhs = pl.tile.extract(et, k, 0, [64, 16], target_memory=pl.Mem.Right)
+                    partial = pl.tile.matmul_acc(acc, lhs, rhs, init_cond=(k == 0))
+                    result = pl.yield_(partial)
+                return pl.store(result, [0, 0], out)
+
+    before = passes.convert_to_ssa()(Before)
+    expected = passes.convert_to_ssa()(Expected)
     _verify_cast_fold_source(before)
     original = next(
         stmt.var for stmt in _cast_fold_assignments(before) if stmt.var.name_hint.startswith("cb__")
     )
     with passes.PassContext([], memory_planner=planner):
         after = passes.auto_tile_matmul_l0()(before)
+    ir.assert_structural_equal(after, expected)
     _assert_ssa_valid(after, "chained_cast_preserves_declared_slot")
     casts = [
         stmt
