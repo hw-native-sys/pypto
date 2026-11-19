@@ -162,7 +162,7 @@ class IndexedProblem {
   std::unordered_map<std::string, OpId> op_by_id_;
 };
 
-/// Demand-count and source-cost caches for O(degree) incremental move evaluation.
+/// Demand counts and conversion terms for incremental move evaluation.
 class IncrementalState {
  public:
   using ChoiceChange = std::pair<OpId, uint16_t>;
@@ -172,6 +172,7 @@ class IncrementalState {
       ValueId value;
       uint16_t source;
       std::vector<int> counts;
+      uint64_t demand_mask = 0;
     };
 
     double gain = 0.0;
@@ -192,26 +193,39 @@ class IncrementalState {
   bool ApplyImprovingBlock(const std::vector<ChoiceChange>& choices, double tolerance);
   [[nodiscard]] LayoutAssignment ToAssignment() const;
 
-  [[nodiscard]] double Cost() const { return cost_; }
+  [[nodiscard]] double Cost() const { return cost_.Value(); }
   [[nodiscard]] const std::vector<uint16_t>& Choices() const { return choices_; }
   [[nodiscard]] const std::vector<uint16_t>& Sources() const { return sources_; }
   [[nodiscard]] const std::vector<uint64_t>& DemandMasks() const { return demand_masks_; }
   [[nodiscard]] const std::vector<std::vector<int>>& Counts() const { return counts_; }
-  [[nodiscard]] const std::vector<std::vector<double>>& SourceCosts() const { return source_costs_; }
+  /// Diagnostic rows for the current demand masks. Call again after changing choices.
+  [[nodiscard]] const std::vector<std::vector<double>>& SourceCosts() const;
   [[nodiscard]] const IndexedProblem& Problem() const { return problem_; }
 
  private:
-  [[nodiscard]] double FactorCostDelta(ValueId value, uint16_t new_source, uint64_t new_mask) const;
+  struct CostSum {
+    void Add(double value);
+    void Replace(double before, double after);
+    [[nodiscard]] double Value() const { return sum + correction; }
+
+    double sum = 0.0;
+    double correction = 0.0;
+  };
+
+  void AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t old_source, uint64_t old_mask,
+                          uint16_t new_source, uint64_t new_mask) const;
+  void RebuildSourceCosts(ValueId value) const;
+  void CommitFactor(ValueId value, uint64_t old_mask, uint16_t new_source);
   void UpdateDemandCount(ValueId value, uint16_t layout, int delta);
-  void UpdateCost(double gain);
 
   const IndexedProblem& problem_;
   std::vector<uint16_t> choices_;
   std::vector<uint16_t> sources_;
   std::vector<uint64_t> demand_masks_;
   std::vector<std::vector<int>> counts_;
-  std::vector<std::vector<double>> source_costs_;
-  double cost_ = 0.0;
+  mutable std::vector<std::vector<double>> source_costs_;
+  mutable std::vector<uint64_t> source_cost_masks_;
+  CostSum cost_;
 };
 
 /// Compute heuristic min-fill width and DP state-space statistics for `instance`.
@@ -222,7 +236,7 @@ LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
                                const std::optional<LayoutAssignment>& initial = std::nullopt,
                                const LayoutSolverConfig& config = {});
 
-/// Topologically initialize layouts, then seed best-prefix FM at the lowest-ID movable op of each component.
+/// Retain a greedy incumbent and try best-prefix FM from the topological seed, within one budget.
 /// Single-op and fan-out moves compete at each frontier step.
 LayoutSolverResult SolveGreedyFM(const LayoutProblemInstance& instance,
                                  const LayoutSolverConfig& config = {});

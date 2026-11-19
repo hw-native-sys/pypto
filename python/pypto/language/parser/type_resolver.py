@@ -2068,11 +2068,15 @@ class TypeResolver:
                 tv.layout = self.resolve_layout(kw.value)
             elif kw.arg == "pad":
                 tv.pad = self._resolve_padvalue(kw.value)
+            elif kw.arg == "nz_blocked":
+                if not isinstance(kw.value, ast.Constant) or type(kw.value.value) is not bool:
+                    raise ParserTypeError("nz_blocked must be a boolean literal", span=self._get_span(kw))
+                tv.nz_blocked = kw.value.value
             else:
                 raise ParserTypeError(
                     f"Unknown TensorView keyword argument: {kw.arg!r}",
                     span=self._get_span(kw),
-                    hint="Supported: valid_shape, stride, layout, pad",
+                    hint="Supported: valid_shape, stride, layout, pad, nz_blocked",
                 )
         return tv
 

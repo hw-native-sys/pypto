@@ -53,6 +53,25 @@ const std::unordered_set<std::string>& ColReductionOps();
 const std::unordered_set<std::string>& OtherRowExpandOps();
 const std::unordered_set<std::string>& ColExpandOps();
 
+/// Tile operands in call order, retaining their original registry argument positions.
+std::vector<std::pair<size_t, VarPtr>> TileOperands(const CallPtr& call);
+
+/// Whether the registry identifies a tile operand as scratch, independent of its data shape.
+bool IsTileWorkspace(const CallPtr& call, size_t index);
+
+/// Whether this call may run as flat elementwise work over an NZ physical buffer.
+bool CanUseVecNzPointwise(const CallPtr& call);
+
+/// Whether the operation depends on its original logical/carrier descriptors.
+bool PreservesTileDescriptors(const CallPtr& call);
+
+/// Whether a row sum reduces one valid element per row of a dense compact column.
+bool CanCopySingletonRowSum(const CallPtr& call);
+
+/// Geometry shared by flat Vec transpose extraction and materialization.
+ValueNode VecTransposeGeometry(const TileTypePtr& tile);
+bool AliasesFirstTileOperand(const CallPtr& call);
+
 /// Return true if the configured backend requires `input_index` of `op_name` to be `row_major`.
 bool HasRowMajorInputRequirement(const std::string& op_name, size_t input_index);
 
@@ -60,9 +79,13 @@ bool HasRowMajorInputRequirement(const std::string& op_name, size_t input_index)
 
 /// Call-site and static invocation multiplicity metadata gathered from Orchestration functions.
 struct OrchCallAnalysis {
+  using GmNames = std::unordered_map<const Var*, std::string>;
+
   struct CallSite {
     std::vector<std::optional<std::string>> arg_names;
     int64_t multiplicity = 1;
+    GmNames gm_names;
+    std::vector<const Expr*> calls;
   };
 
   std::unordered_map<std::string, int64_t> call_counts;
@@ -74,6 +97,8 @@ struct OrchCallAnalysis {
   std::unordered_set<std::string> nz_ineligible_names;
   std::unordered_set<std::string> dn_ineligible_names;
   std::unordered_set<std::string> internal_buffers;
+  std::unordered_set<std::string> external_outputs;
+  GmNames gm_names;
 };
 
 /// Analyze Orchestration functions in `program` for static call multiplicities and GM aliases.

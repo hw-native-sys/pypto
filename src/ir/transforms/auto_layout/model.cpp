@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -44,6 +45,12 @@ void HashCombine(size_t& seed, size_t v) noexcept {
 bool IsColMajor32BAligned(const std::vector<int64_t>& shape, DataType dtype) {
   const int bpe = DTypeByteWidthSafe(dtype);
   return bpe > 0 && shape.size() == 2 && shape[0] > 1 && (shape[0] * bpe) % 32 == 0;
+}
+
+bool SupportsFlatVecTransposeDtype(DataType dtype) {
+  return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32 ||
+         dtype == DataType::INT8 || dtype == DataType::UINT8 || dtype == DataType::INT16 ||
+         dtype == DataType::UINT16 || dtype == DataType::INT32 || dtype == DataType::UINT32;
 }
 
 bool ContainsLayout(const std::vector<LayoutSpec>& layouts, const LayoutSpec& target) {
@@ -208,6 +215,11 @@ int DTypeByteWidth(DataType dtype) {
   return width;
 }
 
+bool IsFlatVecTransposePair(const LayoutSpec& source, const LayoutSpec& destination) {
+  return (source == LayoutSpec::RowMajorFlat() && destination == LayoutSpec::ColMajorFlat()) ||
+         (source == LayoutSpec::ColMajorFlat() && destination == LayoutSpec::RowMajorFlat());
+}
+
 bool IsNzCompatibleShape(const std::vector<int64_t>& shape, DataType dtype) {
   if (shape.size() != 2 && shape.size() != 3) {
     return false;
@@ -288,6 +300,9 @@ double LayoutCostModel::EstimateVbrcbCost(int64_t rows) const {
 
 bool LayoutCostModel::IsValidLoadConfig(const ValueNode& src_node, const ValueNode& dst_node,
                                         const LayoutSpec& src_layout, const LayoutSpec& dst_layout) const {
+  if (src_node.dtype.IsPackedFp4() || dst_node.dtype.IsPackedFp4()) {
+    return src_layout == src_node.current_layout && dst_layout == dst_node.current_layout;
+  }
   if (dst_node.memory_space == MemorySpace::Mat) {
     if (src_layout == src_node.current_layout && src_node.admissible_layouts.size() == 1) {
       return dst_layout == dst_node.current_layout;
@@ -330,6 +345,9 @@ bool LayoutCostModel::IsValidLoadConfig(const ValueNode& src_node, const ValueNo
 bool LayoutCostModel::IsValidVecStoreConfig(const ValueNode& src_node, const ValueNode& dst_node,
                                             const LayoutSpec& src_layout,
                                             const LayoutSpec& dst_layout) const {
+  if (src_node.dtype.IsPackedFp4() || dst_node.dtype.IsPackedFp4()) {
+    return src_layout == src_node.current_layout && dst_layout == dst_node.current_layout;
+  }
   if (src_layout == LayoutSpec::RowBcastFlat()) {
     return false;
   }
@@ -358,6 +376,23 @@ bool LayoutCostModel::IsValidMoveConfig(const ValueNode& src_node, const ValueNo
                                         const LayoutSpec& src_layout, const LayoutSpec& dst_layout) const {
   if (!src_layout.IsTile() || !dst_layout.IsTile()) {
     return false;
+  }
+  if (src_node.dtype.IsPackedFp4() || dst_node.dtype.IsPackedFp4()) {
+    // Packed moves can change the carrier shape as well as the layout. The
+    // original descriptor pair was validated when the IR call was built.
+    if (src_layout != src_node.current_layout || dst_layout != dst_node.current_layout) return false;
+    if (src_node.memory_space == MemorySpace::Vec && dst_node.memory_space == MemorySpace::Vec) {
+      return src_layout == LayoutSpec::RowMajorFlat() && dst_layout == LayoutSpec::FractalNZ();
+    }
+    return true;
+  }
+  if (src_node.memory_space == MemorySpace::Vec && dst_node.memory_space == MemorySpace::Vec &&
+      IsFlatVecTransposePair(src_layout, dst_layout)) {
+    // Preserve an explicit relayout. New repacking is handled as a separate
+    // materialization so the solver can account for its workspace.
+    return src_layout == src_node.current_layout && dst_layout == dst_node.current_layout &&
+           src_node.dtype == dst_node.dtype && src_node.shape == dst_node.shape &&
+           dst_node.has_dense_vec_span && SupportsVecTileConversion(src_node, src_layout, dst_layout);
   }
   if (src_node.memory_space == MemorySpace::Mat && dst_node.memory_space == MemorySpace::Left) {
     return src_layout == src_node.current_layout && dst_layout == dst_node.current_layout;
@@ -414,9 +449,14 @@ double LayoutCostModel::EstimateLoadCost(const ValueNode& src_node, const ValueN
                                    mte2_vec_strided_bytes_per_cycle);
 }
 
-double LayoutCostModel::EstimateMoveCost(const ValueNode& /*src_node*/, const ValueNode& dst_node,
+double LayoutCostModel::EstimateMoveCost(const ValueNode& src_node, const ValueNode& dst_node,
                                          const LayoutSpec& src_layout, const LayoutSpec& dst_layout) const {
   const double total_bytes = static_cast<double>(dst_node.ByteSize());
+  if (src_node.memory_space == MemorySpace::Vec && dst_node.memory_space == MemorySpace::Vec) {
+    const bool transpose = IsFlatVecTransposePair(src_layout, dst_layout);
+    return (transpose ? vec_transpose_fixed_cycles : 0.0) +
+           (transpose ? 2.0 : 1.0) * total_bytes / onchip_relayout_bytes_per_cycle;
+  }
   double bw = mte1_l1_to_l0_bytes_per_cycle;
   if (dst_node.memory_space == MemorySpace::Left) {
     bw = mte1_l0a_bytes_per_cycle;
@@ -470,7 +510,7 @@ double LayoutCostModel::EstimateStoreCost(const ValueNode& src_node, const Value
 
 bool LayoutCostModel::SupportsVecTileConversion(const ValueNode& val_node, const LayoutSpec& src_layout,
                                                 const LayoutSpec& dst_layout) const {
-  if (val_node.memory_space != MemorySpace::Vec || src_layout == dst_layout) {
+  if (val_node.memory_space != MemorySpace::Vec || src_layout == dst_layout || val_node.dtype.IsPackedFp4()) {
     return false;
   }
   if (!src_layout.IsTile() || !dst_layout.IsTile()) {
@@ -478,22 +518,27 @@ bool LayoutCostModel::SupportsVecTileConversion(const ValueNode& val_node, const
   }
   // A2/A3 non-Mat TMOV requires identical physical shapes. A strided subview
   // retains its backing pitch in PTOAS, while the writer allocates a compact
-  // conversion destination. The writer's metadata-only reshape for vectors
-  // likewise cannot change the view's stride.
+  // conversion destination.
   if (val_node.is_strided_subview && TargetArch() == "a2a3") {
     return false;
   }
   if (src_layout == LayoutSpec::FractalNZ() || dst_layout == LayoutSpec::FractalNZ()) {
     return false;
   }
-  if ((src_layout == LayoutSpec::RowMajorFlat() && dst_layout == LayoutSpec::ColMajorFlat()) ||
-      (src_layout == LayoutSpec::ColMajorFlat() && dst_layout == LayoutSpec::RowMajorFlat())) {
-    const bool is_reshape = val_node.shape.size() == 2 && (val_node.shape[0] == 1 || val_node.shape[1] == 1);
-    return is_reshape || !val_node.vec_conversion_headroom ||
-           static_cast<uint64_t>(val_node.ByteSize()) <= *val_node.vec_conversion_headroom;
+  if (IsFlatVecTransposePair(src_layout, dst_layout)) {
+    // Both contiguous axes must satisfy 32-byte alignment. The conversion
+    // emits a TTRANS destination plus separate source-shaped scratch.
+    const int bytes = DTypeByteWidthSafe(val_node.dtype);
+    if (!SupportsFlatVecTransposeDtype(val_node.dtype) || !val_node.has_dense_vec_span ||
+        val_node.is_strided_subview || (src_layout == LayoutSpec::ColMajorFlat() && val_node.is_vec_slice) ||
+        !IsColMajor32BAligned(val_node.shape, val_node.dtype) || val_node.shape[1] <= 1 ||
+        val_node.shape[1] % (32 / bytes) != 0) {
+      return false;
+    }
+    return !val_node.vec_conversion_headroom ||
+           static_cast<uint64_t>(val_node.ByteSize()) <= *val_node.vec_conversion_headroom / 2;
   }
-  if (dst_layout == LayoutSpec::RowBcastFlat() &&
-      (src_layout == LayoutSpec::ColMajorFlat() || src_layout == LayoutSpec::RowMajorFlat())) {
+  if (dst_layout == LayoutSpec::RowBcastFlat() && src_layout == LayoutSpec::ColMajorFlat()) {
     return val_node.shape.size() == 2 && val_node.shape[1] == 1 && val_node.shape[0] > 1 &&
            ContainsLayout(val_node.admissible_layouts, LayoutSpec::RowBcastFlat()) &&
            (!val_node.vec_conversion_headroom ||
@@ -518,17 +563,12 @@ double LayoutCostModel::EstimateConversionCost(const ValueNode& val_node, const 
     if (dst_layout == LayoutSpec::RowBcastFlat()) {
       const int64_t rows = val_node.shape[0];
       const int c0 = C0Elements(val_node.dtype);
-      const double extra_reshape =
-          (src_layout == LayoutSpec::RowMajorFlat()) ? vec_reshape_metadata_cycles : 0.0;
-      return extra_reshape + vec_row_expand_issue_cycles +
-             static_cast<double>(rows * c0) / vec_elements_per_cycle + EstimateVbrcbCost(rows);
+      return vec_row_expand_issue_cycles + static_cast<double>(rows * c0) / vec_elements_per_cycle +
+             EstimateVbrcbCost(rows);
     }
-    if (((src_layout == LayoutSpec::RowMajorFlat() && dst_layout == LayoutSpec::ColMajorFlat()) ||
-         (src_layout == LayoutSpec::ColMajorFlat() && dst_layout == LayoutSpec::RowMajorFlat())) &&
-        val_node.shape.size() == 2 && (val_node.shape[0] == 1 || val_node.shape[1] == 1)) {
-      return vec_reshape_metadata_cycles;
-    }
-    return vec_transpose_fixed_cycles + (total_bytes / onchip_relayout_bytes_per_cycle);
+    // TTRANS reads the original tile and writes its transposed copy. The
+    // companion transpose view simply reinterprets the same allocation.
+    return vec_transpose_fixed_cycles + (2.0 * total_bytes / onchip_relayout_bytes_per_cycle);
   }
   return vec_unsupported_conversion_cycles;
 }
@@ -553,12 +593,15 @@ double LayoutProblemInstance::EstimateConversionCost(const ValueNode& val_node, 
   if (src_layout == dst_layout) {
     return 0.0;
   }
+  if (val_node.dtype.IsPackedFp4()) return cost_model.vec_unsupported_conversion_cycles;
   auto val_it = custom_conversion_costs.find(val_node.name);
   if (val_it != custom_conversion_costs.end()) {
     auto pair_it = val_it->second.find(std::make_pair(src_layout, dst_layout));
     if (pair_it != val_it->second.end()) {
       // Measured costs override prices only for materializable conversions.
-      if (((val_node.is_strided_subview && cost_model.TargetArch() == "a2a3") ||
+      if (val_node.memory_space == MemorySpace::Vec &&
+          (forbid_unmaterializable_gm_conversions ||
+           (val_node.is_strided_subview && cost_model.TargetArch() == "a2a3") ||
            val_node.vec_conversion_headroom.has_value()) &&
           !cost_model.SupportsVecTileConversion(val_node, src_layout, dst_layout)) {
         return cost_model.vec_unsupported_conversion_cycles;
@@ -588,21 +631,33 @@ double OperatorCostMultiplier(const LayoutProblemInstance& instance, const Opera
   return static_cast<double>(op.invocations) * load_scale;
 }
 
+bool CanShareOnChipConversion(int64_t source_invocations, int64_t consumer_invocations) {
+  if (consumer_invocations == 0) return true;
+  return source_invocations > 0 && consumer_invocations >= source_invocations &&
+         (consumer_invocations == std::numeric_limits<int64_t>::max() ||
+          consumer_invocations % source_invocations == 0);
+}
+
 double ConversionMultiplier(const LayoutProblemInstance& instance, const ValueNode& value,
                             const std::unordered_map<std::string, const OperationNode*>& ops_by_id,
                             const std::vector<int64_t>& conversion_invocations) {
   if (value.memory_space == MemorySpace::DDR && value.is_reusable_weight) {
     return 1.0;
   }
-  if (value.memory_space != MemorySpace::DDR && value.producer_op_id.has_value()) {
-    const auto prod_it = ops_by_id.find(*value.producer_op_id);
-    if (prod_it == ops_by_id.end()) {
-      throw pypto::ValueError("Unknown producer_op_id '" + *value.producer_op_id + "' for value '" +
-                              value.name + "'");
+  if (value.memory_space != MemorySpace::DDR && (value.conversion_invocations || value.producer_op_id)) {
+    int64_t producer_invocations;
+    if (value.conversion_invocations) {
+      producer_invocations = *value.conversion_invocations;
+    } else {
+      const auto prod_it = ops_by_id.find(*value.producer_op_id);
+      if (prod_it == ops_by_id.end()) {
+        throw pypto::ValueError("Unknown producer_op_id '" + *value.producer_op_id + "' for value '" +
+                                value.name + "'");
+      }
+      producer_invocations = prod_it->second->invocations;
     }
-    const int64_t producer_invocations = prod_it->second->invocations;
     for (int64_t count : conversion_invocations) {
-      if (count < producer_invocations || producer_invocations <= 0 || (count % producer_invocations) != 0) {
+      if (!CanShareOnChipConversion(producer_invocations, count)) {
         throw pypto::ValueError("On-chip conversion for '" + value.name +
                                 "' has differing producer/consumer execution counts; producer=" +
                                 std::to_string(producer_invocations) +
@@ -734,9 +789,9 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
     }
     auto prod_it = produced_layout.find(val_name);
     const LayoutSpec src_lay = prod_it != produced_layout.end() ? prod_it->second : val_node->current_layout;
-    const bool is_onchip_produced =
-        val_node->memory_space != MemorySpace::DDR && val_node->producer_op_id.has_value();
-    int64_t prod_inv = 0;
+    const bool has_onchip_placement = val_node->memory_space != MemorySpace::DDR &&
+                                      (val_node->conversion_invocations || val_node->producer_op_id);
+    int64_t prod_inv = val_node->conversion_invocations.value_or(0);
     std::vector<LayoutSpec> source_layouts;
     if (val_node->producer_op_id.has_value()) {
       const auto p_op_it = ops_by_id.find(*val_node->producer_op_id);
@@ -744,7 +799,7 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
         throw pypto::ValueError("Unknown producer_op_id '" + *val_node->producer_op_id + "' for value '" +
                                 val_node->name + "'");
       }
-      if (is_onchip_produced) {
+      if (has_onchip_placement && !val_node->conversion_invocations) {
         prod_inv = p_op_it->second->invocations;
       }
       for (const auto& cfg : p_op_it->second->configs) {
@@ -766,8 +821,7 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
     std::set<LayoutSpec> incompatible_targets;
     if (consumers != nullptr) {
       for (const auto* cop : *consumers) {
-        const bool inv_compat = !is_onchip_produced || (cop->invocations >= prod_inv && prod_inv > 0 &&
-                                                        (cop->invocations % prod_inv) == 0);
+        const bool inv_compat = !has_onchip_placement || CanShareOnChipConversion(prod_inv, cop->invocations);
         for (const auto& cfg : cop->configs) {
           bool any_diff = false;
           for (size_t i = 0; i < cop->inputs.size(); ++i) {
@@ -799,8 +853,8 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
                                           [&](const LayoutSpec& s) { return s != b_lay; });
       if (diff_for_b) {
         all_conv_invs_set.insert(model.expected_uses);
-        const bool b_compat = !is_onchip_produced || (model.expected_uses >= prod_inv && prod_inv > 0 &&
-                                                      (model.expected_uses % prod_inv) == 0);
+        const bool b_compat =
+            !has_onchip_placement || CanShareOnChipConversion(prod_inv, model.expected_uses);
         if (b_compat) {
           compat_conv_invs_set.insert(model.expected_uses);
         } else {
@@ -849,7 +903,9 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
     double val_conv = 0.0;
     for (const auto& dst_lay : req_set) {
       if (dst_lay != src_lay) {
-        if (incompatible_targets.count(dst_lay) != 0) {
+        if (incompatible_targets.count(dst_lay) != 0 ||
+            (multiplier == 0 && val_node->memory_space == MemorySpace::Vec &&
+             !model.SupportsVecTileConversion(*val_node, src_lay, dst_lay))) {
           val_conv += model.vec_unsupported_conversion_cycles;
         } else {
           val_conv += multiplier * instance.EstimateConversionCost(*val_node, src_lay, dst_lay);

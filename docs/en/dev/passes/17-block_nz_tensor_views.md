@@ -83,7 +83,14 @@ so the logical window is still intact when this pass runs.
 
 ## Behavior
 
-**Phase 1 — block every NZ `TensorType` shape.**
+The pass marks each blocked `TensorView` with `nz_blocked=True`. This
+metadata is preserved in textual and binary IR. A function can then contain
+blocked tensors alongside newly promoted logical NZ tensors, and a second pass
+only rewrites the logical ones and their coordinates. Legacy IR with the
+`nz_tensor_views_blocked` function attribute is migrated to per-view markers
+without rewriting any coordinates.
+
+**Phase 1 — block each logical NZ `TensorType` shape.**
 
 ```text
 # before

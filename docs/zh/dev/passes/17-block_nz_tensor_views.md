@@ -75,7 +75,12 @@ batch 具化为 `1`。PTOAS 直接校验这个 arity——rank-4 的 view 会被
 
 ## 行为
 
-**阶段 1 —— 对每个 NZ `TensorType` 的 shape 分块。**
+本 pass 为每个已分块的 `TensorView` 设置 `nz_blocked=True`，文本及二进制 IR
+都会保留该标记。同一个函数可以同时包含已分块的张量和新选出的逻辑 NZ 张量，
+再次运行本 pass 时只改写后者及其坐标。读取带有 `nz_tensor_views_blocked`
+函数属性的旧版 IR 时，编译器会迁移到逐 view 标记，已有坐标保持原样。
+
+**阶段 1 —— 对每个逻辑 NZ `TensorType` 的 shape 分块。**
 
 ```text
 # before

@@ -458,6 +458,10 @@ bool IRPythonPrinter::HasStorageType(const TypePtr& type) {
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Call has null op";
   auto distributed_type = As<DistributedTensorType>(op->GetType());
+  const auto tensor_result = AsTensorTypeLike(op->GetType());
+  const bool recorded_nz_result = tensor_result && tensor_result->tensor_view_ &&
+                                  tensor_result->tensor_view_->nz_blocked &&
+                                  (IsOp(op, "tensor.create") || IsOp(op, "tensor.view"));
   // Type deduction may propagate an operand's allocation into the result,
   // while the recorded call retains an allocation-free value type. Preserve
   // the recorded type using the existing lossless dump form.
@@ -474,7 +478,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // recorded Call. Type expressions use a separate printer and keep their DSL
   // spelling, as do Inline/InCore functions whose parser does not fold reads.
   const bool dimension_call = orchestration_function_ && IsOp(op, "tensor.dim");
-  if (!storage_call && !folded_flag && !dimension_call &&
+  if (!storage_call && !recorded_nz_result && !folded_flag && !dimension_call &&
       (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value()))) {
     PrintCall(op);
     return;

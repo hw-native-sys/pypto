@@ -2373,5 +2373,51 @@ def test_rejects_a_dynamic_leading_extent_when_folding(dynamic_axis):
         passes.block_nz_tensor_views()(Before)
 
 
+def test_logical_rank_five_nz_with_block_sized_trailing_dimensions(ascend_backend):
+    @pl.program
+    class Logical:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self, tensor: pl.Tensor[[2, 3, 4, 16, 16], pl.FP16, pl.NZ]
+        ) -> pl.Tensor[[2, 3, 4, 16, 16], pl.FP16, pl.NZ]:
+            return tensor
+
+    blocked = passes.block_nz_tensor_views()(Logical)
+    assert _shape_values(next(iter(blocked.functions.values())).params[0]) == [24, 1, 1, 16, 16]
+    ir.assert_structural_equal(passes.block_nz_tensor_views()(blocked), blocked)
+
+
+def test_blocked_descriptor_survives_roundtrip_and_function_cloning(ascend_backend):
+    @pl.program
+    class Logical:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, tensor: pl.Tensor[[64, 64], pl.FP32, pl.NZ]) -> pl.Tensor[[64, 64], pl.FP32, pl.NZ]:
+            return tensor
+
+    blocked = passes.block_nz_tensor_views()(Logical)
+    # Moving the physical descriptor into another function must preserve the
+    # fact that its coordinates are already blocked, also after persistence.
+    for restored in (ir.deserialize(ir.serialize(blocked)), pl.parse_program(blocked.as_python())):
+        assert isinstance(restored, ir.Program)
+        fn = next(iter(restored.functions.values()))
+        fresh = ir.Function("fresh", fn.params, fn.return_types, fn.body, fn.span, fn.func_type)
+        lowered = passes.block_nz_tensor_views()(ir.Program([fresh], "fresh", fn.span))
+        assert _shape_values(next(iter(lowered.functions.values())).params[0]) == [1, 8, 4, 16, 8]
+
+
+@pytest.mark.parametrize("shape", [[64, 64], [1, 8, 4, 16, 16]])
+def test_rejects_invalid_blocked_nz_descriptor(shape, ascend_backend):
+    # A logical rank and a physical shape with the wrong C0 both lack the
+    # canonical NZ geometry required by the claimed coordinate representation.
+    @pl.program
+    class Invalid:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, tensor: pl.Tensor[shape, pl.FP32, pl.TensorView(layout=pl.NZ, nz_blocked=True)]):
+            return tensor
+
+    with pytest.raises(ValueError, match="nz_blocked=True requires a physical rank-5 NZ shape"):
+        passes.block_nz_tensor_views()(Invalid)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

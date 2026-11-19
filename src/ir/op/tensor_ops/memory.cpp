@@ -34,6 +34,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -303,7 +304,9 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   std::optional<TensorView> result_tv;
   if (!result_strides.empty() || result_layout != TensorLayout::ND ||
       !AreExprVectorsEqual(valid_shape, new_shape) || result_pad != PadValue::null) {
-    result_tv = TensorView(std::move(result_strides), result_layout, valid_shape, result_pad);
+    const bool nz_blocked =
+        result_layout == TensorLayout::NZ && tensor_view_semantics::IsNzBlocked(*tensor_type);
+    result_tv = TensorView(std::move(result_strides), result_layout, valid_shape, result_pad, nz_blocked);
   }
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
     return std::make_shared<DistributedTensorType>(new_shape, tensor_type->dtype_, std::nullopt,

@@ -478,6 +478,9 @@ class TensorView:
     pad: PadValue
     """Pad mode for out-of-valid-shape accesses (default PadValue.null)."""
 
+    nz_blocked: bool
+    """Whether NZ uses physical fractal coordinates."""
+
     @overload
     def __init__(self) -> None:
         """Create an empty tensor view with default ND layout."""
@@ -489,12 +492,13 @@ class TensorView:
         layout: TensorLayout | None = ...,
         valid_shape: Sequence[Expr | int | Scalar] | None = ...,
         pad: PadValue = ...,
+        nz_blocked: bool = ...,
     ) -> None:
         """Create a tensor view with stride, layout, optional valid shape, and optional pad.
 
         Models the ``pypto.ir`` factory surface: every field is optional
         (stride/valid_shape default to empty), but ``layout`` is required
-        whenever any other field is given. Scalars/DynVars are unwrapped to
+        whenever another field is given. Scalars/DynVars are unwrapped to
         their expressions and ints to ConstInt by the factory.
 
         Args:
@@ -502,6 +506,7 @@ class TensorView:
             layout: Tensor layout type (ND, DN, or NZ)
             valid_shape: Valid shape for each dimension (optional, defaults to empty)
             pad: Pad mode for out-of-valid-shape accesses (defaults to PadValue.null)
+            nz_blocked: Whether the NZ view already uses physical coordinates
         """
 
 class _TensorViewSemanticsModule:

@@ -180,16 +180,15 @@ void TestCostModelHardwareEquations() {
   Require(
       a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(), al::LayoutSpec::RowBcastFlat()),
       "Vec [32,1] must support conversion to ROW_BCAST_FLAT");
-  RequireNear(
-      a2a3.EstimateConversionCost(vec_col, al::LayoutSpec::ColMajorFlat(), al::LayoutSpec::RowMajorFlat()),
-      a2a3.vec_reshape_metadata_cycles, 1e-9, "1D [32,1]<->[1,32] conversion must use reshape cost");
-
-  // The same vector can still change orientation by reshape when no storage
-  // remains. Expanding it requires a separate 32-byte block for every row.
+  // Transposing [32, 1] to [1, 32] changes the reduction axis. Keeping
+  // [32, 1] in row-major is also unaligned and cannot use a compact TMOV.
+  Require(!a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(),
+                                          al::LayoutSpec::RowMajorFlat()),
+          "A compact column cannot be relaid out without changing its shape");
   vec_col.vec_conversion_headroom = 0;
-  Require(
-      a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(), al::LayoutSpec::RowMajorFlat()),
-      "Metadata-only orientation changes must remain feasible without scratch");
+  Require(!a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(),
+                                          al::LayoutSpec::RowBcastFlat()),
+          "Broadcast requires separate storage even for a compact column");
   vec_col.vec_conversion_headroom = 1023;
   Require(!a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(),
                                           al::LayoutSpec::RowBcastFlat()),
@@ -211,6 +210,48 @@ void TestCostModelHardwareEquations() {
                                               al::LayoutSpec::RowBcastFlat()),
               a2a3.vec_unsupported_conversion_cycles, 1e-9,
               "A price override cannot provide missing Vec storage");
+
+  auto matrix = MakeValue("matrix", "load", MemorySpace::Vec, false, false,
+                          {al::LayoutSpec::RowMajorFlat(), al::LayoutSpec::ColMajorFlat()});
+  matrix.shape = {16, 32};
+  matrix.dtype = DataType::FP32;
+  const auto row = al::LayoutSpec::RowMajorFlat();
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  matrix.vec_conversion_headroom = 2 * matrix.ByteSize() - 1;
+  Require(!a2a3.SupportsVecTileConversion(matrix, row, col),
+          "TTRANS requires enough space for both temporary and destination tiles");
+  matrix.vec_conversion_headroom = 2 * matrix.ByteSize();
+  Require(
+      a2a3.SupportsVecTileConversion(matrix, row, col) && a2a3.SupportsVecTileConversion(matrix, col, row),
+      "A rectangular dense tile can use either transpose/view ordering");
+  RequireNear(
+      a2a3.EstimateConversionCost(matrix, row, col),
+      a2a3.vec_transpose_fixed_cycles + 2.0 * matrix.ByteSize() / a2a3.onchip_relayout_bytes_per_cycle, 1e-9,
+      "The conversion charges transpose traffic, with a zero-copy dual view");
+  matrix.is_vec_slice = true;
+  Require(
+      a2a3.SupportsVecTileConversion(matrix, row, col) && !a2a3.SupportsVecTileConversion(matrix, col, row),
+      "A compact subview can feed TTRANS but cannot feed its transposed dual");
+
+  auto packed = MakeValue("packed", "pack", MemorySpace::Vec, false, false,
+                          {al::LayoutSpec::RowMajorFlat(), al::LayoutSpec::ColMajorFlat()});
+  packed.shape = {32, 64};
+  packed.dtype = DataType::FP4E2M1X2;
+  packed.current_layout = al::LayoutSpec::RowMajorFlat();
+  auto boxed = packed;
+  boxed.shape = {16, 128};
+  boxed.current_layout = al::LayoutSpec::FractalNZ();
+  Require(a5.IsValidMoveConfig(packed, boxed, packed.current_layout, boxed.current_layout),
+          "The explicit packed ND-to-NZ move can retarget its byte-carrier shape");
+  Require(!a5.IsValidMoveConfig(packed, boxed, al::LayoutSpec::ColMajorFlat(), boxed.current_layout),
+          "An alternate packed source layout cannot reuse the validated descriptor pair");
+  pressure.cost_model = a5;
+  pressure.custom_conversion_costs[packed.name]
+                                  [{al::LayoutSpec::RowMajorFlat(), al::LayoutSpec::ColMajorFlat()}] = 0;
+  RequireNear(
+      pressure.EstimateConversionCost(packed, al::LayoutSpec::RowMajorFlat(), al::LayoutSpec::ColMajorFlat()),
+      a5.vec_unsupported_conversion_cycles, 1e-9,
+      "A price override cannot introduce an unsupported packed Vec conversion");
 
   auto vec_bool = MakeValue("mask", "cmp", MemorySpace::Vec, false, false, {al::LayoutSpec::RowMajorFlat()});
   vec_bool.shape = {16, 32};
@@ -405,6 +446,87 @@ void TestIncrementalStateAndAsymmetricCosts() {
   }
 }
 
+void TestConversionPenaltyRollbackPreservesSmallCosts() {
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  const auto dn = al::LayoutSpec::DN();
+  al::LayoutProblemInstance instance;
+  instance.forbid_unmaterializable_gm_conversions = true;
+  instance.AddValue(MakeValue("input", "P", MemorySpace::DDR, false, false, {nd, nz, dn}));
+  instance.AddValue(MakeValue("a", "A"));
+  instance.AddValue(MakeValue("b", "B"));
+  instance.custom_conversion_costs["input"][{nd, nz}] = 0.1;
+  instance.operations = {
+      MakeOp("P", {}, "input", {{{}, nd, 400003.9}}),
+      MakeOp("A", {"input"}, "a", {{{nz}, nd, 0.0}, {{nd}, nd, 0.0}}),
+      MakeOp("B", {"input"}, "b", {{{nd}, nd, 0.0}, {{dn}, nd, 0.0}}),
+  };
+  const al::IndexedProblem problem(instance);
+  al::IncrementalState state(problem, {0, 0, 0});
+  const auto original_rows = state.SourceCosts();
+  const auto penalty = instance.cost_model.vec_unsupported_conversion_cycles;
+  const auto verify_rollback = [&]() {
+    Require(state.SourceCosts() == original_rows, "A penalty must not damage the other conversion terms");
+    const double independent = al::EvaluateAssignment(instance, state.ToAssignment()).total_cost_cycles;
+    RequireNear(state.Cost(), independent, 1e-9, "Rollback must agree with the independent evaluator");
+    RequireNear(state.Cost(), 400004.0, 1e-9, "Keep the full normal cost after removing the penalty");
+  };
+  for (int i = 0; i < 2; ++i) {
+    RequireNear(state.Gain(2, 1), -penalty, 1e-9, "A singleton adds only the large conversion");
+    state.Apply(2, 1);
+    RequireNear(state.Gain(1, 1), 0.1, 1e-12, "An active penalty cannot hide a small singleton gain");
+    (void)state.SourceCosts();
+    state.Apply(2, 0);
+    verify_rollback();
+
+    const std::vector<al::IncrementalState::ChoiceChange> block{{1, 1}, {2, 1}};
+    const auto evaluation = state.EvaluateBlock(block);
+    RequireNear(evaluation.gain, 0.1 - penalty, 1e-9, "A block replaces the small cost with the penalty");
+    state.ApplyBlock(block, evaluation);
+    RequireNear(state.Gain(1, 0), -0.1, 1e-12, "A small gain stays precise after a joint move");
+    (void)state.SourceCosts();
+    const std::vector<al::IncrementalState::ChoiceChange> undo{{1, 0}, {2, 0}};
+    state.ApplyBlock(undo, state.EvaluateBlock(undo));
+    verify_rollback();
+  }
+}
+
+void TestFMRetainsGreedyIncumbent() {
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  al::LayoutProblemInstance instance;
+  instance.AddValue(MakeValue("a", "A"));
+  instance.AddValue(MakeValue("p", "P"));
+  instance.AddValue(MakeValue("q", "Q"));
+  for (const std::string name : {"a", "p"}) {
+    instance.custom_conversion_costs[name] = {{{nd, nz}, 6.0}, {{nz, nd}, 6.0}};
+  }
+  instance.operations = {
+      MakeOp("A", {}, "a", {{{}, nd, 0.0}, {{}, nz, 100.0}}),
+      MakeOp("P", {"a"}, "p", {{{nd}, nd, 0.0}, {{nd}, nz, 3.0}}),
+      MakeOp("Q", {"p"}, "q", {{{nd}, nd, 10.0}, {{nz}, nd, 0.0}}),
+  };
+  al::LayoutSolverConfig config;
+  config.max_treewidth = 0;
+  for (int64_t evaluations : {8, 12, 20, 100}) {
+    config.max_evaluations = evaluations;
+    const auto greedy = al::SolveGreedy(instance, std::nullopt, config);
+    const auto fm = al::SolveGreedyFM(instance, config);
+    const auto automatic = al::SolveAutoLayout(instance, std::nullopt, config);
+    const auto repeated = al::SolveGreedyFM(instance, config);
+    RequireNear(fm.TotalCostCycles(), greedy.TotalCostCycles(), 1e-9,
+                "A losing FM excursion must retain its greedy incumbent");
+    RequireNear(automatic.TotalCostCycles(), fm.TotalCostCycles(), 1e-9,
+                "Auto fallback must retain the same incumbent");
+    Require(fm.stats.evaluated_moves <= evaluations && automatic.stats.evaluated_moves <= evaluations &&
+                fm.stats.evaluated_moves == repeated.stats.evaluated_moves &&
+                fm.Assignment().op_configs == repeated.Assignment().op_configs,
+            "Both searches must observe the common budget and FM must be deterministic");
+  }
+  RequireNear(al::SolveAutoLayout(instance, std::nullopt, config).TotalCostCycles(), 3.0, 1e-9,
+              "The fallback must preserve the three-cycle layout");
+}
+
 // Test oracle for a single movable component. Keep the original ordered candidate
 // scan so an FM cache change cannot silently change the selected best prefix.
 std::pair<al::LayoutAssignment, int64_t> ScanFM(const al::LayoutProblemInstance& instance,
@@ -486,29 +608,30 @@ void TestCachedFMDemandMultiplicityAndBudget() {
     RequireNear(al::SolveGreedy(inst, std::nullopt, config).TotalCostCycles(), 8.0, 1e-9,
                 "Greedy must stop at the conversion barrier");
 
-    // Seven seed scores and one FM gain for P. Moving P activates both consumers.
+    // Seven seed scores, three greedy scores and one FM gain for P.
+    // Moving P activates both consumers.
     // A then changes the ND demand from 2 to 1
     // (from 4 to 2 for repeats), leaving the same support but making B the last user.
-    config.max_evaluations = 7;
+    config.max_evaluations = 10;
     const auto incomplete_initial = al::SolveGreedyFM(inst, config);
     RequireNear(incomplete_initial.TotalCostCycles(), 8.0, 1e-9, "FM requires a complete initial frontier");
     Require(incomplete_initial.stats.termination_reason == "evaluation_budget", "Initial frontier budget");
 
-    config.max_evaluations = 10;
+    config.max_evaluations = 13;
     const auto incomplete_update = al::SolveGreedyFM(inst, config);
     RequireNear(incomplete_update.TotalCostCycles(), 7.0, 1e-9,
                 "FM retains the best prefix on update budget");
     Require(incomplete_update.stats.termination_reason == "evaluation_budget",
             "Stale consumer update budget");
-    Require(incomplete_update.stats.moves_applied == 2 && incomplete_update.stats.evaluated_moves == 10,
+    Require(incomplete_update.stats.moves_applied == 2 && incomplete_update.stats.evaluated_moves == 13,
             "FM counts retained moves when the evaluation budget is exhausted");
     Require(incomplete_update.Assignment().op_configs.at("B") == inst.operations[2].configs[0],
             "FM must refresh B before choosing its move");
 
-    config.max_evaluations = 11;
+    config.max_evaluations = 14;
     const auto complete = al::SolveGreedyFM(inst, config);
     RequireNear(complete.TotalCostCycles(), 1.0, 1e-9, "FM must take all three coordinated moves");
-    Require(complete.stats.moves_applied == 3 && complete.stats.evaluated_moves == 11,
+    Require(complete.stats.moves_applied == 3 && complete.stats.evaluated_moves == 14,
             "FM charges the initial frontier and affected inputs only");
 
     // The fourth operation is connected through B's output and never profitable.
@@ -522,7 +645,8 @@ void TestCachedFMDemandMultiplicityAndBudget() {
     RequireNear(rollback.TotalCostCycles(), 1.0, 1e-9, "FM must undo the unprofitable tail move");
     Require(rollback.Assignment().op_configs == expected.op_configs && rollback.stats.moves_applied == moves,
             "Cached FM must agree with the scan after suffix rollback and restart");
-    Require(rollback.stats.termination_reason == "local_optimum", "FM must finish after an empty prefix");
+    Require(rollback.stats.termination_reason == "fm_no_improving_prefix",
+            "An empty prefix from the attempted seeds is not a local optimum certificate");
   }
 }
 
@@ -569,22 +693,22 @@ void TestFMExpandsOneHopPerMove() {
   const auto nd = al::LayoutSpec::ND();
   const auto nz = al::LayoutSpec::NZ();
   al::LayoutProblemInstance inst;
-  std::vector<std::string> inputs;
-  for (const std::string id : {"A", "B", "C"}) {
-    const auto value = id + "_out";
-    inst.AddValue(MakeValue(value, id));
-    inst.custom_conversion_costs[value] = {{{nd, nz}, id == "C" ? 20.0 : 5.0}, {{nz, nd}, 0.0}};
-    const std::vector<al::LayoutSpec> layouts(inputs.size(), nd);
-    inst.operations.push_back(MakeOp(id, inputs, value, {{layouts, nd, 0.0}, {layouts, nz, 1.0}}));
-    inst.AddValue(MakeValue(value + "_read", id + "_read"));
-    inst.operations.push_back(MakeOp(id + "_read", {value}, value + "_read", {{{nz}, nd, 0.0}}));
-    inputs = {value};
-  }
+  inst.AddValue(MakeValue("a", "A"));
+  inst.AddValue(MakeValue("b", "B"));
+  inst.AddValue(MakeValue("c", "C"));
+  inst.custom_conversion_costs["a"] = {{{nd, nz}, 10.0}, {{nz, nd}, 0.0}};
+  inst.custom_conversion_costs["b"] = {{{nd, nz}, 10.0}, {{nz, nd}, 0.0}};
+  inst.operations = {
+      MakeOp("A", {}, "a", {{{}, nd, 0.0}, {{}, nz, 1.0}}),
+      MakeOp("B", {"a"}, "b", {{{nd}, nd, 5.0}, {{nz}, nz, 0.0}}),
+      MakeOp("C", {"b"}, "c", {{{nd}, nd, 8.0}, {{nz}, nz, 0.0}}),
+  };
 
   al::LayoutSolverConfig cfg;
   cfg.max_greedy_sweeps = 1;
-  // Nine scores construct the all-ND assignment. The next two permit A then B.
-  // C offers the largest improvement, but first becomes eligible when B moves.
+  // Six seed scores and three greedy scores leave all values in ND. The
+  // remaining two scores permit the uphill A move and then profitable B.
+  // C only becomes profitable and is activated after B moves.
   cfg.max_evaluations = 11;
   const auto limited = al::SolveGreedyFM(inst, cfg);
   const auto& selected = limited.Assignment().op_configs;
@@ -644,9 +768,9 @@ void TestFanoutBlockEscapesFMLocks() {
   Require(automatic.Assignment().op_configs == fm.Assignment().op_configs,
           "Auto fallback must consider the fan-out block");
 
-  // Fourteen seed scores, four single moves at seed A, two NZ choices to rank
-  // for A and four members to score. This budget admits exactly the first decision.
-  config.max_evaluations = 14 + 4 + 2 + 4;
+  // Fourteen seed scores, ten greedy scores, four single moves at seed A,
+  // two NZ choices to rank for A and four members to score.
+  config.max_evaluations = 14 + 10 + 4 + 2 + 4;
   const auto first = al::SolveGreedyFM(inst, config);
   Require(first.Assignment().op_configs == fm.Assignment().op_configs && first.stats.moves_applied == 4,
           "Fan-out must be able to win the very first decision with only A active");
@@ -684,16 +808,16 @@ void TestSeedComparesPositiveSingleAndFanoutGains() {
 
   al::LayoutSolverConfig config;
   config.max_greedy_sweeps = 1;
-  // Ten topological initialization scores, two single changes at A and four
-  // consumers in the proposal. No neighbor of A can be scored as another single.
-  config.max_evaluations = 16;
+  // Ten topological and five greedy scores, then two single changes at A
+  // and four grouped consumers. No neighbor is evaluated as a singleton by FM.
+  config.max_evaluations = 10 + 5 + 2 + 4;
   for (const double cost : {2.0, 2.5, 3.0}) {
     inst.custom_conversion_costs["a"][{nd, nz}] = cost;
     const auto result = al::SolveGreedyFM(inst, config);
     // Unifying the shared input saves 12 - 10 = 2. Changing A's output saves cost - 0.5.
     const bool group_wins = cost < 2.5;
-    Require(result.stats.moves_applied == (group_wins ? 4 : 1),
-            "Compare positive gains at the seed and give the single move precedence on a tie");
+    Require(result.stats.moves_applied == (group_wins ? 5 : 1),
+            "Keep the greedy move and compare its cost with the first FM prefix");
     Require(result.Assignment().op_configs.at("A") == inst.operations.front().configs[group_wins ? 2 : 1],
             "The highest-gain candidate must win the first decision");
   }
@@ -714,7 +838,7 @@ void TestUphillFanoutMovesAndRollsBackAtomically() {
   // The winning group must survive as a single speculative move until P is rescored.
   al::LayoutSolverConfig config;
   config.max_greedy_sweeps = 1;
-  config.max_evaluations = 6 + 1 + 2;
+  config.max_evaluations = 6 + 3 + 1 + 2;
   const auto interrupted = al::SolveGreedyFM(inst, config);
   RequireNear(interrupted.TotalCostCycles(), 8.0, 1e-9, "Roll back the entire uphill group on exhaustion");
   Require(interrupted.stats.moves_applied == 0, "Neither group member belongs to the best prefix yet");
@@ -742,7 +866,7 @@ void TestFMReusesShrinkingFanoutGain() {
   RequireNear(result.TotalCostCycles(), 10.0 + 0.5 * consumers, 1e-9, "Unify the wide fan-out");
   // On the second pass each single move toward ND leaves the all-ND group's
   // final assignment unchanged. Re-evaluating its remaining members costs quadratic time.
-  Require(result.stats.termination_reason == "local_optimum",
+  Require(result.stats.termination_reason == "fm_no_improving_prefix",
           "The shrinking fan-out must fit a linear budget");
 }
 
@@ -1018,6 +1142,8 @@ int main() {
     TestTreewidthStatsChainDiamondAndMultiComponent();
     TestSharedConversionBarrierAndOracle();
     TestIncrementalStateAndAsymmetricCosts();
+    TestConversionPenaltyRollbackPreservesSmallCosts();
+    TestFMRetainsGreedyIncumbent();
     TestCachedFMDemandMultiplicityAndBudget();
     TestCachedFMToleranceScanOrder();
     TestFMExpandsOneHopPerMove();

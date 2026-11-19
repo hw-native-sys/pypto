@@ -35,11 +35,17 @@ def _reset_backend_after_test():
     reset_for_testing()
 
 
-def _emit_incore_mlir(program, planner=passes.MemoryPlanner.PYPTO, *, enable_buffer_ir=True) -> str:
+def _emit_incore_mlir(
+    program,
+    planner=passes.MemoryPlanner.PYPTO,
+    *,
+    enable_buffer_ir=True,
+    strategy=OptimizationStrategy.Default,
+) -> str:
     reset_for_testing()
     set_backend_type(BackendType.Ascend950)
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enable_buffer_ir):
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        optimized = PassManager.get_strategy(strategy).run_passes(program)
     parts: list[str] = []
     for func in optimized.functions.values():
         if func.func_type in (pl.FunctionType.Orchestration, pl.FunctionType.Group):
@@ -776,8 +782,9 @@ def _dense_dn_fp4_conversion_program(source, target):
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 @pytest.mark.parametrize(("source", "target"), [(pl.fp4e2m1x2, pl.fp4e1m2x2), (pl.fp4e1m2x2, pl.fp4e2m1x2)])
-def test_dense_dn_fp4_cast_uses_static_valid_descriptors(source, target, planner):
-    mlir = _emit_incore_mlir(_dense_dn_fp4_conversion_program(source, target), planner)
+@pytest.mark.parametrize("strategy", [OptimizationStrategy.Default, OptimizationStrategy.AutoLayout])
+def test_dense_dn_fp4_cast_uses_static_valid_descriptors(source, target, planner, strategy):
+    mlir = _emit_incore_mlir(_dense_dn_fp4_conversion_program(source, target), planner, strategy=strategy)
     casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
     assert len(casts) == 2, mlir
     for cast in casts:

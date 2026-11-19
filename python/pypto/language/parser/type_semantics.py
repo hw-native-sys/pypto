@@ -290,6 +290,7 @@ class ParameterReturnDims(ir.IRMutator):
                 view.layout,
                 [self.visit_expr(dim) for dim in view.valid_shape],
                 view.pad,
+                nz_blocked=view.nz_blocked,
             )
         if isinstance(typ, ir.DistributedTensorType):
             return ir.DistributedTensorType(shape, typ.dtype, typ.memref, view, typ.window_buffer)

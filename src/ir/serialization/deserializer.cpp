@@ -399,6 +399,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         } else {
           CHECK(false) << "Unknown TensorLayout: " << layout_str;
         }
+      } else if (key == "nz_blocked") {
+        p->val.convert(tensor_view.nz_blocked);
       } else if (key == "pad") {
         std::string pad_str;
         p->val.convert(pad_str);

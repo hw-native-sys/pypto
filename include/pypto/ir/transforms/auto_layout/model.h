@@ -104,6 +104,9 @@ int DTypeByteWidthSafe(DataType dtype);
 /// Whole-byte element width; throws `pypto::ValueError` if `dtype` is sub-byte (< 8 bits storage).
 int DTypeByteWidth(DataType dtype);
 
+/// Whether two layouts differ only in the contiguous axis of a flat Vec tile.
+bool IsFlatVecTransposePair(const LayoutSpec& source, const LayoutSpec& destination);
+
 /// Check whether a logical 2D `[R, C]` or 3D `[B, R, C]` shape can be blocked as `TensorLayout::NZ`.
 bool IsNzCompatibleShape(const std::vector<int64_t>& shape, DataType dtype);
 
@@ -122,6 +125,12 @@ struct ValueNode {
   bool is_strided_subview = false;
   // Free Vec bytes at the producer, where shared conversions are materialized.
   std::optional<uint64_t> vec_conversion_headroom;
+  // TTRANS reads a full dense valid rectangle. A CM-to-RM conversion first
+  // takes a transpose view, which the backend only supports on a whole tile.
+  bool has_dense_vec_span = true;
+  bool is_vec_slice = false;
+  /// Activation count at the writer's insertion site when it differs from the defining op's count.
+  std::optional<int64_t> conversion_invocations;
 
   [[nodiscard]] int64_t NumElements() const;
   [[nodiscard]] int64_t ByteSize() const;
@@ -139,6 +148,11 @@ struct OperatorConfig {
   bool operator==(const OperatorConfig& other) const;
   bool operator!=(const OperatorConfig& other) const { return !(*this == other); }
 };
+
+// The loop transfers themselves cost no cycles. Their IR uses demand the
+// carried layout, and each result has its own conversion insertion site.
+inline constexpr char kVecLoopInitOp[] = "control.vec_loop_init";
+inline constexpr char kVecLoopYieldOp[] = "control.vec_loop_yield";
 
 /// An operation node in a layout problem instance.
 struct OperationNode {
@@ -267,6 +281,9 @@ double OperatorCostMultiplier(const LayoutProblemInstance& instance, const Opera
 double ConversionMultiplier(const LayoutProblemInstance& instance, const ValueNode& value,
                             const std::unordered_map<std::string, const OperationNode*>& ops_by_id,
                             const std::vector<int64_t>& conversion_invocations);
+
+/// Whether a conversion can be placed at the source and shared with this consumer.
+bool CanShareOnChipConversion(int64_t source_invocations, int64_t consumer_invocations);
 
 /// Evaluate `assignment` under the shared-conversion hyperedge objective.
 CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const LayoutAssignment& assignment);

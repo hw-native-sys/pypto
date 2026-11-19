@@ -611,10 +611,9 @@ inline constexpr const char* kAttrAutoScope = "auto_scope";
  * @brief Reserved Function attr key marking that ``BlockNzTensorViews`` has
  * already converted logical NZ tensors in this function to blocked rank-5 form.
  *
- * Value type: ``bool`` (``true`` when stamped). Written by ``BlockNzTensorViews``
- * to keep re-entry idempotent, read by ``auto_layout::ExtractLayoutInstance``,
- * and stripped by ``auto_layout::ApplyLayoutAssignment`` only on functions that
- * newly promote a GM tensor/create/view to ``TensorLayout::NZ``.
+ * Value type: ``bool`` (``true`` when stamped). Keeps old serialized passes
+ * recognizable so their blocked types can be annotated without changing their
+ * offsets a second time. New IR carries provenance on the TensorView itself.
  */
 inline constexpr const char* kAttrNzTensorViewsBlocked = "nz_tensor_views_blocked";
 

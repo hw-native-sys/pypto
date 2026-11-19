@@ -483,6 +483,9 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string tmp_ssa = codegen.GetExprAsCode(op->args_[3]);
   std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[3]);
+  // Source and scratch share their physical shape. A source bound through
+  // treshape may carry static validity while its scratch uses a dynamic-valid
+  // allocation, so print the actual SSA type for each operand.
   if (src_type.empty()) src_type = tmp_type;
   if (tmp_type.empty()) tmp_type = src_type;
   EmitInsOuts(codegen, GetPtoNativeOpSpec("tile.transpose").native_op,
