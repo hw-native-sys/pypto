@@ -10,11 +10,13 @@
 """SIMT pointer ABI, physical addressing and module reachability from explicit IR."""
 
 import re
+import subprocess
 import textwrap
 
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.op import simt
 from pypto.language.parser import parse_program
 from pypto.language.parser.diagnostics import UnsupportedFeatureError
@@ -915,6 +917,97 @@ class ShadowedMath:
     def helper(self, math: pl.Scalar[pl.FP32]):
         result = pl.simt.sin({argument})
 """)
+
+
+@pytest.mark.parametrize("relation", ["eq", "le", "lt", "ge", "gt"])
+def test_lane_mask_codegen(relation):
+    test_queries(f"lanemask_{relation}()", f"get_lanemask_{relation}")
+
+
+@pytest.mark.parametrize("keyword", [False, True])
+def test_bitcast_parser_and_codegen(keyword):
+    args = "value=x, dtype=pl.FP32" if keyword else "x, pl.FP32"
+    program = scalar_program(f"""
+        x = pl.simt.load(dst, (0, 0))
+        floating = pl.simt.bitcast({args})
+        bits = pl.simt.bitcast(floating, pl.INT32)
+        pl.simt.store(dst, (0, 0), bits)
+    """)
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    assert source.count("pto.bitcast ") == 2
+    assert " : i32 -> f32" in source and " : f32 -> i32" in source
+
+
+@pytest.mark.parametrize("name", ["shuffle_idx", "shuffle_up", "shuffle_down", "shuffle_bfly"])
+@pytest.mark.parametrize("width", [16, 32])
+@pytest.mark.parametrize("bound", [None, 0, 15])
+@pytest.mark.parametrize("dtype", ["INT32", "FP32"])
+def test_shuffle_bound_codegen_round_trip(name, width, bound, dtype):
+    attribute = "" if bound is None else f", bound={bound}"
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        value = pl.simt.{name}(x, 1, width={width}{attribute})
+        pl.simt.store(dst, (0, 0), value)
+    """,
+        dtype,
+    )
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    assert f"width = {width} : i32" in source
+    if bound is None:
+        assert "bound =" not in source
+    else:
+        assert f"bound = {bound} : i32" in source
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dtype", ["INT32", "FP32"])
+@pytest.mark.parametrize("width", [16, 32])
+def test_shuffle_window_native_compile(tmp_path, dtype, width):
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    lines = ["x = pl.simt.load(dst, (0, 0))"]
+    for name in ("shuffle_idx", "shuffle_up", "shuffle_down", "shuffle_bfly"):
+        for bound in (0, width - 1):
+            lines.append(f"x = pl.simt.{name}(x, 1, width={width}, bound={bound})")
+    lines.append("pl.simt.store(dst, (0, 0), x)")
+    source = codegen.PTOCodegen().generate_bundle(scalar_program("\n".join(lines), dtype)).helpers[0].source
+    input_path = tmp_path / "windows.pto"
+    input_path.write_text(source)
+    result = subprocess.run(
+        [
+            binary,
+            str(input_path),
+            "--pto-arch=a5",
+            "--pto-backend=vpto",
+            "--emit-vpto-llvm-ir",
+            "-o",
+            str(tmp_path / "windows.ll"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("name", ["atomic_min", "atomic_max", "redux_min", "redux_max"])
+@pytest.mark.parametrize("attribute", ["", ", unsigned=False", ", unsigned=True"])
+def test_unsigned_extrema_codegen_round_trip(name, attribute):
+    args = "dst, (0, 0), x" if name.startswith("atomic") else "x"
+    program = scalar_program(f"""
+        x = pl.simt.load(dst, (0, 0))
+        value = pl.simt.{name}({args}{attribute})
+        pl.simt.store(dst, (0, 0), value)
+    """)
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    signedness = "unsigned" if "True" in attribute else "signed"
+    assert f" {signedness} :" in source
 
 
 if __name__ == "__main__":

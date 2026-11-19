@@ -143,6 +143,16 @@ y = pl.const(1.0, pl.FP32) / (pl.const(1.0, pl.FP32) + pl.simt.exp(-x))
 index = pl.simt.ftoi(y, rounding="f")
 ```
 
+### 标量 bitcast 与物理 lane 掩码
+
+`pl.simt.bitcast(value, dtype)` 的源和目标类型支持 FP32/INT32。
+它保留全部位模式，包括 NaN payload 和有符号零，不执行数值转换或存储视图重解释。
+普通 `pl.cast` 的行为不变。
+
+`pl.simt.lanemask_eq/le/lt/ge/gt()` 返回 INT32 掩码，bit i 表示物理 lane i
+相对当前 lane 的关系。掩码涵盖全部 32 个物理 lane，不随分歧改变；
+查询活跃 lane 应使用 `vote_ballot(True)`。bit 31 使有符号载体为负，但位模式不变。
+
 ## Warp 内协作操作
 
 公共 `pl.simt` 与 IR `pypto.ir.op.simt` 命名空间提供：
@@ -151,9 +161,9 @@ index = pl.simt.ftoi(y, rounding="f")
 | ---- | ----------- | ---- |
 | `vote_all`、`vote_any`、`vote_uni` | BOOL → BOOL | 全部为真、至少一个为真、所有谓词相同 |
 | `vote_ballot` | BOOL → INT32 | 活跃 lane i 的谓词为真时置位 bit i |
-| `shuffle_idx(value, index, *, width=32)` | INT32/FP32 → 同类型 | 读取子组内相对索引指定的源 lane |
+| `shuffle_idx(value, index, *, width=32, bound=None)` | INT32/FP32 → 同类型 | 读取子组内相对索引指定的源 lane |
 | `shuffle_up`、`shuffle_down` | INT32/FP32 → 同类型 | 按偏移读取更低/更高的源 lane |
-| `shuffle_bfly(value, mask, *, width=32)` | INT32/FP32 → 同类型 | 读取子组内 lane 编号与 mask 异或指定的源 lane |
+| `shuffle_bfly(value, mask, *, width=32, bound=None)` | INT32/FP32 → 同类型 | 读取子组内 lane 编号与 mask 异或指定的源 lane |
 | `redux_add`、`redux_min`、`redux_max` | INT32/FP32 → 同类型 | 归约活跃 lane，并将结果返回每个参与 lane |
 
 A5 warp 含 32 个 lane。参与集合是指令执行时的活跃掩码（active execution mask），
@@ -162,14 +172,18 @@ fence 或 block 屏障。结果依赖控制流，不能跨改变活跃集合的�
 
 Shuffle 的 width 仅支持 **16 或 32**，默认为 32，将 warp 划分为连续子组；不改变
 vote/redux 的参与集合。lane 控制参数为 INT32（Python 整数字面量自动规范化）。
-源 lane 必须活跃且位于同一子组；非活跃或越界来源的结果未定义，不能依赖边界自拷贝。
+选中的源 lane 必须活跃。可选 `bound` 必须位于 `[0, width)`，按子组相对坐标限定源窗口：
+`shuffle_up` 为 `[bound, width)`，其余模式为 `[0, bound]`；省略时覆盖完整窗口。
+超出窗口或子组时返回调用 lane 自身的值；非活跃源的结果仍未定义。
+`shuffle_idx` 在检查窗口前将 index 按 width 取模。
 
 Ballot 返回 INT32 位载体，bit 31 可能使数值为负，应使用位运算读取。INT32 min/max
-按有符号数比较，加法按 32 位回绕。FP32 遵循目标平台的归约顺序及特殊值规则，不保证
+默认按有符号数比较；`unsigned=True` 将同一 INT32 位载体按无符号数比较（FP32 拒绝此选项）。
+加法按 32 位回绕。FP32 遵循目标平台的归约顺序及特殊值规则，不保证
 顺序求和或跨平台一致的 NaN/正负零选择。初始前后端子集暂不支持 FP16、UINT32 或 packed 值。
 
 原生映射为 `pto.vote_*`、`pto.shuffle_*` 和 `pto.redux_{add,min,max}{i,f}`；整数
-min/max 显式携带 `signed`。测试经公共 JIT 和 PTOAS LLVM 导出编译所有形式。
+min/max 显式携带 `signed` 或 `unsigned`。测试经公共 JIT 和 PTOAS LLVM 导出编译所有形式。
 可选设备验收位于 `tests/st/runtime/vpto/test_simt_collectives_onboard.py`，覆盖两个
 warp、部分活跃集合、ballot bit 31、有符号归约、shuffle 子组及非活跃输出保留。
 仅编译测试不代表设备执行验收通过。
@@ -217,15 +231,16 @@ MTE/Vector/helper 依赖，不添加手工 fence。
 
 ## 原子操作与同步
 
-`pl.simt.atomic_add/min/max/exch(storage, indices, value)` 和
+`pl.simt.atomic_add/sub/and/or/xor/min/max/exch(storage, indices, value)` 和
 `pl.simt.atomic_cas(storage, indices, compare, value)` 返回**更新前的标量值**。
 `pypto.ir.op.simt` 提供同名接口。操作数必须与存储的 INT32/FP32 类型一致。
 索引沿用 `load`/`store` 的逻辑坐标和物理步长；地址必须满足 4 字节自然对齐且不越界。
 
 | 操作 | INT32 | FP32 | 存储与返回值 |
 | ---- | ----- | ---- | ------------ |
-| `atomic_add` | 32 位回绕加法 | 目标浮点加法 | GM 和 Vec/UB；返回旧标量 |
-| `atomic_min`、`atomic_max` | 有符号比较 | 仅一个操作数为 NaN 时选择数值；均为 NaN 时返回 NaN | GM 和 Vec/UB；返回旧标量 |
+| `atomic_add`、`atomic_sub` | 32 位回绕加减法 | 目标浮点加减法 | GM 和 Vec/UB；返回旧标量 |
+| `atomic_and`、`atomic_or`、`atomic_xor` | 位运算更新 | 不支持 | GM 和 Vec/UB；返回旧标量 |
+| `atomic_min`、`atomic_max` | 默认有符号；`unsigned=True` 按无符号位比较 | 仅一个操作数为 NaN 时选择数值；均为 NaN 时返回 NaN | GM 和 Vec/UB；返回旧标量 |
 | `atomic_exch` | 替换 | 替换 | GM 和 Vec/UB；返回旧标量 |
 | `atomic_cas` | 按位比较 | 按位比较，包括 NaN 载荷及正负零 | GM 和 Vec/UB；返回旧标量 |
 

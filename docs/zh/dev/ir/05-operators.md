@@ -949,9 +949,11 @@ Warp 内协作操作包括 `vote_all/any/uni`、`vote_ballot`、
 `shuffle_idx/up/down/bfly` 和 `redux_add/min/max`。参见
 [协作操作契约](11-simt.md#warp-内协作操作)，了解活跃 lane、支持类型和 shuffle 宽度。
 
-原子操作 `atomic_add/min/max/exch/cas` 返回已初始化 GM/UB 存储的旧 INT32/FP32 值。
+原子操作 `atomic_add/sub/and/or/xor/min/max/exch/cas` 返回已初始化 GM/UB 存储的旧 INT32/FP32 值。
 `syncthreads`、`threadfence` 和 `threadfence_block` 返回 void。参见
 [原子与同步契约](11-simt.md#原子操作与同步)。
 
 标量数学、字节置换、高位乘法与显式饱和/舍入转换详见
 [SIMT 数学契约](11-simt.md#数学位操作与显式转换)。
+
+接口类型限制、`lanemask_*`、`bitcast`、shuffle 窗口与无符号比较见[覆盖矩阵](../codegen/06-simt-interface-coverage.md)。

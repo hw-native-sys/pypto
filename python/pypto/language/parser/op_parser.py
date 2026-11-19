@@ -133,6 +133,11 @@ class OpParser:
                 preserve_omitted_kwargs=True,
             )
         if name in {
+            "bitcast",
+            "atomic_sub",
+            "atomic_and",
+            "atomic_or",
+            "atomic_xor",
             "atomic_add",
             "atomic_min",
             "atomic_max",
@@ -155,7 +160,13 @@ class OpParser:
         }:
             # The public wrappers own keyword binding and literal normalization,
             # just as they do for other schema-validated DSL operations.
-            return self.dispatch_op(_dsl_simt, "pl.simt", name, call)
+            return self.dispatch_op(
+                _dsl_simt,
+                "pl.simt",
+                name,
+                call,
+                preserve_omitted_kwargs=name in {"atomic_min", "atomic_max", "redux_min", "redux_max"},
+            )
         kwargs = self.parse_op_kwargs(call)
         args = call.args
         if name in {"thread_idx", "block_idx", "block_dim", "grid_dim"}:

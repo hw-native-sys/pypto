@@ -204,7 +204,95 @@ def test_vote_accepts_python_bool_predicate(name, predicate):
     ir.assert_structural_equal(call, getattr(pl.simt, name)(predicate).unwrap())
 
 
-ATOMICS = ("atomic_add", "atomic_min", "atomic_max", "atomic_exch", "atomic_cas")
+ATOMICS = ("atomic_add", "atomic_sub", "atomic_min", "atomic_max", "atomic_exch", "atomic_cas")
+
+
+@pytest.mark.parametrize("name", ["atomic_and", "atomic_or", "atomic_xor"])
+@pytest.mark.parametrize("storage_type", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
+def test_bitwise_atomic_contract(name, storage_type):
+    test_atomic_types_effects_and_round_trip(name, storage_type, DataType.INT32)
+    storage = ir.Var("target", storage_type([ir.ConstInt(32, DataType.INDEX, SPAN)], DataType.FP32), SPAN)
+    value = ir.ConstFloat(1.0, DataType.FP32, SPAN)
+    with pytest.raises(ValueError, match="bitwise atomic requires INT32"):
+        getattr(simt, name)(storage, [0], value)
+    with pytest.raises(ValueError, match="requires exactly"):
+        ir.create_op_call(f"simt.{name}", [], {}, SPAN)
+
+
+@pytest.mark.parametrize("name", ["atomic_min", "atomic_max", "redux_min", "redux_max"])
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_unsigned_comparison_carriers(name, unsigned):
+    value = ir.ConstInt(-(1 << 31), DataType.INT32, SPAN)
+    storage = ir.Var("target", ir.TileType([32], DataType.INT32), SPAN)
+    args = [storage, [0], value] if name.startswith("atomic") else [value]
+    call = getattr(simt, name)(*args, unsigned=unsigned)
+    assert call.type.dtype == DataType.INT32
+    assert call.kwargs["unsigned"] == unsigned
+    ir.assert_structural_equal(call, getattr(pl.simt, name)(*args, unsigned=unsigned).unwrap())
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    floating = ir.ConstFloat(1.0, DataType.FP32, SPAN)
+    gm = ir.Var("gm", ir.TensorType([32], DataType.FP32), SPAN)
+    args = [gm, [0], floating] if name.startswith("atomic") else [floating]
+    with pytest.raises(ValueError, match="unsigned comparison requires"):
+        getattr(simt, name)(*args, unsigned=True)
+    with pytest.raises(TypeError, match="unsigned|type"):
+        getattr(simt, name)(*args, unsigned=1)
+
+
+@pytest.mark.parametrize("kwargs", [{"unsigned": True}, {"width": 16}, {"unknown": 0}])
+def test_redux_add_remains_attribute_free(kwargs):
+    with pytest.raises(ValueError, match="does not accept attributes"):
+        ir.create_op_call("simt.redux_add", [simt.lane_id()], kwargs, SPAN)
+
+
+@pytest.mark.parametrize("name", ["shuffle_idx", "shuffle_up", "shuffle_down", "shuffle_bfly"])
+@pytest.mark.parametrize("width", [16, 32])
+def test_shuffle_source_window(name, width):
+    for bound in (0, width - 1):
+        call = getattr(simt, name)(simt.lane_id(), 1, width=width, bound=bound)
+        assert call.kwargs == {"width": width, "bound": bound}
+        ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+        ir.assert_structural_equal(
+            call, getattr(pl.simt, name)(pl.simt.lane_id(), 1, width=width, bound=bound).unwrap()
+        )
+    for bound in (-1, width):
+        with pytest.raises(ValueError, match="bound must be"):
+            getattr(simt, name)(simt.lane_id(), 1, width=width, bound=bound)
+    for bound in (True, "1", 1.0):
+        with pytest.raises(TypeError, match="bound|type"):
+            getattr(simt, name)(simt.lane_id(), 1, width=width, bound=bound)
+
+
+@pytest.mark.parametrize("relation", ["eq", "le", "lt", "ge", "gt"])
+def test_physical_lane_mask_queries(relation):
+    name = f"lanemask_{relation}"
+    call = getattr(simt, name)()
+    assert call.type.dtype == DataType.INT32
+    ir.assert_structural_equal(call, getattr(pl.simt, name)().unwrap())
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    for args, kwargs in [([simt.lane_id()], {}), ([], {"axis": ir.SimtAxis.X})]:
+        with pytest.raises(ValueError, match="no arguments|Unknown|unknown"):
+            ir.create_op_call(f"simt.{name}", args, kwargs, SPAN)
+
+
+@pytest.mark.parametrize("source", [DataType.FP32, DataType.INT32])
+@pytest.mark.parametrize("destination", [DataType.FP32, DataType.INT32])
+def test_scalar_bitcast_contract(source, destination):
+    value = ir.Var("value", ir.ScalarType(source), SPAN)
+    call = simt.bitcast(value, destination)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == destination
+    ir.assert_structural_equal(call, pl.simt.bitcast(value, destination).unwrap())
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    for dtype in (DataType.FP16, DataType.INT64, DataType.UINT32, DataType.BOOL):
+        with pytest.raises(ValueError, match="destination must be"):
+            simt.bitcast(value, dtype)
+        with pytest.raises(ValueError, match="requires an FP32 or INT32 scalar"):
+            simt.bitcast(ir.Var("bad", ir.ScalarType(dtype), SPAN), destination)
+    with pytest.raises(ValueError, match="requires dtype"):
+        ir.create_op_call("simt.bitcast", [value], {}, SPAN)
+    with pytest.raises(ValueError, match="exactly one"):
+        ir.create_op_call("simt.bitcast", [], {"dtype": destination}, SPAN)
 
 
 @pytest.mark.parametrize("name", ATOMICS)
@@ -250,22 +338,23 @@ def test_atomic_checks_arity_before_accessing_arguments(name, arity):
         ir.create_op_call(f"simt.{name}", [simt.lane_id()] * arity, {}, SPAN)
 
 
-def test_atomic_validation_and_cache():
+@pytest.mark.parametrize("name", ["atomic_add", "atomic_sub", "atomic_and", "atomic_or", "atomic_xor"])
+def test_atomic_validation_and_cache(name):
     storage = ir.Var("gm", ir.TensorType([8], DataType.INT32), SPAN)
     tile = ir.Var("ub", ir.TileType([8], DataType.INT32), SPAN)
     integer = simt.lane_id()
     floating = ir.ConstFloat(1.0, DataType.FP32, SPAN)
     with pytest.raises(ValueError, match="value dtype"):
-        simt.atomic_add(storage, [0], floating)
+        getattr(simt, name)(storage, [0], floating)
     with pytest.raises(ValueError, match="compare dtype"):
         simt.atomic_cas(storage, [0], floating, integer)
     with pytest.raises(ValueError, match="one index per"):
-        simt.atomic_add(storage, [0, 0], integer)
+        getattr(simt, name)(storage, [0, 0], integer)
     with pytest.raises(ValueError, match="only to GM"):
-        simt.atomic_add(tile, [0], integer, l2cache="nmfv")
+        getattr(simt, name)(tile, [0], integer, l2cache="nmfv")
     with pytest.raises(ValueError, match="l2cache"):
-        simt.atomic_add(storage, [0], integer, l2cache="nmpref")
-    assert simt.atomic_add(storage, [0], integer, l2cache="nmfv").kwargs["l2cache"] == "nmfv"
+        getattr(simt, name)(storage, [0], integer, l2cache="nmpref")
+    assert getattr(simt, name)(storage, [0], integer, l2cache="nmfv").kwargs["l2cache"] == "nmfv"
 
 
 @pytest.mark.parametrize("name", ["syncthreads", "threadfence", "threadfence_block"])

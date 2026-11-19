@@ -48,6 +48,55 @@ def lane_id() -> Scalar:
     return Scalar(expr=_simt.lane_id())
 
 
+def lanemask_eq() -> Scalar:
+    """Return the physical equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_eq())
+
+
+def lanemask_le() -> Scalar:
+    """Return the physical lower-or-equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_le())
+
+
+def lanemask_lt() -> Scalar:
+    """Return the physical lower-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_lt())
+
+
+def lanemask_ge() -> Scalar:
+    """Return the physical higher-or-equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_ge())
+
+
+def lanemask_gt() -> Scalar:
+    """Return the physical higher-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_gt())
+
+
+def bitcast(value: Scalar | ir.Expr, dtype: DataType) -> Scalar:
+    """Reinterpret an FP32/INT32 scalar as dtype without changing any bits.
+
+    Destination dtype must be FP32 or INT32. NaN payloads and signed zero bits
+    are preserved; this is not a numerical conversion or a storage view.
+    """
+    return Scalar(expr=_simt.bitcast(_unwrap(value), dtype))
+
+
 def load(
     storage: Tensor | Tile | ir.Expr,
     indices: Sequence[int | Scalar | ir.Expr],
@@ -129,22 +178,24 @@ def redux_add(value: Scalar | ir.Expr) -> Scalar:
     return Scalar(expr=_simt.redux_add(_unwrap(value)))
 
 
-def redux_min(value: Scalar | ir.Expr) -> Scalar:
-    """Minimum active-lane INT32 (signed) or FP32 value, returning the input dtype.
+def redux_min(value: Scalar | ir.Expr, *, unsigned: bool = False) -> Scalar:
+    """Minimum active-lane INT32 or FP32 value, returning the input dtype.
 
+    unsigned=True compares INT32 bit carriers as unsigned.
     FP32 follows the target reduction order and special-value rules.
     Uses the current active lanes and does not provide a memory fence.
     """
-    return Scalar(expr=_simt.redux_min(_unwrap(value)))
+    return Scalar(expr=_simt.redux_min(_unwrap(value), unsigned=unsigned))
 
 
-def redux_max(value: Scalar | ir.Expr) -> Scalar:
-    """Maximum active-lane INT32 (signed) or FP32 value, returning the input dtype.
+def redux_max(value: Scalar | ir.Expr, *, unsigned: bool = False) -> Scalar:
+    """Maximum active-lane INT32 or FP32 value, returning the input dtype.
 
+    unsigned=True compares INT32 bit carriers as unsigned.
     FP32 follows the target reduction order and special-value rules.
     Uses the current active lanes and does not provide a memory fence.
     """
-    return Scalar(expr=_simt.redux_max(_unwrap(value)))
+    return Scalar(expr=_simt.redux_max(_unwrap(value), unsigned=unsigned))
 
 
 def _shuffle_control(value: int | Scalar | ir.Expr) -> int | ir.Expr:
@@ -157,48 +208,124 @@ def _shuffle_control(value: int | Scalar | ir.Expr) -> int | ir.Expr:
     return control
 
 
-def shuffle_idx(value: Scalar | ir.Expr, index: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
+def shuffle_idx(
+    value: Scalar | ir.Expr, index: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
     """Read an INT32 or FP32 value from a subgroup-relative lane index.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(index)
-    return Scalar(expr=_simt.shuffle_idx(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_idx(_unwrap(value), control, width=width, bound=bound))
 
 
-def shuffle_up(value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
+def shuffle_up(
+    value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
     """Read an INT32 or FP32 value from a lower lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(offset)
-    return Scalar(expr=_simt.shuffle_up(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_up(_unwrap(value), control, width=width, bound=bound))
 
 
-def shuffle_down(value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
+def shuffle_down(
+    value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
     """Read an INT32 or FP32 value from a higher lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(offset)
-    return Scalar(expr=_simt.shuffle_down(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_down(_unwrap(value), control, width=width, bound=bound))
 
 
-def shuffle_bfly(value: Scalar | ir.Expr, mask: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
+def shuffle_bfly(
+    value: Scalar | ir.Expr, mask: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
     """Read an INT32 or FP32 value from the XOR-selected lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(mask)
-    return Scalar(expr=_simt.shuffle_bfly(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_bfly(_unwrap(value), control, width=width, bound=bound))
+
+
+def atomic_sub(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically subtract from one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_sub(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_and(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically apply bitwise AND to one initialized INT32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_and(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_or(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically apply bitwise OR to one initialized INT32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_or(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_xor(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically apply bitwise XOR to one initialized INT32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_xor(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
 
 
 def atomic_add(
@@ -223,6 +350,7 @@ def atomic_min(
     indices: Sequence[int | Scalar | ir.Expr],
     value: Scalar | ir.Expr,
     *,
+    unsigned: bool = False,
     l2cache: str | None = None,
 ) -> Scalar:
     """Atomically min one initialized INT32/FP32 element and return its old value.
@@ -230,10 +358,14 @@ def atomic_min(
     Operands must match the storage dtype. Indices use the storage logical layout.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
-    INT32 comparison is signed; FP32 special values follow the target rules.
+    unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
     """
     coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
-    return Scalar(expr=_simt.atomic_min(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+    return Scalar(
+        expr=_simt.atomic_min(
+            _unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache, unsigned=unsigned
+        )
+    )
 
 
 def atomic_max(
@@ -241,6 +373,7 @@ def atomic_max(
     indices: Sequence[int | Scalar | ir.Expr],
     value: Scalar | ir.Expr,
     *,
+    unsigned: bool = False,
     l2cache: str | None = None,
 ) -> Scalar:
     """Atomically max one initialized INT32/FP32 element and return its old value.
@@ -248,10 +381,14 @@ def atomic_max(
     Operands must match the storage dtype. Indices use the storage logical layout.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
-    INT32 comparison is signed; FP32 special values follow the target rules.
+    unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
     """
     coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
-    return Scalar(expr=_simt.atomic_max(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+    return Scalar(
+        expr=_simt.atomic_max(
+            _unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache, unsigned=unsigned
+        )
+    )
 
 
 def atomic_exch(

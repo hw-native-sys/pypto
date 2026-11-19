@@ -26,8 +26,8 @@ persistent runtime. See the [canonical SIMT IR](../ir/11-simt.md).
 - Thread/block/grid coordinates and extents, lane ID, and scalar loads/stores.
   GM cache policies pass through unchanged to native PTOAS operations.
 - Active-lane votes/ballot, INT32/FP32 shuffle (width 16 or 32), and
-  INT32/FP32 add/min/max redux. Integer min/max lower with explicit signed
-  comparison. See the [collective contract](../ir/11-simt.md#warp-collectives).
+  INT32/FP32 add/min/max redux. Integer min/max lower with explicit signed or unsigned
+  comparison of INT32 carriers. Shuffle accepts a source-window `bound`. See the [collective contract](../ir/11-simt.md#warp-collectives).
 
 Unsigned arithmetic, other storage dtypes, scalar exponentiation (`**`), floating-point floor division/modulo,
 early return, break/continue, boxed Tile layouts and grouped kernel execution
@@ -117,7 +117,7 @@ participation and untouched inactive outputs.
 ## Atomic and synchronization acceptance
 
 The native mapping uses `pto.atomic_add/min/max/exch/cas`, `pto.syncthreads`,
-`pto.threadfence`, and `pto.threadfence_block`. Integer min/max carry `signed`.
+`pto.threadfence`, and `pto.threadfence_block`. Integer min/max carry `signed` or `unsigned`.
 Atoms use the same affine element offset calculation as scalar memory operations,
 followed by `pto.addptr`; no untyped byte-address or allocation bypass is exposed.
 All atomic targets are ReadWrite, even when the old scalar is unused. Synchronization
@@ -310,3 +310,8 @@ pass the full parent and use parent-relative indices when pitches vary.
 Nested slices, aliases, tuple projections, dropped axes, and manual `Submit`
 calls have pass-level regression coverage. Packed short vectors remain outside
 this executable subset; this acceptance does not add packed storage or APIs.
+
+## Interface coverage
+
+See the [SIMT interface coverage matrix](06-simt-interface-coverage.md) for
+first-batch additions, evidence, and remaining task 11.7 limitations.

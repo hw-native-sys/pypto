@@ -389,6 +389,7 @@ nav:
           - en/dev/codegen/03-vpto-vf-integration.md
           - en/dev/codegen/04-simt-native-validation.md
           - en/dev/codegen/05-simt-lowering.md
+          - en/dev/codegen/06-simt-interface-coverage.md
       - Backend:
           - en/dev/backend/index.md
           - en/dev/backend/00-backend_handler.md

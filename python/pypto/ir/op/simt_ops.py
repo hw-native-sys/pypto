@@ -43,6 +43,55 @@ def lane_id(span: Span | None = None) -> Call:
     return _ir_core.create_op_call("simt.lane_id", [], {}, _get_span_or_capture(span))
 
 
+def lanemask_eq(span: Span | None = None) -> Call:
+    """Return the physical equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return _ir_core.create_op_call("simt.lanemask_eq", [], {}, _get_span_or_capture(span))
+
+
+def lanemask_le(span: Span | None = None) -> Call:
+    """Return the physical lower-or-equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return _ir_core.create_op_call("simt.lanemask_le", [], {}, _get_span_or_capture(span))
+
+
+def lanemask_lt(span: Span | None = None) -> Call:
+    """Return the physical lower-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return _ir_core.create_op_call("simt.lanemask_lt", [], {}, _get_span_or_capture(span))
+
+
+def lanemask_ge(span: Span | None = None) -> Call:
+    """Return the physical higher-or-equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return _ir_core.create_op_call("simt.lanemask_ge", [], {}, _get_span_or_capture(span))
+
+
+def lanemask_gt(span: Span | None = None) -> Call:
+    """Return the physical higher-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return _ir_core.create_op_call("simt.lanemask_gt", [], {}, _get_span_or_capture(span))
+
+
+def bitcast(value: Expr, dtype: DataType, span: Span | None = None) -> Call:
+    """Reinterpret an FP32/INT32 scalar as dtype without changing any bits.
+
+    Destination dtype must be FP32 or INT32. NaN payloads and signed zero bits
+    are preserved; this is not a numerical conversion or a storage view.
+    """
+    return _ir_core.create_op_call("simt.bitcast", [value], {"dtype": dtype}, _get_span_or_capture(span))
+
+
 def load(
     storage: Expr,
     indices: Sequence[int | Expr],
@@ -128,66 +177,74 @@ def _lane_control(value: int | Expr, span: Span) -> Expr:
     return _normalize_expr(value, span, int_dtype=DataType.INT32)
 
 
-def shuffle_idx(value: Expr, index: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+def shuffle_idx(
+    value: Expr, index: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
+) -> Call:
     """Read an INT32 or FP32 value from a subgroup-relative lane index.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
         "simt.shuffle_idx",
         [value, _lane_control(index, span)],
-        {"width": width},
+        {"width": width, **({"bound": bound} if bound is not None else {})},
         span,
     )
 
 
-def shuffle_up(value: Expr, offset: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+def shuffle_up(
+    value: Expr, offset: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
+) -> Call:
     """Read an INT32 or FP32 value from a lower lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
         "simt.shuffle_up",
         [value, _lane_control(offset, span)],
-        {"width": width},
+        {"width": width, **({"bound": bound} if bound is not None else {})},
         span,
     )
 
 
-def shuffle_down(value: Expr, offset: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+def shuffle_down(
+    value: Expr, offset: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
+) -> Call:
     """Read an INT32 or FP32 value from a higher lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
         "simt.shuffle_down",
         [value, _lane_control(offset, span)],
-        {"width": width},
+        {"width": width, **({"bound": bound} if bound is not None else {})},
         span,
     )
 
 
-def shuffle_bfly(value: Expr, mask: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+def shuffle_bfly(
+    value: Expr, mask: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
+) -> Call:
     """Read an INT32 or FP32 value from the XOR-selected lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
         "simt.shuffle_bfly",
         [value, _lane_control(mask, span)],
-        {"width": width},
+        {"width": width, **({"bound": bound} if bound is not None else {})},
         span,
     )
 
@@ -202,24 +259,124 @@ def redux_add(value: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("simt.redux_add", [value], {}, _get_span_or_capture(span))
 
 
-def redux_min(value: Expr, span: Span | None = None) -> Call:
+def redux_min(value: Expr, span: Span | None = None, *, unsigned: bool = False) -> Call:
     """Return the minimum of active-lane INT32 or FP32 values to each active lane.
 
-    The result retains the input dtype. INT32 comparisons are signed.
+    The result retains the input dtype. unsigned=True compares INT32 bit carriers as unsigned.
     FP32 reductions follow the target arithmetic order and special-value rules.
     This operation does not provide a memory fence.
     """
-    return _ir_core.create_op_call("simt.redux_min", [value], {}, _get_span_or_capture(span))
+    return _ir_core.create_op_call(
+        "simt.redux_min", [value], {"unsigned": unsigned}, _get_span_or_capture(span)
+    )
 
 
-def redux_max(value: Expr, span: Span | None = None) -> Call:
+def redux_max(value: Expr, span: Span | None = None, *, unsigned: bool = False) -> Call:
     """Return the maximum of active-lane INT32 or FP32 values to each active lane.
 
-    The result retains the input dtype. INT32 comparisons are signed.
+    The result retains the input dtype. unsigned=True compares INT32 bit carriers as unsigned.
     FP32 reductions follow the target arithmetic order and special-value rules.
     This operation does not provide a memory fence.
     """
-    return _ir_core.create_op_call("simt.redux_max", [value], {}, _get_span_or_capture(span))
+    return _ir_core.create_op_call(
+        "simt.redux_max", [value], {"unsigned": unsigned}, _get_span_or_capture(span)
+    )
+
+
+def atomic_sub(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically subtract from one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_sub",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
+
+
+def atomic_and(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically apply bitwise AND to one initialized INT32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_and",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
+
+
+def atomic_or(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically apply bitwise OR to one initialized INT32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_or",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
+
+
+def atomic_xor(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically apply bitwise XOR to one initialized INT32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_xor",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
 
 
 def atomic_add(
@@ -251,6 +408,7 @@ def atomic_min(
     indices: Sequence[int | Expr],
     value: Expr,
     *,
+    unsigned: bool = False,
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -259,10 +417,12 @@ def atomic_min(
     Operands must match the storage dtype. Indices use the storage logical layout.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
-    INT32 comparison is signed; FP32 special values follow the target rules.
+    unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
     """
     span = _get_span_or_capture(span)
-    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    kwargs: dict[str, str | bool] = {"unsigned": unsigned}
+    if l2cache is not None:
+        kwargs["l2cache"] = l2cache
     return _ir_core.create_op_call(
         "simt.atomic_min",
         [storage, _to_make_tuple(indices, span), value],
@@ -276,6 +436,7 @@ def atomic_max(
     indices: Sequence[int | Expr],
     value: Expr,
     *,
+    unsigned: bool = False,
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -284,10 +445,12 @@ def atomic_max(
     Operands must match the storage dtype. Indices use the storage logical layout.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
-    INT32 comparison is signed; FP32 special values follow the target rules.
+    unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
     """
     span = _get_span_or_capture(span)
-    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    kwargs: dict[str, str | bool] = {"unsigned": unsigned}
+    if l2cache is not None:
+        kwargs["l2cache"] = l2cache
     return _ir_core.create_op_call(
         "simt.atomic_max",
         [storage, _to_make_tuple(indices, span), value],

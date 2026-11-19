@@ -38,7 +38,20 @@ def collect_calls(program, name):
     return calls
 
 
-@pytest.mark.parametrize("name", ["atomic_add", "atomic_min", "atomic_max", "atomic_exch", "atomic_cas"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "atomic_add",
+        "atomic_sub",
+        "atomic_and",
+        "atomic_or",
+        "atomic_xor",
+        "atomic_min",
+        "atomic_max",
+        "atomic_exch",
+        "atomic_cas",
+    ],
+)
 @pytest.mark.parametrize("storage_type", [ir.TileType, ir.TensorType])
 def test_atomic_flattening_preserves_logical_element(name, storage_type):
     storage = ir.Var("storage", storage_type([2, 3, 32], DataType.INT32), SPAN)
@@ -66,10 +79,11 @@ def test_atomic_flattening_preserves_logical_element(name, storage_type):
 
 
 @pytest.mark.parametrize("expression", ["subtract", "multiply_zero", "equal", "tuple"])
-def test_simplify_preserves_nested_atomic_occurrences(expression):
+@pytest.mark.parametrize("name", ["atomic_add", "atomic_sub", "atomic_and", "atomic_or", "atomic_xor"])
+def test_simplify_preserves_nested_atomic_occurrences(expression, name):
     storage = ir.Var("storage", ir.TensorType([1], DataType.INT32), SPAN)
     one = ir.ConstInt(1, DataType.INT32, SPAN)
-    first, second = (simt.atomic_add(storage, [0], one) for _ in range(2))
+    first, second = (getattr(simt, name)(storage, [0], one) for _ in range(2))
     if expression == "subtract":
         value = ir.Sub(first, second, DataType.INT32, SPAN)
         count = 2
@@ -95,7 +109,7 @@ def test_simplify_preserves_nested_atomic_occurrences(expression):
     )
     program = ir.Program([function], "Atomic", SPAN)
     simplified = passes.simplify()(program)
-    assert len(collect_calls(simplified, "simt.atomic_add")) == count
+    assert len(collect_calls(simplified, f"simt.{name}")) == count
 
 
 @pytest.mark.parametrize("effect_position", [0, 1])
@@ -164,7 +178,20 @@ def test_simplify_does_not_reuse_effectful_branch_constraints():
     assert len(collect_calls(simplified, "simt.atomic_add")) == 2
 
 
-@pytest.mark.parametrize("name", ["atomic_add", "atomic_min", "atomic_max", "atomic_exch", "atomic_cas"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "atomic_add",
+        "atomic_sub",
+        "atomic_and",
+        "atomic_or",
+        "atomic_xor",
+        "atomic_min",
+        "atomic_max",
+        "atomic_exch",
+        "atomic_cas",
+    ],
+)
 @pytest.mark.parametrize("direction", [ir.ParamDirection.In, ir.ParamDirection.Out, ir.ParamDirection.InOut])
 def test_window_atomic_outlining_permissions_and_codegen(a5_backend, name, direction):
     # A window is local GM. Its padded row stride must survive outlining, and

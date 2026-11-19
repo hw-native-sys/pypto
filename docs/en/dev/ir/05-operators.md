@@ -1026,18 +1026,16 @@ masks derive their lane count from static group geometry.
 ## Scalar SIMT operations
 
 `pypto.ir.op.simt` exposes typed coordinate queries, `lane_id`, and scalar
-`load`/`store` on UB Tile or GM Tensor storage. `store` returns `VoidType` and
-belongs in `EvalStmt`. See [Scalar SIMT IR](11-simt.md) for the operation,
-launch, cache-policy, and validation contracts.
+`load`/`store` on UB Tile or GM Tensor storage. `store` returns `VoidType` and belongs in `EvalStmt`. See [Scalar SIMT IR](11-simt.md) for the operation, launch, cache-policy, and validation contracts.
 
 Warp collectives include `vote_all/any/uni`, `vote_ballot`,
 `shuffle_idx/up/down/bfly` and `redux_add/min/max`. See the
 [collective contracts](11-simt.md#warp-collectives) for active-lane participation,
-supported types and shuffle widths.
+supported types, shuffle windows and unsigned extrema. `lanemask_*` queries physical lanes;
+`bitcast` preserves FP32/INT32 bits. See the [coverage matrix](../codegen/06-simt-interface-coverage.md).
 
-Atomics `atomic_add/min/max/exch/cas` return the old INT32/FP32 value from
-initialized GM/UB storage. `syncthreads`, `threadfence` and `threadfence_block`
-return void. See [atomic and synchronization contracts](11-simt.md#atomics-and-synchronization).
+Atomics `atomic_add/sub/and/or/xor/min/max/exch/cas` return the old value from
+initialized GM/UB storage (bitwise: INT32; others: INT32/FP32). `syncthreads`, `threadfence` and `threadfence_block` return void. See [atomic and synchronization contracts](11-simt.md#atomics-and-synchronization).
 
 Scalar math, byte permutation, high multiplication and explicit saturated/rounded
 conversion are documented in the [SIMT math contract](11-simt.md#math-bit-operations-and-explicit-conversion).

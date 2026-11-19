@@ -33,6 +33,16 @@ namespace pypto::ir {
 namespace {
 using Kwargs = std::vector<std::pair<std::string, std::any>>;
 
+// Unsigned mode changes how an INT32 bit carrier is compared, not its dtype.
+void ValidateUnsigned(const Kwargs& kwargs, DataType dtype) {
+  for (const auto& [key, value] : kwargs) {
+    if (key == "unsigned") {
+      CHECK(!AnyCast<bool>(value, key) || dtype == DataType::INT32)
+          << "SIMT unsigned comparison requires an INT32 bit carrier";
+    }
+  }
+}
+
 TypePtr QueryType(const std::vector<ExprPtr>&, const Kwargs& kwargs) {
   bool found = false;
   for (const auto& [key, value] : kwargs) {
@@ -104,18 +114,31 @@ TypePtr MemoryType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
 
 // Atomics reuse logical scalar addressing, but are always RMW, including Exch:
 // the returned old value reads storage even when the caller discards it.
-TypePtr AtomicType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool cas) {
+TypePtr AtomicType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool cas,
+                   bool integer_only = false) {
   const size_t arity = cas ? 4 : 3;
   CHECK(args.size() == arity) << "SIMT atomic requires exactly " << arity << " arguments";
-  MemoryType({args[0], args[1], args.back()}, kwargs, true);
+  Kwargs cache_kwargs;
+  for (const auto& item : kwargs) {
+    if (item.first != "unsigned") cache_kwargs.push_back(item);
+  }
+  MemoryType({args[0], args[1], args.back()}, cache_kwargs, true);
   const auto value = As<ScalarType>(args.back()->GetType());
   CHECK(value->dtype_ == DataType::INT32 || value->dtype_ == DataType::FP32)
       << "SIMT atomic requires INT32 or FP32 storage and values";
+  CHECK(!integer_only || value->dtype_ == DataType::INT32)
+      << "SIMT bitwise atomic requires INT32 storage and values";
+  ValidateUnsigned(kwargs, value->dtype_);
   if (cas) {
     const auto compare = As<ScalarType>(args[2]->GetType());
     CHECK(compare && compare->dtype_ == value->dtype_) << "SIMT CAS compare dtype must match storage";
   }
   return args.back()->GetType();
+}
+
+TypePtr LaneMaskType(const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+  CHECK(args.empty() && kwargs.empty()) << "SIMT lane mask takes no arguments or attributes";
+  return std::make_shared<ScalarType>(DataType::INT32);
 }
 
 TypePtr SynchronizationType(const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
@@ -126,7 +149,7 @@ TypePtr SynchronizationType(const std::vector<ExprPtr>& args, const Kwargs& kwar
 // Lane collectives depend on the active execution mask as well as their
 // explicit operands. no_arg_writes is only a storage-effect declaration: it
 // must not be interpreted as permission to hoist them across control flow.
-enum class CollectiveKind { Vote, Ballot, Shuffle, Redux };
+enum class CollectiveKind { Vote, Ballot, Shuffle, Redux, ReduxExtremum };
 
 TypePtr CollectiveType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, const std::string& name,
                        CollectiveKind kind) {
@@ -150,13 +173,22 @@ TypePtr CollectiveType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, c
             constant->value_ <= std::numeric_limits<int32_t>::max())
           << name << " lane control must fit INT32";
     }
+    int width = 32;
     for (const auto& [key, attr] : kwargs) {
-      CHECK(key == "width") << name << " only accepts the width attribute";
-      const auto width = AnyCast<int>(attr, key);
-      CHECK(width == 16 || width == 32) << name << " width must be 16 or 32, got " << width;
+      CHECK(key == "width" || key == "bound") << name << " only accepts width and bound attributes";
+      if (key == "width") width = AnyCast<int>(attr, key);
     }
+    CHECK(width == 16 || width == 32) << name << " width must be 16 or 32, got " << width;
+    for (const auto& [key, attr] : kwargs) {
+      if (key != "bound") continue;
+      const auto bound = AnyCast<int>(attr, key);
+      CHECK(bound >= 0 && bound < width) << name << " bound must be in [0, width), got " << bound;
+    }
+  } else if (kind == CollectiveKind::ReduxExtremum) {
+    ValidateUnsigned(kwargs, value->dtype_);
   } else {
-    CHECK(kwargs.empty()) << name << " does not accept attributes; signedness follows the value dtype";
+    // Attribute-free registrations also need validation in type deduction.
+    CHECK(kwargs.empty()) << name << " does not accept attributes";
   }
   return args[0]->GetType();
 }
@@ -198,6 +230,59 @@ REGISTER_OP("simt.lane_id")
     .f_deduce_type([](const std::vector<ExprPtr>&, const Kwargs& kwargs) {
       CHECK(kwargs.empty()) << "simt.lane_id does not accept axis or other attributes";
       return std::make_shared<ScalarType>(DataType::INT32);
+    });
+REGISTER_OP("simt.lanemask_eq")
+    .set_description("Physical lane relation mask as an INT32 bit carrier")
+    .set_op_category("SimtOp")
+    .no_argument()
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type(LaneMaskType);
+REGISTER_OP("simt.lanemask_le")
+    .set_description("Physical lane relation mask as an INT32 bit carrier")
+    .set_op_category("SimtOp")
+    .no_argument()
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type(LaneMaskType);
+REGISTER_OP("simt.lanemask_lt")
+    .set_description("Physical lane relation mask as an INT32 bit carrier")
+    .set_op_category("SimtOp")
+    .no_argument()
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type(LaneMaskType);
+REGISTER_OP("simt.lanemask_ge")
+    .set_description("Physical lane relation mask as an INT32 bit carrier")
+    .set_op_category("SimtOp")
+    .no_argument()
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type(LaneMaskType);
+REGISTER_OP("simt.lanemask_gt")
+    .set_description("Physical lane relation mask as an INT32 bit carrier")
+    .set_op_category("SimtOp")
+    .no_argument()
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type(LaneMaskType);
+REGISTER_OP("simt.bitcast")
+    .set_description("Reinterpret FP32/INT32 scalar bits without numeric conversion")
+    .set_op_category("SimtOp")
+    .add_argument("value", "FP32 or INT32 scalar")
+    .set_attr<DataType>("dtype")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      CHECK(args.size() == 1) << "simt.bitcast requires exactly one argument";
+      const auto input = As<ScalarType>(args[0]->GetType());
+      CHECK(input && (input->dtype_ == DataType::FP32 || input->dtype_ == DataType::INT32))
+          << "simt.bitcast requires an FP32 or INT32 scalar";
+      CHECK(kwargs.size() == 1 && kwargs[0].first == "dtype") << "simt.bitcast requires dtype";
+      const auto dtype = AnyCast<DataType>(kwargs[0].second, "dtype");
+      CHECK(dtype == DataType::FP32 || dtype == DataType::INT32)
+          << "simt.bitcast destination must be FP32 or INT32";
+      return std::make_shared<ScalarType>(dtype);
     });
 REGISTER_OP("simt.load")
     .set_description("Load one scalar element directly from UB or GM")
@@ -270,6 +355,7 @@ REGISTER_OP("simt.shuffle_idx")
     .add_argument("value", "Current lane scalar")
     .add_argument("control", "INT32 source lane, offset or XOR mask")
     .set_attr<int>("width")
+    .set_attr<int>("bound")
     .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
@@ -281,6 +367,7 @@ REGISTER_OP("simt.shuffle_up")
     .add_argument("value", "Current lane scalar")
     .add_argument("control", "INT32 source lane, offset or XOR mask")
     .set_attr<int>("width")
+    .set_attr<int>("bound")
     .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
@@ -292,6 +379,7 @@ REGISTER_OP("simt.shuffle_down")
     .add_argument("value", "Current lane scalar")
     .add_argument("control", "INT32 source lane, offset or XOR mask")
     .set_attr<int>("width")
+    .set_attr<int>("bound")
     .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
@@ -303,6 +391,7 @@ REGISTER_OP("simt.shuffle_bfly")
     .add_argument("value", "Current lane scalar")
     .add_argument("control", "INT32 source lane, offset or XOR mask")
     .set_attr<int>("width")
+    .set_attr<int>("bound")
     .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
@@ -321,19 +410,73 @@ REGISTER_OP("simt.redux_min")
     .set_description("Active-lane redux_min collective")
     .set_op_category("SimtOp")
     .add_argument("value", "Current lane scalar")
+    .set_attr<bool>("unsigned")
     .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
-      return CollectiveType(args, kwargs, "simt.redux_min", CollectiveKind::Redux);
+      return CollectiveType(args, kwargs, "simt.redux_min", CollectiveKind::ReduxExtremum);
     });
 REGISTER_OP("simt.redux_max")
     .set_description("Active-lane redux_max collective")
     .set_op_category("SimtOp")
     .add_argument("value", "Current lane scalar")
+    .set_attr<bool>("unsigned")
     .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
-      return CollectiveType(args, kwargs, "simt.redux_max", CollectiveKind::Redux);
+      return CollectiveType(args, kwargs, "simt.redux_max", CollectiveKind::ReduxExtremum);
+    });
+REGISTER_OP("simt.atomic_sub")
+    .set_description("Atomic sub on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false);
+    });
+REGISTER_OP("simt.atomic_and")
+    .set_description("Atomic and on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false, true);
+    });
+REGISTER_OP("simt.atomic_or")
+    .set_description("Atomic or on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false, true);
+    });
+REGISTER_OP("simt.atomic_xor")
+    .set_description("Atomic xor on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false, true);
     });
 REGISTER_OP("simt.atomic_add")
     .set_description("Atomic add on one initialized UB or GM element; return its old value")
@@ -355,6 +498,7 @@ REGISTER_OP("simt.atomic_min")
     .add_argument("indices", "Logical element coordinates")
     .add_argument("value", "Scalar update value")
     .set_attr<std::string>("l2cache")
+    .set_attr<bool>("unsigned")
     .set_arg_effect(0, ArgEffect::ReadWrite)
     .set_write_channel(WriteChannel::Simt)
     // Partial destination access intentionally retains Unknown execution-memory metadata.
@@ -368,6 +512,7 @@ REGISTER_OP("simt.atomic_max")
     .add_argument("indices", "Logical element coordinates")
     .add_argument("value", "Scalar update value")
     .set_attr<std::string>("l2cache")
+    .set_attr<bool>("unsigned")
     .set_arg_effect(0, ArgEffect::ReadWrite)
     .set_write_channel(WriteChannel::Simt)
     // Partial destination access intentionally retains Unknown execution-memory metadata.

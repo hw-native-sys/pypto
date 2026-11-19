@@ -601,3 +601,10 @@ Use the configured project environment for both commands. See the
 [API contracts](../../dev/ir/11-simt.md) for supported math, warp, atomic and
 synchronization operations, and [native acceptance](../../dev/codegen/05-simt-lowering.md)
 for compilation versus hardware evidence.
+
+Use `pl.simt.lanemask_lt()` to select physical lanes below the caller, as in the
+compaction example. `bitcast` preserves FP32/INT32 bits; `atomic_sub` and INT32
+`atomic_and/or/xor` update initialized GM/UB storage. Min/max atomics and redux
+accept `unsigned=True` for INT32 carriers. Shuffle `bound` narrows the source
+window without changing its default width. See the [coverage matrix](../../dev/codegen/06-simt-interface-coverage.md)
+for validation evidence and remaining limitations.

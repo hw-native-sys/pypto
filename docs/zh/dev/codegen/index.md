@@ -19,3 +19,5 @@
 - [Passes](../passes/index.md) —— codegen 运行前必须成立的全部前提。
 - [PTO ISA 参考](../../reference/index.md) —— 生成代码所使用的指令语义。
 - [PTOAS 算子状态矩阵](../ptoas-op-status.md) —— 可供发射的 PTOAS 算子范围。
+
+任务 11.7 的新增接口与剩余限制参见 [SIMT 接口覆盖](06-simt-interface-coverage.md)。
