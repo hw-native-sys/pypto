@@ -176,12 +176,13 @@ Simpler 或 CANN，也不运行该直接 runtime 测试。不能据仅编译结�
 `KernelCompiler.compile_incore(..., text_only=True)` 为具有 `kernel_entry` wrapper
 的设备可调用源码提供显式启用的 A5 编译路径。它生成独立的函数/数据 section 和编译器
 栈用量报告，再按入口顺序链接并回收不可达 section。这样可以删除 `g_tilingKey` 等未被
-引用的 SDK 数据；被引用的数据仍须通过最终校验。
+引用的 SDK 数据。
 
 返回链接后的 ELF 前，编译器要求仅有一个非空、可执行的 `.text`，全局 `kernel_entry`
-位于其首字节，不包含其他非空的已分配 section、未处理的重定位或未解析符号，且 section
+位于其首字节，不包含未处理的重定位或未解析符号，且 section
 表和符号表有效，包括索引 0 处的空 section。所有 section 名称必须为 ASCII，避免加载器
-解码名称时忽略无效字符并选择不同的字节。非空的 `.ascend.meta*` section 会被拒绝，因为 kernel 启动元数据可能
+解码名称时忽略无效字符并选择不同的字节。其他 section 不会仅因非空且具有 allocated
+标志而被拒绝；这不代表已证明被丢弃的数据在执行时无需使用。非空的 `.ascend.meta*` section 会被拒绝，因为 kernel 启动元数据可能
 要求额外预留 SU/SIMT 栈或 UB。每个保留的函数都必须具有编译器生成的**静态零栈用量**报告。缺失报告、
 动态栈帧和正栈用量均会被拒绝，因为持久化 runtime 当前没有每任务编译器栈预留契约。
 具有完全相同非空代码范围的函数别名共享一个栈帧，至少需要一份报告，且所有可用的别名报告

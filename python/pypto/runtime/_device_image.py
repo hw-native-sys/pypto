@@ -90,8 +90,6 @@ def _text_section(
                     "link kernel_entry first or remove preceding out-of-line functions."
                 )
             text_index = index
-        elif self_contained and section.flags & 2 and section.size:
-            raise ValueError(f"Device image needs unsupported allocated section {name!r}")
         if self_contained and section.kind in (4, 9) and section.size:
             raise ValueError("Device image must have no remaining relocations")
     if not text_index:
@@ -169,8 +167,10 @@ def _function_groups(functions: dict[str, tuple[int, int]]) -> frozenset[frozens
 def validate_device_image(data: bytes, *, entry_symbol: str | None = None) -> frozenset[frozenset[str]]:
     """Validate a linked AI Core ELF and group retained function aliases by code range.
 
-    The loader keeps only .text and calls its first byte. No allocated data,
-    unresolved symbols or relocation records can survive. Requiring a named
+    The loader keeps only .text and calls its first byte. Additional allocated
+    sections alone do not establish an unsupported execution dependency and are
+    not rejected here. Unresolved symbols and relocation records are rejected.
+    Requiring a named
     entry additionally retains symbol evidence for compiler stack validation.
     This is structural validation of compiler-produced code, not a proof that
     arbitrary machine code is position-independent or obeys the calling ABI.

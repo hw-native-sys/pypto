@@ -221,14 +221,16 @@ establish device completion visibility or performance acceptance.
 compilation path for device-callable sources with a `kernel_entry` wrapper.
 It emits separate function/data sections and a compiler stack-usage report,
 then links with entry ordering and garbage collection. This removes unreferenced
-SDK data such as `g_tilingKey`; referenced data must still pass the final check.
+SDK data such as `g_tilingKey`.
 
 Before returning the linked ELF, the compiler requires one nonempty executable
-`.text` section, a global `kernel_entry` at its first byte, no other nonempty
-allocated sections, no remaining relocations or unresolved symbols, and valid
+`.text` section, a global `kernel_entry` at its first byte, no remaining
+relocations or unresolved symbols, and valid
 section and symbol tables, including a null section at index 0. All section names
 must be ASCII so the loader cannot select different bytes by discarding invalid
-characters during name decoding. Nonempty
+characters during name decoding. Additional allocated sections are not rejected
+solely for being allocated and nonempty; this does not prove that discarded data
+is unnecessary during execution. Nonempty
 `.ascend.meta*` sections are rejected because kernel launch metadata can require
 additional SU/SIMT stack or UB provisioning.
 Every retained function must have a compiler report
