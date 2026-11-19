@@ -445,7 +445,7 @@ these dimensions through JIT and compiled calls without unit conversion.
 Explicit casts from either packed FP4 format to FP8 are legalized on A5 through
 BF16 and FP32. Scale values are unchanged because this numerically converts
 only the data operand. Native packed-FP4 tile matmul retains both packed operands.
-`pl.quant_mx` supports MXFP8 and E2M1 MXFP4 quantization from FP16/BF16;
+`pl.quant_mx` quantizes to MXFP8 from FP16, BF16 or FP32, and to E2M1 MXFP4 from FP16 or BF16;
 FP4 results require supported placement into Mat and Left/Right before tile matmul.
 See [FP4](../fp4.md) for
 quantization alignment and memory-planner requirements.

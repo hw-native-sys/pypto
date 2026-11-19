@@ -392,7 +392,7 @@ Torch E2M1 x2 张量与显式标注的 UINT8 载体在 JIT 和编译后调用中
 
 两种打包 FP4 格式到 FP8 的显式转换均在 A5 上经 BF16 和 FP32 合法化。
 它仅对数据操作数进行数值转换，因此缩放因子不变。原生 FP4 tile 矩阵乘保持两侧打包格式。
-`pl.quant_mx` 支持 MXFP8，以及以 FP16/BF16 为源的 E2M1 MXFP4 量化；
+`pl.quant_mx` 可将 FP16/BF16/FP32 源量化为 MXFP8，将 FP16/BF16 源量化为 E2M1 MXFP4；
 FP4 结果需通过受支持的 Mat 和 Left/Right 放置路径供 tile 矩阵乘使用。量化对齐与内存规划器要求见 [FP4](../fp4.md)。
 
 #### MX / Ascend950：pto-isa 约束
