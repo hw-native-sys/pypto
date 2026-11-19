@@ -362,26 +362,8 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 PyPTO 直接生成带 mask 的 interleave。`intlv`/`dintlv` 两个输出的非活动 lane
 均为零，活动 BF16 值保持原始位模式。省略 mask 时，所有 lane 均活动，并保留融合机会。
 
-独立的小向量排列缺陷 [PTOAS #1659](https://github.com/hw-native-sys/PTOAS/issues/1659)
-仍等待上游修复。保留或移除原补零逻辑均会出现该问题，包括省略 mask 和完整 mask；
-补零无法修复活动 lane 的错误排列。PyPTO 不为此新增 workaround，也不修改接受的
-lane 数范围。使用 PTOAS v0.74 的 A5 验证结果如下：
-
-| 寄存器 dtype | 物理 lane 数 | 已测试且失败的 VL | 已测试且通过的 VL |
-| ------------ | ------------ | ----------------- | ----------------- |
-| INT8, UINT8 | 256 | 8, 64, 128 | 256 |
-| FP16, BF16, INT16, UINT16 | 128 | 8, 64 | 128, 256 |
-| FP32, INT32, UINT32 | 64 | 8 | 64, 128, 256 |
-
-在失败长度下，`intlv` 丢失 high 输出的活动数据，`dintlv` 两个输出中来自第二条输入
-的部分位置错误。所有观测到的非活动 lane 均为零。BF16 VL128/256 的逐位检查通过，
-包括 NaN、无穷、次正规数和正负零。此表仅记录已测试矩阵，不是前端接受的全部偶数
-长度清单。
-
-`tests/st/runtime/vpto/test_reg_interleave_onboard.py` 检查生产代码的显式 mask 和
-省略 mask 路径，完整存储每个操作的两个输出，并检查空、部分、完整 mask、原始位模式
-和保护区域。默认使用上表中各 dtype 已通过验证的长度；显式指定 `--lanes` 也可独立
-复现已知的小 VL 失败。先在不占卡任务中构建，再在 A5 上执行保存的产物：
+`tests/st/runtime/vpto/test_reg_interleave_onboard.py` 检查显式和省略 mask 时的两个输出，包括原始位模式和保护区域。用
+`--lanes` 指定向量长度。先在不占卡时构建，再在 A5 上执行产物：
 
 ```bash
 task-submit --no-device --run \
@@ -389,12 +371,6 @@ task-submit --no-device --run \
 task-submit --device auto --run \
   'python tests/st/runtime/vpto/test_reg_interleave_onboard.py --worker build/interleave "$TASK_DEVICE"'
 ```
-
-复现 #1659 时，使用独立输出目录并以 `--dtypes FP32 --lanes 8` 构建，再通过 `--worker`
-执行；在 PTOAS 修复排列问题之前，数值检查会失败。两个命令均须使用当前 worktree
-的构建及匹配固定版本的 runtime/toolchain 环境。`manifest.json` 单独记录编译失败，
-`result.json` 记录逐输出的硬件检查。编译成功不代表数值正确，这些检查也不测量延迟
-或吞吐量。
 
 ```python
 # Inside a reg_scope, with matching UINT32 registers lo_a/lo_b/hi_a/hi_b:
@@ -417,7 +393,7 @@ scatter 的值必须匹配 Tile dtype。已有的连续 Vec Tile 几何约束仍
 不构成静态初始化证明。VF helper 保守捕获整个 Tile：gather 为 `read`，scatter 为
 `readwrite`。不同 dtype 的捕获通过同一 UB 基址派生出的对应类型指针访问。
 
-索引 codegen 依赖 PTOAS v0.74 或更新版本，对同一 vecscope 内未知的索引访存
+索引 codegen 依赖 PTOAS，对同一 vecscope 内未知的索引访存
 范围进行同步，包括 RAW、WAR 和 WAW 依赖。该版本包含
 [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 的修复，
 因此 PyPTO 不再为每次索引访问发射 `VV_ALL` 屏障。VF 依赖分析由 PTOAS 负责；

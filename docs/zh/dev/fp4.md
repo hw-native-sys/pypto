@@ -59,7 +59,7 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | `fillpad`、`fillpad_expand`、`fillpad_inplace` | 两种格式的 ND Vec；零值、最小值和最大值填充均保留有效载体矩形 |
 | DN 数值转换 | 完整静态连续的二维 BF16↔打包或打包↔打包转换；使用 PYPTO/DSA_RP 静态地址；部分有效、带填充及分块布局均被拒绝 |
 | 直接对打包类型执行 `reshape` 或 `transpose` | 不支持；在现有别名契约允许时，先对字节别名执行 reshape |
-| 原生打包 FP4 `matmul_mx` | Tile API 支持两种格式及 E2M1/E1M2 混合组合，使用 FP32 累加器；需要 PTOAS v0.72 的 Cube 逻辑维度约定 |
+| 原生打包 FP4 `matmul_mx` | Tile API 支持两种格式及 E2M1/E1M2 混合组合，使用 FP32 累加器；需要 PTOAS 的 Cube 逻辑维度约定 |
 | MXFP4 `quant_mx` | 仅 E2M1，输入为 FP16/BF16，支持 OCP 和 axis0 上受支持的 NV 路径；使用 PYPTO/DSA_RP 静态分配 |
 | `pl.tile.quant_mx_raw` | 显式提供工作区，返回原生 E2M1 数据（MXFP8 返回 INT8）及原始 UINT8 指数；支持静态部分有效区域和 axis0 交错 |
 | Ascend910/A2A3 上执行打包 FP4 | 不支持 |
@@ -101,7 +101,7 @@ fp8_nz = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ)
 已按 lane 编写的内核几何不再拆分，仍可使用直接路径。显式 NZ 请求要求使用有地址的直接路径。结果保持逻辑 `[M, 2*K]` 维度，
 NZ 描述符决定物理存储。NZ 的物理行数须为 16 的倍数，有效行尾通过 `valid_shape` 表达。
 该布局选项仅支持 Tile。E1M2 和 FP8E5M2 没有此直接路径。
-需要 PTOAS v0.74 或更新版本及匹配的 A5 ISA。
+需要 PTOAS v0.77 或更新版本及匹配的 A5 ISA。
 
 源 `tile.slice` 保留父 tile 的行跨度和动态行偏移。源窗口的 UB 地址必须能证明为
 32 字节对齐，因此静态打包列偏移须为 32 的倍数。父行跨度为 32 字节的倍数时，

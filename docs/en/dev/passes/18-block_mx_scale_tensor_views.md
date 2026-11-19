@@ -3,7 +3,7 @@
 ## Default pipeline: logical views
 
 `LegalizeMxScaleTensorViews` replaces `BlockMxScaleTensorViews` in the default
-PTO pipeline for PTOAS v0.74. It runs after `FlattenTileNdTo2D` and
+PTO pipeline for PTOAS. It runs after `FlattenTileNdTo2D` and
 `BlockNzTensorViews`, before `MaterializeTensorStrides`.
 
 The pass retains logical `MX_A_ZZ [M, G]`, `MX_B_NN [G, N]` and
@@ -36,7 +36,7 @@ idempotent. The public factory is `passes.legalize_mx_scale_tensor_views()`.
 
 `passes.block_mx_scale_tensor_views()` retains the rank-5 transformation below
 for explicit callers. It is no longer in the default pipeline, and its output
-is not a valid MX tensor-view input to PTOAS v0.74. Do not chain it before the
+is not a valid MX tensor-view input to PTOAS. Do not chain it before the
 new logical legalization pass.
 
 ## Overview

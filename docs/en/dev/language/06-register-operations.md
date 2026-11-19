@@ -401,31 +401,9 @@ PyPTO emits masked interleave directly. Both outputs of `intlv`/`dintlv`
 have zero in inactive lanes and preserve the bit patterns of active BF16
 values. Omitting the mask enables all lanes and preserves fusion opportunities.
 
-The independent small-vector placement defect in
-[PTOAS #1659](https://github.com/hw-native-sys/PTOAS/issues/1659) remains upstream.
-It occurs with or without the former compensation, including omitted/full masks;
-zero selection cannot repair incorrectly arranged active lanes. PyPTO does not
-add another workaround or change accepted lane counts for this defect.
-A5 qualification with PTOAS v0.74 found the following results:
-
-| Register dtypes | Physical lanes | Tested failing VLs | Tested passing VLs |
-| --------------- | -------------- | ------------------ | ------------------ |
-| INT8, UINT8 | 256 | 8, 64, 128 | 256 |
-| FP16, BF16, INT16, UINT16 | 128 | 8, 64 | 128, 256 |
-| FP32, INT32, UINT32 | 64 | 8 | 64, 128, 256 |
-
-At the failing lengths, `intlv` loses active high-result data and `dintlv`
-misplaces the second-input portion of both results. All observed inactive lanes
-were zero. BF16 VL128/256 passed raw-bit checks, including NaNs, infinities,
-subnormals and signed zeros. This table records the tested matrix, not an
-exhaustive list of frontend-accepted even lengths.
-
-`tests/st/runtime/vpto/test_reg_interleave_onboard.py` checks the production
-masked and omitted-mask paths, storing both complete results of each operation.
-It checks empty/partial/full masks, raw bits and guard regions. By default it
-uses the passing lengths above for each dtype. Explicit `--lanes` values also
-allow the known small-VL failure to be reproduced independently. Build outside
-device allocation, then execute the saved artifacts on A5:
+`tests/st/runtime/vpto/test_reg_interleave_onboard.py` checks both results for explicit and
+omitted masks, including raw bits and guard regions. Use `--lanes` to select specific vector
+lengths. Build outside device allocation, then execute the saved artifacts on A5:
 
 ```bash
 task-submit --no-device --run \
@@ -433,14 +411,6 @@ task-submit --no-device --run \
 task-submit --device auto --run \
   'python tests/st/runtime/vpto/test_reg_interleave_onboard.py --worker build/interleave "$TASK_DEVICE"'
 ```
-
-To reproduce #1659, build a separate output directory with `--dtypes FP32 --lanes 8`
-and execute it using `--worker`; its numerical checks fail until PTOAS fixes the
-placement. Use a current-worktree build and the pinned runtime/toolchain
-environment for both commands. `manifest.json` records compilation failures
-separately from the per-output hardware checks in `result.json`. Compilation
-success does not establish numerical correctness, and these checks provide no
-latency or throughput measurement.
 
 ```python
 # Inside a reg_scope, with matching UINT32 registers lo_a/lo_b/hi_a/hi_b:
@@ -468,7 +438,7 @@ they do not establish static initialization proofs. VF helpers capture the
 whole accessed Tile conservatively (`read` for gather, `readwrite` for scatter).
 Mixed-dtype captures use typed pointers derived from the same UB base.
 
-Indexed codegen relies on PTOAS v0.74 or newer to synchronize unknown indexed
+Indexed codegen relies on PTOAS to synchronize unknown indexed
 footprints within a vecscope, including RAW, WAR and WAW dependencies. This
 version includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730),
 so PyPTO emits no per-access `VV_ALL` fences. PTOAS owns VF dependency analysis;

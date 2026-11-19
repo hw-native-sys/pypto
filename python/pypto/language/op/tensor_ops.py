@@ -755,7 +755,7 @@ def matmul(
         b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul operation
@@ -872,7 +872,7 @@ def matmul_acc(
         b_trans: Whether to transpose rhs
         init_cond: Optional predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul_acc operation

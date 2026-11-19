@@ -294,7 +294,7 @@ reshape/reinterpret 描述符使用动态有效维度，并在 `pto.treshape` �
 保留输出身份和未写入区域的数据。Final 阶段 store 保持无条件执行，以清除配对生产者的单元标志；
 若要跳过 phased 操作，应在源码中同时保护生产者和 store，且仍须满足后端既有限制。
 
-PTOAS >= 0.74 支持本地分配、TPOP 派生及连续 Subview 派生的描述符
+PTOAS 支持本地分配、TPOP 派生及连续 Subview 派生的描述符
 （[#1724](https://github.com/hw-native-sys/PTOAS/issues/1724)、[#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)）。
 代码生成检查 SSA 来源，同时保留切片偏移和独立别名身份；推导出的运行时切片有效尺寸显式传给 PTOAS。
 每一层切片来源都必须连续；全宽子切片不能掩盖带跨步的父切片。跨步窗口、未知来源或控制流来源都需在初始化描述符前先物化。`SplitVectorKernel` 保留空 replay reshape/reinterpret/transpose
