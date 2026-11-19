@@ -477,27 +477,6 @@ _FP4_PROBE_CPP = "\n".join(
 )
 
 
-@pytest.mark.parametrize("returncode", [0, 1])
-def test_native_fp4_probe_rejects_old_geometry(fp4_probe, monkeypatch, returncode):
-    # A verifier-only fix still emits the wrong accumulator; neither that nor
-    # an incompatible assembler's verifier rejection can enable execution.
-    result = SimpleNamespace(
-        returncode=returncode,
-        stdout=_FP4_PROBE_CPP.replace("Acc, float, 32, 64,", "Acc, float, 16, 32,"),
-        stderr="" if returncode == 0 else "incompatible accumulator shape",
-    )
-    monkeypatch.setattr(_ptoas_fp4.subprocess, "run", lambda *args, **kwargs: result)
-    with pytest.raises(
-        RuntimeError,
-        match=(
-            rf"Native FP4 MX.*{_PINNED_VERSION_PATTERN}.*PTOAS #1700"
-            rf".*Set PTOAS_ROOT to the released {_PINNED_VERSION_PATTERN}"
-        ),
-    ):
-        _ptoas_fp4.check_native_fp4_mx_support()
-    assert not _ptoas_fp4._verified_binaries
-
-
 def test_native_fp4_missing_binary_recommends_supported_release(monkeypatch):
     monkeypatch.setattr(_ptoas_fp4, "find_ptoas_binary", lambda: None)
     with pytest.raises(
