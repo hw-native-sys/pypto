@@ -352,7 +352,14 @@ def tpush_to_aiv(
     return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, lane_stride=lane_stride, id=id, span=span)
 
 
-def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
+def tpush_to_aic(
+    tile: Tile,
+    *,
+    split: int,
+    id: int | None = None,
+    aiv_subblockid: IntLike | None = None,
+    span: Span | None = None,
+) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe.
 
     The Cube side receives it with [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] and releases the
@@ -364,9 +371,14 @@ def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | 
         split: Split mode (0=none, 1=up-down, 2=left-right). Selects the axis along
             which the two AIV lanes divide the tile; 0 sends it whole.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
-    return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, span=span)
+    lane = aiv_subblockid.unwrap() if isinstance(aiv_subblockid, Scalar) else aiv_subblockid
+    return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, aiv_subblockid=lane, span=span)
 
 
 def tfree_to_aic(
@@ -414,6 +426,7 @@ def tpop_from_aic(
     split: int = 0,
     lane_stride: int | None = None,
     id: int | None = None,
+    aiv_subblockid: IntLike | None = None,
     span: Span | None = None,
 ) -> Tile:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -426,10 +439,15 @@ def tpop_from_aic(
         lane_stride: Partition stride carried when a ragged boundary was
             balanced across the two AIV lanes; omit for the box partition
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2/3/4 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
+    lane = aiv_subblockid.unwrap() if isinstance(aiv_subblockid, Scalar) else aiv_subblockid
     call = _ir_ops.tpop_from_aic(
-        shape=shape, dtype=dtype, split=split, lane_stride=lane_stride, id=id, span=span
+        shape=shape, dtype=dtype, split=split, lane_stride=lane_stride, id=id, aiv_subblockid=lane, span=span
     )
     return Tile(expr=call)
 

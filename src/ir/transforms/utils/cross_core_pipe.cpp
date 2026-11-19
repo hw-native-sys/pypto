@@ -276,7 +276,7 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
         metadata.has_aiv_initialize_pipe = true;
       } else if (IsOp(op, "tile.tpush_to_aiv") && call->args_.size() == 1) {
         RecordTileSlotSize(metadata.c2v, call->args_[0]->GetType());
-      } else if (IsOp(op, "tile.tpush_to_aic") && call->args_.size() == 1) {
+      } else if (IsOp(op, "tile.tpush_to_aic") && !call->args_.empty()) {
         RecordTileSlotSize(metadata.v2c, call->args_[0]->GetType());
       } else if (IsOp(op, "tile.tpop_from_aiv") && assign) {
         RecordTileSlotSize(metadata.v2c, assign->var_->GetType());

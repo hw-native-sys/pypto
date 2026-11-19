@@ -1031,5 +1031,27 @@ class TestLaunchShapeQueryParsing:
             assert call.type.dtype == DataType.INT32
 
 
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_aiv_lane_round_trip(dynamic):
+    """The keyword-only lane prints from IR args and reparses structurally."""
+    lane_expr = "lane" if dynamic else "1"
+    source = f"""
+@pl.program
+class LaneProgram:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, tile: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec], lane: pl.Scalar[pl.INT64]):
+        received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.system.tpop_from_aic(
+            split=1, id=2, aiv_subblockid={lane_expr}
+        )
+        pl.system.tpush_to_aic(tile, split=2, id=3, aiv_subblockid={lane_expr})
+        pl.system.tfree_to_aic(received)
+"""
+    before = pl.parse_program(source)
+    printed = before.as_python()
+    printed_lane = "lane" if dynamic else "pl.const(1, pl.INT64)"
+    assert f"aiv_subblockid={printed_lane}" in printed
+    ir.assert_structural_equal(before, pl.parse_program(printed))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

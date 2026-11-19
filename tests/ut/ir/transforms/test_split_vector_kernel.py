@@ -1084,5 +1084,106 @@ class TestSplitVectorKernelStandaloneSetValidshape:
         _assert_split_matches_expected(Before, Expected)
 
 
+def _assert_extent_after_substitution(expr, values, expected):
+    """Use the compiler's scalar simplifier to check the selected lane's extent."""
+    span = ir.Span.unknown()
+
+    class Substitute(ir.IRMutator):
+        def visit_var(self, op):
+            if op.name_hint in values:
+                assert isinstance(op.type, ir.ScalarType)
+                return ir.ConstInt(values[op.name_hint], op.type.dtype, op.span)
+            return super().visit_var(op)
+
+    value = Substitute().visit_expr(expr)
+    before = ir.Program(
+        [ir.Function("extent", [], [ir.ScalarType(pl.INDEX)], ir.ReturnStmt([value], span), span)],
+        "Extent",
+        span,
+    )
+    wanted = ir.Program(
+        [
+            ir.Function(
+                "extent",
+                [],
+                [ir.ScalarType(pl.INDEX)],
+                ir.ReturnStmt([ir.ConstInt(expected, pl.INDEX, span)], span),
+                span,
+            )
+        ],
+        "Extent",
+        span,
+    )
+    ir.assert_structural_equal(passes.simplify()(before), wanted)
+
+
+@pytest.mark.parametrize(
+    ("mode", "shape", "view", "axis"),
+    [
+        ("UP_DOWN", [31, 16], "", 0),
+        ("LEFT_RIGHT", [16, 31], "", 1),
+        ("UP_DOWN", [32, 16], ", pl.TileView(valid_shape=[31, 16])", 0),
+    ],
+)
+@pytest.mark.parametrize("lane_kind", ["omit", "zero", "one", "swapped"])
+def test_explicit_pop_lane_localizes_odd_validity(mode, shape, view, axis, lane_kind):
+    """The 31-cell band is 16/15 by LOGICAL lane, including its consumers.
+
+    Output placement still follows the executing physical AIV. A swapped pop
+    on physical lane zero must read 15 cells, rather than pairing logical lane
+    one's band offset with physical lane zero's 16-cell valid extent.
+    """
+    operand = {"omit": "", "zero": "0", "one": "1", "swapped": "lane"}[lane_kind]
+    lane_kw = f", aiv_subblockid={operand}" if operand else ""
+    split = 3 if axis == 0 else 4
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector(self, lane: pl.Scalar[pl.INT64], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+        pl.func_attr({{"split": pl.SplitMode.{mode}}})
+        buf = pl.system.reserve_buffer(name="c2v", size=65536)
+        pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
+        received: pl.Tile[{shape}, pl.FP32, pl.Mem.Vec{view}] = pl.system.tpop_from_aic(
+            split={split}{lane_kw}
+        )
+        incremented = pl.tile.add(received, 1.0)
+        pl.system.tfree_to_aic(received)
+        saved = pl.tile.store(incremented, [0, 0], out)
+        return saved
+""")
+    after = _run_split_vector_kernel(before)
+    tiles = {}
+    physical_vars = []
+    stores = []
+
+    class Collect(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call):
+                name = op.value.op.name
+                if name == "tile.get_subblock_idx":
+                    physical_vars.append(op.var)
+                elif name in ("tile.tpop_from_aic", "tile.adds"):
+                    tiles[name] = op
+                elif name == "tile.store":
+                    stores.append(op.value)
+            super().visit_assign_stmt(op)
+
+    Collect().visit_program(after)
+    assert len(tiles) == 2 and physical_vars and len(stores) == 1
+    pop = tiles["tile.tpop_from_aic"].value
+    assert len(pop.args) == (0 if lane_kind == "omit" else 1)
+    for physical in (0, 1):
+        logical = {"omit": physical, "zero": 0, "one": 1, "swapped": 1 - physical}[lane_kind]
+        values = {var.name_hint: physical for var in physical_vars}
+        if lane_kind == "swapped":
+            values[pop.args[0].name_hint] = logical
+        for assignment in tiles.values():
+            extent = assignment.var.type.tile_view.valid_shape[axis]
+            _assert_extent_after_substitution(extent, values, 16 if logical == 0 else 15)
+        # Selecting another input band must not relocate the physical output.
+        _assert_extent_after_substitution(stores[0].args[1].elements[axis], values, physical * 16)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

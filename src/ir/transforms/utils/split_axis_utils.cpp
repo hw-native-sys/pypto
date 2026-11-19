@@ -721,6 +721,7 @@ std::optional<TileInfo> DiscoverElementSplit(const TileTypePtr& before, const Ti
     // Consumers must still check valid regions: equal eight-element boxes can
     // contain eight and six initialized values in the same lane.
     info.logical_step = LogicalLaneStep(input_info, lane_stride);
+    info.validity_lane = input_info.validity_lane;
     return info;
   }
   if (require_logical) return std::nullopt;
@@ -745,7 +746,9 @@ std::optional<TileInfo> DiscoverElementSplit(const TileTypePtr& before, const Ti
     axis = static_cast<int>(d);
   }
   if (axis < 0) return std::nullopt;
-  return TileInfo{after->shape_[axis], axis};
+  TileInfo info{after->shape_[axis], axis};
+  info.validity_lane = input_info.validity_lane;
+  return info;
 }
 
 std::optional<std::vector<TileInfo>> DiscoverTupleElementSplits(
@@ -843,6 +846,13 @@ void RejectDeferredPadFill(bool deferred, const CallPtr& call, const char* cross
          "itself";
 }
 
+ExprPtr PopLaneIndex(const CallPtr& call, const ExprPtr& physical_lane) {
+  if (call->args_.empty()) return physical_lane;
+  const auto& lane = call->args_.front();
+  if (auto constant = As<ConstInt>(lane)) return MakeIndexConst(constant->value_, lane->span_);
+  return MakeCast(lane, DataType::INDEX, lane->span_);
+}
+
 CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int split_dim,
                                    const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
   // NOT widened for a runtime extent, unlike the boundary ops in
@@ -854,7 +864,11 @@ CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int spli
   // tests/st/runtime/cross_core/test_cross_core_split_parity.py, whose
   // xfailing params record what a runtime split-axis extent still gets wrong on
   // this path.
-  auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride);
+  // The transport's lane operand selects the GM band. Its valid extent must
+  // describe that same logical band, even when it differs from the physical
+  // AIV executing the pop. Shape metadata uses INDEX while PTOAS takes i64.
+  const auto pop_lane = PopLaneIndex(call, subblock_idx);
+  auto new_result_type = HalveTileShape(call->GetType(), split_dim, pop_lane, lane_stride);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -1139,6 +1153,17 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
         TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim]), split_dim};
+        if (!call->args_.empty()) {
+          const auto physical_type =
+              As<TileType>(HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride));
+          const auto logical_type = As<TileType>(new_call->GetType());
+          // Equal, fully populated halves need no provenance override. Keeping
+          // their ordinary facts lets existing loop carries remain compatible.
+          if (!tile_view_semantics::ShapeExprListsEquivalent(GetValidShape(physical_type),
+                                                             GetValidShape(logical_type))) {
+            info.validity_lane = PopLaneIndex(call, subblock_idx);
+          }
+        }
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
       }
@@ -1496,7 +1521,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
             reshape_step && !structural_equal(reshape_step, LaneStep(lane_stride, half_dim_size))
                 ? reshape_step
                 : lane_stride;
-        auto new_result_type = HalveTileShape(call->GetType(), result_split_dim, subblock_idx, result_stride);
+        const auto validity_lane = input_info.validity_lane ? input_info.validity_lane : subblock_idx;
+        auto new_result_type =
+            HalveTileShape(call->GetType(), result_split_dim, validity_lane, result_stride);
 
         const ExprPtr lane_step = reshape_info        ? LogicalLaneStep(*reshape_info, lane_stride)
                                   : distinct_capacity ? LogicalLaneStep(input_info, lane_stride)
@@ -1581,8 +1608,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
           // LocalizeTupleElementForSplit is a no-op on a tuple whose split_dim
           // is out of range.
           if (call->args_.size() >= 4) {
-            new_args[3] = LocalizeTupleElementForSplit(call->args_[3], slice_split_dim,
-                                                       tt->shape_[result_split_dim], lane_step, subblock_idx);
+            new_args[3] = LocalizeTupleElementForSplit(
+                call->args_[3], slice_split_dim, tt->shape_[result_split_dim], lane_step, validity_lane);
           }
         } else if (IsOp(call, "tile.set_validshape") && call->args_.size() == 3) {
           // args = (tile, valid_row, valid_col). Halving the result type alone
@@ -1600,7 +1627,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
           if (operand_idx < static_cast<int>(call->args_.size()) &&
               ValidOperandNeedsLocalize(call->args_[operand_idx], tt->shape_[result_split_dim], lane_step)) {
             new_args[operand_idx] = LocalizeValidDimForSplit(
-                call->args_[operand_idx], tt->shape_[result_split_dim], lane_step, subblock_idx);
+                call->args_[operand_idx], tt->shape_[result_split_dim], lane_step, validity_lane);
           }
         }
 
@@ -1672,7 +1699,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
             for (size_t d = 0; d < before_valid.size(); ++d) {
               const auto expected_valid =
                   static_cast<int>(d) == info.split_dim
-                      ? LocalizeValidDimForSplit(before_valid[d], tt->shape_[d], lane_step, subblock_idx)
+                      ? LocalizeValidDimForSplit(before_valid[d], tt->shape_[d], lane_step, validity_lane)
                       : before_valid[d];
               CHECK_SPAN(ProveValidExtentEqual(expected_valid, after_valid[d]) == ProofResult::kTrue,
                          call->span_)
@@ -1694,6 +1721,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
+        info.validity_lane = input_info.validity_lane;
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
         var_replacements[assign->var_.get()] = new_var;
@@ -1983,7 +2011,11 @@ bool SameTileInfo(const TileInfo& a, const TileInfo& b, const ExprPtr& lane_stri
     }
     return true;
   }
-  return a.split_dim == b.split_dim && structural_equal(a.half_dim_size, b.half_dim_size) &&
+  const bool same_validity_lane =
+      a.validity_lane == b.validity_lane ||
+      (a.validity_lane && b.validity_lane && structural_equal(a.validity_lane, b.validity_lane));
+  return same_validity_lane && a.split_dim == b.split_dim &&
+         structural_equal(a.half_dim_size, b.half_dim_size) &&
          structural_equal(LogicalLaneStep(a, lane_stride), LogicalLaneStep(b, lane_stride));
 }
 
