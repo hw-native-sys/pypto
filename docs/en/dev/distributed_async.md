@@ -41,11 +41,8 @@ Adapter symbols and C++ element types reuse the shared dtype conversions.
 | Remote visibility | receiver still needs the existing cross-rank notify/wait protocol | completion-ordered remote consumption |
 
 **Usage pattern.** The transfer runs in the InCore body that owns the
-destination; a call in a host orchestration body is rejected by
-`OrchestrationReferencesResolved`. Direct calls outside InCore receive one
-placement diagnostic, without an additional undefined-function diagnostic.
-The destination is the producer's `InOut`
-output, and a later task consumes it as `In`:
+destination. The destination is the producer's `InOut` output, and a later
+task consumes it as `In`:
 
 ```python
 data = pl.store(row, [my_rank, 0], data)
