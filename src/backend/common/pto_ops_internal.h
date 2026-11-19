@@ -80,6 +80,12 @@ std::vector<std::string> GetIndexOffsetCodes(const std::vector<ir::ExprPtr>& exp
                                              codegen::PTOCodegen& codegen);
 std::vector<std::string> GetDimStrings(const std::vector<ir::ExprPtr>& exprs);
 std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, codegen::PTOCodegen& codegen);
+// Open a guard for dimensions not statically known positive. Callers must
+// eliminate statically empty regions first and bind shared tensor views outside
+// the region. Close it after the memory operation when the return value is true.
+bool BeginNonEmptyRegion(const std::vector<ir::ExprPtr>& extents, codegen::PTOCodegen& codegen,
+                         const std::vector<std::string>& index_values = {});
+void EndNonEmptyRegion(bool guarded, codegen::PTOCodegen& codegen);
 bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs);
 codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& source_tile_type,
                                                            const ir::MakeTuple& shape_tuple,

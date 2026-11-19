@@ -16,7 +16,7 @@ import pytest
 from pypto import ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.backend._ptoas_locate import find_ptoas_binary
-from pypto.backend.pto_backend import _run_ptoas
+from pypto.backend.pto_backend import _get_ptoas_flags, _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import codegen, passes
@@ -392,6 +392,115 @@ def test_packed_fp4_preserves_dn_carrier_geometry(dtype):
     assert views and all("strides = [%c1_index, %c64_index]" in line for line in views), mlir
     allocations = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
     assert allocations and all("blayout=col_major" in line for line in allocations), mlir
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+@pytest.mark.parametrize("dtype", ["FP4E2M1X2", "FP4E1M2X2"])
+@pytest.mark.parametrize("valid", [(0, 0), (0, 32), (32, 0)])
+@pytest.mark.parametrize("inferred_valid", [False, True])
+@pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.parametrize("column_offset", [0, 32])
+def test_empty_fp4_slice_compiles_with_initialized_validity(
+    tmp_path, planner, dtype, valid, inferred_valid, buffer_ir, column_offset
+):
+    """Empty FP4 slices use addressed descriptors or fail with an actionable diagnostic."""
+    rows, cols = valid
+    window_cols = 64 - column_offset
+    load_valid = f", valid_shape=[32 + {rows}, {column_offset} + {cols}]" if inferred_valid else ""
+    slice_valid = "" if inferred_valid else f", valid_shape=[{rows}, {cols}]"
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, src: pl.Tensor[[64, 64], pl.{dtype}],
+        out: pl.Out[pl.Tensor[[32, {window_cols * 2}], pl.BF16]]
+    ) -> pl.Tensor[[32, {window_cols * 2}], pl.BF16]:
+        tile = pl.load(src, [0, 0], [64, 64]{load_valid})
+        window = pl.tile.slice(tile, [32, {window_cols}], [32, {column_offset}]{slice_valid})
+        decoded = pl.cast(window, pl.BF16)
+        return pl.store(decoded, [0, 0], out)
+""")
+    if planner == passes.MemoryPlanner.PTOAS or column_offset:
+        message = (
+            "static PYPTO or DSA_RP address" if planner == passes.MemoryPlanner.PTOAS else "contiguous Vec"
+        )
+        with pytest.raises(ValueError, match=message):
+            _emit_incore_mlir(program, planner, enable_buffer_ir=buffer_ir)
+        return
+    mlir = _emit_incore_mlir(program, planner, enable_buffer_ir=buffer_ir)
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "empty_fp4_slice.pto"
+        cpp = tmp_path / "empty_fp4_slice.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), _get_ptoas_flags(planner))
+        assert cpp.is_file()
+    assert "pto.treshape" not in mlir, mlir
+    descriptor = next(line for line in mlir.splitlines() if "%window__ssa_v0 = pto.alloc_tile" in line)
+    source = next(line for line in mlir.splitlines() if "%tile__ssa_v0 = pto.alloc_tile" in line)
+    source_address = re.search(r"addr = %c(\d+)_i64", source)
+    slice_address = re.search(r"addr = %c(\d+)_i64", descriptor)
+    assert source_address and slice_address, (source, descriptor)
+    assert int(slice_address[1]) - int(source_address[1]) == 32 * 64, (source, descriptor)
+    assert f"valid_row = %c{rows}_index valid_col = %c{cols}_index" in descriptor, descriptor
+    cast = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+    assert "ins(%window__ssa_v0 " in cast, cast
+    assert "v_row=0" not in mlir and "v_col=0" not in mlir, mlir
+    assert "pto.tstore" not in mlir, mlir
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("dtype", ["FP4E2M1X2", "FP4E1M2X2"])
+def test_empty_fp4_replay_slice_uses_initialized_descriptor(tmp_path, planner, dtype):
+    # SplitVectorKernel replay stamps [0, 0] onto local tiles. Preserve it
+    # through a slice that has no explicit valid_shape operand.
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, out: pl.Out[pl.Tensor[[32, 128], pl.BF16]]) -> pl.Tensor[[32, 128], pl.BF16]:
+        tile: pl.Tile[
+            [64, 64], pl.{dtype}, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+        ] = pl.tile.create([64, 64], dtype=pl.{dtype}, target_memory=pl.MemorySpace.Vec)
+        window = pl.tile.slice(tile, [32, 64], [32, 0])
+        decoded = pl.cast(window, pl.BF16)
+        return pl.store(decoded, [0, 0], out)
+""")
+    mlir = _emit_incore_mlir(program, planner)
+    assert "pto.treshape" not in mlir and "pto.tstore" not in mlir, mlir
+    descriptor = next(line for line in mlir.splitlines() if "%window__ssa_v0 = pto.alloc_tile" in line)
+    assert "valid_row = %c0_index valid_col = %c0_index" in descriptor, descriptor
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "empty_fp4_replay.pto"
+        cpp = tmp_path / "empty_fp4_replay.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), _get_ptoas_flags(planner))
+        assert cpp.is_file()
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("dtype", ["FP4E2M1X2", "FP4E1M2X2"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_empty_fp4_slice_rejects_unproven_address(planner, dtype, nested):
+    # AllocateMemoryAddr can fold a dynamic slice offset down to its base.
+    # A nested slice must not mistake that base for a proven static address.
+    first = "base = pl.tile.slice(tile, [32, 64], [start, 0])" if nested else ""
+    source = "base" if nested else "tile"
+    offset = "0" if nested else "start"
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, src: pl.Tensor[[64, 64], pl.{dtype}], start: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[32, 128], pl.BF16]]) -> pl.Tensor[[32, 128], pl.BF16]:
+        tile = pl.load(src, [0, 0], [64, 64])
+        {first}
+        window = pl.tile.slice({source}, [32, 64], [{offset}, 0], valid_shape=[0, 0])
+        decoded = pl.cast(window, pl.BF16)
+        return pl.store(decoded, [0, 0], out)
+""")
+    with pytest.raises(ValueError, match="Empty packed FP4 tile.slice requires .*static"):
+        _emit_incore_mlir(program, planner)
 
 
 def test_fp4e2m1x2_slice_cast_preserves_carrier_offset():

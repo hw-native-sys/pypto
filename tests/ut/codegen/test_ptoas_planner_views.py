@@ -854,6 +854,57 @@ def test_treshape_result_carries_static_valid_dims():
             assert "valid_row = " in ln and "valid_col = " in ln, ln
 
 
+@pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.parametrize("chained", [False, True])
+@pytest.mark.parametrize("parent_rows", [1, 8])
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("width", [8, 16])
+def test_runtime_slice_descriptor_requires_contiguous_ancestry(
+    tmp_path, buffer_ir, chained, parent_rows, empty, width
+):
+    # Explicit runtime validity keeps this multi-row, column-cropped slice from
+    # being canonicalized into a packed copy. A full-width child of that slice
+    # still inherits the grandparent pitch and must not regain eligibility.
+    height = max(1, parent_rows // 2) if chained else parent_rows
+    valid = "0, 0" if empty else "rows, cols"
+    child = (
+        f"window = pl.tile.slice(first, [{height}, {width}], [0, 0], valid_shape=[{valid}])"
+        if chained
+        else ""
+    )
+    source = "window" if chained else "first"
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, x: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[{height}, {width}], pl.INT32]],
+        rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]
+    ) -> pl.Tensor[[{height}, {width}], pl.INT32]:
+        src = pl.load(x, [0, 0], [16, 16])
+        first = pl.tile.slice(src, [{parent_rows}, {width}], [8, {16 - width}], valid_shape=[{valid}])
+        {child}
+        view = pl.tile.reinterpret_view({source}, pl.INT32)
+        return pl.store(view, [0, 0], out)
+""")
+    assert isinstance(program, _ir.Program)
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    if width < 16 and parent_rows > 1:
+        with pytest.raises(ValueError, match="contiguous slice ancestry"):
+            codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+        return
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+    assert "pto.set_validshape" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        pto_backend._compile_pto_module(
+            mlir, "kernel", str(tmp_path), memory_planner=passes.MemoryPlanner.PTOAS
+        )
+
+
 def test_colvec_reshape_folds_away_under_pypto_planner():
     """Default planner: the `[1, N]` view is a second alloc_tile at the source's
     baked address, so no `pto.treshape` is emitted at all."""
@@ -885,6 +936,128 @@ class ZeroValidSentinelReinterpretProgram:
         ] = pl.tile.create([SENTINEL_ROWS, SENTINEL_COLS], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
         view: pl.Tile[[SENTINEL_ROWS, SENTINEL_COLS], pl.INT32] = pl.tile.reinterpret_view(sentinel, pl.INT32)
         return pl.store(view, [0, 0], out)
+
+
+@pytest.mark.parametrize("valid", [(0, 0), (0, 8), (8, 0), (8, 8)])
+@pytest.mark.parametrize("buffer_ir", [False, True])
+def test_empty_reinterpret_view_initializes_valid_and_skips_store(tmp_path, valid, buffer_ir):
+    """An empty view must have initialized runtime extents and no zero-sized GM window."""
+    rows, cols = valid
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, out: pl.Out[pl.Tensor[[16, 8], pl.FP32]]) -> pl.Tensor[[16, 8], pl.FP32]:
+        src: pl.Tile[
+            [16, 8], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[{rows}, {cols}])
+        ] = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        view = pl.tile.reinterpret_view(src, pl.INT32)
+        back = pl.cast(view, pl.FP32)
+        return pl.store(back, [0, 0], out)
+""")
+    assert isinstance(program, _ir.Program)
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+    if 0 in valid:
+        assert "v_row=0" not in mlir and "v_col=0" not in mlir, mlir
+        assert "pto.set_validshape %reinterpret_view_buf" in mlir, mlir
+        assert "pto.partition_view" not in mlir and "pto.tstore" not in mlir, mlir
+    else:
+        assert "v_row=8, v_col=8" in mlir, mlir
+        assert "pto.tstore" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        cpp = pto_backend._compile_pto_module(
+            mlir, "kernel", str(tmp_path), memory_planner=passes.MemoryPlanner.PTOAS
+        )
+        if 0 in valid:
+            assert ".SetValidShape(" in cpp, cpp
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner), ids=lambda planner: planner.name)
+def test_runtime_empty_view_memory_accesses_are_guarded(tmp_path, planner):
+    """Both zero and nonzero runtime extents use initialized handles and guarded GM windows."""
+    program = pl.parse("""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, x: pl.Tensor[[16, 8], pl.FP32], out: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+        rows: pl.Scalar[pl.INDEX]
+    ) -> pl.Tensor[[16, 8], pl.FP32]:
+        src = pl.load(x, [0, 0], [16, 8], valid_shape=[rows, 8])
+        view = pl.tile.reinterpret_view(src, pl.INT32)
+        back = pl.cast(view, pl.FP32)
+        return pl.store(back, [0, 0], out)
+""")
+    mlir = _emit_incore_pto(program, planner)
+    assert mlir.count("scf.if") >= 2, mlir
+    if planner == passes.MemoryPlanner.PTOAS:
+        assert "pto.set_validshape %reinterpret_view_buf" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner), ids=lambda planner: planner.name)
+@pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.parametrize("valid", [(0, 0), (0, 8), (8, 0), (8, 8), "runtime"])
+@pytest.mark.parametrize("chained", [False, True])
+@pytest.mark.parametrize("inferred_valid", [False, True])
+def test_slice_reinterpret_initializes_valid_without_losing_offset(
+    tmp_path, planner, buffer_ir, valid, chained, inferred_valid
+):
+    """A nonzero slice offset and empty validity survive a fresh reinterpret descriptor."""
+    rows, cols = ("rows", "cols") if valid == "runtime" else valid
+    load_valid = f", valid_shape=[8 + {rows}, {cols}]" if inferred_valid else ""
+    slice_valid = "" if inferred_valid else f", valid_shape=[{rows}, {cols}]"
+    extra = "back = pl.tile.reinterpret_view(view, pl.FP32)" if chained else ""
+    result = "back" if chained else "view"
+    dtype = "FP32" if chained else "INT32"
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, x: pl.Tensor[[16, 8], pl.FP32], out: pl.Out[pl.Tensor[[8, 8], pl.{dtype}]],
+        rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]
+    ) -> pl.Tensor[[8, 8], pl.{dtype}]:
+        src = pl.load(x, [0, 0], [16, 8]{load_valid})
+        window = pl.tile.slice(src, [8, 8], [8, 0]{slice_valid})
+        view = pl.tile.reinterpret_view(window, pl.INT32)
+        {extra}
+        return pl.store({result}, [0, 0], out)
+""")
+    assert isinstance(program, _ir.Program)
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert "pto.subview" in mlir, mlir
+    dynamic_valid = valid == "runtime" or 0 in valid
+    if dynamic_valid:
+        if planner == passes.MemoryPlanner.PTOAS:
+            assert "pto.set_validshape %reinterpret_view_buf" in mlir, mlir
+        else:
+            # Fixed-address planners bind an initialized descriptor directly at
+            # the slice address; this aliases storage rather than reserving it.
+            alias = _sole_line(mlir, f"%{result}__ssa_v0 = pto.alloc_tile")
+            assert "valid_row = " in alias and "valid_col = " in alias, alias
+    if valid != "runtime" and 0 in valid:
+        assert "pto.tstore" not in mlir, mlir
+        # The slice itself must be representable, not just the later reinterpret.
+        assert "v_row=0" not in mlir and "v_col=0" not in mlir, mlir
+        assert "pto.set_validshape %slice_empty" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+        if dynamic_valid and planner == passes.MemoryPlanner.PTOAS:
+            # Initialize the newly reshaped descriptor, never the parent slice.
+            reshape = re.search(r"TRESHAPE\((\w+), (\w+)\);", cpp)
+            assert reshape is not None, cpp
+            assert f"{reshape[1]}.SetValidShape(" in cpp, cpp
+            assert f"{reshape[2]}.SetValidShape(" not in cpp, cpp
 
 
 def test_zero_valid_sentinel_treshape_keeps_a_dynamic_valid():

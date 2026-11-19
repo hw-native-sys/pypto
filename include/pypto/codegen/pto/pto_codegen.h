@@ -572,6 +572,13 @@ class PTOCodegen : public CodegenBase {
   /// of such a handle. Subviews and control-flow arguments are not eligible.
   void RegisterMutableTileName(const std::string& ssa_name);
   bool IsMutableTileName(const std::string& ssa_name) const;
+  /// Record a FIFO-backed descriptor accepted as a local source by PTOAS >= 0.74.
+  /// This does not grant user-facing mutation of arbitrary derived views.
+  void RegisterTpopTileName(const std::string& ssa_name);
+  /// Whether contiguous reshape/subview ancestry reaches a local allocation or TPOP.
+  /// Subview offsets remain distinct for alias checks; unknown roots (including
+  /// control-flow arguments) are not accepted merely because they share a MemRef.
+  bool IsLocallyBoundTileName(const std::string& ssa_name) const;
   struct SubviewMaterializationInfo {
     std::string source_ssa;
     std::string source_type;
@@ -1262,6 +1269,11 @@ class PTOCodegen : public CodegenBase {
     std::map<std::string, std::string> tile_view_names;
     /// Handles whose runtime valid extents can be updated by pto.set_validshape.
     std::set<std::string> mutable_tile_names;
+    /// FIFO storage is borrowed, but a TPOP descriptor can root initialized views.
+    std::set<std::string> tpop_tile_names;
+    /// Subview roots eligible for descriptor initialization, not general mutation.
+    /// Cached at emission time independently of full-span storage alias identity.
+    std::set<std::string> locally_bound_subview_names;
 
     /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
@@ -1384,6 +1396,8 @@ class PTOCodegen : public CodegenBase {
       subview_materializations.clear();
       tile_view_names.clear();
       mutable_tile_names.clear();
+      tpop_tile_names.clear();
+      locally_bound_subview_names.clear();
 
       temp_counter = 0;
       used_ssa_names.clear();

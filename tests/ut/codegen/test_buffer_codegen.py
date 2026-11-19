@@ -89,6 +89,37 @@ def _window(*values):
     return ir.MakeTuple([_int(value) if isinstance(value, int) else value for value in values], SPAN)
 
 
+@pytest.mark.parametrize("rows", [0, 8, None])
+def test_empty_buffer_memory_windows(tmp_path, rows):
+    """Explicit Buffer IR shares the empty-region memory contract with Tile IR."""
+    extent = _scalar("rows") if rows is None else _int(rows)
+    tensor_type = ir.TensorType([16, 32], DataType.FP32)
+    source = ir.Var("source", tensor_type, SPAN)
+    output = ir.Var("output", tensor_type, SPAN)
+    tile, alloc = _alloc("tile", _type(valid=(-1, -1)), [extent, _int(32)])
+    params = [source, (output, ir.ParamDirection.Out)] + ([extent] if rows is None else [])
+    text = _emit(
+        _program(
+            [
+                alloc,
+                _eval("buffer.load", source, _window(0, 0), _window(extent, 32), tile),
+                _eval("buffer.store", tile, _window(0, 0), _window(extent, 32), output),
+            ],
+            params,
+        ),
+        flag=False,
+    )
+    if rows == 0:
+        assert "pto.partition_view" not in text, text
+        assert "pto.tload" not in text and "pto.tstore" not in text, text
+    elif rows is None:
+        assert text.count("scf.if") == 2, text
+    else:
+        assert "scf.if" not in text, text
+        assert "pto.tload" in text and "pto.tstore" in text, text
+    _compile_native(tmp_path, text, addressed=False)
+
+
 def _gm_program(
     addressed=False, source_name="input", valid_shape=None, ir_stage=ir.FunctionIRStage.Functional
 ):

@@ -195,6 +195,13 @@ unsupported for this path because its `treshape` rejects the packed FP4 type.
 Aliasing preserves bits; it does not numerically convert one FP4 format into
 the other.
 
+Statically empty packed-FP4 tile slices reuse an initialized address-backed
+result descriptor, avoiding `treshape`. They require PYPTO or DSA_RP planning,
+a static offset, and a contiguous row-major Vec window directly over a local
+allocation. PTOAS-planned or addressless sources, dynamic offsets, nested views,
+and strided/fractal windows report a diagnostic. Slice the GM tensor before
+loading when these restrictions apply; ordinary nonempty slices are unchanged.
+
 Partial-transfer hardware tests compare every carrier byte, including untouched
 output regions. The pinned simulator corrupts DN results, and its partial ND
 case crashes during cleanup despite matching bytes; these cases run on A5 only.

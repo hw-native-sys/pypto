@@ -2647,6 +2647,15 @@ bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
   return fs_.mutable_tile_names.count(ssa_name) > 0;
 }
 
+void PTOCodegen::RegisterTpopTileName(const std::string& ssa_name) { fs_.tpop_tile_names.insert(ssa_name); }
+
+bool PTOCodegen::IsLocallyBoundTileName(const std::string& ssa_name) const {
+  const auto source = fs_.tile_view_names.find(ssa_name);
+  const auto& root = source == fs_.tile_view_names.end() ? ssa_name : source->second;
+  return IsMutableTileName(root) || fs_.tpop_tile_names.count(root) > 0 ||
+         fs_.locally_bound_subview_names.count(root) > 0;
+}
+
 std::string PTOCodegen::EnsureTileView(
     const std::string& source, const std::string& source_type,
     const std::shared_ptr<const ir::TileType>& tile_type, const std::string& name_hint,
@@ -2726,6 +2735,18 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
                                                 const SubviewMaterializationInfo& info) {
   fs_.subview_materializations[subview_ssa] = info;
+  // Definitions precede uses, so cache contiguous ancestry as each subview is
+  // emitted. Cropping columns across multiple rows retains the parent's pitch;
+  // reshaping that descriptor to the packed window size is illegal in PTOAS.
+  // Requiring the parent to be eligible keeps a later full-width child from
+  // hiding a strided ancestor, without repeatedly walking the chain or merging
+  // distinct offsets in tile_view_names (which would break alias checks).
+  const bool contiguous = info.view_rows == 1 || (info.source_cols > 0 && info.view_cols == info.source_cols);
+  if (contiguous && IsLocallyBoundTileName(info.source_ssa)) {
+    fs_.locally_bound_subview_names.insert(subview_ssa);
+  } else {
+    fs_.locally_bound_subview_names.erase(subview_ssa);
+  }
 }
 
 PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterialization(
@@ -3468,30 +3489,17 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
 
   auto c = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
 
-  // `pto.alloc_tile` conveys the valid extent through `valid_row` / `valid_col`
-  // operands, so ExtractTileTypeInfo always renders `v_row=?, v_col=?`. A view op
-  // that takes NO such operands — `pto.treshape` — cannot: PTOAS default-
-  // constructs its destination tile from the result type alone, so a dynamic
-  // valid leaves the tile's valid extent at zero and every consumer silently
-  // becomes a no-op. Render static valid dims whenever the view's effective
-  // valid_shape is statically known.
-  //
-  // This static-valid type string is the PTOAS-facing half of
-  // EmitStaticValidTileView (pto.tquant.mx / X-to-ZZ requireStaticShape): the
-  // treshape result type must carry concrete v_row/v_col, not `?`.
-  //
-  // The one valid_shape that must stay dynamic is the all-zero lane-1 replay
-  // sentinel: a static `v_row=0, v_col=0` has no pto-isa GetValidRow overload
-  // (see IsZeroValidShapeSentinel). Rendering it dynamic is what the sibling
-  // subview inference already does.
+  // Static zero has no PTO-ISA GetValidRow/GetValidCol overload. A dynamic
+  // view is initialized explicitly by its emitter, including the all-zero
+  // replay marker; a default-constructed reshape alone does not initialize it.
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
-  const bool zero_sentinel = ir::tile_view_semantics::IsZeroValidShapeSentinel(valid);
-  if (!zero_sentinel) {
+  const bool empty = ir::tile_view_semantics::HasZeroValidExtent(valid);
+  if (!empty) {
     if (valid.size() == 1) {
       // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
-      // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
-      // dynamic zero-valid extent and its consumers become silent no-ops.
+      // maps to rows=1, cols=shape[0]. Keep positive constant views static,
+      // including the implicit row, without a runtime metadata update.
       if (auto v_col = As<ir::ConstInt>(valid[0])) {
         c.v_row = 1;
         c.v_col = v_col->value_;

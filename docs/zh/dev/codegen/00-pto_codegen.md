@@ -281,15 +281,21 @@ PTOAS 0.65 通过为 scale 发出 `uint64_t`、为行列索引发出 `uint16_t`�
 仍由 `FixpipeEpilogueValid` 拒绝；范围更广的各后端能力表继续独立管辖 Acc-to-GM
 store。
 
-**`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
-`valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、
-`scf.if` 结果、跨核 pop slot。而**视图**——`tile.slice` 下沉出的 `pto.subview`，
-或 `pto.treshape`——把有效范围存在自身类型里，ptoas 会拒绝对它执行这条指令，所以
-PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发射点被记录，而不是从渲染出
-的维度推断：带运行时 `valid_shape` 的切片渲染成 `v_row=?, v_col=?`，与由 alloc
-承载的 handle 完全一样。要收窄视图，请给切片传 `valid_shape=`（它会落到
-`pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
-tile 调用 `set_validshape`。
+**`tile.set_validshape` 下沉。** PyPTO 将用户侧有效尺寸修改限制在受支持的可变 handle 上。
+任意 slice/reshape 视图仍会被拒绝，包括动态有效尺寸切片；视图身份独立于渲染出的维度进行跟踪。
+请在切片上使用 `valid_shape=`，或先收窄源 tile。编译器创建的动态描述符可以单独初始化。 非 FP4 静态空切片先通过全窗口 Subview 绑定地址，再用实际空有效尺寸初始化动态 reshape，避免静态零掩码，且不分配或复制数据。打包 FP4 按照 [FP4 切片限制](../fp4.md) 复用已初始化的带地址描述符。
+
+**空有效区域。** 任意有效维度为零都表示空区域，与物理分配大小无关。空区域或运行时有效尺寸的
+reshape/reinterpret 描述符使用动态有效维度，并在 `pto.treshape` 后通过 `pto.set_validshape`
+初始化；静态正数有效维度保持静态编码。普通 Tile/Buffer 传输跳过静态空窗口，并保护运行时窗口，
+保留输出身份和未写入区域的数据。Final 阶段 store 保持无条件执行，以清除配对生产者的单元标志；
+若要跳过 phased 操作，应在源码中同时保护生产者和 store，且仍须满足后端既有限制。
+
+PTOAS >= 0.74 支持本地分配、TPOP 派生及连续 Subview 派生的描述符
+（[#1724](https://github.com/hw-native-sys/PTOAS/issues/1724)、[#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)）。
+代码生成检查 SSA 来源，同时保留切片偏移和独立别名身份；推导出的运行时切片有效尺寸显式传给 PTOAS。
+每一层切片来源都必须连续；全宽子切片不能掩盖带跨步的父切片。跨步窗口、未知来源或控制流来源都需在初始化描述符前先物化。`SplitVectorKernel` 保留空 replay reshape/reinterpret/transpose
+别名及 TPOP/TPUSH/TFREE 握手；将这些 FIFO 别名替换为 `tile.create` 会额外分配完整数据缓冲区。
 
 ### 跨核操作到 PTO 指令
 
@@ -349,8 +355,7 @@ PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位�
   不一致，pop 的 stride 就会错位——这会静默破坏*有效*区域的数据，因为 ISA 中对应的
   断言在 release 构建里被编译掉了。所以部分有效的 Acc-to-Vec 传输无论是否切分，
   TPOP 以及 TPUSH 的**列**维度都使用完整物理 box，并在传输两侧立即恢复逻辑 valid
-  shape——消费侧通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地
-  绑定 tile，`pto.set_validshape` 无法就地修改它）。第一个例外是切分轴上的 extent：它必须保持
+  shape——消费侧通过纯元数据的 `pto.treshape` 恢复。第一个例外是切分轴上的 extent：它必须保持
   逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段起点——也正因如此，
   编译期无法核验的逐 lane extent 绝不能到达那里。显式 `pl.split_aiv` 中切分轴 extent 为运行期
   值的边界，会让被弹出的 tile 保留完整 box（`split_axis::WithFullSplitAxisValid`），使偶数

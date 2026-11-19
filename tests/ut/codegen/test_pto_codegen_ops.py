@@ -3074,16 +3074,13 @@ class TestTileSliceCodegen:
             f"valid [6,6] (min(size, valid - offset)) on the materialized result; got:\n{alloc_line}"
         )
 
-    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
-        """Regression for issue #1507: subview must not emit static v_row=0, v_col=0
-        when the parent's IR carries the lane1 [0, 0] valid_shape sentinel.
+    @pytest.mark.parametrize("window_cols", [8, 32])
+    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self, window_cols):
+        """Empty contiguous slices avoid static zero masks; strided ones diagnose.
 
-        The parent's static type string always renders v_row=?, v_col=? (per
-        ExtractTileTypeInfo in pto_type_utils.cpp), so PTOAS infers the
-        subview's result valid from the slice's `sizes`. Our inference must
-        align — reading the parent's tile_view_.valid_shape (which can be the
-        sentinel [0, 0] after SplitVectorKernel's WithZeroValidShape) would
-        produce v_row=0, v_col=0 that PTOAS rejects.
+        The lane1 [0, 0] sentinel must survive as initialized dynamic validity.
+        A column-cropped multi-row subview retains its parent's physical pitch,
+        so emitting a descriptor reshape for it is not supported by PTOAS.
         """
 
         @pl.program
@@ -3091,15 +3088,22 @@ class TestTileSliceCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                dst: pl.Tensor[[16, 8], pl.FP32],
-            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                dst: pl.Tensor[[16, window_cols], pl.FP32],
+            ) -> pl.Tensor[[16, window_cols], pl.FP32]:
                 sentinel_tile: pl.Tile[
                     [16, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
                 ] = pl.tile.create([16, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
-                sliced: pl.Tile[[16, 8], pl.FP32] = pl.tile.slice(sentinel_tile, [16, 8], [0, 0])
+                sliced: pl.Tile[[16, window_cols], pl.FP32] = pl.tile.slice(
+                    sentinel_tile, [16, window_cols], [0, 0]
+                )
                 return pl.store(sliced, [0, 0], dst)
 
+        if window_cols < 32:
+            with pytest.raises(ValueError, match="contiguous slice ancestry"):
+                self._generate_mlir(Prog)
+            return
         mlir = self._generate_mlir(Prog)
+        assert "pto.set_validshape %slice_empty" in mlir, mlir
         subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
         assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
         result_type = subview_lines[0].split("->", 1)[-1]
@@ -5201,6 +5205,54 @@ class TestTileStoreAttrsCodegen:
         assert all(expected in line for line in tstore_lines), (
             f"expected final stPhase on every pto.tstore, got:\n{tstore_lines}"
         )
+
+    @pytest.mark.parametrize("cols", [0, 64, "cols"])
+    @pytest.mark.parametrize("final", [False, True])
+    @pytest.mark.parametrize("buffer_ir", [False, True])
+    def test_empty_store_preserves_final_phase(self, tmp_path, cols, final, buffer_ir):
+        """A final store must remain paired instead of being silently elided or guarded."""
+        phase = "Final" if final else "Unspecified"
+        program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, a: pl.Tensor[[1, 128], pl.FP32], b: pl.Tensor[[128, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 64], pl.FP32]], cols: pl.Scalar[pl.INDEX]
+    ):
+        lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+        rhs = pl.load(b, [0, 0], [128, 64], valid_shape=[128, {cols}],
+                      target_memory=pl.MemorySpace.Mat)
+        result = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.{phase})
+        pl.store(result, [0, 0], out, st_phase=pl.STPhase.{phase})
+""")
+        with passes.PassContext([], enable_buffer_ir=buffer_ir):
+            mlir = self._generate_mlir(program)
+        producer = next(line for line in mlir.splitlines() if "pto.tgemv " in line)
+        stores = [line for line in mlir.splitlines() if "pto.tstore" in line]
+        if not final and cols == 0:
+            assert not stores, mlir
+        else:
+            assert len(stores) == 1, mlir
+            store = stores[0]
+            producer_indent = len(producer) - len(producer.lstrip())
+            store_indent = len(store) - len(store.lstrip())
+            if final:
+                assert "accPhase = #pto<acc_phase final>" in producer, mlir
+                assert "stPhase = #pto<st_phase final>" in store, mlir
+                # The store must remain in the producer's straight-line region;
+                # load guards may exist earlier in the same function.
+                assert store_indent == producer_indent, mlir
+            elif cols == "cols":
+                assert store_indent > producer_indent, mlir
+        # A statically zero final store retains the existing backend rejection:
+        # do not silently erase its synchronization effect to make it compile.
+        if find_ptoas_binary() is not None:
+            if final and cols == 0:
+                with pytest.raises(RuntimeError, match="must be positive"):
+                    pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+            else:
+                pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
 
     def test_store_phase_and_atomic_share_one_attr_dict(self):
         """PTOAS receives stPhase and atomicType in the same attribute dictionary."""
