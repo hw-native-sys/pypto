@@ -64,6 +64,18 @@ def _assemble_mx(mlir, tmp_path):
     return cpp
 
 
+_MX_FP8_PAIRS = [
+    pytest.param(pl.FP8E4M3FN, pl.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(pl.FP8E5M2, pl.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(pl.FP8E4M3FN, pl.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(pl.FP8E5M2, pl.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
+# tile_buf dtype spelling in emitted PTO, and the pto-isa C++ element type.
+_PTO_FP8_SPELLING = {pl.FP8E4M3FN: "f8E4M3FN", pl.FP8E5M2: "f8E5M2"}
+_ISA_FP8_SPELLING = {pl.FP8E4M3FN: "float8_e4m3_t", pl.FP8E5M2: "float8_e5m2_t"}
+
+
 class TestMxMatmulCodegen:
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
     @pytest.mark.parametrize("hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NOT_ALLOC_KEEP])
@@ -683,6 +695,71 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         assert "pto.tmatmul.mx.bias" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    @pytest.mark.parametrize(
+        "compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)]
+    )
+    def test_every_fp8_pair_emits_its_own_operand_dtypes(
+        self, tmp_path, compile_with_ptoas, lhs_dtype, rhs_dtype
+    ):
+        """Each MX FP8 pair reaches PTOAS with per-side dtypes on data, scale-addr and matmul.
+
+        Operand placement is left to the compiler (no hand-written ``pl.move``), which
+        is the form the ``matmul_mx`` family is documented to accept and the only one
+        whose Bias staging PTOAS lowers.
+        """
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], lhs_dtype],
+                a_s: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], rhs_dtype],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                bias: pl.Tensor[[1, 32], pl.FP32],
+                out: pl.Tensor[[16, 32], pl.FP32],
+                out_acc: pl.Tensor[[16, 32], pl.FP32],
+                out_bias: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                lhs = pl.load(a, [0, 0], [16, 64])
+                lhs_scale = pl.load(a_s, [0, 0], [16, 2])
+                rhs = pl.load(b, [0, 0], [64, 32])
+                rhs_scale = pl.load(b_s, [0, 0], [2, 32])
+                bias_tile = pl.load(bias, [0, 0], [1, 32])
+                base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                pl.store(base, [0, 0], out)
+                pl.store(pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale), [0, 0], out_acc)
+                pl.store(pl.matmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias_tile), [0, 0], out_bias)
+
+        mlir = _emit_incore_mlir(Program)
+        lhs_pto = _PTO_FP8_SPELLING[lhs_dtype]
+        rhs_pto = _PTO_FP8_SPELLING[rhs_dtype]
+        assert f"loc=left, dtype={lhs_pto}," in mlir
+        assert f"loc=right, dtype={rhs_pto}," in mlir
+        # Each side's scale-addr derivation reads that side's own data dtype; a
+        # dtype hardcoded in the MX path would make the two sides agree wrongly.
+        tget_lines = [line for line in mlir.splitlines() if "pto.tget_scale_addr" in line]
+        left_tget = [line for line in tget_lines if "loc=left," in line]
+        right_tget = [line for line in tget_lines if "loc=right," in line]
+        assert len(left_tget) + len(right_tget) == len(tget_lines) == 2
+        assert f"loc=left, dtype={lhs_pto}," in left_tget[0]
+        assert f"loc=right, dtype={rhs_pto}," in right_tget[0]
+        for pto_op in ("pto.tmatmul.mx ", "pto.tmatmul.mx.acc ", "pto.tmatmul.mx.bias "):
+            line = next(line for line in mlir.splitlines() if pto_op in line)
+            assert f"loc=left, dtype={lhs_pto}," in line
+            assert f"loc=right, dtype={rhs_pto}," in line
+            assert "loc=acc, dtype=f32," in line
+        assert "loc=bias, dtype=f32," in mlir
+
+        if compile_with_ptoas:
+            cpp = _assemble_mx(mlir, tmp_path)
+            assert f"Tile<TileType::Left, {_ISA_FP8_SPELLING[lhs_dtype]}" in cpp
+            assert f"Tile<TileType::Right, {_ISA_FP8_SPELLING[rhs_dtype]}" in cpp
+            # base + acc + bias all lower to TMATMUL_MX overloads.
+            assert cpp.count("TMATMUL_MX(") == 3
 
 
 class TestMxANDScaleCodegen:

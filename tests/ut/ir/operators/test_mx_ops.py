@@ -185,6 +185,14 @@ class TestMatmulMxRegistry:
         assert tget["output_memory"] == "inherit_from_input"
 
 
+_MX_FP8_PAIRS = [
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
+
 class TestMatmulMxTypes:
     @staticmethod
     def _mx_operands(span, *, m=16, k=64, n=32, valid=None, dtype=DataType.FP8E4M3FN):
@@ -204,9 +212,12 @@ class TestMatmulMxTypes:
         rhs_scale = _tile("rhs_scale", [sk, n], DataType.FP8E8M0, valid_shape=[sk_v, n_v])
         return lhs, lhs_scale, rhs, rhs_scale
 
-    def test_type_deduction_and_variants(self):
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    def test_type_deduction_and_variants(self, lhs_dtype, rhs_dtype):
         span = ir.Span.unknown()
-        lhs, lhs_scale, rhs, rhs_scale = self._mx_operands(span)
+        _, lhs_scale, _, rhs_scale = self._mx_operands(span)
+        lhs = _tile("lhs", [16, 64], lhs_dtype)
+        rhs = _tile("rhs", [64, 32], rhs_dtype)
         call = ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
         call_type = call.type
         assert isinstance(call_type, ir.TileType)
@@ -276,22 +287,11 @@ class TestMatmulMxTypes:
 
     def test_rejects_wrong_dtypes_and_alignment(self):
         span = ir.Span.unknown()
-        # data must be FP8E4M3FN
-        with pytest.raises(ValueError, match="requires lhs dtype FP8E4M3FN") as exc_info:
-            ir.op.tile.matmul_mx(
-                ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E5M2), span),
-                ir.Var("ls", ir.TileType([16, 2], DataType.FP8E8M0), span),
-                ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span),
-                ir.Var("rs", ir.TileType([2, 32], DataType.FP8E8M0), span),
-                span,
-            )
-        assert "native FP4" not in str(exc_info.value)
-
-        lhs, lhs_scale, _, rhs_scale = self._mx_operands(span)
-        rhs_fp8e5m2 = ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span)
-        with pytest.raises(ValueError, match="requires rhs dtype FP8E4M3FN") as exc_info:
-            ir.op.tile.matmul_mx(lhs, lhs_scale, rhs_fp8e5m2, rhs_scale, span)
-        assert "native FP4" not in str(exc_info.value)
+        lhs, lhs_scale, rhs, rhs_scale = self._mx_operands(span, dtype=DataType.FP8E5M2)
+        with pytest.raises(ValueError, match="requires lhs dtype FP8E4M3FN, FP8E5M2, or packed FP4"):
+            ir.op.tile.matmul_mx(_tile("lhs", [16, 64], DataType.HF8), lhs_scale, rhs, rhs_scale, span)
+        with pytest.raises(ValueError, match="requires rhs dtype FP8E4M3FN, FP8E5M2, or packed FP4"):
+            ir.op.tile.matmul_mx(lhs, lhs_scale, _tile("rhs", [64, 32], DataType.FP16), rhs_scale, span)
 
         # scale must be FP8E8M0
         lhs, _, rhs, rhs_scale = self._mx_operands(span)
@@ -441,10 +441,11 @@ class TestMatmulMxTypes:
 
 
 class TestTGetScaleAddr:
-    def test_binds_and_rejects(self):
+    @pytest.mark.parametrize("dtype", [DataType.FP8E4M3FN, DataType.FP8E5M2])
+    def test_binds_and_rejects(self, dtype):
         span = ir.Span.unknown()
         dst = _tile("rbs", [2, 32], DataType.FP8E8M0, memory=ir.MemorySpace.RightScale)
-        src = _tile("rb", [64, 32], DataType.FP8E4M3FN, memory=ir.MemorySpace.Right)
+        src = _tile("rb", [64, 32], dtype, memory=ir.MemorySpace.Right)
         call = ir.op.tile.tget_scale_addr(dst, src, span)
         call_type = call.type
         assert isinstance(call_type, ir.TileType)

@@ -860,6 +860,11 @@ inline void StampCompactForNarrowedAccRows(TileView& dst, const std::vector<Expr
   }
 }
 
+/// A5 MX accepts either E4M3FN or E5M2 on each FP8 data operand.
+[[nodiscard]] inline bool IsMxFp8DataType(const DataType& dtype) {
+  return dtype == DataType::FP8E4M3FN || dtype == DataType::FP8E5M2;
+}
+
 /// Matrix arithmetic uses logical value extents; packed FP4 tile types store
 /// byte-carrier extents along the contiguous layout axis. Requires rank two.
 [[nodiscard]] std::vector<ExprPtr> GetMatmulLogicalShape(const TileTypePtr& tile,

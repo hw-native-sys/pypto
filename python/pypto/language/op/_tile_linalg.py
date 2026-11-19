@@ -299,17 +299,17 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = Non
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication.
 
-    Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Both data tiles
-    must either both be FP8E4M3FN or both be packed FP4 (either E2M1x2 or
-    E1M2x2). FP4 carrier extents expand along the contiguous axis; scales
+    Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Each FP8 data
+    tile can use FP8E4M3FN or FP8E5M2 independently. A packed FP4 pair can
+    use either E2M1x2 or E1M2x2 on each side. FP4 carrier extents expand along the contiguous axis; scales
     and the FP32 accumulator use logical value dimensions. Mixed FP4/FP8
     operands require an explicit FP4-to-FP8 cast. Native FP4 requires the
     PTOAS v0.72 logical Cube geometry contract (issue #1700).
 
     Args:
-        lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
+        lhs: Left-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
-        rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
+        rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
 
     Returns:
@@ -322,14 +322,15 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
 def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matmul with accumulation.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: both operands
-    are FP8E4M3FN or both are packed FP4, with logical scale and accumulator shapes.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: each FP8
+    operand can use FP8E4M3FN or FP8E5M2. Packed FP4 pairs use logical scale
+    and accumulator shapes.
 
     Args:
         acc: Accumulator tile
-        lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
+        lhs: Left-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
-        rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
+        rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
 
     Returns:
@@ -344,13 +345,14 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
 def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
     """MX block-scale matmul with bias.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: both operands
-    are FP8E4M3FN or both are packed FP4, with logical scale and accumulator shapes.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: each FP8
+    operand can use FP8E4M3FN or FP8E5M2. Packed FP4 pairs use logical scale
+    and accumulator shapes.
 
     Args:
-        lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
+        lhs: Left-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
-        rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
+        rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
         bias: Bias tile
 
