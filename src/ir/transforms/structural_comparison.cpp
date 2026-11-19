@@ -804,7 +804,9 @@ struct structural_comparison_detail::TypeComparisonCache::Impl {
   std::unordered_map<TypePtr, Id> types;
 
   Id Project(const TypePtr& type) {
-    if (const auto cached = types.find(type); cached != types.end()) return cached->second;
+    if (const auto cached = types.find(type); cached != types.end()) {
+      return cached->second;
+    }
     // Keep each root's binding scope independent, as structural_equal does.
     Projection projection(arena, /*map_free=*/false);
     const auto id = projection.Run(type);
