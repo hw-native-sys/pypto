@@ -905,6 +905,15 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const bool mgather_kw_scratch = mgather && mgather_coalesce == 1 && op->args_.size() >= 3;
   const bool mgather_kw_valid = mgather && ((mgather_coalesce == 0 && op->args_.size() == 3) ||
                                             (mgather_coalesce == 1 && op->args_.size() == 4));
+  // tensor.gather's axis form stores (input, index) positionally and `dim` as a
+  // kwarg, but the public `gather(input, dim=None, index=None, ...)` wrapper's
+  // second positional slot is `dim`, not `index` (its signature mirrors
+  // `gather(input, dim, index)`, matching the flat-form positional call
+  // `gather(input, index)`). Printing `index` positionally there collides
+  // with the explicit `dim=` kwarg -- Python raises "got multiple values for
+  // argument 'dim'" before the wrapper body ever runs. Print `index` as a
+  // keyword too whenever `dim` is present so the call reparses.
+  const bool gather_kw_index = IsOp(op, "tensor.gather") && op->HasKwarg("dim") && op->args_.size() == 2;
 
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
@@ -915,6 +924,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (sort32_kw_tmp && i == 2) continue;
     if (a2av_kw_core_num && i + 1 == op->args_.size()) continue;
     if (mgather && i >= 2) continue;
+    if (gather_kw_index && i == 1) continue;
     if (i > 0) stream_ << ", ";
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
@@ -971,6 +981,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   if (mgather_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[mgather_coalesce == 1 ? 3 : 2]);
+    need_comma = true;
+  }
+  if (gather_kw_index) {
+    stream_ << (need_comma ? ", " : "") << "index=";
+    VisitExpr(op->args_[1]);
     need_comma = true;
   }
   if (IsOp(op, "system.task_dummy")) {
