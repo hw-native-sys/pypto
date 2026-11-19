@@ -13,7 +13,7 @@ Build with --build OUTPUT under task-submit --no-device, then execute with
 --worker OUTPUT DEVICE under task-submit --device auto. Both outputs are stored
 without the governing mask so ignored masks cannot hide behind masked stores.
 Default lengths cover physical registers and larger vectors. Pass --lanes 8 to
-reproduce PTOAS #1659 separately; it must fail until the upstream fix lands.
+run the short-vector hardware regression for PTOAS #1659 separately.
 """
 
 import argparse
@@ -145,8 +145,7 @@ def _build(output, dtypes, lengths, modes):
     recorder = runpy.run_path(str(ROOT / "examples/runtime/vf_emitc_vpto.py"))["_record_compilation"]
     for dtype in dtypes:
         _, storage = _storage(dtype)
-        # Keep #1659 reproductions opt-in; no frontend validation or production
-        # lowering is changed to hide the existing small-vector defect.
+        # Short-vector hardware qualification is opt-in through --lanes.
         selected_lengths = (
             lengths
             if lengths is not None

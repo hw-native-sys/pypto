@@ -362,8 +362,10 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 PyPTO 直接生成带 mask 的 interleave。`intlv`/`dintlv` 两个输出的非活动 lane
 均为零，活动 BF16 值保持原始位模式。省略 mask 时，所有 lane 均活动，并保留融合机会。
 
-`tests/st/runtime/vpto/test_reg_interleave_onboard.py` 检查显式和省略 mask 时的两个输出，包括原始位模式和保护区域。用
-`--lanes` 指定向量长度。先在不占卡时构建，再在 A5 上执行产物：
+`tests/st/runtime/vpto/test_reg_interleave_onboard.py` 检查显式和省略 mask 时的两个输出，
+包括原始位模式和保护区域。默认运行覆盖不短于单个物理寄存器的向量。
+短向量已用 PTOAS v0.77 通过编译检查，A5 数值验证仍待完成。
+可用 `--lanes 8` 执行定向硬件回归。先在不占卡时构建，再在 A5 上执行产物：
 
 ```bash
 task-submit --no-device --run \

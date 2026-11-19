@@ -402,8 +402,11 @@ have zero in inactive lanes and preserve the bit patterns of active BF16
 values. Omitting the mask enables all lanes and preserves fusion opportunities.
 
 `tests/st/runtime/vpto/test_reg_interleave_onboard.py` checks both results for explicit and
-omitted masks, including raw bits and guard regions. Use `--lanes` to select specific vector
-lengths. Build outside device allocation, then execute the saved artifacts on A5:
+omitted masks, including raw bits and guard regions. The default run covers
+lengths at least as wide as one physical register. Short-vector code generation
+has compile coverage with PTOAS v0.77. A5 numerical validation for those lengths
+is pending. Use `--lanes 8` to run a targeted hardware regression. Build outside
+device allocation, then execute the saved artifacts on A5:
 
 ```bash
 task-submit --no-device --run \
