@@ -223,7 +223,9 @@ def test_tensor_matmul_with_transpose():
     func = _simple_function("f", [a, b], assign)
     code = torch_codegen(func)
     assert "a.mT" in code
-    assert "torch.matmul" in code
+    # Matmul emission routes through the `_cube_matmul` preamble helper, which
+    # widens 1-byte / mixed float operand pairs before calling torch.
+    assert "_cube_matmul" in code
 
 
 def test_tensor_matmul_respects_out_dtype():
@@ -235,7 +237,7 @@ def test_tensor_matmul_respects_out_dtype():
     assign = ir.AssignStmt(out, call, _span())
     func = _simple_function("f", [a, b], assign)
     code = torch_codegen(func)
-    assert "torch.matmul(a, b).to(torch.float32)" in code
+    assert "_cube_matmul(a, b).to(torch.float32)" in code
 
 
 @pytest.mark.parametrize("mode", ["round_even", "round_away"])
@@ -566,7 +568,7 @@ def test_tile_sels_and_prelu():
 
 
 def test_tile_matmul_acc():
-    """tile.matmul_acc should emit (acc + torch.matmul(lhs, rhs))."""
+    """tile.matmul_acc should emit (acc + _cube_matmul(lhs, rhs))."""
     acc = _tile_var("acc", [64, 64])
     a = _tile_var("a", [64, 128])
     b = _tile_var("b", [128, 64])
@@ -576,7 +578,7 @@ def test_tile_matmul_acc():
     assign = ir.AssignStmt(out, call, _span())
     func = _simple_function("f", [acc, a, b], assign)
     code = torch_codegen(func)
-    assert "acc + torch.matmul(a, b).float()" in code
+    assert "acc + _cube_matmul(a, b).float()" in code
 
 
 def test_tile_matmul_acc_runtime_init_cond_overwrites():
@@ -614,7 +616,7 @@ def test_tile_matmul_acc_runtime_init_cond_overwrites():
             return pl.store(acc_tile, [0, 0], output)
 
     code = torch_codegen(SplitKFromNonZeroAcc)
-    assert "_acc_init(acc_tile, torch.matmul(a, b).float(), (k0 == 0))" in code
+    assert "_acc_init(acc_tile, _cube_matmul(a, b).float(), (k0 == 0))" in code
 
     ns: dict = {}
     exec(code, ns)  # noqa: S102
@@ -665,9 +667,9 @@ def test_tile_matmul_acc_literal_init_cond_folds():
             return pl.store(out_tile, [0, 0], output)
 
     # True selects the overwrite arm outright -- the accumulator drops out.
-    assert "out_tile = torch.matmul(a, b).float()" in torch_codegen(MatmulAccInitTrue)
+    assert "out_tile = _cube_matmul(a, b).float()" in torch_codegen(MatmulAccInitTrue)
     # False selects the accumulating arm, identical to carrying no predicate.
-    assert "out_tile = (acc + torch.matmul(a, b).float())" in torch_codegen(MatmulAccInitFalse)
+    assert "out_tile = (acc + _cube_matmul(a, b).float())" in torch_codegen(MatmulAccInitFalse)
 
 
 def test_tile_gemv_acc_runtime_init_cond_overwrites():
@@ -702,7 +704,7 @@ def test_tile_gemv_acc_runtime_init_cond_overwrites():
             return pl.store(acc_tile, [0, 0], output)
 
     code = torch_codegen(GemvSplitKFromNonZeroAcc)
-    assert "_acc_init(acc_tile, torch.matmul(a, b).float(), (k0 == 0))" in code
+    assert "_acc_init(acc_tile, _cube_matmul(a, b).float(), (k0 == 0))" in code
 
     ns: dict = {}
     exec(code, ns)  # noqa: S102
@@ -740,7 +742,7 @@ def test_tensor_matmul_acc_init_cond_with_transpose():
             return pl.assemble(output, result, [0, 0])
 
     code = torch_codegen(TensorSplitK)
-    assert "_acc_init(result, torch.matmul(lhs.mT, rhs), (k0 == 0))" in code
+    assert "_acc_init(result, _cube_matmul(lhs.mT, rhs), (k0 == 0))" in code
 
 
 def test_tile_cmp():

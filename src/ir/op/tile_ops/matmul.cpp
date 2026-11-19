@@ -80,10 +80,10 @@ MatmulProductInfo DeduceMatmulProductInfo(const TileTypePtr& lhs_type, const Til
       << " requires rhs valid K to cover lhs valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
       << " and rhs K=" << PythonPrint(rhs_valid[0]);
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-  const auto accumulator_dtype = MatmulAccumulatorDataType(lhs_type->dtype_, rhs_type->dtype_);
+  // Operand dtypes need not be identical: on A5 the Cube multiplies the mixed
+  // FP8 orders (E4M3FN x E5M2 and E5M2 x E4M3FN) too. The accumulator the pair
+  // produces comes back from the same shared check.
+  const auto accumulator_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, op_name);
 
   return MatmulProductInfo{{lhs_shape[0], rhs_shape[1]}, {lhs_valid[0], rhs_valid[1]}, accumulator_dtype};
 }

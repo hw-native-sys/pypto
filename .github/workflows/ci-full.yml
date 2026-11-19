@@ -2244,10 +2244,10 @@ jobs:
 
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
-    # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Three steps share one checkout / install:
+    # because the job also runs ordinary and MX matmul ST on the same
+    # npu-a5 card. The steps share one checkout and install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
-    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
+    #   2. mx-tests-a5           — ordinary and MX matmul plus on-board quantization
     #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
@@ -2309,7 +2309,8 @@ jobs:
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
     # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # quant-to-matmul), test_matmul_fp8_mixed.py (ordinary FP8 matmul), and the
+    # direct FP4-to-FP8 cast case.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2411,12 +2412,15 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
+        # Use one Torch thread before pytest-forked starts its child processes.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
-            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              OMP_NUM_THREADS=1 python -m pytest \
+              tests/st/runtime/ops/test_matmul_fp8_mixed.py \
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_fp4.py::test_direct_fp4_to_fp8_all_patterns \
               tests/st/runtime/ops/test_quant_mx.py \
