@@ -184,6 +184,34 @@ void TestCostModelHardwareEquations() {
       a2a3.EstimateConversionCost(vec_col, al::LayoutSpec::ColMajorFlat(), al::LayoutSpec::RowMajorFlat()),
       a2a3.vec_reshape_metadata_cycles, 1e-9, "1D [32,1]<->[1,32] conversion must use reshape cost");
 
+  // The same vector can still change orientation by reshape when no storage
+  // remains. Expanding it requires a separate 32-byte block for every row.
+  vec_col.vec_conversion_headroom = 0;
+  Require(
+      a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(), al::LayoutSpec::RowMajorFlat()),
+      "Metadata-only orientation changes must remain feasible without scratch");
+  vec_col.vec_conversion_headroom = 1023;
+  Require(!a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(),
+                                          al::LayoutSpec::RowBcastFlat()),
+          "Row broadcast must budget the expanded physical tile");
+  vec_col.vec_conversion_headroom = 1024;
+  Require(
+      a2a3.SupportsVecTileConversion(vec_col, al::LayoutSpec::ColMajorFlat(), al::LayoutSpec::RowBcastFlat()),
+      "Row broadcast fits at the exact storage boundary");
+
+  al::LayoutProblemInstance pressure;
+  pressure.cost_model = a2a3;
+  pressure.custom_conversion_costs[vec_col.name]
+                                  [{al::LayoutSpec::ColMajorFlat(), al::LayoutSpec::RowBcastFlat()}] = 0;
+  RequireNear(pressure.EstimateConversionCost(vec_col, al::LayoutSpec::ColMajorFlat(),
+                                              al::LayoutSpec::RowBcastFlat()),
+              0, 1e-9, "Feasible conversion may use a calibrated cost");
+  vec_col.vec_conversion_headroom = 1023;
+  RequireNear(pressure.EstimateConversionCost(vec_col, al::LayoutSpec::ColMajorFlat(),
+                                              al::LayoutSpec::RowBcastFlat()),
+              a2a3.vec_unsupported_conversion_cycles, 1e-9,
+              "A price override cannot provide missing Vec storage");
+
   auto vec_bool = MakeValue("mask", "cmp", MemorySpace::Vec, false, false, {al::LayoutSpec::RowMajorFlat()});
   vec_bool.shape = {16, 32};
   vec_bool.dtype = DataType::BOOL;

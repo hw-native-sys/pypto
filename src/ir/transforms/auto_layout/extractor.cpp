@@ -1504,6 +1504,45 @@ std::vector<LayoutSpec> AdmissibleTileLayouts(const TileTypePtr& tile_type) {
   return {EffectiveTileLayout(tile_type)};
 }
 
+// The writer inserts a shared materialization immediately after its producer.
+// Estimate the original Vec tiles still live at that point. A producer and
+// consumer can still select a common layout when there is no room for a copy.
+// Each call site has its own Vec storage.
+void RecordVecConversionHeadroom(LayoutProblemInstance& instance, size_t begin, uint64_t capacity) {
+  if (capacity == 0) return;
+  const size_t count = instance.operations.size() - begin;
+  struct Lifetime {
+    size_t first;
+    size_t last;
+  };
+  std::unordered_map<ValueNode*, Lifetime> intervals;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& op = instance.operations[begin + i];
+    auto record = [&](const std::string& name) {
+      auto it = instance.values.find(name);
+      if (it == instance.values.end() || it->second.memory_space != MemorySpace::Vec) return;
+      intervals.try_emplace(&it->second, Lifetime{i, i}).first->second.last = i;
+    };
+    for (const auto& input : op.inputs) record(input);
+    record(op.output);
+  }
+  // After an operation, inputs at their last use can release their storage.
+  // A value unused by later operations needs no downstream conversion.
+  std::vector<int64_t> live_bytes(count, 0);
+  for (const auto& [node, interval] : intervals) {
+    const int64_t bytes = node->ByteSize();
+    live_bytes[interval.first] += bytes;
+    live_bytes[interval.last] -= bytes;
+  }
+  std::partial_sum(live_bytes.begin(), live_bytes.end(), live_bytes.begin());
+  for (const auto& [node, interval] : intervals) {
+    if (interval.first == interval.last) continue;
+    const auto live = static_cast<uint64_t>(live_bytes[interval.first]);
+    const uint64_t remaining = capacity - std::min(capacity, live);
+    node->vec_conversion_headroom = std::min(node->vec_conversion_headroom.value_or(capacity), remaining);
+  }
+}
+
 class PostInferInstanceExtractor {
  public:
   PostInferInstanceExtractor(const LayoutCostModel& model, const backend::Backend* backend,
@@ -1622,7 +1661,9 @@ class PostInferInstanceExtractor {
     }
 
     AnalyzeVecTiles(func);
+    const size_t begin = instance_.operations.size();
     WalkStmt(func->body_);
+    if (backend_) RecordVecConversionHeadroom(instance_, begin, backend_->GetMemSize(MemorySpace::Vec));
   }
 
  private:
@@ -2028,7 +2069,8 @@ class PostInferInstanceExtractor {
   }
 
   const ValueNode* RegisterTileVar(const VarPtr& var, const std::optional<std::string>& producer_op_id,
-                                   const std::vector<std::string>& op_inputs = {}) {
+                                   const std::vector<std::string>& op_inputs = {},
+                                   bool is_strided_subview = false) {
     auto tile_type = As<TileType>(var->GetType());
     if (!tile_type) return nullptr;
     auto shape = StaticShape(tile_type->shape_);
@@ -2052,7 +2094,11 @@ class PostInferInstanceExtractor {
     const MemorySpace space = tile_type->GetMemorySpace().value_or(MemorySpace::Vec);
     const LayoutSpec cur_layout = EffectiveTileLayout(tile_type);
     std::vector<LayoutSpec> admissible;
-    if (space == MemorySpace::Vec) {
+    if (is_strided_subview && model_.TargetArch() == "a2a3") {
+      // A view retains its source layout. Keep consumer configurations from
+      // requesting a layout that would require a compact copy of the view.
+      admissible = {cur_layout};
+    } else if (space == MemorySpace::Vec) {
       admissible = AdmissibleVecTileLayouts(var);
       if (!producer_op_id.has_value()) {
         std::vector<LayoutSpec> filtered;
@@ -2076,6 +2122,7 @@ class PostInferInstanceExtractor {
     node.current_layout = cur_layout;
     node.admissible_layouts = std::move(admissible);
     node.producer_op_id = producer_op_id;
+    node.is_strided_subview = is_strided_subview;
     instance_.AddValue(std::move(node));
     return instance_.FindValue(name);
   }
@@ -2474,6 +2521,35 @@ class PostInferInstanceExtractor {
     return configs;
   }
 
+  static bool IsStridedSubview(const VarPtr& result, const CallPtr& call, const ValueNode& source) {
+    const auto tile_type = As<TileType>(result->GetType());
+    if (tile_type->GetMemorySpace().value_or(MemorySpace::Vec) != MemorySpace::Vec) {
+      return false;
+    }
+    if (!IsOp(call, "tile.slice")) {
+      // These operations reuse the first operand's storage. A new logical
+      // descriptor alone cannot make a strided window a compact allocation.
+      return source.is_strided_subview &&
+             (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") ||
+              IsOp(call, "tile.set_validshape") || IsOp(call, "tile.assemble"));
+    }
+    if (source.is_strided_subview) {
+      return true;
+    }
+    const auto shape = StaticShape(tile_type->shape_);
+    if (!shape || shape->size() != 2 || source.shape.size() != 2) {
+      return true;
+    }
+    // PTOResolveBufferSelect uses the child physical shape only when the
+    // child and parent have identical pointer strides. For flat tiles that
+    // means retaining the full width (row-major) or height (column-major).
+    if (source.current_layout.slayout == TileLayout::none_box) {
+      const size_t pitch_dim = source.current_layout.blayout == TileLayout::col_major ? 0 : 1;
+      return (*shape)[pitch_dim] != source.shape[pitch_dim];
+    }
+    return *shape != source.shape;
+  }
+
   void ExtractGenericTileOp(const AssignStmtPtr& op, const CallPtr& rhs) {
     if (!As<TileType>(op->var_->GetType())) return;
     const std::string& op_name = rhs->op_->name_;
@@ -2505,7 +2581,9 @@ class PostInferInstanceExtractor {
     for (const auto& [_, name, _node] : tile_inputs) {
       inp_names.push_back(name);
     }
-    const ValueNode* dst_node = RegisterTileVar(op->var_, op_id, inp_names);
+    const bool is_strided_subview = !tile_inputs.empty() && std::get<0>(tile_inputs.front()) == 0 &&
+                                    IsStridedSubview(op->var_, rhs, *std::get<2>(tile_inputs.front()));
+    const ValueNode* dst_node = RegisterTileVar(op->var_, op_id, inp_names, is_strided_subview);
     if (!dst_node) return;
 
     std::vector<OperatorConfig> configs;
@@ -2809,7 +2887,8 @@ class PostInferInstanceExtractor {
           const std::string op_id = MakeOpId(rv->name_hint_, "if_join");
           const ValueNode* r_node_ptr = nullptr;
           if (As<TileType>(rv->GetType())) {
-            r_node_ptr = RegisterTileVar(rv, op_id, {then_name, else_name});
+            r_node_ptr = RegisterTileVar(rv, op_id, {then_name, else_name},
+                                         then_node.is_strided_subview || else_node.is_strided_subview);
           } else if (auto tt = AsTensorTypeLike(rv->GetType())) {
             auto [shape, is_static] = TensorShapeWithDynamicFallback(tt->shape_);
             (void)is_static;

@@ -118,6 +118,10 @@ struct ValueNode {
   std::optional<std::string> producer_op_id;
   bool is_reusable_weight = false;
   bool is_external_output = false;
+  /// A Vec subview whose source pitch requires a larger physical PTO tile shape.
+  bool is_strided_subview = false;
+  // Free Vec bytes at the producer, where shared conversions are materialized.
+  std::optional<uint64_t> vec_conversion_headroom;
 
   [[nodiscard]] int64_t NumElements() const;
   [[nodiscard]] int64_t ByteSize() const;

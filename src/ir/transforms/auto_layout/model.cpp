@@ -476,17 +476,28 @@ bool LayoutCostModel::SupportsVecTileConversion(const ValueNode& val_node, const
   if (!src_layout.IsTile() || !dst_layout.IsTile()) {
     return false;
   }
+  // A2/A3 non-Mat TMOV requires identical physical shapes. A strided subview
+  // retains its backing pitch in PTOAS, while the writer allocates a compact
+  // conversion destination. The writer's metadata-only reshape for vectors
+  // likewise cannot change the view's stride.
+  if (val_node.is_strided_subview && TargetArch() == "a2a3") {
+    return false;
+  }
   if (src_layout == LayoutSpec::FractalNZ() || dst_layout == LayoutSpec::FractalNZ()) {
     return false;
   }
   if ((src_layout == LayoutSpec::RowMajorFlat() && dst_layout == LayoutSpec::ColMajorFlat()) ||
       (src_layout == LayoutSpec::ColMajorFlat() && dst_layout == LayoutSpec::RowMajorFlat())) {
-    return true;
+    const bool is_reshape = val_node.shape.size() == 2 && (val_node.shape[0] == 1 || val_node.shape[1] == 1);
+    return is_reshape || !val_node.vec_conversion_headroom ||
+           static_cast<uint64_t>(val_node.ByteSize()) <= *val_node.vec_conversion_headroom;
   }
   if (dst_layout == LayoutSpec::RowBcastFlat() &&
       (src_layout == LayoutSpec::ColMajorFlat() || src_layout == LayoutSpec::RowMajorFlat())) {
     return val_node.shape.size() == 2 && val_node.shape[1] == 1 && val_node.shape[0] > 1 &&
-           ContainsLayout(val_node.admissible_layouts, LayoutSpec::RowBcastFlat());
+           ContainsLayout(val_node.admissible_layouts, LayoutSpec::RowBcastFlat()) &&
+           (!val_node.vec_conversion_headroom ||
+            static_cast<uint64_t>(val_node.shape[0]) <= *val_node.vec_conversion_headroom / 32);
   }
   return false;
 }
@@ -546,6 +557,12 @@ double LayoutProblemInstance::EstimateConversionCost(const ValueNode& val_node, 
   if (val_it != custom_conversion_costs.end()) {
     auto pair_it = val_it->second.find(std::make_pair(src_layout, dst_layout));
     if (pair_it != val_it->second.end()) {
+      // Measured costs override prices only for materializable conversions.
+      if (((val_node.is_strided_subview && cost_model.TargetArch() == "a2a3") ||
+           val_node.vec_conversion_headroom.has_value()) &&
+          !cost_model.SupportsVecTileConversion(val_node, src_layout, dst_layout)) {
+        return cost_model.vec_unsupported_conversion_cycles;
+      }
       return pair_it->second;
     }
   }

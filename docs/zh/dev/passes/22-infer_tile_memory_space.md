@@ -287,6 +287,10 @@ Fiduccia–Mattheyses（FM）局部搜索的每一轮都从连通分量中按提
 
 默认保留外部参数声明的布局。只有当调用方能按所选物理布局提供数据时，才应设置 `options.cost_model.allow_external_input_relayout`。边界打包由调用方负责。在 `options.reusable_tensors` 中标注权重可摊销打包成本。自动提升为 DN 仅适用于符合条件的内部缓冲区。要在写回前检查分配及其转换需求，可调用 `auto_layout::ExtractLayoutInstance` 和 `auto_layout::SolveAutoLayout`。
 
+在 A2/A3 上，若 Vec 切片仍使用较大的底层物理形状，则保留源布局。PTOAS 保留底层跨距，而用于布局转换的 TMOV 要求源与目标的物理形状一致。对于平坦布局，行主序切片保留底层的完整宽度、列主序切片保留底层的完整高度时，仍可进行布局转换。
+
+提取器在每个内核调用点估算各生产者处仍然存活的 Vec tile 占用的字节数。整块布局转换需要额外一个 tile 的空间，行广播每行需要一个 32 字节块，仅调整元数据的 reshape 不消耗额外空间。降低和内存复用完成后，分配器检查最终占用量。
+
 在标准 PyPTO 编译器中，可通过 `ir.compile(program, strategy=...)` 或 `RunConfig(strategy=...)` 选择 `ir.OptimizationStrategy.AutoLayout`。该策略在内存推断之后运行原生布局选择并再次降低 NZ 布局，保留调用方缓冲区的既有布局。如果无法写回所选方案，编译会报错。可使用默认策略进行对照测试。
 
 初始化子模块后，可在仓库根目录构建并测试 C++ 库：

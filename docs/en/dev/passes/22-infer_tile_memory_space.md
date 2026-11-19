@@ -288,6 +288,10 @@ Each Fiduccia–Mattheyses (FM) pass starts from the component’s first movable
 
 By default, external arguments keep their declared layout. Set `options.cost_model.allow_external_input_relayout` only when the caller can supply the selected physical representation. The caller owns boundary packing. Marking a weight in `options.reusable_tensors` amortizes the packing cost. Automatic DN promotion is restricted to eligible internal buffers. To inspect an assignment and its conversion requirements before applying it, use `auto_layout::ExtractLayoutInstance` and `auto_layout::SolveAutoLayout`.
 
+On A2/A3, a Vec slice that retains a larger physical backing shape keeps its source layout. PTOAS preserves the backing stride, and a layout-converting TMOV requires matching physical shapes. Flat slices that preserve the full backing width in row-major or height in column-major can still be converted.
+
+The extractor estimates live Vec tile bytes at each producer within its kernel call site. A full-tile layout conversion needs space for a second tile. A row broadcast needs one 32-byte block per row, while a metadata-only reshape needs no extra storage. The allocator checks the final footprint after lowering and reuse.
+
 In the standard PyPTO compiler, select `ir.OptimizationStrategy.AutoLayout` with `ir.compile(program, strategy=...)` or `RunConfig(strategy=...)`. The strategy runs the native pass immediately after memory inference and re-runs NZ lowering. It preserves caller-owned layouts and reports a compilation error if the solver selects an assignment that the writer cannot materialize. The default strategy remains available for paired comparisons.
 
 To build and test the C++ library from the repository root with the submodules initialized:
