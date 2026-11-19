@@ -799,6 +799,31 @@ structural_comparison_detail::Inspection structural_comparison_detail::Inspect(c
   return inspection;
 }
 
+struct structural_comparison_detail::TypeComparisonCache::Impl {
+  Arena arena;
+  std::unordered_map<TypePtr, Id> types;
+
+  Id Project(const TypePtr& type) {
+    if (const auto cached = types.find(type); cached != types.end()) return cached->second;
+    // Keep each root's binding scope independent, as structural_equal does.
+    Projection projection(arena, /*map_free=*/false);
+    const auto id = projection.Run(type);
+    types.emplace(type, id);
+    return id;
+  }
+};
+
+structural_comparison_detail::TypeComparisonCache::TypeComparisonCache() = default;
+structural_comparison_detail::TypeComparisonCache::~TypeComparisonCache() = default;
+
+bool structural_comparison_detail::TypeComparisonCache::Equal(const TypePtr& lhs, const TypePtr& rhs) {
+  if (lhs == rhs) return true;
+  if (!lhs || !rhs) return false;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  const auto lhs_id = impl_->Project(lhs);
+  return lhs_id == impl_->Project(rhs);
+}
+
 void verify_structural_bindings(const IRNodePtr& node) {
   Arena arena;
   Projection projection(arena, false);

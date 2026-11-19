@@ -232,6 +232,7 @@ struct TraceContext {
   std::unordered_set<const Function*> active_functions;
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> memo;
   std::unordered_map<const Function*, size_t> trailing_ctx_counts;
+  std::optional<structural_comparison_detail::TypeComparisonCache> type_comparisons;
   size_t query_depth = 0;
   bool require_terminal_returns = false;
   // Strict queries must not reuse maps computed without recursive validation.
@@ -249,6 +250,7 @@ struct TraceContext {
     strict_memo.clear();
     strict_tuple_memo.clear();
     trailing_ctx_counts.clear();
+    type_comparisons.reset();
   }
 };
 
@@ -813,22 +815,17 @@ std::vector<std::optional<size_t>> TraceIndexedExprsToParamIndices(
   result.reserve(exprs.size());
   LineageMemo memo;
   memo.formal_param_count = formal_param_count;
-  // Multiple exits may return the same immutable types. Reuse their
-  // validation within this batch instead of rebuilding the type projection.
-  std::unordered_map<TypePtr, std::unordered_map<TypePtr, bool>> type_matches;
-  const auto matches_root_type = [&](const TypePtr& returned, const TypePtr& root) {
-    if (!returned) return false;
-    if (returned == root) return true;
-    const auto [entry, inserted] = type_matches[returned].try_emplace(root, false);
-    if (inserted) entry->second = structural_equal(returned, root);
-    return entry->second;
-  };
+  // Callees and return sites share the same exact type projections within
+  // the enclosing trace scope.
+  auto& type_comparisons = Ctx().type_comparisons;
+  if (!type_comparisons) type_comparisons.emplace();
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
     if (expr) {
       auto lineage = TraceExpr(expr, index, param_indices, program, memo);
       if (lineage.root && (!AsTensorTypeLike(expr->GetType()) ||
-                           matches_root_type(lineage.returned_type, lineage.root->GetType()))) {
+                           (lineage.returned_type &&
+                            type_comparisons->Equal(lineage.returned_type, lineage.root->GetType())))) {
         auto param_it = param_indices.find(lineage.root);
         if (param_it != param_indices.end()) idx = param_it->second;
       }
