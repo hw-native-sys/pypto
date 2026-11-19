@@ -12,6 +12,7 @@
 Run with --platform=a5; --codegen-only builds both device and orchestration
 binaries and constructs callables without starting a Worker. Both modes require
 the pinned Simpler package and CANN toolchain: KernelCompiler uses simpler_setup.
+Both modes also require CANNBotDSL with public device export; the tests skip otherwise.
 This tests the direct bridge under the external-kernel test policy exception,
 independently of automatic PyPTO JIT provider discovery.
 """
@@ -23,6 +24,24 @@ from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
 from pypto.jit.external.contracts import CompileTarget, KernelRequest, ParameterSpec, TensorSpec
 from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
+
+
+def _runtime_target(prepared):
+    return RuntimeTarget(
+        "tmr",
+        "1",
+        prepared.request.target,
+        frozenset({("cannbotdsl.device_callable", 1)}),
+        frozenset(
+            {
+                *(f"core:{core.value}" for core in prepared.execution.cores),
+                f"aiv_lanes:{prepared.execution.aiv_lanes}",
+                "completion:entry_return_visible",
+                "tensor_writeback",
+                "partial_write",
+            }
+        ),
+    )
 
 
 @pytest.mark.platforms("a5", reason="CANNBotDSL direct bridge requires real A5 text-only loading")
@@ -67,21 +86,7 @@ def test_cannbotdsl_runtime_chain(tmp_path, test_config, dynamic, core_type):
             {"aic": cube_add_one, "aiv": add_one, "mixed": mixed_add_one}[kind], request
         )
         assert prepared.execution.aiv_lanes == {"aic": 0, "aiv": 1, "mixed": 2}[kind]
-        target = RuntimeTarget(
-            "tmr",
-            "1",
-            request.target,
-            frozenset({("cannbotdsl.device_callable", 1)}),
-            frozenset(
-                {
-                    *(f"core:{core.value}" for core in prepared.execution.cores),
-                    f"aiv_lanes:{prepared.execution.aiv_lanes}",
-                    "completion:entry_return_visible",
-                    "tensor_writeback",
-                    "partial_write",
-                }
-            ),
-        )
+        target = _runtime_target(prepared)
         task = TMRBridge().lower(prepared, target)
         binaries = compile_task(task, compiler, pto_isa_root=str(tmp_path))
         tasks.append(task)
@@ -210,11 +215,16 @@ def _compute_kernels(cb):
         cb.vec_sync_all()
         with cb.vf():
             mask = cb.reg.full_mask()
-            vx = cb.reg.vload(x_ub)
-            vy = cb.reg.vload(y_ub)
-            summed = cb.reg.vadd(vx, vy, mask=mask)
-            result = cb.reg.vmul(summed, vx, mask=mask)
-            cb.reg.vstore(x_ub, 0, result, mask)
+            # A5 registers hold 256 bytes: process both 64-FP32 halves of the tile.
+            # Keep buffer bases as VF arguments: unrolling adds per-half pointers
+            # and spills a callee-saved scalar register in the MIX wrapper.
+            for half in cb.range(2, unroll=1):
+                offset = half * 64
+                vx = cb.reg.vload(x_ub, offset)
+                vy = cb.reg.vload(y_ub, offset)
+                summed = cb.reg.vadd(vx, vy, mask=mask)
+                result = cb.reg.vmul(summed, vx, mask=mask)
+                cb.reg.vstore(x_ub, offset, result, mask)
         cb.vec_sync_all()
         cb.mem_copy(cb.tile_slice(out, (128,), (tile,)), x_ub)
         cb.vec_sync_all()
@@ -243,27 +253,13 @@ def _compile_compute(tmp_path, entries, specs, flat, kind):
 
     compiler = KernelCompiler("a5")
     tasks, ids, images, bindings, signatures = [], [], [], [], []
-    for index, (kernel, names, slots) in enumerate(entries):
+    for index, (kernel, names, slots, outputs) in enumerate(entries):
         parameters = tuple(
             ParameterSpec(name, flat if index else specs[slot]) for name, slot in zip(names, slots)
         )
         request = KernelRequest(parameters, CompileTarget("a5", "ccec", "runtime-test"))
         prepared = CANNBotDSLProvider().prepare(kernel, request)
-        target = RuntimeTarget(
-            "tmr",
-            "1",
-            request.target,
-            frozenset({("cannbotdsl.device_callable", 1)}),
-            frozenset(
-                {
-                    *(f"core:{core.value}" for core in prepared.execution.cores),
-                    f"aiv_lanes:{prepared.execution.aiv_lanes}",
-                    "completion:entry_return_visible",
-                    "tensor_writeback",
-                    "partial_write",
-                }
-            ),
-        )
+        target = _runtime_target(prepared)
         expected_kind = "aiv" if index else kind
         assert prepared.execution.aiv_lanes == {"aic": 0, "aiv": 1, "mixed": 2}[expected_kind]
         exported_source = next(
@@ -283,17 +279,17 @@ def _compile_compute(tmp_path, entries, specs, flat, kind):
         tasks.append(task)
         ids.append(tuple(range(len(images), len(images) + len(binaries))))
         images.extend(binaries)
-        signatures.extend([slots] * len(binaries))
-        bindings.append(slots)
+        signatures.extend([(slots, outputs)] * len(binaries))
+        bindings.append((slots, outputs))
     submitter = build_submitter(tuple(tasks), tuple(ids))
     for file in submitter.files:
         path = tmp_path / file.path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(file.content)
     calls = []
-    for index, slots in enumerate(bindings):
+    for index, (slots, outputs) in enumerate(bindings):
         for slot in slots:
-            direction = "output" if slot >= 4 and (index == 0 or slot == 6) else "input"
+            direction = "output" if slot in outputs else "input"
             tensor = f"args.tensor({slot}).ref()"
             if index and slot == 4:
                 tensor = "flat_product"
@@ -338,11 +334,11 @@ def test_cannbotdsl_compute(tmp_path, test_config, kind):
     specs = (matrix_a, matrix_b, flat, flat, matrix_out, flat, flat)
     # The consumer reads both MIX outputs, so an early group completion is visible.
     entries = {
-        "aic": [(cube, ("a", "b", "out"), (0, 1, 4))],
-        "aiv": [(vector, ("x", "y", "out"), (2, 3, 5))],
+        "aic": [(cube, ("a", "b", "out"), (0, 1, 4), {4})],
+        "aiv": [(vector, ("x", "y", "out"), (2, 3, 5), {5})],
         "mixed": [
-            (mixed, ("a", "b", "x", "y", "product", "vector"), (0, 1, 2, 3, 4, 5)),
-            (vector, ("x", "y", "out"), (4, 5, 6)),
+            (mixed, ("a", "b", "x", "y", "product", "vector"), (0, 1, 2, 3, 4, 5), {4, 5}),
+            (vector, ("x", "y", "out"), (4, 5, 6), {6}),
         ],
     }[kind]
     images, signatures, orchestration = _compile_compute(tmp_path, entries, specs, flat, kind)
@@ -360,9 +356,7 @@ def test_cannbotdsl_compute(tmp_path, test_config, kind):
     from simpler.worker import Worker  # noqa: PLC0415
 
     cores = []
-    for image, slots in zip(images, signatures):
-        # The only post-MIX child consumes slots 4/5 and writes slot 6.
-        outputs = {6} if slots == (4, 5, 6) else {4, 5}
+    for image, (slots, outputs) in zip(images, signatures):
         cores.append(
             CoreCallable.build(
                 signature=[ArgDirection.OUT if slot in outputs else ArgDirection.IN for slot in slots],
@@ -397,7 +391,11 @@ def test_cannbotdsl_compute(tmp_path, test_config, kind):
                     shapes=spec.shape,
                     dtype=RuntimeDType.FLOAT16 if spec.dtype == DataType.FP16 else RuntimeDType.FLOAT32,
                 ),
-                TensorArgType.INPUT if slot < 4 else TensorArgType.INOUT,
+                TensorArgType.INPUT
+                if slot < 4
+                else TensorArgType.OUTPUT_EXISTING
+                if slot == 6
+                else TensorArgType.INOUT,
             )
         for repeat in range(3):
             a = ((torch.arange(512).reshape(16, 32) % 7 - 3 + repeat) / 4).half()

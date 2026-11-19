@@ -1847,43 +1847,46 @@ def test_runtime_admits_static_local_memory(compiler):
 
 
 @pytest.mark.parametrize(
-    "change",
+    ("change", "match"),
     [
-        {"byte_offset": -32},
-        {"byte_offset": 1},
-        {"byte_offset": True},
-        {"bytes": 0},
-        {"bytes": 512.0},
-        {"max_bytes": 1024},
-        {"max_bytes": True},
-        {"memory_space": True},
-        {"memory_space": 2},
-        {"core": "aic"},
-        {"memory_space_name": "SSBUF"},
-        {"bytes": 256 * 1024, "max_bytes": 256 * 1024},
-        {"unknown": 0},
+        ({"byte_offset": -32}, "invalid static allocation"),
+        ({"byte_offset": 1}, "invalid static allocation"),
+        ({"byte_offset": True}, "invalid static allocation"),
+        ({"bytes": 0}, "invalid static allocation"),
+        ({"bytes": 512.0}, "invalid static allocation"),
+        ({"max_bytes": 1024}, "invalid static allocation"),
+        ({"max_bytes": True}, "invalid static allocation"),
+        ({"memory_space": True}, "invalid static allocation"),
+        ({"memory_space": 2}, "invalid static allocation"),
+        ({"core": "aic"}, "invalid static allocation"),
+        ({"memory_space_name": "SSBUF"}, "unsupported local memory space"),
+        ({"bytes": 256 * 1024, "max_bytes": 256 * 1024}, "invalid static allocation"),
+        ({"unknown": 0}, "exact static local allocation metadata"),
     ],
 )
-def test_runtime_rejects_invalid_local_allocation(compiler, change):
+def test_runtime_rejects_invalid_local_allocation(compiler, change, match):
     _aiv_runtime_manifest(compiler)
     compiler.manifest["resources"].update(
         allocations=[{**_local_allocation(), **change}],
         local_memory_bytes=[{"core": "aiv", "memory_space_name": "UB", "bytes": 512}],
     )
     prepared = _prepare_call(compiler)
-    with pytest.raises(ContractError, match="runtime"):
+    with pytest.raises(ContractError, match=match):
         TMRBridge().lower(prepared, _aiv_target(prepared))
 
 
-@pytest.mark.parametrize("overlap", [False, True])
-def test_runtime_rejects_inconsistent_local_ranges(compiler, overlap):
+@pytest.mark.parametrize(
+    ("overlap", "declared_bytes", "match"),
+    [(False, 1024, "high-water"), (True, 768, "overlapping allocations")],
+)
+def test_runtime_rejects_inconsistent_local_ranges(compiler, overlap, declared_bytes, match):
     _aiv_runtime_manifest(compiler)
     compiler.manifest["resources"].update(
         allocations=[_local_allocation(), _local_allocation(offset=256 if overlap else 1024)],
-        local_memory_bytes=[{"core": "aiv", "memory_space_name": "UB", "bytes": 1024}],
+        local_memory_bytes=[{"core": "aiv", "memory_space_name": "UB", "bytes": declared_bytes}],
     )
     prepared = _prepare_call(compiler)
-    with pytest.raises(ContractError, match="runtime"):
+    with pytest.raises(ContractError, match=match):
         TMRBridge().lower(prepared, _aiv_target(prepared))
 
 

@@ -189,9 +189,12 @@ The ordinary JIT `configure_context` route rejects this task's binary policy
 rather than compiling it without admission checks.
 
 The direct runtime system tests include FP16 Cube matmul with FP32 accumulation,
-SIMD FP32 `(x + y) * x`, and a MIX task executing both pipelines. Each AIV owns
-128 vector elements; a dependent AIV consumes both MIX outputs after whole-group
-completion. Repeated runs change inputs and poison outputs to expose stale data.
+SIMD FP32 `(x + y) * x`, and a MIX task executing both pipelines. In the MIX
+producer, each AIV lane owns one 128-element tile. The standalone SIMD task and
+the dependent AIV each process two tiles (256 elements) on one AIV; the dependent
+task consumes both MIX outputs after whole-group completion. Each tile uses two
+64-element register operations because an A5 vector register holds 256 bytes.
+Repeated runs change inputs and poison outputs to expose stale data.
 These cases exercise allocated on-chip buffers and real compute instructions;
 they do not yet test intra-group Cube-to-vector buffer handoffs. Compile-only
 mode builds both device and orchestration binaries; numerical acceptance requires
