@@ -2295,6 +2295,80 @@ class Program:
         before = pl.parse_program(source)
         ir.assert_structural_equal(passes.optimize_orch_tensors()(before), before)
 
+    @pytest.mark.parametrize("dynamic_first", [True, False])
+    @pytest.mark.parametrize("submit", [True, False])
+    def test_external_dynamic_pitch_uses_runtime_descriptor(self, tmp_path, dynamic_first, submit):
+        # The same extern reads a fixed-width window from buffers with different
+        # physical pitches. Call order must not specialize its generic descriptor.
+        cpp = tmp_path / "external.cpp"
+        cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        values = ("dynamic", "fixed") if dynamic_first else ("fixed", "dynamic")
+        dispatch = "\n        ".join(
+            f"tid_{name} = pl.submit(self.kernel, {name})" if submit else f"self.kernel({name})"
+            for name in values
+        )
+        source = f"""
+W = pl.dynamic("W")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
+    def kernel(self, x: pl.Tensor[[2, 16], pl.FP32]):
+        ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[8, W], pl.FP32], b: pl.Tensor[[8, 32], pl.FP32]):
+        dynamic = pl.tensor.slice(a, [2, 16], [1, 3])
+        fixed = pl.tensor.slice(b, [2, 16], [1, 3])
+        {dispatch}
+"""
+        before = pl.parse_program(source)
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(before), before)
+
+    def test_external_dynamic_pitch_checks_declared_strides(self, tmp_path):
+        cpp = tmp_path / "external.cpp"
+        cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        source = f"""
+W = pl.dynamic("W")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
+    def kernel(self, x: pl.Tensor[[2, 16], pl.FP32, pl.TensorView(stride=[32, 1])]):
+        ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[8, W], pl.FP32]):
+        chunk = pl.tensor.slice(a, [2, 16], [1, 3])
+        self.kernel(chunk)
+"""
+        with pytest.raises(ValueError, match="static physical strides"):
+            passes.optimize_orch_tensors()(pl.parse_program(source))
+
+    def test_packed_graph_callers_bind_pitch_to_formal_extent(self):
+        # Both buffers are packed. The inner extent has a different symbolic
+        # identity in each caller and in the graph formal.
+        program = pl.parse_program("""
+A = pl.dynamic("A")
+B = pl.dynamic("B")
+W = pl.dynamic("W")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[2, W], pl.FP32]):
+        return
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward(self, x: pl.Tensor[[2, W], pl.FP32]):
+        self.kernel(x)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[2, A], pl.FP32], b: pl.Tensor[[2, B], pl.FP32],
+             c: pl.Tensor[[2, 64], pl.FP32]):
+        self.forward(a)
+        self.forward(b)
+        self.forward(c)
+""")
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(program), program)
+
     def test_external_return_attribute_follows_refined_parameter(self, tmp_path):
         cpp = tmp_path / "external.cpp"
         cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')

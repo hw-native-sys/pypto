@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -1629,8 +1630,16 @@ class SliceInputStridesOptimizer {
                                  constraint.parents.end());
       }
       for (const auto& [name, params] : aiv_bindings_) {
-        for (const auto& [index, binding] : params) {
+        for (const auto& [index, observed] : params) {
+          const auto& binding = observed.storage;
           if (!binding.sliced && (!binding.constraint || !constraints_[*binding.constraint].sliced)) continue;
+          const auto& callee = functions_.at(name);
+          const auto formal = AsTensorTypeLike(callee->params_[index]->GetType());
+          // Opaque C++ uses the runtime Tensor descriptor. Keep static refinement
+          // when possible and honor explicit declarations even for externs.
+          if (callee->HasAttr(kAttrExternalSource) && !formal->tensor_view_ && observed.all_nd &&
+              observed.has_dynamic_pitch)
+            continue;
           CHECK_SPAN(binding.consistent && !binding.strides.empty(), *binding.span)
               << "AIV sliced tensor argument requires one consistent static stride per parameter across "
                  "all call sites; pass the full parent tensor and use parent-relative indices instead";
@@ -1784,6 +1793,12 @@ class SliceInputStridesOptimizer {
       const Span* span;
       std::vector<Storage> alternatives;
       std::unordered_map<size_t, Storage> projected;
+    };
+
+    struct AivBinding {
+      Storage storage;
+      bool all_nd;
+      bool has_dynamic_pitch;
     };
 
     struct StrideConstraint {
@@ -2117,6 +2132,31 @@ class SliceInputStridesOptimizer {
       return value;
     }
 
+    static bool HasDynamicPitch(const Storage& info) {
+      return std::any_of(info.strides.begin(), info.strides.end(),
+                         [](const ExprPtr& pitch) { return !As<ConstInt>(pitch); });
+    }
+
+    // A graph helper has its own shape symbols. Compare packed pitches in that
+    // coordinate system so independent callers agree on the same layout. A
+    // singleton axis contributes no offset, regardless of its stored pitch.
+    static void RebindPackedPitch(Storage& info, const TypePtr& actual, const TypePtr& formal) {
+      auto source = AsTensorTypeLike(actual);
+      auto target = AsTensorTypeLike(formal);
+      if (!source || !target || source->shape_.size() != target->shape_.size() ||
+          info.layout != TensorLayout::ND || info.strides.size() != source->shape_.size() ||
+          (target->tensor_view_ &&
+           (!target->tensor_view_->stride.empty() || target->tensor_view_->layout != TensorLayout::ND)))
+        return;
+      const auto packed =
+          tensor_view_semantics::BuildLogicalStridesFromLayout(source->shape_, TensorLayout::ND);
+      for (size_t axis = 0; axis < packed.size(); ++axis) {
+        const auto extent = As<ConstInt>(source->shape_[axis]);
+        if ((!extent || extent->value_ != 1) && !AreExprsEqual(info.strides[axis], packed[axis])) return;
+      }
+      info.strides = tensor_view_semantics::BuildLogicalStridesFromLayout(target->shape_, TensorLayout::ND);
+    }
+
     void AnalyzeCall(const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span, bool submit) {
       if (!As<GlobalVar>(op)) return;
       auto found = functions_.find(op->name_);
@@ -2130,6 +2170,7 @@ class SliceInputStridesOptimizer {
         for (size_t i = 0; i < params.size() - ctx; ++i) {
           auto value = ArgumentStorage(callee, args, supplied, i, submit);
           if (!value) continue;
+          if (i < supplied) RebindPackedPitch(*value, args[i]->GetType(), params[i]->GetType());
           auto [binding, inserted] = bindings.emplace(i, *value);
           if (inserted) {
             binding->second = SeedStorage(*value, span);
@@ -2154,11 +2195,16 @@ class SliceInputStridesOptimizer {
         auto info = *value;
         if (info.constraint) constraint_roots_.push_back(*info.constraint);
         info.span = &span;
-        auto [binding, inserted] = aiv_bindings_[op->name_].emplace(i, info);
+        const bool nd = info.layout == TensorLayout::ND;
+        const bool dynamic_pitch = HasDynamicPitch(info);
+        auto [entry, inserted] = aiv_bindings_[op->name_].try_emplace(i, AivBinding{info, nd, dynamic_pitch});
         if (!inserted) {
-          binding->second.consistent &=
-              binding->second.layout == info.layout && ShapesMatch(binding->second.strides, info.strides);
-          binding->second = MergeStorage(binding->second, info, span);
+          auto& observed = entry->second;
+          observed.all_nd &= nd;
+          observed.has_dynamic_pitch |= dynamic_pitch;
+          auto& binding = observed.storage;
+          binding.consistent &= binding.layout == info.layout && ShapesMatch(binding.strides, info.strides);
+          binding = MergeStorage(binding, info, span);
         }
       }
     }
@@ -2177,7 +2223,7 @@ class SliceInputStridesOptimizer {
     std::unordered_set<std::string> analyzing_;
     std::unordered_set<std::string> analyzed_;
     std::string current_function_;
-    std::unordered_map<std::string, std::unordered_map<size_t, Storage>> aiv_bindings_;
+    std::unordered_map<std::string, std::unordered_map<size_t, AivBinding>> aiv_bindings_;
     std::unordered_map<const Function*, std::vector<std::optional<size_t>>> return_params_;
     std::vector<std::unique_ptr<LazyTuple>> lazy_tuples_;
     std::vector<StrideConstraint> constraints_;
