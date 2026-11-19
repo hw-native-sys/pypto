@@ -39,6 +39,7 @@ Pass AutoLayout(AutoLayoutOptions options) {
         instance.custom_conversion_costs = opts.custom_conversion_costs;
         auto_layout::LayoutSolverConfig solver_cfg;
         solver_cfg.max_treewidth = opts.max_treewidth;
+        solver_cfg.collect_treewidth_stats = false;
 
         auto_layout::LayoutSolverResult result;
         if (opts.solver == "greedy") {

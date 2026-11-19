@@ -145,6 +145,8 @@ struct MinFillResult {
   std::vector<std::vector<OpId>> bags;
   std::vector<std::optional<size_t>> parents;
   int64_t treewidth = 0;
+  int64_t max_bag_states = 0;
+  int64_t total_states = 0;
 };
 
 struct MinFillKey {
@@ -424,7 +426,7 @@ LayoutSolverResult BuildResult(const IncrementalState& state, int64_t evaluated_
                                int64_t greedy_sweeps, double initial_cost_cycles,
                                const std::string& termination_reason,
                                const std::optional<TreewidthStats>& tw_stats = std::nullopt,
-                               int64_t active_tw = 0) {
+                               int64_t unreported_width = 0) {
   const auto& problem = state.Problem();
   CostBreakdown breakdown = EvaluateAssignment(problem.Instance(), state.ToAssignment());
   const double diff = std::abs(state.Cost() - breakdown.total_cost_cycles);
@@ -438,35 +440,40 @@ LayoutSolverResult BuildResult(const IncrementalState& state, int64_t evaluated_
   stats.greedy_sweeps = greedy_sweeps;
   stats.initial_cost_cycles = initial_cost_cycles;
   stats.termination_reason = termination_reason;
-  stats.treewidth = tw_stats.has_value() ? tw_stats->primal_treewidth : active_tw;
-  stats.active_treewidth = tw_stats.has_value() ? tw_stats->active_primal_treewidth : active_tw;
+  stats.treewidth = tw_stats.has_value() ? tw_stats->primal_treewidth : unreported_width;
+  stats.active_treewidth = tw_stats.has_value() ? tw_stats->active_primal_treewidth : unreported_width;
   return LayoutSolverResult{std::move(breakdown), std::move(stats), std::move(conversions), std::move(issues),
                             tw_stats};
 }
 
 struct ActiveDecomposition {
-  TreewidthStats tw_stats;
   std::vector<MinFillResult> component_decomps;
   std::vector<std::vector<OpId>> components;
+  std::vector<std::vector<ValueId>> component_factors;
 };
 
-TreewidthStats ComputeProblemTreewidthInternal(const IndexedProblem& problem) {
+int64_t SaturatingAdd(int64_t a, int64_t b) {
+  const auto limit = std::numeric_limits<int64_t>::max();
+  return a > limit - b ? limit : a + b;
+}
+
+int64_t BagStates(const IndexedProblem& problem, const std::vector<OpId>& bag) {
+  int64_t states = 1;
+  for (OpId op : bag) {
+    const auto domain = static_cast<int64_t>(problem.Ops()[op].costs.size());
+    if (states > std::numeric_limits<int64_t>::max() / domain) return std::numeric_limits<int64_t>::max();
+    states *= domain;
+  }
+  return states;
+}
+
+TreewidthStats ComputeProblemTreewidthInternal(const IndexedProblem& problem,
+                                               const ActiveDecomposition& decomp) {
   const size_t num_ops = problem.NumOps();
   std::vector<OpId> all_ops(num_ops);
   std::iota(all_ops.begin(), all_ops.end(), 0);
-
-  std::vector<OpId> movable;
-  std::vector<bool> is_movable(num_ops, false);
-  for (OpId u = 0; u < num_ops; ++u) {
-    if (problem.Ops()[u].costs.size() > 1) {
-      movable.push_back(u);
-      is_movable[u] = true;
-    }
-  }
-
   std::vector<std::pair<OpId, OpId>> dataflow_edges;
   std::vector<std::pair<OpId, OpId>> primal_edges;
-  std::vector<std::pair<OpId, OpId>> active_edges;
 
   for (const auto& v_info : problem.Values()) {
     const auto& pts = v_info.participants;
@@ -483,59 +490,34 @@ TreewidthStats ComputeProblemTreewidthInternal(const IndexedProblem& problem) {
         const OpId u = pts[i];
         const OpId w = pts[j];
         primal_edges.emplace_back(u, w);
-        if (is_movable[u] && is_movable[w]) {
-          active_edges.emplace_back(u, w);
-        }
       }
     }
   }
 
   auto df_res = MinFillDecomposition(all_ops, dataflow_edges);
   auto primal_res = MinFillDecomposition(all_ops, primal_edges);
-  auto active_res = MinFillDecomposition(movable, active_edges);
 
   int64_t max_bag_size = 0;
   for (const auto& bag : primal_res.bags) {
     max_bag_size = std::max(max_bag_size, static_cast<int64_t>(bag.size()));
   }
-  int64_t max_active_bag_size = 0;
-  int64_t max_prod = num_ops > 0 ? 1 : 0;
-  int64_t total_states = 0;
-  if (!active_res.bags.empty()) {
-    max_prod = 0;
-    for (const auto& bag : active_res.bags) {
-      max_active_bag_size = std::max(max_active_bag_size, static_cast<int64_t>(bag.size()));
-      int64_t prod = 1;
-      for (OpId u : bag) {
-        const int64_t dom = static_cast<int64_t>(problem.Ops()[u].costs.size());
-        if (prod > std::numeric_limits<int64_t>::max() / std::max<int64_t>(1, dom)) {
-          prod = std::numeric_limits<int64_t>::max();
-          break;
-        }
-        prod *= dom;
-      }
-      max_prod = std::max(max_prod, prod);
-      if (total_states > std::numeric_limits<int64_t>::max() - prod) {
-        total_states = std::numeric_limits<int64_t>::max();
-      } else {
-        total_states += prod;
-      }
-    }
-  } else {
-    total_states = num_ops > 0 ? 1 : 0;
-  }
-
   TreewidthStats stats;
   stats.num_values = static_cast<int64_t>(problem.NumValues());
   stats.num_operations = static_cast<int64_t>(num_ops);
-  stats.num_movable_operations = static_cast<int64_t>(movable.size());
   stats.dataflow_treewidth = df_res.treewidth;
   stats.primal_treewidth = primal_res.treewidth;
-  stats.active_primal_treewidth = active_res.treewidth;
   stats.max_bag_size = max_bag_size;
-  stats.max_active_bag_size = max_active_bag_size;
-  stats.max_bag_domain_product = max_prod;
-  stats.total_dp_states = total_states;
+  for (const auto& dec : decomp.component_decomps) {
+    stats.num_movable_operations += static_cast<int64_t>(dec.bags.size());
+    stats.active_primal_treewidth = std::max(stats.active_primal_treewidth, dec.treewidth);
+    stats.max_active_bag_size = std::max(stats.max_active_bag_size, dec.treewidth + 1);
+    stats.max_bag_domain_product = std::max(stats.max_bag_domain_product, dec.max_bag_states);
+    stats.total_dp_states = SaturatingAdd(stats.total_dp_states, dec.total_states);
+  }
+  if (num_ops > 0 && decomp.components.empty()) {
+    stats.max_bag_domain_product = 1;
+    stats.total_dp_states = 1;
+  }
   stats.elimination_order.reserve(primal_res.elim_order.size());
   for (OpId u : primal_res.elim_order) {
     stats.elimination_order.push_back(problem.Ops()[u].op_id);
@@ -552,69 +534,68 @@ TreewidthStats ComputeProblemTreewidthInternal(const IndexedProblem& problem) {
   return stats;
 }
 
-ActiveDecomposition ComputeActiveDecomposition(const IndexedProblem& problem) {
+// Find components on the op/value incidence graph. A shared value connects its
+// participants via one factor; expanding to pairwise edges here would be quadratic.
+// nullopt requests just the components for FM, with no elimination ordering.
+ActiveDecomposition ComputeActiveDecomposition(const IndexedProblem& problem,
+                                               std::optional<int64_t> width_limit) {
   ActiveDecomposition out;
-  const size_t num_ops = problem.NumOps();
-  std::vector<bool> is_movable(num_ops, false);
-  std::vector<OpId> movable;
-  for (OpId u = 0; u < num_ops; ++u) {
-    if (problem.Ops()[u].costs.size() > 1) {
-      is_movable[u] = true;
-      movable.push_back(u);
-    }
-  }
-
-  // Build active primal adjacency for connected-component splitting.
-  std::vector<std::vector<OpId>> adj(num_ops);
-  for (const auto& v_info : problem.Values()) {
-    std::vector<OpId> act;
-    for (OpId u : v_info.participants) {
-      if (is_movable[u]) {
-        act.push_back(u);
-      }
-    }
-    for (size_t i = 0; i < act.size(); ++i) {
-      for (size_t j = i + 1; j < act.size(); ++j) {
-        adj[act[i]].push_back(act[j]);
-        adj[act[j]].push_back(act[i]);
+  std::vector<std::vector<ValueId>> factors_by_op(problem.NumOps());
+  std::vector<std::vector<OpId>> scopes(problem.NumValues());
+  for (ValueId v = 0; v < problem.NumValues(); ++v) {
+    for (OpId u : problem.Values()[v].participants) {
+      if (problem.Ops()[u].costs.size() > 1) {
+        scopes[v].push_back(u);
+        factors_by_op[u].push_back(v);
       }
     }
   }
 
-  std::vector<bool> visited(num_ops, false);
-  for (OpId start : movable) {
-    if (visited[start]) {
-      continue;
-    }
-    std::vector<OpId> comp;
-    std::queue<OpId> q;
-    q.push(start);
-    visited[start] = true;
-    while (!q.empty()) {
-      const OpId u = q.front();
-      q.pop();
-      comp.push_back(u);
-      for (OpId w : adj[u]) {
-        if (!visited[w]) {
-          visited[w] = true;
-          q.push(w);
+  std::vector<bool> seen_op(problem.NumOps(), false);
+  std::vector<bool> seen_value(problem.NumValues(), false);
+  for (OpId start = 0; start < problem.NumOps(); ++start) {
+    if (seen_op[start] || problem.Ops()[start].costs.size() <= 1) continue;
+    auto& ops = out.components.emplace_back();
+    ops.push_back(start);
+    seen_op[start] = true;
+    auto& factors = out.component_factors.emplace_back();
+    int64_t lower_bound = 0;
+    for (size_t i = 0; i < ops.size(); ++i) {
+      for (ValueId v : factors_by_op[ops[i]]) {
+        if (seen_value[v]) continue;
+        seen_value[v] = true;
+        factors.push_back(v);
+        lower_bound = std::max(lower_bound, static_cast<int64_t>(scopes[v].size()) - 1);
+        for (OpId u : scopes[v]) {
+          if (!seen_op[u]) {
+            seen_op[u] = true;
+            ops.push_back(u);
+          }
         }
       }
     }
-    std::sort(comp.begin(), comp.end());
-    std::vector<std::pair<OpId, OpId>> comp_edges;
-    for (OpId u : comp) {
-      for (OpId w : adj[u]) {
-        if (u < w) {
-          comp_edges.emplace_back(u, w);
+    std::sort(ops.begin(), ops.end());
+    auto& dec = out.component_decomps.emplace_back();
+    // Each factor induces a clique. This bound suffices to reject DP without
+    // building the clique or running min-fill on this component.
+    dec.treewidth = lower_bound;
+    if (!width_limit || lower_bound > *width_limit) continue;
+    std::vector<std::pair<OpId, OpId>> edges;
+    for (ValueId v : factors) {
+      const auto& scope = scopes[v];
+      for (size_t i = 0; i < scope.size(); ++i) {
+        for (size_t j = i + 1; j < scope.size(); ++j) {
+          edges.emplace_back(scope[i], scope[j]);
         }
       }
     }
-    out.component_decomps.push_back(MinFillDecomposition(comp, comp_edges));
-    out.components.push_back(std::move(comp));
+    dec = MinFillDecomposition(ops, edges);
+    for (const auto& bag : dec.bags) {
+      const auto states = BagStates(problem, bag);
+      dec.max_bag_states = std::max(dec.max_bag_states, states);
+      dec.total_states = SaturatingAdd(dec.total_states, states);
+    }
   }
-
-  out.tw_stats = ComputeProblemTreewidthInternal(problem);
   return out;
 }
 
@@ -975,80 +956,680 @@ void GreedyRefine(IncrementalState& state, const LayoutSolverConfig& config, int
                   termination_reason);
 }
 
-void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_ops,
-                       const LayoutSolverConfig& config, int64_t& evaluated_moves, int64_t& moves_applied,
-                       int64_t& greedy_sweeps, std::string& termination_reason) {
-  if (comp_ops.size() <= 1) {
-    return;
-  }
-  const auto& problem = state.Problem();
-  const size_t n = comp_ops.size();
-  std::vector<bool> locked(n, false);
-  struct AppliedMove {
-    OpId op_idx;
-    uint16_t old_choice;
+// Report only net changes. Removing and restoring identical demands would perturb the
+// floating-point source-cost cache even though the factor's demand set did not change.
+template <typename Visit>
+void ForEachDemandDelta(const IndexedProblem::OpConfigUse& old_use,
+                        const IndexedProblem::OpConfigUse& new_use, Visit visit) {
+  const auto find_count = [](const auto& use, uint16_t layout) {
+    for (const auto& [index, count] : use.layout_counts) {
+      if (index == layout) return count;
+    }
+    return 0;
   };
-  std::vector<AppliedMove> history;
+  for (const auto& [layout, old_count] : old_use.layout_counts) {
+    const int delta = find_count(new_use, layout) - old_count;
+    if (delta != 0) visit(layout, delta);
+  }
+  for (const auto& [layout, new_count] : new_use.layout_counts) {
+    if ((old_use.demand_mask & (uint64_t{1} << layout)) == 0) visit(layout, new_count);
+  }
+}
+
+// The tournament stores one exact maximum per unlocked operation. Leaf order is the
+// original FM scan order, and equal gains pick the earlier operation/configuration.
+// When tolerance could prevent that maximum from winning, replay the ordered scan
+// from cached gains, pruning any subtree whose maximum cannot improve the incumbent.
+class FMMoveFrontier {
+ public:
+  static constexpr uint16_t kNoChoice = std::numeric_limits<uint16_t>::max();
+  static constexpr double kNoGain = -std::numeric_limits<double>::infinity();
+
+  struct Move {
+    size_t local = 0;
+    uint16_t choice = kNoChoice;
+    double gain = kNoGain;
+  };
+
+  FMMoveFrontier(const IncrementalState& state, const std::vector<OpId>& ops,
+                 const LayoutSolverConfig& config, int64_t& evaluated_moves)
+      : state_(state),
+        ops_(ops),
+        config_(config),
+        evaluated_moves_(evaluated_moves),
+        before_best_(ops.size()) {
+    while (leaf_base_ < ops.size()) leaf_base_ *= 2;
+    tree_.resize(2 * leaf_base_);
+    offsets_.reserve(ops.size() + 1);
+    offsets_.push_back(0);
+    for (OpId op : ops) offsets_.push_back(offsets_.back() + state.Problem().Ops()[op].costs.size());
+    gains_.resize(offsets_.back());
+  }
+
+  void Reset() { std::fill(tree_.begin(), tree_.end(), Move{}); }
+
+  [[nodiscard]] bool Active(size_t local) const { return tree_[leaf_base_ + local].choice != kNoChoice; }
+  [[nodiscard]] bool Empty() const { return tree_[1].choice == kNoChoice; }
+
+  bool Refresh(size_t local) {
+    if (!Evaluate(local)) return false;
+    UpdatePath(local);
+    return true;
+  }
+
+  void Lock(size_t local) {
+    if (!Active(local)) return;
+    tree_[leaf_base_ + local] = {};
+    UpdatePath(local);
+  }
+
+  [[nodiscard]] Move Best() const {
+    const Move winner = tree_[1];
+    size_t first_node = 1;
+    while (first_node < leaf_base_) {
+      first_node *= 2;
+      if (tree_[first_node].choice == kNoChoice) ++first_node;
+    }
+    const size_t first = first_node - leaf_base_;
+    const uint16_t first_choice = state_.Choices()[ops_[first]] == 0 ? 1 : 0;
+    Move best{first, first_choice, gains_[offsets_[first] + first_choice]};
+    // After a NaN first gain, every comparison in the original scan is false.
+    if (std::isnan(best.gain)) return best;
+    if (config_.tolerance == 0.0 || (best.local == winner.local && best.choice == winner.choice))
+      return winner;
+
+    // If the maximum beats every preceding alternative by more than tolerance,
+    // the scan must accept it and cannot replace it. Query only the left siblings
+    // on its path and the cached prefix within its operation.
+    double before = before_best_[winner.local];
+    for (size_t node = leaf_base_ + winner.local; node > 1; node /= 2) {
+      if ((node & 1) != 0) before = std::max(before, tree_[node - 1].gain);
+    }
+    if (winner.gain > before + config_.tolerance) return winner;
+    Scan(1, best);
+    return best;
+  }
+
+ private:
+  bool Evaluate(size_t local) {
+    const OpId op = ops_[local];
+    const uint16_t current = state_.Choices()[op];
+    Move winner{local, kNoChoice, kNoGain};
+    const auto num_choices = static_cast<uint16_t>(offsets_[local + 1] - offsets_[local]);
+    for (uint16_t q = 0; q < num_choices; ++q) {
+      if (q == current) continue;
+      if (evaluated_moves_ >= config_.max_evaluations) return false;
+      ++evaluated_moves_;
+      const double gain = state_.Gain(op, q);
+      gains_[offsets_[local] + q] = gain;
+      // Ignore NaNs for maxima. Best() separately handles a NaN in the first
+      // unlocked candidate, which is the only way the ordered scan can pick one.
+      if (winner.choice == kNoChoice || gain > winner.gain) {
+        before_best_[local] = winner.gain;
+        winner = {local, q, std::isnan(gain) ? kNoGain : gain};
+      }
+    }
+    tree_[leaf_base_ + local] = winner;
+    return true;
+  }
+
+  void UpdateNode(size_t node) {
+    const Move left = tree_[2 * node];
+    const Move right = tree_[2 * node + 1];
+    tree_[node] = left.choice == kNoChoice || right.gain > left.gain ? right : left;
+  }
+
+  void UpdatePath(size_t local) {
+    for (size_t node = (leaf_base_ + local) / 2; node > 0; node /= 2) UpdateNode(node);
+  }
+
+  void Scan(size_t node, Move& best) const {
+    if (!(tree_[node].gain > best.gain + config_.tolerance)) return;
+    if (node < leaf_base_) {
+      Scan(2 * node, best);
+      Scan(2 * node + 1, best);
+      return;
+    }
+    const size_t local = node - leaf_base_;
+    const uint16_t current = state_.Choices()[ops_[local]];
+    const auto num_choices = static_cast<uint16_t>(offsets_[local + 1] - offsets_[local]);
+    for (uint16_t q = 0; q < num_choices; ++q) {
+      const double gain = gains_[offsets_[local] + q];
+      if (q != current && gain > best.gain + config_.tolerance) best = {local, q, gain};
+    }
+  }
+
+  const IncrementalState& state_;
+  const std::vector<OpId>& ops_;
+  const LayoutSolverConfig& config_;
+  int64_t& evaluated_moves_;
+  size_t leaf_base_ = 1;
+  std::vector<Move> tree_;
+  std::vector<size_t> offsets_;
+  std::vector<double> gains_;
+  std::vector<double> before_best_;
+};
+
+// The group neighborhood proposes one configuration per changing consumer for
+// each common target layout. Rank matching configurations outside the shared
+// factor, then score the assembled proposal on all factors jointly.
+class FMFanoutFrontier {
+ public:
+  struct Proposal {
+    std::vector<IndexedProblem::ValueInfo::Consumer> changing_consumers;
+    std::vector<IncrementalState::ChoiceChange> choices;
+    IncrementalState::BlockEvaluation evaluation;
+    long double rebased_gain = 0.0L;
+    long double rounding_margin = 0.0L;
+    long double rounding_margin_per_lock = 0.0L;
+    double priority = 0.0;
+    bool unique_choices = false;
+    bool needs_restaging = false;
+  };
+
+  FMFanoutFrontier(const IncrementalState& state, const std::vector<ValueId>& comp_factors,
+                   const LayoutSolverConfig& config, int64_t& evaluated_moves)
+      : state_(state), config_(config), evaluated_moves_(evaluated_moves) {
+    const auto& problem = state.Problem();
+    auto fanouts = comp_factors;
+    std::sort(fanouts.begin(), fanouts.end());
+    for (ValueId value : fanouts) {
+      const auto& info = problem.Values()[value];
+      if (info.consumers.size() < 2 || info.common_consumer_layouts == 0) continue;
+      const auto movable_consumers =
+          std::count_if(info.consumers.begin(), info.consumers.end(),
+                        [&](const auto& consumer) { return problem.Ops()[consumer.op_id].costs.size() > 1; });
+      if (movable_consumers < 2) continue;
+
+      const size_t index = groups_.size();
+      groups_.emplace_back(value, info.layouts.size());
+      group_by_value_.emplace(value, index);
+      const auto add_dependency = [&](ValueId factor) {
+        auto& dependents = dependents_by_factor_[factor];
+        if (dependents.empty() || dependents.back() != index) dependents.push_back(index);
+      };
+      for (const auto& consumer : info.consumers) {
+        const auto& op = problem.Ops()[consumer.op_id];
+        if (op.costs.size() == 1) continue;
+        // A factor may affect either choice ranking or the exact joint gain.
+        // All configurations of an operation have the same factor scope.
+        add_dependency(op.output_value);
+        for (const auto& use : op.config_uses.front()) add_dependency(use.value_id);
+      }
+    }
+  }
+
+  void Reset() {
+    scores_.clear();
+    dirty_.clear();
+    for (auto& group : groups_) {
+      const auto& info = state_.Problem().Values()[group.value];
+      group.allowed_targets = info.common_consumer_layouts;
+      group.scored_targets = 0;
+      group.rebased_target = 0;
+      group.admitted = false;
+      for (auto& proposal : group.proposals) proposal = {};
+    }
+  }
+
+  void Admit(ValueId value) {
+    const auto it = group_by_value_.find(value);
+    if (it == group_by_value_.end()) return;
+    auto& group = groups_[it->second];
+    if (group.admitted || group.allowed_targets == 0) return;
+    group.admitted = true;
+    std::fill(group.consumers_at_target.begin(), group.consumers_at_target.end(), 0);
+    for (const auto& consumer : state_.Problem().Values()[value].consumers) {
+      const auto& op = state_.Problem().Ops()[consumer.op_id];
+      const uint64_t mask = op.config_uses[state_.Choices()[consumer.op_id]][consumer.input_slot].demand_mask;
+      if (IsSingleLayout(mask)) ++group.consumers_at_target[__builtin_ctzll(mask)];
+    }
+    dirty_.insert(it->second);
+  }
+
+  void Lock(OpId op_id, uint16_t new_choice, std::optional<double> singleton_gain) {
+    const auto& op = state_.Problem().Ops()[op_id];
+    const auto& old_uses = op.config_uses[state_.Choices()[op_id]];
+    const auto& new_uses = op.config_uses[new_choice];
+    for (size_t slot = 0; slot < old_uses.size(); ++slot) {
+      const auto it = group_by_value_.find(old_uses[slot].value_id);
+      if (it == group_by_value_.end()) continue;
+      auto& group = groups_[it->second];
+      const uint64_t old_mask = old_uses[slot].demand_mask;
+      const uint64_t new_mask = new_uses[slot].demand_mask;
+      // Locked consumers may stay in a proposal only if they already request
+      // precisely its target. Track that constraint without scanning the group.
+      const uint64_t allowed = group.allowed_targets & (IsSingleLayout(new_mask) ? new_mask : 0);
+      if (group.admitted && (allowed != group.allowed_targets || old_mask != new_mask)) {
+        dirty_.insert(it->second);
+      }
+      if (singleton_gain && old_mask != new_mask && (allowed & group.scored_targets) != 0) {
+        auto& proposal = group.proposals[__builtin_ctzll(allowed)];
+        if (proposal.unique_choices && std::isfinite(proposal.priority) &&
+            std::isfinite(proposal.rounding_margin_per_lock)) {
+          // The indexed consumer order and every subsequent filter preserve OpId order.
+          const IncrementalState::ChoiceChange move{op_id, new_choice};
+          const auto member = std::lower_bound(proposal.choices.begin(), proposal.choices.end(), move);
+          if (member != proposal.choices.end() && *member == move) {
+            // This singleton reached the same choice as the cached proposal.
+            // Each remaining member has a unique choice, so the proposal's
+            // endpoint survives unchanged even when side factors are shared.
+            group.rebased_target = allowed;
+            proposal.rebased_gain -= *singleton_gain;
+            proposal.rounding_margin += proposal.rounding_margin_per_lock;
+          }
+        }
+      }
+      group.allowed_targets = allowed;
+      if (group.admitted && old_mask != new_mask) {
+        if (IsSingleLayout(old_mask)) --group.consumers_at_target[__builtin_ctzll(old_mask)];
+        if (IsSingleLayout(new_mask)) ++group.consumers_at_target[__builtin_ctzll(new_mask)];
+      }
+    }
+  }
+
+  void Invalidate(ValueId factor) {
+    const auto it = dependents_by_factor_.find(factor);
+    if (it == dependents_by_factor_.end()) return;
+    for (size_t index : it->second) {
+      if (groups_[index].admitted && groups_[index].allowed_targets != 0) dirty_.insert(index);
+    }
+  }
+
+  bool Refresh() {
+    for (size_t index : dirty_) {
+      auto& group = groups_[index];
+      const uint64_t rebased_target = std::exchange(group.rebased_target, 0);
+      while (group.scored_targets != 0) {
+        const auto target = static_cast<uint16_t>(__builtin_ctzll(group.scored_targets));
+        auto& proposal = group.proposals[target];
+        scores_.erase({proposal.priority, index, target});
+        if ((rebased_target & (uint64_t{1} << target)) == 0) {
+          proposal.choices.clear();
+          proposal.evaluation = {};
+        }
+        group.scored_targets &= group.scored_targets - 1;
+      }
+
+      const auto& info = state_.Problem().Values()[group.value];
+      uint64_t targets = group.allowed_targets;
+      while (targets != 0) {
+        const auto target = static_cast<uint16_t>(__builtin_ctzll(targets));
+        const uint64_t bit = uint64_t{1} << target;
+        targets &= targets - 1;
+        const size_t block_size = info.consumers.size() - group.consumers_at_target[target];
+        if (block_size < 2) continue;
+        auto& proposal = group.proposals[target];
+        if (rebased_target == bit) {
+          // Treat a rebased score as an upper bound. An ambiguous comparison
+          // or potential winner forces a fresh exact score before selection.
+          const auto upper = static_cast<double>(proposal.rebased_gain + proposal.rounding_margin);
+          proposal.priority = std::nextafter(upper, std::numeric_limits<double>::infinity());
+          proposal.needs_restaging = true;
+        } else if (!Evaluate(group.value, bit, block_size, proposal)) {
+          return false;
+        }
+        if (std::isnan(proposal.priority)) continue;
+        group.scored_targets |= bit;
+        scores_.insert({proposal.priority, index, target});
+      }
+    }
+    dirty_.clear();
+    return true;
+  }
+
+  bool Best(double singleton_gain, const Proposal*& winner) {
+    winner = nullptr;
+    while (!scores_.empty() && scores_.begin()->gain > singleton_gain + config_.tolerance) {
+      const auto score = *scores_.begin();
+      auto& group = groups_[score.group];
+      auto& proposal = group.proposals[score.target];
+      if (!proposal.needs_restaging) {
+        winner = &proposal;
+        return true;
+      }
+      const auto& info = state_.Problem().Values()[group.value];
+      const auto charge =
+          static_cast<int64_t>(info.consumers.size() - group.consumers_at_target[score.target]);
+      if (charge > config_.max_evaluations - evaluated_moves_) return false;
+      evaluated_moves_ += charge;
+      auto& choices = proposal.choices;
+      const auto already_applied = [&](const auto& choice) {
+        return state_.Choices()[choice.first] == choice.second;
+      };
+      choices.erase(std::remove_if(choices.begin(), choices.end(), already_applied), choices.end());
+      scores_.erase(scores_.begin());
+      SetExactScore(proposal);
+      if (!std::isnan(proposal.priority)) {
+        scores_.insert({proposal.priority, score.group, score.target});
+      } else {
+        group.scored_targets &= ~(uint64_t{1} << score.target);
+      }
+    }
+    return true;
+  }
+
+ private:
+  struct Group {
+    Group(ValueId value, size_t layout_count)
+        : value(value), consumers_at_target(layout_count), proposals(layout_count) {}
+
+    ValueId value;
+    uint64_t allowed_targets = 0;
+    uint64_t scored_targets = 0;
+    uint64_t rebased_target = 0;
+    bool admitted = false;
+    std::vector<size_t> consumers_at_target;
+    std::vector<Proposal> proposals;
+  };
+
+  struct Score {
+    double gain;
+    size_t group;
+    uint16_t target;
+
+    bool operator<(const Score& other) const {
+      if (gain != other.gain) return gain > other.gain;
+      return std::tie(group, target) < std::tie(other.group, other.target);
+    }
+  };
+
+  static bool IsSingleLayout(uint64_t mask) { return mask != 0 && (mask & (mask - 1)) == 0; }
+
+  void SetExactScore(Proposal& proposal) {
+    proposal.evaluation = state_.EvaluateBlock(proposal.choices);
+    proposal.priority = proposal.evaluation.gain;
+    proposal.rebased_gain = proposal.priority;
+    proposal.needs_restaging = false;
+    if (!proposal.unique_choices) return;
+
+    // Factor evaluation can add and remove conversions in either order.
+    // Bound intermediate magnitudes by the cost of every layout in a row,
+    // plus any multi-representation penalty, including currently absent costs.
+    const auto& problem = state_.Problem();
+    long double scale = 1.0L;
+    for (const auto& [op, choice] : proposal.choices) {
+      const auto& costs = problem.Ops()[op].costs;
+      scale += std::max(costs[choice], costs[state_.Choices()[op]]);
+    }
+    for (const auto& factor : proposal.evaluation.factors) {
+      const auto& info = problem.Values()[factor.value];
+      scale += static_cast<long double>(info.max_conversion_cost) * info.layouts.size();
+      if (info.forbid_multi_rep) {
+        scale += std::abs(problem.Instance().cost_model.vec_unsupported_conversion_cycles);
+      }
+    }
+    // Allow for rounding in the original and re-evaluated sums, in the
+    // singleton gain, and in each row's updates (at most 64 layouts).
+    const long double unit = std::numeric_limits<double>::epsilon() * scale;
+    const size_t terms = proposal.choices.size() + proposal.evaluation.factors.size();
+    proposal.rounding_margin_per_lock = unit * (256.0L + 8.0L * terms);
+    proposal.rounding_margin = proposal.rounding_margin_per_lock;
+  }
+
+  bool Evaluate(ValueId value, uint64_t target, size_t block_size, Proposal& proposal) {
+    const auto charge = static_cast<int64_t>(block_size);
+    if (charge > config_.max_evaluations - evaluated_moves_) return false;
+
+    const auto& problem = state_.Problem();
+    const auto needs_change = [&](const IndexedProblem::ValueInfo::Consumer& consumer) {
+      const auto& uses = problem.Ops()[consumer.op_id].config_uses;
+      return uses[state_.Choices()[consumer.op_id]][consumer.input_slot].demand_mask != target;
+    };
+    auto& changing = proposal.changing_consumers;
+    if (changing.empty()) {
+      const auto& consumers = problem.Values()[value].consumers;
+      changing.reserve(block_size);
+      std::copy_if(consumers.begin(), consumers.end(), std::back_inserter(changing), needs_change);
+    } else {
+      // While the target is allowed, any newly locked consumer must already
+      // request it. It can only leave this list. Re-score just the remaining
+      // members when a side factor or an eligible lock changes the proposal.
+      changing.erase(std::remove_if(changing.begin(), changing.end(),
+                                    [&](const auto& consumer) { return !needs_change(consumer); }),
+                     changing.end());
+    }
+    std::vector<uint16_t> matching_choices;
+    proposal.choices.clear();
+    proposal.choices.reserve(block_size);
+    proposal.unique_choices = true;
+    for (const auto& consumer : changing) {
+      const OpId op = consumer.op_id;
+      const auto& uses = problem.Ops()[op].config_uses;
+      matching_choices.clear();
+      for (uint16_t q = 0; q < uses.size(); ++q) {
+        if (uses[q][consumer.input_slot].demand_mask == target) matching_choices.push_back(q);
+      }
+      // Common targets come from intersecting the consumer catalogs.
+      uint16_t choice = matching_choices.front();
+      if (matching_choices.size() > 1) {
+        proposal.unique_choices = false;
+        double best_gain = FMMoveFrontier::kNoGain;
+        for (uint16_t q : matching_choices) {
+          if (evaluated_moves_ == config_.max_evaluations) return false;
+          ++evaluated_moves_;
+          const double gain = state_.Gain(op, q, value);
+          if (gain > best_gain + config_.tolerance) {
+            best_gain = gain;
+            choice = q;
+          }
+        }
+      }
+      proposal.choices.emplace_back(op, choice);
+    }
+    // Keep the existing charge of one joint evaluation per changed operation
+    // in addition to the evaluations used to rank matching configurations.
+    if (charge > config_.max_evaluations - evaluated_moves_) return false;
+    evaluated_moves_ += charge;
+    SetExactScore(proposal);
+    return true;
+  }
+
+  const IncrementalState& state_;
+  const LayoutSolverConfig& config_;
+  int64_t& evaluated_moves_;
+  std::vector<Group> groups_;
+  std::unordered_map<ValueId, size_t> group_by_value_;
+  std::unordered_map<ValueId, std::vector<size_t>> dependents_by_factor_;
+  std::set<size_t> dirty_;
+  std::set<Score> scores_;
+};
+
+// Exact block scores depend on all count changes. Single-op gains only change
+// when the source, support, or the consumer's ability to remove a layout changes.
+struct FMFactorChange {
+  bool source_changed = false;
+  bool support_changed = false;
+  bool consumer_can_remove_changed = false;
+  bool counts_changed = false;
+
+  void NoteCountChange(int before, int after, bool repeated_operand) {
+    if (before == after) return;
+    counts_changed = true;
+    support_changed |= (before == 0) != (after == 0);
+    consumer_can_remove_changed |= repeated_operand || (before == 1) != (after == 1);
+  }
+};
+
+template <typename Visit>
+void VisitSingleMoveFactors(const IncrementalState& state, OpId op_idx, uint16_t new_choice, Visit visit) {
+  const auto& problem = state.Problem();
+  const auto& op = problem.Ops()[op_idx];
+  const uint16_t old_choice = state.Choices()[op_idx];
+  const auto& old_uses = op.config_uses[old_choice];
+  const auto& new_uses = op.config_uses[new_choice];
+  if (op.output_layout_indices[old_choice] != op.output_layout_indices[new_choice]) {
+    FMFactorChange change;
+    change.source_changed = true;
+    visit(op.output_value, change);
+  }
+  for (size_t slot = 0; slot < old_uses.size(); ++slot) {
+    const ValueId value = old_uses[slot].value_id;
+    const auto& counts = state.Counts()[value];
+    const bool repeated = problem.Values()[value].has_repeated_operand;
+    FMFactorChange change;
+    ForEachDemandDelta(old_uses[slot], new_uses[slot], [&](uint16_t layout, int delta) {
+      change.NoteCountChange(counts[layout], counts[layout] + delta, repeated);
+    });
+    visit(value, change);
+  }
+}
+
+template <typename Visit>
+void VisitBlockMoveFactors(const IncrementalState& state, const IncrementalState::BlockEvaluation& evaluation,
+                           Visit visit) {
+  for (const auto& factor : evaluation.factors) {
+    FMFactorChange change;
+    change.source_changed = state.Sources()[factor.value] != factor.source;
+    const auto& counts = state.Counts()[factor.value];
+    const bool repeated = state.Problem().Values()[factor.value].has_repeated_operand;
+    for (size_t layout = 0; layout < counts.size(); ++layout) {
+      change.NoteCountChange(counts[layout], factor.counts[layout], repeated);
+    }
+    visit(factor.value, change);
+  }
+}
+
+void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_ops,
+                       const std::vector<ValueId>& comp_factors, const LayoutSolverConfig& config,
+                       int64_t& evaluated_moves, int64_t& moves_applied, int64_t& greedy_sweeps,
+                       std::string& termination_reason) {
+  const size_t n = comp_ops.size();
+  FMMoveFrontier singles(state, comp_ops, config, evaluated_moves);
+  FMFanoutFrontier groups(state, comp_factors, config, evaluated_moves);
+  std::vector<bool> marked(n, false);
+  std::vector<bool> seen(n, false);
+  std::unordered_set<ValueId> expanded_values;
+  std::vector<size_t> affected;
+  std::vector<IncrementalState::ChoiceChange> history;
+  std::vector<size_t> move_starts;
+  std::vector<IncrementalState::ChoiceChange> undo;
   history.reserve(n);
+  move_starts.reserve(n);
+
+  const auto& problem = state.Problem();
+  const auto local_index = [&](OpId op) {
+    // Every movable participant of a factor belongs to this component.
+    return static_cast<size_t>(std::lower_bound(comp_ops.begin(), comp_ops.end(), op) - comp_ops.begin());
+  };
+  const auto activate = [&](size_t local) {
+    if (seen[local]) return true;
+    seen[local] = true;
+    if (!singles.Refresh(local)) return false;
+    const auto& op = problem.Ops()[comp_ops[local]];
+    groups.Admit(op.output_value);
+    for (const auto& use : op.config_uses.front()) groups.Admit(use.value_id);
+    return true;
+  };
+  const auto expand_value = [&](ValueId value) {
+    if (!expanded_values.insert(value).second) return true;
+    for (OpId op : problem.Values()[value].participants) {
+      if (problem.Ops()[op].costs.size() > 1 && !activate(local_index(op))) return false;
+    }
+    return true;
+  };
+  const auto expand_move = [&]() {
+    for (size_t i = move_starts.back(); i < history.size(); ++i) {
+      const auto& op = problem.Ops()[history[i].first];
+      if (!expand_value(op.output_value)) return false;
+      for (const auto& use : op.config_uses.front()) {
+        if (!expand_value(use.value_id)) return false;
+      }
+    }
+    return true;
+  };
+  const auto record_and_lock = [&](size_t local, uint16_t choice, std::optional<double> singleton_gain) {
+    const OpId op = comp_ops[local];
+    history.emplace_back(op, state.Choices()[op]);
+    seen[local] = true;
+    singles.Lock(local);
+    groups.Lock(op, choice, singleton_gain);
+  };
+  const auto mark_factor = [&](ValueId value, const FMFactorChange& change) {
+    if (change.source_changed || change.counts_changed) groups.Invalidate(value);
+    if (singles.Empty() ||
+        (!change.source_changed && !change.support_changed && !change.consumer_can_remove_changed))
+      return;
+    const auto& info = problem.Values()[value];
+    for (OpId op : info.participants) {
+      if (problem.Ops()[op].costs.size() <= 1 || (!change.support_changed && op == info.producer_op))
+        continue;
+      const size_t local = local_index(op);
+      if (singles.Active(local) && !marked[local]) {
+        marked[local] = true;
+        affected.push_back(local);
+      }
+    }
+  };
 
   for (int64_t pass = 0; pass < config.max_greedy_sweeps; ++pass) {
     ++greedy_sweeps;
-    std::fill(locked.begin(), locked.end(), false);
     history.clear();
+    move_starts.clear();
+    std::fill(seen.begin(), seen.end(), false);
+    expanded_values.clear();
     double best_prefix_cost = state.Cost();
     size_t best_prefix_len = 0;
-    bool budget_hit = false;
-
-    for (size_t step = 0; step < n; ++step) {
-      size_t best_local = n;
-      uint16_t best_q = 0;
-      double best_gain = -std::numeric_limits<double>::infinity();
-      for (size_t i = 0; i < n; ++i) {
-        if (locked[i]) {
-          continue;
+    // The previous pass may have rolled back its suffix. Rebuild both
+    // frontiers from the lowest-ID movable operation in the component.
+    singles.Reset();
+    groups.Reset();
+    bool budget_hit = !activate(0) || !groups.Refresh();
+    while (!budget_hit && !singles.Empty()) {
+      const auto single = singles.Best();
+      const FMFanoutFrontier::Proposal* group = nullptr;
+      if (!groups.Best(single.gain, group)) {
+        budget_hit = true;
+        break;
+      }
+      move_starts.push_back(history.size());
+      // A compatible block changes at least two unlocked operations. Exact
+      // block gains compete with singleton gains even when both increase cost.
+      if (group != nullptr) {
+        for (const auto& [op, choice] : group->choices) {
+          record_and_lock(local_index(op), choice, std::nullopt);
         }
-        const OpId op_idx = comp_ops[i];
-        const size_t num_cfg = problem.Ops()[op_idx].costs.size();
-        const uint16_t cur_q = state.Choices()[op_idx];
-        for (uint16_t q = 0; q < static_cast<uint16_t>(num_cfg); ++q) {
-          if (q == cur_q) {
-            continue;
-          }
-          if (evaluated_moves + 1 > config.max_evaluations) {
-            budget_hit = true;
-            break;
-          }
-          ++evaluated_moves;
-          const double g = state.Gain(op_idx, q);
-          if (best_local == n || g > best_gain + config.tolerance) {
-            best_gain = g;
-            best_local = i;
-            best_q = q;
-          }
-        }
-        if (budget_hit) {
+        if (history.size() < n) VisitBlockMoveFactors(state, group->evaluation, mark_factor);
+        state.ApplyBlock(group->choices, group->evaluation);
+      } else {
+        record_and_lock(single.local, single.choice, single.gain);
+        const OpId op = comp_ops[single.local];
+        if (history.size() < n) VisitSingleMoveFactors(state, op, single.choice, mark_factor);
+        state.Apply(op, single.choice);
+      }
+      if (state.Cost() < best_prefix_cost - config.tolerance) {
+        best_prefix_cost = state.Cost();
+        best_prefix_len = history.size();
+      }
+      if (history.size() == n) break;
+      for (size_t local : affected) {
+        marked[local] = false;
+        if (!singles.Refresh(local)) {
+          budget_hit = true;
           break;
         }
       }
-      if (budget_hit || best_local == n) {
-        break;
-      }
-      const OpId chosen_op = comp_ops[best_local];
-      const uint16_t old_q = state.Choices()[chosen_op];
-      state.Apply(chosen_op, best_q);
-      locked[best_local] = true;
-      history.push_back(AppliedMove{chosen_op, old_q});
-      const double cur_cost = state.Cost();
-      if (cur_cost < best_prefix_cost - config.tolerance) {
-        best_prefix_cost = cur_cost;
-        best_prefix_len = history.size();
-      }
+      affected.clear();
+      // Explore every incident value once, even when the move changes only
+      // intrinsic cost. A compatible block can lock undiscovered consumers.
+      if (!budget_hit && (!expand_move() || !groups.Refresh())) budget_hit = true;
     }
 
-    for (size_t idx = history.size(); idx > best_prefix_len; --idx) {
-      const auto& mv = history[idx - 1];
-      state.Apply(mv.op_idx, mv.old_choice);
+    // A whole move is the smallest unit of either the retained prefix or the
+    // rolled-back suffix. Undo demand changes jointly for each group.
+    while (history.size() > best_prefix_len) {
+      const size_t begin = move_starts.back();
+      move_starts.pop_back();
+      if (begin + 1 == history.size()) {
+        const auto [op, choice] = history[begin];
+        state.Apply(op, choice);
+      } else {
+        undo.assign(history.begin() + begin, history.end());
+        state.ApplyBlock(undo, state.EvaluateBlock(undo));
+      }
+      history.resize(begin);
     }
+    moves_applied += static_cast<int64_t>(best_prefix_len);
     if (budget_hit) {
       termination_reason = "evaluation_budget";
       return;
@@ -1057,7 +1638,6 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
       termination_reason = "local_optimum";
       return;
     }
-    moves_applied += static_cast<int64_t>(best_prefix_len);
   }
   termination_reason = "greedy_sweep_budget";
 }
@@ -1204,6 +1784,7 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
     op_info.costs.reserve(op.configs.size());
     op_info.output_layout_indices.reserve(op.configs.size());
     op_info.config_uses.resize(op.configs.size());
+    std::vector<uint64_t> single_layouts_by_input;
 
     const double cost_mult = RequireFiniteNonNegative(OperatorCostMultiplier(instance_, op), op.op_id);
     for (size_t q = 0; q < op.configs.size(); ++q) {
@@ -1255,6 +1836,7 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
           u_entry.layout_counts.emplace_back(static_cast<uint16_t>(lay_idx), 1);
           uses.push_back(std::move(u_entry));
         } else {
+          values_[vid].has_repeated_operand = true;
           it->demand_mask |= (uint64_t{1} << lay_idx);
           auto c_it = std::find_if(it->layout_counts.begin(), it->layout_counts.end(), [&](const auto& pair) {
             return pair.first == static_cast<uint16_t>(lay_idx);
@@ -1266,7 +1848,18 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
           }
         }
       }
+      if (q == 0) single_layouts_by_input.resize(uses.size());
+      for (size_t slot = 0; slot < uses.size(); ++slot) {
+        if (uses[slot].layout_counts.size() == 1) {
+          single_layouts_by_input[slot] |= uses[slot].demand_mask;
+        }
+      }
       op_info.config_uses[q] = std::move(uses);
+    }
+    for (size_t slot = 0; slot < single_layouts_by_input.size(); ++slot) {
+      auto& value = values_[op_info.config_uses[0][slot].value_id];
+      value.consumers.push_back({u, slot});
+      value.common_consumer_layouts &= single_layouts_by_input[slot];
     }
   }
 
@@ -1479,6 +2072,7 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
         v_info.conv_costs[static_cast<size_t>(src_idx) * num_layouts + dst_idx] = c;
       }
     }
+    v_info.max_conversion_cost = *std::max_element(v_info.conv_costs.begin(), v_info.conv_costs.end());
   }
 }
 
@@ -1587,7 +2181,34 @@ IncrementalState::IncrementalState(const IndexedProblem& problem, std::vector<ui
   }
 }
 
-double IncrementalState::Gain(OpId op_idx, uint16_t new_choice) const {
+double IncrementalState::FactorCostDelta(ValueId value, uint16_t new_source, uint64_t new_mask) const {
+  const auto& info = problem_.Values()[value];
+  const uint64_t old_mask = demand_masks_[value];
+  const double multi_rep_penalty = problem_.Instance().cost_model.vec_unsupported_conversion_cycles;
+  const double mr_delta = info.forbid_multi_rep ? (static_cast<double>(__builtin_popcountll(new_mask) > 1) -
+                                                   static_cast<double>(__builtin_popcountll(old_mask) > 1)) *
+                                                      multi_rep_penalty
+                                                : 0.0;
+  const double old_cost = source_costs_[value][sources_[value]];
+  const double new_source_cost = source_costs_[value][new_source];
+  if (old_mask == new_mask) return new_source_cost - old_cost + mr_delta;
+
+  double new_cost = new_source_cost + mr_delta;
+  uint64_t added = new_mask & ~old_mask;
+  uint64_t removed = old_mask & ~new_mask;
+  const double* row = info.conv_costs.data() + static_cast<size_t>(new_source) * info.layouts.size();
+  while (added != 0) {
+    new_cost += row[__builtin_ctzll(added)];
+    added &= added - 1;
+  }
+  while (removed != 0) {
+    new_cost -= row[__builtin_ctzll(removed)];
+    removed &= removed - 1;
+  }
+  return new_cost - old_cost;
+}
+
+double IncrementalState::Gain(OpId op_idx, uint16_t new_choice, std::optional<ValueId> omitted_factor) const {
   const auto& op = problem_.Ops()[op_idx];
   const uint16_t old_choice = choices_[op_idx];
   if (old_choice == new_choice) {
@@ -1600,10 +2221,8 @@ double IncrementalState::Gain(OpId op_idx, uint16_t new_choice) const {
 
   auto compute_val_delta = [&](ValueId v, const IndexedProblem::OpConfigUse* old_u,
                                const IndexedProblem::OpConfigUse* new_u) -> double {
-    const auto& v_info = problem_.Values()[v];
-    const size_t num_layouts = v_info.layouts.size();
-    const uint16_t old_src = sources_[v];
-    const uint16_t new_src = (v == op.output_value) ? op.output_layout_indices[new_choice] : old_src;
+    if (v == omitted_factor) return 0.0;
+    const uint16_t new_src = (v == op.output_value) ? op.output_layout_indices[new_choice] : sources_[v];
 
     uint64_t new_mask = demand_masks_[v];
     if (old_u != nullptr) {
@@ -1642,32 +2261,7 @@ double IncrementalState::Gain(OpId op_idx, uint16_t new_choice) const {
       }
     }
 
-    const double multi_rep_penalty = problem_.Instance().cost_model.vec_unsupported_conversion_cycles;
-    const double mr_delta = v_info.forbid_multi_rep
-                                ? (static_cast<double>(__builtin_popcountll(new_mask) > 1) -
-                                   static_cast<double>(__builtin_popcountll(demand_masks_[v]) > 1)) *
-                                      multi_rep_penalty
-                                : 0.0;
-
-    if (new_mask == demand_masks_[v]) {
-      return source_costs_[v][new_src] - source_costs_[v][old_src] + mr_delta;
-    }
-
-    double factor = source_costs_[v][new_src] + mr_delta;
-    uint64_t diff_on = new_mask & ~demand_masks_[v];
-    uint64_t diff_off = demand_masks_[v] & ~new_mask;
-    const double* row = v_info.conv_costs.data() + static_cast<size_t>(new_src) * num_layouts;
-    while (diff_on != 0) {
-      const int dst = __builtin_ctzll(diff_on);
-      factor += row[dst];
-      diff_on &= diff_on - 1;
-    }
-    while (diff_off != 0) {
-      const int dst = __builtin_ctzll(diff_off);
-      factor -= row[dst];
-      diff_off &= diff_off - 1;
-    }
-    return factor - source_costs_[v][old_src];
+    return FactorCostDelta(v, new_src, new_mask);
   };
 
   bool out_seen = false;
@@ -1714,41 +2308,101 @@ void IncrementalState::Apply(OpId op_idx, uint16_t new_choice) {
   const double g = Gain(op_idx, new_choice);
   const auto& op = problem_.Ops()[op_idx];
 
-  auto update_count = [&](ValueId v, uint16_t lay_idx, int delta) {
-    const int old_cnt = counts_[v][lay_idx];
-    const int new_cnt = old_cnt + delta;
-    counts_[v][lay_idx] = new_cnt;
-    const int support_delta = static_cast<int>(new_cnt > 0) - static_cast<int>(old_cnt > 0);
-    if (support_delta != 0) {
-      if (new_cnt > 0) {
-        demand_masks_[v] |= (uint64_t{1} << lay_idx);
-      } else {
-        demand_masks_[v] &= ~(uint64_t{1} << lay_idx);
-      }
-      const auto& v_info = problem_.Values()[v];
-      const size_t num_layouts = v_info.layouts.size();
-      for (size_t s = 0; s < num_layouts; ++s) {
-        source_costs_[v][s] +=
-            static_cast<double>(support_delta) * v_info.conv_costs[s * num_layouts + lay_idx];
-      }
-    }
-  };
-
-  for (const auto& old_u : op.config_uses[old_choice]) {
-    for (const auto& [lay_idx, cnt] : old_u.layout_counts) {
-      update_count(old_u.value_id, lay_idx, -cnt);
-    }
-  }
-  for (const auto& new_u : op.config_uses[new_choice]) {
-    for (const auto& [lay_idx, cnt] : new_u.layout_counts) {
-      update_count(new_u.value_id, lay_idx, cnt);
-    }
+  const auto& old_uses = op.config_uses[old_choice];
+  const auto& new_uses = op.config_uses[new_choice];
+  for (size_t i = 0; i < old_uses.size(); ++i) {
+    ForEachDemandDelta(old_uses[i], new_uses[i], [&](uint16_t layout, int delta) {
+      UpdateDemandCount(old_uses[i].value_id, layout, delta);
+    });
   }
 
   sources_[op.output_value] = op.output_layout_indices[new_choice];
   choices_[op_idx] = new_choice;
-  cost_ -= g;
-  if (std::abs(g) > 1e9) {
+  UpdateCost(g);
+}
+
+IncrementalState::BlockEvaluation IncrementalState::EvaluateBlock(
+    const std::vector<ChoiceChange>& choices) const {
+  // Keep factors in first-touch order so floating-point summation follows a
+  // deterministic order. Each factor sees every consumer and source change.
+  BlockEvaluation evaluation;
+  auto& factors = evaluation.factors;
+  std::unordered_map<ValueId, size_t> factor_positions;
+  const auto get_factor = [&](ValueId value) -> BlockEvaluation::Factor& {
+    auto [it, inserted] = factor_positions.try_emplace(value, factors.size());
+    if (inserted) factors.push_back({value, sources_[value], counts_[value]});
+    return factors[it->second];
+  };
+
+  double delta = 0.0;
+  for (const auto& [op_idx, new_choice] : choices) {
+    const auto& op = problem_.Ops()[op_idx];
+    const auto old_choice = choices_[op_idx];
+    delta += op.costs[new_choice] - op.costs[old_choice];
+    const uint16_t new_source = op.output_layout_indices[new_choice];
+    if (new_source != sources_[op.output_value]) get_factor(op.output_value).source = new_source;
+
+    const auto& old_uses = op.config_uses[old_choice];
+    const auto& new_uses = op.config_uses[new_choice];
+    for (size_t i = 0; i < old_uses.size(); ++i) {
+      ForEachDemandDelta(old_uses[i], new_uses[i], [&](uint16_t layout, int count_delta) {
+        get_factor(old_uses[i].value_id).counts[layout] += count_delta;
+      });
+    }
+  }
+  for (const auto& factor : factors) {
+    uint64_t mask = 0;
+    for (uint16_t layout = 0; layout < factor.counts.size(); ++layout) {
+      if (factor.counts[layout] > 0) mask |= uint64_t{1} << layout;
+    }
+    delta += FactorCostDelta(factor.value, factor.source, mask);
+  }
+  evaluation.gain = -delta;
+  return evaluation;
+}
+
+void IncrementalState::ApplyBlock(const std::vector<ChoiceChange>& choices,
+                                  const BlockEvaluation& evaluation) {
+  for (const auto& factor : evaluation.factors) {
+    for (uint16_t layout = 0; layout < factor.counts.size(); ++layout) {
+      const int count_delta = factor.counts[layout] - counts_[factor.value][layout];
+      if (count_delta != 0) UpdateDemandCount(factor.value, layout, count_delta);
+    }
+    sources_[factor.value] = factor.source;
+  }
+  for (const auto& [op_idx, new_choice] : choices) choices_[op_idx] = new_choice;
+  UpdateCost(evaluation.gain);
+}
+
+bool IncrementalState::ApplyImprovingBlock(const std::vector<ChoiceChange>& choices, double tolerance) {
+  const auto evaluation = EvaluateBlock(choices);
+  if (!(evaluation.gain > tolerance)) return false;
+  ApplyBlock(choices, evaluation);
+  return true;
+}
+
+void IncrementalState::UpdateDemandCount(ValueId value, uint16_t layout, int delta) {
+  const int previous = counts_[value][layout];
+  const int next = previous + delta;
+  counts_[value][layout] = next;
+  const int support_delta = static_cast<int>(next > 0) - static_cast<int>(previous > 0);
+  if (support_delta == 0) return;
+  if (next > 0) {
+    demand_masks_[value] |= uint64_t{1} << layout;
+  } else {
+    demand_masks_[value] &= ~(uint64_t{1} << layout);
+  }
+  const auto& info = problem_.Values()[value];
+  const size_t num_layouts = info.layouts.size();
+  for (size_t source = 0; source < num_layouts; ++source) {
+    source_costs_[value][source] +=
+        static_cast<double>(support_delta) * info.conv_costs[source * num_layouts + layout];
+  }
+}
+
+void IncrementalState::UpdateCost(double gain) {
+  cost_ -= gain;
+  if (std::abs(gain) > 1e9) {
     // Recompute exact total cost after entering/leaving a large penalty state so IEEE-754
     // cancellation cannot leave residual drift in `cost_`.
     double exact = 0.0;
@@ -1792,12 +2446,13 @@ LayoutAssignment IncrementalState::ToAssignment() const {
 
 TreewidthStats ComputeTreewidth(const LayoutProblemInstance& instance) {
   IndexedProblem problem(instance);
-  return ComputeProblemTreewidthInternal(problem);
+  return ComputeProblemTreewidthInternal(
+      problem, ComputeActiveDecomposition(problem, std::numeric_limits<int64_t>::max()));
 }
 
-LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
-                               const std::optional<LayoutAssignment>& initial,
-                               const LayoutSolverConfig& config) {
+static LayoutSolverResult SolveLocalSearch(const LayoutProblemInstance& instance,
+                                           const std::optional<LayoutAssignment>& initial,
+                                           const LayoutSolverConfig& config, bool refine_with_fm) {
   config.Validate();
   IndexedProblem problem(instance);
   int64_t evaluated_moves = 0;
@@ -1816,29 +2471,51 @@ LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
   IncrementalState state(problem, std::move(choices));
   const double initial_cost = state.Cost();
   if (termination_reason != "evaluation_budget") {
-    GreedyRefine(state, config, evaluated_moves, moves_applied, greedy_sweeps, termination_reason);
+    if (!refine_with_fm) {
+      GreedyRefine(state, config, evaluated_moves, moves_applied, greedy_sweeps, termination_reason);
+    } else {
+      const auto graph = ComputeActiveDecomposition(problem, std::nullopt);
+      for (size_t c = 0; c < graph.components.size(); ++c) {
+        FMRefineComponent(state, graph.components[c], graph.component_factors[c], config, evaluated_moves,
+                          moves_applied, greedy_sweeps, termination_reason);
+        if (termination_reason == "evaluation_budget") break;
+      }
+    }
   }
   return BuildResult(state, evaluated_moves, moves_applied, greedy_sweeps, initial_cost, termination_reason);
+}
+
+LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
+                               const std::optional<LayoutAssignment>& initial,
+                               const LayoutSolverConfig& config) {
+  return SolveLocalSearch(instance, initial, config, false);
+}
+
+LayoutSolverResult SolveGreedyFM(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
+  return SolveLocalSearch(instance, std::nullopt, config, true);
 }
 
 LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
   config.Validate();
   IndexedProblem problem(instance);
-  const auto decomp = ComputeActiveDecomposition(problem);
+  const auto decomp = ComputeActiveDecomposition(
+      problem, config.collect_treewidth_stats ? std::numeric_limits<int64_t>::max() : config.max_treewidth);
+  const auto stats = config.collect_treewidth_stats
+                         ? std::optional{ComputeProblemTreewidthInternal(problem, decomp)}
+                         : std::nullopt;
 
   if (problem.NumOps() == 0) {
     IncrementalState empty_state(problem, {});
-    return BuildResult(empty_state, 0, 0, 0, 0.0, "optimal", decomp.tw_stats);
+    return BuildResult(empty_state, 0, 0, 0, 0.0, "optimal", stats, -1);
   }
-  if (decomp.tw_stats.active_primal_treewidth > config.max_treewidth) {
-    throw pypto::ValueError("Treewidth DP active primal treewidth " +
-                            std::to_string(decomp.tw_stats.active_primal_treewidth) +
-                            " exceeds max_treewidth=" + std::to_string(config.max_treewidth));
-  }
-  if (decomp.tw_stats.max_bag_domain_product > config.max_bag_states) {
-    throw pypto::ValueError("Treewidth DP max bag states " +
-                            std::to_string(decomp.tw_stats.max_bag_domain_product) +
-                            " exceeds max_bag_states=" + std::to_string(config.max_bag_states));
+  for (const auto& dec : decomp.component_decomps) {
+    if (dec.treewidth > config.max_treewidth) {
+      throw pypto::ValueError("Treewidth DP component exceeds max_treewidth=" +
+                              std::to_string(config.max_treewidth));
+    }
+    if (dec.max_bag_states > config.max_bag_states) {
+      throw pypto::ValueError("Treewidth DP exceeds max_bag_states=" + std::to_string(config.max_bag_states));
+    }
   }
 
   int64_t evaluated_moves = 0;
@@ -1848,7 +2525,7 @@ LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance, const
                             std::to_string(config.max_evaluations));
   }
   IncrementalState state(problem, std::move(choices));
-  return BuildResult(state, evaluated_moves, 0, 0, state.Cost(), "optimal", decomp.tw_stats);
+  return BuildResult(state, evaluated_moves, 0, 0, state.Cost(), "optimal", stats, -1);
 }
 
 LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
@@ -1856,12 +2533,16 @@ LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
                                    const LayoutSolverConfig& config) {
   config.Validate();
   IndexedProblem problem(instance);
-  const auto decomp = ComputeActiveDecomposition(problem);
+  const auto decomp = ComputeActiveDecomposition(
+      problem, config.collect_treewidth_stats ? std::numeric_limits<int64_t>::max() : config.max_treewidth);
+  const auto stats = config.collect_treewidth_stats
+                         ? std::optional{ComputeProblemTreewidthInternal(problem, decomp)}
+                         : std::nullopt;
   int64_t evaluated_moves = 0;
 
   if (problem.NumOps() == 0) {
     IncrementalState empty_state(problem, {});
-    return BuildResult(empty_state, 0, 0, 0, 0.0, "optimal", decomp.tw_stats);
+    return BuildResult(empty_state, 0, 0, 0, 0.0, "optimal", stats, -1);
   }
 
   const size_t num_comps = decomp.component_decomps.size();
@@ -1869,48 +2550,31 @@ LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
   std::vector<size_t> fallback_comps;
   for (size_t c = 0; c < num_comps; ++c) {
     const auto& dec = decomp.component_decomps[c];
-    int64_t comp_max_prod = 1;
-    int64_t comp_total_states = 0;
-    for (const auto& bag : dec.bags) {
-      int64_t prod = 1;
-      for (OpId u : bag) {
-        const int64_t dom = static_cast<int64_t>(problem.Ops()[u].costs.size());
-        if (prod > std::numeric_limits<int64_t>::max() / std::max<int64_t>(1, dom)) {
-          prod = std::numeric_limits<int64_t>::max();
-          break;
-        }
-        prod *= dom;
-      }
-      comp_max_prod = std::max(comp_max_prod, prod);
-      if (comp_total_states > std::numeric_limits<int64_t>::max() - prod) {
-        comp_total_states = std::numeric_limits<int64_t>::max();
-      } else {
-        comp_total_states += prod;
-      }
-    }
-    if (dec.treewidth <= config.max_treewidth && comp_max_prod <= config.max_bag_states &&
-        comp_total_states <= config.max_evaluations) {
+    if (dec.treewidth <= config.max_treewidth && dec.max_bag_states <= config.max_bag_states &&
+        dec.total_states <= config.max_evaluations) {
       dp_comps.push_back(c);
     } else {
       fallback_comps.push_back(c);
     }
   }
 
-  const DPContext dp_ctx = BuildDPContext(problem, decomp);
   std::vector<uint16_t> dp_choices(problem.NumOps(), 0);
   int64_t dp_evals = 0;
   std::vector<size_t> solved_dp_comps;
-  for (size_t c : dp_comps) {
-    if (RunTreewidthDPOnSingleComponent(problem, decomp, dp_ctx, c, config, dp_evals, dp_choices)) {
-      solved_dp_comps.push_back(c);
-    } else {
-      fallback_comps.push_back(c);
+  if (!dp_comps.empty()) {
+    const DPContext dp_ctx = BuildDPContext(problem, decomp);
+    for (size_t c : dp_comps) {
+      if (RunTreewidthDPOnSingleComponent(problem, decomp, dp_ctx, c, config, dp_evals, dp_choices)) {
+        solved_dp_comps.push_back(c);
+      } else {
+        fallback_comps.push_back(c);
+      }
     }
   }
 
   if (fallback_comps.empty()) {
     IncrementalState state(problem, std::move(dp_choices));
-    return BuildResult(state, dp_evals, 0, 0, state.Cost(), "optimal", decomp.tw_stats);
+    return BuildResult(state, dp_evals, 0, 0, state.Cost(), "optimal", stats, -1);
   }
 
   evaluated_moves = dp_evals;
@@ -1931,36 +2595,32 @@ LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
     }
   }
 
-  std::vector<bool> in_fallback(problem.NumOps(), false);
-  for (size_t c : fallback_comps) {
-    for (OpId u : decomp.components[c]) {
-      in_fallback[u] = true;
-    }
-  }
-  std::vector<OpId> fallback_ops;
-  for (OpId u : problem.TopoOrder()) {
-    if (in_fallback[u]) {
-      fallback_ops.push_back(u);
-    }
-  }
-
   IncrementalState state(problem, std::move(choices));
   const double initial_cost = state.Cost();
-  if (termination_reason != "evaluation_budget" && !fallback_ops.empty()) {
-    GreedyRefineOps(state, fallback_ops, config, evaluated_moves, moves_applied, greedy_sweeps,
-                    termination_reason);
-    if (!initial.has_value() && termination_reason != "evaluation_budget") {
+  if (termination_reason != "evaluation_budget") {
+    if (initial.has_value()) {
+      std::vector<bool> in_fallback(problem.NumOps(), false);
+      for (size_t c : fallback_comps) {
+        for (OpId u : decomp.components[c]) in_fallback[u] = true;
+      }
+      std::vector<OpId> fallback_ops;
+      for (OpId u : problem.TopoOrder()) {
+        if (in_fallback[u]) fallback_ops.push_back(u);
+      }
+      GreedyRefineOps(state, fallback_ops, config, evaluated_moves, moves_applied, greedy_sweeps,
+                      termination_reason);
+    } else {
       for (size_t c : fallback_comps) {
         if (termination_reason == "evaluation_budget") {
           break;
         }
-        FMRefineComponent(state, decomp.components[c], config, evaluated_moves, moves_applied, greedy_sweeps,
-                          termination_reason);
+        FMRefineComponent(state, decomp.components[c], decomp.component_factors[c], config, evaluated_moves,
+                          moves_applied, greedy_sweeps, termination_reason);
       }
     }
   }
   return BuildResult(state, evaluated_moves, moves_applied, greedy_sweeps, initial_cost, termination_reason,
-                     decomp.tw_stats);
+                     stats, -1);
 }
 
 }  // namespace auto_layout

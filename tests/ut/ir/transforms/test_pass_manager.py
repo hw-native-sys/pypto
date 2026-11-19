@@ -90,6 +90,15 @@ TENSOR_OPTIMIZATION_PASSES = [
 ]
 
 
+def _run_through_auto_layout(program: ir.Program) -> ir.Program:
+    prefix = passes.PassPipeline()
+    for step in ir.PassManager.get_strategy(ir.OptimizationStrategy.AutoLayout).passes:
+        prefix.add_pass(step)
+        if step.get_name() == "AutoLayout":
+            return prefix.run(program)
+    raise AssertionError("AutoLayout is missing from the pipeline")
+
+
 class TestOptimizationStrategy:
     """Test OptimizationStrategy enum."""
 
@@ -114,6 +123,29 @@ class TestPassManagerBasics:
         pos = baseline.index("InferTileMemorySpace") + 1
         assert selected == baseline[:pos] + ["AutoLayout", "BlockNzTensorViews"] + baseline[pos:]
 
+    def test_auto_layout_keeps_shared_compact_row(self, ascend_backend):
+        @pl.program
+        class SharedRow:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP32],
+                y: pl.Tensor[[32, 64], pl.FP32],
+                out_x: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+                out_y: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+            ) -> pl.Tuple[pl.Tensor[[32, 64], pl.FP32], pl.Tensor[[32, 64], pl.FP32]]:
+                tx = pl.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Vec)
+                ty = pl.load(y, [0, 0], [32, 64], target_memory=pl.Mem.Vec)
+                tmp = pl.tile.create([32, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                row = pl.tile.row_sum(tx, tmp)
+                out_x = pl.store(pl.tile.row_expand_add(tx, row), [0, 0], out_x)
+                out_y = pl.store(pl.tile.row_expand_add(ty, row), [0, 0], out_y)
+                return out_x, out_y
+
+        printed = ir.python_print(_run_through_auto_layout(SharedRow))
+        assert printed.count("pl.tile.row_expand_add(") == 2
+        assert "pl.tile.row_expand(" not in printed
+
     def test_auto_layout_preserves_runtime_join(self, ascend_backend):
         @pl.program
         class Branch:
@@ -137,12 +169,7 @@ class TestPassManagerBasics:
                 out = pl.store(joined, [0, 0], out)
                 return out
 
-        prefix = passes.PassPipeline()
-        for pass_obj in ir.PassManager.get_strategy(ir.OptimizationStrategy.AutoLayout).passes:
-            prefix.add_pass(pass_obj)
-            if pass_obj.get_name() == "AutoLayout":
-                break
-        result = prefix.run(Branch)
+        result = _run_through_auto_layout(Branch)
         properties = passes.IRPropertySet()
         for prop in (
             passes.IRProperty.TypeChecked,

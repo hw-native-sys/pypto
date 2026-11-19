@@ -2598,15 +2598,15 @@ class PostInferInstanceExtractor {
     } else if (op_name == "tile.row_expand_add" && tile_inputs.size() >= 2) {
       const ValueNode* tile_mn = std::get<2>(tile_inputs[0]);
       const ValueNode* row_vec = std::get<2>(tile_inputs[1]);
-      const int64_t m_dim = tile_mn->shape.size() >= 2 ? tile_mn->shape[tile_mn->shape.size() - 2] : 1;
       const double base_cost =
           static_cast<double>(std::max(tile_mn->NumElements(), dst_node->NumElements())) /
           model_.vec_elements_per_cycle;
       std::vector<LayoutSpec> cm_ins{LayoutSpec::RowMajorFlat(), LayoutSpec::ColMajorFlat()};
       cm_ins.resize(tile_inputs.size(), LayoutSpec::RowMajorFlat());
+      // TROWEXPANDADD consumes the compact column directly. An explicit expansion
+      // is charged once by the conversion cost when consumers demand RowBcastFlat.
       configs.push_back(OperatorConfig{op_id, op_name, std::move(cm_ins), LayoutSpec::RowMajorFlat(),
-                                       base_cost + model_.EstimateVbrcbCost(m_dim),
-                                       "tile.row_expand_add (compact col_major + vbrcb)"});
+                                       base_cost, "tile.row_expand_add (compact col_major)"});
       if (std::find(row_vec->admissible_layouts.begin(), row_vec->admissible_layouts.end(),
                     LayoutSpec::RowBcastFlat()) != row_vec->admissible_layouts.end()) {
         std::vector<LayoutSpec> bcast_ins{LayoutSpec::RowMajorFlat(), LayoutSpec::RowBcastFlat()};
