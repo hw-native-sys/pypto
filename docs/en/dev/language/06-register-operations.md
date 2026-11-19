@@ -397,12 +397,9 @@ individual registers (for example, `low, high = pl.reg.mull(a, b, mask)`),
 not the tuple itself. The verifier rejects tuple-valued joins and loop carries.
 `mull` preserves input signedness in both halves. Subtraction carry masks use
 **true for no borrow**; they are distinct from the execution mask.
-Both outputs of `intlv`/`dintlv` have zero in inactive lanes. The pinned/minimum
-PTOAS v0.74 implements native result masking (`b6945321`,
-[PTOAS #1732](https://github.com/hw-native-sys/PTOAS/issues/1732)), so PyPTO emits
-masked interleave directly, without additional result-clearing `vsel` operations
-or BF16-to-UINT16-to-BF16 compensation casts. Active BF16 values retain their bit
-patterns. Omitted-mask calls retain their all-active lowering and fusion opportunities.
+PyPTO emits masked interleave directly. Both outputs of `intlv`/`dintlv`
+have zero in inactive lanes and preserve the bit patterns of active BF16
+values. Omitting the mask enables all lanes and preserves fusion opportunities.
 
 The independent small-vector placement defect in
 [PTOAS #1659](https://github.com/hw-native-sys/PTOAS/issues/1659) remains upstream.
