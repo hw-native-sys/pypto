@@ -1457,12 +1457,11 @@ def test_reg_spill_policy_on_generated_reg_scope_helper(tmp_path, monkeypatch, a
     @pl.function(type=pl.FunctionType.AIV)
     def register_policy_kernel():
         src = pl.tile.full([128], pl.FP32, 1.0)
-        dst = pl.tile.full([128], pl.FP32, 0.0)
         with pl.reg_scope():
             x = pl.reg.load(src, lanes=64)
             y = pl.reg.add(x, x)
-            out = pl.reg.store(dst, value=y)
-        _consumer = pl.tile.add(out, src)
+            out = pl.reg.store(src, value=y)
+        _consumer = pl.tile.add(out, out)
 
     with passes.PassContext([]):
         program = passes.flatten_tile_nd_to_2d()(ir.Program([register_policy_kernel], "Policy", SPAN))
