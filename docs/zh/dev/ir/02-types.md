@@ -47,6 +47,17 @@ VF 代码生成仍由 PR3 实现。
 
 `Simplify` 可消除已证明零次执行的 Sequential Require 循环，并返回初始携带值；非空 Require（包括单次循环）必须保留。
 
+### Squeeze-store 状态
+
+`ir.SqueezeStoreType.get()` 是局限于 register 作用域的不透明 SSA 状态。
+公开接口采用显式 `squeeze_store_init/step/flush`，解析器将 init 关联的目标
+补为 step/flush 的内部内存操作数；
+step 消费前一状态并生成后继状态，ConvertToSSA 为顺序循环添加状态携带值。
+它下沉为 `!pto.align`，不能跨 RegScope 或函数边界、不能重复消费，必须恰好收尾一次。
+编译器消除零次循环等场景产生的线性 SSA 转发会消费旧名称，后续复用旧名称仍会报错。
+每个 step 和 flush 显式携带目标 Tile，以便内存效果与别名分析识别写入。
+该类型没有实例字段，支持结构比较和序列化。
+
 ### 内部 Buffer 类型
 
 `BufferType` 描述最终设备 IR 中的可变片上缓冲区，直接继承 `Type`，

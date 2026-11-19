@@ -579,6 +579,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return GetPrefetchAsyncContextType();
     } else if (type_kind == "AsyncEventType") {
       return GetAsyncEventType();
+    } else if (type_kind == "SqueezeStoreType") {
+      return GetSqueezeStoreType();
     } else if (type_kind == "AsyncSessionType") {
       return GetAsyncSessionType();
     } else if (type_kind == "MemRefType") {

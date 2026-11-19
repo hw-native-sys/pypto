@@ -50,6 +50,20 @@ loop analysis and emission are not implemented by this infrastructure change.
 Simplify may remove proven zero-trip Sequential Require loops and return initial
 carried values; nonempty Require loops, including single-trip loops, are preserved.
 
+### Squeeze-store state
+
+`ir.SqueezeStoreType.get()` is an opaque, region-local SSA state. The public API
+uses explicit `squeeze_store_init/step/flush` operations; the parser resolves
+the destination inherited from init into step/flush memory operands.
+A step consumes the preceding state and returns its successor; ConvertToSSA
+carries it across sequential loops. It lowers to `!pto.align`, cannot cross a
+RegScope/function boundary or be duplicated, and must be flushed exactly once.
+Compiler-generated linear renames, such as an eliminated zero-trip loop's
+result, consume the previous SSA name; reusing that name is rejected.
+Every step and flush also names the destination Tile explicitly so memory
+effects and aliases remain visible. This type has no instance fields and
+supports structural comparison and serialization.
+
 ### Internal buffer types
 
 `BufferType` describes a mutable on-chip buffer in the final device IR. It

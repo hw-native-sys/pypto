@@ -10,6 +10,7 @@
 """Runtime, hierarchy, SPMD and explicit split scopes and their body carriers."""
 
 import ast
+import copy
 import keyword as _keyword_mod
 import warnings
 from collections.abc import Iterator
@@ -41,6 +42,7 @@ from .enum_utils import (
 from .parser_state import FunctionContext, ParseCallbacks, ParserServices
 from .region_context import RegionContext
 from .source_comments import SourceCommentTracker
+from .squeeze_store_parser import expand_squeeze_state_ops
 from .syntax_helpers import (
     is_cache_policy_marker,
     is_dep_var_type,
@@ -2749,7 +2751,11 @@ class ScopeParser:
                     return
 
                 if func.attr == "reg_scope":
-                    self.parse_reg_scope(stmt, context_expr)
+                    normalized = copy.copy(stmt)
+                    normalized.body = expand_squeeze_state_ops(
+                        stmt.body, self.services.span_tracker.get_span(stmt)
+                    )
+                    self.parse_reg_scope(normalized, context_expr)
                     return
 
                 # Unified runtime scope: with pl.scope(mode=...): ...

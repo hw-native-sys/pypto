@@ -51,6 +51,7 @@ class ScopeOperands : public IRVisitor {
  public:
   // Access sites whose Tile operands need an external UB pointer.
   std::vector<CallPtr> memory;
+  bool micro = false;
   // Store/control-flow result -> source view. Stores change bytes, not Tile
   // ownership; branch aliases additionally require both sources to agree.
   std::map<const Var*, VarPtr> aliases;
@@ -65,17 +66,23 @@ class ScopeOperands : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& stmt) override {
-    if (As<RegType>(stmt->var_->GetType()) || As<ScalarType>(stmt->var_->GetType())) {
+    if (As<RegType>(stmt->var_->GetType()) || As<SqueezeStoreType>(stmt->var_->GetType()) ||
+        As<ScalarType>(stmt->var_->GetType())) {
       locals.push_back(stmt->var_);
     }
     if (auto call = As<Call>(stmt->value_); call && (IsOp(call, "reg.store") || IsOp(call, "reg.scatter"))) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
     }
+    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.squeeze_store_flush")) {
+      aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[1]));
+    }
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
+    micro |= IsOp(call, "reg.squeeze_store_init");
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       memory.push_back(call);
     }
     IRVisitor::VisitExpr_(call);
@@ -122,6 +129,16 @@ class ScopeOperands : public IRVisitor {
 
 std::string PTOCodegen::GetRegTypeString(const ir::RegTypePtr& type) const {
   CHECK(type && GetBackendHandler()->SupportsRegType(*type)) << "Unsupported A5 register type";
+  if (micro_reg_scope_) {
+    if (type->kind_ == ir::RegKind::MaskReg) {
+      CHECK(type->shape_ == 64 || type->shape_ == 128)
+          << "Squeeze-store micro lowering requires 64- or 128-lane masks";
+      return "!pto.mask<b" + std::to_string(2048 / type->shape_) + ">";
+    }
+    CHECK(type->shape_ * type->dtype_.GetByte() == 256)
+        << "Squeeze-store micro lowering requires full 256-byte registers";
+    return "!pto.vreg<" + std::to_string(type->shape_) + "x" + RegisterElement(type->dtype_) + ">";
+  }
   if (type->kind_ == ir::RegKind::MaskReg) return "!pto.vmi.mask<" + std::to_string(type->shape_) + "xpred>";
   return "!pto.vmi.vreg<" + std::to_string(type->shape_) + "x" + RegisterElement(type->dtype_) + ">";
 }
@@ -189,7 +206,7 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
   // Hoist addresses, including the addresses used by chained store versions.
   // A store version is an alias, never a new allocation or region result.
   for (const auto& call : operands.memory) {
-    auto target = ir::AsVarLike(call->args_[0]);
+    auto target = ir::AsVarLike(ir::GetRegMemoryEffect(call).target);
     CHECK_SPAN(target, call->span_) << "Register address requires a Tile variable";
     auto external = resolve_external(target);
     auto tile = ir::As<ir::TileType>(external->GetType());
@@ -211,15 +228,177 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
     reg_addresses_[target.get()] = it->second;
   }
   inside_reg_scope_ = true;
+  micro_reg_scope_ = operands.micro;
   EmitStructural("pto.vecscope {");
   IncreaseIndent();
   VisitStmt(scope->body_);
   DecreaseIndent();
   EmitStructural("}");
+  CHECK_SPAN(!squeeze_destination_, scope->span_) << "Unflushed squeeze-store state";
   inside_reg_scope_ = false;
+  micro_reg_scope_ = false;
   reg_addresses_.clear();
   reg_tuple_values_.clear();
   for (const auto& local : operands.locals) fs_.var_to_mlir.erase(local.get());
+}
+
+bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& result) {
+  using namespace ir;  // NOLINT(build/namespaces)
+  const auto& args = call->args_;
+  auto type = [this](const ExprPtr& expr) {
+    if (auto reg = As<RegType>(expr->GetType())) return GetRegTypeString(reg);
+    if (As<SqueezeStoreType>(expr->GetType())) return std::string("!pto.align");
+    return GetTypeString(As<ScalarType>(expr->GetType())->dtype_);
+  };
+  auto value = [this](const ExprPtr& expr) { return GetExprAsCode(expr); };
+  const auto name = NewNamedTemp(result->name_hint_);
+  auto bind = [&] { BindVarToMlir(result, name); };
+  auto full_mask = [&](int64_t lanes) {
+    const auto mask_type =
+        GetRegTypeString(std::make_shared<RegType>(lanes, DataType::BOOL, RegKind::MaskReg));
+    auto mask = NewNamedTemp("squeeze_all");
+    Emit(mask + " = pto.pset_b" + std::to_string(2048 / lanes) + " \"PAT_ALL\" : " + mask_type);
+    return mask;
+  };
+  auto pointer = [&](const ExprPtr& target, const ExprPtr& offset) {
+    auto var = AsVarLike(target);
+    auto address = reg_addresses_.find(var.get());
+    INTERNAL_CHECK_SPAN(address != reg_addresses_.end(), call->span_)
+        << "Internal error: missing squeeze-store memory capture";
+    auto tile = As<TileType>(target->GetType());
+    const auto element = RegisterElement(tile->dtype_);
+    auto index = value(offset);
+    if (tile->tile_view_ && tile->tile_view_->start_offset) {
+      const auto origin = EmitArithOperand(tile->tile_view_->start_offset, "index");
+      const auto adjusted = NewNamedTemp("squeeze_view_offset");
+      Emit(adjusted + " = arith.addi " + index + ", " + origin + " : index");
+      index = adjusted;
+    }
+    const auto base = NewNamedTemp("squeeze_base");
+    Emit(base + " = pto.addptr " + address->second + ", " + index + " : <" + element + ", ub> -> <" +
+         element + ", ub>");
+    return base;
+  };
+
+  if (IsOp(call, "reg.squeeze_store_init")) {
+    CHECK_SPAN(!squeeze_destination_, call->span_) << "Squeeze streams cannot nest";
+    squeeze_cursor_ = pointer(args[0], args[1]);
+    auto tile = As<TileType>(args[0]->GetType());
+    squeeze_pointer_type_ = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
+    squeeze_destination_ = args[0];
+    Emit("pto.sprclr \"AR\"");
+    Emit(name + " = pto.init_align : !pto.align");
+    bind();
+    return true;
+  }
+  if (IsOp(call, "reg.squeeze_store_step") || IsOp(call, "reg.squeeze_store_flush")) {
+    CHECK_SPAN(squeeze_destination_ && squeeze_destination_ == args[1], call->span_)
+        << "Squeeze-store state must use its original destination";
+    if (IsOp(call, "reg.squeeze_store_step")) {
+      // Keep vsqz directly connected to vstur: PTOAS chooses SQZ MODE_STORED
+      // from this use, and pushes the SQZN count needed by the corresponding store.
+      auto packed = NewNamedTemp("squeeze_packed");
+      Emit(packed + " = pto.vsqz " + value(args[2]) + ", " + value(args[3]) + " : " + type(args[2]) + ", " +
+           type(args[3]) + " -> " + type(args[2]));
+      Emit(name + " = pto.vstur " + value(args[0]) + ", " + packed + ", " + squeeze_cursor_ +
+           ", \"POST_UPDATE\" : !pto.align, " + type(args[2]) + ", " + squeeze_pointer_type_ +
+           " -> !pto.align");
+      bind();
+    } else {
+      Emit("pto.vstar " + value(args[0]) + ", " + squeeze_cursor_ + " : !pto.align, " +
+           squeeze_pointer_type_);
+      BindVarToMlir(result, value(args[1]));
+      squeeze_destination_.reset();
+      squeeze_cursor_.clear();
+      squeeze_pointer_type_.clear();
+    }
+    return true;
+  }
+  if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
+    CHECK_SPAN(GetKwargOr<int>(call->kwargs_, "block_stride", 0) == 0, call->span_)
+        << "Squeeze-store micro lowering requires contiguous register stores";
+    const auto base = pointer(args[0], args[1]);
+    auto tile = As<TileType>(args[0]->GetType());
+    auto ptr_type = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
+    auto zero = GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    if (IsOp(call, "reg.load")) {
+      Emit(name + " = pto.vlds " + base + "[" + zero + "] : " + ptr_type + " -> " +
+           GetRegTypeString(As<RegType>(call->GetType())));
+      bind();
+    } else {
+      auto lanes = As<RegType>(args[2]->GetType())->shape_;
+      auto mask = args.size() == 4 ? value(args[3]) : full_mask(lanes);
+      auto mask_type = GetRegTypeString(std::make_shared<RegType>(lanes, DataType::BOOL, RegKind::MaskReg));
+      Emit("pto.vsts " + value(args[2]) + ", " + base + "[" + zero + "], " + mask + " : " + type(args[2]) +
+           ", " + ptr_type + ", " + mask_type);
+      BindVarToMlir(result, value(args[0]));
+    }
+    return true;
+  }
+  auto result_reg = As<RegType>(call->GetType());
+  CHECK_SPAN(result_reg, call->span_) << "Unsupported result in squeeze-store micro lowering";
+  auto result_type = GetRegTypeString(result_reg);
+  if (IsOp(call, "reg.full_mask")) {
+    Emit(name + " = pto.pset_b" + std::to_string(2048 / result_reg->shape_) +
+         " \"PAT_ALL\" : " + result_type);
+  } else if (IsOp(call, "reg.active_mask")) {
+    auto count = NewNamedTemp("squeeze_count");
+    auto unused = NewNamedTemp("squeeze_unused_count");
+    Emit(count + " = arith.index_cast " + value(args[0]) + " : index to i32");
+    Emit(name + ", " + unused + " = pto.plt_b" + std::to_string(2048 / result_reg->shape_) + " " + count +
+         " : i32 -> " + result_type + ", i32");
+  } else if (IsOp(call, "reg.compare") || IsOp(call, "reg.compares")) {
+    auto opcode = IsOp(call, "reg.compare") ? "pto.vcmp" : "pto.vcmps";
+    Emit(name + " = " + opcode + " " + value(args[0]) + ", " + value(args[1]) + ", " + value(args[2]) +
+         ", \"" + GetStringKwarg(call->kwargs_, "predicate", "") + "\" : " + type(args[0]) + ", " +
+         type(args[1]) + ", " + type(args[2]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.squeeze")) {
+    Emit(name + " = pto.vsqz " + value(args[0]) + ", " + value(args[1]) + " : " + type(args[0]) + ", " +
+         type(args[1]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.select")) {
+    Emit(name + " = pto.vsel " + value(args[1]) + ", " + value(args[2]) + ", " + value(args[0]) + " : " +
+         type(args[1]) + ", " + type(args[2]) + ", " + type(args[0]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.interpret_cast")) {
+    Emit(name + " = pto.vbitcast " + value(args[0]) + " : " + type(args[0]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.broadcast")) {
+    CHECK_SPAN(As<ScalarType>(args[0]->GetType()), call->span_)
+        << "Squeeze-store micro broadcast requires a scalar";
+    Emit(name + " = pto.vbr " + value(args[0]) + " : " + type(args[0]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.index_gen")) {
+    auto input = value(args[0]);
+    auto scalar_type = type(args[0]);
+    auto generated_type = result_type;
+    // VCI uses a signless integer ABI. Preserve all unsigned index bits by
+    // reinterpreting the result, rather than converting through floating point.
+    if (result_reg->dtype_.IsUnsignedInt()) {
+      scalar_type = "i" + std::to_string(result_reg->dtype_.GetBit());
+      auto cast = NewNamedTemp("squeeze_index_base");
+      Emit(cast + " = builtin.unrealized_conversion_cast " + input + " : " + type(args[0]) + " to " +
+           scalar_type);
+      input = cast;
+      generated_type = "!pto.vreg<" + std::to_string(result_reg->shape_) + "x" + scalar_type + ">";
+    }
+    auto generated = generated_type == result_type ? name : NewNamedTemp("squeeze_indices");
+    Emit(generated + " = pto.vci " + input + " {order = \"ASC\"} : " + scalar_type + " -> " + generated_type);
+    if (generated != name)
+      Emit(name + " = pto.vbitcast " + generated + " : " + generated_type + " -> " + result_type);
+  } else if (IsOp(call, "reg.mask_and") || IsOp(call, "reg.mask_or") || IsOp(call, "reg.mask_xor") ||
+             IsOp(call, "reg.mask_not")) {
+    auto all = full_mask(result_reg->shape_);
+    auto opcode = "pto.p" + call->op_->name_.substr(std::string("reg.mask_").size());
+    std::string operands = value(args[0]);
+    std::string types = type(args[0]);
+    if (args.size() == 2) {
+      operands += ", " + value(args[1]);
+      types += ", " + type(args[1]);
+    }
+    Emit(name + " = " + opcode + " " + operands + ", " + all + " : " + types + ", " + result_type + " -> " +
+         result_type);
+  } else {
+    CHECK_SPAN(false, call->span_) << call->op_->name_ << " is not supported in squeeze-store micro lowering";
+  }
+  bind();
+  return true;
 }
 
 bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& result) {
@@ -236,6 +415,7 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
   // Revalidate forged/deserialized calls as well as normal Builder output.
   auto validated = registry.Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
   const auto& args = call->args_;
+  if (micro_reg_scope_) return TryEmitMicroRegCall(validated, result);
   auto operand_type = [this](const ir::ExprPtr& expr) {
     if (auto reg = ir::As<ir::RegType>(expr->GetType())) return GetRegTypeString(reg);
     return GetTypeString(ir::As<ir::ScalarType>(expr->GetType())->dtype_);

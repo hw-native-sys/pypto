@@ -75,7 +75,8 @@ with pl.reg_scope(auto_sync=False):
 外部 Tile 和只读 Scalar 是隐式输入。寄存器与局部 Scalar 不能通过区域外使用、
 函数返回、循环结果、元组或向外部变量赋值逃逸；函数边界递归检查嵌套元组类型。Tile 操作数必须源于区域外；
 `store` 和 `scatter` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
-包括 `store` 和 `scatter`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
+包括 `store` 和 `scatter`；裸 store 会被拒绝。`squeeze_store_flush(state)` 允许独立作为语句。
+`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
 只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
@@ -491,3 +492,69 @@ PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费
 显式 mask 仍保证非活动结果为零；省略 mask 无需额外的结果清零选择指令。
 相邻的两次 BF16 load 后接无 mask 的 `dintlv` 因此可降低为 A5 `DINTLV_B16`，
 后续 `convert` 自动选择所需 EVEN/ODD 部分。物理转换部分仍由后端决定。
+
+## 保序压缩与流式写出
+
+`squeeze(value, mask)` 将选中的 lane 按原顺序压到寄存器开头。输入必须是一个
+完整的 256 字节 UINT16 或 UINT32 寄存器，分别为 128 或 64 个 lane，并提供同
+lane 数的 mask。只有选中元素组成的前缀有定义；写回时应使用选中数量对应的
+前缀 mask。该操作保持整数位模式，包括大于 `2**24` 的 UINT32。
+
+```python
+with pl.reg_scope():
+    value = pl.reg.load(src, lanes=64)  # UINT32 Tile
+    keep = pl.reg.active_mask(9, lanes=64)
+    packed = pl.reg.squeeze(value, keep)
+    out = pl.reg.store(dst, value=packed, mask=keep)
+```
+
+多批数据需要在 UB 中连续追加时，使用显式 `squeeze_store_init/step/flush`
+状态接口。初始化一次，每次 step 都接收并返回状态，循环后对最终状态收尾：
+
+```python
+with pl.reg_scope():
+    state = pl.reg.squeeze_store_init(dst, offset=7)
+    for i in pl.range(0, 4):
+        value = pl.reg.load(src, offset=i * 64, lanes=64)
+        keep = pl.reg.active_mask(9, lanes=64)
+        state = pl.reg.squeeze_store_step(state, value, keep)
+    pl.reg.squeeze_store_flush(state)
+    # dst[7:43] contains four selected prefixes, without gaps.
+```
+
+| API | 返回值与行为 |
+| --- | ------------ |
+| `squeeze_store_init(dst, offset=0)` | 创建绑定目标和初始元素偏移的不透明状态。 |
+| `squeeze_store_step(state, value, mask)` | 消费当前状态，按顺序追加选中元素并返回新状态。 |
+| `squeeze_store_flush(state)` | 消费最终状态，收尾并返回目标 Tile 别名；允许单独作为语句。 |
+
+step 和 flush 从 init 继承目标，用户不重复传入 dst。编译器在 init 清空 AR 并
+初始化对齐状态；每次 step 直接生成 `pto.vsqz` 与 `pto.vstur "POST_UPDATE"`，
+通过循环的 `!pto.align` SSA 参数传递状态，在 flush 生成一次 `pto.vstar`。
+推进的是内部游标，原始目标 Tile 地址保持不变。空 mask 不追加元素；空流或零次
+循环仍需 flush。旧流收尾后才能初始化下一条流；硬件共享 AR，因此不能同时打开
+多条流。上下文管理器形式暂不作为首期接口。
+
+PTOAS 0.74 目前仍将 stored 形式的 VSQZ 标为纯操作，但该指令会推入供 VSTUR
+消费的 SQZN 计数。在 PTOAS 完成副作用建模前，验证器拒绝 value 和 mask 都是
+循环不变量的写入：至少一个输入必须在当前循环内加载或由循环变量推导。
+同一 RegScope 内多个 step 位置也不能复用完全相同的 value/mask 对，以免
+公共子表达式消除删掉必需的 SQZN 生产者。这是保守的后端限制，追加语义保持不变。
+
+目标必须是连续布局的 Vec Tile，dtype 与输入一致且为 UINT16/UINT32。
+offset 以元素为单位，地址包含 Tile View 起点；入口检查静态容量边界。
+与动态 register store 相同，调用方必须保证运行时
+`offset + sum(selected_lanes) <= dst_capacity`。接口不会截断或扩容；写出序列
+前后的字节保持原值，后续会读取的尾部需要事先初始化。
+
+状态不能逃逸出 RegScope、不能复制，也不能在 step/flush 消费后复用，
+作用域结束前必须显式收尾。init 和 step 必须接收返回状态；flush 可独立作为语句，
+也可接收其返回的目标别名。流打开期间不得读写、重绑定目标或其别名。
+首版支持顺序语句和顺序 for 循环；通过 lane mask 选择元素，不支持活动状态期间的
+`if`、`while`、`break`、`continue`。
+
+PTOAS 0.74 不支持 VMI 寄存器值直接衔接物理 micro 指令，因此含流的整个
+register scope 使用物理寄存器 codegen。当前支持完整 256 字节 load/store、
+标量广播、索引生成、位重解释、比较、选择、mask 生成与逻辑运算及 squeeze；
+其他操作和非完整寄存器形状会明确报错。不含流的 scope 继续使用 VMI lowering，
+纯 `squeeze` 也走此路径。后续 PTOAS 提供流式 VMI 后，可以保持用户接口不变。

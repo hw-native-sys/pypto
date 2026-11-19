@@ -168,6 +168,8 @@ _MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,
     "AsyncEventType": ir.AsyncEventType.get,
     "AsyncEvent": ir.AsyncEventType.get,
+    "SqueezeStore": ir.SqueezeStoreType.get,
+    "SqueezeStoreType": ir.SqueezeStoreType.get,
     "AsyncSessionType": ir.AsyncSessionType.get,
     "AsyncSession": ir.AsyncSessionType.get,
     "CommCtxType": ir.CommCtxType.get,
@@ -584,7 +586,11 @@ class TypeResolver:
             and node.value.attr == "_dump"
             and isinstance(node.value.value, ast.Name)
         ):
-            getters = {"WindowBuffer": ir.WindowBufferType.get, "Unknown": ir.UnknownType}
+            getters = {
+                "WindowBuffer": ir.WindowBufferType.get,
+                "Unknown": ir.UnknownType,
+                "SqueezeStore": ir.SqueezeStoreType.get,
+            }
             getter = getters.get(node.attr)
             return getter() if getter is not None else None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):

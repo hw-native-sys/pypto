@@ -84,8 +84,9 @@ Scalars cannot escape their defining region through later uses, function returns
 loop results, tuples or assignments to outer variables. Nested tuple types are
 checked at function boundaries too. Tile operands must
 originate outside the region; `store` and `scatter` return aliases usable after the region.
-Assign every operation result to a variable, including `store` and `scatter`; a bare store is
-rejected. For loop APIs and hardware-loop policy, see [statements](01-statements.md).
+Assign ordinary register operation results to variables, including `store` and
+`scatter`; a bare store is rejected. `squeeze_store_flush(state)` also permits a
+standalone statement. For loop APIs and hardware-loop policy, see [statements](01-statements.md).
 `pl.hardware_loop()` (`HardwareLoopPolicy.Require`) is restricted to this lexical
 scope, including when the loop has zero trips.
 The A5 codegen boundary and backend execution limitations are
@@ -162,6 +163,81 @@ Dynamic offsets and valid extents pass through when static checks cannot prove a
 violation. The caller owns their runtime bounds and initialization. A store does
 not enlarge `valid_shape`, allocate storage or create a snapshot: its result
 aliases the destination and has exactly the destination Tile type.
+
+## Stable compaction and streaming stores
+
+`squeeze(value, mask)` packs selected lanes into the beginning of one register,
+preserving their order. It accepts one full 256-byte UINT16 or UINT32 register
+(128 or 64 lanes) and a matching mask. Only the selected prefix is defined; use
+a prefix mask of the selected count when storing it. Integer bits are preserved,
+including UINT32 values above `2**24`.
+
+```python
+with pl.reg_scope():
+    value = pl.reg.load(src, lanes=64)  # UINT32 Tile
+    keep = pl.reg.active_mask(9, lanes=64)
+    packed = pl.reg.squeeze(value, keep)
+    out = pl.reg.store(dst, value=packed, mask=keep)
+```
+
+Use explicit `squeeze_store_init/step/flush` state operations when successive
+chunks must append into one dense UB sequence. Initialize once, rebind the
+state to every step's result, and flush the final state after the loop:
+
+```python
+with pl.reg_scope():
+    state = pl.reg.squeeze_store_init(dst, offset=7)
+    for i in pl.range(0, 4):
+        value = pl.reg.load(src, offset=i * 64, lanes=64)
+        keep = pl.reg.active_mask(9, lanes=64)
+        state = pl.reg.squeeze_store_step(state, value, keep)
+    pl.reg.squeeze_store_flush(state)
+    # dst[7:43] contains four selected prefixes, without gaps.
+```
+
+| API | Result and behavior |
+| --- | ------------------- |
+| `squeeze_store_init(dst, offset=0)` | Create opaque state bound to the destination and initial element offset. |
+| `squeeze_store_step(state, value, mask)` | Consume the current state, append selected lanes in order, and return its successor. |
+| `squeeze_store_flush(state)` | Consume the final state, finalize pending bytes and return a destination Tile alias. A standalone call is allowed. |
+
+Step and flush inherit the destination from init; callers do not repeat `dst`.
+The compiler initializes alignment and clears AR at init, lowers each step
+directly to `pto.vsqz` followed by `pto.vstur "POST_UPDATE"`, carries `!pto.align`
+through the loop, and emits one `pto.vstar` at flush. A private cursor advances;
+the original destination Tile keeps its address. Empty masks append nothing.
+An empty or zero-trip stream must still be flushed. A new stream may initialize
+after the previous stream has flushed; simultaneously active streams are
+rejected because AR is shared. The context-manager frontend is deferred.
+
+PTOAS 0.74 also treats the stored form of VSQZ as pure, although it pushes a
+SQZN count consumed by VSTUR. Until that effect is modeled in PTOAS, the verifier
+rejects loop-invariant value/mask pairs: load or derive at least one input inside
+the current loop. Reusing the same value/mask pair at multiple step sites in one
+RegScope is also rejected to prevent commoning away a required SQZN producer.
+These are conservative backend restrictions, not a change to append semantics.
+
+The destination must be a contiguous Vec Tile with matching UINT16/UINT32
+dtype. Offsets count elements, include the Tile View origin, and are checked
+against static capacity at entry. As with dynamic register stores, the caller
+must ensure `offset + sum(selected_lanes) <= dst_capacity` at runtime.
+There is no truncation or allocation growth. Bytes before and after the written
+sequence retain their contents; initialize any tail that will later be read.
+
+The state cannot escape RegScope, be copied, be reused after step/flush, or
+remain unflushed on exit. Init and step must bind their returned state. Flush
+may be a statement or an assignment to its destination alias. Do not read,
+write or rebind the destination, including aliases, while a state is active.
+This first lowering supports straight-line code and sequential for loops;
+use lane masks for selection rather than an `if`, `while`, `break` or `continue`.
+
+PTOAS 0.74 cannot connect VMI register values directly to physical micro
+instructions. A register scope containing a stream therefore uses physical
+register codegen throughout. It currently supports full 256-byte loads/stores,
+scalar broadcast, index generation, reinterpretation, comparisons, selection,
+mask generation/logic, and squeeze. Other operations or partial register shapes
+are diagnosed. Scopes without streams retain ordinary VMI lowering, including
+pure `squeeze`. Future PTOAS stream-aware VMI can preserve this public API.
 
 ## Vector and mask generators
 

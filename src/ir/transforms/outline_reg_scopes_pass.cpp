@@ -88,10 +88,12 @@ class Operands : public var_collectors::VarDefUseCollector {
         !var_defs.count(stmt->var_.get())) {
       Use(stmt->var_);
     }
-    if (auto call = As<Call>(stmt->value_); IsOp(call, "reg.store") || IsOp(call, "reg.scatter")) {
-      auto target = AsVarLike(call->args_[0]);
+    if (auto call = As<Call>(stmt->value_);
+        IsOp(call, "reg.store") || IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
+      auto target = AsVarLike(GetRegMemoryEffect(call).target);
       CHECK_SPAN(target, call->span_) << "Register store requires a named Tile";
-      if (stmt->var_ != target) {
+      if (As<TileType>(stmt->var_->GetType()) && stmt->var_ != target) {
         if (conditional_depth_ && aliases.count(stmt->var_.get())) {
           branch_sources.emplace_back(aliases.at(stmt->var_.get()), target);
         }

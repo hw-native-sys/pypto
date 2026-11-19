@@ -3114,7 +3114,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // downstream ``pld.system.rank(ctx)`` / ``pld.system.nranks(ctx)`` codegen
   // resolve ``ctx`` via the standard ``GetExprAsCode(call->args_[0])`` path.
   const auto& var_type = op->var_->GetType();
-  if ((As<ScalarType>(var_type) || As<ir::RegType>(var_type) || As<CommCtxType>(var_type)) &&
+  if ((As<ScalarType>(var_type) || As<ir::RegType>(var_type) || As<ir::SqueezeStoreType>(var_type) ||
+       As<CommCtxType>(var_type)) &&
       !fs_.current_expr_value.empty()) {
     BindVarToMlir(op->var_, fs_.current_expr_value);
   }

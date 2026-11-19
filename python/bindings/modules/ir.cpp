@@ -734,6 +734,12 @@ void BindIR(nb::module_& m) {
   comm_ctx_type_class.def_static("get", &GetCommCtxType, "Get the shared singleton CommCtxType instance.");
   BindFields<CommCtxType>(comm_ctx_type_class);
 
+  auto squeeze_store_type = nb::class_<SqueezeStoreType, Type>(
+      ir, "SqueezeStoreType", "Linear state local to a register squeeze-store scope.");
+  squeeze_store_type.def(nb::init<>());
+  squeeze_store_type.def_static("get", &GetSqueezeStoreType, "Get the squeeze-store state type.");
+  BindFields<SqueezeStoreType>(squeeze_store_type);
+
   // Async-prefetch handle types - singleton markers for the prefetch.* op family.
   // All three are opaque: the workspace backing a context, the in-flight event and
   // the session are runtime-side values with no compile-time payload.

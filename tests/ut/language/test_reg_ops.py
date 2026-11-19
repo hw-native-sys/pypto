@@ -495,5 +495,196 @@ def kernel(policy: pl.Scalar[pl.BOOL]):
 """)
 
 
+def test_squeeze_store_explicit_state_roundtrip():
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        src: pl.Tile[[256], pl.UINT32, pl.MemorySpace.Vec],
+        dst: pl.Tile[[320], pl.UINT32, pl.MemorySpace.Vec],
+    ):
+        with pl.reg_scope():
+            state = pl.reg.squeeze_store_init(dst, offset=7)
+            for i in pl.range(0, 4):
+                value = pl.reg.load(src, offset=i * 64, lanes=64)
+                keep = pl.reg.active_mask(9, lanes=64)
+                state = pl.reg.squeeze_store_step(state, value, keep)
+            pl.reg.squeeze_store_flush(state)
+
+    printed = python_print(kernel, format=False)
+    assert printed.count("pl.reg._squeeze_store_init(") == 1
+    assert printed.count("pl.reg._squeeze_store_step(") == 1
+    assert printed.count("pl.reg._squeeze_store_flush(") == 1
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
+
+
+def test_squeeze_store_public_api_has_no_destination_in_step_or_flush():
+    assert list(inspect.signature(pl.reg.squeeze_store_init).parameters) == ["dst", "offset"]
+    assert list(inspect.signature(pl.reg.squeeze_store_step).parameters) == ["state", "value", "mask"]
+    assert list(inspect.signature(pl.reg.squeeze_store_flush).parameters) == ["state"]
+    assert not hasattr(pl.reg, "squeeze_store")
+
+
+def test_squeeze_store_public_expression_construction_keeps_destination():
+    span = ir.Span.unknown()
+    dst = ir.Var("dst", ir.TileType([128], pl.UINT32, memory_space=ir.MemorySpace.Vec), span)
+    value = ir.Var("value", ir.RegType(64, pl.UINT32, ir.RegKind.VecReg), span)
+    mask = ir.Var("mask", ir.RegType(64, pl.BOOL, ir.RegKind.MaskReg), span)
+    initial = pl.reg.squeeze_store_init(dst, offset=7)
+    state = pl.reg.squeeze_store_step(initial, value, mask)
+    flushed = pl.reg.squeeze_store_flush(state).unwrap()
+    assert isinstance(state, ir.Call) and state.args[1] is dst
+    assert isinstance(flushed, ir.Call) and flushed.args[1] is dst
+
+
+@pytest.mark.parametrize(
+    "body,message",
+    [
+        ("copied = state\n        pl.reg.squeeze_store_flush(state)", "cannot be copied"),
+        (
+            "copied: pl._dump.SqueezeStore = state\n        pl.reg.squeeze_store_flush(state)",
+            "cannot be copied",
+        ),
+        ("pl.reg.squeeze_store_step(state, value, keep)", "Assign the returned"),
+        ("state = pl.reg.squeeze_store_step(state, value, keep)", "must be flushed"),
+        (
+            "pl.reg.squeeze_store_flush(state)\n        pl.reg.squeeze_store_flush(state)",
+            "consumed exactly once",
+        ),
+        (
+            "pl.reg.squeeze_store_flush(state)\n"
+            "        state = pl.reg.squeeze_store_step(state, value, keep)",
+            "consumed exactly once",
+        ),
+        (
+            "if True:\n            state = pl.reg.squeeze_store_step(state, value, keep)\n"
+            "        pl.reg.squeeze_store_flush(state)",
+            "conditionals",
+        ),
+        ("other = pl.reg.squeeze_store_init(dst)\n        pl.reg.squeeze_store_flush(other)", "cannot nest"),
+        ("observed = pl.reg.load(dst, lanes=64)\n        pl.reg.squeeze_store_flush(state)", "Flush"),
+        ("dst = src\n        pl.reg.squeeze_store_flush(state)", "Tile inputs|original destination"),
+        (
+            "for i in pl.range(0, 4):\n            break\n        pl.reg.squeeze_store_flush(state)",
+            "before break",
+        ),
+        (
+            "for i in pl.range(0, 4):\n            continue\n        pl.reg.squeeze_store_flush(state)",
+            "before continue",
+        ),
+    ],
+)
+def test_squeeze_store_rejects_invalid_state_lifetime(body, message):
+    source = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(
+    src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+    dst: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+):
+    with pl.reg_scope():
+        value = pl.reg.load(src, lanes=64)
+        keep = pl.reg.full_mask(lanes=64)
+        state = pl.reg.squeeze_store_init(dst)
+        BODY
+""".replace("BODY", body)
+    with pytest.raises((ParserError, ValueError), match=message):
+        pl.parse(source)
+
+
+def test_squeeze_store_keywords_and_flush_alias():
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+        dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec],
+    ):
+        with pl.reg_scope():
+            value = pl.reg.load(src, lanes=64)
+            keep = pl.reg.active_mask(3, lanes=64)
+            initial = pl.reg.squeeze_store_init(dst=dst, offset=7)
+            updated = pl.reg.squeeze_store_step(mask=keep, state=initial, value=value)
+            written = pl.reg.squeeze_store_flush(state=updated)
+        _observed = pl.tile.add(written, written)
+
+    restored = pl.parse(python_print(kernel, format=False))
+    ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "pl.reg.squeeze_store_init(dst, dst=dst)",
+        "pl.reg.squeeze_store_init(dst, unknown=0)",
+        "pl.reg.squeeze_store_step(state, dst, value, keep)",
+        "pl.reg.squeeze_store_step(state, value, mask=keep, state=state)",
+        "pl.reg.squeeze_store_flush(state, dst)",
+    ],
+)
+def test_squeeze_store_public_api_rejects_invalid_arguments(operation):
+    source = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        value = pl.reg.load(dst, lanes=64)
+        keep = pl.reg.active_mask(3, lanes=64)
+        state = pl.reg.squeeze_store_init(dst)
+        result = OPERATION
+""".replace("OPERATION", operation)
+    with pytest.raises((ParserError, ValueError), match="argument"):
+        pl.parse(source)
+
+
+def test_squeeze_store_state_cannot_be_reused():
+    source = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        value = pl.reg.load(dst, lanes=64)
+        keep = pl.reg.full_mask(lanes=64)
+        initial = pl.reg.squeeze_store_init(dst)
+        next_state = pl.reg.squeeze_store_step(initial, value, keep)
+        reused = pl.reg.squeeze_store_step(initial, value, keep)
+        pl.reg.squeeze_store_flush(reused)
+"""
+    with pytest.raises((ParserError, ValueError), match="consumed exactly once"):
+        pl.parse(source)
+
+
+def test_squeeze_store_rejects_invariant_sqz_hoisting_risk():
+    source = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(
+    src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+    dst: pl.Tile[[320], pl.UINT32, pl.MemorySpace.Vec],
+):
+    with pl.reg_scope():
+        value = pl.reg.load(src, lanes=64)
+        keep = pl.reg.active_mask(3, lanes=64)
+        state = pl.reg.squeeze_store_init(dst)
+        for i in pl.range(0, 4):
+            state = pl.reg.squeeze_store_step(state, value, keep)
+        pl.reg.squeeze_store_flush(state)
+"""
+    with pytest.raises((ParserError, ValueError), match="loop-invariant"):
+        pl.parse(source)
+
+
+def test_squeeze_store_rejects_reused_sqz_producer():
+    source = """
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(
+    src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+    dst: pl.Tile[[320], pl.UINT32, pl.MemorySpace.Vec],
+):
+    with pl.reg_scope():
+        value = pl.reg.load(src, lanes=64)
+        keep = pl.reg.active_mask(3, lanes=64)
+        state = pl.reg.squeeze_store_init(dst)
+        state = pl.reg.squeeze_store_step(state, value, keep)
+        state = pl.reg.squeeze_store_step(state, value, keep)
+        pl.reg.squeeze_store_flush(state)
+"""
+    with pytest.raises((ParserError, ValueError), match="common stored SQZ"):
+        pl.parse(source)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

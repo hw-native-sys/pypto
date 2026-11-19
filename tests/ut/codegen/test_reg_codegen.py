@@ -1403,5 +1403,110 @@ def test_bf16_block_stride_lowers_to_vsstb(lanes, active, tmp_path):
     assert lowered.count("pto.vsstb ") == lanes // 128
 
 
+def squeeze_stream_program(dtype="UINT32", lanes=64, trips=4):
+    function = pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def squeeze_chunks():
+    src = pl.tile.full([{lanes * 4}], pl.{dtype}, 17)
+    dst = pl.tile.full([{lanes * 4 + 64}], pl.{dtype}, 123)
+    with pl.reg_scope():
+        state = pl.reg.squeeze_store_init(dst, offset=7)
+        for i in pl.range(0, {trips}):
+            value = pl.reg.load(src, offset=i * {lanes}, lanes={lanes})
+            keep = pl.reg.active_mask(9, lanes={lanes})
+            state = pl.reg.squeeze_store_step(state, value, keep)
+        pl.reg.squeeze_store_flush(state)
+""")
+    assert isinstance(function, ir.Function)
+    program = ir.Program([function], "SqueezeChunks", SPAN)
+    with passes.PassContext([]):
+        program = passes.convert_to_ssa()(program)
+        return passes.init_mem_ref()(program)
+
+
+@pytest.mark.parametrize("dtype,lanes", [("UINT16", 128), ("UINT32", 64)])
+@pytest.mark.parametrize("trips", [0, 1, 4])
+def test_squeeze_stream_micro_carries_alignment_and_flushes_after_loop(dtype, lanes, trips):
+    source = generate(squeeze_stream_program(dtype, lanes, trips))
+    assert "pto.vmi." not in source
+    assert source.count("pto.init_align") == 1
+    assert source.count("pto.vsqz") == 1
+    assert source.count("pto.vstur") == 1
+    assert source.count("pto.vstar") == 1
+    loop = source.index("scf.for")
+    flush = source.index("pto.vstar")
+    assert source.index("pto.init_align") < loop < source.index("pto.vstur") < flush
+    assert "iter_args(" in source[loop : source.index("pto.vstur")]
+    assert "-> (!pto.align)" in source[loop : source.index("pto.vstur")]
+    assert source.index("scf.yield", loop) < flush
+    assert '"POST_UPDATE"' in source
+    # Original Tile pointers remain usable: only the private stream base advances.
+    assert "squeeze_base" in source
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dtype,lanes", [("UINT16", 128), ("UINT32", 64)])
+def test_squeeze_stream_micro_compiles_with_ptoas(dtype, lanes, tmp_path):
+    compile_review_pto(generate(squeeze_stream_program(dtype, lanes)), tmp_path)
+
+
+@pytest.mark.parametrize("trips", [0, 1, 4])
+def test_squeeze_stream_state_serialization_and_simplify_preserve_effects(trips):
+    program = squeeze_stream_program(trips=trips)
+    restored = ir.deserialize(ir.serialize(program))
+    assert isinstance(restored, ir.Program)
+    ir.assert_structural_equal(program, restored)
+    assert ir.structural_hash(program) == ir.structural_hash(restored)
+    with passes.PassContext([]):
+        simplified = passes.simplify()(restored)
+    source = generate(simplified)
+    assert source.count("pto.vstur") == (0 if trips == 0 else 1)
+    assert source.count("pto.vstar") == 1
+
+
+def test_explicit_squeeze_state_supports_named_loop_carry():
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def squeeze_named_carry():
+    src = pl.tile.full([256], pl.UINT32, 17)
+    dst = pl.tile.full([320], pl.UINT32, 123)
+    with pl.reg_scope():
+        initial = pl.reg.squeeze_store_init(dst, offset=7)
+        for i, (current,) in pl.range(0, 4, init_values=(initial,)):
+            value = pl.reg.load(src, offset=i * 64, lanes=64)
+            keep = pl.reg.active_mask(9, lanes=64)
+            updated = pl.reg.squeeze_store_step(current, value, keep)
+            final = pl.yield_(updated)
+        pl.reg.squeeze_store_flush(final)
+""")
+    assert isinstance(function, ir.Function)
+    program = ir.Program([function], "NamedSqueezeCarry", SPAN)
+    with passes.PassContext([]):
+        program = passes.convert_to_ssa()(program)
+        program = passes.init_mem_ref()(program)
+    source = generate(program)
+    assert "iter_args(" in source and "-> (!pto.align)" in source
+    assert source.count("pto.vstur") == source.count("pto.vstar") == 1
+
+
+@pytest.mark.ptoas_compile
+def test_empty_explicit_squeeze_state_compiles(tmp_path):
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def empty_squeeze():
+    dst = pl.tile.full([128], pl.UINT32, 123)
+    with pl.reg_scope():
+        state = pl.reg.squeeze_store_init(dst, offset=7)
+        pl.reg.squeeze_store_flush(state)
+""")
+    assert isinstance(function, ir.Function)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([function], "EmptySqueeze", SPAN))
+    source = generate(program)
+    assert source.count("pto.init_align") == source.count("pto.vstar") == 1
+    assert "pto.vstur" not in source
+    compile_review_pto(source, tmp_path)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

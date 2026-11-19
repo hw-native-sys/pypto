@@ -711,3 +711,94 @@ def scatter(
     if not isinstance(base_offset, int) or base_offset != 0:
         args.append(_expr(base_offset))
     return Tile(expr=_call("scatter", args))
+
+
+def squeeze(value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
+    """Pack selected UINT16/UINT32 lanes in order; the remaining lanes are undefined.
+
+    value must fill one 256-byte register (128 UINT16 or 64 UINT32 lanes).
+    Use squeeze_store_init/step/flush to append selected values across chunks.
+    """
+    return Reg(_call("squeeze", [_expr(value), _expr(mask)]))
+
+
+def squeeze_store_init(dst: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0) -> ir.Expr:
+    """Initialize an explicit squeeze-store state inside reg_scope.
+
+    Args:
+        dst: Contiguous UINT16/UINT32 Vec Tile receiving the selected elements.
+        offset: Starting element offset relative to dst, evaluated once.
+
+    Returns:
+        Opaque stream state. Carry each step's returned state into the next
+        step, then call squeeze_store_flush exactly once on the final state.
+        The caller must keep offset + total selected lanes within dst capacity.
+    """
+    return _squeeze_store_init(dst, offset)
+
+
+def squeeze_store_step(state: ir.Expr, value: Reg | ir.Expr, mask: Reg | ir.Expr) -> ir.Expr:
+    """Append selected lanes in order and return the successor stream state.
+
+    Args:
+        state: The latest state from squeeze_store_init or squeeze_store_step.
+        value: One full 256-byte UINT16/UINT32 register.
+        mask: Matching BOOL MaskReg selecting lanes to append.
+
+    Returns:
+        The updated state, including pending alignment. This consumes the old
+        state; the destination and initial offset are inherited from init.
+    """
+    return _squeeze_store_step(state, _squeeze_store_destination(state), value, mask)
+
+
+def squeeze_store_flush(state: ir.Expr) -> Tile:
+    """Finalize the stream's pending bytes exactly once.
+
+    Args:
+        state: Final state after all steps, or the initial state for an empty stream.
+
+    Returns:
+        A Tile alias of the original destination. The call may also be used as
+        a standalone statement. Reading the destination is valid after flush.
+    """
+    return _squeeze_store_flush(state, _squeeze_store_destination(state))
+
+
+def _squeeze_store_destination(state: ir.Expr) -> ir.Expr:
+    # Direct expression construction can recover provenance from the producer.
+    # Parsed named states are resolved before invocation by the DSL normalizer;
+    # no mutable Python object or runtime lookup owns the destination.
+    if not isinstance(state.type, ir.SqueezeStoreType):
+        raise TypeError("Expected squeeze-store state from squeeze_store_init/step")
+    if isinstance(state, ir.Call):
+        if state.op.name == ir.get_op("reg.squeeze_store_init").name:
+            return state.args[0]
+        if state.op.name == ir.get_op("reg.squeeze_store_step").name:
+            return state.args[1]
+    raise RuntimeError("Named squeeze-store states require a parsed function and pl.reg_scope()")
+
+
+# Parser-generated state operations. Explicit SSA edges let ConvertToSSA add
+# alignment loop carries without exposing a physical alignment register to users.
+def _squeeze_store_init(dst: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0) -> ir.Expr:
+    return _call("squeeze_store_init", [_expr(dst), _expr(offset)])
+
+
+def _squeeze_store_step(
+    state: ir.Expr, dst: Tile | ir.Expr, value: Reg | ir.Expr, mask: Reg | ir.Expr
+) -> ir.Expr:
+    return _call("squeeze_store_step", [state, _expr(dst), _expr(value), _expr(mask)])
+
+
+def _squeeze_store_flush(state: ir.Expr, dst: Tile | ir.Expr) -> Tile:
+    return Tile(expr=_call("squeeze_store_flush", [state, _expr(dst)]))
+
+
+# Shared by syntax expansion; these are IR dump/parser hooks, not user-facing
+# additional user-facing APIs. The public state API omits the destination.
+_SQUEEZE_STORE_STATE_OPS = {
+    "init": _squeeze_store_init,
+    "step": _squeeze_store_step,
+    "flush": _squeeze_store_flush,
+}

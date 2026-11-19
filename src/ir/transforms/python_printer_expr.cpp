@@ -617,6 +617,10 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
+  if (IsOp(op, "reg.squeeze_store_init") || IsOp(op, "reg.squeeze_store_step") ||
+      IsOp(op, "reg.squeeze_store_flush")) {
+    op_name.insert(std::string("reg.").size(), "_");
+  }
   // Keep the existing barrier IR while presenting its parameterized public
   // API. The native ops have no operands or kwargs; retain the legacy call
   // spelling for noncanonical calls rather than silently dropping metadata.

@@ -232,6 +232,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return prefix_ + ".AsyncEvent";
   }
 
+  if (As<SqueezeStoreType>(type)) {
+    return prefix_ + "._dump.SqueezeStore";
+  }
+
   if (As<AsyncSessionType>(type)) {
     return prefix_ + ".AsyncSession";
   }

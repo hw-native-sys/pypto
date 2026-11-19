@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +32,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -125,7 +127,7 @@ class RegionChecker : public IRVisitor {
     }
     if (collecting_ && region_ && As<TileType>(op->var_->GetType())) {
       auto call = As<Call>(op->value_);
-      if (!IsOp(call, "reg.store") && !IsOp(call, "reg.scatter")) {
+      if (!IsOp(call, "reg.store") && !IsOp(call, "reg.scatter") && !IsOp(call, "reg.squeeze_store_flush")) {
         Error(
             "RegScope Tile inputs must originate outside the region; only reg.store/reg.scatter return Tile",
             op->span_);
@@ -301,7 +303,7 @@ class RegionChecker : public IRVisitor {
     if (auto found = region_types_.find(key); found != region_types_.end()) {
       return found->second;
     }
-    bool result = As<RegType>(type) || (include_scalar && As<ScalarType>(type));
+    bool result = As<RegType>(type) || As<SqueezeStoreType>(type) || (include_scalar && As<ScalarType>(type));
     if (auto tuple = As<TupleType>(type); tuple && !result) {
       for (const auto& element : tuple->types_) {
         if (ContainsRegionValue(element, include_scalar)) {
@@ -352,11 +354,225 @@ class RegionChecker : public IRVisitor {
   std::map<const Var*, const RegScopeStmt*> owners_;
   std::map<std::pair<const Type*, bool>, bool> region_types_;
 };
+
+// A stream token is linear state, not a reusable register value. Check its
+// structured lifetime before optimizations and again at the codegen boundary.
+// This walk follows SSA loop carries without enumerating loop iterations.
+class SqueezeStreamChecker : public IRVisitor {
+ public:
+  explicit SqueezeStreamChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+ protected:
+  void VisitStmt_(const RegScopeStmtPtr& scope) override {
+    class StreamFinder : public IRVisitor {
+     public:
+      bool found = false;
+      void VisitExpr_(const CallPtr& call) override {
+        found |= IsOp(call, "reg.squeeze_store_init") || IsOp(call, "reg.squeeze_store_step") ||
+                 IsOp(call, "reg.squeeze_store_flush");
+        IRVisitor::VisitExpr_(call);
+      }
+    } finder;
+    finder.VisitStmt(scope->body_);
+    if (!finder.found) return;
+    inside_region_ = true;
+    auto outer_loops = std::move(loops_);
+    const auto outer_depth = depth_;
+    loops_.clear();
+    depth_ = 0;
+    write_inputs_.clear();
+    IRVisitor::VisitStmt_(scope);
+    if (state_) Error("Squeeze-store state must be flushed before leaving RegScope", scope->span_);
+    state_.reset();
+    destination_.reset();
+    loops_ = std::move(outer_loops);
+    depth_ = outer_depth;
+    inside_region_ = false;
+  }
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    if (!inside_region_) return;
+    auto call = As<Call>(stmt->value_);
+    if (IsOp(call, "reg.squeeze_store_init")) {
+      if (state_) Error("Squeeze streams cannot nest", stmt->span_);
+      state_ = stmt->var_;
+      destination_ = call->args_[0];
+      init_depth_ = depth_;
+      return;
+    }
+    if (IsOp(call, "reg.squeeze_store_step") || IsOp(call, "reg.squeeze_store_flush")) {
+      if (!state_ || call->args_[0] != state_) {
+        Error("Squeeze-store state must be consumed exactly once, in order", stmt->span_);
+      }
+      if (!destination_ || call->args_[1] != destination_) {
+        Error("Squeeze-store state must use its original destination", stmt->span_);
+      }
+      if (IsOp(call, "reg.squeeze_store_flush")) {
+        if (depth_ != init_depth_)
+          Error("A squeeze stream must close at its opening loop depth", stmt->span_);
+        state_.reset();
+        destination_.reset();
+      } else {
+        // PTOAS 0.74 marks VSQZ pure even when its stored form pushes SQZN.
+        // Hoisting it out of a loop can leave VSTUR without one count per
+        // iteration. Admit loop writes only when a load or induction-variable
+        // dependency keeps the producer in that loop. Remove this restriction
+        // once PTOAS models the stored-SQZ effect.
+        auto dependencies = Dependencies(call->args_[2]);
+        const auto mask_dependencies = Dependencies(call->args_[3]);
+        dependencies.insert(mask_dependencies.begin(), mask_dependencies.end());
+        if (!loops_.empty() && !dependencies.count(loops_.back())) {
+          Error(
+              "PTOAS 0.74 cannot safely stream loop-invariant value and mask; "
+              "load or derive an input inside the current loop",
+              stmt->span_);
+        }
+        if (!write_inputs_.emplace(call->args_[2], call->args_[3]).second) {
+          Error(
+              "PTOAS 0.74 may common stored SQZ producers; do not reuse the same "
+              "value/mask pair at multiple squeeze_store_step sites",
+              stmt->span_);
+        }
+        state_ = stmt->var_;
+      }
+      return;
+    }
+    if (As<SqueezeStoreType>(stmt->var_->GetType())) {
+      // Eliminating a zero/single-trip loop can forward its state result by
+      // assignment. This is a linear rename: consume the old SSA name so any
+      // subsequent use of it still fails. Public state copies are rejected by
+      // the frontend, but canonical IR and its printer must preserve these
+      // compiler-generated transfers.
+      if (AsVarLike(stmt->value_) && stmt->value_ == state_) {
+        state_ = stmt->var_;
+        return;
+      }
+      Error("Squeeze-store state cannot be copied or constructed by another operation", stmt->span_);
+    }
+    if (state_ && call &&
+        (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
+         IsOp(call, "reg.scatter"))) {
+      auto target = GetRegMemoryEffect(call).target;
+      auto source_type = As<TileType>(target->GetType());
+      auto dst_type = As<TileType>(destination_->GetType());
+      bool aliases = target == destination_;
+      // Views of one allocation share a root even when their variable names
+      // differ. Pending partial blocks must not be observed through an alias.
+      if (source_type->memref_ && dst_type->memref_) {
+        aliases |= (*source_type->memref_)->base_ == (*dst_type->memref_)->base_;
+      }
+      if (aliases)
+        Error("Flush the squeeze stream before accessing its destination or an alias", stmt->span_);
+    }
+    dependencies_[stmt->var_.get()] = Dependencies(stmt->value_);
+  }
+  void VisitStmt_(const ForStmtPtr& loop) override {
+    if (!inside_region_) {
+      VisitStmt(loop->body_);
+      return;
+    }
+    if (loops_.size() == 4) {
+      Error("Squeeze-store loops can nest at most four levels", loop->span_);
+      return;
+    }
+    auto outer = state_;
+    size_t carry = loop->iter_args_.size();
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      if (!As<SqueezeStoreType>(loop->iter_args_[i]->GetType())) continue;
+      if (carry != loop->iter_args_.size() || !outer || loop->iter_args_[i]->initValue_ != outer) {
+        Error("Squeeze-store loop carry must continue the active stream", loop->span_);
+      }
+      carry = i;
+      state_ = loop->iter_args_[i];
+    }
+    if (state_ && loop->kind_ != ForKind::Sequential) {
+      Error("Squeeze-store writes require sequential loops", loop->span_);
+    }
+    loops_.push_back(loop.get());
+    dependencies_[loop->loop_var_.get()] = {loop.get()};
+    // Physical VF loops have a bounded nesting depth, keeping dependency-set
+    // unions bounded and this analysis O(N log N).
+    ++depth_;
+    VisitStmt(loop->body_);
+    --depth_;
+    loops_.pop_back();
+    if (carry != loop->iter_args_.size()) {
+      auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+      if (!yield || carry >= yield->value_.size() || yield->value_[carry] != state_) {
+        Error("Squeeze-store loop must yield its final state", loop->span_);
+      }
+      state_ = loop->return_vars_[carry];
+    } else if (!outer && state_) {
+      Error("Squeeze-store state cannot escape its opening loop", loop->span_);
+    }
+  }
+  void VisitStmt_(const IfStmtPtr& stmt) override {
+    if (state_)
+      Error("Use lane masks instead of conditionals while squeeze-store state is active", stmt->span_);
+    IRVisitor::VisitStmt_(stmt);
+  }
+  void VisitStmt_(const WhileStmtPtr& stmt) override {
+    if (state_) Error("Squeeze-store state currently supports sequential for loops", stmt->span_);
+    IRVisitor::VisitStmt_(stmt);
+  }
+  void VisitStmt_(const BreakStmtPtr& stmt) override {
+    if (state_)
+      Error("Flush squeeze-store state before break; early loop exits are unsupported", stmt->span_);
+  }
+  void VisitStmt_(const ContinueStmtPtr& stmt) override {
+    if (state_)
+      Error("Flush squeeze-store state before continue; early loop exits are unsupported", stmt->span_);
+  }
+  void VisitVarLike_(const VarPtr& var) override {
+    if (!inside_region_) return;
+    if (auto found = dependencies_.find(var.get()); found != dependencies_.end()) {
+      observed_.insert(found->second.begin(), found->second.end());
+    }
+  }
+  void VisitExpr_(const CallPtr& call) override {
+    if (!inside_region_) return;
+    if (IsOp(call, "reg.load") || IsOp(call, "reg.gather")) {
+      observed_.insert(loops_.begin(), loops_.end());
+    }
+    for (const auto& arg : call->args_) {
+      if (As<SqueezeStoreType>(arg->GetType())) {
+        Error("Squeeze-store state is only valid in its stream lifecycle operations", call->span_);
+      }
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+
+ private:
+  std::set<const ForStmt*> Dependencies(const ExprPtr& expr) {
+    auto previous = std::move(observed_);
+    observed_.clear();
+    VisitExpr(expr);
+    auto result = std::move(observed_);
+    observed_ = std::move(previous);
+    return result;
+  }
+  void Error(const std::string& message, const Span& span) {
+    diagnostics_.emplace_back(DiagnosticSeverity::Error, "RegScopeValid", 0, message, span);
+  }
+  std::vector<Diagnostic>& diagnostics_;
+  std::vector<const ForStmt*> loops_;
+  std::map<const Var*, std::set<const ForStmt*>> dependencies_;
+  std::set<const ForStmt*> observed_;
+  std::set<std::pair<ExprPtr, ExprPtr>> write_inputs_;
+  bool inside_region_ = false;
+  ExprPtr state_;
+  ExprPtr destination_;
+  int depth_ = 0;
+  int init_depth_ = 0;
+};
 }  // namespace
 
 void VerifyRegScopes(const FunctionPtr& function, std::vector<Diagnostic>& diagnostics,
                      bool final_placement) {
-  if (function && function->body_) RegionChecker(function, diagnostics, final_placement).Run();
+  if (function && function->body_) {
+    RegionChecker(function, diagnostics, final_placement).Run();
+    // Type/arity diagnostics above take precedence over lifecycle validation.
+    if (diagnostics.empty()) SqueezeStreamChecker(diagnostics).VisitStmt(function->body_);
+  }
 }
 void CheckRegScopes(const FunctionPtr& function) {
   std::vector<Diagnostic> diagnostics;

@@ -223,6 +223,7 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
 }  // namespace
 
 std::string PTOCodegen::GetValueCarryTypeString(const ir::TypePtr& type) const {
+  if (As<ir::SqueezeStoreType>(type)) return "!pto.align";
   if (auto reg = As<ir::RegType>(type)) return GetRegTypeString(reg);
   return GetScalarIterArgTypeString(As<ScalarType>(type));
 }
@@ -267,7 +268,8 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
-      if (As<ScalarType>(return_var->GetType()) || As<ir::RegType>(return_var->GetType())) {
+      if (As<ScalarType>(return_var->GetType()) ||
+          (As<ir::RegType>(return_var->GetType()) || As<ir::SqueezeStoreType>(return_var->GetType()))) {
         std::string ret_name = NewNamedTemp(return_var->name_hint_);
         BindVarToMlir(return_var, ret_name);
         scf_return_names.push_back(ret_name);
@@ -632,7 +634,9 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   std::vector<bool> is_ssa(op->iter_args_.size(), false);
   bool has_ssa_iter_args = false;
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType())) {
+    if (As<ScalarType>(op->iter_args_[i]->GetType()) ||
+        (As<ir::RegType>(op->iter_args_[i]->GetType()) ||
+         As<ir::SqueezeStoreType>(op->iter_args_[i]->GetType()))) {
       is_ssa[i] = true;
       has_ssa_iter_args = true;
     }
@@ -820,7 +824,9 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
   std::vector<bool> is_ssa(op->iter_args_.size(), false);
   bool has_ssa_iter_args = false;
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType())) {
+    if (As<ScalarType>(op->iter_args_[i]->GetType()) ||
+        (As<ir::RegType>(op->iter_args_[i]->GetType()) ||
+         As<ir::SqueezeStoreType>(op->iter_args_[i]->GetType()))) {
       is_ssa[i] = true;
       has_ssa_iter_args = true;
     }

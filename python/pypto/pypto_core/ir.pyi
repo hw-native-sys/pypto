@@ -1099,6 +1099,13 @@ class CommCtxType(Type):
         """Get the shared singleton CommCtxType instance."""
         ...
 
+class SqueezeStoreType(Type):
+    """Linear state local to a register squeeze-store scope."""
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> SqueezeStoreType: ...
+
 class PrefetchAsyncContextType(Type):
     """Singleton marker type for ``prefetch.make_context`` outputs.
 

@@ -606,6 +606,7 @@ class Projection {
     PROJECT_TYPE(VoidType)
     PROJECT_TYPE(ScalarType)
     PROJECT_TYPE(RegType)
+    PROJECT_TYPE(SqueezeStoreType)
     PROJECT_TYPE(TensorType)
     PROJECT_TYPE(DistributedTensorType)
     PROJECT_TYPE(TileType)

@@ -575,5 +575,47 @@ def test_mem_bar_rejects_operands():
         call("mem_bar", [integer(0)], kind="VV_ALL")
 
 
+@pytest.mark.parametrize("dtype,lanes", [(DataType.UINT16, 128), (DataType.UINT32, 64)])
+def test_squeeze_and_stream_effect_contract(dtype, lanes):
+    value = vec(lanes, dtype)
+    keep = mask(lanes)
+    packed = call("squeeze", [value, keep])
+    ir.assert_structural_equal(packed.type, value.type)
+    dst = ir.Var("dst", ir.TileType([lanes * 4], dtype, memory_space=ir.MemorySpace.Vec), SPAN)
+    initial = call("squeeze_store_init", [dst, integer(7)])
+    assert isinstance(initial.type, ir.SqueezeStoreType)
+    state = ir.Var("state", initial.type, SPAN)
+    step = call("squeeze_store_step", [state, dst, value, keep])
+    effect = ir.get_reg_memory_effect(step)
+    assert effect["target"] is dst
+    assert effect["access"] == ir.ArgEffect.Write
+    assert effect["begin"] is None and effect["end"] is None
+    assert effect["mask"] is keep
+    flushed = call("squeeze_store_flush", [state, dst])
+    ir.assert_structural_equal(flushed.type, dst.type)
+    assert ir.get_reg_op_spec("reg.squeeze_store_flush")["output_reuses_input_arg"] == 1
+
+
+@pytest.mark.parametrize(
+    "dtype,lanes,message",
+    [
+        (DataType.INT32, 64, "UINT16/UINT32"),
+        (DataType.FP32, 64, "UINT16/UINT32"),
+        (DataType.UINT32, 32, "256-byte"),
+        (DataType.UINT16, 64, "256-byte"),
+    ],
+)
+def test_squeeze_rejects_unsupported_payloads(dtype, lanes, message):
+    with pytest.raises(ValueError, match=message):
+        call("squeeze", [vec(lanes, dtype), mask(lanes)])
+
+
+@pytest.mark.parametrize("offset", [-1, 129])
+def test_squeeze_store_initial_offset_bounds(offset):
+    dst = ir.Var("dst", ir.TileType([128], DataType.UINT32, memory_space=ir.MemorySpace.Vec), SPAN)
+    with pytest.raises(ValueError, match="capacity"):
+        call("squeeze_store_init", [dst, integer(offset)])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

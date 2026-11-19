@@ -903,7 +903,93 @@ REGISTER_OP("reg.scatter")
       return IndexedMemory(a, false);
     });
 
+// A stream is represented by explicit state edges, including through loop
+// carries. It is not an ordinary Tile version or a per-call compress_store.
+REGISTER_OP("reg.squeeze")
+    .set_op_category("RegOp")
+    .set_description("Pack selected UINT16/UINT32 lanes in stable order")
+    .set_reg_op("pto.vmi.compress")
+    .add_argument("value", "One physical UINT16/UINT32 VecReg")
+    .add_argument("mask", "Matching MaskReg")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "reg.squeeze expects value and mask";
+      auto value = Register(a[0], RegKind::VecReg);
+      CHECK(value->dtype_ == DataType::UINT16 || value->dtype_ == DataType::UINT32)
+          << "reg.squeeze requires UINT16/UINT32";
+      CHECK(value->shape_ == 256 / value->dtype_.GetByte())
+          << "reg.squeeze requires one full 256-byte register";
+      CHECK(Register(a[1], RegKind::MaskReg)->shape_ == value->shape_) << "Squeeze mask lane mismatch";
+      return value;
+    });
+
+REGISTER_OP("reg.squeeze_store_init")
+    .set_op_category("RegOp")
+    .set_description("Begin a region-local squeeze stream")
+    .set_reg_op("pto.init_align")
+    .add_argument("dst", "Destination Vec Tile")
+    .add_argument("offset", "Initial element offset")
+    .set_input_memory(0, MemorySpace::Vec)
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "squeeze_store_init expects destination and offset";
+      auto tile = Memory(a, 0, false);
+      CHECK(tile->dtype_ == DataType::UINT16 || tile->dtype_ == DataType::UINT32)
+          << "squeeze_store requires UINT16/UINT32 destination";
+      return GetSqueezeStoreType();
+    });
+
+REGISTER_OP("reg.squeeze_store_step")
+    .set_op_category("RegOp")
+    .set_description("Append selected lanes and advance squeeze-store state")
+    .set_reg_op("pto.vstur")
+    .add_argument("state", "Previous squeeze-store state")
+    .add_argument("dst", "The stream destination")
+    .add_argument("value", "One physical UINT16/UINT32 VecReg")
+    .add_argument("mask", "Matching MaskReg")
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_arg_effect(1, ArgEffect::Write)
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 4) << "squeeze_store_step expects state, destination, value and mask";
+      CHECK(As<SqueezeStoreType>(a[0]->GetType())) << "Expected squeeze-store state";
+      auto packed = OpRegistry::GetInstance().Create("reg.squeeze", {a[2], a[3]}, k, a[2]->span_);
+      auto tile = As<TileType>(a[1]->GetType());
+      CHECK(tile && tile->GetMemorySpace() == MemorySpace::Vec) << "Expected Vec Tile destination";
+      CHECK(tile->dtype_ == As<RegType>(packed->GetType())->dtype_) << "Squeeze destination dtype mismatch";
+      return GetSqueezeStoreType();
+    });
+
+REGISTER_OP("reg.squeeze_store_flush")
+    .set_op_category("RegOp")
+    .set_description("Finalize pending stream bytes and return the destination alias")
+    .set_reg_op("pto.vstar")
+    .add_argument("state", "Final squeeze-store state")
+    .add_argument("dst", "The stream destination")
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_output_reuses_input(1)
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "squeeze_store_flush expects state and destination";
+      CHECK(As<SqueezeStoreType>(a[0]->GetType())) << "Expected squeeze-store state";
+      auto tile = As<TileType>(a[1]->GetType());
+      CHECK(tile && tile->GetMemorySpace() == MemorySpace::Vec &&
+            (tile->dtype_ == DataType::UINT16 || tile->dtype_ == DataType::UINT32))
+          << "Expected UINT16/UINT32 Vec Tile destination";
+      return tile;
+    });
+
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
+  if (IsOp(call, "reg.squeeze_store_step") || IsOp(call, "reg.squeeze_store_flush")) {
+    (void)OpRegistry::GetInstance().Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
+    auto tile = As<TileType>(call->args_[1]->GetType());
+    // Selected counts and the post-updated cursor are dynamic. Neither a full
+    // Tile overwrite nor initialization of its untouched tail can be inferred.
+    return {call->args_[1],   tile->memref_ ? (*tile->memref_)->base_ : nullptr,
+            ArgEffect::Write, std::nullopt,
+            std::nullopt,     IsOp(call, "reg.squeeze_store_step") ? call->args_[3] : nullptr};
+  }
+
   CHECK(IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter"))
       << "Memory effect requires reg.load/store/gather/scatter";
