@@ -301,6 +301,9 @@ def put_async(
     completed. Completion is owned by the enclosing task and carried by the
     producer ``InOut`` -> consumer ``In`` dependency.
 
+    ``dst`` is a window-bound DistributedTensor; local ``src`` may be a
+    plain Tensor or a DistributedTensor from another communication domain.
+
     ``engine`` is a compile-time kwarg; V1 accepts :attr:`CommEngine.URMA` only
     and rejects any other engine. With no offsets/shape this transfers the full
     local ``src`` into the full peer ``dst`` slice. Supplying ``dst_offsets``,
@@ -349,6 +352,9 @@ def get_async(
     result aliases argument 0); returning does **not** mean the data has
     arrived. Completion is owned by the enclosing task and carried by the
     producer ``InOut`` -> consumer ``In`` dependency.
+
+    ``src`` is a window-bound DistributedTensor; local ``dst`` may be a
+    plain Tensor or a DistributedTensor from another communication domain.
 
     ``engine`` is a compile-time kwarg; V1 accepts :attr:`CommEngine.URMA` only
     and rejects any other engine. With no offsets/shape this reads the full

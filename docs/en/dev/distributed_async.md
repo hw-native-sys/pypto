@@ -7,11 +7,13 @@ communication window, requests the URMA workspace from the IR `engines` field,
 and submits through the existing runtime entry point; it never polls.
 Completion is owned by the enclosing task: submission registers the request's
 completion condition, so a later task that consumes the destination as an input
-is released only after the transfer retires. Both endpoints must be
-window-bound, dense row-major `DistributedTensor`s in the same communication
-domain: endpoints materialized into different window scopes compile but are
-rejected at runtime. The result aliases `dst`; returning from the op does not
-imply completion.
+is released only after the transfer retires. The remote endpoint (`put_async.dst`
+or `get_async.src`) must be a window-bound `DistributedTensor`. The local endpoint
+(`put_async.src` or `get_async.dst`) accepts a plain `Tensor` or a
+`DistributedTensor` from another communication domain. Both endpoints must be
+dense row-major. The caller supplies memory accessible to URMA; this API adds no
+automatic MR registration or staging. The result preserves the type and storage
+of `dst`; returning from the op does not imply completion.
 
 Adapter symbols and C++ element types reuse the shared dtype conversions.
 
@@ -36,7 +38,7 @@ Adapter symbols and C++ element types reuse the shared dtype conversions.
 | Target | A5 (Ascend 950) InCore/AIV body | additional targets once the helper ABI is ported |
 | Payload | one contiguous region per call; the runtime splits transfers above 256 MiB internally | multi-SGE / scatter-gather lists |
 | Completion | enclosing AIV task (normal done + registered async conditions); producer `InOut` → consumer `In` | explicit events, `wait`/`test`, per-request release |
-| Registration | both endpoints are existing window-bound `DistributedTensor`s in the same communication domain | automatic MR registration / implicit staging |
+| Registration | remote endpoint is window-bound; local endpoint may be a plain `Tensor` or belong to another domain | automatic MR registration / implicit staging |
 | Source lifetime | caller must not overwrite `src` until the transfer task retires | runtime-managed lifetime |
 | Remote visibility | receiver still needs the existing cross-rank notify/wait protocol | completion-ordered remote consumption |
 
@@ -81,7 +83,7 @@ policy).
 materialized, its dense byte size (`product(shape) * dtype_bytes`) must fit the
 allocation's logical size; an oversized view is rejected even if the program
 only accesses a prefix. The physical cache-line padding of a slot is not
-addressable through a view. The verifier also rejects a non-window endpoint, a
+addressable through a view. The verifier also rejects a non-window remote endpoint, a
 non-contiguous region, a missing offset/shape argument, a negative constant
 peer, an invalid engine, and a transfer region that does not fit its endpoint
 view. A symbolic view or slot size is checked on the host when the window declaration

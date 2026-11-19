@@ -346,16 +346,14 @@ inline void ValidateAsyncIntegerRegionArgs(const std::vector<ExprPtr>& args, siz
 // shape[i+1] and stride.back() == 1.
 inline void ValidateAsyncEndpointView(const TensorTypePtr& type, const std::string& op_name,
                                       const std::string& role) {
-  auto dist = As<DistributedTensorType>(type);
-  CHECK(dist) << op_name << " " << role << " must be a DistributedTensor (window-bound)";
-  const auto& view = dist->tensor_view_;
+  const auto& view = type->tensor_view_;
   if (!view) return;
   // An implicit (empty) stride is still layout-dependent: DN/NZ storage is not
   // one dense row-major range, so check the layout before accepting it.
   CHECK(view->layout == TensorLayout::ND)
       << op_name << " " << role << " must use the row-major ND layout for a contiguous transfer";
   if (view->stride.empty()) return;
-  const auto& shape = dist->shape_;
+  const auto& shape = type->shape_;
   CHECK(view->stride.size() == shape.size())
       << op_name << " " << role << " view stride rank must match the tensor rank";
   for (size_t i = 0; i < shape.size(); ++i) {

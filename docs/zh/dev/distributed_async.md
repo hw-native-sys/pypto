@@ -5,9 +5,11 @@
 范围与通信窗口，通过 IR `engines` 字段申请 URMA workspace，并复用现有运行时入口提交；
 它从不轮询。完成由所属任务拥有：提交时会注册该请求的完成条件，因此后续以目标为
 输入的任务要等传输完成后才会被释放。
-两端都必须是窗口绑定、稠密行主序（dense row-major）的 `DistributedTensor`，且位于同一通信域：
-被物化到不同窗口作用域的两端可以编译，但会在运行时被拒绝。
-结果与 `dst` 共用存储；算子返回不代表传输完成。
+远端端点（`put_async.dst` 或 `get_async.src`）必须是窗口绑定的 `DistributedTensor`。
+本地端点（`put_async.src` 或 `get_async.dst`）可以是普通 `Tensor`，也可以是另一通信域的
+`DistributedTensor`。两端都必须采用稠密行主序（dense row-major）布局。
+调用方需提供 URMA 可访问的内存；该接口不会自动注册 MR 或引入暂存。
+结果保留 `dst` 的类型并与其共用存储；算子返回不代表传输完成。
 
 adapter 符号与 C++ 元素类型复用公共 dtype 转换。
 
@@ -31,7 +33,7 @@ adapter 符号与 C++ 元素类型复用公共 dtype 转换。
 | 目标 | A5（Ascend 950）InCore/AIV body | helper ABI 移植后的其他目标 |
 | 载荷 | 每次调用一个连续区域；运行时在内部拆分超过 256 MiB 的传输 | 多 SGE / scatter-gather 列表 |
 | 完成 | 所属 AIV task（正常完成 + 已注册的异步条件）；producer `InOut` → consumer `In` | 显式 event、`wait`/`test`、按请求释放 |
-| 注册 | 两端均为已存在的、窗口绑定且位于同一通信域的 `DistributedTensor` | 自动 MR 注册 / 隐式暂存 |
+| 注册 | 远端为窗口绑定的 `DistributedTensor`；本地可为普通 `Tensor` 或属于另一通信域 | 自动 MR 注册 / 隐式暂存 |
 | 源生命周期 | 调用方在传输 task 退役前不得覆盖 `src` | 运行时管理生命周期 |
 | 远端可见性 | 接收方仍需现有的跨 rank notify/wait 协议 | 完成序的远端消费 |
 
@@ -68,7 +70,7 @@ URMA workspace，并要求通信域申请 `workspace_engines=("urma",)`（目前
 **失败诊断。** 容量按 `分配 >= 窗口视图 >= 传输区域` 传递地约束。窗口具化时，
 其连续布局字节数（`product(shape) * dtype_bytes`）必须不超过分配的逻辑大小；即使程序只访问前缀，
 过大的视图也会被拒绝。槽位的物理 cache-line 对齐填充不能通过视图访问。verifier
-还拒绝非窗口端点、非连续区域、缺少 offset/shape 参数、负的常量 peer、非法 engine，
+还拒绝非窗口的远端端点、非连续区域、缺少 offset/shape 参数、负的常量 peer、非法 engine，
 以及不满足其端点视图的传输区域。符号化的视图或槽位大小在 host 执行 window 声明时检查，早于其消费者。
 生成的 helper 在运行时拒绝非法 peer（`peer < 0`、`peer >= nranks` 或
 `peer == rankId`）、越界的端点或窗口字节范围、为零/未对齐的字节数以及缺失的
