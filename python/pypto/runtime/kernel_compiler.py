@@ -273,6 +273,7 @@ class KernelCompiler:
                 linked,
                 "Incore-link",
             )
+            _device_image.validate_device_entry(binary)
             if helpers:
                 _vpto.validate_device_image(binary)
             if text_only:

@@ -129,6 +129,50 @@ def test_legacy_unstamped_cache_is_invalidated_once(tmp_path: Path) -> None:
     assert not orch_sidecar.exists()
 
 
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+def test_pre_entry_validation_cache_is_invalidated(tmp_path, platform):
+    """Even authentic schema-two files predate device-entry validation."""
+    context = _context(platform=platform)
+    raw = _touch(tmp_path / "cache/kernel.bin", b"unchecked raw code")
+    elf = _touch(tmp_path / "kernels/aiv/kernel.o", b"unchecked ELF")
+    source = _touch(tmp_path / "kernels/aiv/kernel.cpp", b"// preserved source")
+    record_binary_context(tmp_path, replace(context, schema=2))
+
+    assert prepare_binary_context(tmp_path, context) == 2
+    assert not raw.exists()
+    assert not elf.exists()
+    assert source.exists()
+
+
+@pytest.mark.parametrize("entry", [0x1000, 0x1008])
+@pytest.mark.parametrize("cached", [False, True])
+def test_device_entry_checked_before_extraction_and_cache_publication(
+    device_runner, device_elf, tmp_path, entry, cached
+):
+    """Both freshly linked and source-adjacent ELFs must pass the same check."""
+    source = _touch(tmp_path / "kernel.cpp", b"// generated")
+    image = device_elf(entry=entry)
+    sidecar = source.with_suffix(".o")
+    if cached:
+        sidecar.write_bytes(image)
+    compiler = SimpleNamespace(compile_incore=Mock(return_value=image))
+    kernel = dict(source=str(source), core_type="aiv", func_id=0)
+    cache = tmp_path / "cache"
+    args = (kernel, compiler, "a5", "isa", "runtime")
+    if entry == 0x1000:
+        raw, code = device_runner._compile_single_kernel(*args, cache_dir=cache)
+        assert raw == image
+        assert code == b"\x10" * 24
+        assert len(list(cache.glob("*.bin"))) == 1
+    else:
+        with pytest.raises(ValueError, match="kernel_entry.*start of .text"):
+            device_runner._compile_single_kernel(*args, cache_dir=cache)
+        assert not list(cache.glob("*.bin"))
+        if not cached:
+            assert not sidecar.exists()
+    assert compiler.compile_incore.call_count == (0 if cached else 1)
+
+
 @pytest.mark.parametrize(
     "changed_context",
     [
@@ -316,6 +360,49 @@ def _stub_assembly(device_runner, monkeypatch, tmp_path: Path, chip_build: Mock)
     return context
 
 
+@pytest.mark.parametrize("entry", [0x1000, 0x1008])
+def test_old_raw_cache_rebuilds_through_entry_validation(
+    device_runner, device_elf, monkeypatch, tmp_path, entry
+):
+    """A matching legacy digest cannot bypass validation or reach CoreCallable."""
+    chip_build = Mock(return_value=object())
+    context = _stub_assembly(device_runner, monkeypatch, tmp_path, chip_build)
+    context = replace(context, platform="a5")
+    monkeypatch.setattr(device_runner, "_current_binary_context", Mock(return_value=context))
+    source = _touch(tmp_path / "kernels/kernel.cpp", b"// kernel")
+    with (tmp_path / "kernel_config.py").open("a") as stream:
+        stream.write(f"KERNELS = [dict(func_id=3, core_type='aiv', source={str(source)!r})]\n")
+    raw_cache = _touch(tmp_path / "cache/kernel.bin", b"old unchecked raw code")
+    sidecar = _touch(source.with_suffix(".o"), device_elf(entry=0x1008))
+    record_binary_context(tmp_path, replace(context, schema=2))
+
+    def compile_image(*args, **kwargs):
+        assert not raw_cache.exists()
+        assert not sidecar.exists()
+        return device_elf(entry=entry)
+
+    compiler = SimpleNamespace(compile_incore=Mock(side_effect=compile_image))
+    core_build = Mock(return_value=object())
+    monkeypatch.setattr(device_runner, "KernelCompiler", Mock(return_value=compiler))
+    monkeypatch.setattr(device_runner, "_kernel_cache_file", Mock(return_value=raw_cache))
+    monkeypatch.setattr(device_runner, "CoreCallable", SimpleNamespace(build=core_build))
+    if entry == 0x1008:
+        with pytest.raises(ValueError, match="kernel_entry.*start of .text"):
+            device_runner._compile_and_assemble(tmp_path, "a5")
+        core_build.assert_not_called()
+        chip_build.assert_not_called()
+        assert not raw_cache.exists()
+        assert not binary_context_path(tmp_path).exists()
+    else:
+        device_runner._compile_and_assemble(tmp_path, "a5")
+        assert core_build.call_args.kwargs["binary"] == b"\x10" * 24
+        assert raw_cache.read_bytes() == b"\x10" * 24
+        # A new stamp authorizes reuse of the checked bytes on the second load.
+        device_runner._compile_and_assemble(tmp_path, "a5")
+        assert core_build.call_count == 2
+    compiler.compile_incore.assert_called_once()
+
+
 def test_compile_and_assemble_records_context_after_success(
     device_runner,
     monkeypatch,
@@ -481,7 +568,7 @@ def test_ready_promotion_ignores_inherited_mutable_binaries(device_runner, monke
 
 @pytest.mark.parametrize("platform", ["a2a3sim", "a2a3"])
 def test_ready_compiler_retains_only_one_copy_of_final_binaries(
-    device_runner, monkeypatch, tmp_path, platform
+    device_runner, monkeypatch, tmp_path, device_elf, platform
 ):
     compile_orchestration = device_runner._compile_single_orchestration
     _stub_assembly(device_runner, monkeypatch, tmp_path, Mock(return_value=object()))
@@ -491,11 +578,10 @@ def test_ready_compiler_retains_only_one_copy_of_final_binaries(
     kernel = b"k" * 100_000
     orchestration = b"o" * 300_000
     compiler = SimpleNamespace(
-        compile_incore=Mock(return_value=kernel if platform.endswith("sim") else kernel * 3),
+        compile_incore=Mock(return_value=kernel if platform.endswith("sim") else device_elf(text=kernel)),
         compile_orchestration=Mock(return_value=orchestration),
     )
     monkeypatch.setattr(device_runner, "KernelCompiler", Mock(return_value=compiler))
-    monkeypatch.setattr(device_runner, "extract_text_section", Mock(return_value=kernel))
     monkeypatch.setattr(device_runner, "_kernel_cache_file", Mock(return_value=tmp_path / "cache/kernel.bin"))
     monkeypatch.setattr(device_runner, "CoreCallable", SimpleNamespace(build=Mock(return_value=object())))
     monkeypatch.setattr(device_runner, "_compile_single_orchestration", compile_orchestration)

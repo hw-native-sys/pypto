@@ -84,7 +84,9 @@ def _source(tmp_path):
 
 
 @pytest.mark.parametrize("platform", ["a2a3", "a5", "a2a3sim", "a5sim"])
-def test_incore_build_and_link_are_owned_by_pypto(compiler_module, monkeypatch, tmp_path, platform):
+def test_incore_build_and_link_are_owned_by_pypto(
+    compiler_module, monkeypatch, tmp_path, device_elf, platform
+):
     """Verify target-specific compiler commands, device linking and output cleanup."""
     commands = []
 
@@ -93,13 +95,15 @@ def test_incore_build_and_link_are_owned_by_pypto(compiler_module, monkeypatch, 
         commands.append(command)
         assert kwargs["cwd"] == tmp_path
         assert kwargs["timeout"] == 900
-        Path(command[command.index("-o") + 1]).write_bytes(b"linked" if command[0] == "linker" else b"object")
+        Path(command[command.index("-o") + 1]).write_bytes(
+            device_elf() if command[0] == "linker" else b"object"
+        )
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     compiler = compiler_module.KernelCompiler(platform)
     result = compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path), build_dir=str(tmp_path))
-    assert result == (b"object" if platform.endswith("sim") else b"linked")
+    assert result == (b"object" if platform.endswith("sim") else device_elf())
     assert len(commands) == (1 if platform.endswith("sim") else 2)
     assert f"-I{tmp_path / 'sdk include'}" in commands[0]
     assert ("-DSDK_SIM_TARGET" in commands[0]) == platform.endswith("sim")
@@ -179,7 +183,9 @@ def test_invalid_inputs_fail_before_compiler(compiler_module, monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("platform", ["a2a3sim", "a2a3"])
-def test_sanitizer_flags_apply_only_to_host_builds(compiler_module, monkeypatch, tmp_path, platform):
+def test_sanitizer_flags_apply_only_to_host_builds(
+    compiler_module, monkeypatch, tmp_path, device_elf, platform
+):
     """Keep sanitizer instrumentation on host builds and out of device compiler commands."""
     monkeypatch.setattr(compiler_module.KernelCompiler, "_sanitizers", "address")
     compiler = compiler_module.KernelCompiler(platform)
@@ -188,7 +194,9 @@ def test_sanitizer_flags_apply_only_to_host_builds(compiler_module, monkeypatch,
     def run(command, **kwargs):
         """Record target flags while supplying a successful build output."""
         commands.append(command)
-        Path(command[command.index("-o") + 1]).write_bytes(b"binary")
+        Path(command[command.index("-o") + 1]).write_bytes(
+            device_elf() if command[0] == "linker" else b"binary"
+        )
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
@@ -250,38 +258,6 @@ def test_invalid_compiler_timeout_fails_before_sdk_setup(compiler_module, monkey
     sdk.assert_not_called()
 
 
-def _vpto_elf(*, entry=0x1000, extra_flags=0, extra_kind=1, extra_size=0):
-    """Construct a minimal linked image to exercise loader constraints without CANN."""
-    data = bytearray(384)
-    data[:6] = b"\x7fELF\x02\x01"
-    struct.pack_into("<HH", data, 16, 2, 0x1029)
-    struct.pack_into("<Q", data, 24, entry)
-    struct.pack_into("<Q", data, 40, 128)
-    struct.pack_into("<HHH", data, 58, 64, 4, 1)
-    names = b"\0.shstrtab\0.text\0.extra\0"
-    data[64 : 64 + len(names)] = names
-    struct.pack_into("<IIQQQQIIQQ", data, 192, 1, 3, 0, 0, 64, len(names), 0, 0, 1, 0)
-    struct.pack_into("<IIQQQQIIQQ", data, 256, 11, 1, 6, 0x1000, 96, 4, 0, 0, 4, 0)
-    struct.pack_into(
-        "<IIQQQQIIQQ",
-        data,
-        320,
-        17,
-        extra_kind,
-        extra_flags,
-        0x2000,
-        100,
-        extra_size,
-        0,
-        0,
-        4,
-        24 if extra_kind == 2 else 0,
-    )
-    if extra_kind == 2:
-        struct.pack_into("<IBBH", data, 100, 1, 0, 0, 0)
-    return bytes(data)
-
-
 @pytest.mark.parametrize(
     "kwargs,error",
     [
@@ -291,12 +267,12 @@ def _vpto_elf(*, entry=0x1000, extra_flags=0, extra_kind=1, extra_size=0):
         ({"extra_kind": 2, "extra_size": 24}, "unresolved symbol"),
     ],
 )
-def test_vpto_rejects_images_that_text_loader_cannot_load(kwargs, error):
+def test_vpto_rejects_images_that_text_loader_cannot_load(device_elf, kwargs, error):
     from pypto.runtime._vpto import validate_device_image  # noqa: PLC0415
 
-    validate_device_image(_vpto_elf())
+    validate_device_image(device_elf())
     with pytest.raises(ValueError, match=error):
-        validate_device_image(_vpto_elf(**kwargs))
+        validate_device_image(device_elf(**kwargs))
 
 
 def _text_only_elf():
@@ -730,7 +706,7 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
 
 @pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "memory_attrs", "bridge", "simt_asm"])
 def test_vpto_compilation_links_helpers_and_rejects_bridge(
-    compiler_module, monkeypatch, tmp_path, helper_kind
+    compiler_module, monkeypatch, tmp_path, device_elf, helper_kind
 ):
     monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
     monkeypatch.setenv("LD_DEBUG", "libs")
@@ -782,7 +758,7 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
                     arg.split("=", 1)[1] for arg in command if arg.startswith("--symbol-ordering-file=")
                 )
                 assert Path(order).read_text() == "kernel_entry\n"
-            output.write_bytes(_vpto_elf() if command[0] == "linker" else b"object")
+            output.write_bytes(device_elf() if command[0] == "linker" else b"object")
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
@@ -793,7 +769,7 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
             compiler.compile_incore(_source(tmp_path), **kwargs)
         assert not any(command[0] == "linker" for command in commands)
     else:
-        assert compiler.compile_incore(_source(tmp_path), **kwargs) == _vpto_elf()
+        assert compiler.compile_incore(_source(tmp_path), **kwargs) == device_elf()
         assert [command[0] for command in commands] == [
             "compiler",
             "ptoas",
@@ -806,6 +782,104 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
         assert "--cce-generic-addrspace=off" in commands[2]
         assert "-ffunction-sections" in commands[0]
     assert not list(tmp_path.glob("pypto-incore-*"))
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("core", ["aic", "aiv"])
+@pytest.mark.parametrize("entry", [0x1000, 0x1008])
+def test_native_entry_layout_without_vpto_helpers(
+    compiler_module, monkeypatch, tmp_path, device_elf, platform, core, entry
+):
+    """An ordinary extern must never return an image that starts at a decoy."""
+    image = device_elf(entry=entry)
+    compiler = compiler_module.KernelCompiler(platform)
+    monkeypatch.setattr(compiler, "_run", Mock(return_value=image))
+    kwargs = dict(core_type=core, pto_isa_root=str(tmp_path), build_dir=str(tmp_path))
+    if entry == 0x1000:
+        assert compiler.compile_incore(_source(tmp_path), **kwargs) == image
+    else:
+        with pytest.raises(ValueError, match="kernel_entry.*start of .text") as error:
+            compiler.compile_incore(_source(tmp_path), **kwargs)
+        assert "0x1008" in str(error.value)
+        assert "0x1000" in str(error.value)
+        assert "offset=0x8" in str(error.value)
+    assert not list(tmp_path.glob("pypto-incore-*"))
+
+
+@pytest.mark.parametrize("kind", [1, 8])
+def test_native_entry_check_preserves_block_local_sections(device_elf, kind):
+    """Ordinary images need not satisfy VPTO's separate-data prohibition."""
+    from pypto.runtime._device_image import validate_device_entry  # noqa: PLC0415
+
+    image = device_elf(extra_flags=3, extra_kind=kind, extra_size=16)
+    validate_device_entry(image)
+    with pytest.raises(ValueError, match="allocated section"):
+        validate_device_image(image)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["short", "host", "relocatable", "table", "strings", "name", "empty", "nobits", "nonexec", "duplicate"],
+)
+def test_device_image_rejects_invalid_entry_container(device_elf, damage):
+    from pypto.runtime._device_image import validate_device_entry  # noqa: PLC0415
+
+    data = bytearray(device_elf())
+    (table,) = struct.unpack_from("<Q", data, 40)
+    text = table + 128
+    if damage == "short":
+        data = data[:32]
+    elif damage == "host":
+        struct.pack_into("<H", data, 18, 183)  # EM_AARCH64, not AI Core.
+    elif damage == "relocatable":
+        struct.pack_into("<H", data, 16, 1)  # ET_REL has no executable entry.
+    elif damage == "table":
+        struct.pack_into("<Q", data, 40, len(data))
+    elif damage == "strings":
+        struct.pack_into("<Q", data, table + 64 + 24, len(data))
+    elif damage == "name":
+        struct.pack_into("<I", data, text, len(data))
+    elif damage == "empty":
+        struct.pack_into("<Q", data, text + 32, 0)
+    elif damage == "nobits":
+        struct.pack_into("<I", data, text + 4, 8)
+    elif damage == "nonexec":
+        struct.pack_into("<Q", data, text + 8, 2)
+    else:
+        data[table + 192 : table + 256] = data[text : text + 64]
+    with pytest.raises(ValueError):
+        validate_device_entry(bytes(data))
+
+
+@pytest.mark.parametrize("with_decoy", [False, True])
+def test_real_native_entry_layout(tmp_path, with_decoy):
+    """Compile the issue's A5/AIV reduction without allocating or executing on an NPU."""
+    pytest.importorskip("simpler_setup")
+    if shutil.which("ccec") is None:
+        pytest.skip("CCEC is required for the real device compiler")
+    from pypto.runtime import pto_isa_include_dir  # noqa: PLC0415
+    from pypto.runtime._device_image import validate_device_entry  # noqa: PLC0415
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+    source = tmp_path / "entry_offset.cpp"
+    decoy = 'extern "C" __aicore__ void decoy(__gm__ int64_t* args) { pipe_barrier(PIPE_ALL); }\n'
+    source.write_text(
+        "#include <pto/pto-inst.hpp>\n"
+        + (decoy if with_decoy else "")
+        + 'extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {\n'
+        "  set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);\n"
+        "  wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);\n"
+        "  pipe_barrier(PIPE_ALL);\n}\n"
+    )
+    compiler = KernelCompiler("a5")
+    pto_isa_root = str(Path(pto_isa_include_dir()).parent)
+    if with_decoy:
+        with pytest.raises(ValueError, match="kernel_entry.*offset=0x8"):
+            compiler.compile_incore(str(source), core_type="aiv", pto_isa_root=pto_isa_root)
+    else:
+        validate_device_entry(
+            compiler.compile_incore(str(source), core_type="aiv", pto_isa_root=pto_isa_root)
+        )
 
 
 def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkeypatch, tmp_path):
@@ -888,7 +962,7 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
     assert result.stdout.strip() == version_output
 
 
-def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypatch, tmp_path):
+def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypatch, tmp_path, device_elf):
     monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
     monkeypatch.setenv("LD_AUDIT", "libobserver.so")
 
@@ -899,12 +973,14 @@ def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypa
             environment = os.environ
         assert environment["LD_PRELOAD"] == "liballocator.so:"
         assert environment["LD_AUDIT"] == "libobserver.so"
-        Path(command[command.index("-o") + 1]).write_bytes(b"binary")
+        Path(command[command.index("-o") + 1]).write_bytes(
+            device_elf() if command[0] == "linker" else b"binary"
+        )
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     compiler = compiler_module.KernelCompiler("a2a3")
-    assert compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path)) == b"binary"
+    assert compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path)) == device_elf()
 
 
 @pytest.mark.parametrize("effect", ["none", "read", "write", "argmem: read, inaccessiblemem: write"])

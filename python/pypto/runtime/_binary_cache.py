@@ -20,7 +20,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
-_BINARY_CONTEXT_SCHEMA = 2
+# Schema 3 excludes raw device payloads produced before entry validation.
+_BINARY_CONTEXT_SCHEMA = 3
 _BINARY_CONTEXT_FILENAME = "binary_context.json"
 
 

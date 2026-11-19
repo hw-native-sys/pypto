@@ -49,7 +49,7 @@ import torch
 from pypto._external_source import external_source_digest, kernel_binary_cache_path
 from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
-from . import _callable_identity, _vpto
+from . import _callable_identity, _device_image, _vpto
 from ._binary_cache import (
     BinaryCacheContext,
     binary_context_lock,
@@ -358,7 +358,8 @@ def _compile_single_kernel(
         else None
     )
     raw = None if force_rebuild or output_file is None else _load_binary(output_file)
-    if raw is None:
+    compiled = raw is None
+    if compiled:
         helper_options: dict[str, Any] = (
             {"vpto_sources": helpers, "_vpto_snapshot": helper_snapshot} if helpers else {}
         )
@@ -370,10 +371,17 @@ def _compile_single_kernel(
             extra_include_dirs=kernel.get("extra_include_dirs"),
             **helper_options,
         )
-        if output_file is not None:
-            _save_binary(raw, output_file)
-
+    assert raw is not None
+    if not platform.endswith("sim"):
+        # Source-adjacent ELFs can bypass compile_incore. Validate before
+        # extraction or publishing either the raw ELF or stripped cache entry.
+        if helpers:
+            _vpto.validate_device_image(raw)
+        else:
+            _device_image.validate_device_entry(raw)
     kernel_bin = raw if platform.endswith("sim") else extract_text_section(raw)
+    if compiled and output_file is not None:
+        _save_binary(raw, output_file)
 
     if cache_file is not None:
         _save_binary(kernel_bin, cache_file)

@@ -424,6 +424,26 @@ runtime target 字段与 provider 记录采用相同的严格类型校验。支�
 `(str, int)` tuple，名称非空且版本为正整数；不能利用 Python 数值相等规则将 bool 或 float 当作
 有效 ABI 版本。runtime 名称和版本也必须非空。
 
+## 原始设备镜像入口
+
+硬件 kernel（A2/A3 和 A5 的 AIC、AIV）以原始 `.text` 字节加载。
+`kernel_entry` 必须位于非空、可执行 `.text` 段的偏移零处。
+链接参数 `-e kernel_entry` 只选择 ELF 入口元数据，不会移动函数。
+因此，保留了更早的非内联函数的源码 wrapper 即使链接成功，也可能违反加载器 ABI。
+
+PyPTO 在 `compile_incore` 返回前校验链接后的 AI Core ELF；对于源码旁缓存的 ELF，
+也会在提取代码或发布缓存前再次校验。非零入口偏移会报错，并给出入口地址、`.text` 地址
+和偏移。应让链接后的入口位于最前，或移除前面的非内联函数；必须检查最终 ELF，不能仅
+依赖源码顺序。CPU simulator 共享库通过符号解析 `kernel_entry`，不使用此检查。
+
+普通 extern 校验不会施加 VPTO helper 对其他分配段的禁令，例如 AscendC 的 block-local
+存储段。Helper 构建仍执行 VPTO 的附加自包含镜像校验。
+
+可变二进制缓存 context 使用 schema 3：旧 stamp 会使原始代码缓存和 ELF sidecar 均失效，
+即使文件摘要匹配也不能复用。已发布的 `BINARY_READY` manifest 使用 schema 2，包含分布式
+父级和子级 manifest。旧 prebuilt manifest 会在构造 callable 前被拒绝，需要从源码重新
+构建这些产物。仅凭原始代码字节无法证明原 ELF 的入口位置。新生成且通过校验的缓存仍可复用。
+
 ## 版本与缓存身份
 
 未知 schema 版本和必需能力触发 `ContractError`。原生 ABI 版本独立于契约和 host runtime ABI。

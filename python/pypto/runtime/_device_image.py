@@ -62,7 +62,9 @@ def _sections(data: bytes) -> tuple[int, list[_Section], bytes]:
     return entry, sections, names.payload(data)
 
 
-def _text_section(entry: int, sections: list[_Section], strings: bytes, *, plain_callee: bool) -> int:
+def _text_section(
+    entry: int, sections: list[_Section], strings: bytes, *, plain_callee: bool, self_contained: bool = True
+) -> int:
     text_index = 0
     for index, section in enumerate(sections):
         name = _string(strings, section.name)
@@ -81,11 +83,16 @@ def _text_section(entry: int, sections: list[_Section], strings: bytes, *, plain
             if section.kind != 1 or section.flags != 6 or not section.size:
                 raise ValueError("Device image requires a nonempty executable .text section")
             if entry != section.address:
-                raise ValueError("Device image kernel_entry must be at the start of .text")
+                raise ValueError(
+                    "Device image kernel_entry must be at the start of .text: "
+                    f"entry={entry:#x}, .text={section.address:#x}, offset={entry - section.address:#x}. "
+                    "The persistent loader executes raw code from byte zero; "
+                    "link kernel_entry first or remove preceding out-of-line functions."
+                )
             text_index = index
-        elif section.flags & 2 and section.size:
+        elif self_contained and section.flags & 2 and section.size:
             raise ValueError(f"Device image needs unsupported allocated section {name!r}")
-        if section.kind in (4, 9) and section.size:
+        if self_contained and section.kind in (4, 9) and section.size:
             raise ValueError("Device image must have no remaining relocations")
     if not text_index:
         raise ValueError("Device image requires a nonempty .text section")
@@ -173,3 +180,15 @@ def validate_device_image(data: bytes, *, entry_symbol: str | None = None) -> fr
         raise ValueError("Device image has an unsupported ELF version")
     text_index = _text_section(entry, sections, strings, plain_callee=entry_symbol is not None)
     return _functions(data, sections, text_index, entry_symbol)
+
+
+def validate_device_entry(data: bytes) -> None:
+    """Check a linked device entry without imposing the self-contained callee contract.
+
+    All hardware images enter at byte zero of .text, including ordinary extern
+    builds without VPTO helpers. They may use AscendC block-local sections, so
+    this check preserves their data contract. Simulator SOs resolve their
+    entry by symbol and must not pass through device-image validation.
+    """
+    entry, sections, strings = _sections(data)
+    _text_section(entry, sections, strings, plain_callee=False, self_contained=False)
