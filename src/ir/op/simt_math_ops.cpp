@@ -71,9 +71,8 @@ TypePtr ConversionType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, c
       has_dtype = true;
     } else if (key == "rounding") {
       rounding = AnyCast<std::string>(value, key);
-    } else if (key == "unsigned" && input_float != output_float) {
-      AnyCast<bool>(value, key);
-    } else if (key == "saturate" && input_float && output_float) {
+    } else if ((key == "unsigned" && input_float != output_float) ||
+               (key == "saturate" && input_float && output_float)) {
       AnyCast<bool>(value, key);
     } else {
       CHECK(false) << name << " does not accept attribute " << key;

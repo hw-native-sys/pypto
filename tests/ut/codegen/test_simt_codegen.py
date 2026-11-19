@@ -1241,5 +1241,17 @@ def test_ftof_preserves_positional_dtype_and_omitted_defaults(attributes):
     ir.assert_structural_equal(program, parse_program(str(program)))
 
 
+@pytest.mark.parametrize("arguments", ["value=1.0, dtype=pl.FP16", "dtype=pl.FP16, value=1.0"])
+def test_ftof_keyword_literal_matches_positional_operand(arguments):
+    body = """
+        y = pl.simt.ftof(ARGUMENTS)
+        z = pl.simt.ftof(y, pl.FP32)
+        pl.simt.store(dst, (0, 0), z)
+    """
+    positional = scalar_program(body.replace("ARGUMENTS", "1.0, pl.FP16"), "FP32")
+    keyword = scalar_program(body.replace("ARGUMENTS", arguments), "FP32")
+    ir.assert_structural_equal(positional, keyword)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

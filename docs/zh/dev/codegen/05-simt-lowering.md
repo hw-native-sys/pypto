@@ -101,7 +101,8 @@ INT32/FP32 载荷以及 16/32 宽度，包括分支中的参与集合和非活�
 ## 原子与同步验收
 
 原生映射使用 `pto.atomic_add/min/max/exch/cas`、`pto.syncthreads`、
-`pto.threadfence` 和 `pto.threadfence_block`。整数 min/max 显式携带 `signed`。
+`pto.threadfence` 和 `pto.threadfence_block`。整数 min/max 显式携带 `signed` 或 `unsigned`，
+无符号整数类型自动使用 `unsigned` 比较。
 原子沿用标量访存的仿射元素偏移计算，再通过 `pto.addptr` 寻址；不暴露无类型字节
 地址或绕过分配的路径。所有原子目标均为 ReadWrite，即使未使用旧标量返回值。
 同步调用保持有序副作用，`no_arg_writes` 不表示纯函数。

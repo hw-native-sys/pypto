@@ -172,6 +172,7 @@ class OpParser:
                 "pl.simt",
                 name,
                 call,
+                expression_keywords=frozenset({"value"}) if name == "ftof" else frozenset(),
                 preserve_omitted_kwargs=name
                 in {"atomic_min", "atomic_max", "redux_min", "redux_max", "ftof"},
             )

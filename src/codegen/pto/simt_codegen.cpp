@@ -376,7 +376,7 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     return ir::GetScalarDtype(value).IsUnsignedInt() ? type.substr(1) : type;
   };
   auto native_operand = [this, &native_type](const ir::ExprPtr& value) {
-    const auto source = GetExprAsCode(value);
+    auto source = GetExprAsCode(value);
     if (!ir::GetScalarDtype(value).IsUnsignedInt()) return source;
     const auto result = NewTemp();
     Emit(result + " = builtin.unrealized_conversion_cast " + source + " : " + GetExprTypeAnnotation(value) +

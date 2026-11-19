@@ -305,7 +305,7 @@ def test_simt_interface_gaps(tmp_path, onboard):
     support["run"](
         tmp_path, "interface_gaps", command, timeout=int(os.environ.get("PYPTO_VPTO_TIMEOUT", "600"))
     )
-    assert json.loads((tmp_path / "result.json").read_text())["checks"] == (7 if onboard else 0)
+    assert json.loads((tmp_path / "result.json").read_text())["checks"] == (12 if onboard else 0)
 
 
 if __name__ == "__main__":
