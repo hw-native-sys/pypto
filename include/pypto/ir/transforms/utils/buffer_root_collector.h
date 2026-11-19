@@ -29,19 +29,6 @@ namespace pypto {
 namespace ir {
 namespace buffer_root {
 
-/// Reuse logical shape comparisons across collectors for one immutable program.
-class ShapeMatchCache {
- public:
-  [[nodiscard]] bool Matches(const TypePtr& a, const TypePtr& b);
-
- private:
-  using TypePair = std::pair<TypePtr, TypePtr>;
-  struct TypePairHash {
-    size_t operator()(const TypePair& types) const;
-  };
-  std::unordered_map<TypePair, bool, TypePairHash> matches_;
-};
-
 /// What RecordCallReturnRoots does for a single-return call when the owning buffer
 /// cannot be pinned to one Out/InOut arg by shape+dtype (no match, or two+
 /// distinct same-typed candidates). The right choice depends on the consumer:
@@ -64,18 +51,17 @@ enum class AmbiguousRootPolicy {
  * calls (Call and Submit alike). Pure structural analysis — no optimization
  * logic.
  *
- * For a call's single (non-tuple) return value the owning root is selected by
- * matching the return type's shape+dtype against the callee's Out/InOut args
- * (see RecordCallReturnRoots), so a differently-typed InOut scratch is never
- * mistaken for the real output buffer (issue #1564 / #1580). When that match is
- * ambiguous, the fallback is governed by @p ambiguous_policy (see
- * AmbiguousRootPolicy).
+ * With reshape tracking, returned-parameter lineage identifies the backing
+ * buffer. Unproven returns retain the known writable candidates for dependency
+ * analysis. Other consumers match the shape and dtype of a single return
+ * against the callee's Out/InOut arguments (issues #1564 / #1580), with
+ * @p ambiguous_policy controlling the fallback.
  */
 class BufferRootCollector : public IRVisitor {
  public:
   explicit BufferRootCollector(ProgramPtr program,
                                AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip,
-                               bool follow_reshape = false, ShapeMatchCache* shape_matches = nullptr);
+                               bool follow_reshape = false);
 
   void Initialize(const std::vector<VarPtr>& params);
 
@@ -163,12 +149,11 @@ class BufferRootCollector : public IRVisitor {
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
   // value aliases its source buffer with the same logical shape and dtype.
-  [[nodiscard]] bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
+  [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
 
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
   bool follow_reshape_;
-  ShapeMatchCache* shape_matches_;
   using RootSetPair = std::pair<RootSetId, RootSetId>;
   struct RootSetPairHash {
     size_t operator()(const RootSetPair& pair) const;

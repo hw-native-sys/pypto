@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -40,32 +39,11 @@ namespace {
 
 using op_predicates::IsBuiltinOp;
 
-bool MatchLogicalShape(const TypePtr& a, const TypePtr& b) {
-  const auto ta = AsTensorTypeLike(a);
-  const auto tb = AsTensorTypeLike(b);
-  return ta && tb && ta->GetKind() == tb->GetKind() && ta->dtype_ == tb->dtype_ &&
-         (a == b || AreExprVectorsEqual(ta->shape_, tb->shape_));
-}
-
 }  // namespace
 
-size_t ShapeMatchCache::TypePairHash::operator()(const TypePair& types) const {
-  return hash_combine(std::hash<TypePtr>{}(types.first), std::hash<TypePtr>{}(types.second));
-}
-
-bool ShapeMatchCache::Matches(const TypePtr& a, const TypePtr& b) {
-  if (a == b) return AsTensorTypeLike(a) != nullptr;
-  const auto [it, inserted] = matches_.try_emplace({a, b}, false);
-  if (inserted) it->second = MatchLogicalShape(a, b);
-  return it->second;
-}
-
 BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy ambiguous_policy,
-                                         bool follow_reshape, ShapeMatchCache* shape_matches)
-    : program_(std::move(program)),
-      ambiguous_policy_(ambiguous_policy),
-      follow_reshape_(follow_reshape),
-      shape_matches_(shape_matches) {}
+                                         bool follow_reshape)
+    : program_(std::move(program)), ambiguous_policy_(ambiguous_policy), follow_reshape_(follow_reshape) {}
 
 void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
@@ -364,45 +342,44 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
                                                 const std::vector<OutputRoot>& out_roots,
                                                 const CallPtr& call) {
   if (out_roots.empty()) return;
-  const bool track_tensor_return = follow_reshape_ && AsTensorTypeLike(call->GetType());
-  ExprPtr returned_arg;
-  if (track_tensor_return) {
+  if (follow_reshape_ && AsTensorTypeLike(call->GetType())) {
     const auto callee = program_->GetFunction(call->op_->name_);
+    RootCandidates candidates;
     if (callee && callee->return_types_.size() == 1) {
       const auto arg_count = call->args_.size();
       const auto param = return_lineage::ReturnedParamIndex(callee, program_).value_or(arg_count);
       if (param < arg_count) {
-        returned_arg = call->args_[param];
-        // A helper can write a scratch output and still return an input.
-        // Its proven return storage takes precedence over output matching.
-        if (HasStorageProof(returned_arg)) {
-          ShareRootCandidates(result, returned_arg);
+        const auto& argument = call->args_[param];
+        if (HasStorageProof(argument)) {
+          ShareRootCandidates(result, argument);
           return;
         }
+        candidates = ResolveRootCandidates(argument);
       }
     }
+    // A reshape can change dimensions without moving the data. Only lineage
+    // proves the returned buffer. With incomplete lineage, retain the known
+    // writable candidates and keep their identity unresolved.
+    for (const auto& output : out_roots) {
+      candidates = UnionCandidates(candidates, output.roots);
+    }
+    BindRootCandidates(result, candidates, /*unresolved=*/true);
+    return;
   }
-  const auto record_output = [&](const OutputRoot& output) {
-    // A shape match supplies a candidate. When tracing could not prove the
-    // return (for example, a view of an input), it cannot prove its storage.
-    const bool unproven = track_tensor_return &&
-                          (returned_arg.get() != output.argument.get() || !HasStorageProof(returned_arg));
-    BindRootCandidates(result, output.roots, output.ambiguous || unproven);
-  };
-  if (out_roots.size() == 1 && (!returned_arg || returned_arg.get() == out_roots.front().argument.get())) {
-    record_output(out_roots.front());
+
+  if (out_roots.size() == 1) {
+    const auto& output = out_roots.front();
+    BindRootCandidates(result, output.roots, output.ambiguous);
     return;
   }
 
   const OutputRoot* match = nullptr;
-  bool ambiguous = returned_arg != nullptr;
+  bool ambiguous = false;
   for (const auto& candidate : out_roots) {
-    if (!TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) continue;
-    if (candidate.roots.set == 0) {
-      // A compatible output with unknown storage could be the result.
-      // Its absence from the root map does not prove the other match.
-      ambiguous = ambiguous || follow_reshape_;
-    } else if (!match) {
+    if (candidate.roots.set == 0 || !TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
+      continue;
+    }
+    if (!match) {
       match = &candidate;
     } else if (match->roots.set != candidate.roots.set || match->roots.first != candidate.roots.first ||
                match->ambiguous != candidate.ambiguous) {
@@ -410,32 +387,10 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
     }
   }
   if (match && !ambiguous) {
-    record_output(*match);
+    BindRootCandidates(result, match->roots, match->ambiguous);
     return;
   }
 
-  if (follow_reshape_ && ambiguous) {
-    // A partially resolved return can still share storage with any compatible
-    // candidate, so retain those dependencies until its root is proven.
-    std::vector<RootCandidates> inputs;
-    if (const auto& returned = ResolveRootCandidates(returned_arg); returned.set != 0) {
-      inputs.push_back(returned);
-    }
-    for (const auto& candidate : out_roots) {
-      if (candidate.roots.set != 0 && TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
-        inputs.push_back(candidate.roots);
-      }
-    }
-    if (inputs.empty()) {
-      // Shapes can differ for views of one buffer. Keep the known writable
-      // roots as a conservative fallback when shape matching proves nothing.
-      for (const auto& candidate : out_roots) {
-        if (candidate.roots.set != 0) inputs.push_back(candidate.roots);
-      }
-    }
-    MergeRootCandidates(result, inputs, /*unresolved=*/true);
-    return;
-  }
   // No provable unambiguous type match (0 matches, or >1 distinct candidates).
   // The fallback depends on what the consumer needs when the owning buffer
   // can't be pinned down:
@@ -447,12 +402,21 @@ void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
   //                  so a later write to the returned var still promotes to
   //                  InOut; a null root would silently drop the WAW/InOut dep.
   if (ambiguous_policy_ == AmbiguousRootPolicy::kFirstOutput) {
-    record_output(out_roots.front());
+    const auto& output = out_roots.front();
+    BindRootCandidates(result, output.roots, output.ambiguous);
   }
 }
 
 bool BufferRootCollector::TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b) {
-  return shape_matches_ ? shape_matches_->Matches(a, b) : MatchLogicalShape(a, b);
+  const auto ta = AsTensorTypeLike(a);
+  const auto tb = AsTensorTypeLike(b);
+  if (!ta || !tb || ta->GetKind() != tb->GetKind()) return false;
+  if (ta->dtype_ != tb->dtype_) return false;
+  if (ta->shape_.size() != tb->shape_.size()) return false;
+  for (size_t i = 0; i < ta->shape_.size(); ++i) {
+    if (!AreExprsEqual(ta->shape_[i], tb->shape_[i])) return false;
+  }
+  return true;
 }
 
 }  // namespace buffer_root
