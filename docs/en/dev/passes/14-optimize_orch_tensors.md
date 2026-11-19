@@ -112,6 +112,14 @@ For example, an `[8, 256]` window of a `[10, 288]` parent retains `[288, 1]`.
 This AIV refinement requires static physical strides consistent across every
 call to the same parameter. Mixed dense/sliced calls with different pitches,
 dynamic pitches, and conflicting explicit parameter strides or layouts are diagnosed.
+A hand-written AIV extern with an implicit ND parameter can read a dynamic pitch
+from its runtime Tensor descriptor. The pass leaves the parameter unspecialized
+when every caller uses ND and at least one supplies a dynamic pitch. Mixing ND
+and DN callers for a sliced parameter raises an error.
+For packed ND graph arguments, the pass compares pitches in the helper's shape
+variables. A formal with explicit strides or a non-ND layout keeps the caller's
+pitches. When all callers agree on a static physical pitch, a slice inside the
+helper retains it for AIV specialization.
 A layout-only declaration is still a storage contract: runtime-allocated ND outputs
 cannot satisfy a DN formal, even when it declares no stride.
 Loop-carried and branch-merged tensors must agree on physical strides at every

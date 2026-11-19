@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -1520,8 +1521,9 @@ class SliceInputStridesOptimizer {
 
   class SliceAnalyzer : public IRVisitor {
    public:
-    SliceAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names)
-        : program_(program), incore_names_(incore_names) {
+    SliceAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names,
+                  bool rebind_packed)
+        : program_(program), incore_names_(incore_names), rebind_packed_(rebind_packed) {
       for (const auto& [gvar, func] : program->functions_) functions_.emplace(func->name_, func);
     }
 
@@ -1572,6 +1574,7 @@ class SliceInputStridesOptimizer {
       }
       CHECK_SPAN(visited == incoming.size(), program_->span_)
           << "Tensor stride propagation requires an acyclic orchestration call graph";
+      PropagateConstraints();
     }
 
     void AnalyzeFunction(const FunctionPtr& func) {
@@ -1592,45 +1595,65 @@ class SliceInputStridesOptimizer {
       analyzed_.insert(func->name_);
     }
 
-    InputShapeMap result() {
-      // Later callers and loop backedges can introduce slice provenance after
-      // consumers were recorded. Each flag and dependency edge is visited at
-      // most once, including cycles, without rescanning any function body.
+    bool rebound_static_pitch() const { return rebound_static_pitch_; }
+
+    void PropagateConstraints() {
+      // A later graph caller or loop backedge can introduce a slice or invalidate
+      // a first caller's pitch. Each flag changes at most once on each edge.
       std::vector<std::vector<size_t>> dependents(constraints_.size());
       std::vector<size_t> pending;
       for (size_t i = 0; i < constraints_.size(); ++i) {
         for (const auto parent : constraints_[i].parents) dependents[parent].push_back(i);
-        if (constraints_[i].sliced) pending.push_back(i);
+        if (constraints_[i].sliced || !constraints_[i].consistent) pending.push_back(i);
       }
       while (!pending.empty()) {
         auto index = pending.back();
         pending.pop_back();
         for (const auto dependent : dependents[index]) {
-          if (constraints_[dependent].sliced) continue;
-          constraints_[dependent].sliced = true;
-          pending.push_back(dependent);
+          const auto& parent = constraints_[index];
+          auto& child = constraints_[dependent];
+          const bool inherits_conflict = child.consistent && !parent.consistent;
+          if (inherits_conflict || (parent.sliced && !child.sliced)) {
+            child.sliced |= parent.sliced;
+            if (inherits_conflict) {
+              child.consistent = false;
+              child.span = parent.span;
+            }
+            pending.push_back(dependent);
+          }
         }
       }
-      // Loop backedges are known only after visiting their bodies. Validate the
-      // constraints reachable from AIV operands once, including operands used
-      // inside the loop. Indexed edges permit cycles without a fixed-point walk.
-      std::vector<bool> visited(constraints_.size(), false);
-      while (!constraint_roots_.empty()) {
-        const auto index = constraint_roots_.back();
-        constraint_roots_.pop_back();
-        if (visited[index]) continue;
-        visited[index] = true;
-        const auto& constraint = constraints_[index];
-        CHECK_SPAN(constraint.consistent, *constraint.span)
-            << "AIV tensor argument requires consistent physical strides across loop carries and branches, "
-               "and graph calls; tensor.reshape requires packed ND storage; "
-               "pass the full parent tensor and use parent-relative indices instead";
-        constraint_roots_.insert(constraint_roots_.end(), constraint.parents.begin(),
-                                 constraint.parents.end());
-      }
+    }
+
+    InputShapeMap result(const SliceAnalyzer* physical = nullptr) {
       for (const auto& [name, params] : aiv_bindings_) {
-        for (const auto& [index, binding] : params) {
-          if (!binding.sliced && (!binding.constraint || !constraints_[*binding.constraint].sliced)) continue;
+        for (const auto& [index, observed] : params) {
+          const auto& binding = observed.storage;
+          const bool sliced =
+              binding.sliced || (binding.constraint && constraints_[*binding.constraint].sliced);
+          if (const auto* raw = physical ? physical->CommonStaticStorage(name, index) : nullptr) {
+            if (sliced) {
+              result_[name][index] = {raw->strides, raw->layout};
+            }
+            continue;
+          }
+          for (const auto source : observed.argument_constraints) {
+            const auto& constraint = constraints_[source];
+            CHECK_SPAN(constraint.consistent, *constraint.span)
+                << "AIV tensor argument requires consistent physical strides across loop carries and "
+                   "branches, "
+                   "and graph calls; tensor.reshape requires packed ND storage; "
+                   "pass the full parent tensor and use parent-relative indices instead";
+          }
+          if (!sliced) continue;
+          const auto& callee = functions_.at(name);
+          const auto formal = AsTensorTypeLike(callee->params_[index]->GetType());
+          // Opaque C++ uses the runtime Tensor descriptor. Keep static refinement
+          // when possible and honor explicit declarations even for externs.
+          if (callee->HasAttr(kAttrExternalSource) && !formal->tensor_view_ && observed.all_nd &&
+              observed.has_dynamic_pitch) {
+            continue;
+          }
           CHECK_SPAN(binding.consistent && !binding.strides.empty(), *binding.span)
               << "AIV sliced tensor argument requires one consistent static stride per parameter across "
                  "all call sites; pass the full parent tensor and use parent-relative indices instead";
@@ -1784,6 +1807,14 @@ class SliceInputStridesOptimizer {
       const Span* span;
       std::vector<Storage> alternatives;
       std::unordered_map<size_t, Storage> projected;
+    };
+
+    struct AivBinding {
+      Storage storage;
+      bool all_nd;
+      bool has_dynamic_pitch;
+      // Each argument must satisfy its upstream joins, even for a generic extern.
+      std::vector<size_t> argument_constraints;
     };
 
     struct StrideConstraint {
@@ -2072,10 +2103,17 @@ class SliceInputStridesOptimizer {
               // Record unsupported physical reshapes on their result, rather
               // than rejecting unrelated InCore paths during the eager scan.
               // Only constraints reachable from an AIV operand are diagnosed.
-              if (IsOp(call, "tensor.reshape") &&
-                  (source.layout != TensorLayout::ND ||
+              const bool reshape = IsOp(call, "tensor.reshape");
+              // The physical pass cannot prove packing for a shape reinterpretation
+              // when the caller's constant pitch is expressed symbolically here.
+              // Leave that proof to the pass using the helper's shape variables.
+              const bool requires_packed =
+                  reshape || (!rebind_packed_ && (IsOp(call, "tensor.reinterpret_view") ||
+                                                  (IsOp(call, "tensor.view") && call->args_.size() >= 2)));
+              if (requires_packed &&
+                  ((reshape && source.layout != TensorLayout::ND) ||
                    !AreExprVectorsEqual(source.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
-                                                            tensor->shape_, TensorLayout::ND)))) {
+                                                            tensor->shape_, source.layout)))) {
                 info.sliced = source.sliced;
                 info.consistent = false;
                 info.constraint = source.constraint;
@@ -2117,6 +2155,46 @@ class SliceInputStridesOptimizer {
       return value;
     }
 
+    const Storage* CommonStaticStorage(const std::string& name, size_t index) const {
+      const auto& raw = aiv_bindings_.at(name).at(index).storage;
+      if (!raw.consistent || raw.strides.empty() || HasDynamicPitch(raw.strides) ||
+          (raw.constraint && !constraints_[*raw.constraint].consistent)) {
+        return nullptr;
+      }
+      return &raw;
+    }
+
+    static bool HasDynamicPitch(const std::vector<ExprPtr>& strides) {
+      return std::any_of(strides.begin(), strides.end(),
+                         [](const ExprPtr& pitch) { return !As<ConstInt>(pitch); });
+    }
+
+    // A graph helper has its own shape symbols. Compare packed pitches in that
+    // coordinate system so independent callers agree on the same layout. A
+    // singleton axis contributes no offset, regardless of its stored pitch.
+    void RebindPackedPitch(Storage& info, const TypePtr& actual, const TypePtr& formal) {
+      auto source = AsTensorTypeLike(actual);
+      auto target = AsTensorTypeLike(formal);
+      if (!source || !target || source->shape_.size() != target->shape_.size() ||
+          info.layout != TensorLayout::ND || info.strides.size() != source->shape_.size() ||
+          (target->tensor_view_ &&
+           (!target->tensor_view_->stride.empty() || target->tensor_view_->layout != TensorLayout::ND))) {
+        return;
+      }
+      const auto packed =
+          tensor_view_semantics::BuildLogicalStridesFromLayout(source->shape_, TensorLayout::ND);
+      auto rebound = tensor_view_semantics::BuildLogicalStridesFromLayout(target->shape_, TensorLayout::ND);
+      bool changes_static_pitch = false;
+      for (size_t axis = 0; axis < packed.size(); ++axis) {
+        const auto extent = As<ConstInt>(source->shape_[axis]);
+        if ((!extent || extent->value_ != 1) && !AreExprsEqual(info.strides[axis], packed[axis])) return;
+        changes_static_pitch |=
+            As<ConstInt>(info.strides[axis]) && !AreExprsEqual(info.strides[axis], rebound[axis]);
+      }
+      rebound_static_pitch_ |= changes_static_pitch;
+      info.strides = std::move(rebound);
+    }
+
     void AnalyzeCall(const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span, bool submit) {
       if (!As<GlobalVar>(op)) return;
       auto found = functions_.find(op->name_);
@@ -2130,6 +2208,9 @@ class SliceInputStridesOptimizer {
         for (size_t i = 0; i < params.size() - ctx; ++i) {
           auto value = ArgumentStorage(callee, args, supplied, i, submit);
           if (!value) continue;
+          if (rebind_packed_ && i < supplied) {
+            RebindPackedPitch(*value, args[i]->GetType(), params[i]->GetType());
+          }
           auto [binding, inserted] = bindings.emplace(i, *value);
           if (inserted) {
             binding->second = SeedStorage(*value, span);
@@ -2152,19 +2233,29 @@ class SliceInputStridesOptimizer {
         auto value = ArgumentStorage(callee, args, supplied, i, submit);
         if (!value) continue;
         auto info = *value;
-        if (info.constraint) constraint_roots_.push_back(*info.constraint);
         info.span = &span;
-        auto [binding, inserted] = aiv_bindings_[op->name_].emplace(i, info);
+        const bool nd = info.layout == TensorLayout::ND;
+        const bool dynamic_pitch = HasDynamicPitch(info.strides);
+        auto [entry, inserted] =
+            aiv_bindings_[op->name_].try_emplace(i, AivBinding{info, nd, dynamic_pitch, {}});
+        if (info.constraint) {
+          entry->second.argument_constraints.push_back(*info.constraint);
+        }
         if (!inserted) {
-          binding->second.consistent &=
-              binding->second.layout == info.layout && ShapesMatch(binding->second.strides, info.strides);
-          binding->second = MergeStorage(binding->second, info, span);
+          auto& observed = entry->second;
+          observed.all_nd &= nd;
+          observed.has_dynamic_pitch |= dynamic_pitch;
+          auto& binding = observed.storage;
+          binding.consistent &= binding.layout == info.layout && ShapesMatch(binding.strides, info.strides);
+          binding = MergeStorage(binding, info, span);
         }
       }
     }
 
     const ProgramPtr& program_;
     const std::unordered_set<std::string>& incore_names_;
+    const bool rebind_packed_;
+    bool rebound_static_pitch_ = false;
     std::unordered_map<const Var*, std::vector<ExprPtr>> var_to_parent_shape_;
     std::unordered_set<std::string> conflicted_;
     InputShapeMap result_;
@@ -2177,18 +2268,24 @@ class SliceInputStridesOptimizer {
     std::unordered_set<std::string> analyzing_;
     std::unordered_set<std::string> analyzed_;
     std::string current_function_;
-    std::unordered_map<std::string, std::unordered_map<size_t, Storage>> aiv_bindings_;
+    std::unordered_map<std::string, std::unordered_map<size_t, AivBinding>> aiv_bindings_;
     std::unordered_map<const Function*, std::vector<std::optional<size_t>>> return_params_;
     std::vector<std::unique_ptr<LazyTuple>> lazy_tuples_;
     std::vector<StrideConstraint> constraints_;
-    std::vector<size_t> constraint_roots_;
   };
 
   InputShapeMap Analyze(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
     return_lineage::ScopedTraceCache trace_cache;
-    SliceAnalyzer analyzer(program, incore_names);
+    SliceAnalyzer analyzer(program, incore_names, /*rebind_packed=*/true);
     analyzer.AnalyzeFunctions();
-    return analyzer.result();
+    if (!analyzer.rebound_static_pitch()) return analyzer.result();
+
+    // A helper's symbolic packed stride compares callers in its own scope. If
+    // rebinding erased a constant, check physical strides independently across
+    // the same call sites (including later callers of already visited helpers).
+    SliceAnalyzer physical(program, incore_names, /*rebind_packed=*/false);
+    physical.AnalyzeFunctions();
+    return analyzer.result(&physical);
   }
 
   class InParamSubstitutionMutator : public IRMutator {
