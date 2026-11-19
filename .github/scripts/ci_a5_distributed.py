@@ -30,6 +30,7 @@ from ci_control import (
     pull,
     report,
     sha,
+    verify_tested_base,
 )
 
 COMMAND = "/ci a5-distributed"
@@ -218,30 +219,38 @@ def reopen(repo: str, run: dict[str, Any]) -> None:
             attempt_check(repo, check, str(run["id"]), str(run["run_attempt"]))
 
 
-def pinned_merge(repo: str, number: int) -> tuple[dict[str, Any], str, str, str]:
-    """Wait for GitHub to publish the test merge for the first head/base observed."""
+def pinned_merge(repo: str, number: int, head: str, live_base: str) -> tuple[str, str]:
+    """Return the GitHub test merge and its actual first parent for this request."""
     deadline = time.monotonic() + MERGE_WAIT_SECONDS
-    pinned = None
     while True:
         pr = pull(repo, number)
-        head, base = sha(pr["head"]["sha"]), current_base(repo)
-        if pinned is None:
-            pinned = (head, base)
-        elif pinned != (head, base):
+        if pr["head"]["sha"] != head or current_base(repo) != live_base:
             raise ValueError(f"PR head or base changed while waiting; post {COMMAND} again")
         if pr.get("mergeable") is False:
             raise ValueError("PR has merge conflicts; update the PR branch before retrying")
         if pr.get("mergeable") is True and pr.get("merge_commit_sha"):
             merge = sha(pr["merge_commit_sha"])
             commit = api(f"repos/{repo}/git/commits/{merge}")
-            if [parent["sha"] for parent in commit["parents"]] == [base, head]:
-                return pr, head, base, merge
-        # GitHub can briefly return an old synthetic merge after a base update.
-        # Retry only that eventual consistency; never switch to a newer head.
+            parents = commit["parents"]
+            if len(parents) == 2 and parents[1]["sha"] == head:
+                tested_base = sha(parents[0]["sha"])
+                verify_tested_base(repo, tested_base, live_base, COMMAND)
+                break
+        # GitHub may still be computing the merge for this head.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ValueError(f"GitHub test merge is not ready; retry {COMMAND} later")
         time.sleep(min(MERGE_POLL_SECONDS, remaining))
+    # A push can land while we read the merge parents and compare them with main.
+    latest = pull(repo, number)
+    if (
+        latest["head"]["sha"] != head
+        or latest.get("merge_commit_sha") != merge
+        or latest.get("mergeable") is not True
+        or current_base(repo) != live_base
+    ):
+        raise ValueError(f"PR or its test merge changed during validation. Post {COMMAND} again")
+    return merge, tested_base
 
 
 def prepare(repo: str, event: dict[str, Any]) -> None:
@@ -253,7 +262,8 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
     ):
         return
     number = int(event["issue"]["number"])
-    pr, head, base, merge = pinned_merge(repo, number)
+    pr = pull(repo, number)
+    head, live_base = sha(pr["head"]["sha"]), current_base(repo)
     lint = matching_lint_run(repo, pr, COMMAND)
     if lint["conclusion"] != "success":
         raise ValueError(f"PR lint workflow did not pass; fix or rerun lint before {COMMAND}")
@@ -261,11 +271,12 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
     checks = head_checks(repo, head)
     existing = reusable_request(repo, number, checks, run_id)
     if existing:
+        # Reuse the original check only while this PR still has an eligible merge.
+        pinned_merge(repo, number, head, live_base)
         report(f"Reusing the A5 distributed run for PR #{number} at {head}. [Run]({existing})")
         return
-    latest = pull(repo, number)
-    if latest["head"]["sha"] != head or latest.get("merge_commit_sha") != merge or current_base(repo) != base:
-        raise ValueError(f"PR head or base changed during validation; post {COMMAND} again")
+    # Open the check on the linted head before waiting for the merge so PR Checks
+    # can show admission failures even when no device job starts.
     attempt = os.environ["GITHUB_RUN_ATTEMPT"]
     url = attempt_url(repo, run_id, attempt)
     owner_key = f"a5-pr-{number}:{run_id}"
@@ -291,9 +302,10 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             raise ValueError("GitHub did not return a valid check ID")
         check_id = active_id = str(check["id"])
     try:
+        merge, tested_base = pinned_merge(repo, number, head, live_base)
         output({"checkout_sha": merge, "check_id": check_id})
-    except (OSError, ValueError):
-        # Without these outputs the normal finalizer cannot find the check.
+    except Exception as error:
+        # Without the outputs the result job cannot close this attempt's check.
         try:
             update_check(
                 repo,
@@ -301,13 +313,15 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
                 {
                     "status": "completed",
                     "conclusion": "failure",
-                    **attempt_fields(url, "Could not publish job outputs."),
+                    **attempt_fields(url, f"Could not schedule A5 distributed tests. {error}"),
                 },
             )
         except subprocess.CalledProcessError as cleanup_error:
             report(f"Could not complete check {active_id}: {cleanup_error}")
         raise
-    report(f"A5 distributed tests for PR #{number}: head {head}, base {base}, merge {merge}. [Run]({url})")
+    report(
+        f"A5 distributed tests for PR #{number}: head {head}, base {tested_base}, merge {merge}. [Run]({url})"
+    )
 
 
 def finish(repo: str, needs: dict[str, Any]) -> None:

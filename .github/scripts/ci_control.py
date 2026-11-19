@@ -300,18 +300,24 @@ def verify_result_freshness(repo: str, head: str, tested_base: str) -> None:
     """Apply the admission limit to results while rejecting rewritten base history."""
     base = current_base(repo)
     verify_branch_freshness(repo, head, base)
-    if base != tested_base:
-        comparison = api(f"repos/{repo}/compare/{sha(tested_base)}...{base}?per_page=1")
-        if comparison.get("merge_base_commit", {}).get("sha") != tested_base:
-            raise ValueError("main no longer contains the tested base; rebase and post /ci full again")
-        behind = comparison.get("ahead_by")
-        if type(behind) is not int or behind < 0:
-            raise ValueError("Cannot determine how many commits the tested base is behind main")
-        if behind > REBASE_BEHIND_LIMIT:
-            raise ValueError(
-                f"Tested base is {behind} commits behind main (must be at most {REBASE_BEHIND_LIMIT}); "
-                "rebase onto the latest main, wait for lint, and post /ci full again"
-            )
+    verify_tested_base(repo, tested_base, base, "/ci full")
+
+
+def verify_tested_base(repo: str, tested_base: str, live_base: str, command: str) -> None:
+    """Accept the actual merge parent if it is within the CI window on main."""
+    if tested_base == live_base:
+        return
+    comparison = api(f"repos/{repo}/compare/{sha(tested_base)}...{live_base}?per_page=1")
+    if comparison.get("merge_base_commit", {}).get("sha") != tested_base:
+        raise ValueError(f"main no longer contains the tested base; rebase and post {command} again")
+    behind = comparison.get("ahead_by")
+    if type(behind) is not int or behind < 0:
+        raise ValueError("Cannot determine how many commits the tested base is behind main")
+    if behind > REBASE_BEHIND_LIMIT:
+        raise ValueError(
+            f"Tested base is {behind} commits behind main (must be at most {REBASE_BEHIND_LIMIT}); "
+            f"rebase onto the latest main, wait for lint, and post {command} again"
+        )
 
 
 def unfinished_request_exists(repo: str, title: str, start: datetime, end: datetime) -> bool:
