@@ -84,9 +84,10 @@ def lanemask_gt(span: Span | None = None) -> Call:
 
 
 def bitcast(value: Expr, dtype: DataType, span: Span | None = None) -> Call:
-    """Reinterpret an FP32/INT32 scalar as dtype without changing any bits.
+    """Reinterpret an unpacked numeric scalar as dtype without changing any bits.
 
-    Destination dtype must be FP32 or INT32. NaN payloads and signed zero bits
+    Source and destination must have equal bit width: FP16/BF16/FP32 or
+    8/16/32/64-bit integers. NaN payloads and signed zero bits
     are preserved; this is not a numerical conversion or a storage view.
     """
     return _ir_core.create_op_call("simt.bitcast", [value], {"dtype": dtype}, _get_span_or_capture(span))
@@ -133,7 +134,7 @@ def store(
     )
 
 
-def _vote_call(name: str, predicate: bool | Expr, span: Span) -> Call:
+def _predicate_call(name: str, predicate: bool | Expr, span: Span) -> Call:
     value = _ir_core.ConstBool(predicate, span) if isinstance(predicate, bool) else predicate
     return _ir_core.create_op_call(name, [value], {}, span)
 
@@ -143,7 +144,7 @@ def vote_all(predicate: bool | Expr, span: Span | None = None) -> Call:
 
     Uses the current active lanes; this operation does not provide a memory fence.
     """
-    return _vote_call("simt.vote_all", predicate, _get_span_or_capture(span))
+    return _predicate_call("simt.vote_all", predicate, _get_span_or_capture(span))
 
 
 def vote_any(predicate: bool | Expr, span: Span | None = None) -> Call:
@@ -151,7 +152,7 @@ def vote_any(predicate: bool | Expr, span: Span | None = None) -> Call:
 
     Uses the current active lanes; this operation does not provide a memory fence.
     """
-    return _vote_call("simt.vote_any", predicate, _get_span_or_capture(span))
+    return _predicate_call("simt.vote_any", predicate, _get_span_or_capture(span))
 
 
 def vote_uni(predicate: bool | Expr, span: Span | None = None) -> Call:
@@ -159,7 +160,7 @@ def vote_uni(predicate: bool | Expr, span: Span | None = None) -> Call:
 
     Uses the current active lanes; this operation does not provide a memory fence.
     """
-    return _vote_call("simt.vote_uni", predicate, _get_span_or_capture(span))
+    return _predicate_call("simt.vote_uni", predicate, _get_span_or_capture(span))
 
 
 def vote_ballot(predicate: bool | Expr, span: Span | None = None) -> Call:
@@ -167,7 +168,7 @@ def vote_ballot(predicate: bool | Expr, span: Span | None = None) -> Call:
 
     Uses the current active lanes; this operation does not provide a memory fence.
     """
-    return _vote_call("simt.vote_ballot", predicate, _get_span_or_capture(span))
+    return _predicate_call("simt.vote_ballot", predicate, _get_span_or_capture(span))
 
 
 def _lane_control(value: int | Expr, span: Span) -> Expr:
@@ -180,7 +181,7 @@ def _lane_control(value: int | Expr, span: Span) -> Expr:
 def shuffle_idx(
     value: Expr, index: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
 ) -> Call:
-    """Read an INT32 or FP32 value from a subgroup-relative lane index.
+    """Read an FP16/FP32 or 32/64-bit integer value from a subgroup-relative lane index.
 
     Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
     Out-of-window sources return the caller value; inactive sources are undefined.
@@ -198,7 +199,7 @@ def shuffle_idx(
 def shuffle_up(
     value: Expr, offset: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
 ) -> Call:
-    """Read an INT32 or FP32 value from a lower lane in the subgroup.
+    """Read an FP16/FP32 or 32/64-bit integer value from a lower lane in the subgroup.
 
     Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
     Out-of-window sources return the caller value; inactive sources are undefined.
@@ -216,7 +217,7 @@ def shuffle_up(
 def shuffle_down(
     value: Expr, offset: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
 ) -> Call:
-    """Read an INT32 or FP32 value from a higher lane in the subgroup.
+    """Read an FP16/FP32 or 32/64-bit integer value from a higher lane in the subgroup.
 
     Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
     Out-of-window sources return the caller value; inactive sources are undefined.
@@ -234,7 +235,7 @@ def shuffle_down(
 def shuffle_bfly(
     value: Expr, mask: int | Expr, *, width: int = 32, bound: int | None = None, span: Span | None = None
 ) -> Call:
-    """Read an INT32 or FP32 value from the XOR-selected lane in the subgroup.
+    """Read an FP16/FP32 or 32/64-bit integer value from the XOR-selected lane in the subgroup.
 
     Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
     Out-of-window sources return the caller value; inactive sources are undefined.
@@ -250,7 +251,7 @@ def shuffle_bfly(
 
 
 def redux_add(value: Expr, span: Span | None = None) -> Call:
-    """Return the sum of active-lane INT32 or FP32 values to each active lane.
+    """Return the sum of active-lane FP16/FP32 or 32-bit integer values to each active lane.
 
     The result retains the input dtype. INT32 sums wrap at 32 bits.
     FP32 reductions follow the target arithmetic order and special-value rules.
@@ -260,9 +261,10 @@ def redux_add(value: Expr, span: Span | None = None) -> Call:
 
 
 def redux_min(value: Expr, span: Span | None = None, *, unsigned: bool = False) -> Call:
-    """Return the minimum of active-lane INT32 or FP32 values to each active lane.
+    """Return the minimum of active-lane FP16/FP32 or 32-bit integer values to each active lane.
 
     The result retains the input dtype. unsigned=True compares INT32 bit carriers as unsigned.
+    UINT32 inputs always use unsigned comparison.
     FP32 reductions follow the target arithmetic order and special-value rules.
     This operation does not provide a memory fence.
     """
@@ -272,9 +274,10 @@ def redux_min(value: Expr, span: Span | None = None, *, unsigned: bool = False) 
 
 
 def redux_max(value: Expr, span: Span | None = None, *, unsigned: bool = False) -> Call:
-    """Return the maximum of active-lane INT32 or FP32 values to each active lane.
+    """Return the maximum of active-lane FP16/FP32 or 32-bit integer values to each active lane.
 
     The result retains the input dtype. unsigned=True compares INT32 bit carriers as unsigned.
+    UINT32 inputs always use unsigned comparison.
     FP32 reductions follow the target arithmetic order and special-value rules.
     This operation does not provide a memory fence.
     """
@@ -291,9 +294,12 @@ def atomic_sub(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically subtract from one initialized INT32/FP32 element and return its old value.
+    """Atomically subtract from an initialized element and return its old value.
+
+    Supports 32/64-bit integers and FP16/BF16/FP32; 64-bit atomics require GM.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -315,9 +321,10 @@ def atomic_and(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically apply bitwise AND to one initialized INT32 element and return its old value.
+    """Atomically apply bitwise AND to one initialized 32/64-bit integer element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -339,9 +346,10 @@ def atomic_or(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically apply bitwise OR to one initialized INT32 element and return its old value.
+    """Atomically apply bitwise OR to one initialized 32/64-bit integer element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -363,9 +371,10 @@ def atomic_xor(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically apply bitwise XOR to one initialized INT32 element and return its old value.
+    """Atomically apply bitwise XOR to one initialized 32/64-bit integer element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -387,9 +396,10 @@ def atomic_add(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically add one initialized INT32/FP32 element and return its old value.
+    """Atomically add one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -412,9 +422,10 @@ def atomic_min(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically min one initialized INT32/FP32 element and return its old value.
+    """Atomically min one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
@@ -440,9 +451,10 @@ def atomic_max(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically max one initialized INT32/FP32 element and return its old value.
+    """Atomically max one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
@@ -467,9 +479,10 @@ def atomic_exch(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically exch one initialized INT32/FP32 element and return its old value.
+    """Atomically exch one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -492,9 +505,10 @@ def atomic_cas(
     l2cache: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Atomically cas one initialized INT32/FP32 element and return its old value.
+    """Atomically cas one initialized 32/64-bit integer or FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     Comparison is bitwise, including FP32 NaN payloads and signed zeros.
@@ -671,27 +685,123 @@ def mulhi(lhs: Expr, rhs: Expr, *, unsigned: bool = False, span: Span | None = N
     )
 
 
-def ftoi(value: Expr, *, rounding: str = "z", unsigned: bool = False, span: Span | None = None) -> Call:
-    """Convert FP32 to a saturated INT32 bit carrier with explicit rounding.
+def ftoi(
+    value: Expr,
+    *,
+    dtype: DataType | None = None,
+    rounding: str = "z",
+    unsigned: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Convert FP16/BF16/FP32 to a saturated 32/64-bit integer with explicit rounding.
 
-    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    The default destination is INT32. A 64-bit destination requires FP32 input.
     Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
-    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    z = toward zero. unsigned interprets signed integer carriers as unsigned; unsigned dtypes
+    always use unsigned conversion.
     Saturation is mandatory: out-of-range values clamp to the integer limits.
     NaN conversion follows the target contract; NaN payloads are not preserved.
     """
     return _ir_core.create_op_call(
-        "simt.ftoi", [value], {"rounding": rounding, "unsigned": unsigned}, _get_span_or_capture(span)
+        "simt.ftoi",
+        [value],
+        {"rounding": rounding, "unsigned": unsigned, **({"dtype": dtype} if dtype is not None else {})},
+        _get_span_or_capture(span),
     )
 
 
-def itof(value: Expr, *, rounding: str = "r", unsigned: bool = False, span: Span | None = None) -> Call:
-    """Convert an INT32 bit carrier to FP32 with explicit rounding.
+def itof(
+    value: Expr,
+    *,
+    dtype: DataType | None = None,
+    rounding: str = "r",
+    unsigned: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Convert a 32/64-bit integer to FP16/BF16/FP32 with explicit rounding.
 
-    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    The default destination is FP32. A 64-bit source requires FP32 output.
     Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
-    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    z = toward zero. unsigned interprets signed integer carriers as unsigned; unsigned dtypes
+    always use unsigned conversion.
     """
     return _ir_core.create_op_call(
-        "simt.itof", [value], {"rounding": rounding, "unsigned": unsigned}, _get_span_or_capture(span)
+        "simt.itof",
+        [value],
+        {"rounding": rounding, "unsigned": unsigned, **({"dtype": dtype} if dtype is not None else {})},
+        _get_span_or_capture(span),
+    )
+
+
+def veccore_id(span: Span | None = None) -> Call:
+    """Return the target vector core identifier as an INT32 scalar."""
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("simt.veccore_id", [], {}, span)
+
+
+def trap(span: Span | None = None) -> Call:
+    """Request device termination at runtime.
+
+    Termination and host error reporting depend on the runtime; use explicit
+    control flow to guard unsafe accesses. This is not a compile-time assertion.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("simt.trap", [], {}, span)
+
+
+def assert_(cond: bool | Expr, span: Span | None = None) -> Call:
+    """Request a device trap when the BOOL runtime predicate is false.
+
+    Termination and host error reporting depend on the runtime; use explicit
+    control flow to guard unsafe accesses. This is not a compile-time assertion.
+    """
+    span = _get_span_or_capture(span)
+    return _predicate_call("simt.assert_", cond, span)
+
+
+def div(lhs: Expr, rhs: Expr, *, precision: str = "intrinsic", span: Span | None = None) -> Call:
+    """Divide FP32 operands with explicit target precision.
+
+    precision is intrinsic or precision_0ulp_ftz_true. The latter requests
+    the target 0-ULP division mode with flush-to-zero behavior on A5.
+    Ordinary / is unchanged; exceptional values follow target semantics.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("simt.div", [lhs, rhs], {"precision": precision}, span)
+
+
+def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Return the FP32 remainder using a quotient truncated toward zero.
+
+    This follows fmod-style semantics, including the dividend sign; it is
+    distinct from Python floor modulo. Exceptional values follow the target.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("simt.rem", [lhs, rhs], {}, span)
+
+
+def mul_i32toi64(lhs: Expr, rhs: Expr, *, unsigned: bool = False, span: Span | None = None) -> Call:
+    """Return the widened INT32 product as an INT64 bit carrier.
+
+    unsigned=True zero-extends the two INT32 bit carriers before multiplication;
+    otherwise operands are sign-extended. The result retains all 64 product bits.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("simt.mul_i32toi64", [lhs, rhs], {"unsigned": unsigned}, span)
+
+
+def ftof(
+    value: Expr, dtype: DataType, *, rounding: str = "r", saturate: bool = False, span: Span | None = None
+) -> Call:
+    """Convert between distinct FP16/BF16/FP32 formats with explicit rounding.
+
+    Rounding r/a/f/c/z is supported for every pair; o (round to odd) is
+    supported only for FP32 to FP16. saturate requests finite overflow clamping.
+    NaN and signed-zero handling follows the target conversion contract.
+    """
+    return _ir_core.create_op_call(
+        "simt.ftof",
+        [value],
+        {"dtype": dtype, "rounding": rounding, "saturate": saturate},
+        _get_span_or_capture(span),
     )

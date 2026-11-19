@@ -878,7 +878,7 @@ def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("entry_name", ["interface_entry", "subtraction_entry"])
+@pytest.mark.parametrize("entry_name", ["interface_entry", "subtraction_entry", "extended_entry"])
 def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entry_name):
     binary = find_ptoas_binary()
     if binary is None:
@@ -900,9 +900,22 @@ def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entr
             assert text.count(" unsigned :") == 6
             assert "bound = 3 : i32" in text and "bound = 11 : i32" in text
             assert "pto.bitcast" in text
-        else:
+        elif entry_name == "subtraction_entry":
             assert text.count("pto.atomic_sub ") == 4
             assert "l2cache(nmfv)" in text
+        else:
+            for operation in (
+                "divf",
+                "remf",
+                "ftof",
+                "ftoi",
+                "itof",
+                "mul_i32toi64",
+                "assert",
+                "get_veccoreid",
+            ):
+                assert f"pto.{operation}" in text
+            assert "precision_0ulp_ftz_true" in text
         output = tmp_path / "interfaces.ll"
         result = subprocess.run(
             [

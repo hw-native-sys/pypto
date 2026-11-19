@@ -10,6 +10,7 @@
 """DSL operator dispatch, argument conversion and buffer metadata."""
 
 import ast
+import inspect
 from typing import Any, TypeGuard, cast
 
 from pypto.ir import op as ir_op
@@ -120,6 +121,9 @@ class OpParser:
             "fma",
             "prmt",
             "mulhi",
+            "mul_i32toi64",
+            "div",
+            "rem",
             "ftoi",
             "itof",
         }:
@@ -134,6 +138,9 @@ class OpParser:
             )
         if name in {
             "bitcast",
+            "ftof",
+            "trap",
+            "assert_",
             "atomic_sub",
             "atomic_and",
             "atomic_or",
@@ -165,7 +172,8 @@ class OpParser:
                 "pl.simt",
                 name,
                 call,
-                preserve_omitted_kwargs=name in {"atomic_min", "atomic_max", "redux_min", "redux_max"},
+                preserve_omitted_kwargs=name
+                in {"atomic_min", "atomic_max", "redux_min", "redux_max", "ftof"},
             )
         kwargs = self.parse_op_kwargs(call)
         args = call.args
@@ -755,7 +763,9 @@ class OpParser:
                 # DSL wrappers materialize conversion defaults, but raw IR may
                 # intentionally omit them. Keep only attributes present in the
                 # source so printing/reparsing preserves structural identity.
-                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in kwargs}
+                # Attributes such as ftof's dtype can also be passed positionally.
+                supplied = inspect.signature(op_func).bind(*args, **kwargs).arguments
+                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in supplied}
                 if len(explicit_kwargs) != len(result.kwargs):
                     result = ir.create_op_call(result.op.name, result.args, explicit_kwargs, span)
             return self.attrs.attach_op_attrs(result, attrs)

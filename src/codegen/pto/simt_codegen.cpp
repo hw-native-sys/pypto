@@ -47,14 +47,15 @@ std::string Join(const std::vector<std::string>& values) {
   return result;
 }
 
-// Keep the initial executable scalar subset explicit. In particular, accepting
-// unsigned types here would reuse signed comparisons in the ordinary emitter.
-// Storage support alone does not establish arithmetic/conversion semantics.
+// Scalar storage and arithmetic use the same unpacked carrier subset. Operator
+// schemas impose their narrower restrictions (for example no BF16 shuffle).
 void CheckScalar(DataType dtype, const Span& span) {
-  CHECK_SPAN(dtype == DataType::FP32 || dtype == DataType::INT32 || dtype == DataType::INDEX ||
+  CHECK_SPAN(dtype == DataType::FP32 || dtype == DataType::FP16 || dtype == DataType::BF16 ||
+                 (dtype.IsInt() && dtype.GetBit() >= 8 && dtype.GetBit() <= 64) || dtype == DataType::INDEX ||
                  dtype == DataType::BOOL,
              span)
-      << "SIMT scalar lowering currently supports FP32, INT32, INDEX and BOOL; got " << dtype.ToString();
+      << "SIMT scalar lowering supports FP16/BF16/FP32, 8/16/32/64-bit integers, INDEX and BOOL; got "
+      << dtype.ToString();
 }
 
 class ScalarSubsetChecker : public IRVisitor {
@@ -139,8 +140,9 @@ std::string PTOCodegen::SimtParameterType(const ir::TypePtr& type) {
   const auto tensor = ir::AsTensorTypeLike(type);
   INTERNAL_CHECK(tile || tensor) << "Internal error: SIMT ABI requires scalar or borrowed storage";
   const auto dtype = tile ? tile->dtype_ : tensor->dtype_;
-  CHECK(dtype == DataType::FP32 || dtype == DataType::INT32)
-      << "SIMT storage lowering currently supports FP32 and INT32; got " << dtype.ToString();
+  CheckScalar(dtype, ir::Span::unknown());
+  CHECK(dtype != DataType::INDEX && dtype != DataType::BOOL)
+      << "SIMT storage requires a byte-addressable scalar dtype";
   if (tile) {
     CHECK(tile->memory_space_ == ir::MemorySpace::Vec) << "SIMT Tile lowering requires Vec (UB) storage";
     const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
@@ -366,6 +368,29 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
   const auto* entry = ir::LookupOpEntry(call->op_);
   if (!entry || entry->GetOpCategory() != "SimtOp") return false;
   INTERNAL_CHECK_SPAN(inside_simt_function_, call->span_) << "Internal error: SIMT op outside helper";
+  // Public unsigned values retain uiN in the helper ABI. Native SIMT arithmetic
+  // ops require signless iN, with signedness selected separately. These bridges
+  // preserve bits and never perform a numerical cast.
+  auto native_type = [this](const ir::ExprPtr& value) {
+    auto type = GetExprTypeAnnotation(value);
+    return ir::GetScalarDtype(value).IsUnsignedInt() ? type.substr(1) : type;
+  };
+  auto native_operand = [this, &native_type](const ir::ExprPtr& value) {
+    const auto source = GetExprAsCode(value);
+    if (!ir::GetScalarDtype(value).IsUnsignedInt()) return source;
+    const auto result = NewTemp();
+    Emit(result + " = builtin.unrealized_conversion_cast " + source + " : " + GetExprTypeAnnotation(value) +
+         " to " + native_type(value));
+    return result;
+  };
+  auto bind_result = [this, &call, &native_type](const std::string& value) {
+    fs_.current_expr_value = value;
+    if (!ir::GetScalarDtype(call).IsUnsignedInt()) return;
+    const auto result = NewTemp();
+    Emit(result + " = builtin.unrealized_conversion_cast " + value + " : " + native_type(call) + " to " +
+         GetExprTypeAnnotation(call));
+    fs_.current_expr_value = result;
+  };
   const bool store = ir::IsOp(call, "simt.store");
   const bool atomic =
       entry->HasDeclaredArgEffect(0) && entry->GetArgEffect(0, call->kwargs_) == ir::ArgEffect::ReadWrite;
@@ -393,15 +418,23 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
       const auto ptr_body = "<" + element + (gm ? ", gm>" : ", ub>");
       Emit(address + " = pto.addptr " + pointer + ", " + offset + " : " + ptr_body + " -> " + ptr_body);
       auto operands = address;
-      for (size_t i = 2; i < call->args_.size(); ++i) operands += ", " + GetExprAsCode(call->args_[i]);
+      auto atomic_type = type;
+      const auto atomic_element = native_type(call);
+      if (shaped->dtype_.IsUnsignedInt()) {
+        atomic_type = "!pto.ptr<" + atomic_element + (gm ? ", gm>" : ", ub>");
+        operands = NewTemp();
+        Emit(operands + " = pto.castptr " + address + " : " + type + " -> " + atomic_type);
+      }
+      for (size_t i = 2; i < call->args_.size(); ++i) operands += ", " + native_operand(call->args_[i]);
       if ((ir::IsOp(call, "simt.atomic_min") || ir::IsOp(call, "simt.atomic_max")) &&
-          shaped->dtype_ == DataType::INT32) {
-        policy += call->GetKwarg<bool>("unsigned", false) ? " unsigned" : " signed";
+          shaped->dtype_.IsInt()) {
+        policy += call->GetKwarg<bool>("unsigned", false) || shaped->dtype_.IsUnsignedInt() ? " unsigned"
+                                                                                            : " signed";
       }
       const auto result = NewTemp();
-      Emit(result + " = pto." + call->op_->name_.substr(5) + " " + operands + policy + " : " + type + ", " +
-           element + " -> " + element);
-      fs_.current_expr_value = result;
+      Emit(result + " = pto." + call->op_->name_.substr(5) + " " + operands + policy + " : " + atomic_type +
+           ", " + atomic_element + " -> " + atomic_element);
+      bind_result(result);
     } else if (store) {
       const auto value = GetExprAsCode(call->args_[2]);
       Emit(std::string(gm ? "pto.stg " : "pto.store ") + value + ", " + pointer + "[" + offset + "]" +
@@ -416,8 +449,14 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     return true;
   }
   if (ir::IsOp(call, "simt.syncthreads") || ir::IsOp(call, "simt.threadfence") ||
-      ir::IsOp(call, "simt.threadfence_block")) {
+      ir::IsOp(call, "simt.threadfence_block") || ir::IsOp(call, "simt.trap")) {
     Emit("pto." + call->op_->name_.substr(5));
+    fs_.current_expr_value.clear();
+    return true;
+  }
+  if (ir::IsOp(call, "simt.assert_")) {
+    const auto predicate = GetExprAsCode(call->args_[0]);
+    Emit("pto.assert " + predicate + " : i1");
     fs_.current_expr_value.clear();
     return true;
   }
@@ -430,16 +469,29 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     size_t arity;
   };
   static const MathOp math_ops[] = {
-      {"simt.abs", "absf", true, 1},         {"simt.min", "minf", true, 2},
-      {"simt.max", "maxf", true, 2},         {"simt.exp", "exp", false, 1},
-      {"simt.log", "log", false, 1},         {"simt.sqrt", "sqrt", false, 1},
-      {"simt.sin", "sin", false, 1},         {"simt.cos", "cos", false, 1},
-      {"simt.ceil", "ceil", false, 1},       {"simt.floor", "floor", false, 1},
-      {"simt.rint", "rint", false, 1},       {"simt.round", "round", false, 1},
-      {"simt.pow", "pow", false, 2},         {"simt.fma", "fma", false, 3},
-      {"simt.prmt", "prmt", false, 3},       {"simt.mulhi", "mulhi", false, 2},
-      {"simt.ftoi", "ftoi", false, 1},       {"simt.itof", "itof", false, 1},
+      {"simt.abs", "absf", true, 1},
+      {"simt.min", "minf", true, 2},
+      {"simt.max", "maxf", true, 2},
+      {"simt.exp", "exp", false, 1},
+      {"simt.log", "log", false, 1},
+      {"simt.sqrt", "sqrt", false, 1},
+      {"simt.sin", "sin", false, 1},
+      {"simt.cos", "cos", false, 1},
+      {"simt.ceil", "ceil", false, 1},
+      {"simt.floor", "floor", false, 1},
+      {"simt.rint", "rint", false, 1},
+      {"simt.round", "round", false, 1},
+      {"simt.pow", "pow", false, 2},
+      {"simt.fma", "fma", false, 3},
+      {"simt.prmt", "prmt", false, 3},
+      {"simt.mulhi", "mulhi", false, 2},
+      {"simt.ftoi", "ftoi", false, 1},
+      {"simt.itof", "itof", false, 1},
       {"simt.bitcast", "bitcast", false, 1},
+      {"simt.ftof", "ftof", false, 1},
+      {"simt.div", "divf", true, 2},
+      {"simt.rem", "remf", true, 2},
+      {"simt.mul_i32toi64", "mul_i32toi64", false, 2},
   };
   for (const auto& spec : math_ops) {
     if (!ir::IsOp(call, spec.name)) continue;
@@ -448,26 +500,32 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     std::vector<std::string> operands;
     std::vector<std::string> types;
     for (const auto& arg : call->args_) {
-      operands.push_back(GetExprAsCode(arg));
-      types.push_back(GetExprTypeAnnotation(arg));
+      operands.push_back(native_operand(arg));
+      types.push_back(native_type(arg));
     }
     std::string attributes;
     const bool ftoi = ir::IsOp(call, "simt.ftoi");
     const bool itof = ir::IsOp(call, "simt.itof");
-    if (ftoi || itof || ir::IsOp(call, "simt.mulhi")) {
-      attributes = call->GetKwarg<bool>("unsigned", false) ? " unsigned" : " signed";
+    const bool ftof = ir::IsOp(call, "simt.ftof");
+    if (ftoi || itof || ir::IsOp(call, "simt.mulhi") || ir::IsOp(call, "simt.mul_i32toi64")) {
+      const auto integer_type = ir::GetScalarDtype(ftoi ? ir::ExprPtr(call) : call->args_[0]);
+      attributes =
+          call->GetKwarg<bool>("unsigned", false) || integer_type.IsUnsignedInt() ? " unsigned" : " signed";
     }
-    if (ftoi || itof) {
+    if (ir::IsOp(call, "simt.div")) {
+      attributes = " {precisionType = #pto<div_precision " +
+                   call->GetKwarg<std::string>("precision", "intrinsic") + ">}";
+    }
+    if (ftoi || itof || ftof) {
       attributes += " round(" + call->GetKwarg<std::string>("rounding", ftoi ? "z" : "r") + ")";
       // PTOAS requires saturation for FP32 -> integer; ordinary pl.cast keeps
       // its existing contract and does not use this explicit conversion API.
-      if (ftoi) attributes += " sat";
+      if (ftoi || (ftof && call->GetKwarg<bool>("saturate", false))) attributes += " sat";
     }
     const auto result = NewTemp();
-    const auto signature =
-        spec.same_type_syntax ? types.front() : Join(types) + " -> " + GetExprTypeAnnotation(call);
+    const auto signature = spec.same_type_syntax ? types.front() : Join(types) + " -> " + native_type(call);
     Emit(result + " = pto." + spec.native + " " + Join(operands) + attributes + " : " + signature);
-    fs_.current_expr_value = result;
+    bind_result(result);
     return true;
   }
   // Keep the collective at its original control-flow location: its implicit
@@ -481,9 +539,9 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
   if (vote || shuffle || redux) {
     INTERNAL_CHECK_SPAN(call->args_.size() == (shuffle ? 2 : 1), call->span_)
         << "Internal error: SIMT collective arity";
-    const auto input = GetExprAsCode(call->args_[0]);
-    const auto input_type = GetExprTypeAnnotation(call->args_[0]);
-    const auto output_type = GetExprTypeAnnotation(call);
+    const auto input = native_operand(call->args_[0]);
+    const auto input_type = native_type(call->args_[0]);
+    const auto output_type = native_type(call);
     auto operation = "pto." + call->op_->name_.substr(5);
     auto operands = input;
     std::string attributes;
@@ -499,20 +557,24 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
       }
       attributes += "}";
     } else if (redux) {
-      const bool integer = ir::As<ir::ScalarType>(call->GetType())->dtype_ == DataType::INT32;
+      const auto dtype = ir::GetScalarDtype(call);
+      const bool integer = dtype.IsInt();
       operation += integer ? "i" : "f";
       if (integer && !ir::IsOp(call, "simt.redux_add")) {
-        attributes = call->GetKwarg<bool>("unsigned", false) ? " unsigned" : " signed";
+        attributes =
+            call->GetKwarg<bool>("unsigned", false) || dtype.IsUnsignedInt() ? " unsigned" : " signed";
       }
     }
     const auto result = NewTemp();
     Emit(result + " = " + operation + " " + operands + attributes + " : " + types + " -> " + output_type);
-    fs_.current_expr_value = result;
+    bind_result(result);
     return true;
   }
   std::string operation;
   if (ir::IsOp(call, "simt.lane_id")) {
     operation = "pto.get_laneid";
+  } else if (ir::IsOp(call, "simt.veccore_id")) {
+    operation = "pto.get_veccoreid";
   } else if (ir::IsOp(call, "simt.lanemask_eq") || ir::IsOp(call, "simt.lanemask_le") ||
              ir::IsOp(call, "simt.lanemask_lt") || ir::IsOp(call, "simt.lanemask_ge") ||
              ir::IsOp(call, "simt.lanemask_gt")) {

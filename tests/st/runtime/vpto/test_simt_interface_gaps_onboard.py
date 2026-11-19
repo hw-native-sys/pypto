@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""First-batch SIMT interface acceptance on A5, including bit-level boundaries."""
+"""SIMT interface acceptance on A5, including scalar types and bit-level boundaries."""
 
 import json
 import os
@@ -123,6 +123,54 @@ def subtraction_entry(
     return subtraction_kernel(state, values, old, copied)
 
 
+@pl.jit.aiv
+def extended_kernel(
+    values: pl.Tensor[[1, 32], pl.FP32],
+    output: pl.InOut[pl.Tensor[[5, 32], pl.FP32]],
+    half: pl.InOut[pl.Tensor[[1, 32], pl.FP16]],
+    bfloat: pl.InOut[pl.Tensor[[1, 32], pl.BF16]],
+    wide: pl.InOut[pl.Tensor[[1, 32], pl.INT64]],
+    unsigned: pl.InOut[pl.Tensor[[1, 32], pl.UINT32]],
+):
+    with pl.simt_scope(dims=(32, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        x = pl.simt.load(values, (0, tid))
+        divisor = pl.const(3.0, pl.FP32)
+        quotient = pl.simt.div(x, divisor, precision="precision_0ulp_ftz_true")
+        remainder = pl.simt.rem(x, divisor)
+        h = pl.simt.ftof(x, pl.FP16)
+        b = pl.simt.ftof(x, pl.BF16)
+        integer = pl.simt.ftoi(x, dtype=pl.INT64)
+        pl.simt.store(half, (0, tid), h)
+        pl.simt.store(bfloat, (0, tid), b)
+        pl.simt.store(output, (0, tid), quotient)
+        pl.simt.store(output, (1, tid), remainder)
+        pl.simt.store(output, (2, tid), pl.simt.ftof(h, pl.FP32))
+        pl.simt.store(output, (3, tid), pl.simt.ftof(b, pl.FP32))
+        pl.simt.store(output, (4, tid), pl.simt.itof(integer))
+        product = pl.simt.mul_i32toi64(tid - pl.const(16, pl.INT32), pl.const(2147483647, pl.INT32))
+        pl.simt.store(wide, (0, tid), product)
+        u = pl.simt.load(unsigned, (0, tid))
+        shifted = u >> pl.const(1, pl.UINT32)
+        pl.simt.atomic_max(unsigned, (0, tid), shifted)
+        maximum = pl.simt.atomic_exch(unsigned, (0, tid), shifted)
+        pl.simt.store(unsigned, (0, tid), maximum >> pl.const(1, pl.UINT32))
+        pl.simt.assert_(pl.simt.veccore_id() >= 0)
+    return output, half, bfloat, wide, unsigned
+
+
+@pl.jit
+def extended_entry(
+    values: pl.Tensor[[1, 32], pl.FP32],
+    output: pl.InOut[pl.Tensor[[5, 32], pl.FP32]],
+    half: pl.InOut[pl.Tensor[[1, 32], pl.FP16]],
+    bfloat: pl.InOut[pl.Tensor[[1, 32], pl.BF16]],
+    wide: pl.InOut[pl.Tensor[[1, 32], pl.INT64]],
+    unsigned: pl.InOut[pl.Tensor[[1, 32], pl.UINT32]],
+):
+    return extended_kernel(values, output, half, bfloat, wide, unsigned)
+
+
 def compile_case(directory: Path, *, entry=interface_entry):
     return entry.compile(
         config=RunConfig(
@@ -138,8 +186,10 @@ def compile_case(directory: Path, *, entry=interface_entry):
 def acceptance(output: Path, device: int | None):
     integer = compile_case(output / "integer")
     floating = compile_case(output / "floating", entry=subtraction_entry)
+    extended = compile_case(output / "extended", entry=extended_entry)
     integer.load()
     floating.load()
+    extended.load()
     checks = 0
     if device is not None:
         config = RunConfig(
@@ -148,6 +198,7 @@ def acceptance(output: Path, device: int | None):
         with runtime.ChipWorker(config=config, runtime=integer.runtime_name) as worker:
             handle = worker.register(integer)
             float_handle = worker.register(floating)
+            extended_handle = worker.register(extended)
             # Include bit 31, signed extrema, signed zero, infinities and NaN payloads.
             initial = torch.tensor(
                 [-(1 << 31), (1 << 31) - 1, -1, 0, 1, 17, -17, 99], dtype=torch.int32
@@ -210,7 +261,35 @@ def acceptance(output: Path, device: int | None):
             torch.testing.assert_close(old_f, initial_f.repeat(2, 1), rtol=0, atol=0)
             for actual in (state_f, copied_f):
                 torch.testing.assert_close(actual, initial_f - 2 * updates_f, rtol=0, atol=0)
-            checks = 7
+            inputs = torch.tensor([-7.5, -1.5, -0.0, 0.0, 1.5, 7.5, 0.1, 32752.0]).repeat(4).reshape(1, 32)
+            extended_output = torch.zeros((5, 32), dtype=torch.float32)
+            half = torch.zeros((1, 32), dtype=torch.float16)
+            bfloat = torch.zeros((1, 32), dtype=torch.bfloat16)
+            wide = torch.zeros((1, 32), dtype=torch.int64)
+            unsigned_seed = (
+                torch.tensor([0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 17, 99, 256], dtype=torch.int64)
+                .repeat(4)
+                .reshape(1, 32)
+            )
+            unsigned = unsigned_seed.to(torch.uint32)
+            extended_handle(inputs, extended_output, half, bfloat, wide, unsigned)
+            expected_extended = torch.cat(
+                [
+                    inputs / 3,
+                    torch.fmod(inputs, 3),
+                    inputs.half().float(),
+                    inputs.bfloat16().float(),
+                    torch.trunc(inputs),
+                ]
+            )
+            torch.testing.assert_close(extended_output, expected_extended, rtol=0, atol=0)
+            torch.testing.assert_close(half, inputs.half(), rtol=0, atol=0)
+            torch.testing.assert_close(bfloat, inputs.bfloat16(), rtol=0, atol=0)
+            torch.testing.assert_close(
+                wide, (torch.arange(32, dtype=torch.int64) - 16).reshape(1, 32) * 2147483647, rtol=0, atol=0
+            )
+            torch.testing.assert_close(unsigned.to(torch.int64), unsigned_seed >> 1, rtol=0, atol=0)
+            checks = 12
     (output / "result.json").write_text(json.dumps({"checks": checks}))
 
 

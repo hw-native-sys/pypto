@@ -40,18 +40,44 @@
 当前主机的 NPU 探测返回 DCMI -8005。新增接口的设备证据仍待完成，
 包括原子竞争、分歧中的物理 lane 掩码、FP32 减法特殊值及全部 shuffle 窗口组合。
 
+## 第二批：标量类型与显式操作
+
+标量存储 ABI 扩展为 FP16/BF16/FP32 和 8/16/32/64 位有符号、无符号整数。
+这不表示每条指令都接受全部类型。无符号值在原生 builtin 边界使用保留位模式的
+signless 载体，并显式选择无符号解释。
+
+| 类别 | 支持的非 packed 类型 | 限制 |
+| ---- | -------------------- | ---- |
+| GM/UB load/store、标量捕获 | FP16/BF16/FP32；8/16/32/64 位有符号/无符号整数 | BOOL/INDEX 仅用于计算；不支持 FP8 存储 |
+| `bitcast` | 同上 | 源与目标位宽相同 |
+| `shuffle_*` | FP16/FP32；32/64 位有符号/无符号整数 | 不支持 BF16；lane 控制仍为 INT32 |
+| `redux_*` | FP16/FP32；32 位有符号/无符号整数 | 不支持 BF16 和 64 位整数 |
+| 原子 add/sub/min/max/exch | FP16/BF16/FP32；32/64 位有符号/无符号整数 | 64 位原子仅支持 GM |
+| 原子 and/or/xor | 32/64 位有符号/无符号整数 | 64 位原子仅支持 GM |
+| 原子 CAS | FP32；32/64 位有符号/无符号整数 | 不支持 FP16/BF16；64 位仅支持 GM |
+| `ftof` | FP16/BF16/FP32 间不同类型对 | r/a/f/c/z；仅 FP32→FP16 支持 o；可选饱和 |
+| `ftoi` | FP16/BF16/FP32→有符号/无符号 INT32；FP32→有符号/无符号 INT64 | r/a/f/c/z；强制饱和 |
+| `itof` | 有符号/无符号 INT32→FP16/BF16/FP32；有符号/无符号 INT64→FP32 | r/a/f/c/z |
+| 既有显式标量数学 | FP32；`prmt`/`mulhi` 使用 INT32 位载体 | 不统一放开半精度数学 |
+| `mul_i32toi64` | INT32 输入、INT64 输出 | 可选择无符号解释 INT32 位载体 |
+| `div`、`rem` | FP32 | 显式精度和截断余数；普通 `/`、`%` 不变 |
+| `veccore_id` | INT32 输出 | 目标 vector core ID |
+| `trap`、`assert_` | Void；assert 要求 BOOL | 依赖 runtime 的诊断，不作为安全访存保护 |
+
+新增测试位于 `tests/ut/codegen/test_simt_codegen.py`，覆盖存储、原子/协作和转换对的
+原生 LLVM 导出。公共 JIT 验收用例还覆盖 FP16/BF16/INT64/UINT32 ABI、无符号最高位、
+显式除法/余数和拓宽乘法。硬件数值验收仍待完成，编译成功不等于数值验证通过。
+独立 worktree C++ 构建及相关 SIMT 回归通过，包括公共 JIT 用例和要求 PTOAS v0.74 的
+原生编译。设备探测仍返回 DCMI -8005，在沙箱外执行也相同。
+
 ## 剩余范围
 
 | 类别 | 当前覆盖 | 剩余工作 / 限制 |
 | ---- | -------- | --------------- |
 | 坐标、维度、lane ID | 已有 DSL/IR/原生降低 | 无需重复实现 |
-| `get_veccoreid`、`get_clock32/64` | 缺失 | 保留时钟采样的优化语义；clock64 依赖 INT64 |
-| FP32 算术/数学 | 已有算术、数学和显式转换 | 显式高精度 `divf`、截断余数 `remf` |
-| 非 packed FP16/BF16、INT64、无符号类型 | 尚非通用可执行类型 | 逐操作存储/计算/协作/原子矩阵；UB i64 原子仍禁止 |
-| `ftof` 和其他 `ftoi/itof` 组合 | 已有 FP32↔INT32 转换 | 每个新增转换对的舍入/饱和验证 |
-| `mul_i32toi64` | 缺失 | INT64 结果及有符号/无符号操作数解释 |
-| 运行时 trap/assert | 缺失 | 目标/runtime 终止与宿主错误报告 |
-| `keep/resume` | 缺失 | slot、序言/尾声、相邻 launch 和线程状态生命周期 |
+| `get_clock32/64` | 未暴露 | 固定 PTOAS 将读取视为纯操作，合并不同采样，详见下文 |
+| 运行时 trap/assert | 已有 DSL/IR/原生降低 | 设备终止和宿主错误传播尚未验证 |
+| `keep/resume` | 未暴露 | 需要配对 launch 表示、slot 验证和线程状态生命周期约束 |
 | `addui_extended`、`mul_extended` | 无直接多结果 API | 现有算术/位运算和 `mulhi` 可表达部分能力，不宣称完整类型覆盖 |
 | `ceildiv`、`select` | 支持的标量可由算术/控制流组合表达 | 缺少同名 API 不等于缺少计算能力 |
 | packed 与短向量 | 任务 11.6 暂缓 | 不是 11.7 的前置条件 |
@@ -60,3 +86,30 @@
 
 保持 PTOAS v0.74。升级 v0.77 时需要同步适配内存 offset 类型，
 以及分歧控制流下 vote/shuffle/redux 的活跃 lane 副作用回归，不能只修改版本号。
+
+### 时钟采样阻碍
+
+PTOAS v0.74 将 `get_clock32/64` 声明为纯操作。原生探针读取两次 `get_clock32`、
+相减并写入 GM，导出的 LLVM 只保留写入常量零，时钟读取完全消失。
+PyPTO 保留调用无法修复下游的公共子表达式消除，因此在原生副作用契约和优化回归
+修复前不暴露时钟 API；仅支持 INT64 存储不能解决这个问题。最小入口函数体：
+
+```mlir
+%a = pto.get_clock32 : i32
+%b = pto.get_clock32 : i32
+%elapsed = arith.subi %b, %a : i32
+%zero = arith.constant 0 : index
+pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, i32
+```
+
+放入 `pto.simt_entry` 函数，使用 `--pto-arch=a5
+--pto-backend=vpto --emit-vpto-llvm-ir` 编译，输出的 store 写入零。
+
+### 跨入口状态阻碍
+
+原生 `keep/resume` 可分别编译，但契约要求同一外层 launch 序列中的相邻 SIMT 入口。
+当前可执行 PyPTO bundle 为每个 helper 生成独立模块和外层 wrapper，只传递内存副作用，
+没有 helper 产物之间带类型的线程状态依赖。仅暴露指令无法验证 launch 配对和状态寿命。
+后续实现需要把配对入口表示为同一 launch 序列，检查维度与 slot 类型一致，拒绝 slot
+重叠（64 位值占用偶数起始的两个 word），并约束 resume 序言、keep 尾声的位置。
+这类状态依赖不能建模为普通内存 fence。

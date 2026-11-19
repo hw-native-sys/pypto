@@ -7,7 +7,7 @@
 ## 可执行子集
 
 - A5 AIV 调用方，由 `SpecializeSimtHelpers` 特化常量三维 block 大小，最多 2,048 线程。
-- 借用的 GM Tensor 和 UB Vec Tile，元素类型为 FP32 或 INT32。Tile 需要仿射、
+- 借用的 GM Tensor 和 UB Vec Tile，元素类型采用支持的非 packed 数值类型。Tile 需要仿射、
   非分形布局。寻址使用物理 stride 和 Tile 起始偏移，逻辑 `valid_shape` 不替代物理 stride。
   借用的 `tile.slice`/reshape 视图句柄会被拒绝，因为其类型可能缺少父存储的物理行跨度。
   Launch 前须通过 `tile.extract` 将窗口物化到独立存储。视图来源会沿别名、条件分支结果
@@ -15,13 +15,13 @@
   原地 `tile.assemble` 的结果继承目标存储的来源：更新稠密存储仍受支持，更新视图仍会被拒绝。
   受支持存储的显式 stride 优先；
   稠密 DN Tensor 的后备 stride 仅交换末尾两个轴，批次轴保持在最外层。
-- FP32、INT32、INDEX、BOOL 标量及结构化 `if`、`for`、`while`。
+- FP16/BF16/FP32、8/16/32/64 位有符号/无符号整数、INDEX、BOOL 标量及结构化 `if`、`for`、`while`。
   有符号整数整除和取模保留向下取整语义；FP32 不等比较将 NaN 视为不等；
   数值转 BOOL 通过与零比较实现。
 - 线程、block、grid 坐标和维度，lane ID，以及标量读写。
   GM 缓存策略原样传递到原生 PTOAS 操作。
 
-无符号运算、其他存储类型、标量幂运算（`**`）、浮点向下整除/取模、提前 return、break/continue、
+FP8 与 packed 存储、标量幂运算（`**`）、浮点向下整除/取模、提前 return、break/continue、
 分形 Tile 布局和分组内核执行目前会给出明确诊断。CPU 仿真（`a5sim`）和其他
 设备后端不能执行这些原生 helper。与规范 IR 一致，调用方必须保证索引不越界，
 并发写入没有数据竞争。
@@ -84,8 +84,9 @@ python tests/st/runtime/vpto/test_simt_ir_onboard.py --worker build/simt-ir-runt
 
 ## Warp 协作扩展
 
-支持活跃 lane 的 vote/ballot、INT32/FP32 shuffle（width 为 16 或 32），以及
-INT32/FP32 的 add/min/max redux；整数 min/max 显式使用 signed 比较。
+支持活跃 lane 的 vote/ballot、FP16/FP32 与 32/64 位整数 shuffle（width 为 16 或 32），
+以及 FP16/FP32 与 32 位整数 add/min/max redux；整数 min/max 根据无符号类型或显式标志
+选择 signed/unsigned 比较。
 参见[协作操作契约](../ir/11-simt.md#warp-内协作操作)。
 
 Warp 验收与上述 GM/UB 历史验收分开记录。
@@ -113,9 +114,9 @@ INT32/FP32 载荷以及 16/32 宽度，包括分支中的参与集合和非活�
 | `syncthreads` 与两种 fence | LLVM workitem 同步/fence intrinsic | 四个 warp 的 UB/GM 发布与读取，以及后续 MTE 输出 |
 
 此矩阵已在 Ascend950DT_9581、PTOAS v0.72、CANN 9.3.0 及 runtime
-`391b2fbcd4dd053204a677662c39b6b7636e8043` 上验证。原子位置为自然对齐的 4 字节
-元素；UINT32/INT64、half/bfloat16、packed 值、可选顺序/scope 及跨 AIV 同步不属于
-当前前端契约。详见 [API 语义与限制](../ir/11-simt.md#原子操作与同步)。
+`391b2fbcd4dd053204a677662c39b6b7636e8043` 上验证。这些设备结果覆盖自然对齐的 4 字节原子元素。
+更宽类型及 half/bfloat16 现有独立编译覆盖，见[逐操作矩阵](06-simt-interface-coverage.md)。
+packed 值、可选顺序/scope 及跨 AIV 同步仍不属于当前前端契约。详见 [API 语义与限制](../ir/11-simt.md#原子操作与同步)。
 发布测试使用了会合，不能证明单独 fence 构成同步协议，也不承诺系统级可见性。
 
 `tests/st/runtime/vpto/test_simt_atomics_onboard.py` 提供竞争和屏障用例（15 项检查），
