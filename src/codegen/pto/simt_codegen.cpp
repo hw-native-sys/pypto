@@ -394,7 +394,7 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
       for (size_t i = 2; i < call->args_.size(); ++i) operands += ", " + GetExprAsCode(call->args_[i]);
       if ((ir::IsOp(call, "simt.atomic_min") || ir::IsOp(call, "simt.atomic_max")) &&
           shaped->dtype_ == DataType::INT32) {
-        policy += " signed";
+        policy += call->GetKwarg<bool>("unsigned", false) ? " unsigned" : " signed";
       }
       const auto result = NewTemp();
       Emit(result + " = pto." + call->op_->name_.substr(5) + " " + operands + policy + " : " + type + ", " +
@@ -428,12 +428,16 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     size_t arity;
   };
   static const MathOp math_ops[] = {
-      {"simt.abs", "absf", true, 1},     {"simt.min", "minf", true, 2},   {"simt.max", "maxf", true, 2},
-      {"simt.exp", "exp", false, 1},     {"simt.log", "log", false, 1},   {"simt.sqrt", "sqrt", false, 1},
-      {"simt.sin", "sin", false, 1},     {"simt.cos", "cos", false, 1},   {"simt.ceil", "ceil", false, 1},
-      {"simt.floor", "floor", false, 1}, {"simt.rint", "rint", false, 1}, {"simt.round", "round", false, 1},
-      {"simt.pow", "pow", false, 2},     {"simt.fma", "fma", false, 3},   {"simt.prmt", "prmt", false, 3},
-      {"simt.mulhi", "mulhi", false, 2}, {"simt.ftoi", "ftoi", false, 1}, {"simt.itof", "itof", false, 1},
+      {"simt.abs", "absf", true, 1},         {"simt.min", "minf", true, 2},
+      {"simt.max", "maxf", true, 2},         {"simt.exp", "exp", false, 1},
+      {"simt.log", "log", false, 1},         {"simt.sqrt", "sqrt", false, 1},
+      {"simt.sin", "sin", false, 1},         {"simt.cos", "cos", false, 1},
+      {"simt.ceil", "ceil", false, 1},       {"simt.floor", "floor", false, 1},
+      {"simt.rint", "rint", false, 1},       {"simt.round", "round", false, 1},
+      {"simt.pow", "pow", false, 2},         {"simt.fma", "fma", false, 3},
+      {"simt.prmt", "prmt", false, 3},       {"simt.mulhi", "mulhi", false, 2},
+      {"simt.ftoi", "ftoi", false, 1},       {"simt.itof", "itof", false, 1},
+      {"simt.bitcast", "bitcast", false, 1},
   };
   for (const auto& spec : math_ops) {
     if (!ir::IsOp(call, spec.name)) continue;
@@ -485,11 +489,19 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     if (shuffle) {
       operands += ", " + GetExprAsCode(call->args_[1]);
       types += ", i32";
-      attributes = " {width = " + std::to_string(call->GetKwarg<int>("width", 32)) + " : i32}";
+      const auto width = call->GetKwarg<int>("width", 32);
+      attributes = " {width = " + std::to_string(width) + " : i32";
+      // Omission preserves PTOAS's widest-window default (zero for shuffle_up).
+      if (call->HasKwarg("bound")) {
+        attributes += ", bound = " + std::to_string(call->GetKwarg<int>("bound")) + " : i32";
+      }
+      attributes += "}";
     } else if (redux) {
       const bool integer = ir::As<ir::ScalarType>(call->GetType())->dtype_ == DataType::INT32;
       operation += integer ? "i" : "f";
-      if (integer && !ir::IsOp(call, "simt.redux_add")) attributes = " signed";
+      if (integer && !ir::IsOp(call, "simt.redux_add")) {
+        attributes = call->GetKwarg<bool>("unsigned", false) ? " unsigned" : " signed";
+      }
     }
     const auto result = NewTemp();
     Emit(result + " = " + operation + " " + operands + attributes + " : " + types + " -> " + output_type);
@@ -499,6 +511,10 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
   std::string operation;
   if (ir::IsOp(call, "simt.lane_id")) {
     operation = "pto.get_laneid";
+  } else if (ir::IsOp(call, "simt.lanemask_eq") || ir::IsOp(call, "simt.lanemask_le") ||
+             ir::IsOp(call, "simt.lanemask_lt") || ir::IsOp(call, "simt.lanemask_ge") ||
+             ir::IsOp(call, "simt.lanemask_gt")) {
+    operation = "pto.get_" + call->op_->name_.substr(5);
   } else {
     const auto axis = call->GetKwarg<ir::SimtAxis>("axis", ir::SimtAxis::X);
     const std::string suffix = axis == ir::SimtAxis::X ? "x" : axis == ir::SimtAxis::Y ? "y" : "z";

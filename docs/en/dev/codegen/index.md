@@ -20,3 +20,5 @@ IR to generated code. Anything that needs a decision was already decided by a pa
 - [Passes](../passes/index.md) — everything that must hold before codegen runs.
 - [PTO ISA reference](../../reference/index.md) — the instruction semantics the generated code uses.
 - [PTOAS Op Status Matrix](../ptoas-op-status.md) — which PTOAS ops are available to emit.
+
+See [SIMT interface coverage](06-simt-interface-coverage.md) for task 11.7 additions and remaining limits.

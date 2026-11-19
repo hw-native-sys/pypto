@@ -159,6 +159,17 @@ y = pl.const(1.0, pl.FP32) / (pl.const(1.0, pl.FP32) + pl.simt.exp(-x))
 index = pl.simt.ftoi(y, rounding="f")
 ```
 
+### Scalar bitcast and physical lane masks
+
+`pl.simt.bitcast(value, dtype)` accepts FP32/INT32 input and destination types.
+It preserves every bit, including NaN payloads and signed zeros; no numerical
+conversion or memory reinterpretation occurs. Ordinary `pl.cast` is unchanged.
+
+`pl.simt.lanemask_eq/le/lt/ge/gt()` return INT32 masks whose bit i describes
+physical lane i relative to the calling lane. These masks cover all 32 physical
+lanes regardless of divergence; use `vote_ballot(True)` for active lanes.
+Bit 31 makes the signed carrier negative without changing its bit pattern.
+
 ## Warp collectives
 
 The public `pl.simt` and IR `pypto.ir.op.simt` namespaces expose:
@@ -167,9 +178,9 @@ The public `pl.simt` and IR `pypto.ir.op.simt` namespaces expose:
 | --------- | -------------- | ------- |
 | `vote_all`, `vote_any`, `vote_uni` | BOOL → BOOL | All true, any true, or all predicates equal |
 | `vote_ballot` | BOOL → INT32 | Bit i is set for active lane i with a true predicate |
-| `shuffle_idx(value, index, *, width=32)` | INT32/FP32 → same type | Read subgroup-relative source lane |
+| `shuffle_idx(value, index, *, width=32, bound=None)` | INT32/FP32 → same type | Read subgroup-relative source lane |
 | `shuffle_up`, `shuffle_down` | INT32/FP32 → same type | Read lower/higher source lane by an offset |
-| `shuffle_bfly(value, mask, *, width=32)` | INT32/FP32 → same type | Read source lane selected by local-lane XOR mask |
+| `shuffle_bfly(value, mask, *, width=32, bound=None)` | INT32/FP32 → same type | Read source lane selected by local-lane XOR mask |
 | `redux_add`, `redux_min`, `redux_max` | INT32/FP32 → same type | Reduce active lanes; return the result to each active lane |
 
 The A5 warp contains 32 lanes. Participation is the current active execution
@@ -181,19 +192,23 @@ not be hoisted across branches or iterations that change active lanes.
 Shuffle widths are **16 or 32**, defaulting to 32. Width splits the warp into
 contiguous subgroups; it does not alter vote or redux participation. Lane controls
 are INT32 (Python integer literals are normalized). A shuffle source must be
-active and inside the same subgroup. Results from inactive or out-of-range
-sources are unspecified; algorithms must not rely on boundary self-copy.
+active when selected. Optional `bound` must be in `[0, width)` and selects a
+subgroup-relative source window: `[bound, width)` for `shuffle_up`,
+`[0, bound]` for the other modes. Omission selects the full window. Sources
+outside that window or subgroup return the caller value; inactive sources
+remain undefined. `shuffle_idx` wraps its index modulo width before the window check.
 
 Ballot returns an INT32 bit carrier, so bit 31 can make its numeric value
-negative. Use bit operations to inspect it. INT32 min/max use signed comparisons;
+negative. Use bit operations to inspect it. INT32 min/max default to signed
+comparisons; `unsigned=True` selects unsigned comparison of the same INT32 bit carriers (FP32 rejects this option);
 integer sums wrap at 32 bits. FP32 follows the target reduction order and
 special-value rules, without a promise of sequential summation or portable
 NaN/signed-zero selection. FP16, UINT32 and packed values remain unsupported
 in this initial frontend/backend subset.
 
 The native mapping is `pto.vote_*`, `pto.shuffle_*` and `pto.redux_{add,min,max}{i,f}`;
-integer min/max explicitly carry `signed`. Tests compile all forms through the
-public JIT and PTOAS LLVM export. Opt-in device acceptance lives in
+integer min/max explicitly carry `signed` or `unsigned`. Tests compile all forms
+through the public JIT and PTOAS LLVM export. Opt-in device acceptance lives in
 `tests/st/runtime/vpto/test_simt_collectives_onboard.py`, covering two warps,
 partial active sets, ballot bit 31, signed reductions, shuffle subgroups and
 untouched inactive outputs. Compile-only tests do not establish device execution.
@@ -209,7 +224,7 @@ count keep their initial value. The caller supplies `0 <= valid <= 64`.
 The `USE_BALLOT` constexpr selects two implementations:
 
 - **Ballot:** count the set bits below the current lane to obtain its exclusive
-  rank. A nonnegative lower-lane mask excludes bit 31 without a shift by 32;
+  rank. `lanemask_lt()` excludes bit 31 without a shift by 32;
   scalar bit operations implement population count using existing IR.
 - **Scan:** compose five `shuffle_up` stages at distances 1, 2, 4, 8 and 16.
   Every lane executes each shuffle; only lanes with an in-range source add its
@@ -250,7 +265,7 @@ for device checks and the timing methodology.
 
 ## Atomics and synchronization
 
-`pl.simt.atomic_add/min/max/exch(storage, indices, value)` and
+`pl.simt.atomic_add/sub/and/or/xor/min/max/exch(storage, indices, value)` and
 `pl.simt.atomic_cas(storage, indices, compare, value)` return the **old scalar**.
 The same names exist in `pypto.ir.op.simt`. All operands must match the storage
 INT32/FP32 dtype. Indices use the same logical coordinates and physical strides
@@ -258,8 +273,9 @@ as `load`/`store`; addresses must be naturally aligned to four bytes and in boun
 
 | Operation | INT32 | FP32 | Storage / result |
 | --------- | ----- | ---- | ---------------- |
-| `atomic_add` | 32-bit wrapping addition | Target floating addition | GM and Vec/UB; old scalar |
-| `atomic_min`, `atomic_max` | Signed comparison | Numeric operand wins over one NaN; both NaN yield NaN | GM and Vec/UB; old scalar |
+| `atomic_add`, `atomic_sub` | 32-bit wrapping addition/subtraction | Target floating addition/subtraction | GM and Vec/UB; old scalar |
+| `atomic_and`, `atomic_or`, `atomic_xor` | Bitwise update | Unsupported | GM and Vec/UB; old scalar |
+| `atomic_min`, `atomic_max` | Signed by default; `unsigned=True` interprets INT32 bits as unsigned | Numeric operand wins over one NaN; both NaN yield NaN | GM and Vec/UB; old scalar |
 | `atomic_exch` | Replace | Replace | GM and Vec/UB; old scalar |
 | `atomic_cas` | Bitwise comparison | Bitwise comparison, including NaN payloads and signed zeros | GM and Vec/UB; old scalar |
 

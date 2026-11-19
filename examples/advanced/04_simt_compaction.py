@@ -52,9 +52,9 @@ def compact_warps(
         # zero but remain active, including lane 31 used to broadcast the count.
         if USE_BALLOT:
             bits = pl.simt.vote_ballot(selected != 0)
-            # Avoid shifting by 32 or interpreting ballot bit 31 as a sign.
-            # This mask has exactly lane low bits set, even for lane 0 or 31.
-            lower = pl.const(0x7FFFFFFF, pl.INT32) >> (31 - lane)
+            # Physical lower-lane bits, independent of the active mask. Bit 31
+            # is never included, so the population-count shifts remain signed-safe.
+            lower = pl.simt.lanemask_lt()
             packed = bits & lower
             # Parallel bit count using existing scalar IR; no native popcount
             # operation is assumed. All intermediate values are nonnegative.
@@ -67,7 +67,7 @@ def compact_warps(
         else:
             inclusive = selected
             # The shuffle executes in every lane. Only consume its result when
-            # the source is in range; boundary self-copy is not guaranteed.
+            # the source is in range; otherwise self-copy would double the sum.
             for stage in pl.unroll(5):
                 offset = pl.cast(1 << stage, pl.INT32)
                 previous = pl.simt.shuffle_up(inclusive, offset)

@@ -877,5 +877,54 @@ def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys
         backend.reset_for_testing()
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("entry_name", ["interface_entry", "subtraction_entry"])
+def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entry_name):
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    pytestconfig.addinivalue_line("markers", "platforms(*ids, reason): supported ST platforms")
+    fixture = runpy.run_path(str(source))
+    backend.reset_for_testing()
+    try:
+        fixture["compile_case"](tmp_path, entry=fixture[entry_name])
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        text = helpers[0].read_text()
+        if entry_name == "interface_entry":
+            for name in ("sub", "and", "or", "xor", "min", "max"):
+                assert text.count(f"pto.atomic_{name} ") == 2
+            for relation in ("eq", "le", "lt", "ge", "gt"):
+                assert f"pto.get_lanemask_{relation}" in text
+            assert text.count(" unsigned :") == 6
+            assert "bound = 3 : i32" in text and "bound = 11 : i32" in text
+            assert "pto.bitcast" in text
+        else:
+            assert text.count("pto.atomic_sub ") == 4
+            assert "l2cache(nmfv)" in text
+        output = tmp_path / "interfaces.ll"
+        result = subprocess.run(
+            [
+                binary,
+                str(helpers[0]),
+                "--pto-arch=a5",
+                "--pto-backend=vpto",
+                "--emit-vpto-llvm-ir",
+                "-o",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert output.stat().st_size > 0
+        assert "asm sideeffect" not in output.read_text()
+    finally:
+        backend.reset_for_testing()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

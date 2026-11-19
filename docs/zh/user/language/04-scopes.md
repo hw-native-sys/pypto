@@ -532,3 +532,9 @@ task-submit --device auto --max-time 600 --run \
 两条命令均使用已配置的项目环境。数学、warp、原子及同步操作参见
 [API 契约](../../dev/ir/11-simt.md)；编译验证与硬件执行证据参见
 [原生验收](../../dev/codegen/05-simt-lowering.md)。
+
+使用 `pl.simt.lanemask_lt()` 选择低于当前 lane 的物理 lane，如压缩示例所示。
+`bitcast` 保留 FP32/INT32 位模式；`atomic_sub` 和 INT32 `atomic_and/or/xor`
+更新已初始化的 GM/UB 存储。min/max 原子与 redux 支持对 INT32 位载体指定
+`unsigned=True`。shuffle 的 `bound` 缩小源窗口，默认 width 不变。
+验证证据与剩余限制参见[覆盖矩阵](../../dev/codegen/06-simt-interface-coverage.md)。
