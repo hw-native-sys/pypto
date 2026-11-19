@@ -224,6 +224,9 @@ Pass ConvertTensorToTileOps() {
       return_lineage::ScopedTraceCache return_cache;
       std::vector<bool> visiting(functions_phase2b.size(), false);
       std::vector<bool> resolved(functions_phase2b.size(), false);
+      // A reshape-derived InOut preserves data at a child launch. It does
+      // not require reading an explicitly Out parameter at the caller entry.
+      std::vector<std::vector<bool>> reshape_inout(functions_phase2b.size());
       const auto infer = [&](auto&& self, size_t index) -> void {
         if (resolved[index]) return;
         auto& func = functions_phase2b[index];
@@ -242,21 +245,17 @@ Pass ConvertTensorToTileOps() {
                                                /*follow_reshape=*/true);
         roots.Initialize(func->params_);
         roots.VisitStmt(func->body_);
-        std::vector<bool> reshaped(func->params_.size(), false);
-        std::vector<bool> writes(func->params_.size(), false);
-        auto new_dirs = func->param_directions_;
+        std::vector<unsigned> param_accesses(func->params_.size(), 0U);
         constexpr unsigned kReshaped = 1U;
         constexpr unsigned kWrite = 2U;
         constexpr unsigned kExplicitInOut = 4U;
+        constexpr unsigned kReshapeInOut = 8U;
         const auto& sets = roots.RootSets();
         std::vector<unsigned> accesses(sets.size(), 0U);
         const auto record_access = [&](const Var* root, unsigned access) {
           const auto param = facts.param_idx.find(root);
           if (param == facts.param_idx.end()) return;
-          const size_t i = param->second;
-          reshaped[i] = reshaped[i] || (access & kReshaped) != 0;
-          writes[i] = writes[i] || (access & kWrite) != 0;
-          if ((access & kExplicitInOut) != 0) new_dirs[i] = ParamDirection::InOut;
+          param_accesses[param->second] |= access;
         };
         const auto record_arg = [&](const Var* arg, unsigned access) {
           const auto set = roots.RootSetOf(arg);
@@ -273,11 +272,16 @@ Pass ConvertTensorToTileOps() {
           const auto callee_it = function_indices.find(call->op_->name_);
           if (callee_it == function_indices.end()) continue;
           const auto& directions = functions_phase2b[callee_it->second]->param_directions_;
+          const auto& callee_reshape_inout = reshape_inout[callee_it->second];
           for (size_t ai = 0; ai < call->args_.size() && ai < directions.size(); ++ai) {
             const auto direction = directions[ai];
             auto arg = AsVarLike(call->args_[ai]);
             if (!arg || direction == ParamDirection::In) continue;
-            const unsigned access = kWrite | (direction == ParamDirection::InOut ? kExplicitInOut : 0U);
+            unsigned access = kWrite;
+            if (direction == ParamDirection::InOut) {
+              access |= ai < callee_reshape_inout.size() && callee_reshape_inout[ai] ? kReshapeInOut
+                                                                                     : kExplicitInOut;
+            }
             record_arg(arg.get(), access);
           }
         }
@@ -295,11 +299,18 @@ Pass ConvertTensorToTileOps() {
             accesses[node.right] |= access;
           }
         }
+        auto new_dirs = func->param_directions_;
+        auto& inferred_inout = reshape_inout[index];
+        inferred_inout.resize(new_dirs.size());
         for (size_t i = 0; i < new_dirs.size(); ++i) {
-          if (new_dirs[i] == ParamDirection::In && writes[i]) {
-            // A write through a reshaped view does not prove that the whole
-            // backing parameter is overwritten. Retain its incoming value.
-            new_dirs[i] = reshaped[i] ? ParamDirection::InOut : ParamDirection::Out;
+          const auto access = param_accesses[i];
+          if ((access & kExplicitInOut) != 0) {
+            new_dirs[i] = ParamDirection::InOut;
+          } else if (new_dirs[i] == ParamDirection::In && (access & kWrite) != 0) {
+            // A partial write through a reshaped view can leave original data
+            // live. Propagate that requirement through unannotated callers.
+            inferred_inout[i] = (access & (kReshaped | kReshapeInOut)) != 0;
+            new_dirs[i] = inferred_inout[i] ? ParamDirection::InOut : ParamDirection::Out;
           }
         }
         resolved[index] = true;

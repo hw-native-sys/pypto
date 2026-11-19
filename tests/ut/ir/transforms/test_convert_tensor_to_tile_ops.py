@@ -8671,6 +8671,95 @@ class TestCalleeDirectionPropagationThroughCarries:
         after = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_graph_loop_writes_through_body_local_reshape_backedge(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def update(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.store(pl.load(buf, [1, 0], [1, 64]), [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def graph(self, a: pl.Tensor[[1, 128], pl.FP32], b: pl.Tensor[[1, 128], pl.FP32]):
+                first = pl.reshape(a, [2, 64])
+                for _i, (carry,) in pl.range(2, init_values=(first,)):
+                    self.update(carry)
+                    next_buf = pl.reshape(b, [2, 64])
+                    _result = pl.yield_(next_buf)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def update(self, buf: pl.InOut[pl.Tensor[[2, 64], pl.FP32]]):
+                pl.tile.store(pl.tile.load(buf, [1, 0], [1, 64], [1, 64]), [0, 0], buf)
+                return  # noqa: PLR1711 - lowering materializes the void return.
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def graph(
+                self,
+                a: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+            ):
+                first = pl.reshape(a, [2, 64])
+                for _i, (carry,) in pl.range(2, init_values=(first,)):
+                    self.update(carry)
+                    next_buf = pl.reshape(b, [2, 64])
+                    _result = pl.yield_(next_buf)
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    def test_reshape_inout_in_child_graph_preserves_explicit_outer_out(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def initialize(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def overwrite(self, dst: pl.Out[pl.Tensor[[2, 64], pl.FP32]]) -> pl.Tensor[[2, 64], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def child(self, dst: pl.Tensor[[1, 128], pl.FP32]):
+                view = pl.reshape(dst, [2, 64])
+                self.overwrite(view)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                ready = self.initialize(seed, dst)
+                self.child(ready)
+                return ready
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def initialize(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def overwrite(self, dst: pl.Out[pl.Tensor[[2, 64], pl.FP32]]) -> pl.Tensor[[2, 64], pl.FP32]:
+                return dst
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def child(self, dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]]):
+                view = pl.reshape(dst, [2, 64])
+                self.overwrite(view)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, seed: pl.Tensor[[1, 128], pl.FP32], dst: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                ready = self.initialize(seed, dst)
+                self.child(ready)
+                return ready
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
     @pytest.mark.parametrize(
         "return_mode", ["unknown_output", "input", "reshaped_input", "reversed_tuple", "slice"]
     )

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -101,18 +102,36 @@ void BufferRootCollector::InitializeLoopCarryRoots(const std::vector<IterArgPtr>
                                                    const StmtPtr& body, bool may_repeat) {
   const auto yield =
       follow_reshape_ && may_repeat && !iter_args.empty() ? transform_utils::GetLastYieldStmt(body) : nullptr;
+  std::unordered_map<const Var*, VarPtr> backedge_sources;
+  if (yield) {
+    // Index the straight-line aliases once. Their sources can have known
+    // storage even when the yielded SSA definitions have not been visited.
+    for (const auto& stmt : transform_utils::FlattenToStmts(body)) {
+      const auto assign = As<AssignStmt>(stmt);
+      if (!assign) continue;
+      auto value = assign->value_;
+      if (auto call = As<Call>(value); call && IsOp(call, "tensor.reshape") && !call->args_.empty()) {
+        value = call->args_.front();
+      }
+      const auto source = AsVarLike(value);
+      if (!source) continue;
+      const auto prior = backedge_sources.find(source.get());
+      backedge_sources.emplace(assign->var_.get(), prior == backedge_sources.end() ? source : prior->second);
+    }
+  }
   for (size_t i = 0; i < iter_args.size(); ++i) {
     const auto& iter_arg = iter_args[i];
     const auto& init = iter_arg->initValue_;
-    if (!yield || i >= yield->value_.size() || yield->value_[i].get() == iter_arg.get()) {
+    ExprPtr next = yield && i < yield->value_.size() ? yield->value_[i] : nullptr;
+    if (const auto source = backedge_sources.find(AsVarLike(next).get()); source != backedge_sources.end()) {
+      next = source->second;
+    }
+    if (!next || next.get() == iter_arg.get()) {
       ShareRootCandidates(iter_arg, init);
       continue;
     }
 
-    // An external yield can already be resolved before visiting the body.
-    // For an unresolved body value, the initializer alone does not prove
-    // that later iterations refer to the same storage.
-    const auto& next = yield->value_[i];
+    // The initializer alone does not prove the storage of an unknown backedge.
     const auto& initial_roots = ResolveRootCandidates(init);
     const auto& next_roots = ResolveRootCandidates(next);
     const bool unresolved =
