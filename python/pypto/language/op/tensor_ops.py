@@ -397,7 +397,7 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
       ``cache=pl.CachePolicy.DEFAULT`` opts a single read back into the cache
       inside a bypassing scope.
 
-    Requires PTOAS >= v0.74. **On A2/A3** a declared read compiles to a
+    Requires PTOAS >= v0.77. **On A2/A3** a declared read compiles to a
     ``cache_policy`` attribute on ``pto.tload`` plus the device's no-cache alias
     offset, which the assembler adds to that one load's source address; the
     offset comes from the driver through the dispatch payload, and a device that
