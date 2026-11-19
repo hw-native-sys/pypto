@@ -883,6 +883,11 @@ The codegen:
 | `DataType::INT8` | `i8` |
 | `DataType::UINT8` | `ui8` |
 
+Tile and Buffer codegen prepare the signed `FloorDiv` and `FloorMod` lowering before function emission.
+A dividend proved non-negative from literals or enclosing loop bounds and a positive constant divisor
+permit `arith.divsi` or `arith.remsi` when the proof holds at the emitted width. Otherwise the emitter
+uses `arith.floordivsi` or a signed remainder with a sign correction.
+
 ### Scalar Boolean Casts
 
 `pl.cast(flag, dtype)` maps scalar `False` to numeric zero and `True` to numeric

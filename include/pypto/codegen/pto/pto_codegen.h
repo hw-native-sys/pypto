@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -992,31 +993,6 @@ class PTOCodegen : public CodegenBase {
   std::string EmitCastToInt(const ir::ExprPtr& expr, const std::string& mlir_name, unsigned target_bits,
                             const char* api_name);
 
-  /// Whether `expr` cannot be negative at run time, evaluated at `dtype` -- the
-  /// width the enclosing operation is emitted at, since `EmitArithOperand`
-  /// narrows operands into it.
-  ///
-  /// A conservative syntactic check, not a bound analysis: it answers `false`
-  /// whenever it is unsure, and a `false` only costs the cheaper lowering. It
-  /// recognises just the shapes a slot index is built from -- a literal, an
-  /// induction variable whose loop starts at a non-negative literal, that
-  /// variable minus a non-negative literal no greater than the start, and floor
-  /// divisions or remainders of those by a positive literal.
-  ///
-  /// Sums and products are deliberately **not** recognised. Non-negative
-  /// operands do not give a non-negative fixed-width result: over an INDEX loop
-  /// `0, 1, 2`, `i * 4611686018427387904` wraps to INT64_MIN at i == 2. Every
-  /// shape above is closed under its own range instead -- a quotient or
-  /// remainder by a positive literal cannot exceed its dividend, and
-  /// `iv - start` with `0 <= start <= iv` stays in `[0, iv]` -- so none of them
-  /// can overflow.
-  ///
-  /// The point is FloorDiv/FloorMod: both follow the divisor's sign, which
-  /// costs a conditional correction over the hardware's truncating ops. With a
-  /// non-negative dividend and a positive divisor the two agree exactly, so the
-  /// correction is dead code.
-  [[nodiscard]] bool IsProvablyNonNegative(const ir::ExprPtr& expr, DataType dtype) const;
-
   /**
    * @brief Generate PTO-ISA MLIR for a single function
    */
@@ -1261,17 +1237,9 @@ class PTOCodegen : public CodegenBase {
     // operation-specific semantics and need not equal the logical result's.
     std::map<std::string, std::shared_ptr<const ir::TileType>> ssa_to_tile_type;
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
-    /// Constant lower bound of each enclosing loop variable, while its body is
-    /// being emitted. `VisitStmt_(ForStmtPtr)` adds an entry when the loop's
-    /// start is a literal and removes it on the way out, so an entry means
-    /// "this variable is at least this value, here".
-    ///
-    /// Used only to prove a dividend non-negative, which is what lets a signed
-    /// FloorDiv/FloorMod lower to its cheap truncating form. Restricting it to
-    /// literal starts is deliberate: a symbolic start would need a real bound
-    /// analysis, and the shapes that matter -- a slot index derived from the
-    /// induction variable -- all have one.
-    std::map<const ir::Var*, int64_t> loop_var_lower_bound;
+
+    // Prepared before emission. Missing signed operations require floor semantics.
+    std::unordered_set<const ir::Expr*> truncating_floor_div_mod;
 
     /// View SSA -> actual storage origin. Only full-span treshape inherits its
     /// source's origin; subviews stay distinct because their window can differ.
@@ -1419,6 +1387,7 @@ class PTOCodegen : public CodegenBase {
       ssa_to_tile_buf_type.clear();
       ssa_to_tile_type.clear();
       subview_materializations.clear();
+      truncating_floor_div_mod.clear();
       tile_view_names.clear();
       mutable_tile_names.clear();
       tpop_tile_names.clear();

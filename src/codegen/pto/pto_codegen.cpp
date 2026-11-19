@@ -70,6 +70,7 @@
 #include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "src/codegen/pto/pto_scalar_floor_div_mod_plan.h"
 #include "src/codegen/pto/pto_tensor_view_plan.h"
 
 namespace pypto {
@@ -1340,6 +1341,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   fs_.Reset();
   fs_.current_function = func;
+  fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(func->body_, func->params_);
 
   // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
   // not carry its DPS destinations in args_ — the parser desugars them into
