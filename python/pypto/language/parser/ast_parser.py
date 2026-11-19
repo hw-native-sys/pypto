@@ -923,7 +923,11 @@ class ASTParser:
                     override_type = ir.TensorType(
                         inferred.shape, inferred.dtype, resolved.memref, annotated_view
                     )
-                if not types_match(override_type, inferred):
+                # FlattenCallExpr can bind a dimension read in the operands while
+                # the printed descriptor still carries the original expression.
+                if not types_match(override_type, inferred) and not ShapeDimAliasExpander(
+                    self.function.shape_dim_aliases
+                ).views_match(annotated_view, view):
                     raise ParserTypeError(
                         f"TensorView annotation for '{var_name}' conflicts with the sampled window",
                         span=span,

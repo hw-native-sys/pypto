@@ -2897,6 +2897,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
     }
   }
   auto call = As<ir::Call>(op->value_);
+  if (ir::IsOp(call, "tensor.dim")) {
+    BindVarToMlir(op->var_, GetExprAsCode(call));
+    return;
+  }
   if (TryEmitVFCall(call, op->var_)) return;
   if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
     if (auto it = vf_return_aliases_.find(rhs.get()); it != vf_return_aliases_.end()) {

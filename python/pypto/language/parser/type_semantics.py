@@ -314,6 +314,19 @@ class ShapeDimAliasExpander(ir.IRMutator):
         super().__init__()
         self.aliases = aliases
 
+    def views_match(self, lhs: ir.TensorView, rhs: ir.TensorView) -> bool:
+        def dims_match(left: Sequence[ir.Expr], right: Sequence[ir.Expr]) -> bool:
+            return len(left) == len(right) and all(
+                ir.structural_equal(self.visit_expr(a), self.visit_expr(b)) for a, b in zip(left, right)
+            )
+
+        return (
+            lhs.layout == rhs.layout
+            and lhs.pad == rhs.pad
+            and dims_match(lhs.stride, rhs.stride)
+            and dims_match(lhs.valid_shape, rhs.valid_shape)
+        )
+
     def visit_var(self, op: ir.Var) -> ir.Expr:
         return self.aliases.get(op.unique_id, op)
 
