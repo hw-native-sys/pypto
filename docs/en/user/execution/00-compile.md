@@ -58,7 +58,7 @@ assert compiled.param_names == ["a", "b", "out"]
 
 ### `ir.compile` parameters
 
-Eighteen, of which four carry most decisions. The rest have defaults you rarely
+The parameters below, of which four carry most decisions. The rest have defaults you rarely
 move. All are keyword-only — only `program` is positional.
 
 | Parameter | Default | What it decides |
@@ -70,6 +70,7 @@ move. All are keyword-only — only `program` is positional.
 | `backend_type` | `Ascend910` | Target for passes and codegen (`Ascend910` / `Ascend950`) |
 | `platform` | `None` | Execution platform the artifact is built for; must match the worker that dispatches it |
 | `skip_ptoas` | `False` | Stop at `.pto` (MLIR) instead of building the device binary |
+| `allow_reg_spill` | `False` | Allow register spills for generated A5 RegScope VF helpers; other targets and SIMT helpers are unaffected |
 | `verification_level` | `None` | `NONE` / `BASIC` / `ROUNDTRIP`; `None` defers to `PYPTO_VERIFY_LEVEL`, else `BASIC` |
 | `memory_planner` | `None` | `PYPTO` / `DSA_RP` / `PTOAS` — who plans on-chip buffers ([Memory](../performance/05-memory.md)) |
 | `diagnostic_phase` | `None` | Which phase warnings and perf hints are gated at |

@@ -325,6 +325,7 @@ class KernelCompiler:
             repr(effective_flags),
             "intrinsic-simt-abi-v1",
             "reg-spill-policy-v1",
+            "device-image-data-sections-v2",
             _vpto.REG_SPILL_GUARD_FLAG,
             "bisheng-memory-attrs-v1",
             check_ptoas_version(ptoas),

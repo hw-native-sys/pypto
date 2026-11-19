@@ -276,15 +276,32 @@ def test_vpto_rejects_images_that_text_loader_cannot_load(device_elf, kwargs, er
 
 @pytest.mark.parametrize("section_name", [b".extra", b"__CCE_VF_STACK_SIZE"])
 @pytest.mark.parametrize("flags", [2, 3])
-def test_vpto_accepts_additional_allocated_sections(section_name, flags):
+def test_vpto_accepts_additional_allocated_sections(device_elf, section_name, flags):
     from pypto.runtime._vpto import validate_device_image  # noqa: PLC0415
 
-    image = bytearray(_vpto_elf(extra_flags=flags, extra_size=4))
+    image = bytearray(device_elf(extra_flags=flags, extra_size=4))
     names = b"\0.shstrtab\0.text\0" + section_name + b"\0"
-    struct.pack_into("<Q", image, 192 + 24, len(image))
+    section_offset = struct.unpack_from("<Q", image, 40)[0]
+    struct.pack_into("<Q", image, section_offset + 64 + 24, len(image))
     image.extend(names)
-    struct.pack_into("<Q", image, 192 + 32, len(names))
+    struct.pack_into("<Q", image, section_offset + 64 + 32, len(names))
     validate_device_image(bytes(image))
+
+
+@pytest.mark.parametrize(
+    "name,kind", [(b".data", 1), (b".rodata.constants", 1), (b".bss", 8), (b".custom_storage", 8)]
+)
+def test_vpto_rejects_allocated_data_sections(device_elf, name, kind):
+    from pypto.runtime._vpto import validate_device_image  # noqa: PLC0415
+
+    image = bytearray(device_elf(extra_flags=2, extra_kind=kind, extra_size=4))
+    names = b"\0.shstrtab\0.text\0" + name + b"\0"
+    section_offset = struct.unpack_from("<Q", image, 40)[0]
+    struct.pack_into("<Q", image, section_offset + 64 + 24, len(image))
+    image.extend(names)
+    struct.pack_into("<Q", image, section_offset + 64 + 32, len(names))
+    with pytest.raises(ValueError, match="allocated data section"):
+        validate_device_image(bytes(image))
 
 
 def _text_only_elf():
@@ -548,7 +565,7 @@ def test_text_only_rejects_unsupported_build_modes(compiler_module, monkeypatch,
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("live_data", [False, True])
 def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, live_data):
-    """SDK allocated data alone does not cause linked-image admission failure."""
+    """Unreferenced SDK data is collected; retained data cannot enter a text-only callee."""
     cb = pytest.importorskip("cannbotdsl")
     if not hasattr(cb, "export_device"):
         pytest.skip("installed CANNBotDSL lacks public device export")
@@ -585,8 +602,8 @@ def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, l
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(file.content)
     source = tmp_path / "entry.cpp"
-    # Exercise both dead and retained SDK data. This is compile-only coverage,
-    # not evidence that text extraction preserves referenced data at execution.
+    # A live SDK data reference survives GC and must fail admission; the
+    # persistent text loader cannot retain its storage.
     read_data = "args[0] = g_tilingKey;" if live_data else ""
     source.write_text(
         f'#include "{artifact.entry}"\n'
@@ -611,9 +628,13 @@ def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, l
     includes += [headers[0].parents[1], headers[0].parents[2]]
     includes.extend(tmp_path / path for path in artifact.include_dirs)
     kwargs = dict(pto_isa_root=str(tmp_path), extra_include_dirs=[str(p) for p in includes], text_only=True)
-    binary = compiler.compile_incore(str(source), **kwargs)
-    functions = validate_device_image(binary, entry_symbol="kernel_entry")
-    assert any("kernel_entry" in names for names in functions)
+    if live_data:
+        with pytest.raises(ValueError, match="allocated data section"):
+            compiler.compile_incore(str(source), **kwargs)
+    else:
+        binary = compiler.compile_incore(str(source), **kwargs)
+        functions = validate_device_image(binary, entry_symbol="kernel_entry")
+        assert any("kernel_entry" in names for names in functions)
 
 
 @pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed"])
@@ -819,9 +840,9 @@ def test_native_entry_check_preserves_block_local_sections(device_elf, kind):
     """Ordinary images need not satisfy VPTO's separate-data prohibition."""
     from pypto.runtime._device_image import validate_device_entry  # noqa: PLC0415
 
-    image = device_elf(extra_flags=3, extra_kind=kind, extra_size=16)
+    image = device_elf(extra_flags=3, extra_kind=kind, extra_size=16).replace(b".extra\0", b".data\0\0")
     validate_device_entry(image)
-    with pytest.raises(ValueError, match="allocated section"):
+    with pytest.raises(ValueError, match="allocated data section"):
         validate_device_image(image)
 
 

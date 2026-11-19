@@ -181,7 +181,7 @@ compiled(*tensors, config=config)
 
 | 由谁读取 | 类型 | 字段 |
 | -------- | ---- | ---- |
-| `ir.compile` | `CompileOptions` | `backend_type`、`execution_mode`（兼容旧 `platform`）、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
+| `ir.compile` | `CompileOptions` | `backend_type`、`execution_mode`（兼容旧 `platform`）、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config`, `allow_reg_spill` |
 | 派发 | `RunOptions` | `platform`、`device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)），以及内嵌的 `DfxOptions` |
 | 一次派发采集哪些诊断 | `DfxOptions` | `enable_chip_swimlane`、`enable_dump_args`、`enable_pmu`、`enable_dep_gen`、`enable_scope_stats`（[DFX](03-runtime-dfx.md)） |
 | 仅系统测试 harness | —— | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
@@ -343,3 +343,5 @@ return-style 执行自动分配纯 `Out` 参数，按声明顺序返回这些位
 这一执行 ABI 与 IR 的逻辑返回值不同：它不求值 `ReturnStmt`，不按其操作数
 重新排列输出，也不重建嵌套 tuple。程序内部的 Call/Submit 结果绑定则遵循
 被调函数的显式返回值到参数映射。
+
+`allow_reg_spill` 默认为 `False`，仅适用于生成的 A5 RegScope VF helper。

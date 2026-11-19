@@ -198,7 +198,7 @@ Its fields split three ways, and each way is a type:
 
 | Read by | Type | Fields |
 | ------- | ---- | ------ |
-| `ir.compile` | `CompileOptions` | `backend_type`, `execution_mode` (legacy `platform`), `strategy`, `dump_passes`, `dump_ptoas_passes`, `profiling` (`compile_profiling`), `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `output_dir` (`save_kernels_dir`), `memory_planner`, `distributed_config` |
+| `ir.compile` | `CompileOptions` | `backend_type`, `execution_mode` (legacy `platform`), `strategy`, `dump_passes`, `dump_ptoas_passes`, `profiling` (`compile_profiling`), `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `output_dir` (`save_kernels_dir`), `memory_planner`, `distributed_config`, `allow_reg_spill` |
 | Dispatch | `RunOptions` | `platform`, `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), and a nested `DfxOptions` |
 | A dispatch's diagnostics | `DfxOptions` | `enable_chip_swimlane`, `enable_dump_args`, `enable_pmu`, `enable_dep_gen`, `enable_scope_stats` ([DFX](03-runtime-dfx.md)) |
 | The system-test harness only | — | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
@@ -387,3 +387,5 @@ This execution ABI is distinct from logical IR returns: it does not evaluate
 `ReturnStmt`, reorder outputs according to its operands, or reconstruct nested
 tuples. Call/Submit result binding inside a program instead follows the
 callee's explicit return-to-parameter map.
+
+`allow_reg_spill` defaults to `False` and applies only to generated A5 RegScope VF helpers.
