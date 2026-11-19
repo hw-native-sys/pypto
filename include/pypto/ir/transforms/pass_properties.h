@@ -326,6 +326,16 @@ inline const PassProperties kInferTileMemorySpaceProperties{
                  IRProperty::AccCompactValid},
     .invalidated = {IRProperty::AivSplitValid}};
 
+// -- AutoLayout pass ----------------------------------------------------------
+// Runs after InferTileMemorySpace (before BlockNzTensorViews) to rewrite GM
+// TensorLayouts and on-chip tile layouts, preserving SSAForm,
+// TileMemoryInferred, and NormalizedStmtStructure.
+inline const PassProperties kAutoLayoutProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
+                 IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
+                 IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
+
 // -- Insert MX scale-address binding pass ------------------------------------
 //
 // Runs immediately after InferTileMemorySpace.

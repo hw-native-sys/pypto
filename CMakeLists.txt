@@ -90,9 +90,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=.)
 endif()
 
-# Find Python and nanobind
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
-find_package(nanobind CONFIG REQUIRED)
+option(PYPTO_BUILD_PYTHON_BINDINGS "Build the PyPTO Python extension" ON)
+if(PYPTO_BUILD_PYTHON_BINDINGS)
+    find_package(Python COMPONENTS Interpreter Development REQUIRED)
+    find_package(nanobind CONFIG REQUIRED)
+elseif(SKBUILD_MODE)
+    message(FATAL_ERROR "Building a PyPTO wheel requires PYPTO_BUILD_PYTHON_BINDINGS=ON")
+endif()
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
@@ -298,6 +302,11 @@ set(PYPTO_SOURCES
     src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/transpose.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp
+    src/ir/transforms/auto_layout/auto_layout_pass.cpp
+    src/ir/transforms/auto_layout/extractor.cpp
+    src/ir/transforms/auto_layout/model.cpp
+    src/ir/transforms/auto_layout/solver.cpp
+    src/ir/transforms/auto_layout/writer.cpp
     src/ir/transforms/legalize_tile_cast_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
@@ -466,8 +475,16 @@ set(PYPTO_SOURCES
     src/sync/resource_catalog.cpp
 )
 
-# Include Python bindings
-add_subdirectory(python/bindings)
+if(PYPTO_BUILD_PYTHON_BINDINGS)
+    add_subdirectory(python/bindings)
+else()
+    # A shared library retains translation units that register operators and backends
+    # through static initializers, including registrations absent from the link graph.
+    add_library(pypto_native SHARED ${PYPTO_SOURCES})
+    target_include_directories(pypto_native PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/common)
+    target_link_libraries(pypto_native PUBLIC libbacktrace PRIVATE msgpackc-cxx)
+endif()
 
 # The IR-free DSA-RP solver has a small native test that does not require the
 # Python extension or a device runtime. Skip it when building a wheel.

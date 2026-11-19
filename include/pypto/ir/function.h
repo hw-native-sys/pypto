@@ -608,6 +608,17 @@ inline constexpr const char* kAttrRequireContiguousOperands = "require_contiguou
 inline constexpr const char* kAttrAutoScope = "auto_scope";
 
 /**
+ * @brief Reserved Function attr key marking that ``BlockNzTensorViews`` has
+ * already converted logical NZ tensors in this function to blocked rank-5 form.
+ *
+ * Value type: ``bool`` (``true`` when stamped). Written by ``BlockNzTensorViews``
+ * to keep re-entry idempotent, read by ``auto_layout::ExtractLayoutInstance``,
+ * and stripped by ``auto_layout::ApplyLayoutAssignment`` only on functions that
+ * newly promote a GM tensor/create/view to ``TensorLayout::NZ``.
+ */
+inline constexpr const char* kAttrNzTensorViewsBlocked = "nz_tensor_views_blocked";
+
+/**
  * @brief Function definition
  *
  * Represents a complete function definition with name, parameters, return types, and body.

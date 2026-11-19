@@ -12,13 +12,16 @@
 #ifndef PYPTO_IR_TRANSFORMS_PASSES_H_
 #define PYPTO_IR_TRANSFORMS_PASSES_H_
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/transforms/auto_layout/model.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
 
@@ -798,6 +801,36 @@ Pass InsertMxScaleAddr();
  * once consumers depend on materialized stride).
  */
 Pass MaterializeTensorStrides();
+
+/**
+ * @brief Options for the native C++ AutoLayout compiler pass
+ */
+struct AutoLayoutOptions {
+  auto_layout::LayoutCostModel cost_model;
+  auto_layout::CustomConversionCostMap custom_conversion_costs;
+  std::unordered_set<std::string> reusable_tensors;
+  std::string solver = "auto";
+  int64_t max_treewidth = 8;
+  std::string name = "AutoLayout";
+};
+
+/**
+ * @brief Select GM tensor and on-chip tile layouts and apply them to the program
+ *
+ * Run after InferTileMemorySpace. The automatic solver runs exact dynamic
+ * programming on components within its budgets and local search on the rest.
+ * Run BlockNzTensorViews after selection to lower newly selected NZ layouts.
+ */
+Pass AutoLayout(AutoLayoutOptions options = {});
+
+/**
+ * @brief Apply an explicit LayoutAssignment to a Program
+ *
+ * Materializes pre-selected GM TensorLayouts and on-chip tile layouts into IR
+ * (used for calibration variants and explicit layout tests).
+ */
+Pass AutoLayoutFromAssignment(const auto_layout::LayoutAssignment& assignment,
+                              const std::string& name = "AutoLayout");
 
 /**
  * @brief Repair backend-required layouts for constrained elementwise tile ops

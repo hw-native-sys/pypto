@@ -276,3 +276,19 @@ tile *参数* 在阶段 1 起始处按函数类型分别处理：
 | `AIC` / `AIV` | 接受，并作为分析的**种子** | 二者是由混合 kernel 调用的 sub-worker，tile 参数正是常规的跨核交接 |
 
 参数的 space 属于签名的一部分 —— 由调用方决定该 tile 位于何处 —— 因此本 pass 从不推断它。`AIC` / `AIV` 的 tile 参数若省略 space，属于用户错误，报错会给出应补充的标注。
+
+## 原生流水线中的可选布局选择
+
+`InferTileMemorySpace` 之后，可调用 C++ pass `pypto::ir::pass::AutoLayout()` 为 GM 张量和片上 tile 选择布局。随后再次运行 `BlockNzTensorViews()`，降低新标注的 NZ 张量，再继续后端布局合法化。
+
+该 pass 最小化模型估算的算子周期，并对同一个值的每一种目标布局只收取一次转换成本。自动求解器对满足宽度和求值预算的连通分量使用精确动态规划，对过宽的分量使用局部搜索。共享一个值的算子在求解图中构成团，因此即使 kernel 较浅，扇出较大的张量也可能达到宽度上限。
+
+默认保留外部参数声明的布局。只有当调用方能按所选物理布局提供数据时，才应设置 `options.cost_model.allow_external_input_relayout`。边界打包由调用方负责。在 `options.reusable_tensors` 中标注权重可摊销打包成本。自动提升为 DN 仅适用于符合条件的内部缓冲区。要在写回前检查分配及其转换需求，可调用 `auto_layout::ExtractLayoutInstance` 和 `auto_layout::SolveAutoLayout`。
+
+初始化子模块后，可在仓库根目录构建并测试 C++ 库：
+
+```bash
+cmake -S . -B build -DPYPTO_BUILD_PYTHON_BINDINGS=OFF
+cmake --build build --target pypto_auto_layout_solver_test pypto_auto_layout_pass_test --parallel 1
+ctest --test-dir build -R '^pypto_auto_layout_' --output-on-failure
+```

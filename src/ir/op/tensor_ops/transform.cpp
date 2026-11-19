@@ -614,16 +614,23 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   // NZ is a legal TensorType layout (in its blocked form), but tensor.view
   // reinterprets shape/strides, and a blocked NZ view's dims are a fractal
   // decomposition rather than free axes — re-viewing them would break the
-  // addressing. Milestone 1 therefore keeps NZ out of tensor.view entirely.
+  // addressing. Milestone 1 therefore keeps NZ out of tensor.view except for
+  // explicit backing-memory aliases between NZ and 2D ND ([B*(C/c0), R*c0]).
   // Source first: when the source is NZ, ``new_layout`` defaults to it, so
   // checking the destination first would report the derived symptom instead of
   // the annotation the user actually wrote.
-  CHECK(src_layout != TensorLayout::NZ)
-      << "tensor.view does not support an NZ source: its dims are a fractal decomposition, "
-      << "so re-viewing them would break the fractal addressing. Slice the NZ tensor directly.";
-  CHECK(new_layout != TensorLayout::NZ)
-      << "tensor.view cannot produce an NZ layout: the blocked NZ shape is derived from the "
-      << "source tensor by BlockNzTensorViews, not chosen at a view site";
+  const bool is_nz_backing_alias_candidate =
+      has_shape && requested_layout.has_value() &&
+      ((src_layout == TensorLayout::NZ && new_layout == TensorLayout::ND) ||
+       (src_layout == TensorLayout::ND && new_layout == TensorLayout::NZ));
+  if (!is_nz_backing_alias_candidate) {
+    CHECK(src_layout != TensorLayout::NZ)
+        << "tensor.view does not support an NZ source: its dims are a fractal decomposition, "
+        << "so re-viewing them would break the fractal addressing. Slice the NZ tensor directly.";
+    CHECK(new_layout != TensorLayout::NZ)
+        << "tensor.view cannot produce an NZ layout: the blocked NZ shape is derived from the "
+        << "source tensor by BlockNzTensorViews, not chosen at a view site";
+  }
 
   if (src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
     auto canon_check = tensor_view_semantics::CheckCanonicalView(
@@ -694,6 +701,49 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   CHECK(new_layout != TensorLayout::DN || new_shape.size() >= 2)
       << "tensor.view: DN layout requires rank >= 2, got " << new_shape.size();
 
+  if (is_nz_backing_alias_candidate) {
+    const int64_t c0 = tensor_view_semantics::NzC0Elems(src_type->dtype_);
+    auto extract_nz_plane = [&](const std::vector<ExprPtr>& shape) -> std::pair<int64_t, int64_t> {
+      if (tensor_view_semantics::IsBlockedNzShape(shape, src_type->dtype_)) {
+        auto b = As<ConstInt>(shape[0]);
+        auto c1 = As<ConstInt>(shape[1]);
+        auto r1 = As<ConstInt>(shape[2]);
+        CHECK(b && c1 && r1 && b->value_ > 0 && c1->value_ > 0 && r1->value_ > 0)
+            << "tensor.view: NZ backing alias requires static positive blocked NZ dimensions";
+        return {b->value_ * c1->value_, r1->value_ * tensor_view_semantics::kNzFractalRow * c0};
+      }
+      CHECK(shape.size() == 2 || shape.size() == 3)
+          << "tensor.view: NZ backing alias requires rank-2 or rank-3 logical NZ shape, got rank "
+          << shape.size();
+      int64_t batch = 1;
+      if (shape.size() == 3) {
+        auto b = As<ConstInt>(shape[0]);
+        CHECK(b && b->value_ > 0) << "tensor.view: NZ backing alias requires static positive batch extent";
+        batch = b->value_;
+      }
+      auto rows = As<ConstInt>(shape[shape.size() - 2]);
+      auto cols = As<ConstInt>(shape[shape.size() - 1]);
+      CHECK(rows && cols && rows->value_ > 0 && cols->value_ > 0 &&
+            rows->value_ % tensor_view_semantics::kNzFractalRow == 0 && cols->value_ % c0 == 0)
+          << "tensor.view: NZ backing alias requires static fractal-aligned [R, C] (R % 16 == 0, C % " << c0
+          << " == 0)";
+      return {batch * (cols->value_ / c0), rows->value_ * c0};
+    };
+    auto extract_nd_plane = [&](const std::vector<ExprPtr>& shape) -> std::pair<int64_t, int64_t> {
+      CHECK(shape.size() == 2) << "tensor.view: NZ backing ND alias must have rank 2, got " << shape.size();
+      auto p0 = As<ConstInt>(shape[0]);
+      auto p1 = As<ConstInt>(shape[1]);
+      CHECK(p0 && p1 && p0->value_ > 0 && p1->value_ > 0)
+          << "tensor.view: NZ backing ND alias requires static positive 2D shape";
+      return {p0->value_, p1->value_};
+    };
+    const auto nz_plane = extract_nz_plane(src_layout == TensorLayout::NZ ? src_type->shape_ : new_shape);
+    const auto nd_plane = extract_nd_plane(src_layout == TensorLayout::NZ ? new_shape : src_type->shape_);
+    CHECK(nz_plane == nd_plane) << "tensor.view: NZ<->ND backing alias requires 2D ND shape ["
+                                << nz_plane.first << ", " << nz_plane.second << "], got [" << nd_plane.first
+                                << ", " << nd_plane.second << "]";
+  }
+
   TensorView new_view;
   if (!has_shape && src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
     std::vector<ExprPtr> new_stride = src_type->tensor_view_->stride;
@@ -701,6 +751,9 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       std::iter_swap(new_stride.end() - 2, new_stride.end() - 1);
     }
     new_view = TensorView(std::move(new_stride), new_layout);
+  } else if (new_layout == TensorLayout::NZ &&
+             !tensor_view_semantics::IsBlockedNzShape(new_shape, src_type->dtype_)) {
+    new_view = TensorView(std::vector<ExprPtr>{}, TensorLayout::NZ);
   } else {
     new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
   }

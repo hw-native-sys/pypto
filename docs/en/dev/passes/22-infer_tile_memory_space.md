@@ -277,3 +277,19 @@ Tile *parameters* are handled by function type, at the start of Phase 1:
 | `AIC` / `AIV` | Accepted, and **seeds** the analysis | These are sub-workers entered from a mixed kernel, so a tile parameter is the ordinary cross-core handoff |
 
 A parameter's space is part of the signature — the caller decides where the tile lives — so this pass never infers it. An `AIC`/`AIV` tile parameter that omits its space is a user error, reported with the annotation to add.
+
+## Optional layout selection in a native pipeline
+
+After `InferTileMemorySpace`, the C++ pass `pypto::ir::pass::AutoLayout()` can select layouts for GM tensors and on-chip tiles. Run `BlockNzTensorViews()` again after selection to lower newly annotated NZ tensors, then continue to backend layout legalization.
+
+The pass minimizes modeled operator cycles and charges a conversion once per value and distinct requested layout. Its automatic solver uses exact dynamic programming for connected components within the configured width and evaluation budgets. Wider components use local search. Operators sharing a value form a clique in the solver graph, so a tensor with many consumers can reach the width limit even in a shallow kernel.
+
+By default, external arguments keep their declared layout. Set `options.cost_model.allow_external_input_relayout` only when the caller can supply the selected physical representation. The caller owns boundary packing. Marking a weight in `options.reusable_tensors` amortizes the packing cost. Automatic DN promotion is restricted to eligible internal buffers. To inspect an assignment and its conversion requirements before applying it, use `auto_layout::ExtractLayoutInstance` and `auto_layout::SolveAutoLayout`.
+
+To build and test the C++ library from the repository root with the submodules initialized:
+
+```bash
+cmake -S . -B build -DPYPTO_BUILD_PYTHON_BINDINGS=OFF
+cmake --build build --target pypto_auto_layout_solver_test pypto_auto_layout_pass_test --parallel 1
+ctest --test-dir build -R '^pypto_auto_layout_' --output-on-failure
+```

@@ -1,0 +1,2548 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include "pypto/ir/transforms/auto_layout/writer.h"
+
+#include <algorithm>
+#include <any>
+#include <cctype>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/auto_layout/extractor.h"
+#include "pypto/ir/transforms/auto_layout/model.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+namespace ir {
+namespace auto_layout {
+
+namespace {
+
+constexpr const char* kOpTensorCreate = "tensor.create";
+constexpr const char* kOpTensorView = "tensor.view";
+constexpr const char* kOpTileCreate = "tile.create";
+constexpr const char* kOpTileLoad = "tile.load";
+constexpr const char* kOpTileStore = "tile.store";
+constexpr const char* kOpTileMove = "tile.move";
+constexpr const char* kOpTileTransposeView = "tile.transpose_view";
+constexpr const char* kOpTileFull = "tile.full";
+constexpr const char* kOpTileReshape = "tile.reshape";
+constexpr const char* kOpTileRowExpand = "tile.row_expand";
+constexpr const char* kOpTileRowExpandAdd = "tile.row_expand_add";
+
+TensorTypePtr WithTensorLayout(const TensorTypePtr& tensor_type, TensorLayout layout) {
+  if (IsA<DistributedTensorType>(tensor_type) || detail::TensorTypeLayout(tensor_type) == layout) {
+    return tensor_type;
+  }
+  const auto& old_view = tensor_type->tensor_view_;
+  if (layout == TensorLayout::ND &&
+      (!old_view.has_value() ||
+       (old_view->stride.empty() && old_view->valid_shape.empty() && old_view->pad == PadValue::null))) {
+    return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
+                                        std::nullopt);
+  }
+  std::vector<ExprPtr> valid_shape = old_view.has_value() ? old_view->valid_shape : std::vector<ExprPtr>{};
+  PadValue pad = old_view.has_value() ? old_view->pad : PadValue::null;
+  TensorView new_view(std::vector<ExprPtr>{}, layout, std::move(valid_shape), pad);
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
+                                      std::move(new_view));
+}
+
+TypePtr RemapTypeWithSubst(const TypePtr& type, const std::unordered_map<const Var*, ExprPtr>& subst) {
+  if (!type || subst.empty()) {
+    return type;
+  }
+  if (auto tup = As<TupleType>(type)) {
+    std::vector<TypePtr> elems;
+    elems.reserve(tup->types_.size());
+    bool changed = false;
+    for (const auto& elem : tup->types_) {
+      TypePtr remapped = RemapTypeWithSubst(elem, subst);
+      changed |= remapped.get() != elem.get();
+      elems.push_back(std::move(remapped));
+    }
+    return changed ? std::make_shared<TupleType>(std::move(elems)) : type;
+  }
+  return CloneTypeWithMemRefAndRemapExprs(
+      type, GetTypeMemRef(type), [&](const ExprPtr& e) { return transform_utils::Substitute(e, subst); });
+}
+
+TypePtr WithVecMemorySpace(const TypePtr& type, const std::optional<TileView>& tile_view = std::nullopt) {
+  auto tt = As<TileType>(type);
+  if (!tt) {
+    return type;
+  }
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, tt->memref_,
+                                    tile_view.has_value() ? tile_view : tt->tile_view_, MemorySpace::Vec);
+}
+
+TileView ColMajorTileView(const TileTypePtr& tile_type) {
+  const auto& old = tile_type->tile_view_;
+  std::vector<ExprPtr> valid_shape =
+      (old.has_value() && !old->valid_shape.empty()) ? old->valid_shape : tile_type->shape_;
+  std::vector<ExprPtr> stride = old.has_value() ? old->stride : std::vector<ExprPtr>{};
+  ExprPtr start_offset = old.has_value() ? old->start_offset : nullptr;
+  PadValue pad = old.has_value() ? old->pad : PadValue::null;
+  CompactMode compact = old.has_value() ? old->compact : CompactMode::null;
+  return TileView(std::move(valid_shape), std::move(stride), std::move(start_offset), TileLayout::col_major,
+                  TileLayout::none_box, 512, pad, compact);
+}
+
+CallPtr CreateOpCallWithAttrs(const std::string& op_name, const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::vector<std::pair<std::string, std::any>>& attrs, const Span& span) {
+  CallPtr created = OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
+  if (attrs.empty()) {
+    return created;
+  }
+  return std::make_shared<Call>(created->op_, created->args_, created->kwargs_, attrs, created->GetType(),
+                                created->span_);
+}
+
+CallPtr WithCallType(const CallPtr& call, const TypePtr& new_type) {
+  if (call->GetType().get() == new_type.get()) {
+    return call;
+  }
+  return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, new_type, call->span_);
+}
+
+std::vector<std::pair<std::string, std::any>> ReplaceOrInsertKwarg(
+    std::vector<std::pair<std::string, std::any>> kwargs, const std::string& key, std::any value) {
+  for (auto& [k, v] : kwargs) {
+    if (k == key) {
+      v = std::move(value);
+      return kwargs;
+    }
+  }
+  kwargs.emplace_back(key, std::move(value));
+  return kwargs;
+}
+
+void CollectExprVars(const ExprPtr& expr, std::unordered_set<const Var*>& seen,
+                     std::vector<const Var*>& order) {
+  if (!expr) {
+    return;
+  }
+  if (auto v = AsVarLike(expr)) {
+    if (seen.insert(v.get()).second) {
+      order.push_back(v.get());
+    }
+    return;
+  }
+  if (auto tup = As<MakeTuple>(expr)) {
+    for (const auto& el : tup->elements_) {
+      CollectExprVars(el, seen, order);
+    }
+    return;
+  }
+  if (auto cast = As<Cast>(expr)) {
+    CollectExprVars(cast->operand_, seen, order);
+    return;
+  }
+  if (auto bin = As<BinaryExpr>(expr)) {
+    CollectExprVars(bin->left_, seen, order);
+    CollectExprVars(bin->right_, seen, order);
+  }
+}
+
+std::unordered_set<const Var*> NzOffsetScalarVars(
+    const StmtPtr& body, const std::vector<std::pair<VarPtr, ParamDirection>>& new_params,
+    const std::vector<VarPtr>& old_params) {
+  std::unordered_set<const Var*> nz_tensor_vars;
+  for (size_t i = 0; i < new_params.size() && i < old_params.size(); ++i) {
+    auto tt = AsTensorTypeLike(new_params[i].first->GetType());
+    if (tt && detail::TensorTypeLayout(tt) == TensorLayout::NZ) {
+      nz_tensor_vars.insert(old_params[i].get());
+    }
+  }
+  if (nz_tensor_vars.empty()) {
+    return {};
+  }
+
+  std::unordered_map<const Var*, ExprPtr> scalar_defs;
+  std::unordered_map<const Var*, std::pair<ExprPtr, ExprPtr>> loop_bounds;
+  std::unordered_set<const Var*> expanded;
+  std::vector<const Var*> worklist;
+
+  auto walk_expr = [&](auto& self, const ExprPtr& expr) -> void {
+    auto call = As<Call>(expr);
+    if (!call) {
+      return;
+    }
+    for (const auto& arg : call->args_) {
+      self(self, arg);
+    }
+    if (call->op_->name_ == kOpTileLoad && call->args_.size() >= 2) {
+      if (auto src = AsVarLike(call->args_[0]); src && nz_tensor_vars.count(src.get()) != 0) {
+        CollectExprVars(call->args_[1], expanded, worklist);
+        if (call->args_.size() >= 4) {
+          CollectExprVars(call->args_[3], expanded, worklist);
+        }
+      }
+    } else if (call->op_->name_ == kOpTileStore && call->args_.size() >= 3) {
+      if (auto dst = AsVarLike(call->args_[2]); dst && nz_tensor_vars.count(dst.get()) != 0) {
+        CollectExprVars(call->args_[1], expanded, worklist);
+      }
+    }
+  };
+
+  auto walk_stmt = [&](auto& self, const StmtPtr& stmt) -> void {
+    if (!stmt) {
+      return;
+    }
+    if (auto asg = As<AssignStmt>(stmt)) {
+      if (As<ScalarType>(asg->var_->GetType())) {
+        scalar_defs.emplace(asg->var_.get(), asg->value_);
+      } else if (AsTensorTypeLike(asg->var_->GetType())) {
+        if (auto src = AsVarLike(asg->value_); src && nz_tensor_vars.count(src.get()) != 0) {
+          nz_tensor_vars.insert(asg->var_.get());
+        }
+      }
+      walk_expr(walk_expr, asg->value_);
+    } else if (auto fs = As<ForStmt>(stmt)) {
+      loop_bounds.emplace(fs->loop_var_.get(), std::pair<ExprPtr, ExprPtr>{fs->start_, fs->step_});
+    } else if (auto es = As<EvalStmt>(stmt)) {
+      walk_expr(walk_expr, es->expr_);
+    } else if (auto rs = As<ReturnStmt>(stmt)) {
+      for (const auto& v : rs->value_) {
+        walk_expr(walk_expr, v);
+      }
+    }
+    for (const auto& child : detail::IterChildStmts(stmt)) {
+      self(self, child);
+    }
+  };
+  walk_stmt(walk_stmt, body);
+
+  while (!worklist.empty()) {
+    const Var* v = worklist.back();
+    worklist.pop_back();
+    if (auto def_it = scalar_defs.find(v); def_it != scalar_defs.end()) {
+      CollectExprVars(def_it->second, expanded, worklist);
+    }
+    if (auto lb_it = loop_bounds.find(v); lb_it != loop_bounds.end()) {
+      CollectExprVars(lb_it->second.first, expanded, worklist);
+      CollectExprVars(lb_it->second.second, expanded, worklist);
+    }
+  }
+  return expanded;
+}
+
+std::vector<ExprPtr> NzBackingNdShapeExprs(const std::vector<ExprPtr>& shape, int64_t c0, const Span& span) {
+  auto static_dims = detail::StaticShape(shape);
+  if (static_dims.has_value() && static_dims->size() >= 2) {
+    int64_t batch = 1;
+    for (size_t i = 0; i + 2 < static_dims->size(); ++i) {
+      batch *= (*static_dims)[i];
+    }
+    const int64_t rows = (*static_dims)[static_dims->size() - 2];
+    const int64_t cols = (*static_dims)[static_dims->size() - 1];
+    return {
+        MakeIndexConst(batch * (cols / c0), span),
+        MakeIndexConst(rows * c0, span),
+    };
+  }
+  ExprPtr c0_expr = MakeIndexConst(c0, span);
+  ExprPtr cb_expr = MakeFloorDiv(shape.back(), c0_expr, span);
+  ExprPtr row_expr = cb_expr;
+  for (size_t i = shape.size() - 2; i > 0; --i) {
+    row_expr = MakeMul(shape[i - 1], row_expr, span);
+  }
+  ExprPtr col_expr = MakeMul(shape[shape.size() - 2], c0_expr, span);
+  return {std::move(row_expr), std::move(col_expr)};
+}
+
+std::pair<std::vector<ExprPtr>, std::vector<ExprPtr>> NzBackingNdOffsetsAndWindow(
+    const std::vector<ExprPtr>& offsets, const std::vector<ExprPtr>& gm_shape, int64_t tr, int64_t tc,
+    int64_t c0, const Span& span) {
+  ExprPtr b_idx = nullptr;
+  if (gm_shape.size() > 2) {
+    ExprPtr stride_expr = nullptr;
+    for (size_t i = gm_shape.size() - 2; i > 0; --i) {
+      const size_t idx = i - 1;
+      const ExprPtr& off = offsets[idx];
+      auto off_ci = As<ConstInt>(off);
+      if (!(off_ci && off_ci->value_ == 0)) {
+        ExprPtr term = stride_expr ? MakeMul(off, stride_expr, span) : off;
+        b_idx = b_idx ? MakeAdd(b_idx, term, span) : term;
+      }
+      const ExprPtr& dim_expr = gm_shape[idx];
+      stride_expr = stride_expr ? MakeMul(dim_expr, stride_expr, span) : dim_expr;
+    }
+  }
+
+  const ExprPtr& off_r = offsets[offsets.size() - 2];
+  const ExprPtr& off_c = offsets[offsets.size() - 1];
+  ExprPtr c0_expr = MakeIndexConst(c0, span);
+
+  ExprPtr cb_expr;
+  if (auto off_c_ci = As<ConstInt>(off_c)) {
+    cb_expr = MakeIndexConst(off_c_ci->value_ / c0, span);
+  } else {
+    cb_expr = MakeFloorDiv(off_c, c0_expr, span);
+  }
+
+  ExprPtr nd_row;
+  auto b_ci = As<ConstInt>(b_idx);
+  if (!b_idx || (b_ci && b_ci->value_ == 0)) {
+    nd_row = cb_expr;
+  } else {
+    ExprPtr c_blocks_expr;
+    if (auto last_ci = As<ConstInt>(gm_shape.back())) {
+      c_blocks_expr = MakeIndexConst(last_ci->value_ / c0, span);
+    } else {
+      c_blocks_expr = MakeFloorDiv(gm_shape.back(), c0_expr, span);
+    }
+    ExprPtr b_scaled = MakeMul(b_idx, c_blocks_expr, span);
+    if (auto cb_ci = As<ConstInt>(cb_expr); cb_ci && cb_ci->value_ == 0) {
+      nd_row = b_scaled;
+    } else {
+      nd_row = MakeAdd(b_scaled, cb_expr, span);
+    }
+  }
+
+  ExprPtr nd_col;
+  if (auto off_r_ci = As<ConstInt>(off_r)) {
+    nd_col = MakeIndexConst(off_r_ci->value_ * c0, span);
+  } else {
+    nd_col = MakeMul(off_r, c0_expr, span);
+  }
+
+  std::vector<ExprPtr> nd_win = {
+      MakeIndexConst(tc / c0, span),
+      MakeIndexConst(tr * c0, span),
+  };
+  return {std::vector<ExprPtr>{std::move(nd_row), std::move(nd_col)}, std::move(nd_win)};
+}
+
+std::optional<int64_t> ParseOpIdCounter(const std::string& op_id, const std::string& prefix) {
+  std::string rest;
+  if (!prefix.empty()) {
+    if (op_id.rfind(prefix, 0) != 0) {
+      return std::nullopt;
+    }
+    rest = op_id.substr(prefix.size());
+  } else {
+    const size_t op_pos = op_id.find("op_");
+    const std::string head = (op_pos == std::string::npos) ? op_id : op_id.substr(0, op_pos);
+    if (head.find('.') != std::string::npos) {
+      return std::nullopt;
+    }
+    rest = op_id;
+  }
+  if (rest.rfind("op_", 0) != 0) {
+    return std::nullopt;
+  }
+  const size_t first_us = 3;  // after "op_"
+  const size_t second_us = rest.find('_', first_us);
+  const std::string num_str =
+      (second_us == std::string::npos) ? rest.substr(first_us) : rest.substr(first_us, second_us - first_us);
+  if (num_str.empty()) {
+    return std::nullopt;
+  }
+  int64_t val = 0;
+  for (unsigned char c : num_str) {
+    if (!std::isdigit(c)) {
+      return std::nullopt;
+    }
+    val = val * 10 + (c - '0');
+  }
+  return val;
+}
+
+void FindReturnStmts(const StmtPtr& stmt, std::vector<ReturnStmtPtr>& out) {
+  if (!stmt) {
+    return;
+  }
+  if (auto rs = As<ReturnStmt>(stmt)) {
+    out.push_back(rs);
+    return;
+  }
+  for (const auto& child : detail::IterChildStmts(stmt)) {
+    FindReturnStmts(child, out);
+  }
+}
+
+using ParamSig = std::vector<std::optional<TensorLayout>>;
+
+struct ParamSigHash {
+  size_t operator()(const std::pair<std::string, ParamSig>& key) const {
+    size_t h = std::hash<std::string>{}(key.first);
+    for (const auto& opt : key.second) {
+      h ^= (opt.has_value() ? static_cast<size_t>(*opt) + 1 : 0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    }
+    return h;
+  }
+};
+
+struct LayoutSpecKeyHash {
+  size_t operator()(const std::pair<const Var*, LayoutSpec>& key) const {
+    size_t h = std::hash<const void*>{}(key.first);
+    h ^= LayoutSpecHash{}(key.second) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
+bool IsVecTileType(const TypePtr& type) {
+  auto tt = As<TileType>(type);
+  return tt && tt->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec;
+}
+
+class LayoutAssignmentWriter : public IRMutator {
+ public:
+  explicit LayoutAssignmentWriter(const LayoutAssignment& assignment) : op_configs_(assignment.op_configs) {
+    for (const auto& [name, spec] : assignment.value_layouts) {
+      if (spec.IsTensor()) {
+        tensor_layouts_.emplace(name, spec.tensor_layout);
+      } else {
+        tile_layouts_.emplace(name, spec);
+      }
+    }
+  }
+
+  ProgramPtr Rewrite(const ProgramPtr& program) {
+    std::vector<FunctionPtr> funcs;
+    funcs.reserve(program->functions_.size());
+    std::unordered_map<std::string, FunctionPtr> func_by_name;
+    std::vector<FunctionPtr> incore_funcs;
+    std::vector<FunctionPtr> other_funcs;
+    std::vector<FunctionPtr> top_orch;
+    std::vector<FunctionPtr> sub_orch;
+
+    for (const auto& [gv, fn] : program->functions_) {
+      (void)gv;
+      funcs.push_back(fn);
+      func_by_name.emplace(fn->name_, fn);
+      if (IsInCoreType(fn->func_type_)) {
+        incore_funcs.push_back(fn);
+      } else {
+        other_funcs.push_back(fn);
+        if (fn->func_type_ == FunctionType::Orchestration) {
+          top_orch.push_back(fn);
+        } else {
+          sub_orch.push_back(fn);
+        }
+      }
+    }
+
+    std::vector<FunctionPtr> extra_incore;
+    if (!other_funcs.empty()) {
+      OrchCallAnalysis orch = AnalyzeOrchestration(program);
+      param_steps_ = std::move(orch.param_steps);
+      std::sort(sub_orch.begin(), sub_orch.end(), [&](const FunctionPtr& a, const FunctionPtr& b) {
+        auto it_a = orch.call_order.find(a->name_);
+        auto it_b = orch.call_order.find(b->name_);
+        const size_t oa = it_a != orch.call_order.end() ? it_a->second : std::numeric_limits<size_t>::max();
+        const size_t ob = it_b != orch.call_order.end() ? it_b->second : std::numeric_limits<size_t>::max();
+        return oa < ob;
+      });
+      extra_incore = RegisterCalleeSpecializations(func_by_name, orch);
+    }
+
+    multi_incore_ = incore_funcs.size() > 1;
+    std::unordered_map<std::string, FunctionPtr> rewritten_by_name;
+
+    auto visit_all = [&](const std::vector<FunctionPtr>& list) {
+      for (const auto& fn : list) {
+        rewritten_by_name.emplace(fn->name_, VisitFunction(fn));
+      }
+    };
+    visit_all(incore_funcs);
+    visit_all(extra_incore);
+    // Visit sub_orch in reverse call_order (callees before callers) or sub_orch order.
+    visit_all(sub_orch);
+    visit_all(top_orch);
+
+    std::unordered_set<std::string> used_spec_names;
+    for (const auto& [k, spec_name] : specialized_callees_) {
+      (void)k;
+      used_spec_names.insert(spec_name);
+    }
+
+    std::vector<FunctionPtr> new_funcs;
+    new_funcs.reserve(incore_funcs.size() + extra_incore.size() + other_funcs.size());
+    for (const auto& fn : incore_funcs) {
+      new_funcs.push_back(rewritten_by_name.at(fn->name_));
+    }
+    for (const auto& ef : extra_incore) {
+      if (used_spec_names.count(ef->name_) != 0) {
+        new_funcs.push_back(rewritten_by_name.at(ef->name_));
+      }
+    }
+    for (const auto& fn : other_funcs) {
+      new_funcs.push_back(rewritten_by_name.at(fn->name_));
+    }
+
+    if (new_funcs.size() == funcs.size()) {
+      bool all_same = true;
+      for (size_t i = 0; i < funcs.size(); ++i) {
+        if (new_funcs[i].get() != funcs[i].get()) {
+          all_same = false;
+          break;
+        }
+      }
+      if (all_same) {
+        return program;
+      }
+    }
+    return std::make_shared<Program>(std::move(new_funcs), program->name_, program->span_);
+  }
+
+  FunctionPtr VisitFunction(const FunctionPtr& func) override {
+    if (func->level_.has_value() && LevelToLinquLevel(*func->level_) >= 3) {
+      return func;
+    }
+    local_var_remap_.clear();
+    current_func_name_ = func->name_;
+    func_promoted_gm_to_nz_ = false;
+
+    auto [new_params, changed, has_nz_param] = RewriteFuncParams(func);
+
+    std::vector<StmtPtr> prologue_stmts;
+    if (has_nz_param && IsInCoreType(func->func_type_)) {
+      prologue_stmts = BuildAlignedParamPrologue(func->name_, new_params, func->params_, func->body_);
+    }
+    if (IsInCoreType(func->func_type_)) {
+      std::vector<StmtPtr> vec_prologue = BuildIncoreVecPrologue(func, new_params);
+      prologue_stmts.insert(prologue_stmts.end(), std::make_move_iterator(vec_prologue.begin()),
+                            std::make_move_iterator(vec_prologue.end()));
+    } else {
+      ClearPrescanState();
+    }
+    if (!prologue_stmts.empty()) {
+      changed = true;
+    }
+
+    StmtPtr new_body = VisitStmt(func->body_);
+    if (!prologue_stmts.empty()) {
+      std::vector<StmtPtr> combined = std::move(prologue_stmts);
+      if (auto seq = As<SeqStmts>(new_body)) {
+        combined.insert(combined.end(), seq->stmts_.begin(), seq->stmts_.end());
+      } else {
+        combined.push_back(new_body);
+      }
+      new_body = std::make_shared<SeqStmts>(std::move(combined), new_body->span_);
+    }
+
+    auto [new_return_types, ret_changed] = SyncFuncReturnTypes(func, new_params, new_body);
+    changed = changed || ret_changed;
+    func_return_types_[func->name_] = new_return_types;
+
+    // Strip `nz_tensor_views_blocked` only when THIS function newly promoted a GM
+    // parameter or local `tensor.create`/`tensor.view` to NZ, and remap Expr-valued attrs.
+    std::vector<std::pair<std::string, std::any>> filtered_attrs;
+    filtered_attrs.reserve(func->attrs_.size());
+    bool stripped_nz_attr = false;
+    for (const auto& kv : func->attrs_) {
+      if (func_promoted_gm_to_nz_ && kv.first == kAttrNzTensorViewsBlocked) {
+        stripped_nz_attr = true;
+        continue;
+      }
+      filtered_attrs.push_back(kv);
+    }
+    auto [new_attrs, attrs_changed] = MutateAttrs(filtered_attrs);
+    changed = changed || stripped_nz_attr || attrs_changed;
+
+    if (!changed && new_body.get() == func->body_.get()) {
+      return func;
+    }
+
+    std::vector<VarPtr> param_vars;
+    std::vector<ParamDirection> param_dirs;
+    param_vars.reserve(new_params.size());
+    param_dirs.reserve(new_params.size());
+    for (auto& [p, d] : new_params) {
+      param_vars.push_back(std::move(p));
+      param_dirs.push_back(d);
+    }
+
+    auto rebuilt = std::make_shared<Function>(
+        func->name_, std::move(param_vars), std::move(param_dirs), std::move(new_return_types),
+        std::move(new_body), func->span_, func->func_type_, func->level_, func->role_, std::move(new_attrs),
+        func->requires_runtime_binding_, func->ir_stage_);
+    return NormalizeStmtStructure(rebuilt);
+  }
+
+ protected:
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    if (auto it = local_var_remap_.find(op.get()); it != local_var_remap_.end()) {
+      return it->second;
+    }
+    TypePtr remapped_type = RemapTypeViaVisitor(op->GetType());
+    if (remapped_type.get() != op->GetType().get()) {
+      auto fresh = std::make_shared<Var>(op->name_hint_, std::move(remapped_type), op->span_);
+      local_var_remap_.emplace(op.get(), fresh);
+      return fresh;
+    }
+    return op;
+  }
+
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    if (auto it = local_var_remap_.find(op.get()); it != local_var_remap_.end()) {
+      return it->second;
+    }
+    TypePtr remapped_type = RemapTypeViaVisitor(op->GetType());
+    if (remapped_type.get() != op->GetType().get()) {
+      auto fresh =
+          std::make_shared<IterArg>(op->name_hint_, std::move(remapped_type), op->initValue_, op->span_);
+      local_var_remap_.emplace(op.get(), fresh);
+      return fresh;
+    }
+    return op;
+  }
+
+  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    std::vector<StmtPtr> new_stmts;
+    new_stmts.reserve(op->stmts_.size());
+    bool changed = false;
+    for (const auto& s : op->stmts_) {
+      StmtPtr visited = VisitStmt(s);
+      if (visited.get() != s.get()) {
+        changed = true;
+      }
+      if (auto vseq = As<SeqStmts>(visited); vseq && !As<SeqStmts>(s)) {
+        new_stmts.insert(new_stmts.end(), vseq->stmts_.begin(), vseq->stmts_.end());
+      } else {
+        new_stmts.push_back(std::move(visited));
+      }
+    }
+    if (!changed) {
+      return op;
+    }
+    return std::make_shared<SeqStmts>(std::move(new_stmts), op->span_);
+  }
+
+  struct LoopRewriteResult {
+    std::vector<IterArgPtr> new_iter_args;
+    StmtPtr new_body;
+    std::vector<VarPtr> new_return_vars;
+    ExprPtr new_condition;
+    bool iter_changed = false;
+    bool ret_changed = false;
+  };
+
+  LoopRewriteResult RewriteLoopIterArgsAndBody(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
+                                               const std::vector<VarPtr>& return_vars,
+                                               const ExprPtr& condition = nullptr) {
+    LoopRewriteResult res;
+    res.new_iter_args.reserve(iter_args.size());
+    std::vector<std::optional<LayoutSpec>> loop_vec_lays;
+    loop_vec_lays.reserve(iter_args.size());
+    std::vector<StmtPtr> ia_prologue;
+
+    for (const auto& ia : iter_args) {
+      const ExprPtr& old_init = ia->initValue_;
+      ExprPtr new_init = old_init ? VisitExpr(old_init) : old_init;
+      std::optional<LayoutSpec> ia_lay;
+      if (IsVecTileType(ia->GetType())) {
+        if (auto it = vec_prod_lay_.find(ia.get()); it != vec_prod_lay_.end()) {
+          ia_lay = it->second;
+        }
+      }
+      loop_vec_lays.push_back(ia_lay);
+
+      IterArgPtr new_ia = ia;
+      if (new_init &&
+          (new_init.get() != old_init.get() || !structural_equal(new_init->GetType(), ia->GetType()))) {
+        new_ia = std::make_shared<IterArg>(ia->name_hint_, new_init->GetType(), new_init, ia->span_);
+        local_var_remap_[ia.get()] = new_ia;
+        res.iter_changed = true;
+      }
+      res.new_iter_args.push_back(new_ia);
+
+      if (ia_lay.has_value() && vec_demanded_.count(ia.get()) != 0) {
+        std::vector<StmtPtr> convs = EmitDemandedConversions(ia.get(), new_ia, *ia_lay, ia->span_);
+        ia_prologue.insert(ia_prologue.end(), std::make_move_iterator(convs.begin()),
+                           std::make_move_iterator(convs.end()));
+      }
+    }
+
+    if (condition) {
+      res.new_condition = VisitExpr(condition);
+    }
+
+    yield_frames_.push_back({std::move(loop_vec_lays), {}});
+    try {
+      res.new_body = VisitStmt(body);
+    } catch (...) {
+      yield_frames_.pop_back();
+      throw;
+    }
+    yield_frames_.pop_back();
+
+    if (!ia_prologue.empty()) {
+      if (auto seq = As<SeqStmts>(res.new_body)) {
+        ia_prologue.insert(ia_prologue.end(), seq->stmts_.begin(), seq->stmts_.end());
+      } else {
+        ia_prologue.push_back(res.new_body);
+      }
+      res.new_body = std::make_shared<SeqStmts>(std::move(ia_prologue), res.new_body->span_);
+    }
+
+    res.new_return_vars.reserve(return_vars.size());
+    for (size_t idx = 0; idx < return_vars.size(); ++idx) {
+      const VarPtr& rv = return_vars[idx];
+      TypePtr expected_type =
+          idx < res.new_iter_args.size() ? res.new_iter_args[idx]->GetType() : rv->GetType();
+      if (!structural_equal(expected_type, rv->GetType())) {
+        auto new_rv = std::make_shared<Var>(rv->name_hint_, expected_type, rv->span_);
+        local_var_remap_[rv.get()] = new_rv;
+        res.new_return_vars.push_back(std::move(new_rv));
+        res.ret_changed = true;
+      } else {
+        res.new_return_vars.push_back(rv);
+      }
+    }
+    return res;
+  }
+
+  StmtPtr WrapWithReturnVarConversions(const std::vector<VarPtr>& orig_rvs,
+                                       const std::vector<VarPtr>& new_rvs, StmtPtr main_stmt,
+                                       const Span& span) {
+    std::vector<StmtPtr> convs;
+    for (size_t idx = 0; idx < orig_rvs.size() && idx < new_rvs.size(); ++idx) {
+      const Var* orig_rv = orig_rvs[idx].get();
+      const VarPtr& new_rv = new_rvs[idx];
+      if (!IsVecTileType(new_rv->GetType()) || vec_demanded_.count(orig_rv) == 0) {
+        continue;
+      }
+      LayoutSpec prod_lay = EffectiveTileLayout(As<TileType>(new_rv->GetType()));
+      if (auto prod_it = vec_prod_lay_.find(orig_rv); prod_it != vec_prod_lay_.end()) {
+        prod_lay = prod_it->second;
+      }
+      std::vector<StmtPtr> extra = EmitDemandedConversions(orig_rv, new_rv, prod_lay, span);
+      convs.insert(convs.end(), std::make_move_iterator(extra.begin()), std::make_move_iterator(extra.end()));
+    }
+    if (convs.empty()) {
+      return main_stmt;
+    }
+    std::vector<StmtPtr> seq;
+    seq.reserve(1 + convs.size());
+    seq.push_back(std::move(main_stmt));
+    seq.insert(seq.end(), std::make_move_iterator(convs.begin()), std::make_move_iterator(convs.end()));
+    return std::make_shared<SeqStmts>(std::move(seq), span);
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    ExprPtr new_start = VisitExpr(op->start_);
+    ExprPtr new_stop = VisitExpr(op->stop_);
+    ExprPtr new_step = VisitExpr(op->step_);
+    LoopRewriteResult lr = RewriteLoopIterArgsAndBody(op->iter_args_, op->body_, op->return_vars_);
+    auto [new_attrs, attrs_changed] = MutateAttrs(op->attrs_);
+
+    StmtPtr main_stmt = op;
+    if (lr.iter_changed || lr.ret_changed || attrs_changed || new_start.get() != op->start_.get() ||
+        new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() ||
+        lr.new_body.get() != op->body_.get()) {
+      main_stmt = std::make_shared<ForStmt>(
+          op->loop_var_, std::move(new_start), std::move(new_stop), std::move(new_step),
+          std::move(lr.new_iter_args), std::move(lr.new_body), lr.new_return_vars, op->span_, op->kind_,
+          std::move(new_attrs), op->leading_comments_, op->hardware_loop_policy_);
+    }
+    return WrapWithReturnVarConversions(op->return_vars_, lr.new_return_vars, std::move(main_stmt),
+                                        op->span_);
+  }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    LoopRewriteResult lr =
+        RewriteLoopIterArgsAndBody(op->iter_args_, op->body_, op->return_vars_, op->condition_);
+
+    StmtPtr main_stmt = op;
+    if (lr.iter_changed || lr.ret_changed || lr.new_condition.get() != op->condition_.get() ||
+        lr.new_body.get() != op->body_.get()) {
+      main_stmt = std::make_shared<WhileStmt>(std::move(lr.new_condition), std::move(lr.new_iter_args),
+                                              std::move(lr.new_body), lr.new_return_vars, op->span_,
+                                              op->leading_comments_);
+    }
+    return WrapWithReturnVarConversions(op->return_vars_, lr.new_return_vars, std::move(main_stmt),
+                                        op->span_);
+  }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    ExprPtr new_cond = VisitExpr(op->condition_);
+
+    yield_frames_.emplace_back();
+    StmtPtr new_then;
+    try {
+      new_then = VisitStmt(op->then_body_);
+    } catch (...) {
+      yield_frames_.pop_back();
+      throw;
+    }
+    std::vector<TypePtr> then_types = std::move(yield_frames_.back().branch_yield_types);
+    yield_frames_.pop_back();
+
+    std::optional<StmtPtr> new_else = op->else_body_;
+    std::vector<TypePtr> else_types;
+    if (op->else_body_.has_value() && *op->else_body_) {
+      yield_frames_.emplace_back();
+      StmtPtr visited_else;
+      try {
+        visited_else = VisitStmt(*op->else_body_);
+      } catch (...) {
+        yield_frames_.pop_back();
+        throw;
+      }
+      else_types = std::move(yield_frames_.back().branch_yield_types);
+      yield_frames_.pop_back();
+      new_else = std::move(visited_else);
+    }
+
+    std::vector<VarPtr> new_return_vars;
+    new_return_vars.reserve(op->return_vars_.size());
+    bool ret_changed = false;
+    for (size_t idx = 0; idx < op->return_vars_.size(); ++idx) {
+      const VarPtr& rv = op->return_vars_[idx];
+      TypePtr target_type = rv->GetType();
+      if (idx < then_types.size() && !structural_equal(then_types[idx], rv->GetType())) {
+        target_type = then_types[idx];
+      } else if (idx < else_types.size() && !structural_equal(else_types[idx], rv->GetType())) {
+        target_type = else_types[idx];
+      }
+      if (!structural_equal(target_type, rv->GetType())) {
+        auto new_rv = std::make_shared<Var>(rv->name_hint_, std::move(target_type), rv->span_);
+        local_var_remap_[rv.get()] = new_rv;
+        new_return_vars.push_back(std::move(new_rv));
+        ret_changed = true;
+      } else {
+        new_return_vars.push_back(rv);
+      }
+    }
+
+    const bool else_changed = op->else_body_.has_value()
+                                  ? (!new_else.has_value() || new_else->get() != (*op->else_body_).get())
+                                  : new_else.has_value();
+    StmtPtr main_stmt = op;
+    if (ret_changed || new_cond.get() != op->condition_.get() || new_then.get() != op->then_body_.get() ||
+        else_changed) {
+      main_stmt = std::make_shared<IfStmt>(std::move(new_cond), std::move(new_then), std::move(new_else),
+                                           new_return_vars, op->span_, op->leading_comments_);
+    }
+    return WrapWithReturnVarConversions(op->return_vars_, new_return_vars, std::move(main_stmt), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const YieldStmtPtr& op) override {
+    const std::vector<std::optional<LayoutSpec>> expected_lays =
+        yield_frames_.empty() ? std::vector<std::optional<LayoutSpec>>{} : yield_frames_.back().loop_expected;
+    std::vector<ExprPtr> new_vals;
+    new_vals.reserve(op->value_.size());
+    std::vector<StmtPtr> extra_stmts;
+    bool changed = false;
+    for (size_t idx = 0; idx < op->value_.size(); ++idx) {
+      const ExprPtr& val = op->value_[idx];
+      std::optional<LayoutSpec> target_lay = idx < expected_lays.size() ? expected_lays[idx] : std::nullopt;
+      if (target_lay.has_value()) {
+        if (auto val_var = AsVarLike(val)) {
+          auto prod_it = vec_prod_lay_.find(val_var.get());
+          auto shape_it = orig_tile_shapes_.find(val_var.get());
+          if (prod_it != vec_prod_lay_.end() && prod_it->second != *target_lay &&
+              shape_it != orig_tile_shapes_.end()) {
+            auto remap_it = local_var_remap_.find(val_var.get());
+            VarPtr cur_var = remap_it != local_var_remap_.end() ? remap_it->second : val_var;
+            auto [conv_var, conv_stmts] = EmitVecConversion(val_var.get(), cur_var, prod_it->second,
+                                                            *target_lay, shape_it->second, op->span_);
+            extra_stmts.insert(extra_stmts.end(), std::make_move_iterator(conv_stmts.begin()),
+                               std::make_move_iterator(conv_stmts.end()));
+            new_vals.push_back(std::move(conv_var));
+            changed = true;
+            continue;
+          }
+        }
+      }
+      ExprPtr visited = VisitExpr(val);
+      if (visited.get() != val.get()) {
+        changed = true;
+      }
+      new_vals.push_back(std::move(visited));
+    }
+    if (!yield_frames_.empty() && yield_frames_.back().loop_expected.empty()) {
+      auto& types = yield_frames_.back().branch_yield_types;
+      types.clear();
+      types.reserve(new_vals.size());
+      for (const auto& nv : new_vals) {
+        types.push_back(nv->GetType());
+      }
+    }
+    if (!changed && extra_stmts.empty()) {
+      return op;
+    }
+    auto new_yield = std::make_shared<YieldStmt>(std::move(new_vals), op->span_);
+    if (!extra_stmts.empty()) {
+      extra_stmts.push_back(std::move(new_yield));
+      return std::make_shared<SeqStmts>(std::move(extra_stmts), op->span_);
+    }
+    return new_yield;
+  }
+
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto call = As<Call>(op->expr_); call && call->op_->name_ == kOpTileStore) {
+      std::optional<OperatorConfig> cfg;
+      if (!eval_store_cfgs_.empty()) {
+        cfg = std::move(eval_store_cfgs_.front());
+        eval_store_cfgs_.pop_front();
+      }
+      const OperatorConfig* cfg_ptr = cfg.has_value() ? &(*cfg) : nullptr;
+      auto [store_call, pre_stmts, nz_src] = RewriteTileStore(call, cfg_ptr, op->span_);
+      (void)nz_src;
+      if (store_call.get() == call.get() && pre_stmts.empty()) {
+        return op;
+      }
+      auto new_eval = std::make_shared<EvalStmt>(std::move(store_call), op->span_);
+      if (!pre_stmts.empty()) {
+        pre_stmts.push_back(std::move(new_eval));
+        return std::make_shared<SeqStmts>(std::move(pre_stmts), op->span_);
+      }
+      return new_eval;
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    const std::string clean_name = detail::CleanName(op->var_->name_hint_);
+    std::optional<LayoutSpec> target_tile_desc = LookupTileDesc(op->var_->name_hint_);
+    auto t_it = tensor_layouts_.find(clean_name);
+    if (t_it == tensor_layouts_.end()) {
+      t_it = tensor_layouts_.find(op->var_->name_hint_);
+    }
+    std::optional<TensorLayout> target_tensor_layout =
+        (t_it != tensor_layouts_.end()) ? std::optional<TensorLayout>(t_it->second) : std::nullopt;
+
+    CallPtr rhs = As<Call>(op->value_);
+    if (rhs && rhs->op_->name_ == kOpTensorCreate && target_tensor_layout.has_value() &&
+        !IsA<DistributedTensorType>(op->var_->GetType())) {
+      if (auto lhs_tt = As<TensorType>(op->var_->GetType());
+          lhs_tt && detail::TensorTypeLayout(lhs_tt) != *target_tensor_layout) {
+        std::vector<ExprPtr> new_args;
+        new_args.reserve(rhs->args_.size());
+        for (const auto& a : rhs->args_) {
+          new_args.push_back(VisitExpr(a));
+        }
+        auto new_kwargs = ReplaceOrInsertKwarg(rhs->kwargs_, "layout", *target_tensor_layout);
+        CallPtr new_call =
+            CreateOpCallWithAttrs(rhs->op_->name_, new_args, new_kwargs, rhs->attrs_, rhs->span_);
+        auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_call->GetType(), op->var_->span_);
+        local_var_remap_[op->var_.get()] = new_var;
+        if (*target_tensor_layout == TensorLayout::NZ) {
+          func_promoted_gm_to_nz_ = true;
+        }
+        return std::make_shared<AssignStmt>(std::move(new_var), std::move(new_call), op->span_);
+      }
+    }
+
+    auto cfg_it = assign_op_cfg_.find(op->var_.get());
+    const OperatorConfig* cfg = (cfg_it != assign_op_cfg_.end()) ? &cfg_it->second : nullptr;
+
+    if (rhs && rhs->op_->name_ == kOpTileLoad && IsVecTileType(op->var_->GetType()) && cfg != nullptr &&
+        cfg->output_layout.IsTile()) {
+      return RewriteVecLoadAssign(op, rhs, *cfg);
+    }
+
+    if (rhs && rhs->op_->name_ == kOpTileStore) {
+      auto [store_call, pre_stmts, nz_src_gm] = RewriteTileStore(rhs, cfg, op->span_);
+      if (nz_src_gm) {
+        if (auto nz_tt = As<TensorType>(nz_src_gm->GetType())) {
+          auto store_nd_var =
+              std::make_shared<Var>(clean_name + "_nd_store", store_call->GetType(), op->span_);
+          auto assign_store = std::make_shared<AssignStmt>(store_nd_var, std::move(store_call), op->span_);
+          auto logical_shape = std::make_shared<MakeTuple>(nz_tt->shape_, op->span_);
+          std::vector<std::pair<std::string, std::any>> view_kwargs = {{"layout", TensorLayout::NZ}};
+          CallPtr view_call =
+              CreateOpCallWithAttrs(kOpTensorView, {store_nd_var, logical_shape}, view_kwargs, {}, op->span_);
+          auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, view_call->GetType(), op->var_->span_);
+          local_var_remap_[op->var_.get()] = new_lhs;
+          func_promoted_gm_to_nz_ = true;
+          pre_stmts.push_back(std::move(assign_store));
+          pre_stmts.push_back(
+              std::make_shared<AssignStmt>(std::move(new_lhs), std::move(view_call), op->span_));
+          return std::make_shared<SeqStmts>(std::move(pre_stmts), op->span_);
+        }
+      }
+      return FinishVecAssign(op->var_, std::move(store_call), std::nullopt, op->span_, op);
+    }
+
+    if (rhs && rhs->op_->name_ == kOpTileMove && As<TileType>(op->var_->GetType())) {
+      if (StmtPtr moved = RewriteTileMoveAssign(op, rhs, cfg, target_tile_desc)) {
+        return moved;
+      }
+    }
+
+    if (rhs && rhs->op_->name_.rfind("tile.", 0) == 0 && rhs->op_->name_ != kOpTileLoad &&
+        rhs->op_->name_ != kOpTileStore && rhs->op_->name_ != kOpTileTransposeView &&
+        IsVecTileType(op->var_->GetType()) && cfg != nullptr && cfg->output_layout.IsTile()) {
+      return RewriteVecGenericAssign(op, rhs, *cfg);
+    }
+
+    ExprPtr new_value = VisitExpr(op->value_);
+    std::optional<LayoutSpec> prod_lay;
+    if (IsVecTileType(op->var_->GetType())) {
+      if (auto it = vec_prod_lay_.find(op->var_.get()); it != vec_prod_lay_.end()) {
+        prod_lay = it->second;
+      }
+    }
+    return FinishVecAssign(op->var_, std::move(new_value), prod_lay, op->span_, op);
+  }
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(op->args_.size());
+    bool args_changed = false;
+    for (const auto& arg : op->args_) {
+      ExprPtr visited = VisitExpr(arg);
+      if (visited.get() != arg.get()) {
+        args_changed = true;
+      }
+      new_args.push_back(std::move(visited));
+    }
+    auto [new_attrs, attrs_changed] = MutateAttrs(op->attrs_);
+
+    if (auto gv = As<GlobalVar>(op->op_)) {
+      const std::string target_name = ResolveSpecializedCallee(gv->name_, new_args);
+      auto ret_it = func_return_types_.find(target_name);
+      TypePtr ret_type = (ret_it != func_return_types_.end())
+                             ? SyncCallReturnType(op->GetType(), ret_it->second)
+                             : RemapTypeViaVisitor(op->GetType());
+      const bool type_changed = (ret_type.get() != op->GetType().get());
+      if (!args_changed && target_name == gv->name_ && !type_changed && !attrs_changed) {
+        return op;
+      }
+      OpPtr target_gv = (target_name != gv->name_) ? std::make_shared<GlobalVar>(target_name) : op->op_;
+      return std::make_shared<Call>(std::move(target_gv), std::move(new_args), op->kwargs_,
+                                    std::move(new_attrs), std::move(ret_type), op->span_);
+    }
+
+    if (!args_changed && !attrs_changed) {
+      return op;
+    }
+    if (op->op_->name_ == kOpTileLoad) {
+      return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_attrs),
+                                    op->GetType(), op->span_);
+    }
+    return CreateOpCallWithAttrs(op->op_->name_, new_args, op->kwargs_, new_attrs, op->span_);
+  }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(op->args_.size());
+    bool args_changed = false;
+    for (const auto& arg : op->args_) {
+      ExprPtr visited = VisitExpr(arg);
+      if (visited.get() != arg.get()) {
+        args_changed = true;
+      }
+      new_args.push_back(std::move(visited));
+    }
+
+    std::vector<ExprPtr> new_deps;
+    new_deps.reserve(op->deps_.size());
+    bool deps_changed = false;
+    for (const auto& dep : op->deps_) {
+      ExprPtr visited = VisitExpr(dep);
+      if (visited.get() != dep.get()) {
+        deps_changed = true;
+      }
+      new_deps.push_back(std::move(visited));
+    }
+
+    std::optional<ExprPtr> new_core_num = op->core_num_;
+    bool core_num_changed = false;
+    if (op->core_num_.has_value() && *op->core_num_) {
+      ExprPtr remapped = VisitExpr(*op->core_num_);
+      if (remapped.get() != (*op->core_num_).get()) {
+        new_core_num = std::move(remapped);
+        core_num_changed = true;
+      }
+    }
+
+    std::optional<ExprPtr> new_predicate = op->predicate_;
+    bool predicate_changed = false;
+    if (op->predicate_.has_value() && *op->predicate_) {
+      ExprPtr remapped = VisitExpr(*op->predicate_);
+      if (remapped.get() != (*op->predicate_).get()) {
+        new_predicate = std::move(remapped);
+        predicate_changed = true;
+      }
+    }
+
+    auto [new_attrs, attrs_changed] = MutateAttrs(op->attrs_);
+
+    auto gv = As<GlobalVar>(op->op_);
+    const std::string target_name = gv ? ResolveSpecializedCallee(gv->name_, new_args) : "";
+    const bool callee_changed = gv && target_name != gv->name_;
+    TypePtr ret_type = op->GetType();
+    if (gv) {
+      if (auto ret_it = func_return_types_.find(target_name); ret_it != func_return_types_.end()) {
+        ret_type = SyncCallReturnType(op->GetType(), ret_it->second);
+      } else {
+        ret_type = RemapTypeViaVisitor(op->GetType());
+      }
+    } else {
+      ret_type = RemapTypeViaVisitor(op->GetType());
+    }
+    const bool type_changed = (ret_type.get() != op->GetType().get());
+
+    if (!args_changed && !deps_changed && !core_num_changed && !predicate_changed && !attrs_changed &&
+        !callee_changed && !type_changed) {
+      return op;
+    }
+
+    OpPtr target_op = callee_changed ? std::make_shared<GlobalVar>(target_name) : op->op_;
+    return std::make_shared<Submit>(std::move(target_op), std::move(new_args), std::move(new_deps),
+                                    op->kwargs_, std::move(new_attrs), std::move(ret_type), op->span_,
+                                    std::move(new_core_num), op->sync_start_, op->allow_early_resolve_,
+                                    std::move(new_predicate));
+  }
+
+ private:
+  std::pair<std::vector<std::pair<std::string, std::any>>, bool> MutateAttrs(
+      const std::vector<std::pair<std::string, std::any>>& attrs) {
+    std::vector<std::pair<std::string, std::any>> out;
+    out.reserve(attrs.size());
+    bool changed = false;
+    for (const auto& [k, v] : attrs) {
+      auto remapped = MapAttrExprs(v, [this](const ExprPtr& e) { return VisitExpr(e); });
+      if (remapped.has_value()) {
+        changed = true;
+        out.emplace_back(k, std::move(*remapped));
+      } else {
+        out.emplace_back(k, v);
+      }
+    }
+    return {std::move(out), changed};
+  }
+
+  CallPtr CreateOpCallWithAttrs(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::vector<std::pair<std::string, std::any>>& attrs,
+                                const Span& span) {
+    auto [mutated_attrs, attrs_changed] = MutateAttrs(attrs);
+    (void)attrs_changed;
+    return ::pypto::ir::auto_layout::CreateOpCallWithAttrs(op_name, args, kwargs, mutated_attrs, span);
+  }
+  std::optional<TensorLayout> LookupTensorLayout(const std::string& name_hint) const {
+    const std::string clean_name = detail::CleanName(name_hint);
+    if (!current_func_name_.empty()) {
+      auto sit = scoped_tensor_layouts_.find({current_func_name_, clean_name});
+      if (sit != scoped_tensor_layouts_.end()) {
+        return sit->second;
+      }
+    }
+    if (auto it = tensor_layouts_.find(clean_name); it != tensor_layouts_.end()) {
+      return it->second;
+    }
+    if (auto it = tensor_layouts_.find(name_hint); it != tensor_layouts_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<LayoutSpec> LookupTileDesc(const std::string& name_hint) const {
+    const std::string clean_name = detail::CleanName(name_hint);
+    if (!current_func_name_.empty()) {
+      if (auto ov = tile_prefix_override_.find(current_func_name_); ov != tile_prefix_override_.end()) {
+        if (auto it = tile_layouts_.find(ov->second + "." + clean_name); it != tile_layouts_.end()) {
+          return it->second;
+        }
+      }
+      if (auto it = tile_layouts_.find(current_func_name_ + "." + clean_name); it != tile_layouts_.end()) {
+        return it->second;
+      }
+    }
+    if (auto it = tile_layouts_.find(clean_name); it != tile_layouts_.end()) {
+      return it->second;
+    }
+    if (auto it = tile_layouts_.find(name_hint); it != tile_layouts_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  ParamSig SiteParamSignature(const FunctionPtr& callee,
+                              const std::vector<std::optional<std::string>>& site_args) const {
+    ParamSig sig;
+    sig.reserve(callee->params_.size());
+    for (size_t p_idx = 0; p_idx < callee->params_.size(); ++p_idx) {
+      const auto& param = callee->params_[p_idx];
+      auto tt = AsTensorTypeLike(param->GetType());
+      if (!tt) {
+        sig.emplace_back(std::nullopt);
+        continue;
+      }
+      const TensorLayout default_lay = detail::TensorTypeLayout(tt);
+      const auto& arg_opt = (p_idx < site_args.size()) ? site_args[p_idx] : std::nullopt;
+      if (arg_opt.has_value()) {
+        auto it = tensor_layouts_.find(*arg_opt);
+        sig.emplace_back(it != tensor_layouts_.end() ? it->second : default_lay);
+      } else {
+        sig.emplace_back(default_lay);
+      }
+    }
+    return sig;
+  }
+
+  std::vector<FunctionPtr> RegisterCalleeSpecializations(
+      const std::unordered_map<std::string, FunctionPtr>& func_by_name, const OrchCallAnalysis& orch) {
+    std::vector<FunctionPtr> extra_incore;
+    std::unordered_set<std::string> used_names;
+    for (const auto& [name, fn] : func_by_name) {
+      (void)fn;
+      used_names.insert(name);
+    }
+
+    for (const auto& [callee_name, sites] : orch.call_sites) {
+      auto callee_it = func_by_name.find(callee_name);
+      if (callee_it == func_by_name.end() || sites.empty()) {
+        continue;
+      }
+      const FunctionPtr& callee = callee_it->second;
+      callee_formal_params_.emplace(callee_name, callee->params_);
+      if (sites.size() == 1) {
+        const auto& site_args = sites[0].arg_names;
+        for (size_t p_idx = 0; p_idx < callee->params_.size(); ++p_idx) {
+          const auto& arg_opt = (p_idx < site_args.size()) ? site_args[p_idx] : std::nullopt;
+          if (arg_opt.has_value()) {
+            if (auto it = tensor_layouts_.find(*arg_opt); it != tensor_layouts_.end()) {
+              scoped_tensor_layouts_.emplace(
+                  std::make_pair(callee_name, detail::CleanName(callee->params_[p_idx]->name_hint_)),
+                  it->second);
+            }
+          }
+        }
+        continue;
+      }
+
+      for (size_t site_idx = 0; site_idx < sites.size(); ++site_idx) {
+        const auto& site_args = sites[site_idx].arg_names;
+        ParamSig sig = SiteParamSignature(callee, site_args);
+        std::string spec_name;
+        if (site_idx == 0) {
+          spec_name = callee_name;
+          tile_prefix_override_[spec_name] = callee_name + "_0";
+          specialized_callees_.emplace(std::make_pair(callee_name, sig), spec_name);
+        } else if (specialized_callees_.count({callee_name, sig}) != 0) {
+          continue;
+        } else {
+          size_t suffix = site_idx;
+          spec_name = callee_name + "_site" + std::to_string(suffix);
+          while (used_names.count(spec_name) != 0) {
+            ++suffix;
+            spec_name = callee_name + "_site" + std::to_string(suffix);
+          }
+          used_names.insert(spec_name);
+          tile_prefix_override_[spec_name] = callee_name + "_" + std::to_string(site_idx);
+          specialized_callees_.emplace(std::make_pair(callee_name, sig), spec_name);
+          for (size_t p_idx = 0; p_idx < callee->params_.size(); ++p_idx) {
+            if (auto step_it = param_steps_.find({callee_name, p_idx}); step_it != param_steps_.end()) {
+              param_steps_[{spec_name, p_idx}] = step_it->second;
+            }
+          }
+          // Clone formal params, their types, return_types_, attrs_, and body defs so every
+          // specialized Function maintains disjoint SSA Vars and remapped symbolic expressions.
+          std::vector<VarPtr> cloned_params;
+          cloned_params.reserve(callee->params_.size());
+          std::unordered_map<const Var*, ExprPtr> formal_map;
+          for (const auto& p : callee->params_) {
+            TypePtr remapped_type = RemapTypeWithSubst(p->GetType(), formal_map);
+            auto cp = std::make_shared<Var>(p->name_hint_, std::move(remapped_type), p->span_);
+            formal_map.emplace(p.get(), cp);
+            cloned_params.push_back(std::move(cp));
+          }
+          std::vector<TypePtr> cloned_return_types;
+          cloned_return_types.reserve(callee->return_types_.size());
+          for (const auto& rt : callee->return_types_) {
+            cloned_return_types.push_back(RemapTypeWithSubst(rt, formal_map));
+          }
+          std::vector<std::pair<std::string, std::any>> cloned_attrs = callee->attrs_;
+          for (auto& [attr_key, attr_val] : cloned_attrs) {
+            (void)attr_key;
+            if (auto remapped = MapAttrExprs(
+                    attr_val, [&](const ExprPtr& e) { return transform_utils::Substitute(e, formal_map); });
+                remapped.has_value()) {
+              attr_val = std::move(*remapped);
+            }
+          }
+          DeepCloneResult cloned = DeepClone(callee->body_, formal_map, /*clone_def_vars=*/true);
+          extra_incore.push_back(std::make_shared<Function>(
+              spec_name, std::move(cloned_params), callee->param_directions_, std::move(cloned_return_types),
+              std::move(cloned.cloned_body), callee->span_, callee->func_type_, callee->level_, callee->role_,
+              std::move(cloned_attrs), callee->requires_runtime_binding_, callee->ir_stage_));
+        }
+
+        for (size_t p_idx = 0; p_idx < callee->params_.size(); ++p_idx) {
+          if (const auto& lay_opt = sig[p_idx]; lay_opt.has_value()) {
+            scoped_tensor_layouts_.emplace(
+                std::make_pair(spec_name, detail::CleanName(callee->params_[p_idx]->name_hint_)), *lay_opt);
+          }
+        }
+      }
+    }
+    return extra_incore;
+  }
+
+  std::string ResolveSpecializedCallee(const std::string& callee_name,
+                                       const std::vector<ExprPtr>& new_args) const {
+    ParamSig sig;
+    sig.reserve(new_args.size());
+    for (const auto& arg : new_args) {
+      auto tt = AsTensorTypeLike(arg->GetType());
+      sig.push_back(tt ? std::optional<TensorLayout>(detail::TensorTypeLayout(tt)) : std::nullopt);
+    }
+    if (auto params_it = callee_formal_params_.find(callee_name); params_it != callee_formal_params_.end()) {
+      for (size_t idx = sig.size(); idx < params_it->second.size(); ++idx) {
+        auto tt = AsTensorTypeLike(params_it->second[idx]->GetType());
+        sig.push_back(tt ? std::optional<TensorLayout>(detail::TensorTypeLayout(tt)) : std::nullopt);
+      }
+    }
+    auto spec_it = specialized_callees_.find({callee_name, sig});
+    return spec_it != specialized_callees_.end() ? spec_it->second : callee_name;
+  }
+
+  std::string FuncTilePrefix(const std::string& func_name) const {
+    if (auto it = tile_prefix_override_.find(func_name); it != tile_prefix_override_.end()) {
+      return it->second + ".";
+    }
+    if (multi_incore_) {
+      return func_name + ".";
+    }
+    return "";
+  }
+
+  std::vector<std::pair<std::string, OperatorConfig>> CollectFuncOpConfigs(
+      const std::string& func_name) const {
+    const std::string prefix = FuncTilePrefix(func_name);
+    struct Entry {
+      int64_t cnt;
+      std::string op_id;
+      OperatorConfig cfg;
+    };
+    std::vector<Entry> matched;
+    for (const auto& [op_id, cfg] : op_configs_) {
+      if (auto cnt = ParseOpIdCounter(op_id, prefix)) {
+        matched.push_back({*cnt, op_id, cfg});
+      }
+    }
+    std::sort(matched.begin(), matched.end(), [](const Entry& a, const Entry& b) { return a.cnt < b.cnt; });
+    std::vector<std::pair<std::string, OperatorConfig>> out;
+    out.reserve(matched.size());
+    for (auto& e : matched) {
+      out.emplace_back(std::move(e.op_id), std::move(e.cfg));
+    }
+    return out;
+  }
+
+  void ClearPrescanState() {
+    assign_op_cfg_.clear();
+    eval_store_cfgs_.clear();
+    vec_prod_lay_.clear();
+    vec_demanded_.clear();
+    vec_conv_vars_.clear();
+    vec_logical_shapes_.clear();
+    orig_tile_shapes_.clear();
+    nz_nd_needed_vars_.clear();
+    nz_nd_backing_vars_.clear();
+    yield_frames_.clear();
+  }
+
+  std::optional<OperatorConfig> InferLoadConfig(
+      const CallPtr& rhs, const VarPtr& lhs_var,
+      const std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) const {
+    if (!lhs_var || rhs->args_.empty()) {
+      return std::nullopt;
+    }
+    auto src_arg = AsVarLike(rhs->args_[0]);
+    if (!src_arg) {
+      return std::nullopt;
+    }
+    std::optional<TensorLayout> gm_lay;
+    if (auto it = var_tensor_lays.find(src_arg.get()); it != var_tensor_lays.end()) {
+      gm_lay = it->second;
+    } else if (auto src_tt = AsTensorTypeLike(src_arg->GetType())) {
+      gm_lay = LookupTensorLayout(src_arg->name_hint_);
+      if (!gm_lay.has_value()) {
+        gm_lay = detail::TensorTypeLayout(src_tt);
+      }
+    }
+    std::optional<LayoutSpec> dst_lay = LookupTileDesc(lhs_var->name_hint_);
+    auto lhs_tile = As<TileType>(lhs_var->GetType());
+    if (!dst_lay.has_value() && lhs_tile) {
+      dst_lay = EffectiveTileLayout(lhs_tile);
+    }
+    if (gm_lay == TensorLayout::DN && lhs_tile &&
+        lhs_tile->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
+      dst_lay = LayoutSpec::ColMajorFlat();
+    }
+    if (!gm_lay.has_value() || !dst_lay.has_value()) {
+      return std::nullopt;
+    }
+    return OperatorConfig{"fallback", rhs->op_->name_, {LayoutSpec::Tensor(*gm_lay)}, *dst_lay, 0.0};
+  }
+
+  std::optional<OperatorConfig> InferStoreConfig(
+      const CallPtr& rhs, const std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) const {
+    if (rhs->args_.size() < 3) {
+      return std::nullopt;
+    }
+    auto tile_arg = AsVarLike(rhs->args_[0]);
+    auto dst_arg = AsVarLike(rhs->args_[2]);
+    if (!tile_arg || !dst_arg) {
+      return std::nullopt;
+    }
+    std::optional<TensorLayout> gm_lay;
+    if (auto it = var_tensor_lays.find(dst_arg.get()); it != var_tensor_lays.end()) {
+      gm_lay = it->second;
+    } else if (auto dst_tt = AsTensorTypeLike(dst_arg->GetType())) {
+      gm_lay = LookupTensorLayout(dst_arg->name_hint_);
+      if (!gm_lay.has_value()) {
+        gm_lay = detail::TensorTypeLayout(dst_tt);
+      }
+    }
+    auto tile_t = As<TileType>(tile_arg->GetType());
+    if (!tile_t || !gm_lay.has_value()) {
+      return std::nullopt;
+    }
+    LayoutSpec tile_lay = EffectiveTileLayout(tile_t);
+    if (auto it = vec_prod_lay_.find(tile_arg.get()); it != vec_prod_lay_.end()) {
+      tile_lay = it->second;
+    }
+    if (tile_t->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
+      std::optional<std::vector<int64_t>> t_shape;
+      if (auto it = orig_tile_shapes_.find(tile_arg.get()); it != orig_tile_shapes_.end()) {
+        t_shape = it->second;
+      } else {
+        t_shape = detail::StaticShape(tile_t->shape_);
+      }
+      const bool is_col_vec =
+          t_shape.has_value() && t_shape->size() == 2 && (*t_shape)[1] == 1 && (*t_shape)[0] > 1;
+      if (*gm_lay == TensorLayout::NZ) {
+        tile_lay = LayoutSpec::FractalNZ();
+      } else if (*gm_lay == TensorLayout::DN || is_col_vec) {
+        tile_lay = LayoutSpec::ColMajorFlat();
+      } else {
+        tile_lay = LayoutSpec::RowMajorFlat();
+      }
+    }
+    return OperatorConfig{"fallback", rhs->op_->name_, {tile_lay}, LayoutSpec::Tensor(*gm_lay), 0.0};
+  }
+
+  std::optional<OperatorConfig> InferOpConfig(
+      const CallPtr& rhs, const VarPtr& lhs_var,
+      const std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) const {
+    const std::string& op_name = rhs->op_->name_;
+    if (op_name == kOpTileLoad) {
+      return InferLoadConfig(rhs, lhs_var, var_tensor_lays);
+    }
+    if (op_name == kOpTileStore) {
+      return InferStoreConfig(rhs, var_tensor_lays);
+    }
+    if (op_name == kOpTileMove && lhs_var && !rhs->args_.empty()) {
+      auto src_arg = AsVarLike(rhs->args_[0]);
+      auto src_t = src_arg ? As<TileType>(src_arg->GetType()) : TileTypePtr(nullptr);
+      if (!src_t) {
+        return std::nullopt;
+      }
+      LayoutSpec src_lay = EffectiveTileLayout(src_t);
+      if (auto it = vec_prod_lay_.find(src_arg.get()); it != vec_prod_lay_.end()) {
+        src_lay = it->second;
+      }
+      LayoutSpec dst_lay = src_lay;
+      if (auto found = LookupTileDesc(lhs_var->name_hint_)) {
+        dst_lay = *found;
+      } else if (auto lhs_t = As<TileType>(lhs_var->GetType())) {
+        dst_lay = EffectiveTileLayout(lhs_t);
+      }
+      return OperatorConfig{"fallback", op_name, {src_lay}, dst_lay, 0.0};
+    }
+
+    auto lhs_t = lhs_var ? As<TileType>(lhs_var->GetType()) : TileTypePtr(nullptr);
+    if (!lhs_t) {
+      return std::nullopt;
+    }
+    std::vector<VarPtr> tile_args;
+    for (const auto& a : rhs->args_) {
+      if (auto av = AsVarLike(a); av && As<TileType>(av->GetType())) {
+        tile_args.push_back(std::move(av));
+      }
+    }
+    if (tile_args.empty() && op_name != kOpTileFull) {
+      return std::nullopt;
+    }
+    if (op_name == kOpTileReshape && tile_args.size() == 1) {
+      auto in_t = As<TileType>(tile_args[0]->GetType());
+      auto in_shape_it = orig_tile_shapes_.find(tile_args[0].get());
+      std::optional<std::vector<int64_t>> in_shape =
+          in_shape_it != orig_tile_shapes_.end() ? std::optional<std::vector<int64_t>>(in_shape_it->second)
+                                                 : detail::StaticShape(in_t->shape_);
+      auto dst_shape = detail::StaticShape(lhs_t->shape_);
+      if (in_shape.has_value() && dst_shape.has_value() && in_shape->size() == 2 && dst_shape->size() == 2 &&
+          ((*in_shape)[0] == 1 || (*in_shape)[1] == 1) && ((*dst_shape)[0] == 1 || (*dst_shape)[1] == 1)) {
+        LayoutSpec in_lay = EffectiveTileLayout(in_t);
+        if (auto it = vec_prod_lay_.find(tile_args[0].get()); it != vec_prod_lay_.end()) {
+          in_lay = it->second;
+        }
+        LayoutSpec out_lay = LookupTileDesc(lhs_var->name_hint_).value_or(EffectiveTileLayout(lhs_t));
+        return OperatorConfig{"fallback", op_name, {in_lay}, out_lay, 0.0};
+      }
+      return OperatorConfig{
+          "fallback", op_name, {LayoutSpec::RowMajorFlat()}, LayoutSpec::RowMajorFlat(), 0.0};
+    }
+    if (detail::RowReductionOps().count(op_name) != 0) {
+      return OperatorConfig{"fallback", op_name,
+                            std::vector<LayoutSpec>(tile_args.size(), LayoutSpec::RowMajorFlat()),
+                            LayoutSpec::ColMajorFlat(), 0.0};
+    }
+    if (detail::ColReductionOps().count(op_name) != 0 || detail::ColExpandOps().count(op_name) != 0) {
+      return OperatorConfig{"fallback", op_name,
+                            std::vector<LayoutSpec>(tile_args.size(), LayoutSpec::RowMajorFlat()),
+                            LayoutSpec::RowMajorFlat(), 0.0};
+    }
+    if (detail::OtherRowExpandOps().count(op_name) != 0 && tile_args.size() >= 2) {
+      std::vector<LayoutSpec> ins(tile_args.size(), LayoutSpec::RowMajorFlat());
+      ins[1] = LayoutSpec::ColMajorFlat();
+      return OperatorConfig{"fallback", op_name, std::move(ins), LayoutSpec::RowMajorFlat(), 0.0};
+    }
+    if (op_name == kOpTileRowExpandAdd && tile_args.size() >= 2) {
+      auto vec_lay = LookupTileDesc(tile_args[1]->name_hint_);
+      LayoutSpec in1 =
+          (vec_lay == LayoutSpec::RowBcastFlat()) ? LayoutSpec::RowBcastFlat() : LayoutSpec::ColMajorFlat();
+      std::vector<LayoutSpec> ins(tile_args.size(), LayoutSpec::RowMajorFlat());
+      ins[1] = in1;
+      return OperatorConfig{"fallback", op_name, std::move(ins), LayoutSpec::RowMajorFlat(), 0.0};
+    }
+    LayoutSpec out_lay = LookupTileDesc(lhs_var->name_hint_).value_or(EffectiveTileLayout(lhs_t));
+    if (out_lay == LayoutSpec::FractalNZ()) {
+      return OperatorConfig{"fallback", op_name,
+                            std::vector<LayoutSpec>(tile_args.size(), LayoutSpec::FractalNZ()),
+                            LayoutSpec::FractalNZ(), 0.0};
+    }
+    std::vector<LayoutSpec> in_lays;
+    in_lays.reserve(tile_args.size());
+    for (size_t idx = 0; idx < tile_args.size(); ++idx) {
+      if (detail::HasRowMajorInputRequirement(op_name, idx)) {
+        in_lays.push_back(LayoutSpec::RowMajorFlat());
+      } else if (auto it = vec_prod_lay_.find(tile_args[idx].get()); it != vec_prod_lay_.end()) {
+        in_lays.push_back(it->second);
+      } else {
+        in_lays.push_back(EffectiveTileLayout(As<TileType>(tile_args[idx]->GetType())));
+      }
+    }
+    return OperatorConfig{"fallback", op_name, std::move(in_lays), out_lay, 0.0};
+  }
+
+  void RecordVecDemand(const VarPtr& tile_var, const LayoutSpec& req_lay) {
+    if (!req_lay.IsTile() || !IsVecTileType(tile_var->GetType())) {
+      return;
+    }
+    auto prod_it = vec_prod_lay_.find(tile_var.get());
+    if (prod_it == vec_prod_lay_.end() || prod_it->second == req_lay ||
+        prod_it->second == LayoutSpec::FractalNZ() || req_lay == LayoutSpec::FractalNZ()) {
+      return;
+    }
+    auto& demanded = vec_demanded_[tile_var.get()];
+    if (std::find(demanded.begin(), demanded.end(), req_lay) == demanded.end()) {
+      demanded.push_back(req_lay);
+    }
+  }
+
+  void RecordPrescanCallOutputs(const StmtPtr& stmt, const std::string& op_name, const VarPtr& lhs_var,
+                                const OperatorConfig& cfg,
+                                std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) {
+    if (lhs_var) {
+      assign_op_cfg_.emplace(lhs_var.get(), cfg);
+    } else if (As<EvalStmt>(stmt)) {
+      eval_store_cfgs_.push_back(cfg);
+    }
+    if (!lhs_var) {
+      return;
+    }
+    if (auto lhs_t = As<TileType>(lhs_var->GetType())) {
+      if (lhs_t->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec &&
+          cfg.output_layout.IsTile()) {
+        if (auto shape = detail::StaticShape(lhs_t->shape_)) {
+          orig_tile_shapes_[lhs_var.get()] = *shape;
+          if (cfg.output_layout == LayoutSpec::FractalNZ()) {
+            vec_logical_shapes_[lhs_var.get()] = *shape;
+          }
+        }
+        vec_prod_lay_.insert_or_assign(lhs_var.get(), cfg.output_layout);
+      }
+    } else if (op_name == kOpTileStore && AsTensorTypeLike(lhs_var->GetType())) {
+      if (cfg.input_layouts.size() >= 2 && cfg.input_layouts[1].IsTensor()) {
+        var_tensor_lays[lhs_var.get()] = cfg.input_layouts[1].tensor_layout;
+      }
+    }
+  }
+
+  void RecordPrescanCallDemands(const CallPtr& rhs, const VarPtr& lhs_var, const OperatorConfig& cfg) {
+    const std::string& op_name = rhs->op_->name_;
+    if (op_name == kOpTileLoad && !rhs->args_.empty()) {
+      if (auto gm_var = AsVarLike(rhs->args_[0]);
+          gm_var && lhs_var && IsVecTileType(lhs_var->GetType()) &&
+          cfg.output_layout == LayoutSpec::FractalNZ() && !cfg.input_layouts.empty() &&
+          cfg.input_layouts[0] == LayoutSpec::Tensor(TensorLayout::NZ)) {
+        nz_nd_needed_vars_.insert(gm_var.get());
+      }
+    } else if (op_name == kOpTileStore && rhs->args_.size() >= 3) {
+      auto tile_arg = AsVarLike(rhs->args_[0]);
+      auto dst_arg = AsVarLike(rhs->args_[2]);
+      const bool tile_is_vec = tile_arg && IsVecTileType(tile_arg->GetType());
+      LayoutSpec gm_out_lay = cfg.input_layouts.size() >= 2 ? cfg.input_layouts[1] : cfg.output_layout;
+      if (tile_is_vec && !cfg.input_layouts.empty() && cfg.input_layouts[0] != LayoutSpec::FractalNZ()) {
+        RecordVecDemand(tile_arg, cfg.input_layouts[0]);
+      }
+      if (tile_is_vec && dst_arg && !cfg.input_layouts.empty() &&
+          cfg.input_layouts[0] == LayoutSpec::FractalNZ() &&
+          gm_out_lay == LayoutSpec::Tensor(TensorLayout::NZ)) {
+        nz_nd_needed_vars_.insert(dst_arg.get());
+      }
+    } else if (op_name == kOpTileMove && !rhs->args_.empty()) {
+      if (auto src_var = AsVarLike(rhs->args_[0]); src_var && !cfg.input_layouts.empty()) {
+        RecordVecDemand(src_var, cfg.input_layouts[0]);
+      }
+    } else {
+      std::vector<VarPtr> tile_args;
+      for (const auto& a : rhs->args_) {
+        if (auto av = AsVarLike(a); av && As<TileType>(av->GetType())) {
+          tile_args.push_back(std::move(av));
+        }
+      }
+      for (size_t i = 0; i < tile_args.size() && i < cfg.input_layouts.size(); ++i) {
+        RecordVecDemand(tile_args[i], cfg.input_layouts[i]);
+      }
+    }
+  }
+
+  void AliasVarPrescanInfo(const VarPtr& dst_var, const Var* src_var,
+                           std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) {
+    if (AsTensorTypeLike(dst_var->GetType())) {
+      if (auto it = var_tensor_lays.find(src_var); it != var_tensor_lays.end()) {
+        var_tensor_lays[dst_var.get()] = it->second;
+      }
+    } else if (As<TileType>(dst_var->GetType())) {
+      if (auto it = vec_prod_lay_.find(src_var); it != vec_prod_lay_.end()) {
+        vec_prod_lay_.insert_or_assign(dst_var.get(), it->second);
+        if (auto sit = orig_tile_shapes_.find(src_var); sit != orig_tile_shapes_.end()) {
+          orig_tile_shapes_[dst_var.get()] = sit->second;
+        }
+        if (auto lit = vec_logical_shapes_.find(src_var); lit != vec_logical_shapes_.end()) {
+          vec_logical_shapes_[dst_var.get()] = lit->second;
+        }
+      }
+    }
+  }
+
+  void PrescanFunction(const FunctionPtr& func,
+                       const std::vector<std::pair<VarPtr, ParamDirection>>& new_params) {
+    ClearPrescanState();
+    std::unordered_map<const Var*, TensorLayout> var_tensor_lays;
+    for (size_t i = 0; i < new_params.size() && i < func->params_.size(); ++i) {
+      const VarPtr& new_p = new_params[i].first;
+      const VarPtr& old_p = func->params_[i];
+      if (auto tt = AsTensorTypeLike(new_p->GetType())) {
+        var_tensor_lays[old_p.get()] = detail::TensorTypeLayout(tt);
+      } else if (auto tile_t = As<TileType>(new_p->GetType());
+                 tile_t && tile_t->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
+        auto shape = detail::StaticShape(tile_t->shape_);
+        if (shape.has_value()) {
+          orig_tile_shapes_[old_p.get()] = *shape;
+        }
+        LayoutSpec lay = LookupTileDesc(old_p->name_hint_).value_or(EffectiveTileLayout(tile_t));
+        vec_prod_lay_.insert_or_assign(old_p.get(), lay);
+        if (lay == LayoutSpec::FractalNZ() && shape.has_value()) {
+          vec_logical_shapes_[old_p.get()] = *shape;
+        }
+      }
+    }
+
+    auto collected = CollectFuncOpConfigs(func->name_);
+    std::deque<std::pair<std::string, OperatorConfig>> op_queue(std::make_move_iterator(collected.begin()),
+                                                                std::make_move_iterator(collected.end()));
+    const bool has_op_configs = !op_queue.empty();
+    const std::string prefix = FuncTilePrefix(func->name_);
+
+    auto pop_cfg = [&](const std::string& op_name,
+                       const std::optional<std::string>& lhs_hint) -> std::optional<OperatorConfig> {
+      if (op_queue.empty()) {
+        return std::nullopt;
+      }
+      const auto& [head_id, head_cfg] = op_queue.front();
+      if (head_cfg.op_name != op_name) {
+        return std::nullopt;
+      }
+      if (lhs_hint.has_value() && op_name != kOpTileStore) {
+        auto cnt = ParseOpIdCounter(head_id, prefix);
+        if (!cnt.has_value()) {
+          return std::nullopt;
+        }
+        const std::string rest_prefix = prefix + "op_" + std::to_string(*cnt) + "_";
+        if (head_id.size() < rest_prefix.size()) {
+          return std::nullopt;
+        }
+        const std::string tail = head_id.substr(rest_prefix.size());
+        const std::string expected = *lhs_hint + "_";
+        if (tail.rfind(expected, 0) != 0) {
+          return std::nullopt;
+        }
+      }
+      OperatorConfig out = op_queue.front().second;
+      op_queue.pop_front();
+      return out;
+    };
+
+    auto handle_call = [&](const StmtPtr& stmt, const CallPtr& rhs, const VarPtr& lhs_var) {
+      const std::string& op_name = rhs->op_->name_;
+      if (op_name == kOpTensorCreate && lhs_var) {
+        if (auto lhs_tt = AsTensorTypeLike(lhs_var->GetType())) {
+          var_tensor_lays[lhs_var.get()] =
+              LookupTensorLayout(lhs_var->name_hint_).value_or(detail::TensorTypeLayout(lhs_tt));
+          return;
+        }
+      }
+      if (op_name == kOpTileCreate && lhs_var) {
+        if (auto lhs_t = As<TileType>(lhs_var->GetType())) {
+          if (lhs_t->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
+            if (auto shape = detail::StaticShape(lhs_t->shape_)) {
+              orig_tile_shapes_[lhs_var.get()] = *shape;
+            }
+            vec_prod_lay_.insert_or_assign(lhs_var.get(), EffectiveTileLayout(lhs_t));
+          }
+          return;
+        }
+      }
+      if (op_name == kOpTileTransposeView || op_name.rfind("tile.", 0) != 0) {
+        return;
+      }
+      std::optional<std::string> hint =
+          lhs_var ? std::optional<std::string>(lhs_var->name_hint_) : std::nullopt;
+      std::optional<OperatorConfig> cfg = pop_cfg(op_name, hint);
+      if (!cfg.has_value() && !has_op_configs) {
+        cfg = InferOpConfig(rhs, lhs_var, var_tensor_lays);
+      }
+      if (!cfg.has_value()) {
+        if (lhs_var && IsVecTileType(lhs_var->GetType())) {
+          auto lhs_t = As<TileType>(lhs_var->GetType());
+          if (auto shape = detail::StaticShape(lhs_t->shape_)) {
+            orig_tile_shapes_[lhs_var.get()] = *shape;
+          }
+          vec_prod_lay_.insert_or_assign(lhs_var.get(), EffectiveTileLayout(lhs_t));
+        }
+        return;
+      }
+      RecordPrescanCallOutputs(stmt, op_name, lhs_var, *cfg, var_tensor_lays);
+      RecordPrescanCallDemands(rhs, lhs_var, *cfg);
+    };
+
+    std::vector<std::vector<const Var*>> yield_stacks;
+    auto prescan_loop = [&](auto& self, const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
+                            const std::vector<VarPtr>& return_vars) {
+      for (const auto& ia : iter_args) {
+        if (auto init_v = AsVarLike(ia->initValue_)) {
+          AliasVarPrescanInfo(ia, init_v.get(), var_tensor_lays);
+        }
+      }
+      yield_stacks.emplace_back();
+      self(self, body);
+      std::vector<const Var*> yielded = std::move(yield_stacks.back());
+      yield_stacks.pop_back();
+      for (size_t idx = 0; idx < return_vars.size(); ++idx) {
+        // Prefer iter_args_[idx] over yielded[idx] so loop return_vars keep the loop-carried
+        // iter_arg layout when yielded values alias distinct inner tiles (Class C fix).
+        const Var* src_v = (idx < iter_args.size() && iter_args[idx] != nullptr)
+                               ? iter_args[idx].get()
+                               : (idx < yielded.size() ? yielded[idx] : nullptr);
+        if (src_v != nullptr) {
+          AliasVarPrescanInfo(return_vars[idx], src_v, var_tensor_lays);
+        }
+      }
+    };
+
+    auto walk = [&](auto& self, const StmtPtr& stmt) -> void {
+      if (!stmt) {
+        return;
+      }
+      if (auto asg = As<AssignStmt>(stmt)) {
+        if (auto rhs_call = As<Call>(asg->value_)) {
+          handle_call(stmt, rhs_call, asg->var_);
+        } else if (auto rhs_var = AsVarLike(asg->value_)) {
+          AliasVarPrescanInfo(asg->var_, rhs_var.get(), var_tensor_lays);
+        }
+      } else if (auto fs = As<ForStmt>(stmt)) {
+        prescan_loop(self, fs->iter_args_, fs->body_, fs->return_vars_);
+        return;
+      } else if (auto ws = As<WhileStmt>(stmt)) {
+        prescan_loop(self, ws->iter_args_, ws->body_, ws->return_vars_);
+        return;
+      } else if (auto ifs = As<IfStmt>(stmt)) {
+        yield_stacks.emplace_back();
+        self(self, ifs->then_body_);
+        std::vector<const Var*> then_y = std::move(yield_stacks.back());
+        yield_stacks.pop_back();
+
+        std::vector<const Var*> else_y;
+        if (ifs->else_body_.has_value() && *ifs->else_body_) {
+          yield_stacks.emplace_back();
+          self(self, *ifs->else_body_);
+          else_y = std::move(yield_stacks.back());
+          yield_stacks.pop_back();
+        }
+        for (size_t idx = 0; idx < ifs->return_vars_.size(); ++idx) {
+          const Var* tv = idx < then_y.size() ? then_y[idx] : nullptr;
+          const Var* ev = idx < else_y.size() ? else_y[idx] : nullptr;
+          if (tv != nullptr && ev != nullptr) {
+            if (AsTensorTypeLike(ifs->return_vars_[idx]->GetType())) {
+              auto it_t = var_tensor_lays.find(tv);
+              auto it_e = var_tensor_lays.find(ev);
+              if (it_t != var_tensor_lays.end() && it_e != var_tensor_lays.end() &&
+                  it_t->second == it_e->second) {
+                var_tensor_lays[ifs->return_vars_[idx].get()] = it_t->second;
+              }
+            } else if (As<TileType>(ifs->return_vars_[idx]->GetType())) {
+              auto it_t = vec_prod_lay_.find(tv);
+              auto it_e = vec_prod_lay_.find(ev);
+              if (it_t != vec_prod_lay_.end() && it_e != vec_prod_lay_.end() &&
+                  it_t->second == it_e->second) {
+                AliasVarPrescanInfo(ifs->return_vars_[idx], tv, var_tensor_lays);
+              }
+            }
+          } else if (tv != nullptr && else_y.empty()) {
+            AliasVarPrescanInfo(ifs->return_vars_[idx], tv, var_tensor_lays);
+          }
+        }
+        return;
+      } else if (auto ys = As<YieldStmt>(stmt); ys && !yield_stacks.empty()) {
+        std::vector<const Var*> vars;
+        vars.reserve(ys->value_.size());
+        for (const auto& v : ys->value_) {
+          auto vv = AsVarLike(v);
+          vars.push_back(vv ? vv.get() : nullptr);
+        }
+        yield_stacks.back() = std::move(vars);
+      } else if (auto es = As<EvalStmt>(stmt)) {
+        if (auto c = As<Call>(es->expr_); c && c->op_->name_ == kOpTileStore) {
+          handle_call(stmt, c, nullptr);
+        }
+      } else if (auto rs = As<ReturnStmt>(stmt)) {
+        for (const auto& val : rs->value_) {
+          if (auto c = As<Call>(val); c && c->op_->name_ == kOpTileStore) {
+            handle_call(stmt, c, nullptr);
+          }
+        }
+      }
+      for (const auto& child : detail::IterChildStmts(stmt)) {
+        self(self, child);
+      }
+    };
+    walk(walk, func->body_);
+  }
+
+  std::pair<VarPtr, std::vector<StmtPtr>> EmitVecConversion(const Var* orig_var, const VarPtr& src_var,
+                                                            const LayoutSpec& prod_lay,
+                                                            const LayoutSpec& target_lay,
+                                                            const std::vector<int64_t>& orig_shape,
+                                                            const Span& span) {
+    if (auto it = vec_conv_vars_.find({orig_var, target_lay}); it != vec_conv_vars_.end()) {
+      return {it->second, {}};
+    }
+    if (prod_lay == target_lay) {
+      return {src_var, {}};
+    }
+    auto src_tt = As<TileType>(src_var->GetType());
+    if (!src_tt || orig_shape.size() != 2) {
+      return {src_var, {}};
+    }
+
+    std::vector<StmtPtr> stmts;
+    const std::string base_name = detail::CleanName(src_var->name_hint_);
+
+    if (target_lay == LayoutSpec::RowBcastFlat()) {
+      VarPtr cm_var = src_var;
+      if (prod_lay != LayoutSpec::ColMajorFlat()) {
+        auto [cv, extra] =
+            EmitVecConversion(orig_var, src_var, prod_lay, LayoutSpec::ColMajorFlat(), orig_shape, span);
+        cm_var = std::move(cv);
+        stmts.insert(stmts.end(), std::make_move_iterator(extra.begin()),
+                     std::make_move_iterator(extra.end()));
+      }
+      auto cm_tt = As<TileType>(cm_var->GetType());
+      const int64_t rows = orig_shape[0];
+      const int64_t c0 = C0Elements(cm_tt->dtype_);
+      auto shape_tuple = std::make_shared<MakeTuple>(
+          std::vector<ExprPtr>{MakeIndexConst(rows, span), MakeIndexConst(c0, span)}, span);
+      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", cm_tt->dtype_},
+                                                                     {"target_memory", MemorySpace::Vec}};
+      CallPtr tgt_call = CreateOpCallWithAttrs(kOpTileCreate, {shape_tuple}, create_kwargs, {}, span);
+      tgt_call = WithCallType(tgt_call, WithVecMemorySpace(tgt_call->GetType()));
+      auto tgt_var = std::make_shared<Var>(base_name + "_bcast_buf", tgt_call->GetType(), span);
+      stmts.push_back(std::make_shared<AssignStmt>(tgt_var, std::move(tgt_call), span));
+
+      CallPtr exp_call = CreateOpCallWithAttrs(kOpTileRowExpand, {tgt_var, cm_var}, {}, {}, span);
+      exp_call = WithCallType(exp_call, WithVecMemorySpace(exp_call->GetType()));
+      auto exp_var = std::make_shared<Var>(base_name + "_bcast", exp_call->GetType(), span);
+      stmts.push_back(std::make_shared<AssignStmt>(exp_var, std::move(exp_call), span));
+      vec_conv_vars_.emplace(std::make_pair(orig_var, LayoutSpec::RowBcastFlat()), exp_var);
+      return {exp_var, std::move(stmts)};
+    }
+
+    const bool is_rm_cm_pair =
+        (prod_lay == LayoutSpec::RowMajorFlat() && target_lay == LayoutSpec::ColMajorFlat()) ||
+        (prod_lay == LayoutSpec::ColMajorFlat() && target_lay == LayoutSpec::RowMajorFlat());
+    if (is_rm_cm_pair && (orig_shape[0] == 1 || orig_shape[1] == 1)) {
+      const int64_t big = std::max(orig_shape[0], orig_shape[1]);
+      const int64_t r = (target_lay == LayoutSpec::RowMajorFlat()) ? 1 : big;
+      const int64_t c = (target_lay == LayoutSpec::RowMajorFlat()) ? big : 1;
+      auto shape_tuple = std::make_shared<MakeTuple>(
+          std::vector<ExprPtr>{MakeIndexConst(r, span), MakeIndexConst(c, span)}, span);
+      CallPtr reshape_call = CreateOpCallWithAttrs(kOpTileReshape, {src_var, shape_tuple}, {}, {}, span);
+      reshape_call = WithCallType(reshape_call, WithVecMemorySpace(reshape_call->GetType()));
+      const std::string suffix = (target_lay == LayoutSpec::RowMajorFlat()) ? "rm" : "cm";
+      auto conv_var = std::make_shared<Var>(base_name + "_" + suffix, reshape_call->GetType(), span);
+      stmts.push_back(std::make_shared<AssignStmt>(conv_var, std::move(reshape_call), span));
+      vec_conv_vars_.emplace(std::make_pair(orig_var, target_lay), conv_var);
+      return {conv_var, std::move(stmts)};
+    }
+
+    if (is_rm_cm_pair) {
+      std::vector<std::pair<std::string, std::any>> move_kwargs = {
+          {"target_memory", MemorySpace::Vec},
+          {"blayout", target_lay.blayout},
+          {"slayout", target_lay.slayout},
+      };
+      CallPtr move_call = CreateOpCallWithAttrs(kOpTileMove, {src_var}, move_kwargs, {}, span);
+      move_call = WithCallType(move_call, WithVecMemorySpace(move_call->GetType()));
+      const std::string suffix = (target_lay == LayoutSpec::RowMajorFlat()) ? "rm" : "cm";
+      auto conv_var = std::make_shared<Var>(base_name + "_" + suffix, move_call->GetType(), span);
+      stmts.push_back(std::make_shared<AssignStmt>(conv_var, std::move(move_call), span));
+      vec_conv_vars_.emplace(std::make_pair(orig_var, target_lay), conv_var);
+      return {conv_var, std::move(stmts)};
+    }
+
+    return {src_var, {}};
+  }
+
+  std::vector<StmtPtr> EmitDemandedConversions(const Var* orig_var, const VarPtr& prod_var,
+                                               const LayoutSpec& prod_lay, const Span& span) {
+    auto dem_it = vec_demanded_.find(orig_var);
+    if (dem_it == vec_demanded_.end() || !As<TileType>(prod_var->GetType())) {
+      return {};
+    }
+    std::optional<std::vector<int64_t>> orig_shape;
+    if (auto it = orig_tile_shapes_.find(orig_var); it != orig_tile_shapes_.end()) {
+      orig_shape = it->second;
+    } else {
+      orig_shape = detail::StaticShape(As<TileType>(prod_var->GetType())->shape_);
+    }
+    if (!orig_shape.has_value()) {
+      return {};
+    }
+    std::vector<StmtPtr> stmts;
+    for (const auto& target_lay : dem_it->second) {
+      auto [conv, extra] = EmitVecConversion(orig_var, prod_var, prod_lay, target_lay, *orig_shape, span);
+      (void)conv;
+      stmts.insert(stmts.end(), std::make_move_iterator(extra.begin()), std::make_move_iterator(extra.end()));
+    }
+    return stmts;
+  }
+
+  VarPtr GetTileVarForLayout(const VarPtr& orig_arg, const LayoutSpec& req_lay) const {
+    if (req_lay.IsTile()) {
+      if (auto it = vec_conv_vars_.find({orig_arg.get(), req_lay}); it != vec_conv_vars_.end()) {
+        return it->second;
+      }
+    }
+    auto it = local_var_remap_.find(orig_arg.get());
+    return it != local_var_remap_.end() ? it->second : orig_arg;
+  }
+
+  std::pair<VarPtr, std::vector<StmtPtr>> GetNzNdBackingVar(const Var* orig_var, const ExprPtr& remapped_nz,
+                                                            const Span& span) {
+    if (auto it = nz_nd_backing_vars_.find(orig_var); it != nz_nd_backing_vars_.end()) {
+      return {it->second, {}};
+    }
+    auto nz_tt = As<TensorType>(remapped_nz->GetType());
+    if (!nz_tt) {
+      throw ValueError("Expected TensorType for NZ backing view");
+    }
+    const int64_t c0 = C0Elements(nz_tt->dtype_);
+    std::vector<ExprPtr> nd_shape = NzBackingNdShapeExprs(nz_tt->shape_, c0, span);
+    auto shape_tuple = std::make_shared<MakeTuple>(std::move(nd_shape), span);
+    std::vector<std::pair<std::string, std::any>> view_kwargs = {{"layout", TensorLayout::ND}};
+    CallPtr view_call =
+        CreateOpCallWithAttrs(kOpTensorView, {remapped_nz, shape_tuple}, view_kwargs, {}, span);
+    std::string hint = "nz";
+    if (auto rv = AsVarLike(remapped_nz)) {
+      hint = detail::CleanName(rv->name_hint_);
+    }
+    auto nd_var = std::make_shared<Var>(hint + "_nd_view", view_call->GetType(), span);
+    func_promoted_gm_to_nz_ = true;
+    auto assign = std::make_shared<AssignStmt>(nd_var, std::move(view_call), span);
+    return {nd_var, {std::move(assign)}};
+  }
+
+  struct RewriteParamsResult {
+    std::vector<std::pair<VarPtr, ParamDirection>> new_params;
+    bool changed = false;
+    bool has_nz_param = false;
+  };
+
+  RewriteParamsResult RewriteFuncParams(const FunctionPtr& func) {
+    RewriteParamsResult res;
+    res.new_params.reserve(func->params_.size());
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      const VarPtr& param = func->params_[i];
+      const ParamDirection dir = func->param_directions_[i];
+      std::optional<TensorLayout> target_layout = LookupTensorLayout(param->name_hint_);
+      auto tt = As<TensorType>(param->GetType());
+      if (tt && !IsA<DistributedTensorType>(param->GetType()) && target_layout.has_value() &&
+          detail::TensorTypeLayout(tt) != *target_layout &&
+          !(detail::TensorTypeLayout(tt) == TensorLayout::NZ && tt->shape_.size() >= 4) &&
+          !(*target_layout == TensorLayout::NZ && tt->shape_.size() < 2)) {
+        TensorTypePtr new_type = WithTensorLayout(tt, *target_layout);
+        auto new_param = std::make_shared<Var>(param->name_hint_, std::move(new_type), param->span_);
+        local_var_remap_[param.get()] = new_param;
+        res.new_params.emplace_back(std::move(new_param), dir);
+        res.changed = true;
+        if (*target_layout == TensorLayout::NZ) {
+          res.has_nz_param = true;
+          func_promoted_gm_to_nz_ = true;
+        }
+      } else {
+        res.new_params.emplace_back(param, dir);
+        if (tt && detail::TensorTypeLayout(tt) == TensorLayout::NZ) {
+          res.has_nz_param = true;
+        }
+      }
+    }
+    return res;
+  }
+
+  std::vector<StmtPtr> BuildAlignedParamPrologue(
+      const std::string& func_name, const std::vector<std::pair<VarPtr, ParamDirection>>& new_params,
+      const std::vector<VarPtr>& old_params, const StmtPtr& body) {
+    auto nz_vars = NzOffsetScalarVars(body, new_params, old_params);
+    std::vector<StmtPtr> stmts;
+    for (size_t p_idx = 0; p_idx < new_params.size(); ++p_idx) {
+      const VarPtr& param = new_params[p_idx].first;
+      if (nz_vars.count(param.get()) == 0) {
+        continue;
+      }
+      auto step_it = param_steps_.find({func_name, p_idx});
+      auto st = As<ScalarType>(param->GetType());
+      if (step_it != param_steps_.end() && step_it->second > 1 && step_it->second % 8 == 0 && st) {
+        const DataType dt = st->dtype_;
+        const Span& span = param->span_;
+        auto c0 = std::make_shared<ConstInt>(0, dt, span);
+        auto c_step = std::make_shared<ConstInt>(step_it->second, dt, span);
+        auto max_expr = std::make_shared<Max>(param, std::move(c0), dt, span);
+        auto div_expr = std::make_shared<FloorDiv>(std::move(max_expr), std::move(c_step), dt, span);
+        auto c_step2 = std::make_shared<ConstInt>(step_it->second, dt, span);
+        auto aligned_expr = std::make_shared<Mul>(std::move(div_expr), std::move(c_step2), dt, span);
+        auto aligned_var =
+            std::make_shared<Var>(detail::CleanName(param->name_hint_) + "_aligned", param->GetType(), span);
+        local_var_remap_[param.get()] = aligned_var;
+        stmts.push_back(std::make_shared<AssignStmt>(std::move(aligned_var), std::move(aligned_expr), span));
+      }
+    }
+    return stmts;
+  }
+
+  std::vector<StmtPtr> BuildIncoreVecPrologue(
+      const FunctionPtr& func, const std::vector<std::pair<VarPtr, ParamDirection>>& new_params) {
+    PrescanFunction(func, new_params);
+    std::vector<StmtPtr> stmts;
+    for (size_t i = 0; i < new_params.size() && i < func->params_.size(); ++i) {
+      const VarPtr& new_p = new_params[i].first;
+      const VarPtr& old_p = func->params_[i];
+      if (nz_nd_needed_vars_.count(old_p.get()) != 0) {
+        if (auto tt = As<TensorType>(new_p->GetType());
+            tt && detail::TensorTypeLayout(tt) == TensorLayout::NZ) {
+          auto [nd_var, extra] = GetNzNdBackingVar(old_p.get(), new_p, new_p->span_);
+          nz_nd_backing_vars_[old_p.get()] = std::move(nd_var);
+          stmts.insert(stmts.end(), std::make_move_iterator(extra.begin()),
+                       std::make_move_iterator(extra.end()));
+          continue;
+        }
+      }
+      if (IsVecTileType(new_p->GetType())) {
+        if (auto prod_it = vec_prod_lay_.find(old_p.get()); prod_it != vec_prod_lay_.end()) {
+          std::vector<StmtPtr> extra =
+              EmitDemandedConversions(old_p.get(), new_p, prod_it->second, new_p->span_);
+          stmts.insert(stmts.end(), std::make_move_iterator(extra.begin()),
+                       std::make_move_iterator(extra.end()));
+        }
+      }
+    }
+    return stmts;
+  }
+
+  std::pair<std::vector<TypePtr>, bool> SyncFuncReturnTypes(
+      const FunctionPtr& func, const std::vector<std::pair<VarPtr, ParamDirection>>& new_params,
+      const StmtPtr& new_body) const {
+    std::vector<TypePtr> new_return_types = func->return_types_;
+    bool changed = false;
+    std::vector<ReturnStmtPtr> ret_stmts;
+    FindReturnStmts(new_body, ret_stmts);
+    if (!ret_stmts.empty()) {
+      for (const auto& rs : ret_stmts) {
+        for (size_t idx = 0; idx < rs->value_.size() && idx < new_return_types.size(); ++idx) {
+          auto r_tt = As<TensorType>(new_return_types[idx]);
+          auto v_tt = As<TensorType>(rs->value_[idx]->GetType());
+          if (r_tt && v_tt && detail::TensorTypeLayout(r_tt) != detail::TensorTypeLayout(v_tt)) {
+            new_return_types[idx] = WithTensorLayout(r_tt, detail::TensorTypeLayout(v_tt));
+            changed = true;
+          }
+        }
+      }
+      return {std::move(new_return_types), changed};
+    }
+    if (new_return_types.size() == 1) {
+      if (auto r_tt = As<TensorType>(new_return_types[0])) {
+        for (const auto& [param, direction] : new_params) {
+          if (direction == ParamDirection::Out || direction == ParamDirection::InOut) {
+            std::optional<TensorLayout> target_layout = LookupTensorLayout(param->name_hint_);
+            if (target_layout.has_value() && As<TensorType>(param->GetType()) &&
+                detail::TensorTypeLayout(r_tt) != *target_layout) {
+              new_return_types[0] = WithTensorLayout(r_tt, *target_layout);
+              return {std::move(new_return_types), true};
+            }
+          }
+        }
+      }
+    }
+    return {std::move(new_return_types), false};
+  }
+
+  struct StoreRewriteResult {
+    CallPtr store_call;
+    std::vector<StmtPtr> pre_stmts;
+    ExprPtr nz_logical_shape_src;
+  };
+
+  StoreRewriteResult RewriteTileStore(const CallPtr& rhs, const OperatorConfig* cfg, const Span& span) {
+    std::optional<LayoutSpec> store_gm_lay;
+    if (cfg != nullptr) {
+      store_gm_lay = cfg->input_layouts.size() >= 2 ? cfg->input_layouts[1] : cfg->output_layout;
+    }
+    if (cfg != nullptr && !cfg->input_layouts.empty() && cfg->input_layouts[0] == LayoutSpec::FractalNZ() &&
+        store_gm_lay == LayoutSpec::Tensor(TensorLayout::NZ) && rhs->args_.size() >= 3) {
+      auto tile_orig = AsVarLike(rhs->args_[0]);
+      auto offs_tuple = As<MakeTuple>(rhs->args_[1]);
+      auto dst_orig = AsVarLike(rhs->args_[2]);
+      if (tile_orig && IsVecTileType(tile_orig->GetType()) && offs_tuple && dst_orig) {
+        auto tile_t = As<TileType>(tile_orig->GetType());
+        auto remap_it = local_var_remap_.find(tile_orig.get());
+        VarPtr new_tile = remap_it != local_var_remap_.end() ? remap_it->second : tile_orig;
+        ExprPtr new_dst = VisitExpr(dst_orig);
+        int64_t tr = 0;
+        int64_t tc = 0;
+        if (auto sit = vec_logical_shapes_.find(tile_orig.get());
+            sit != vec_logical_shapes_.end() && sit->second.size() >= 2) {
+          tr = sit->second[0];
+          tc = sit->second[1];
+        } else if (auto st = detail::StaticShape(tile_t->shape_); st.has_value() && st->size() >= 2) {
+          tr = (*st)[0];
+          tc = (*st)[1];
+        }
+        auto new_dst_tt = As<TensorType>(new_dst->GetType());
+        const int64_t c0 = C0Elements(new_dst_tt->dtype_);
+        auto [backing_var, pre_stmts] = GetNzNdBackingVar(dst_orig.get(), new_dst, span);
+        std::vector<ExprPtr> visited_offs;
+        visited_offs.reserve(offs_tuple->elements_.size());
+        for (const auto& el : offs_tuple->elements_) {
+          visited_offs.push_back(VisitExpr(el));
+        }
+        auto [nd_offs, nd_win] =
+            NzBackingNdOffsetsAndWindow(visited_offs, new_dst_tt->shape_, tr, tc, c0, rhs->span_);
+        std::vector<ExprPtr> new_args = {
+            std::move(new_tile),
+            std::make_shared<MakeTuple>(std::move(nd_offs), offs_tuple->span_),
+            std::move(backing_var),
+        };
+        if (rhs->args_.size() >= 4) {
+          new_args.push_back(std::make_shared<MakeTuple>(std::move(nd_win), rhs->args_[3]->span_));
+        }
+        CallPtr store_call =
+            CreateOpCallWithAttrs(kOpTileStore, new_args, rhs->kwargs_, rhs->attrs_, rhs->span_);
+        return {std::move(store_call), std::move(pre_stmts), std::move(new_dst)};
+      }
+    }
+
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(rhs->args_.size());
+    bool args_changed = false;
+    for (size_t idx = 0; idx < rhs->args_.size(); ++idx) {
+      const ExprPtr& arg = rhs->args_[idx];
+      if (idx == 0 && cfg != nullptr && !cfg->input_layouts.empty()) {
+        if (auto av = AsVarLike(arg); av && IsVecTileType(av->GetType())) {
+          VarPtr tv = GetTileVarForLayout(av, cfg->input_layouts[0]);
+          if (tv.get() != arg.get()) {
+            args_changed = true;
+          }
+          new_args.push_back(std::move(tv));
+          continue;
+        }
+      }
+      ExprPtr visited = VisitExpr(arg);
+      if (visited.get() != arg.get()) {
+        args_changed = true;
+      }
+      new_args.push_back(std::move(visited));
+    }
+    if (!args_changed) {
+      return {rhs, {}, nullptr};
+    }
+    CallPtr store_call = CreateOpCallWithAttrs(kOpTileStore, new_args, rhs->kwargs_, rhs->attrs_, rhs->span_);
+    return {std::move(store_call), {}, nullptr};
+  }
+
+  StmtPtr FinishVecAssign(const VarPtr& orig_var, ExprPtr new_value,
+                          const std::optional<LayoutSpec>& prod_lay, const Span& span,
+                          const AssignStmtPtr& orig_stmt) {
+    VarPtr new_var = orig_var;
+    const TypePtr& orig_t = orig_var->GetType();
+    const TypePtr& new_t = new_value->GetType();
+    if (new_value.get() != orig_stmt->value_.get() &&
+        (AsTensorTypeLike(orig_t) || As<TileType>(orig_t) || As<TupleType>(orig_t)) &&
+        (AsTensorTypeLike(new_t) || As<TileType>(new_t) || As<TupleType>(new_t))) {
+      new_var = std::make_shared<Var>(orig_var->name_hint_, new_t, orig_var->span_);
+      local_var_remap_[orig_var.get()] = new_var;
+    }
+
+    StmtPtr main_stmt;
+    if (new_var.get() == orig_var.get() && new_value.get() == orig_stmt->value_.get()) {
+      main_stmt = orig_stmt;
+    } else {
+      main_stmt = std::make_shared<AssignStmt>(new_var, std::move(new_value), span);
+    }
+
+    if (prod_lay.has_value() && vec_demanded_.count(orig_var.get()) != 0) {
+      std::vector<StmtPtr> conv_stmts = EmitDemandedConversions(orig_var.get(), new_var, *prod_lay, span);
+      if (!conv_stmts.empty()) {
+        std::vector<StmtPtr> seq;
+        seq.reserve(1 + conv_stmts.size());
+        seq.push_back(std::move(main_stmt));
+        seq.insert(seq.end(), std::make_move_iterator(conv_stmts.begin()),
+                   std::make_move_iterator(conv_stmts.end()));
+        return std::make_shared<SeqStmts>(std::move(seq), span);
+      }
+    }
+    return main_stmt;
+  }
+
+  StmtPtr RewriteVecLoadAssign(const AssignStmtPtr& op, const CallPtr& rhs, const OperatorConfig& cfg) {
+    auto lhs_tt = As<TileType>(op->var_->GetType());
+    if (cfg.output_layout == LayoutSpec::FractalNZ() && !cfg.input_layouts.empty() &&
+        cfg.input_layouts[0] == LayoutSpec::Tensor(TensorLayout::NZ) && rhs->args_.size() >= 3) {
+      auto gm_var = AsVarLike(rhs->args_[0]);
+      auto offs_tuple = As<MakeTuple>(rhs->args_[1]);
+      if (gm_var && offs_tuple) {
+        ExprPtr new_gm = VisitExpr(gm_var);
+        auto new_gm_tt = As<TensorType>(new_gm->GetType());
+        int64_t tr = 0;
+        int64_t tc = 0;
+        if (auto sit = vec_logical_shapes_.find(op->var_.get());
+            sit != vec_logical_shapes_.end() && sit->second.size() >= 2) {
+          tr = sit->second[0];
+          tc = sit->second[1];
+        } else if (auto st = detail::StaticShape(lhs_tt->shape_); st.has_value() && st->size() >= 2) {
+          tr = (*st)[0];
+          tc = (*st)[1];
+        }
+        const int64_t c0 = C0Elements(lhs_tt->dtype_);
+        auto [backing_var, pre_stmts] = GetNzNdBackingVar(gm_var.get(), new_gm, op->span_);
+        std::vector<ExprPtr> visited_offs;
+        visited_offs.reserve(offs_tuple->elements_.size());
+        for (const auto& el : offs_tuple->elements_) {
+          visited_offs.push_back(VisitExpr(el));
+        }
+        auto [nd_offs, nd_win] =
+            NzBackingNdOffsetsAndWindow(visited_offs, new_gm_tt->shape_, tr, tc, c0, rhs->span_);
+        std::vector<ExprPtr> new_args = {
+            std::move(backing_var),
+            std::make_shared<MakeTuple>(std::move(nd_offs), offs_tuple->span_),
+            std::make_shared<MakeTuple>(nd_win, rhs->args_[2]->span_),
+        };
+        if (rhs->args_.size() >= 4) {
+          new_args.push_back(std::make_shared<MakeTuple>(std::move(nd_win), rhs->args_[3]->span_));
+        }
+        CallPtr load_call =
+            CreateOpCallWithAttrs(kOpTileLoad, new_args, rhs->kwargs_, rhs->attrs_, rhs->span_);
+        load_call = WithCallType(load_call, WithVecMemorySpace(load_call->GetType()));
+        auto new_var = std::make_shared<Var>(op->var_->name_hint_, load_call->GetType(), op->var_->span_);
+        local_var_remap_[op->var_.get()] = new_var;
+        auto assign_load = std::make_shared<AssignStmt>(std::move(new_var), std::move(load_call), op->span_);
+        if (!pre_stmts.empty()) {
+          pre_stmts.push_back(std::move(assign_load));
+          return std::make_shared<SeqStmts>(std::move(pre_stmts), op->span_);
+        }
+        return assign_load;
+      }
+    }
+
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(rhs->args_.size());
+    bool args_changed = false;
+    for (const auto& arg : rhs->args_) {
+      ExprPtr visited = VisitExpr(arg);
+      if (visited.get() != arg.get()) {
+        args_changed = true;
+      }
+      new_args.push_back(std::move(visited));
+    }
+    const bool need_col_view = (cfg.output_layout == LayoutSpec::ColMajorFlat() &&
+                                EffectiveTileLayout(lhs_tt) != LayoutSpec::ColMajorFlat());
+    ExprPtr new_value = rhs;
+    if (args_changed || need_col_view) {
+      TypePtr load_type =
+          need_col_view ? WithVecMemorySpace(lhs_tt, ColMajorTileView(lhs_tt)) : op->var_->GetType();
+      new_value = std::make_shared<Call>(rhs->op_, std::move(new_args), rhs->kwargs_, rhs->attrs_,
+                                         std::move(load_type), rhs->span_);
+    }
+    return FinishVecAssign(op->var_, std::move(new_value), cfg.output_layout, op->span_, op);
+  }
+
+  StmtPtr RewriteTileMoveAssign(const AssignStmtPtr& op, const CallPtr& rhs, const OperatorConfig* cfg,
+                                const std::optional<LayoutSpec>& target_tile_desc) {
+    auto lhs_tt = As<TileType>(op->var_->GetType());
+    const bool dst_is_vec = lhs_tt->GetMemorySpace() == MemorySpace::Vec;
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(rhs->args_.size());
+    bool args_changed = false;
+    VarPtr in_arg = !rhs->args_.empty() ? AsVarLike(rhs->args_[0]) : nullptr;
+    if (dst_is_vec && cfg != nullptr && !cfg->input_layouts.empty() && in_arg &&
+        IsVecTileType(in_arg->GetType())) {
+      VarPtr new_src = GetTileVarForLayout(in_arg, cfg->input_layouts[0]);
+      if (new_src.get() != in_arg.get()) {
+        args_changed = true;
+      }
+      new_args.push_back(std::move(new_src));
+      for (size_t i = 1; i < rhs->args_.size(); ++i) {
+        ExprPtr v = VisitExpr(rhs->args_[i]);
+        if (v.get() != rhs->args_[i].get()) {
+          args_changed = true;
+        }
+        new_args.push_back(std::move(v));
+      }
+    } else {
+      for (const auto& arg : rhs->args_) {
+        ExprPtr v = VisitExpr(arg);
+        if (v.get() != arg.get()) {
+          args_changed = true;
+        }
+        new_args.push_back(std::move(v));
+      }
+    }
+
+    std::optional<LayoutSpec> chosen_desc = (cfg != nullptr && cfg->output_layout.IsTile())
+                                                ? std::optional<LayoutSpec>(cfg->output_layout)
+                                                : target_tile_desc;
+    if (!chosen_desc.has_value() || (EffectiveTileLayout(lhs_tt) == *chosen_desc && !args_changed)) {
+      return nullptr;
+    }
+    auto new_kwargs = ReplaceOrInsertKwarg(rhs->kwargs_, "blayout", chosen_desc->blayout);
+    new_kwargs = ReplaceOrInsertKwarg(std::move(new_kwargs), "slayout", chosen_desc->slayout);
+    CallPtr new_call = CreateOpCallWithAttrs(rhs->op_->name_, new_args, new_kwargs, rhs->attrs_, rhs->span_);
+    if (dst_is_vec) {
+      new_call = WithCallType(new_call, WithVecMemorySpace(new_call->GetType()));
+    }
+    return FinishVecAssign(op->var_, std::move(new_call),
+                           dst_is_vec ? chosen_desc : std::optional<LayoutSpec>{}, op->span_, op);
+  }
+
+  StmtPtr RewriteVecGenericAssign(const AssignStmtPtr& op, const CallPtr& rhs, const OperatorConfig& cfg) {
+    auto lhs_tt = As<TileType>(op->var_->GetType());
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(rhs->args_.size());
+
+    if (rhs->op_->name_ == kOpTileFull && !rhs->args_.empty()) {
+      if (auto orig_tuple = As<MakeTuple>(rhs->args_[0])) {
+        auto cur_shape = detail::StaticShape(lhs_tt->shape_);
+        ExprPtr shape_tuple = orig_tuple;
+        if (cfg.output_layout == LayoutSpec::FractalNZ() && cur_shape.has_value() && cur_shape->size() == 2) {
+          const int64_t c0 = C0Elements(lhs_tt->dtype_);
+          shape_tuple = std::make_shared<MakeTuple>(
+              std::vector<ExprPtr>{MakeIndexConst((*cur_shape)[1] / c0, orig_tuple->span_),
+                                   MakeIndexConst((*cur_shape)[0] * c0, orig_tuple->span_)},
+              orig_tuple->span_);
+        } else if (cfg.output_layout == LayoutSpec::RowMajorFlat() && cur_shape.has_value() &&
+                   cur_shape->size() == 2 && (*cur_shape)[1] == 1 && (*cur_shape)[0] > 1) {
+          shape_tuple = std::make_shared<MakeTuple>(
+              std::vector<ExprPtr>{MakeIndexConst(1, orig_tuple->span_),
+                                   MakeIndexConst((*cur_shape)[0], orig_tuple->span_)},
+              orig_tuple->span_);
+        }
+        new_args.push_back(std::move(shape_tuple));
+        for (size_t i = 1; i < rhs->args_.size(); ++i) {
+          new_args.push_back(VisitExpr(rhs->args_[i]));
+        }
+      }
+    } else if (rhs->op_->name_ == kOpTileReshape && rhs->args_.size() >= 2) {
+      auto in_arg = AsVarLike(rhs->args_[0]);
+      auto orig_tuple = As<MakeTuple>(rhs->args_[1]);
+      if (in_arg && orig_tuple) {
+        auto cur_shape = detail::StaticShape(lhs_tt->shape_);
+        const LayoutSpec& req_lay = !cfg.input_layouts.empty() ? cfg.input_layouts[0] : cfg.output_layout;
+        VarPtr new_in = GetTileVarForLayout(in_arg, req_lay);
+        ExprPtr shape_tuple = orig_tuple;
+        if (cur_shape.has_value() && cur_shape->size() == 2 &&
+            ((*cur_shape)[0] == 1 || (*cur_shape)[1] == 1)) {
+          const int64_t big = std::max((*cur_shape)[0], (*cur_shape)[1]);
+          const int64_t r = (cfg.output_layout == LayoutSpec::RowMajorFlat()) ? 1 : big;
+          const int64_t c = (cfg.output_layout == LayoutSpec::RowMajorFlat()) ? big : 1;
+          if ((*cur_shape)[0] != r || (*cur_shape)[1] != c) {
+            shape_tuple =
+                std::make_shared<MakeTuple>(std::vector<ExprPtr>{MakeIndexConst(r, orig_tuple->span_),
+                                                                 MakeIndexConst(c, orig_tuple->span_)},
+                                            orig_tuple->span_);
+          }
+        }
+        new_args = {std::move(new_in), std::move(shape_tuple)};
+      }
+    }
+
+    if (new_args.empty()) {
+      size_t tile_idx = 0;
+      for (const auto& arg : rhs->args_) {
+        if (auto av = AsVarLike(arg); av && As<TileType>(av->GetType())) {
+          const LayoutSpec& req_lay =
+              tile_idx < cfg.input_layouts.size() ? cfg.input_layouts[tile_idx] : cfg.output_layout;
+          ++tile_idx;
+          new_args.push_back(GetTileVarForLayout(av, req_lay));
+        } else {
+          new_args.push_back(VisitExpr(arg));
+        }
+      }
+    }
+
+    bool args_changed = (new_args.size() != rhs->args_.size());
+    if (!args_changed) {
+      for (size_t i = 0; i < new_args.size(); ++i) {
+        if (new_args[i].get() != rhs->args_[i].get()) {
+          args_changed = true;
+          break;
+        }
+      }
+    }
+
+    ExprPtr new_value = rhs;
+    if (args_changed) {
+      CallPtr rebuilt =
+          CreateOpCallWithAttrs(rhs->op_->name_, new_args, rhs->kwargs_, rhs->attrs_, rhs->span_);
+      std::optional<TileView> tv_override;
+      if (cfg.output_layout == LayoutSpec::ColMajorFlat()) {
+        if (auto rt = As<TileType>(rebuilt->GetType());
+            rt && EffectiveTileLayout(rt) != LayoutSpec::ColMajorFlat()) {
+          tv_override = ColMajorTileView(rt);
+        }
+      }
+      new_value = WithCallType(rebuilt, WithVecMemorySpace(rebuilt->GetType(), tv_override));
+    }
+    return FinishVecAssign(op->var_, std::move(new_value), cfg.output_layout, op->span_, op);
+  }
+
+  std::unordered_map<std::string, TensorLayout> tensor_layouts_;
+  std::unordered_map<std::string, LayoutSpec> tile_layouts_;
+  const std::unordered_map<std::string, OperatorConfig>& op_configs_;
+
+  std::map<std::pair<std::string, std::string>, TensorLayout> scoped_tensor_layouts_;
+  std::unordered_map<std::string, std::string> tile_prefix_override_;
+  std::unordered_map<std::pair<std::string, ParamSig>, std::string, ParamSigHash> specialized_callees_;
+  std::unordered_map<std::string, std::vector<VarPtr>> callee_formal_params_;
+  std::map<std::pair<std::string, size_t>, int64_t> param_steps_;
+  std::unordered_map<const Var*, VarPtr> local_var_remap_;
+  std::unordered_map<std::string, std::vector<TypePtr>> func_return_types_;
+  std::string current_func_name_;
+  bool func_promoted_gm_to_nz_ = false;
+  bool multi_incore_ = false;
+
+  // Per-function prescan state.
+  std::unordered_map<const Var*, OperatorConfig> assign_op_cfg_;
+  std::deque<OperatorConfig> eval_store_cfgs_;
+  std::unordered_map<const Var*, LayoutSpec> vec_prod_lay_;
+  std::unordered_map<const Var*, std::vector<LayoutSpec>> vec_demanded_;
+  std::unordered_map<std::pair<const Var*, LayoutSpec>, VarPtr, LayoutSpecKeyHash> vec_conv_vars_;
+  std::unordered_map<const Var*, std::vector<int64_t>> vec_logical_shapes_;
+  std::unordered_map<const Var*, std::vector<int64_t>> orig_tile_shapes_;
+  std::unordered_set<const Var*> nz_nd_needed_vars_;
+  std::unordered_map<const Var*, VarPtr> nz_nd_backing_vars_;
+  struct YieldFrame {
+    std::vector<std::optional<LayoutSpec>> loop_expected;
+    std::vector<TypePtr> branch_yield_types;
+  };
+  std::vector<YieldFrame> yield_frames_;
+};
+
+}  // namespace
+
+TypePtr SyncCallReturnType(const TypePtr& call_type, const std::vector<TypePtr>& ret_types) {
+  if (ret_types.empty()) {
+    return call_type;
+  }
+  if (auto ct = As<TensorType>(call_type); ct && !IsA<DistributedTensorType>(call_type)) {
+    if (auto rt = AsTensorTypeLike(ret_types[0])) {
+      return WithTensorLayout(ct, detail::TensorTypeLayout(rt));
+    }
+  }
+  if (auto tup = As<TupleType>(call_type)) {
+    std::vector<TypePtr> elems = tup->types_;
+    bool changed = false;
+    for (size_t idx = 0; idx < ret_types.size() && idx < elems.size(); ++idx) {
+      auto et = As<TensorType>(elems[idx]);
+      auto rt = AsTensorTypeLike(ret_types[idx]);
+      if (et && !IsA<DistributedTensorType>(elems[idx]) && rt) {
+        TensorTypePtr updated = WithTensorLayout(et, detail::TensorTypeLayout(rt));
+        if (updated.get() != et.get()) {
+          elems[idx] = std::move(updated);
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      return std::make_shared<TupleType>(std::move(elems));
+    }
+  }
+  return call_type;
+}
+
+ProgramPtr ApplyLayoutAssignment(const ProgramPtr& program, const LayoutAssignment& assignment) {
+  LayoutAssignmentWriter writer(assignment);
+  return writer.Rewrite(program);
+}
+
+}  // namespace auto_layout
+}  // namespace ir
+}  // namespace pypto
