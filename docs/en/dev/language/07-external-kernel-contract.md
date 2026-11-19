@@ -650,6 +650,32 @@ Graph replay. Allocate output storage before submitting. CPU tests compile and e
 argument conversion and checks against pinned TMR headers; mocked completion intrinsics
 verify sequencing, not device visibility. Device acceptance remains task 34.7.
 
+## Raw device-image entry
+
+Hardware kernels (A2/A3 and A5, AIC and AIV) are loaded as raw `.text` bytes.
+`kernel_entry` must be at offset zero of a nonempty executable `.text` section.
+The linker option `-e kernel_entry` selects ELF entry metadata; it does not move
+the function. A source wrapper that retains an earlier out-of-line function can
+therefore link successfully but violate the loader ABI.
+
+PyPTO validates the linked AI Core ELF before returning it from `compile_incore`
+and validates source-adjacent cached ELFs again before extraction or cache
+publication. Nonzero entry offsets fail with the entry address, `.text` address
+and offset. Link the entry first or remove preceding out-of-line functions;
+verify the resulting ELF rather than relying on source order. CPU simulator
+shared libraries resolve `kernel_entry` by symbol and do not use this check.
+
+Ordinary extern validation does not impose the VPTO helper prohibition on other
+allocated sections, such as AscendC block-local storage. VPTO's additional
+self-contained-image checks remain enabled for helper builds.
+
+Mutable binary-cache contexts use schema 3: older stamps invalidate both raw
+payloads and cached ELF sidecars, even when their hashes match. Published
+`BINARY_READY` manifests use schema 2, including distributed parent and child
+manifests. Older prebuilt manifests are rejected before callable construction;
+rebuild those artifacts from source. Raw bytes alone cannot prove where their
+original ELF entry was located. New, validated cache entries remain reusable.
+
 ## Versions and cache identity
 
 Unknown schema versions and required capabilities fail with `ContractError`.

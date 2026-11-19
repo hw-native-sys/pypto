@@ -9,7 +9,6 @@
 
 """Regression tests for compiled kernel binary cache identity."""
 
-import importlib
 from typing import Any
 
 import pytest
@@ -128,9 +127,7 @@ def test_external_cache_tracks_compiler_include_headers_at_same_root(tmp_path):
     assert runtime_changed_path != pto_changed_path
 
 
-def test_external_compile_ignores_source_sidecar(tmp_path):
-    pytest.importorskip("simpler_setup", reason="requires the optional device compiler package")
-    device_runner = importlib.import_module("pypto.runtime.device_runner")
+def test_external_compile_ignores_source_sidecar(tmp_path, device_runner):
     source = tmp_path / "entry.cpp"
     source.write_text("// external\n")
     sidecar = source.with_suffix(".so")
@@ -152,9 +149,7 @@ def test_external_compile_ignores_source_sidecar(tmp_path):
     assert sidecar.read_bytes() == b"stale wrong-core binary"
 
 
-def test_external_compile_forwards_descriptor_include_dirs(tmp_path):
-    pytest.importorskip("simpler_setup", reason="requires the optional device compiler package")
-    device_runner = importlib.import_module("pypto.runtime.device_runner")
+def test_external_compile_forwards_descriptor_include_dirs(tmp_path, device_runner):
     source = tmp_path / "entry.cpp"
     source.write_text("// external\n")
     include_dir = tmp_path / "include"
@@ -223,9 +218,8 @@ def test_external_cache_is_relocatable(tmp_path):
     assert path_a == path_b
 
 
-def test_vpto_build_ignores_sidecars_and_separates_cache(tmp_path, monkeypatch):
-    pytest.importorskip("simpler_setup")
-    runner = importlib.import_module("pypto.runtime.device_runner")
+def test_vpto_build_ignores_sidecars_and_separates_cache(tmp_path, monkeypatch, device_elf, device_runner):
+    runner = device_runner
     source = tmp_path / "entry.cpp"
     source.write_text("// generated")
     helper = tmp_path / "helper.pto"
@@ -234,7 +228,13 @@ def test_vpto_build_ignores_sidecars_and_separates_cache(tmp_path, monkeypatch):
         source=str(source), core_type="aiv", func_id=0, code_name="entry", vpto_sources=[str(helper)]
     )
     compiler = _Compiler()
-    monkeypatch.setattr(runner, "extract_text_section", lambda raw: raw)
+    original_compile = compiler.compile_incore
+
+    def compile_image(*args, **kwargs):
+        original_compile(*args, **kwargs)
+        return device_elf()
+
+    monkeypatch.setattr(compiler, "compile_incore", compile_image)
     source.with_suffix(".o").write_bytes(b"stale")
     source.with_name(f"entry_{runner._generated_cache_identity(kernel)}.o").write_bytes(b"stale")
     raw, _ = runner._compile_single_kernel(kernel, compiler, "a5", "isa", "runtime")
@@ -256,9 +256,8 @@ def test_vpto_build_ignores_sidecars_and_separates_cache(tmp_path, monkeypatch):
         runner._kernel_cache_file(tmp_path, kernel, "a5sim", "isa", "runtime", compiler)
 
 
-def test_vpto_publication_uses_precompile_identity(tmp_path, monkeypatch):
-    pytest.importorskip("simpler_setup")
-    runner = importlib.import_module("pypto.runtime.device_runner")
+def test_vpto_publication_uses_precompile_identity(tmp_path, monkeypatch, device_runner, device_elf):
+    runner = device_runner
     source = tmp_path / "kernel.cpp"
     source.write_text("void kernel() {}")
     helper = tmp_path / "helper.pto"
@@ -272,10 +271,9 @@ def test_vpto_publication_uses_precompile_identity(tmp_path, monkeypatch):
     def compile_with_edit(source, **kwargs):
         # Model an edit while compiling the already-selected source snapshot.
         helper.write_text("// pypto.reg_auto_sync: true\nmodule {}")
-        return b"snapshot binary"
+        return device_elf(text=b"snapshot binary")
 
     monkeypatch.setattr(compiler, "compile_incore", compile_with_edit)
-    monkeypatch.setattr(runner, "extract_text_section", lambda raw: raw)
     runner._compile_single_kernel(kernel, compiler, "a5", "isa", "runtime", cache_dir=cache)
     after = runner._kernel_cache_file(cache, kernel, "a5", "isa", "runtime", compiler)
     assert before != after
