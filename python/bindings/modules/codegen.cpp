@@ -48,6 +48,7 @@ void BindCodegen(nb::module_& m) {
       .def_ro("caller_parameter_types", &VFHelper::caller_parameter_types)
       .def_ro("parameter_effects", &VFHelper::parameter_effects)
       .def_ro("parameter_indices", &VFHelper::parameter_indices)
+      .def_ro("capture_base_indices", &VFHelper::capture_base_indices)
       .def_ro("capture_byte_offsets", &VFHelper::capture_byte_offsets);
   nb::class_<PTOCodegenBundle>(codegen_module, "PTOCodegenBundle")
       .def_ro("caller_source", &PTOCodegenBundle::caller_source)

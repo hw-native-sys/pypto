@@ -16,7 +16,7 @@ lowering without changing the DSL or automatically selecting vector scopes.
 flowchart TD
   IR[Planned A5 AIV function] --> Bundle[PTOCodegen.generate_bundle]
   Bundle --> Caller[Caller PTO: Tiles and annotated adapter]
-  Bundle --> Helper[Helper PTO: common UB base and static offsets]
+  Bundle --> Helper[Helper PTO: UB pointers and view offsets]
   Caller --> EmitC[PTOAS EmitC and caller synchronization]
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
@@ -46,25 +46,26 @@ Lists follow first-use order; entries without helpers have empty lists. SIMT
 definitions and adapters are not entries. A cached SIMT artifact can appear in
 several entries' lists without duplicating its source. Each codegen invocation
 resets this relation, and previously returned bundles retain their own metadata.
-The execution driver retains this relation in the version-4 helper manifest
+The execution driver retains this relation in the version-5 helper manifest
 and uses emitted entry names when attaching `vpto_sources` to kernel configs.
 For a mixed Group, only the AIV entry links VF helpers; the AIC entry has no
 helper dependencies. Grouped SIMT execution remains unsupported.
 
-The helper emitter reuses `PTOCodegen`'s register operation lowering. Its UB
-pointers denote planned MemRef bases; the VMI emitter adds each Tile view's
-element origin exactly once. Captures from different statically allocated
-views are reconstructed from one common UB base with constant displacements.
-This retains overlap information across the separate compilation boundary.
-Tile parameters and their derived views are rejected: their runtime UB pointers
-cannot be related using the planner offsets assigned to local allocations.
+The VF emitter binds storage from the actual AIV call operands. Planned Tiles
+share the lowest captured UB address. Each live C2V receive supplies its current
+slot pointer through the adapter's `pto.tile_buf_addr`. Dense constant-offset
+windows on the same receive share that pointer. The emitter checks that planned
+allocations fall outside each captured pipe reservation. The manifest records
+the pointer parameter for each capture in `capture_base_indices` (−1 for a
+scalar) and its displacement in `capture_byte_offsets`. VMI adds the Tile
+view's element origin once at the memory instruction.
 
 ## Two synchronization boundaries
 
 | Boundary | Information supplied by PyPTO | Work performed by PTOAS |
 | -------- | ----------------------------- | ----------------------- |
 | Caller | Tile operands and `pto.tileop.effects` on a SIMD adapter | Insert MTE2 → V and V → MTE3 events around transfers and the call |
-| VF body | Common UB pointer base, constant offsets, VMI memory operations and per-scope policy | In automatic mode, insert barriers for overlapping WR, RW and WW accesses |
+| VF body | Planned and FIFO pointer bases, constant offsets, VMI memory operations and per-scope policy | In automatic mode, insert barriers for overlapping WR, RW and WW accesses |
 
 The caller adapter keeps Tiles visible during dependency analysis. Only its
 body extracts a UB pointer with `pto.tile_buf_addr` and calls the helper.
@@ -129,16 +130,20 @@ is position independent; helpers still have to obey the device-call ABI.
 | Target | A5, AIV, ONBOARD, PyPTO Tile memory planner |
 | Grouping | Standalone AIV or a mixed Group with one AIC function and one AIV function; the AIV may execute on one or both vector lanes |
 | Scope | Register operations and canonical hardware loops nested up to four levels |
-| Memory | Register loads/stores and indexed accesses supported by the frontend and PTOAS; mixed Tile dtypes share one UB base |
-| Aliasing | Common UB base, static view displacements and store SSA aliases |
+| Memory | Register loads/stores and indexed accesses supported by the frontend and PTOAS; mixed dtypes and FIFO/local captures |
+| Aliasing | Common pointer for aliases of each receive, static displacements and store SSA aliases |
 | Masks and scalars | Runtime masks and supported scalar captures |
 | Packaging | Source artifact relocation, helper-aware binary cache |
 
-Mixed Group VF captures must refer to statically planned local UB allocations.
-A cast/copy after a C2V receive can materialize such an allocation; reshaping a
-FIFO receive does not. Direct FIFO-backed captures, parameter-backed Tiles,
-ungrouped peers, broader Group layouts, grouped SIMT, CPU simulation of device
-objects, Bridge calls and general helper control flow remain unsupported.
+A mixed Group VF can update a Cube result directly in its AIV FIFO slot.
+The caller keeps the receive alive across outlined VF calls and downstream Tile
+consumers. Before `tfree`, a caller-local SIMD adapter marks the slot as
+`readwrite` on PIPE_V. This models returning its credit. PTOAS can then insert
+an MTE3 → V event pair when a GM store still reads that slot. Caller code
+containing explicit pipe flags cannot use this path because PTOAS may skip
+automatic synchronization. Parameter-backed Tiles, strided or dynamic FIFO
+windows, ungrouped peers, broader Group layouts, grouped SIMT, CPU simulation
+of device objects, Bridge calls and general helper control flow remain unsupported.
 Memory-mode and alignment constraints are checked by the
 frontend and toolchain; supported combinations require compiler and hardware
 coverage. See the [register operation reference](../language/06-register-operations.md)
@@ -168,8 +173,9 @@ def mixed_reg(a: pl.Tensor[[32, 32], pl.BF16],
 `tests/st/runtime/vpto/test_mixed_reg_onboard.py` covers this path and a split-AIV
 variant with two helpers. It checks full-output numerics, untouched regions,
 AIC symbol isolation, AIV linking, cache hits, helper-content invalidation and
-artifact relocation. Direct FIFO capture requires separate storage-lifetime
-and completion validation and is not enabled by this support.
+artifact relocation. The direct FP32 variants exercise seven distinct producer
+payloads on a two-slot ring, masked writeback, a subsequent Tile consumer and
+the native MTE3 → V edge before credit return.
 
 ## Required hardware loops
 

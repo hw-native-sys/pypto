@@ -1995,7 +1995,7 @@ def _emit_unit(
         local_files[f"vpto/{unit.name}/manifest.json"] = (
             json.dumps(
                 {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "entry_helpers": unit.entry_helpers,
                     "target": "a5",
                     "core_type": "aiv",
@@ -2013,6 +2013,7 @@ def _emit_unit(
                             "caller_parameter_types": h.caller_parameter_types,
                             "parameter_effects": h.parameter_effects,
                             "parameter_indices": h.parameter_indices,
+                            "capture_base_indices": h.capture_base_indices,
                             "capture_byte_offsets": h.capture_byte_offsets,
                             "source": f"{h.symbol}.pto",
                             "source_sha256": hashlib.sha256(h.source.encode()).hexdigest(),

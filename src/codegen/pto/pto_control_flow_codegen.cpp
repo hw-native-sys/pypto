@@ -448,6 +448,21 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           if (auto tile_type = As<TileType>(op->return_vars_[i]->GetType())) {
             value = EnsureTileView(value, GetSSATileBufType(value), tile_type, "if_borrow_view");
           }
+          if (As<TileType>(op->return_vars_[i]->GetType())) {
+            // Both branch values must describe the same dominating receive and
+            // physical window before a later VF can reconstruct its address.
+            const auto name = GetVarName(op->return_vars_[i]);
+            const auto candidate = fs_.c2v_views.find(value);
+            if (body == op->then_body_ && candidate != fs_.c2v_views.end()) {
+              fs_.c2v_views[name] = candidate->second;
+            } else if (auto prior = fs_.c2v_views.find(name);
+                       prior != fs_.c2v_views.end() &&
+                       (candidate == fs_.c2v_views.end() ||
+                        prior->second.received != candidate->second.received ||
+                        prior->second.byte_offset != candidate->second.byte_offset)) {
+              fs_.c2v_views.erase(prior);
+            }
+          }
           ssa_yields.push_back(std::move(value));
         } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType()) ||
                    ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {

@@ -208,6 +208,8 @@ void PTOCodegen::VisitStmt_(const ir::SimtLaunchStmtPtr& launch) {
     const auto native_type = SimtParameterType(function->params_[i]->GetType());
     artifact.parameter_types.push_back(native_type);
     artifact.parameter_indices.push_back(i);
+    artifact.capture_base_indices.push_back(ir::As<ir::ScalarType>(arg->GetType()) ? -1
+                                                                                   : static_cast<int64_t>(i));
     artifact.capture_byte_offsets.push_back(0);
     artifact.parameter_effects.push_back(effects->second[i]);
     if (auto tensor = ir::AsTensorTypeLike(arg->GetType())) {

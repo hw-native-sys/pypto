@@ -91,10 +91,11 @@ struct VFHelper {
   std::vector<std::string> parameter_types;
   std::vector<std::string> caller_parameter_types;
   std::vector<std::string> parameter_effects;
-  /// Helper argument -> caller argument; VF collapses memory onto one UB base,
-  /// while SIMT retains each storage pointer and scalar argument in ABI order.
+  /// Helper parameter -> caller operand supplying that pointer or scalar.
   std::vector<size_t> parameter_indices;
-  /// VF byte offsets from its shared UB base; zero for scalars and SIMT pointers.
+  /// Caller operand -> helper pointer parameter, or -1 for a scalar.
+  std::vector<int64_t> capture_base_indices;
+  /// Byte displacement relative to that selected pointer.
   std::vector<int64_t> capture_byte_offsets;
 };
 
@@ -574,7 +575,14 @@ class PTOCodegen : public CodegenBase {
   bool IsMutableTileName(const std::string& ssa_name) const;
   /// Record a FIFO-backed descriptor accepted as a local source by PTOAS >= 0.74.
   /// This does not grant user-facing mutation of arbitrary derived views.
-  void RegisterTpopTileName(const std::string& ssa_name);
+  void RegisterTpopTileName(const std::string& ssa_name, int c2v_pipe = -1);
+  /// Model returning a VF-borrowed slot on PIPE_V for PTOAS dependency insertion.
+  void EmitVFC2VRelease(const ir::ExprPtr& tile);
+  void RecordExplicitPipeFlag() { fs_.has_explicit_pipe_flags = true; }
+  void RecordVecReservation(const std::string& handle, int base, int size) {
+    fs_.vec_reservations[handle] = {base, static_cast<int64_t>(base) + size};
+  }
+  void RecordC2VBuffer(int pipe, const std::string& handle, int slot_size, int slot_count);
   /// Whether contiguous reshape/subview ancestry reaches a local allocation or TPOP.
   /// Subview offsets remain distinct for alias checks; unknown roots (including
   /// control-flow arguments) are not accepted merely because they share a MemRef.
@@ -910,6 +918,8 @@ class PTOCodegen : public CodegenBase {
   bool separate_vf_ = false;
   bool supported_vf_entries_ = false;
   std::vector<VFHelper> vf_helpers_;
+  /// Caller-local release marker definitions, deduplicated by Tile descriptor type.
+  std::map<std::string, std::string> c2v_release_symbols_;
   std::map<std::string, std::vector<std::string>> entry_helpers_;
   /// Separate membership index preserves first-use order without linear scans.
   std::set<std::pair<std::string, std::string>> entry_helper_uses_;
@@ -1271,6 +1281,21 @@ class PTOCodegen : public CodegenBase {
     std::set<std::string> mutable_tile_names;
     /// FIFO storage is borrowed, but a TPOP descriptor can root initialized views.
     std::set<std::string> tpop_tile_names;
+    struct C2VView {
+      std::string received;
+      int pipe;
+      int64_t byte_offset;
+    };
+    /// Descriptor -> dominating receive and byte displacement within its slot.
+    std::map<std::string, C2VView> c2v_views;
+    std::map<std::string, std::pair<int64_t, int64_t>> vec_reservations;
+    struct C2VBuffer {
+      std::pair<int64_t, int64_t> reservation;
+      int slot_size;
+    };
+    std::map<int, C2VBuffer> c2v_buffers;
+    std::set<std::string> vf_received_tiles;
+    bool has_explicit_pipe_flags = false;
     /// Subview roots eligible for descriptor initialization, not general mutation.
     /// Cached at emission time independently of full-span storage alias identity.
     std::set<std::string> locally_bound_subview_names;
@@ -1397,6 +1422,11 @@ class PTOCodegen : public CodegenBase {
       tile_view_names.clear();
       mutable_tile_names.clear();
       tpop_tile_names.clear();
+      c2v_views.clear();
+      vec_reservations.clear();
+      c2v_buffers.clear();
+      vf_received_tiles.clear();
+      has_explicit_pipe_flags = false;
       locally_bound_subview_names.clear();
 
       temp_counter = 0;
