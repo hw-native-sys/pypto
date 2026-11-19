@@ -362,8 +362,9 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName
       << " native FP4 matmul requires the tile API; load packed operands into Mat and use "
          "pl.tile.matmul_mx with explicit Left/Right placement";
-  CHECK_SPAN(lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN, span)
-      << kOpName << " requires FP8E4M3FN data tensors";
+  CHECK_SPAN(IsMxFp8DataType(lhs->dtype_) && IsMxFp8DataType(rhs->dtype_), span)
+      << kOpName << " requires FP8E4M3FN or FP8E5M2 on each data operand, but got " << lhs->dtype_.ToString()
+      << " x " << rhs->dtype_.ToString();
   CHECK_SPAN(lhs_scale->dtype_ == DataType::FP8E8M0 && rhs_scale->dtype_ == DataType::FP8E8M0, span)
       << kOpName << " requires FP8E8M0 scale tensors";
   const auto lhs_layout =
@@ -435,9 +436,9 @@ REGISTER_OP("tensor.quant_mx")
 REGISTER_OP("tensor.matmul_mx")
     .set_op_category("TensorOp")
     .set_description("MXFP8 matrix multiplication of oriented data and scale tensors")
-    .add_argument("lhs", "Left FP8E4M3FN tensor [M, K]")
-    .add_argument("lhs_scale", "Left FP8E8M0 MX_A_ZZ scale tensor [M, K/32]")
-    .add_argument("rhs", "Right FP8E4M3FN tensor [K, N]")
+    .add_argument("lhs", "Left FP8E4M3FN or FP8E5M2 tensor [M, K]")
+    .add_argument("lhs_scale", "Left FP8E8M0 MX_A_ZZ or MX_A_ND scale tensor [M, K/32]")
+    .add_argument("rhs", "Right FP8E4M3FN or FP8E5M2 tensor [K, N]")
     .add_argument("rhs_scale", "Right FP8E8M0 MX_B_NN scale tensor [K/32, N]")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

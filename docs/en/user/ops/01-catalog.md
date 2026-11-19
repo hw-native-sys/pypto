@@ -144,7 +144,7 @@ Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compil
 | [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | Multiply with a bias operand. Same operand pairs as `matmul`; the bias matches the accumulator dtype |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | Batched multiply, **tile operands only**. For tensors call `pl.matmul` — rank > 2 dispatches to `tile.batch_matmul` during lowering |
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | Matrix-vector forms |
-| [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX block-scale multiply. Tensor `matmul_mx` uses oriented 2D data/scale tensors with FP8E4M3FN on both sides and returns FP32. The Tile API supports all four FP8E4M3FN/FP8E5M2 pairs and packed FP4 pairs, including the Tile-only `_acc` and `_bias` forms |
+| [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX block-scale multiply. Tensor `matmul_mx` uses oriented 2D data/scale tensors and returns FP32. Both APIs support all four FP8E4M3FN/FP8E5M2 pairs. The Tile API also supports packed FP4 pairs and the `_acc` and `_bias` forms |
 
 `pl.tile.matmul`, `pl.tile.matmul_acc`, and the GEMV family accept producer
 phases through `acc_phase=pl.AccPhase`. `Unspecified` is the default and keeps
