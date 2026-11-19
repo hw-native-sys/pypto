@@ -14,10 +14,9 @@
 ///
 /// Three linear sweeps, each visiting every node once:
 ///
-///   1. ``ScopeIndex``    -- where every Var is defined and which clock range each loop
-///                           spans, so "is this extent visible before the loop?" is an
-///                           interval test on the extent's own (tiny) expression rather
-///                           than a scan of the loop body.
+///   1. ``ScopeIndex``    -- definition scopes, matmul provenance, and tile use counts.
+///                           Scope membership and exclusive uses can be checked without
+///                           scanning the loop body for each carry.
 ///   2. ``CarryAnalyzer`` -- decides, per carry, the valid shape to declare. Reads types
 ///                           only; rewrites nothing.
 ///   3. ``CarryRewriter`` -- applies the decisions top-down. A loop's seed is re-declared
@@ -44,6 +43,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -66,6 +66,32 @@ namespace {
 std::vector<ExprPtr> TrailingYieldValues(const StmtPtr& body) {
   auto yield = transform_utils::GetLastYieldStmt(body);
   return yield ? yield->value_ : std::vector<ExprPtr>{};
+}
+
+/// Recognize a split-K update that runs directly before the loop's yield and
+/// overwrites its input on the first iteration of a statically nonempty loop.
+AssignStmtPtr FindPredicatedInitUpdate(const ForStmtPtr& loop) {
+  if (loop->kind_ != ForKind::Sequential && loop->kind_ != ForKind::Pipeline) return nullptr;
+  auto body = As<SeqStmts>(loop->body_);
+  if (!body || body->stmts_.size() < 2 || !As<YieldStmt>(body->stmts_.back())) return nullptr;
+  auto update = As<AssignStmt>(body->stmts_[body->stmts_.size() - 2]);
+  auto call = update ? As<Call>(update->value_) : nullptr;
+  if (!IsOp(call, "tile.matmul_acc") || call->args_.size() != 4) return nullptr;
+
+  auto start = As<ConstInt>(loop->start_);
+  auto stop = As<ConstInt>(loop->stop_);
+  auto step = As<ConstInt>(loop->step_);
+  if (!start || !stop || !step || step->value_ <= 0 || start->value_ >= stop->value_) return nullptr;
+  // Simplify may already have folded the first-iteration test for a one-trip loop.
+  if (auto constant = As<ConstBool>(call->args_[3])) return constant->value_ ? update : nullptr;
+  auto eq = As<Eq>(call->args_[3]);
+  if (!eq) return nullptr;
+
+  const auto matches_start = [&](const ExprPtr& index, const ExprPtr& value) {
+    auto constant = As<ConstInt>(value);
+    return index.get() == loop->loop_var_.get() && constant && constant->value_ == start->value_;
+  };
+  return matches_start(eq->left_, eq->right_) || matches_start(eq->right_, eq->left_) ? update : nullptr;
 }
 
 /// The valid extents a carry should be declared at: per axis, the yield's extent when it
@@ -134,6 +160,11 @@ class ScopeIndex : public IRVisitor {
     return it == defining_call_.end() ? nullptr : it->second;
   }
 
+  [[nodiscard]] bool HasOneTileUse(const Var* var) const {
+    auto it = tile_uses_.find(var);
+    return it != tile_uses_.end() && it->second == 1;
+  }
+
   [[nodiscard]] bool IsMatmulResult(const ExprPtr& expr) const {
     auto var = AsVarLike(expr);
     return var && matmul_results_.count(var.get());
@@ -165,6 +196,13 @@ class ScopeIndex : public IRVisitor {
   }
 
  protected:
+  void VisitVarLike_(const VarPtr& op) override {
+    if (As<TileType>(op->GetType())) ++tile_uses_[op.get()];
+  }
+
+  // References to an IterArg read the carry. Only its loop header reads the seed.
+  void VisitExpr_(const IterArgPtr& op) override { VisitVarLike_(op); }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     Define(op->var_.get());
     if (auto call = As<Call>(op->value_)) {
@@ -184,12 +222,14 @@ class ScopeIndex : public IRVisitor {
     } else if (IsMatmulResult(op->value_)) {
       matmul_results_[op->var_.get()] = MatmulProductType(op->value_);
     }
-    IRVisitor::VisitStmt_(op);
+    VisitExpr(op->value_);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     for (const auto& rv : op->return_vars_) Define(rv.get());
-    IRVisitor::VisitStmt_(op);
+    VisitExpr(op->condition_);
+    VisitStmt(op->then_body_);
+    if (op->else_body_) VisitStmt(*op->else_body_);
     if (!op->else_body_) return;
     const auto then_values = TrailingYieldValues(op->then_body_);
     const auto else_values = TrailingYieldValues(*op->else_body_);
@@ -207,15 +247,21 @@ class ScopeIndex : public IRVisitor {
 
   void VisitStmt_(const ForStmtPtr& op) override {
     for (const auto& rv : op->return_vars_) Define(rv.get());
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
     EnterLoop(op, [&] {
       Define(op->loop_var_.get());
-      IRVisitor::VisitStmt_(op);
+      VisitStmt(op->body_);
     });
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& rv : op->return_vars_) Define(rv.get());
-    EnterLoop(op, [&] { IRVisitor::VisitStmt_(op); });
+    EnterLoop(op, [&] {
+      VisitExpr(op->condition_);
+      VisitStmt(op->body_);
+    });
   }
 
  private:
@@ -225,6 +271,7 @@ class ScopeIndex : public IRVisitor {
   /// defined *inside* it, so an extent naming one of them is correctly refused.
   template <typename LoopPtr, typename Fn>
   void EnterLoop(const LoopPtr& loop, Fn&& visit_children) {
+    for (const auto& iter_arg : loop->iter_args_) VisitExpr(iter_arg->initValue_);
     const size_t enter = ++clock_;
     for (const auto& iter_arg : loop->iter_args_) Define(static_cast<const Var*>(iter_arg.get()));
     visit_children();
@@ -236,10 +283,15 @@ class ScopeIndex : public IRVisitor {
   std::map<const Stmt*, std::pair<size_t, size_t>> loop_span_;
   std::map<const Var*, CallPtr> defining_call_;
   std::map<const Var*, TypePtr> matmul_results_;
+  std::map<const Var*, size_t> tile_uses_;
 };
 
-/// The valid shape to declare for a carry, keyed by the ``IterArg`` that carries it.
-using CarryDecisions = std::map<const Var*, std::vector<ExprPtr>>;
+struct CarryDecision {
+  std::vector<ExprPtr> valid_shape;
+  std::optional<bool> compact;
+};
+
+using CarryDecisions = std::map<const Var*, CarryDecision>;
 
 /// Decides which carries to re-declare. Reads types; rewrites nothing.
 class CarryAnalyzer : public IRVisitor {
@@ -252,7 +304,7 @@ class CarryAnalyzer : public IRVisitor {
  protected:
   void VisitStmt_(const ForStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
-    Decide(op);
+    Decide(op, tensor_mode_ ? nullptr : FindPredicatedInitUpdate(op));
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -261,12 +313,43 @@ class CarryAnalyzer : public IRVisitor {
   }
 
  private:
+  [[nodiscard]] TileTypePtr PredicatedProductType(const AssignStmtPtr& update, const IterArgPtr& iter_arg,
+                                                  const ExprPtr& yielded, const VarPtr& result) const {
+    if (!update || yielded.get() != update->var_.get()) return nullptr;
+    auto call = As<Call>(update->value_);
+    if (call->args_[0].get() != iter_arg.get() || !index_.HasOneTileUse(iter_arg.get())) return nullptr;
+
+    // A separate compact allocation is safe only when the original seed is an
+    // unbound, private create and the update is the carry's only consumer.
+    auto seed = AsVarLike(iter_arg->initValue_);
+    auto create = seed ? index_.DefiningCall(seed.get()) : nullptr;
+    if (!IsOp(create, "tile.create") || !index_.HasOneTileUse(seed.get())) return nullptr;
+    auto seed_type = As<TileType>(seed->GetType());
+    auto carry_type = As<TileType>(iter_arg->GetType());
+    auto result_type = As<TileType>(result->GetType());
+    auto yield_type = As<TileType>(yielded->GetType());
+    if (!seed_type || !carry_type || !result_type || !yield_type || seed_type->memref_ ||
+        carry_type->memref_ || yield_type->memref_ || result_type->memref_ ||
+        (seed_type->memory_space_ && seed_type->memory_space_ != MemorySpace::Acc) ||
+        GetKwargOr<bool>(create->kwargs_, "flat_layout", false) ||
+        GetKwargOr<bool>(create->kwargs_, "transpose", false)) {
+      return nullptr;
+    }
+
+    // Query the fresh product's geometry with the same deducer as tile.matmul.
+    // The accumulating call itself must still inherit its destination's layout.
+    auto product =
+        OpRegistry::GetInstance().Create("tile.matmul", {call->args_[1], call->args_[2]}, call->span_);
+    auto product_type = As<TileType>(product->GetType());
+    return AreExprVectorsEqual(carry_type->shape_, product_type->shape_) ? product_type : nullptr;
+  }
+
   template <typename LoopPtr>
-  void Decide(const LoopPtr& loop) {
+  void Decide(const LoopPtr& loop, const AssignStmtPtr& predicated_update = nullptr) {
     const auto& iter_args = loop->iter_args_;
     if (iter_args.empty()) return;
     const auto yields = TrailingYieldValues(loop->body_);
-    if (yields.size() != iter_args.size()) return;
+    if (yields.size() != iter_args.size() || loop->return_vars_.size() != iter_args.size()) return;
 
     for (size_t i = 0; i < iter_args.size(); ++i) {
       if (tensor_mode_) {
@@ -275,7 +358,7 @@ class CarryAnalyzer : public IRVisitor {
         auto seed = AsVarLike(iter_args[i]->initValue_);
         if (narrowed && seed && IsOp(index_.DefiningCall(seed.get()), "tensor.create") &&
             index_.IsMatmulResult(yields[i]) && ExtentsAreVisibleBefore(*narrowed, loop)) {
-          decisions_[static_cast<const Var*>(iter_args[i].get())] = std::move(*narrowed);
+          decisions_[static_cast<const Var*>(iter_args[i].get())] = {std::move(*narrowed), std::nullopt};
         }
         continue;
       }
@@ -283,6 +366,12 @@ class CarryAnalyzer : public IRVisitor {
       // A conditional is typed from its then branch, which may still inherit
       // the seed's non-compact layout. Inspect the fresh product in either arm.
       auto product_tile = As<TileType>(index_.MatmulProductType(yields[i]));
+      bool predicated_product = false;
+      if (!product_tile && predicated_update) {
+        product_tile =
+            PredicatedProductType(predicated_update, iter_args[i], yields[i], loop->return_vars_[i]);
+        predicated_product = product_tile != nullptr;
+      }
       auto yield_tile = product_tile ? product_tile : As<TileType>(yields[i]->GetType());
       auto narrowed = NarrowedValidShape(init_tile, yield_tile);
       bool needs_compact_repair = false;
@@ -299,18 +388,20 @@ class CarryAnalyzer : public IRVisitor {
       // Only an L0C carry is re-declared, and `tile.set_validshape` is 2D.
       if (narrowed->size() != 2) continue;
       if (yield_tile->GetMemorySpace() != MemorySpace::Acc) continue;
-      // Nothing to reconcile when both readings of the buffer land on the same pitch --
-      // notably a single-fractal-block box, where `ceil(validRow/16)*16` is the physical
-      // row count whatever the valid rows are. The same predicate `AccCompactValid` uses,
-      // so a carry this declines is also a carry the verifier does not ask about, and a
-      // `[16, N]` accumulator keeps the exact form it has today.
-      if (!needs_compact_repair && AccPitchesCoincide(narrowed->at(0), init_tile->shape_[0])) continue;
+      const bool pitches_coincide = AccPitchesCoincide(narrowed->at(0), init_tile->shape_[0]);
+      if (!needs_compact_repair && !predicated_product && pitches_coincide) continue;
       if (!ExtentsAreVisibleBefore(*narrowed, loop)) continue;
       // Only a `tile.create` seed can be re-declared as a narrowed box.
       auto seed = AsVarLike(iter_args[i]->initValue_);
       if (!seed || !index_.IsFreshTileSeed(seed.get())) continue;
 
-      decisions_[static_cast<const Var*>(iter_args[i].get())] = std::move(*narrowed);
+      // The predicate proves the fresh carry's valid rectangle. Even with an
+      // unchanged row pitch, the store needs that rectangle on both axes.
+      std::optional<bool> compact;
+      if (predicated_product && pitches_coincide) {
+        compact = tile_view_semantics::GetEffectiveTileView(*init_tile).compact == CompactMode::normal;
+      }
+      decisions_[static_cast<const Var*>(iter_args[i].get())] = {std::move(*narrowed), compact};
     }
   }
 
@@ -610,7 +701,7 @@ class CarryRewriter : public IRMutator {
   /// accumulator advertising the physical row pitch. Declaring the box lets
   /// ``tile.create``'s own deducer derive the Acc layout for the box it declares.
   /// Returns null when the seed is not one this repair can re-declare.
-  ExprPtr BuildNarrowedInit(const IterArgPtr& iter_arg, const std::vector<ExprPtr>& valid,
+  ExprPtr BuildNarrowedInit(const IterArgPtr& iter_arg, const CarryDecision& decision,
                             std::vector<StmtPtr>* prologue) {
     auto seed = AsVarLike(iter_arg->initValue_);
     if (!seed) return nullptr;
@@ -618,8 +709,8 @@ class CarryRewriter : public IRMutator {
     // The extents were chosen against the types as the analyzer found them; an enclosing
     // rewrite may since have replaced the vars they name.
     std::vector<ExprPtr> visited_valid;
-    visited_valid.reserve(valid.size());
-    for (const auto& extent : valid) visited_valid.push_back(VisitExpr(extent));
+    visited_valid.reserve(decision.valid_shape.size());
+    for (const auto& extent : decision.valid_shape) visited_valid.push_back(VisitExpr(extent));
 
     if (tensor_mode_) {
       if (!IsOp(index_.DefiningCall(seed.get()), "tensor.create")) return nullptr;
@@ -634,8 +725,9 @@ class CarryRewriter : public IRMutator {
     auto init_tile = As<TileType>(iter_arg->GetType());
     if (!init_tile || !index_.IsFreshTileSeed(seed.get())) return nullptr;
 
-    auto narrowed = acc_init::BuildNarrowedAccInit(init_tile->shape_, visited_valid, init_tile->dtype_,
-                                                   seed->name_hint_ + "_narrowed", iter_arg->span_);
+    auto narrowed =
+        acc_init::BuildNarrowedAccInit(init_tile->shape_, visited_valid, init_tile->dtype_,
+                                       seed->name_hint_ + "_narrowed", iter_arg->span_, decision.compact);
     for (auto& stmt : narrowed.stmts) prologue->push_back(std::move(stmt));
     return narrowed.value;
   }

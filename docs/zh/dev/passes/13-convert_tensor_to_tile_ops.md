@@ -679,10 +679,15 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 `AccCompactValid` 属性验证器拒绝。`FlattenTileNdTo2D` 调用同一个 helper，用于 ND 种子——
 它的收窄要等到 `tile.batch_matmul` 展开成 2D matmul 时才出现。
 
-两种情况下携带值保持原样：一是缓冲区的两种读法本来就不会分歧——单 fractal 块的 `[16, N]`
-累加器无论有效行是多少都按物理行打包（但已收窄种子的 compact 元数据仍需与 yield 对齐）；
-二是收窄用的表达式只在循环体内计算，重新声明的种子
-在那之前根本命名不到它。
+对于 `pl.pipeline(0, 2, stage=2)` 这样的循环，同一修复也支持直接用
+`pl.matmul_acc(acc, lhs, rhs, init_cond=(kb == 0))` 更新累加器。当累加器是该循环独占且未绑定
+存储的分配、编译期可证明循环非空且首轮必定覆盖时，pass 从操作数推导有效 M/N。有效范围须在
+循环入口可见。初值将有效 M/N 传递到循环内及最终写回。行步长一致时，初值沿用原有的
+compact 模式。例如单 fractal 块的 `[16, N]` 分配可以按物理行步长写回 7 个有效行。见
+[#3475](https://github.com/hw-native-sys/pypto/issues/3475)。
+
+对于其他携带值修复，行步长一致时跳过改写，已收窄种子的 compact 元数据需要与 yield 对齐
+的情况除外。修复要求在循环前声明初值的位置可以引用收窄后的有效范围。
 
 ## 实现
 

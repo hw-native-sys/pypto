@@ -92,6 +92,50 @@ def create_tensor_seeded_acc_2d(
     return y
 
 
+def _predicated_tensor_acc_kernel(
+    rows_per_tile,
+    *,
+    start=0,
+    stop=2,
+    init_index=0,
+    prior_data=False,
+    varying_rows=False,
+    read_before_init=False,
+):
+    """Issue #3475: a predicated split-K loop with a runtime valid M."""
+
+    @pl.jit
+    def kernel(
+        x: pl.Tensor[[rows_per_tile, 512], pl.FP32],
+        w: pl.Tensor[[32, 512], pl.FP32],
+        rows: pl.Scalar[pl.INDEX],
+        y: pl.Out[pl.Tensor[[rows_per_tile, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(1, name_hint="predicated_narrow_acc"):
+            valid_rows = pl.min(rows_per_tile, rows)
+            if prior_data:
+                lhs0 = pl.slice(x, [rows_per_tile, 256], [0, 0])
+                rhs0 = pl.slice(w, [32, 256], [0, 0])
+                acc = pl.matmul(lhs0, rhs0, b_trans=True)
+            else:
+                acc = pl.create_tensor([rows_per_tile, 32], dtype=pl.FP32)
+            for kb in pl.pipeline(start, stop, stage=2):
+                if read_before_init:
+                    y[0:rows_per_tile, 0:32] = acc
+                k0 = kb * 256
+                if varying_rows:
+                    extent = pl.min(rows_per_tile, rows - kb)
+                    lhs = pl.slice(x, [rows_per_tile, 256], [0, k0], valid_shape=[extent, 256])
+                else:
+                    lhs = pl.slice(x, [rows_per_tile, 256], [0, k0], valid_shape=[valid_rows, 256])
+                rhs = pl.slice(w, [32, 256], [0, k0])
+                acc = pl.matmul_acc(acc, lhs, rhs, b_trans=True, init_cond=(kb == init_index))
+            y[0:rows_per_tile, 0:32] = acc
+        return y
+
+    return kernel
+
+
 @pl.jit
 def carry_flows_into_a_later_loop(
     x: pl.Tensor[[BLOCKS * M_TILE, K], pl.INT8],
@@ -405,6 +449,67 @@ def test_convert_tensor_to_tile_ops_repairs_a_2d_seeded_carry():
     assert _tile_view(stored).compact == ir.CompactMode.normal
 
 
+@pytest.mark.parametrize("rows_per_tile", [16, 64])
+def test_predicated_split_k_preserves_valid_rows(rows_per_tile):
+    """Both tiles store the runtime extent, and only the larger one needs compact storage."""
+    kernel = _predicated_tensor_acc_kernel(rows_per_tile)
+    lowered = _lower(kernel, stop_after="convert_tensor_to_tile_ops")
+    mode = ir.CompactMode.normal if rows_per_tile == 64 else ir.CompactMode.null
+    stored = _stored_tile_type(lowered)
+    assert _tile_view(stored).compact == mode
+    assert not _is_const(_valid_rows(stored), rows_per_tile)
+    assert len([call for call in _calls(lowered, _TILE_CREATE_OP) if call.kwargs.get("compact")]) == (
+        rows_per_tile == 64
+    )
+
+
+def test_predicated_split_k_narrows_columns_at_full_height():
+    """The L0C row pitch is unchanged while the store still needs a narrowed N."""
+
+    @pl.jit
+    def column_tail(
+        x: pl.Tensor[[64, 512], pl.FP32],
+        w: pl.Tensor[[32, 512], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(1, name_hint="predicated_acc_column_tail"):
+            acc = pl.create_tensor([64, 32], dtype=pl.FP32)
+            for kb in pl.pipeline(0, 2, stage=2):
+                k0 = kb * 256
+                lhs = pl.slice(x, [64, 256], [0, k0])
+                rhs = pl.slice(w, [32, 256], [0, k0], valid_shape=[24, 256])
+                acc = pl.matmul_acc(acc, lhs, rhs, b_trans=True, init_cond=(kb == 0))
+            y[0:64, 0:32] = acc
+        return y
+
+    lowered = _lower(column_tail, stop_after="convert_tensor_to_tile_ops")
+    view = _tile_view(_stored_tile_type(lowered))
+    assert view.compact == ir.CompactMode.null
+    valid_rows, valid_columns = view.valid_shape
+    assert _is_const(valid_rows, 64)
+    assert _is_const(valid_columns, 24)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({"init_index": 1}, id="first-iteration-accumulates"),
+        pytest.param({"start": 1}, id="predicate-does-not-match-loop-start"),
+        pytest.param({"stop": 0}, id="empty-loop"),
+        pytest.param({"prior_data": True}, id="previously-written-accumulator"),
+        pytest.param({"varying_rows": True}, id="rows-vary-with-k"),
+        pytest.param({"read_before_init": True}, id="carry-read-before-update"),
+    ],
+)
+def test_predicated_split_k_declines_unproven_initialization(options):
+    """A predicate alone cannot justify changing the loop's storage contract."""
+    lowered = _lower(_predicated_tensor_acc_kernel(64, **options), stop_after="convert_tensor_to_tile_ops")
+    stores = _calls(lowered, _TILE_STORE_OP)
+    assert stores
+    assert all(_is_const(_valid_rows(store.args[0].type), 64) for store in stores)
+    assert not [call for call in _calls(lowered, _TILE_CREATE_OP) if call.kwargs.get("compact")]
+
+
 def test_seed_is_redeclared_as_a_compact_narrowed_box():
     """The narrowed seed is declared, not stamped: ``tile.create(compact=True)``.
 
@@ -636,7 +741,8 @@ def test_default_pipeline_accepts_the_narrowed_carry(kernel):
     assert result is not None
 
 
-def test_emitted_pto_stores_at_the_pitch_mad_wrote_at():
+@pytest.mark.parametrize("predicated", [False, True], ids=["explicit-branch", "init-cond"])
+def test_emitted_pto_stores_at_the_pitch_mad_wrote_at(predicated):
     """End to end: the ``pto.tstore`` reads a compact tile at a runtime row extent.
 
     This is the shape of the defect as it reached the device -- ``TSTORE`` walked L0C at
@@ -651,9 +757,8 @@ def test_emitted_pto_stores_at_the_pitch_mad_wrote_at():
 
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
-    lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-        _jit_program(create_tensor_seeded_acc)
-    )
+    kernel = _predicated_tensor_acc_kernel(64) if predicated else create_tensor_seeded_acc
+    lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_jit_program(kernel))
     device_side = ir.Program(_incore_functions(lowered), lowered.name, ir.Span.unknown())
     mlir = codegen.PTOCodegen().generate(device_side)
 
