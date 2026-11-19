@@ -426,17 +426,16 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     transport_col = EmitIndexOperand(codegen, result_tile_type->shape_[1], "tpop transport col");
   }
 
-  // A frontend tpop result is not itself a locally bound tile in PTOAS, so
-  // pto.set_validshape cannot mutate it directly. When transport uses the
-  // static transport extents, pop into a temporary and expose the logical result via
-  // pto.treshape. PTOAS has a dedicated zero-copy treshape-over-tpop lowering
+  // When transport uses static transport extents, pop into a temporary and
+  // expose the logical result via pto.treshape without changing transport metadata.
+  // PTOAS has a dedicated zero-copy treshape-over-tpop lowering
   // that preserves the FIFO tile handle while rebuilding its static valid
   // metadata. A full-box pto.subview is not equivalent here: PTOAS lowers that
   // path through a disconnected tile handle on A2/A3.
   //
-  // Treshape carries no valid-row/valid-col operands, so it can restore only
-  // static logical extents. Keep the existing direct TPOP behavior for dynamic
-  // valid shapes until PTO exposes a dynamic metadata rebind for pipe entries.
+  // This transport rebind uses a static result type. Dynamic and empty pops
+  // keep their explicit valid operands; later dynamic views initialize their
+  // own descriptor with set_validshape, supported for TPOP roots by PTOAS >= 0.74.
   std::string transport_buf = use_static_transport ? codegen.NewNamedTemp("tpop_transport") : result_buf;
   std::ostringstream oss;
   oss << transport_buf << " = pto.tpop_from_" << target;
@@ -450,6 +449,7 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     oss << " -> " << result_type;
   }
   codegen.Emit(oss.str());
+  codegen.RegisterTpopTileName(transport_buf);
   if (use_static_transport) {
     std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
     INTERNAL_CHECK_SPAN(!logical_type.empty(), op->span_)
@@ -458,6 +458,10 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     codegen.Emit(logical_buf + " = pto.treshape " + transport_buf + " : " + result_type + " -> " +
                  logical_type);
     codegen.RegisterTileBufType(logical_buf, logical_type, result_tile_type);
+    // This descriptor changes validity only, retaining the TPOP's full physical
+    // shape and pitch. Keep its FIFO provenance without marking it as a general
+    // Tile view: SIMT can safely borrow it with the original dense layout.
+    codegen.RegisterTpopTileName(logical_buf);
     codegen.SetCurrentResultBuf(logical_buf);
   }
 

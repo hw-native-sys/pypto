@@ -206,6 +206,55 @@ def test_explicit_valid_shape_matmul_carry(test_config):
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@pytest.mark.parametrize(
+    ("rows_per_tile", "valid_columns"),
+    [(64, 32), (16, 32), (64, 24)],
+    ids=["runtime-rows", "single-fractal", "column-tail"],
+)
+def test_predicated_split_k_valid_extents(test_config, rows_per_tile, valid_columns):
+    """Predicated carries preserve row pitch and the product's valid rectangle."""
+
+    @pl.jit
+    def split_k(
+        a: pl.Tensor[[rows_per_tile, 512], pl.FP32],
+        w: pl.Tensor[[32, 512], pl.FP32],
+        rows: pl.Scalar[pl.INDEX],
+        out: pl.InOut[pl.Tensor[[rows_per_tile, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(1, name_hint="predicated_narrow_acc"):
+            if valid_columns == 32:
+                valid_rows = pl.min(rows_per_tile, rows)
+            else:
+                valid_rows = rows_per_tile
+            acc = pl.create_tensor([rows_per_tile, 32], dtype=pl.FP32)
+            for kb in pl.pipeline(0, 2, stage=2):
+                k0 = kb * 256
+                lhs = pl.slice(a, [rows_per_tile, 256], [0, k0], valid_shape=[valid_rows, 256])
+                rhs = pl.slice(w, [32, 256], [0, k0], valid_shape=[valid_columns, 256])
+                acc = pl.matmul_acc(acc, lhs, rhs, b_trans=True, init_cond=(kb == 0))
+            out[0:rows_per_tile, 0:32] = acc
+        return out
+
+    a = (torch.arange(rows_per_tile * 512, dtype=torch.float32).reshape(rows_per_tile, 512) % 5) - 2
+    w = (torch.arange(32 * 512, dtype=torch.float32).reshape(32, 512) % 7) - 3
+    product = a @ w.T
+    out = torch.empty((rows_per_tile, 32), dtype=torch.float32)
+    compiled = split_k.compile(a, w, rows_per_tile, out, config=test_config)
+    # 16 and 17 straddle the first N-fractal pitch change. The untouched GM
+    # tail checks that the store uses the product extent on each axis.
+    row_counts = (rows_per_tile,)
+    if valid_columns == 32:
+        row_counts = (7, 16) if rows_per_tile == 16 else (7, 16, 17, 64)
+    for rows in row_counts:
+        out.fill_(-777)
+        compiled(a, w, rows, out, config=test_config)
+        if not test_config.codegen_only:
+            expected = torch.full_like(out, -777)
+            expected[:rows, :valid_columns] = product[:rows, :valid_columns]
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 def _planner_tag(planner: MemoryPlanner) -> str:
     return {
         MemoryPlanner.PYPTO: "pypto",

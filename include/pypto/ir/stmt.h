@@ -929,13 +929,38 @@ class RegScopeStmt : public ScopeStmt {
   RegScopeStmt(std::string name_hint, StmtPtr body, Span span, std::vector<std::string> leading_comments = {},
                std::vector<std::pair<std::string, std::any>> attrs = {})
       : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
-                  std::move(attrs)) {}
+                  NormalizeAttrs(std::move(attrs))) {}
+
+  // Absent policy is the canonical default, including legacy serialized IR.
+  [[nodiscard]] bool AutoSync() const {
+    for (const auto& [key, value] : attrs_) {
+      if (key == "auto_sync") return std::any_cast<bool>(value);
+    }
+    return true;
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::RegScopeStmt; }
   [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Reg; }
   [[nodiscard]] std::string TypeName() const override { return "RegScopeStmt"; }
 
   static constexpr auto GetFieldDescriptors() { return ScopeStmt::GetFieldDescriptors(); }
+
+ private:
+  static std::vector<std::pair<std::string, std::any>> NormalizeAttrs(
+      std::vector<std::pair<std::string, std::any>> attrs) {
+    bool seen = false;
+    attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                               [&seen](const auto& attr) {
+                                 if (attr.first != "auto_sync") return false;
+                                 CHECK(!seen) << "Duplicate auto_sync attribute";
+                                 seen = true;
+                                 const auto* value = std::any_cast<bool>(&attr.second);
+                                 CHECK(value) << "RegScope auto_sync must be a bool";
+                                 return *value;
+                               }),
+                attrs.end());
+    return attrs;
+  }
 };
 
 using RegScopeStmtPtr = std::shared_ptr<const RegScopeStmt>;

@@ -52,7 +52,7 @@ Other dtypes receive a diagnostic rather than an invalid floating-point literal.
 The codegen generates MLIR in the following fixed order:
 
 1. **Constants**: `arith.constant` for index and float values
-2. **Tensor Views**: `pto.make_tensor_view` for all tensor parameters
+2. **Tensor Views**: `pto.make_tensor_view` for referenced GM tensor parameters that need views
 3. **Allocations**: `pto.alloc_tile` for all tile buffers (based on MemRef)
 4. **Operations**: Function body with load, compute, store operations
 
@@ -310,17 +310,11 @@ allow the validated `INT32 Acc → FP16 Mat` (`DEQF16`) form. Other scaled
 Acc-to-Mat dtype pairs remain rejected by `FixpipeEpilogueValid`; the wider
 per-backend tables continue to govern Acc-to-GM stores independently.
 
-**`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
-operand's `valid_row` / `valid_col` operands, so the operand must be a handle
-that has them: an alloc, an `scf.if` result, a cross-core pop slot.  A **view** —
-the `pto.subview` a `tile.slice` lowers to, or a `pto.treshape` — carries its
-valid extent in its own type instead, so ptoas rejects the op against one; PyPTO
-therefore rejects it first, with a message pointing at the slice.  View-ness is
-tracked at those emission sites rather than inferred from the rendered dims: a
-slice given a runtime `valid_shape` renders `v_row=?, v_col=?` exactly as an
-alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
-(it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
-or call `set_validshape` on the source tile before taking the view.
+**`tile.set_validshape` lowering.** PyPTO restricts user-facing validity mutation to supported mutable handles. Arbitrary slice/reshape views remain rejected, including runtime-valid slices; view identity is tracked independently of the rendered dimensions. Use `valid_shape=` on a slice or narrow its source first. Compiler-created dynamic descriptors can be initialized separately. Non-FP4 statically empty slices bind an address-only, full-window subview and initialize a dynamic reshape with the actual empty extent; this avoids static zero masks without allocating or copying payload data. Packed FP4 uses initialized addressed descriptors under the [FP4 slice restrictions](../fp4.md).
+
+**Empty valid regions.** Either valid dimension being zero denotes an empty region, regardless of physical allocation size. Empty/runtime-valid reshape and reinterpret descriptors use dynamic valid dimensions initialized by `pto.set_validshape` after `pto.treshape`; static positive dimensions retain their static encoding. Ordinary Tile/Buffer transfers skip static empty windows and guard runtime windows, preserving output identity and untouched destination data. Final-phase stores remain unconditional to clear the paired producer's unit flag; guard producer and store together in source when skipping a phased operation, subject to existing backend restrictions.
+
+PTOAS >= 0.74 supports locally allocated, TPOP-derived, and contiguous subview-derived descriptors ([#1724](https://github.com/hw-native-sys/PTOAS/issues/1724), [#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)). Codegen checks SSA ancestry while preserving slice offsets and distinct alias identities; inferred runtime slice validity is passed explicitly. Every slice ancestor must be contiguous; a full-width child cannot hide a strided parent. Strided windows and unknown/control-flow roots require materialization before descriptor initialization. `SplitVectorKernel` retains empty replay reshape/reinterpret/transpose aliases and TPOP/TPUSH/TFREE handshakes. Replacing these FIFO aliases with `tile.create` would allocate a full payload buffer.
 
 ### Cross-Core Operations → PTO Instructions
 
@@ -383,8 +377,8 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
   the *valid* region, since the ISA's matching assertion is compiled out in release builds. So a
   partial Acc-to-Vec transfer uses the full physical box for TPOP and for the TPUSH **columns**,
   whether the transfer is no-split or split, and restores the logical valid shape immediately on each
-  side of the transport — on the consumer side through a metadata-only `pto.treshape` (a frontend
-  tpop result is not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place).
+  side of the transport — on the consumer side through a metadata-only `pto.treshape` that
+  encodes the static logical extents without changing the transport descriptor.
   The split-axis extent is one exception: it stays per-lane on the TPOP operands, because that is
   what tells the ISA where lane 1's band begins — which is also why a per-lane extent the compiler
   could not verify must never get there. An explicit `pl.split_aiv` boundary whose split-axis extent is a
@@ -443,7 +437,8 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
 
 ### Tensor View Generation
 
-For each `TensorType` parameter, the codegen generates:
+Tile and Buffer codegen prepare entry views for referenced GM tensors, excluding raw workspace pointers.
+The emitter materializes `pto.make_tensor_view` operands from the prepared shape, strides, and layout:
 
 ```mlir
 %0 = pto.make_tensor_view %arg0,
@@ -456,7 +451,7 @@ For each `TensorType` parameter, the codegen generates:
 **Key aspects**:
 
 - Shape from `TensorType.shape_`
-- Strides computed as row-major: `[dim1, 1]` for 2D tensors
+- Explicit strides take precedence. A packed 2D ND view uses `[dim1, 1]`.
 - Constants (`%c32_index`, `%c1_index`) auto-generated, including any that appear only inside a composite shape/stride expression
 - Composite dims lower to arithmetic, e.g. `M * 2` → `arith.muli %M, %c2_index`
 - Tensor view type uses `?` for each dimension (e.g., `?x?xf32` for 2D)
@@ -464,13 +459,12 @@ For each `TensorType` parameter, the codegen generates:
 #### Layout Handling for 2D Tensors
 
 The `layout` attribute on `make_tensor_view` tells PTOAS the memory layout
-convention. The codegen determines shape, strides, and layout based on the
-tensor's IR type and shape:
+convention. View preparation uses the tensor's IR type and shape:
 
 | Case | Shape emitted | Strides emitted | Layout | Notes |
 | ---- | ------------- | --------------- | ------ | ----- |
 | ND `[R, C]` | `[R, C]` | `[C, 1]` | `nd` | Standard row-major |
-| DN `[R, C]` (both > 1) | `[C, R]` | `[1, C]` | `dn` | Shape swapped for PTOAS column-major convention |
+| DN `[R, C]` (both > 1) | `[R, C]` | `[1, R]` | `dn` | Packed column-major |
 | Column vector `[M, 1]` | `[M, 1]` | `[1, M]` | `dn` | Auto-detected, no DN annotation needed |
 
 **Column vector auto-DN**: Any 2D tensor whose last dimension is a compile-time

@@ -9,16 +9,28 @@
 
 """On-board A5 runtime tests for MX quantization."""
 
-from typing import Any
-
 import pypto.language as pl
 import pytest
 import torch
 from harness import st
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.runtime.runner import RunConfig
+from harness.core.harness import DataType, TensorSpec
+
+# These dtypes are optional in the torch versions the project supports
+# (>=2.0), and the case list below dereferences them while collecting — before
+# the a5 platform marker could skip. Guard at import, like test_matmul_mx.py.
+_REQUIRED_TORCH_DTYPES = ("float4_e2m1fn_x2", "float8_e4m3fn", "float8_e8m0fnu")
+if not all(hasattr(torch, name) for name in _REQUIRED_TORCH_DTYPES):
+    pytest.skip("torch MXFP4/MXFP8/E8M0 dtypes required", allow_module_level=True)
 
 MX_GROUP_SIZE = 32
+# One MX scale box is 16 rows x 2 groups of exponent codes.
+_SCALE_BOX_ROWS = 16
+_SCALE_BOX_COLS = 2
+# Block exponents the FP8 fixtures cycle through, as `[_MIN_SCALE_EXPONENT,
+# _MIN_SCALE_EXPONENT + _SCALE_EXPONENTS)`. See `_quant_inputs_and_golden` for
+# why FP16 exactness caps the span at 16.
+_MIN_SCALE_EXPONENT = -8
+_SCALE_EXPONENTS = 16
 
 
 def _case_shapes(group_axis: int) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -36,143 +48,163 @@ def _pack_scale_codes(codes: torch.Tensor, group_axis: int) -> torch.Tensor:
     return packed.contiguous().reshape(1, -1).view(torch.float8_e8m0fnu)
 
 
-def _quant_inputs_and_golden(group_axis: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build exact MXFP8 blocks with known quantized values and E8M0 scales."""
-    fp8_values = torch.tensor(
-        [
-            -448,
-            -256,
-            -128,
-            -64,
-            -32,
-            -16,
-            -8,
-            -4,
-            -2,
-            -1,
-            -0.5,
-            -0.25,
-            -0.125,
-            -0.0625,
-            -0.015625,
-            0,
-            0.015625,
-            0.0625,
-            0.125,
-            0.25,
-            0.5,
-            1,
-            2,
-            4,
-            8,
-            16,
-            32,
-            64,
-            128,
-            256,
-            448,
-            0,
-        ],
-        dtype=torch.float32,
-    )
-    src_shape, quant_shape = _case_shapes(group_axis)
+# Values an E4M3 block reproduces bit-exactly once its own 2**e scale is divided
+# out, so the goldens below can assert equality instead of a tolerance.
+_FP8_E4M3_EXACT = torch.tensor(
+    [
+        -448,
+        -256,
+        -128,
+        -64,
+        -32,
+        -16,
+        -8,
+        -4,
+        -2,
+        -1,
+        -0.5,
+        -0.25,
+        -0.125,
+        -0.0625,
+        -0.015625,
+        0,
+        0.015625,
+        0.0625,
+        0.125,
+        0.25,
+        0.5,
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        448,
+        0,
+    ],
+    dtype=torch.float32,
+)
+
+
+def _quant_inputs_and_golden(
+    group_axis: int,
+    src_shape: tuple[int, int] | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build exact MXFP8 blocks with known quantized values and E8M0 scales.
+
+    ``src_shape`` defaults to the small per-axis shape; the larger cases pass one
+    that spans several 16x2 scale boxes along both axes. OCP selects
+    ``floor(log2(amax)) - 8`` for E4M3, which is exactly ``e`` for a block of
+    ``_FP8_E4M3_EXACT * 2**e`` — hence an expected scale code of ``e + 127`` and
+    a quantized payload equal to ``_FP8_E4M3_EXACT`` itself.
+    """
+    fp8_values = _FP8_E4M3_EXACT
+    if src_shape is None:
+        src_shape, quant_shape = _case_shapes(group_axis)
+    else:
+        quant_shape = src_shape if group_axis == 1 else (src_shape[1], src_shape[0])
     groups = src_shape[1] // MX_GROUP_SIZE
     exponent_shape = (src_shape[0], groups) if group_axis == 1 else (groups, src_shape[0])
-    group_exponents = (torch.arange(exponent_shape[0] * exponent_shape[1]) % 4 - 1).reshape(exponent_shape)
-    scales = torch.pow(2.0, group_exponents).to(torch.float32)
+    # Both the exponent and the payload must vary with *both* scale coordinates,
+    # or the fixture cannot see a layout bug: a row-major `arange % 4` gives
+    # every row the same exponents and every group the same 32 values, so
+    # swapping two box rows or two group boxes leaves the bytes identical.
+    rows_index = torch.arange(exponent_shape[0]).reshape(-1, 1)
+    groups_index = torch.arange(exponent_shape[1]).reshape(1, -1)
+    # One exponent per 16x2 box, so no two boxes carry the same scale bytes and
+    # a swapped box is visible. `_pack_scale_codes` boxes (row/16, group/2) on
+    # axis1 and (group/2, row/16) on axis0, so index the box -- and the lane
+    # inside it -- the same way round.
     if group_axis == 1:
-        src = (fp8_values.reshape(1, 1, MX_GROUP_SIZE) * scales.unsqueeze(-1)).reshape(src_shape)
-        quantized = fp8_values.to(torch.float8_e4m3fn).repeat(src_shape[0], groups)
+        box_index = (rows_index // _SCALE_BOX_ROWS) * (
+            (exponent_shape[1] + _SCALE_BOX_COLS - 1) // _SCALE_BOX_COLS
+        ) + (groups_index // _SCALE_BOX_COLS)
+        lane_in_box = (rows_index % _SCALE_BOX_ROWS) * _SCALE_BOX_COLS + (groups_index % _SCALE_BOX_COLS)
     else:
-        src_kn = (fp8_values.reshape(1, MX_GROUP_SIZE, 1) * scales.unsqueeze(1)).reshape(quant_shape)
+        box_index = (groups_index // _SCALE_BOX_ROWS) * (
+            (exponent_shape[0] + _SCALE_BOX_COLS - 1) // _SCALE_BOX_COLS
+        ) + (rows_index // _SCALE_BOX_COLS)
+        lane_in_box = (groups_index % _SCALE_BOX_ROWS) * _SCALE_BOX_COLS + (rows_index % _SCALE_BOX_COLS)
+    # The exponent must vary *inside* a box too, not just between boxes: the
+    # payload rotation below only orders the data, so a scale permutation that
+    # X-to-ZZ packing gets wrong independently of the payload is invisible
+    # while all 32 scale bytes of a box are equal. Driving it from
+    # `lane_in_box` makes a swapped row or group pair show up in `out_scale`.
+    #
+    # 16 is the widest injective stride the source dtypes allow. Every source
+    # value is `_FP8_E4M3_EXACT * 2**e` and must be exactly representable:
+    # 448 * 2**7 == 57344 is the largest FP16-finite choice, and
+    # 0.015625 * 2**-8 == 2**-14 is the smallest FP16 *normal* one, so e is
+    # confined to `_SCALE_EXPONENTS` values for the box's 32 lanes. Two lanes
+    # 16 apart therefore still share an exponent; a transpose of the 16x2 inner
+    # order, a swap of the two groups, or any pair closer than 16 does not.
+    group_exponents = ((box_index + lane_in_box) % _SCALE_EXPONENTS) + _MIN_SCALE_EXPONENT
+    scales = torch.pow(2.0, group_exponents).to(torch.float32)
+    # The payload rotation distinguishes all 32 lanes of a box, and it has to be
+    # *injective* over the box, not merely varying. `(row * 5 + group * 11) % 32`
+    # was not: for axis1 (row=15, group=0) and (row=0, group=1) both rotate by
+    # 11, which made those two blocks byte-identical and a swap between them
+    # invisible. `lane_in_box` runs 0..31 exactly once per box, so
+    # `box_index + lane_in_box` is a permutation of the 32 rotations within every
+    # box while still differing between boxes. Rotation is itself a permutation
+    # of the block, so each block's amax stays 448 and OCP still selects
+    # exactly `e`.
+    rotation = (box_index + lane_in_box) % MX_GROUP_SIZE
+    lane = torch.arange(MX_GROUP_SIZE)
+    if group_axis == 1:
+        # [rows, groups, 32] payload, rotated per group.
+        values = fp8_values[(lane.reshape(1, 1, -1) - rotation.unsqueeze(-1)) % MX_GROUP_SIZE]
+        src = (values * scales.unsqueeze(-1)).reshape(src_shape)
+        quantized = values.to(torch.float8_e4m3fn).reshape(src_shape)
+    else:
+        # [groups, 32, N]: the group axis is outermost in the quantized result.
+        values = fp8_values[(lane.reshape(1, -1, 1) - rotation.unsqueeze(1)) % MX_GROUP_SIZE]
+        src_kn = (values * scales.unsqueeze(1)).reshape(quant_shape)
         src = src_kn.transpose(0, 1)
-        quantized = (
-            fp8_values.to(torch.float8_e4m3fn)
-            .reshape(1, MX_GROUP_SIZE, 1)
-            .expand(groups, MX_GROUP_SIZE, src_shape[0])
-            .reshape(quant_shape)
-        )
+        quantized = values.to(torch.float8_e4m3fn).reshape(quant_shape)
     scale = _pack_scale_codes((group_exponents + 127).to(torch.uint8), group_axis)
-    return src.contiguous(), quantized.contiguous(), scale.contiguous()
+    return src.to(dtype).contiguous(), quantized.contiguous(), scale.contiguous()
 
 
-class TestQuantMx(PTOTestCase):
-    """Quantize FP32 blocks through either public MX grouping path."""
-
-    __test__ = False
-
-    def __init__(self, group_axis: int, *, platform: str | None = None):
-        super().__init__(RunConfig(rtol=0, atol=0), platform=platform)
-        self.group_axis = group_axis
-        self.src_shape, self.quant_shape = _case_shapes(group_axis)
-        self.scale_elements = self.src_shape[0] * self.src_shape[1] // MX_GROUP_SIZE
-
-    def get_name(self) -> str:
-        return f"quant_mx_axis{self.group_axis}_{self.src_shape[0]}x{self.src_shape[1]}"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        src, _expected_quant, _expected_scale = _quant_inputs_and_golden(self.group_axis)
-        return [
-            TensorSpec("src", list(self.src_shape), DataType.FP32, init_value=src),
-            TensorSpec("out_quant", list(self.quant_shape), DataType.FP8E4M3FN, is_output=True),
-            TensorSpec(
-                "out_scale",
-                [1, self.scale_elements],
-                DataType.FP8E8M0,
-                is_output=True,
-            ),
-        ]
-
-    def get_program(self) -> Any:
-        src_rows, src_cols = self.src_shape
-        quant_rows, quant_cols = self.quant_shape
-        scale_elements = self.scale_elements
-        group_axis = self.group_axis
-
-        @pl.program
-        class QuantMxProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def quant_mx(
-                self,
-                src: pl.Tensor[[src_rows, src_cols], pl.FP32],
-                out_quant: pl.Out[pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]],
-                out_scale: pl.Out[pl.Tensor[[1, scale_elements], pl.FP8E8M0]],
-            ):
-                src_tile = pl.load(src, [0, 0], [src_rows, src_cols])
-                quantized, scale = pl.quant_mx(src_tile, group_axis=group_axis)
-                out_quant = pl.store(quantized, [0, 0], out_quant)
-                out_scale = pl.store(pl.reshape(scale, [1, scale_elements]), [0, 0], out_scale)
-                return out_quant, out_scale
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                src: pl.Tensor[[src_rows, src_cols], pl.FP32],
-                out_quant: pl.Out[pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]],
-                out_scale: pl.Out[pl.Tensor[[1, scale_elements], pl.FP8E8M0]],
-            ):
-                out_quant, out_scale = self.quant_mx(src, out_quant, out_scale)
-                return out_quant, out_scale
-
-        return QuantMxProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        _src, expected_quant, expected_scale = _quant_inputs_and_golden(self.group_axis)
-        tensors["out_quant"][:] = expected_quant
-        tensors["out_scale"][:] = expected_scale
+def _fp8_case_shapes(group_axis: int, src_shape: tuple[int, int]) -> tuple[int, int]:
+    """Quantized shape for a source of ``src_shape`` on ``group_axis``."""
+    rows, cols = src_shape
+    return (rows, cols) if group_axis == 1 else (cols, rows)
 
 
-@pytest.mark.platforms("a5")
-class TestQuantMxOperations:
-    """Numerical execution coverage for the Ascend950-only quantization ops."""
+def _make_fp8_quant(group_axis: int, src_shape: tuple[int, int], dtype, algorithm: str):
+    """Quantize exactly representable blocks through one public MX path."""
+    rows, cols = src_shape
+    quant_rows, quant_cols = _fp8_case_shapes(group_axis, src_shape)
+    scale_elements = rows * cols // MX_GROUP_SIZE
 
-    @pytest.mark.parametrize(
-        ("platform", "group_axis"),
-        [pytest.param("a5", 1, id="a5-axis1"), pytest.param("a5", 0, id="a5-axis0")],
-    )
-    def test_quant_mx(self, test_runner, platform, group_axis):
-        result = test_runner.run(TestQuantMx(group_axis, platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
+    @pl.jit(auto_scope=False)
+    def quantize(
+        src: pl.Tensor[[rows, cols], dtype],
+        out_quant: pl.Out[pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]],
+        out_scale: pl.Out[pl.Tensor[[1, scale_elements], pl.FP8E8M0]],
+    ):
+        with pl.spmd(1):
+            block = pl.tile.get_block_idx()
+            values = pl.tile.load(src, [block * rows, 0], [rows, cols])
+            quantized, scale = pl.quant_mx(values, group_axis=group_axis, quant_scale_alg=algorithm)
+            pl.tile.store(quantized, [0, 0], out_quant)
+            pl.tile.store(pl.reshape(scale, [1, scale_elements]), [0, 0], out_scale)
+        return out_quant, out_scale
+
+    return quantize
+
+
+def _fp8_quant_golden(group_axis: int, src_shape: tuple[int, int], torch_dtype):
+    def golden(tensors):
+        _src, quant, scale = _quant_inputs_and_golden(group_axis, src_shape, torch_dtype)
+        return {"out_quant": quant, "out_scale": scale}
+
+    return golden
 
 
 def _fp4_quant_golden(group_axis, algorithm, raw=False, interleave=False):
@@ -250,6 +282,70 @@ def _make_fp4_quant(group_axis, dtype, algorithm):
     return quantize
 
 
+_E2M1_LEVELS = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+
+
+def _decode_packed_e2m1(payload: torch.Tensor) -> torch.Tensor:
+    """Decode packed E2M1 carriers to float, low nibble first.
+
+    The inverse of the packing the encoder golden performs: byte ``b`` holds the
+    even column in its low nibble and the odd column in its high nibble, bit 3
+    is the sign and bits 0-2 index the eight E2M1 magnitudes.
+    """
+    carriers = payload.view(torch.uint8)
+    nibbles = torch.stack((carriers & 0x0F, carriers >> 4), dim=-1).flatten(-2)
+    magnitude = _E2M1_LEVELS[(nibbles & 0x07).long()]
+    return torch.where((nibbles & 0x08) != 0, -magnitude, magnitude)
+
+
+class _Fp4EncodeAndDequantReference:
+    """Check the FP4 payload twice: against the encoder, and by decoding it.
+
+    The encoder golden reimplements block scaling and nearest-even E2M1
+    rounding, so a mistake shared with the implementation would cancel. This
+    adds the opposite direction: decode what the device actually wrote, scale it
+    by the exponent the device actually chose, and require the product to equal
+    the source **exactly**. That holds because every source value is an E2M1
+    level times a power of two, and it shares no arithmetic with the encoder.
+
+    Axis1 only, and only for a single 16x2 scale box, where the packed byte
+    order is plain row-major so the exponents can be read back with a reshape.
+    The axis0 box order needs the inverse of ``_pack_scale_codes``; its byte
+    comparison against the encoder golden already covers that path.
+    """
+
+    def __init__(self, rows: int, groups: int, torch_dtype):
+        assert rows == 16, "the packed order is row-major only for one box row"
+        self._rows = rows
+        self._groups = groups
+        self._torch_dtype = torch_dtype
+        self._encoder = _fp4_quant_golden(1, "ocp")
+
+    def golden(self, tensors):
+        return self._encoder(tensors)
+
+    def compare(self, actual, expected):
+        _compare_quant_bytes(actual, expected)
+        # Rebuild the source rather than remembering it from `golden`: with
+        # `--save-kernels` into an existing directory the harness reuses the
+        # persisted goldens and never calls `golden` in this process, so any
+        # state stashed there would still be unset here.
+        source = _fp4_quant_source(1, self._torch_dtype).float()
+        decoded = _decode_packed_e2m1(actual["out_quant"])
+        codes = actual["out_scale"].view(torch.uint8).reshape(self._rows, self._groups)
+        scales = torch.pow(2.0, codes.float() - 127.0)
+        rebuilt = decoded.reshape(self._rows, self._groups, MX_GROUP_SIZE) * scales.unsqueeze(-1)
+        blocks = source.reshape(self._rows, self._groups, MX_GROUP_SIZE)
+        limit = (_E2M1_LEVELS[-1] * scales).unsqueeze(-1)
+        expected_values = torch.clamp(blocks, -limit, limit)
+        wrong = rebuilt != expected_values
+        assert not bool(wrong.any()), (
+            "dequantized payload does not reproduce the source: first mismatch at "
+            f"{torch.nonzero(wrong)[0].tolist()} (got {rebuilt[wrong][0].item()}, "
+            f"want {expected_values[wrong][0].item()})"
+        )
+
+
 def _compare_quant_bytes(actual, expected):
     assert actual.keys() == expected.keys()
     for name in expected:
@@ -313,6 +409,14 @@ def _fp4_quant_output(name: str, shape: list[int]) -> TensorSpec:
     )
 
 
+# One reference per axis1 source dtype, so each instance can rebuild that
+# dtype's source in `compare` without depending on `golden` having run.
+_FP4_AXIS1_REFERENCES = {
+    pl.BF16: _Fp4EncodeAndDequantReference(16, 2, torch.bfloat16),
+    pl.FP16: _Fp4EncodeAndDequantReference(16, 2, torch.float16),
+}
+
+
 # Defer Torch operations until after pytest-forked forks the test process;
 # collection-time computation can leave inherited CPU thread-pool locks held.
 @pytest.mark.platforms("a5")
@@ -333,8 +437,9 @@ def _fp4_quant_output(name: str, shape: list[int]) -> TensorSpec:
                 _fp4_quant_output("out_scale", [1, 32 if axis == 1 else 128]),
             ],
             name=f"fp4_quant_axis{axis}_{dtype}_{algorithm}",
-            golden=_fp4_quant_golden(axis, algorithm),
-            compare=_compare_quant_bytes,
+            # Axis1 additionally gets the decode-side reference; see the class.
+            golden=(_FP4_AXIS1_REFERENCES[dtype].golden if axis == 1 else _fp4_quant_golden(axis, algorithm)),
+            compare=(_FP4_AXIS1_REFERENCES[dtype].compare if axis == 1 else _compare_quant_bytes),
         )
         for dtype, torch_dtype, data_dtype in (
             (pl.BF16, torch.bfloat16, DataType.BF16),
@@ -382,6 +487,85 @@ def _fp4_quant_output(name: str, shape: list[int]) -> TensorSpec:
     ],
 )
 def test_fp4_quant_runtime(case_run):
+    case_run.assert_passed()
+
+
+# The FP8 paths used to run through a PTOTestCase, whose default validator is
+# `torch.isclose`: at rtol=atol=0 that still accepts a -0.0 for a +0.0, so the
+# "exact" claim did not actually cover the sign bit of a zero payload byte.
+# These cases compare carrier bytes instead, like the FP4 ones above.
+#
+# The matrix covers every source dtype on both grouping axes at 64x128, which
+# spans four 16x2 scale box rows and two box columns, so a wrong box order or
+# row pitch cannot pass by coincidence. The NV rows are path coverage, not a
+# numerical discriminator: OCP picks `floor(log2(amax)) - 8` and NV
+# `ceil(log2(amax / 448))`, which agree for every block here because each
+# block's amax is `448 * 2**e`. They differ only when amax's mantissa exceeds
+# 1.75, which within a binade means amax > 448 and OCP clipping — so the
+# algorithms are separated numerically by the FP4 axis0 NV cases above (amax 7
+# against an E2M1 max of 6), while these rows prove the MXFP8 NV instantiation
+# runs on device and is bit-identical where it should be.
+_FP8_SRC_SHAPE = (64, 128)
+_FP8_DTYPES = (
+    (pl.FP32, torch.float32, DataType.FP32),
+    (pl.FP16, torch.float16, DataType.FP16),
+    (pl.BF16, torch.bfloat16, DataType.BF16),
+)
+
+
+def _fp8_scale_elements(src_shape: tuple[int, int]) -> int:
+    return src_shape[0] * src_shape[1] // MX_GROUP_SIZE
+
+
+def _fp8_output_spec(name: str, shape: tuple[int, int], dtype: DataType, torch_dtype) -> TensorSpec:
+    return TensorSpec(
+        name,
+        list(shape),
+        dtype,
+        init_value=lambda: torch.zeros(shape, dtype=torch.uint8).view(torch_dtype),
+        is_output=True,
+    )
+
+
+def _fp8_case(axis: int, dtype, torch_dtype, data_dtype, algorithm: str):
+    src_shape = _FP8_SRC_SHAPE
+    elements = _fp8_scale_elements(src_shape)
+    return st.case(
+        _make_fp8_quant(axis, src_shape, dtype, algorithm),
+        tensors=[
+            TensorSpec(
+                "src",
+                list(src_shape),
+                data_dtype,
+                init_value=lambda: _quant_inputs_and_golden(axis, src_shape, torch_dtype)[0],
+            ),
+            _fp8_output_spec(
+                "out_quant",
+                _fp8_case_shapes(axis, src_shape),
+                DataType.FP8E4M3FN,
+                torch.float8_e4m3fn,
+            ),
+            _fp8_output_spec("out_scale", (1, elements), DataType.FP8E8M0, torch.float8_e8m0fnu),
+        ],
+        name=f"quant_mx_axis{axis}_{data_dtype.name.lower()}_{algorithm}",
+        golden=_fp8_quant_golden(axis, src_shape, torch_dtype),
+        compare=_compare_quant_bytes,
+    )
+
+
+@pytest.mark.platforms("a5")
+@st.cases(
+    # OCP on both axes for all three source dtypes.
+    *[
+        _fp8_case(axis, dtype, torch_dtype, data_dtype, "ocp")
+        for dtype, torch_dtype, data_dtype in _FP8_DTYPES
+        for axis in (1, 0)
+    ],
+    # NV where PTOAS allows it: axis0 for every dtype, axis1 for FP32 only.
+    *[_fp8_case(0, dtype, torch_dtype, data_dtype, "nv") for dtype, torch_dtype, data_dtype in _FP8_DTYPES],
+    _fp8_case(1, pl.FP32, torch.float32, DataType.FP32, "nv"),
+)
+def test_fp8_quant_runtime(case_run):
     case_run.assert_passed()
 
 

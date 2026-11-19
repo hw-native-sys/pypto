@@ -166,14 +166,17 @@ int main() {{
         executed = subprocess.run([str(executable)], capture_output=True, text=True, timeout=30, check=False)
         assert executed.returncode == 0, executed.stderr
 
-    @pytest.mark.parametrize(("dtype", "runtime_dtype"), [(pl.fp4e2m1x2, "FP4E2M1"), (pl.fp4e1m2x2, "UINT8")])
-    def test_fp4_runtime_shapes_preserve_carrier_units(self, dtype, runtime_dtype):
+    @pytest.mark.parametrize(
+        ("dtype", "runtime_dtype"),
+        [(pl.fp4e2m1x2, "FP4E2M1"), (pl.fp4e1m2x2, "UINT8"), (pl.HF8, "UINT8")],
+    )
+    def test_low_precision_runtime_allocation_preserves_carrier_units(self, dtype, runtime_dtype):
         """Orchestration allocation preserves the declared byte-carrier extents."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
 
         @pl.program
-        class Fp4CarrierProgram:
+        class CarrierProgram:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
@@ -182,7 +185,7 @@ int main() {{
                 out = pl.create_tensor([8, 32], dtype=dtype)
                 return out
 
-        code = _generate_orch_code(_run_through_frontend_normalization(Fp4CarrierProgram))
+        code = _generate_orch_code(_run_through_frontend_normalization(CarrierProgram))
         assert "uint32_t out_ci_shapes[2] = {8, 32};" in code
         assert f"DataType::{runtime_dtype}" in code
 

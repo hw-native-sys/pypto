@@ -419,5 +419,81 @@ def test_block_stride_store_round_trip():
     ir.assert_structural_equal(kernel, pl.parse(printed), enable_auto_mapping=True)
 
 
+def test_manual_reg_scope_mem_bar_roundtrip():
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]):
+        with pl.reg_scope(auto_sync=False):
+            x = pl.reg.load(src, lanes=64)
+            pl.reg.mem_bar("VLD_VST")
+            _out = pl.reg.store(src, value=x)
+
+    printed = python_print(kernel, format=False)
+    assert "auto_sync=False" in printed
+    assert "pl.reg.mem_bar(" in printed
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("option", ["1", "'false'", "None", "pl.const(0, pl.INT32)"])
+def test_reg_auto_sync_rejects_non_bool(option):
+    source = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def kernel():
+    with pl.reg_scope(auto_sync={option}):
+        pl.reg.mem_bar("VV_ALL")
+"""
+    with pytest.raises((ParserError, ValueError, TypeError), match="auto_sync|bool"):
+        pl.parse(source)
+
+
+def test_reg_mem_bar_value_rejected():
+    with pytest.raises((ParserError, ValueError, TypeError), match="mem_bar|statement|Assign"):
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel():
+            with pl.reg_scope():
+                _value = pl.reg.mem_bar("VV_ALL")
+
+
+@pytest.mark.parametrize("arguments", ["False", "unknown=False", "auto_sync=True, auto_sync=False"])
+def test_reg_auto_sync_rejects_invalid_arguments(arguments):
+    source = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def kernel():
+    with pl.reg_scope({arguments}):
+        pl.reg.mem_bar("VV_ALL")
+"""
+    with pytest.raises((ParserError, ValueError, TypeError, SyntaxError), match="auto_sync|keyword"):
+        pl.parse(source)
+
+
+def test_reg_auto_sync_compiletime_bool_and_default_normalization():
+    policy = False
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def manual():
+        with pl.reg_scope(auto_sync=policy):
+            pl.reg.mem_bar(kind="VV_ALL")
+
+    assert "auto_sync=False" in python_print(manual, format=False)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def automatic():
+        with pl.reg_scope(auto_sync=True):
+            pl.reg.mem_bar("VV_ALL")
+
+    assert "with pl.reg_scope():" in python_print(automatic, format=False)
+
+
+def test_reg_auto_sync_runtime_policy_rejected():
+    with pytest.raises((ParserError, ValueError, TypeError), match="auto_sync|compile-time"):
+        pl.parse("""
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(policy: pl.Scalar[pl.BOOL]):
+    with pl.reg_scope(auto_sync=policy):
+        pl.reg.mem_bar("VV_ALL")
+""")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

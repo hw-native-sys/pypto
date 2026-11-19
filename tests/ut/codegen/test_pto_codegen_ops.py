@@ -3074,16 +3074,13 @@ class TestTileSliceCodegen:
             f"valid [6,6] (min(size, valid - offset)) on the materialized result; got:\n{alloc_line}"
         )
 
-    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
-        """Regression for issue #1507: subview must not emit static v_row=0, v_col=0
-        when the parent's IR carries the lane1 [0, 0] valid_shape sentinel.
+    @pytest.mark.parametrize("window_cols", [8, 32])
+    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self, window_cols):
+        """Empty contiguous slices avoid static zero masks; strided ones diagnose.
 
-        The parent's static type string always renders v_row=?, v_col=? (per
-        ExtractTileTypeInfo in pto_type_utils.cpp), so PTOAS infers the
-        subview's result valid from the slice's `sizes`. Our inference must
-        align — reading the parent's tile_view_.valid_shape (which can be the
-        sentinel [0, 0] after SplitVectorKernel's WithZeroValidShape) would
-        produce v_row=0, v_col=0 that PTOAS rejects.
+        The lane1 [0, 0] sentinel must survive as initialized dynamic validity.
+        A column-cropped multi-row subview retains its parent's physical pitch,
+        so emitting a descriptor reshape for it is not supported by PTOAS.
         """
 
         @pl.program
@@ -3091,15 +3088,22 @@ class TestTileSliceCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                dst: pl.Tensor[[16, 8], pl.FP32],
-            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                dst: pl.Tensor[[16, window_cols], pl.FP32],
+            ) -> pl.Tensor[[16, window_cols], pl.FP32]:
                 sentinel_tile: pl.Tile[
                     [16, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
                 ] = pl.tile.create([16, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
-                sliced: pl.Tile[[16, 8], pl.FP32] = pl.tile.slice(sentinel_tile, [16, 8], [0, 0])
+                sliced: pl.Tile[[16, window_cols], pl.FP32] = pl.tile.slice(
+                    sentinel_tile, [16, window_cols], [0, 0]
+                )
                 return pl.store(sliced, [0, 0], dst)
 
+        if window_cols < 32:
+            with pytest.raises(ValueError, match="contiguous slice ancestry"):
+                self._generate_mlir(Prog)
+            return
         mlir = self._generate_mlir(Prog)
+        assert "pto.set_validshape %slice_empty" in mlir, mlir
         subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
         assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
         result_type = subview_lines[0].split("->", 1)[-1]
@@ -5202,6 +5206,54 @@ class TestTileStoreAttrsCodegen:
             f"expected final stPhase on every pto.tstore, got:\n{tstore_lines}"
         )
 
+    @pytest.mark.parametrize("cols", [0, 64, "cols"])
+    @pytest.mark.parametrize("final", [False, True])
+    @pytest.mark.parametrize("buffer_ir", [False, True])
+    def test_empty_store_preserves_final_phase(self, tmp_path, cols, final, buffer_ir):
+        """A final store must remain paired instead of being silently elided or guarded."""
+        phase = "Final" if final else "Unspecified"
+        program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, a: pl.Tensor[[1, 128], pl.FP32], b: pl.Tensor[[128, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 64], pl.FP32]], cols: pl.Scalar[pl.INDEX]
+    ):
+        lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+        rhs = pl.load(b, [0, 0], [128, 64], valid_shape=[128, {cols}],
+                      target_memory=pl.MemorySpace.Mat)
+        result = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.{phase})
+        pl.store(result, [0, 0], out, st_phase=pl.STPhase.{phase})
+""")
+        with passes.PassContext([], enable_buffer_ir=buffer_ir):
+            mlir = self._generate_mlir(program)
+        producer = next(line for line in mlir.splitlines() if "pto.tgemv " in line)
+        stores = [line for line in mlir.splitlines() if "pto.tstore" in line]
+        if not final and cols == 0:
+            assert not stores, mlir
+        else:
+            assert len(stores) == 1, mlir
+            store = stores[0]
+            producer_indent = len(producer) - len(producer.lstrip())
+            store_indent = len(store) - len(store.lstrip())
+            if final:
+                assert "accPhase = #pto<acc_phase final>" in producer, mlir
+                assert "stPhase = #pto<st_phase final>" in store, mlir
+                # The store must remain in the producer's straight-line region;
+                # load guards may exist earlier in the same function.
+                assert store_indent == producer_indent, mlir
+            elif cols == "cols":
+                assert store_indent > producer_indent, mlir
+        # A statically zero final store retains the existing backend rejection:
+        # do not silently erase its synchronization effect to make it compile.
+        if find_ptoas_binary() is not None:
+            if final and cols == 0:
+                with pytest.raises(RuntimeError, match="must be positive"):
+                    pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+            else:
+                pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+
     def test_store_phase_and_atomic_share_one_attr_dict(self):
         """PTOAS receives stPhase and atomicType in the same attribute dictionary."""
         mlir = self._generate_fp32_store(atomic=pl.AtomicType.Add, st_phase=pl.STPhase.Final)
@@ -6686,6 +6738,151 @@ class TestB03TriAndGatherCodegen:
 
         with pytest.raises(ValueError, match="scratch must not overlap idx"):
             self._generate_mlir(Prog)
+
+
+class TestA5MixedFp8MatmulCodegen:
+    """`pto.tmatmul` family with the A5 mixed FP8 operand pairs.
+
+    PTOAS v0.74 accepts any (E4M3FN | E5M2) operand pair and HiF8 x HiF8
+    with an f32 destination on A5 (`verifyMatmulTypeTriple`). The
+    operand dtypes therefore have to reach the emitted instruction unchanged, and
+    the target-dependent half of the contract is enforced at codegen.
+
+    Physical K is 64: an 8-bit Left/Right box packs 32 bytes along K, so K must be
+    a multiple of 32.
+    """
+
+    # (lhs, rhs) -> emitted PTOAS dtype spellings
+    _A5_PAIRS = [
+        (pl.FP8E4M3FN, pl.FP8E4M3FN, "f8E4M3FN", "f8E4M3FN"),
+        (pl.FP8E4M3FN, pl.FP8E5M2, "f8E4M3FN", "f8E5M2"),
+        (pl.FP8E5M2, pl.FP8E4M3FN, "f8E5M2", "f8E4M3FN"),
+        (pl.FP8E5M2, pl.FP8E5M2, "f8E5M2", "f8E5M2"),
+        (pl.HF8, pl.HF8, "!pto.hif8", "!pto.hif8"),
+    ]
+
+    def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend950) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    @staticmethod
+    def _matmul_program(lhs_dtype, rhs_dtype, form):
+        """One kernel per matmul form, sharing the mixed FP8 operand pair.
+
+        The form is selected here, outside the kernel bodies: a `str` closure
+        variable is not a type the DSL parser can capture.
+        """
+        if form == "base":
+
+            @pl.program
+            class Base:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[32, 64], lhs_dtype],
+                    b: pl.Tensor[[64, 32], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                ) -> pl.Tensor[[32, 32], pl.FP32]:
+                    lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                        a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                    )
+                    rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                        b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul(lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Base
+
+        if form == "acc":
+
+            @pl.program
+            class Acc:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[32, 64], lhs_dtype],
+                    b: pl.Tensor[[64, 32], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                ) -> pl.Tensor[[32, 32], pl.FP32]:
+                    lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                        a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                    )
+                    rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                        b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    seed: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul(lhs, rhs)
+                    product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul_acc(seed, lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Acc
+
+        @pl.program
+        class Bias:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[32, 64], lhs_dtype],
+                b: pl.Tensor[[64, 32], rhs_dtype],
+                bias: pl.Tensor[[1, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                    a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                )
+                rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                    b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                )
+                bias_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(
+                    bias, [0, 0], [1, 32], target_memory=pl.MemorySpace.Mat
+                )
+                product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul_bias(lhs, rhs, bias_tile)
+                return pl.store(product, [0, 0], out)
+
+        return Bias
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _A5_PAIRS)
+    @pytest.mark.parametrize(
+        "form,pto_op", [("base", "pto.tmatmul "), ("acc", "pto.tmatmul.acc"), ("bias", "pto.tmatmul.bias")]
+    )
+    def test_mixed_fp8_operand_dtypes_reach_the_instruction(
+        self, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op
+    ):
+        mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
+        line = next(line for line in mlir.splitlines() if pto_op in line)
+        # Each operand keeps its own dtype: the lhs box is col_major/row_major in
+        # left, the rhs row_major/col_major in right, and dst is the f32 Acc tile.
+        assert f"loc=left, dtype={lhs_text}" in line
+        assert f"loc=right, dtype={rhs_text}" in line
+        assert "loc=acc, dtype=f32" in line
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _A5_PAIRS)
+    @pytest.mark.parametrize(
+        "form,isa_macro",
+        [("base", "TMATMUL("), ("acc", "TMATMUL_ACC("), ("bias", "TMATMUL_BIAS(")],
+    )
+    def test_mixed_fp8_matmul_compiles_with_native_ptoas(
+        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, isa_macro
+    ):
+        """The real assembler, not just our own expectation of it, accepts the pair."""
+        mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert isa_macro in cpp
+
+    @pytest.mark.parametrize("form", ["base", "acc", "bias"])
+    def test_mixed_fp8_matmul_is_rejected_on_a2a3(self, form):
+        """A2/A3 has no FP8 Cube operand, so the pair must fail before PTOAS."""
+        with pytest.raises(ValueError, match="not supported on the 'a2a3' backend"):
+            self._generate_mlir(self._matmul_program(pl.FP8E4M3FN, pl.FP8E5M2, form), BackendType.Ascend910)
 
 
 if __name__ == "__main__":

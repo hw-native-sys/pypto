@@ -64,7 +64,7 @@ cannot be related using the planner offsets assigned to local allocations.
 | Boundary | Information supplied by PyPTO | Work performed by PTOAS |
 | -------- | ----------------------------- | ----------------------- |
 | Caller | Tile operands and `pto.tileop.effects` on a SIMD adapter | Insert MTE2 → V and V → MTE3 events around transfers and the call |
-| VF body | Common UB pointer base, constant offsets and VMI memory operations | Insert barriers for overlapping WR, RW and WW accesses |
+| VF body | Common UB pointer base, constant offsets, VMI memory operations and per-scope policy | In automatic mode, insert barriers for overlapping WR, RW and WW accesses |
 
 The caller adapter keeps Tiles visible during dependency analysis. Only its
 body extracts a UB pointer with `pto.tile_buf_addr` and calls the helper.
@@ -77,13 +77,24 @@ PyPTO adds no fixed `pipe_barrier(PIPE_ALL)` around the call. The normal kernel
 tail synchronization remains enabled. The boundary contract relies on A5 VF
 completion semantics and is restricted to AIV helpers.
 
-PTOAS owns VF dependency analysis and barrier placement, including ordering
-proved by SSA data dependencies. PyPTO passes its LLVM output to Bisheng without
+In the default `pl.reg_scope(auto_sync=True)` mode, PTOAS owns VF dependency
+analysis and barrier placement, including ordering proved by SSA data dependencies.
+`pl.reg_scope(auto_sync=False)` passes `--enable-vecscope-mem-bar=false` for
+that helper; the author supplies required intra-scope UB barriers through the
+statement-only `pl.reg.mem_bar(kind)` API. PyPTO does not override other insertion
+settings; their defaults belong to the selected toolchain. Each generated helper
+carries `// pypto.reg_auto_sync: true` or `false` in its source header. Runtime
+compilation and cache identity resolve the policy from the same source snapshot,
+so mixed policies work across separate helpers and artifact relocation. Old
+unmarked helpers retain automatic synchronization. Combined diagnostic
+`generate()` output, including `skip_ptoas=True`, rejects manual scopes; use
+`generate_bundle()` for their compilation. Caller effects, DMA and kernel-tail
+synchronization remain in force. PyPTO passes its LLVM output to Bisheng without
 reconstructing memory dependencies or imposing an LLVM instruction whitelist.
 PTOAS/Bisheng diagnostics propagate to the caller. The separate external-symbol
 and device-image checks below enforce the helper packaging contract.
 
-Indexed gather/scatter rely on the pinned PTOAS v0.74 or newer for conservative
+In automatic mode, indexed gather/scatter rely on the pinned PTOAS v0.74 or newer for conservative
 RAW/WAR/WAW synchronization of unknown footprints within a vecscope. This
 includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730);
 PyPTO does not add per-access `VV_ALL` fences. Caller/helper boundary and GM

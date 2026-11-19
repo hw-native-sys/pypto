@@ -250,6 +250,9 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
   } else if (IsOp(call, "tile.transpose") || IsOp(call, "tile.fmods") || IsOp(call, "tile.rems") ||
              IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") || IsOp(call, "tile.row_sum") ||
              IsOp(call, "tile.row_prod")) {
+    // Metadata-only reshape/reinterpret/transpose views use the generic rebuild
+    // below: they must keep aliasing FIFO storage, even when their valid area is
+    // empty. Replacing them with tile.create allocates a full discarded payload.
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
     // hazard gh#1649 hit for subview slices. The replay result is discarded, so

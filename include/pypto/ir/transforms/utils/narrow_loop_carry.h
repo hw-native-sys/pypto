@@ -55,16 +55,18 @@ namespace narrow_loop_carry {
  *     every ``valid_shape`` is bounded by that box, so a dynamic yield extent is already
  *     trusted to fit inside it. An init that is *itself* already narrowed is never widened
  *     on an undecidable relation.
- *   * only where the two readings of the buffer would actually disagree
- *     (``AccPitchesCoincide``, shared with the ``AccCompactValid`` verifier). A
- *     single-fractal-block box packs to its physical rows whatever its valid rows, so a
- *     ``[16, N]`` accumulator keeps the exact form it has today. An already-narrowed
- *     seed also gets repaired when its compact metadata differs from the yield's.
+ *   * for carries from explicit matmul branches, only when the pitches may differ
+ *     (``AccPitchesCoincide``, shared with ``AccCompactValid``) or an already-narrowed
+ *     seed needs its compact mode aligned with the yield. Predicated updates preserve
+ *     the product's valid M and N at equal row pitches as well.
  *   * only where the narrowed extents are visible *before* the loop. The re-declared seed
  *     sits there, and the common spelling puts the row count next to the slice it bounds,
  *     inside the body -- hoisting that would leave codegen with a symbol it cannot bind.
  *     Such a carry is declined; where its pitches genuinely differ, ``AccCompactValid``
  *     then reports it as a compile error rather than letting it corrupt data.
+ *   * a predicated ``tile.matmul_acc`` can supply the product's shape when it directly
+ *     updates and yields a private carry, the seed has no declared storage, and the
+ *     predicate provably overwrites on the first iteration of a nonempty loop.
  *
  * Cost is O(N log N) in the size of the function: three linear sweeps -- a scope index, a
  * decision pass over types, and one top-down rewrite -- over ordered-map lookups. The

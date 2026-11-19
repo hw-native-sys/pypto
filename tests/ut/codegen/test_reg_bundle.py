@@ -22,6 +22,7 @@ from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _generate_pto_bundle
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
+from pypto.runtime._vpto import ptoas_flags_for_source
 from test_reg_codegen import SPAN, build_kernel
 
 
@@ -43,12 +44,7 @@ def compile_vf_bundle(bundle, tmp_path):
         (
             f"helper_{index}",
             helper.source,
-            [
-                "--pto-backend=vpto",
-                "--emit-vpto-llvm-ir",
-                "--vmi-fastmath=false",
-                "--enable-vecscope-mem-bar=true",
-            ],
+            list(ptoas_flags_for_source(helper.source)),
         )
         for index, helper in enumerate(bundle.helpers)
     )
@@ -1197,6 +1193,99 @@ def test_hardware_loop_bundle_rejects_scalar_carries():
                 builder.emit(ir.YieldStmt([carry], SPAN))
     with pytest.raises(ValueError, match="register or mask loop-carried values only"):
         codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "ScalarCarry", SPAN))
+
+
+@pytest.mark.ptoas_compile
+def test_manual_scope_bundle_policy_and_barrier(tmp_path):
+    ib = IRBuilder()
+    with ib.function("manual_kernel", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with ib.reg_scope(SPAN, auto_sync=False):
+            ib.emit_reg_mem_bar("VST_VLD", SPAN)
+    program = ir.Program([f.get_result()], "ManualSync", SPAN)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert len(bundle.helpers) == 1
+    assert bundle.helpers[0].source.startswith("// pypto.reg_auto_sync: false\n")
+    assert bundle.helpers[0].source.count('pto.mem_bar "VST_VLD"') == 1
+    compile_vf_bundle(bundle, tmp_path)
+    llvm = (tmp_path / "helper_0.ll").read_text()
+    assert "llvm.hivm.mem.bar" in llvm
+    with pytest.raises(ValueError, match="generate_bundle"):
+        codegen.PTOCodegen().generate(program, emit_source_loc=False)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "VV_ALL",
+        "VST_VLD",
+        "VLD_VST",
+        "VST_VST",
+        "VS_ALL",
+        "VST_LD",
+        "VLD_ST",
+        "VST_ST",
+        "SV_ALL",
+        "ST_VLD",
+        "LD_VST",
+        "ST_VST",
+        "SS_ALL",
+        "ST_LD",
+        "LD_ST",
+        "ST_ST",
+    ],
+)
+def test_explicit_barrier_codegen_exact_kind(kind):
+    ib = IRBuilder()
+    with ib.function("barrier_kernel", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with ib.reg_scope(SPAN):
+            ib.emit_reg_mem_bar(kind, SPAN)
+    program = ir.Program([f.get_result()], "BarrierKind", SPAN)
+    source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
+    assert source.count(f'pto.mem_bar "{kind}"') == 1
+
+
+def test_mixed_scope_sync_policies_have_independent_helpers():
+    ib = IRBuilder()
+    with ib.function("mixed_policy", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with ib.reg_scope(SPAN):
+            ib.emit_reg_mem_bar("VLD_VST", SPAN)
+        with ib.reg_scope(SPAN, auto_sync=False):
+            ib.emit_reg_mem_bar("VST_VLD", SPAN)
+    program = ir.Program([f.get_result()], "MixedPolicy", SPAN)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert len(bundle.helpers) == 2
+    assert bundle.helpers[0].source.startswith("// pypto.reg_auto_sync: true\n")
+    assert bundle.helpers[1].source.startswith("// pypto.reg_auto_sync: false\n")
+    assert 'pto.mem_bar "VLD_VST"' in bundle.helpers[0].source
+    assert 'pto.mem_bar "VST_VLD"' in bundle.helpers[1].source
+    assert all(not h.parameter_types for h in bundle.helpers)
+
+
+@pytest.mark.ptoas_compile
+def test_manual_store_load_barrier_survives_ptoas(tmp_path):
+    # The fence orders real aliasing UB memory, not merely an empty scope.
+    ib = IRBuilder()
+    with ib.function("manual_overlap", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = ib.let("dst", tile.full([128], dtype=DataType.FP32, value=1))
+        with ib.reg_scope(SPAN, auto_sync=False):
+            value = ib.emit_reg(
+                "value", "reg.load", [dst, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            updated = ib.emit_reg_store("updated", dst, value, span=SPAN)
+            ib.emit_reg_mem_bar("VST_VLD", SPAN)
+            loaded = ib.emit_reg(
+                "loaded", "reg.load", [updated, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            ib.emit_reg_store("out", updated, loaded, offset=64, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "ManualOverlap", SPAN))
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    helper = bundle.helpers[0]
+    assert helper.source.count('pto.mem_bar "VST_VLD"') == 1
+    assert helper.parameter_effects == ["readwrite"]
+    compile_vf_bundle(bundle, tmp_path)
+    llvm = (tmp_path / "helper_0.ll").read_text()
+    assert len(re.findall(r"call void @llvm\.hivm\.mem\.bar", llvm)) == 1
 
 
 if __name__ == "__main__":

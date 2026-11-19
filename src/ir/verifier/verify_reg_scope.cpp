@@ -41,6 +41,8 @@ namespace {
 /// illegal definition. Maps use Var identity, never spelling: rebinding a name
 /// to a Tile result must not accidentally authorize an earlier Reg escape.
 class RegionChecker : public IRVisitor {
+  const Call* statement_barrier_ = nullptr;
+
  public:
   RegionChecker(FunctionPtr function, std::vector<Diagnostic>& diagnostics, bool final)
       : function_(std::move(function)), diagnostics_(diagnostics), final_(final) {}
@@ -103,6 +105,9 @@ class RegionChecker : public IRVisitor {
   void VisitStmt_(const GraphScopeStmtPtr& op) override { Block(op); }
   void VisitStmt_(const CommDomainScopeStmtPtr& op) override { Block(op); }
   void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto call = As<Call>(op->value_); call && IsOp(call, "reg.mem_bar")) {
+      Error("reg.mem_bar is statement-only", op->span_);
+    }
     if (collecting_) {
       auto type = op->var_->GetType();
       if (ContainsRegionValue(type, true)) {
@@ -153,6 +158,9 @@ class RegionChecker : public IRVisitor {
     IRVisitor::VisitExpr_(op);
   }
   void VisitExpr_(const CallPtr& op) override {
+    if (!collecting_ && IsOp(op, "reg.mem_bar") && op.get() != statement_barrier_) {
+      Error("reg.mem_bar is statement-only", op->span_);
+    }
     if (!collecting_ && op->op_->name_.rfind("reg.", 0) == 0) {
       if (!region_) Error("reg operation requires RegScope", op->span_);
       // Raw Call construction can bypass type deduction. Revalidate the actual
@@ -173,10 +181,16 @@ class RegionChecker : public IRVisitor {
     storing_container_ = previous;
   }
   void VisitStmt_(const EvalStmtPtr& op) override {
-    if (auto call = As<Call>(op->expr_); call && call->op_->name_.rfind("reg.", 0) == 0) {
+    if (auto call = As<Call>(op->expr_);
+        call && call->op_->name_.rfind("reg.", 0) == 0 && !IsOp(call, "reg.mem_bar")) {
       Error("Register calls require AssignStmt; bare store is not allowed", op->span_);
     }
+    const auto* previous = statement_barrier_;
+    if (auto call = As<Call>(op->expr_); call && IsOp(call, "reg.mem_bar")) {
+      statement_barrier_ = call.get();
+    }
     IRVisitor::VisitStmt_(op);
+    statement_barrier_ = previous;
   }
   void VisitStmt_(const IfStmtPtr& op) override {
     const auto previous = yield_region_;

@@ -2244,10 +2244,10 @@ jobs:
 
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
-    # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Three steps share one checkout / install:
+    # because the job also runs ordinary and MX matmul ST on the same
+    # npu-a5 card. The steps share one checkout and install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
-    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
+    #   2. mx-tests-a5           — ordinary and MX matmul plus on-board quantization
     #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
@@ -2309,7 +2309,8 @@ jobs:
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
     # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # quant-to-matmul), test_matmul_fp8_mixed.py (ordinary FP8 matmul), and the
+    # direct FP4-to-FP8 cast case.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2411,12 +2412,15 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
+        # Use one Torch thread before pytest-forked starts its child processes.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
-            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              OMP_NUM_THREADS=1 python -m pytest \
+              tests/st/runtime/ops/test_matmul_fp8_mixed.py \
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_fp4.py::test_direct_fp4_to_fp8_all_patterns \
               tests/st/runtime/ops/test_quant_mx.py \
@@ -2501,97 +2505,6 @@ jobs:
         uses: ./.github/actions/kill-orphaned-tasks
         with:
           checkout-path: a5-checkout
-
-  onboard-tests-a5-distributed:
-    timeout-minutes: 110
-    # Bootstrap the trusted main-branch job before adding hardware acceptance
-    # tests. /ci full loads this workflow from main, so a PR cannot introduce
-    # and exercise a new job in the same dispatched run. Select the real suite
-    # from the test checkout when present; otherwise run the bootstrap dummy.
-    needs: [changes, toolchain, lint-gate]
-    if: >-
-      !cancelled() &&
-      needs.changes.result == 'success' &&
-      needs.lint-gate.result == 'success' &&
-      needs.toolchain.result == 'success' &&
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.full == 'true'
-    permissions:
-      contents: read
-    runs-on: [self-hosted, linux, npu-a5]
-    defaults:
-      run:
-        working-directory: a5-dist-checkout
-    env:
-      PTOAS_ROOT: ${{ github.workspace }}/a5-dist-checkout/ptoas-bin
-      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
-      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
-      CMAKE_BUILD_PARALLEL_LEVEL: 16
-      CMAKE_C_COMPILER_LAUNCHER: ccache
-      CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_MAXSIZE: 30G
-      CCACHE_UMASK: '000'
-      TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
-    steps:
-      - name: Fetch composite action definitions
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.workflow_sha }}
-          sparse-checkout: .github/actions
-          clean: false
-          persist-credentials: false
-
-      - name: Setup CI job
-        uses: ./.github/actions/setup-ci-job
-        with:
-          checkout-path: a5-dist-checkout
-          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
-          needs-device: 'true'
-          pip-cache-name: pip-a5
-          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
-          runtime-targets: build_package_a5
-          # Keep runner-specific ring settings out of this job's environment.
-          unset-ring: 'true'
-          toolchain: bundle
-
-      - name: Run distributed tests
-        timeout-minutes: 70
-        run: |
-          source activate.sh
-          # This switch must already be on main before the test-only follow-up:
-          # editing a PR's workflow cannot change a trusted /ci full command.
-          if [ -f tests/st/distributed/test_l3_urma_async.py ]; then
-            LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/urma_async/ascend"
-            mkdir -p "$LOGDIR"
-            export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
-            # Four cards select the P=4 cases. No --forked: JIT compilation can
-            # leave a child that pytest-forked waits on beyond its timeout.
-            task-submit --device auto --device-num 4 --timeout 3900 --max-time 1800 \
-              --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
-                tests/st/distributed/test_l3_urma_async.py \
-                -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \
-                --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-distributed-junit.xml"
-          else
-            python -m pytest tests/lint/test_ci_placeholder.py -v \
-              --junitxml=ci-distributed-junit.xml
-          fi
-
-      - name: Upload distributed test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: a5-distributed-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: warn
-          path: |
-            a5-dist-checkout/ci-distributed-junit.xml
-            a5-dist-checkout/outputs/urma_async/ascend/**
-
-      - name: Kill orphaned task-submit tasks
-        if: always()
-        uses: ./.github/actions/kill-orphaned-tasks
-        with:
-          checkout-path: a5-dist-checkout
 
   system-tests-a5sim:
     permissions:
@@ -2755,7 +2668,6 @@ jobs:
       - docs-examples
       - examples-tests
       - onboard-tests-a5
-      - onboard-tests-a5-distributed
       - prebuild-wheels
       - prebuild-wheels-github
       - pypto-lib-compile

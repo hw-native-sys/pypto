@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -563,9 +564,12 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const RegScopeStmtPtr& op) {
-  CHECK_SPAN(op->name_hint_.empty() && op->attrs_.empty(), op->span_)
+  CHECK_SPAN(
+      op->name_hint_.empty() && std::all_of(op->attrs_.begin(), op->attrs_.end(),
+                                            [](const auto& attr) { return attr.first == "auto_sync"; }),
+      op->span_)
       << "RegScope Python printing cannot preserve name_hint or attrs";
-  stream_ << "with " << prefix_ << ".reg_scope():\n";
+  stream_ << "with " << prefix_ << ".reg_scope(" << (op->AutoSync() ? "" : "auto_sync=False") << "):\n";
   IncreaseIndent();
   if (auto seq = As<SeqStmts>(op->body_); seq && seq->stmts_.empty()) {
     stream_ << GetIndent() << "pass";

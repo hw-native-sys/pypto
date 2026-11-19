@@ -28,7 +28,7 @@ class _Compiler:
         del runtime_name
         return self.runtime_include_dirs
 
-    def vpto_cache_identity(self, sources, core_type):
+    def vpto_cache_identity(self, sources, core_type, *, snapshot=None):
         return external_source_digest(sources, metadata=(core_type,))
 
     def compile_incore(self, source, **kwargs):
@@ -254,6 +254,33 @@ def test_vpto_build_ignores_sidecars_and_separates_cache(tmp_path, monkeypatch):
     assert runner._generated_code_key(plain) != runner._generated_code_key(kernel)
     with pytest.raises(ValueError, match="VPTO helpers require"):
         runner._kernel_cache_file(tmp_path, kernel, "a5sim", "isa", "runtime", compiler)
+
+
+def test_vpto_publication_uses_precompile_identity(tmp_path, monkeypatch):
+    pytest.importorskip("simpler_setup")
+    runner = importlib.import_module("pypto.runtime.device_runner")
+    source = tmp_path / "kernel.cpp"
+    source.write_text("void kernel() {}")
+    helper = tmp_path / "helper.pto"
+    helper.write_text("// pypto.reg_auto_sync: false\nmodule {}")
+    kernel = _kernel(source, "aiv", 0)
+    kernel["vpto_sources"] = [str(helper)]
+    compiler = _Compiler()
+    cache = tmp_path / "cache"
+    before = runner._kernel_cache_file(cache, kernel, "a5", "isa", "runtime", compiler)
+
+    def compile_with_edit(source, **kwargs):
+        # Model an edit while compiling the already-selected source snapshot.
+        helper.write_text("// pypto.reg_auto_sync: true\nmodule {}")
+        return b"snapshot binary"
+
+    monkeypatch.setattr(compiler, "compile_incore", compile_with_edit)
+    monkeypatch.setattr(runner, "extract_text_section", lambda raw: raw)
+    runner._compile_single_kernel(kernel, compiler, "a5", "isa", "runtime", cache_dir=cache)
+    after = runner._kernel_cache_file(cache, kernel, "a5", "isa", "runtime", compiler)
+    assert before != after
+    assert before.read_bytes() == b"snapshot binary"
+    assert not after.exists()
 
 
 if __name__ == "__main__":

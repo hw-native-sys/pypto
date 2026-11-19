@@ -267,7 +267,7 @@ def _artifact(cb: Any, source: str, manifest: dict[str, Any]) -> SourceArtifact:
     payload = source.encode("utf-8")
     _require(bool(payload), "device export returned empty source")
     _require(hashlib.sha256(payload).hexdigest() == manifest["source_sha256"], "source digest mismatch")
-    # Preserve all provider-specific requirements for the named ABI's future
+    # Preserve all provider-specific requirements for the named ABI's runtime
     # bridge: POD fields, views, state, resources, completion and binary loading.
     # Copying the JSON prevents subsequent mutations of DeviceExport.manifest.
     files = [
@@ -442,11 +442,12 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
 
 
 class CANNBotDSLProvider:
-    """Direct, uncached preparation; no JIT discovery or runtime dispatch yet.
+    """Direct, uncached preparation; automatic JIT discovery remains unsupported.
 
-    The descriptor ABI is intentionally unsupported by TMRBridge. A future
-    bridge must consume device_manifest.json, validate all declared resources
-    and views, and publish completion only after all participants return.
+    TMRBridge.lower supports the checked single-block A5 AIC/AIV/MIX subset.
+    Use cannbotdsl_runtime.compile_task and build_submitter for direct execution;
+    they consume the manifest and require binary admission and completion-based
+    ordering. Other resource or launch requirements are rejected.
     """
 
     def prepare(self, kernel: object, request: KernelRequest) -> PreparedKernel:

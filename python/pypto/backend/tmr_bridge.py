@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 TMR bridge for the internal ``c_pointer`` v1 native ABI.
+"""A5 TMR bridges for ``c_pointer`` and the CANNBotDSL AIC/AIV/MIX ABI.
 
 Physical arguments can reorder/repeat logical parameters. Metadata arguments
 are unsigned integers; pointers name allocation bases and the native function
@@ -395,6 +395,10 @@ class TMRBridge:
     """Lower supported native functions to existing AIC/AIV/MIX task entries."""
 
     def lower(self, prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
+        if prepared.native_abi.name == "cannbotdsl.device_callable":
+            from .cannbotdsl_runtime import lower  # noqa: PLC0415
+
+            return lower(prepared, target)
         _validate(prepared, target)
         _validate_abi(prepared)
         symbol = f"pypto_external_check_{prepared_digest(prepared)}"
@@ -418,6 +422,11 @@ class MaterializedTask:
 
     def configure_context(self, ctx: "SpecializeContext") -> None:
         """Attach the checked bridge output to the existing specialization path."""
+        if self.task.binary_policy != "ordinary":
+            raise ContractError(
+                "TMR bridge: descriptor JIT integration is not supported; "
+                "use compile_task and build_submitter"
+            )
         if ctx.func_type != "extern":
             raise ContractError("TMR bridge: configure_context requires an extern declaration")
         prepared = self.task.prepared

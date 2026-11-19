@@ -26,11 +26,41 @@ def kernel(
     z = pl.tile.add(out, out)
 ```
 
-`pl.reg_scope()` 不接受参数，没有 captures、结果列表或 yield，也不能嵌套。
+`pl.reg_scope(*, auto_sync=True)` 没有 captures、结果列表或 yield，也不能嵌套。
+`auto_sync` 必须是编译期 bool；省略或 `True` 保留 UB 屏障自动插入，
+`False` 选择显式同步。
 前端允许 InCore、AIV 设备上下文，包括 Opaque、Orchestration、Graph 函数内
 在 outlining 前显式声明的 InCore 作用域。`ExpandMixedKernel` 后，寄存器区域必须
 位于 AIV 函数内。禁止直接在调度代码中使用，也禁止在 RegScope 内嵌套调度作用域。
 显式配置非 A5 目标时拒绝；尚未选定目标时，目标检查延迟到编译阶段。
+
+### 显式 UB 屏障
+
+`pl.reg.mem_bar(kind: str) -> None` 仅允许作为寄存器作用域内的语句，
+精确生成 `pto.mem_bar "KIND"`，不能赋值、返回或作为表达式使用。
+`kind` 是大小写敏感的编译期字符串，无默认值：
+
+| 家族 | 可用类型 |
+| ---- | -------- |
+| VV | `VV_ALL`, `VST_VLD`, `VLD_VST`, `VST_VST` |
+| VS | `VS_ALL`, `VST_LD`, `VLD_ST`, `VST_ST` |
+| SV | `SV_ALL`, `ST_VLD`, `LD_VST`, `ST_VST` |
+| SS | `SS_ALL`, `ST_LD`, `LD_ST`, `ST_ST` |
+
+```python
+# tile is initialized local Vec storage captured from outside the scope.
+with pl.reg_scope(auto_sync=False):
+    value = pl.reg.load(tile, lanes=64)
+    pl.reg.mem_bar("VLD_VST")
+    tile = pl.reg.store(tile, value=value)
+    pl.reg.mem_bar("VST_VLD")
+    value = pl.reg.load(tile, lanes=64)
+```
+
+手动作用域由作者提供所有必要的 RAW/WAR/WAW 和跨迭代屏障；自动作用域
+也允许显式屏障。`ALL` 仅覆盖所属家族，`VV_ALL` 不覆盖标量访存。
+这些屏障只约束同一 vecscope 内的 UB 访问，不能替代跨作用域、DMA、GM
+或跨核同步。参见 [VF 编译契约](../codegen/03-vpto-vf-integration.md)。
 
 内联 helper 可以包含 `reg_scope` 并接收显式标注的 Vec Tile。展开时继承调用方的
 执行上下文，最终仍必须位于 AIV。寄存器值不能跨越 helper 边界，应返回由
@@ -410,8 +440,9 @@ with pl.reg_scope():
 
 | API | 含义 |
 | --- | ---- |
-| `with ib.reg_scope(span=None):` | 在 Python IRBuilder 中打开寄存器区域。 |
+| `with ib.reg_scope(span=None, *, auto_sync=True):` | 在 Python IRBuilder 中打开寄存器区域。 |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | 构造命名操作。`op_name` 是如 `"reg.add"` 的注册名称；`args` 为 IR 操作数，`kwargs` 为操作属性。 |
+| `ib.emit_reg_mem_bar(kind, span=None)` | 构造无结果的显式 UB 同步屏障。 |
 | `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | 构造命名 store，返回目标 Tile 别名。 |
 | `ir.get_reg_op_spec(name)` | 查询操作的区域要求和 VMI emitter。 |
 | `ir.get_reg_memory_effect(call)` | 查询 load/store 的目标 Tile、已知根分配、读写类型、半开元素区间和可选 mask；未知根或区间端点仍表示未知。 |
@@ -421,8 +452,8 @@ Builder 与 DSL 共享类型及参数检查。完成函数时检查区域归属�
 验证手工 IR，`MixedKernelExpanded` 检查最终 AIV placement。内存效应查询保留
 mask，但不据此认定整个缓冲区已初始化或访问区间互不重叠。
 
-Python 文本语法不接受区域元数据。打印带非空 `name_hint` 或 `attrs` 的手工
-RegScope 会报错，避免丢失元数据；二进制序列化保留这些字段。空区域打印为 `pass`。
+手动同步区域打印为 `pl.reg_scope(auto_sync=False)`。其他非空属性或非空
+`name_hint` 会导致打印报错；二进制序列化保留这些字段。空区域打印为 `pass`。
 以上 API 列表表示当前前端支持范围；PTOAS 中没有对应上述 API 的指令尚未通过
 `pl.reg` 暴露。
 

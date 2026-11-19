@@ -16,6 +16,7 @@ conversion, element reorder, truncation, or duplication is observable.
 """
 
 from dataclasses import replace
+from itertools import product
 from typing import Any
 
 import pypto.language as pl
@@ -24,6 +25,7 @@ import torch
 from harness import st
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.pypto_core.passes import MemoryPlanner
+from pypto.runtime.tensor_spec import ScalarSpec
 
 ROWS = 8
 COLS = 16
@@ -317,6 +319,149 @@ def _packed_fp4_alias_cases():
     else pytest.mark.skip(reason="torch.float4_e2m1fn_x2 is unavailable")
 )
 def test_packed_fp4_byte_reshape_round_trip(case_run):
+    case_run.assert_passed()
+
+
+@pl.jit
+def empty_extent_reinterpret(
+    x: pl.Tensor, out: pl.InOut[pl.Tensor], rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        src = pl.load(x, [0, 0], [16, 16], valid_shape=[rows, cols])
+        view = pl.tile.reinterpret_view(src, pl.FP16)
+        back = pl.cast(view, pl.FP32)
+        pl.store(back, [0, 0], out)
+    return out
+
+
+def _empty_extent_cases():
+    for planner in _PLANNERS:
+        for rows, cols in ((0, 0), (0, 8), (8, 0), (8, 8)):
+            x = torch.arange(256, dtype=torch.float32).reshape(16, 16)
+            expected = torch.full((16, 32), -7.0, dtype=torch.float32)
+            expected[:rows, : cols * 2] = x.view(torch.float16).float()[:rows, : cols * 2]
+            yield st.case(
+                empty_extent_reinterpret,
+                x,
+                torch.full((16, 32), -7.0, dtype=torch.float32),
+                rows,
+                cols,
+                name=f"empty_extent_reinterpret_{planner.name}_{rows}x{cols}",
+                scalars=[ScalarSpec("rows", rows), ScalarSpec("cols", cols)],
+                memory_planner=planner,
+                golden=lambda _tensors, expected=expected: expected,
+            )
+
+
+@st.cases(*_empty_extent_cases())
+def test_empty_extent_reinterpret_preserves_output(case_run):
+    """Empty stores preserve a nonzero output; nonempty stores change exactly the valid rectangle."""
+    case_run.assert_passed()
+
+
+@pl.jit
+def sliced_extent_reinterpret(
+    x: pl.Tensor,
+    out: pl.InOut[pl.Tensor],
+    rows: pl.Scalar[pl.INDEX],
+    cols: pl.Scalar[pl.INDEX],
+    offset: pl.Scalar[pl.INDEX],
+    inferred_valid: pl.constexpr,
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        if inferred_valid:
+            src = pl.load(x, [0, 0], [16, 16], valid_shape=[offset + rows, cols])
+            window = pl.tile.slice(src, [8, 16], [offset, 0])
+        else:
+            src = pl.load(x, [0, 0], [16, 16])
+            window = pl.tile.slice(src, [8, 16], [offset, 0], valid_shape=[rows, cols])
+        view = pl.tile.reinterpret_view(window, pl.FP16)
+        back = pl.cast(view, pl.FP32)
+        pl.store(back, [0, 0], out)
+    return out
+
+
+@pl.jit
+def static_sliced_extent_reinterpret(
+    x: pl.Tensor,
+    out: pl.InOut[pl.Tensor],
+    rows: pl.constexpr,
+    cols: pl.constexpr,
+    inferred_valid: pl.constexpr,
+    consume_slice: pl.constexpr,
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        if inferred_valid:
+            src = pl.load(x, [0, 0], [16, 16], valid_shape=[8 + rows, cols])
+            window = pl.tile.slice(src, [8, 16], [8, 0])
+        else:
+            src = pl.load(x, [0, 0], [16, 16])
+            window = pl.tile.slice(src, [8, 16], [8, 0], valid_shape=[rows, cols])
+        if consume_slice:
+            window = pl.neg(window)
+        view = pl.tile.reinterpret_view(window, pl.FP16)
+        back = pl.cast(view, pl.FP32)
+        pl.store(back, [0, 0], out)
+    return out
+
+
+def _static_sliced_extent_cases():
+    for planner, buffer_ir, inferred_valid, consume_slice in product(
+        _PLANNERS, (False, True), (False, True), (False, True)
+    ):
+        for rows, cols in ((0, 0), (0, 8), (8, 0), (8, 8)):
+            x = torch.arange(256, dtype=torch.float32).reshape(16, 16)
+            expected = torch.full((8, 32), -7.0, dtype=torch.float32)
+            values = -x[8:] if consume_slice else x[8:]
+            expected[:rows, : cols * 2] = values.view(torch.float16).float()[:rows, : cols * 2]
+            yield st.case(
+                static_sliced_extent_reinterpret,
+                x,
+                torch.full((8, 32), -7.0, dtype=torch.float32),
+                rows,
+                cols,
+                inferred_valid,
+                consume_slice,
+                name=f"static_sliced_extent_{planner.name}_{buffer_ir}_{inferred_valid}_{consume_slice}_{rows}x{cols}",
+                memory_planner=planner,
+                enable_buffer_ir=buffer_ir,
+                golden=lambda _tensors, expected=expected: expected,
+            )
+
+
+@st.cases(*_static_sliced_extent_cases())
+def test_static_sliced_extent_reinterpret_compiles_and_preserves_output(case_run):
+    """Unlike runtime extents, static zeros can leak into ISA template arguments."""
+    case_run.assert_passed()
+
+
+def _sliced_extent_cases():
+    for planner, buffer_ir, inferred_valid in product(_PLANNERS, (False, True), (False, True)):
+        for rows, cols in ((0, 0), (0, 8), (8, 0), (8, 8)):
+            x = torch.arange(256, dtype=torch.float32).reshape(16, 16)
+            expected = torch.full((8, 32), -7.0, dtype=torch.float32)
+            # Nonzero runtime offset catches a view accidentally rebound to the
+            # parent's base. Sentinel data outside the valid rectangle must stay.
+            expected[:rows, : cols * 2] = x[8:].view(torch.float16).float()[:rows, : cols * 2]
+            yield st.case(
+                sliced_extent_reinterpret,
+                x,
+                torch.full((8, 32), -7.0, dtype=torch.float32),
+                rows,
+                cols,
+                8,
+                inferred_valid,
+                name=f"sliced_extent_reinterpret_{planner.name}_{buffer_ir}_{inferred_valid}_{rows}x{cols}",
+                scalars=[ScalarSpec("rows", rows), ScalarSpec("cols", cols), ScalarSpec("offset", 8)],
+                memory_planner=planner,
+                enable_buffer_ir=buffer_ir,
+                golden=lambda _tensors, expected=expected: expected,
+            )
+
+
+@st.cases(*_sliced_extent_cases())
+def test_sliced_extent_reinterpret_preserves_offset_and_output(case_run):
+    """Exercise #1706 with empty and nonempty views at a runtime slice offset."""
     case_run.assert_passed()
 
 

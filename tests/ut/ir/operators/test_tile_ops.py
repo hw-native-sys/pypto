@@ -3034,6 +3034,105 @@ class TestTileMatMulOps:
         ir_str = str(Program)
         assert "tile.matmul_bias" in ir_str
 
+    # --- A5 mixed FP8 operand pairs (pto.tmatmul / .acc / .bias) -------------
+    # PTOAS v0.72 `verifyMatmulTypeTriple` accepts any (E4M3FN | E5M2) pair with
+    # an f32 destination on A5, so the frontend must stop requiring lhs == rhs.
+    # Physical K is a multiple of 32 throughout: that is the 1-byte boxed K
+    # granularity the Left/Right fractals impose.
+    _MIXED_FP8_PAIRS = [
+        (DataType.FP8E4M3FN, DataType.FP8E5M2),
+        (DataType.FP8E5M2, DataType.FP8E4M3FN),
+        (DataType.FP8E5M2, DataType.FP8E5M2),
+        (DataType.FP8E4M3FN, DataType.FP8E4M3FN),
+        (DataType.HF8, DataType.HF8),
+    ]
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype", _MIXED_FP8_PAIRS)
+    def test_tile_matmul_accepts_fp8_pairs(self, lhs_dtype, rhs_dtype):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], lhs_dtype), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], rhs_dtype), span)
+
+        call = tile.matmul(lhs, rhs)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP32
+        assert call.type.memory_space == ir.MemorySpace.Acc
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype", _MIXED_FP8_PAIRS)
+    def test_tile_matmul_acc_accepts_fp8_pairs(self, lhs_dtype, rhs_dtype):
+        span = ir.Span.unknown()
+        acc = ir.Var("acc", ir.TileType([16, 32], DataType.FP32), span)
+        lhs = ir.Var("lhs", ir.TileType([16, 64], lhs_dtype), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], rhs_dtype), span)
+
+        call = tile.matmul_acc(acc, lhs, rhs)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP32
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype", _MIXED_FP8_PAIRS)
+    def test_tile_matmul_bias_accepts_fp8_pairs(self, lhs_dtype, rhs_dtype):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], lhs_dtype), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], rhs_dtype), span)
+        bias = ir.Var("bias", ir.TileType([1, 32], DataType.FP32), span)
+
+        call = tile.matmul_bias(lhs, rhs, bias)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP32
+
+    @pytest.mark.parametrize("acc_dtype", [DataType.FP16, DataType.INT32, DataType.FP8E4M3FN])
+    def test_tile_matmul_acc_mixed_fp8_requires_fp32_accumulator(self, acc_dtype):
+        """PTOAS leaves acc_in unchecked against dst, so the frontend must hold the line."""
+        span = ir.Span.unknown()
+        acc = ir.Var("acc", ir.TileType([16, 32], acc_dtype), span)
+        lhs = ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E4M3FN), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span)
+
+        with pytest.raises(ValueError, match="requires accumulator dtype fp32"):
+            tile.matmul_acc(acc, lhs, rhs)
+
+    def test_tile_matmul_bias_mixed_fp8_requires_fp32_bias(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E5M2), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E4M3FN), span)
+        bias = ir.Var("bias", ir.TileType([1, 32], DataType.FP8E4M3FN), span)
+
+        with pytest.raises(ValueError, match="requires bias dtype fp32"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    @pytest.mark.parametrize(
+        "lhs_dtype,rhs_dtype",
+        [
+            # Mixing widths is not a pair the Cube has: only the FP8 formats pair
+            # with each other.
+            (DataType.FP8E4M3FN, DataType.FP16),
+            (DataType.FP16, DataType.FP8E5M2),
+            (DataType.FP8E4M3FN, DataType.HF8),
+            (DataType.FP8E5M2, DataType.INT8),
+            (DataType.FP8E4M3FN, DataType.FP4E2M1X2),
+            (DataType.FP16, DataType.FP32),
+        ],
+    )
+    def test_tile_matmul_rejects_unpaired_operand_dtypes(self, lhs_dtype, rhs_dtype):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], lhs_dtype), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], rhs_dtype), span)
+
+        with pytest.raises(ValueError, match="identical lhs and rhs data types"):
+            tile.matmul(lhs, rhs)
+
+    def test_tile_matmul_mixed_fp8_rejects_tf32_mode(self):
+        """HF32 rounding is an FP32-operand feature; PTOAS rejects it for FP8."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E4M3FN), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span)
+
+        with pytest.raises(ValueError, match="tf32_mode requires FP32 lhs and rhs"):
+            tile.matmul(lhs, rhs, tf32_mode="round_even")
+
     def test_tile_gemv(self):
         """Test tile.gemv operator - general matrix-vector multiplication."""
 
