@@ -283,7 +283,23 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
               << "Register Tile branch result lacks a prepared external handle";
           continue;
         }
+        const auto then_value =
+            then_yield && i < then_yield->value_.size() ? ir::AsVarLike(then_yield->value_[i]) : nullptr;
+        const auto else_value =
+            else_yield && i < else_yield->value_.size() ? ir::AsVarLike(else_yield->value_[i]) : nullptr;
         if (!tile_type->memref_) {
+          // If both arms yield the same already-bound descriptor, it dominates
+          // the join. Keep its TPOP provenance and runtime valid shape so a
+          // subsequent dynamic view can replay directly from that descriptor.
+          if (then_value && else_value) {
+            const auto then_it = fs_.var_to_mlir.find(GetVarKey(then_value));
+            const auto else_it = fs_.var_to_mlir.find(GetVarKey(else_value));
+            if (then_it != fs_.var_to_mlir.end() && else_it != fs_.var_to_mlir.end() &&
+                then_it->second == else_it->second && IsLocallyBoundTileName(then_it->second)) {
+              BindVarToMlir(return_var, then_it->second);
+              continue;
+            }
+          }
           // A borrowed FIFO value has no address for a phi allocation. Carry
           // its tile handle through the branch instead of allocating storage
           // disconnected from the receive. Normalize the yielded view types
@@ -324,10 +340,6 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // branch producers write the phi handle (they are re-bound to it below,
         // fix #1956) while the loop result and every post-if read still resolve
         // to the shared one, which no branch ever wrote.
-        const auto then_value =
-            then_yield && i < then_yield->value_.size() ? ir::AsVarLike(then_yield->value_[i]) : nullptr;
-        const auto else_value =
-            else_yield && i < else_yield->value_.size() ? ir::AsVarLike(else_yield->value_[i]) : nullptr;
         std::string ret_name =
             TryGetSharedTileBufHandle(tile_type, alloc_fields.type_str, then_value, else_value);
         if (!ret_name.empty()) {

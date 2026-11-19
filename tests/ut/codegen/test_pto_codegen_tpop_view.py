@@ -136,6 +136,48 @@ def test_borrowed_if_result_codegen(tmp_path: Path, planner: passes.MemoryPlanne
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_dynamic_reinterpret_after_borrowed_if(
+    tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
+):
+    """Both arms yield the same descriptor, including its runtime valid rows."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self,
+            flag: pl.Scalar[pl.BOOL],
+            rows: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[16, 16], pl.INT32]],
+        ) -> pl.Tensor[[16, 16], pl.INT32]:
+            buffer = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[rows, 8])] = (
+                pl.tpop_from_aic(split=0)
+            )
+            if flag:
+                selected = pl.yield_(received)
+            else:
+                selected = pl.yield_(received)
+            view = pl.tile.reinterpret_view(selected, pl.INT32)
+            out = pl.store(view, [0, 0], out)
+            pl.tfree_to_aic(received)
+            return out
+
+    mlir = _compile_borrowed_program(Program, planner, tmp_path, backend_type)
+    body = _function_body(mlir, "kernel")
+    pop = re.search(r"(%\w+) = pto\.tpop_from_aic", body)
+    assert pop is not None
+    view = re.search(rf"(%\w+) = pto\.treshape {pop[1]} :", body)
+    assert view is not None
+    assert body.index("scf.if") < view.start() < body.index("pto.tfree_from_aic")
+    assert f"pto.set_validshape {view[1]}," in body
+    assert "pto.alloc_tile" not in body and "pto.tmov" not in body
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_borrowed_if_view_result_codegen(
     tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
 ):
@@ -285,7 +327,9 @@ def test_same_mat_fifo_if_result_codegen(
 
     mlir = _generate_mixed_tile_mlir(Program, planner)
     body = _function_body(mlir, "kernel_aic")
-    assert re.search(r"scf\.if .* -> \(!pto\.tile_buf<loc=mat", body), body
+    pop = re.search(r"(%\w+) = pto\.tpop_from_aiv", body)
+    assert pop is not None
+    assert body.index("scf.if") < body.index(f"pto.tmov ins({pop[1]} :")
     assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in body.splitlines()), body
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
