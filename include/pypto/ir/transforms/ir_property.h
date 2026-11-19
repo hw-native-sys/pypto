@@ -63,8 +63,9 @@ enum class IRProperty : uint64_t {
                                     ///< requires materialization, RFC #1300 §2.2)
   ArrayNotEscaped,                  ///< ArrayType never appears as a function parameter or return type
   CommDomainScopesMaterialized,     ///< Host_orch bodies are wrapped in CommDomainScopeStmts (one per
-                                    ///< inferred comm domain) and pld.tensor.window result types carry
-                                    ///< DistributedTensorType.window_buffer_ back-references
+                                    ///< inferred comm domain), pld.tensor.window result types carry
+                                    ///< DistributedTensorType.window_buffer_ back-references, and every
+                                    ///< window-bearing view fits its slot's logical byte size
   DistTensorCtxMaterialized,        ///< No pld.system.get_comm_ctx survives outside host orchestration;
                                     ///< every chip-orchestration / device communication context is an
                                     ///< explicit CommCtxType SSA value traceable to a parameter

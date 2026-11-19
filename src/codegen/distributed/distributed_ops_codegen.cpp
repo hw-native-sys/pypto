@@ -264,17 +264,14 @@ REGISTER_DISTRIBUTED_OP(pld_tensor_alloc_window_buffer, "pld.tensor.alloc_window
 }
 
 // ============================================================================
-// pld.tensor.window — host-side marker, no runtime emission.
+// pld.tensor.window — check dynamic capacity at the view declaration.
 //
-// ``pld.tensor.window`` materialises a window-bound view at IR construction
-// time; ``MaterializeCommDomainScopes`` rewires every dispatch site so the per-rank
-// wire view is derived from ``__comm_d0[r].buffers["<name>"]`` at
-// chip-arg emission time. The host_orch.py module never calls back into
-// the IR window op.
+// The view is IR metadata; per-rank wire Tensors are still built at dispatch.
+// Returning an empty expression suppresses the wrapping Python assignment.
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(pld_tensor_window, "pld.tensor.window") {
-  (void)op;
-  (void)codegen;
+  auto& dist_codegen = dynamic_cast<DistributedCodegen&>(codegen);
+  dist_codegen.EmitWindowCapacityCheck(op);
   return "";
 }
 
@@ -477,6 +474,11 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
          "got "
       << op->args_.size();
 
+  // This handler indexes the host tensors dict. Distributed windows are
+  // resolved through per-rank buffers and have no entry in that dict.
+  CHECK_SPAN(ir::As<ir::TensorType>(op->args_[0]->GetType()), op->span_)
+      << "tensor.slice in a HOST orchestrator currently supports plain Tensor operands only";
+
   const std::string input_name = codegen.GetExprAsCode(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.slice input must resolve to a non-empty Python name";
 
@@ -523,7 +525,6 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
   std::ostringstream line;
   line << "tensors[\"" << lhs << "\"] = tensors[\"" << input_name << "\"][" << indices.str() << "]";
   codegen.Emit(line.str());
-  dist_codegen.MarkDeclared(lhs);
   return "";
 }
 
@@ -604,7 +605,6 @@ REGISTER_DISTRIBUTED_OP(tensor_assemble, "tensor.assemble") {
   if (lhs != target_name) {
     codegen.Emit("tensors[\"" + lhs + "\"] = tensors[\"" + target_name + "\"]");
   }
-  dist_codegen.MarkDeclared(lhs);
   return "";
 }
 

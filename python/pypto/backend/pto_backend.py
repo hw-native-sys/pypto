@@ -523,6 +523,16 @@ static __aicore__ void pypto_urma_transfer_impl(
   const uint64_t remote_base_abs =
       reinterpret_cast<uint64_t>(kPut ? dst_base : src_base);
   const uint64_t local_window = comm->windowsIn[comm->rankId];
+  // The selected context describes the remote endpoint's domain, and both
+  // endpoints must live in that window: a local endpoint registered in a
+  // different domain would carry the wrong local registration token.
+  const uint64_t local_window_off =
+      local_base_abs < local_window ? 0 : local_base_abs - local_window;
+  if (local_base_abs < local_window || local_window_off > comm->winSize ||
+      local_extent > comm->winSize - local_window_off) {
+    pypto_urma_fail(ctx, static_cast<int32_t>(SIMPLER_ERROR_ASYNC_COMPLETION_INVALID));
+    return;
+  }
   if (local_off > local_extent || bytes > local_extent - local_off ||
       remote_view_off > remote_extent || bytes > remote_extent - remote_view_off ||
       local_off > kMaxAddress - local_base_abs ||

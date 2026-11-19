@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/window_view_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -674,6 +675,17 @@ class DefiningCallRetyper : public IRMutator {
   return nullptr;
 }
 
+// Host windows require URMA resources even when their only uses are local.
+std::vector<std::string> RequiredDomainEngines(const std::vector<WindowBufferPtr>& slots,
+                                               std::vector<std::string> engines) {
+  const bool has_host = std::any_of(slots.begin(), slots.end(),
+                                    [](const auto& slot) { return slot->memory_source_ == "host"; });
+  if (has_host && std::find(engines.begin(), engines.end(), "urma") == engines.end()) {
+    engines.emplace_back("urma");
+  }
+  return engines;
+}
+
 /// Process one host_orch function: identify allocs/windows/dispatches,
 /// construct WindowBuffer instances, rewrite the body to substitute view Vars
 /// with type-updated copies, and wrap the body in a chain of
@@ -693,7 +705,7 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
       explicit EngineUpdater(const std::vector<std::string>& engines) : engines_(engines) {}
       StmtPtr VisitStmt_(const CommDomainScopeStmtPtr& op) override {
         auto updated = As<CommDomainScopeStmt>(IRMutator::VisitStmt_(op));
-        auto required = updated->engines_;
+        auto required = RequiredDomainEngines(updated->slots_, updated->engines_);
         for (const auto& engine : engines_) {
           if (std::find(required.begin(), required.end(), engine) == required.end()) {
             required.push_back(engine);
@@ -773,9 +785,25 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   // Phase 4: construct WindowBuffer for each alloc. Final descriptor merging
   // happens in Phase 6 below (per-group), so we don't precompute it here.
   for (auto& rec : collector.allocs) {
-    rec->wb = std::make_shared<const WindowBuffer>(rec->ptr_var, rec->size_expr,
-                                                   /*load_from_host=*/false,
-                                                   /*store_to_host=*/false, rec->span);
+    rec->wb = std::make_shared<const WindowBuffer>(
+        rec->ptr_var, rec->size_expr,
+        /*load_from_host=*/false,
+        /*store_to_host=*/false, rec->span, rec->alloc_call->GetKwarg<std::string>("memory_source", "device"),
+        rec->alloc_call->GetKwarg<std::string>("init", ""));
+  }
+
+  // Every direct pld.tensor.window view must fit the logical size of its
+  // allocation. Reject an oversized view even if the program only accesses a
+  // prefix: the view itself must be valid independently of its consumers.
+  for (const auto& w : collector.windows) {
+    auto view_dt = As<DistributedTensorType>(w.old_view_var->GetType());
+    INTERNAL_CHECK_SPAN(view_dt, w.old_view_var->span_)
+        << "MaterializeCommDomainScopes: pld.tensor.window result should have DistributedTensorType";
+    const auto fit = EvaluateWindowViewFit(*view_dt, *w.alloc->wb);
+    CHECK_SPAN(fit.fit != WindowViewFit::kViolation,
+               w.window_call ? w.window_call->span_ : w.old_view_var->span_)
+        << "MaterializeCommDomainScopes: "
+        << DescribeWindowViewFit(w.old_view_var->name_hint_, *w.alloc->wb, fit);
   }
 
   // Phase 5: build var substitution map for every pld.tensor.window result Var,
@@ -831,15 +859,16 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     Span span;
   };
   std::vector<PendingDomain> pending;
-  std::map<DeviceDescriptor, size_t> desc_to_index;
+  std::map<std::pair<DeviceDescriptor, std::string>, size_t> desc_to_index;
   for (const auto& rec : collector.allocs) {
     DeviceDescriptor merged;
     for (const auto& d : rec->seen) merged.Merge(d);
-    auto it = desc_to_index.find(merged);
+    const auto key = std::make_pair(merged, rec->wb->memory_source_);
+    auto it = desc_to_index.find(key);
     size_t index;
     if (it == desc_to_index.end()) {
       index = pending.size();
-      desc_to_index.emplace(merged, index);
+      desc_to_index.emplace(key, index);
       pending.push_back({merged, {}, {}, rec->span});
     } else {
       index = it->second;
@@ -872,9 +901,10 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   for (size_t i = pending.size(); i-- > 0;) {
     auto& g = pending[i];
     std::string name_hint = "comm_d" + std::to_string(i);
+    auto required_engines = RequiredDomainEngines(g.slots, engines);
     new_body = std::make_shared<const CommDomainScopeStmt>(
         g.desc.ToDevices(), std::move(g.slots), std::move(name_hint), new_body, g.span,
-        std::vector<std::string>{}, std::vector<std::pair<std::string, std::any>>{}, engines);
+        std::vector<std::string>{}, std::vector<std::pair<std::string, std::any>>{}, required_engines);
   }
 
   if (new_body.get() == func->body_.get()) return func;
