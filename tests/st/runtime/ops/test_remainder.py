@@ -112,9 +112,9 @@ def _make_program(
     # With N=64, DEFAULT needs 64 candidate + 8 mask + 8 address elements;
     # INT32 keeps three (TREM) or two (TREMS) 64-element data areas.
     # HIGH_PRECISION TREM additionally needs staged state and a fused buffer
-    # (784 elements total).
+    # (912 elements total).
     if high_precision:
-        scratch_cols = 784
+        scratch_cols = 912
     elif dtype == DataType.INT32:
         scratch_cols = 208 if op_name == "rem" else 144
     else:
@@ -459,7 +459,7 @@ _CASES = [
 class TestRemainderFamily:
     """A2/A3 exact-op coverage for TREM, TREMS, TFMOD, and TFMODS."""
 
-    @pytest.mark.platforms("a2a3")
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("op_name,dtype,valid_shape,scalar,high_precision,boundary_values", _CASES)
     def test_remainder(
         self, test_runner, op_name, dtype, valid_shape, scalar, high_precision, boundary_values

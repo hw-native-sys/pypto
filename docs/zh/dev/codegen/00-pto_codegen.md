@@ -2,7 +2,7 @@
 
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
-PyPTO 要求 PTOAS v0.74 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `27fe21756` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `83b1b2b52`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
+PyPTO 要求 PTOAS v0.74 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `fb2796ac2` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `6065c782`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
 
 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) 保留 MX 的逻辑二维形状、步幅和偏移。PTOAS 根据 `mx_a_zz` / `mx_b_nn` 构造打包后的物理描述符；不能将这些视图重新标记为 ND。
 
@@ -13,7 +13,7 @@ A2/A3 余数操作的 scratch 类型必须与输入相同，且不能与输入�
 | TREM | 2（PTOAS 要求） | `k*S + 8*ceil(S/256) + 8`，INT32 时 `k` = 3，否则为 1 |
 | TREMS | 1 | `k*S + 8*ceil(S/256) + 8`，INT32 时 `k` = 2，否则为 1 |
 
-`S` 是按 8 个元素对齐的源行跨度。FP32 高精度 TREM 要求的列数是该值与 `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8)` 的较大者，其中 `C = max(valid_cols // 64, 1)`；有效列数动态变化时，用物理宽度作为上界。
+`S` 是按 8 个元素对齐的源行跨度。FP32 高精度 TREM 要求的列数是该值与 `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 640*min(C, 8)` 的较大者，其中 `C = max(valid_cols // 64, 1)`；有效列数动态变化时，用物理宽度作为上界。
 
 ISA 将 INT32 中间结果保存在 scratch 中，不会写回输入。
 

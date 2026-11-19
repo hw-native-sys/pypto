@@ -2,7 +2,7 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
-PyPTO requires PTOAS v0.74 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `27fe21756` pins PTO-ISA `83b1b2b52` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
+PyPTO requires PTOAS v0.74 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `fb2796ac2` pins PTO-ISA `6065c782` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
 
 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) preserves logical rank-2 MX shapes, strides, and offsets. PTOAS constructs packed descriptors from `mx_a_zz` / `mx_b_nn`; do not relabel these views as ND.
 
@@ -13,7 +13,7 @@ A2/A3 remainder scratch must match the input dtype and be disjoint from its sour
 | TREM | 2 (PTOAS requirement) | `k*S + 8*ceil(S/256) + 8`, `k` = 3 for INT32, else 1 |
 | TREMS | 1 | `k*S + 8*ceil(S/256) + 8`, `k` = 2 for INT32, else 1 |
 
-`S` is the source row stride rounded to 8 elements. FP32 high-precision TREM requires the larger of that column count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8)`, where `C = max(valid_cols // 64, 1)`; use physical width to bound dynamic valid columns.
+`S` is the source row stride rounded to 8 elements. FP32 high-precision TREM requires the larger of that column count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 640*min(C, 8)`, where `C = max(valid_cols // 64, 1)`; use physical width to bound dynamic valid columns.
 
 The ISA keeps INT32 intermediates in the scratch and never writes the sources.
 
