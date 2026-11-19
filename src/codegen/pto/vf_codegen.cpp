@@ -181,6 +181,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     // Empty for the planner's common base, otherwise the defining TPOP descriptor.
     std::string received;
     int64_t offset;
+    uint64_t planned_bytes = 0;
   };
   std::vector<Capture> memory;
   std::map<int, std::pair<int64_t, int64_t>> reservations;
@@ -204,7 +205,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     const auto handle = GetExprAsCode(root);
     const auto fifo = fs_.c2v_views.find(handle);
     const bool borrowed = fifo != fs_.c2v_views.end();
-    CHECK_SPAN(borrowed || tile->memref_, call->span_)
+    const auto allocation = tile->memref_.value_or(nullptr);
+    CHECK_SPAN(borrowed || allocation, call->span_)
         << "VF capture requires planned local UB or a contiguous view of a known AIV C2V receive";
     auto effect = ir::GetRegMemoryEffect(call);
     CHECK_SPAN((borrowed || effect.root) && (effect.begin || !operands.loops.empty() ||
@@ -220,16 +222,18 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
           ir::cross_core_pipe::TryGetTileSlotSizeBytes(fs_.ssa_to_tile_type.at(view.received));
       const auto access = ir::As<ir::TileType>(target->GetType());
       const auto view_bytes = ir::cross_core_pipe::TryGetTileSlotSizeBytes(access);
+      const auto element_bytes = static_cast<int64_t>(access->dtype_.GetByte());
       const auto start = access->tile_view_ ? access->tile_view_->start_offset : nullptr;
       const auto start_const = ir::As<ir::ConstInt>(start);
       // The pointer is runtime, but its maximum physical window is fixed by
       // this receive. Include any additional element origin used by VMI.
-      CHECK_SPAN(storage_bytes && *storage_bytes <= pipe->second.slot_size && view_bytes &&
-                     *storage_bytes >= view.byte_offset && *view_bytes <= *storage_bytes - view.byte_offset &&
-                     (!start || (start_const && start_const->value_ >= 0 &&
-                                 start_const->value_ <= (*storage_bytes - view.byte_offset - *view_bytes) /
-                                                            static_cast<int64_t>(access->dtype_.GetByte()))),
-                 call->span_)
+      CHECK_SPAN(
+          storage_bytes && *storage_bytes <= pipe->second.slot_size && view_bytes && element_bytes > 0 &&
+              *storage_bytes >= view.byte_offset && *view_bytes <= *storage_bytes - view.byte_offset &&
+              (!start ||
+               (start_const && start_const->value_ >= 0 &&
+                start_const->value_ <= (*storage_bytes - view.byte_offset - *view_bytes) / element_bytes)),
+          call->span_)
           << "VF C2V view must fit within the received tile";
     }
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
@@ -245,10 +249,11 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
         arguments.push_back(view.received);
         artifact.caller_parameter_types.push_back(GetSSATileBufType(view.received));
       } else {
-        const auto origin = ir::As<ir::ConstInt>((*tile->memref_)->byte_offset_);
+        const auto origin = ir::As<ir::ConstInt>(allocation->byte_offset_);
         CHECK_SPAN(origin && origin->value_ >= 0, call->span_)
             << "Cannot prove register offset bounds or static VF capture address";
         capture.offset = origin->value_;
+        capture.planned_bytes = allocation->size_;
         arguments.push_back(handle);
         artifact.caller_parameter_types.push_back(GetExprTypeAnnotation(root));
       }
@@ -276,10 +281,10 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     }
     for (const auto& capture : memory) {
       if (!capture.received.empty()) continue;
-      const auto size = (*capture.tile->memref_)->size_;
-      CHECK_SPAN(capture.offset >= end ||
-                     (capture.offset <= begin && size <= static_cast<uint64_t>(begin - capture.offset)),
-                 scope->span_)
+      CHECK_SPAN(
+          capture.offset >= end || (capture.offset <= begin &&
+                                    capture.planned_bytes <= static_cast<uint64_t>(begin - capture.offset)),
+          scope->span_)
           << "VF planned UB capture overlaps a reserved C2V buffer";
     }
   }

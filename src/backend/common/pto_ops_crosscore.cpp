@@ -452,8 +452,9 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   }
   codegen.Emit(oss.str());
   const int c2v_pipe = std::string_view(target) == "aic" ? op->GetKwarg<int>("id", 0) : -1;
-  if (c2v_pipe >= 0 && result_tile_type)
+  if (c2v_pipe >= 0 && result_tile_type) {
     codegen.RegisterTileBufType(transport_buf, result_type, result_tile_type);
+  }
   codegen.RegisterTpopTileName(transport_buf, c2v_pipe);
   if (use_static_transport) {
     std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
