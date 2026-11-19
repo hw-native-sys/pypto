@@ -829,6 +829,12 @@ FuncGmIneligible CollectFuncGmIneligible(
     root_names[r] = src_name;
   };
 
+  auto pin_layout = [&](const Var* var) {
+    const auto name = lookup_name(var);
+    out.nz.insert(name);
+    out.dn.insert(name);
+  };
+
   struct YieldFrame {
     std::vector<const Var*> loop_targets;
     std::vector<std::vector<ExprPtr>> branch_yields;
@@ -855,15 +861,26 @@ FuncGmIneligible CollectFuncGmIneligible(
             if (IsOp(call, "tensor.reshape")) {
               out.dn.insert(b_name);
             }
-          } else if (auto alias_idx = ResultAliasedArgIndex(call);
-                     alias_idx.has_value() && *alias_idx < call->args_.size()) {
-            if (auto src_v = AsVarLike(call->args_[*alias_idx]);
-                src_v && AsTensorTypeLike(src_v->GetType())) {
-              union_vars(as->var_.get(), src_v.get());
+          } else {
+            const bool transpose = IsOp(call, "tensor.transpose");
+            auto alias_idx = ResultAliasedArgIndex(call);
+            if (!alias_idx && (transpose || IsOp(call, "tensor.slice") || IsOp(call, "tensor.view"))) {
+              alias_idx = 0;
             }
-          } else if ((IsOp(call, "tensor.slice") || IsOp(call, "tensor.view")) && !call->args_.empty()) {
-            if (auto src_v = AsVarLike(call->args_[0]); src_v && AsTensorTypeLike(src_v->GetType())) {
-              union_vars(as->var_.get(), src_v.get());
+            if (alias_idx && *alias_idx < call->args_.size()) {
+              const auto src = AsVarLike(call->args_[*alias_idx]);
+              const auto src_type = src ? AsTensorTypeLike(src->GetType()) : nullptr;
+              if (transpose) pin_layout(as->var_.get());
+              if (src_type) {
+                const auto dst_type = AsTensorTypeLike(as->var_->GetType());
+                if (!transpose && detail::TensorTypeLayout(dst_type) == detail::TensorTypeLayout(src_type)) {
+                  union_vars(as->var_.get(), src.get());
+                } else {
+                  // Pin the caller's buffer even when this formal or its local alias has a different name.
+                  pin_layout(src.get());
+                  pin_layout(as->var_.get());
+                }
+              }
             }
           }
         }
@@ -1168,12 +1185,13 @@ class OrchAnalyzer {
         return false;
       }();
       for (size_t i = 0; i < args.size() && i < resolved.size(); ++i) {
-        if (!resolved[i].has_value()) continue;
-        analysis_.dn_ineligible_names.insert(*resolved[i]);
+        const auto& name_opt = resolved[i];
+        if (!name_opt.has_value()) continue;
+        analysis_.dn_ineligible_names.insert(*name_opt);
         auto arg_v = AsVarLike(args[i]);
         const bool whole_host = arg_v && host_whole_matrix_vars_.count(arg_v.get()) != 0;
         if (!is_device_dispatch || !whole_host) {
-          analysis_.nz_ineligible_names.insert(*resolved[i]);
+          analysis_.nz_ineligible_names.insert(*name_opt);
         }
       }
     }
@@ -1273,7 +1291,16 @@ class OrchAnalyzer {
         continue;
       }
       const std::string src_alias = GetVarName(arg_v.get());
-      if (i == 0 && assign_var && AsTensorTypeLike(assign_var->GetType()) && !IsOp(call, "tensor.reshape")) {
+      const bool layout_changing = [&]() {
+        if (IsOp(call, "tensor.transpose")) {
+          return true;
+        }
+        auto lhs_tt = assign_var ? AsTensorTypeLike(assign_var->GetType()) : nullptr;
+        auto src_tt = AsTensorTypeLike(arg_v->GetType());
+        return lhs_tt && src_tt && detail::TensorTypeLayout(lhs_tt) != detail::TensorTypeLayout(src_tt);
+      }();
+      if (i == 0 && assign_var && AsTensorTypeLike(assign_var->GetType()) && !IsOp(call, "tensor.reshape") &&
+          !layout_changing) {
         UnionVars(assign_var.get(), arg_v.get());
       }
       const bool ok_nz =

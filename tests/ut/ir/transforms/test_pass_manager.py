@@ -11,6 +11,7 @@
 
 import os
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 
@@ -106,6 +107,53 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
         assert pm.pass_names == TENSOR_OPTIMIZATION_PASSES
+
+    def test_auto_layout_strategy(self):
+        baseline = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default).pass_names
+        selected = ir.PassManager.get_strategy(ir.OptimizationStrategy.AutoLayout).pass_names
+        pos = baseline.index("InferTileMemorySpace") + 1
+        assert selected == baseline[:pos] + ["AutoLayout", "BlockNzTensorViews"] + baseline[pos:]
+
+    def test_auto_layout_preserves_runtime_join(self, ascend_backend):
+        @pl.program
+        class Branch:
+            @pl.function(type=pl.FunctionType.InCore)
+            def reduce_or_add(
+                self,
+                flag: pl.Scalar[pl.BOOL],
+                x: pl.Tensor[[32, 32], pl.FP16],
+                y: pl.Tensor[[32, 1], pl.FP16],
+                z: pl.Tensor[[32, 1], pl.FP16],
+                out: pl.Out[pl.Tensor[[32, 1], pl.FP16]],
+            ) -> pl.Tensor[[32, 1], pl.FP16]:
+                tx = pl.load(x, [0, 0], [32, 32], target_memory=pl.Mem.Vec)
+                ty = pl.load(y, [0, 0], [32, 1], target_memory=pl.Mem.Vec)
+                tz = pl.load(z, [0, 0], [32, 1], target_memory=pl.Mem.Vec)
+                if flag:
+                    tmp = pl.tile.create([32, 32], dtype=pl.FP16, target_memory=pl.Mem.Vec)
+                    joined = pl.tile.row_max(tx, tmp)
+                else:
+                    joined = pl.tile.add(ty, tz)
+                out = pl.store(joined, [0, 0], out)
+                return out
+
+        prefix = passes.PassPipeline()
+        for pass_obj in ir.PassManager.get_strategy(ir.OptimizationStrategy.AutoLayout).passes:
+            prefix.add_pass(pass_obj)
+            if pass_obj.get_name() == "AutoLayout":
+                break
+        result = prefix.run(Branch)
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.TypeChecked,
+            passes.IRProperty.UseAfterDef,
+            passes.IRProperty.AssignTypeSymmetry,
+        ):
+            properties.insert(prop)
+        passes.verify_properties(properties, result, "AutoLayout")
+        printed = ir.python_print(result)
+        assert "if " in printed and "tile.row_max" in printed and "tile.add" in printed
+        assert "tile.store" in printed
 
     def test_pass_manager_rejects_unknown_strategy(self):
         """An unsupported strategy value raises instead of silently running Default."""

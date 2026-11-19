@@ -18,6 +18,7 @@
 #include <nanobind/stl/vector.h>      // NOLINT(misc-include-cleaner) -- registers std::vector casters
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -26,6 +27,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
@@ -652,6 +654,14 @@ void BindPass(nb::module_& m) {
              "tile.extract absorbs the offset and reads the slice's source directly, and a\n"
              "tile.matmul operand is replaced by a tile.extract(target_memory=Left|Right).\n"
              "The dead tile.slice is then dropped, unifying Mat->Left/Right on pto.textract.");
+  passes.def(
+      "auto_layout",
+      []() {
+        pass::AutoLayoutOptions options;
+        options.fail_on_writeback_issues = true;
+        return pass::AutoLayout(std::move(options));
+      },
+      "Select GM and on-chip layouts with the native solver, requiring a writable assignment.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
   passes.def("insert_mx_scale_addr", &pass::InsertMxScaleAddr,

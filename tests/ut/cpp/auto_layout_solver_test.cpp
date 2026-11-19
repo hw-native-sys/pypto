@@ -514,30 +514,41 @@ void TestIfJoinAndClassFCrossLoopForbidden() {
   const auto RM = al::LayoutSpec::RowMajorFlat();
   const auto CM = al::LayoutSpec::ColMajorFlat();
 
-  // 1) control.if_join enforces zero conversion on branch inputs.
+  // 1) control.if_join forces both branches to match the join layout, inserting a
+  // realizable Vec branch-yield conversion only when direct matching costs more.
   al::LayoutProblemInstance join_inst;
   join_inst.AddValue(MakeValue("t_then", "P_then", MemorySpace::Vec, false, false, {RM, CM}));
   join_inst.AddValue(MakeValue("t_else", "P_else", MemorySpace::Vec, false, false, {RM, CM}));
   join_inst.AddValue(MakeValue("t_join", "J_if", MemorySpace::Vec, false, false, {RM, CM}));
   join_inst.AddValue(MakeValue("y_out", "Cons", MemorySpace::Vec, false, false, {RM}));
 
-  al::OperationNode p_then = MakeOp("P_then", {}, "t_then", {{{}, RM, 5.0}, {{}, CM, 1.0}});
-  al::OperationNode p_else = MakeOp("P_else", {}, "t_else", {{{}, RM, 1.0}, {{}, CM, 100.0}});
-  al::OperationNode j_if =
-      MakeOp("J_if", {"t_then", "t_else"}, "t_join", {{{RM, RM}, RM, 0.0}, {{CM, CM}, CM, 0.0}});
-  j_if.op_name = "control.if_join";
-  for (auto& c : j_if.configs) {
-    c.op_name = "control.if_join";
-  }
-  al::OperationNode cons = MakeOp("Cons", {"t_join"}, "y_out", {{{RM}, RM, 0.0}});
+  al::OperationNode p_then = MakeOp("P_then", {}, "t_then", {{{}, RM, 100.0}, {{}, CM, 1.0}}, 1, "tile.load");
+  al::OperationNode p_else = MakeOp("P_else", {}, "t_else", {{{}, RM, 1.0}, {{}, CM, 100.0}}, 1, "tile.load");
+  al::OperationNode j_if = MakeOp("J_if", {"t_then", "t_else"}, "t_join",
+                                  {{{RM, RM}, RM, 0.0}, {{CM, CM}, CM, 0.0}}, 1, "control.if_join");
+  al::OperationNode cons = MakeOp("Cons", {"t_join"}, "y_out", {{{RM}, RM, 0.0}}, 1, "tile.store");
   join_inst.operations = {p_then, p_else, j_if, cons};
 
   const auto join_dp = al::SolveTreewidthDP(join_inst);
   Require(join_dp.writeback_issues.empty(), "Valid if_join must have no conversion issues");
-  Require(join_dp.breakdown.assignment.op_configs.at("P_then").output_layout == RM,
-          "control.if_join must force then branch to match join RM");
+  Require(join_dp.breakdown.assignment.op_configs.at("P_then").output_layout == CM,
+          "then branch must keep CM and insert a branch-yield Vec conversion to RM");
   Require(join_dp.breakdown.assignment.op_configs.at("P_else").output_layout == RM,
-          "control.if_join must force else branch to match join RM");
+          "else branch must match join RM");
+  Require(join_dp.breakdown.assignment.op_configs.at("J_if").output_layout == RM,
+          "control.if_join output must match consumer RM");
+  Require(join_dp.conversions.size() == 1, "Expected exactly one branch-yield conversion for t_then");
+
+  // When a branch conversion into control.if_join is not cheaper than matching directly,
+  // the branch switches directly to the join layout with zero conversions.
+  al::LayoutProblemInstance direct_join_inst = join_inst;
+  direct_join_inst.operations[0] =
+      MakeOp("P_then", {}, "t_then", {{{}, RM, 1.5}, {{}, CM, 1.0}}, 1, "tile.load");
+  const auto direct_dp = al::SolveTreewidthDP(direct_join_inst);
+  Require(direct_dp.writeback_issues.empty(), "Direct-match if_join must have no conversion issues");
+  Require(direct_dp.breakdown.assignment.op_configs.at("P_then").output_layout == RM,
+          "Cheaper direct-match branch must switch to RM without conversion");
+  Require(direct_dp.conversions.empty(), "Direct-match if_join must emit zero conversions");
 
   // With disjoint branch domains the extractor records the original join as a
   // pinned baseline. It cannot be written as a zero-cost layout conversion.
@@ -551,7 +562,7 @@ void TestIfJoinAndClassFCrossLoopForbidden() {
               std::vector<std::string>{"Conditional join 'J_if' has incompatible branch layouts"},
           "An incompatible pinned join must prevent writeback");
 
-  // 2) Class F: on-chip value produced inside a loop and consumed once after the loop
+  // 2) Class F: on-chip value produced with invocations=1 and consumed with invocations=4
   // prefers conversion-free match without throwing.
   al::LayoutProblemInstance loop_mismatch;
   loop_mismatch.AddValue(MakeValue("v", "Prod", MemorySpace::Vec, false, false, {RM, CM}));
@@ -564,6 +575,24 @@ void TestIfJoinAndClassFCrossLoopForbidden() {
   Require(lm_res.writeback_issues.empty(), "Class F conversion-free config must succeed without issues");
   Require(lm_res.breakdown.assignment.op_configs.at("Prod").output_layout == RM,
           "Class F producer must match consumer layout");
+
+  // 3) Class F gain-cache/evaluator agreement under budget=1 when one consumer has incompatible
+  // invocations=1 and another has compatible invocations=2.
+  al::LayoutProblemInstance budget1_inst;
+  budget1_inst.AddValue(MakeValue("v", "prod", MemorySpace::Vec, false, false, {RM, CM}));
+  budget1_inst.AddValue(MakeValue("w1", "c1", MemorySpace::Vec, false, false, {RM, CM}));
+  budget1_inst.AddValue(MakeValue("w2", "c2", MemorySpace::Vec, false, false, {RM, CM}));
+  budget1_inst.operations = {
+      MakeOp("prod", {}, "v", {{{}, RM, 1.0}, {{}, CM, 1000.0}}, 2),
+      MakeOp("c1", {"v"}, "w1", {{{CM}, CM, 1.0}, {{RM}, RM, 500.0}}, 2),
+      MakeOp("c2", {"v"}, "w2", {{{RM}, RM, 1.0}, {{CM}, CM, 1.0}}, 1),
+  };
+  al::LayoutSolverConfig cfg_b1;
+  cfg_b1.max_treewidth = 0;
+  cfg_b1.max_evaluations = 1;
+  const auto b1_res = al::SolveAutoLayout(budget1_inst, std::nullopt, cfg_b1);
+  Require(std::isfinite(b1_res.TotalCostCycles()),
+          "Class F evaluator and gain cache must agree even at max_evaluations=1");
 }
 
 }  // namespace

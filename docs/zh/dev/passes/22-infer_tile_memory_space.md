@@ -285,6 +285,8 @@ tile *参数* 在阶段 1 起始处按函数类型分别处理：
 
 默认保留外部参数声明的布局。只有当调用方能按所选物理布局提供数据时，才应设置 `options.cost_model.allow_external_input_relayout`。边界打包由调用方负责。在 `options.reusable_tensors` 中标注权重可摊销打包成本。自动提升为 DN 仅适用于符合条件的内部缓冲区。要在写回前检查分配及其转换需求，可调用 `auto_layout::ExtractLayoutInstance` 和 `auto_layout::SolveAutoLayout`。
 
+在标准 PyPTO 编译器中，可通过 `ir.compile(program, strategy=...)` 或 `RunConfig(strategy=...)` 选择 `ir.OptimizationStrategy.AutoLayout`。该策略在内存推断之后运行原生布局选择并再次降低 NZ 布局，保留调用方缓冲区的既有布局。如果无法写回所选方案，编译会报错。可使用默认策略进行对照测试。
+
 初始化子模块后，可在仓库根目录构建并测试 C++ 库：
 
 ```bash

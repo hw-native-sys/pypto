@@ -672,6 +672,10 @@ def canonicalize_tile_slice() -> Pass:
     on ``tile.extract`` / ``pto.textract``.
     """
 
+def auto_layout() -> Pass:
+    """Select GM and on-chip layouts with the native solver, requiring a writable assignment."""
+    ...
+
 def infer_tile_memory_space() -> Pass:
     """Infer TileType memory spaces and safe stationary matmul residency.
 
@@ -1181,6 +1185,7 @@ __all__ = [
     "legalize_spmd_launches",
     "auto_tile_matmul_l0",
     "canonicalize_tile_slice",
+    "auto_layout",
     "infer_tile_memory_space",
     "insert_mx_scale_addr",
     "materialize_tensor_strides",

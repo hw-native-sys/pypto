@@ -105,6 +105,7 @@ class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
 
     Default = "Default"  # Full tensor-oriented PTO pipeline
+    AutoLayout = "AutoLayout"  # Default pipeline with native layout selection
 
 
 class PassDumpLevel(Enum):
@@ -164,7 +165,7 @@ class PassManager:
         analyze_auto_scopes_for_deps: bool,
     ) -> tuple[PassFactory, ...]:
         """Build the immutable pass-factory recipe for an optimization strategy."""
-        if strategy != OptimizationStrategy.Default:
+        if strategy not in (OptimizationStrategy.Default, OptimizationStrategy.AutoLayout):
             raise ValueError(f"Unsupported optimization strategy: {strategy!r}")
         tensor_prefix_passes: tuple[PassFactory, ...] = (
             passes.lower_graph_for_runtime,
@@ -193,6 +194,11 @@ class PassManager:
             passes.convert_tensor_to_tile_ops,
             passes.optimize_orch_tensors,
         )
+        layout_passes = (
+            (passes.auto_layout, passes.block_nz_tensor_views)
+            if strategy == OptimizationStrategy.AutoLayout
+            else ()
+        )
         tile_pto_passes: tuple[PassFactory, ...] = (
             passes.lower_composite_ops,
             passes.flatten_tile_nd_to_2d,
@@ -214,6 +220,7 @@ class PassManager:
             passes.auto_tile_matmul_l0,
             passes.canonicalize_tile_slice,
             passes.infer_tile_memory_space,
+            *layout_passes,
             passes.insert_mx_scale_addr,
             passes.resolve_backend_op_layouts,
             # Preserve explicit AIV regions and localize boundary valid extents.

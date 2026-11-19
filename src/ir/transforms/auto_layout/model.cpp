@@ -612,12 +612,18 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
   std::unordered_map<std::string, std::set<LayoutSpec>> consumer_layouts;
   std::unordered_map<std::string, std::unordered_map<LayoutSpec, std::set<int64_t>, LayoutSpecHash>>
       consumer_invocations;
-  std::unordered_map<std::string, std::set<LayoutSpec>> if_join_demands;
   std::unordered_map<std::string, OperatorConfig> resolved_configs;
   std::unordered_map<std::string, const OperationNode*> ops_by_id;
+  std::unordered_map<std::string, std::vector<const OperationNode*>> val_to_consumers;
   ops_by_id.reserve(instance.operations.size());
   for (const auto& op : instance.operations) {
     ops_by_id[op.op_id] = &op;
+    for (const auto& inp_name : op.inputs) {
+      auto& vec = val_to_consumers[inp_name];
+      if (vec.empty() || vec.back() != &op) {
+        vec.push_back(&op);
+      }
+    }
   }
 
   for (const auto& op : instance.operations) {
@@ -685,9 +691,6 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
       const LayoutSpec& req_layout = chosen_cfg->input_layouts[i];
       consumer_layouts[inp_name].insert(req_layout);
       consumer_invocations[inp_name][req_layout].insert(op.invocations);
-      if (op.op_name == "control.if_join") {
-        if_join_demands[inp_name].insert(req_layout);
-      }
     }
   }
 
@@ -702,7 +705,9 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
 
   std::unordered_map<std::string, double> per_value_conv;
   double conv_cost_total = 0.0;
-  for (const auto& [val_name, req_set] : consumer_layouts) {
+  for (const auto& entry : consumer_layouts) {
+    const std::string& val_name = entry.first;
+    const auto& req_set = entry.second;
     if (req_set.empty()) {
       continue;
     }
@@ -712,19 +717,122 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
     }
     auto prod_it = produced_layout.find(val_name);
     const LayoutSpec src_lay = prod_it != produced_layout.end() ? prod_it->second : val_node->current_layout;
-    std::vector<int64_t> conv_invs;
-    for (const auto& target : req_set) {
-      if (target != src_lay) {
-        const auto& inv_set = consumer_invocations[val_name][target];
-        conv_invs.insert(conv_invs.end(), inv_set.begin(), inv_set.end());
+    const bool is_onchip_produced =
+        val_node->memory_space != MemorySpace::DDR && val_node->producer_op_id.has_value();
+    int64_t prod_inv = 0;
+    std::vector<LayoutSpec> source_layouts;
+    if (val_node->producer_op_id.has_value()) {
+      const auto p_op_it = ops_by_id.find(*val_node->producer_op_id);
+      if (p_op_it == ops_by_id.end()) {
+        throw pypto::ValueError("Unknown producer_op_id '" + *val_node->producer_op_id + "' for value '" +
+                                val_node->name + "'");
+      }
+      if (is_onchip_produced) {
+        prod_inv = p_op_it->second->invocations;
+      }
+      for (const auto& cfg : p_op_it->second->configs) {
+        if (std::find(source_layouts.begin(), source_layouts.end(), cfg.output_layout) ==
+            source_layouts.end()) {
+          source_layouts.push_back(cfg.output_layout);
+        }
+      }
+    } else {
+      source_layouts.push_back(val_node->current_layout);
+    }
+
+    const auto cons_it = val_to_consumers.find(val_name);
+    const std::vector<const OperationNode*>* consumers =
+        cons_it != val_to_consumers.end() ? &cons_it->second : nullptr;
+
+    std::set<int64_t> compat_conv_invs_set;
+    std::set<int64_t> all_conv_invs_set;
+    std::set<LayoutSpec> incompatible_targets;
+    if (consumers != nullptr) {
+      for (const auto* cop : *consumers) {
+        const bool inv_compat = !is_onchip_produced || (cop->invocations >= prod_inv && prod_inv > 0 &&
+                                                        (cop->invocations % prod_inv) == 0);
+        for (const auto& cfg : cop->configs) {
+          bool any_diff = false;
+          for (size_t i = 0; i < cop->inputs.size(); ++i) {
+            if (cop->inputs[i] != val_name) {
+              continue;
+            }
+            const LayoutSpec& lay = cfg.input_layouts[i];
+            const bool diff_for_lay = std::any_of(source_layouts.begin(), source_layouts.end(),
+                                                  [&](const LayoutSpec& s) { return s != lay; });
+            if (diff_for_lay) {
+              any_diff = true;
+              if (!inv_compat) {
+                incompatible_targets.insert(lay);
+              }
+            }
+          }
+          if (any_diff) {
+            all_conv_invs_set.insert(cop->invocations);
+            if (inv_compat) {
+              compat_conv_invs_set.insert(cop->invocations);
+            }
+          }
+        }
       }
     }
-    const double multiplier = ConversionMultiplier(instance, *val_node, ops_by_id, conv_invs);
+    if (val_node->is_external_output && !model.allow_external_output_relayout) {
+      const LayoutSpec& b_lay = val_node->current_layout;
+      const bool diff_for_b = std::any_of(source_layouts.begin(), source_layouts.end(),
+                                          [&](const LayoutSpec& s) { return s != b_lay; });
+      if (diff_for_b) {
+        all_conv_invs_set.insert(model.expected_uses);
+        const bool b_compat = !is_onchip_produced || (model.expected_uses >= prod_inv && prod_inv > 0 &&
+                                                      (model.expected_uses % prod_inv) == 0);
+        if (b_compat) {
+          compat_conv_invs_set.insert(model.expected_uses);
+        } else {
+          incompatible_targets.insert(b_lay);
+        }
+      }
+    }
+
+    bool has_conversion_free_layout = false;
+    if (!incompatible_targets.empty()) {
+      for (const auto& s_lay : source_layouts) {
+        if (val_node->is_external_output && !model.allow_external_output_relayout &&
+            s_lay != val_node->current_layout) {
+          continue;
+        }
+        bool ok_all = true;
+        if (consumers != nullptr) {
+          for (const auto* cop : *consumers) {
+            const bool ok_cop =
+                std::any_of(cop->configs.begin(), cop->configs.end(), [&](const OperatorConfig& c) {
+                  for (size_t i = 0; i < cop->inputs.size(); ++i) {
+                    if (cop->inputs[i] == val_name && c.input_layouts[i] != s_lay) {
+                      return false;
+                    }
+                  }
+                  return true;
+                });
+            if (!ok_cop) {
+              ok_all = false;
+              break;
+            }
+          }
+        }
+        if (ok_all) {
+          has_conversion_free_layout = true;
+          break;
+        }
+      }
+    }
+
+    const std::set<int64_t>& selected_invs = (!incompatible_targets.empty() && has_conversion_free_layout)
+                                                 ? compat_conv_invs_set
+                                                 : all_conv_invs_set;
+    const std::vector<int64_t> invs_for_mult(selected_invs.begin(), selected_invs.end());
+    const double multiplier = ConversionMultiplier(instance, *val_node, ops_by_id, invs_for_mult);
     double val_conv = 0.0;
-    const auto ij_it = if_join_demands.find(val_name);
     for (const auto& dst_lay : req_set) {
       if (dst_lay != src_lay) {
-        if (ij_it != if_join_demands.end() && ij_it->second.count(dst_lay) != 0) {
+        if (incompatible_targets.count(dst_lay) != 0) {
           val_conv += model.vec_unsupported_conversion_cycles;
         } else {
           val_conv += multiplier * instance.EstimateConversionCost(*val_node, src_lay, dst_lay);

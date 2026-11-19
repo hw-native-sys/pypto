@@ -48,7 +48,7 @@ Pass AutoLayout(AutoLayoutOptions options) {
         } else {
           result = auto_layout::SolveAutoLayout(instance, std::nullopt, solver_cfg);
         }
-        if (!result.writeback_issues.empty()) {
+        if (!opts.fail_on_writeback_issues && !result.writeback_issues.empty()) {
           return program;
         }
         return auto_layout::ApplyLayoutAssignment(program, result.WritebackAssignment());

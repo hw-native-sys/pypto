@@ -698,7 +698,7 @@ class LayoutAssignmentWriter : public IRMutator {
       res.new_condition = VisitExpr(condition);
     }
 
-    yield_frames_.push_back({std::move(loop_vec_lays), {}});
+    yield_frames_.push_back({std::move(loop_vec_lays), {}, /*is_if_branch=*/false});
     try {
       res.new_body = VisitStmt(body);
     } catch (...) {
@@ -798,7 +798,33 @@ class LayoutAssignmentWriter : public IRMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     ExprPtr new_cond = VisitExpr(op->condition_);
 
-    yield_frames_.emplace_back();
+    std::vector<std::optional<LayoutSpec>> then_expected(op->return_vars_.size());
+    std::vector<std::optional<LayoutSpec>> else_expected(op->return_vars_.size());
+    auto ij_it = if_join_cfgs_.find(op.get());
+    for (size_t idx = 0; idx < op->return_vars_.size(); ++idx) {
+      const VarPtr& rv = op->return_vars_[idx];
+      if (!IsVecTileType(rv->GetType())) {
+        continue;
+      }
+      if (ij_it != if_join_cfgs_.end()) {
+        auto cfg_it = ij_it->second.find(idx);
+        if (cfg_it != ij_it->second.end()) {
+          if (cfg_it->second.input_layouts.size() >= 1 && cfg_it->second.input_layouts[0].IsTile()) {
+            then_expected[idx] = cfg_it->second.input_layouts[0];
+          }
+          if (cfg_it->second.input_layouts.size() >= 2 && cfg_it->second.input_layouts[1].IsTile()) {
+            else_expected[idx] = cfg_it->second.input_layouts[1];
+          }
+          continue;
+        }
+      }
+      if (auto prod_it = vec_prod_lay_.find(rv.get()); prod_it != vec_prod_lay_.end()) {
+        then_expected[idx] = prod_it->second;
+        else_expected[idx] = prod_it->second;
+      }
+    }
+
+    yield_frames_.push_back({std::move(then_expected), {}, /*is_if_branch=*/true});
     StmtPtr new_then;
     try {
       new_then = VisitStmt(op->then_body_);
@@ -812,7 +838,7 @@ class LayoutAssignmentWriter : public IRMutator {
     std::optional<StmtPtr> new_else = op->else_body_;
     std::vector<TypePtr> else_types;
     if (op->else_body_.has_value() && *op->else_body_) {
-      yield_frames_.emplace_back();
+      yield_frames_.push_back({std::move(else_expected), {}, /*is_if_branch=*/true});
       StmtPtr visited_else;
       try {
         visited_else = VisitStmt(*op->else_body_);
@@ -861,6 +887,7 @@ class LayoutAssignmentWriter : public IRMutator {
   StmtPtr VisitStmt_(const YieldStmtPtr& op) override {
     const std::vector<std::optional<LayoutSpec>> expected_lays =
         yield_frames_.empty() ? std::vector<std::optional<LayoutSpec>>{} : yield_frames_.back().loop_expected;
+    const bool is_if_branch = !yield_frames_.empty() && yield_frames_.back().is_if_branch;
     std::vector<ExprPtr> new_vals;
     new_vals.reserve(op->value_.size());
     std::vector<StmtPtr> extra_stmts;
@@ -870,6 +897,14 @@ class LayoutAssignmentWriter : public IRMutator {
       std::optional<LayoutSpec> target_lay = idx < expected_lays.size() ? expected_lays[idx] : std::nullopt;
       if (target_lay.has_value()) {
         if (auto val_var = AsVarLike(val)) {
+          if (auto conv_it = vec_conv_vars_.find({val_var.get(), *target_lay});
+              conv_it != vec_conv_vars_.end()) {
+            new_vals.push_back(conv_it->second);
+            if (conv_it->second.get() != val_var.get()) {
+              changed = true;
+            }
+            continue;
+          }
           auto prod_it = vec_prod_lay_.find(val_var.get());
           auto shape_it = orig_tile_shapes_.find(val_var.get());
           if (prod_it != vec_prod_lay_.end() && prod_it->second != *target_lay &&
@@ -878,6 +913,11 @@ class LayoutAssignmentWriter : public IRMutator {
             VarPtr cur_var = remap_it != local_var_remap_.end() ? remap_it->second : val_var;
             auto [conv_var, conv_stmts] = EmitVecConversion(val_var.get(), cur_var, prod_it->second,
                                                             *target_lay, shape_it->second, op->span_);
+            if (is_if_branch && !conv_stmts.empty()) {
+              // Keep branch-local conversion Var scoped to this branch so a sibling branch cannot
+              // accidentally reuse a non-dominating SSA Var from `vec_conv_vars_`.
+              vec_conv_vars_.erase({val_var.get(), *target_lay});
+            }
             extra_stmts.insert(extra_stmts.end(), std::make_move_iterator(conv_stmts.begin()),
                                std::make_move_iterator(conv_stmts.end()));
             new_vals.push_back(std::move(conv_var));
@@ -892,7 +932,7 @@ class LayoutAssignmentWriter : public IRMutator {
       }
       new_vals.push_back(std::move(visited));
     }
-    if (!yield_frames_.empty() && yield_frames_.back().loop_expected.empty()) {
+    if (!yield_frames_.empty() && (is_if_branch || yield_frames_.back().loop_expected.empty())) {
       auto& types = yield_frames_.back().branch_yield_types;
       types.clear();
       types.reserve(new_vals.size());
@@ -1353,6 +1393,12 @@ class LayoutAssignmentWriter : public IRMutator {
     };
     std::vector<Entry> matched;
     for (const auto& [op_id, cfg] : op_configs_) {
+      if (cfg.op_name == kOpTileTransposeView) {
+        continue;
+      }
+      if (cfg.op_name.rfind("tile.", 0) != 0 && cfg.op_name != "control.if_join") {
+        continue;
+      }
       if (auto cnt = ParseOpIdCounter(op_id, prefix)) {
         matched.push_back({*cnt, op_id, cfg});
       }
@@ -1368,6 +1414,7 @@ class LayoutAssignmentWriter : public IRMutator {
 
   void ClearPrescanState() {
     assign_op_cfg_.clear();
+    if_join_cfgs_.clear();
     eval_store_cfgs_.clear();
     vec_prod_lay_.clear();
     vec_demanded_.clear();
@@ -1564,19 +1611,26 @@ class LayoutAssignmentWriter : public IRMutator {
     return OperatorConfig{"fallback", op_name, std::move(in_lays), out_lay, 0.0};
   }
 
-  void RecordVecDemand(const VarPtr& tile_var, const LayoutSpec& req_lay) {
-    if (!req_lay.IsTile() || !IsVecTileType(tile_var->GetType())) {
+  void RecordVecDemandRaw(const Var* tile_var, const LayoutSpec& req_lay) {
+    if (tile_var == nullptr || !req_lay.IsTile()) {
       return;
     }
-    auto prod_it = vec_prod_lay_.find(tile_var.get());
+    auto prod_it = vec_prod_lay_.find(tile_var);
     if (prod_it == vec_prod_lay_.end() || prod_it->second == req_lay ||
         prod_it->second == LayoutSpec::FractalNZ() || req_lay == LayoutSpec::FractalNZ()) {
       return;
     }
-    auto& demanded = vec_demanded_[tile_var.get()];
+    auto& demanded = vec_demanded_[tile_var];
     if (std::find(demanded.begin(), demanded.end(), req_lay) == demanded.end()) {
       demanded.push_back(req_lay);
     }
+  }
+
+  void RecordVecDemand(const VarPtr& tile_var, const LayoutSpec& req_lay) {
+    if (!IsVecTileType(tile_var->GetType())) {
+      return;
+    }
+    RecordVecDemandRaw(tile_var.get(), req_lay);
   }
 
   void RecordPrescanCallOutputs(const StmtPtr& stmt, const std::string& op_name, const VarPtr& lhs_var,
@@ -1821,26 +1875,57 @@ class LayoutAssignmentWriter : public IRMutator {
           yield_stacks.pop_back();
         }
         for (size_t idx = 0; idx < ifs->return_vars_.size(); ++idx) {
+          const VarPtr& rv = ifs->return_vars_[idx];
           const Var* tv = idx < then_y.size() ? then_y[idx] : nullptr;
           const Var* ev = idx < else_y.size() ? else_y[idx] : nullptr;
+          std::optional<OperatorConfig> join_cfg = pop_cfg("control.if_join", rv->name_hint_);
+          if (join_cfg.has_value()) {
+            if_join_cfgs_[ifs.get()][idx] = *join_cfg;
+            if (IsVecTileType(rv->GetType()) && join_cfg->output_layout.IsTile()) {
+              if (auto rt = As<TileType>(rv->GetType())) {
+                if (auto shape = detail::StaticShape(rt->shape_)) {
+                  orig_tile_shapes_[rv.get()] = *shape;
+                }
+              }
+              vec_prod_lay_.insert_or_assign(rv.get(), join_cfg->output_layout);
+              if (tv != nullptr && join_cfg->input_layouts.size() >= 1) {
+                RecordVecDemandRaw(tv, join_cfg->input_layouts[0]);
+              }
+              if (ev != nullptr && join_cfg->input_layouts.size() >= 2) {
+                RecordVecDemandRaw(ev, join_cfg->input_layouts[1]);
+              }
+            } else if (AsTensorTypeLike(rv->GetType()) && join_cfg->output_layout.IsTensor()) {
+              var_tensor_lays[rv.get()] = join_cfg->output_layout.tensor_layout;
+            }
+            continue;
+          }
           if (tv != nullptr && ev != nullptr) {
-            if (AsTensorTypeLike(ifs->return_vars_[idx]->GetType())) {
+            if (AsTensorTypeLike(rv->GetType())) {
               auto it_t = var_tensor_lays.find(tv);
               auto it_e = var_tensor_lays.find(ev);
               if (it_t != var_tensor_lays.end() && it_e != var_tensor_lays.end() &&
                   it_t->second == it_e->second) {
-                var_tensor_lays[ifs->return_vars_[idx].get()] = it_t->second;
+                var_tensor_lays[rv.get()] = it_t->second;
               }
-            } else if (As<TileType>(ifs->return_vars_[idx]->GetType())) {
+            } else if (As<TileType>(rv->GetType())) {
               auto it_t = vec_prod_lay_.find(tv);
               auto it_e = vec_prod_lay_.find(ev);
               if (it_t != vec_prod_lay_.end() && it_e != vec_prod_lay_.end() &&
                   it_t->second == it_e->second) {
-                AliasVarPrescanInfo(ifs->return_vars_[idx], tv, var_tensor_lays);
+                AliasVarPrescanInfo(rv, tv, var_tensor_lays);
+              } else if (!has_op_configs && IsVecTileType(rv->GetType())) {
+                auto rt = As<TileType>(rv->GetType());
+                LayoutSpec fallback_lay = LookupTileDesc(rv->name_hint_).value_or(EffectiveTileLayout(rt));
+                if (auto shape = detail::StaticShape(rt->shape_)) {
+                  orig_tile_shapes_[rv.get()] = *shape;
+                }
+                vec_prod_lay_.insert_or_assign(rv.get(), fallback_lay);
+                RecordVecDemandRaw(tv, fallback_lay);
+                RecordVecDemandRaw(ev, fallback_lay);
               }
             }
           } else if (tv != nullptr && else_y.empty()) {
-            AliasVarPrescanInfo(ifs->return_vars_[idx], tv, var_tensor_lays);
+            AliasVarPrescanInfo(rv, tv, var_tensor_lays);
           }
         }
         return;
@@ -2491,6 +2576,7 @@ class LayoutAssignmentWriter : public IRMutator {
 
   // Per-function prescan state.
   std::unordered_map<const Var*, OperatorConfig> assign_op_cfg_;
+  std::unordered_map<const IfStmt*, std::unordered_map<size_t, OperatorConfig>> if_join_cfgs_;
   std::deque<OperatorConfig> eval_store_cfgs_;
   std::unordered_map<const Var*, LayoutSpec> vec_prod_lay_;
   std::unordered_map<const Var*, std::vector<LayoutSpec>> vec_demanded_;
@@ -2502,6 +2588,7 @@ class LayoutAssignmentWriter : public IRMutator {
   struct YieldFrame {
     std::vector<std::optional<LayoutSpec>> loop_expected;
     std::vector<TypePtr> branch_yield_types;
+    bool is_if_branch = false;
   };
   std::vector<YieldFrame> yield_frames_;
 };

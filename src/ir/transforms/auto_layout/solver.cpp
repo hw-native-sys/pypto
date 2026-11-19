@@ -396,15 +396,20 @@ std::pair<std::vector<LayoutConversion>, std::vector<std::string>> BuildConversi
       conversions.push_back(
           LayoutConversion{v_info.name, src_spec, dst_spec, conv_cost, consumer_op_ids, boundary});
       if (!boundary) {
-        const bool producer_ok =
-            !v_info.producer_op.has_value() || StartsWithTile(problem.Ops()[*v_info.producer_op].op_name);
+        const std::string& prod_op_name =
+            v_info.producer_op.has_value() ? problem.Ops()[*v_info.producer_op].op_name : std::string();
+        const bool producer_ok = !v_info.producer_op.has_value() || StartsWithTile(prod_op_name) ||
+                                 prod_op_name == "control.if_join";
         const bool consumers_ok =
-            std::all_of(consumer_indices.begin(), consumer_indices.end(),
-                        [&](OpId idx) { return StartsWithTile(problem.Ops()[idx].op_name); });
+            std::all_of(consumer_indices.begin(), consumer_indices.end(), [&](OpId idx) {
+              const std::string& cname = problem.Ops()[idx].op_name;
+              return StartsWithTile(cname) || cname == "control.if_join";
+            });
+        const bool compat_invs = (v_info.incompatible_target_mask & (uint64_t{1} << dst_idx)) == 0;
         const bool realizable_vec =
             node->memory_space == MemorySpace::Vec &&
             instance.cost_model.SupportsVecTileConversion(*node, src_spec, dst_spec) && producer_ok &&
-            consumers_ok;
+            consumers_ok && compat_invs;
         if (!realizable_vec) {
           issues.push_back("Value '" + v_info.name + "' needs an internal conversion " +
                            src_spec.ShortName() + " -> " + dst_spec.ShortName());
@@ -1345,7 +1350,6 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
     std::set<int64_t> conv_invs_set;
     std::set<int64_t> compat_conv_invs_set;
     std::vector<uint16_t> target_indices;
-    uint64_t if_join_target_mask = 0;
     uint64_t incompatible_target_mask = 0;
     auto add_target = [&](uint16_t idx) {
       if (std::find(target_indices.begin(), target_indices.end(), idx) == target_indices.end()) {
@@ -1358,7 +1362,6 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
 
     for (OpId p : v_info.participants) {
       const OpInfo& op_info = ops_[p];
-      const bool is_if_join = (op_info.op_name == "control.if_join");
       const bool inv_compat = !is_onchip_produced || (op_info.invocations >= prod_inv && prod_inv > 0 &&
                                                       (op_info.invocations % prod_inv) == 0);
       for (const auto& uses_vec : op_info.config_uses) {
@@ -1369,9 +1372,6 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
           bool any_diff = false;
           for (const auto& [lay_idx, _] : use.layout_counts) {
             add_target(lay_idx);
-            if (is_if_join) {
-              if_join_target_mask |= (uint64_t{1} << lay_idx);
-            }
             bool diff_for_lay = false;
             for (uint16_t src_idx : source_indices) {
               if (src_idx != lay_idx) {
@@ -1454,6 +1454,8 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
       }
     }
 
+    v_info.incompatible_target_mask = incompatible_target_mask;
+
     const std::vector<int64_t> conv_invs =
         (incompatible_target_mask != 0 && has_conversion_free_layout)
             ? std::vector<int64_t>(compat_conv_invs_set.begin(), compat_conv_invs_set.end())
@@ -1466,7 +1468,7 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
           continue;
         }
         const uint64_t dst_bit = uint64_t{1} << dst_idx;
-        if ((if_join_target_mask & dst_bit) != 0 || (incompatible_target_mask & dst_bit) != 0) {
+        if ((incompatible_target_mask & dst_bit) != 0) {
           v_info.conv_costs[static_cast<size_t>(src_idx) * num_layouts + dst_idx] =
               instance_.cost_model.vec_unsupported_conversion_cycles;
           continue;
