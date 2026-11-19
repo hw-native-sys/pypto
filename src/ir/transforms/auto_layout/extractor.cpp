@@ -2068,6 +2068,18 @@ class PostInferInstanceExtractor {
     return candidates;
   }
 
+  // Distinct SSA definitions can share a name hint, including a generated suffix.
+  // A scratch allocation defines a value without advancing the operation counter.
+  std::string FreshValueName(const std::string& hint) {
+    if (instance_.FindValue(hint) == nullptr) return hint;
+    const std::string base = hint + "_" + std::to_string(op_counter_);
+    std::string candidate = base;
+    while (instance_.FindValue(candidate) != nullptr) {
+      candidate = base + "_" + std::to_string(next_value_suffix_++);
+    }
+    return candidate;
+  }
+
   const ValueNode* RegisterTileVar(const VarPtr& var, const std::optional<std::string>& producer_op_id,
                                    const std::vector<std::string>& op_inputs = {},
                                    bool is_strided_subview = false) {
@@ -2078,17 +2090,9 @@ class PostInferInstanceExtractor {
     for (const auto& inp : op_inputs) {
       consumed_values_.insert(inp);
     }
-    const std::string base_name = CleanName(var->name_hint_);
-    std::string name = tile_prefix_.empty() ? base_name : (tile_prefix_ + base_name);
-    if (const ValueNode* existing = instance_.FindValue(name);
-        existing != nullptr && (existing->producer_op_id.has_value() || !producer_op_id.has_value() ||
-                                consumed_values_.count(name) != 0)) {
-      const std::string raw_name = tile_prefix_.empty() ? var->name_hint_ : (tile_prefix_ + var->name_hint_);
-      if (instance_.FindValue(raw_name) == nullptr && consumed_values_.count(raw_name) == 0) {
-        name = raw_name;
-      } else {
-        name = raw_name + "_" + std::to_string(op_counter_);
-      }
+    std::string name = tile_prefix_ + CleanName(var->name_hint_);
+    if (instance_.FindValue(name) != nullptr) {
+      name = FreshValueName(tile_prefix_ + var->name_hint_);
     }
     var_to_name_[var.get()] = name;
     const MemorySpace space = tile_type->GetMemorySpace().value_or(MemorySpace::Vec);
@@ -2379,7 +2383,7 @@ class PostInferInstanceExtractor {
 
     if (is_additional_store) {
       consumed_values_.insert(dst_name);
-      const std::string sink_name = tile_name + "_stored_" + std::to_string(op_counter_);
+      const std::string sink_name = FreshValueName(tile_name + "_stored_" + std::to_string(op_counter_));
       ValueNode sink;
       sink.name = sink_name;
       sink.shape = src_node.shape;
@@ -2895,9 +2899,7 @@ class PostInferInstanceExtractor {
             if (!shape.empty()) {
               std::string r_name = tile_prefix_ + CleanName(rv->name_hint_);
               if (r_name.empty()) r_name = "if_join_val";
-              if (instance_.FindValue(r_name) != nullptr) {
-                r_name = r_name + "_" + std::to_string(op_counter_);
-              }
+              r_name = FreshValueName(r_name);
               var_to_name_[rv.get()] = r_name;
               consumed_values_.insert(then_name);
               consumed_values_.insert(else_name);
@@ -2997,6 +2999,7 @@ class PostInferInstanceExtractor {
   LayoutProblemInstance& instance_;
   std::unordered_set<std::string>& consumed_values_;
   size_t& op_counter_;
+  size_t next_value_suffix_ = 0;
   std::string tile_prefix_;
   int64_t loop_multiplier_;
   std::vector<std::optional<std::string>> param_overrides_;

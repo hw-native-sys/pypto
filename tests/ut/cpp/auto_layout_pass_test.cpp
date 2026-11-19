@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "pypto/backend/common/backend_config.h"
@@ -27,6 +28,46 @@ namespace al = ir::auto_layout;
 using pypto::DataType;
 
 namespace {
+
+void TestDistinctTileDefinitionsWithRepeatedHints() {
+  const auto span = ir::Span::unknown();
+  const auto width = std::make_shared<ir::ConstInt>(16, DataType::INDEX, span);
+  const auto shape = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{width, width}, span);
+  const auto& registry = ir::OpRegistry::GetInstance();
+  std::vector<ir::StmtPtr> stmts;
+  auto bind = [&](const std::string& hint, const ir::CallPtr& call) {
+    auto var = std::make_shared<ir::Var>(hint, call->GetType(), span);
+    stmts.push_back(std::make_shared<ir::AssignStmt>(var, call, span));
+    return var;
+  };
+  auto full = [&]() {
+    auto fill = std::make_shared<ir::ConstInt>(1, DataType::INT32, span);
+    return registry.Create("tile.full", {shape, fill}, {{"dtype", DataType::INT32}}, span);
+  };
+  bind("t_3", full());  // User-provided hints can also look like generated names.
+  auto first = bind("t", full());
+  auto second = bind("t", full());
+  for (int i = 0; i < 2; ++i) {
+    bind("t", registry.Create("tile.create", {shape},
+                              {{"dtype", DataType::INT32}, {"target_memory", ir::MemorySpace::Vec}}, span));
+  }
+  bind("sum", registry.Create("tile.add", {first, second}, {}, span));
+  stmts.push_back(std::make_shared<ir::ReturnStmt>(span));
+  auto func = std::make_shared<ir::Function>("repeated_hints", std::vector<ir::VarPtr>{},
+                                             std::vector<ir::ParamDirection>{}, std::vector<ir::TypePtr>{},
+                                             std::make_shared<ir::SeqStmts>(stmts, span), span,
+                                             ir::FunctionType::InCore);
+  auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{func}, "test", span);
+  const auto instance = al::ExtractLayoutInstance(program);
+  assert(instance.values.size() == 6);
+  assert(instance.operations.size() == 4);
+  for (const auto& op : instance.operations) {
+    assert(instance.values.at(op.output).producer_op_id == op.op_id);
+  }
+  const auto& inputs = instance.operations.back().inputs;
+  assert((inputs == std::vector<std::string>{instance.operations[1].output, instance.operations[2].output}));
+  assert(instance.operations[1].output != instance.operations[2].output);
+}
 
 void TestVecConversionPressure() {
   const auto span = ir::Span::unknown();
@@ -186,6 +227,7 @@ int main() {
   assert(al::detail::TensorTypeLayout(weight_type(rewritten)) == ir::TensorLayout::NZ);
   const auto blocked = ir::pass::BlockNzTensorViews()(rewritten);
   assert(weight_type(blocked)->shape_.size() == 5);
+  TestDistinctTileDefinitionsWithRepeatedHints();
   TestVecConversionPressure();
   TestSubviewStore(true);
   TestSubviewStore(false);
