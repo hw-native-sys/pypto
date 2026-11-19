@@ -813,13 +813,22 @@ std::vector<std::optional<size_t>> TraceIndexedExprsToParamIndices(
   result.reserve(exprs.size());
   LineageMemo memo;
   memo.formal_param_count = formal_param_count;
+  // Multiple exits may return the same immutable types. Reuse their
+  // validation within this batch instead of rebuilding the type projection.
+  std::unordered_map<TypePtr, std::unordered_map<TypePtr, bool>> type_matches;
+  const auto matches_root_type = [&](const TypePtr& returned, const TypePtr& root) {
+    if (!returned) return false;
+    if (returned == root) return true;
+    const auto [entry, inserted] = type_matches[returned].try_emplace(root, false);
+    if (inserted) entry->second = structural_equal(returned, root);
+    return entry->second;
+  };
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
     if (expr) {
       auto lineage = TraceExpr(expr, index, param_indices, program, memo);
-      if (lineage.root &&
-          (!AsTensorTypeLike(expr->GetType()) ||
-           (lineage.returned_type && structural_equal(lineage.returned_type, lineage.root->GetType())))) {
+      if (lineage.root && (!AsTensorTypeLike(expr->GetType()) ||
+                           matches_root_type(lineage.returned_type, lineage.root->GetType()))) {
         auto param_it = param_indices.find(lineage.root);
         if (param_it != param_indices.end()) idx = param_it->second;
       }
