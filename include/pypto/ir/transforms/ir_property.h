@@ -120,11 +120,11 @@ enum class IRProperty : uint64_t {
                                     ///< store pipe can combine (BackendHandler::SupportsBf16AtomicAdd).
                                     ///< Decidable on the user's own IR, so it is a structural property
                                     ///< verified at pipeline input
-  AccCompactValid,                  ///< Every tile.matmul_acc / tile.matmul_mx_acc whose lhs valid rows
-                                    ///< make mad's pitch differ from the accumulator's physical row
-                                    ///< count accumulates into a CompactMode::normal buffer, and no tile
-                                    ///< outside the fractal spaces (Left/Right/Acc) carries a compact
-                                    ///< mode at all. `mad` lays L0C out at ceil(validRow/16)*16 taken
+  AccCompactValid,                  ///< Every tile.matmul_acc, tile.matmul_mx_acc, or tile.gemv_mx_acc
+                                    ///< whose lhs valid rows make mad's pitch differ from the
+                                    ///< accumulator's physical row count uses a CompactMode::normal
+                                    ///< buffer, and only the fractal spaces (Left/Right/Acc) carry
+                                    ///< a compact mode. `mad` lays L0C out at ceil(validRow/16)*16 taken
                                     ///< from the L0A operand, and only a compact tile makes a reader
                                     ///< recompute that pitch instead of using the physical row count.
                                     ///< Verifiable once InferTileMemorySpace has resolved memory spaces

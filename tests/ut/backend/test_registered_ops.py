@@ -43,6 +43,9 @@ def test_backend_inventory_preserves_architecture_exclusions():
     mx_ops = {
         ir.get_op(name).name
         for name in (
+            "tile.gemv_mx",
+            "tile.gemv_mx_acc",
+            "tile.gemv_mx_bias",
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
             "tile.matmul_mx_bias",

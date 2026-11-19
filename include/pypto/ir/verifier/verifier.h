@@ -134,10 +134,10 @@ std::string DescribeFixpipePreQuantTargets(const backend::BackendHandler& handle
 /**
  * @brief Factory for the Acc compact-mode property verifier
  *
- * Checks that every ``tile.matmul_acc`` / ``tile.matmul_mx_acc`` accumulates
- * into a compact buffer whenever ``mad``'s pitch differs from the accumulator's
- * physical row count, and that no tile outside Left/Right/Acc carries a compact
- * mode.
+ * Checks that ``tile.matmul_acc``, ``tile.matmul_mx_acc``, and ``tile.gemv_mx_acc``
+ * accumulate into a compact buffer whenever ``mad``'s pitch differs from the
+ * accumulator's physical row count, and that no tile outside Left/Right/Acc
+ * carries a compact mode.
  *
  * @return Shared pointer to AccCompactValid PropertyVerifier
  */

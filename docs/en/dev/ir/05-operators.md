@@ -515,6 +515,37 @@ quantization alignment and memory-planner requirements.
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
 | Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md). |
 
+### Tile-only MX GEMV (Ascend950)
+
+`pl.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)` computes a single-row
+block-scaled product. `gemv_mx_acc(acc, ...)` accumulates in place, while
+`gemv_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias)` initializes with FP32 bias.
+All three lower to the corresponding `pto.tgemv.mx` operations on A5.
+
+The lhs has one physical and valid row. The result uses physical `[1, N]`
+and valid `[1, valid_N]` shapes. FP8 operands independently accept
+FP8E4M3FN or FP8E5M2. Native packed FP4 operands independently accept
+E2M1 and E1M2. FP4 row vectors keep their packed pairs along K even in
+L0A. Physical N is a multiple of 32
+(FP4: 64). FP8E8M0 scales use `[1, ceil(valid_K/32)]` and
+`[ceil(valid_K/32), physical_N]`, with RHS valid columns matching valid N.
+Single-row lhs scales use contiguous ND in GM for FP8 and `MX_A_ND` for FP4. Scale addresses are
+bound automatically before scale fills. Bias uses physical
+`[1, N]` and matching valid N. The accumulator must match the product's
+physical and valid shapes, FP32 dtype, and `compact=normal`. GEMV results also carry this mode
+so L0C readers use MAD's 16-row fractal pitch despite the single-row descriptor.
+`tile.move` from a single-row Mat tile to Left requires a 512-byte-aligned
+physical width. For packed FP4, `tile.extract` and `tile.slice` preserve the
+source's packing axis, so a carrier row containing two logical M values cannot
+be used as a K-packed Left row vector. `tile.transpose_view` also requires both
+its source and result to lie outside the packed FP4 Left row-vector case.
+Physical K is a multiple of 512 for FP8 or 1024 for FP4. FP8 requires static
+valid K equal to physical K and one data/scale binding per side in a
+straight-line region. FP4 allows narrower valid K. PTOAS 0.74's single-row
+`MX_A_ND` load supports two scale groups. Larger GM scale transfers remain
+subject to downstream load support. Base and accumulating calls accept
+`acc_phase`, and a Final producer requires a matching Final store.
+
 ### Tile-only GEMV family (A2/A3)
 
 The tile-only GEMV family uses logical shape `[1, N]` but follows the Cube

@@ -681,13 +681,13 @@ def infer_tile_memory_space() -> Pass:
     """
 
 def insert_mx_scale_addr() -> Pass:
-    """Insert ``tile.tget_scale_addr`` before MX matmul consumers.
+    """Insert ``tile.tget_scale_addr`` before MX matmul and MX GEMV consumers.
 
     Requires ``infer_tile_memory_space`` first so Left/LeftScale and
-    Right/RightScale pairs are resolved. Rewrites each ``matmul_mx`` family
-    call to consume the bound scale SSA. Bindings are never reused across MX
-    consumers because ``tget_scale_addr`` mutates a shared physical scale
-    buffer whose aliases are not represented by SSA identity.
+    Right/RightScale pairs are resolved. Rewrites the base, accumulation, and
+    bias variants of ``tile.matmul_mx`` and ``tile.gemv_mx`` to consume the bound
+    scale SSA values. A straight-line consumer can reuse the latest same-side
+    binding if both operands are unchanged and no invalidating operation intervenes.
     """
 
 def materialize_tensor_strides() -> Pass:

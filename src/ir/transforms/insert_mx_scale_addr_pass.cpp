@@ -157,10 +157,13 @@ class MxScaleAddrInserter : public IRMutator {
 
   std::optional<Binding> left_binding_;
   std::optional<Binding> right_binding_;
+  // Pair invalidation drops the binding but does not undo its earlier use.
+  bool mx_consumed_ = false;
 
   void ClearBindings() {
     left_binding_.reset();
     right_binding_.reset();
+    mx_consumed_ = false;
   }
 
   void InvalidateBinding(const TypePtr& type) {
@@ -172,10 +175,11 @@ class MxScaleAddrInserter : public IRMutator {
   }
 
   static std::vector<std::pair<size_t, size_t>> GetDataScalePairs(const CallPtr& call) {
-    if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias")) {
+    if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias") || IsOp(call, "tile.gemv_mx") ||
+        IsOp(call, "tile.gemv_mx_bias")) {
       return {{0, 1}, {2, 3}};
     }
-    if (IsOp(call, "tile.matmul_mx_acc")) {
+    if (IsOp(call, "tile.matmul_mx_acc") || IsOp(call, "tile.gemv_mx_acc")) {
       return {{1, 2}, {3, 4}};
     }
     return {};
@@ -195,6 +199,8 @@ class MxScaleAddrInserter : public IRMutator {
                                     const CallPtr& call, bool& changed) {
     const auto pairs = GetDataScalePairs(call);
     if (pairs.empty()) return assign;
+    const bool is_gemv =
+        IsOp(call, "tile.gemv_mx") || IsOp(call, "tile.gemv_mx_acc") || IsOp(call, "tile.gemv_mx_bias");
 
     if (backend::BackendConfig::IsConfigured()) {
       const auto* pass_context = PassContext::Current();
@@ -226,6 +232,13 @@ class MxScaleAddrInserter : public IRMutator {
                           ? left_binding_
                           : right_binding_;
       if (!binding || binding->scale.get() != scale.get() || binding->data.get() != data.get()) {
+        // A second FP8 GEMV window can bind to a previously consumed scale
+        // allocation. Identical bindings are reused, but changing the pair
+        // can let PTOAS associate the new binding with the earlier scale fill.
+        CHECK_SPAN(!is_gemv || !mx_consumed_ || As<TileType>(data->GetType())->dtype_.IsPackedFp4(),
+                   call->span_)
+            << call->op_->name_
+            << " requires one FP8 MX scale binding per side in a straight-line region (PTOAS #1691)";
         auto binding_call = registry.Create("tile.tget_scale_addr", {scale, data}, {}, call->span_);
         auto bound_scale =
             std::make_shared<Var>(scale->name_hint_ + "_bound", binding_call->GetType(), call->span_);
@@ -236,6 +249,7 @@ class MxScaleAddrInserter : public IRMutator {
       call_changed = true;
       changed = true;
     }
+    mx_consumed_ = true;
 
     if (!call_changed) return assign;
     auto deduced = registry.Create(call->op_->name_, new_args, call->kwargs_, call->span_);

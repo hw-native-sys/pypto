@@ -148,13 +148,13 @@ const char* TileLayoutToStr(ir::TileLayout layout) {
 }
 
 std::optional<size_t> GetPtoFp4LogicalAxis(const std::string& loc, const std::string& dtype_str,
-                                           ir::TileLayout blayout) {
+                                           ir::TileLayout blayout, bool row_vector) {
   if ((loc != "mat" && loc != "left" && loc != "right") ||
       (dtype_str != DataTypeToMLIR(DataType::FP4E2M1X2) &&
        dtype_str != DataTypeToMLIR(DataType::FP4E1M2X2))) {
     return std::nullopt;
   }
-  return blayout == ir::TileLayout::col_major ? 0 : 1;
+  return blayout == ir::TileLayout::col_major && !(row_vector && loc == "left") ? 0 : 1;
 }
 
 std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,
@@ -163,8 +163,9 @@ std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,
   INTERNAL_CHECK(space) << "Internal error: PTO tile coordinates require a memory space";
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(tile);
   auto result = coordinates;
-  if (auto axis =
-          GetPtoFp4LogicalAxis(MemorySpaceToMLIR(*space), DataTypeToMLIR(tile.dtype_), view.blayout)) {
+  if (auto axis = GetPtoFp4LogicalAxis(
+          MemorySpaceToMLIR(*space), DataTypeToMLIR(tile.dtype_), view.blayout,
+          ir::As<ir::ConstInt>(tile.shape_[0]) && ir::As<ir::ConstInt>(tile.shape_[0])->value_ == 1)) {
     INTERNAL_CHECK(result.size() == 2) << "Internal error: packed Cube coordinates must be rank two";
     result[*axis] =
         ir::AdjustPackedFp4CastLastDim({result[*axis]}, tile.dtype_, DataType::FP32, ir::Span::unknown())[0];
@@ -179,7 +180,7 @@ std::string FormatTileBufTypeString(const std::string& loc, const std::string& d
   // IR shapes and memory planning count byte carriers. PTOAS v0.72 keeps
   // Cube tile dimensions logical (GitCode PTOAS !381); Vec/GM still count
   // carriers. Convert only the serialized descriptor, never its allocation.
-  if (auto axis = GetPtoFp4LogicalAxis(loc, dtype_str, blayout)) {
+  if (auto axis = GetPtoFp4LogicalAxis(loc, dtype_str, blayout, rows == 1)) {
     if (*axis == 0) {
       rows *= 2;
       v_row *= 2;
