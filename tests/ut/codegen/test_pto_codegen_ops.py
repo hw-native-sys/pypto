@@ -2179,6 +2179,22 @@ class Window:
         if find_ptoas_binary() is not None:
             pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
 
+    def test_tensor_window_dim_step_preserves_loaded_value(self, tmp_path):
+        @pl.program
+        class Window:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[8, 8], pl.FP32]):
+                v = pl.tensor.view(x, [2, 2], steps=[pl.tensor.dim(x, 0) // 4, 1])
+                value = pl.tensor.read(v, [1, 1])
+                pl.tensor.write(x, [0, 0], value)
+
+        mlir = self._generate_mlir(Window)
+        load = re.search(r"(%\w+) = pto.load .* -> f32", mlir)
+        assert load is not None, mlir
+        assert f"pto.store {load[1]}, " in mlir, mlir
+        if find_ptoas_binary() is not None:
+            pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+
     def test_tensor_window_scalar_read_with_runtime_step_and_index(self):
         @pl.program
         class Window:
