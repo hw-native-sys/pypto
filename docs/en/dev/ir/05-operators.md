@@ -450,14 +450,14 @@ later unrolls the batched form into per-batch 2D ops.
 
 ### MX block-scale matmul (Ascend950)
 
-Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` supports FP8E4M3FN on both sides. Both APIs also accept native packed FP4 (E2M1x2 or E1M2x2 on each side). For mixed FP4/FP8, cast the FP4 operand to FP8 explicitly. A5 can cast E2M1 directly to E4M3 for supported descriptors; other packed-FP4-to-FP8 casts use a BF16/FP32 bridge. The conversion leaves scale values unchanged.
+Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` supports FP8E4M3FN on both sides. Both APIs also accept native packed FP4 (E2M1x2 or E1M2x2 on each side). For mixed FP4/FP8, cast the FP4 operand to FP8 explicitly. A5 can cast E2M1 directly to E4M3 for supported descriptors. Other packed-FP4-to-FP8 casts use a BF16/FP32 bridge. The conversion leaves scale values unchanged.
 
 | IR / DSL | Contract |
 | -------- | -------- |
-| `tile.load`, `tile.move` | Load non-strided FP8E8M0 scales with TensorLayout `MX_A_ZZ` or `MX_B_NN` into Mat. `pl.load` defaults to Mat; raw IR must specify `target_memory=Mat`. Move to `LeftScale` or `RightScale` instead of creating a tile there. The source and layout overrides must match row/row/32 (left) or col/col/32 (right). |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`. Use distinct FP8E8M0 scales of logical shape `[M, ceil(K/32)]` / `[ceil(K/32), N]` and FP32 Acc `[M,N]`. Logical physical M/K/N must align to 16/64/32 (FP4: 16/64/64), with additional boxed tile alignment. Valid K must preserve the physical scale-group count. PyPTO checks constant extents; PTOAS verifies symbolic geometry. |
+| `tile.load`, `tile.move` | Load non-strided FP8E8M0 scales with TensorLayout `MX_A_ZZ` or `MX_B_NN` into Mat. `pl.load` defaults to Mat. Raw IR must specify `target_memory=Mat`. Move to `LeftScale` or `RightScale` instead of creating a tile there. The source and layout overrides must match row/row/32 (left) or col/col/32 (right). |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`. Use distinct FP8E8M0 scales of logical shape `[M, ceil(K/32)]` / `[ceil(K/32), N]` and FP32 Acc `[M,N]`. Logical physical M/K/N must align to 16/64/32 (FP4: 16/64/64), with additional boxed tile alignment. Valid K must preserve the physical scale-group count. PyPTO checks constant extents. PTOAS verifies symbolic geometry. |
 | `tensor.matmul_mx` | Static oriented 2D data, loaded to Mat before Left/Right staging. M/K/N align to 16/64/32 (FP4: 32/64/64). For FP4, the contiguous axis counts packed bytes: ND shapes `[M,K/2]` / `[K,N/2]`, DN `[M/2,K]` / `[K/2,N]`. Scales and FP32 output retain their logical shapes. The canonical M/K/N of 128/64/64 uses `[128,2]` / `[2,64]` scales in ZZ/NN for both FP8 and FP4. |
-| `tile.matmul_mx_acc` / `pl.matmul_mx_acc`, `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | Acc prepends an accumulator and updates it in place via `set_output_reuses_input(0)`; its physical and valid M/N must match the result. Bias appends an FP32 `[1,N]` operand. |
+| `tile.matmul_mx_acc` / `pl.matmul_mx_acc`, `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | Acc prepends an accumulator and updates it in place via `set_output_reuses_input(0)`. Its physical and valid M/N must match the result. Bias appends an FP32 `[1,N]` operand. |
 | `tile.tget_scale_addr` | Internal DPS binding that updates `dst_scale` in place (`LeftScale↔Left`, `RightScale↔Right`). `InsertMxScaleAddr` inserts it after `InferTileMemorySpace`. |
 
 - MX-layout sources reject `tensor.slice`, `tensor.reshape`, `tensor.transpose`, `tensor.reinterpret_view`, ordinary `tensor.view`, `pld.tile.remote_load`, and tensor/tile `gather_row`. The subview path cannot represent a base offset. GM staging supports product-preserving FP8E8M0 shaped aliases between ND backing and `MX_A_ZZ` / `MX_B_NN`.
@@ -466,11 +466,11 @@ Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` s
 
 #### MX / Ascend950: pto-isa constraints
 
-Cube uses separate `TileType::ScaleLeft` and `TileType::ScaleRight` buffers. The logical scale fractal is 32. Loads use `TLoadMxCube*` (AZZ2ZZ) for row-major `mx_a_zz` or col-major `mx_b_nn`. `TMov` `CommonCheckMX` allows UINT8 Mat to FP8E8M0 scale moves. Fill scales only after `GetScaleAddr(Left/Right)` binds their destination; the provisional allocation is no longer used after binding.
+Cube uses separate `TileType::ScaleLeft` and `TileType::ScaleRight` buffers. The logical scale fractal is 32. Loads use `TLoadMxCube*` (AZZ2ZZ) for row-major `mx_a_zz` or col-major `mx_b_nn`. `TMov` `CommonCheckMX` allows UINT8 Mat to FP8E8M0 scale moves. Fill scales only after `GetScaleAddr(Left/Right)` binds their destination. The provisional allocation is no longer used after binding.
 
 #### MX / Ascend950: PTOAS constraints
 
-PTOAS uses one `loc=scaling`; EmitC recovers the side. UINT8 in that location selects Fixpipe scaling, so promote during the shape-matched Mat-to-scale `tmov`. Reshape flat `[1,G]` scales to the logical A or B shape while they are still UINT8 in Mat. `PTOA5NormalizeTMovPass` moves `tget_scale_addr` before the scale fill. Codegen emits logical rank-2 `make_tensor_view` with `#pto.layout` (PTOAS InferPTOLayout and EmitC map it to physical packing). PTOAS supports `pto.tmatmul.mx`, `.acc`, `.bias`, `pto.tget_scale_addr`, and `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md).
+PTOAS uses one `loc=scaling`. EmitC recovers the side. UINT8 in that location selects Fixpipe scaling, so promote during the shape-matched Mat-to-scale `tmov`. Reshape flat `[1,G]` scales to the logical A or B shape while they are still UINT8 in Mat. `PTOA5NormalizeTMovPass` moves `tget_scale_addr` before the scale fill. Codegen emits logical rank-2 `make_tensor_view` with `#pto.layout` (PTOAS InferPTOLayout and EmitC map it to physical packing). PTOAS supports `pto.tmatmul.mx`, `.acc`, `.bias`, `pto.tget_scale_addr`, and `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md).
 
 ### Tile-only GEMV family (A2/A3)
 
