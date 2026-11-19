@@ -1142,6 +1142,38 @@ def test_signed_floor_mod_emits_sign_correction(dtype):
     assert "arith.select" in mlir
 
 
+def test_loop_tile_metadata_uses_prepared_floor_divmod():
+    """A runtime extent embedded only in TileType is materialized inside its defining loop."""
+    span = ir.Span.unknown()
+    dtype = DataType.INDEX
+    size = ir.ConstInt(32, dtype, span)
+    start = ir.ConstInt(8, dtype, span)
+    ib = IRBuilder()
+    with ib.function("tile_metadata_divmod", type=ir.FunctionType.InCore) as f:
+        stop = f.param("stop", ir.ScalarType(dtype))
+        index = ib.var("i", ir.ScalarType(dtype))
+        with ib.for_loop(index, start, stop, 1):
+            offset = ir.Sub(index, start, dtype, span)
+            quotient = ir.FloorDiv(offset, size, dtype, span)
+            valid_cols = ir.FloorMod(quotient, size, dtype, span)
+            space = ir.MemorySpace.Vec
+            memref = ir.MemRef(space, ir.ConstInt(0, DataType.INT64, span), 32 * 32 * 4, 0)
+            view = ir.TileView(valid_shape=[size, valid_cols])
+            tile_type = ir.TileType([32, 32], DataType.FP32, memref, view, space)
+            ib.let("tile", tile.create([32, 32], DataType.FP32, space), type=tile_type)
+
+    mlir = _generate_mlir(ir.Program([f.get_result()], "TileMetadataDivMod", span))
+    lines = _get_mlir_lines(mlir)
+    division = _single_line(lines, " = arith.divsi ")
+    remainder = _single_line(lines, " = arith.remsi ")
+    allocation = _single_line(lines, " = pto.alloc_tile ")
+    assert lines.index(division) < lines.index(remainder) < lines.index(allocation)
+    assert f"valid_col = {remainder.split()[0]}" in allocation
+    assert mlir.index("scf.for") < mlir.index(division)
+    assert "arith.floordivsi" not in mlir
+    assert "arith.select" not in mlir
+
+
 def test_loop_start_literal_is_validated_at_its_own_width():
     """A start literal is judged at the dtype it is emitted at, not the variable's.
 

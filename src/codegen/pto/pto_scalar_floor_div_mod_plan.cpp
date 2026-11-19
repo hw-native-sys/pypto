@@ -23,6 +23,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -43,7 +44,7 @@ class ScalarFloorDivModPlanner : public ir::IRVisitor {
  public:
   std::unordered_set<const ir::Expr*> Prepare(const ir::StmtPtr& body,
                                               const std::vector<ir::VarPtr>& params) {
-    for (const auto& param : params) VisitExpr(param);
+    for (const auto& param : params) VisitTypeMetadata(param->GetType());
     if (body) VisitStmt(body);
 
     std::unordered_set<const ir::Expr*> truncating;
@@ -54,6 +55,27 @@ class ScalarFloorDivModPlanner : public ir::IRVisitor {
   }
 
  protected:
+  // References consume SSA bindings. Walk metadata and initial values at
+  // their materialization sites to use the loop bounds present at evaluation.
+  void VisitVarLike_(const ir::VarPtr&) override {}
+  void VisitExpr_(const ir::IterArgPtr&) override {}
+
+  void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    VisitTypeMetadata(op->var_->GetType());
+  }
+
+  void VisitStmt_(const ir::IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    for (const auto& result : op->return_vars_) VisitTypeMetadata(result->GetType());
+  }
+
+  void VisitStmt_(const ir::WhileStmtPtr& loop) override {
+    VisitInitialValues(loop->iter_args_, loop->span_);
+    for (const auto& result : loop->return_vars_) VisitTypeMetadata(result->GetType());
+    IRVisitor::VisitStmt_(loop);
+  }
+
   void VisitStmt_(const ir::ForStmtPtr& loop) override {
     INTERNAL_CHECK_SPAN(loop->loop_var_ && loop->body_, loop->span_)
         << "Internal error: ForStmt requires a loop variable and body";
@@ -61,7 +83,7 @@ class ScalarFloorDivModPlanner : public ir::IRVisitor {
     VisitExpr(loop->start_);
     VisitExpr(loop->stop_);
     VisitExpr(loop->step_);
-    for (const auto& arg : loop->iter_args_) VisitExpr(arg);
+    VisitInitialValues(loop->iter_args_, loop->span_);
 
     const auto start = ir::As<ir::ConstInt>(loop->start_);
     const auto* var = loop->loop_var_.get();
@@ -69,26 +91,45 @@ class ScalarFloorDivModPlanner : public ir::IRVisitor {
     // emitted width before the separate cast to the loop's index type.
     const bool inserted = start && ConstIntFitsDtype(start->value_, start->dtype()) &&
                           loop_lower_bounds_.try_emplace(var, start->value_).second;
+    if (inserted) visited_types_.emplace_back();
     VisitStmt(loop->body_);
-    if (inserted) loop_lower_bounds_.erase(var);
-
-    for (const auto& result : loop->return_vars_) VisitExpr(result);
-  }
-
-  void VisitVarLike_(const ir::VarPtr& var) override {
-    // Entry view operands and tile allocation extents/addresses also go
-    // through the scalar emitter, even when they occur only in type metadata.
-    ir::var_collectors::VisitTypeExprFields(*this, var->GetType());
-    if (const auto tile = ir::As<ir::TileType>(var->GetType())) {
-      const ir::MemRefPtr memref = tile->memref_.value_or(nullptr);
-      if (memref && memref->byte_offset_) VisitExpr(memref->byte_offset_);
+    if (inserted) {
+      visited_types_.pop_back();
+      loop_lower_bounds_.erase(var);
     }
+
+    for (const auto& result : loop->return_vars_) VisitTypeMetadata(result->GetType());
   }
 
   void VisitExpr_(const ir::FloorDivPtr& op) override { VisitFloorOp(op); }
   void VisitExpr_(const ir::FloorModPtr& op) override { VisitFloorOp(op); }
 
  private:
+  void VisitInitialValues(const std::vector<ir::IterArgPtr>& args, const ir::Span& span) {
+    for (const auto& arg : args) {
+      INTERNAL_CHECK_SPAN(arg, span) << "Internal error: loop has a null iter_arg";
+      VisitTypeMetadata(arg->GetType());
+      IRVisitor::VisitExpr_(arg);
+    }
+  }
+
+  void VisitTypeMetadata(const ir::TypePtr& type) {
+    // Parameters, assignments and control-flow results can supply operands
+    // for entry views and tile allocations. Shared types need one walk for
+    // these sites within each set of active loop bounds.
+    if (!type || !visited_types_.back().insert(type.get()).second) return;
+    if (const auto tuple = ir::As<ir::TupleType>(type)) {
+      for (const auto& element : tuple->types_) VisitTypeMetadata(element);
+      return;
+    }
+
+    ir::var_collectors::VisitTypeExprFields(*this, type);
+    if (const auto tile = ir::As<ir::TileType>(type)) {
+      const ir::MemRefPtr memref = tile->memref_.value_or(nullptr);
+      if (memref && memref->byte_offset_) VisitExpr(memref->byte_offset_);
+    }
+  }
+
   void VisitFloorOp(const ir::BinaryExprPtr& op) {
     VisitBinaryExpr_(op);
 
@@ -137,6 +178,7 @@ class ScalarFloorDivModPlanner : public ir::IRVisitor {
     bool all_exact = true;
   };
 
+  std::vector<std::unordered_set<const ir::Type*>> visited_types_{1};
   std::unordered_map<const ir::Var*, int64_t> loop_lower_bounds_;
   std::unordered_map<const ir::Expr*, Uses> truncation_;
 };
