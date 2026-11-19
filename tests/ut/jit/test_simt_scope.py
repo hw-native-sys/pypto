@@ -814,7 +814,47 @@ def test_public_row_update_native_compile(tmp_path, use_simt):
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("script", ["04_simt_compaction.py", "06_simt_row_update.py"])
+@pytest.mark.parametrize("dims", [(n, 1, 1) for n in (1, 256, 257, 512, 513, 1024, 1025, 2048)] + [(8, 4, 8)])
+def test_public_strided_simt_compile(tmp_path, dims):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    example = Path(__file__).resolve().parents[3] / "examples/advanced/07_simt_strided_copy.py"
+    entry = runpy.run_path(str(example))["strided_copy"]
+    backend.reset_for_testing()
+    try:
+        compiled = entry.compile(
+            X=dims[0],
+            Y=dims[1],
+            Z=dims[2],
+            config=RunConfig(
+                backend_type=backend.BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
+                cache_config=CacheConfig(enabled=False),
+                save_kernels_dir=str(tmp_path),
+            ),
+        )
+        assert isinstance(compiled, CompiledProgram)
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        native = helpers[0].read_text()
+        threads = dims[0] * dims[1] * dims[2]
+        registers = 128 if threads <= 256 else 64 if threads <= 512 else 32 if threads <= 1024 else 16
+        assert f"pto.simt_max_threads = {threads}" in native
+        assert f"pto.simt_max_regs = {registers}" in native
+        # Logical width is 256, but all three captured GM windows have a
+        # different physical pitch. Losing any pitch crosses a row boundary.
+        for pitch in (288, 320, 352):
+            assert f"{pitch} : index" in native
+        assert native.count("pto.stg") == 2
+        assert "scf.for" in native and "pto.ldg" in native
+    finally:
+        backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "script", ["04_simt_compaction.py", "06_simt_row_update.py", "07_simt_strided_copy.py"]
+)
 def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")

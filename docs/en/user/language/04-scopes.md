@@ -14,7 +14,7 @@ spreading a kernel across blocks.
 
 Placement answers one question: **which piece of hardware runs this code.**
 
-There are four constructs, all written with `with` (or `for`), and they compose:
+There are five constructs, written with `with` (or `for`), each with its own execution-domain limits:
 
 | Construct | Places work on |
 | --------- | -------------- |
@@ -22,6 +22,7 @@ There are four constructs, all written with `with` (or `for`), and they compose:
 | `pl.cluster` | One physical cluster — co-schedules a Cube and a Vector kernel |
 | `pl.spmd` | `n` blocks — the same kernel, once per block |
 | `pl.split_aiv` | Two AIV lanes — splits one region across both |
+| `pl.simt_scope` | A scalar thread block inside an explicit AIV kernel on A5 |
 
 The alternative to `pl.at` is writing a separate `@pl.jit.incore` function and calling it.
 They produce the same thing: `pl.at` is outlined into exactly such a function during
@@ -525,3 +526,78 @@ pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 
 - [Tasks and Ordering](../tasks/index.md) — when the placed work runs relative to everything else.
 - [OutlineIncoreScopes](../../dev/passes/10-outline_incore_scopes.md) — how `pl.at` becomes a function.
 - [ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md) — what `pl.split` drives.
+
+## SIMT: scalar threads inside an AIV kernel
+
+Use `pl.simt_scope` inside `@pl.jit.aiv` for per-element indexing, irregular
+control flow, warp collectives, or scalar atomics on A5. Tile operations belong
+outside the scope; ordinary regular Tile/SIMD computation remains a useful
+baseline when comparing performance. A SIMT block is local to the AIV caller;
+`dims` does not create runtime tasks or distribute work across AIV cores.
+
+Import `pypto.language as pl`, then write a device helper and a JIT entry:
+
+```python
+@pl.jit.aiv
+def copy_aiv(src: pl.Tensor[[1, 32], pl.FP32],
+             dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+             valid: pl.Scalar[pl.INT32]):
+    with pl.simt_scope(dims=(32, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        if tid < valid:
+            value = pl.simt.load(src, (0, tid))
+            pl.simt.store(dst, (0, tid), value)
+    return dst
+
+@pl.jit
+def copy(src: pl.Tensor[[1, 32], pl.FP32],
+         dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+         valid: pl.Scalar[pl.INT32]):
+    return copy_aiv(src, dst, valid)
+```
+
+Here the caller supplies `0 <= valid <= 32` and initialized `dst` storage.
+Indices are not automatically bounds-checked. Threads outside the valid range
+do nothing, so the output tail retains its previous values. Use `InOut`, not
+`Out`, for partially updated GM storage. SIMT stores must match the storage
+dtype; use `pl.cast(value, pl.INT32)` when index arithmetic produces a value to
+store in an INT32 tensor.
+
+- `dims=(x, y, z)` contains positive compile-time integers, with a product up to
+  2,048. Resource limits are inferred; do not supply register/thread limits.
+- Query `thread_idx` and `block_dim` with `pl.simt.Axis.X/Y/Z`. For a flattened
+  index, use `x + block_dim(X) * (y + block_dim(Y) * z)`. A block can process
+  more elements with `pl.range(linear, valid, total_threads)`.
+- Scalar locals are private to each thread and cannot escape the scope.
+  Writable storage captures are rebound automatically. GM aliases observe the
+  same updated memory; a saved Tile value preserves its old version.
+- Build views outside the scope. Tensor subviews retain physical strides and
+  their nonzero origin. Borrowed UB slice/reshape views require materialization
+  with `pl.tile.extract` before launch; see the [storage limits](../../dev/codegen/05-simt-lowering.md).
+- Sliced Tensor arguments crossing an AIV function boundary require static
+  physical strides that agree at every call to that parameter. For varying
+  pitches, pass the full parent and use parent-relative indices in the helper.
+- FP32/INT32 storage is supported. CPU simulation, packed values, nested SIMT,
+  launch inside `reg_scope`, and early `return`/`break`/`continue` are unsupported.
+  `syncthreads` must be reached unconditionally; a fence alone is not a rendezvous.
+
+Compile with `RunConfig(backend_type=BackendType.Ascend950,
+execution_mode=ExecutionMode.ONBOARD)`. Compiling does not reserve a device;
+run only on an allocated A5 device. The runnable examples default to compile-only:
+
+| Example | Use case |
+| ------- | -------- |
+| [Strided copy](../../../../examples/advanced/07_simt_strided_copy.py) | Three-dimensional threads, GM subviews with different row pitches, two outputs and preserved guards/tails |
+| [Warp compaction](../../../../examples/advanced/04_simt_compaction.py) | Stable indices/counts using ballot or shuffle scan |
+| [Mixed row update](../../../../examples/advanced/06_simt_row_update.py) | Tile producer → SIMT update → Tile consumer, old Tile preservation and SIMD comparison |
+
+```bash
+python examples/advanced/07_simt_strided_copy.py --dims 8 4 8 --valid 257
+task-submit --device auto --max-time 600 --run \
+  'python examples/advanced/07_simt_strided_copy.py --device "$TASK_DEVICE" --dims 8 4 8 --valid 257'
+```
+
+Use the configured project environment for both commands. See the
+[API contracts](../../dev/ir/11-simt.md) for supported math, warp, atomic and
+synchronization operations, and [native acceptance](../../dev/codegen/05-simt-lowering.md)
+for compilation versus hardware evidence.
