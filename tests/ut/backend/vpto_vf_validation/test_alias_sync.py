@@ -43,7 +43,7 @@ def helper_source(kind: str, offset: int, relation: str = "static") -> str:
         args += ", %offset: index"
         setup = ""
     elif relation == "derived":
-        setup += "\n    %other = pto.addptr %base, %offset : <f32, ub> -> <f32, ub>"
+        setup += "\n    %other = pto.addptr %base, %offset : <f32, ub>, index -> <f32, ub>"
         second_base, second_offset = "%other", "%zero"
 
     def store(value: str, base: str, index: str) -> str:

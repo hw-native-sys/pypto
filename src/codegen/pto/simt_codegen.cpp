@@ -579,7 +579,8 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
       // addptr uses element offsets, including the affine view's physical stride.
       const auto address = NewTemp();
       const auto ptr_body = "<" + element + (gm ? ", gm>" : ", ub>");
-      Emit(address + " = pto.addptr " + pointer + ", " + offset + " : " + ptr_body + " -> " + ptr_body);
+      Emit(address + " = pto.addptr " + pointer + ", " + offset + " : " + ptr_body + ", index -> " +
+           ptr_body);
       auto operands = address;
       auto atomic_type = type;
       const auto atomic_element = native_type(call);
@@ -601,12 +602,12 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     } else if (store) {
       const auto value = GetExprAsCode(call->args_[2]);
       Emit(std::string(gm ? "pto.stg " : "pto.store ") + value + ", " + pointer + "[" + offset + "]" +
-           policy + " : " + type + ", " + element);
+           policy + " : " + type + ", index, " + element);
       fs_.current_expr_value.clear();
     } else {
       const auto result = NewTemp();
       Emit(result + (gm ? " = pto.ldg " : " = pto.load ") + pointer + "[" + offset + "]" + policy + " : " +
-           type + " -> " + element);
+           type + ", index -> " + element);
       fs_.current_expr_value = result;
     }
     return true;

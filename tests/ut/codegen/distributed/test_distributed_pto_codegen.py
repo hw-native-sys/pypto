@@ -1482,7 +1482,7 @@ def test_rank_emits_pto_load_at_slot_2_plus_trunci():
     kWindowSlotStride = 16/8) then truncates to signless ``i32`` for PTOAS.
 
     Asserts that the emitted MLIR contains ``pto.load %argN[%cK] :
-    !pto.ptr<i64> -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
+    !pto.ptr<i64>, index -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
     is the nranks path).
     """
 
@@ -1497,7 +1497,7 @@ def test_rank_emits_pto_load_at_slot_2_plus_trunci():
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
     # rank lowering line.
-    assert "pto.load " in body and "!pto.ptr<i64> -> i64" in body, body
+    assert "pto.load " in body and "!pto.ptr<i64>, index -> i64" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body
     # rank does not shrui — only nranks does.
@@ -1524,7 +1524,7 @@ def test_nranks_emits_pto_load_plus_shrui_32_plus_trunci():
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
     # nranks lowering: pto.load + arith.shrui + arith.trunci.
-    assert "pto.load " in body and "!pto.ptr<i64> -> i64" in body, body
+    assert "pto.load " in body and "!pto.ptr<i64>, index -> i64" in body, body
     assert "arith.shrui" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body

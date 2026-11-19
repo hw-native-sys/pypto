@@ -359,7 +359,7 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 寄存器，例如 `low, high = pl.reg.mull(a, b, mask)`；校验器拒绝元组类型的
 合流结果和循环携带值。`mull` 的两部分保留输入的符号性。
 减法的进位掩码以 **true 表示无借位**，与控制执行的 mask 是两个不同参数。
-`intlv`/`dintlv` 两个输出的非活动 lane 均为零。当前固定及最低支持的 PTOAS v0.74
+`intlv`/`dintlv` 两个输出的非活动 lane 均为零。PTOAS v0.74
 已实现原生结果掩码（`b6945321`，
 [PTOAS #1732](https://github.com/hw-native-sys/PTOAS/issues/1732)），因此 PyPTO
 直接生成带 mask 的 interleave，不再附加结果补零 `vsel` 或用于补零的

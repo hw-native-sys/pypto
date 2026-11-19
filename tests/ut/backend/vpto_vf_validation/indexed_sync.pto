@@ -10,7 +10,7 @@ module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
     %c255_ui32 = builtin.unrealized_conversion_cast %2 : i32 to ui32
     %c0_index = arith.constant 0 : index
     %c448_index = arith.constant 448 : index
-    %dst = pto.addptr %arg0, %c256_index : <f32, ub> -> <f32, ub>
+    %dst = pto.addptr %arg0, %c256_index : <f32, ub>, index -> <f32, ub>
     pto.vecscope {
       %idx = pto.vmi.vci %c0_i32 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
       %broadcast_scalar = builtin.unrealized_conversion_cast %arg1 : i32 to si32

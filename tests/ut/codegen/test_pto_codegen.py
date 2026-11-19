@@ -1058,7 +1058,7 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
 
 @pytest.mark.parametrize("dtype", [DataType.FP32, DataType.INT32, DataType.UINT32, DataType.INT64])
 def test_scalar_pointer_load_store_ptoas(tmp_path, dtype):
-    """Tensor scalar accesses use the unified PTOAS 0.64 pointer operations."""
+    """Tensor scalar accesses emit the explicit PTOAS pointer offset type."""
     tensor_type = ir.TensorType([4, 8], dtype)
     ib = IRBuilder()
     with ib.function("scalar_copy", type=ir.FunctionType.InCore) as f:
@@ -1076,6 +1076,8 @@ def test_scalar_pointer_load_store_ptoas(tmp_path, dtype):
     assert "%arg0[" in load
     assert ", %arg1[" in store
     assert load.split(" = ", 1)[0] in store
+    assert ", index -> " in load
+    assert ", index, " in store
     assert "pto.load_scalar" not in mlir
     assert "pto.store_scalar" not in mlir
 
