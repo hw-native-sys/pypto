@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <map>
@@ -33,6 +34,8 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -53,7 +56,7 @@ const auto& GetLastYieldStmt = transform_utils::GetLastYieldStmt;
 
 StmtPtr FinalizeNestedTpopTfrees(const StmtPtr& stmt, core_affinity::CoreSide side,
                                  const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
-                                 const ProgramPtr& program);
+                                 bool reject_escaping_borrows, const ProgramPtr& program);
 
 }  // namespace
 
@@ -155,14 +158,60 @@ const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Va
   return (it != tpop_var_remap.end() && it->second) ? it->second.get() : var;
 }
 
-std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
-                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
-                                        const ProgramPtr& program) {
-  return_lineage::ScopedTraceCache lineage_cache;
+namespace {
+
+// Check the finalized stream once, without rescanning each nested subtree for
+// every outer receive. Accepted nested bodies release their local receives
+// locally, so one structural visit also covers zero/multiple loop iterations.
+// A deeper receive/release must never consume an enclosing body's FIFO prefix.
+class NestedFifoValidator : public IRVisitor {
+ protected:
+  void VisitStmt_(const ForStmtPtr& op) override { VisitRegion(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitRegion(op); }
+  void VisitStmt_(const IfStmtPtr& op) override { VisitRegion(op); }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    auto call = As<Call>(op->value_);
+    if (!op_predicates::IsTPop(call)) return;
+    auto& pending = outstanding_[call->GetKwarg<int>("id", 0)];
+    CHECK_SPAN(pending.empty() || pending.front() == depth_, op->span_)
+        << "FIFO receive in a nested body cannot reuse a pipe with an outstanding outer receive; "
+           "finish the outer receive's consumers and release it before entering the nested body, "
+           "or use a different pipe";
+    pending.push_back(depth_);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    auto call = As<Call>(op->expr_);
+    if (!op_predicates::IsTFree(call)) return;
+    auto& pending = outstanding_[call->GetKwarg<int>("id", 0)];
+    if (pending.empty()) return;
+    CHECK_SPAN(pending.front() == depth_, op->span_)
+        << "FIFO release in a nested body cannot release an outstanding outer receive; "
+           "release the received slot in its defining body";
+    pending.pop_front();
+  }
+
+ private:
+  template <typename RegionPtr>
+  void VisitRegion(const RegionPtr& op) {
+    ++depth_;
+    IRVisitor::VisitStmt_(op);
+    --depth_;
+  }
+
+  size_t depth_ = 0;
+  std::map<int, std::deque<size_t>> outstanding_;
+};
+
+std::vector<StmtPtr> FinalizeTpopTfreesImpl(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
+                                            const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                            bool reject_escaping_borrows, const ProgramPtr& program) {
   std::vector<StmtPtr> normalized_inputs;
   normalized_inputs.reserve(stmts.size());
   for (const auto& stmt : stmts) {
-    normalized_inputs.push_back(FinalizeNestedTpopTfrees(stmt, side, tpop_var_remap, program));
+    normalized_inputs.push_back(
+        FinalizeNestedTpopTfrees(stmt, side, tpop_var_remap, reject_escaping_borrows, program));
   }
 
   std::map<const Var*, TpopLifetime> chains;
@@ -172,6 +221,10 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
   using TpopVarRemap = std::unordered_map<const Var*, VarPtr>;
   std::unordered_map<const Var*, VarPtr> local_tpop_var_remap = tpop_var_remap;
 
+  // Each component of a VF tuple can alias a different receive, or ordinary
+  // storage (nullptr). Record roots at the definition, before leaving its scope.
+  using TupleRoots = std::vector<VarPtr>;
+  std::unordered_map<const Var*, TupleRoots> tuple_roots;
   auto canonicalize_var = [&](const VarPtr& var, const TpopVarRemap& remap) -> VarPtr {
     if (!var) {
       return nullptr;
@@ -185,8 +238,7 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 
   auto try_resolve_canonical_tpop = [&](const ExprPtr& expr, const TpopVarRemap& remap,
                                         VarPtr* canonical_var) -> bool {
-    // A zero-copy view that inherits its input's buffer (slice / reshape /
-    // transpose_view / ... — any IsBufferAliasingViewOp) over a popped tile
+    // A zero-copy view or registry-declared physical writeback over a popped tile
     // aliases that buffer, so the view's own uses must extend the tpop's
     // lifetime. Peel through a *chain* of such views (e.g.
     // slice(transpose_view(tpop))) down to the underlying tile — a single-level
@@ -199,18 +251,24 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
       if (src_var) {
         break;
       }
-      auto call = std::dynamic_pointer_cast<const Call>(alias_src);
+      if (auto item = As<TupleGetItemExpr>(alias_src)) {
+        auto tuple = AsVarLike(item->tuple_);
+        auto it = tuple_roots.find(tuple.get());
+        if (it == tuple_roots.end() || item->index_ < 0 ||
+            static_cast<size_t>(item->index_) >= it->second.size()) {
+          break;
+        }
+        alias_src = it->second[item->index_];
+        continue;
+      }
+      auto call = As<Call>(alias_src);
       if (auto helper = ResolveVFCall(call, program)) {
         auto args = VFReturnedArguments(helper, call);
         if (args.size() != 1) break;
         alias_src = args[0];
         continue;
       }
-      if (!call || !call->op_ || call->args_.empty() ||
-          !op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-        break;
-      }
-      alias_src = call->args_[0];
+      alias_src = op_predicates::GetBufferAliasSource(alias_src);
     }
     if (!src_var) {
       return false;
@@ -225,82 +283,74 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
     return true;
   };
 
-  std::function<void(const VarPtr&, const ExprPtr&, TpopVarRemap&)> propagate_alias_into;
-  std::function<void(const StmtPtr&, TpopVarRemap&)> propagate_stmt_aliases_into;
-  std::function<TpopVarRemap(const std::vector<StmtPtr>&, const TpopVarRemap&)> build_body_alias_map;
-
-  propagate_alias_into = [&](const VarPtr& alias_var, const ExprPtr& src_expr, TpopVarRemap& remap) {
-    VarPtr canonical_var;
-    if (!alias_var || !try_resolve_canonical_tpop(src_expr, remap, &canonical_var)) {
-      return;
+  // Use the same per-result comparison for a Tile and for each Tile in a VF
+  // tuple. Different local operands in a sibling component do not change a
+  // proven FIFO root. An absent branch contributes no proven borrow.
+  auto result_roots = [&](const ExprPtr& expr, const TpopVarRemap& remap, const TypePtr& type) -> TupleRoots {
+    if (auto tuple = As<TupleType>(type)) {
+      auto var = AsVarLike(expr);
+      if (auto it = tuple_roots.find(var.get()); it != tuple_roots.end()) {
+        return it->second;
+      }
+      TupleRoots roots(tuple->types_.size());
+      std::vector<ExprPtr> elements;
+      auto call = As<Call>(expr);
+      if (auto helper = ResolveVFCall(call, program)) {
+        elements = VFReturnedArguments(helper, call);
+      } else if (auto literal = As<MakeTuple>(expr)) {
+        elements = literal->elements_;
+      }
+      for (size_t i = 0; i < elements.size() && i < roots.size(); ++i) {
+        try_resolve_canonical_tpop(elements[i], remap, &roots[i]);
+      }
+      return roots;
     }
-    remap[alias_var.get()] = canonical_var;
+    VarPtr root;
+    try_resolve_canonical_tpop(expr, remap, &root);
+    return {root};
   };
 
-  std::unordered_map<const Var*, std::vector<ExprPtr>> vf_tuple_aliases;
+  auto bind_roots = [&](const VarPtr& var, TupleRoots roots, TpopVarRemap& remap) {
+    if (As<TupleType>(var->GetType())) {
+      tuple_roots[var.get()] = std::move(roots);
+    } else if (roots.front()) {
+      remap[var.get()] = roots.front();
+    }
+  };
+
+  auto check_escape = [&](const ExprPtr& value, const TpopVarRemap& remap, const Span& span) {
+    for (const auto& root : result_roots(value, remap, value->GetType())) {
+      CHECK_SPAN(!root, span)
+          << "FIFO-backed Tile cannot escape the body where it is received through yield or return; "
+             "materialize independent Tile storage before exporting the value";
+    }
+  };
+
+  std::function<void(const StmtPtr&, TpopVarRemap&)> propagate_stmt_aliases_into;
+  std::function<TpopVarRemap(const std::vector<StmtPtr>&, const TpopVarRemap&)> build_body_alias_map;
   auto propagate_if_return_aliases_into = [&](const IfStmtPtr& if_stmt, TpopVarRemap& remap) {
     auto then_map = build_body_alias_map(FlattenBody(if_stmt->then_body_), remap);
     auto then_yield = GetLastYieldStmt(if_stmt->then_body_);
-    std::optional<TpopVarRemap> else_map;
+    auto else_map = remap;
     YieldStmtPtr else_yield;
-    if (if_stmt->else_body_.has_value()) {
-      else_map = build_body_alias_map(FlattenBody(if_stmt->else_body_.value()), remap);
-      else_yield = GetLastYieldStmt(if_stmt->else_body_.value());
+    if (if_stmt->else_body_) {
+      else_map = build_body_alias_map(FlattenBody(*if_stmt->else_body_), remap);
+      else_yield = GetLastYieldStmt(*if_stmt->else_body_);
     }
-
     for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-      if (As<TupleType>(if_stmt->return_vars_[i]->GetType()) && then_yield && else_yield &&
-          i < then_yield->value_.size() && i < else_yield->value_.size()) {
-        auto lhs = AsVarLike(then_yield->value_[i]);
-        auto rhs = AsVarLike(else_yield->value_[i]);
-        if (lhs && rhs && vf_tuple_aliases.count(lhs.get()) && vf_tuple_aliases.count(rhs.get())) {
-          const auto& left = vf_tuple_aliases.at(lhs.get());
-          const auto& right = vf_tuple_aliases.at(rhs.get());
-          std::vector<ExprPtr> merged;
-          bool matches = left.size() == right.size();
-          for (size_t j = 0; matches && j < left.size(); ++j) {
-            auto a = canonicalize_var(AsVarLike(left[j]), then_map);
-            auto b = canonicalize_var(AsVarLike(right[j]), *else_map);
-            matches = a && b && a.get() == b.get();
-            merged.push_back(a);
-          }
-          if (matches) vf_tuple_aliases[if_stmt->return_vars_[i].get()] = std::move(merged);
-        }
-        continue;
+      const auto& result = if_stmt->return_vars_[i];
+      auto left = result_roots(then_yield && i < then_yield->value_.size() ? then_yield->value_[i] : nullptr,
+                               then_map, result->GetType());
+      auto right = result_roots(else_yield && i < else_yield->value_.size() ? else_yield->value_[i] : nullptr,
+                                else_map, result->GetType());
+      for (size_t j = 0; j < left.size(); ++j) {
+        if (left[j] == right[j]) continue;
+        CHECK_SPAN(!reject_escaping_borrows, if_stmt->span_)
+            << "FIFO-backed Tile control-flow result must preserve the same received slot on every path; "
+               "materialize independent Tile storage before merging different buffers";
+        left[j] = nullptr;
       }
-      VarPtr canonical_var;
-      bool has_canonical = false;
-      bool consistent = true;
-
-      auto merge_yield_value = [&](const YieldStmtPtr& yield_stmt, const TpopVarRemap& branch_map) {
-        if (!yield_stmt || i >= yield_stmt->value_.size()) {
-          consistent = false;
-          return;
-        }
-        VarPtr branch_canonical;
-        if (!try_resolve_canonical_tpop(yield_stmt->value_[i], branch_map, &branch_canonical)) {
-          consistent = false;
-          return;
-        }
-        if (!has_canonical) {
-          canonical_var = branch_canonical;
-          has_canonical = true;
-          return;
-        }
-        if (canonical_var.get() != branch_canonical.get()) {
-          consistent = false;
-        }
-      };
-
-      merge_yield_value(then_yield, then_map);
-      if (else_map.has_value()) {
-        merge_yield_value(else_yield, else_map.value());
-      } else {
-        consistent = false;
-      }
-      if (has_canonical && consistent) {
-        remap[if_stmt->return_vars_[i].get()] = canonical_var;
-      }
+      bind_roots(result, std::move(left), remap);
     }
   };
 
@@ -308,43 +358,46 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
                                                 const std::vector<VarPtr>& return_vars, TpopVarRemap& remap) {
     TpopVarRemap body_map = remap;
     for (const auto& iter_arg : iter_args) {
-      propagate_alias_into(iter_arg, iter_arg ? iter_arg->initValue_ : nullptr, body_map);
+      bind_roots(iter_arg, result_roots(iter_arg->initValue_, remap, iter_arg->GetType()), body_map);
     }
     body_map = build_body_alias_map(FlattenBody(body), body_map);
     auto yield_stmt = GetLastYieldStmt(body);
-    if (!yield_stmt) {
-      return;
-    }
-    for (size_t i = 0; i < iter_args.size() && i < yield_stmt->value_.size(); ++i) {
-      propagate_alias_into(iter_args[i], yield_stmt->value_[i], body_map);
-    }
+    if (!yield_stmt) return;
     for (size_t i = 0; i < return_vars.size() && i < yield_stmt->value_.size(); ++i) {
-      propagate_alias_into(return_vars[i], yield_stmt->value_[i], remap);
+      // The backedge SSA value may be defined only in the loop body. A zero-trip
+      // result instead takes the initial value, so both paths must agree.
+      const auto& result = return_vars[i];
+      auto yielded = result_roots(yield_stmt->value_[i], body_map, result->GetType());
+      if (reject_escaping_borrows && i < iter_args.size()) {
+        auto initial = result_roots(iter_args[i]->initValue_, remap, result->GetType());
+        CHECK_SPAN(initial == yielded, yield_stmt->span_)
+            << "FIFO-backed Tile loop carry must preserve the same received slot, including zero iterations; "
+               "materialize independent Tile storage before carrying a different buffer";
+      }
+      bind_roots(result, std::move(yielded), remap);
     }
   };
 
   propagate_stmt_aliases_into = [&](const StmtPtr& stmt, TpopVarRemap& remap) {
+    if (auto ret = As<ReturnStmt>(stmt); ret && reject_escaping_borrows) {
+      // This walk has the enclosing body's receive/alias map. The earlier
+      // bottom-up finalization only knows local receives, so it cannot reject
+      // an outer borrow returned from a nested branch or loop on its own.
+      for (const auto& value : ret->value_) check_escape(value, remap, ret->span_);
+      return;
+    }
+    if (auto scope = As<RegScopeStmt>(stmt)) {
+      // RegScope is an execute-once region whose Tile versions remain visible
+      // afterward. Export aliases without flattening the scope or placing any
+      // free inside it; last-use accounting retains the enclosing statement.
+      for (const auto& child : FlattenBody(scope->body_)) propagate_stmt_aliases_into(child, remap);
+      return;
+    }
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (auto call = As<Call>(assign->value_); As<TupleType>(assign->var_->GetType())) {
-        if (auto helper = ResolveVFCall(call, program)) {
-          vf_tuple_aliases[assign->var_.get()] = VFReturnedArguments(helper, call);
-        }
+      const auto& type = assign->var_->GetType();
+      if (As<TileType>(type) || As<TupleType>(type)) {
+        bind_roots(assign->var_, result_roots(assign->value_, remap, type), remap);
       }
-      if (auto source = AsVarLike(assign->value_)) {
-        if (auto it = vf_tuple_aliases.find(source.get()); it != vf_tuple_aliases.end()) {
-          vf_tuple_aliases[assign->var_.get()] = it->second;
-        }
-      }
-      if (auto item = As<TupleGetItemExpr>(assign->value_)) {
-        if (auto tuple = AsVarLike(item->tuple_); tuple && vf_tuple_aliases.count(tuple.get())) {
-          const auto& args = vf_tuple_aliases.at(tuple.get());
-          if (item->index_ >= 0 && static_cast<size_t>(item->index_) < args.size()) {
-            propagate_alias_into(assign->var_, args[item->index_], remap);
-          }
-          return;
-        }
-      }
-      propagate_alias_into(assign->var_, assign->value_, remap);
       return;
     }
     if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
@@ -419,17 +472,23 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
       continue;
     }
 
-    const auto refs = CollectCallArgVarRefs(normalized_inputs[i]);
+    const auto& stmt = normalized_inputs[i];
+    const auto yield = As<YieldStmt>(stmt);
+    const auto ret = As<ReturnStmt>(stmt);
+    if (reject_escaping_borrows && (yield || ret)) {
+      for (const auto& value : yield ? yield->value_ : ret->value_) {
+        check_escape(value, local_tpop_var_remap, stmt->span_);
+      }
+    }
+
+    const auto refs = CollectCallArgVarRefs(stmt);
     for (const auto* ref : var_collectors::GetSortedVarRefs(refs)) {
       // A nested projection still references the outer tuple even before its
       // branch-local alias is propagated. Keep all borrowed tuple components
       // alive through the containing statement; never free before the branch.
-      if (auto tuple = vf_tuple_aliases.find(ref); tuple != vf_tuple_aliases.end()) {
-        for (const auto& value : tuple->second) {
-          VarPtr canonical;
-          if (try_resolve_canonical_tpop(value, local_tpop_var_remap, &canonical)) {
-            chains.at(canonical.get()).last_use_idx = i;
-          }
+      if (auto tuple = tuple_roots.find(ref); tuple != tuple_roots.end()) {
+        for (const auto& root : tuple->second) {
+          if (root) chains.at(root.get()).last_use_idx = i;
         }
       }
       const Var* canonical_ref = CanonicalizeTpopRef(ref, local_tpop_var_remap);
@@ -479,18 +538,44 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
     auto deferred_it = deferred_tfrees.find(i);
     const bool has_deferred = deferred_it != deferred_tfrees.end();
-    // A YieldStmt is the mandatory terminator of a control-flow body — nothing
-    // may follow it. When a tpop tile's last use is the yield itself (the body
-    // carries the tile out as a return value), emit the deferred tfree *before*
-    // the yield so the yield stays the body tail. Appending it after would
-    // break the "body ends with YieldStmt" invariant and crash downstream
-    // passes such as Simplify's StripTrailingYield.
-    const bool is_terminator = As<YieldStmt>(normalized_inputs[i]) != nullptr;
+    auto result_stmt = normalized_inputs[i];
+    const auto yield = As<YieldStmt>(result_stmt);
+    const bool is_terminator = yield != nullptr;
     if (has_deferred && is_terminator) {
+      // A branch/loop-local receive cannot outlive its release. Materialize
+      // Tile-only yield values before the frees, so later phi lowering reads
+      // independent storage. Copy the yielded view, not just its FIFO root.
+      // RegScope functions already reject these escapes above.
+      auto copied_yield = MutableCopy(yield);
+      for (auto& value : copied_yield->value_) {
+        VarPtr received;
+        if (!try_resolve_canonical_tpop(value, local_tpop_var_remap, &received)) continue;
+        auto tile = As<TileType>(received->GetType());
+        INTERNAL_CHECK_SPAN(tile && tile->memory_space_.has_value(), yield->span_)
+            << "Internal error: received Tile must have a memory space before FIFO yield materialization";
+        // Only Vec receives have a supported same-space materialization here.
+        // AIC receives reside in Mat: copying them would emit Mat-to-Mat TMOV,
+        // which is unsupported on A2/A3. Do not assume a legal copy on another
+        // backend without a corresponding lowering and lifetime contract.
+        CHECK_SPAN(tile->memory_space_ == MemorySpace::Vec, yield->span_)
+            << "Yielding a branch/loop-local FIFO-backed Tile is only supported in Vec memory; "
+               "consume the Mat receive inside its defining branch or loop before yielding";
+        auto copy = OpRegistry::GetInstance().Create(
+            "tile.move", {value}, {{"target_memory", std::any(*tile->memory_space_)}}, yield->span_);
+        auto source = AsVarLike(value);
+        auto name =
+            auto_name::AddQualifier(source ? source->name_hint_ : received->name_hint_, "fifo_result");
+        auto copied = std::make_shared<Var>(name, copy->GetType(), yield->span_);
+        result.push_back(std::make_shared<AssignStmt>(copied, copy, yield->span_));
+        value = copied;
+      }
+      result_stmt = copied_yield;
+      // Keep YieldStmt last: downstream control-flow passes require it to be
+      // the terminator even when the last FIFO consumer was a yielded value.
       result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
     }
     if (!remove_existing_tfree[i]) {
-      result.push_back(normalized_inputs[i]);
+      result.push_back(result_stmt);
     }
     if (has_deferred && !is_terminator) {
       result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
@@ -499,30 +584,65 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
   return result;
 }
 
+}  // namespace
+
+std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
+                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                        const ProgramPtr& program) {
+  return_lineage::ScopedTraceCache lineage_cache;
+  // Establish the conservative register/FIFO contract once for the whole body,
+  // including borrows that escape a branch before a later register scope.
+  // Preserve the existing Tile-only control-flow lowering contract.
+  class VFUseFinder : public IRVisitor {
+   public:
+    explicit VFUseFinder(const ProgramPtr& program) : program_(program) {}
+    void VisitExpr_(const CallPtr& call) override {
+      if (!found && ResolveVFCall(call, program_)) found = true;
+      if (!found) IRVisitor::VisitExpr_(call);
+    }
+    void VisitStmt_(const RegScopeStmtPtr&) override { found = true; }
+    bool found = false;
+
+   private:
+    const ProgramPtr& program_;
+  } finder(program);
+  for (const auto& stmt : stmts) {
+    finder.VisitStmt(stmt);
+    if (finder.found) break;
+  }
+  auto finalized = FinalizeTpopTfreesImpl(stmts, side, tpop_var_remap, finder.found, program);
+  if (finder.found) {
+    NestedFifoValidator validator;
+    for (const auto& stmt : finalized) validator.VisitStmt(stmt);
+  }
+  return finalized;
+}
+
 }  // namespace tpop_tfree
 
 namespace {
 
 StmtPtr FinalizeNestedTpopTfrees(const StmtPtr& stmt, core_affinity::CoreSide side,
                                  const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
-                                 const ProgramPtr& program) {
+                                 bool reject_escaping_borrows, const ProgramPtr& program) {
   if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    auto new_body =
-        tpop_tfree::FinalizeTpopTfrees(FlattenBody(for_stmt->body_), side, tpop_var_remap, program);
+    auto new_body = tpop_tfree::FinalizeTpopTfreesImpl(FlattenBody(for_stmt->body_), side, tpop_var_remap,
+                                                       reject_escaping_borrows, program);
     return loop_repair::RebuildForStmt(for_stmt, loop_repair::MakeBody(new_body, for_stmt->span_));
   }
   if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    auto new_then =
-        tpop_tfree::FinalizeTpopTfrees(FlattenBody(if_stmt->then_body_), side, tpop_var_remap, program);
+    auto new_then = tpop_tfree::FinalizeTpopTfreesImpl(FlattenBody(if_stmt->then_body_), side, tpop_var_remap,
+                                                       reject_escaping_borrows, program);
     std::optional<std::vector<StmtPtr>> new_else;
     if (const auto& else_body = if_stmt->else_body_) {
-      new_else = tpop_tfree::FinalizeTpopTfrees(FlattenBody(*else_body), side, tpop_var_remap, program);
+      new_else = tpop_tfree::FinalizeTpopTfreesImpl(FlattenBody(*else_body), side, tpop_var_remap,
+                                                    reject_escaping_borrows, program);
     }
     return loop_repair::RebuildIfStmt(if_stmt, new_then, new_else);
   }
   if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    auto new_body =
-        tpop_tfree::FinalizeTpopTfrees(FlattenBody(while_stmt->body_), side, tpop_var_remap, program);
+    auto new_body = tpop_tfree::FinalizeTpopTfreesImpl(FlattenBody(while_stmt->body_), side, tpop_var_remap,
+                                                       reject_escaping_borrows, program);
     return loop_repair::RebuildWhileStmt(while_stmt, loop_repair::MakeBody(new_body, while_stmt->span_));
   }
   return stmt;

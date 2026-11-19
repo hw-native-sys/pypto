@@ -318,6 +318,139 @@ def test_mixed_kernel_keeps_vf_on_aiv_and_passes_pipe_storage(local_copy):
             codegen.PTOCodegen().generate_bundle(unit, emit_source_loc=False)
 
 
+def mixed_epilogue(body: str) -> ir.Program:
+    prefix = MIXED_SOURCE.split("        with pl.reg_scope():")[0]
+    prefix = prefix.replace("def main(self, x:", "def main(self, n: pl.Scalar[pl.INDEX], x:")
+    return parse_program(
+        prefix + textwrap.indent(textwrap.dedent(body), "        ") + "        return output\n"
+    )
+
+
+def lower_through(source: ir.Program, pass_name: str | None) -> ir.Program:
+    if pass_name is None:
+        with passes.PassContext([]):
+            return PassManager.get_strategy().run_passes(source)
+    with passes.PassContext([], enable_buffer_ir=False):
+        for transform in PassManager.get_strategy().passes:
+            source = transform(source)
+            if transform.get_name() == pass_name:
+                return source
+    raise AssertionError(f"{pass_name} missing from the default strategy")
+
+
+@pytest.mark.parametrize(
+    "pass_name", ["ExpandMixedKernel", "InitMemRef", pytest.param(None, id="full-default")]
+)
+def test_vf_loop_result_keeps_outer_receive_until_store(pass_name):
+    # The runtime bound permits zero trips. Both the initial Tile and the VF
+    # writeback on every backedge must denote the receive consumed after the loop.
+    result = lower_through(
+        mixed_epilogue("""
+        for _, (carried,) in pl.range(n, init_values=(vec,)):
+            with pl.reg_scope():
+                value = pl.reg.load(carried, lanes=64)
+                updated = pl.reg.store(carried, value=value)
+            result = pl.yield_(updated)
+        output = pl.tile.store(result, [0, 0], output)
+    """),
+        pass_name,
+    )
+    (vf,) = helpers(result)
+    aiv = next(f for f in result.functions.values() if f.func_type == ir.FunctionType.AIV)
+    assert isinstance(aiv.body, ir.SeqStmts)
+    body = aiv.body.stmts
+    (loop,) = (s for s in body if isinstance(s, ir.ForStmt))
+    assert vf.name in ir.python_print(loop)
+    (pop,) = (
+        s
+        for s in body
+        if isinstance(s, ir.AssignStmt)
+        and isinstance(s.value, ir.Call)
+        and s.value.op.name == ir.get_op("tile.tpop_from_aic").name
+    )
+    (store,) = (
+        s
+        for s in body
+        if isinstance(s, ir.AssignStmt)
+        and isinstance(s.value, ir.Call)
+        and s.value.op.name == ir.get_op("tile.store").name
+    )
+    (free,) = (
+        s
+        for s in body
+        if isinstance(s, ir.EvalStmt)
+        and isinstance(s.expr, ir.Call)
+        and s.expr.op.name == ir.get_op("system.tfree_to_aic").name
+    )
+    assert isinstance(store.value, ir.Call) and store.value.args[0] is loop.return_vars[0]
+    assert isinstance(free.expr, ir.Call) and free.expr.args[0] is pop.var
+    assert body.index(store) < body.index(free)
+    if pass_name != "ExpandMixedKernel":
+        assert isinstance(loop.return_vars[0].type, ir.TileType)
+        assert loop.return_vars[0].type.memref is None
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.HasMemRefs)
+        passes.verify_properties(properties, result, "outlined VF FIFO loop result")
+
+
+def test_vf_loop_rejects_replacing_a_borrow_with_local_storage():
+    source = mixed_epilogue("""
+        for _, (carried,) in pl.range(n, init_values=(vec,)):
+            with pl.reg_scope():
+                value = pl.reg.load(carried, lanes=64)
+                updated = pl.reg.store(carried, value=value)
+            local = pl.tile.add(updated, updated)
+            result = pl.yield_(local)
+        output = pl.tile.store(result, [0, 0], output)
+    """)
+    with pytest.raises(ValueError, match="including zero iterations"):
+        lower_through(source, "ExpandMixedKernel")
+
+
+def test_vf_tuple_projection_keeps_received_slot_across_branch():
+    # Same-shaped outputs are returned by a single VF. Only the receive is
+    # borrowed, and one branch names it through the second projection.
+    result = lower_through(
+        mixed_epilogue("""
+        local: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec,
+                       pl.TileView(valid_shape=[16, 128], stride=[128, 1])] = pl.tile.add(vec, vec)
+        with pl.reg_scope():
+            value = pl.reg.load(local, lanes=64)
+            updated_local = pl.reg.store(local, value=value)
+            updated_vec = pl.reg.store(vec, value=value)
+        if n > 0:
+            selected = pl.yield_(updated_vec)
+        else:
+            selected = pl.yield_(vec)
+        output = pl.tile.store(updated_local, [0, 0], output)
+        output = pl.tile.store(selected, [0, 0], output)
+    """),
+        "InitMemRef",
+    )
+    (vf,) = helpers(result)
+    assert len(vf.return_types) == 2
+    aiv = next(f for f in result.functions.values() if f.func_type == ir.FunctionType.AIV)
+    assert isinstance(aiv.body, ir.SeqStmts)
+    # The allocated sibling must keep its own buffer, and the selected receive
+    # must survive until its last store without gaining a new allocation.
+    stores = [
+        s.value
+        for s in aiv.body.stmts
+        if isinstance(s, ir.AssignStmt)
+        and isinstance(s.value, ir.Call)
+        and s.value.op.name == ir.get_op("tile.store").name
+    ]
+    assert len(stores) == 2
+    local, received = (call.args[0].type for call in stores)
+    assert isinstance(local, ir.TileType) and local.memref is not None
+    assert isinstance(received, ir.TileType) and received.memref is None
+    emitted = ir.python_print(aiv)
+    assert emitted.rindex("tile.store") < emitted.index("system.tfree_to_aic")
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.HasMemRefs)
+    passes.verify_properties(properties, result, "outlined VF projection and same-slot join")
+
+
 def test_register_loop_carries_are_local_and_retyped():
     source = program("""
 with pl.reg_scope():
@@ -1151,7 +1284,9 @@ z = pl.tile.add(first, second)
     assert len(bundle.helpers) == 1
 
 
-def test_vf_tuple_if_result_keeps_pipe_storage_live():
+@pytest.mark.parametrize("region", ["branch", "loop"])
+@pytest.mark.parametrize("different_storage", [False, True])
+def test_vf_tuple_control_flow_result_keeps_pipe_storage_live(region, different_storage):
     text = MIXED_SOURCE.replace("def main(self, x:", "def main(self, n: pl.Scalar[pl.INDEX], x:")
     text = text.replace(
         "            updated = pl.reg.store(vec, value=value)",
@@ -1170,30 +1305,64 @@ def test_vf_tuple_if_result_keeps_pipe_storage_live():
         caller.params[0], ir.ConstInt(0, DataType.INDEX, caller.span), DataType.BOOL, caller.span
     )
 
-    class BranchTuple(ir.IRMutator):
+    class CarryTuple(ir.IRMutator):
         def visit_assign_stmt(self, op: ir.AssignStmt) -> ir.Stmt:
             if isinstance(op.value, ir.Call) and isinstance(op.value.op, ir.GlobalVar):
                 left = ir.Var("left_pair", op.var.type, op.span)
                 right = ir.Var("right_pair", op.var.type, op.span)
+                second_call = op.value
+                right_stmts: list[ir.Stmt] = []
+                if different_storage:
+                    (arg,) = op.value.args
+                    local = ir.Var("independent", arg.type, op.span)
+                    add = ir.Call(ir.get_op("tile.add"), [arg, arg], arg.type, op.span)
+                    right_stmts.append(ir.AssignStmt(local, add, op.span))
+                    second_call = ir.Call(op.value.op, [local], op.var.type, op.span)
+                right_stmts.extend(
+                    [ir.AssignStmt(right, second_call, op.span), ir.YieldStmt([right], op.span)]
+                )
+                right_body = ir.SeqStmts(right_stmts, op.span)
+                if region == "loop":
+                    # Zero trips select the first call, a nonempty loop selects
+                    # its last call. Project the whole tuple only after the join.
+                    assert caller is not None
+                    seed = ir.AssignStmt(left, op.value, op.span)
+                    carry = ir.IterArg("pair", op.var.type, left, op.span)
+                    index = ir.Var("i", caller.params[0].type, op.span)
+                    zero = ir.ConstInt(0, DataType.INDEX, op.span)
+                    one = ir.ConstInt(1, DataType.INDEX, op.span)
+                    loop = ir.ForStmt(
+                        index, zero, caller.params[0], one, [carry], right_body, [op.var], op.span
+                    )
+                    return ir.SeqStmts([seed, loop], op.span)
                 then = ir.SeqStmts(
                     [ir.AssignStmt(left, op.value, op.span), ir.YieldStmt([left], op.span)], op.span
                 )
-                otherwise = ir.SeqStmts(
-                    [ir.AssignStmt(right, op.value, op.span), ir.YieldStmt([right], op.span)], op.span
-                )
-                return ir.IfStmt(condition, then, otherwise, [op.var], op.span)
+                return ir.IfStmt(condition, then, right_body, [op.var], op.span)
             return super().visit_assign_stmt(op)
 
-    result = BranchTuple().visit_program(source)
-    with passes.PassContext([], enable_buffer_ir=False):
-        for transform in PassManager.get_strategy().passes:
-            result = transform(result)
-            if transform.get_name() == "ExpandMixedKernel":
-                break
+    source = CarryTuple().visit_program(source)
+    if different_storage:
+        message = "same received slot on every path" if region == "branch" else "including zero iterations"
+        with pytest.raises(ValueError, match=message):
+            lower_through(source, "ExpandMixedKernel")
+        return
+    result = lower_through(source, "InitMemRef")
     aiv = next(f for f in result.functions.values() if f.func_type == ir.FunctionType.AIV)
     emitted = ir.python_print(aiv)
     assert "left_pair" in emitted and "right_pair" in emitted
     assert emitted.rindex("tile.store") < emitted.index("system.tfree_to_aic")
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.HasMemRefs)
+    passes.verify_properties(properties, result, "VF tuple branch result")
+    assert isinstance(aiv.body, ir.SeqStmts)
+    projected = [
+        s.var.type
+        for s in aiv.body.stmts
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.TupleGetItemExpr)
+    ]
+    assert len(projected) == 2
+    assert all(isinstance(tile, ir.TileType) and tile.memref is None for tile in projected)
 
 
 def test_vf_identity_result_inherits_mat_memory():
