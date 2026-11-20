@@ -2359,9 +2359,18 @@ class Program:
         else:
             ir.assert_structural_equal(passes.optimize_orch_tensors()(program), program)
 
-    def test_external_aiv_rejects_pitched_reshape(self, tmp_path):
+    @pytest.mark.parametrize("join", [False, True], ids=["direct", "branch"])
+    def test_external_aiv_rejects_pitched_reshape(self, tmp_path, join):
         cpp = tmp_path / "external.cpp"
         cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        source = "chunk"
+        choose = ""
+        if join:
+            source = "selected"
+            choose = """if take_packed:
+            selected = pl.yield_(packed)
+        else:
+            selected = pl.yield_(chunk)"""
         program = pl.parse_program(f"""
 @pl.program
 class Program:
@@ -2370,9 +2379,11 @@ class Program:
         ...
 
     @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, parent: pl.Tensor[[10, 288], pl.FP32]):
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32], packed: pl.Tensor[[8, 256], pl.FP32],
+             take_packed: pl.Scalar[pl.BOOL]):
         chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
-        self.kernel(pl.tensor.reshape(chunk, [4, 512]))
+        {choose}
+        self.kernel(pl.tensor.reshape({source}, [4, 512]))
 """)
         with pytest.raises(ValueError, match="tensor.reshape requires packed ND storage"):
             passes.optimize_orch_tensors()(program)

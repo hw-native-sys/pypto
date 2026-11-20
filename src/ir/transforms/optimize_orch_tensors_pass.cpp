@@ -1634,8 +1634,10 @@ class SliceInputStridesOptimizer {
       // Loop backedges are known only after visiting their bodies. Validate the
       // constraints reachable from AIV operands once, including operands used
       // inside the loop. Indexed edges permit cycles without a fixed-point walk.
-      ValidateConstraints(constraint_roots_, true);
+      // Extern operands can keep different pitches after a join, but a
+      // zero-copy reshape still needs packed input on every incoming path.
       ValidateConstraints(descriptor_roots_, false);
+      ValidateConstraints(std::move(constraint_roots_), true);
 
       for (const auto& [name, params] : aiv_bindings_) {
         for (const auto& [index, binding] : params) {
@@ -1814,7 +1816,7 @@ class SliceInputStridesOptimizer {
       const Span* span;
       std::vector<size_t> parents;
       bool uses_inherited_pitch = false;
-      bool invalid_reshape = false;
+      bool reshape = false;
     };
     struct ExternalRoot {
       const Function* function;
@@ -1870,7 +1872,7 @@ class SliceInputStridesOptimizer {
                          [](const ExprPtr& extent) { return As<ConstInt>(extent) != nullptr; });
     }
 
-    void ValidateConstraints(std::vector<size_t> pending, bool require_consensus) const {
+    void ValidateConstraints(std::vector<size_t> pending, bool require_consensus) {
       if (pending.empty()) return;
       std::vector<bool> visited(constraints_.size(), false);
       while (!pending.empty()) {
@@ -1879,10 +1881,16 @@ class SliceInputStridesOptimizer {
         if (visited[index]) continue;
         visited[index] = true;
         const auto& constraint = constraints_[index];
-        CHECK_SPAN(require_consensus ? constraint.consistent : !constraint.invalid_reshape, *constraint.span)
-            << "AIV tensor argument requires consistent physical strides across loop carries and branches, "
-               "and graph calls; tensor.reshape requires packed ND storage; "
-               "pass the full parent tensor and use parent-relative indices instead";
+        if (!require_consensus && constraint.reshape) {
+          constraint_roots_.push_back(index);
+          continue;
+        }
+        if (require_consensus) {
+          CHECK_SPAN(constraint.consistent, *constraint.span)
+              << "AIV tensor argument requires consistent physical strides across loop carries and branches, "
+                 "and graph calls; tensor.reshape requires packed ND storage; "
+                 "pass the full parent tensor and use parent-relative indices instead";
+        }
         pending.insert(pending.end(), constraint.parents.begin(), constraint.parents.end());
       }
     }
@@ -2197,7 +2205,8 @@ class SliceInputStridesOptimizer {
               // Record unsupported physical reshapes on their result, rather
               // than rejecting unrelated InCore paths during the eager scan.
               // Only constraints reachable from an AIV operand are diagnosed.
-              if (IsOp(call, "tensor.reshape") &&
+              const bool reshape = IsOp(call, "tensor.reshape");
+              if (reshape &&
                   (source.layout != TensorLayout::ND ||
                    !AreExprVectorsEqual(source.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
                                                             tensor->shape_, TensorLayout::ND)))) {
@@ -2205,7 +2214,7 @@ class SliceInputStridesOptimizer {
                 info.consistent = false;
                 info.packed_nd = false;
                 info.constraint = source.constraint;
-                constraints_[AddConstraint(info, call->span_)].invalid_reshape = true;
+                constraints_[AddConstraint(info, call->span_)].reshape = true;
                 return info;
               }
               auto args = call->args_;
@@ -2218,7 +2227,13 @@ class SliceInputStridesOptimizer {
               info.packed_nd &= source.packed_nd;
               info.consistent = source.consistent;
               info.constraint = source.constraint;
-              RecordInheritedPitch(info, call->span_);
+              if (reshape && info.constraint) {
+                auto& constraint = constraints_[AddConstraint(info, call->span_)];
+                constraint.reshape = true;
+                constraint.uses_inherited_pitch = info.packed_nd;
+              } else {
+                RecordInheritedPitch(info, call->span_);
+              }
               return info;
             }
           }
