@@ -231,6 +231,26 @@ def test_device_rejected_on_non_orchestrator_callee():
                 return 0
 
 
+@pytest.mark.parametrize("level", ["HOST", "NODE", "CLUSTER_0", "POD"])
+@pytest.mark.parametrize("qualified", [False, True])
+def test_topology_queries_and_window_allocation_parse_at_both_levels(level, qualified):
+    system = "pld.system" if qualified else "pld"
+    tensor = "pld.tensor" if qualified else "pld"
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.{level}, role=pl.Role.Orchestrator)
+    def orch(self):
+        ranks = {system}.world_size()
+        workers = {system}.num_workers()
+        buf = {tensor}.alloc_window_buffer(ranks * workers)
+        return buf
+""")
+    orch = _get_func(program, "orch")
+    for name in ("pld.system.world_size", "pld.system.num_workers", "pld.tensor.alloc_window_buffer"):
+        _find_callee_call(orch, ir.get_op(name).name)
+
+
 @pytest.mark.parametrize("op", ["put", "get"])
 def test_pod_parser_builds_tensor_transfer(op):
     source = f"""
