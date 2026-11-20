@@ -37,7 +37,7 @@ def init(  # noqa: PLR0913
 
     Ring sizing accepts a positive scalar or four per-depth values. Diagnostics
     require ``output_dir``. The optional workspace budget is in bytes and is
-    passed to the public Worker. Graph capture is unsupported. Direct JIT calls
+    passed to the public Worker. Initialize outside graph capture. Direct JIT calls
     use this initialized Worker and the current Torch stream; compile() retains
     explicit program semantics.
     """
@@ -78,6 +78,6 @@ def init(  # noqa: PLR0913
     native = launch._load_native()
     stream = framework.npu.current_stream(current)
     if native.check_call(stream.stream_id, current):
-        raise NotImplementedError("Torch kernel graph capture is not supported; initialize outside capture")
+        raise NotImplementedError("Torch kernel initialization must run outside graph capture")
     native.borrow_context(current)  # Check live context before claiming kernel mode.
     state.ensure_worker(config)

@@ -172,6 +172,7 @@ class _BorrowedWorkerSession:
         self._context = self._native.borrow_context(config.device_id)
         self._device_id = config.device_id
         self._generation = state.generation
+        self.capture_anchors: dict[int, Any] = {}
         self.worker: Any = None
         self._owner = _OwnerThread()
 
@@ -214,6 +215,11 @@ class _BorrowedWorkerSession:
     @property
     def device_location(self) -> Any:
         return self.worker.device_location
+
+    def synchronize_device(self) -> None:
+        from pypto.torch.interop import _load_torch_npu  # noqa: PLC0415
+
+        _load_torch_npu().npu.synchronize(self._device_id)
 
     def wait(self, ticket: Any) -> None:
         def retire() -> None:

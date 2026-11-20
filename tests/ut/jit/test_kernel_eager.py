@@ -89,7 +89,8 @@ def test_real_compiler_cache_callback_and_retirement(eager_env, copy_kernel, stu
     assert artifact.metadata is not None and artifact.metadata.return_aliases == (2, 2)
     metadata = json.loads((artifact.output_dir / "compiled_meta.json").read_text())
     assert metadata["supported_execution_modes"] == ["kernel"]
-    assert (artifact.output_dir / "kernel_config.py").is_file()
+    config_source = (artifact.output_dir / "kernel_config.py").read_text()
+    assert '"signature": [_D.IN, _D.OUT, _D.SCALAR]' in config_source
     assert list(artifact.output_dir.glob("orchestration/*.cpp"))
     assert list(artifact.output_dir.glob("ptoas/*.pto"))
     env.run_queue()
@@ -128,40 +129,18 @@ def test_compile_keeps_program_contract_and_separate_cache(eager_env, copy_kerne
     env.state.close()  # Explicit close may synchronize the queued callback.
 
 
-@pytest.mark.parametrize("warm", [False, True])
-def test_capture_rejected_before_binding_even_when_prepared(
-    eager_env, copy_kernel, stub_device_runner, monkeypatch, warm
-):
+def test_capture_uses_only_eager_warmed_entries(eager_env, copy_kernel, stub_device_runner, monkeypatch):
     env = eager_env
     env.init()
-    if warm:
-        copy_kernel(env.tensor(), 1, env.tensor())
-        env.state.drain()
-    env.capture = True
-    monkeypatch.setattr(copy_kernel, "_bind_args", lambda *a: pytest.fail("capture entered binding"))
-    with pytest.raises(NotImplementedError, match="capture"):
-        copy_kernel()
-    env.capture = False
-    env.state.close()
-
-
-def test_fake_capable_capture_only_uses_prepared_entries(
-    eager_env, copy_kernel, stub_device_runner, monkeypatch
-):
-    from pypto.torch import launch  # noqa: PLC0415
-
-    env = eager_env
-    env.init()
-    monkeypatch.setattr(launch, "_capture_supported", lambda: True)
     x, out = env.tensor(), env.tensor()
-    env.capture = True
+    env.capture = 42
     with pytest.raises(RuntimeError, match="not prepared"):
         copy_kernel(x, 1, out)
     assert not copy_kernel._cache and "register" not in env.events
     env.capture = False
     copy_kernel(x, 1, out)
     env.state.drain()
-    env.capture = True
+    env.capture = 42
     monkeypatch.setattr(copy_kernel, "_compile", lambda *a, **kw: pytest.fail("compiled during capture"))
     monkeypatch.setattr(
         env.state, "ensure_callable", lambda *a: pytest.fail("registered or loaded during capture")
@@ -174,6 +153,258 @@ def test_fake_capable_capture_only_uses_prepared_entries(
     with pytest.raises(RuntimeError, match="not been prepared"):
         copy_kernel(x, 2, out)
     env.state._registrations.update(registrations)
+    env.run_queue()  # The original framework capture_end drains its host queue.
+    env.capture = False
+    env.models[42].destroyed = True
+    env.state.close()
+
+
+def test_capture_admission_polls_warmup_but_defers_its_finalization(
+    eager_env, copy_kernel, stub_device_runner, monkeypatch
+):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    warmup = env.state._submissions[0]
+    original_done = env.api.PreparedSubmission.done
+
+    def poll(submission):
+        if submission is warmup.submission:
+            env.events.append("warmup.poll")
+        return original_done.__get__(submission)
+
+    monkeypatch.setattr(env.api.PreparedSubmission, "done", property(poll))
+    env.run_queue()
+    env.runs[0].complete = True  # The user's Torch synchronization completed warmup.
+    env.events.clear()
+    env.capture = 42
+    copy_kernel(x, 2, out)
+    assert not warmup.retired and len(env.state._submissions) == 2 and len(env.queue) == 1
+    assert "warmup.poll" in env.events and "wait" not in env.events
+    assert "synchronize" not in env.events and "device.synchronize" not in env.events
+    env.run_queue()
+    env.capture = False
+    env.models[42].destroyed = True
+    env.state.close()
+
+
+def test_capture_returns_before_callbacks_and_shares_model_notice(eager_env, copy_kernel, stub_device_runner):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    baseline = len(env.runs)
+
+    # Observe the original methods: PyPTO must never wrap any NPUGraph method.
+    class Graph:
+        def capture_end(self):
+            env.run_queue()
+            env.capture = False
+
+        def replay(self):
+            pass
+
+        def reset(self):
+            env.models[42].destroyed = True
+
+    env.framework.npu.NPUGraph = Graph
+    methods = (Graph.capture_end, Graph.replay, Graph.reset)
+    env.capture = 42
+    env.events.clear()
+    copy_kernel(x, 2, out)
+    copy_kernel(out, 3, x)
+    first, second = env.state._submissions
+    assert len(env.queue) == 2 and len(env.runs) == baseline
+    assert "synchronize" not in env.events and "device.synchronize" not in env.events
+    assert not first.done() and not second.done()
+    assert first.capture.native is second.capture.anchors[42]
+    assert first.submission.model_notice is second.submission.model_notice
+    graph = Graph()
+    graph.capture_end()
+    copy_kernel(x, 4, out)  # A live graph retains every owner during eager admission.
+    assert env.state.state is KernelState.READY
+    assert len(env.state._submissions) == 3 and first._owners and second._owners
+    assert "capture.release" not in env.events and "device.synchronize" not in env.events
+    graph.replay()
+    graph.reset()
+    env.events.clear()
+    copy_kernel(x, 5, out)  # Reclaim the destroyed graph before enqueueing this call.
+    assert first.retired and second.retired
+    assert len(env.queue) == 1 and env.state._submissions[-1].submission.run is None
+    assert len(env.state._submissions) == 1
+    assert not env.state._worker.capture_anchors
+    assert env.events.index("device.synchronize") < env.events.index("capture.release")
+    assert env.events.index("capture.release") < env.events.index("prepare")
+    assert methods == (Graph.capture_end, Graph.replay, Graph.reset)
+    env.state.close()
+
+
+def test_capture_close_refuses_live_graph_and_retries_after_destroy(
+    eager_env, copy_kernel, stub_device_runner
+):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    env.capture = 23
+    copy_kernel(x, 2, out)
+    env.run_queue()
+    env.capture = False
+    ticket = env.state._submissions[0]
+    with pytest.raises(RuntimeError, match="caller-owned NPUGraph"):
+        env.state.close()
+    assert ticket._owners and not ticket.retired and "close" not in env.events
+    env.models[23].destroyed = True
+    env.state.close()
+    assert ticket.retired and env.state.state is KernelState.CLOSED
+
+
+@pytest.mark.parametrize("failure", ["device_sync_error", "capture_release_error"])
+def test_capture_cleanup_failure_preserves_owners_for_close_retry(
+    eager_env, copy_kernel, stub_device_runner, failure
+):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    env.capture = 42
+    copy_kernel(x, 2, out)
+    env.run_queue()
+    env.capture = False
+    env.models[42].destroyed = True
+    error = RuntimeError("cleanup refused")
+    setattr(env, failure, error)
+    ticket = env.state._submissions[0]
+    with pytest.raises(RuntimeError) as caught:
+        env.state.close()
+    assert caught.value is error
+    assert ticket._owners and not ticket.retired and not ticket.submission.safe_to_release
+    setattr(env, failure, None)
+    env.state.close()
+    assert ticket.retired and env.state.state is KernelState.CLOSED
+
+
+def test_capture_model_address_reuse_does_not_reuse_destroyed_anchor(
+    eager_env, copy_kernel, stub_device_runner
+):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    env.capture = 42
+    copy_kernel(x, 2, out)
+    env.run_queue()
+    old = env.state._submissions[0]
+    env.models[42].destroyed = True
+    env.events.clear()
+    copy_kernel(x, 3, out)  # New recording must defer the old model's cleanup.
+    assert not old.retired and "device.synchronize" not in env.events
+    new = env.state._submissions[1]
+    assert new.submission.model_notice is not old.submission.model_notice
+    env.run_queue()
+    env.capture = False
+    env.state.drain()
+    assert old.retired and not new.retired
+    assert env.state._worker.capture_anchors[42] is new.capture.native
+    env.models[42].destroyed = True
+    env.state.close()
+
+
+@pytest.mark.parametrize("after_notice", [False, True])
+def test_capture_partial_retention_failure_keeps_resources_until_checked_cleanup(
+    eager_env, copy_kernel, stub_device_runner, monkeypatch, after_notice
+):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    original = env.api.PreparedSubmission._retain_model_resources
+    error = ValueError("retention failed")
+
+    def fail(submission, anchor=None):
+        if after_notice:
+            original(submission, anchor)
+        raise error
+
+    monkeypatch.setattr(env.api.PreparedSubmission, "_retain_model_resources", fail)
+    env.capture = 42
+    with pytest.raises(ValueError) as caught:
+        copy_kernel(x, 2, out)
+    assert caught.value is error and not env.queue
+    ticket = env.state._submissions[0]
+    assert not ticket.retired and ticket._owners
+    env.capture = False
+    if after_notice:
+        with pytest.raises(RuntimeError, match="destroy notice"):
+            env.state.close()
+        assert ticket._owners
+        env.models[42].destroyed = True
+    with pytest.raises(ValueError) as caught:
+        env.state.close()
+    assert caught.value is error and ticket.retired and env.state.state is KernelState.CLOSED
+
+
+def test_capture_enqueue_failure_preserves_model_owners(eager_env, copy_kernel, stub_device_runner):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    env.capture = 42
+    env.enqueue_error = ValueError("enqueue failed")
+    with pytest.raises(ValueError, match="enqueue failed"):
+        copy_kernel(x, 2, out)
+    ticket = env.state._submissions[0]
+    assert ticket.submission.cancelled and ticket._owners and not ticket.retired
+    env.capture = False
+    env.models[42].destroyed = True
+    with pytest.raises(ValueError, match="enqueue failed"):
+        env.state.close()
+    assert ticket.retired and env.state.state is KernelState.CLOSED
+
+
+@pytest.mark.parametrize("failure", ["device_sync_error", "capture_release_error"])
+def test_automatic_capture_cleanup_failure_retains_owners_and_refuses_new_enqueue(
+    eager_env, copy_kernel, stub_device_runner, failure
+):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    env.capture = 42
+    copy_kernel(x, 2, out)
+    env.run_queue()
+    env.capture = False
+    env.models[42].destroyed = True
+    ticket = env.state._submissions[0]
+    error = RuntimeError("retry release")
+    setattr(env, failure, error)
+    env.events.clear()
+    with pytest.raises(RuntimeError, match="earlier asynchronous launch error") as caught:
+        copy_kernel(x, 3, out)
+    assert caught.value.__cause__ is error
+    assert env.state.state is KernelState.FAILED and env.state._submissions == [ticket]
+    assert ticket._owners and not ticket.retired
+    assert "prepare" not in env.events and not env.queue
+    setattr(env, failure, None)
+    env.state.close()
+    assert ticket.retired and env.state.state is KernelState.CLOSED
+
+
+def test_capture_rejects_diagnostics_before_compilation(eager_env, copy_kernel, tmp_path):
+    env = eager_env
+    env.init(enable_chip_swimlane=1, output_dir=tmp_path)
+    env.capture = 42
+    with pytest.raises(ValueError, match="diagnostics disabled"):
+        copy_kernel(env.tensor(), 1, env.tensor())
+    assert not copy_kernel._cache and not env.queue
     env.capture = False
     env.state.close()
 
@@ -352,9 +583,8 @@ def test_persistent_kernel_build_restore_and_binary_validation(
 
     assert handle.spec.state is ArtifactState.BINARY_READY
     assert len(built) == 1
-    from pypto.torch import launch  # noqa: PLC0415
-
-    monkeypatch.setattr(launch, "_capture_supported", lambda: True)
+    generated_config = json.loads((artifact.output_dir / "kernel_config.json").read_text())
+    assert generated_config["orchestration"]["signature"] == ["IN", "OUT", "SCALAR"]
     env.capture = True
     with monkeypatch.context() as capture_patch:
         capture_patch.setattr(copy_kernel, "_compile", lambda *a, **kw: pytest.fail("capture compiled"))
@@ -365,6 +595,8 @@ def test_persistent_kernel_build_restore_and_binary_validation(
         copy_kernel._artifact_objects.clear()
         with pytest.raises(RuntimeError, match="not prepared"):
             copy_kernel(x, 3, out)  # A disk hit must not load/restore during capture.
+    env.run_queue()
+    env.models[1].destroyed = True
     env.capture = False
     copy_kernel._artifact_objects.clear()
     copy_kernel(x, 7, out)
