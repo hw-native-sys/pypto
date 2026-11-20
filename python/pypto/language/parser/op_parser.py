@@ -53,6 +53,12 @@ from .type_resolver import (
     _is_dump_call,  # noqa: PLC2701
 )
 
+# These orchestration intrinsics have parser-level context diagnostics.
+_ORCHESTRATION_INTRINSICS = frozenset(
+    ir.get_op(name).name
+    for name in ("pld.system.world_size", "pld.system.num_workers", "pld.tensor.alloc_window_buffer")
+)
+
 
 class OpParser:
     """DSL operator dispatch, argument conversion and buffer metadata."""
@@ -1079,8 +1085,6 @@ class OpParser:
 
         - ``alloc_window_buffer``: must be intercepted at assignment-LHS.
           Reaching here means it was used outside that context.
-
-        ``parse_call`` validates the distributed context of the resulting IR operation.
         """
         span = self.services.span_tracker.get_span(call)
 
@@ -1111,7 +1115,8 @@ class OpParser:
                 "pld.remote_store",
             )
 
-        return self.dispatch_op(_dsl_pld, "pld", op_name, call)
+        result = self.dispatch_op(_dsl_pld, "pld", op_name, call)
+        return self.check_orchestration_intrinsic(result, call)
 
     def parse_pld_category_op(self, category: str, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse ``pld.<category>.<op>(...)`` — 3-segment canonical form.
@@ -1137,7 +1142,8 @@ class OpParser:
                 hint=f"Check spelling, or list available ops in pypto.language.distributed.op.{category}_ops",
             )
 
-        return self.dispatch_op(submodule, f"pld.{category}", op_name, call)
+        result = self.dispatch_op(submodule, f"pld.{category}", op_name, call)
+        return self.check_orchestration_intrinsic(result, call)
 
     def parse_builtin_op(self, segments: list[str], call: ast.Call) -> ir.Expr:
         """Parse printer-emitted ``pl.builtin.<category>.<op>(...)``.
@@ -1372,6 +1378,11 @@ class OpParser:
             )
 
         return ir.ConstInt(cache[dtype_name], DataType.INDEX, span)
+
+    def check_orchestration_intrinsic(self, result: ir.Expr, call: ast.Call) -> ir.Expr:
+        if isinstance(result, ir.Call) and result.op.name in _ORCHESTRATION_INTRINSICS:
+            self.validate_distributed_op_context(result.op, self.services.span_tracker.get_span(call))
+        return result
 
     def validate_distributed_op_context(self, op: ir.Op, span: ir.Span) -> None:
         in_device_scope = self.function.func_type in GRAPH_FORBIDDEN_FUNC_TYPES or any(

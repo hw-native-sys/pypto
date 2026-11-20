@@ -231,6 +231,25 @@ def test_device_rejected_on_non_orchestrator_callee():
                 return 0
 
 
+@pytest.mark.parametrize("op", ["put", "get"])
+def test_pod_parser_builds_tensor_transfer(op):
+    source = f"""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.POD, role=pl.Role.Orchestrator)
+    def pod(
+        self,
+        dst: pld.DistributedTensor[[16, 64], pl.FP16],
+        src: pld.DistributedTensor[[16, 64], pl.FP16],
+        peer: pl.Scalar[pl.INT32],
+    ):
+        pld.tensor.{op}(dst, peer=peer, src=src)
+"""
+    func = _get_func(pl.parse_program(source), "pod")
+    call = _find_callee_call(func, ir.get_op(f"pld.tensor.{op}").name)
+    assert len(call.args) == 3
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
