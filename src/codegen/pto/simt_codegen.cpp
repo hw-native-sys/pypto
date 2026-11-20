@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -57,6 +58,166 @@ void CheckScalar(DataType dtype, const Span& span) {
       << "SIMT scalar lowering supports FP16/BF16/FP32, 8/16/32/64-bit integers, INDEX and BOOL; got "
       << dtype.ToString();
 }
+
+// Bisheng's A5 SIMT backend cannot select LLVM frem (the lowering of pto.remf).
+// Compute fmod using binary long division of the FP32 significands instead.
+// Unlike x - trunc(x / y) * y, this is exact for large ratios and subnormals,
+// needs no floating-point arithmetic/FTZ assumptions, and never overflows i32.
+class SimtRemainderEmitter {
+ public:
+  SimtRemainderEmitter(std::function<void(const std::string&, bool)> emit,
+                       std::function<std::string()> new_temp)
+      : emit_(std::move(emit)), new_temp_(std::move(new_temp)) {}
+
+  std::string Generate(const std::string& lhs, const std::string& rhs) {
+    zero_ = Constant(0);
+    one_ = Constant(1);
+    hidden_ = Constant(0x800000);
+    const auto fraction_mask = Constant(0x7fffff);
+    const auto magnitude_mask = Constant(0x7fffffff);
+    const auto sign_mask = Constant(-2147483647 - 1);
+    const auto infinity = Constant(0x7f800000);
+    const auto nan = Constant(0x7fc00000);
+    const auto x = Value("arith.bitcast " + lhs + " : f32 to i32");
+    const auto y = Value("arith.bitcast " + rhs + " : f32 to i32");
+    const auto ax = Binary("andi", x, magnitude_mask);
+    const auto ay = Binary("andi", y, magnitude_mask);
+    const auto sign = Binary("andi", x, sign_mask);
+    const auto invalid_x = Compare("uge", ax, infinity);
+    const auto invalid_y = Binary("ori", Compare("ugt", ay, infinity), Compare("eq", ay, zero_), "i1");
+    const auto invalid = Binary("ori", invalid_x, invalid_y, "i1");
+    const auto result = new_temp_();
+    Open(result + " = scf.if " + invalid + " -> (i32) {");
+    Emit("scf.yield " + nan + " : i32");
+    Else();
+    // This also handles finite x / infinity and preserves the sign of zero.
+    const auto small = Compare("ult", ax, ay);
+    const auto finite = new_temp_();
+    Open(finite + " = scf.if " + small + " -> (i32) {");
+    Emit("scf.yield " + x + " : i32");
+    Else();
+    const auto equal = Compare("eq", ax, ay);
+    const auto reduced = new_temp_();
+    Open(reduced + " = scf.if " + equal + " -> (i32) {");
+    Emit("scf.yield " + sign + " : i32");
+    Else();
+    // Here both operands are finite/nonzero and |x| > |y|. Normalize both
+    // significands into [2^23, 2^24), using signed biased exponents for subnormals.
+    const auto shift = Constant(23);
+    auto unpack = [&](const std::string& magnitude) {
+      const auto exponent = Binary("shrui", magnitude, shift);
+      const auto subnormal = Compare("eq", exponent, zero_);
+      const auto fraction = Binary("andi", magnitude, fraction_mask);
+      const auto mantissa = Select(subnormal, fraction, Binary("ori", fraction, hidden_));
+      return Normalize(mantissa, Select(subnormal, one_, exponent));
+    };
+    const auto [mx, ex] = unpack(ax);
+    const auto [my, ey] = unpack(ay);
+    const auto loop = new_temp_();
+    const auto m = new_temp_();
+    const auto e = new_temp_();
+    Open(loop + ":2 = scf.while (" + m + " = " + mx + ", " + e + " = " + ex +
+         ") : (i32, i32) -> (i32, i32) {");
+    const auto more = Compare("sgt", e, ey);
+    Emit("scf.condition(" + more + ") " + m + ", " + e + " : i32, i32");
+    Close("} do {");
+    ++indent_;
+    const auto next_m = new_temp_();
+    const auto next_e = new_temp_();
+    Emit("^bb0(" + next_m + ": i32, " + next_e + ": i32):", true);
+    // Each iteration starts below 2*my; one subtraction then a shift suffices.
+    const auto remainder = SubtractIfGreater(next_m, my);
+    const auto shifted = Binary("shli", remainder, one_);
+    const auto decremented = Binary("subi", next_e, one_);
+    Emit("scf.yield " + shifted + ", " + decremented + " : i32, i32");
+    Close("}");
+    const auto residual = SubtractIfGreater(loop + "#0", my);
+    const auto [mantissa, exponent] = Normalize(residual, ey);
+    const auto packed = new_temp_();
+    Open(packed + " = scf.if " + Compare("sgt", exponent, zero_) + " -> (i32) {");
+    const auto normal = Binary("ori", Binary("subi", mantissa, hidden_), Binary("shli", exponent, shift));
+    Emit("scf.yield " + normal + " : i32");
+    Else();
+    // A nonzero residual is a representable FP32 value; this shift is at most
+    // 23 and discards only zero bits. Normalize leaves zero's exponent unchanged.
+    const auto subnormal = Binary("shrui", mantissa, Binary("subi", one_, exponent));
+    Emit("scf.yield " + subnormal + " : i32");
+    Close("}");
+    const auto magnitude = Select(Compare("eq", mantissa, zero_), zero_, packed);
+    const auto signed_result = Binary("ori", magnitude, sign);
+    Emit("scf.yield " + signed_result + " : i32");
+    Close("}");
+    Emit("scf.yield " + reduced + " : i32");
+    Close("}");
+    Emit("scf.yield " + finite + " : i32");
+    Close("}");
+    return Value("arith.bitcast " + result + " : i32 to f32");
+  }
+
+ private:
+  void Emit(const std::string& text, bool structural = false) {
+    emit_(std::string(indent_ * 2, ' ') + text, structural);
+  }
+  void Open(const std::string& text) {
+    Emit(text, true);
+    ++indent_;
+  }
+  void Close(const std::string& text) {
+    --indent_;
+    Emit(text, true);
+  }
+  void Else() {
+    Close("} else {");
+    ++indent_;
+  }
+  std::string Value(const std::string& operation) {
+    const auto result = new_temp_();
+    Emit(result + " = " + operation);
+    return result;
+  }
+  std::string Constant(int32_t value) { return Value("arith.constant " + std::to_string(value) + " : i32"); }
+  std::string Binary(const std::string& op, const std::string& lhs, const std::string& rhs,
+                     const std::string& type = "i32") {
+    return Value("arith." + op + " " + lhs + ", " + rhs + " : " + type);
+  }
+  std::string Compare(const std::string& predicate, const std::string& lhs, const std::string& rhs) {
+    return Value("arith.cmpi " + predicate + ", " + lhs + ", " + rhs + " : i32");
+  }
+  std::string Select(const std::string& condition, const std::string& yes, const std::string& no) {
+    return Value("arith.select " + condition + ", " + yes + ", " + no + " : i32");
+  }
+  std::string SubtractIfGreater(const std::string& lhs, const std::string& rhs) {
+    return Select(Compare("uge", lhs, rhs), Binary("subi", lhs, rhs), lhs);
+  }
+  std::pair<std::string, std::string> Normalize(const std::string& mantissa, const std::string& exponent) {
+    const auto result = new_temp_();
+    const auto m = new_temp_();
+    const auto e = new_temp_();
+    Open(result + ":2 = scf.while (" + m + " = " + mantissa + ", " + e + " = " + exponent +
+         ") : (i32, i32) -> (i32, i32) {");
+    const auto nonzero = Compare("ne", m, zero_);
+    const auto small = Compare("ult", m, hidden_);
+    const auto more = Binary("andi", nonzero, small, "i1");
+    Emit("scf.condition(" + more + ") " + m + ", " + e + " : i32, i32");
+    Close("} do {");
+    ++indent_;
+    const auto next_m = new_temp_();
+    const auto next_e = new_temp_();
+    Emit("^bb0(" + next_m + ": i32, " + next_e + ": i32):", true);
+    const auto shifted = Binary("shli", next_m, one_);
+    const auto decremented = Binary("subi", next_e, one_);
+    Emit("scf.yield " + shifted + ", " + decremented + " : i32, i32");
+    Close("}");
+    return {result + "#0", result + "#1"};
+  }
+
+  std::function<void(const std::string&, bool)> emit_;
+  std::function<std::string()> new_temp_;
+  size_t indent_ = 0;
+  std::string zero_;
+  std::string one_;
+  std::string hidden_;
+};
 
 class ScalarSubsetChecker : public IRVisitor {
  public:
@@ -460,6 +621,22 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     fs_.current_expr_value.clear();
     return true;
   }
+  if (ir::IsOp(call, "simt.rem")) {
+    const auto lhs = GetExprAsCode(call->args_[0]);
+    const auto rhs = GetExprAsCode(call->args_[1]);
+    SimtRemainderEmitter emitter(
+        [this](const std::string& text, bool structural) {
+          // Region delimiters and block headers cannot carry operation locations.
+          if (structural) {
+            EmitStructural(text);
+          } else {
+            Emit(text);
+          }
+        },
+        [this]() { return NewTemp(); });
+    fs_.current_expr_value = emitter.Generate(lhs, rhs);
+    return true;
+  }
   // Explicit scalar math remains in the SIMT execution domain. Validate names
   // through the registry just like the existing collective dispatch.
   struct MathOp {
@@ -469,29 +646,17 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     size_t arity;
   };
   static const MathOp math_ops[] = {
-      {"simt.abs", "absf", true, 1},
-      {"simt.min", "minf", true, 2},
-      {"simt.max", "maxf", true, 2},
-      {"simt.exp", "exp", false, 1},
-      {"simt.log", "log", false, 1},
-      {"simt.sqrt", "sqrt", false, 1},
-      {"simt.sin", "sin", false, 1},
-      {"simt.cos", "cos", false, 1},
-      {"simt.ceil", "ceil", false, 1},
-      {"simt.floor", "floor", false, 1},
-      {"simt.rint", "rint", false, 1},
-      {"simt.round", "round", false, 1},
-      {"simt.pow", "pow", false, 2},
-      {"simt.fma", "fma", false, 3},
-      {"simt.prmt", "prmt", false, 3},
-      {"simt.mulhi", "mulhi", false, 2},
-      {"simt.ftoi", "ftoi", false, 1},
-      {"simt.itof", "itof", false, 1},
-      {"simt.bitcast", "bitcast", false, 1},
-      {"simt.ftof", "ftof", false, 1},
-      {"simt.div", "divf", true, 2},
-      {"simt.rem", "remf", true, 2},
-      {"simt.mul_i32toi64", "mul_i32toi64", false, 2},
+      {"simt.abs", "absf", true, 1},         {"simt.min", "minf", true, 2},
+      {"simt.max", "maxf", true, 2},         {"simt.exp", "exp", false, 1},
+      {"simt.log", "log", false, 1},         {"simt.sqrt", "sqrt", false, 1},
+      {"simt.sin", "sin", false, 1},         {"simt.cos", "cos", false, 1},
+      {"simt.ceil", "ceil", false, 1},       {"simt.floor", "floor", false, 1},
+      {"simt.rint", "rint", false, 1},       {"simt.round", "round", false, 1},
+      {"simt.pow", "pow", false, 2},         {"simt.fma", "fma", false, 3},
+      {"simt.prmt", "prmt", false, 3},       {"simt.mulhi", "mulhi", false, 2},
+      {"simt.ftoi", "ftoi", false, 1},       {"simt.itof", "itof", false, 1},
+      {"simt.bitcast", "bitcast", false, 1}, {"simt.ftof", "ftof", false, 1},
+      {"simt.div", "divf", true, 2},         {"simt.mul_i32toi64", "mul_i32toi64", false, 2},
   };
   for (const auto& spec : math_ops) {
     if (!ir::IsOp(call, spec.name)) continue;

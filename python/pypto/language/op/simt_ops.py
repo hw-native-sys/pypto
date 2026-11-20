@@ -668,7 +668,9 @@ def rem(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr) -> Scalar:
     """Return the FP32 remainder using a quotient truncated toward zero.
 
     This follows fmod-style semantics, including the dividend sign; it is
-    distinct from Python floor modulo. Exceptional values follow the target.
+    distinct from Python floor modulo. Subnormals and signed zero are preserved.
+    A zero divisor, infinite dividend, or NaN operand produces NaN; a finite
+    dividend with an infinite divisor is returned unchanged.
     """
     return Scalar(expr=_simt.rem(_unwrap(lhs), _unwrap(rhs)))
 

@@ -11,6 +11,7 @@
 
 import ast
 import json
+import os
 import re
 import runpy
 import subprocess
@@ -906,7 +907,6 @@ def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entr
         else:
             for operation in (
                 "divf",
-                "remf",
                 "ftof",
                 "ftoi",
                 "itof",
@@ -937,6 +937,46 @@ def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entr
         assert "asm sideeffect" not in output.read_text()
     finally:
         backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("entry_name", ["extended_entry", "remainder_entry"])
+def test_simt_interfaces_device_compile(tmp_path, entry_name):
+    """LLVM export alone accepted frem, which Bisheng then rejected on A5.
+
+    Use the actual runtime helper compiler and flags, without requiring an NPU.
+    Cover both the original failing kernel and a nonconstant divisor so LLVM
+    cannot remove exceptional-input paths before device instruction selection.
+    """
+    if os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1":
+        pytest.skip("Opt in to the A5 compiler with PYPTO_RUN_VPTO_VF_VALIDATION=1")
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    # The unit-suite import hooks stub the SDK. A subprocess must import the
+    # installed runtime so this exercises real compiler discovery and execution.
+    script = """
+import runpy
+import sys
+from pathlib import Path
+from pypto.runtime.kernel_compiler import KernelCompiler
+
+fixture = runpy.run_path(sys.argv[1])
+output = Path(sys.argv[2])
+fixture["compile_case"](output, entry=fixture[sys.argv[3]])
+helpers = tuple(str(path) for path in (output / "vpto").rglob("*.pto"))
+assert len(helpers) == 1
+objects = KernelCompiler("a5")._compile_vpto_helpers(helpers, output)
+assert len(objects) == 1 and objects[0].stat().st_size > 0
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(tmp_path), entry_name],
+        env={**os.environ, "PYPTO_SKIP_RUNTIME_PIN_CHECK": "0", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not re.search(r"\bfrem\b", (tmp_path / "vpto_0.ll").read_text())
 
 
 if __name__ == "__main__":

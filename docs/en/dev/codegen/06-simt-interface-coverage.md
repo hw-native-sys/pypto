@@ -83,6 +83,19 @@ validation. The worktree C++ build and focused SIMT regressions pass, including
 the public JIT fixture and required PTOAS v0.74 native compilation. The device
 probe still reports DCMI -8005, including outside the sandbox.
 
+FP32 `rem` uses integer significand reduction because the A5 Bisheng backend
+cannot select the LLVM `frem` emitted by `pto.remf`. This preserves subnormals
+and the dividend sign, including zero, without a rounded floating-point quotient.
+A zero divisor, infinite dividend or NaN operand returns NaN; finite/infinity
+returns the dividend. NaN payloads are not specified.
+
+The JIT `test_simt_interfaces_device_compile` regression compiles both the extended
+fixture and a dynamic-divisor remainder kernel through the production PTOAS and
+Bisheng helper path. Enable it with `PYPTO_RUN_VPTO_VF_VALIDATION=1`; no NPU is
+needed. A host LLVM regression checks the emitted arithmetic against `fmod`, while
+the onboard fixture checks bitwise results across signs and exponent boundaries.
+Host execution and device compilation do not substitute for onboard acceptance.
+
 ## Remaining scope
 
 | Family | Current coverage | Remaining work / limitation |

@@ -70,6 +70,17 @@ signless 载体，并显式选择无符号解释。
 独立 worktree C++ 构建及相关 SIMT 回归通过，包括公共 JIT 用例和要求 PTOAS v0.74 的
 原生编译。设备探测仍返回 DCMI -8005，在沙箱外执行也相同。
 
+FP32 `rem` 使用整数有效数归约，因为 A5 Bisheng 后端无法选择 `pto.remf`
+生成的 LLVM `frem`。该实现无需舍入后的浮点商，保留次正规数和被除数符号
+（包括零）。除数为零、被除数为无穷大或任一操作数为 NaN 时返回 NaN；
+有限数除以无穷大时返回被除数。不保证 NaN 的载荷位。
+
+JIT 回归 `test_simt_interfaces_device_compile` 将扩展接口用例和动态除数的
+余数内核送入生产 PTOAS、Bisheng 辅助函数编译路径。通过
+`PYPTO_RUN_VPTO_VF_VALIDATION=1` 启用，无需 NPU。主机 LLVM 回归将实际生成的
+算术与 `fmod` 对比；上板用例按位检查不同符号和指数边界的结果。
+主机执行和设备编译不能替代上板数值验收。
+
 ## 剩余范围
 
 | 类别 | 当前覆盖 | 剩余工作 / 限制 |

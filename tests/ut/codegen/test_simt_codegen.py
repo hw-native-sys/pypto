@@ -9,7 +9,12 @@
 
 """SIMT pointer ABI, physical addressing and module reachability from explicit IR."""
 
+import ctypes
+import math
+import random
 import re
+import shutil
+import struct
 import subprocess
 import textwrap
 
@@ -1206,10 +1211,101 @@ def test_explicit_precision_and_runtime_diagnostics_native_compile(tmp_path):
     )
     ir.assert_structural_equal(program, parse_program(str(program)))
     source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
-    assert "precision_0ulp_ftz_true" in source and "pto.remf" in source
+    assert "precision_0ulp_ftz_true" in source and "pto.remf" not in source
     assert "pto.assert" in source and "pto.trap" in source and "pto.get_veccoreid" in source
     llvm = _compile_extended_simt(tmp_path, source)
     assert "llvm.hivm.TRAP" in llvm
+
+
+@pytest.mark.ptoas_compile
+def test_remainder_lowering_numerics(tmp_path):
+    """Execute the emitted integer algorithm, with only GM access adapted to host memory.
+
+    This checks lowering semantics independently of device availability. Device
+    selection is covered separately through KernelCompiler, and the onboard
+    fixture checks execution on A5, including divergent lanes and subnormals.
+    """
+    clang = shutil.which("clang")
+    if clang is None:
+        pytest.skip("Host clang is required to execute exported LLVM")
+    program = scalar_program(
+        """
+        x = pl.simt.load(dst, (0, 0))
+        value = pl.simt.rem(x, n)
+        pl.simt.store(dst, (0, 0), value)
+        """,
+        "FP32",
+        scalar_dtype="FP32",
+    )
+    source = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False).helpers[0].source
+    assert "pto.remf" not in source
+    llvm = _compile_extended_simt(tmp_path, source)
+    assert not re.search(r"\bfrem\b", llvm)
+    entry = re.search(
+        r"^define linkonce_odr simt_entry void @[^ (]+\(([^\n]*)\)[^\n]*\{\n(.*?)^\}",
+        llvm,
+        re.M | re.S,
+    )
+    assert entry, llvm
+    arguments, body = entry.groups()
+    # Retain every arithmetic instruction, branch and phi from PTOAS. Replacing
+    # one load/store intrinsic with one LLVM instruction preserves SSA numbering.
+    arguments = arguments.replace("ptr addrspace(1)", "ptr")
+    body = body.replace("ptr addrspace(1)", "ptr")
+    body, loads = re.subn(
+        r"call i32 @llvm\.hivm\.ldg\.cache\.s32\(ptr (%\w+), i32 0\)",
+        r"load i32, ptr \1",
+        body,
+    )
+    body, stores = re.subn(
+        r"call void @llvm\.hivm\.stg\.cache\.b32\(ptr (%\w+), i32 (%\w+), i32 0\)",
+        r"store i32 \2, ptr \1",
+        body,
+    )
+    assert loads == stores == 1
+    assert "llvm.hivm" not in body
+    host_llvm = tmp_path / "remainder-host.ll"
+    host_llvm.write_text(f"define void @remainder({arguments}) {{\n{body}}}\n")
+    library = tmp_path / "remainder-host.so"
+    result = subprocess.run(
+        [clang, "-shared", "-fPIC", "-O2", str(host_llvm), "-o", str(library)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    function = ctypes.CDLL(str(library)).remainder
+    function.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_float]
+    function.restype = None
+    # Cross all signs and magnitude boundaries, then sample arbitrary bit
+    # patterns. Comparing bits catches negative zero and one-ULP errors.
+    magnitudes = [
+        0,
+        1,
+        3,
+        0x7FFFFF,
+        0x800000,
+        0x800001,
+        0x3F800000,
+        0x40400000,
+        0x7F7FFFFF,
+        0x7F800000,
+        0x7FC00001,
+    ]
+    edges = [bits | sign for bits in magnitudes for sign in (0, 0x80000000)]
+    pairs = [(x, y) for x in edges for y in edges]
+    rng = random.Random(3505)
+    pairs.extend((rng.getrandbits(32), rng.getrandbits(32)) for _ in range(10000))
+    for x_bits, y_bits in pairs:
+        x, y = (struct.unpack("=f", struct.pack("=I", bits))[0] for bits in (x_bits, y_bits))
+        output = ctypes.c_float(x)
+        function(ctypes.byref(output), y)
+        if not math.isfinite(x) or math.isnan(y) or y == 0:
+            assert math.isnan(output.value), (hex(x_bits), hex(y_bits), output.value)
+        else:
+            expected = struct.pack("=f", math.fmod(x, y))
+            assert bytes(output) == expected, (hex(x_bits), hex(y_bits), output.value, expected.hex())
 
 
 @pytest.mark.ptoas_compile

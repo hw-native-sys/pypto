@@ -171,6 +171,64 @@ def extended_entry(
     return extended_kernel(values, output, half, bfloat, wide, unsigned)
 
 
+@pl.jit.aiv
+def remainder_kernel(
+    lhs: pl.Tensor[[1, 32], pl.FP32],
+    rhs: pl.Tensor[[1, 32], pl.FP32],
+    output: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+):
+    with pl.simt_scope(dims=(32, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        x = pl.simt.load(lhs, (0, tid))
+        y = pl.simt.load(rhs, (0, tid))
+        pl.simt.store(output, (0, tid), pl.simt.rem(x, y))
+    return output
+
+
+@pl.jit
+def remainder_entry(
+    lhs: pl.Tensor[[1, 32], pl.FP32],
+    rhs: pl.Tensor[[1, 32], pl.FP32],
+    output: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+):
+    return remainder_kernel(lhs, rhs, output)
+
+
+def check_remainders(handle):
+    """Divergent lanes cover exponent extremes, signed zero and invalid inputs."""
+    pairs = [
+        (0, 0x40400000),  # +0 / 3
+        (0x40F00000, 0x40400000),  # 7.5 / 3
+        (0x3F800000, 0x40400000),  # |x| < |y|
+        (0x40400000, 0x40400000),  # equal magnitudes
+        (0x7F7FFFFF, 0x40400000),  # ratio too large for a float quotient
+        (0x7F7FFFFF, 3),  # maximum normal / subnormal
+        (0x800000, 3),  # minimum normal / subnormal
+        (0x7FFFFF, 3),  # maximum subnormal / subnormal
+        (3, 2),  # nonzero subnormal remainder
+        (1, 0x800000),  # minimum subnormal / normal
+        (0x800001, 0x800000),  # normal operands, subnormal remainder
+        (0x3F800000, 0x7F800000),  # finite / infinity
+        (0x7F800000, 0x3F800000),  # infinity / finite
+        (0x3F800000, 0),  # zero divisor
+        (0x7FC00001, 0x3F800000),  # NaN dividend
+        (0x3F800000, 0x7FC00001),  # NaN divisor
+    ]
+    for divisor_sign in (0, 0x80000000):
+        signed_pairs = [(x | sign, y | divisor_sign) for sign in (0, 0x80000000) for x, y in pairs]
+        lhs, rhs = (
+            torch.tensor(bits, dtype=torch.int64).to(torch.int32).view(torch.float32).reshape(1, 32)
+            for bits in zip(*signed_pairs, strict=True)
+        )
+        output = torch.zeros_like(lhs)
+        handle(lhs, rhs, output)
+        expected = torch.fmod(lhs, rhs)
+        invalid = torch.isnan(expected)
+        assert torch.equal(torch.isnan(output), invalid)
+        # Numerical equality misses signed zero and can hide subnormal flushing.
+        assert torch.equal(output.view(torch.int32)[~invalid], expected.view(torch.int32)[~invalid])
+
+
 def compile_case(directory: Path, *, entry=interface_entry):
     return entry.compile(
         config=RunConfig(
@@ -187,9 +245,11 @@ def acceptance(output: Path, device: int | None):
     integer = compile_case(output / "integer")
     floating = compile_case(output / "floating", entry=subtraction_entry)
     extended = compile_case(output / "extended", entry=extended_entry)
+    remainder = compile_case(output / "remainder", entry=remainder_entry)
     integer.load()
     floating.load()
     extended.load()
+    remainder.load()
     checks = 0
     if device is not None:
         config = RunConfig(
@@ -199,6 +259,7 @@ def acceptance(output: Path, device: int | None):
             handle = worker.register(integer)
             float_handle = worker.register(floating)
             extended_handle = worker.register(extended)
+            remainder_handle = worker.register(remainder)
             # Include bit 31, signed extrema, signed zero, infinities and NaN payloads.
             initial = torch.tensor(
                 [-(1 << 31), (1 << 31) - 1, -1, 0, 1, 17, -17, 99], dtype=torch.int32
@@ -289,7 +350,8 @@ def acceptance(output: Path, device: int | None):
                 wide, (torch.arange(32, dtype=torch.int64) - 16).reshape(1, 32) * 2147483647, rtol=0, atol=0
             )
             torch.testing.assert_close(unsigned.to(torch.int64), unsigned_seed >> 1, rtol=0, atol=0)
-            checks = 12
+            check_remainders(remainder_handle)
+            checks = 14
     (output / "result.json").write_text(json.dumps({"checks": checks}))
 
 
@@ -305,7 +367,7 @@ def test_simt_interface_gaps(tmp_path, onboard):
     support["run"](
         tmp_path, "interface_gaps", command, timeout=int(os.environ.get("PYPTO_VPTO_TIMEOUT", "600"))
     )
-    assert json.loads((tmp_path / "result.json").read_text())["checks"] == (12 if onboard else 0)
+    assert json.loads((tmp_path / "result.json").read_text())["checks"] == (14 if onboard else 0)
 
 
 if __name__ == "__main__":

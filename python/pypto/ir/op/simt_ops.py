@@ -774,7 +774,9 @@ def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Return the FP32 remainder using a quotient truncated toward zero.
 
     This follows fmod-style semantics, including the dividend sign; it is
-    distinct from Python floor modulo. Exceptional values follow the target.
+    distinct from Python floor modulo. Subnormals and signed zero are preserved.
+    A zero divisor, infinite dividend, or NaN operand produces NaN; a finite
+    dividend with an infinite divisor is returned unchanged.
     """
     span = _get_span_or_capture(span)
     return _ir_core.create_op_call("simt.rem", [lhs, rhs], {}, span)
