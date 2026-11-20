@@ -1403,7 +1403,8 @@ def test_keep_resume_native_pair_contract(tmp_path, keep_resume_native_pair):
 
 
 @pytest.mark.ptoas_compile
-def test_keep_resume_device_object_compile(tmp_path, keep_resume_native_pair):
+@pytest.mark.parametrize("caller_environment", ["unset", "different"])
+def test_keep_resume_device_object_compile(tmp_path, keep_resume_native_pair, caller_environment):
     """Keep/resume must use native size validation and retain the caller ABI."""
     if os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1":
         pytest.skip("Opt in to the A5 compiler with PYPTO_RUN_VPTO_VF_VALIDATION=1")
@@ -1439,8 +1440,13 @@ extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {
 image = output / "kernel.elf"
 image.write_bytes(compiler.compile_incore(str(wrapper), pto_isa_root=ensure_pto_isa_root(),
                                         vpto_sources=sources, build_dir=str(output)))
-cann = Path(os.environ["ASCEND_HOME_PATH"])
-disassembly = subprocess.check_output([cann / "bin/llvm-objdump", "-d", image], text=True, timeout=30)
+# The SDK already selected the compiler. A later caller override must not
+# redirect inspection to another installation or require the variable to exist.
+os.environ.pop("ASCEND_HOME_PATH", None)
+if sys.argv[2] == "different":
+    os.environ["ASCEND_HOME_PATH"] = str(output / "unselected-cann")
+disassembler = Path(compiler._vpto_toolchain()[1]).with_name("llvm-objdump")
+disassembly = subprocess.check_output([disassembler, "-d", image], text=True, timeout=30)
 symbols = subprocess.check_output(["readelf", "-Ws", image], text=True, timeout=30)
 (output / "kernel.disasm").write_text(disassembly)
 (output / "kernel.symbols").write_text(symbols)
@@ -1458,7 +1464,7 @@ for size, name in zip(sizes, ("state_producer", "state_consumer"), strict=True):
     assert int(size) != 65535 and int(size) * 4 == int(symbol[1])
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path)],
+        [sys.executable, "-c", script, str(tmp_path), caller_environment],
         env={**os.environ, "PYPTO_SKIP_RUNTIME_PIN_CHECK": "0", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
         capture_output=True,
         text=True,
