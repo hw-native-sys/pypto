@@ -221,7 +221,7 @@ print(pto_code)
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
-| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
+| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / A5 BF16 NZ Vec-to-Mat 插入 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
 | `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc`（`src0 + src1 + carry`） |
@@ -258,6 +258,16 @@ print(pto_code)
 因此保留整数类型原有的整块 TMOV 复制。
 A2/A3 的插入列偏移必须满足 32 字节对齐（8 个 FP32 或 16 个 FP16/BF16 元素）。
 代码生成会拒绝违反该限制的常量偏移；动态偏移也必须由调用方保证满足此条件。
+
+A5 上，BF16 Vec-to-Mat 插入在源目标使用相同的非紧凑 NZ 布局
+（`col_major`、`row_major`、fractal 512、无填充）时也通过 MTE3 的
+`pto.tinsert` 下沉。它保留父 Mat tile 的物理步长（physical pitch），支持
+在行偏移 0、16、……、112 处依次插入 16 行数据，填满 128 行目标。
+结果必须原地复用 Mat 目标；独立结果会被拒绝，因为保留目标其他元素需要
+不支持的 Mat-to-Mat 拷贝。源有效列数和列偏移必须是编译期确定的 16 的倍数：
+NZ 搬运按完整的 32 字节 BF16 列块复制。
+此路径不扩展 ND-to-NZ 转换、其他 dtype 或 A2/A3 Vec-to-Mat 插入的支持范围。
+共享 L1 的生命周期以及与 Cube 消费者之间的同步仍由混合内核负责。
 
 **Acc 写回上的 FIXPIPE epilogue。** **发生类型转换的** `Acc → Mat` assemble，
 以及**任何** `Acc → GM` store，都是 cube 的 fix-pipe 在排空 L0C——它可以在写出的

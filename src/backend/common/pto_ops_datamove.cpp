@@ -74,7 +74,8 @@ using pto_ops_detail::MaterializeSubviewOperandIfNeeded;
 // Writes source tile into target tile at a given row/col offset.  Lowering:
 //   1. (optional) pto.tmov target → dst when buffer reuse did not merge them
 //      (preserves any data outside the insertion window).
-//   2. pto.tinsert for supported ND Vec copies and FIXPIPE Acc->Mat writebacks;
+//   2. pto.tinsert for supported ND Vec copies, A5 BF16 NZ Vec->Mat inserts,
+//      and FIXPIPE Acc->Mat writebacks;
 //      otherwise pto.subview + pto.tmov into the destination window.
 // Arguments: args[0] = target (destination base), args[1] = source, args[2] = offset MakeTuple
 static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
@@ -146,6 +147,35 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   INTERNAL_CHECK_SPAN(fixpipe_insert || !has_epilogue, op->span_)
       << "Internal error: tile.assemble carries a FIXPIPE epilogue (pre_quant / pre_relu) but does not "
          "lower to pto.tinsert; the epilogue would be dropped";
+
+  const auto source_view = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type);
+  const bool a5_bf16_mat_insert =
+      codegen.GetBackendHandler()->GetPtoTargetArch() == "a5" &&
+      source_tile_type->memory_space_ == ir::MemorySpace::Vec &&
+      result_tile_type->memory_space_ == ir::MemorySpace::Mat && source_tile_type->dtype_ == DataType::BF16 &&
+      source_view.blayout == ir::TileLayout::col_major && source_view.slayout == ir::TileLayout::row_major &&
+      source_view.fractal == 512 && source_view.compact == ir::CompactMode::null;
+  if (a5_bf16_mat_insert) {
+    // A5's MTE3 TINSERT takes the parent Mat tile and explicit offsets. A
+    // source-typed subview would incorrectly turn the Mat destination into Vec.
+    // CheckSubviewTileCompat above keeps this path within matching BF16 NZ
+    // configs; other dtypes/layouts/architectures retain their existing lowering.
+    CHECK_SPAN(target == dst, op->span_)
+        << "tile.assemble: A5 BF16 NZ Vec->Mat insertion requires the result to reuse the Mat target "
+           "in-place; a preservation copy from Mat is unsupported";
+    CHECK_SPAN(source_view.valid_shape.size() == 2 && result_tile_type->shape_.size() == 2, op->span_)
+        << "tile.assemble: A5 BF16 NZ Vec->Mat insertion requires two-dimensional tiles";
+    // NZ UB->L1 copies operate on whole 32-byte column blocks (16 BF16
+    // elements). A partial block or a shifted block would overwrite data
+    // outside the logical insertion window. Keep uncertain alignment rejected
+    // until a lowering that preserves those surrounding elements is available.
+    const auto valid_cols = ir::As<ir::ConstInt>(source_view.valid_shape[1]);
+    const auto col_offset = ir::As<ir::ConstInt>(offset_tuple->elements_[1]);
+    CHECK_SPAN(valid_cols && col_offset && valid_cols->value_ % 16 == 0 && col_offset->value_ % 16 == 0,
+               op->span_)
+        << "tile.assemble: A5 BF16 NZ Vec->Mat insertion requires a compile-time valid column count "
+           "and column offset that are each a multiple of 16";
+  }
 
   if (source_tile_type->dtype_.IsPackedFp4()) {
     // The type deducer admits native FP4 insertion only for matching NZ views.
@@ -284,7 +314,6 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   // i8/u8 tiles with dynamic ValidCol (-1) at its two-byte alignment assertion.
   // Keep integer copies on their existing path rather than regressing working
   // whole-tile TMOVs.
-  const auto source_view = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type);
   const auto dtype = source_tile_type->dtype_;
   const bool vec_insert = source_tile_type->memory_space_ == ir::MemorySpace::Vec &&
                           result_tile_type->memory_space_ == ir::MemorySpace::Vec &&
@@ -299,7 +328,7 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
         << "tile.assemble: A2/A3 ND Vec insertion requires a 32-byte-aligned column offset (a multiple of "
         << 32 / dtype.GetByte() << " elements for " << dtype.ToString() << ")";
   }
-  if (fixpipe_insert || vec_insert) {
+  if (fixpipe_insert || vec_insert || a5_bf16_mat_insert) {
     std::ostringstream tins;
     tins << "pto.tinsert ins(" << src << ", " << row_off << ", " << col_off;
     if (!src_type.empty()) tins << " : " << src_type << ", index, index";
