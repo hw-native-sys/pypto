@@ -41,22 +41,20 @@ output_dir/
 
 `kernel_config.py` 提供 `RUNTIME_CONFIG` 字典，派发路径据此启动程序。
 
-| 键 | 何时写入 | 备注 |
-| - | ---- | -- |
-| `runtime` | 总是 | 目标平台实际使用的 Simpler 实现名。 |
-| `aicpu_thread_num` | 总是（`0`） | `0` 选择运行时的架构默认值（a2a3 为 4，a5 为 5）。调用方可以覆盖。 |
+- `runtime` 记录目标平台实际使用的 Simpler 实现名。
+- `aicpu_thread_num` 默认为 `0`，表示使用运行时的架构默认值
+  （a2a3 为 4，a5 为 5）。调用方可以覆盖。
 
 通过 `ir.compile(runtime=...)` 或 `PassContext([], runtime=...)` 选择
 `RuntimeKind`。需要按运行时做 IR 合法化的 pass 通过
 `PassContext::GetRuntime()` 获取该选择。代码生成根据目标平台解析实际实现，
 再写入 `RUNTIME_CONFIG["runtime"]`。
 
-| 编译时选择 | 目标平台 | 制品中记录的名称 |
-| ----- | ---- | -------- |
-| `TENSORMAP_AND_RINGBUFFER` | 受支持的平台 | `tensormap_and_ringbuffer` |
-| `HOST_BUILD_GRAPH` | A2/A3 | `host_build_graph` |
-| `HOST_BUILD_GRAPH` | A5 和 A5 模拟器 | `percounter` |
-| `HOST_BUILD_GRAPH_EXPERIMENTAL` | A5 和 A5 模拟器 | `host_build_graph` |
+- `TENSORMAP_AND_RINGBUFFER` 生成 `tensormap_and_ringbuffer`。
+- `HOST_BUILD_GRAPH` 在 A2/A3 上生成 `host_build_graph`，
+  在 A5 和 A5 模拟器上生成 `percounter`。
+- `HOST_BUILD_GRAPH_EXPERIMENTAL` 在 A5 和 A5 模拟器上生成
+  `host_build_graph`。
 
 `passes.runtime_kind_to_name` 和 `passes.runtime_kind_from_name` 转换编译时的
 运行时选择。加载制品时，runner 直接读取记录的实现名，并选择对应的 Simpler
