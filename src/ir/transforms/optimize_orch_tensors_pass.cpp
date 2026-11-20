@@ -1593,22 +1593,31 @@ class SliceInputStridesOptimizer {
     }
 
     InputShapeMap result() {
-      // Later callers and loop backedges can introduce slice provenance after
-      // consumers were recorded. Each flag and dependency edge is visited at
-      // most once, including cycles, without rescanning any function body.
+      // A later caller or backedge can introduce a slice or disprove packed ND
+      // storage. Each fact propagates once per edge, including around cycles.
       std::vector<std::vector<size_t>> dependents(constraints_.size());
       std::vector<size_t> pending;
       for (size_t i = 0; i < constraints_.size(); ++i) {
         for (const auto parent : constraints_[i].parents) dependents[parent].push_back(i);
-        if (constraints_[i].sliced) pending.push_back(i);
+        if (constraints_[i].sliced || !constraints_[i].packed_nd) pending.push_back(i);
       }
       while (!pending.empty()) {
         auto index = pending.back();
         pending.pop_back();
         for (const auto dependent : dependents[index]) {
-          if (constraints_[dependent].sliced) continue;
-          constraints_[dependent].sliced = true;
+          auto& child = constraints_[dependent];
+          const bool sliced = child.sliced || constraints_[index].sliced;
+          const bool packed_nd = child.packed_nd && constraints_[index].packed_nd;
+          if (sliced == child.sliced && packed_nd == child.packed_nd) continue;
+          child.sliced = sliced;
+          child.packed_nd = packed_nd;
           pending.push_back(dependent);
+        }
+      }
+      for (const auto& root : external_roots_) {
+        const auto& binding = aiv_bindings_.at(root.function->name_).at(root.param);
+        if (!UsesPackedRuntimeStrides(*root.function, root.param, binding)) {
+          constraint_roots_.push_back(root.constraint);
         }
       }
       // Loop backedges are known only after visiting their bodies. Validate the
@@ -1631,6 +1640,7 @@ class SliceInputStridesOptimizer {
       for (const auto& [name, params] : aiv_bindings_) {
         for (const auto& [index, binding] : params) {
           if (!binding.sliced && (!binding.constraint || !constraints_[*binding.constraint].sliced)) continue;
+          if (UsesPackedRuntimeStrides(*functions_.at(name), index, binding)) continue;
           CHECK_SPAN(binding.consistent && !binding.strides.empty(), *binding.span)
               << "AIV sliced tensor argument requires one consistent static stride per parameter across "
                  "all call sites; pass the full parent tensor and use parent-relative indices instead";
@@ -1772,6 +1782,7 @@ class SliceInputStridesOptimizer {
       std::vector<ExprPtr> strides;
       TensorLayout layout = TensorLayout::ND;
       bool sliced = false;
+      bool packed_nd = false;
       bool consistent = true;
       const Span* span = nullptr;
       std::optional<size_t> constraint;
@@ -1789,9 +1800,38 @@ class SliceInputStridesOptimizer {
     struct StrideConstraint {
       bool consistent = true;
       bool sliced = false;
+      bool packed_nd = false;
       const Span* span;
       std::vector<size_t> parents;
     };
+    struct ExternalRoot {
+      const Function* function;
+      size_t param;
+      size_t constraint;
+    };
+
+    // An opaque kernel receives a runtime descriptor. Its row pitch can vary
+    // when every reaching allocation/view has the packed strides of its own
+    // runtime shape. An explicit strided formal still requires specialization.
+    bool UsesPackedRuntimeStrides(const Function& function, size_t param, const Storage& value) const {
+      if (!function.HasAttr(kAttrExternalSource) || !value.packed_nd ||
+          (value.constraint && !constraints_[*value.constraint].packed_nd))
+        return false;
+      const auto formal = AsTensorTypeLike(function.params_[param]->GetType());
+      if (!formal || formal->shape_.size() != value.strides.size()) return false;
+      const auto expected =
+          tensor_view_semantics::BuildLogicalStridesFromLayout(formal->shape_, TensorLayout::ND);
+      const auto& view = formal->tensor_view_;
+      if (view && (view->layout != TensorLayout::ND ||
+                   (!view->stride.empty() && !AreExprVectorsEqual(view->stride, expected))))
+        return false;
+      bool dynamic = false;
+      for (size_t i = 0; i < value.strides.size(); ++i) {
+        if (As<ConstInt>(expected[i]) && !AreExprsEqual(expected[i], value.strides[i])) return false;
+        dynamic |= !As<ConstInt>(value.strides[i]);
+      }
+      return dynamic;
+    }
     using ValueGroups = std::vector<Storage>;
     using Bindings = std::unordered_map<const Expr*, Storage>;
     using UndoBindings = std::unordered_map<const Expr*, std::optional<Storage>>;
@@ -1836,7 +1876,7 @@ class SliceInputStridesOptimizer {
     }
 
     size_t AddConstraint(Storage& info, const Span& span) {
-      StrideConstraint constraint{info.consistent, info.sliced, &span, {}};
+      StrideConstraint constraint{info.consistent, info.sliced, info.packed_nd, &span, {}};
       if (info.constraint) constraint.parents.push_back(*info.constraint);
       const auto index = constraints_.size();
       info.constraint = index;
@@ -1849,6 +1889,7 @@ class SliceInputStridesOptimizer {
       constraint.consistent &= yielded.consistent && initial.layout == yielded.layout &&
                                AreExprVectorsEqual(initial.strides, yielded.strides);
       constraint.sliced |= initial.sliced || yielded.sliced;
+      constraint.packed_nd &= initial.packed_nd && yielded.packed_nd;
       if (yielded.constraint) constraint.parents.push_back(*yielded.constraint);
     }
 
@@ -1913,6 +1954,7 @@ class SliceInputStridesOptimizer {
         if (!backedge) AddConstraint(value, span);
         if (value.constraint) Constrain(*value.constraint, value, other);
         value.sliced |= other.sliced;
+        value.packed_nd &= other.packed_nd;
       }
       return value;
     }
@@ -1964,6 +2006,11 @@ class SliceInputStridesOptimizer {
         info.strides = tensor->tensor_view_ && !tensor->tensor_view_->stride.empty()
                            ? tensor->tensor_view_->stride
                            : tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, layout);
+        info.packed_nd =
+            layout == TensorLayout::ND &&
+            (!tensor->tensor_view_ || tensor->tensor_view_->stride.empty() ||
+             AreExprVectorsEqual(info.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                   tensor->shape_, TensorLayout::ND)));
       }
       return info;
     }
@@ -2060,6 +2107,13 @@ class SliceInputStridesOptimizer {
         } else {
           info.strides.clear();
         }
+        // A leading slab of a packed parent is packed if and only if the
+        // inherited strides equal the dense strides for the resulting shape.
+        const auto result = AsTensorTypeLike(expr->GetType());
+        info.packed_nd =
+            info.packed_nd && result && info.layout == TensorLayout::ND &&
+            AreExprVectorsEqual(info.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                  result->shape_, TensorLayout::ND));
       } else {
         if (auto call = As<Call>(expr)) {
           if (IsTensorMetadataView(call)) {
@@ -2078,6 +2132,7 @@ class SliceInputStridesOptimizer {
                                                             tensor->shape_, TensorLayout::ND)))) {
                 info.sliced = source.sliced;
                 info.consistent = false;
+                info.packed_nd = false;
                 info.constraint = source.constraint;
                 AddConstraint(info, call->span_);
                 return info;
@@ -2089,6 +2144,7 @@ class SliceInputStridesOptimizer {
                   OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_);
               info = TypeStorage(inferred->GetType());
               info.sliced = source.sliced;
+              info.packed_nd &= source.packed_nd;
               info.consistent = source.consistent;
               info.constraint = source.constraint;
               return info;
@@ -2111,6 +2167,7 @@ class SliceInputStridesOptimizer {
       // Synthesized outputs allocate shape/dtype only, hence packed row-major
       // storage regardless of an explicit view on the formal parameter.
       Storage value;
+      value.packed_nd = true;
       value.strides = tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, TensorLayout::ND);
       value.sliced = tensor->tensor_view_ && (!tensor->tensor_view_->stride.empty() ||
                                               tensor->tensor_view_->layout != TensorLayout::ND);
@@ -2152,7 +2209,13 @@ class SliceInputStridesOptimizer {
         auto value = ArgumentStorage(callee, args, supplied, i, submit);
         if (!value) continue;
         auto info = *value;
-        if (info.constraint) constraint_roots_.push_back(*info.constraint);
+        if (info.constraint) {
+          if (callee->HasAttr(kAttrExternalSource)) {
+            external_roots_.push_back({callee.get(), i, *info.constraint});
+          } else {
+            constraint_roots_.push_back(*info.constraint);
+          }
+        }
         info.span = &span;
         auto [binding, inserted] = aiv_bindings_[op->name_].emplace(i, info);
         if (!inserted) {
@@ -2181,6 +2244,7 @@ class SliceInputStridesOptimizer {
     std::unordered_map<const Function*, std::vector<std::optional<size_t>>> return_params_;
     std::vector<std::unique_ptr<LazyTuple>> lazy_tuples_;
     std::vector<StrideConstraint> constraints_;
+    std::vector<ExternalRoot> external_roots_;
     std::vector<size_t> constraint_roots_;
   };
 
