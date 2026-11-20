@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -1596,10 +1597,12 @@ class SliceInputStridesOptimizer {
       // A later caller or backedge can introduce a slice or disprove packed ND
       // storage. Each fact propagates once per edge, including around cycles.
       std::vector<std::vector<size_t>> dependents(constraints_.size());
+      std::vector<bool> pitch_conflict(constraints_.size());
       std::vector<size_t> pending;
       for (size_t i = 0; i < constraints_.size(); ++i) {
         for (const auto parent : constraints_[i].parents) dependents[parent].push_back(i);
-        if (constraints_[i].sliced || !constraints_[i].packed_nd) pending.push_back(i);
+        pitch_conflict[i] = !constraints_[i].consistent;
+        if (constraints_[i].sliced || !constraints_[i].packed_nd || pitch_conflict[i]) pending.push_back(i);
       }
       while (!pending.empty()) {
         auto index = pending.back();
@@ -1607,16 +1610,22 @@ class SliceInputStridesOptimizer {
         for (const auto dependent : dependents[index]) {
           auto& child = constraints_[dependent];
           const bool sliced = child.sliced || constraints_[index].sliced;
-          const bool packed_nd = child.packed_nd && constraints_[index].packed_nd;
-          if (sliced == child.sliced && packed_nd == child.packed_nd) continue;
+          const bool conflict = pitch_conflict[dependent] || pitch_conflict[index];
+          const bool packed_nd = child.packed_nd && constraints_[index].packed_nd &&
+                                 !(child.uses_inherited_pitch && pitch_conflict[index]);
+          if (sliced == child.sliced && packed_nd == child.packed_nd &&
+              conflict == pitch_conflict[dependent]) {
+            continue;
+          }
           child.sliced = sliced;
           child.packed_nd = packed_nd;
+          pitch_conflict[dependent] = conflict;
           pending.push_back(dependent);
         }
       }
       for (const auto& root : external_roots_) {
         const auto& binding = aiv_bindings_.at(root.function->name_).at(root.param);
-        if (!UsesPackedRuntimeStrides(*root.function, root.param, binding)) {
+        if (!UsesPackedRuntimeStrides(*root.function, root.param, binding, pitch_conflict)) {
           constraint_roots_.push_back(root.constraint);
         }
       }
@@ -1640,7 +1649,7 @@ class SliceInputStridesOptimizer {
       for (const auto& [name, params] : aiv_bindings_) {
         for (const auto& [index, binding] : params) {
           if (!binding.sliced && (!binding.constraint || !constraints_[*binding.constraint].sliced)) continue;
-          if (UsesPackedRuntimeStrides(*functions_.at(name), index, binding)) continue;
+          if (UsesPackedRuntimeStrides(*functions_.at(name), index, binding, pitch_conflict)) continue;
           CHECK_SPAN(binding.consistent && !binding.strides.empty(), *binding.span)
               << "AIV sliced tensor argument requires one consistent static stride per parameter across "
                  "all call sites; pass the full parent tensor and use parent-relative indices instead";
@@ -1803,6 +1812,7 @@ class SliceInputStridesOptimizer {
       bool packed_nd = false;
       const Span* span;
       std::vector<size_t> parents;
+      bool uses_inherited_pitch = false;
     };
     struct ExternalRoot {
       const Function* function;
@@ -1813,21 +1823,29 @@ class SliceInputStridesOptimizer {
     // An opaque kernel receives a runtime descriptor. Its row pitch can vary
     // when every reaching allocation/view has the packed strides of its own
     // runtime shape. An explicit strided formal still requires specialization.
-    bool UsesPackedRuntimeStrides(const Function& function, size_t param, const Storage& value) const {
+    bool UsesPackedRuntimeStrides(const Function& function, size_t param, const Storage& value,
+                                  const std::vector<bool>& pitch_conflict) const {
       if (!function.HasAttr(kAttrExternalSource) || !value.packed_nd ||
-          (value.constraint && !constraints_[*value.constraint].packed_nd))
+          (value.constraint && !constraints_[*value.constraint].packed_nd)) {
         return false;
+      }
       const auto formal = AsTensorTypeLike(function.params_[param]->GetType());
       if (!formal || formal->shape_.size() != value.strides.size()) return false;
       const auto expected =
           tensor_view_semantics::BuildLogicalStridesFromLayout(formal->shape_, TensorLayout::ND);
       const auto& view = formal->tensor_view_;
       if (view && (view->layout != TensorLayout::ND ||
-                   (!view->stride.empty() && !AreExprVectorsEqual(view->stride, expected))))
+                   (!view->stride.empty() && !AreExprVectorsEqual(view->stride, expected)))) {
         return false;
+      }
       bool dynamic = false;
       for (size_t i = 0; i < value.strides.size(); ++i) {
-        if (As<ConstInt>(expected[i]) && !AreExprsEqual(expected[i], value.strides[i])) return false;
+        if (As<ConstInt>(expected[i])) {
+          if (!AreExprsEqual(expected[i], value.strides[i])) return false;
+          // Only the innermost unit stride follows from packed ND alone. A
+          // fixed outer stride must remain true for all incoming layouts.
+          if (i + 1 < expected.size() && value.constraint && pitch_conflict[*value.constraint]) return false;
+        }
         dynamic |= !As<ConstInt>(value.strides[i]);
       }
       return dynamic;
@@ -1882,6 +1900,16 @@ class SliceInputStridesOptimizer {
       info.constraint = index;
       constraints_.push_back(std::move(constraint));
       return index;
+    }
+
+    // The proof for a derived view compares the strides inherited from the
+    // first incoming binding. Later callers/backedges may supply packed parents
+    // with a different pitch. A whole parent remains packed, but a window
+    // inferred from that first pitch is no longer known to be packed.
+    void RecordInheritedPitch(Storage& info, const Span& span) {
+      if (info.packed_nd && info.constraint) {
+        constraints_[AddConstraint(info, span)].uses_inherited_pitch = true;
+      }
     }
 
     void Constrain(size_t index, const Storage& initial, const Storage& yielded) {
@@ -2107,13 +2135,27 @@ class SliceInputStridesOptimizer {
         } else {
           info.strides.clear();
         }
-        // A leading slab of a packed parent is packed if and only if the
-        // inherited strides equal the dense strides for the resulting shape.
+        // Codegen clamps shapes to the source at runtime. A shifted or ragged
+        // inner axis could therefore shrink while still inheriting the original
+        // pitch. Only admit slabs retaining every inner extent at offset zero.
         const auto result = AsTensorTypeLike(expr->GetType());
+        const auto offsets = ExtractTupleElements(call->args_[2], shape.size());
+        bool seen_leading = false;
+        bool full_inner_axes = shape.size() == source_rank && offsets.size() == source_rank;
+        for (size_t axis = 0; full_inner_axes && axis < source_rank; ++axis) {
+          if (!seen_leading) {
+            seen_leading =
+                std::find(dropped.begin(), dropped.end(), static_cast<int64_t>(axis)) == dropped.end();
+            continue;
+          }
+          const auto offset = As<ConstInt>(offsets[axis]);
+          full_inner_axes = offset && offset->value_ == 0 && AreExprsEqual(shape[axis], source->shape_[axis]);
+        }
         info.packed_nd =
-            info.packed_nd && result && info.layout == TensorLayout::ND &&
+            info.packed_nd && full_inner_axes && result && info.layout == TensorLayout::ND &&
             AreExprVectorsEqual(info.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
                                                   result->shape_, TensorLayout::ND));
+        RecordInheritedPitch(info, call->span_);
       } else {
         if (auto call = As<Call>(expr)) {
           if (IsTensorMetadataView(call)) {
@@ -2147,6 +2189,7 @@ class SliceInputStridesOptimizer {
               info.packed_nd &= source.packed_nd;
               info.consistent = source.consistent;
               info.constraint = source.constraint;
+              RecordInheritedPitch(info, call->span_);
               return info;
             }
           }

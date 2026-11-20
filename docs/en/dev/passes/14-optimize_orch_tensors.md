@@ -112,6 +112,12 @@ For example, an `[8, 256]` window of a `[10, 288]` parent retains `[288, 1]`.
 This AIV refinement requires static physical strides consistent across every
 call to the same parameter. Mixed dense/sliced calls with different pitches,
 dynamic pitches, and conflicting explicit parameter strides or layouts are diagnosed.
+External C++ AIV kernels may use runtime pitch when every reaching operand
+has packed ND storage and the formal accepts packed ND. For example, selecting
+one rank from a packed `[ranks, batch, width]` table preserves a dense
+`[batch, width]` block with row pitch `width`. A cropped or shifted inner axis,
+or a derived window whose inherited pitch changes at another caller or loop
+backedge, still requires static stride specialization.
 A layout-only declaration is still a storage contract: runtime-allocated ND outputs
 cannot satisfy a DN formal, even when it declares no stride.
 Loop-carried and branch-merged tensors must agree on physical strides at every
