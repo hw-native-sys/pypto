@@ -527,6 +527,9 @@ inline constexpr const char* kAttrExternalSource = "external_source";
  */
 inline constexpr const char* kAttrExternalReturnParams = "external_return_params";
 
+// Native callback binary admission and completion policy (string).
+inline constexpr const char* kAttrExternalBinaryPolicy = "external_binary_policy";
+
 /**
  * @brief Bridge-owned host C++ checker definition and its callable symbol (strings).
  *

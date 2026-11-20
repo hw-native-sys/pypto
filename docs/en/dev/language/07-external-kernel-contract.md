@@ -2,7 +2,7 @@
 
 This is the interface baseline for tasks 34.1–34.4 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
 It defines data exchange and executable IR prototypes, not a public provider
-registration API or an installed CANNBotDSL runtime adapter.
+registration API. The explicit CANNBotDSL JIT binding below supports a checked A5 subset.
 
 ## Responsibilities
 
@@ -142,10 +142,61 @@ its identity is explicitly incomplete because no complete Python closure/input
 snapshot exists. This provider is therefore not registered with the capture-only
 registry and does not claim preparation-cache reuse.
 
-The A5 TMR bridge supports direct execution of the single-block AIC/AIV/MIX
-subset described below. Automatic discovery and lifetime-safe binding in JIT
-programs remain follow-up work; device numerical and performance acceptance
-remain tracked separately. Preparation and binary compilation do not use caches.
+The A5 TMR bridge supports direct execution and explicit ordinary JIT binding of
+single-block AIC/AIV/MIX kernels. Native-object automatic discovery, complete input
+capture, persistent reuse, and performance acceptance remain separate work.
+Preparation and native binary compilation do not use caches.
+
+### Ordinary JIT binding
+
+Bind a native kernel to a Python signature declaration and call it inside an
+ordinary `@pl.jit` orchestration:
+
+```python
+from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
+
+@pl.jit.extern(binding=CANNBotDSLProvider().bind(native_kernel))
+def native(x: pl.Tensor, out: pl.Tensor):
+    ...
+
+@pl.jit
+def pipeline(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    native(x, out)
+    return out
+```
+
+Parameter names/order must match the native kernel. The declaration is void;
+use bare tensor annotations. Read/write directions and hidden SSA writebacks
+come from the validated native export. AIC/AIV/MIX topology is also inferred
+from that export; MIX produces one Group containing an AIC and a dual-lane AIV
+member. Ordinary PyPTO producers and consumers can surround the call.
+
+Use `compile(..., config=RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD))` or ordinary JIT execution
+with that configuration and the TMR runtime. `specialize()` and `lower()`
+are currently unsupported for these bindings; inspect the compiled program instead. This first JIT subset requires positive
+static ND shapes, packed strides, a 64-byte-aligned first element, and an extent
+that occupies whole 64-byte cache lines. Shape/stride/alignment/bounds checks run
+before every submission, including loaded-program reuse; a signature is not
+proof about actual caller storage. Launch checks require one block without
+synchronized start. Unaligned or strided views and dynamic shapes fail explicitly.
+
+Each compilation prepares afresh and owns its exported sources in a private
+subdirectory of the program output. A later `CompiledProgram.load()` remains valid
+after the preparation call returns. Programs containing these bindings bypass
+both JIT cache levels because Python closure capture is incomplete. Each native
+member also bypasses raw/stripped binary caches and must pass zero-stack and
+text-only ELF admission with the compiler's selected SDK. Task 34.6 remains
+responsible for reusable preparation identities.
+
+All tasks in such an orchestration disable early dispatch, including ordinary
+PyPTO consumers, so dependencies wait for producer completion and all MIX FINs.
+Whole-cache-line native views ensure logical non-overlap also excludes cache-line
+false sharing. Per-core serialization and the bridge's entry/exit drain and
+state restoration retain callback-local resource exclusivity.
+
+The A5 system tests compile and load ordinary JIT chains around real matmul and
+vector kernels for all three topologies. They reuse each loaded program with
+changed inputs and NaN outputs; the MIX consumer uses both native results.
 
 ### A5 AIC/AIV/MIX runtime path
 
@@ -185,8 +236,8 @@ headers from the compiler's selected CANN SDK, retains owned source through
 compilation, and requires text-only ELF admission and static zero-stack reports.
 Text-only compilation omits optional frame-pointer bookkeeping so spill-free
 SIMD VF calls can satisfy the same zero-stack check; actual stack use remains rejected.
-The ordinary JIT `configure_context` route rejects this task's binary policy
-rather than compiling it without admission checks.
+The legacy `configure_context` helper still rejects this binary policy. Use the
+explicit JIT binding above to carry admission requirements through ordinary compilation.
 
 The direct runtime system tests include FP16 Cube matmul with FP32 accumulation,
 SIMD FP32 `(x + y) * x`, and a MIX task executing both pipelines. In the MIX
@@ -334,7 +385,7 @@ FP16/BF16 runtime scalars are unsupported.
 Passing this checker **does not authorize device execution**: byte-level
 non-overlap does not establish 64-byte cache-line isolation between tasks.
 Resource ownership, stack/loading validation and task completion require the
-shared runtime bridge above. Automatic JIT binding remains follow-up work.
+shared runtime bridge above. The explicit JIT binding enforces the same checks.
 
 ### CANNBotDSL cross-invocation cache-line conflicts
 
@@ -370,7 +421,9 @@ until execution completes; changes require another check. A `false` result
 proves only this pair's GM non-conflict and says nothing about local resources,
 stack/loading requirements or completion visibility. Calls outside this protocol
 also require a dependency or isolation policy. The batch helper below converts
-these predicates into TMR dependencies; JIT integration remains follow-up work.
+these predicates into TMR dependencies. The explicit JIT subset instead requires
+whole-cache-line views and completion-based ordinary data dependencies; arbitrary
+strided-view scheduling remains unsupported.
 
 ### CANNBotDSL ordered batch submission
 
@@ -408,7 +461,8 @@ calls need separate ordering or isolation. It does not prove intra-group safety,
 resource ownership, stack limits, binary loading or completion visibility by
 itself. The direct runtime path described above composes this helper with
 `TMRBridge.lower`, checked compilation and actual TMR submission for the supported
-subset. Automatic JIT discovery and binding remain follow-up work.
+subset. The explicit JIT binding uses the restricted view policy above; automatic
+native-object discovery remains follow-up work.
 
 ## Requests and prepared kernels
 
@@ -646,8 +700,8 @@ Compilation verifies native argument count, types, sizes and alignments.
 includes, contract and checker to an existing extern specialization. Keep that lease
 alive until the existing runtime has compiled/published its sources. AIC/AIV members,
 mixed Groups and vector lane count come from the execution contract. Registered-object
-discovery remains task 34.5; persistent reuse remains task 34.6. CANNBotDSL uses
-the dedicated direct runtime path documented above.
+automatic discovery remains separate work; persistent reuse remains task 34.6.
+CANNBotDSL supports the direct runtime and explicit JIT binding paths above.
 
 Orchestration invokes the checker after building actual task arguments and before
 submission, including direct calls, explicit submits and reordered SPMD/Group wrappers.

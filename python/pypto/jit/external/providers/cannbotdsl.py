@@ -20,7 +20,10 @@ import importlib
 import inspect
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
@@ -445,10 +448,17 @@ class CANNBotDSLProvider:
     """Direct, uncached preparation; automatic JIT discovery remains unsupported.
 
     TMRBridge.lower supports the checked single-block A5 AIC/AIV/MIX subset.
-    Use cannbotdsl_runtime.compile_task and build_submitter for direct execution;
-    they consume the manifest and require binary admission and completion-based
+    Use bind() for an ordinary JIT extern declaration, or
+    cannbotdsl_runtime.compile_task and build_submitter for direct execution.
+    Both consume the manifest and require binary admission and completion-based
     ordering. Other resource or launch requirements are rejected.
     """
+
+    def bind(self, kernel: object) -> "CANNBotDSLBinding":
+        """Bind a native kernel for an ``@pl.jit.extern(binding=...)`` declaration."""
+        from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding  # noqa: PLC0415
+
+        return CANNBotDSLBinding(self, kernel)
 
     def prepare(self, kernel: object, request: KernelRequest) -> PreparedKernel:
         _validate_inputs(request)
