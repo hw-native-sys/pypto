@@ -303,10 +303,12 @@ task-submit --device auto --max-time 600 --run \
 The opt-in pytest case is `test_simt_strided`, with the same build/persistent
 gates as the earlier acceptance cases.
 
-Sliced arguments crossing an AIV call boundary currently require static,
-consistent physical strides for each parameter across all calls. Different
-pitches or conflicting explicit parameter strides produce a compile diagnostic;
-pass the full parent and use parent-relative indices when pitches vary.
+Generated AIV kernels require static physical strides for sliced arguments,
+consistent across calls to each parameter. If pitches vary, pass the full
+parent and use parent-relative indices. An external C++ AIV parameter with
+static inner extents and no explicit tensor view can use runtime descriptor
+strides. With dynamic inner extents, runtime strides require packed ND storage
+on all incoming paths. Explicit parameter views enforce their storage contract.
 Nested slices, aliases, tuple projections, dropped axes, and manual `Submit`
 calls have pass-level regression coverage. Packed short vectors remain outside
 this executable subset; this acceptance does not add packed storage or APIs.

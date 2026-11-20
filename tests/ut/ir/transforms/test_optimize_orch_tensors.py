@@ -2325,6 +2325,58 @@ class Program:
         assert function.attrs["external_return_params"][0] is function.params[0]
         passes.normalize_return_order()(after)
 
+    @pytest.mark.parametrize("pitch", ["dynamic", "different_callers"], ids=["dynamic", "caller-specific"])
+    @pytest.mark.parametrize("explicit_view", [False, True], ids=["descriptor", "explicit-view"])
+    def test_external_aiv_can_use_runtime_pitch(self, tmp_path, pitch, explicit_view):
+        cpp = tmp_path / "external.cpp"
+        cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        parent_width = "N" if pitch == "dynamic" else "288"
+        second_call = ""
+        if pitch == "different_callers":
+            second_call = "second = pl.tensor.slice(other, [8, 256], [1, 7])\n        self.dispatch(second)"
+        view = ", pl.TensorView(stride=[288, 1])" if explicit_view else ""
+        program = pl.parse_program(f"""
+N = pl.dynamic("N")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32{view}]):
+        ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def dispatch(self, x: pl.Tensor[[8, 256], pl.FP32]):
+        self.kernel(x)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, {parent_width}], pl.FP32], other: pl.Tensor[[10, 320], pl.FP32]):
+        first = pl.tensor.slice(parent, [8, 256], [1, 7])
+        self.dispatch(first)
+        {second_call}
+""")
+        if explicit_view:
+            with pytest.raises(ValueError, match="requires (consistent|static) physical strides"):
+                passes.optimize_orch_tensors()(program)
+        else:
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(program), program)
+
+    def test_external_aiv_rejects_pitched_reshape(self, tmp_path):
+        cpp = tmp_path / "external.cpp"
+        cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
+    def kernel(self, x: pl.Tensor[[4, 512], pl.FP32]):
+        ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, 288], pl.FP32]):
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        self.kernel(pl.tensor.reshape(chunk, [4, 512]))
+""")
+        with pytest.raises(ValueError, match="tensor.reshape requires packed ND storage"):
+            passes.optimize_orch_tensors()(program)
+
     def test_refined_tile_store_preserves_attrs(self):
         program = pl.parse_program("""
 @pl.program
