@@ -209,6 +209,7 @@ class RunConfig:
             (``NONE`` / ``CONCISE`` / ``EXPLICIT``) or a ``bool``
             (``True`` -> ``CONCISE``, ``False`` -> ``NONE``). ``EXPLICIT`` resolves
             implicit tile layouts and distributed window buffers in the dump.
+        allow_reg_spill: Allow A5 RegScope VF helpers to use spill storage. Defaults to False.
         dump_ptoas_passes: If ``True``, dump full-module intermediate IR after
             every ptoas pass under
             ``<output_dir>/ptoas_passes/<codegen-unit>/``. Has no effect when
@@ -402,6 +403,7 @@ class RunConfig:
     memory_planner: MemoryPlanner | None = None
     dump_ptoas_passes: bool = False
     enable_software_pipeline: bool | None = None
+    allow_reg_spill: bool = False
 
     if TYPE_CHECKING:
         # The runtime ``__init__`` wrapper installed at the bottom of this
@@ -450,9 +452,12 @@ class RunConfig:
             memory_planner: MemoryPlanner | None = ...,
             dump_ptoas_passes: bool = ...,
             enable_software_pipeline: bool | None = ...,
+            allow_reg_spill: bool = ...,
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if type(self.allow_reg_spill) is not bool:
+            raise TypeError("RunConfig.allow_reg_spill must be a bool")
         # The two axes replace what used to be a membership test on the packed
         # platform string. They make a *disagreeing* platform unrepresentable,
         # but not a nonsensical one: ``execution_mode="sim"`` is not
@@ -606,6 +611,7 @@ class RunConfig:
             output_dir=self.save_kernels_dir,
             memory_planner=self.memory_planner,
             enable_software_pipeline=self.enable_software_pipeline,
+            allow_reg_spill=self.allow_reg_spill,
             distributed_config=self.distributed_config,
         )
 
@@ -924,8 +930,11 @@ class CompileOptions:
     memory_planner: MemoryPlanner | None = None
     distributed_config: "DistributedConfig | None" = None
     enable_software_pipeline: bool | None = None
+    allow_reg_spill: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.allow_reg_spill) is not bool:
+            raise TypeError("CompileOptions.allow_reg_spill must be a bool")
         if type(self.execution_mode) is not ExecutionMode:
             raise TypeError(
                 f"CompileOptions.execution_mode must be an ExecutionMode, got {self.execution_mode!r}"
@@ -954,6 +963,7 @@ class CompileOptions:
             value = getattr(self, name)
             if value is not None:
                 kwargs[name] = value
+        kwargs["allow_reg_spill"] = self.allow_reg_spill
         return kwargs
 
 

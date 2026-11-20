@@ -178,6 +178,7 @@ class TestMakeCacheKey:
             ("buffer_ir_version", 0),
             ("gather_compare_scratch_version", 2),
             ("enable_software_pipeline", False),
+            ("allow_reg_spill", False),
         )
 
     def test_tensor_shape_in_key(self):
@@ -1497,6 +1498,13 @@ def test_nonfinite_math_constant_cache_respects_shadowing(monkeypatch):
     initial = kernel._get_source_hash()
     monkeypatch.setattr(math, "inf", 1.0)
     assert kernel._get_source_hash() == initial
+
+
+def test_reg_spill_policy_splits_cache():
+    kwargs: dict[str, Any] = dict(
+        source_hash="spill-case", param_names=[], tensor_shapes={}, tensor_dtypes={}, dynamic_dims=set()
+    )
+    assert make_cache_key(**kwargs) != make_cache_key(**kwargs, allow_reg_spill=True)
 
 
 if __name__ == "__main__":

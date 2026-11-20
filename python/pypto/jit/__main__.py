@@ -76,6 +76,7 @@ def _run_config(value: Any, cache: CacheConfig | None, base: Path) -> RunConfig:
                 "strategy",
                 "memory_planner",
                 "enable_software_pipeline",
+                "allow_reg_spill",
                 "distributed_config",
                 "dump_passes",
                 "dump_ptoas_passes",
@@ -85,7 +86,13 @@ def _run_config(value: Any, cache: CacheConfig | None, base: Path) -> RunConfig:
             "run_config",
         )
     )
-    for name in ("dump_passes", "dump_ptoas_passes", "save_kernels", "enable_software_pipeline"):
+    for name in (
+        "dump_passes",
+        "dump_ptoas_passes",
+        "save_kernels",
+        "enable_software_pipeline",
+        "allow_reg_spill",
+    ):
         if name in data and type(data[name]) is not bool:
             raise ValueError(f"run_config.{name} must be a boolean")
     for name, enum in (("strategy", OptimizationStrategy), ("memory_planner", MemoryPlanner)):

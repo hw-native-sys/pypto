@@ -49,7 +49,7 @@ assert compiled.param_names == ["a", "b", "out"]
 
 ### `ir.compile` 的参数
 
-十八个，其中四个承担了大部分决策，其余的默认值你很少会动。它们全部是关键字参数 ——
+以下参数中，四个承担了大部分决策，其余的默认值你很少会动。它们全部是关键字参数 ——
 只有 `program` 是位置参数。
 
 | 参数 | 默认 | 决定什么 |
@@ -61,6 +61,7 @@ assert compiled.param_names == ["a", "b", "out"]
 | `backend_type` | `Ascend910` | pass 与 codegen 的目标（`Ascend910` / `Ascend950`） |
 | `platform` | `None` | 产物面向的执行平台；必须与派发它的 worker 一致 |
 | `skip_ptoas` | `False` | 停在 `.pto`（MLIR），不构建设备二进制 |
+| `allow_reg_spill` | `False` | 允许生成的 A5 RegScope VF helper 发生寄存器 spill；其他目标和 SIMT helper 不受影响 |
 | `verification_level` | `None` | `NONE` / `BASIC` / `ROUNDTRIP`；`None` 交给 `PYPTO_VERIFY_LEVEL`，否则 `BASIC` |
 | `memory_planner` | `None` | `PYPTO` / `DSA_RP` / `PTOAS` —— 谁规划片上缓冲（[内存](../performance/05-memory.md)） |
 | `diagnostic_phase` | `None` | 警告与性能提示在哪个阶段设门 |

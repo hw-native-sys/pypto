@@ -262,7 +262,6 @@ def test_invalid_compiler_timeout_fails_before_sdk_setup(compiler_module, monkey
     "kwargs,error",
     [
         ({"entry": 0x1010}, "start of .text"),
-        ({"extra_flags": 2, "extra_size": 4}, "allocated section"),
         ({"extra_kind": 4, "extra_size": 4}, "relocations"),
         ({"extra_kind": 2, "extra_size": 24}, "unresolved symbol"),
     ],
@@ -273,6 +272,36 @@ def test_vpto_rejects_images_that_text_loader_cannot_load(device_elf, kwargs, er
     validate_device_image(device_elf())
     with pytest.raises(ValueError, match=error):
         validate_device_image(device_elf(**kwargs))
+
+
+@pytest.mark.parametrize("section_name", [b".extra", b"__CCE_VF_STACK_SIZE"])
+@pytest.mark.parametrize("flags", [2, 3])
+def test_vpto_accepts_additional_allocated_sections(device_elf, section_name, flags):
+    from pypto.runtime._vpto import validate_device_image  # noqa: PLC0415
+
+    image = bytearray(device_elf(extra_flags=flags, extra_size=4))
+    names = b"\0.shstrtab\0.text\0" + section_name + b"\0"
+    section_offset = struct.unpack_from("<Q", image, 40)[0]
+    struct.pack_into("<Q", image, section_offset + 64 + 24, len(image))
+    image.extend(names)
+    struct.pack_into("<Q", image, section_offset + 64 + 32, len(names))
+    validate_device_image(bytes(image))
+
+
+@pytest.mark.parametrize(
+    "name,kind", [(b".data", 1), (b".rodata.constants", 1), (b".bss", 8), (b".custom_storage", 8)]
+)
+def test_vpto_rejects_allocated_data_sections(device_elf, name, kind):
+    from pypto.runtime._vpto import validate_device_image  # noqa: PLC0415
+
+    image = bytearray(device_elf(extra_flags=2, extra_kind=kind, extra_size=4))
+    names = b"\0.shstrtab\0.text\0" + name + b"\0"
+    section_offset = struct.unpack_from("<Q", image, 40)[0]
+    struct.pack_into("<Q", image, section_offset + 64 + 24, len(image))
+    image.extend(names)
+    struct.pack_into("<Q", image, section_offset + 64 + 32, len(names))
+    with pytest.raises(ValueError, match="allocated data section"):
+        validate_device_image(bytes(image))
 
 
 def _text_only_elf():
@@ -538,7 +567,7 @@ def test_text_only_rejects_unsupported_build_modes(compiler_module, monkeypatch,
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("live_data", [False, True])
 def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, live_data):
-    """The real exporter includes SDK data; the strict link must remove only dead data."""
+    """Unreferenced SDK data is collected; retained data cannot enter a text-only callee."""
     cb = pytest.importorskip("cannbotdsl")
     if not hasattr(cb, "export_device"):
         pytest.skip("installed CANNBotDSL lacks public device export")
@@ -575,8 +604,8 @@ def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, l
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(file.content)
     source = tmp_path / "entry.cpp"
-    # A live reference must survive GC and fail admission. Dropping every data
-    # section unconditionally would turn this into silently miscompiled code.
+    # A live SDK data reference survives GC and must fail admission; the
+    # persistent text loader cannot retain its storage.
     read_data = "args[0] = g_tilingKey;" if live_data else ""
     source.write_text(
         f'#include "{artifact.entry}"\n'
@@ -602,7 +631,7 @@ def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, l
     includes.extend(tmp_path / path for path in artifact.include_dirs)
     kwargs = dict(pto_isa_root=str(tmp_path), extra_include_dirs=[str(p) for p in includes], text_only=True)
     if live_data:
-        with pytest.raises(ValueError, match="allocated section"):
+        with pytest.raises(ValueError, match="allocated data section"):
             compiler.compile_incore(str(source), **kwargs)
     else:
         binary = compiler.compile_incore(str(source), **kwargs)
@@ -813,9 +842,9 @@ def test_native_entry_check_preserves_block_local_sections(device_elf, kind):
     """Ordinary images need not satisfy VPTO's separate-data prohibition."""
     from pypto.runtime._device_image import validate_device_entry  # noqa: PLC0415
 
-    image = device_elf(extra_flags=3, extra_kind=kind, extra_size=16)
+    image = device_elf(extra_flags=3, extra_kind=kind, extra_size=16).replace(b".extra\0", b".data\0\0")
     validate_device_entry(image)
-    with pytest.raises(ValueError, match="allocated section"):
+    with pytest.raises(ValueError, match="allocated data section"):
         validate_device_image(image)
 
 
@@ -1167,6 +1196,74 @@ def test_reg_auto_sync_accepts_vf_name_containing_simt_entry(compiler_module):
         'module { func.func @__pypto_vf_simt_entry_0() attributes {note = "pto.simt_entry"} {} }'
     )
     assert "--enable-vecscope-mem-bar=false" in compiler_module._vpto.ptoas_flags_for_source(source)
+
+
+@pytest.mark.parametrize(
+    "platform,policy,guard",
+    [("a5", "deny", True), ("a5", "allow", False), ("a5", None, False), ("a2a3", "deny", False)],
+)
+def test_reg_spill_policy_flags(compiler_module, monkeypatch, tmp_path, platform, policy, guard):
+    compiler = compiler_module.KernelCompiler(platform)
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    helper = tmp_path / "helper.pto"
+    helper.write_text(f"// pypto.reg_spill: {policy}\nmodule {{}}")
+    commands = []
+
+    def run(cmd, output, label):
+        commands.append(cmd)
+        output.write_text("define void @helper() { ret void }")
+        return b"object"
+
+    monkeypatch.setattr(compiler, "_run", run)
+    compiler._compile_vpto_helpers((str(helper),), tmp_path)
+    assert ("--cce-disable-vf-stack-reserved-ubuf" in commands[1]) is guard
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "The total stack object size (704) exceeded vf stack size (0).\nTotal Spilled Byte Size: 704",
+        "unknown command line argument",
+        "The total stack object size (704) exceeded vf stack size (512).",
+        "The total stack object size (704) exceeded\nvf stack size (0).\nPredicates: 0",
+    ],
+)
+def test_reg_spill_preserves_original_compiler_error(compiler_module, monkeypatch, tmp_path, diagnostic):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    helper = tmp_path / "helper.pto"
+    helper.write_text("// pypto.reg_spill: deny\nmodule {}")
+    original_error = RuntimeError(diagnostic)
+
+    def run(cmd, output, label):
+        if cmd[0] == "ptoas":
+            output.write_text("define void @helper() { ret void }")
+            return b"llvm"
+        raise original_error
+
+    monkeypatch.setattr(compiler, "_run", run)
+    with pytest.raises(RuntimeError) as caught:
+        compiler._compile_vpto_helpers((str(helper),), tmp_path)
+    assert caught.value is original_error
+    assert str(caught.value) == diagnostic
+    assert not (tmp_path / "report").exists()
+
+
+def test_reg_spill_cache_tracks_source_policy(compiler_module, monkeypatch, tmp_path):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    monkeypatch.setattr(compiler_module, "check_ptoas_version", lambda _: "ptoas 0.74")
+    monkeypatch.setattr(
+        compiler_module.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="bisheng", stderr="")
+    )
+    helper = tmp_path / "helper.pto"
+    helper.write_text("// pypto.reg_spill: deny\nmodule {}")
+    denied = compiler.vpto_cache_identity((str(helper),), "aiv")
+    with monkeypatch.context() as guard_patch:
+        guard_patch.setattr(compiler_module._vpto, "REG_SPILL_GUARD_FLAG", "--different-spill-guard")
+        assert compiler.vpto_cache_identity((str(helper),), "aiv") != denied
+    helper.write_text("// pypto.reg_spill: allow\nmodule {}")
+    assert compiler.vpto_cache_identity((str(helper),), "aiv") != denied
 
 
 if __name__ == "__main__":

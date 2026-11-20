@@ -9,15 +9,21 @@
 
 """Register lowering tests assert typed VMI, external storage and lexical scope."""
 
+import hashlib
+import json
 import subprocess
+from types import SimpleNamespace
+from typing import cast
 
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.compile_profiling import StageRecord
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
+from pypto.runtime._vpto import PTOAS_FLAGS
 
 SPAN = ir.Span("register_kernel.py", 10, 1, 10, 60)
 
@@ -1401,6 +1407,110 @@ def test_bf16_block_stride_lowers_to_vsstb(lanes, active, tmp_path):
     assert result.returncode == 0, result.stderr
     lowered = output.read_text()
     assert lowered.count("pto.vsstb ") == lanes // 128
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_reg_spill_policy_only_stamps_vf_helpers(tmp_path, monkeypatch, allowed):
+    def helper(kind):
+        return SimpleNamespace(
+            kind=kind,
+            symbol=kind,
+            source="module {}",
+            adapter_symbol="adapter",
+            parameter_types=[],
+            caller_parameter_types=[],
+            parameter_effects=[],
+            parameter_indices=[],
+            capture_byte_offsets=[],
+        )
+
+    monkeypatch.setattr(pto_backend, "_emit_single_function_output", lambda *args: None)
+    unit = pto_backend._CodegenUnit(
+        name="mixed",
+        pto_code="",
+        funcs=list(build_kernel().functions.values()),
+        is_group=False,
+        stage_record=StageRecord(name="test", start=0),
+        helpers=(cast(codegen.VFHelper, helper("vf")), cast(codegen.VFHelper, helper("simt"))),
+        allow_reg_spill=allowed,
+    )
+    result = pto_backend._emit_unit(unit, str(tmp_path), skip_ptoas=True)
+    assert result.error is None
+    vf = result.files["vpto/mixed/vf.pto"]
+    assert vf.startswith(f"// pypto.reg_spill: {'allow' if allowed else 'deny'}\n")
+    assert result.files["vpto/mixed/simt.pto"] == "module {}"
+    manifest = json.loads(result.files["vpto/mixed/manifest.json"])
+    assert manifest["helpers"][0]["source_sha256"] == hashlib.sha256(vf.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("allowed", [None, False, True], ids=["default", "deny", "allow"])
+@pytest.mark.parametrize(
+    "compile_ptoas",
+    [False, pytest.param(True, marks=pytest.mark.ptoas_compile)],
+    ids=["codegen", "ptoas"],
+)
+def test_reg_spill_policy_on_generated_reg_scope_helper(tmp_path, monkeypatch, allowed, compile_ptoas):
+    compiler = find_ptoas_binary() if compile_ptoas else None
+    if compile_ptoas and compiler is None:
+        pytest.skip("PTOAS is unavailable")
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def register_policy_kernel():
+        src = pl.tile.full([128], pl.FP32, 1.0)
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=64)
+            y = pl.reg.add(x, x)
+            out = pl.reg.store(src, value=y)
+        _consumer = pl.tile.add(out, out)
+
+    with passes.PassContext([]):
+        program = passes.flatten_tile_nd_to_2d()(ir.Program([register_policy_kernel], "Policy", SPAN))
+        program = passes.init_mem_ref()(program)
+        program = passes.allocate_memory_addr()(program)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert len(bundle.helpers) == 1
+    helper = bundle.helpers[0]
+    assert helper.kind == "vf"
+    assert "pto.vmi.vadd" in helper.source
+    assert "pto.vmi.vstore" in helper.source
+
+    monkeypatch.setattr(pto_backend, "_emit_single_function_output", lambda *args: None)
+    unit = pto_backend._CodegenUnit(
+        name="register_kernel",
+        pto_code=bundle.caller_source,
+        funcs=list(program.functions.values()),
+        is_group=False,
+        stage_record=StageRecord(name="test", start=0),
+        helpers=tuple(bundle.helpers),
+        entry_helpers=bundle.entry_helpers,
+    )
+    if allowed is not None:
+        unit.allow_reg_spill = allowed
+    result = pto_backend._emit_unit(unit, str(tmp_path), skip_ptoas=True)
+    assert result.error is None
+    source = result.files[f"vpto/register_kernel/{helper.symbol}.pto"]
+    policy = "allow" if allowed else "deny"
+    assert source == f"// pypto.reg_spill: {policy}\n" + helper.source
+    manifest = json.loads(result.files["vpto/register_kernel/manifest.json"])
+    assert manifest["helpers"][0]["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+    if compile_ptoas:
+        helper_path = tmp_path / f"{helper.symbol}.pto"
+        helper_path.write_text(source)
+        llvm_path = helper_path.with_suffix(".ll")
+        # Production exports LLVM through PTOAS; the spill guard is applied
+        # by the subsequent Bisheng invocation, not this lowering stage.
+        assert compiler is not None
+        lowered = subprocess.run(
+            [compiler, str(helper_path), *PTOAS_FLAGS, "-o", str(llvm_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert lowered.returncode == 0, lowered.stderr
+        llvm = llvm_path.read_text()
+        assert f"@{helper.symbol}(" in llvm
+        assert "llvm.hivm." in llvm
 
 
 if __name__ == "__main__":

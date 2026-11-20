@@ -1253,6 +1253,7 @@ class JITFunction:
                 compile_kwargs.get("enable_software_pipeline")
             ),
             runtime=runtime,
+            allow_reg_spill=compile_kwargs["allow_reg_spill"],
         )
 
         if _contract is not None:

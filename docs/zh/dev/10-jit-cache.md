@@ -268,9 +268,13 @@ CLI 导入指定的可信模块，只解析显式列出的模块级 JIT 函数�
 除非请求同时给出样例张量（此时绑定按位置进行），否则可以省略标量。
 
 可序列化的 `run_config` 字段为 `platform`、`strategy`、`memory_planner`、`enable_software_pipeline`、
-`distributed_config`、`dump_passes`、`dump_ptoas_passes`、`save_kernels`、
+`allow_reg_spill`、`distributed_config`、`dump_passes`、`dump_ptoas_passes`、`save_kernels`、
 `save_kernels_dir`；枚举使用 Python 成员名。分布式设置支持 `device_ids`、
-`num_sub_workers`、`runtime`、`aicpu_thread_num`。预热结果区分共享及私有准备，失败
+`num_sub_workers`、`runtime`、`aicpu_thread_num`。
+`allow_reg_spill` 默认为 `false`：生成的 A5 `reg_scope` VF helper 使用
+`--cce-disable-vf-stack-reserved-ubuf` 编译；设为 `true` 允许 spill。其他目标和独立
+SIMT helper 不受影响。Bisheng 编译失败保留原始诊断，不额外解析 spill 字符串。
+预热结果区分共享及私有准备，失败
 返回非零退出码。`stat` 仅读取 JSON 清单及声明的负载大小，不导入缓存代码、不获取
 写锁、不修复条目。
 

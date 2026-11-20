@@ -258,8 +258,8 @@ class KernelCompiler:
                 link_flags.append(f"--symbol-ordering-file={order}")
             if text_only:
                 # CANN headers may define unused allocated data (g_tilingKey).
-                # GC removes only unreachable sections. Any surviving data
-                # remains an error: the persistent loader retains only .text.
+                # GC removes only unreachable sections; it does not establish
+                # whether surviving compiler metadata is needed by the loader.
                 link_flags.append("--gc-sections")
             binary = self._run(
                 [
@@ -326,6 +326,9 @@ class KernelCompiler:
             "reg-auto-sync-v1",
             repr(effective_flags),
             "intrinsic-simt-abi-v1",
+            "reg-spill-policy-v1",
+            "device-image-data-sections-v2",
+            _vpto.REG_SPILL_GUARD_FLAG,
             "bisheng-memory-attrs-v1",
             check_ptoas_version(ptoas),
             result.stdout,
@@ -385,7 +388,13 @@ class KernelCompiler:
             llvm.write_text(_vpto.prepare_llvm_for_bisheng(llvm_text))
             # PTOAS owns VF dependency analysis, including ordering through SSA
             # values. Do not re-infer synchronization from emitted LLVM text.
-            command = [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)]
+            # Only generated RegScope helpers carry this policy. SIMT and manually
+            # supplied device sources retain their existing compilation contract.
+            guarded = self.platform == "a5" and _vpto.REG_SPILL_DENY_MARKER in source_text.splitlines()
+            device_flags: list[str] = list(_vpto.DEVICE_FLAGS)
+            if guarded:
+                device_flags.append(_vpto.REG_SPILL_GUARD_FLAG)
+            command = [bisheng, *device_flags, "-c", "-x", "ir", str(llvm), "-o", str(obj)]
             self._run(command, obj, "VPTO device compilation")
             objects.append(obj)
         return objects

@@ -1961,6 +1961,7 @@ class _CodegenUnit:
     # Keys are emitted function names, not the group/compilation-unit name.
     # The two AIV lanes share one entry and therefore the same helper objects.
     entry_helpers: dict[str, list[str]] = field(default_factory=lambda: dict[str, list[str]]())
+    allow_reg_spill: bool = False
 
 
 @dataclass
@@ -1989,7 +1990,12 @@ def _emit_unit(
     # Each helper is self-contained. ABI data is retained beside the sources for
     # review, while source contents participate in the runtime binary cache key.
     for helper in unit.helpers:
-        local_files[f"vpto/{unit.name}/{helper.symbol}.pto"] = helper.source
+        policy = (
+            f"// pypto.reg_spill: {'allow' if unit.allow_reg_spill else 'deny'}\n"
+            if helper.kind == "vf"
+            else ""
+        )
+        local_files[f"vpto/{unit.name}/{helper.symbol}.pto"] = policy + helper.source
     if unit.helpers:
         local_files[f"vpto/{unit.name}/manifest.json"] = (
             json.dumps(
@@ -2015,7 +2021,9 @@ def _emit_unit(
                             "capture_base_indices": h.capture_base_indices,
                             "capture_byte_offsets": h.capture_byte_offsets,
                             "source": f"{h.symbol}.pto",
-                            "source_sha256": hashlib.sha256(h.source.encode()).hexdigest(),
+                            "source_sha256": hashlib.sha256(
+                                local_files[f"vpto/{unit.name}/{h.symbol}.pto"].encode()
+                            ).hexdigest(),
                         }
                         for h in unit.helpers
                     ],
@@ -2160,6 +2168,7 @@ def generate(
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    allow_reg_spill: bool = False,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -2214,6 +2223,7 @@ def generate(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            allow_reg_spill=allow_reg_spill,
         )
 
     # L2-only program with multiple Orchestrations: emit each as a
@@ -2229,6 +2239,7 @@ def generate(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            allow_reg_spill=allow_reg_spill,
         )
 
     return _generate_single_chip(
@@ -2239,6 +2250,7 @@ def generate(
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
+        allow_reg_spill=allow_reg_spill,
     )
 
 
@@ -2251,6 +2263,7 @@ def _generate_with_distributed(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    allow_reg_spill: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for a distributed (L3+) program.
 
@@ -2285,6 +2298,7 @@ def _generate_with_distributed(
                 emit_source_loc=emit_source_loc,
                 dump_ptoas_passes=dump_ptoas_passes,
                 runtime=runtime,
+                allow_reg_spill=allow_reg_spill,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
@@ -2498,6 +2512,7 @@ def _generate_multi_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    allow_reg_spill: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
 
@@ -2523,6 +2538,7 @@ def _generate_multi_chip(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            allow_reg_spill=allow_reg_spill,
         )
         for path, content in chip_files.items():
             result_files[f"next_levels/{func.name}/{path}"] = content
@@ -2613,6 +2629,7 @@ def _generate_single_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    allow_reg_spill: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -2713,6 +2730,7 @@ def _generate_single_chip(
                     stage_record=stage,
                     helpers=helpers,
                     entry_helpers=entry_helpers,
+                    allow_reg_spill=allow_reg_spill,
                 )
             )
         except Exception as e:
@@ -2757,6 +2775,7 @@ def _generate_single_chip(
                     stage_record=stage,
                     helpers=helpers,
                     entry_helpers=entry_helpers,
+                    allow_reg_spill=allow_reg_spill,
                 )
             )
         except Exception as e:

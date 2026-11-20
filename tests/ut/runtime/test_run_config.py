@@ -1249,5 +1249,18 @@ def test_positional_compile_options_platform_is_deprecated():
     assert options.execution_mode is ExecutionMode.ONBOARD
 
 
+@pytest.mark.parametrize("allowed", [False, True])
+def test_reg_spill_compile_option_propagation(allowed):
+    config = RunConfig(allow_reg_spill=allowed)
+    assert config.compile_kwargs()["allow_reg_spill"] is allowed
+    assert CompileOptions(allow_reg_spill=allowed).as_compile_kwargs()["allow_reg_spill"] is allowed
+
+
+@pytest.mark.parametrize("factory", [RunConfig, CompileOptions])
+def test_reg_spill_rejects_non_boolean(factory):
+    with pytest.raises(TypeError, match="allow_reg_spill"):
+        factory(allow_reg_spill="false")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

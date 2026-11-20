@@ -344,6 +344,7 @@ def compile(  # noqa: PLR0913
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    allow_reg_spill: bool = False,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -377,6 +378,8 @@ def compile(  # noqa: PLR0913
             ``<output_dir>/ptoas_passes/<codegen-unit>/``. Default: False.
             Has no effect when ``skip_ptoas=True``.
         backend_type: Backend type for passes and codegen (default: Ascend910)
+        allow_reg_spill: Allow A5 RegScope VF helpers to spill registers to VF stack.
+            Defaults to False; other targets and independent SIMT helpers are unaffected.
         skip_ptoas: Skip the ptoas compilation step and emit raw MLIR (.pto) files
             instead of compiled C++ kernel wrappers.
         emit_source_loc: When True, each generated ``.pto`` operation carries an
@@ -488,6 +491,7 @@ def compile(  # noqa: PLR0913
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
+        allow_reg_spill=allow_reg_spill,
     )
     lowered_program = result.lowered_program
     # Entry selection and execution wrappers belong to the public program API.
@@ -604,6 +608,7 @@ def _compile_to_files(  # noqa: PLR0913
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    allow_reg_spill: bool = False,
 ) -> _CompilationResult:
     """Run shared contract analysis, passes and codegen without execution wrappers."""
     from ._compile_contract import (  # noqa: PLC0415
@@ -615,6 +620,8 @@ def _compile_to_files(  # noqa: PLR0913
     )
     from .param_info import _extract_func_param_infos  # noqa: PLC0415
 
+    if type(allow_reg_spill) is not bool:
+        raise TypeError("allow_reg_spill must be a bool")
     logical, aliases = analyze_contract(program, contract)
     backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
     platform = _platform_string(backend_type, mode)
@@ -695,6 +702,7 @@ def _compile_to_files(  # noqa: PLR0913
                     emit_source_loc=emit_source_loc,
                     dump_ptoas_passes=dump_ptoas_passes,
                     runtime=effective_runtime,
+                    allow_reg_spill=allow_reg_spill,
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

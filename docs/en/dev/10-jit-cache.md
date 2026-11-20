@@ -335,9 +335,13 @@ select an artifact, since a scalar parameter is a runtime value. Omit them
 unless the request also names sample tensors, which makes the binding positional.
 
 Serializable `run_config` fields are `platform`, `strategy`, `memory_planner`, `enable_software_pipeline`,
-`distributed_config`, `dump_passes`, `dump_ptoas_passes`, `save_kernels`, and
+`allow_reg_spill`, `distributed_config`, `dump_passes`, `dump_ptoas_passes`, `save_kernels`, and
 `save_kernels_dir`; enums use their Python member names. Distributed settings
 accept `device_ids`, `num_sub_workers`, `runtime`, and `aicpu_thread_num`.
+`allow_reg_spill` defaults to `false`: generated A5 `reg_scope` VF helpers compile
+with `--cce-disable-vf-stack-reserved-ubuf`. Set it to `true` to allow spilling;
+other targets and independent SIMT helpers are unaffected. Bisheng compilation
+failures retain their original diagnostics without spill-specific parsing.
 Warmup reports shared versus private preparation and exits nonzero on failure.
 `stat` reads JSON manifests and declared payload sizes without importing cached
 code, acquiring write locks or repairing entries.
