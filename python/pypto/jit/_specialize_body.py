@@ -659,7 +659,7 @@ class BodyTransformer(ast.NodeTransformer):
             elif callee is not None and callee.func_type in (None, "orchestration"):
                 dispatch_keys = PLACEMENT_KEYWORDS
             else:
-                dispatch_keys = frozenset()
+                dispatch_keys = frozenset[str]()
             callee_keywords = [kw for kw in original.keywords if kw.arg not in dispatch_keys]
             if callee is not None and (callee_keywords or callee.constexpr_values):
                 param_order = callee.param_names
