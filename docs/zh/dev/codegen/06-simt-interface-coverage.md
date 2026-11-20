@@ -1,8 +1,7 @@
 # SIMT 接口覆盖
 
-本矩阵跟踪任务 11.7，以固定的 PTOAS v0.74
-（`be4c7a51f66ceadda6eb8a001d7bddccb3507700`）为基准。
-接口声明不等于设备执行证据。通用无符号类型与单个操作对 INT32 位载体的无符号解释不同。
+本矩阵跟踪任务 11.7，以固定的 PTOAS v0.77 为基准。
+通用无符号类型与单个操作对 INT32 位载体的无符号解释不同。
 
 ## 第一批：32 位接口
 
@@ -23,17 +22,18 @@
 验证 cache 属性并参与 launch 的存储版本追踪。
 源窗口规则和非活跃源限制见 [IR 契约](../ir/11-simt.md)。
 
-2026-11-19 验证：独立 worktree 的 C++ 构建通过；SIMT 算子、原子回归、codegen、
-公共 JIT、作用域提取和存储准备共 **1,124 项测试通过**。测试要求 PTOAS v0.74，
-包括两个新增验收入口的 LLVM 导出，以及四种 shuffle 在 INT32/FP32、width 16/32
-和两个窗口边界下的编译。Python lint、实现类型检查、文档双语与导航检查通过。
-不宣称设备执行验收通过。
+2026-11-20 使用 PTOAS v0.77 验证。独立 worktree 的 C++ 构建通过。SIMT 算子、原子回归、
+codegen、公共 JIT、作用域提取和存储准备共 **1,128 项测试通过**。
+LLVM 导出覆盖第一批的两个验收入口，以及四种 shuffle 在 INT32/FP32、width 16/32
+和两个窗口边界下的编译。
 
 验证入口：
 
 - `tests/ut/ir/operators/test_simt_ops.py`：schema、类型/属性错误、序列化、包装层一致性和原子读写副作用。
 - `tests/ut/jit/test_simt_scope.py::test_first_batch_simt_interfaces_native_compile`：
   公共 JIT 完整降低和固定 PTOAS LLVM 导出，覆盖 GM/UB、无符号比较、窗口属性和旧值未使用的原子更新。
+- `tests/ut/jit/test_simt_scope.py::test_public_warp_collectives_native_compile`：
+  验证 LLVM 导出的 vote、shuffle 和 redux 调用仍在活跃分支中，并验证循环条件每轮重新计算 vote。
 - `tests/st/runtime/vpto/test_simt_interface_gaps_onboard.py`：
   可选数值验收，覆盖无符号最高位边界、旧值、位模式和窗口；编译成功不代表设备执行成功。
 
@@ -98,8 +98,8 @@ JIT 回归 `test_simt_interfaces_device_compile` 将扩展接口用例和动态�
 
 ## 工具链边界
 
-保持 PTOAS v0.74。升级 v0.77 时需要同步适配内存 offset 类型，
-以及分歧控制流下 vote/shuffle/redux 的活跃 lane 副作用回归，不能只修改版本号。
+PTOAS v0.77 要求在指针运算和标量访存操作中显式标注元素偏移的类型。
+PyPTO 为这些操作数发射 `index`。
 
 ### 时钟采样阻碍
 
