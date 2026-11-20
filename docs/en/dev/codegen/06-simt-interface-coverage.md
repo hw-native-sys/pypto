@@ -130,10 +130,10 @@ are fixed; INT64 storage alone does not resolve this. Minimal entry body:
 %b = pto.get_clock32 : i32
 %elapsed = arith.subi %b, %a : i32
 %zero = arith.constant 0 : index
-pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, i32
+pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, index, i32
 ```
 
-Compile inside a `pto.simt_entry` function with `--pto-arch=a5
+Compile inside a `pto.simt_entry` function with PTOAS v0.77 and `--pto-arch=a5
 --pto-backend=vpto --emit-vpto-llvm-ir`; the resulting store contains zero.
 
 ### Cross-entry state blocker

@@ -113,10 +113,10 @@ PyPTO 保留调用无法修复下游的公共子表达式消除，因此在原�
 %b = pto.get_clock32 : i32
 %elapsed = arith.subi %b, %a : i32
 %zero = arith.constant 0 : index
-pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, i32
+pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, index, i32
 ```
 
-放入 `pto.simt_entry` 函数，使用 `--pto-arch=a5
+放入 `pto.simt_entry` 函数，使用 PTOAS v0.77 和 `--pto-arch=a5
 --pto-backend=vpto --emit-vpto-llvm-ir` 编译，输出的 store 写入零。
 
 ### 跨入口状态阻碍
