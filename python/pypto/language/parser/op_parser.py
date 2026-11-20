@@ -1095,7 +1095,7 @@ class OpParser:
             self.validate_host_or_cluster_scope(f"pld.system.{op_name}", span)
 
     def validate_host_or_cluster_scope(self, op_name: str, span: ir.Span) -> None:
-        level = self.function.func_level
+        level = self.regions.effective_level
         in_device_scope = any(
             self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
         )
@@ -1106,7 +1106,7 @@ class OpParser:
         ):
             raise ParserSyntaxError(
                 f"{op_name}() can only be called in HOST or CLUSTER_0 orchestration context "
-                f"(not inside InCore / SPMD scopes); current function level: {level}",
+                f"(not inside InCore / SPMD scopes); current hierarchy level: {level}",
                 span=span,
                 hint="Call from a HOST or CLUSTER_0 orchestrator outside any nested device-side scope",
             )
