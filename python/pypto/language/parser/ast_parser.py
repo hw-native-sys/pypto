@@ -1983,15 +1983,6 @@ class ASTParser:
         return result
 
     def parse_call(self, call: ast.Call) -> ir.Expr:
-        # Each parsed call validates only its newly built root. Its argument
-        # calls were checked while parsing them; rescanning their IR subtrees
-        # here would make deeply nested source expressions quadratic.
-        result = self._parse_call_impl(call)
-        if isinstance(result, (ir.Call, ir.Submit)):
-            self.ops.validate_distributed_op_context(result.op, self.span_tracker.get_span(call))
-        return result
-
-    def _parse_call_impl(self, call: ast.Call) -> ir.Expr:
         """Parse function call.
 
         Args:
@@ -2003,7 +1994,8 @@ class ASTParser:
         func = call.func
 
         if _is_dump_call(call):
-            return self.calls.parse_dump_call(call)
+            result = self.calls.parse_dump_call(call)
+            return self.ops.check_orchestration_intrinsic(result, call)
 
         # Handle pl.yield_() specially
         if isinstance(func, ast.Attribute) and func.attr == "yield_":
