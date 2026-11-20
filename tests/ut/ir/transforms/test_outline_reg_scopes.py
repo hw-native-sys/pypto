@@ -1390,5 +1390,51 @@ class Identity:
     assert assignment.var.type.memory_space == ir.MemorySpace.Mat
 
 
+@pytest.mark.parametrize("return_alias", [False, True])
+def test_squeeze_stream_preserves_write_capture_and_flush_alias(return_alias):
+    flush = (
+        "written = pl.reg.squeeze_store_flush(curr_ureg, dst)"
+        if return_alias
+        else "_flushed = pl.reg.squeeze_store_flush(curr_ureg, dst)"
+    )
+    use = "z = pl.tile.add(written, written)" if return_alias else "z = pl.tile.add(dst, dst)"
+    before = parse_program(f"""
+@pl.program
+class Kernel:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self):
+        src = pl.tile.full([256], dtype=pl.UINT32, value=17)
+        dst = pl.tile.full([320], dtype=pl.UINT32, value=123)
+        with pl.reg_scope():
+            init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
+            for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
+                value = pl.reg.load(src, offset=i * 64, lanes=64)
+                keep = pl.reg.active_mask(9, lanes=64)
+                next_ureg = pl.reg.squeeze_store_step(curr_ureg, dst, value, keep)
+                curr_ureg = pl.yield_(next_ureg)
+            {flush}
+        {use}
+""")
+    after = passes.outline_reg_scopes()(before)
+    (helper,) = helpers(after)
+    # SSA normalization may rename captures. Verify memory directions rather
+    # than requiring source spellings or one particular capture ordering.
+    assert len(helper.params) == 2
+    assert helper.param_directions.count(ir.ParamDirection.In) == 1
+    assert helper.param_directions.count(ir.ParamDirection.InOut) == 1
+    destination = next(
+        param
+        for param, direction in zip(helper.params, helper.param_directions)
+        if direction == ir.ParamDirection.InOut
+    )
+    assert all(not isinstance(param.type, ir.SqueezeStoreType) for param in helper.params)
+    if return_alias:
+        assert isinstance(helper.body, ir.SeqStmts)
+        result = helper.body.stmts[-1]
+        assert isinstance(result, ir.ReturnStmt)
+        assert result.value[0] is destination
+    ir.assert_structural_equal(after, passes.outline_reg_scopes()(after))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

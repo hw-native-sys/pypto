@@ -57,7 +57,8 @@ class RegisterRoots : public IRVisitor {
       return;
     }
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       auto effect = GetRegMemoryEffect(call);
       auto tile = As<TileType>(effect.target->GetType());
       if (effect.root) {
@@ -154,7 +155,7 @@ class InitializationChecker : public IRVisitor {
       }
     }
     if (IsOp(call, "tile.create") || IsOp(call, "reg.store") || IsOp(call, "reg.scatter") ||
-        op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        IsOp(call, "reg.squeeze_store_flush") || op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
       return;
     }
     // An actual Tile-producing operation initializes its valid output region.
@@ -172,7 +173,8 @@ class InitializationChecker : public IRVisitor {
       return;
     }
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       auto effect = GetRegMemoryEffect(call);
       if (!effect.root || !roots_.count(effect.root.get())) {
         IRVisitor::VisitExpr_(call);

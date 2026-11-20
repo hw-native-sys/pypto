@@ -75,7 +75,8 @@ with pl.reg_scope(auto_sync=False):
 外部 Tile 和只读 Scalar 是隐式输入。寄存器与局部 Scalar 不能通过区域外使用、
 函数返回、循环结果、元组或向外部变量赋值逃逸；函数边界递归检查嵌套元组类型。Tile 操作数必须源于区域外；
 `store` 和 `scatter` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
-包括 `store` 和 `scatter`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
+包括 `store` 和 `scatter`；裸 store 会被拒绝。流的 `append` 独立作为语句，内部写回由编译器绑定。
+`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
 只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
@@ -491,3 +492,98 @@ PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费
 显式 mask 仍保证非活动结果为零；省略 mask 无需额外的结果清零选择指令。
 相邻的两次 BF16 load 后接无 mask 的 `dintlv` 因此可降低为 A5 `DINTLV_B16`，
 后续 `convert` 自动选择所需 EVEN/ODD 部分。物理转换部分仍由后端决定。
+
+## 保序压缩与连续写出
+
+`squeeze(value, mask)` 将选中的 lane 按原顺序压到寄存器开头。输入必须是一个
+完整的 256 字节 UINT16 或 UINT32 寄存器，分别为 128 或 64 个 lane，并提供同
+lane 数的 mask。只有选中元素组成的前缀有定义；写回时应使用选中数量对应的
+前缀 mask。该操作保持整数位模式，包括大于 `2**24` 的 UINT32。
+
+```python
+with pl.reg_scope():
+    value = pl.reg.load(src, lanes=64)  # UINT32 Tile
+    keep = pl.reg.active_mask(9, lanes=64)
+    packed = pl.reg.squeeze(value, keep)
+    out = pl.reg.store(dst, value=packed, mask=keep)
+```
+
+多批数据需要在 UB 中连续追加时，显式使用
+`squeeze_store_init/step/flush`。通过 `pl.range(..., init_values=...)`
+携带不透明状态，并在循环体中 yield 更新后的状态：
+
+```python
+with pl.reg_scope():
+    init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
+        value = pl.reg.load(src, offset=i * 64, lanes=64)
+        keep = pl.reg.active_mask(9, lanes=64)
+        next_ureg = pl.reg.squeeze_store_step(curr_ureg, dst, value, keep)
+        final_ureg = pl.yield_(next_ureg)
+    written = pl.reg.squeeze_store_flush(final_ureg, dst)
+    # dst[7:43] contains four selected prefixes, without gaps.
+```
+
+目标参数是 Tile，不是指针。只有 `init` 接收 `offset`，它在初始化时求值一次，
+以元素为单位、相对 Tile 连续视图起点计算，并叠加已有的 View `start_offset`。
+例如视图起点为 32、`offset=7` 时，从底层分配的第 39 个元素开始写。
+`step` 和 `flush` 不接收 offset，直接延续已有状态链。每次 `step` 使用与 `init` 相同的目标，
+mask 的 lane 数必须与 VecReg 一致。追加整个寄存器或已知前缀时，分别使用 full
+mask 或 prefix mask。squeeze 结果的尾部未定义，因此 mask 只能选择其中已定义的前缀。
+
+`init` 初始化 UReg 追加状态并返回不透明的 `SqueezeStoreType` 值；它不初始化目标
+Tile。每次 `step` 必须消费当前循环携带的 UReg 值并返回后继值；循环通过 `init_values`
+和 `pl.yield_` 携带它。循环外消费 `pl.yield_` 绑定的循环结果（上例为 `final_ureg`），
+循环结束后恰好调用一次 `flush`。
+后端将状态链降低为一次 alignment 初始化、循环携带的 `!pto.align`、每轮
+`vstur "POST_UPDATE"` 和最后一次 `vstar`。`flush` 返回目标 Tile 的 alias，不会
+清零未写容量。调用方负责保证输出容量，并只读取已写入的前缀。
+
+输入可能没有任何数据块，例如某个批次没有候选元素。循环执行零次时，初始状态原样
+传给循环结果。已经初始化的链仍然需要恰好一次 flush，即使一次 step 都没有执行；
+此时追加零个元素，目标内容保持原值。没有 step 的顺序语句也遵循相同规则：
+
+```python
+with pl.reg_scope():
+    ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    written = pl.reg.squeeze_store_flush(ureg, dst)
+```
+
+这样，运行时数据块数量为零或非零都使用同一套 init/step/flush 契约，用户无需另写
+条件分支。编译器可以删除已经证明为空的循环，同时转发其初始状态。
+
+PTOAS 0.74 目前仍将 stored 形式的 VSQZ 标为纯操作，但该指令会推入供 VSTUR
+消费的 SQZN 计数。在 PTOAS 完成副作用建模前，验证器拒绝 value 和 mask 都是
+循环不变量的写入：至少一个输入必须在当前循环内加载或由循环变量推导。
+输入也可以来自循环携带的寄存器，由 `pl.yield_` 用这样的值更新。
+同一 RegScope 内多个 step 也不能复用等价的 value/mask 生产者，以免
+公共子表达式消除删掉必需的 SQZN 生产者。这包括对同一 value 使用等价的 full mask
+或 prefix mask 重复写出，即使这些 mask 分别构造。这是保守的后端限制，追加语义保持不变。
+
+目标必须是静态一维 Vec Tile，或可以按行优先顺序无复制展平的二维 Vec Tile；
+dtype 与输入一致且为 UINT16/UINT32。默认连续布局和显式连续 stride 都可以：
+`[2, 64]` 配合 stride `[64, 1]` 合法，stride `[96, 1]` 有行间空隙，会被拒绝。
+长度为一的轴不产生间隔，单行、单列视图也支持。首版不支持 boxed、padding、compact
+和非退化列优先视图。仅改变 shape 不会让带间隔的视图变连续。
+offset 包含 Tile View 起点；入口检查静态容量边界。
+与动态 register store 相同，调用方必须保证运行时
+`offset + sum(selected_lanes) <= dst_capacity`。接口不会截断或扩容；写出序列
+前后的字节保持原值，后续会读取的尾部需要事先初始化。
+
+状态是局限于同一 RegScope 的线性值：每次只消费当前状态，用 step 的结果替换它，
+并在退出区域前恰好 flush 一次。状态不能通过函数返回或容器逃逸。活动链期间不得
+读写、重绑定目标或其别名。顺序 for 循环通过 `init_values` 和 `pl.yield_` 显式携带
+状态，最多嵌套四层。活动链内不支持条件分支、while 循环和提前退出；通过 lane mask 筛选。
+
+当前基于 AR 的 lowering 同时支持一条**活动**追加链；flush 后可以在同一 RegScope
+开启下一条链，顺序链的总数没有四条的上限。这是实现限制，不是硬件非对齐寄存器数量。
+Ascend C 分别规定 load 和 store 非对齐寄存器上限为四个，但 squeeze-store 还使用
+共享 AR 状态。支持多条同时活动的 squeeze 链需要独立管理游标与计数，并验证后端；
+仅增加资源数量限制不能提供这一能力。参见[寄存器数量限制](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/ascendcopapi/docs/en/api/SIMD-API/basic_api/reg_vector_compute/register_data_types/UnalignRegForLoad-UnalignRegForStore.md)
+和 [squeeze-store 的 AR 语义](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/ascendcopapi/atlasascendc_api_07_0324.html)。
+
+PTOAS 0.74 不支持 VMI 寄存器值直接衔接物理 micro 指令，因此含流的整个
+register scope 使用物理寄存器 codegen。当前支持完整 256 字节 load/store、
+标量广播、索引生成、位重解释、比较、选择、mask 生成与逻辑运算及 squeeze；
+其他操作和非完整寄存器形状会明确报错。不含流的 scope 继续使用 VMI lowering，
+纯 `squeeze` 也走此路径。后续 PTOAS 提供流式 VMI 后，可以保持用户接口不变。

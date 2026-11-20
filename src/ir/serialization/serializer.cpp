@@ -524,7 +524,7 @@ class IRSerializer::Impl {
       type_map["types"] = msgpack::object(types_vec, zone);
     } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<VoidType>(type) || IsA<PtrType>(type) ||
                IsA<WindowBufferType>(type) || IsA<CommCtxType>(type) || IsA<PrefetchAsyncContextType>(type) ||
-               IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type)) {
+               IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type) || IsA<SqueezeStoreType>(type)) {
       // Singleton marker types (no extra fields beyond the type_kind key).
     } else {
       INTERNAL_UNREACHABLE << "Unknown Type subclass: " << type->TypeName();

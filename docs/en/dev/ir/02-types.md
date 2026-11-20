@@ -50,6 +50,25 @@ loop analysis and emission are not implemented by this infrastructure change.
 Simplify may remove proven zero-trip Sequential Require loops and return initial
 carried values; nonempty Require loops, including single-trip loops, are preserved.
 
+### Squeeze-store state
+
+`ir.SqueezeStoreType.get()` is an opaque, region-local SSA value representing
+the UReg append state. The public `squeeze_store_init/step/flush` operations
+expose this chain directly. `init` receives the destination Tile and element
+offset, then initializes the UReg state; it does not initialize the Tile's
+storage. Every operation names the destination Tile so memory effects and
+aliases remain visible; the frontend does not expose a pointer. A step consumes
+the current loop-carried UReg value and returns its successor;
+`pl.range(..., init_values=...)` carries it through sequential loops. It lowers
+to `!pto.align`, cannot cross a RegScope/function boundary or be duplicated, and
+must be flushed exactly once, including when no step ran or a loop was empty.
+The current AR-based lowering permits one live chain; closing it permits another
+in the same region. This is distinct from the hardware unalign-register limit.
+Compiler-generated linear renames, such as an
+eliminated zero-trip loop's result, consume the previous SSA name; reusing that
+name is rejected. This type has no instance fields and supports structural
+comparison and serialization.
+
 ### Internal buffer types
 
 `BufferType` describes a mutable on-chip buffer in the final device IR. It

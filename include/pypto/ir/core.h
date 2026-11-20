@@ -126,6 +126,7 @@ enum class ObjectKind {
   AsyncEventType,
   AsyncSessionType,
   RegType,
+  SqueezeStoreType,
 
   // Other IR node kinds
   Function,

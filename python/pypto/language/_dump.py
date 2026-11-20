@@ -29,6 +29,7 @@ from pypto.pypto_core import ir
 # Annotation-only marker values. The parser resolves the spelling, not the value.
 WindowBuffer = ir.WindowBufferType.get()
 Unknown = ir.UnknownType()
+SqueezeStore = ir.SqueezeStoreType.get()
 
 
 def float64(bits: str) -> float:

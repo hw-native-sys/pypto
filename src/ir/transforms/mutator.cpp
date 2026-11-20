@@ -393,10 +393,14 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   // from args, so the args walk alone won't propagate substitutions into a
   // returned TileType/TensorType's shape/view fields.
   auto new_type = RemapTypeViaVisitor(op->GetType());
-  if (args_changed && (IsOp(op, "reg.store") || IsOp(op, "reg.scatter"))) {
-    // Reg stores/scatters return exactly their destination type, including storage
-    // metadata rewritten by InitMemRef, MemoryReuse or AllocateMemoryAddr.
-    new_type = new_args[0]->GetType();
+  auto& registry = OpRegistry::GetInstance();
+  if (args_changed && registry.IsRegistered(op->op_->name_)) {
+    const auto& entry = registry.GetEntry(op->op_->name_);
+    if (const auto reuse = entry.GetOutputReusesInputArg(); entry.GetRegSpec() && reuse) {
+      // Register writes return their destination type, including rewritten
+      // storage metadata. A stream flush names its destination at slot 1.
+      new_type = new_args[*reuse]->GetType();
+    }
   }
   bool type_changed = (new_type.get() != op->GetType().get());
 
