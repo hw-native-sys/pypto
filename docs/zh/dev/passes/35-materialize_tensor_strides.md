@@ -6,7 +6,7 @@
 
 默认流水线中的 MX 视图经 [LegalizeMxScaleTensorViews](18-block_mx_scale_tensor_views.md)
 处理后保持逻辑 rank-2，stride 为 `[cols, 1]`，物理打包由 PTOAS 完成。
-该 pass 仍接受显式旧版分块的 rank-5 MX 视图，但不会在默认流水线中将其输出给 PTOAS v0.74。
+该 pass 仍接受显式旧版分块的 rank-5 MX 视图，但不会在默认流水线中将其输出给 PTOAS。
 
 逻辑 MX 视图要求所属函数带有 `LegalizeMxScaleTensorViews` 生成的合法化标记，
 确保自定义流水线不会跳过 load offset 的对齐和非负检查。

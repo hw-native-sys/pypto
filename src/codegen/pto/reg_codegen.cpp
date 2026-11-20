@@ -256,8 +256,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     if (tile->tile_view_ && tile->tile_view_->start_offset) {
       auto origin = EmitArithOperand(tile->tile_view_->start_offset, "index");
       auto adjusted = NewNamedTemp("reg_indexed_base");
-      Emit(adjusted + " = pto.addptr " + pointer + ", " + origin + " : <" + element + ", ub> -> <" + element +
-           ", ub>");
+      Emit(adjusted + " = pto.addptr " + pointer + ", " + origin + " : <" + element + ", ub>, index -> <" +
+           element + ", ub>");
       pointer = adjusted;
     }
     const size_t base_index = indexed_read ? 3 : 4;
@@ -266,8 +266,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
       // the original index register and predicate unchanged for gather/scatter.
       auto offset = GetExprAsCode(args[base_index]);
       auto adjusted = NewNamedTemp("reg_indexed_offset_base");
-      Emit(adjusted + " = pto.addptr " + pointer + ", " + offset + " : <" + element + ", ub> -> <" + element +
-           ", ub>");
+      Emit(adjusted + " = pto.addptr " + pointer + ", " + offset + " : <" + element + ", ub>, index -> <" +
+           element + ", ub>");
       pointer = adjusted;
     }
     // PTOAS >= 0.72 conservatively synchronizes unknown indexed footprints,

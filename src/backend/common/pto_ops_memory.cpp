@@ -892,7 +892,7 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
-  oss << " -> " << scalar_type;
+  oss << ", index -> " << scalar_type;
   codegen.Emit(oss.str());
   return "";
 }
@@ -926,7 +926,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   if (!tensor_type_str.empty() || !value_type.empty()) {
     oss << " : ";
     if (!tensor_type_str.empty()) oss << tensor_type_str;
-    if (!tensor_type_str.empty() && !value_type.empty()) oss << ", ";
+    oss << ", index, ";
     if (!value_type.empty()) oss << value_type;
   }
   codegen.Emit(oss.str());

@@ -1275,7 +1275,7 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   // Read rankId (the low 32 bits of the (rankId, rankNum) 8-byte slot at
   // u64 index k_rank_idx).
   const std::string rk_pair = NewTemp();
-  Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64> -> i64");
+  Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64>, index -> i64");
   const std::string rk_i32 = NewTemp();
   Emit(rk_i32 + " = arith.trunci " + rk_pair + " : i64 to i32");
   const std::string rk_idx = NewTemp();
@@ -1285,13 +1285,13 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   const std::string lb_off = NewTemp();
   Emit(lb_off + " = arith.addi " + c_w + ", " + rk_idx + " : index");
   const std::string lbase = NewTemp();
-  Emit(lbase + " = pto.load " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64> -> i64");
+  Emit(lbase + " = pto.load " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64>, index -> i64");
 
   // peer_base = windowsIn[peer]
   const std::string pb_off = NewTemp();
   Emit(pb_off + " = arith.addi " + c_w + ", " + peer_ssa + " : index");
   const std::string pbase = NewTemp();
-  Emit(pbase + " = pto.load " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64> -> i64");
+  Emit(pbase + " = pto.load " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64>, index -> i64");
 
   // delta_bytes = peer_base - local_base; converted to an element offset
   // because pto.addptr takes element counts, not bytes.
@@ -2877,7 +2877,7 @@ std::string PTOCodegen::GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask) {
     region_ssa = NewTemp();
     const std::string elem_type = GetTypeString(fs_.gm_slot_buffer_dtype);
     Emit(region_ssa + " = pto.addptr " + fs_.gm_slot_buffer_ssa + ", " + offset_ssa + " : <" + elem_type +
-         "> -> <" + elem_type + ">");
+         ">, index -> <" + elem_type + ">");
   }
 
   fs_.gm_slot_buffer_region_by_pipe[key] = region_ssa;

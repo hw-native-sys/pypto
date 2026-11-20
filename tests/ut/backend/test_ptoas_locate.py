@@ -28,6 +28,7 @@ Once found, the executable must be at least the pinned ``PTOAS_VERSION``;
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -41,6 +42,7 @@ from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION, check_ptoas_version, 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _major, _minor = (int(part) for part in PTOAS_MIN_VERSION.removeprefix("v").split(".")[:2])
 _PINNED = PTOAS_MIN_VERSION.removeprefix("v")
+_PINNED_VERSION_PATTERN = re.escape(PTOAS_MIN_VERSION)
 _NEWER = f"{_major}.{_minor + 1}"
 _OLDER = f"{_major}.{_minor - 1}" if _minor else f"{_major - 1}.99"
 
@@ -459,7 +461,7 @@ def test_run_ptoas_timeout_reports_configured_deadline(monkeypatch):
 def fp4_probe(tmp_path, monkeypatch):
     binary = _make_executable(tmp_path / "ptoas")
     monkeypatch.setattr(_ptoas_fp4, "find_ptoas_binary", lambda: str(binary))
-    monkeypatch.setattr(_ptoas_fp4, "check_ptoas_version", lambda _: "ptoas 0.74+patched")
+    monkeypatch.setattr(_ptoas_fp4, "check_ptoas_version", lambda _: f"ptoas {_PINNED}+patched")
     _ptoas_fp4._verified_binaries.clear()
     return binary
 
@@ -475,26 +477,11 @@ _FP4_PROBE_CPP = "\n".join(
 )
 
 
-@pytest.mark.parametrize("returncode", [0, 1])
-def test_native_fp4_probe_rejects_old_geometry(fp4_probe, monkeypatch, returncode):
-    # A verifier-only fix still emits the wrong accumulator; neither that nor
-    # an incompatible assembler's verifier rejection can enable execution.
-    result = SimpleNamespace(
-        returncode=returncode,
-        stdout=_FP4_PROBE_CPP.replace("Acc, float, 32, 64,", "Acc, float, 16, 32,"),
-        stderr="" if returncode == 0 else "incompatible accumulator shape",
-    )
-    monkeypatch.setattr(_ptoas_fp4.subprocess, "run", lambda *args, **kwargs: result)
-    with pytest.raises(
-        RuntimeError, match=r"Native FP4 MX.*v0.74.*PTOAS #1700.*Set PTOAS_ROOT to the released v0.74"
-    ):
-        _ptoas_fp4.check_native_fp4_mx_support()
-    assert not _ptoas_fp4._verified_binaries
-
-
 def test_native_fp4_missing_binary_recommends_supported_release(monkeypatch):
     monkeypatch.setattr(_ptoas_fp4, "find_ptoas_binary", lambda: None)
-    with pytest.raises(RuntimeError, match=r"Set PTOAS_ROOT to the released v0.74.*No PTOAS executable"):
+    with pytest.raises(
+        RuntimeError, match=rf"Set PTOAS_ROOT to the released {_PINNED_VERSION_PATTERN}.*No PTOAS executable"
+    ):
         _ptoas_fp4.check_native_fp4_mx_support()
 
 

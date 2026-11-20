@@ -2,7 +2,10 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
-PyPTO requires PTOAS v0.74 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `27fe21756` pins PTO-ISA `83b1b2b52` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
+PyPTO requires PTOAS v0.77 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `27fe21756` pins PTO-ISA `83b1b2b52` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
+
+PTOAS v0.77 requires an explicit element-offset operand type on pointer
+arithmetic and scalar memory accesses. PyPTO emits `index` for those offsets.
 
 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) preserves logical rank-2 MX shapes, strides, and offsets. PTOAS constructs packed descriptors from `mx_a_zz` / `mx_b_nn`; do not relabel these views as ND.
 
@@ -314,7 +317,7 @@ per-backend tables continue to govern Acc-to-GM stores independently.
 
 **Empty valid regions.** Either valid dimension being zero denotes an empty region, regardless of physical allocation size. Empty/runtime-valid reshape and reinterpret descriptors use dynamic valid dimensions initialized by `pto.set_validshape` after `pto.treshape`; static positive dimensions retain their static encoding. Ordinary Tile/Buffer transfers skip static empty windows and guard runtime windows, preserving output identity and untouched destination data. Final-phase stores remain unconditional to clear the paired producer's unit flag; guard producer and store together in source when skipping a phased operation, subject to existing backend restrictions.
 
-PTOAS >= 0.74 supports locally allocated, TPOP-derived, and contiguous subview-derived descriptors ([#1724](https://github.com/hw-native-sys/PTOAS/issues/1724), [#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)). Codegen checks SSA ancestry while preserving slice offsets and distinct alias identities; inferred runtime slice validity is passed explicitly. Every slice ancestor must be contiguous; a full-width child cannot hide a strided parent. Strided windows and unknown/control-flow roots require materialization before descriptor initialization. `SplitVectorKernel` retains empty replay reshape/reinterpret/transpose aliases and TPOP/TPUSH/TFREE handshakes. Replacing these FIFO aliases with `tile.create` would allocate a full payload buffer.
+PTOAS supports locally allocated, TPOP-derived, and contiguous subview-derived descriptors ([#1724](https://github.com/hw-native-sys/PTOAS/issues/1724), [#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)). Codegen checks SSA ancestry while preserving slice offsets and distinct alias identities; inferred runtime slice validity is passed explicitly. Every slice ancestor must be contiguous; a full-width child cannot hide a strided parent. Strided windows and unknown/control-flow roots require materialization before descriptor initialization. `SplitVectorKernel` retains empty replay reshape/reinterpret/transpose aliases and TPOP/TPUSH/TFREE handshakes. Replacing these FIFO aliases with `tile.create` would allocate a full payload buffer.
 
 ### Cross-Core Operations → PTO Instructions
 

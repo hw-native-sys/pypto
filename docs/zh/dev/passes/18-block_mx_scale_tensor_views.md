@@ -2,7 +2,7 @@
 
 ## 默认流水线：逻辑视图
 
-面向 PTOAS v0.74，`LegalizeMxScaleTensorViews` 在默认 PTO 流水线中替代
+面向 PTOAS，`LegalizeMxScaleTensorViews` 在默认 PTO 流水线中替代
 `BlockMxScaleTensorViews`。它位于 `FlattenTileNdTo2D`、`BlockNzTensorViews`
 之后，`MaterializeTensorStrides` 之前。
 
@@ -30,7 +30,7 @@ load/store 坐标及带形状的 ND/MX 别名。`MaterializeTensorStrides` 生�
 ## 旧版显式分块
 
 `passes.block_mx_scale_tensor_views()` 为显式调用者保留下述 rank-5 转换。
-它不再属于默认流水线，其输出不能作为 PTOAS v0.74 的 MX tensor-view 输入。
+它不再属于默认流水线，其输出不能作为 PTOAS 的 MX tensor-view 输入。
 不要在新的逻辑 legalization pass 前调用旧版分块 pass。
 
 ## 概述

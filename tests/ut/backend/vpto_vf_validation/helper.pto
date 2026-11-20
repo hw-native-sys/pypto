@@ -12,8 +12,8 @@ module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
   func.func @run_vf(%base: !pto.ptr<f32, ub>, %n: i32) attributes {pto.aiv} {
     %rhs_offset = arith.constant 1024 : index
     %out_offset = arith.constant 2048 : index
-    %rhs = pto.addptr %base, %rhs_offset : <f32, ub> -> <f32, ub>
-    %out = pto.addptr %base, %out_offset : <f32, ub> -> <f32, ub>
+    %rhs = pto.addptr %base, %rhs_offset : <f32, ub>, index -> <f32, ub>
+    %out = pto.addptr %base, %out_offset : <f32, ub>, index -> <f32, ub>
     %offset0 = arith.constant 0 : index
     %lane0 = arith.constant 0 : i32
     %offset1 = arith.constant 64 : index

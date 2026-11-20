@@ -50,7 +50,7 @@ def test_indexed_barrier(
         # unknown upper bounds, so PTOAS may conservatively retain their barrier.
         source = source.replace(
             "    pto.vecscope {",
-            "    %other = pto.addptr %dst, %c256_index : <f32, ub> -> <f32, ub>\n    pto.vecscope {",
+            "    %other = pto.addptr %dst, %c256_index : <f32, ub>, index -> <f32, ub>\n    pto.vecscope {",
         )
         lines = replacement.splitlines()
         lines[1] = lines[1].replace("%dst", "%other")

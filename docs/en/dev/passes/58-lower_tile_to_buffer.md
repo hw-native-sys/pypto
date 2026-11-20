@@ -234,10 +234,8 @@ does not invent a Buffer-valued phi or export a branch-local view. Window Tile
 carries, nested dynamic-valid windows and dynamic-valid relabels/assemble remain
 outside default selection.
 
-Native scalar swaps require PTOAS 0.69 or newer, which fixes
-[PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622) by preserving
-parallel-copy semantics for loop yields. The repository's pinned PTOAS version
-includes this fix. Acceptance checks execute the generated kernels: correct
+Native scalar swaps rely on the pinned PTOAS release to preserve parallel-copy
+semantics for loop yields ([PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622)). Acceptance checks execute the generated kernels: correct
 Buffer IR and successful native compilation alone do not establish numerical
 correctness.
 

@@ -1,9 +1,7 @@
 # SIMT interface coverage
 
-This matrix tracks task 11.7 against pinned PTOAS v0.74
-(`be4c7a51f66ceadda6eb8a001d7bddccb3507700`). An interface declaration is
-not evidence of device execution. General unsigned types are distinct from
-INT32 values interpreted as unsigned by one operation.
+This matrix tracks task 11.7 against pinned PTOAS v0.77. General unsigned
+types are distinct from INT32 values interpreted as unsigned by one operation.
 
 ## First batch: 32-bit interfaces
 
@@ -26,13 +24,11 @@ They return the old value, retain discarded updates, preserve cache validation,
 and participate in launch storage versioning. The source-window rules and
 inactive-source restriction are in the [IR contract](../ir/11-simt.md).
 
-Validation on 2026-11-19: a fresh worktree C++ build passed, followed by
-**1,124 passing tests** across SIMT operators, atomic regressions, codegen,
-public JIT, outlining and storage preparation. PTOAS v0.74 was required,
-including LLVM export of both first-batch entries and all four shuffle modes
-with INT32/FP32 payloads, widths 16/32 and both boundary bounds. Python lint,
-implementation type checks and documentation parity/navigation checks passed.
-No device execution is claimed.
+Validation on 2026-11-20 with PTOAS v0.77: a fresh worktree C++ build passed,
+followed by **1,128 passing tests** across SIMT operators, atomic regressions,
+codegen, public JIT, outlining and storage preparation. LLVM export covered
+both first-batch entries and all four shuffle modes with INT32/FP32 payloads,
+widths 16/32 and both boundary bounds.
 
 Evidence is collected by:
 
@@ -41,6 +37,9 @@ Evidence is collected by:
 - `tests/ut/jit/test_simt_scope.py::test_first_batch_simt_interfaces_native_compile`:
   complete public JIT lowering and pinned PTOAS LLVM export, including GM/UB,
   unsigned comparisons, window attributes and retained unused atomic results.
+- `tests/ut/jit/test_simt_scope.py::test_public_warp_collectives_native_compile`:
+  verifies that the exported LLVM calls to vote, shuffle and redux remain on
+  the active branch and that a loop condition recomputes its vote each iteration.
 - `tests/st/runtime/vpto/test_simt_interface_gaps_onboard.py`: opt-in numerical
   fixture for unsigned high-bit boundaries, old values, bit patterns and windows.
   A successful compile does not count as a successful device run.
@@ -114,9 +113,8 @@ Host execution and device compilation do not substitute for onboard acceptance.
 
 ## Toolchain boundary
 
-PTOAS stays pinned to v0.74. A v0.77 upgrade needs both typed memory offsets
-and regressions for vote/shuffle/redux active-lane effects under divergent control
-flow; changing the version number alone is insufficient.
+PTOAS v0.77 requires explicit element-offset types for pointer arithmetic and
+scalar memory operations. PyPTO emits `index` for these operands.
 
 ### Clock sampling blocker
 
@@ -132,10 +130,10 @@ are fixed; INT64 storage alone does not resolve this. Minimal entry body:
 %b = pto.get_clock32 : i32
 %elapsed = arith.subi %b, %a : i32
 %zero = arith.constant 0 : index
-pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, i32
+pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, index, i32
 ```
 
-Compile inside a `pto.simt_entry` function with `--pto-arch=a5
+Compile inside a `pto.simt_entry` function with PTOAS v0.77 and `--pto-arch=a5
 --pto-backend=vpto --emit-vpto-llvm-ir`; the resulting store contains zero.
 
 ### Cross-entry state blocker

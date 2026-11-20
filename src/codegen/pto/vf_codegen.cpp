@@ -328,8 +328,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     if (relative != 0) {
       const auto offset = helper.GetOrEmitConstant(relative / bytes, DataType::INDEX);
       auto adjusted = helper.NewNamedTemp("capture" + std::to_string(i));
-      helper.Emit(adjusted + " = pto.addptr " + address + ", " + offset + " : <" + target + ", ub> -> <" +
-                  target + ", ub>");
+      helper.Emit(adjusted + " = pto.addptr " + address + ", " + offset + " : <" + target +
+                  ", ub>, index -> <" + target + ", ub>");
       address = adjusted;
     }
     addresses.push_back(address);

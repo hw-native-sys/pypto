@@ -174,7 +174,7 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   // (2) addptr from the local pointer by that element offset.
   std::string peer_ptr = codegen.NewTemp();
   codegen.Emit(peer_ptr + " = pto.addptr " + target.local_ptr_ssa + ", " + delems + " : " + ptr_type +
-               " -> " + ptr_type);
+               ", index -> " + ptr_type);
 
   // (3) make_tensor_view at the call site. Mirror ``EmitMakeTensorViews`` so
   // local and peer views use identical shape/stride/layout metadata.
@@ -1458,7 +1458,7 @@ static std::string EmitLoadRankPair(codegen::PTOCodegen& cg, const std::string& 
   constexpr int64_t kRankSlotIdx = static_cast<int64_t>(cl::kRankIdOffset / cl::kWindowSlotStride);
   std::string slot_c = cg.GetOrEmitConstant(kRankSlotIdx, DataType::INDEX);
   std::string rk_pair = cg.NewTemp();
-  cg.Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + slot_c + "] : !pto.ptr<i64> -> i64");
+  cg.Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + slot_c + "] : !pto.ptr<i64>, index -> i64");
   return rk_pair;
 }
 

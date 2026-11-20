@@ -545,6 +545,7 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig, entry_na
             "vote.any",
             "vote.uni",
             "vote.ballot",
+            *(f"shfl.{mode}.{dtype}" for mode in ("idx", "up", "down", "bfly") for dtype in ("i32", "f32")),
             "redux.add.s32",
             "redux.min.s32",
             "redux.max.s32",
@@ -552,8 +553,36 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig, entry_na
             "redux.min.f32",
             "redux.max.f32",
         )
-        for intrinsic in ("vote.any",) if is_while else intrinsics:
-            assert f"@llvm.hivm.{intrinsic}" in llvm
+        # Match calls in the exported function. Declarations alone do not show
+        # that PTOAS preserved the active lanes of each collective.
+        function = re.search(r"^define [^\n]*\bsimt_entry\b[^\n]*\{\n(.*?)^}", llvm, re.M | re.S)
+        assert function is not None
+        body = function[1]
+        label = r"[\w.$-]+"
+        entry, *labeled_blocks = re.split(rf"^({label}):[^\n]*\n", body, flags=re.M)
+        blocks = dict(zip(labeled_blocks[::2], labeled_blocks[1::2], strict=True))
+        active_branch = re.search(rf"^  br i1 [^,\n]+, label %({label}), label %{label}$", entry, re.M)
+        assert active_branch is not None
+        collective_block = blocks[active_branch[1]]
+
+        if is_while:
+            # The loop must recalculate the vote and branch on its result on
+            # every active iteration. Follow the emitted edges rather than SSA numbers.
+            header_edge = re.search(rf"^  br label %({label})$", collective_block, re.M)
+            assert header_edge is not None
+            collective_block = blocks[header_edge[1]]
+            vote = re.search(rf"^  (%{label}) = call i1 @llvm\.hivm\.vote\.any\(", collective_block, re.M)
+            assert vote is not None
+            loop_branch = re.search(
+                rf"^  br i1 {re.escape(vote[1])}, label %({label}), label %{label}$", collective_block, re.M
+            )
+            assert loop_branch is not None
+            assert re.search(rf"^  br label %{re.escape(header_edge[1])}$", blocks[loop_branch[1]], re.M)
+
+        intrinsic_call = r"\bcall\b[^\n]*@llvm\.hivm\.((?:vote|shfl|redux)\.[\w.]+)\("
+        guarded_calls = re.findall(intrinsic_call, collective_block)
+        assert sorted(guarded_calls) == sorted(("vote.any",) if is_while else intrinsics)
+        assert re.findall(intrinsic_call, body) == guarded_calls
         assert "asm " not in llvm
     finally:
         backend.reset_for_testing()
