@@ -1350,10 +1350,16 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "runtime",
-    [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH],
+    ("ascend_backend", "runtime", "name"),
+    [
+        (BackendType.Ascend910, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, "tensormap_and_ringbuffer"),
+        (BackendType.Ascend910, passes.RuntimeKind.HOST_BUILD_GRAPH, "host_build_graph"),
+        (BackendType.Ascend950, passes.RuntimeKind.HOST_BUILD_GRAPH, "percounter"),
+        (BackendType.Ascend950, passes.RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL, "host_build_graph"),
+    ],
+    indirect=["ascend_backend"],
 )
-def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime):
+def test_every_next_level_reports_the_selected_runtime(tmp_path, ascend_backend, runtime, name):
     """All chip sub-builds in one distributed program must name the same runtime.
 
     The builtin collectives are materialized from templates rather than by the
@@ -1397,7 +1403,6 @@ def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime):
     # Both a user chip Orchestration and a template-materialized builtin, so the
     # test would still pass vacuously if either side were missing.
     assert len(configs) >= 2, f"expected a user chip and a builtin config, got {sorted(configs)}"
-    name = passes.runtime_kind_to_name(runtime)
     for path, text in configs.items():
         assert f'"runtime": "{name}"' in text, f"{path} does not report runtime {name!r}"
 

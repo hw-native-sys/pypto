@@ -283,6 +283,7 @@ std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument
 constexpr std::pair<RuntimeKind, const char*> kRuntimeNames[] = {
     {RuntimeKind::TensorMapAndRingBuffer, "tensormap_and_ringbuffer"},
     {RuntimeKind::HostBuildGraph, "host_build_graph"},
+    {RuntimeKind::HostBuildGraphExperimental, "host_build_graph_experimental"},
 };
 
 std::string RuntimeKindToName(RuntimeKind kind) {

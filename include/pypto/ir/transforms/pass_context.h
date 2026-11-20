@@ -241,11 +241,10 @@ enum class MemoryPlanner {
 /**
  * @brief Which Simpler runtime ABI a compilation targets.
  *
- * The two runtimes differ in where the task graph is built, which is what
+ * The runtime families differ in where the task graph is built, which is what
  * decides whether an orchestration fragment can be recorded and replayed at
- * all. Closed set: each enumerator corresponds to one implementation under
- * `runtime/src/<arch>/runtime/`, and a pass that must legalize IR for a
- * particular runtime switches on this rather than comparing strings.
+ * all. Codegen resolves the selected family to a Simpler implementation for
+ * the target architecture. Passes use the family to legalize IR.
  */
 enum class RuntimeKind : uint8_t {
   /// Task graph built on the AICPU, dependencies auto-derived through the
@@ -254,17 +253,21 @@ enum class RuntimeKind : uint8_t {
   /// Host CPU builds the whole task graph up front, which is what makes Graph
   /// Execution (record once, replay) possible.
   HostBuildGraph = 1,
+  /// Explicit selection of the original A5 host graph scheduler.
+  HostBuildGraphExperimental = 2,
 };
+
+inline constexpr bool IsHostBuildGraph(RuntimeKind kind) {
+  return kind == RuntimeKind::HostBuildGraph || kind == RuntimeKind::HostBuildGraphExperimental;
+}
 
 inline constexpr RuntimeKind kDefaultRuntimeKind = RuntimeKind::TensorMapAndRingBuffer;
 
 /**
  * @brief Wire name for a runtime kind.
  *
- * This is the value written to `RUNTIME_CONFIG["runtime"]` in the generated
- * `kernel_config.py`, the value `CompiledProgram.runtime_name` reports, and the
- * name used verbatim as a filesystem path component when compiling kernels — so
- * it is spelled out here rather than derived from the enumerator name.
+ * This spelling identifies the application-facing compile selection. Codegen
+ * writes its target-specific Simpler implementation name into kernel_config.py.
  *
  * @param kind The runtime kind
  * @return Wire name, e.g. "host_build_graph"
@@ -274,7 +277,7 @@ inline constexpr RuntimeKind kDefaultRuntimeKind = RuntimeKind::TensorMapAndRing
 /**
  * @brief Parse a wire name back into a runtime kind.
  *
- * @param name Wire name as it appears in `RUNTIME_CONFIG["runtime"]`
+ * @param name Application-facing runtime selection
  * @return The matching kind
  * @throws pypto::ValueError if the name is not one PyPTO can compile for
  */

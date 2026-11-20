@@ -73,7 +73,7 @@ from pypto._cache_config import capture_cache_config, record_stats, time_stage
 from pypto._environment import explicit_env_request
 from pypto._external_source import external_source_digest
 from pypto._identity import digest_record
-from pypto._target import _parse_platform, _platform_string
+from pypto._target import _parse_platform, _platform_string, runtime_implementation_name
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
@@ -1275,7 +1275,7 @@ class JITFunction:
                     build,
                     self._persistent_source_digest,
                     platform=target_platform,
-                    runtime_name=runtime_kind_to_name(runtime),
+                    runtime_name=runtime_implementation_name(runtime, target_platform),
                     distributed=self._func_type == "host",
                     **consumer_options,
                 )

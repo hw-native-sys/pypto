@@ -20,8 +20,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
+from pypto._target import runtime_implementation_name
 from pypto.pypto_core import DataType
-from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
+from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind
 
 if TYPE_CHECKING:
     from pypto.ir.pass_manager import OptimizationStrategy
@@ -243,7 +244,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
         ("enable_pypto_l0c_double_buffer", effective_pypto_dbc),
         ("dep_layouts", dep_layouts),
-        ("runtime", runtime_kind_to_name(runtime)),
+        ("runtime", runtime_implementation_name(runtime, platform)),
         ("enable_buffer_ir", enable_buffer_ir),
         ("buffer_ir_version", 14 if enable_buffer_ir else 0),
         # Tile fallback also changed: native compare gather needs its full scratch

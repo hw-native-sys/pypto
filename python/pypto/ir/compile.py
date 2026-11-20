@@ -13,6 +13,7 @@ import logging
 import os
 import tempfile
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -24,6 +25,7 @@ from pypto._target import (
     _platform_string,
     _resolve_target,
     _warn_deprecated_platform,
+    runtime_implementation_name,
 )
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_orch_names
@@ -137,6 +139,7 @@ class _CompilationResult(NamedTuple):
     backend_type: BackendType
     logical_parameters: "list[ParamInfo] | None"
     return_aliases: tuple[int, ...] | None
+    runtime_name: str
 
 
 def _is_distributed(program: _ir_core.Program) -> bool:
@@ -500,7 +503,10 @@ def compile(  # noqa: PLR0913
             result.output_dir,
             backend_type=result.backend_type,
             platform=result.platform,
-            distributed_config=DistributedConfig() if distributed_config is None else distributed_config,
+            distributed_config=replace(
+                distributed_config if distributed_config is not None else DistributedConfig(),
+                runtime=result.runtime_name,
+            ),
         )
 
     names = multi_chip_orch_names(lowered_program)
@@ -674,7 +680,7 @@ def _compile_to_files(  # noqa: PLR0913
             assert logical is not None
             lowered = external_parameter_names(logical, lowered)
             validate_lowered_signature(logical, lowered)
-            if effective_runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH:
+            if _passes.is_host_build_graph(effective_runtime):
                 validate_kernel_host_access(transformed_program)
 
         # Codegen target selection is owned by the per-backend BackendHandler;
@@ -708,7 +714,13 @@ def _compile_to_files(  # noqa: PLR0913
     _log_debug(f"PyPTO artifacts written to {os.path.realpath(output_dir)}")
 
     return _CompilationResult(
-        transformed_program, output_dir, platform, effective_backend_type, logical, aliases
+        transformed_program,
+        output_dir,
+        platform,
+        effective_backend_type,
+        logical,
+        aliases,
+        runtime_implementation_name(effective_runtime, platform),
     )
 
 

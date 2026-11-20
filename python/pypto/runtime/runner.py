@@ -1360,7 +1360,7 @@ def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
     )
 
     host_tensor_indices: list[int] = []
-    if runtime_name == "host_build_graph":
+    if runtime_name in ("host_build_graph", "percounter"):
         from ._artifact_sources import read_kernel_config  # noqa: PLC0415
 
         kernel_config = read_kernel_config(work_dir / "kernel_config.py")

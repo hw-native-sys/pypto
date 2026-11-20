@@ -541,6 +541,14 @@ class TestMakeCacheKey:
         key_hbg = self._make_key(**kwargs, runtime=passes.RuntimeKind.HOST_BUILD_GRAPH)
         assert key_tmrb != key_hbg, "runtime must split the cache key"
 
+    def test_a5_hbg_cache_names_physical_implementation(self):
+        hbg = self._make_key(platform="a5", runtime=passes.RuntimeKind.HOST_BUILD_GRAPH)
+        experimental = self._make_key(platform="a5", runtime=passes.RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL)
+        assert hbg.compile_opts is not None
+        assert ("runtime", "percounter") in hbg.compile_opts
+        assert experimental.compile_opts is not None
+        assert ("runtime", "host_build_graph") in experimental.compile_opts
+
 
 class TestResolveRuntime:
     """The runtime the JIT keys on must match the one ``ir.compile()`` will use."""
