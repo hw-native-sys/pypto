@@ -844,6 +844,8 @@ class TestCrossCore:
         result = test_runner.run(C2VUDTest())
         assert result.passed, f"Cross-core C2V updown compilation failed: {result.error}"
 
+    # Re-enable on A5 hardware once the pinned PTO-ISA fixes no-split error 507018.
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5sim")
     def test_tpop_c2v_nosplit(self, test_runner):
         """C2V no-split pipe: compile through full pipeline and verify correctness."""
         result = test_runner.run(C2VNoSplitTest())
@@ -859,11 +861,15 @@ class TestCrossCore:
         result = test_runner.run(BiDirectLRTest())
         assert result.passed, f"Cross-core bidirect left-right compilation failed: {result.error}"
 
+    # Re-enable on A5 hardware once the pinned PTO-ISA fixes no-split error 507018.
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5sim")
     def test_tpop_bidirect_nosplit(self, test_runner):
         """Bidirect no-split pipe: compile through full pipeline and verify correctness."""
         result = test_runner.run(BiDirectNoSplitTest())
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
 
+    # Re-enable on A5 hardware once the pinned PTO-ISA fixes no-split error 507018.
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5sim")
     def test_tpop_bidirect_spmd_nosplit(self, test_runner):
         """Bidirect cube<->vec + transpose fused in one no-split pl.spmd scope.
 
