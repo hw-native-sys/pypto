@@ -33,7 +33,7 @@ from pypto.pypto_core.ir import (
     TileView as _TileViewBase,
 )
 
-from .utils import _normalize_expr, _normalize_shape
+from .utils import _normalize_expr
 
 
 def _merge_annotation_metadata(annotation: Type, inferred: Type) -> Type:
@@ -112,17 +112,17 @@ def _tensor_type_init_wrapper(
     memref: MemRef | None = None,
     tensor_view: _TensorViewBase | None = None,
 ):
-    """Wrapped __init__ for TensorType that supports integer shapes, optional MemRef and TensorView.
+    """Forward raw shape extents to TensorType's native validator.
 
     Args:
         shape: Shape dimensions as a sequence of integers or Expr nodes.
-               Integers are automatically converted to ConstInt(dim, DataType.INT64, Span.unknown()).
+               The native constructor validates elements and converts integers to INDEX constants.
         dtype: Element data type
         memref: Optional memory reference
         tensor_view: Optional tensor view information
     """
-    shape_exprs = _normalize_shape(shape)
-    _native_tensor_type_init(self, shape_exprs, dtype, memref, tensor_view)
+    # Pre-normalization would turn bool/float into Exprs before native validation.
+    _native_tensor_type_init(self, shape, dtype, memref, tensor_view)
 
 
 def _tile_type_init_wrapper(
@@ -133,26 +133,25 @@ def _tile_type_init_wrapper(
     tile_view: _TileViewBase | None = None,
     memory_space: MemorySpace | None = None,
 ):
-    """Wrapped __init__ for TileType that supports integer shapes, optional MemRef and TileView.
+    """Forward raw shape extents while preserving Tile memory-space inference.
 
     Args:
         shape: Shape dimensions as a sequence of integers or Expr nodes.
-               Integers are automatically converted to ConstInt(dim, DataType.INT64, Span.unknown()).
+               The native constructor validates elements and converts integers to INDEX constants.
         dtype: Element data type
         memref: Optional memory reference
         tile_view: Optional tile view information
         memory_space: Optional memory space
     """
-    shape_exprs = _normalize_shape(shape)
     if memref is not None and memory_space is None:
         memory_space = _infer_tile_memory_space_from_memref(memref)
-    _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, memory_space)
+    _native_tile_type_init(self, shape, dtype, memref, tile_view, memory_space)
 
 
-# Monkey-patch the native TensorType.__init__ to support integer shapes
+# Python versions differ in whether nanobind construction uses these patched
+# initializers. Both paths leave shape validation to the native constructor.
 TensorType.__init__ = _tensor_type_init_wrapper
 
-# Monkey-patch the native TileType.__init__ to support integer shapes
 TileType.__init__ = _tile_type_init_wrapper
 
 
