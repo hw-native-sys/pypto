@@ -3156,6 +3156,109 @@ class TestTileSliceCodegen:
 class TestTileAssembleCodegen:
     """Tests for destination preservation and target-specific tile insertion."""
 
+    def _bf16_nz_vec_mat_program(
+        self, offsets=((16, 0),), valid_shape=(16, 256), result_base="l1", dtype="BF16", source_cols=256
+    ):
+        """Explicit storage isolates instruction selection from memory planning."""
+        layout = "blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major, fractal=512"
+        target_type = (
+            f'pl.Tile[[128, 256], pl.{dtype}, pl.MemRef("l1", 0, 65536), pl.Mem.Mat, pl.TileView({layout})]'
+        )
+        result_type = target_type.replace('"l1"', f'"{result_base}"')
+        source_type = (
+            f'pl.Tile[[16, {source_cols}], pl.{dtype}, pl.MemRef("ub", 0, 8192), '
+            f"pl.Mem.Vec, pl.TileView({layout}, valid_shape={list(valid_shape)})]"
+        )
+        # Distinct SSA results reuse the same Mat allocation across all writes.
+        writes = []
+        target = "target"
+        for index, (row, col) in enumerate(offsets):
+            result = f"result_{index}"
+            writes.append(
+                f"        {result}: {result_type} = pl.tile.assemble({target}, source, [{row}, {col}])"
+            )
+            target = result
+        return pl.parse_program(
+            "@pl.program\n"
+            "class Repro:\n"
+            "    @pl.function(type=pl.FunctionType.AIV)\n"
+            "    def kernel(self):\n"
+            f"        target: {target_type} = pl.tile.create([128, 256], dtype=pl.{dtype}, "
+            "target_memory=pl.Mem.Mat)\n"
+            f"        source: {source_type} = pl.tile.create([16, {source_cols}], dtype=pl.{dtype}, "
+            "target_memory=pl.Mem.Vec)\n" + "\n".join(writes)
+        )
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize(
+        ("offsets", "valid_shape", "source_cols"),
+        [
+            (((16, 0),), (16, 256), 256),
+            (tuple((row, 0) for row in range(0, 128, 16)), (16, 256), 256),
+            (((16, 0),), (16, 128), 256),
+            (((16, 16),), (16, 128), 128),
+        ],
+        ids=["single", "eight_chunks", "narrow_valid_columns", "column_offset"],
+    )
+    def test_a5_bf16_nz_vec_mat_assemble_ptoas(self, tmp_path, offsets, valid_shape, source_cols):
+        """Issue #3458: insert directly into the parent Mat tile, retaining NZ pitch."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(offsets, valid_shape, source_cols=source_cols)
+        mlir = codegen.PTOCodegen().generate(program)
+        inserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
+        assert len(inserts) == len(offsets), mlir
+        assert "pto.subview" not in mlir
+        assert "pto.tmov" not in mlir
+        # No private result allocations or preservation copies: all writes use
+        # the original target and source, including the eight-insertion chain.
+        assert mlir.count("pto.alloc_tile") == 2
+        constants = dict(re.findall(r"(%\w+) = arith.constant (\d+) : index", mlir))
+        source_valid = re.search(r"%source = pto.alloc_tile .*valid_col = (%\w+)", mlir)
+        assert source_valid is not None, mlir
+        assert int(constants[source_valid[1]]) == valid_shape[1]
+        for line, (row, col) in zip(inserts, offsets):
+            operands = re.search(r"ins\(%source, (%\w+), (%\w+) :", line)
+            assert operands is not None, line
+            assert int(constants[operands[1]]) == row
+            assert int(constants[operands[2]]) == col
+            assert "outs(%target : !pto.tile_buf<loc=mat, dtype=bf16, rows=128, cols=256" in line
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert cpp.count("TINSERT(") == len(offsets)
+        assert "TMOV(" not in cpp
+
+    def test_a5_bf16_nz_vec_mat_assemble_requires_target_reuse(self):
+        """A fresh Mat result cannot preserve the target through a Mat->Mat copy."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(result_base="separate_l1")
+        with pytest.raises(ValueError, match="BF16 NZ Vec->Mat.*reuse the Mat target"):
+            codegen.PTOCodegen().generate(program)
+
+    @pytest.mark.parametrize("valid_columns", [127, 255])
+    def test_a5_bf16_nz_vec_mat_assemble_rejects_unaligned_valid_columns(self, valid_columns):
+        """NZ block copies must not overwrite columns beyond the valid window."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(valid_shape=(16, valid_columns))
+        with pytest.raises(ValueError, match="BF16 NZ Vec->Mat.*multiple of 16"):
+            codegen.PTOCodegen().generate(program)
+
+    def test_a5_bf16_nz_vec_mat_assemble_rejects_unaligned_column_offset(self):
+        """A block-aligned width cannot compensate for a shifted NZ column block."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(((16, 1),), (16, 128), source_cols=128)
+        with pytest.raises(ValueError, match="BF16 NZ Vec->Mat.*multiple of 16"):
+            codegen.PTOCodegen().generate(program)
+
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("dtype", ["BF16", "FP16"])
+    def test_bf16_nz_vec_mat_assemble_tinsert_scope(self, backend_type, dtype):
+        """The new selection must not broaden A2/A3 or other dtype contracts."""
+        backend.set_backend_type(backend_type)
+        mlir = codegen.PTOCodegen().generate(self._bf16_nz_vec_mat_program(dtype=dtype))
+        selected = backend_type == BackendType.Ascend950 and dtype == "BF16"
+        assert ("pto.tinsert" in mlir) == selected
+
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
         backend.reset_for_testing()
