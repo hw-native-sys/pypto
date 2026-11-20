@@ -246,10 +246,20 @@ A5 Host domains map local and peer windows for synchronous MTE reads on
 `tensormap_and_ringbuffer`, `host_build_graph`, and `percounter`. It also includes
 Simpler #3174, which preserves the local window base for Host URMA domains.
 
-The compiler currently does not reject Host peer-MTE operations or mixed URMA/MTE
-use, including CHIP collectives after builtin lowering. This does not establish
-hardware support for every combination; execution depends on the runtime's mappings
-and the communication operations used by the kernel.
+`MaterializeDistTensorCtx` rejects a domain used by both `put_async`/`get_async`
+and remote MTE `remote_load`/`remote_store` or `put`/`get` primitives, including
+lowered tile forms and uses forwarded through `Call`/`Submit`. All window slots
+in a domain share this restriction; Host and Device domains are checked alike.
+Only the remote operand of a transfer contributes to the check. Ordinary local
+loads/stores and MTE primitives whose peer is provably `rank(get_comm_ctx(window))`
+for the same domain are allowed. Constant peer `0` is also local in a statically
+single-rank domain. Peers not proven local are conservatively treated as remote.
+
+This first check covers those explicit primitives, not hidden communication in
+builtin collective templates, notify/wait, or arbitrary external kernels. It
+uses actual operations rather than the conservatively provisioned engine list;
+operations on different domains do not conflict in this check. Runtime mappings
+and hardware restrictions still determine which combinations can execute.
 
 ### Runtime source initialization
 

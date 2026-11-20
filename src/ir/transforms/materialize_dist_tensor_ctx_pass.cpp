@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <array>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -26,6 +27,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -405,6 +407,234 @@ class DistParamAliasCollector : public IRVisitor {
   const FunctionCtxPlan* plan_;
 };
 
+// Analyze primitive remote accesses before adding context arguments. Effects flow
+// from callee parameters back to actual arguments, never between unrelated call
+// sites of a shared helper. All slots of a materialized domain share one node.
+// Each of the two effect bits traverses an edge at most once: O(nodes + edges).
+class RemoteEngineChecker : public IRVisitor {
+ public:
+  RemoteEngineChecker(ProgramPtr program, const std::unordered_map<std::string, FunctionCtxPlan>& plans)
+      : program_(std::move(program)), plans_(plans) {}
+
+  void Check() {
+    DomainCollector domains;
+    domains.VisitProgram(program_);
+    domains_ = std::move(domains.slots);
+    roots_ = std::move(domains.roots);
+    for (const auto& [node, scope] : roots_) {
+      identities_[node].scope = scope;
+    }
+    for (const auto& [gvar, func] : program_->functions_) {
+      auto plan = plans_.find(func->name_);
+      DistParamAliasCollector aliases(program_, &plans_, plan == plans_.end() ? nullptr : &plan->second);
+      aliases.VisitStmt(func->body_);
+      aliases_ = &aliases;
+      Definitions definitions;
+      definitions.VisitStmt(func->body_);
+      definitions_ = std::move(definitions.values);
+      scalar_values_.clear();
+      VisitStmt(func->body_);
+    }
+    aliases_ = nullptr;
+    PropagateIdentities();
+    for (const auto& access : mte_accesses_) {
+      // rank(get_comm_ctx(window)) is local even when another slot of the same
+      // domain supplies the context. Unknown peer expressions remain remote.
+      const auto& target = identities_[access.target];
+      const auto& rank = identities_[access.rank_source];
+      const bool known_domain = target.scope && !target.multiple;
+      const bool local = access.rank_source == access.target ||
+                         (known_domain && rank.scope == target.scope && !rank.multiple) ||
+                         (known_domain && access.peer_zero && target.scope->devices_.size() == 1);
+      if (!local) AddEffect(access.target, 1, access.op);
+    }
+    for (size_t i = 0; i < effects_pending_.size(); ++i) {
+      const auto [node, engine] = effects_pending_[i];
+      for (const auto* caller : callers_[node]) AddEffect(caller, engine, effects_[node][engine]);
+    }
+    // Check materialized domains when available. Without a HOST entry, a
+    // repeated formal still identifies one domain and can be checked directly.
+    if (!roots_.empty()) {
+      for (const auto& [node, scope] : roots_) CheckNode(node, scope->name_hint_);
+    } else {
+      for (const auto& [node, effects] : effects_) CheckNode(node, node->name_hint_);
+    }
+  }
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    Analyze(op->op_, op->args_, op);
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const SubmitPtr& op) override {
+    Analyze(op->op_, op->args_, op);
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  struct DomainCollector : IRVisitor {
+    std::unordered_map<const Var*, const Var*> slots;
+    std::vector<std::pair<const Var*, CommDomainScopeStmtPtr>> roots;
+    void VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+      if (!op->slots_.empty()) {
+        const auto* root = op->slots_.front().get();
+        roots.emplace_back(root, op);
+        for (const auto& slot : op->slots_) slots[slot.get()] = root;
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+  };
+  struct Definitions : IRVisitor {
+    std::unordered_map<const Var*, ExprPtr> values;
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      // Standalone pass callers may supply non-SSA input. Multiple definitions
+      // cannot prove locality for an earlier use from the final definition.
+      auto [it, inserted] = values.emplace(op->var_.get(), op->value_);
+      if (!inserted) it->second = nullptr;
+      IRVisitor::VisitStmt_(op);
+    }
+  };
+  struct Identity {
+    CommDomainScopeStmtPtr scope;
+    bool multiple = false;
+  };
+  struct MteAccess {
+    const Var* target;
+    const Var* rank_source;
+    bool peer_zero;
+    ExprPtr op;
+  };
+
+  const Var* Resolve(const ExprPtr& expr) const {
+    if (auto type = As<DistributedTensorType>(expr->GetType()); type && type->window_buffer_) {
+      const auto* window = type->window_buffer_->get();
+      auto it = domains_.find(window);
+      return it == domains_.end() ? window : it->second;
+    }
+    return aliases_->ResolveCtx(expr).get();
+  }
+
+  ExprPtr ScalarValue(const ExprPtr& expr) {
+    auto [it, inserted] = scalar_values_.emplace(expr.get(), expr);
+    if (!inserted) return it->second;
+    ExprPtr result = expr;
+    if (auto var = AsVarLike(expr)) {
+      auto def = definitions_.find(var.get());
+      if (def != definitions_.end() && def->second) result = ScalarValue(def->second);
+    } else if (auto cast = As<Cast>(expr)) {
+      // Only rank-preserving integer casts can prove locality.
+      const auto dtype = As<ScalarType>(cast->GetType())->dtype_;
+      const auto source = As<ScalarType>(cast->operand_->GetType())->dtype_;
+      if ((dtype == DataType::INT64 || dtype == DataType::INDEX) &&
+          (source == DataType::INT32 || source == DataType::INT64 || source == DataType::INDEX)) {
+        result = ScalarValue(cast->operand_);
+      }
+    }
+    scalar_values_[expr.get()] = result;
+    return result;
+  }
+
+  const Var* RankSource(const ExprPtr& peer) {
+    auto rank = As<Call>(ScalarValue(peer));
+    if (!rank || !IsOp(rank, "pld.system.rank") || rank->args_.size() != 1) return nullptr;
+    auto ctx = As<Call>(ScalarValue(rank->args_[0]));
+    if (!ctx || !IsOp(ctx, "pld.system.get_comm_ctx") || ctx->args_.size() != 1) return nullptr;
+    return Resolve(ctx->args_[0]);
+  }
+
+  void Analyze(const OpPtr& op, const std::vector<ExprPtr>& args, const ExprPtr& expr) {
+    if (auto global = As<GlobalVar>(op)) {
+      auto callee = program_->GetFunction(global->name_);
+      auto plan = plans_.find(global->name_);
+      if (!callee || plan == plans_.end()) return;
+      // This scan precedes signature extension: Submit supplies a prefix of
+      // ordinary parameters, so omitted runtime-owned outputs have no edge.
+      for (size_t index : plan->second.dist_param_indices) {
+        if (index >= args.size()) continue;
+        if (const auto* actual = Resolve(args[index])) {
+          const auto* formal = plan->second.param_to_ctx.at(callee->params_[index].get()).get();
+          callers_[formal].push_back(actual);
+          callees_[actual].push_back(formal);
+        }
+      }
+      return;
+    }
+    size_t target = 0;
+    size_t peer = 1;
+    const bool urma = IsOp(op, "pld.tensor.put_async") || IsOp(op, "pld.tensor.get_async");
+    if (IsOp(op, "pld.tensor.get_async") || IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) {
+      target = 2;
+    } else if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) {
+      target = 1;
+      peer = 2;
+    } else if (!urma && !IsOp(op, "pld.tile.remote_load") && !IsOp(op, "pld.tensor.put") &&
+               !IsOp(op, "pld.tile.put")) {
+      return;
+    }
+    INTERNAL_CHECK_SPAN(args.size() > target && args.size() > peer, expr->span_)
+        << "Internal error: remote transfer is missing its window or peer operand";
+    const auto* node = Resolve(args[target]);
+    if (!node) return;
+    if (urma) {
+      AddEffect(node, 0, expr);
+    } else {
+      const auto constant = As<ConstInt>(ScalarValue(args[peer]));
+      mte_accesses_.push_back({node, RankSource(args[peer]), constant && constant->value_ == 0, expr});
+    }
+  }
+
+  void PropagateIdentities() {
+    // A formal's identity moves only from unknown -> one domain -> multiple.
+    // This proves same-domain rank queries without conflating distinct callers.
+    std::vector<const Var*> pending;
+    for (const auto& [node, scope] : roots_) pending.push_back(node);
+    for (size_t i = 0; i < pending.size(); ++i) {
+      const auto source = identities_[pending[i]];
+      for (const auto* callee : callees_[pending[i]]) {
+        auto& dest = identities_[callee];
+        if (dest.multiple) continue;
+        if (source.multiple || (dest.scope && dest.scope != source.scope)) {
+          dest.multiple = true;
+          pending.push_back(callee);
+        } else if (!dest.scope && source.scope) {
+          dest.scope = source.scope;
+          pending.push_back(callee);
+        }
+      }
+    }
+  }
+
+  void AddEffect(const Var* node, size_t engine, const ExprPtr& op) {
+    auto& effects = effects_[node];
+    if (effects[engine]) return;
+    effects[engine] = op;
+    effects_pending_.emplace_back(node, engine);
+  }
+
+  void CheckNode(const Var* node, const std::string& name) {
+    const auto& effects = effects_[node];
+    CHECK_SPAN(!effects[0] || !effects[1], node->span_)
+        << "Communication domain '" << name
+        << "' cannot combine URMA async transfers with remote MTE accesses "
+           "(remote_load/store or put/get). MTE access to the domain's local rank is allowed; "
+           "use rank(get_comm_ctx(window)) for an explicit local peer.";
+  }
+
+  ProgramPtr program_;
+  const std::unordered_map<std::string, FunctionCtxPlan>& plans_;
+  const DistParamAliasCollector* aliases_ = nullptr;
+  std::unordered_map<const Var*, const Var*> domains_;
+  std::vector<std::pair<const Var*, CommDomainScopeStmtPtr>> roots_;
+  std::unordered_map<const Var*, ExprPtr> definitions_;
+  std::unordered_map<const Expr*, ExprPtr> scalar_values_;
+  std::unordered_map<const Var*, Identity> identities_;
+  std::unordered_map<const Var*, std::vector<const Var*>> callers_;
+  std::unordered_map<const Var*, std::vector<const Var*>> callees_;
+  std::unordered_map<const Var*, std::array<ExprPtr, 2>> effects_;
+  std::vector<std::pair<const Var*, size_t>> effects_pending_;
+  std::vector<MteAccess> mte_accesses_;
+};
+
 class MaterializeDistTensorCtxMutator : public IRMutator {
  public:
   MaterializeDistTensorCtxMutator(ProgramPtr program,
@@ -714,6 +944,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     auto plan = BuildFunctionCtxPlan(func);
     if (!plan.dist_param_indices.empty()) plans.emplace(func->name_, std::move(plan));
   }
+  RemoteEngineChecker(program, plans).Check();
   if (plans.empty()) return program;
 
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> extended;

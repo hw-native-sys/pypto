@@ -45,7 +45,7 @@ from importlib import resources
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import codegen
+from pypto import codegen, ir
 from pypto.backend import BackendType, pto_backend
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import passes  # match the import path used by ut/conftest.py
@@ -2425,8 +2425,13 @@ def test_host_peer_mte_through_chip_call(use_urma):
             out = pld.window(out_buf, [1, 64], dtype=pl.FP32)
             self.chip(table, out, device=0)
 
-    # Fold the selector before engine detection. Mixed URMA/MTE is not rejected.
-    code = _lower(passes.simplify()(Prog))
+    # Both transfers address the same Host domain's remote rank.
+    program = passes.simplify()(Prog)
+    if use_urma:
+        with pytest.raises(ValueError, match="cannot combine URMA async transfers with remote MTE"):
+            _lower(program)
+        return
+    code = _lower(program)
     compile(code, "host_peer_access.py", "exec")
     assert "memory_source=AddressSpace.HOST" in code
     assert code.count('workspace_engines=("urma",)') == (2 if use_urma else 0)
@@ -2539,6 +2544,162 @@ def test_l2_collective_allows_host_peer_access_after_builtin_lowering(indexed, h
     compile(code, "host_l2_collective.py", "exec")
     assert code.count("memory_source=AddressSpace.HOST") == 1
     assert ('workspace_engines=("urma",)' in code) == indexed
+
+
+def _primitive_engine_program(
+    mte_op,
+    async_op,
+    *,
+    local_peer,
+    same_domain,
+    memory_source="host",
+    submit=False,
+    window_local=False,
+    rank_count=2,
+):
+    mte_source = memory_source if same_domain else ("device" if memory_source == "host" else "host")
+    async_get = async_op == "get"
+    single_rank = rank_count == 1
+    async_peer = 0 if single_rank else 1
+    mte_get = mte_op == "get"
+    mte_put = mte_op == "put"
+    mte_load = mte_op == "remote_load"
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def transfers(
+            self,
+            async_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            mte_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            # Query a different slot's context: locality is a domain property,
+            # not window identity. Aliases must preserve the rank expression.
+            ctx = pld.get_comm_ctx(async_window)
+            rank = pld.rank(ctx)
+            if single_rank:
+                peer = pl.const(0, pl.INT32)
+            elif local_peer:
+                peer = rank
+            else:
+                peer = pl.const(1, pl.INT32)
+            if async_get:
+                if window_local:
+                    mte_window = pld.tensor.get_async(mte_window, async_peer, async_window)
+                else:
+                    local = pld.tensor.get_async(local, async_peer, async_window)
+            elif window_local:
+                pld.tensor.put_async(async_window, async_peer, mte_window)
+            else:
+                pld.tensor.put_async(async_window, async_peer, local)
+            if mte_get:
+                pld.tensor.get(local, peer, mte_window)
+            elif mte_put:
+                pld.tensor.put(mte_window, peer, local)
+            elif mte_load:
+                tile = pld.tile.remote_load(mte_window, peer, [0, 0], [1, 64])
+                local = pl.tile.store(tile, [0, 0], local)
+            else:
+                pld.tensor.remote_store(local, mte_window, peer, [0, 0])
+            return local
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            async_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            mte_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            if submit:
+                with pl.manual_scope():
+                    local, _tid = pl.submit(self.transfers, async_window, mte_window, local)
+            else:
+                local = self.transfers(async_window, mte_window, local)
+            return local
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]]):
+            async_buf = pld.alloc_window_buffer(256, memory_source=memory_source)
+            mte_buf = pld.alloc_window_buffer(256, memory_source=mte_source)
+            for rank in pl.range(rank_count):
+                async_window = pld.window(async_buf, [1, 64], dtype=pl.FP32)
+                mte_window = pld.window(mte_buf, [1, 64], dtype=pl.FP32)
+                local = self.chip(async_window, mte_window, local, device=rank)
+
+    program = passes.convert_to_ssa()(Prog)
+    program = passes.simplify()(program)
+    return passes.normalize_return_order()(program)
+
+
+@pytest.mark.parametrize("mte_op", ["get", "put", "remote_load", "remote_store"])
+@pytest.mark.parametrize("async_op", ["get", "put"])
+@pytest.mark.parametrize("memory_source", ["host", "device"])
+@pytest.mark.parametrize("local_peer", [False, True])
+def test_primitive_remote_engines_same_domain(mte_op, async_op, memory_source, local_peer):
+    program = _primitive_engine_program(
+        mte_op, async_op, local_peer=local_peer, same_domain=True, memory_source=memory_source
+    )
+    if not local_peer:
+        with pytest.raises(ValueError, match="Communication domain.*cannot combine URMA.*remote MTE"):
+            _lower(program)
+    else:
+        code = _lower(program)
+        assert code.count('workspace_engines=("urma",)') == 1
+
+
+@pytest.mark.parametrize("mte_op", ["get", "put", "remote_load", "remote_store"])
+@pytest.mark.parametrize("async_op", ["get", "put"])
+def test_primitive_remote_engines_different_domains(mte_op, async_op):
+    program = _primitive_engine_program(mte_op, async_op, local_peer=False, same_domain=False)
+    code = _lower(program)
+    assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
+
+
+@pytest.mark.parametrize("async_op", ["get", "put"])
+@pytest.mark.parametrize("same_domain", [False, True])
+def test_async_local_window_does_not_require_remote_urma(async_op, same_domain):
+    # The async local operand is also the MTE remote operand. Only the async
+    # peer's domain requires URMA; get_async's result preserves window lineage.
+    program = _primitive_engine_program(
+        "get", async_op, local_peer=False, same_domain=same_domain, window_local=True
+    )
+    if same_domain:
+        with pytest.raises(ValueError, match="cannot combine URMA.*remote MTE"):
+            _lower(program)
+    else:
+        assert _lower(program).count("with (_domain_provider or orch.allocate_domain)(") == 2
+
+
+@pytest.mark.parametrize("async_op", ["get", "put"])
+def test_single_rank_domain_allows_constant_local_peer(async_op):
+    program = _primitive_engine_program("get", async_op, local_peer=True, same_domain=True, rank_count=1)
+    assert 'workspace_engines=("urma",)' in _lower(program)
+
+
+@pytest.mark.parametrize("local_peer", [False, True])
+def test_primitive_remote_engines_through_submit(local_peer):
+    program = _primitive_engine_program("get", "put", local_peer=local_peer, same_domain=True, submit=True)
+    if local_peer:
+        assert 'workspace_engines=("urma",)' in _lower(program)
+    else:
+        with pytest.raises(ValueError, match="cannot combine URMA.*remote MTE"):
+            _lower(program)
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("mte_op", ["get", "put", "remote_load", "remote_store"])
+@pytest.mark.parametrize("local_peer", [False, True])
+def test_primitive_remote_engines_default_pipeline(tmp_path, mte_op, local_peer):
+    # The normal pipeline lowers tensor put/get/store into tile operations
+    # before checking domains. Exercise that path as well as the focused passes.
+    program = _primitive_engine_program(mte_op, "get", local_peer=local_peer, same_domain=True)
+    if local_peer:
+        result = ir.compile(program, output_dir=str(tmp_path), platform="a5", skip_ptoas=True)
+        assert (result.output_dir / "orchestration" / "host_orch.py").exists()
+    else:
+        with pytest.raises(ValueError, match="cannot combine URMA.*remote MTE"):
+            ir.compile(program, output_dir=str(tmp_path), platform="a5", skip_ptoas=True)
 
 
 if __name__ == "__main__":
