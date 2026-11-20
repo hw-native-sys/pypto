@@ -33,6 +33,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -46,6 +47,7 @@
 #include "pypto/ir/transforms/auto_layout/model.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
+#include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
@@ -462,11 +464,12 @@ int64_t ForTripCount(const ForStmtPtr& op, const std::unordered_map<const Var*, 
   return 1;
 }
 
-int64_t InCoreForTripCount(const ForStmtPtr& op, const std::unordered_map<const Var*, ExprPtr>& scalar_defs) {
+std::optional<int64_t> StaticInCoreForTripCount(const ForStmtPtr& op,
+                                                const std::unordered_map<const Var*, ExprPtr>& scalar_defs) {
   const auto start = EvalScalarExpr(op->start_, scalar_defs, std::nullopt);
   const auto stop = EvalScalarExpr(op->stop_, scalar_defs, std::nullopt);
   const auto step = EvalScalarExpr(op->step_, scalar_defs, std::nullopt);
-  if (!start || !stop || !step || *step == 0) return ForTripCount(op, scalar_defs);
+  if (!start || !stop || !step || *step == 0) return std::nullopt;
   return RangeTripCount(*start, *stop, *step);
 }
 
@@ -1359,8 +1362,9 @@ class OrchAnalyzer {
     const std::vector<std::optional<std::string>> empty;
     const auto& overrides = caller != analysis_.call_arg_names.end() ? caller->second : empty;
     GmBindings bindings(program_, func, definitions_, overrides);
-    if (caller == analysis_.call_arg_names.end())
+    if (caller == analysis_.call_arg_names.end()) {
       bindings.RecordReturnedStorage(func->body_, analysis_.external_outputs);
+    }
     bindings_ = &bindings;
     bindings.PinLayouts(analysis_);
     analysis_.gm_names.insert(bindings.Names().begin(), bindings.Names().end());
@@ -1627,59 +1631,79 @@ std::vector<LayoutSpec> AdmissibleTileLayouts(const TileTypePtr& tile_type) {
   return {EffectiveTileLayout(tile_type)};
 }
 
-// The writer inserts a shared materialization immediately after its producer.
-// Estimate the original Vec tiles still live at that point. A producer and
-// consumer can still select a common layout when there is no room for a copy.
-// Each call site has its own Vec storage.
-using VecBackingMap = std::unordered_map<std::string, std::vector<std::string>>;
+// A copy is inserted after its definition. Operand and result allocations
+// overlap during an operation, and its last-use operands can be released before
+// the conversion workspace is needed.
+struct UnmodeledVecTile {
+  size_t definition;
+  size_t last;
+  int64_t bytes;
+  std::optional<std::string> registered_name;
+};
 
-void RecordVecConversionHeadroom(LayoutProblemInstance& instance, size_t begin, uint64_t capacity,
-                                 const VecBackingMap& vec_backings) {
-  if (capacity == 0) return;
-  const size_t count = instance.operations.size() - begin;
-  struct Lifetime {
-    size_t first;
-    size_t last;
+void RecordVecMemoryRegion(LayoutProblemInstance& instance, VecMemoryRegion region,
+                           const std::unordered_map<std::string, size_t>& definitions,
+                           const std::unordered_map<std::string, size_t>& other_uses, size_t event_count,
+                           uint64_t reserved_bytes, const std::vector<UnmodeledVecTile>& unmodeled_tiles) {
+  const size_t count = region.operation_positions.size();
+  if (region.capacity == 0 || count == 0) return;
+  std::unordered_map<std::string, size_t> first_uses;
+  auto record = [&](const std::string& name, size_t position) {
+    const auto* node = instance.FindValue(name);
+    if (!node || node->memory_space != MemorySpace::Vec) return;
+    auto& first = first_uses.try_emplace(name, position).first->second;
+    first = std::min(first, position);
+    auto& last = region.last_uses[name];
+    last = std::max(last, position);
   };
-  std::unordered_map<ValueNode*, Lifetime> intervals;
-  std::unordered_map<const ValueNode*, Lifetime> backing_intervals;
   for (size_t i = 0; i < count; ++i) {
-    const auto& op = instance.operations[begin + i];
-    auto record = [&](const std::string& name) {
-      auto it = instance.values.find(name);
-      if (it == instance.values.end() || it->second.memory_space != MemorySpace::Vec) return;
-      intervals.try_emplace(&it->second, Lifetime{i, i}).first->second.last = i;
-      auto backing = vec_backings.find(name);
-      if (backing == vec_backings.end()) {
-        backing_intervals.try_emplace(&it->second, Lifetime{i, i}).first->second.last = i;
-      } else {
-        for (const auto& root : backing->second) {
-          backing_intervals.try_emplace(instance.FindValue(root), Lifetime{i, i}).first->second.last = i;
-        }
+    const auto& op = instance.operations[region.first_operation + i];
+    const size_t position = region.operation_positions[i];
+    for (const auto& input : op.inputs) record(input, position);
+    // Additional stores have a synthetic Vec result for the solver only.
+    if (op.op_name != "tile.store") record(op.output, position);
+  }
+  for (const auto& [name, position] : other_uses) record(name, position);
+  if (first_uses.empty()) return;
+  for (size_t i = count; i > 0; --i) {
+    const auto& output = instance.operations[region.first_operation + i - 1].output;
+    if (const auto it = region.backings.find(output); it != region.backings.end()) {
+      const size_t last = region.last_uses.at(output);
+      for (const auto& backing : it->second) {
+        auto& backing_last = region.last_uses[backing];
+        backing_last = std::max(backing_last, last);
       }
-    };
-    for (const auto& input : op.inputs) record(input);
-    record(op.output);
+    }
   }
-  // After an operation, inputs at their last use can release their storage.
-  // A value unused by later operations needs no downstream conversion.
-  std::vector<int64_t> live_bytes(count, 0);
-  // Each interval contributes independent integer differences to the timeline.
-  // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
-  for (const auto& [node, interval] : backing_intervals) {
-    const int64_t bytes = node->ByteSize();
-    live_bytes[interval.first] += bytes;
-    live_bytes[interval.last] -= bytes;
+
+  std::vector<int64_t> original_bytes(event_count + 1, 0);
+  original_bytes.front() = static_cast<int64_t>(std::min(reserved_bytes, region.capacity));
+  for (const auto& tile : unmodeled_tiles) {
+    if (tile.registered_name) continue;
+    original_bytes[tile.definition] += tile.bytes;
+    original_bytes[region.EffectiveLastUse(tile.definition, tile.last) + 1] -= tile.bytes;
   }
-  std::partial_sum(live_bytes.begin(), live_bytes.end(), live_bytes.begin());
-  // Each iteration updates a distinct ValueNode from the completed timeline.
-  // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
-  for (const auto& [node, interval] : intervals) {
-    if (interval.first == interval.last) continue;
-    const auto live = static_cast<uint64_t>(live_bytes[interval.first]);
-    const uint64_t remaining = capacity - std::min(capacity, live);
-    node->vec_conversion_headroom = std::min(node->vec_conversion_headroom.value_or(capacity), remaining);
+  for (auto& [name, last] : region.last_uses) {
+    auto it = definitions.find(name);
+    const size_t definition = it != definitions.end() ? it->second : first_uses.at(name);
+    last = region.EffectiveLastUse(definition, last);
+    const size_t copy = definition == 0 ? 0 : definition + 1;
+    region.copy_positions.emplace(name, copy);
+    if (region.backings.count(name) == 0) {
+      const int64_t bytes = instance.values.at(name).ByteSize();
+      original_bytes[definition] += bytes;
+      original_bytes[last + 1] -= bytes;
+    }
   }
+  original_bytes.pop_back();
+  std::partial_sum(original_bytes.begin(), original_bytes.end(), original_bytes.begin());
+  for (const auto& [name, copy] : region.copy_positions) {
+    if (copy > region.last_uses.at(name)) continue;
+    const auto occupied = static_cast<uint64_t>(original_bytes[copy]);
+    instance.values.at(name).vec_conversion_headroom = region.capacity - std::min(region.capacity, occupied);
+  }
+  region.original_bytes = std::move(original_bytes);
+  instance.vec_memory_regions.push_back(std::move(region));
 }
 
 class PostInferInstanceExtractor {
@@ -1713,7 +1737,7 @@ class PostInferInstanceExtractor {
         gm_names_(gm_names),
         param_steps_(param_steps) {}
 
-  void Extract(const FunctionPtr& func) {
+  void Extract(const FunctionPtr& func, LayoutWritebackBindings* bindings) {
     for (size_t i = 0; i < func->params_.size(); ++i) {
       RegisterGmVar(func->params_[i], true, i);
     }
@@ -1723,9 +1747,27 @@ class PostInferInstanceExtractor {
       if (As<TileType>(formal->GetType())) RegisterTileVar(formal, std::nullopt);
     }
     const size_t begin = instance_.operations.size();
+    vec_memory_.first_operation = begin;
     WalkStmt(func->body_);
     if (backend_) {
-      RecordVecConversionHeadroom(instance_, begin, backend_->GetMemSize(MemorySpace::Vec), vec_backings_);
+      vec_memory_.capacity = backend_->GetMemSize(MemorySpace::Vec);
+      uint64_t reserved_bytes = 0;
+      if (has_reserve_buffer_) {
+        const auto policy = backend_->CreateMemoryAllocatorPolicy();
+        const auto reserved = ResolveReserveBufferBases(func, *policy);
+        if (auto it = reserved.reserved_end_by_space.find(MemorySpace::Vec);
+            it != reserved.reserved_end_by_space.end()) {
+          reserved_bytes = it->second;
+        }
+      }
+      RecordVecMemoryRegion(instance_, std::move(vec_memory_), vec_definitions_, vec_other_uses_,
+                            vec_position_ + 1, reserved_bytes, unmodeled_vec_tiles_);
+    }
+    if (bindings) {
+      auto& site = bindings->sites[tile_prefix_];
+      site.value_names = std::move(var_to_name_);
+      site.begin = begin;
+      site.end = instance_.operations.size();
     }
   }
 
@@ -2271,6 +2313,19 @@ class PostInferInstanceExtractor {
     node.is_vec_slice = is_vec_slice;
     if (space == MemorySpace::Vec && !producer_op_id) {
       node.conversion_invocations = InvocationCount(model_.expected_uses, loop_multiplier_);
+      // A generic consumer can introduce an operand whose producer has no layout factor.
+      size_t definition = vec_position_;
+      if (auto it = unmodeled_vec_vars_.find(var.get()); it != unmodeled_vec_vars_.end()) {
+        auto& tile = unmodeled_vec_tiles_[it->second];
+        if (tile.registered_name) {
+          var_to_name_[var.get()] = *tile.registered_name;
+          return instance_.FindValue(*tile.registered_name);
+        }
+        definition = tile.definition;
+        vec_other_uses_[name] = tile.last;
+        tile.registered_name = name;
+      }
+      vec_definitions_.emplace(name, definition);
     }
     instance_.AddValue(std::move(node));
     return instance_.FindValue(name);
@@ -2282,15 +2337,16 @@ class PostInferInstanceExtractor {
 
   void RecordVecBacking(const ValueNode& view, const ValueNode& input) {
     if (view.memory_space != MemorySpace::Vec || input.memory_space != MemorySpace::Vec) return;
-    auto backing = vec_backings_.find(input.name);
-    const auto roots =
-        backing == vec_backings_.end() ? std::vector<std::string>{input.name} : backing->second;
-    auto& view_backing = vec_backings_[view.name];
-    for (const auto& root : roots) {
-      if (std::find(view_backing.begin(), view_backing.end(), root) == view_backing.end()) {
-        view_backing.push_back(root);
-      }
+    auto& backings = vec_memory_.backings[view.name];
+    if (std::find(backings.begin(), backings.end(), input.name) == backings.end()) {
+      backings.push_back(input.name);
     }
+  }
+
+  void AddOperation(OperationNode operation) {
+    vec_memory_.operation_positions.push_back(++vec_position_);
+    ++vec_position_;  // The writer inserts conversion instructions after the operation.
+    instance_.operations.push_back(std::move(operation));
   }
 
   void ExtractLoad(const AssignStmtPtr& op, const CallPtr& rhs) {
@@ -2339,7 +2395,7 @@ class PostInferInstanceExtractor {
                                                      kind + ")"});
       }
     }
-    instance_.operations.push_back(std::move(op_node));
+    AddOperation(std::move(op_node));
   }
 
   void ExtractTransposeView(const AssignStmtPtr& op, const CallPtr& rhs) {
@@ -2390,7 +2446,7 @@ class PostInferInstanceExtractor {
                                                    src_node->current_layout.ShortName() + " -> " +
                                                    dst_node->current_layout.ShortName() + ")"});
     }
-    instance_.operations.push_back(std::move(op_node));
+    AddOperation(std::move(op_node));
   }
 
   void ExtractMove(const AssignStmtPtr& op, const CallPtr& rhs) {
@@ -2433,7 +2489,7 @@ class PostInferInstanceExtractor {
                                                      "->" + MemorySpaceToString(dst_node->memory_space)});
       }
     }
-    instance_.operations.push_back(std::move(op_node));
+    AddOperation(std::move(op_node));
   }
 
   void ExtractMatmul(const AssignStmtPtr& op, const CallPtr& rhs) {
@@ -2476,7 +2532,7 @@ class PostInferInstanceExtractor {
                                       cost,
                                       "L0 Cube MAD (Left[" + req_lhs.ShortName() + "] x Right[" +
                                           req_rhs.ShortName() + "] -> Acc[" + req_dst.ShortName() + "])"}};
-    instance_.operations.push_back(std::move(op_node));
+    AddOperation(std::move(op_node));
   }
 
   void ExtractStore(const CallPtr& rhs) {
@@ -2558,12 +2614,12 @@ class PostInferInstanceExtractor {
         updated_dst.admissible_layouts = supported_out_layouts;
         instance_.AddValue(std::move(updated_dst));
       }
-      instance_.operations.push_back(OperationNode{op_id,
-                                                   rhs->op_->name_,
-                                                   {tile_name, dst_name},
-                                                   sink_name,
-                                                   InvocationCount(model_.expected_uses, loop_multiplier_),
-                                                   std::move(configs)});
+      AddOperation(OperationNode{op_id,
+                                 rhs->op_->name_,
+                                 {tile_name, dst_name},
+                                 sink_name,
+                                 InvocationCount(model_.expected_uses, loop_multiplier_),
+                                 std::move(configs)});
       return;
     }
 
@@ -2573,12 +2629,12 @@ class PostInferInstanceExtractor {
     }
     updated_dst.producer_op_id = op_id;
     instance_.AddValue(std::move(updated_dst));
-    instance_.operations.push_back(OperationNode{op_id,
-                                                 rhs->op_->name_,
-                                                 {tile_name},
-                                                 dst_name,
-                                                 InvocationCount(model_.expected_uses, loop_multiplier_),
-                                                 std::move(configs)});
+    AddOperation(OperationNode{op_id,
+                               rhs->op_->name_,
+                               {tile_name},
+                               dst_name,
+                               InvocationCount(model_.expected_uses, loop_multiplier_),
+                               std::move(configs)});
   }
 
   std::vector<OperatorConfig> BuildPointwiseVecConfigs(
@@ -2832,9 +2888,8 @@ class PostInferInstanceExtractor {
       configs = BuildPointwiseVecConfigs(op_id, op_name, rhs, tile_inputs, *dst_node);
     }
 
-    instance_.operations.push_back(OperationNode{op_id, op_name, std::move(inp_names), dst_node->name,
-                                                 InvocationCount(model_.expected_uses, loop_multiplier_),
-                                                 std::move(configs)});
+    AddOperation(OperationNode{op_id, op_name, std::move(inp_names), dst_node->name,
+                               InvocationCount(model_.expected_uses, loop_multiplier_), std::move(configs)});
   }
 
   void WalkAssignStmt(const AssignStmtPtr& op) {
@@ -2844,7 +2899,9 @@ class PostInferInstanceExtractor {
     if (auto rhs = As<Call>(op->value_)) {
       const std::string& op_name = rhs->op_->name_;
       if (IsOp(rhs, "tile.create")) {
+        ++vec_position_;
         RegisterTileVar(op->var_, std::nullopt);
+        ++vec_position_;
       } else if (IsOp(rhs, "tile.load")) {
         ExtractLoad(op, rhs);
       } else if (IsOp(rhs, "tile.transpose_view")) {
@@ -2865,6 +2922,9 @@ class PostInferInstanceExtractor {
       auto it = var_to_name_.find(rv.get());
       if (!AsTensorTypeLike(op->var_->GetType()) && it != var_to_name_.end()) {
         var_to_name_[op->var_.get()] = it->second;
+      } else if (auto allocation = unmodeled_vec_vars_.find(rv.get());
+                 allocation != unmodeled_vec_vars_.end()) {
+        unmodeled_vec_vars_.emplace(op->var_.get(), allocation->second);
       }
     }
   }
@@ -2872,6 +2932,31 @@ class PostInferInstanceExtractor {
   const ValueNode* LookupTileValue(const Var* var) const {
     auto it = var_to_name_.find(var);
     return it == var_to_name_.end() ? nullptr : instance_.FindValue(it->second);
+  }
+
+  void RecordOtherVecUse(const ExprPtr& expression, size_t position) {
+    if (const auto var = AsVarLike(expression)) {
+      if (const auto* value = LookupTileValue(var.get()); value && value->memory_space == MemorySpace::Vec) {
+        vec_other_uses_[value->name] = position;
+      } else if (auto it = unmodeled_vec_vars_.find(var.get()); it != unmodeled_vec_vars_.end()) {
+        auto& tile = unmodeled_vec_tiles_[it->second];
+        tile.last = position;
+        if (tile.registered_name) vec_other_uses_[*tile.registered_name] = position;
+      }
+    } else if (const auto call = As<Call>(expression)) {
+      if (IsOp(call, "system.reserve_buffer")) has_reserve_buffer_ = true;
+      for (const auto& arg : call->args_) RecordOtherVecUse(arg, position);
+    } else if (const auto submit = As<Submit>(expression)) {
+      for (const auto& arg : submit->args_) RecordOtherVecUse(arg, position);
+    } else if (const auto tuple = As<MakeTuple>(expression)) {
+      for (const auto& element : tuple->elements_) RecordOtherVecUse(element, position);
+    }
+  }
+
+  void WalkEffect(const ExprPtr& expr) {
+    const size_t previous = vec_position_;
+    if (auto call = As<Call>(expr); call && IsOp(call, "tile.store")) ExtractStore(call);
+    if (vec_position_ == previous) RecordOtherVecUse(expr, ++vec_position_);
   }
 
   const ValueNode* AddVecLoopTransfer(const VarPtr& dst, const ValueNode* src, const ValueNode* initial,
@@ -2891,18 +2976,17 @@ class PostInferInstanceExtractor {
     instance_.values.at(node->name).conversion_invocations = result_invocations;
     if (src && may_execute_body) RecordVecBacking(*node, *src);
     if (initial) RecordVecBacking(*node, *initial);
-    instance_.operations.push_back(
-        OperationNode{op_id,
-                      op_name,
-                      std::move(inputs),
-                      node->name,
-                      use_invocations,
-                      {OperatorConfig{op_id, op_name, std::move(layouts), carried, 0.0}}});
+    AddOperation(OperationNode{op_id,
+                               op_name,
+                               std::move(inputs),
+                               node->name,
+                               use_invocations,
+                               {OperatorConfig{op_id, op_name, std::move(layouts), carried, 0.0}}});
     return node;
   }
 
   void WalkLoop(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
-                const std::vector<VarPtr>& return_vars, int64_t trip_count) {
+                const std::vector<VarPtr>& return_vars, int64_t trip_count, bool may_repeat) {
     const int64_t outer_mult = loop_multiplier_;
     const int64_t body_mult = InvocationCount(outer_mult, trip_count);
     const int64_t entry_count = InvocationCount(model_.expected_uses, outer_mult);
@@ -2912,6 +2996,12 @@ class PostInferInstanceExtractor {
     // and activation counts on the two sides of the loop boundary.
     std::vector<const ValueNode*> vec_iterations(iter_args.size(), nullptr);
     auto backedge = transform_utils::GetLastYieldStmt(body);
+    const auto parent_scope = vec_loop_scope_;
+    const size_t loop_index = vec_memory_.loops.size();
+    if (may_repeat) {
+      vec_loop_scope_ = loop_index;
+      vec_memory_.loops.push_back({++vec_position_, 0, parent_scope});
+    }
     for (size_t i = 0; i < iter_args.size(); ++i) {
       const auto& ia = iter_args[i];
       auto type = As<TileType>(ia->GetType());
@@ -2933,6 +3023,10 @@ class PostInferInstanceExtractor {
     yield_stack_.emplace_back();
     loop_multiplier_ = body_mult;
     WalkStmt(body);
+    if (may_repeat) {
+      vec_memory_.loops[loop_index].end = vec_position_;
+      vec_loop_scope_ = parent_scope;
+    }
     loop_multiplier_ = outer_mult;
     auto yielded_vars = std::move(yield_stack_.back());
     yield_stack_.pop_back();
@@ -2955,13 +3049,33 @@ class PostInferInstanceExtractor {
   void WalkStmt(const StmtPtr& stmt) {
     if (!stmt) return;
     if (auto as = As<AssignStmt>(stmt)) {
+      const size_t previous_position = vec_position_;
       WalkAssignStmt(as);
+      if (vec_position_ == previous_position && !AsVarLike(as->value_)) {
+        RecordOtherVecUse(as->value_, ++vec_position_);
+        const auto tile = As<TileType>(as->var_->GetType());
+        if (tile && tile->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec &&
+            !LookupTileValue(as->var_.get())) {
+          // Account for static Vec results even when the operation has no layout factor (e.g. tile.tri).
+          if (const auto shape = StaticShape(tile->shape_)) {
+            ValueNode node;
+            node.shape = *shape;
+            node.dtype = tile->dtype_;
+            unmodeled_vec_vars_.emplace(as->var_.get(), unmodeled_vec_tiles_.size());
+            unmodeled_vec_tiles_.push_back({vec_position_, vec_position_, node.ByteSize(), std::nullopt});
+            ++vec_position_;  // A later modeled consumer can request a copy after this definition.
+          }
+        }
+      }
     } else if (auto fs = As<ForStmt>(stmt)) {
-      WalkLoop(fs->iter_args_, fs->body_, fs->return_vars_, InCoreForTripCount(fs, scalar_defs_));
+      const auto trips = StaticInCoreForTripCount(fs, scalar_defs_);
+      WalkLoop(fs->iter_args_, fs->body_, fs->return_vars_, trips ? *trips : ForTripCount(fs, scalar_defs_),
+               !trips || *trips > 1);
       return;
     } else if (auto ws = As<WhileStmt>(stmt)) {
       const auto condition = As<ConstBool>(ws->condition_);
-      WalkLoop(ws->iter_args_, ws->body_, ws->return_vars_, condition && !condition->value_ ? 0 : 1);
+      const bool may_execute = !condition || condition->value_;
+      WalkLoop(ws->iter_args_, ws->body_, ws->return_vars_, may_execute ? 1 : 0, may_execute);
       return;
     } else if (auto ys = As<YieldStmt>(stmt)) {
       if (!yield_stack_.empty()) {
@@ -2974,15 +3088,9 @@ class PostInferInstanceExtractor {
         yield_stack_.back() = std::move(yvars);
       }
     } else if (auto es = As<EvalStmt>(stmt)) {
-      if (auto call = As<Call>(es->expr_); call && IsOp(call, "tile.store")) {
-        ExtractStore(call);
-      }
+      WalkEffect(es->expr_);
     } else if (auto rs = As<ReturnStmt>(stmt)) {
-      for (const auto& val : rs->value_) {
-        if (auto call = As<Call>(val); call && IsOp(call, "tile.store")) {
-          ExtractStore(call);
-        }
-      }
+      for (const auto& val : rs->value_) WalkEffect(val);
     } else if (auto ifs = As<IfStmt>(stmt)) {
       yield_stack_.emplace_back();
       WalkStmt(ifs->then_body_);
@@ -3070,13 +3178,12 @@ class PostInferInstanceExtractor {
                                                   0.0,
                                                   "Conditional if_join (pinned baseline)"});
           }
-          instance_.operations.push_back(
-              OperationNode{op_id,
-                            "control.if_join",
-                            {then_name, else_name},
-                            r_node.name,
-                            InvocationCount(model_.expected_uses, loop_multiplier_),
-                            std::move(join_configs)});
+          AddOperation(OperationNode{op_id,
+                                     "control.if_join",
+                                     {then_name, else_name},
+                                     r_node.name,
+                                     InvocationCount(model_.expected_uses, loop_multiplier_),
+                                     std::move(join_configs)});
         } else if (has_t && !has_else) {
           var_to_name_[rv.get()] = it_t->second;
         } else if (has_t != has_e) {
@@ -3114,7 +3221,14 @@ class PostInferInstanceExtractor {
   const std::map<std::pair<std::string, size_t>, int64_t>& param_steps_;
 
   std::unordered_map<const Var*, std::string> var_to_name_;
-  VecBackingMap vec_backings_;
+  VecMemoryRegion vec_memory_{};
+  std::optional<size_t> vec_loop_scope_;
+  bool has_reserve_buffer_ = false;
+  std::vector<UnmodeledVecTile> unmodeled_vec_tiles_;
+  std::unordered_map<const Var*, size_t> unmodeled_vec_vars_;
+  std::unordered_map<std::string, size_t> vec_definitions_;
+  std::unordered_map<std::string, size_t> vec_other_uses_;
+  size_t vec_position_ = 0;
   std::unordered_map<const Var*, ExprPtr> scalar_defs_;
   std::vector<std::vector<const Var*>> yield_stack_;
   std::unordered_set<const Var*> vec_tmp_vars_;
@@ -3503,6 +3617,18 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
 LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const LayoutCostModel& cost_model,
                                             const std::unordered_set<std::string>& reusable_tensors,
                                             const std::unordered_set<std::string>& nz_inputs) {
+  return ExtractLayoutInstance(program, cost_model, reusable_tensors, nz_inputs, nullptr);
+}
+
+LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const LayoutCostModel& cost_model,
+                                            const std::unordered_set<std::string>& reusable_tensors,
+                                            const std::unordered_set<std::string>& nz_inputs,
+                                            LayoutWritebackBindings* bindings) {
+  auto program = tensor_view_semantics::RestoreLegacyBlockedNzViews(input);
+  if (bindings) {
+    bindings->program = program;
+    bindings->sites.clear();
+  }
   LayoutCostModel resolved_model = cost_model;
   const backend::Backend* be = ResolveBackend(resolved_model);
   if (!resolved_model.backend_type.has_value() && be != nullptr) {
@@ -3573,7 +3699,7 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const Lay
                                        orch.dn_ineligible_names, orch.internal_buffers, instance,
                                        consumed_values, op_counter, prefix, site.multiplicity, site.gm_names,
                                        orch.param_steps);
-        ext.Extract(func);
+        ext.Extract(func, bindings);
       }
       continue;
     }
@@ -3585,12 +3711,13 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const Lay
                                    orch.external_outputs, orch.reshaped_names, orch.nz_ineligible_names,
                                    orch.dn_ineligible_names, orch.internal_buffers, instance, consumed_values,
                                    op_counter, prefix, call_mult, orch.gm_names, orch.param_steps);
-    ext.Extract(func);
+    ext.Extract(func, bindings);
   }
 
   PruneUnsupportedGmAndFractalLayouts(instance, orch.nz_ineligible_names, orch.dn_ineligible_names,
                                       orch.reshaped_names);
   SanitizeInstanceInvariants(instance);
+  if (bindings) bindings->orch = std::move(orch);
   return instance;
 }
 

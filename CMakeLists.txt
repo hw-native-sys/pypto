@@ -476,18 +476,30 @@ set(PYPTO_SOURCES
 )
 
 if(PYPTO_BUILD_PYTHON_BINDINGS)
-    add_subdirectory(python/bindings)
+    # Embed all core objects in the module and the native test so both retain
+    # the static initializers that register operators and backends.
+    add_library(pypto_native OBJECT ${PYPTO_SOURCES})
+    set_target_properties(pypto_native PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
 else()
-    # A shared library retains translation units that register operators and backends
-    # through static initializers, including registrations absent from the link graph.
+    # Keep the standalone shared library available in bindings-free builds.
     add_library(pypto_native SHARED ${PYPTO_SOURCES})
-    target_include_directories(pypto_native PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/common)
-    target_link_libraries(pypto_native PUBLIC libbacktrace PRIVATE msgpackc-cxx)
+endif()
+target_include_directories(pypto_native PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/common)
+target_link_libraries(pypto_native PUBLIC libbacktrace PRIVATE msgpackc-cxx)
+
+if(PYPTO_BUILD_PYTHON_BINDINGS)
+    add_subdirectory(python/bindings)
+    # Keep nanobind's optimization and section flags for the core sources
+    # previously compiled as part of the module.
+    target_compile_options(pypto_native PRIVATE $<TARGET_PROPERTY:${LIBRARY_NAME},COMPILE_OPTIONS>)
 endif()
 
-# The IR-free DSA-RP solver has a small native test that does not require the
-# Python extension or a device runtime. Skip it when building a wheel.
+# Native unit tests are available in standalone CMake builds.
 include(CTest)
 if(BUILD_TESTING AND NOT SKBUILD_MODE)
     add_subdirectory(tests/ut/cpp)

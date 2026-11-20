@@ -131,9 +131,16 @@ struct ValueNode {
   bool is_vec_slice = false;
   /// Activation count at the writer's insertion site when it differs from the defining op's count.
   std::optional<int64_t> conversion_invocations;
+  // Conversion pairs penalized in a capacity-repair solve.
+  std::vector<std::pair<LayoutSpec, LayoutSpec>> blocked_vec_conversions;
 
   [[nodiscard]] int64_t NumElements() const;
   [[nodiscard]] int64_t ByteSize() const;
+};
+
+struct VecConversionStorage {
+  uint64_t destination_bytes;
+  uint64_t scratch_bytes;
 };
 
 /// One legal input/output layout configuration for an IR operation.
@@ -233,6 +240,9 @@ struct LayoutCostModel {
                                          const std::optional<LayoutSpec>& src_layout = std::nullopt) const;
   [[nodiscard]] bool SupportsVecTileConversion(const ValueNode& val_node, const LayoutSpec& src_layout,
                                                const LayoutSpec& dst_layout) const;
+  /// Storage sizes for a materializable layout pair, before capacity constraints.
+  [[nodiscard]] std::optional<VecConversionStorage> GetVecConversionStorage(
+      const ValueNode& val_node, const LayoutSpec& src_layout, const LayoutSpec& dst_layout) const;
   [[nodiscard]] double EstimateConversionCost(const ValueNode& val_node, const LayoutSpec& src_layout,
                                               const LayoutSpec& dst_layout) const;
 };
@@ -240,6 +250,27 @@ struct LayoutCostModel {
 using CustomConversionCostMap =
     std::unordered_map<std::string,
                        std::unordered_map<std::pair<LayoutSpec, LayoutSpec>, double, LayoutPairHash>>;
+
+/// Vec pressure events for one kernel call site, indexed by operation and value.
+struct VecMemoryRegion {
+  struct LoopScope {
+    size_t begin;
+    size_t end;
+    std::optional<size_t> parent;
+  };
+
+  size_t first_operation;
+  uint64_t capacity;
+  std::vector<size_t> operation_positions;
+  std::vector<int64_t> original_bytes;
+  std::unordered_map<std::string, size_t> copy_positions;
+  std::unordered_map<std::string, size_t> last_uses;
+  std::unordered_map<std::string, std::vector<std::string>> backings;
+  std::vector<LoopScope> loops;  // In increasing order of body entry.
+
+  /// A value defined before a loop and read inside it is live through the backedge.
+  [[nodiscard]] size_t EffectiveLastUse(size_t definition, size_t last_use) const;
+};
 
 /// Complete layout optimization problem instance.
 struct LayoutProblemInstance {
@@ -252,6 +283,7 @@ struct LayoutProblemInstance {
   /// When true (set by `ExtractLayoutInstance`), penalize unmaterializable GM internal conversions and
   /// multi-representation GM inputs so the solver avoids unrewritable assignments.
   bool forbid_unmaterializable_gm_conversions = false;
+  std::vector<VecMemoryRegion> vec_memory_regions;
 
   void AddValue(ValueNode node);
   [[nodiscard]] const ValueNode* FindValue(const std::string& name) const;

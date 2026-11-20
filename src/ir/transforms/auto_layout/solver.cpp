@@ -18,6 +18,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -445,6 +446,184 @@ LayoutSolverResult BuildResult(const IncrementalState& state, int64_t evaluated_
   stats.active_treewidth = tw_stats.has_value() ? tw_stats->active_primal_treewidth : unreported_width;
   return LayoutSolverResult{std::move(breakdown), std::move(stats), std::move(conversions), std::move(issues),
                             tw_stats};
+}
+
+// Range maximum and range addition keep each selected copy's capacity check
+// logarithmic in the number of events, even for long-lived shared copies.
+class VecPressure {
+ public:
+  explicit VecPressure(const std::vector<int64_t>& original)
+      : size_(original.size()), maximum_(4 * size_), added_(4 * size_) {
+    Build(original, 1, 0, size_);
+  }
+
+  [[nodiscard]] int64_t Peak(size_t first, size_t last) const { return Peak(1, 0, size_, first, last + 1); }
+
+  void Add(size_t first, size_t last, int64_t bytes) { Add(1, 0, size_, first, last + 1, bytes); }
+
+ private:
+  void Build(const std::vector<int64_t>& original, size_t node, size_t begin, size_t end) {
+    if (end - begin == 1) {
+      maximum_[node] = original[begin];
+      return;
+    }
+    const size_t mid = begin + (end - begin) / 2;
+    Build(original, 2 * node, begin, mid);
+    Build(original, 2 * node + 1, mid, end);
+    maximum_[node] = std::max(maximum_[2 * node], maximum_[2 * node + 1]);
+  }
+
+  [[nodiscard]] int64_t Peak(size_t node, size_t begin, size_t end, size_t first, size_t last) const {
+    if (first <= begin && end <= last) return maximum_[node];
+    const size_t mid = begin + (end - begin) / 2;
+    int64_t peak = 0;
+    if (first < mid) peak = Peak(2 * node, begin, mid, first, last);
+    if (mid < last) peak = std::max(peak, Peak(2 * node + 1, mid, end, first, last));
+    return peak + added_[node];
+  }
+
+  void Add(size_t node, size_t begin, size_t end, size_t first, size_t last, int64_t bytes) {
+    if (first <= begin && end <= last) {
+      maximum_[node] += bytes;
+      added_[node] += bytes;
+      return;
+    }
+    const size_t mid = begin + (end - begin) / 2;
+    if (first < mid) Add(2 * node, begin, mid, first, last, bytes);
+    if (mid < last) Add(2 * node + 1, mid, end, first, last, bytes);
+    maximum_[node] = std::max(maximum_[2 * node], maximum_[2 * node + 1]) + added_[node];
+  }
+
+  size_t size_;
+  std::vector<int64_t> maximum_;
+  std::vector<int64_t> added_;
+};
+
+struct VecCopy {
+  const ValueNode* value;
+  LayoutSpec source;
+  LayoutSpec target;
+  VecConversionStorage storage;
+  size_t first;
+  size_t last;
+};
+
+struct VecCapacityConflicts {
+  std::vector<std::string> issues;
+  std::vector<VecCopy> copies;
+  std::vector<std::pair<size_t, OperatorConfig>> transposes;
+};
+
+bool FitsVecCapacity(int64_t occupied, uint64_t capacity, uint64_t extra) {
+  const auto used = static_cast<uint64_t>(occupied);
+  return used <= capacity && extra <= capacity - used;
+}
+
+VecCapacityConflicts FindVecCapacityConflicts(const LayoutProblemInstance& instance,
+                                              const LayoutAssignment& assignment) {
+  VecCapacityConflicts conflicts;
+  if (instance.vec_memory_regions.empty()) return conflicts;
+  std::unordered_map<std::string, LayoutSpec> produced;
+  for (const auto& op : instance.operations) {
+    const auto config = assignment.op_configs.find(op.op_id);
+    if (config != assignment.op_configs.end()) produced.emplace(op.output, config->second.output_layout);
+  }
+  for (const auto& region : instance.vec_memory_regions) {
+    if (region.operation_positions.empty()) continue;
+    if (region.first_operation > instance.operations.size() ||
+        region.operation_positions.size() > instance.operations.size() - region.first_operation) {
+      throw pypto::ValueError("Vec pressure region has operations outside the layout instance");
+    }
+    std::map<std::pair<std::string, LayoutSpec>, size_t> copy_by_demand;
+    std::vector<VecCopy> copies;
+    auto original = region.original_bytes;
+    for (size_t i = 0; i < region.operation_positions.size(); ++i) {
+      const auto& op = instance.operations[region.first_operation + i];
+      auto selected = assignment.op_configs.find(op.op_id);
+      if (selected == assignment.op_configs.end()) continue;
+      const auto& cfg = selected->second;
+      const size_t position = region.operation_positions[i];
+      if (position >= original.size()) {
+        throw pypto::ValueError("Vec pressure operation is outside its timeline");
+      }
+      for (size_t j = 0; j < op.inputs.size() && j < cfg.input_layouts.size(); ++j) {
+        const auto& name = op.inputs[j];
+        const auto* value = instance.FindValue(name);
+        if (!value || value->memory_space != MemorySpace::Vec) continue;
+        const LayoutSpec target = cfg.input_layouts[j];
+        LayoutSpec src = value->current_layout;
+        if (const auto it = produced.find(name); it != produced.end()) {
+          src = it->second;
+        } else if (const auto assigned = assignment.value_layouts.find(name);
+                   assigned != assignment.value_layouts.end()) {
+          src = assigned->second;
+        }
+        const auto storage = instance.cost_model.GetVecConversionStorage(*value, src, target);
+        if (storage) {
+          const auto backing = region.backings.find(op.output);
+          const bool aliases_copy =
+              backing != region.backings.end() &&
+              std::find(backing->second.begin(), backing->second.end(), name) != backing->second.end();
+          const size_t first = region.copy_positions.at(name);
+          const size_t last =
+              region.EffectiveLastUse(first, aliases_copy ? region.last_uses.at(op.output) : position);
+          const auto [it, inserted] = copy_by_demand.try_emplace(std::make_pair(name, target), copies.size());
+          if (inserted) {
+            copies.push_back(VecCopy{value, src, target, *storage, first, last});
+          } else {
+            copies[it->second].last = std::max(copies[it->second].last, last);
+          }
+        }
+        // An explicit Vec move can also lower to a physical transpose. Its
+        // result is already in the baseline, so only its scratch is additional.
+        if (j == 0 && op.op_name == "tile.move" && IsFlatVecTransposePair(target, cfg.output_layout)) {
+          const auto* output = instance.FindValue(op.output);
+          const auto workspace =
+              instance.cost_model.GetVecConversionStorage(*value, target, cfg.output_layout);
+          if (output && output->memory_space == MemorySpace::Vec && workspace) {
+            if (!FitsVecCapacity(original[position], region.capacity, workspace->scratch_bytes)) {
+              conflicts.issues.push_back("Vec capacity exceeded by transpose at '" + op.op_id + "'");
+              conflicts.transposes.emplace_back(region.first_operation + i, cfg);
+            }
+            original[position] += static_cast<int64_t>(workspace->scratch_bytes);
+          }
+        }
+      }
+    }
+    if (copies.empty()) continue;
+    std::stable_sort(copies.begin(), copies.end(),
+                     [](const VecCopy& a, const VecCopy& b) { return a.first < b.first; });
+    VecPressure pressure(original);
+    size_t insertion = copies.front().first;
+    uint64_t insertion_scratch = 0;
+    for (const auto& copy : copies) {
+      if (copy.first > copy.last || copy.last >= original.size()) {
+        throw pypto::ValueError("Vec conversion of '" + copy.value->name + "' has an invalid lifetime");
+      }
+      const auto [destination, scratch] = copy.storage;
+      if (copy.first != insertion) {
+        insertion = copy.first;
+        insertion_scratch = 0;
+      }
+      const uint64_t scratch_peak = std::max(insertion_scratch, scratch);
+      const bool fits_lifetime =
+          FitsVecCapacity(pressure.Peak(copy.first, copy.last), region.capacity, destination);
+      const bool fits_scratch =
+          destination <= region.capacity &&
+          FitsVecCapacity(pressure.Peak(copy.first, copy.first), region.capacity - destination, scratch_peak);
+      if (fits_lifetime && fits_scratch) {
+        pressure.Add(copy.first, copy.last, static_cast<int64_t>(destination));
+        // Several prologue conversions can share an insertion point. Reserve
+        // space for the largest scratch allocation regardless of their order.
+        insertion_scratch = scratch_peak;
+      } else {
+        conflicts.issues.push_back("Vec capacity exceeded by conversion of '" + copy.value->name + "' " +
+                                   copy.source.ShortName() + " -> " + copy.target.ShortName());
+        conflicts.copies.push_back(copy);
+      }
+    }
+  }
+  return conflicts;
 }
 
 struct ActiveDecomposition {
@@ -1117,6 +1296,7 @@ class FMMoveFrontier {
 class FMFanoutFrontier {
  public:
   struct Proposal {
+    ValueId value = 0;
     std::vector<IndexedProblem::ValueInfo::Consumer> changing_consumers;
     std::vector<IncrementalState::ChoiceChange> choices;
     IncrementalState::BlockEvaluation evaluation;
@@ -1372,6 +1552,7 @@ class FMFanoutFrontier {
     const auto charge = static_cast<int64_t>(block_size);
     if (charge > config_.max_evaluations - evaluated_moves_) return false;
 
+    proposal.value = value;
     const auto& problem = state_.Problem();
     const auto needs_change = [&](const IndexedProblem::ValueInfo::Consumer& consumer) {
       const auto& uses = problem.Ops()[consumer.op_id].config_uses;
@@ -1567,6 +1748,8 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
   };
 
   size_t seed = 0;
+  bool tried_fanout_seed = false;
+  bool tried_midpoint = false;
   for (int64_t pass = 0; pass < config.max_greedy_sweeps; ++pass) {
     ++greedy_sweeps;
     history.clear();
@@ -1575,8 +1758,11 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
     expanded_values.clear();
     double best_prefix_cost = state.Cost();
     size_t best_prefix_len = 0;
-    // Rebuild both frontiers after rollback. An empty prefix at the first
-    // seed also gets a pass starting from a different part of the component.
+    const auto& seed_op = problem.Ops()[comp_ops[seed]];
+    std::optional<size_t> fanout_seed;
+    double fanout_seed_gain = config.tolerance;
+    // Rebuild both frontiers from a single operator after rollback. Its incident
+    // fan-outs compete with that operator's alternatives from the first move.
     singles.Reset();
     groups.Reset();
     bool budget_hit = !activate(seed) || !groups.Refresh();
@@ -1591,6 +1777,19 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
       // A compatible block changes at least two unlocked operations. Exact
       // block gains compete with singleton gains even when both increase cost.
       if (group != nullptr) {
+        // A profitable block discovered after moving away from the seed may
+        // have arrived too late to recover earlier losses. Remember one of its
+        // consumers so the block can compete before those operations lock.
+        if (!tried_fanout_seed && group->evaluation.gain > fanout_seed_gain &&
+            group->value != seed_op.output_value &&
+            std::none_of(seed_op.config_uses.front().begin(), seed_op.config_uses.front().end(),
+                         [&](const auto& use) { return use.value_id == group->value; })) {
+          const size_t consumer = local_index(group->choices.front().first);
+          if (consumer != 0 && (!tried_midpoint || consumer != n / 2)) {
+            fanout_seed = consumer;
+            fanout_seed_gain = group->evaluation.gain;
+          }
+        }
         for (const auto& [op, choice] : group->choices) {
           record_and_lock(local_index(op), choice, std::nullopt);
         }
@@ -1640,14 +1839,23 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
       return;
     }
     if (best_prefix_len == 0) {
-      if (seed == 0 && n > 1 && pass + 1 < config.max_greedy_sweeps) {
+      if (fanout_seed) {
+        seed = *fanout_seed;
+        tried_fanout_seed = true;
+        tried_midpoint |= seed == n / 2;
+        continue;
+      }
+      if (!tried_midpoint && n > 1 && pass + 1 < config.max_greedy_sweeps) {
         seed = n / 2;
+        tried_midpoint = true;
         continue;
       }
       termination_reason = "fm_no_improving_prefix";
       return;
     }
     seed = 0;
+    tried_fanout_seed = false;
+    tried_midpoint = false;
   }
   termination_reason = "greedy_sweep_budget";
 }
@@ -2513,6 +2721,11 @@ TreewidthStats ComputeTreewidth(const LayoutProblemInstance& instance) {
       problem, ComputeActiveDecomposition(problem, std::numeric_limits<int64_t>::max()));
 }
 
+std::vector<std::string> CheckVecConversionCapacity(const LayoutProblemInstance& instance,
+                                                    const LayoutAssignment& assignment) {
+  return FindVecCapacityConflicts(instance, assignment).issues;
+}
+
 static LayoutSolverResult SolveLocalSearch(const LayoutProblemInstance& instance,
                                            const std::optional<LayoutAssignment>& initial,
                                            const LayoutSolverConfig& config, bool refine_with_fm) {
@@ -2547,17 +2760,8 @@ static LayoutSolverResult SolveLocalSearch(const LayoutProblemInstance& instance
   return BuildResult(state, evaluated_moves, moves_applied, greedy_sweeps, initial_cost, termination_reason);
 }
 
-LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
-                               const std::optional<LayoutAssignment>& initial,
-                               const LayoutSolverConfig& config) {
-  return SolveLocalSearch(instance, initial, config, false);
-}
-
-LayoutSolverResult SolveGreedyFM(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
-  return SolveLocalSearch(instance, std::nullopt, config, true);
-}
-
-LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
+static LayoutSolverResult SolveTreewidthDPCore(const LayoutProblemInstance& instance,
+                                               const LayoutSolverConfig& config) {
   config.Validate();
   IndexedProblem problem(instance);
   const auto decomp = ComputeActiveDecomposition(
@@ -2590,9 +2794,9 @@ LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance, const
   return BuildResult(state, evaluated_moves, 0, 0, state.Cost(), "optimal", stats, -1);
 }
 
-LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
-                                   const std::optional<LayoutAssignment>& initial,
-                                   const LayoutSolverConfig& config) {
+static LayoutSolverResult SolveAutoLayoutCore(const LayoutProblemInstance& instance,
+                                              const std::optional<LayoutAssignment>& initial,
+                                              const LayoutSolverConfig& config) {
   config.Validate();
   IndexedProblem problem(instance);
   const auto decomp = ComputeActiveDecomposition(
@@ -2678,6 +2882,121 @@ LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
   }
   return BuildResult(state, evaluated_moves, moves_applied, greedy_sweeps, initial_cost, termination_reason,
                      stats, -1);
+}
+
+namespace {
+
+std::optional<LayoutAssignment> DeclaredLayoutAssignment(const LayoutProblemInstance& instance) {
+  LayoutAssignment assignment;
+  for (const auto& op : instance.operations) {
+    const auto config = std::find_if(op.configs.begin(), op.configs.end(), [&](const OperatorConfig& cfg) {
+      if (cfg.output_layout != instance.values.at(op.output).current_layout) return false;
+      for (size_t i = 0; i < op.inputs.size(); ++i) {
+        if (cfg.input_layouts[i] != instance.values.at(op.inputs[i]).current_layout) return false;
+      }
+      return true;
+    });
+    if (config == op.configs.end()) return std::nullopt;
+    assignment.op_configs.emplace(op.op_id, *config);
+  }
+  return assignment;
+}
+
+template <typename Solve>
+LayoutSolverResult SolveWithVecCapacity(const LayoutProblemInstance& instance,
+                                        const LayoutSolverConfig& config, Solve solve) {
+  auto result = solve(instance, config, false);
+  if (instance.vec_memory_regions.empty()) return result;
+  const auto original_conflicts = FindVecCapacityConflicts(instance, result.Assignment());
+  if (original_conflicts.issues.empty()) return result;
+
+  auto constrained = instance;
+  auto totals = result.stats;
+  auto restore_original_score = [&](const LayoutAssignment& assignment, const std::string& reason) {
+    IndexedProblem problem(instance);
+    IncrementalState state(problem, problem.InitialChoices(assignment));
+    return BuildResult(state, totals.evaluated_moves, totals.moves_applied, totals.greedy_sweeps,
+                       totals.initial_cost_cycles, reason, result.treewidth_stats, result.stats.treewidth);
+  };
+  auto retry_config = config;
+  auto conflicts = original_conflicts;
+  constexpr int kMaxCapacityRetries = 3;
+  for (int attempt = 0; attempt < kMaxCapacityRetries; ++attempt) {
+    retry_config.max_evaluations = config.max_evaluations - totals.evaluated_moves;
+    if (retry_config.max_evaluations <= 0) break;
+    bool changed = false;
+    for (const auto& copy : conflicts.copies) {
+      auto& blocked = constrained.values.at(copy.value->name).blocked_vec_conversions;
+      const auto pair = std::make_pair(copy.source, copy.target);
+      if (std::find(blocked.begin(), blocked.end(), pair) == blocked.end()) {
+        blocked.push_back(pair);
+        changed = true;
+      }
+    }
+    for (const auto& [index, transpose] : conflicts.transposes) {
+      auto& configs = constrained.operations[index].configs;
+      if (configs.size() <= 1) continue;
+      if (auto it = std::find(configs.begin(), configs.end(), transpose); it != configs.end()) {
+        configs.erase(it);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+    auto candidate = solve(constrained, retry_config, true);
+    totals.evaluated_moves += candidate.stats.evaluated_moves;
+    totals.moves_applied += candidate.stats.moves_applied;
+    totals.greedy_sweeps += candidate.stats.greedy_sweeps;
+    conflicts = FindVecCapacityConflicts(instance, candidate.Assignment());
+    if (conflicts.issues.empty()) {
+      auto repaired = restore_original_score(candidate.Assignment(), "vec_capacity_repaired");
+      if (repaired.writeback_issues.empty()) return repaired;
+      break;
+    }
+  }
+
+  if (const auto declared = DeclaredLayoutAssignment(instance)) {
+    auto baseline = restore_original_score(*declared, "vec_capacity_declared_layouts");
+    if (baseline.writeback_issues.empty() &&
+        CheckVecConversionCapacity(instance, baseline.Assignment()).empty()) {
+      return baseline;
+    }
+  }
+  totals.termination_reason = "vec_capacity_conflict";
+  result.stats = std::move(totals);
+  result.writeback_issues.insert(result.writeback_issues.end(), original_conflicts.issues.begin(),
+                                 original_conflicts.issues.end());
+  return result;
+}
+
+}  // namespace
+
+LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
+                               const std::optional<LayoutAssignment>& initial,
+                               const LayoutSolverConfig& config) {
+  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool retry) {
+    return SolveLocalSearch(constrained, retry ? std::nullopt : initial, limits, false);
+  });
+}
+
+LayoutSolverResult SolveGreedyFM(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
+  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool) {
+    return SolveLocalSearch(constrained, std::nullopt, limits, true);
+  });
+}
+
+LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
+  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool retry) {
+    if (retry) return SolveAutoLayoutCore(constrained, std::nullopt, limits);
+    return SolveTreewidthDPCore(constrained, limits);
+  });
+}
+
+LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
+                                   const std::optional<LayoutAssignment>& initial,
+                                   const LayoutSolverConfig& config) {
+  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool retry) {
+    return SolveAutoLayoutCore(constrained, retry ? std::nullopt : initial, limits);
+  });
 }
 
 }  // namespace auto_layout

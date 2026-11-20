@@ -105,6 +105,18 @@ struct OrchCallAnalysis {
   GmNames gm_names;
 };
 
+/// IR identities used to write a solved instance back to the same normalized program.
+struct LayoutWritebackBindings {
+  struct Site {
+    std::unordered_map<const Var*, std::string> value_names;
+    size_t begin = 0;
+    size_t end = 0;  // Half-open range in LayoutProblemInstance::operations.
+  };
+  ProgramPtr program;
+  OrchCallAnalysis orch;
+  std::unordered_map<std::string, Site> sites;  // Indexed by TileLayoutPrefix.
+};
+
 /// Analyze Orchestration functions in `program` for static call multiplicities and GM aliases.
 OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program);
 
@@ -115,6 +127,12 @@ LayoutSpec EffectiveTileLayout(const TileTypePtr& tile_type);
 LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const LayoutCostModel& cost_model = {},
                                             const std::unordered_set<std::string>& reusable_tensors = {},
                                             const std::unordered_set<std::string>& nz_inputs = {});
+
+/// Capture the normalized IR and site-specific SSA keys alongside the abstract problem.
+LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const LayoutCostModel& cost_model,
+                                            const std::unordered_set<std::string>& reusable_tensors,
+                                            const std::unordered_set<std::string>& nz_inputs,
+                                            LayoutWritebackBindings* bindings);
 
 }  // namespace auto_layout
 }  // namespace ir

@@ -24,6 +24,36 @@ def _select(program: ir.Program) -> ir.Program:
     raise AssertionError("AutoLayout missing from pipeline")
 
 
+def test_each_store_uses_its_own_destination_layout(ascend_backend):
+    @pl.program
+    class Stores:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[32, 32], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            dn: pl.Out[
+                pl.Tensor[[32, 32], pl.FP32, pl.TensorView(stride=[1, 32], layout=pl.TensorLayout.DN)]
+            ],
+        ):
+            data = pl.load(x, [0, 0], [32, 32], target_memory=pl.Mem.Vec)
+            mask = pl.tile.tri(0, [32, 32], dtype=pl.FP32)
+            out = pl.store(mask, [0, 0], out)
+            dn = pl.store(data, [0, 0], dn)
+
+    body = next(iter(_select(Stores).functions.values())).body
+    assert isinstance(body, ir.SeqStmts)
+    layouts = []
+    for stmt in body.stmts:
+        if isinstance(stmt, (ir.AssignStmt, ir.EvalStmt)):
+            call = stmt.value if isinstance(stmt, ir.AssignStmt) else stmt.expr
+            if isinstance(call, ir.Call) and call.op.name == ir.get_op("tile.store").name:
+                tile = call.args[0].type
+                assert isinstance(tile, ir.TileType)
+                layouts.append(tile.get_effective_tile_view().blayout)
+    assert layouts == [ir.TileLayout.row_major, ir.TileLayout.col_major]
+
+
 def test_shape_changing_reshape_preserves_flat_element_order(ascend_backend):
     @pl.program
     class Reshape:

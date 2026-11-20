@@ -823,6 +823,90 @@ void TestSeedComparesPositiveSingleAndFanoutGains() {
   }
 }
 
+void TestCapacityRepairOfExplicitTranspose() {
+  const auto row = al::LayoutSpec::RowMajorFlat();
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  al::LayoutProblemInstance instance;
+  instance.AddValue(MakeValue("a", "load", MemorySpace::Vec));
+  instance.AddValue(MakeValue("b", "move", MemorySpace::Vec));
+  instance.operations = {
+      MakeOp("load", {}, "a", {{{}, col, 0}}, 1, "tile.load"),
+      MakeOp("move", {"a"}, "b", {{{col}, row, 0}, {{col}, col, 10}}, 1, "tile.move"),
+  };
+  al::VecMemoryRegion region{};
+  region.capacity = 1024;
+  region.operation_positions = {1, 3};
+  region.original_bytes = {0, 512, 512, 1024};
+  instance.vec_memory_regions.push_back(region);
+  al::LayoutAssignment initial;
+  for (const auto& op : instance.operations) initial.op_configs.emplace(op.op_id, op.configs.front());
+  Require(al::CheckVecConversionCapacity(instance, initial).size() == 1,
+          "Two 512-byte tiles leave no space for transpose scratch");
+  for (const auto& result : {al::SolveAutoLayout(instance, initial), al::SolveTreewidthDP(instance),
+                             al::SolveGreedy(instance, initial), al::SolveGreedyFM(instance)}) {
+    Require(result.writeback_issues.empty() && result.Assignment().op_configs.at("move").output_layout == col,
+            "Repair the explicit move even though the load has no declared-layout configuration");
+  }
+}
+
+void TestFMRestartsAtLateFanout() {
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  al::LayoutProblemInstance inst;
+  inst.cost_model.expected_uses = 10;
+  inst.forbid_unmaterializable_gm_conversions = true;
+  auto weight = MakeValue("weight", std::nullopt, MemorySpace::DDR, true);
+  weight.shape = {128, 128};
+  inst.AddValue(weight);
+  for (const std::string id : {"A", "B", "C", "D", "E"}) inst.AddValue(MakeValue(id, id));
+  inst.operations = {
+      MakeOp("A", {}, "A", {{{}, nd, 10.0}, {{}, nd, 80.0}}, 10),
+      MakeOp("B", {"A"}, "B", {{{nd}, nd, 10.0}, {{nd}, nd, 80.0}}, 10),
+      MakeOp("C", {"B"}, "C", {{{nd}, nd, 10.0}, {{nd}, nd, 80.0}}, 10),
+      MakeOp("D", {"C", "weight"}, "D", {{{nd, nd}, nd, 70.0}, {{nd, nz}, nd, 10.0}}, 10),
+      MakeOp("E", {"C", "weight"}, "E", {{{nd, nd}, nd, 70.0}, {{nd, nz}, nd, 10.0}}, 10),
+  };
+
+  al::LayoutSolverConfig config;
+  config.max_treewidth = 0;
+  config.max_greedy_sweeps = 1;
+  const auto greedy = al::SolveGreedy(inst, std::nullopt, config);
+  const auto first = al::SolveGreedyFM(inst, config);
+  // The group saves 568 cycles but reaching it from A or the midpoint C
+  // first locks in a 700-cycle increase. One FM pass must keep the incumbent.
+  RequireNear(first.TotalCostCycles(), 1700.0, 1e-9, "An upstream seed misses the profitable prefix");
+  Require(first.Assignment().op_configs == greedy.Assignment().op_configs &&
+              first.stats.termination_reason == "greedy_sweep_budget",
+          "A skipped fan-out restart must count as sweep budget exhaustion");
+
+  config.max_greedy_sweeps = 2;
+  const auto fm = al::SolveGreedyFM(inst, config);
+  const auto exact = al::SolveTreewidthDP(inst);
+  RequireNear(fm.TotalCostCycles(), 1132.0, 1e-9, "Restart at the shared weight before locking the chain");
+  Require(fm.Assignment().op_configs == exact.Assignment().op_configs && fm.stats.moves_applied == 2,
+          "Only the two weight consumers belong to the best prefix");
+  Require(al::SolveGreedyFM(inst).Assignment().op_configs == fm.Assignment().op_configs,
+          "The default solver must find the fan-out improvement");
+  Require(
+      al::SolveAutoLayout(inst, std::nullopt, config).Assignment().op_configs == fm.Assignment().op_configs,
+      "Auto fallback must use the fan-out restart");
+
+  // Restarting needs a singleton score and two block scores. Leave the
+  // restart one score short of considering the whole block.
+  config.max_evaluations = first.stats.evaluated_moves + 2;
+  const auto limited = al::SolveGreedyFM(inst, config);
+  Require(limited.stats.termination_reason == "evaluation_budget" &&
+              limited.stats.evaluated_moves <= config.max_evaluations && limited.stats.moves_applied == 0 &&
+              limited.Assignment().op_configs == greedy.Assignment().op_configs,
+          "Exhaustion before scoring the whole restart block must keep the greedy incumbent");
+  ++config.max_evaluations;
+  const auto retained = al::SolveGreedyFM(inst, config);
+  Require(retained.stats.termination_reason == "evaluation_budget" &&
+              retained.stats.evaluated_moves == config.max_evaluations && retained.stats.moves_applied == 2 &&
+              retained.Assignment().op_configs == fm.Assignment().op_configs,
+          "Exhaustion after scoring the restart block must keep the new best prefix");
+}
+
 void TestUphillFanoutMovesAndRollsBackAtomically() {
   const auto nd = al::LayoutSpec::ND();
   const auto nz = al::LayoutSpec::NZ();
@@ -1149,6 +1233,8 @@ int main() {
     TestFMExpandsOneHopPerMove();
     TestFanoutBlockEscapesFMLocks();
     TestSeedComparesPositiveSingleAndFanoutGains();
+    TestFMRestartsAtLateFanout();
+    TestCapacityRepairOfExplicitTranspose();
     TestUphillFanoutMovesAndRollsBackAtomically();
     TestFMReusesShrinkingFanoutGain();
     TestFanoutBlockChangesSourceAndDemandTogether();

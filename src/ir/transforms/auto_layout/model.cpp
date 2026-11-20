@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <set>
@@ -508,22 +509,22 @@ double LayoutCostModel::EstimateStoreCost(const ValueNode& src_node, const Value
   return fixpipe_drain_fixed_cycles + (total_bytes / bw) + odd_penalty;
 }
 
-bool LayoutCostModel::SupportsVecTileConversion(const ValueNode& val_node, const LayoutSpec& src_layout,
-                                                const LayoutSpec& dst_layout) const {
+std::optional<VecConversionStorage> LayoutCostModel::GetVecConversionStorage(
+    const ValueNode& val_node, const LayoutSpec& src_layout, const LayoutSpec& dst_layout) const {
   if (val_node.memory_space != MemorySpace::Vec || src_layout == dst_layout || val_node.dtype.IsPackedFp4()) {
-    return false;
+    return std::nullopt;
   }
   if (!src_layout.IsTile() || !dst_layout.IsTile()) {
-    return false;
+    return std::nullopt;
   }
   // A2/A3 non-Mat TMOV requires identical physical shapes. A strided subview
   // retains its backing pitch in PTOAS, while the writer allocates a compact
   // conversion destination.
   if (val_node.is_strided_subview && TargetArch() == "a2a3") {
-    return false;
+    return std::nullopt;
   }
   if (src_layout == LayoutSpec::FractalNZ() || dst_layout == LayoutSpec::FractalNZ()) {
-    return false;
+    return std::nullopt;
   }
   if (IsFlatVecTransposePair(src_layout, dst_layout)) {
     // Both contiguous axes must satisfy 32-byte alignment. The conversion
@@ -533,18 +534,31 @@ bool LayoutCostModel::SupportsVecTileConversion(const ValueNode& val_node, const
         val_node.is_strided_subview || (src_layout == LayoutSpec::ColMajorFlat() && val_node.is_vec_slice) ||
         !IsColMajor32BAligned(val_node.shape, val_node.dtype) || val_node.shape[1] <= 1 ||
         val_node.shape[1] % (32 / bytes) != 0) {
-      return false;
+      return std::nullopt;
     }
-    return !val_node.vec_conversion_headroom ||
-           static_cast<uint64_t>(val_node.ByteSize()) <= *val_node.vec_conversion_headroom / 2;
+    const auto tile_bytes = static_cast<uint64_t>(val_node.ByteSize());
+    return VecConversionStorage{tile_bytes, tile_bytes};
   }
-  if (dst_layout == LayoutSpec::RowBcastFlat() && src_layout == LayoutSpec::ColMajorFlat()) {
-    return val_node.shape.size() == 2 && val_node.shape[1] == 1 && val_node.shape[0] > 1 &&
-           ContainsLayout(val_node.admissible_layouts, LayoutSpec::RowBcastFlat()) &&
-           (!val_node.vec_conversion_headroom ||
-            static_cast<uint64_t>(val_node.shape[0]) <= *val_node.vec_conversion_headroom / 32);
+  if (dst_layout == LayoutSpec::RowBcastFlat() && src_layout == LayoutSpec::ColMajorFlat() &&
+      val_node.shape.size() == 2 && val_node.shape[1] == 1 && val_node.shape[0] > 1 &&
+      ContainsLayout(val_node.admissible_layouts, LayoutSpec::RowBcastFlat())) {
+    return VecConversionStorage{static_cast<uint64_t>(val_node.shape[0]) * 32, 0};
   }
-  return false;
+  return std::nullopt;
+}
+
+bool LayoutCostModel::SupportsVecTileConversion(const ValueNode& val_node, const LayoutSpec& src_layout,
+                                                const LayoutSpec& dst_layout) const {
+  const auto storage = GetVecConversionStorage(val_node, src_layout, dst_layout);
+  if (!storage ||
+      std::find(val_node.blocked_vec_conversions.begin(), val_node.blocked_vec_conversions.end(),
+                std::make_pair(src_layout, dst_layout)) != val_node.blocked_vec_conversions.end()) {
+    return false;
+  }
+  if (!val_node.vec_conversion_headroom) return true;
+  const auto headroom = *val_node.vec_conversion_headroom;
+  return storage->destination_bytes <= headroom &&
+         storage->scratch_bytes <= headroom - storage->destination_bytes;
 }
 
 double LayoutCostModel::EstimateConversionCost(const ValueNode& val_node, const LayoutSpec& src_layout,
@@ -571,6 +585,19 @@ double LayoutCostModel::EstimateConversionCost(const ValueNode& val_node, const 
     return vec_transpose_fixed_cycles + (2.0 * total_bytes / onchip_relayout_bytes_per_cycle);
   }
   return vec_unsupported_conversion_cycles;
+}
+
+size_t VecMemoryRegion::EffectiveLastUse(size_t definition, size_t last_use) const {
+  auto it = std::upper_bound(loops.begin(), loops.end(), last_use,
+                             [](size_t use, const LoopScope& loop) { return use < loop.begin; });
+  if (it == loops.begin()) return last_use;
+  const LoopScope* loop = &*std::prev(it);
+  while (definition < loop->begin) {
+    last_use = std::max(last_use, loop->end);
+    if (!loop->parent) break;
+    loop = &loops[*loop->parent];
+  }
+  return last_use;
 }
 
 void LayoutProblemInstance::AddValue(ValueNode node) {

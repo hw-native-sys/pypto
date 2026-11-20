@@ -13,10 +13,8 @@
 
 #include <algorithm>
 #include <any>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -24,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -42,6 +41,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/auto_layout/extractor.h"
 #include "pypto/ir/transforms/auto_layout/model.h"
+#include "pypto/ir/transforms/auto_layout/solver.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
@@ -364,41 +364,6 @@ std::pair<std::vector<ExprPtr>, std::vector<ExprPtr>> NzBackingNdOffsetsAndWindo
   return {std::vector<ExprPtr>{std::move(nd_row), std::move(nd_col)}, std::move(nd_win)};
 }
 
-std::optional<int64_t> ParseOpIdCounter(const std::string& op_id, const std::string& prefix) {
-  std::string rest;
-  if (!prefix.empty()) {
-    if (op_id.rfind(prefix, 0) != 0) {
-      return std::nullopt;
-    }
-    rest = op_id.substr(prefix.size());
-  } else {
-    const size_t op_pos = op_id.find("op_");
-    const std::string head = (op_pos == std::string::npos) ? op_id : op_id.substr(0, op_pos);
-    if (head.find('.') != std::string::npos) {
-      return std::nullopt;
-    }
-    rest = op_id;
-  }
-  if (rest.rfind("op_", 0) != 0) {
-    return std::nullopt;
-  }
-  const size_t first_us = 3;  // after "op_"
-  const size_t second_us = rest.find('_', first_us);
-  const std::string num_str =
-      (second_us == std::string::npos) ? rest.substr(first_us) : rest.substr(first_us, second_us - first_us);
-  if (num_str.empty()) {
-    return std::nullopt;
-  }
-  int64_t val = 0;
-  for (unsigned char c : num_str) {
-    if (!std::isdigit(c)) {
-      return std::nullopt;
-    }
-    val = val * 10 + (c - '0');
-  }
-  return val;
-}
-
 void FindReturnStmts(const StmtPtr& stmt, std::vector<ReturnStmtPtr>& out) {
   if (!stmt) {
     return;
@@ -475,7 +440,9 @@ TypePtr SyncGmResultElements(const TypePtr& target, const std::vector<TypePtr>& 
 
 class LayoutAssignmentWriter : public IRMutator {
  public:
-  explicit LayoutAssignmentWriter(const LayoutAssignment& assignment) : op_configs_(assignment.op_configs) {
+  LayoutAssignmentWriter(const LayoutProblemInstance& instance, LayoutWritebackBindings& bindings,
+                         const LayoutAssignment& assignment, LayoutAssignment* inferred = nullptr)
+      : op_configs_(assignment.op_configs), instance_(instance), bindings_(bindings), inferred_(inferred) {
     for (const auto& [name, spec] : assignment.value_layouts) {
       if (spec.IsTensor()) {
         tensor_layouts_.emplace(name, spec.tensor_layout);
@@ -524,7 +491,7 @@ class LayoutAssignmentWriter : public IRMutator {
       tile_prefixes_.emplace(fn->name_, detail::TileLayoutPrefix(program, fn->name_, multi_incore));
     }
     std::vector<FunctionPtr> extra_incore;
-    OrchCallAnalysis orch = AnalyzeOrchestration(program);
+    auto& orch = bindings_.orch;
     gm_names_ = std::move(orch.gm_names);
     if (!other_funcs.empty()) {
       param_steps_ = std::move(orch.param_steps);
@@ -586,6 +553,8 @@ class LayoutAssignmentWriter : public IRMutator {
     }
     local_var_remap_.clear();
     current_func_name_ = func->name_;
+    auto prefix = tile_prefixes_.find(current_func_name_);
+    current_tile_site_ = prefix == tile_prefixes_.end() ? nullptr : &bindings_.sites.at(prefix->second);
 
     auto [new_params, changed, has_nz_param] = RewriteFuncParams(func);
 
@@ -1022,12 +991,8 @@ class LayoutAssignmentWriter : public IRMutator {
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
     if (auto call = As<Call>(op->expr_); call && call->op_->name_ == kOpTileStore) {
-      std::optional<OperatorConfig> cfg;
-      if (!eval_store_cfgs_.empty()) {
-        cfg = std::move(eval_store_cfgs_.front());
-        eval_store_cfgs_.pop_front();
-      }
-      const OperatorConfig* cfg_ptr = cfg.has_value() ? &(*cfg) : nullptr;
+      const auto cfg = standalone_store_cfgs_.find(op.get());
+      const OperatorConfig* cfg_ptr = cfg == standalone_store_cfgs_.end() ? nullptr : &cfg->second.at(0);
       auto [store_call, pre_stmts, nz_src] = RewriteTileStore(call, cfg_ptr, op->span_);
       (void)nz_src;
       if (store_call.get() == call.get() && pre_stmts.empty()) {
@@ -1043,9 +1008,44 @@ class LayoutAssignmentWriter : public IRMutator {
     return IRMutator::VisitStmt_(op);
   }
 
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    const auto configs = standalone_store_cfgs_.find(op.get());
+    if (configs == standalone_store_cfgs_.end()) return IRMutator::VisitStmt_(op);
+    std::vector<ExprPtr> values;
+    std::vector<StmtPtr> prefix;
+    size_t materialized = 0;
+    bool changed = false;
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      const auto& old = op->value_[i];
+      const auto cfg = configs->second.find(i);
+      std::vector<StmtPtr> setup;
+      auto value = cfg == configs->second.end()
+                       ? VisitExpr(old)
+                       : RewriteStoredResult(As<Call>(old), &cfg->second, "returned", op->span_, setup);
+      changed |= value != old;
+      if (!setup.empty()) {
+        // Preserve left-to-right return evaluation before a later NZ store
+        // needs statements for its backing view.
+        for (; materialized < values.size(); ++materialized) {
+          auto& earlier = values[materialized];
+          if (AsVarLike(earlier)) continue;
+          auto var = std::make_shared<Var>("return_value", earlier->GetType(), op->span_);
+          prefix.push_back(std::make_shared<AssignStmt>(var, earlier, op->span_));
+          earlier = std::move(var);
+        }
+        prefix.insert(prefix.end(), setup.begin(), setup.end());
+      }
+      values.push_back(std::move(value));
+    }
+    if (!changed && prefix.empty()) return op;
+    auto ret = std::make_shared<ReturnStmt>(std::move(values), op->span_, op->leading_comments_);
+    if (prefix.empty()) return ret;
+    prefix.push_back(std::move(ret));
+    return std::make_shared<SeqStmts>(std::move(prefix), op->span_);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    const std::string clean_name = detail::CleanName(op->var_->name_hint_);
-    std::optional<LayoutSpec> target_tile_desc = LookupTileDesc(op->var_->name_hint_);
+    std::optional<LayoutSpec> target_tile_desc = LookupTileDesc(op->var_);
     const auto target_tensor_layout = LookupTensorLayout(op->var_);
 
     CallPtr rhs = As<Call>(op->value_);
@@ -1076,25 +1076,12 @@ class LayoutAssignmentWriter : public IRMutator {
     }
 
     if (rhs && rhs->op_->name_ == kOpTileStore) {
-      auto [store_call, pre_stmts, nz_src_gm] = RewriteTileStore(rhs, cfg, op->span_);
-      if (nz_src_gm) {
-        if (auto nz_tt = As<TensorType>(nz_src_gm->GetType())) {
-          auto store_nd_var =
-              std::make_shared<Var>(clean_name + "_nd_store", store_call->GetType(), op->span_);
-          auto assign_store = std::make_shared<AssignStmt>(store_nd_var, std::move(store_call), op->span_);
-          auto logical_shape = std::make_shared<MakeTuple>(nz_tt->shape_, op->span_);
-          std::vector<std::pair<std::string, std::any>> view_kwargs = {{"layout", TensorLayout::NZ}};
-          CallPtr view_call =
-              CreateOpCallWithAttrs(kOpTensorView, {store_nd_var, logical_shape}, view_kwargs, {}, op->span_);
-          auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, view_call->GetType(), op->var_->span_);
-          local_var_remap_[op->var_.get()] = new_lhs;
-          pre_stmts.push_back(std::move(assign_store));
-          pre_stmts.push_back(
-              std::make_shared<AssignStmt>(std::move(new_lhs), std::move(view_call), op->span_));
-          return std::make_shared<SeqStmts>(std::move(pre_stmts), op->span_);
-        }
-      }
-      return FinishVecAssign(op->var_, std::move(store_call), std::nullopt, op->span_, op);
+      std::vector<StmtPtr> prefix;
+      auto value = RewriteStoredResult(rhs, cfg, detail::CleanName(op->var_->name_hint_), op->span_, prefix);
+      auto assign = FinishVecAssign(op->var_, std::move(value), std::nullopt, op->span_, op);
+      if (prefix.empty()) return assign;
+      prefix.push_back(std::move(assign));
+      return std::make_shared<SeqStmts>(std::move(prefix), op->span_);
     }
 
     if (rhs && rhs->op_->name_ == kOpTileMove && As<TileType>(op->var_->GetType())) {
@@ -1267,19 +1254,14 @@ class LayoutAssignmentWriter : public IRMutator {
     return std::nullopt;
   }
 
-  std::optional<LayoutSpec> LookupTileDesc(const std::string& name_hint) const {
-    const auto prefix = tile_prefixes_.find(current_func_name_);
-    if (prefix == tile_prefixes_.end()) return std::nullopt;
-    const std::string clean_name = detail::CleanName(name_hint);
-    if (auto it = tile_layouts_.find(prefix->second + clean_name); it != tile_layouts_.end()) {
-      return it->second;
-    }
-    if (name_hint != clean_name) {
-      if (auto it = tile_layouts_.find(prefix->second + name_hint); it != tile_layouts_.end()) {
-        return it->second;
-      }
-    }
-    return std::nullopt;
+  std::optional<LayoutSpec> LookupTileDesc(const VarPtr& var) const {
+    if (!current_tile_site_) return std::nullopt;
+    const auto& values = current_tile_site_->value_names;
+    auto key = values.find(var.get());
+    if (key == values.end()) return std::nullopt;
+    auto layout = tile_layouts_.find(key->second);
+    if (layout == tile_layouts_.end()) return std::nullopt;
+    return layout->second;
   }
 
   ParamSig SiteParamSignature(const FunctionPtr& callee,
@@ -1339,7 +1321,12 @@ class LayoutAssignmentWriter : public IRMutator {
         for (const auto& child : detail::IterChildStmts(stmt)) self(self, child);
       };
       find_allocations(find_allocations, callee->body_);
-      std::map<std::pair<ParamSig, ParamSig>, std::string> variants;
+      // Distinct sites can choose different tile layouts even with identical GM interfaces.
+      // Compare choices in callee-local coordinates, independent of solver names and modeled cost.
+      using TileChoices = std::vector<std::pair<size_t, LayoutSpec>>;
+      using OpChoices = std::vector<std::pair<std::string, std::vector<LayoutSpec>>>;
+      std::unordered_map<const Var*, size_t> tile_indices;
+      std::map<std::tuple<ParamSig, ParamSig, TileChoices, OpChoices>, std::string> variants;
       for (size_t site_idx = 0; site_idx < sites.size(); ++site_idx) {
         const auto& site = sites[site_idx];
         ParamSig sig = SiteParamSignature(callee, site.arg_names);
@@ -1351,8 +1338,28 @@ class LayoutAssignmentWriter : public IRMutator {
                   ? detail::TensorTypeLayout(AsTensorTypeLike(allocation->GetType()))
                   : layout->second);
         }
-        auto [variant, new_variant] =
-            variants.try_emplace(std::make_pair(sig, std::move(allocation_layouts)));
+        const auto prefix = detail::TileLayoutPrefix(program, callee_name, true, site_idx);
+        auto& tile_site = bindings_.sites.at(prefix);
+        TileChoices tiles;
+        for (const auto& [var, key] : tile_site.value_names) {
+          if (auto layout = tile_layouts_.find(key); layout != tile_layouts_.end()) {
+            const auto index = tile_indices.try_emplace(var, tile_indices.size()).first->second;
+            tiles.emplace_back(index, layout->second);
+          }
+        }
+        std::sort(tiles.begin(), tiles.end());
+        OpChoices ops;
+        for (size_t i = tile_site.begin; i < tile_site.end; ++i) {
+          const auto& id = instance_.operations[i].op_id;
+          auto& choice = ops.emplace_back();
+          if (auto cfg = op_configs_.find(id); cfg != op_configs_.end()) {
+            choice.first = cfg->second.op_name;
+            choice.second = cfg->second.input_layouts;
+            choice.second.push_back(cfg->second.output_layout);
+          }
+        }
+        auto [variant, new_variant] = variants.try_emplace(
+            std::make_tuple(sig, std::move(allocation_layouts), std::move(tiles), std::move(ops)));
         std::string& spec_name = variant->second;
         if (!new_variant) {
           for (const auto* call : site.calls) specialized_calls_.emplace(call, spec_name);
@@ -1404,6 +1411,9 @@ class LayoutAssignmentWriter : public IRMutator {
           const auto& names = sites[site_idx].gm_names;
           auto copy_name = [&](const Var* original, const Var* copy) {
             if (auto it = names.find(original); it != names.end()) gm_names_.emplace(copy, it->second);
+            if (auto it = tile_site.value_names.find(original); it != tile_site.value_names.end()) {
+              tile_site.value_names.emplace(copy, it->second);
+            }
           };
           for (size_t i = 0; i < callee->params_.size(); ++i) {
             copy_name(callee->params_[i].get(), cloned_params[i].get());
@@ -1414,8 +1424,7 @@ class LayoutAssignmentWriter : public IRMutator {
               std::move(cloned.cloned_body), callee->span_, callee->func_type_, callee->level_, callee->role_,
               std::move(cloned_attrs), callee->requires_runtime_binding_, callee->ir_stage_));
         }
-        tile_prefixes_.insert_or_assign(
-            spec_name, detail::TileLayoutPrefix(program, callee_name, /*qualify_function=*/true, site_idx));
+        tile_prefixes_.insert_or_assign(spec_name, prefix);
         for (const auto* call : site.calls) specialized_calls_.emplace(call, spec_name);
       }
     }
@@ -1444,42 +1453,10 @@ class LayoutAssignmentWriter : public IRMutator {
     return spec_it != specialized_callees_.end() ? spec_it->second : callee_name;
   }
 
-  std::string FuncTilePrefix(const std::string& func_name) const {
-    auto it = tile_prefixes_.find(func_name);
-    return it != tile_prefixes_.end() ? it->second : std::string{};
-  }
-
-  std::vector<std::pair<std::string, OperatorConfig>> CollectFuncOpConfigs(
-      const std::string& func_name) const {
-    const std::string prefix = FuncTilePrefix(func_name);
-    struct Entry {
-      int64_t cnt;
-      std::string op_id;
-      OperatorConfig cfg;
-    };
-    std::vector<Entry> matched;
-    for (const auto& [op_id, cfg] : op_configs_) {
-      if (cfg.op_name.rfind("tile.", 0) != 0 && cfg.op_name != "control.if_join" &&
-          cfg.op_name != kVecLoopInitOp && cfg.op_name != kVecLoopYieldOp) {
-        continue;
-      }
-      if (auto cnt = ParseOpIdCounter(op_id, prefix)) {
-        matched.push_back({*cnt, op_id, cfg});
-      }
-    }
-    std::sort(matched.begin(), matched.end(), [](const Entry& a, const Entry& b) { return a.cnt < b.cnt; });
-    std::vector<std::pair<std::string, OperatorConfig>> out;
-    out.reserve(matched.size());
-    for (auto& e : matched) {
-      out.emplace_back(std::move(e.op_id), std::move(e.cfg));
-    }
-    return out;
-  }
-
   void ClearPrescanState() {
     assign_op_cfg_.clear();
     if_join_cfgs_.clear();
-    eval_store_cfgs_.clear();
+    standalone_store_cfgs_.clear();
     vec_prod_lay_.clear();
     vec_alias_roots_.clear();
     vec_loop_inits_.clear();
@@ -1512,7 +1489,7 @@ class LayoutAssignmentWriter : public IRMutator {
         gm_lay = detail::TensorTypeLayout(src_tt);
       }
     }
-    std::optional<LayoutSpec> dst_lay = LookupTileDesc(lhs_var->name_hint_);
+    std::optional<LayoutSpec> dst_lay = LookupTileDesc(lhs_var);
     auto lhs_tile = As<TileType>(lhs_var->GetType());
     if (lhs_tile && (!dst_lay.has_value() || lhs_tile->dtype_.IsPackedFp4())) {
       dst_lay = EffectiveTileLayout(lhs_tile);
@@ -1603,7 +1580,7 @@ class LayoutAssignmentWriter : public IRMutator {
             "fallback", op_name, {EffectiveTileLayout(src_t)}, EffectiveTileLayout(lhs_t), 0.0};
       }
       LayoutSpec dst_lay = src_lay;
-      if (auto found = LookupTileDesc(lhs_var->name_hint_)) {
+      if (auto found = LookupTileDesc(lhs_var)) {
         dst_lay = *found;
       } else if (lhs_t) {
         dst_lay = EffectiveTileLayout(lhs_t);
@@ -1647,13 +1624,13 @@ class LayoutAssignmentWriter : public IRMutator {
         tile_args.size() >= 2) {
       auto inputs = input_layouts(LayoutSpec::RowMajorFlat());
       const auto& row_arg = tile_args[1].second;
-      auto vec_lay = LookupTileDesc(row_arg->name_hint_);
+      auto vec_lay = LookupTileDesc(row_arg);
       inputs[1] = IsOp(rhs, kOpTileRowExpandAdd) && vec_lay == LayoutSpec::RowBcastFlat()
                       ? LayoutSpec::RowBcastFlat()
                       : LayoutSpec::ColMajorFlat();
       return OperatorConfig{"fallback", op_name, std::move(inputs), original_output, 0.0};
     }
-    LayoutSpec out_lay = LookupTileDesc(lhs_var->name_hint_).value_or(EffectiveTileLayout(lhs_t));
+    LayoutSpec out_lay = LookupTileDesc(lhs_var).value_or(EffectiveTileLayout(lhs_t));
     if (out_lay == LayoutSpec::FractalNZ() && detail::CanUseVecNzPointwise(rhs)) {
       return OperatorConfig{"fallback", op_name, input_layouts(LayoutSpec::FractalNZ()), out_lay, 0.0};
     }
@@ -1704,12 +1681,12 @@ class LayoutAssignmentWriter : public IRMutator {
   }
 
   void RecordPrescanCallOutputs(const StmtPtr& stmt, const std::string& op_name, const VarPtr& lhs_var,
-                                const OperatorConfig& cfg,
+                                size_t result_index, const OperatorConfig& cfg,
                                 std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) {
     if (lhs_var) {
       assign_op_cfg_.emplace(lhs_var.get(), cfg);
-    } else if (As<EvalStmt>(stmt)) {
-      eval_store_cfgs_.push_back(cfg);
+    } else {
+      standalone_store_cfgs_[stmt.get()].emplace(result_index, cfg);
     }
     if (!lhs_var) {
       return;
@@ -1808,7 +1785,7 @@ class LayoutAssignmentWriter : public IRMutator {
         if (shape.has_value()) {
           orig_tile_shapes_[old_p.get()] = *shape;
         }
-        LayoutSpec lay = LookupTileDesc(old_p->name_hint_).value_or(EffectiveTileLayout(tile_t));
+        LayoutSpec lay = LookupTileDesc(old_p).value_or(EffectiveTileLayout(tile_t));
         vec_prod_lay_.insert_or_assign(old_p.get(), lay);
         if (lay == LayoutSpec::FractalNZ() && shape.has_value()) {
           vec_logical_shapes_[old_p.get()] = *shape;
@@ -1816,42 +1793,47 @@ class LayoutAssignmentWriter : public IRMutator {
       }
     }
 
-    auto collected = CollectFuncOpConfigs(func->name_);
-    std::deque<std::pair<std::string, OperatorConfig>> op_queue(std::make_move_iterator(collected.begin()),
-                                                                std::make_move_iterator(collected.end()));
-    const bool has_op_configs = !op_queue.empty();
-    const std::string prefix = FuncTilePrefix(func->name_);
-
-    auto pop_cfg = [&](const std::string& op_name,
-                       const std::optional<std::string>& lhs_hint) -> std::optional<OperatorConfig> {
-      if (op_queue.empty()) {
-        return std::nullopt;
-      }
-      const auto& [head_id, head_cfg] = op_queue.front();
-      if (head_cfg.op_name != op_name) {
-        return std::nullopt;
-      }
-      if (lhs_hint.has_value() && op_name != kOpTileStore) {
-        auto cnt = ParseOpIdCounter(head_id, prefix);
-        if (!cnt.has_value()) {
-          return std::nullopt;
+    const auto& site = *current_tile_site_;
+    size_t next = site.begin;
+    auto take_op = [&](const std::string& name, const VarPtr& output,
+                       const CallPtr& call = nullptr) -> const OperationNode* {
+      if (next == site.end) return nullptr;
+      const auto& op = instance_.operations[next];
+      if (name != op.op_name) return nullptr;
+      if (name == kOpTileStore) {
+        // A store whose source or destination was outside the model must not
+        // consume the configuration of the next modeled store.
+        if (!call || call->args_.size() < 3) return nullptr;
+        auto src = site.value_names.find(AsVarLike(call->args_[0]).get());
+        auto dst = site.value_names.find(AsVarLike(call->args_[2]).get());
+        const auto& modeled_dst = op.inputs.size() == 2 ? op.inputs[1] : op.output;
+        if (src == site.value_names.end() || src->second != op.inputs.front() ||
+            dst == site.value_names.end() || dst->second != modeled_dst) {
+          return nullptr;
         }
-        const std::string rest_prefix = prefix + "op_" + std::to_string(*cnt) + "_";
-        if (head_id.size() < rest_prefix.size()) {
-          return std::nullopt;
-        }
-        const std::string tail = head_id.substr(rest_prefix.size());
-        const std::string expected = *lhs_hint + "_";
-        if (tail.rfind(expected, 0) != 0) {
-          return std::nullopt;
-        }
+      } else if (output) {
+        auto it = site.value_names.find(output.get());
+        if (it == site.value_names.end() || it->second != op.output) return nullptr;
       }
-      OperatorConfig out = op_queue.front().second;
-      op_queue.pop_front();
-      return out;
+      ++next;
+      return &op;
     };
+    auto selected = [&](const OperationNode* op) -> std::optional<OperatorConfig> {
+      if (op) {
+        if (auto it = op_configs_.find(op->op_id); it != op_configs_.end()) return it->second;
+      }
+      return std::nullopt;
+    };
+    auto remember = [&](const OperationNode* op, const OperatorConfig& config) {
+      if (inferred_ && op) inferred_->op_configs.insert_or_assign(op->op_id, config);
+    };
+    const auto site_first = instance_.operations.begin() + static_cast<std::ptrdiff_t>(site.begin);
+    const auto site_last = instance_.operations.begin() + static_cast<std::ptrdiff_t>(site.end);
+    const bool has_op_configs = std::any_of(
+        site_first, site_last, [&](const OperationNode& op) { return op_configs_.count(op.op_id) != 0; });
 
-    auto handle_call = [&](const StmtPtr& stmt, const CallPtr& rhs, const VarPtr& lhs_var) {
+    auto handle_call = [&](const StmtPtr& stmt, const CallPtr& rhs, const VarPtr& lhs_var,
+                           size_t result_index = 0) {
       const std::string& op_name = rhs->op_->name_;
       if (lhs_var && IsVecTileType(lhs_var->GetType())) {
         const auto source = rhs->args_.empty() ? nullptr : AsVarLike(rhs->args_[0]);
@@ -1881,11 +1863,11 @@ class LayoutAssignmentWriter : public IRMutator {
       if (op_name.rfind("tile.", 0) != 0) {
         return;
       }
-      std::optional<std::string> hint =
-          lhs_var ? std::optional<std::string>(lhs_var->name_hint_) : std::nullopt;
-      std::optional<OperatorConfig> cfg = pop_cfg(op_name, hint);
-      if (!cfg.has_value() && !has_op_configs) {
+      const auto* modeled = take_op(op_name, lhs_var, rhs);
+      auto cfg = selected(modeled);
+      if (!cfg && !has_op_configs) {
         cfg = InferOpConfig(rhs, lhs_var, var_tensor_lays);
+        if (cfg) remember(modeled, *cfg);
       }
       if (!cfg.has_value()) {
         if (lhs_var && IsVecTileType(lhs_var->GetType())) {
@@ -1897,7 +1879,7 @@ class LayoutAssignmentWriter : public IRMutator {
         }
         return;
       }
-      RecordPrescanCallOutputs(stmt, op_name, lhs_var, *cfg, var_tensor_lays);
+      RecordPrescanCallOutputs(stmt, op_name, lhs_var, result_index, *cfg, var_tensor_lays);
       RecordPrescanCallDemands(rhs, lhs_var, *cfg);
     };
 
@@ -1910,11 +1892,21 @@ class LayoutAssignmentWriter : public IRMutator {
       if (vec_slices_.count(source) != 0) vec_slices_.insert(var.get());
       if (source && !cfg.input_layouts.empty()) RecordVecDemandRaw(source, cfg.input_layouts[0]);
     };
+    auto loop_config = [&](const char* name, const VarPtr& var) -> std::optional<OperatorConfig> {
+      const auto* op = take_op(name, var);
+      auto config = selected(op);
+      // Extraction models each loop transfer with its single carried representation.
+      if (op && !config && !has_op_configs && op->configs.size() == 1) {
+        config = op->configs.front();
+        remember(op, *config);
+      }
+      return config;
+    };
     auto prescan_loop = [&](auto& self, const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
                             const std::vector<VarPtr>& return_vars) {
       for (const auto& ia : iter_args) {
         auto init_v = AsVarLike(ia->initValue_);
-        auto cfg = IsVecTileType(ia->GetType()) ? pop_cfg(kVecLoopInitOp, ia->name_hint_) : std::nullopt;
+        auto cfg = IsVecTileType(ia->GetType()) ? loop_config(kVecLoopInitOp, ia) : std::nullopt;
         if (cfg) {
           record_loop_binding(ia, *cfg, init_v.get());
           vec_loop_inits_.insert(ia.get());
@@ -1930,8 +1922,7 @@ class LayoutAssignmentWriter : public IRMutator {
         const Var* yielded_var = idx < yielded.size() ? yielded[idx] : nullptr;
         const Var* iter = idx < iter_args.size() ? iter_args[idx].get() : nullptr;
         const auto& result = return_vars[idx];
-        auto cfg =
-            IsVecTileType(result->GetType()) ? pop_cfg(kVecLoopYieldOp, result->name_hint_) : std::nullopt;
+        auto cfg = IsVecTileType(result->GetType()) ? loop_config(kVecLoopYieldOp, result) : std::nullopt;
         if (cfg) {
           record_loop_binding(result, *cfg, yielded_var);
           if (vec_slices_.count(iter) != 0) vec_slices_.insert(result.get());
@@ -1981,7 +1972,18 @@ class LayoutAssignmentWriter : public IRMutator {
           const Var* tv = idx < then_y.size() ? then_y[idx] : nullptr;
           const Var* ev = idx < else_y.size() ? else_y[idx] : nullptr;
           if (vec_slices_.count(tv) != 0 || vec_slices_.count(ev) != 0) vec_slices_.insert(rv.get());
-          std::optional<OperatorConfig> join_cfg = pop_cfg("control.if_join", rv->name_hint_);
+          const auto* join = take_op("control.if_join", rv);
+          auto join_cfg = selected(join);
+          if (join && !join_cfg && !has_op_configs) {
+            auto layout = LookupTileDesc(rv);
+            auto choice =
+                std::find_if(join->configs.begin(), join->configs.end(),
+                             [&](const OperatorConfig& cfg) { return cfg.output_layout == layout; });
+            if (choice != join->configs.end()) {
+              join_cfg = *choice;
+              remember(join, *choice);
+            }
+          }
           if (join_cfg.has_value()) {
             if_join_cfgs_[ifs.get()][idx] = *join_cfg;
             if (IsVecTileType(rv->GetType()) && join_cfg->output_layout.IsTile()) {
@@ -2018,13 +2020,21 @@ class LayoutAssignmentWriter : public IRMutator {
                 AliasVarPrescanInfo(rv, tv, var_tensor_lays);
               } else if (!has_op_configs && IsVecTileType(rv->GetType())) {
                 auto rt = As<TileType>(rv->GetType());
-                LayoutSpec fallback_lay = LookupTileDesc(rv->name_hint_).value_or(EffectiveTileLayout(rt));
+                LayoutSpec fallback_lay = LookupTileDesc(rv).value_or(EffectiveTileLayout(rt));
                 if (auto shape = detail::StaticShape(rt->shape_)) {
                   orig_tile_shapes_[rv.get()] = *shape;
                 }
                 vec_prod_lay_.insert_or_assign(rv.get(), fallback_lay);
                 RecordVecDemandRaw(tv, fallback_lay);
                 RecordVecDemandRaw(ev, fallback_lay);
+              }
+              // Without a selected join, both yields use the inferred result layout.
+              // Record that choice after resolving equal branch layouts so the
+              // capacity check sees exactly the conversions requested by writeback.
+              if (const auto it = vec_prod_lay_.find(rv.get());
+                  join && inferred_ && !has_op_configs && it != vec_prod_lay_.end()) {
+                const auto& layout = it->second;
+                remember(join, {join->op_id, join->op_name, {layout, layout}, layout});
               }
             }
           } else if (tv != nullptr && else_y.empty()) {
@@ -2045,9 +2055,9 @@ class LayoutAssignmentWriter : public IRMutator {
           handle_call(stmt, c, nullptr);
         }
       } else if (auto rs = As<ReturnStmt>(stmt)) {
-        for (const auto& val : rs->value_) {
-          if (auto c = As<Call>(val); c && c->op_->name_ == kOpTileStore) {
-            handle_call(stmt, c, nullptr);
+        for (size_t i = 0; i < rs->value_.size(); ++i) {
+          if (auto c = As<Call>(rs->value_[i]); c && c->op_->name_ == kOpTileStore) {
+            handle_call(stmt, c, nullptr, i);
           }
         }
       }
@@ -2426,6 +2436,19 @@ class LayoutAssignmentWriter : public IRMutator {
     return {std::move(store_call), {}, nullptr};
   }
 
+  // A Vec NZ store writes the flattened ND backing. Restore the logical
+  // tensor result for both an assignment and a store returned directly.
+  ExprPtr RewriteStoredResult(const CallPtr& rhs, const OperatorConfig* cfg, const std::string& name,
+                              const Span& span, std::vector<StmtPtr>& prefix) {
+    auto [store, setup, logical] = RewriteTileStore(rhs, cfg, span);
+    prefix = std::move(setup);
+    if (!logical) return store;
+    auto stored = std::make_shared<Var>(name + "_nd_store", store->GetType(), span);
+    prefix.push_back(std::make_shared<AssignStmt>(stored, std::move(store), span));
+    auto shape = std::make_shared<MakeTuple>(AsTensorTypeLike(logical->GetType())->shape_, span);
+    return CreateOpCallWithAttrs(kOpTensorView, {stored, shape}, {{"layout", TensorLayout::NZ}}, {}, span);
+  }
+
   StmtPtr FinishVecAssign(const VarPtr& orig_var, ExprPtr new_value,
                           const std::optional<LayoutSpec>& prod_lay, const Span& span,
                           const AssignStmtPtr& orig_stmt) {
@@ -2719,6 +2742,10 @@ class LayoutAssignmentWriter : public IRMutator {
   std::unordered_map<std::string, LayoutSpec> tile_layouts_;
   const std::unordered_map<std::string, OperatorConfig>& op_configs_;
 
+  const LayoutProblemInstance& instance_;
+  LayoutWritebackBindings& bindings_;
+  LayoutAssignment* inferred_;
+  const LayoutWritebackBindings::Site* current_tile_site_ = nullptr;
   OrchCallAnalysis::GmNames gm_names_;
   std::unordered_map<std::string, std::string> tile_prefixes_;
   std::unordered_map<std::pair<std::string, ParamSig>, std::string, ParamSigHash> specialized_callees_;
@@ -2733,7 +2760,7 @@ class LayoutAssignmentWriter : public IRMutator {
   // Per-function prescan state.
   std::unordered_map<const Var*, OperatorConfig> assign_op_cfg_;
   std::unordered_map<const IfStmt*, std::unordered_map<size_t, OperatorConfig>> if_join_cfgs_;
-  std::deque<OperatorConfig> eval_store_cfgs_;
+  std::unordered_map<const Stmt*, std::unordered_map<size_t, OperatorConfig>> standalone_store_cfgs_;
   std::unordered_map<const Var*, LayoutSpec> vec_prod_lay_;
   std::unordered_map<const Var*, const Var*> vec_alias_roots_;
   std::unordered_set<const Var*> vec_loop_inits_;
@@ -2764,8 +2791,21 @@ TypePtr SyncCallReturnType(const TypePtr& call_type, const std::vector<TypePtr>&
 }
 
 ProgramPtr ApplyLayoutAssignment(const ProgramPtr& program, const LayoutAssignment& assignment) {
-  LayoutAssignmentWriter writer(assignment);
-  return writer.Rewrite(tensor_view_semantics::RestoreLegacyBlockedNzViews(program));
+  LayoutWritebackBindings bindings;
+  const auto instance = ExtractLayoutInstance(program, {}, {}, {}, &bindings);
+  LayoutAssignment effective = assignment;
+  LayoutAssignmentWriter writer(instance, bindings, assignment, &effective);
+  auto rewritten = writer.Rewrite(bindings.program);
+  // Check the configurations that value-only writeback inferred from the actual IR.
+  const auto issues = CheckVecConversionCapacity(instance, effective);
+  if (!issues.empty()) throw ValueError(issues.front());
+  return rewritten;
+}
+
+ProgramPtr detail::ApplySolvedLayout(const LayoutProblemInstance& instance, LayoutWritebackBindings bindings,
+                                     const LayoutAssignment& assignment) {
+  LayoutAssignmentWriter writer(instance, bindings, assignment);
+  return writer.Rewrite(bindings.program);
 }
 
 }  // namespace auto_layout

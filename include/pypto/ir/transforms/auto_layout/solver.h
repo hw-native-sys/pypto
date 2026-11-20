@@ -231,6 +231,10 @@ class IncrementalState {
 /// Compute heuristic min-fill width and DP state-space statistics for `instance`.
 TreewidthStats ComputeTreewidth(const LayoutProblemInstance& instance);
 
+/// Check Vec capacity for the conversion demands in the assignment's selected operation configurations.
+std::vector<std::string> CheckVecConversionCapacity(const LayoutProblemInstance& instance,
+                                                    const LayoutAssignment& assignment);
+
 /// Solve via topological initialization followed by coordinate-descent refinement.
 LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
                                const std::optional<LayoutAssignment>& initial = std::nullopt,
@@ -241,7 +245,8 @@ LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
 LayoutSolverResult SolveGreedyFM(const LayoutProblemInstance& instance,
                                  const LayoutSolverConfig& config = {});
 
-/// Solve to global optimality via connected-component min-fill treewidth DP.
+/// Solve the layout cost factors exactly via connected-component min-fill treewidth DP.
+/// When the result exceeds Vec capacity, use bounded capacity repair within the evaluation budget.
 LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance,
                                     const LayoutSolverConfig& config = {});
 

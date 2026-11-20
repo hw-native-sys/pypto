@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <memory>
@@ -72,7 +73,109 @@ void TestDistinctTileDefinitionsWithRepeatedHints() {
   assert(instance.operations[1].output != instance.operations[2].output);
 }
 
-void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts() {
+void TestValueOnlyWritebackWithRepeatedHints(const std::string& first_hint, const std::string& second_hint) {
+  const auto span = ir::Span::unknown();
+  const std::vector<int64_t> dims{32, 32};
+  const auto dn = std::make_shared<ir::TensorType>(
+      dims, DataType::FP32, std::nullopt, ir::TensorView(std::vector<int64_t>{1, 32}, ir::TensorLayout::DN));
+  const auto nd = std::make_shared<ir::TensorType>(dims, DataType::FP32, std::nullopt);
+  const auto shape = std::make_shared<ir::MakeTuple>(nd->shape_, span);
+  const auto zero = std::make_shared<ir::ConstInt>(0, DataType::INDEX, span);
+  const auto offsets = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{zero, zero}, span);
+  auto first = std::make_shared<ir::Var>("first", dn, span);
+  auto second = std::make_shared<ir::Var>("second", nd, span);
+  auto load = [&](const ir::VarPtr& input, const std::string& hint) {
+    auto call = ir::OpRegistry::GetInstance().Create("tile.load", {input, offsets, shape, shape},
+                                                     {{"target_memory", ir::MemorySpace::Vec}}, span);
+    return std::make_shared<ir::AssignStmt>(std::make_shared<ir::Var>(hint, call->GetType(), span), call,
+                                            span);
+  };
+  auto body = std::make_shared<ir::SeqStmts>(
+      std::vector<ir::StmtPtr>{load(first, first_hint), load(second, second_hint),
+                               std::make_shared<ir::ReturnStmt>(span)},
+      span);
+  auto kernel =
+      std::make_shared<ir::Function>("kernel", std::vector<ir::VarPtr>{first, second},
+                                     std::vector<ir::ParamDirection>(2, ir::ParamDirection::In),
+                                     std::vector<ir::TypePtr>{}, body, span, ir::FunctionType::InCore);
+  auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel}, "probe", span);
+  auto assignment = al::SolveAutoLayout(al::ExtractLayoutInstance(program)).WritebackAssignment();
+  for (bool values_only : {false, true}) {
+    if (values_only) assignment.op_configs.clear();
+    const auto result = ir::pass::AutoLayoutFromAssignment(assignment)(program);
+    auto loads = ir::As<ir::SeqStmts>(result->GetFunction("kernel")->body_);
+    auto layout = [&](size_t i) {
+      auto tile = ir::As<ir::AssignStmt>(loads->stmts_.at(i))->var_;
+      return al::EffectiveTileLayout(ir::As<ir::TileType>(tile->GetType()));
+    };
+    assert(layout(0) == al::LayoutSpec::ColMajorFlat());
+    assert(layout(1) == al::LayoutSpec::RowMajorFlat());
+  }
+}
+
+void TestStoreBindingAcrossUnmodeledStore(bool return_store) {
+  const auto span = ir::Span::unknown();
+  const std::vector<int64_t> dims{32, 32};
+  const auto nd = std::make_shared<ir::TensorType>(dims, DataType::FP32, std::nullopt);
+  const auto dn = std::make_shared<ir::TensorType>(
+      dims, DataType::FP32, std::nullopt, ir::TensorView(std::vector<int64_t>{1, 32}, ir::TensorLayout::DN));
+  const auto input = std::make_shared<ir::Var>("input", nd, span);
+  const auto mask_output = std::make_shared<ir::Var>("mask_output", nd, span);
+  const auto data_output = std::make_shared<ir::Var>("data_output", dn, span);
+  const auto shape = std::make_shared<ir::MakeTuple>(nd->shape_, span);
+  const auto zero = std::make_shared<ir::ConstInt>(0, DataType::INDEX, span);
+  const auto offsets = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{zero, zero}, span);
+  const auto& registry = ir::OpRegistry::GetInstance();
+  const auto load = registry.Create("tile.load", {input, offsets, shape, shape},
+                                    {{"target_memory", ir::MemorySpace::Vec}}, span);
+  const auto data = std::make_shared<ir::Var>("data", load->GetType(), span);
+  const auto diagonal = std::make_shared<ir::ConstInt>(0, DataType::INT32, span);
+  const auto tri = registry.Create("tile.tri", {diagonal, shape}, {{"dtype", DataType::FP32}}, span);
+  const auto mask = std::make_shared<ir::Var>("mask", tri->GetType(), span);
+  const auto mask_store = registry.Create("tile.store", {mask, offsets, mask_output}, {}, span);
+  const auto data_store = registry.Create("tile.store", {data, offsets, data_output}, {}, span);
+  std::vector<ir::StmtPtr> stmts{std::make_shared<ir::AssignStmt>(data, load, span),
+                                 std::make_shared<ir::AssignStmt>(mask, tri, span),
+                                 std::make_shared<ir::EvalStmt>(mask_store, span)};
+  if (!return_store) stmts.push_back(std::make_shared<ir::EvalStmt>(data_store, span));
+  stmts.push_back(std::make_shared<ir::ReturnStmt>(
+      std::vector<ir::ExprPtr>{return_store ? ir::ExprPtr(data_store) : data_output}, span));
+  const auto kernel = std::make_shared<ir::Function>(
+      "kernel", std::vector<ir::VarPtr>{input, mask_output, data_output},
+      std::vector<ir::ParamDirection>{ir::ParamDirection::In, ir::ParamDirection::Out,
+                                      ir::ParamDirection::Out},
+      std::vector<ir::TypePtr>{dn}, std::make_shared<ir::SeqStmts>(stmts, span), span,
+      ir::FunctionType::InCore);
+  const auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel}, "stores", span);
+  // The extractor models the ND load and its DN store. The intervening ND
+  // mask store must receive the mask itself, even when it precedes a returned store.
+  const auto instance = al::ExtractLayoutInstance(program);
+  assert(instance.operations.size() == 2);
+  for (bool values_only : {false, true}) {
+    auto assignment = al::SolveAutoLayout(instance).WritebackAssignment();
+    if (values_only) assignment.op_configs.clear();
+    auto rewritten = ir::pass::AutoLayoutFromAssignment(assignment)(program);
+    const auto body = ir::As<ir::SeqStmts>(rewritten->GetFunction("kernel")->body_);
+    size_t stores = 0;
+    for (const auto& stmt : body->stmts_) {
+      ir::CallPtr store;
+      if (const auto eval = ir::As<ir::EvalStmt>(stmt)) store = ir::As<ir::Call>(eval->expr_);
+      if (const auto ret = ir::As<ir::ReturnStmt>(stmt)) store = ir::As<ir::Call>(ret->value_.front());
+      if (!ir::IsOp(store, "tile.store")) continue;
+      if (stores++ == 0) {
+        assert(store->args_[0] == mask);
+        assert(store->args_[2] == mask_output);
+      } else {
+        assert(al::EffectiveTileLayout(ir::As<ir::TileType>(store->args_[0]->GetType())) ==
+               al::LayoutSpec::ColMajorFlat());
+        assert(store->args_[2] == data_output);
+      }
+    }
+    assert(stores == 2);
+  }
+}
+
+void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts(bool values_only) {
   const auto span = ir::Span::unknown();
   const auto tensor =
       std::make_shared<ir::TensorType>(std::vector<int64_t>{32, 32}, DataType::FP32, std::nullopt);
@@ -85,8 +188,18 @@ void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts() {
     auto load = registry.Create("tile.load", {input, offsets, shape, shape},
                                 {{"target_memory", ir::MemorySpace::Vec}}, span);
     auto loaded = std::make_shared<ir::Var>("loaded", load->GetType(), span);
+    auto create = registry.Create("tensor.create", {shape}, {{"dtype", DataType::FP32}}, span);
+    auto scratch = std::make_shared<ir::Var>("scratch", create->GetType(), span);
+    auto scratch_load = registry.Create("tile.load", {scratch, offsets, shape, shape},
+                                        {{"target_memory", ir::MemorySpace::Vec}}, span);
+    auto second = std::make_shared<ir::Var>("loaded", scratch_load->GetType(), span);
+    auto move = registry.Create("tile.move", {second}, {{"target_memory", ir::MemorySpace::Vec}}, span);
+    auto moved = std::make_shared<ir::Var>("moved", move->GetType(), span);
     auto body = std::make_shared<ir::SeqStmts>(
         std::vector<ir::StmtPtr>{std::make_shared<ir::AssignStmt>(loaded, load, span),
+                                 std::make_shared<ir::AssignStmt>(scratch, create, span),
+                                 std::make_shared<ir::AssignStmt>(second, scratch_load, span),
+                                 std::make_shared<ir::AssignStmt>(moved, move, span),
                                  std::make_shared<ir::ReturnStmt>(span)},
         span);
     return std::make_shared<ir::Function>(name, std::vector<ir::VarPtr>{input},
@@ -110,6 +223,7 @@ void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts() {
   add_site("kernel", "column_source");
   add_site("kernel_2", "independent");
   add_site("kernel_site2", "reserved");
+  add_site("kernel", "tile_variant");
   stmts.push_back(std::make_shared<ir::ReturnStmt>(span));
   const auto entry = std::make_shared<ir::Function>(
       "entry", std::vector<ir::VarPtr>{}, std::vector<ir::ParamDirection>{}, std::vector<ir::TypePtr>{},
@@ -120,16 +234,20 @@ void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts() {
 
   // Select different legal configurations with the same assignment hint at
   // site 2 of "kernel" and in the separately declared "kernel_2".
-  assert(instance.operations.size() == 5);
+  assert(instance.operations.size() == 18);
   al::LayoutAssignment assignment;
   const auto row = al::LayoutSpec::RowMajorFlat();
   const auto col = al::LayoutSpec::ColMajorFlat();
+  // The fourth site uses the same ND parameter and scratch layouts as the
+  // first, but selects a column-major representation for its private move.
+  const auto tile_variant = al::detail::TileLayoutPrefix(program, "kernel", true, 3) + "moved";
   for (const auto& op : instance.operations) {
-    assert(op.op_name == "tile.load" && op.inputs.size() == 1);
+    const bool move = op.op_name == "tile.move";
+    assert((move || op.op_name == "tile.load") && op.inputs.size() == 1);
     const auto& source = op.inputs.front();
-    const bool column = source == "column_source";
-    const auto input = column ? al::LayoutSpec::DN() : al::LayoutSpec::ND();
+    const bool column = source == "column_source" || op.output == tile_variant;
     const auto output = column ? col : row;
+    const auto input = move ? output : (column ? al::LayoutSpec::DN() : al::LayoutSpec::ND());
     const auto config = std::find_if(op.configs.begin(), op.configs.end(), [&](const auto& cfg) {
       return cfg.input_layouts.front() == input && cfg.output_layout == output;
     });
@@ -138,23 +256,33 @@ void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts() {
     assignment.value_layouts.emplace(source, input);
     assignment.value_layouts.emplace(op.output, output);
   }
+  if (values_only) assignment.op_configs.clear();
   const auto rewritten = al::ApplyLayoutAssignment(program, assignment);
   const auto body = ir::As<ir::SeqStmts>(rewritten->GetFunction("entry")->body_);
   std::vector<std::string> callees;
-  callees.reserve(5);
+  callees.reserve(6);
   for (const auto& stmt : body->stmts_) {
     if (auto eval = ir::As<ir::EvalStmt>(stmt)) {
       auto call = ir::As<ir::Call>(eval->expr_);
       callees.push_back(ir::As<ir::GlobalVar>(call->op_)->name_);
     }
   }
-  assert(callees.size() == 5);
+  assert(callees.size() == 6);
   assert(callees[0] == "kernel" && callees[1] == "kernel");
   assert(callees[2] != "kernel" && callees[2] != "kernel_2" && callees[2] != "kernel_site2");
   assert(callees[3] == "kernel_2" && callees[4] == "kernel_site2");
+  assert(callees[5] != callees[0] && callees[5] != callees[2]);
 
   auto load_layout = [&](const std::string& callee) {
     const auto seq = ir::As<ir::SeqStmts>(rewritten->GetFunction(callee)->body_);
+    // Even when the private move materializes a transpose, the scratch load
+    // itself retains the row-major layout of its ND source.
+    const auto moved = ir::As<ir::AssignStmt>(seq->stmts_[seq->stmts_.size() - 2]);
+    assert(moved->var_->name_hint_ == "moved");
+    assert(al::EffectiveTileLayout(ir::As<ir::TileType>(moved->var_->GetType())) ==
+           (callee == callees[5] ? col : row));
+    const auto second = ir::As<ir::AssignStmt>(seq->stmts_.at(2));
+    assert(al::EffectiveTileLayout(ir::As<ir::TileType>(second->var_->GetType())) == row);
     const auto load = ir::As<ir::AssignStmt>(seq->stmts_.front());
     assert(ir::IsOp(ir::As<ir::Call>(load->value_), "tile.load"));
     return al::EffectiveTileLayout(ir::As<ir::TileType>(load->var_->GetType()));
@@ -163,6 +291,218 @@ void TestCallSiteAndFunctionNamesKeepTheirOwnLayouts() {
   assert(load_layout(callees[2]) == col);
   assert(load_layout(callees[3]) == row);
   assert(load_layout(callees[4]) == row);
+  assert(load_layout(callees[5]) == row);
+}
+
+void TestValueOnlyJoinCapacity(int64_t columns, bool matching_branches,
+                               std::optional<size_t> expected_transposes) {
+  const auto span = ir::Span::unknown();
+  const auto tensor =
+      std::make_shared<ir::TensorType>(std::vector<int64_t>{32, columns}, DataType::FP32, std::nullopt);
+  const auto shape = std::make_shared<ir::MakeTuple>(tensor->shape_, span);
+  const auto zero = std::make_shared<ir::ConstInt>(0, DataType::INDEX, span);
+  const auto offsets = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{zero, zero}, span);
+  std::vector<ir::VarPtr> params;
+  std::vector<ir::StmtPtr> stmts;
+  auto load = [&](const std::string& name) {
+    auto input = std::make_shared<ir::Var>(name, tensor, span);
+    params.push_back(input);
+    auto call = ir::OpRegistry::GetInstance().Create("tile.load", {input, offsets, shape, shape},
+                                                     {{"target_memory", ir::MemorySpace::Vec}}, span);
+    auto tile = std::make_shared<ir::Var>(name + "_tile", call->GetType(), span);
+    stmts.push_back(std::make_shared<ir::AssignStmt>(tile, call, span));
+    return tile;
+  };
+  const auto a = load("a");
+  const auto b = load("b");
+  const auto result = std::make_shared<ir::Var>("result", a->GetType(), span);
+  const auto condition =
+      std::make_shared<ir::Var>("condition", std::make_shared<ir::ScalarType>(DataType::BOOL), span);
+  params.push_back(condition);
+  stmts.push_back(std::make_shared<ir::IfStmt>(
+      condition, std::make_shared<ir::YieldStmt>(std::vector<ir::ExprPtr>{a}, span),
+      std::make_shared<ir::YieldStmt>(std::vector<ir::ExprPtr>{b}, span), std::vector<ir::VarPtr>{result},
+      span));
+  stmts.push_back(std::make_shared<ir::ReturnStmt>(span));
+  const auto kernel = std::make_shared<ir::Function>(
+      "kernel", params, std::vector<ir::ParamDirection>(params.size(), ir::ParamDirection::In),
+      std::vector<ir::TypePtr>{}, std::make_shared<ir::SeqStmts>(stmts, span), span,
+      ir::FunctionType::InCore);
+  const auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel}, "join", span);
+
+  // Omit the result layout. Different branches fall back to the row-major
+  // result. Two column-major branches can carry their common layout directly.
+  al::LayoutAssignment assignment;
+  assignment.value_layouts.emplace("a", al::LayoutSpec::DN());
+  if (matching_branches) assignment.value_layouts.emplace("b", al::LayoutSpec::DN());
+  ir::ProgramPtr rewritten;
+  try {
+    rewritten = al::ApplyLayoutAssignment(program, assignment);
+  } catch (const pypto::ValueError& e) {
+    assert(!expected_transposes && std::string(e.what()).find("Vec capacity") != std::string::npos);
+    return;
+  }
+  assert(expected_transposes);
+  const auto body = ir::As<ir::SeqStmts>(rewritten->GetFunction("kernel")->body_);
+  size_t transposes = 0;
+  for (const auto& stmt : body->stmts_) {
+    if (const auto assign = ir::As<ir::AssignStmt>(stmt);
+        assign && ir::IsOp(ir::As<ir::Call>(assign->value_), "tile.transpose")) {
+      ++transposes;
+    }
+  }
+  assert(transposes == *expected_transposes);
+  const auto join = ir::As<ir::IfStmt>(body->stmts_[body->stmts_.size() - 2]);
+  assert(al::EffectiveTileLayout(ir::As<ir::TileType>(join->return_vars_.front()->GetType())) ==
+         (matching_branches ? al::LayoutSpec::ColMajorFlat() : al::LayoutSpec::RowMajorFlat()));
+}
+
+enum class VecPressureScope { StraightLine, ForLoop, WhileLoop, Reserved, UnmodeledGenerator };
+
+void TestVecCopyLifetime(int64_t a_columns, int64_t b_columns, bool overlap, bool convert_b,
+                         size_t expected_copies, VecPressureScope scope = VecPressureScope::StraightLine) {
+  const auto span = ir::Span::unknown();
+  const auto& registry = ir::OpRegistry::GetInstance();
+  const auto zero = std::make_shared<ir::ConstInt>(0, DataType::INDEX, span);
+  const auto offsets = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{zero, zero}, span);
+  std::vector<ir::VarPtr> params;
+  std::vector<ir::ParamDirection> directions;
+  std::vector<ir::StmtPtr> allocations;
+  std::vector<ir::ExprPtr> arguments;
+  auto make_tile = [&](const std::string& name, int64_t columns) {
+    const auto type =
+        std::make_shared<ir::TensorType>(std::vector<int64_t>{32, columns}, DataType::FP32, std::nullopt);
+    const auto shape = std::make_shared<ir::MakeTuple>(type->shape_, span);
+    auto input = std::make_shared<ir::Var>(name + "_input", type, span);
+    auto output = std::make_shared<ir::Var>(name + "_output", type, span);
+    params.insert(params.end(), {input, output});
+    directions.insert(directions.end(), {ir::ParamDirection::InOut, ir::ParamDirection::Out});
+    auto load = registry.Create("tile.load", {input, offsets, shape, shape},
+                                {{"target_memory", ir::MemorySpace::Vec}}, span);
+    if (scope == VecPressureScope::UnmodeledGenerator && name == "b") {
+      auto diagonal = std::make_shared<ir::ConstInt>(0, DataType::INT32, span);
+      load = registry.Create("tile.tri", {diagonal, shape}, {{"dtype", DataType::FP32}}, span);
+    }
+    auto tile = std::make_shared<ir::Var>(name, load->GetType(), span);
+    auto store = registry.Create("tile.store", {tile, offsets, output}, {}, span);
+    auto store_original = registry.Create("tile.store", {tile, offsets, input}, {}, span);
+    for (const auto& suffix : {"_source", "_buffer"}) {
+      auto alloc = registry.Create("tensor.create", {shape}, {{"dtype", DataType::FP32}}, span);
+      auto gm = std::make_shared<ir::Var>(name + suffix, alloc->GetType(), span);
+      allocations.push_back(std::make_shared<ir::AssignStmt>(gm, alloc, span));
+      arguments.push_back(gm);
+    }
+    return std::array<ir::StmtPtr, 3>{std::make_shared<ir::AssignStmt>(tile, load, span),
+                                      std::make_shared<ir::EvalStmt>(store, span),
+                                      std::make_shared<ir::EvalStmt>(store_original, span)};
+  };
+  const auto [load_a, store_a, store_original_a] = make_tile("a", a_columns);
+  const auto [load_b, store_b, store_original_b] = make_tile("b", b_columns);
+  std::vector<ir::StmtPtr> stmts;
+  if (scope == VecPressureScope::Reserved) {
+    // Tile storage starts after the end of the reservation, including its explicit base.
+    auto reserve =
+        registry.Create("system.reserve_buffer", {},
+                        {{"name", std::string("pipe")}, {"size", 8 * 1024}, {"base", 16 * 1024}}, span);
+    stmts.push_back(std::make_shared<ir::EvalStmt>(reserve, span));
+  }
+  stmts.push_back(load_a);
+  std::vector<ir::StmtPtr> uses;
+  if (overlap) uses.push_back(load_b);
+  uses.insert(uses.end(), {store_a, store_original_a});
+  if (!overlap) uses.push_back(load_b);
+  uses.insert(uses.end(), {store_b, store_original_b});
+  if (scope == VecPressureScope::ForLoop || scope == VecPressureScope::WhileLoop) {
+    auto body = std::make_shared<ir::SeqStmts>(uses, span);
+    if (scope == VecPressureScope::ForLoop) {
+      auto one = std::make_shared<ir::ConstInt>(1, DataType::INDEX, span);
+      auto two = std::make_shared<ir::ConstInt>(2, DataType::INDEX, span);
+      auto induction = std::make_shared<ir::Var>("i", zero->GetType(), span);
+      stmts.push_back(std::make_shared<ir::ForStmt>(induction, zero, two, one, std::vector<ir::IterArgPtr>{},
+                                                    body, std::vector<ir::VarPtr>{}, span));
+    } else {
+      auto condition = std::make_shared<ir::ConstBool>(true, span);
+      stmts.push_back(std::make_shared<ir::WhileStmt>(condition, std::vector<ir::IterArgPtr>{}, body,
+                                                      std::vector<ir::VarPtr>{}, span));
+    }
+  } else {
+    stmts.insert(stmts.end(), uses.begin(), uses.end());
+  }
+  stmts.push_back(std::make_shared<ir::ReturnStmt>(span));
+  const auto kernel = std::make_shared<ir::Function>("kernel", params, directions, std::vector<ir::TypePtr>{},
+                                                     std::make_shared<ir::SeqStmts>(stmts, span), span,
+                                                     ir::FunctionType::InCore);
+  auto call = std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>("kernel"), arguments, span);
+  allocations.push_back(std::make_shared<ir::EvalStmt>(call, span));
+  allocations.push_back(std::make_shared<ir::ReturnStmt>(span));
+  const auto entry = std::make_shared<ir::Function>(
+      "entry", std::vector<ir::VarPtr>{}, std::vector<ir::ParamDirection>{}, std::vector<ir::TypePtr>{},
+      std::make_shared<ir::SeqStmts>(allocations, span), span, ir::FunctionType::Orchestration);
+  const auto program =
+      std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel, entry}, "pressure", span);
+  auto instance = al::ExtractLayoutInstance(program);
+  if (scope == VecPressureScope::UnmodeledGenerator) {
+    // B is only used by skipped stores. It still owns storage at the last modeled store of A.
+    assert(!instance.FindValue("b"));
+    const auto& region = instance.vec_memory_regions.at(0);
+    assert(region.original_bytes.at(region.operation_positions.back()) == 32 * 4 * (a_columns + b_columns));
+  }
+  const auto row = al::LayoutSpec::RowMajorFlat();
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  assert(instance.cost_model.SupportsVecTileConversion(instance.values.at("a"), row, col));
+  if (convert_b) {
+    assert(instance.cost_model.SupportsVecTileConversion(instance.values.at("b"), row, col));
+  }
+  // Make the transpose free and make the store prefer it when capacity allows.
+  al::LayoutAssignment preferred;
+  for (auto& op : instance.operations) {
+    if (op.op_name == "tile.load") {
+      for (auto& cfg : op.configs) cfg.op_cost_cycles = cfg.output_layout == row ? 0 : 10000;
+    }
+    if (op.op_name != "tile.store") continue;
+    const auto& tile = op.inputs.front();
+    const auto target = op.inputs.size() == 1 && (tile == "a" || convert_b) ? col : row;
+    instance.custom_conversion_costs[tile][{row, col}] = 0;
+    for (auto& cfg : op.configs) cfg.op_cost_cycles = cfg.input_layouts.front() == target ? 0 : 1000;
+    const auto selected = std::find_if(op.configs.begin(), op.configs.end(),
+                                       [&](const auto& cfg) { return cfg.input_layouts.front() == target; });
+    assert(selected != op.configs.end());
+    preferred.op_configs.emplace(op.op_id, *selected);
+  }
+  const auto conflicts = al::CheckVecConversionCapacity(instance, preferred);
+  const size_t requested_copies = convert_b ? 2 : 1;
+  assert(conflicts.size() == requested_copies - expected_copies);
+  // A values-only caller can request the same copies by choosing DN for the
+  // destination buffers. Check the inferred store demands before returning IR.
+  al::LayoutAssignment only_buffers;
+  only_buffers.value_layouts.emplace("a_buffer", al::LayoutSpec::DN());
+  if (convert_b) only_buffers.value_layouts.emplace("b_buffer", al::LayoutSpec::DN());
+  bool rejected = false;
+  try {
+    al::ApplyLayoutAssignment(program, only_buffers);
+  } catch (const pypto::ValueError& e) {
+    assert(std::string(e.what()).find("Vec capacity") != std::string::npos);
+    rejected = true;
+  }
+  assert(rejected == !conflicts.empty());
+  for (const auto& result : {al::SolveAutoLayout(instance), al::SolveTreewidthDP(instance),
+                             al::SolveGreedy(instance), al::SolveGreedyFM(instance)}) {
+    assert(result.writeback_issues.empty());
+    assert(result.conversions.size() == expected_copies);
+    assert(al::CheckVecConversionCapacity(instance, result.Assignment()).empty());
+  }
+  const auto result = al::SolveAutoLayout(instance);
+  const auto rewritten = al::ApplyLayoutAssignment(program, result.WritebackAssignment());
+  size_t transposes = 0;
+  auto count = [&](auto& self, const ir::StmtPtr& stmt) -> void {
+    if (const auto assign = ir::As<ir::AssignStmt>(stmt);
+        assign && ir::IsOp(ir::As<ir::Call>(assign->value_), "tile.transpose")) {
+      ++transposes;
+    }
+    for (const auto& child : al::detail::IterChildStmts(stmt)) self(self, child);
+  };
+  count(count, rewritten->GetFunction("kernel")->body_);
+  assert(transposes == expected_copies);
 }
 
 void TestVecConversionPressure() {
@@ -439,7 +779,25 @@ int main() {
   const auto blocked = ir::pass::BlockNzTensorViews()(rewritten);
   assert(weight_type(blocked)->shape_.size() == 5);
   TestDistinctTileDefinitionsWithRepeatedHints();
-  TestCallSiteAndFunctionNamesKeepTheirOwnLayouts();
+  TestValueOnlyWritebackWithRepeatedHints("t", "t");
+  TestValueOnlyWritebackWithRepeatedHints("t__ssa_v0", "t__ssa_v1");
+  TestValueOnlyWritebackWithRepeatedHints("t_1", "t_2");
+  TestStoreBindingAcrossUnmodeledStore(false);
+  TestStoreBindingAcrossUnmodeledStore(true);
+  TestCallSiteAndFunctionNamesKeepTheirOwnLayouts(false);
+  TestCallSiteAndFunctionNamesKeepTheirOwnLayouts(true);
+  TestValueOnlyJoinCapacity(256, false, 1);
+  TestValueOnlyJoinCapacity(512, false, std::nullopt);  // Three 64 KiB tiles exceed Vec capacity.
+  TestValueOnlyJoinCapacity(512, true, 0);
+  TestVecCopyLifetime(384, 768, true, false, 0);  // A later allocation exceeds 184 KiB with the copy.
+  TestVecCopyLifetime(384, 576, true, false, 1);  // Transpose scratch is free by the later allocation.
+  TestVecCopyLifetime(320, 320, true, true, 1);   // A second transpose exceeds capacity with the first copy.
+  TestVecCopyLifetime(320, 320, false, true, 2);  // The same copies fit if their lifetimes are disjoint.
+  // Both representations of A must survive B for the next iteration.
+  TestVecCopyLifetime(384, 768, false, false, 0, VecPressureScope::ForLoop);
+  TestVecCopyLifetime(384, 768, false, false, 0, VecPressureScope::WhileLoop);
+  TestVecCopyLifetime(384, 576, true, false, 0, VecPressureScope::Reserved);
+  TestVecCopyLifetime(384, 768, true, false, 0, VecPressureScope::UnmodeledGenerator);
   TestVecConversionPressure();
   TestSubviewStore(true);
   TestSubviewStore(false);

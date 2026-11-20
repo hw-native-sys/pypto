@@ -22,8 +22,16 @@ namespace pypto {
 namespace ir {
 namespace auto_layout {
 
+struct LayoutWritebackBindings;
+
 /// Write a `LayoutAssignment` (both GM `TensorLayout` and on-chip `LayoutSpec`) back to IR.
 ProgramPtr ApplyLayoutAssignment(const ProgramPtr& program, const LayoutAssignment& assignment);
+
+namespace detail {
+/// Write an already validated solver result using identities from the same extraction.
+ProgramPtr ApplySolvedLayout(const LayoutProblemInstance& instance, LayoutWritebackBindings bindings,
+                             const LayoutAssignment& assignment);
+}  // namespace detail
 
 /// Synchronize a `Call` or `Submit` return type with updated callee return types.
 TypePtr SyncCallReturnType(const TypePtr& call_type, const std::vector<TypePtr>& ret_types);

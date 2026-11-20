@@ -34,8 +34,9 @@ Pass AutoLayout(AutoLayoutOptions options) {
   const std::string pass_name = options.name.empty() ? std::string("AutoLayout") : options.name;
   return CreateProgramPass(
       [opts = std::move(options)](const ProgramPtr& program) -> ProgramPtr {
+        auto_layout::LayoutWritebackBindings bindings;
         auto_layout::LayoutProblemInstance instance = auto_layout::ExtractLayoutInstance(
-            program, opts.cost_model, opts.reusable_tensors, opts.nz_inputs);
+            program, opts.cost_model, opts.reusable_tensors, opts.nz_inputs, &bindings);
         instance.custom_conversion_costs = opts.custom_conversion_costs;
         auto_layout::LayoutSolverConfig solver_cfg;
         solver_cfg.max_treewidth = opts.max_treewidth;
@@ -52,7 +53,8 @@ Pass AutoLayout(AutoLayoutOptions options) {
         if (!opts.fail_on_writeback_issues && !result.writeback_issues.empty()) {
           return program;
         }
-        return auto_layout::ApplyLayoutAssignment(program, result.WritebackAssignment());
+        return auto_layout::detail::ApplySolvedLayout(instance, std::move(bindings),
+                                                      result.WritebackAssignment());
       },
       pass_name, kAutoLayoutProperties);
 }
