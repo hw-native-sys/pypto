@@ -9,6 +9,12 @@
 
 """Codegen tests for MXFP8, native FP4, and explicit FP4-to-FP8 legalization."""
 
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -74,6 +80,114 @@ _MX_FP8_PAIRS = [
 # tile_buf dtype spelling in emitted PTO, and the pto-isa C++ element type.
 _PTO_FP8_SPELLING = {pl.FP8E4M3FN: "f8E4M3FN", pl.FP8E5M2: "f8E5M2"}
 _ISA_FP8_SPELLING = {pl.FP8E4M3FN: "float8_e4m3_t", pl.FP8E5M2: "float8_e5m2_t"}
+
+
+def _simulate_mx_load(program, tmp_path, backing, tile_shape, major, scalar_args=()):
+    """Execute the generated TLOAD and return the Mat tile in logical order."""
+    compiler = shutil.which("g++-15")
+    if compiler is None:
+        pytest.skip("GCC 15 is required for the CPU simulator")
+    cpp = _assemble_mx(_emit_incore_mlir(program), tmp_path)
+
+    isa_root = os.environ.get("PTO_ISA_ROOT")
+    if isa_root:
+        include_dir = Path(isa_root) / "include"
+    else:
+        pytest.importorskip("simpler_setup")
+        from pypto.runtime import pto_isa_include_dir  # noqa: PLC0415
+
+        include_dir = pto_isa_include_dir()
+    assert (include_dir / "pto/pto-inst.hpp").is_file(), f"PTO-ISA headers missing in {include_dir}"
+
+    rows, cols = tile_shape
+    input_bytes = ", ".join(str(value) for value in backing)
+    args = "".join(f", {value}" for value in scalar_args)
+    source = tmp_path / "probe.cpp"
+    source.write_text(
+        "#include <array>\n#include <cstdint>\n#include <cstdio>\n"
+        + cpp
+        + f"""
+int main() {{
+    pto::NPU_MEMORY_INIT(pto::NPUArch::A5);
+    const std::array<uint8_t, {len(backing)}> raw{{{input_bytes}}};
+    std::array<float8_e8m0_t, raw.size()> input{{}};
+    for (size_t i = 0; i < input.size(); ++i) {{
+        input[i] = float8_e8m0_t::FromRaw(raw[i]);
+    }}
+    load_window(input.data(){args});
+
+    // The generated kernel places its sole Mat tile at byte offset zero.
+    Tile<TileType::Mat, float8_e8m0_t, {rows}, {cols}, BLayout::{major}, {rows}, {cols},
+         SLayout::{major}, 32, PadValue::Null, CompactMode::Null> tile;
+    TASSIGN(tile, 0);
+    for (int row = 0; row < {rows}; ++row) {{
+        for (int col = 0; col < {cols}; ++col) {{
+            std::printf("%u ", static_cast<unsigned>(tile.GetElement(row, col).RawData()));
+        }}
+    }}
+}}
+"""
+    )
+    binary = tmp_path / "probe"
+    result = subprocess.run(
+        [
+            compiler,
+            "-std=c++23",
+            "-pthread",
+            "-D__CPU_SIM",
+            "-DPTO_CPU_SIM_TARGET_A5",
+            "-D__DAV_CUBE__",
+            f"-I{include_dir}",
+            str(source),
+            "-o",
+            str(binary),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return [int(value) for value in subprocess.check_output([str(binary)], timeout=30).split()]
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("layout", ["MX_A_ZZ", "MX_B_NN"])
+@pytest.mark.parametrize("nonzero_offset", [False, True], ids=["parent-stride", "nonzero-offset"])
+def test_packed_mx_scale_subwindow_loads_expected_bytes(tmp_path, layout, nonzero_offset):
+    """Test origin within one block and parent stride across two blocks independently."""
+    # Both layouts store 16 outer lanes by 2 scale groups per physical fractal.
+    # A's outer dimension is rows; B's outer dimension is columns.
+    outer, groups = 64, 8
+    outer_start, group_start = (16, 2) if nonzero_offset else (0, 0)
+    outer_size, group_size = (16, 4) if nonzero_offset else (32, 4)
+    logical = np.arange(outer * groups).reshape(outer, groups) % 251
+    backing = logical.reshape(outer // 16, 16, groups // 2, 2).transpose(0, 2, 1, 3).ravel()
+    window = logical[outer_start : outer_start + outer_size, group_start : group_start + group_size]
+    if layout == "MX_A_ZZ":
+        shape, offset, sizes, major = (
+            (outer, groups),
+            (outer_start, group_start),
+            (outer_size, group_size),
+            "RowMajor",
+        )
+    else:
+        shape, offset, sizes, major = (
+            (groups, outer),
+            (group_start, outer_start),
+            (group_size, outer_size),
+            "ColMajor",
+        )
+        window = window.T
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def load_window(self, scales: pl.Tensor[[{shape[0]}, {shape[1]}], pl.FP8E8M0, pl.{layout}]):
+        _ = pl.load(scales, [{offset[0]}, {offset[1]}], [{sizes[0]}, {sizes[1]}], target_memory=pl.Mem.Mat)
+""")
+    actual = _simulate_mx_load(program, tmp_path, backing, sizes, major)
+    np.testing.assert_array_equal(np.array(actual).reshape(sizes), window)
 
 
 class TestMxMatmulCodegen:
