@@ -41,8 +41,11 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 On an open PR targeting `main`, post `/ci a5-distributed` as a new conversation
 comment after automatic lint passes for the current PR head to run
 `onboard-tests-a5-distributed` on its test merge. If lint is missing, running or
-failed, the request ends before device scheduling. Post the command again after lint passes. The
-`ci/a5-distributed` check on the PR head links to the run and its artifacts.
+failed, post the command again after lint passes. Once lint passes, the request creates the
+`ci/a5-distributed` check on the PR head before validating the test merge. Its second parent must
+match that head. Its first parent can be up to 10 commits behind `main` and must still be in
+`main`'s history. If validation fails, the check shows the reason and links to the workflow run.
+After the device job runs, the same check links to its results and artifacts.
 Repeated commands for the same PR head reuse an active or successful run. If a run ends without
 success, including a timeout, post the command again. The new request closes any unfinished checks
 from that run. New checks record their PR number so the command can also retire a pending check
