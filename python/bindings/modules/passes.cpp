@@ -145,7 +145,7 @@ void BindPass(nb::module_& m) {
              "backend store pipe can combine; a bf16 destination requires the Ascend910 (A2/A3) "
              "profile")
       .value("AccCompactValid", IRProperty::AccCompactValid,
-             "Every tile.matmul_acc / tile.matmul_mx_acc accumulates into a CompactMode.normal "
+             "Every tile.matmul_acc, tile.matmul_mx_acc, or tile.gemv_mx_acc uses a CompactMode.normal "
              "buffer when mad's pitch (ceil(lhs validRow/16)*16) differs from the accumulator's "
              "physical row count, and no tile outside Left/Right/Acc carries a compact mode")
       .value("GraphBoundaryLegalized", IRProperty::GraphBoundaryLegalized,
@@ -647,12 +647,12 @@ void BindPass(nb::module_& m) {
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
   passes.def("insert_mx_scale_addr", &pass::InsertMxScaleAddr,
-             "Create a pass that inserts tile.tget_scale_addr before MX matmul consumers\n\n"
+             "Insert tile.tget_scale_addr before MX matmul and MX GEMV consumers.\n\n"
              "Requires InferTileMemorySpace first so Left/LeftScale and Right/RightScale\n"
-             "pairs are resolved. Rewrites InCore/AIC/AIV functions; each matmul_mx family\n"
-             "call consumes the bound scale SSA. Bindings are never reused across MX\n"
-             "consumers because tget_scale_addr mutates a shared physical scale buffer\n"
-             "whose aliases are not represented by SSA identity.");
+             "pairs are resolved. Rewrites the base, accumulation, and bias variants\n"
+             "of tile.matmul_mx and tile.gemv_mx to consume the bound scale SSA values.\n"
+             "A straight-line consumer can reuse the latest same-side binding if both\n"
+             "operands are unchanged and no invalidating operation intervenes.");
   passes.def("materialize_tensor_strides", &pass::MaterializeTensorStrides,
              "Create the MaterializeTensorStrides pass (RFC #1300 §2.4).\n\n"
              "Walks every TensorType reachable from the program and rewrites any\n"

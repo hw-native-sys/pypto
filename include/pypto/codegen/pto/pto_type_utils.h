@@ -50,7 +50,7 @@ const char* TileLayoutToStr(ir::TileLayout layout);
 /// Packed axis expanded from carrier units to PTOAS v0.72 Cube logical units.
 /// Vec and GM remain in carrier units at the PTO boundary.
 std::optional<size_t> GetPtoFp4LogicalAxis(const std::string& loc, const std::string& dtype_str,
-                                           ir::TileLayout blayout);
+                                           ir::TileLayout blayout, bool row_vector = false);
 
 /// Convert a tile's carrier shape, validity, or offsets to PTO coordinate units.
 std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,

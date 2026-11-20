@@ -171,9 +171,9 @@ output elements outside the valid rectangle.
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ✅ | ❌ | ✅ | — | A5 frontend + codegen; native FP4 E2M1/E1M2 device tests passed (valid K=64, N=64) |
+| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 frontend + codegen; native FP4 E2M1/E1M2 device tests passed (valid K=64, N=64) |
+| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 frontend + codegen; native FP4 E2M1/E1M2 device tests passed (valid K=64, N=64) |
 | **Vector Arithmetic and Math (42)** |  |  |  |  |  |  |  |  |
 | pto.tadd | TADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

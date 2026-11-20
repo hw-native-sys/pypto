@@ -56,7 +56,7 @@ Keep the English and Chinese documentation synchronized.
 | 20 | [AutoTileMatmulL0](20-auto_tile_matmul_l0.md) | Picks an L0 tile shape `(m, n, k)` from the backend's L0 capacities and tiles matmuls to it |
 | 21 | [CanonicalizeTileSlice](21-canonicalize_tile_slice.md) | Lowers `tile.slice` into the canonical `tile.extract` form |
 | 22 | [InferTileMemorySpace](22-infer_tile_memory_space.md) | Infers the on-chip `MemorySpace` of every tile and inserts `tile.move` to legalize mismatches |
-| 23 | [InsertMxScaleAddr](23-insert_mx_scale_addr.md) | Inserts `tile.tget_scale_addr` before MX matmul consumers after memory spaces are resolved |
+| 23 | [InsertMxScaleAddr](23-insert_mx_scale_addr.md) | Inserts `tile.tget_scale_addr` before MX matmul and MX GEMV consumers after memory spaces are resolved |
 | 24 | [ResolveBackendOpLayouts](24-resolve_backend_op_layouts.md) | Repairs backend-required tile layouts for elementwise ops |
 | 25 | [LowerAutoVectorSplit](25-lower_auto_vector_split.md) | Prepares authored `split_aiv` regions and rejects implicit mixed-kernel splitting |
 | 26 | [ExpandMixedKernel](26-expand_mixed_kernel.md) | Splits mixed InCore functions into separate AIC (Cube) and AIV (Vector) kernels |

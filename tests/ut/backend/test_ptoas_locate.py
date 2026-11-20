@@ -517,6 +517,20 @@ def test_native_fp4_probe_caches_success_and_rechecks_replaced_binary(fp4_probe,
     assert len(calls) == 2
 
 
+def test_native_fp4_gemv_checks_all_overloads_independently(fp4_probe, monkeypatch):
+    def run(command, **kwargs):
+        source = Path(command[-1]).read_text()
+        if "pto.tmatmul.mx" in source:
+            return SimpleNamespace(returncode=0, stdout=_FP4_PROBE_CPP, stderr="")
+        assert all(f"pto.tgemv.mx{suffix} ins" in source for suffix in ("", ".acc", ".bias"))
+        return SimpleNamespace(returncode=0, stdout="TGEMV_MX(\nTGEMV_MX(", stderr="")
+
+    monkeypatch.setattr(_ptoas_fp4.subprocess, "run", run)
+    _ptoas_fp4.check_native_fp4_mx_support()
+    with pytest.raises(RuntimeError, match="missing TGEMV_MX forms"):
+        _ptoas_fp4.check_native_fp4_mx_support(gemv=True)
+
+
 def test_native_fp4_probe_retries_after_failure(fp4_probe, monkeypatch):
     results = iter(
         (

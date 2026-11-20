@@ -104,12 +104,16 @@ void ValidateIntScalarTupleElements(const MakeTuplePtr& tuple, const std::string
 // destination's packing axis when declaring the ISA tile.
 void RetargetPackedFp4Geometry(DataType dtype, TileLayout source_layout, TileLayout target_layout,
                                std::vector<ExprPtr>& shape, TileView& view, const Span& span,
-                               const std::string& op_name) {
+                               const std::string& op_name, bool single_row_left = false) {
   if (!dtype.IsPackedFp4() || source_layout == target_layout) return;
   CHECK_SPAN(shape.size() >= 2, span)
       << op_name << ": changing a packed FP4 packing axis requires at least two dimensions";
   const size_t old_axis = source_layout == TileLayout::col_major ? shape.size() - 2 : shape.size() - 1;
   const size_t new_axis = target_layout == TileLayout::col_major ? shape.size() - 2 : shape.size() - 1;
+  // A row-vector keeps its packed pairs along K even in L0A's column-major
+  // descriptor. There is no second logical row to pair with.
+  auto rows = As<ConstInt>(shape[shape.size() - 2]);
+  if (single_row_left && rows && rows->value_ == 1) return;
   auto convert = [&](std::vector<ExprPtr>& dims) {
     if (dims.empty()) return;
     auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
@@ -772,7 +776,20 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
              args[0]->span_)
       << op_name << ": packed FP4 Mat layout conversion requires a Left or Right destination";
   RetargetPackedFp4Geometry(out_dtype, source_view.blayout, tile_view.blayout, output_shape, tile_view,
-                            args[0]->span_, op_name);
+                            args[0]->span_, op_name, space == MemorySpace::Left);
+  if (out_dtype.IsPackedFp4() && space == MemorySpace::Left && output_shape.size() == 2) {
+    const auto output_rows = As<ConstInt>(output_shape[0]);
+    if (output_rows && output_rows->value_ == 1) {
+      // L0A interprets a one-row descriptor as a K-packed row vector. A
+      // column-major Mat carrier row already holds two logical M values.
+      const auto input_rows = As<ConstInt>(input_shape[0]);
+      CHECK_SPAN(input_rows && input_rows->value_ == 1 &&
+                     (tile_type->GetMemorySpace() == MemorySpace::Left ||
+                      source_view.blayout == TileLayout::row_major),
+                 args[0]->span_)
+          << op_name << ": packed FP4 Left row vectors require one logical source row";
+    }
+  }
 
   // Stamp memory_space_ for every destination so the view is canonicalized once,
   // against the space it is actually a view of (same contract as tile.load).

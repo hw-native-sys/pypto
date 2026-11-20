@@ -142,9 +142,9 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过；A5 真机验证待补 |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过；A5 真机验证待补 |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过；A5 真机验证待补 |
-| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ✅ | ❌ | ✅ | — | A5 frontend + codegen; native FP4 E2M1/E1M2 device tests passed (valid K=64, N=64) |
+| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 frontend + codegen; native FP4 E2M1/E1M2 device tests passed (valid K=64, N=64) |
+| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 frontend + codegen; native FP4 E2M1/E1M2 device tests passed (valid K=64, N=64) |
 | **向量算术与数学（42）** |  |  |  |  |  |  |  |  |
 | pto.tadd | TADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

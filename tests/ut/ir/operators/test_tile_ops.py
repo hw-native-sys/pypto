@@ -9812,6 +9812,44 @@ def test_packed_fp4_extract_and_assemble_native_boundaries(dtype):
         tile.extract(mat, 0, 0, [16, 64], target_memory=ir.MemorySpace.Right)
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_windows_preserve_left_row_vector_packing(dtype):
+    span = ir.Span.unknown()
+    matrix = ir.Var("matrix", ir.TensorType([2, 256], dtype), span)
+    mat = tile.load(matrix, [0, 0], [2, 256], target_memory=ir.MemorySpace.Mat)
+    # This meets GEMV's physical width, but each byte still contains two M values.
+    assert _tile_result_shape(mat) == [1, 512]
+    with pytest.raises(ValueError, match="Left row-vector boundary"):
+        tile.extract(mat, 0, 0, [1, 512], target_memory=ir.MemorySpace.Left)
+
+    left_matrix = ir.Var("left_matrix", ir.TileType([8, 128], dtype, None, None, ir.MemorySpace.Left), span)
+    with pytest.raises(ValueError, match="Left row-vector boundary"):
+        tile.extract(left_matrix, 0, 0, [1, 128], target_memory=ir.MemorySpace.Left)
+    with pytest.raises(ValueError, match="Left row-vector boundary"):
+        tile.slice(left_matrix, [1, 128], [0, 0])
+
+    row = ir.Var("row", ir.TensorType([1, 512], dtype), span)
+    left_row = tile.move(
+        tile.load(row, [0, 0], [1, 512], target_memory=ir.MemorySpace.Mat), ir.MemorySpace.Left
+    )
+    assert _tile_result_shape(tile.extract(left_row, 0, 0, [1, 256], target_memory=ir.MemorySpace.Left)) == [
+        1,
+        256,
+    ]
+    with pytest.raises(ValueError, match="extraction requires zero offset on the packed axis"):
+        tile.extract(left_row, 0, 64, [1, 256], target_memory=ir.MemorySpace.Left)
+    with pytest.raises(ValueError, match="Left row-vector boundary"):
+        tile.transpose_view(left_row)
+    left_col = ir.Var("left_col", ir.TileType([128, 1], dtype, None, None, ir.MemorySpace.Left), span)
+    with pytest.raises(ValueError, match="Left row-vector boundary"):
+        tile.transpose_view(left_col)
+
+    nd = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box)
+    left_rows = ir.Var("left_rows", ir.TileType([2, 64], dtype, None, nd, ir.MemorySpace.Left), span)
+    with pytest.raises(ValueError, match="packed FP4 Left row vectors require one logical source row"):
+        tile.move(left_rows, target_memory=ir.MemorySpace.Left, blayout=ir.TileLayout.col_major)
+
+
 @pytest.mark.parametrize("namespace", ["tensor", "tile"])
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize(

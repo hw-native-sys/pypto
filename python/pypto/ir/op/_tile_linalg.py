@@ -251,6 +251,46 @@ def matmul_mx_bias(
     )
 
 
+def gemv_mx(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matrix-vector multiplication: C = gemv_mx(A, A_scale, B, B_scale)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.gemv_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
+
+
+def gemv_mx_acc(
+    acc: Expr,
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matmul with accumulation: acc += gemv_mx(...)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.gemv_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
+
+
+def gemv_mx_bias(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    bias: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matmul with bias: C = gemv_mx(...) + bias."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.gemv_mx_bias", [lhs, lhs_scale, rhs, rhs_scale, bias], {}, actual_span
+    )
+
+
 def tget_scale_addr(dst_scale: Expr, src: Expr, span: Span | None = None) -> Call:
     """Build the compiler-internal MX scale-address binding operation."""
     actual_span = _get_span_or_capture(span)

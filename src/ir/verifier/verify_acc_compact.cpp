@@ -58,8 +58,8 @@ bool IsFractalSpace(MemorySpace space) {
 /// `tile.tpush_to_aiv`. Both shipped as wrong numbers on device with no
 /// diagnostic at any layer.
 ///
-/// The check sits on `tile.matmul_acc` / `tile.matmul_mx_acc`, which is where
-/// both halves of the comparison are in hand: the lhs whose valid rows `mad`
+/// The check sits on `tile.matmul_acc`, `tile.matmul_mx_acc`, and `tile.gemv_mx_acc`.
+/// Both halves of the comparison are in hand: the lhs whose valid rows `mad`
 /// takes M from, and the accumulator buffer the result aliases in place. That is
 /// also the one op that *inherits* compact rather than deriving it
 /// (`matmul.cpp`), so it is exactly where a chain seeded by a non-compact buffer
@@ -129,10 +129,13 @@ class AccCompactVisitor : public IRVisitor {
   }
 
  private:
-  /// `args = (accumulator, lhs, rhs)`. The lhs is the L0A operand whose valid
-  /// rows `mad` takes M from; the accumulator is the L0C buffer it writes.
+  /// The first two operands are the accumulator and the L0A lhs whose valid
+  /// rows `mad` takes M from.
   void CheckAccumulate(const CallPtr& call) {
-    if (!IsOp(call, "tile.matmul_acc") && !IsOp(call, "tile.matmul_mx_acc")) return;
+    if (!IsOp(call, "tile.matmul_acc") && !IsOp(call, "tile.matmul_mx_acc") &&
+        !IsOp(call, "tile.gemv_mx_acc")) {
+      return;
+    }
     if (call->args_.size() < 2 || !call->args_[0] || !call->args_[1]) return;
 
     auto acc_type = As<TileType>(call->args_[0]->GetType());

@@ -515,5 +515,84 @@ class TestTGetScaleAddr:
             ir.op.tile.tget_scale_addr(dst, src, span)
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP8E4M3FN, DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_gemv_mx_single_row_and_variants(dtype):
+    span = ir.Span.unknown()
+    packed = dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2)
+    physical_k = 1024 if packed else 512
+    lhs = _tile("lhs", [1, 512], dtype, valid_shape=[1, 64 if packed else 128])
+    rhs = _tile("rhs", [physical_k, 32 if packed else 64], dtype, valid_shape=[128, 32 if packed else 64])
+    sa = _tile("sa", [1, 4], DataType.FP8E8M0)
+    sb = _tile("sb", [4, 64], DataType.FP8E8M0)
+    product = ir.op.tile.gemv_mx(lhs, sa, rhs, sb)
+    assert isinstance(product.type, ir.TileType)
+    assert all(isinstance(d, ir.ConstInt) for d in product.type.shape)
+    assert [d.value for d in product.type.shape if isinstance(d, ir.ConstInt)] == [1, 64]
+    assert product.type.tile_view is not None
+    assert product.type.tile_view.compact == ir.CompactMode.normal
+    acc = ir.Var("acc", product.type, span)
+    bias = _tile("bias", [1, 64], DataType.FP32)
+    for call in (
+        ir.op.tile.gemv_mx_acc(acc, lhs, sa, rhs, sb),
+        ir.op.tile.gemv_mx_bias(lhs, sa, rhs, sb, bias),
+    ):
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP32
+    with pytest.raises(ValueError, match="acc rows"):
+        ir.op.tile.gemv_mx_acc(_tile("bad_acc", [16, 64], DataType.FP32), lhs, sa, rhs, sb)
+    with pytest.raises(ValueError, match="requires a compact accumulator"):
+        ir.op.tile.gemv_mx_acc(_tile("bad_acc", [1, 64], DataType.FP32), lhs, sa, rhs, sb)
+    with pytest.raises(ValueError, match="512-byte row-vector alignment"):
+        ir.op.tile.gemv_mx(_tile("short_lhs", [1, 128], dtype), sa, rhs, sb)
+    with pytest.raises(ValueError, match="physical M exactly 1"):
+        ir.op.tile.gemv_mx(_tile("bad_lhs", [16, 128], dtype), sa, rhs, sb)
+    with pytest.raises(ValueError, match="lhs_scale"):
+        ir.op.tile.gemv_mx(lhs, _tile("bad_scale", [16, 4], DataType.FP8E8M0), rhs, sb)
+
+
+@pytest.mark.parametrize("name", ["gemv_mx", "gemv_mx_acc", "gemv_mx_bias"])
+def test_gemv_mx_public_exports_and_memory_contract(name):
+    assert getattr(pl, name) is getattr(pl.tile, name)
+    spec = ir.get_op_memory_spec(f"tile.{name}")
+    assert spec is not None
+    assert spec["output_memory"] == ir.MemorySpace.Acc
+    constraints = [
+        [ir.MemorySpace.Left],
+        [ir.MemorySpace.LeftScale],
+        [ir.MemorySpace.Right],
+        [ir.MemorySpace.RightScale],
+    ]
+    if name == "gemv_mx_acc":
+        constraints.insert(0, [ir.MemorySpace.Acc])
+    elif name == "gemv_mx_bias":
+        constraints.append([ir.MemorySpace.Bias])
+    assert spec["input_constraints"] == constraints
+
+
+def test_gemv_mx_scales_follow_valid_k():
+    lhs = _tile("lhs", [1, 512], DataType.FP8E4M3FN, valid_shape=[1, 32])
+    rhs = _tile("rhs", [512, 64], DataType.FP8E4M3FN, valid_shape=[32, 20])
+    sa = _tile("sa", [1, 1], DataType.FP8E8M0)
+    sb = _tile("sb", [1, 64], DataType.FP8E8M0, valid_shape=[1, 20])
+    call = ir.op.tile.gemv_mx(lhs, sa, rhs, sb)
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.tile_view is not None
+    assert [d.value for d in call.type.tile_view.valid_shape if isinstance(d, ir.ConstInt)] == [1, 20]
+
+
+@pytest.mark.parametrize("load_column_major", [False, True])
+def test_fp4_left_cannot_collapse_two_logical_rows(load_column_major):
+    span = ir.Span.unknown()
+    if load_column_major:
+        tensor = ir.Var("a", ir.TensorType([2, 512], DataType.FP4E2M1X2), span)
+        mat = ir.op.tile.load(tensor, [0, 0], [2, 512], target_memory=ir.MemorySpace.Mat)
+    else:
+        view = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.col_major)
+        mat_type = ir.TileType([2, 512], DataType.FP4E2M1X2, tile_view=view, memory_space=ir.MemorySpace.Mat)
+        mat = ir.Var("mat", mat_type, span)
+    with pytest.raises(ValueError, match="packed FP4 Left row vectors require one logical source row"):
+        ir.op.tile.move(mat, ir.MemorySpace.Left)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

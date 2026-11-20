@@ -190,6 +190,8 @@ static const std::unordered_set<std::string_view>& LayoutAwareOps() {
       "tile.fillpad",
       // Fractal / window / index addressed.
       "tile.matmul",
+      "tile.gemv_mx",
+      "tile.gemv_mx_bias",
       "tile.matmul_mx",
       "tile.matmul_mx_bias",
       "tile.matmul_bias",
@@ -987,6 +989,8 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
+    {"tile.gemv_mx", "pto.tgemv.mx", 4},
+    {"tile.gemv_mx_bias", "pto.tgemv.mx.bias", 5},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
     {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
     // tile.matmul has phase-aware custom codegen.
@@ -1488,6 +1492,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return MakePhasedMatmulCodegenPTO("pto.tgemv", 2, op, codegen);
   });
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv"));
+  reg("tile.gemv_mx_acc", make_mx_acc_codegen("pto.tgemv.mx.acc"));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakePhasedMatmulCodegenPTO("pto.tgemv.bias", 3, op, codegen);
