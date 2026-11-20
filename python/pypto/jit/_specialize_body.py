@@ -16,14 +16,17 @@ and rebinding rules stay aligned with emitted source.
 
 import ast
 from collections.abc import Iterator, Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pypto.language.diagnostics import ParserError
 from pypto.pypto_core import arith, ir
 
 from . import _specialize_values as values
-from ._call_syntax import SUBMIT_DISPATCH_KEYWORDS, dependency_call
+from ._call_syntax import PLACEMENT_KEYWORDS, SUBMIT_DISPATCH_KEYWORDS, dependency_call
 from ._specialize_types import DynDim, TensorMeta
+
+if TYPE_CHECKING:
+    from .specializer import SpecializeContext
 
 _BindingValue = TypeVar("_BindingValue")
 
@@ -96,16 +99,15 @@ class BodyTransformer(ast.NodeTransformer):
         param_names: list[str] | None = None,
         initial_used_names: set[str] | None = None,
         py_globals: Mapping[str, Any] | None = None,
-        dep_param_names: dict[str, list[str]] | None = None,
+        callee_contexts: "Mapping[str, SpecializeContext] | None" = None,
         dep_func_names: dict[str, str] | None = None,
         constexpr_values: Mapping[str, str] | None = None,
-        dep_constexpr_params: dict[str, set[str]] | None = None,
         dep_call_targets: Mapping[int, str] | None = None,
     ) -> None:
         super().__init__()
         self._meta = dict(tensor_meta)
         self._constexpr = dict(constexpr_values or {})
-        self._dep_constexpr_params = dep_constexpr_params or {}
+        self._callee_contexts = callee_contexts or {}
         self._dep_names = dep_names
         # Call name → generated function name, for deps this body reaches
         # under a different name (an aliased import). ``visit_Call`` resolves
@@ -128,11 +130,6 @@ class BodyTransformer(ast.NodeTransformer):
             for i, dim in enumerate(meta.shape):
                 if isinstance(dim, DynDim) and dim.name not in self._dynvar_anchors:
                     self._dynvar_anchors[dim.name] = (pname, i)
-        # Maps dep_name → ordered parameter list. Used by ``visit_Call`` to
-        # normalise keyword args to positional, so generated
-        # ``self.<dep>(a, out=out)`` calls become parser-accepted
-        # ``self.<dep>(a, out)``.
-        self._dep_param_names = dep_param_names or {}
         # Module-level globals from the originating function. Used by
         # ``visit_Name`` to inline imported int/float/bool constants
         # (e.g. ``BATCH = 16`` from a config module) at their use sites.
@@ -654,14 +651,24 @@ class BodyTransformer(ast.NodeTransformer):
                 attr=dep_name,
                 ctx=ast.Load(),
             )
-            param_order = self._dep_param_names.get(dep_name)
-            constexpr_params = self._dep_constexpr_params.get(dep_name, set())
-            if param_order is not None and (node.keywords or constexpr_params):
+            is_submit = original is not normalized
+            callee = self._callee_contexts.get(dep_name)
+            # Only HOST entries discover chip orchestrators as JIT dependencies.
+            if is_submit:
+                dispatch_keys = SUBMIT_DISPATCH_KEYWORDS
+            elif callee is not None and callee.func_type in (None, "orchestration"):
+                dispatch_keys = PLACEMENT_KEYWORDS
+            else:
+                dispatch_keys = frozenset()
+            callee_keywords = [kw for kw in original.keywords if kw.arg not in dispatch_keys]
+            if callee is not None and (callee_keywords or callee.constexpr_values):
+                param_order = callee.param_names
+                constexpr_params = callee.constexpr_values
                 bound_args = [
                     (param_order[index] if index < len(param_order) else None, arg)
                     for index, arg in enumerate(node.args)
                 ]
-                kw_by_name = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+                kw_by_name = {kw.arg: kw.value for kw in callee_keywords if kw.arg is not None}
                 # Append keyword-bound args in dep's parameter order, skipping
                 # params already covered by positional args.
                 for param in param_order[len(node.args) :]:
@@ -670,7 +677,7 @@ class BodyTransformer(ast.NodeTransformer):
                 # Any remaining keywords (e.g. **kwargs splats or unknown names)
                 # are kept as-is so we don't silently drop them; the parser
                 # will surface them as a clear error.
-                remaining_kw = [kw for kw in node.keywords if kw.arg is None or kw.arg in kw_by_name]
+                remaining_kw = [kw for kw in callee_keywords if kw.arg is None or kw.arg in kw_by_name]
                 if constexpr_params:
                     # Drop the callee's compile-time arguments. It resolved them
                     # during specialization and its generated signature no longer
@@ -679,7 +686,7 @@ class BodyTransformer(ast.NodeTransformer):
                     # slots: a later keyword constexpr is not the missing output.
                     bound_args = [(param, arg) for param, arg in bound_args if param not in constexpr_params]
                     remaining_kw = [kw for kw in remaining_kw if kw.arg not in constexpr_params]
-                if original is not normalized:
+                if is_submit:
                     # Submit can allocate a suffix of omitted outputs. The
                     # native ABI has no way to encode a hole in that prefix.
                     runtime_params = [param for param in param_order if param not in constexpr_params]
@@ -690,16 +697,12 @@ class BodyTransformer(ast.NodeTransformer):
                         )
                 new_node = ast.Call(func=new_func, args=[arg for _, arg in bound_args], keywords=remaining_kw)
             else:
-                new_node = ast.Call(func=new_func, args=node.args, keywords=node.keywords)
-            if original is not normalized:
-                # Keep dispatch metadata on Submit while specializing the callee's
-                # constexpr/keyword arguments exactly like an ordinary JIT call.
-                dispatch_keywords = [kw for kw in original.keywords if kw.arg in SUBMIT_DISPATCH_KEYWORDS]
+                new_node = ast.Call(func=new_func, args=node.args, keywords=callee_keywords)
+            if is_submit:
                 new_node = ast.Call(
-                    func=original.func,
-                    args=[new_func, *new_node.args],
-                    keywords=[*new_node.keywords, *dispatch_keywords],
+                    func=original.func, args=[new_func, *new_node.args], keywords=new_node.keywords
                 )
+            new_node.keywords.extend(kw for kw in original.keywords if kw.arg in dispatch_keys)
             ast.copy_location(new_node, original)
             return cast("ast.expr", self.generic_visit(new_node))
         return cast("ast.expr", self.generic_visit(node))
