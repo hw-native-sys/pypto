@@ -2473,6 +2473,78 @@ class Program:
         with pytest.raises(ValueError, match="static physical strides"):
             passes.optimize_orch_tensors()(Program)
 
+    @pytest.mark.parametrize("layout", ["dense", "crop", "mixed", "clamp"])
+    @pytest.mark.parametrize("nested", [False, True], ids=["direct", "orchestrated"])
+    def test_external_dynamic_pitch_requires_packed_storage_at_every_call(self, tmp_path, layout, nested):
+        cpp = tmp_path / "external.cpp"
+        cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        callee = "dispatch" if nested else "kernel"
+        calls = {
+            "dense": f"self.{callee}(slab)",
+            "crop": f"self.{callee}(crop)",
+            "mixed": f"self.{callee}(slab)\n        self.{callee}(crop)",
+            "clamp": f"self.{callee}(clamped)",
+        }
+        source = f"""
+W = pl.dynamic("W")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
+    def kernel(self, x: pl.Tensor[[8, W], pl.FP32]):
+        ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def dispatch(self, x: pl.Tensor[[8, W], pl.FP32]):
+        self.kernel(x)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, data: pl.Tensor[[2, 8, W], pl.FP32], wider: pl.Tensor[[2, 8, W + 8], pl.FP32]):
+        slab = pl.tensor.slice(data, [1, 8, W], [1, 0, 0], drop_dims=[0])
+        crop = pl.tensor.slice(wider, [1, 8, W], [1, 0, 7], drop_dims=[0])
+        clamped = pl.tensor.slice(data, [1, 8, W], [1, 0, 1], drop_dims=[0], clamp=True)
+        {calls[layout]}
+"""
+        program = pl.parse_program(source)
+        if layout == "dense":
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(program), program)
+        else:
+            with pytest.raises(
+                ValueError, match="consistent physical strides|static stride|static physical stride"
+            ):
+                passes.optimize_orch_tensors()(program)
+
+    @pytest.mark.parametrize("use_backedge", [False, True], ids=["later_caller", "loop_backedge"])
+    def test_external_derived_window_requires_consistent_parent_pitch(self, tmp_path, use_backedge):
+        cpp = tmp_path / "external.cpp"
+        cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+        body = (
+            "for _, (carried,) in pl.range(2, init_values=(parent,)):\n"
+            "            self.dispatch(carried)\n"
+            "            next_parent = pl.tensor.slice(wider, [10, W], [0, 0])\n"
+            "            unused = pl.yield_(next_parent)"
+            if use_backedge
+            else "self.dispatch(parent)\n        self.dispatch(wider)"
+        )
+        source = f"""
+W = pl.dynamic("W")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
+    def kernel(self, x: pl.Tensor[[8, W], pl.FP32]):
+        ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def dispatch(self, x: pl.Tensor[[10, W], pl.FP32]):
+        slab = pl.tensor.slice(x, [8, W], [1, 0])
+        self.kernel(slab)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[10, W], pl.FP32], wider: pl.Tensor[[10, W + 8], pl.FP32]):
+        {body}
+"""
+        with pytest.raises(ValueError, match="consistent physical strides|static physical strides"):
+            passes.optimize_orch_tensors()(pl.parse_program(source))
+
     def test_aiv_blocked_slice_keeps_layout_legalization(self):
         """NZ slices must keep the existing blocked-layout lowering path."""
 
