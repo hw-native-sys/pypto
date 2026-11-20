@@ -104,9 +104,6 @@ void OrchestrationStmtCodegen::TaskDispatchPlan::Emit(OrchestrationStmtCodegen& 
     cg.EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
   }
   cg.EmitSelectiveDumpCall(task_var, params);
-  for (const auto& line : pre_lines) {
-    cg.EmitIndentedLine(line);
-  }
   if (deps_before_launch) {
     // Direct-call order: deps -> launch_spec -> task metadata.
     cg.EmitManualDeps(call, task_var);
@@ -121,6 +118,11 @@ void OrchestrationStmtCodegen::TaskDispatchPlan::Emit(OrchestrationStmtCodegen& 
     cg.EmitTaskTimingSlot(task_var, call);
     cg.EmitPredicateHint(task_var, call);
     cg.EmitManualDeps(call, task_var);
+  }
+  // Pre-submit checks must observe the final launch spec and task metadata,
+  // including settings supplied by explicit submissions and wrapper functions.
+  for (const auto& line : pre_lines) {
+    cg.EmitIndentedLine(line);
   }
   cg.EmitTaskSubmitAndBind(submit_expr, capture_outputs);
 }
@@ -725,7 +727,9 @@ void OrchestrationStmtCodegen::EmitLaunchSpec(const std::string& task_var, const
 // no-op there. Emitted on the producer task's CoreTaskArgs before its rt_submit_* —
 // see simpler#1065 ("codegen-side emission of set_allow_early_resolve()").
 void OrchestrationStmtCodegen::EmitEarlyResolveHint(const std::string& task_var, const CallPtr& call) {
-  if (call->GetAttr<bool>("allow_early_resolve", false)) {
+  // Native completion requirements take precedence over speculative hints on
+  // every producer in the program, including ordinary PyPTO kernels.
+  if (!require_task_completion_ && call->GetAttr<bool>("allow_early_resolve", false)) {
     EmitIndentedLine(task_var + ".set_allow_early_resolve(true);");
   }
 }
@@ -927,8 +931,8 @@ void OrchestrationStmtCodegen::AppendExternalPreflight(TaskDispatchPlan& plan,
       << "External preflight requires a valid C++ checker symbol";
   CHECK_SPAN(kernel_func->HasAttr(kAttrExternalSource), kernel_func->span_)
       << "External preflight requires a native external source";
-  // pre_lines run after all add_* calls and before rt_submit. The checker sees
-  // exactly the tensor-first ordering dispatched to the native wrapper, even
+  // pre_lines run after all arguments and launch settings, just before rt_submit.
+  // The checker sees the final launch and tensor-first argument ordering, even
   // when an Spmd/Group wrapper permutes the caller's parameters.
   const std::string check = symbol + "(" + plan.task_var + ");";
   if (std::find(plan.pre_lines.begin(), plan.pre_lines.end(), check) == plan.pre_lines.end()) {
