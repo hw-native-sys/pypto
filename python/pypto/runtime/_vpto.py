@@ -32,6 +32,16 @@ PTOAS_FLAGS = (
 # the persistent loader starts at byte zero of the final .text payload.
 CALLER_FLAGS = ("-ffunction-sections",)
 LINK_SYMBOL_ORDER = ("kernel_entry",)
+
+# Inline-assembly SIMT entries require PTOAS's object-level launch-size check.
+# Keep scheduling deterministic and let PTOAS own any supported size repair.
+SIMT_OBJECT_FLAGS = (
+    "--emit-vpto-device-object",
+    "--vpto-fix-vfsimt-size=auto",
+    "--bisheng-vec-misched=on",
+)
+
+
 DEVICE_FLAGS = (
     "--cce-aicore-arch=dav-c310-vec",
     "--cce-aicore-only",
@@ -46,6 +56,34 @@ DEVICE_FLAGS = (
 )
 
 REG_AUTO_SYNC_PREFIX = "// pypto.reg_auto_sync:"
+
+
+def simt_object_aliases(llvm: str, data: bytes) -> tuple[str, ...]:
+    """Map LLVM logical exports to PTOAS's documented native AIV ABI names.
+
+    Object emission adds .vector (new CANN) or _mix_aiv (old CANN). Inspect
+    the object instead of guessing the installed CANN's suffix. Only alias
+    exports observed in the LLVM input, never unrelated native symbols.
+    """
+    exports = _device_image.device_object_exports(data)
+    aliases: list[str] = []
+    found_export = False
+    for signature in re.findall(r"^define\s+([^\n{]+)", llvm, re.MULTILINE):
+        if re.search(r"\b(?:simt_entry|internal|private)\b", signature.partition("@")[0]):
+            continue
+        match = re.search(r"@([A-Za-z_][A-Za-z_0-9.]*)\(", signature)
+        if match is None:
+            raise ValueError(f"Unsupported SIMT object export signature: {signature}")
+        name = match[1]
+        candidates = [symbol for symbol in (name, f"{name}.vector", f"{name}_mix_aiv") if symbol in exports]
+        if len(candidates) != 1:
+            raise ValueError(f"SIMT object export {name!r} needs one native definition, got {candidates}")
+        found_export = True
+        if candidates[0] != name:
+            aliases.append(f"--defsym={name}={candidates[0]}")
+    if not found_export:
+        raise ValueError("SIMT object has no logical exports")
+    return tuple(aliases)
 
 
 def snapshot_sources(sources: tuple[str, ...]) -> tuple[str, ...]:
