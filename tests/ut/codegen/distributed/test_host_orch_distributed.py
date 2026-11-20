@@ -2336,7 +2336,7 @@ def test_if_cross_branch_phi_yields_tensors() -> None:
     )
 
 
-def test_host_window_requests_urma_and_context():
+def test_host_window_without_urma_uses_domain_context():
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -2353,8 +2353,8 @@ def test_host_window_requests_urma_and_context():
     code = _lower(Prog)
     compile(code, "host_domain.py", "exec")
     assert "memory_source=AddressSpace.HOST" in code
-    assert 'workspace_engines=("urma",)' in code
-    assert '__comm_d0.device_context(0, workspace_engines=("urma",))' in code
+    assert "workspace_engines" not in code
+    assert "__comm_d0.device_context(0)" in code
     assert "host._requires_host_domain = True" in code
     assert "validate_host_domain_runtime" not in code
 
@@ -2395,25 +2395,42 @@ def test_host_window_initializer_is_only_a_runtime_binding(key, monkeypatch):
     assert "open(" not in code
 
 
-def test_host_peer_mte_is_rejected_through_chip_call():
+@pytest.mark.parametrize("use_urma", [False, True])
+def test_host_peer_mte_through_chip_call(use_urma):
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.InCore)
-        def read(self, x: pld.DistributedTensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+        def read(
+            self,
+            x: pld.DistributedTensor[[1, 64], pl.FP32],
+            out: pl.Out[pld.DistributedTensor[[1, 64], pl.FP32]],
+        ):
+            if use_urma:
+                pld.tensor.get_async(out, 1, x)
             pld.tensor.get(out, 1, x)
 
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip(self, x: pld.DistributedTensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+        def chip(
+            self,
+            x: pld.DistributedTensor[[1, 64], pl.FP32],
+            out: pl.Out[pld.DistributedTensor[[1, 64], pl.FP32]],
+        ):
             self.read(x, out)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host(self, out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+        def host(self):
             buf = pld.alloc_window_buffer(256, memory_source="host")
+            out_buf = pld.alloc_window_buffer(256)
             table = pld.window(buf, [1, 64], dtype=pl.FP32)
+            out = pld.window(out_buf, [1, 64], dtype=pl.FP32)
             self.chip(table, out, device=0)
 
-    with pytest.raises(ValueError, match="Host communication windows require URMA"):
-        _lower(Prog)
+    # Fold the selector before engine detection. Mixed URMA/MTE is not rejected.
+    code = _lower(passes.simplify()(Prog))
+    compile(code, "host_peer_access.py", "exec")
+    assert "memory_source=AddressSpace.HOST" in code
+    assert code.count('workspace_engines=("urma",)') == (2 if use_urma else 0)
+    assert "__comm_d0.device_context(0)" in code
 
 
 def test_host_local_window_can_share_chip_with_device_peer_access():
@@ -2449,7 +2466,7 @@ def test_host_local_window_can_share_chip_with_device_peer_access():
     assert code.count("memory_source=AddressSpace.HOST") == 1
 
 
-def test_host_collective_rejects_peer_mte_before_builtin_lowering():
+def test_host_collective_allows_peer_mte_before_builtin_lowering():
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -2464,14 +2481,16 @@ def test_host_collective_rejects_peer_mte_before_builtin_lowering():
                 self.chip(signal, device=rank)
             pld.tensor.barrier(signal)
 
-    with pytest.raises(ValueError, match="Host communication windows require URMA"):
-        _lower_host_collectives(Prog)
+    code, _ = _lower_host_collectives(Prog)
+    compile(code, "host_collective.py", "exec")
+    assert "memory_source=AddressSpace.HOST" in code
+    assert "workspace_engines" not in code
 
 
 @pytest.mark.parametrize("indexed", [False, True], ids=["all_to_all_v", "indexed_all_to_all_v"])
 @pytest.mark.parametrize("host_operand", ["input", "target", "signal", "send_counts", "recv_counts"])
-def test_l2_collective_checks_host_peer_access_after_builtin_lowering(indexed, host_operand):
-    """Builtin stubs hide peer accesses, including a plain-Tensor send_counts formal."""
+def test_l2_collective_allows_host_peer_access_after_builtin_lowering(indexed, host_operand):
+    """Host backing does not force URMA or reject builtins that also use MTE."""
     input_source = "host" if host_operand == "input" else "device"
     target_source = "host" if host_operand == "target" else "device"
     signal_source = "host" if host_operand == "signal" else "device"
@@ -2516,14 +2535,10 @@ def test_l2_collective_checks_host_peer_access_after_builtin_lowering(indexed, h
     program = passes.simplify()(Prog)
     program = passes.normalize_return_order()(program)
     program = passes.lower_l2_tensor_collectives()(program)
-    if host_operand in {"target", "signal", "send_counts"}:
-        with pytest.raises(ValueError, match="Host communication windows require URMA.*__builtin_"):
-            _lower(program)
-    else:
-        # Local-only Host input/recv_counts must not be rejected with peer operands.
-        code = _lower(program)
-        compile(code, "host_l2_collective.py", "exec")
-        assert code.count("memory_source=AddressSpace.HOST") == 1
+    code = _lower(program)
+    compile(code, "host_l2_collective.py", "exec")
+    assert code.count("memory_source=AddressSpace.HOST") == 1
+    assert ('workspace_engines=("urma",)' in code) == indexed
 
 
 if __name__ == "__main__":

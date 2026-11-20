@@ -2485,7 +2485,6 @@ def test_host_and_device_windows_have_separate_domains():
                         memory_source="host",
                     ),
                 ],
-                engines=["urma"],
             ):
                 with pl._dump.comm_domain(
                     name="comm_d1",
@@ -2540,7 +2539,7 @@ def test_host_and_device_windows_have_separate_domains():
     scope = _get_func(after, "host").body
     assert isinstance(scope, ir.CommDomainScopeStmt)
     assert [slot.memory_source for slot in scope.slots] == ["host", "host"]
-    assert list(scope.engines) == ["urma"]
+    assert list(scope.engines) == []
     assert scope.slots[0].init == "engram_l1"
     ir.assert_structural_equal(
         scope.slots[0], ir.deserialize(ir.serialize(scope.slots[0])), enable_auto_mapping=True

@@ -232,24 +232,24 @@ absent definitions are outside this contract. Legacy informational
 and the private `window_buffer` text descriptor. Slots are grouped by both device
 coverage and memory source: Host and Device allocations never share a physical domain.
 
-Host codegen requests `AddressSpace.HOST` and `workspace_engines=("urma",)` from
-Simpler, and obtains the per-rank context with the URMA workspace. This requires
-Simpler #2913 or later and its supported same-machine A5 `tensormap_and_ringbuffer`
-configuration. Runtime API capabilities are checked once when loading the generated
-entry during worker setup, including `initializer` support when needed; dispatch does
-not repeat signature inspection. Simpler validates the platform and runtime combination. The current runtime submodule already provides this API.
+Host codegen requests `AddressSpace.HOST` from Simpler. Engine requirements follow
+the same program-wide usage detection as Device domains: an URMA asynchronous
+transfer or indexed collective adds `workspace_engines=("urma",)` to every domain;
+Host backing alone does not request URMA. The per-rank `device_context(rank)` accessor
+uses the engines already provisioned on the domain and tracks context lifetime.
 
-The owning rank may use its device-mapped tensor locally. Host peer windows are not
-MTE mappings: peer access requires URMA. Existing peer-MTE primitives and collectives
-are rejected when their remote operands originate from Host windows, including through
-forwarded chip/InCore parameters. URMA asynchronous operators are not classified as
-peer MTE. Host peer URMA reads remain a separate execution feature.
+Runtime API capabilities are checked once when loading the generated entry during
+worker setup, including `initializer` support when needed; dispatch does not repeat
+signature inspection. Simpler validates the platform and runtime combination. The
+current runtime submodule includes Simpler #3146: with no workspace engines,
+A5 Host domains map local and peer windows for synchronous MTE reads on
+`tensormap_and_ringbuffer`, `host_build_graph`, and `percounter`. It also includes
+Simpler #3174, which preserves the local window base for Host URMA domains.
 
-The check also covers CHIP `all_to_all_v` and `indexed_all_to_all_v` after builtin
-lowering: `target` supplies the peer-mapped context, and `signal` / `send_counts`
-are accessed directly on peers. These operands cannot use Host windows, including
-`send_counts` whose synthesized formal is a plain Tensor. Local-only `input` and
-`recv_counts` may use Host windows.
+The compiler currently does not reject Host peer-MTE operations or mixed URMA/MTE
+use, including CHIP collectives after builtin lowering. This does not establish
+hardware support for every combination; execution depends on the runtime's mappings
+and the communication operations used by the kernel.
 
 ### Runtime source initialization
 

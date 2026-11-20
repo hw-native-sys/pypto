@@ -800,7 +800,8 @@ def test_chip_rail_requests_no_async_workspace(tmp_path):
 
 
 @pytest.mark.parametrize("skip_ptoas", [True, False])
-def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_ptoas):
+@pytest.mark.parametrize("memory_source", ["device", "host"])
+def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_ptoas, memory_source):
     """End-to-end A9: an async transfer reaches the host domain's engine list.
 
     The engine scan must recognise ``put_async`` on the chip function, the pass
@@ -845,7 +846,7 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            dst_buf = pld.alloc_window_buffer(window_bytes)
+            dst_buf = pld.alloc_window_buffer(window_bytes, memory_source=memory_source)
             src_buf = pld.alloc_window_buffer(window_bytes)
             dst = pld.window(dst_buf, [SIZE], dtype=pl.FP32)
             src = pld.window(src_buf, [SIZE], dtype=pl.FP32)
@@ -863,6 +864,11 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
     assert 'workspace_engines=("urma",)' in host_orch, host_orch
+    # Host and Device windows form separate domains, both provisioned from usage.
+    assert host_orch.count('workspace_engines=("urma",)') == (2 if memory_source == "host" else 1)
+    if memory_source == "host":
+        assert "memory_source=AddressSpace.HOST" in host_orch
+        assert "__comm_d0.device_context(0)" in host_orch
     # No synchronous fallback may be introduced by the lowering.
     assert "DmaEngine" not in host_orch, host_orch
     if skip_ptoas:

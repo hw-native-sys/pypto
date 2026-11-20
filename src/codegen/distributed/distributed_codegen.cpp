@@ -631,9 +631,6 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   }
   if (memory_source == "host") {
     emitter_.EmitLine("memory_source=AddressSpace.HOST,");
-    INTERNAL_CHECK_SPAN(std::find(op->engines_.begin(), op->engines_.end(), "urma") != op->engines_.end(),
-                        op->span_)
-        << "Internal error: Host communication domain is missing its URMA engine requirement";
   }
   if (!initializers.str().empty()) {
     emitter_.EmitLine("initializer=make_window_initializer(_window_sources, (" + initializers.str() +
@@ -1852,7 +1849,9 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
       << "pld.system.get_comm_ctx host lowering requires a window-bound DistributedTensor";
   const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(*window_buffer));
   if ((*window_buffer)->memory_source_ == "host") {
-    return handle_var + ".device_context(" + rank_expr + ", workspace_engines=(\"urma\",))";
+    // Use the engines provisioned on the domain; this accessor also tracks
+    // scalar-only context use for the Host mapping lifetime.
+    return handle_var + ".device_context(" + rank_expr + ")";
   }
   return handle_var + "[" + rank_expr + "].device_ctx";
 }

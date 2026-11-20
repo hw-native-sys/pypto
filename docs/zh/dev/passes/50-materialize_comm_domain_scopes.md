@@ -191,21 +191,20 @@ pass 运行之后：
 `WindowBuffer.memory_source` 在克隆、序列化和私有 `window_buffer` 文本描述符中保留。
 通信域按设备覆盖范围和内存来源共同分组：Host 与 Device 分配不共享物理通信域。
 
-Host 代码生成向 Simpler 请求 `AddressSpace.HOST` 和 `workspace_engines=("urma",)`，
-并获取带 URMA 工作区的各 rank 通信上下文。这要求 Simpler #2913 或更新版本，以及其支持的
-同机 A5 `tensormap_and_ringbuffer` 配置。运行时 API 能力在 worker 初始化加载入口时检查一次，
-需要初始化时也检查 `initializer` 参数；每次派发不再重复反射函数签名。平台和运行时组合由
-Simpler 校验。当前 runtime 子模块已提供此 API。
+Host 代码生成向 Simpler 请求 `AddressSpace.HOST`。引擎需求与 Device 通信域一样，
+通过程序级使用检测确定：URMA 异步传输或 indexed 集合通信会为所有通信域添加
+`workspace_engines=("urma",)`；仅使用 Host 存储不会申请 URMA。
+各 rank 的 `device_context(rank)` 使用通信域已配置的引擎，并跟踪上下文生命周期。
 
-所属 rank 可以通过设备映射的 tensor 进行本地访问。Host peer 窗口不是 MTE 映射，
-远端访问必须走 URMA。现有 peer-MTE 原语和集合通信在远端操作数来自 Host 窗口时会被拒绝，
-包括通过 chip/InCore 参数转发的情况。URMA 异步算子不被归类为 peer MTE。
-Host peer URMA 读取的执行接入仍是独立的后续工作。
+运行时 API 能力在 worker 初始化加载入口时检查一次，需要初始化时也检查 `initializer`
+参数；每次派发不再重复反射函数签名。平台和运行时组合由 Simpler 校验，当前 runtime
+子模块包含 Simpler #3146：未申请工作区引擎时，A5 Host 域会映射本地及 peer 窗口，
+支持 `tensormap_and_ringbuffer`、`host_build_graph` 和 `percounter` 的同步 MTE 读取。
+同时包含 #3174，为 Host URMA 域保留本地窗口基地址。
 
-检查也覆盖 builtin lowering 后的 CHIP `all_to_all_v` 和 `indexed_all_to_all_v`：
-`target` 提供带 peer 映射的通信上下文，`signal` / `send_counts` 会被直接远端访问。
-这些操作数不能使用 Host 窗口；即使 `send_counts` 的合成形参是普通 Tensor，也会检查其来源。
-只做本地访问的 `input` 和 `recv_counts` 可以使用 Host 窗口。
+编译器暂不拒绝 Host peer-MTE 操作，也不检测 URMA/MTE 混用，包括 builtin lowering
+后的 CHIP 集合通信。这不代表所有组合均受硬件支持；执行依赖运行时的内存映射和 kernel
+使用的通信操作。
 
 ### 运行时来源初始化
 
