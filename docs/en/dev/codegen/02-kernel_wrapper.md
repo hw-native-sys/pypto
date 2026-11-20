@@ -53,7 +53,7 @@ through `PassContext::GetRuntime()`. Code generation resolves it for the target
 platform before writing `RUNTIME_CONFIG["runtime"]`.
 
 | Compile-time selection | Target | Name in the artifact |
-| --- | --- | --- |
+| ---------------------- | ------ | -------------------- |
 | `TENSORMAP_AND_RINGBUFFER` | Supported platforms | `tensormap_and_ringbuffer` |
 | `HOST_BUILD_GRAPH` | A2/A3 | `host_build_graph` |
 | `HOST_BUILD_GRAPH` | A5 and A5 simulation | `percounter` |
