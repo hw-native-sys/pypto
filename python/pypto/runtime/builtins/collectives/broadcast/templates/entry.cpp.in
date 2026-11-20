@@ -26,7 +26,8 @@ void submit_broadcast_kernel(const ChipTaskArgs &orch_args) {
   params.add_inout(target);
   params.add_inout(signal);
   params.add_scalar(orch_args.scalar(0));  // nranks
-  params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
+  params.add_scalar(orch_args.scalar(1));  // Data/target context
+  params.add_scalar(orch_args.scalar(2));  // Signal context
   rt_submit_aiv_task(0, params);
 }
 
@@ -38,7 +39,7 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
     const ChipTaskArgs &orch_args) {
   (void)orch_args;
   return OrchestrationConfig{
-      .expected_arg_count = 4,
+      .expected_arg_count = 5,
   };
 }
 

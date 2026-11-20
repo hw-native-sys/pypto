@@ -1160,9 +1160,8 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   //
   // Keyed on each buffer's OWNING scope (``ScopeForWindowBuffer``), not on the innermost
   // lexical scope: a dispatch nested inside an inner domain may consume an outer domain's
-  // buffer, and this path — unlike the builtin-collective emitter, which asserts all its
-  // window args share one scope — places no such restriction on user kernels. Attaching the
-  // WAW edge to the lexically-innermost scope would then chain the dispatch into a domain it
+  // buffer. Both user kernels and builtin collectives may consume several domains.
+  // Attaching the WAW edge to the lexically-innermost scope would chain the dispatch into a domain it
   // does not actually touch while leaving the domain it *does* touch unordered.
   std::vector<ir::CommDomainScopeStmtPtr> comm_arg_scopes;
 

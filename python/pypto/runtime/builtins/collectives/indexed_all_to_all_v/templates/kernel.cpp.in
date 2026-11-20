@@ -326,8 +326,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor* signal_tensor = reinterpret_cast<__gm__ Tensor*>(args[2]);
   __gm__ Tensor* send_counts_tensor = reinterpret_cast<__gm__ Tensor*>(args[3]);
   __gm__ Tensor* recv_counts_tensor = reinterpret_cast<__gm__ Tensor*>(args[4]);
-  // Six tensor operands, followed by the first materialized CommContext.
+  // One context for each remote operand, in target/signal/send-count order.
   __gm__ CommContext* comm_ctx = reinterpret_cast<__gm__ CommContext*>(args[6]);
+  __gm__ CommContext* signal_ctx = reinterpret_cast<__gm__ CommContext*>(args[7]);
+  __gm__ CommContext* counts_ctx = reinterpret_cast<__gm__ CommContext*>(args[8]);
   auto* index_tensor = reinterpret_cast<__gm__ Tensor*>(args[5]);
   auto* index_base =
       reinterpret_cast<__gm__ int32_t*>(index_tensor->buffer.addr) + index_tensor->start_offset;
@@ -385,7 +387,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // whether block_num is 1 or many — no per-block ordering (e.g. block 0
   // leading the rest) is required for this barrier's own correctness.
   // Threshold GE(1): first of this call's two credit rounds.
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(1));
+  ExchangeBarrier(signal_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(1));
 
   // A single block publishes recv_counts with non-cacheable scalar stores.
   {
@@ -402,7 +404,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
       for (int src = 0; src < nranks; ++src) {
         if (src == my_rank) continue;
-        __gm__ int32_t* remote_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
+        __gm__ int32_t* remote_slot = CommRemotePtr(counts_ctx, send_counts_base + my_rank, src);
         int32_t pulled = static_cast<int32_t>(ld_dev(reinterpret_cast<__gm__ uint32_t*>(remote_slot), 0));
         if (pulled < 0 || pulled > max_recv) {
           FailIndexed("indexed_all_to_all_v: peer count outside [0,C]");
@@ -458,7 +460,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   dsb(DSB_DDR);
   // Second credit round: credits accumulate across the call's two barrier
   // phases, so this rendezvous waits for GE(2) rather than GE(1).
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(2));
+  ExchangeBarrier(signal_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(2));
 
   // Credit epilogue: this block added +1 (A) and +1 (B) to every peer's lane;
   // drop both in ONE AtomicAdd(-2) per lane. Never reset to zero - a credit

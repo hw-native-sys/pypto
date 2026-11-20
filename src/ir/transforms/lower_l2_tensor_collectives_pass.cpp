@@ -51,13 +51,8 @@
  *
  *     args[0..4]  input, target, signal, send_counts, recv_counts (Tensor*)
  *     args[5]     CommContext*
- *     args[6..7]  unread duplicates of args[5] — MaterializeDistTensorCtx
- *                 appends one CommCtx parameter per DistributedTensor
- *                 parameter, and the canonical signature declares exactly
- *                 three of those (target, signal, recv_counts; input and
- *                 send_counts are plain Tensor whatever the call site passes).
- *                 All three resolve to the same device_ctx, since every
- *                 operand of one collective belongs to one comm domain.
+ *     args[6..7]  signal and send-count CommContext pointers, respectively.
+ *                 Each remote operand keeps its own communication domain.
  *
  * The rank count comes from ``CommContext::rankNum``, not from a scalar
  * argument: the CHIP orchestration cannot compute it (``pld.system.nranks``
@@ -197,15 +192,9 @@ struct BuiltinKernelSpec {
       {ParamDirection::In, ParamDirection::InOut, ParamDirection::InOut, ParamDirection::In,
        ParamDirection::InOut},
       {"input", "target", "signal", "send_counts", "recv_counts"},
-      // `input` stays Tensor-like on the public op (plain Tensor or
-      // DistributedTensor — the kernel only reads it locally as the TPUT
-      // source). `send_counts` is required to be window-bound at the call site
-      // on this rail (peers pull it through CommRemotePtr; see LowerCollective),
-      // but BOTH are declared as plain `Tensor*` here: the synthesized
-      // signature fixes the ABI and the variant stays keyed on dtype alone. The
-      // three genuinely window-bound operands stay distributed, which is also
-      // what gives MaterializeDistTensorCtx the CommCtx parameters the kernel
-      // needs.
+      // Only remotely addressed operands are distributed in the canonical
+      // signature. This fixes the context suffix to target, signal, send_counts
+      // independently of the kinds passed for local input/recv_counts.
       //
       // The public op's trailing `core_num` arg is deliberately NOT a kernel
       // parameter. This rail's kernel args come from the managed pipeline's own
@@ -218,23 +207,16 @@ struct BuiltinKernelSpec {
       // rankNum/rankId on every rank (one AIV block then spins in
       // `ExchangeBarrier` until the scheduler's watchdog fires). Kernel ABI
       // parity with the HOST rail is five operands plus the ctx, nothing more.
-      {false, true, true, false, true},
+      {false, true, true, true, false},
   };
 }
 
 /// The parameter type the synthesized signature declares, which is deliberately
 /// *not* whatever the call site passed.
 ///
-/// `input` and `send_counts` are both rendered as a flat `Tensor*` — the two
-/// kinds are indistinguishable to the kernel — and `send_counts` is additionally
-/// pinned to a window-bound DistributedTensor at the call site (LowerCollective),
-/// so the canonical declaration cannot depend on the call. Copying the first
-/// call's types would make one cached function
-/// carry an accidental ABI: a later call passing the other kind would inherit a
-/// signature whose CommCtx parameter count no longer matches its arguments,
-/// because MaterializeDistTensorCtx appends one per DistributedTensor
-/// parameter. Declaring a canonical type instead keeps the variant keyed on
-/// dtype alone, which is the only thing that actually changes the kernel.
+/// Local input and receive counts have no context. Canonical types keep the
+/// suffix stable when different calls pass plain tensors or window views for
+/// those operands; remote target, signal and send counts each keep their ctx.
 [[nodiscard]] TypePtr CanonicalParamType(bool distributed, const ExprPtr& arg, const Span& span) {
   auto arg_type = AsTensorTypeLike(arg->GetType());
   INTERNAL_CHECK_SPAN(arg_type, span) << "LowerL2TensorCollectives: collective operand must be Tensor-like";
@@ -528,7 +510,6 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
       } else {
         spec.template_dir = *template_dir;
       }
-      spec.param_distributed[4] = false;  // Receive counts are written only locally.
       spec.param_names.push_back("index");
       spec.param_directions.push_back(ParamDirection::In);
       spec.param_distributed.push_back(false);

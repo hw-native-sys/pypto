@@ -545,10 +545,10 @@ def test_indexed_use_requests_urma_only_for_its_buffers(tmp_path):
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
     assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
-    d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
-    d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
-    assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert "workspace_engines" not in d1, host_orch
+    domains = _buffer_domains(host_orch)
+    assert domains["data_buf"][1] is True
+    assert domains["signal_buf"][1] is False
+    assert domains["counts_buf"][1] is False
 
 
 def test_shared_dispatch_keeps_unrelated_domains_without_urma(tmp_path):
@@ -626,15 +626,17 @@ def test_shared_dispatch_keeps_unrelated_domains_without_urma(tmp_path):
     # ordering token per domain. Only the indexed buffers receive the URMA requirement.
     mixed = host_orch.split('_submit_chip(orch, callables["chip_mixed"]', 1)[0]
     mixed = mixed[mixed.rindex("= TaskArgs()") :]
-    assert '__comm_d1[0].buffers["plain_buf' in mixed, host_orch
-    assert '__comm_d0[0].buffers["input_buf' in mixed, host_orch
-    assert "__comm_d1_ord" in mixed and "__comm_d0_ord" in mixed, host_orch
+    domains = _buffer_domains(host_orch)
+    for name in ("plain_buf", "input_buf", "data_buf"):
+        handle = domains[name][0]
+        assert f'{handle}[0].buffers["{name}' in mixed, host_orch
+        assert f"{handle}_ord" in mixed, host_orch
 
     assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
-    d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
-    d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
-    assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert "workspace_engines" not in d1, host_orch
+    domains = _buffer_domains(host_orch)
+    assert domains["data_buf"][1] is True
+    assert domains["signal_buf"][1] is False
+    assert domains["counts_buf"][1] is False
 
 
 def test_indexed_collective_fed_by_if_result_requests_urma(tmp_path):
@@ -767,10 +769,10 @@ def test_local_operand_domain_does_not_require_urma(tmp_path):
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
     assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
-    d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
-    d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
-    assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert "workspace_engines" not in d1, host_orch
+    domains = _buffer_domains(host_orch)
+    assert domains["data_buf"][1] is True
+    assert domains["signal_buf"][1] is False
+    assert domains["counts_buf"][1] is False
 
 
 @pytest.mark.parametrize("engines", [[], ["sdma"], ["urma"], ["sdma", "urma"]])
@@ -877,6 +879,182 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_
         wrappers = [p.read_text() for p in result.output_dir.rglob("*.cpp") if "kernels" in p.parts]
         assert any("pypto_urma_put_async_f32" in wrapper and ", args);" in wrapper for wrapper in wrappers)
     assert any("%__pypto_deferred_raw_args: !pto.ptr<i64>" in source for source in emitted_mlir)
+
+
+def _buffer_domains(source):
+    """Map source allocation names to generated domain handles and engine flags."""
+    result = {}
+    for body, handle in re.findall(
+        r"with \(_domain_provider or orch.allocate_domain\)\((.*?)\) as (\w+):", source, re.S
+    ):
+        for name in re.findall(r'CommBufferSpec\(name="([^"]+)"', body):
+            # WindowBuffer names retain the source allocation prefix after SSA.
+            result[name.split("__ssa_", 1)[0]] = (handle, 'workspace_engines=("urma",)' in body)
+    return result
+
+
+def _host_collective_operands(kind, *, async_operand=None):
+    input_rows = 1 if kind == "allgather" else 2
+    calls = {
+        "barrier": "pld.tensor.barrier(sig)",
+        "allreduce": "pld.tensor.allreduce(data, sig)",
+        "allreduce_ring": 'pld.tensor.allreduce(data, sig, mode="ring")',
+        "broadcast": "pld.tensor.broadcast(data, sig, root=0)",
+        "reduce_scatter": "pld.tensor.reduce_scatter(data, sig)",
+        "allgather": "pld.tensor.allgather(inp, data, sig)",
+        "all_to_all": "pld.tensor.all_to_all(inp, data, sig)",
+        "all_to_all_v": "pld.tensor.all_to_all_v(inp, data, sig, counts, recv)",
+    }
+    signal_shape = "[3, 2]" if kind == "allreduce_ring" else ("[2, 1]" if kind == "all_to_all_v" else "[2]")
+    async_definition = ""
+    async_call = ""
+    chip_return_type = "pld.DistributedTensor[[2, 64], pl.FP32]"
+    chip_return = "data"
+    host_result = ""
+    local_parameter = ""
+    host_parameter = ""
+    local_argument = ""
+    if async_operand:
+        shape, dtype = (f"[{input_rows}, 64]", "FP32") if async_operand == "inp" else (signal_shape, "INT32")
+        async_definition = f"""
+    @pl.function(type=pl.FunctionType.InCore)
+    def async_touch(self, x: pld.DistributedTensor[{shape}, pl.{dtype}],
+                    local: pl.InOut[pl.Tensor[{shape}, pl.{dtype}]]
+    ) -> pl.Tensor[{shape}, pl.{dtype}]:
+        return pld.tensor.get_async(local, 0, x)
+"""
+        async_call = f"        local = self.async_touch({async_operand}, local)\n"
+        chip_return_type = f"pl.Tensor[{shape}, pl.{dtype}]"
+        chip_return = "local"
+        host_result = "local = "
+        local_parameter = f", local: pl.InOut[pl.Tensor[{shape}, pl.{dtype}]]"
+        host_parameter = local_parameter
+        local_argument = ", local"
+    return pl.parse_program(f"""
+@pl.program
+class OperandDomains:
+{async_definition}
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip(self, inp: pld.DistributedTensor[[{input_rows}, 64], pl.FP32],
+             data: pld.DistributedTensor[[2, 64], pl.FP32],
+             sig: pld.DistributedTensor[{signal_shape}, pl.INT32],
+             counts: pld.DistributedTensor[[2, 1], pl.INT32],
+             recv: pld.DistributedTensor[[2, 1], pl.INT32]{local_parameter}
+    ) -> {chip_return_type}:
+{async_call}        return {chip_return}
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self{host_parameter}):
+        input_buf = pld.alloc_window_buffer(512)
+        data_buf = pld.alloc_window_buffer(512)
+        signal_buf = pld.alloc_window_buffer(64, memory_source="host")
+        counts_buf = pld.alloc_window_buffer(8)
+        recv_buf = pld.alloc_window_buffer(8)
+        inp = pld.window(input_buf, [{input_rows}, 64], dtype=pl.FP32)
+        data = pld.window(data_buf, [2, 64], dtype=pl.FP32)
+        sig = pld.window(signal_buf, {signal_shape}, dtype=pl.INT32)
+        counts = pld.window(counts_buf, [2, 1], dtype=pl.INT32)
+        recv = pld.window(recv_buf, [2, 1], dtype=pl.INT32)
+        for r in pl.range(2):
+            {host_result}self.chip(inp, data, sig, counts, recv{local_argument}, device=r)
+        {calls[kind]}
+""")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "barrier",
+        "allreduce",
+        "allreduce_ring",
+        "broadcast",
+        "reduce_scatter",
+        "allgather",
+        "all_to_all",
+        "all_to_all_v",
+    ],
+)
+def test_host_collective_uses_each_remote_operands_context(tmp_path, kind):
+    # Data and signal have identical participants but different backing domains.
+    result = ir.compile(
+        _host_collective_operands(kind),
+        output_dir=str(tmp_path / kind),
+        platform="a5",
+        skip_ptoas=True,
+        distributed_config=DistributedConfig(device_ids=[0, 1], num_sub_workers=0),
+    )
+    source = (result.output_dir / "orchestration" / "host_orch.py").read_text()
+    domains = _buffer_domains(source)
+    data, signal = domains["data_buf"][0], domains["signal_buf"][0]
+    assert data != signal
+    assert not any(urma for _, urma in domains.values())
+    dispatch = source.split(f'_submit_chip(orch, callables["builtin.tensor.{kind}', 1)[0]
+    dispatch = dispatch[dispatch.rindex("= TaskArgs()") :]
+    assert f".add_scalar({signal}.device_context(" in dispatch
+    if kind != "barrier":
+        assert f".add_scalar({data}[" in dispatch and "].device_ctx)" in dispatch
+        assert f"{data}_ord" in dispatch and f"{signal}_ord" in dispatch
+    kernel = next((result.output_dir / "next_levels").glob(f"builtin.tensor.{kind}*/kernels/aiv/*.cpp"))
+    kernel_source = kernel.read_text()
+    if kind != "barrier":
+        assert "signal_ctx" in kernel_source
+        assert "CommRemotePtr(comm_ctx, signal_base" not in kernel_source.split("void kernel_entry", 1)[1]
+
+
+def test_host_allgather_accepts_urma_local_input(tmp_path):
+    # The local allgather input can independently be an URMA remote operand in
+    # another task. It must not dictate the allgather target or signal context.
+    result = ir.compile(
+        _host_collective_operands("allgather", async_operand="inp"),
+        output_dir=str(tmp_path / "local_urma"),
+        platform="a5",
+        skip_ptoas=True,
+        distributed_config=DistributedConfig(device_ids=[0, 1], num_sub_workers=0),
+    )
+    source = (result.output_dir / "orchestration" / "host_orch.py").read_text()
+    domains = _buffer_domains(source)
+    assert domains["input_buf"][1]
+    assert not domains["data_buf"][1] and not domains["signal_buf"][1]
+    dispatch = source.split('_submit_chip(orch, callables["builtin.tensor.allgather', 1)[0]
+    dispatch = dispatch[dispatch.rindex("= TaskArgs()") :]
+    for handle, _ in domains.values():
+        if handle in {domains[name][0] for name in ("input_buf", "data_buf", "signal_buf")}:
+            assert f"{handle}_ord" in dispatch
+
+
+@pytest.mark.parametrize("kind", ["barrier", "allreduce", "allgather", "all_to_all_v"])
+def test_collective_signal_conflicts_with_urma(tmp_path, kind):
+    with pytest.raises(ValueError, match="cannot combine URMA"):
+        ir.compile(
+            _host_collective_operands(kind, async_operand="sig"),
+            output_dir=str(tmp_path / kind),
+            platform="a5",
+            skip_ptoas=True,
+            distributed_config=DistributedConfig(device_ids=[0, 1], num_sub_workers=0),
+        )
+
+
+def test_indexed_remote_operands_get_distinct_engine_contexts(tmp_path):
+    result = ir.compile(
+        _build_indexed_rail_program(host=False, dtype_name="fp32"),
+        output_dir=str(tmp_path / "indexed_contexts"),
+        platform="a5",
+        skip_ptoas=True,
+        distributed_config=DistributedConfig(device_ids=[0, 1], num_sub_workers=0),
+    )
+    source = (result.output_dir / "orchestration" / "host_orch.py").read_text()
+    domains = _buffer_domains(source)
+    assert domains["data_buf"][1]
+    assert not domains["sig_buf"][1] and not domains["counts_buf"][1]
+    assert domains["data_buf"][0] != domains["sig_buf"][0]
+    kernel = next(
+        (result.output_dir / "next_levels").glob("*/kernels/aiv/__builtin_indexed_all_to_all_v__fp32.cpp")
+    )
+    text = kernel.read_text()
+    assert "signal_ctx = reinterpret_cast<__gm__ CommContext*>(args[7])" in text
+    assert "counts_ctx = reinterpret_cast<__gm__ CommContext*>(args[8])" in text
+    assert "ExchangeBarrier(signal_ctx, signal_base" in text
+    assert "CommRemotePtr(counts_ctx, send_counts_base" in text
 
 
 if __name__ == "__main__":

@@ -54,8 +54,8 @@ per destination and is `[NR*MAX_RECV, SIZE]`. In both `all_to_all` /
 `all_to_all_v` additionally requires `send_counts` (window-bound at this
 layer; peers pull ONE word per rank from it, so the `[NR]` INT32 vector is all
 the buffer must hold) and `recv_counts` (window-bound, filled by the kernel) —
-all five window args must resolve into the same
-`CommDomainScopeStmt` and must be pairwise-distinct window allocations
+the five window args may belong to different `CommDomainScopeStmt` domains,
+and must be pairwise-distinct window allocations
 (aliasing any pair is a cross-process race, whether data-vs-data,
 data-vs-control, or control-vs-control).
 
@@ -113,8 +113,11 @@ The parser restores this metadata directly, without rerunning materialization.
 
 ## Checks
 
-The pass requires both args to be materialized `DistributedTensorType` views in
-the same `CommDomainScopeStmt`. The host allreduce builtin supports
+The pass requires materialized `DistributedTensorType` views. Each remote
+operand uses its own communication context, including signals and send counts.
+The data/target domain selects the launch ranks (the signal domain for a barrier).
+Domain compatibility is the caller's responsibility. Dispatch includes ordering
+tokens for every domain touched, including local-only input/output domains. The host allreduce builtin supports
 `ReduceOp.Sum`, `Max`, `Min`, and `Prod` over FP16 or FP32 data and arbitrary
 positive element counts. It processes 256-element chunks and rounds ragged FP16
 and FP32 load spans to 32 bytes without changing the logical tensor shape.

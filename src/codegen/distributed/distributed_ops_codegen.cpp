@@ -32,6 +32,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/utils/collective_operand_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -122,7 +123,7 @@ std::string ArgDirectionToTensorArgType(ir::ArgDirection dir) {
 /// Emit the per-device chip dispatch for a builtin tensor collective.
 ///
 /// The scalar tail is, in order: the comm-domain rank count (unless
-/// ``emit_rank_count`` is false), the device CommContext pointer, and — only
+/// ``emit_rank_count`` is false), one CommContext pointer per remote operand, and — only
 /// for the builtins that launch an SPMD grid — ``core_num``.
 ///
 /// ``emit_rank_count=false`` drops the leading rank-count scalar for a builtin
@@ -148,21 +149,25 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   INTERNAL_CHECK_SPAN(arg_directions.size() == call->args_.size(), call->span_)
       << "Internal error: builtin tensor collective dispatch arg_directions length mismatch";
 
-  std::optional<std::string> handle_var;
-  for (const auto& arg : call->args_) {
-    auto dist_type = ir::As<ir::DistributedTensorType>(arg->GetType());
-    if (!dist_type || !dist_type->window_buffer_.has_value()) continue;
-    const auto& window_buffer = dist_type->window_buffer_.value();
-    const std::string arg_handle = codegen.GetCommDomainHandleVar(window_buffer);
-    if (!handle_var.has_value()) {
-      handle_var = arg_handle;
-      continue;
-    }
-    INTERNAL_CHECK_SPAN(*handle_var == arg_handle, call->span_)
-        << "Internal error: builtin tensor collective window args must share the same comm-domain scope";
+  const auto roles = ir::GetCollectiveOperandRoles(call->op_);
+  INTERNAL_CHECK_SPAN(roles.has_value(), call->span_) << "Missing builtin collective operand roles";
+  std::vector<std::string> context_handles;
+  std::vector<std::string> context_exprs;
+  for (size_t index : roles->context_args) {
+    auto type = ir::As<ir::DistributedTensorType>(call->args_[index]->GetType());
+    INTERNAL_CHECK_SPAN(type, call->span_) << "Builtin collective remote operand must be distributed";
+    INTERNAL_CHECK_SPAN(type->window_buffer_.has_value(), call->span_)
+        << "Builtin collective remote operand must be window-bound";
+    const auto& buffer = type->window_buffer_.value();
+    const auto handle = codegen.GetCommDomainHandleVar(buffer);
+    context_handles.push_back(handle);
+    // Host mappings need the accessor to keep the context alive through dispatch.
+    context_exprs.push_back(buffer->memory_source_ == "host" ? handle + ".device_context(" + rank_expr + ")"
+                                                             : handle + "[" + rank_expr + "].device_ctx");
   }
-  INTERNAL_CHECK_SPAN(handle_var.has_value(), call->span_)
-      << "Internal error: builtin tensor collective dispatch needs at least one window-bound arg";
+  const auto& handle_var = context_handles.front();
+  std::vector<std::string> ordering_handles;
+  std::set<std::string> seen_handles;
 
   const std::string ta_var = codegen.NextTaskArgsVar();
 
@@ -172,11 +177,8 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   // requires every tensor added before any scalar, and the ordering-token
   // tensor below still has to follow every window/tile arg. Collect their code
   // in arg order and emit them after that token AND after the fixed
-  // domain_size/device_ctx scalars, but ahead of the out-of-band core_num
-  // *attr* scalar below. That exact order is load-bearing: entry.cpp.in reads
-  // its slots positionally (scalar(0)=nranks, scalar(1)=CommContext,
-  // scalar(2)=core_num), so reordering these emissions silently shifts every
-  // slot — see ad30598d for what that costs to debug.
+  // domain-size/context scalars, but ahead of the out-of-band core_num
+  // attribute scalar below. Entry templates read these slots positionally.
   std::vector<std::string> deferred_scalar_args;
   for (size_t i = 0; i < call->args_.size(); ++i) {
     const std::string tag = ArgDirectionToTensorArgType(arg_directions[i]);
@@ -185,8 +187,7 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
           << "Internal error: builtin tensor collective window arg must have a WindowBuffer";
       const auto& window_buffer = dist_type->window_buffer_.value();
       const std::string arg_handle = codegen.GetCommDomainHandleVar(window_buffer);
-      INTERNAL_CHECK_SPAN(arg_handle == *handle_var, call->span_)
-          << "Internal error: builtin tensor collective window args must share the same comm-domain scope";
+      if (seen_handles.insert(arg_handle).second) ordering_handles.push_back(arg_handle);
       const std::string name = codegen.SanitizeName(window_buffer->name_hint_);
       const std::string shape = codegen.FormatShapeTuple(dist_type->shape_);
       const std::string dtype_enum =
@@ -211,20 +212,18 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
         << "Internal error: unsupported builtin tensor collective arg type at index " << i;
   }
 
-  // Per-rank comm ordering token, appended as the LAST TENSOR (before the scalars, which
-  // TaskArgs requires). The token is what carries this dispatch into the ordering chain
-  // EmitCallToWorker builds. Without it, a rank mixing a builtin barrier/collective with a
-  // custom comm kernel — or issuing builtins across separate dispatches — could have a
-  // waiting dispatch routed ahead of its producer, which is the deadlock the token exists
-  // to prevent. All window args here are
-  // checked above to share one comm domain, so a single token is enough.
-  codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + *handle_var + "_ord\"][" +
-               rank_expr + "]), TensorArgType.INOUT)");
-
-  if (emit_rank_count) {
-    codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
+  // Order this task against every domain it touches, including local-only
+  // operands. Tokens stay after the real tensors and are not forwarded to AIV.
+  for (const auto& handle : ordering_handles) {
+    codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + handle + "_ord\"][" +
+                 rank_expr + "]), TensorArgType.INOUT)");
   }
-  codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].device_ctx)");
+  if (emit_rank_count) {
+    codegen.Emit(ta_var + ".add_scalar(" + handle_var + "[" + rank_expr + "].domain_size)");
+  }
+  // Contexts follow remote-operand order, even when several share a domain.
+  // Entry templates and the managed CHIP kernel signatures use this same ABI.
+  for (const auto& context : context_exprs) codegen.Emit(ta_var + ".add_scalar(" + context + ")");
   // A genuine dynamic scalar argument (e.g. all_to_all_v's core_num) — a
   // reference to its actual runtime value, unlike the `core_num` out-of-band
   // *attr* parameter just below, which is always baked as a literal.

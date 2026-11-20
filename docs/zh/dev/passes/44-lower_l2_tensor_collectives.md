@@ -64,7 +64,7 @@ data = self.__builtin_all_to_all_v__fp32(stage, data, signal, counts, recv)
 
 | 方面 | 取值 |
 | ---- | ---- |
-| 参数 | `input, target, signal, send_counts, recv_counts` —— 规范化类型，**不是**调用点的类型：`input` / `send_counts` 声明为普通 `Tensor`，其余三个为 `DistributedTensor` |
+| 参数 | `input, target, signal, send_counts, recv_counts` —— 规范化类型，**不是**调用点的类型：`input` / `recv_counts` 声明为普通 `Tensor`；`target`、`signal`、`send_counts` 为 `DistributedTensor` |
 | 方向 | `In, InOut, InOut, In, InOut` |
 | 函数体 | `return target` —— 单条 `ReturnStmt`，永不参与代码生成 |
 | Attrs | `builtin_template_dir`、`builtin_template_vars`、`require_contiguous_operands` |
@@ -106,7 +106,7 @@ kernel 走同一条路径，区别只在于文本来自模板而非 ptoas。
 | ---- | --------- | -------------------- |
 | `args[0..4]` | `input, target, signal, send_counts, recv_counts` | 相同 |
 | `args[5]` | `CommContext*` | `CommContext*` |
-| `args[6..7]` | — | `args[5]` 的未读副本 |
+| `args[6..7]` | signal 和 send-count context | 相同 |
 
 两条通路都不传 rank 数标量。kernel 读 `CommContext::rankNum`，它与 HOST dispatch
 过去传的 `domain_size` 是同一个数：`comm_derive_context` **按 comm domain** 建
@@ -114,12 +114,13 @@ context，其 `rankNum` 就是该域的 rank 数。去掉这个标量的代价�
 读取，换来的是一份共享源码。这在 CHIP 通路上也是唯一可行方案 —— 它根本无法计算
 rank 数，`pld.system.nranks` 只有 InCore 代码生成，没有 orchestration 代码生成。
 
-`args[6..7]` 的副本是 `MaterializeDistTensorCtx` **为每个 `DistributedTensor`
-参数各追加一个 `CommCtx` 参数**的产物。合成签名中恰好声明三个这样的参数 ——
-`target`、`signal`、`recv_counts` —— 因为无论调用点传入哪种类型，`input` 与
-`send_counts` 都被规范化为普通 `Tensor`。因此该尾部恒为三项，且第一个 ctx 总是
-落在 `args[5]`，因为尾部跟在全部五个 tensor 参数之后。三者全部解析到同一个
-`device_ctx`，因为一次调用的五个操作数必属同一个 comm domain。
+`MaterializeDistTensorCtx` 按规范化参数顺序追加每个远端操作数的 context：
+target、signal、send counts。本地 input 和 receive counts 在合成签名中始终为
+普通 `Tensor`，即使调用者传入窗口 view。每个 context 解析到该操作数自己的域；
+不要求同域，参与设备和 rank 顺序的兼容性由调用者保证。
+
+Indexed all-to-all-v 在 `args[5]` 增加本地 index tensor，将三个 context 移至
+`args[6..8]`。target 使用 URMA，signal 和 send counts 使用 MTE。
 
 ## 启动宽度
 
@@ -197,14 +198,8 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   （signal stride `>= B`）仍由 lowering 阶段静态校验：`S` 与折叠出的 `B` 都是编译期常量。
 - **rank 数**。kernel 读取 `CommContext::rankNum`，因此当显式设备子集小于 context
   的 rank 数时，其行为与传入 comm domain `domain_size` 的 HOST 通路不同。
-- **「同属一个通信域」是未经检查的前置条件**。kernel 通过单个 `CommContext`
-  （`args[5]`）解析所有对端地址，因此绑定到不同域的操作数会寻址到错误的远端窗口。
-  HOST 通路用 `FindScopeForBuffers` 强制了等价约束——它能直接看到 window buffer；
-  本通路做不到：comm domain 在 `MaterializeCommDomainScopes`（pass 46）与
-  `MaterializeDistTensorCtx`（pass 48）之前没有 IR 表示，而这两者都在本 pass
-  之后运行；到那时该集合通信的操作数已是外层 pipeline 的参数，把它们追溯回绑定它们
-  的 host window 需要目前不存在的跨函数分析。改为比较追加的 `CommCtx` 实参也不成立：
-  每个 `DistributedTensor` 参数各自生成一个，单域调用本就携带多个互不相同的 SSA 值。
+- **域兼容性由调用者保证**。远端操作数使用各自的 context，因此支持不同域；
+  参与设备和 rank 顺序必须与 collective 的 target 域兼容。
 
 ## 测试
 

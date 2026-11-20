@@ -51,6 +51,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
+  __gm__ CommContext *signal_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
   int32_t block_idx = get_block_idx(args);
   int32_t block_num = get_block_num(args);
 
@@ -92,7 +93,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal =
-        CommRemotePtr(comm_ctx, signal_base + my_rank * signal_stride + block_idx, peer);
+        CommRemotePtr(signal_ctx, signal_base + my_rank * signal_stride + block_idx, peer);
     pto::comm::Signal sig(remote_signal);
     pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
@@ -152,7 +153,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
       __gm__ int32_t *remote_signal =
-          CommRemotePtr(comm_ctx, signal_base + my_rank * signal_stride + block_idx, peer);
+          CommRemotePtr(signal_ctx, signal_base + my_rank * signal_stride + block_idx, peer);
       pto::comm::Signal sig(remote_signal);
       pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
     }

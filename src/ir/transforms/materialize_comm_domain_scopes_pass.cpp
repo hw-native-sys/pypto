@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/collective_operand_utils.h"
 #include "pypto/ir/transforms/utils/dist_tensor_alias_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -260,8 +261,10 @@ class BufferEngineCollector : public IRVisitor {
       VisitStmt(func->body_);
     }
     aliases_ = nullptr;
-    for (size_t i = 0; i < pending_.size(); ++i) {
-      const auto [node, engine] = pending_[i];
+    // Record may append work; consume by index without retaining iterators.
+    size_t next = 0;
+    while (next < pending_.size()) {
+      const auto [node, engine] = pending_[next++];
       for (const auto* caller : callers_[node]) Record(caller, engine);
     }
     if (roots_.empty()) {
@@ -299,16 +302,12 @@ class BufferEngineCollector : public IRVisitor {
   }
 
   void Analyze(const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span) {
-    // Indexed builtins use the target's URMA context to address target, signal
-    // and send-count windows. Input, recv-counts and index are local operands.
-    // This preserves the builtin's declared workspace requirement without
-    // assigning URMA to unrelated arguments of its enclosing CHIP function.
-    const bool indexed = IsOp(op, "pld.tensor.indexed_all_to_all_v") ||
-                         (op && op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0);
-    if (indexed) {
-      INTERNAL_CHECK_SPAN(args.size() >= 4, span) << "Indexed collective is missing its window operands";
-      for (size_t i = 1; i <= 3; ++i) {
-        if (const auto* buffer = Resolve(args[i])) Record(buffer, 0);
+    if (auto roles = GetCollectiveOperandRoles(op)) {
+      for (size_t index : roles->context_args) {
+        INTERNAL_CHECK_SPAN(index < args.size(), span) << "Collective is missing a remote operand";
+        if (const auto* buffer = Resolve(args[index])) {
+          Record(buffer, roles->target_uses_urma && index == roles->context_args.front() ? 0 : 1);
+        }
       }
     }
     if (auto global = As<GlobalVar>(op)) {
@@ -331,8 +330,8 @@ class BufferEngineCollector : public IRVisitor {
       target = 2;
     } else if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) {
       target = 1;
-    } else if (!urma && !IsOp(op, "pld.tile.remote_load") && !IsOp(op, "pld.tensor.put") &&
-               !IsOp(op, "pld.tile.put")) {
+    } else if (!urma && !IsOp(op, "pld.system.notify") && !IsOp(op, "pld.tile.remote_load") &&
+               !IsOp(op, "pld.tensor.put") && !IsOp(op, "pld.tile.put")) {
       return;
     }
     INTERNAL_CHECK_SPAN(args.size() > target, span)
@@ -349,7 +348,7 @@ class BufferEngineCollector : public IRVisitor {
     CHECK_SPAN(!engines[0] || !engines[1], buffer->span_)
         << "Communication buffer '" << buffer->name_hint_
         << "' cannot combine URMA async transfers with MTE primitives "
-           "(remote_load/store or put/get), regardless of peer rank.";
+           "(remote_load/store, put/get, notify or collective operands), regardless of peer rank.";
   }
 
   ProgramPtr program_;

@@ -68,7 +68,7 @@ function added to the program:
 
 | Aspect | Value |
 | ------ | ----- |
-| Parameters | `input, target, signal, send_counts, recv_counts` — canonical types, **not** the call site's: `input` / `send_counts` are declared plain `Tensor`, the other three `DistributedTensor` |
+| Parameters | `input, target, signal, send_counts, recv_counts` — canonical types, **not** the call site's: `input` / `recv_counts` are declared plain `Tensor`; `target`, `signal`, `send_counts` are `DistributedTensor` |
 | Directions | `In, InOut, InOut, In, InOut` |
 | Body | `return target` — one `ReturnStmt`, never compiled |
 | Attrs | `builtin_template_dir`, `builtin_template_vars`, `require_contiguous_operands` |
@@ -115,7 +115,7 @@ Both rails reach the kernel with the same argument layout:
 | ---- | --------- | --------------------- |
 | `args[0..4]` | `input, target, signal, send_counts, recv_counts` | same |
 | `args[5]` | `CommContext*` | `CommContext*` |
-| `args[6..7]` | — | unread duplicates of `args[5]` |
+| `args[6..7]` | signal and send-count contexts | same |
 
 Neither rail passes a rank-count scalar. The kernel reads
 `CommContext::rankNum`, which is the same number the HOST dispatch used to pass
@@ -125,14 +125,14 @@ at kernel entry and buys a single shared source. It is also the only option on
 the CHIP rail, which cannot compute a rank count at all —
 `pld.system.nranks` has an InCore codegen but no orchestration codegen.
 
-The `args[6..7]` duplicates are an artifact of `MaterializeDistTensorCtx`
-appending **one `CommCtx` parameter per `DistributedTensor` parameter**. The
-synthesized signature declares exactly three of those — `target`, `signal`,
-`recv_counts` — because `input` and `send_counts` are canonically plain
-`Tensor` whichever kind the call site passes. The tail is therefore always
-three slots wide, and the first ctx always lands at `args[5]` because the tail
-follows all five tensor parameters. All three resolve to the same `device_ctx`,
-since every operand of one collective belongs to one comm domain.
+`MaterializeDistTensorCtx` appends one context per remote operand in canonical
+parameter order: target, signal, send counts. Local input and receive counts
+stay plain `Tensor` in the synthesized signature, even when supplied as window
+views. Each context resolves to that operand's own domain; domains need not be
+equal. The caller ensures compatible participants and rank ordering.
+
+Indexed all-to-all-v adds its local index tensor at `args[5]`, moving the three
+contexts to `args[6..8]`. Its target uses URMA; signal and send counts use MTE.
 
 ## Launch width
 
@@ -229,18 +229,9 @@ passes earlier, so re-reporting them here would blame the wrong pass.
 - **Rank count.** The kernel reads `CommContext::rankNum`, so an explicit device
   subset smaller than the context's rank count would be handled differently from
   the HOST rail, which passes the comm domain's `domain_size`.
-- **One communication domain is an unchecked precondition.** The kernel resolves
-  every peer address through a single `CommContext` (`args[5]`), so operands
-  bound to different domains would address the wrong remote windows. The HOST
-  rail enforces the equivalent through `FindScopeForBuffers`, which sees the
-  window buffers directly. This rail cannot: a comm domain has no IR
-  representation until `MaterializeCommDomainScopes` (pass 46) and
-  `MaterializeDistTensorCtx` (pass 48), both of which run *after* this pass, and
-  by then the collective's operands are the enclosing pipeline's parameters —
-  relating them back to the host windows that bind them needs interprocedural
-  tracing that does not exist today. Comparing the appended `CommCtx` arguments
-  instead does not work either: one is minted per `DistributedTensor` parameter,
-  so a single-domain call already carries several distinct SSA values.
+- **Domain compatibility is the caller's responsibility.** Remote operands
+  use separate contexts, so different domains are supported. Their participants
+  and rank ordering must agree with the collective's target domain.
 
 ## Tests
 

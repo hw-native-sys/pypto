@@ -40,10 +40,14 @@ Local-only buffers with no engine requirement join a compatible group: an
 otherwise URMA-only group can include them; when both categories are present,
 they join the default non-URMA group. Source order determines domain/slot order.
 
-The indexed collective's declared URMA requirement applies to its target, signal
-and send-count buffers, which its shared context addresses. Local input,
-receive-count and index operands do not independently request URMA. This does
-not analyze hidden operations inside builtin templates or external kernels.
+Collectives contribute requirements per operand: ordinary collective remote
+payloads, signals and remotely read send counts require MTE; indexed all-to-all-v
+requires URMA only for its target, and MTE for signal and send counts. Local
+input, receive counts and index operands impose no remote-engine requirement.
+The same rules cover public ops, HOST builtins and synthesized CHIP kernels;
+lowered `notify` operations retain the signal's MTE requirement. Each remote
+operand receives its own context. Operands need not share a domain; callers
+ensure compatible participants, rank ordering and collective semantics.
 
 Re-running the pass refreshes requirements and splits existing scopes when
 needed, preserving the `WindowBuffer` objects referenced by tensor views.

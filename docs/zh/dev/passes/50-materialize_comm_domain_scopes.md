@@ -34,9 +34,12 @@ buffer 会分到不同域：MTE 的工作区列表为空，URMA 使用 `engines=
 没有引擎需求的本地 buffer 可加入兼容分组：只有 URMA 的分组可以包含它们；两类引擎
 都存在时，它们加入默认的非 URMA 分组。域和 slot 的顺序由分配顺序确定。
 
-Indexed 集合通信声明的 URMA 需求只作用于其共享 context 寻址的 target、signal 和
-send-count buffer。本地 input、receive-count 和 index 操作数不单独申请 URMA。
-这不代表分析了 builtin 模板或外部 kernel 内隐藏的操作。
+集合通信（collective）逐操作数收集引擎需求：普通 collective 的远端数据、signal
+和远端读取的 send counts 使用 MTE；indexed all-to-all-v 仅 target 使用 URMA，
+signal 和 send counts 使用 MTE。本地 input、receive counts 和 index 不产生远端引擎需求。
+此规则覆盖公开算子、HOST builtin 和合成的 CHIP kernel；lowering 后的 `notify`
+仍保留 signal 的 MTE 需求。每个远端操作数传递各自的 context，不要求操作数属于同域；
+参与设备、rank 顺序以及 collective 语义的兼容性由调用者保证。
 
 再次运行会刷新需求，必要时拆分已有 scope，并保持 tensor view 引用的 `WindowBuffer`
 对象身份不变。分布式代码生成只输出结果 IR 中的 `workspace_engines`，不再推断需求。
