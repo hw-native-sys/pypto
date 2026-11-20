@@ -53,6 +53,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -1068,6 +1069,7 @@ void PTOCodegen::RecordEntryHelperUse(const std::string& symbol) {
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   ir::return_lineage::ScopedTraceCache lineage_cache;
   vf_helpers_.clear();
+  c2v_release_symbols_.clear();
   vf_program_ = program;
   bound_vf_regions_.clear();
   vf_return_aliases_.clear();
@@ -1153,6 +1155,14 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
     }
   }
 
+  for (const auto& [type, symbol] : c2v_release_symbols_) {
+    for (const auto& [gvar, func] : program->functions_) {
+      CHECK_SPAN(func->name_ != symbol, func->span_) << "Reserved C2V release symbol: " << symbol;
+    }
+    stream_ << "  func.func private @" << symbol << "(%tile: " << type << ") attributes "
+            << "{pto.ptodsl.subkernel_helper = \"simd\", pto.tileop.effects = [\"readwrite\"]} {\n"
+               "    return\n  }\n";
+  }
   EmitDeferredCompletionAdapterDeclaration();
   EmitUrmaTransferAdapterDeclarations();
   for (const auto& helper : vf_helpers_) {
@@ -1738,6 +1748,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     VisitStmt(func->body_);
   }
 
+  CHECK_SPAN(fs_.vf_received_tiles.empty() || !fs_.has_explicit_pipe_flags, func->span_)
+      << "VF C2V capture requires automatic caller synchronization; explicit pipe flags disable it";
   std::string body_content = stream_.str();
 
   // Render the prologue before flushing constants so constants unique to a
@@ -2629,6 +2641,17 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
 }
 
 void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::string& reshape_source) {
+  if (auto view = fs_.c2v_views.find(reshape_source); view != fs_.c2v_views.end()) {
+    const auto target = fs_.ssa_to_tile_type.find(ssa_name);
+    if (target != fs_.ssa_to_tile_type.end()) {
+      const auto& layout = target->second->tile_view_;
+      if (!layout ||
+          (layout->blayout == ir::TileLayout::row_major && layout->slayout == ir::TileLayout::none_box &&
+           layout->compact == ir::CompactMode::null)) {
+        fs_.c2v_views[ssa_name] = view->second;
+      }
+    }
+  }
   const auto source = fs_.tile_view_names.find(reshape_source);
   fs_.tile_view_names[ssa_name] = source != fs_.tile_view_names.end()
                                       ? source->second
@@ -2647,7 +2670,27 @@ bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
   return fs_.mutable_tile_names.count(ssa_name) > 0;
 }
 
-void PTOCodegen::RegisterTpopTileName(const std::string& ssa_name) { fs_.tpop_tile_names.insert(ssa_name); }
+void PTOCodegen::RegisterTpopTileName(const std::string& ssa_name, int c2v_pipe) {
+  fs_.tpop_tile_names.insert(ssa_name);
+  auto type = fs_.ssa_to_tile_type.find(ssa_name);
+  if (c2v_pipe >= 0 && separate_vf_ && type != fs_.ssa_to_tile_type.end()) {
+    const auto layout = ir::tile_view_semantics::GetEffectiveTileView(*type->second);
+    if (layout.blayout == ir::TileLayout::row_major && layout.slayout == ir::TileLayout::none_box &&
+        layout.compact == ir::CompactMode::null) {
+      fs_.c2v_views[ssa_name] = {ssa_name, c2v_pipe, 0};
+    }
+  }
+}
+
+void PTOCodegen::RecordC2VBuffer(int pipe, const std::string& handle, int slot_size, int slot_count) {
+  const auto it = fs_.vec_reservations.find(handle);
+  if (it != fs_.vec_reservations.end() && slot_count > 0 &&
+      static_cast<int64_t>(slot_size) * slot_count <= it->second.second - it->second.first) {
+    fs_.c2v_buffers[pipe] = {it->second, slot_size};
+  } else {
+    fs_.c2v_buffers.erase(pipe);
+  }
+}
 
 bool PTOCodegen::IsLocallyBoundTileName(const std::string& ssa_name) const {
   const auto source = fs_.tile_view_names.find(ssa_name);
@@ -2742,6 +2785,25 @@ void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
   // hiding a strided ancestor, without repeatedly walking the chain or merging
   // distinct offsets in tile_view_names (which would break alias checks).
   const bool contiguous = info.view_rows == 1 || (info.source_cols > 0 && info.view_cols == info.source_cols);
+  // A flattened VF address can describe dense windows with a known start.
+  // Preserve the receive itself so aliases use the same symbolic VMI pointer.
+  auto parent = fs_.c2v_views.find(info.source_ssa);
+  if (contiguous && parent != fs_.c2v_views.end() && info.source_cols > 0) {
+    const auto row = As<ir::ConstInt>(info.row_offset);
+    const auto col = As<ir::ConstInt>(info.col_offset);
+    int64_t elements;
+    if (row && col && row->value_ >= 0 && col->value_ >= 0 &&
+        !__builtin_mul_overflow(row->value_, info.source_cols, &elements) &&
+        !__builtin_add_overflow(elements, col->value_, &elements)) {
+      const auto& type = fs_.ssa_to_tile_type.at(info.source_ssa);
+      auto bytes = ir::storage_size::StaticLogicalOffsetToByte(elements, type->dtype_);
+      if (bytes &&
+          *bytes <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - parent->second.byte_offset)) {
+        fs_.c2v_views[subview_ssa] = {parent->second.received, parent->second.pipe,
+                                      parent->second.byte_offset + static_cast<int64_t>(*bytes)};
+      }
+    }
+  }
   if (contiguous && IsLocallyBoundTileName(info.source_ssa)) {
     fs_.locally_bound_subview_names.insert(subview_ssa);
   } else {
@@ -3087,7 +3149,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         return;
       }
     } else if (auto tile_type = As<TileType>(op->var_->GetType());
-               tile_type && (!emit_tile_addr_ || IsParameterBackedTile(tile_type))) {
+               tile_type && (!tile_type->memref_ || !emit_tile_addr_ || IsParameterBackedTile(tile_type))) {
       // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS. `lhs` and
       // `rhs` denote the identical tile value, so `lhs` must resolve to `rhs`'s
       // CURRENT SSA binding. This matters when `rhs` is a view (tile.reshape /

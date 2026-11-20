@@ -299,23 +299,24 @@ def test_mixed_kernel_keeps_vf_on_aiv_and_passes_pipe_storage(local_copy):
     if not local_copy:
         assert text.index("tile.store") < text.index("system.tfree_to_aic")
     unit = ir.Program([aiv, helper], "DeviceUnit", result.span)
-    if local_copy:
-        bundle = codegen.PTOCodegen().generate_bundle(unit, emit_source_loc=False)
-        assert len(bundle.helpers) == 1
-        assert bundle.helpers[0].parameter_effects == ["readwrite"]
-        # Upstream grouped execution must retain the outlined helper's owner:
-        # the AIC peer has no VF helper, while the AIV member calls this one.
-        grouped_unit = ir.Program([*callers, helper], "GroupedDeviceUnit", result.span)
-        grouped = codegen.PTOCodegen().generate_bundle(grouped_unit, emit_source_loc=False)
-        assert len(grouped.helpers) == 1
-        assert grouped.entry_helpers[aiv.name] == [grouped.helpers[0].symbol]
-        aic = next(f for f in callers if f.func_type == ir.FunctionType.AIC)
-        assert grouped.entry_helpers[aic.name] == []
-    else:
-        # The existing VF ABI requires static allocated UB addresses; outlining
-        # preserves that restriction while retaining pipe lifetime in the IR.
-        with pytest.raises(ValueError, match="statically planned local UB"):
-            codegen.PTOCodegen().generate_bundle(unit, emit_source_loc=False)
+    bundle = codegen.PTOCodegen().generate_bundle(unit, emit_source_loc=False)
+    (artifact,) = bundle.helpers
+    assert artifact.parameter_effects == ["readwrite"]
+    assert artifact.capture_base_indices == [0]
+    grouped = codegen.PTOCodegen().generate_bundle(
+        ir.Program([*callers, helper], "GroupedDeviceUnit", result.span), emit_source_loc=False
+    )
+    (artifact,) = grouped.helpers
+    aic = next(f for f in callers if f.func_type == ir.FunctionType.AIC)
+    assert grouped.entry_helpers == {aic.name: [], aiv.name: [artifact.symbol]}
+    if not local_copy:
+        pto = grouped.caller_source
+        assert pto.index("pto.tpop_from_aic") < pto.index(f"func.call @{artifact.adapter_symbol}")
+        assert (
+            pto.index(f"func.call @{artifact.adapter_symbol}")
+            < pto.index("pto.tstore")
+            < pto.index("pto.tfree_from_aic")
+        )
 
 
 def mixed_epilogue(body: str) -> ir.Program:

@@ -14,7 +14,7 @@ VPTO helper。本功能扩展 typed VMI lowering，不改变 DSL，也不自动�
 flowchart TD
   IR[完成内存规划的 A5 AIV 函数] --> Bundle[PTOCodegen.generate_bundle]
   Bundle --> Caller[Caller PTO: Tiles 与带注解 adapter]
-  Bundle --> Helper[Helper PTO: 公共 UB 基址与静态偏移]
+  Bundle --> Helper[Helper PTO: UB 指针与视图偏移]
   Caller --> EmitC[PTOAS EmitC 与 caller 同步]
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
@@ -42,24 +42,23 @@ Bundle 将 helper 产物与调用入口分开记录。`helpers` 中每个产物�
 没有 helper 的入口对应空列表；SIMT 定义和 adapter 不属于入口。
 复用的 SIMT 产物可以出现在多个入口的列表中，无需重复生成源码。
 每次代码生成都会重置该关系，已返回的 bundle 保留各自的元数据。
-执行驱动将该关系保存在第 4 版 helper manifest 中，并按生成的入口名称向
+执行驱动将该关系保存在第 5 版 helper manifest 中，并按生成的入口名称向
 kernel 配置添加 `vpto_sources`。对于 mixed Group，只有 AIV 入口链接 VF helper，
 AIC 入口没有 helper 依赖。Grouped SIMT 执行仍不受支持。
 
-Helper 发射复用 `PTOCodegen` 的寄存器操作 lowering。UB 指针对应内存规划得到的
-MemRef 基址；VMI 发射器为每次访问加上 Tile view 的元素起点，且只加一次。
-不同静态分配 view 的捕获项通过一个公共 UB 基址和常量位移重建，使独立编译后的
-helper 仍保留访问重叠关系。
-
-Tile 参数及其派生 view 会被拒绝：它们的运行时 UB 指针关系不能通过局部
-分配的规划偏移确定。
+VF 根据 AIV 调用点的实际参数绑定存储。规划的 Tile 共用捕获项中最低的 UB 地址。
+对于 C2V 接收值，适配器通过 `pto.tile_buf_addr` 取得本轮实际槽位的指针。
+同一接收值上连续、偏移已知的窗口共用该指针。编译器检查局部规划的分配与所捕获
+FIFO 的预留区互不重叠。manifest 的 `capture_base_indices` 记录各捕获项使用的
+指针形参序号（标量为 −1），`capture_byte_offsets` 记录相对该指针的字节偏移。
+VMI 在具体访存指令上再计入一次 Tile view 的元素起点。
 
 ## 两层同步边界
 
 | 边界 | PyPTO 提供的信息 | PTOAS 完成的工作 |
 | ---- | ---------------- | ---------------- |
 | Caller | SIMD adapter 上的 Tile 参数与 `pto.tileop.effects` | 为搬运和调用插入 MTE2 → V、V → MTE3 事件 |
-| VF body | 公共 UB 指针基址、常量偏移、VMI 内存操作及作用域策略 | 自动模式下为重叠的 WR、RW、WW 访问插入屏障 |
+| VF body | 规划的 UB 和 FIFO 指针基址、常量偏移、VMI 内存操作及作用域策略 | 自动模式下为重叠的 WR、RW、WW 访问插入屏障 |
 
 Caller adapter 在依赖分析期间保留 Tile，只有 adapter 函数体才通过
 `pto.tile_buf_addr` 取出 UB 指针并调用 helper。Tile 捕获项标记为 `read`；只要有
@@ -116,15 +115,18 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helpe
 | 目标 | A5、AIV、ONBOARD、PyPTO Tile 内存规划器 |
 | 分组 | 独立 AIV，或包含一个 AIC 函数和一个 AIV 函数的 mixed Group；同一个 AIV 函数可以在一个或两个 vector lane 上执行 |
 | 作用域 | 寄存器操作和最多四层嵌套的规范硬件循环 |
-| 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；不同 Tile dtype 共用 UB 基址 |
-| 别名 | 公共 UB 基址、静态 view 位移、store SSA 别名 |
+| 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；支持不同 dtype 及 FIFO 与局部 UB 混合捕获 |
+| 别名 | 同一接收值的别名共用指针、静态 view 位移、store SSA 别名 |
 | Mask 与标量 | 运行时 mask 与受支持的标量捕获 |
 | 打包 | 源码 artifact 迁移、包含 helper 标识的二进制缓存 |
 
-Mixed Group 的 VF 捕获项必须指向静态规划的局部 UB 分配。
-C2V 接收之后的 cast/copy 可以物化这样的分配；仅对 FIFO 接收结果做 reshape 并不会。
-直接捕获 FIFO 缓冲区、参数支持的 Tile、未分组 peer、更广泛的 Group 组合、
-grouped SIMT、设备对象的 CPU 模拟执行、Bridge 调用及一般 helper 控制流仍不受支持。
+Mixed Group 的 VF 可以直接在 AIV 的 FIFO 槽位上修改 Cube 结果。调用方让槽位跨
+VF 调用和后续 Tile 消费者保持有效。在 `tfree` 前，调用方通过一个 SIMD 适配器将
+归还槽位建模为 PIPE_V 对该 Tile 的 `readwrite`。当 GM store 还在读取槽位时，
+PTOAS 据此插入 MTE3 → V 事件对。显式使用流水线 flag 的调用方不支持这条路径，
+因为 PTOAS 可能跳过自动同步。参数支持的 Tile、跨行不连续或动态起点的 FIFO 窗口、
+未分组 peer、更广泛的 Group 组合、grouped SIMT、设备对象的 CPU 模拟执行、
+Bridge 调用及一般 helper 控制流仍不受支持。
 访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
 具体 dtype、mask 与索引访存契约见[寄存器操作参考](../language/06-register-operations.md)。
 
@@ -150,8 +152,8 @@ def mixed_reg(a: pl.Tensor[[32, 32], pl.BF16],
 
 `tests/st/runtime/vpto/test_mixed_reg_onboard.py` 覆盖这条路径，以及包含两个 helper
 的 split-AIV 变体。测试检查完整输出数值、未修改区域、AIC 符号隔离、AIV 链接、
-缓存命中、helper 内容变更失效和产物迁移。直接 FIFO 捕获还需要单独验证存储生命周期
-和操作完成条件，本次支持范围不包含它。
+缓存命中、helper 内容变更失效和产物迁移。直接接收 FP32 的用例在双槽环上连续传送七批不同数据，
+覆盖掩码写回、后续 Tile 消费以及归还槽位前的 MTE3 → V 事件。
 
 ## Required hardware loops
 

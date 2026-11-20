@@ -38,6 +38,8 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -449,7 +451,11 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     oss << " -> " << result_type;
   }
   codegen.Emit(oss.str());
-  codegen.RegisterTpopTileName(transport_buf);
+  const int c2v_pipe = std::string_view(target) == "aic" ? op->GetKwarg<int>("id", 0) : -1;
+  if (c2v_pipe >= 0 && result_tile_type) {
+    codegen.RegisterTileBufType(transport_buf, result_type, result_tile_type);
+  }
+  codegen.RegisterTpopTileName(transport_buf, c2v_pipe);
   if (use_static_transport) {
     std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
     INTERNAL_CHECK_SPAN(!logical_type.empty(), op->span_)
@@ -461,7 +467,7 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     // This descriptor changes validity only, retaining the TPOP's full physical
     // shape and pitch. Keep its FIFO provenance without marking it as a general
     // Tile view: SIMT can safely borrow it with the original dense layout.
-    codegen.RegisterTpopTileName(logical_buf);
+    codegen.RegisterTpopTileName(logical_buf, c2v_pipe);
     codegen.SetCurrentResultBuf(logical_buf);
   }
 
@@ -483,6 +489,7 @@ static std::string MakeTfreeCodegenPTO(const char* target, const CallPtr& op,
   const int split = op->GetKwarg<int>("split", 0);
 
   std::ostringstream oss;
+  if (std::string_view(target) == "aic") codegen.EmitVFC2VRelease(op->args_[0]);
   oss << "pto.tfree_from_" << target << " " << FormatFrontendPipeAttrs(op, split);
   codegen.Emit(oss.str());
 
@@ -542,6 +549,12 @@ static std::string MakeInitializePipeCodegenPTO(const char* target, const CallPt
   oss << "pto." << target << "_initialize_pipe "
       << FormatInitializePipeAttrs(op, dir_mask, slot_size, *codegen.GetBackendHandler());
   const int pipe_id = op->GetKwarg<int>("id", 0);
+  constexpr int c2v = ir::core_affinity::kDirMaskC2V;
+  constexpr int both = c2v | ir::core_affinity::kDirMaskV2C;
+  if (std::string_view(target) == "aiv" && (dir_mask == c2v || dir_mask == both)) {
+    const auto slots = op->GetKwarg<int>("slot_num", ir::cross_core_pipe::GetPtoasImplicitSlotNum(dir_mask));
+    codegen.RecordC2VBuffer(pipe_id, c2v_ssa, slot_size, slots);
+  }
   if (op->HasKwarg("c2v_dtype")) {
     codegen.RecordC2VPipeDtype(pipe_id, op->GetKwarg<DataType>("c2v_dtype"));
   }
@@ -623,6 +636,7 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
 
   auto emit_flag = [](const ir::CallPtr& op, codegen::CodegenBase& base, const char* instruction) {
     auto& codegen = AsPto(base);
+    codegen.RecordExplicitPipeFlag();
     const int src = op->GetKwarg<int>("src_pipe");
     const int dst = op->GetKwarg<int>("dst_pipe");
     const std::string src_name = "PIPE_" + ir::PipeTypeToString(static_cast<ir::PipeType>(src));
@@ -708,6 +722,7 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
       location = "mat";
     } else if (codegen.IsAIVFunction()) {
       location = "vec";
+      if (!auto_alloc) codegen.RecordVecReservation(ssa_name, base, size);
     } else {
       location = "undefined";
     }

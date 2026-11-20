@@ -122,6 +122,7 @@ def test_gm_bundle_preserves_native_abi_and_physical_stride():
     assert bundle.entry_helpers == {"kernel": [helper.symbol]}
     assert helper.kind == "simt"
     assert helper.parameter_types == ["!pto.ptr<f32, gm>", "!pto.ptr<f32, gm>", "i32"]
+    assert helper.capture_base_indices == [0, 1, -1]
     assert helper.parameter_effects == ["read", "readwrite", "none"]
     assert "pto.get_tid_y" in helper.source
     assert "arith.constant 32 : index" in helper.source

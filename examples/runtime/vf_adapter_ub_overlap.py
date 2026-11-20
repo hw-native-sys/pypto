@@ -124,10 +124,11 @@ def _prepare(directory: Path) -> CompiledProgram:
 def _check_tile_sync(directory: Path, wrapper: str) -> None:
     """Check the production caller/adapter contract without rewriting sources."""
     manifest = json.loads((directory / "vpto/body/manifest.json").read_text())
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["synchronization"] == "ptoas-insert-sync"
     assert manifest["effect_scope"] == "whole-tile"
     helper = manifest["helpers"][0]
+    assert helper["capture_base_indices"] == [0] * 5 + [-1] * 3
     assert helper["parameter_effects"] == ["readwrite"] * 5 + ["none"] * 3
     assert helper["parameter_types"] == ["!pto.ptr<f32, ub>", "i32", "f32", "f32"]
     assert all(t.startswith("!pto.tile_buf<") for t in helper["caller_parameter_types"][:5])
