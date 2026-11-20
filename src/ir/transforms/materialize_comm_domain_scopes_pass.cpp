@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -18,6 +19,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -39,8 +41,10 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/dist_tensor_alias_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/window_view_utils.h"
 #include "pypto/ir/type.h"
@@ -205,6 +209,156 @@ class AllocAndWindowCollector : public IRVisitor {
   std::vector<ForStmtPtr> loops;                              ///< loops carrying values (iter_args non-empty)
   std::vector<WhileStmtPtr> whiles;
   std::unordered_map<const Var*, ExprPtr> var_defs;
+};
+
+// Index 0 is URMA; index 1 is MTE. MTE is an analysis-only requirement:
+// its runtime domain uses an empty workspace-engine list.
+using BufferEngines = std::unordered_map<const Var*, std::array<bool, 2>>;
+
+std::array<bool, 2> EnginesFor(const BufferEngines& engines, const Var* buffer) {
+  const auto it = engines.find(buffer);
+  return it == engines.end() ? std::array<bool, 2>{} : it->second;
+}
+
+// Collect effects per allocation, before compatible allocations are grouped.
+// Propagate callee requirements back to each actual argument independently;
+// caller facts never flow into shared formals and contaminate another call.
+// Each engine bit traverses an edge at most once: O(nodes + edges).
+class BufferEngineCollector : public IRVisitor {
+ public:
+  explicit BufferEngineCollector(ProgramPtr program) : program_(std::move(program)) {}
+
+  BufferEngines Collect() {
+    // Standalone invocations need not have normalized return statements yet.
+    // Share the existing memoized lineage analysis across all callee queries.
+    return_lineage::ScopedTraceCache lineage_cache;
+    for (const auto& [gv, func] : program_->functions_) {
+      if (func->func_type_ == FunctionType::SIMT) continue;
+      auto& plan = plans_[func->name_];
+      plan.returned_param_indices = return_lineage::ReturnedParamIndices(func, program_);
+      for (size_t i = 0; i < func->params_.size(); ++i) {
+        const auto& param = func->params_[i];
+        if (!As<DistributedTensorType>(param->GetType())) continue;
+        plan.dist_param_indices.push_back(i);
+        plan.param_to_ctx[param.get()] = param;
+      }
+    }
+    for (const auto& [gv, func] : program_->functions_) {
+      auto plan = plans_.find(func->name_);
+      dist_tensor_alias::DistParamAliasCollector aliases(program_, &plans_,
+                                                         plan == plans_.end() ? nullptr : &plan->second);
+      AllocAndWindowCollector windows;
+      windows.VisitStmt(func->body_);
+      for (const auto& alloc : windows.allocs) roots_[alloc->ptr_var.get()] = alloc->ptr_var;
+      // Seed raw views with their allocation identity. The same alias walker
+      // used by context materialization handles returns, loop carries and views.
+      for (const auto& view : windows.windows) {
+        aliases.alias_to_ctx[view.old_view_var.get()] = view.alloc->ptr_var;
+      }
+      aliases.VisitStmt(func->body_);
+      aliases_ = &aliases;
+      VisitStmt(func->body_);
+    }
+    aliases_ = nullptr;
+    for (size_t i = 0; i < pending_.size(); ++i) {
+      const auto [node, engine] = pending_[i];
+      for (const auto* caller : callers_[node]) Record(caller, engine);
+    }
+    if (roots_.empty()) {
+      // A standalone CHIP entry has no allocation sites yet, but incompatible
+      // uses of the same formal still necessarily refer to one buffer.
+      for (const auto& [buffer, engines] : engines_) Check(buffer, engines);
+    } else {
+      for (const auto& [buffer, owner] : roots_) Check(buffer, EnginesFor(engines_, buffer));
+    }
+    return std::move(engines_);
+  }
+
+ protected:
+  void VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+    // Re-running the pass must retain allocation identity even for explicit
+    // materialized IR whose body contains no alloc_window_buffer calls.
+    for (const auto& slot : op->slots_) roots_[slot->base_.get()] = slot->base_;
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitExpr_(const CallPtr& op) override {
+    Analyze(op->op_, op->args_, op->span_);
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const SubmitPtr& op) override {
+    Analyze(op->op_, op->args_, op->span_);
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  const Var* Resolve(const ExprPtr& expr) const {
+    if (auto type = As<DistributedTensorType>(expr->GetType()); type && type->window_buffer_) {
+      return (*type->window_buffer_)->base_.get();
+    }
+    return aliases_->ResolveCtx(expr).get();
+  }
+
+  void Analyze(const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span) {
+    // Indexed builtins use the target's URMA context to address target, signal
+    // and send-count windows. Input, recv-counts and index are local operands.
+    // This preserves the builtin's declared workspace requirement without
+    // assigning URMA to unrelated arguments of its enclosing CHIP function.
+    const bool indexed = IsOp(op, "pld.tensor.indexed_all_to_all_v") ||
+                         (op && op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0);
+    if (indexed) {
+      INTERNAL_CHECK_SPAN(args.size() >= 4, span) << "Indexed collective is missing its window operands";
+      for (size_t i = 1; i <= 3; ++i) {
+        if (const auto* buffer = Resolve(args[i])) Record(buffer, 0);
+      }
+    }
+    if (auto global = As<GlobalVar>(op)) {
+      auto callee = program_->GetFunction(global->name_);
+      auto plan = plans_.find(global->name_);
+      if (!callee || plan == plans_.end()) return;
+      // Before context suffixes are appended, Submit supplies an ordinary
+      // parameter prefix; omitted runtime-owned outputs have no actual buffer.
+      for (size_t index : plan->second.dist_param_indices) {
+        if (index >= args.size()) continue;
+        if (const auto* actual = Resolve(args[index])) {
+          callers_[callee->params_[index].get()].push_back(actual);
+        }
+      }
+      return;
+    }
+    size_t target = 0;
+    const bool urma = IsOp(op, "pld.tensor.put_async") || IsOp(op, "pld.tensor.get_async");
+    if (IsOp(op, "pld.tensor.get_async") || IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) {
+      target = 2;
+    } else if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) {
+      target = 1;
+    } else if (!urma && !IsOp(op, "pld.tile.remote_load") && !IsOp(op, "pld.tensor.put") &&
+               !IsOp(op, "pld.tile.put")) {
+      return;
+    }
+    INTERNAL_CHECK_SPAN(args.size() > target, span)
+        << "Communication primitive is missing its window operand";
+    if (const auto* buffer = Resolve(args[target])) Record(buffer, urma ? 0 : 1);
+  }
+
+  void Record(const Var* buffer, size_t engine) {
+    if (engines_[buffer][engine]) return;
+    engines_[buffer][engine] = true;
+    pending_.emplace_back(buffer, engine);
+  }
+  static void Check(const Var* buffer, const std::array<bool, 2>& engines) {
+    CHECK_SPAN(!engines[0] || !engines[1], buffer->span_)
+        << "Communication buffer '" << buffer->name_hint_
+        << "' cannot combine URMA async transfers with MTE primitives "
+           "(remote_load/store or put/get), regardless of peer rank.";
+  }
+
+  ProgramPtr program_;
+  std::unordered_map<std::string, dist_tensor_alias::FunctionCtxPlan> plans_;
+  const dist_tensor_alias::DistParamAliasCollector* aliases_ = nullptr;
+  std::unordered_map<const Var*, VarPtr> roots_;
+  std::unordered_map<const Var*, std::vector<const Var*>> callers_;
+  BufferEngines engines_;
+  std::vector<std::pair<const Var*, size_t>> pending_;
 };
 
 /// Detects whether a Call resolves to a chip-level Orchestration function (i.e.
@@ -681,34 +835,81 @@ class DefiningCallRetyper : public IRMutator {
 /// ``CommDomainScopeStmt`` (one per inferred comm domain, outer = first
 /// declared, inner = last declared).
 FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string, FunctionPtr>& chip_orchs,
-                            const std::vector<std::string>& engines) {
+                            const BufferEngines& engines) {
   // Idempotence: if this function's body is already wrapped in a
   // CommDomainScopeStmt, the pass has run on it before — skip to avoid
   // double-wrapping the body and minting a fresh set of WindowBuffer
   // instances that would shadow the existing ones on every view.
   if (func->body_ && As<CommDomainScopeStmt>(func->body_)) {
-    // Preserve materialized slots, but refresh requirements if the Program
-    // acquired another engine use since its domains were materialized.
+    // Preserve the WindowBuffer objects referenced by existing tensor types,
+    // but split an old scope if newly introduced uses need distinct engines.
     class EngineUpdater : public IRMutator {
      public:
-      explicit EngineUpdater(const std::vector<std::string>& engines) : engines_(engines) {}
+      explicit EngineUpdater(const BufferEngines& engines) : engines_(engines) {}
+      std::set<std::string> names;
       StmtPtr VisitStmt_(const CommDomainScopeStmtPtr& op) override {
         auto updated = As<CommDomainScopeStmt>(IRMutator::VisitStmt_(op));
-        auto required = updated->engines_;
-        for (const auto& engine : engines_) {
-          if (std::find(required.begin(), required.end(), engine) == required.end()) {
-            required.push_back(engine);
-          }
+        std::array<bool, 2> combined{};
+        for (const auto& slot : updated->slots_) {
+          const auto uses = EnginesFor(engines_, slot->base_.get());
+          combined[0] |= uses[0];
+          combined[1] |= uses[1];
         }
-        if (required == updated->engines_) return updated;
-        auto result = MutableCopy(updated);
-        result->engines_ = std::move(required);
-        return result;
+        // Explicit materialized IR may declare a workspace for an opaque
+        // kernel. With no recognized uses, retain that declaration unchanged.
+        if (!combined[0] && !combined[1]) return updated;
+        std::array<std::vector<WindowBufferPtr>, 2> groups;
+        for (const auto& slot : updated->slots_) {
+          const auto uses = EnginesFor(engines_, slot->base_.get());
+          const bool urma = uses[0] || (!uses[1] && combined[0] && !combined[1]);
+          groups[urma ? 1 : 0].push_back(slot);
+        }
+        auto engines = updated->engines_;
+        engines.erase(std::remove(engines.begin(), engines.end(), "urma"), engines.end());
+        const bool split = !groups[0].empty() && !groups[1].empty();
+        if (!split) {
+          if (!groups[1].empty()) engines.emplace_back("urma");
+          if (engines == updated->engines_) return updated;
+          auto result = MutableCopy(updated);
+          result->engines_ = std::move(engines);
+          return result;
+        }
+        // Keep the original name on the outer scope. New names are allocated
+        // from one monotonic sequence, avoiding collisions with existing IR.
+        std::string name;
+        do {
+          name = "comm_engine_" + std::to_string(next_name_++);
+        } while (!names.insert(name).second);
+        const auto first = EnginesFor(engines_, updated->slots_.front()->base_.get());
+        const size_t outer_group = first[0] ? 1 : 0;
+        const size_t inner_group = 1 - outer_group;
+        auto inner = MutableCopy(updated);
+        inner->name_hint_ = std::move(name);
+        inner->slots_ = std::move(groups[inner_group]);
+        inner->engines_ = engines;
+        if (inner_group == 1) inner->engines_.emplace_back("urma");
+        auto outer = MutableCopy(updated);
+        outer->slots_ = std::move(groups[outer_group]);
+        outer->engines_ = std::move(engines);
+        if (outer_group == 1) outer->engines_.emplace_back("urma");
+        outer->body_ = inner;
+        return outer;
       }
 
      private:
-      const std::vector<std::string>& engines_;
+      const BufferEngines& engines_;
+      size_t next_name_ = 0;
     } updater(engines);
+    class NameCollector : public IRVisitor {
+     public:
+      std::set<std::string> names;
+      void VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+        names.insert(op->name_hint_);
+        IRVisitor::VisitStmt_(op);
+      }
+    } names;
+    names.VisitStmt(func->body_);
+    updater.names = std::move(names.names);
     auto body = updater.VisitStmt(func->body_);
     if (body == func->body_) return func;
     auto result = MutableCopy(func);
@@ -832,10 +1033,10 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   for (const auto& fs : collector.loops) sync_loop_carries(fs->iter_args_, fs->return_vars_);
   for (const auto& ws : collector.whiles) sync_loop_carries(ws->iter_args_, ws->return_vars_);
 
-  // Phase 6: cluster allocs into pending domain entries by merged descriptor
-  // (alloc-order within a domain). Use a vector for deterministic order: scan
+  // Phase 6: cluster allocs by merged device descriptor, memory source and
+  // engine category (alloc-order within a domain). Use a vector for deterministic order: scan
   // collector.allocs in source order and append to the first matching entry
-  // or create a new one. `desc_to_index` maps a merged descriptor to its
+  // or create a new one. `desc_to_index` maps the composite grouping key to its
   // `pending` slot (O(log domains) via DeviceDescriptor::operator<, per
   // pass-complexity.md — a per-alloc linear scan of `pending` would make this
   // Phase O(allocs^2) for programs with many distinct comm domains). Store
@@ -846,19 +1047,37 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     std::vector<WindowBufferPtr> slots;
     std::set<std::string> names;  // sanity check
     Span span;
+    bool uses_urma;
   };
   std::vector<PendingDomain> pending;
-  std::map<std::pair<DeviceDescriptor, std::string>, size_t> desc_to_index;
+  using Coverage = std::pair<DeviceDescriptor, std::string>;
+  std::map<Coverage, std::array<bool, 2>> coverage_engines;
+  std::unordered_map<const Var*, Coverage> coverage;
   for (const auto& rec : collector.allocs) {
     DeviceDescriptor merged;
     for (const auto& d : rec->seen) merged.Merge(d);
-    const auto key = std::make_pair(merged, rec->wb->memory_source_);
+    auto key = std::make_pair(merged, rec->wb->memory_source_);
+    coverage.emplace(rec->ptr_var.get(), key);
+    const auto uses = EnginesFor(engines, rec->ptr_var.get());
+    auto& combined = coverage_engines[key];
+    combined[0] |= uses[0];
+    combined[1] |= uses[1];
+  }
+  std::map<std::tuple<DeviceDescriptor, std::string, bool>, size_t> desc_to_index;
+  for (const auto& rec : collector.allocs) {
+    const auto& [merged, memory_source] = coverage.at(rec->ptr_var.get());
+    const auto uses = EnginesFor(engines, rec->ptr_var.get());
+    const auto combined = coverage_engines.at(coverage.at(rec->ptr_var.get()));
+    // Unclassified local-only slots may share a compatible domain. Prefer the
+    // default MTE/no-workspace group when both explicit categories are present.
+    const bool uses_urma = uses[0] || (!uses[1] && combined[0] && !combined[1]);
+    const auto key = std::make_tuple(merged, memory_source, uses_urma);
     auto it = desc_to_index.find(key);
     size_t index;
     if (it == desc_to_index.end()) {
       index = pending.size();
       desc_to_index.emplace(key, index);
-      pending.push_back({merged, {}, {}, rec->span});
+      pending.push_back({merged, {}, {}, rec->span, uses_urma});
     } else {
       index = it->second;
     }
@@ -892,7 +1111,8 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     std::string name_hint = "comm_d" + std::to_string(i);
     new_body = std::make_shared<const CommDomainScopeStmt>(
         g.desc.ToDevices(), std::move(g.slots), std::move(name_hint), new_body, g.span,
-        std::vector<std::string>{}, std::vector<std::pair<std::string, std::any>>{}, engines);
+        std::vector<std::string>{}, std::vector<std::pair<std::string, std::any>>{},
+        g.uses_urma ? std::vector<std::string>{"urma"} : std::vector<std::string>{});
   }
 
   if (new_body.get() == func->body_.get()) return func;
@@ -907,35 +1127,7 @@ namespace pass {
 
 Pass MaterializeCommDomainScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    // Conservative program-wide policy: one URMA use provisions every domain,
-    // regardless of its memory source. Host backing alone does not require URMA.
-    // Precise domain attribution belongs here in a future refinement, not in codegen.
-    class EngineCollector : public IRVisitor {
-     public:
-      bool uses_urma = false;
-      void Record(const OpPtr& op) {
-        // LowerL2TensorCollectives may already have replaced the registered op
-        // with a synthesized builtin function (not a registry operator).
-        if (op && (IsOp(op, "pld.tensor.indexed_all_to_all_v") || IsOp(op, "pld.tensor.put_async") ||
-                   IsOp(op, "pld.tensor.get_async") ||
-                   op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0)) {
-          uses_urma = true;
-        }
-      }
-      void VisitExpr_(const CallPtr& op) override {
-        Record(op->op_);
-        IRVisitor::VisitExpr_(op);
-      }
-      void VisitExpr_(const SubmitPtr& op) override {
-        Record(op->op_);
-        IRVisitor::VisitExpr_(op);
-      }
-    } collector;
-    for (const auto& [gv, func] : program->functions_) {
-      if (func && func->body_) collector.VisitStmt(func->body_);
-    }
-    const std::vector<std::string> engines =
-        collector.uses_urma ? std::vector<std::string>{"urma"} : std::vector<std::string>{};
+    const auto engines = BufferEngineCollector(program).Collect();
     // Index chip-level Orchestration functions by name so the dispatch
     // analyzer can recognise host → chip Calls.
     std::map<std::string, FunctionPtr> chip_orchs;

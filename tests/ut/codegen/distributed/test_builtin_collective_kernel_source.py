@@ -480,8 +480,8 @@ def test_indexed_rail_requests_the_urma_workspace(tmp_path):
     assert 'workspace_engines=("urma",)' in host_orch, host_orch
 
 
-def test_indexed_use_requests_urma_for_all_domains(tmp_path):
-    """Program-wide URMA detection provisions every materialized domain."""
+def test_indexed_use_requests_urma_only_for_its_buffers(tmp_path):
+    """Trace URMA requirements to buffers, not every argument of a dispatch."""
     dtype = _dtype_of("fp32")
     dtype_bytes = dtype.get_byte()
     i32_bytes = pl.INT32.get_byte()
@@ -544,15 +544,15 @@ def test_indexed_use_requests_urma_for_all_domains(tmp_path):
     )
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
-    assert host_orch.count('workspace_engines=("urma",)') == 2, host_orch
+    assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
     d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
     d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
     assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert 'workspace_engines=("urma",)' in d1, host_orch
+    assert "workspace_engines" not in d1, host_orch
 
 
-def test_shared_dispatch_provisions_all_domains_conservatively(tmp_path):
-    """Program-wide URMA detection provisions every materialized domain."""
+def test_shared_dispatch_keeps_unrelated_domains_without_urma(tmp_path):
+    """Trace URMA requirements to buffers, not every argument of a dispatch."""
     dtype = _dtype_of("fp32")
     dtype_bytes = dtype.get_byte()
     i32_bytes = pl.INT32.get_byte()
@@ -623,18 +623,18 @@ def test_shared_dispatch_provisions_all_domains_conservatively(tmp_path):
 
     # The dispatch really is shared: one TaskArgs carries the sibling domain's
     # ``plain`` window alongside the indexed domain's operands, plus one
-    # ordering token per domain. Both domains receive the program's URMA requirement.
+    # ordering token per domain. Only the indexed buffers receive the URMA requirement.
     mixed = host_orch.split('_submit_chip(orch, callables["chip_mixed"]', 1)[0]
     mixed = mixed[mixed.rindex("= TaskArgs()") :]
     assert '__comm_d1[0].buffers["plain_buf' in mixed, host_orch
     assert '__comm_d0[0].buffers["input_buf' in mixed, host_orch
     assert "__comm_d1_ord" in mixed and "__comm_d0_ord" in mixed, host_orch
 
-    assert host_orch.count('workspace_engines=("urma",)') == 2, host_orch
+    assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
     d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
     d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
     assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert 'workspace_engines=("urma",)' in d1, host_orch
+    assert "workspace_engines" not in d1, host_orch
 
 
 def test_indexed_collective_fed_by_if_result_requests_urma(tmp_path):
@@ -704,8 +704,8 @@ def test_indexed_collective_fed_by_if_result_requests_urma(tmp_path):
     assert 'workspace_engines=("urma",)' in host_orch, host_orch
 
 
-def test_local_operand_domain_also_receives_program_engines(tmp_path):
-    """Program-wide URMA detection provisions every materialized domain."""
+def test_local_operand_domain_does_not_require_urma(tmp_path):
+    """Trace URMA requirements to buffers, not every argument of a dispatch."""
     dtype = _dtype_of("fp32")
     dtype_bytes = dtype.get_byte()
     i32_bytes = pl.INT32.get_byte()
@@ -766,11 +766,11 @@ def test_local_operand_domain_also_receives_program_engines(tmp_path):
     )
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
-    assert host_orch.count('workspace_engines=("urma",)') == 2, host_orch
+    assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
     d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
     d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
     assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert 'workspace_engines=("urma",)' in d1, host_orch
+    assert "workspace_engines" not in d1, host_orch
 
 
 @pytest.mark.parametrize("engines", [[], ["sdma"], ["urma"], ["sdma", "urma"]])
@@ -805,8 +805,8 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_
     """End-to-end A9: an async transfer reaches the host domain's engine list.
 
     The engine scan must recognise ``put_async`` on the chip function, the pass
-    must record ``urma`` on every materialized domain under the program-wide
-    policy, and codegen must render it as ``workspace_engines``. Nothing else in
+    must record ``urma`` on the remote operand's buffer, and codegen must
+    render the derived domain requirement as ``workspace_engines``. Nothing else in
     the program asks for URMA, so a missing match would emit a domain with no
     engine list and the runtime would hand the helper a zero workspace.
     """
@@ -864,8 +864,8 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
     assert 'workspace_engines=("urma",)' in host_orch, host_orch
-    # Host and Device windows form separate domains, both provisioned from usage.
-    assert host_orch.count('workspace_engines=("urma",)') == (2 if memory_source == "host" else 1)
+    # The local-only source does not require URMA on its own domain.
+    assert host_orch.count('workspace_engines=("urma",)') == 1
     if memory_source == "host":
         assert "memory_source=AddressSpace.HOST" in host_orch
         assert "__comm_d0.device_context(0)" in host_orch

@@ -3,9 +3,10 @@
 Materializes one explicit `CommCtxType` parameter and argument for each
 `DistributedTensorType` function parameter, except in SIMT helpers.
 
-Before extending signatures, the pass rejects mixing explicit URMA async transfers and MTE
-communication primitives in one domain, regardless of peer rank; see
-[Host DDR windows](50-materialize_comm_domain_scopes.md#host-ddr-windows) for the scope.
+Engine requirements, per-buffer conflict checks and domain grouping belong to
+[MaterializeCommDomainScopes](50-materialize_comm_domain_scopes.md#async-workspace-engines).
+This pass only materializes contexts for those domains. Both passes share the
+distributed-tensor alias tracing utility.
 
 ## Overview
 

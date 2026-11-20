@@ -3,9 +3,9 @@
 本 pass 为每个 `DistributedTensorType` 函数参数显式物化一个对应的
 `CommCtxType` 参数和实参，SIMT helper 除外。
 
-扩展签名前，本 Pass 拒绝同一通信域混用显式 URMA 异步传输与 MTE 通信原语，
-不区分 peer 是否为本卡；检查范围见
-[Host DDR 窗口](50-materialize_comm_domain_scopes.md#host-ddr-窗口)。
+引擎需求、单 buffer 冲突检查和通信域分组由
+[MaterializeCommDomainScopes](50-materialize_comm_domain_scopes.md#异步工作区引擎) 完成。
+本 Pass 只为这些通信域物化上下文；两个 Pass 共用分布式 tensor 的别名追踪工具。
 
 ## 概览
 
