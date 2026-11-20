@@ -21,15 +21,14 @@ lower-level primitives only when building a custom protocol.
 
 ## System Substrate (`pld.system.*`)
 
-These are the lowest-level distributed primitives. Scope varies per op —
-`world_size` is host-only; `get_comm_ctx` works in both host orchestrator and
-InCore kernel code; `rank`, `nranks`, `notify`, `wait`, and `defer_wait` have codegen
-support only in InCore kernel code (there is no host-orchestrator lowering
-for them).
+The parser accepts `world_size` and `num_workers` in HOST and CLUSTER_0 orchestration.
+`get_comm_ctx` works in both host orchestrators and InCore kernels. Codegen supports
+`rank`, `nranks`, `notify`, `wait`, and `defer_wait` only in InCore kernels.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `world_size` | `() -> Scalar` | **Host-only.** Number of ranks in the distributed execution. Returns `INT64`. |
+| `world_size` | `() -> Scalar` | Number of ranks in the distributed execution. Returns `INT64`. |
+| `num_workers` | `() -> Scalar` | Number of immediate child workers. Returns `INT64`. |
 | `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | Lift a `DistributedTensor` to its `CommCtx` handle. Works in host orchestrator and InCore code. The verifier rejects plain `pl.Tensor`. |
 | `rank` | `(ctx: Ctx) -> Scalar` | **InCore-only.** Local rank index (`INT32`). Lowers to a load of `CommContext::rankId`. |
 | `nranks` | `(ctx: Ctx) -> Scalar` | **InCore-only.** Number of ranks in this comm group (`INT32`). Lowers to a load of `CommContext::rankNum`. |
@@ -45,7 +44,7 @@ even though they are as foundational as the substrate above.
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `window` | `(buf: Ptr, shape: Sequence[IntLike], *, dtype: DataType) -> DT` | Materialise a window-buffer `Ptr` as a `DistributedTensor` view. `buf` comes from `alloc_window_buffer`. |
-| `alloc_window_buffer` | `(size: IntLike, *, name: str = "") -> Ptr` | Allocate a per-rank HCCL window buffer. **Size is in bytes.** The `name` kwarg is injected by the parser from the LHS assignment — never pass it explicitly. |
+| `alloc_window_buffer` | `(size: IntLike, *, name: str = "") -> Ptr` | Declare a per-rank HCCL window buffer in HOST or CLUSTER_0 orchestration. **Size is in bytes.** The `name` kwarg is injected by the parser from the LHS assignment — never pass it explicitly. |
 | `alloc_window_buffer` | `(shape: Sequence[IntLike], *, dtype: DataType, name: str = "") -> Ptr` | Convenience overload. `size = prod(shape) x dtype.get_byte()` computed automatically. |
 
 ## Notify & Wait: The Signal Handshake

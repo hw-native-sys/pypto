@@ -13,9 +13,7 @@
 The short form (``pld.world_size()``) is the unified-dispatch entry point
 and the long form (``pld.system.world_size()``) is the canonical 3-segment
 surface. Both lift to ``ir.OpExpr('pld.system.world_size')`` returning a
-scalar INT64. Host-only enforcement happens at parse time: invocations
-outside a ``level=pl.Level.HOST`` function body are rejected with a clear
-error message.
+scalar INT64 in HOST or CLUSTER_0 orchestration.
 """
 
 import pypto.language as pl
@@ -144,9 +142,8 @@ def test_world_size_rejects_kwargs():
                 return 0
 
 
-def test_world_size_rejected_outside_host_function():
-    """``pld.world_size()`` is host-only — calling it from a CORE_GROUP-level
-    function body is a parse error."""
+def test_world_size_rejected_in_core_group():
+    """Calling ``pld.world_size()`` in a CORE_GROUP scope is a parse error."""
     with pytest.raises(ParserSyntaxError, match="HOST"):
 
         @pl.program

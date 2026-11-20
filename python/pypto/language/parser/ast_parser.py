@@ -335,6 +335,7 @@ class ASTParser:
         self.type_resolver.register_window_definitions(func_def)
         self.function.func_name = func_name
         self.function.func_level = func_level
+        self.regions.effective_level = func_level
         # auto_scope rides in func_attrs; absent ⇒ default True.
         self.function.func_auto_scope = bool((func_attrs or {}).get(AUTO_SCOPE_ATTR, True))
         self.function.func_type = func_type
@@ -1286,9 +1287,7 @@ class ASTParser:
         Parser-only concerns (everything else delegates to the DSL wrapper /
         IR builder / C++ deducer via :func:`invoke_dsl`):
 
-        - HOST-only, like ``world_size`` (see ``_validate_pld_op_call``): the
-          window buffer is a host-orchestration resource, not lowerable inside
-          InCore / SPMD scopes.
+        - Callable in HOST or CLUSTER_0 orchestration, outside InCore / SPMD scopes.
         - LHS must be a single ``ast.Name``.
         - That name must be globally unique within the ``@pl.program``.
         - User can't pass ``name=`` (it's parser-injected from the LHS).
@@ -1296,18 +1295,8 @@ class ASTParser:
         span = self.span_tracker.get_span(value)
         is_printed = _is_dump_call(value, "alloc_window_buffer")
 
-        in_device_scope = any(
-            self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
-        )
-        if not is_printed and (self.function.func_level != ir.Level.HOST or in_device_scope):
-            raise ParserSyntaxError(
-                "pld.tensor.alloc_window_buffer() can only be called in HOST orchestration "
-                "context (not inside InCore / SPMD scopes); "
-                f"current function level: {self.function.func_level}",
-                span=span,
-                hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                "on the enclosing function and call outside any nested device-side scope",
-            )
+        if not is_printed:
+            self.ops.validate_host_or_cluster_scope("pld.tensor.alloc_window_buffer", span)
 
         if not isinstance(target, ast.Name):
             raise ParserSyntaxError(
