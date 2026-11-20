@@ -397,7 +397,8 @@ v = pl.tensor.view(x, [2, 512], offsets=[3, 0], steps=[500, 2])
 依赖设备运行时值的窗口参数须满足边界条件。如果形状、偏移、步长或有效范围来自内存读取，先将读取结果赋给标量，再用它创建视图。
 如果源张量是分布式张量，视图保留分布式类型和原来的窗口缓冲区。
 标量 `tensor.read` 和 `tensor.write` 按视图的物理 stride 寻址。在上例中，下标 `[1, 1]` 对应 `x[503, 2]`。
-使用原生 tile DMA 时，`pl.load` 和 `pl.store` 要求编译器能证明物理内轴的步长为 1。ND 的内轴是最后一维，DN 的内轴是倒数第二维。
+使用原生 tile DMA 时，`pl.load`、`pl.store` 和 `pl.gather_row` 要求编译器能证明物理内轴的步长为 1。ND 的内轴是最后一维，DN 的内轴是倒数第二维。
+`pl.gather_row(..., transpose=True)` 生成的 DN 描述符沿用源窗口调整后的基址，并交换物理步长。转置后的内轴对应源窗口的最后一维。
 
 Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
 [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h)）：

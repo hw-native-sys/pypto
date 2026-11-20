@@ -197,6 +197,19 @@ def test_gather_row_rejects_dtype_mismatch():
                 return kv
 
 
+@pytest.mark.parametrize("transpose", [False, True])
+def test_tile_gather_row_rejects_sampled_columns(transpose):
+    with pytest.raises(InvalidOperationError, match=r"tile\.gather_row: .*non-unit physical inner stride"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[64, 128], pl.BF16]):
+                window = pl.tensor.view(src, [16, 64], offsets=[1, 0], steps=[2, 2])
+                dst = pl.tile.create([64, 64], dtype=pl.BF16, target_memory=pl.Mem.Mat)
+                _ = pl.tile.gather_row(dst, window, [0, 0], [0, 0], [1, 64], transpose=transpose)
+
+
 def test_gather_row_forwards_valid_shape_to_tile_op():
     """The optional valid_shape rides through ConvertTensorToTileOps verbatim.
 

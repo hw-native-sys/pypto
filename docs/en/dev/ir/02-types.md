@@ -452,8 +452,11 @@ memory read, assign the read to a scalar before constructing the view.
 If the source is a distributed tensor, the view retains its distributed type
 and its original window buffer. Scalar `tensor.read` and `tensor.write` use
 the view's physical strides. In the example above, index `[1, 1]` addresses
-`x[503, 2]`. For native tile DMA, `pl.load` and `pl.store` require a provable unit
-physical inner stride (last axis for ND, penultimate for DN).
+`x[503, 2]`. Native tile DMA in `pl.load`, `pl.store`, and `pl.gather_row` requires a
+provable unit physical inner stride (last axis for ND, penultimate for DN).
+For `pl.gather_row(..., transpose=True)`, the transposed DN descriptor uses the
+source window's adjusted base and swaps its physical strides. Its inner axis
+is the source window's last axis.
 
 The packed canonical formulas (`BuildLogicalStridesFromLayout` in
 [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h)):

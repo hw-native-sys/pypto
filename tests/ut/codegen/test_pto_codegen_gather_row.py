@@ -22,7 +22,8 @@ The non-transposing path keeps the canonical ND source view (no DN make_tensor_v
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 MM = 32
@@ -109,6 +110,31 @@ def test_gather_row_no_transpose_keeps_nd_source_view():
     assert "pto.subview" in mlir
     # No DN-strided source view is built for the straight ND2NZ row load.
     assert "layout = #pto.layout<dn>" not in mlir
+
+
+@pytest.mark.ptoas_compile
+def test_gather_row_transpose_preserves_sampled_window_addressing(tmp_path):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, src: pl.Tensor[[64, 64], pl.BF16], a: pl.Tensor[[16, 64], pl.BF16]):
+            window = pl.tensor.view(src, [16, 64], offsets=[1, 0], steps=[2, 1])
+            kv = pl.create_l1([64, 16], pl.BF16, transpose=True)
+            for r in pl.range(16):
+                kv = pl.gather_row(kv, window, [0, r], [r, 0], [1, 64], transpose=True)
+            return pl.matmul(a, kv, out_dtype=pl.FP32)
+
+    mlir = _codegen_incore(Program)
+    origin = next(line for line in mlir.splitlines() if " = pto.addptr " in line)
+    assert ", %c64_index" in origin
+    adjusted_ptr = origin.split(" = ", 1)[0].strip()
+    dn_view = next(line for line in mlir.splitlines() if "layout = #pto.layout<dn>" in line)
+    # ND rows are sampled at [1 + 2*r]. Their transposed descriptor shares
+    # the adjusted origin and maps that physical row pitch to its second axis.
+    assert f"pto.make_tensor_view {adjusted_ptr}, shape = [%c64_index, %c16_index]" in dn_view
+    assert "strides = [%c1_index, %c128_index]" in dn_view
+    if find_ptoas_binary() is not None:
+        pto_backend._compile_pto_module(mlir, "gather_row_window", str(tmp_path))
 
 
 STATIC_ROWS = ROWS // 2
