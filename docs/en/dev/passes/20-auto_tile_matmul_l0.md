@@ -30,7 +30,30 @@ Already-L0 pipelines are not automatically marked for accumulator double bufferi
 
 **Invalidates**: nothing.
 
-**When to use**: Always, as part of the default tile-stage pipeline. The pass is a no-op when no Mat-resident matmul needs tiling or cast folding.
+**When to use**: Always, as part of the default tile-stage pipeline. The pass is a no-op when no Mat-resident matmul needs tiling, cast folding, or init/acc branch sharing.
+
+## Sharing init/acc branches with the PTOAS planner
+
+Before K tiling, the PTOAS path recognizes a pipeline reduction ending in
+`if cond: next = tile.matmul(a, b)` / `else: next = tile.matmul_acc(acc, a, b)`.
+It replaces that pair with `tile.matmul_acc(acc, a, b, init_cond=cond)`; a reversed
+branch pair uses `not cond`. The existing K tiler applies initialization only to
+the first sub-block and accumulates subsequent blocks in the original order.
+This produces one shared Mat-to-L0 extraction sequence. PTOAS can allocate reuse
+events without duplicating them across the two branches (PTOAS issue #1727).
+
+The match requires one loop-carried accumulator initialized by a private,
+single-use `tile.create`, one branch result directly yielded by that pipeline,
+identical matrix operands and call metadata, static 2D Mat operands, and an
+output that fits L0C. Both branches must contain only their matrix operation and
+yield. Live aliases, explicit accumulator MemRefs, mismatched layouts or metadata,
+already-predicated accumulation, extra effects and other control-flow shapes
+retain the existing lowering. Missing accumulator memory-space annotations are
+allowed before inference; other type fields must match.
+
+PYPTO and DSA_RP retain their existing schedules. This rewrite neither introduces
+cross-iteration prefetch nor changes slot rotation. PTOAS still inserts every
+synchronization operation; PyPTO does not delete barriers or assign event IDs.
 
 ## API
 

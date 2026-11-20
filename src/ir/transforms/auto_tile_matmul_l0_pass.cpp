@@ -187,6 +187,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/acc_init_builder.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
@@ -1131,6 +1132,19 @@ class MatScratchPlacer : public SubtilePlacer {
   Span sp_;
 };
 
+/// Reuse the shared read census, including metadata captures, and index the
+/// definitions needed to prove branch-sharing owns fresh accumulator storage.
+class BranchSharingReadCounter : public SiblingUseCounter {
+ public:
+  DirectDefMap definitions;
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    definitions.emplace(op->var_.get(), op);
+    SiblingUseCounter::VisitStmt_(op);
+  }
+};
+
 /// Canonical frontend split-K reduction matched for loop-level M/N tiling:
 ///
 ///   init = tile.create([M, N])
@@ -1260,6 +1274,139 @@ std::optional<std::pair<AssignStmtPtr, YieldStmtPtr>> MatchSingleAssignYield(con
     factor = As<ConstInt>(mul->left_);
   }
   return scaled && factor && factor->value_ != 0 && scaled.get() == loop_var.get();
+}
+
+/// Share Mat operand extraction before AutoTile creates independent K loops
+/// for an init/acc branch pair. The existing init_cond contract overwrites the
+/// accumulator when true; subsequent K blocks accumulate in the original order.
+/// PTOAS can then allocate one set of Mat-to-L0 reuse events instead of separate
+/// groups for mutually exclusive branches (PTOAS #1727).
+///
+/// This is deliberately not general if-conversion. Require a single-result,
+/// side-effect-free pair, identical matrix operands/types/attributes, and a
+/// private loop-carried accumulator rooted in a single-use create. Otherwise
+/// overwriting the old accumulator on the init arm could destroy a live alias.
+/// Only the PTOAS planner invokes this phase; existing PYPTO/DSA scheduling stays
+/// unchanged. One shared read/definition index plus one traversal avoids per-branch scans.
+class SharedMatmulBranchMutator : public IRMutator {
+ public:
+  explicit SharedMatmulBranchMutator(const BranchSharingReadCounter& reads) : reads_(reads) {}
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    const auto saved = loop_;
+    loop_ = op;
+    auto result = IRMutator::VisitStmt_(op);
+    loop_ = saved;
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    if (auto result = TryShare(op)) return result;
+    return IRMutator::VisitStmt_(op);
+  }
+
+ private:
+  bool SingleUse(const VarPtr& var) const {
+    const auto it = reads_.counts.find(var.get());
+    return it != reads_.counts.end() && it->second == 1;
+  }
+
+  StmtPtr TryShare(const IfStmtPtr& op) const {
+    if (!loop_ || loop_->kind_ != ForKind::Pipeline || loop_->iter_args_.size() != 1 ||
+        loop_->return_vars_.size() != 1 || !op->else_body_ || op->return_vars_.size() != 1) {
+      return nullptr;
+    }
+    // The branch must directly feed this loop's yield. A single syntactic use
+    // inside another loop is not a single dynamic use of the old accumulator.
+    const auto body = As<SeqStmts>(loop_->body_);
+    if (!body || body->stmts_.size() < 2 || body->stmts_[body->stmts_.size() - 2].get() != op.get()) {
+      return nullptr;
+    }
+    const auto yield = As<YieldStmt>(body->stmts_.back());
+    if (!yield || yield->value_.size() != 1 || yield->value_[0].get() != op->return_vars_[0].get()) {
+      return nullptr;
+    }
+    auto fresh = MatchSingleAssignYield(op->then_body_, "tile.matmul");
+    auto accum = MatchSingleAssignYield(*op->else_body_, "tile.matmul_acc");
+    bool inverted = false;
+    if (!fresh || !accum) {
+      fresh = MatchSingleAssignYield(*op->else_body_, "tile.matmul");
+      accum = MatchSingleAssignYield(op->then_body_, "tile.matmul_acc");
+      inverted = true;
+    }
+    if (!fresh || !accum) return nullptr;
+    const auto mm = As<Call>(fresh->first->value_);
+    const auto mac = As<Call>(accum->first->value_);
+    if (mm->args_.size() != 2 || mac->args_.size() != 3 || mm->args_[0].get() != mac->args_[1].get() ||
+        mm->args_[1].get() != mac->args_[2].get()) {
+      return nullptr;
+    }
+    const auto acc = As<IterArg>(mac->args_[0]);
+    if (!acc || acc.get() != loop_->iter_args_[0].get() || !SingleUse(acc)) return nullptr;
+    const auto init = AsVarLike(acc->initValue_);
+    if (!init || !SingleUse(init)) return nullptr;
+    const auto def = reads_.definitions.find(init.get());
+    if (def == reads_.definitions.end() || !IsOp(As<Call>(def->second->value_), "tile.create")) {
+      return nullptr;
+    }
+    // All storage decisions still belong to the planner. Authored MemRefs or
+    // different output views can make value-equivalent operations non-interchangeable.
+    const auto result_type = As<TileType>(mm->GetType());
+    for (const auto& type :
+         {mm->GetType(), mac->GetType(), fresh->first->var_->GetType(), accum->first->var_->GetType(),
+          op->return_vars_[0]->GetType(), acc->GetType(), init->GetType()}) {
+      const auto tile = As<TileType>(type);
+      if (!tile || tile->memref_ || (tile->memory_space_ && tile->memory_space_ != MemorySpace::Acc)) {
+        return nullptr;
+      }
+      // Tensor-to-tile lowering can leave the create/IterArg space uninferred.
+      // Only that missing space may differ; layout, dtype and shape must agree.
+      auto normalized = MutableCopy(tile);
+      normalized->memory_space_ = MemorySpace::Acc;
+      if (!structural_equal(normalized, mm->GetType())) return nullptr;
+    }
+    if (!result_type || result_type->shape_.size() != 2 ||
+        result_type->GetMemorySpace() != MemorySpace::Acc) {
+      return nullptr;
+    }
+    for (const auto& operand : mm->args_) {
+      const auto var = AsVarLike(operand);
+      const auto tile = var ? As<TileType>(var->GetType()) : nullptr;
+      int64_t rows = 0, cols = 0;
+      if (!IsStatic2DInSpaces(tile, {MemorySpace::Mat}, rows, cols)) return nullptr;
+    }
+    // Oversized output reductions are handled by RewriteCanonicalSplitKAcc.
+    // Do not turn other output-placement shapes into unsupported standalone acc calls.
+    auto* ctx = PassContext::Current();
+    const auto bytes =
+        utils::StaticPhysicalAllocationBytes(result_type, MemorySpace::Acc, ctx->GetBackendHandler());
+    const auto capacity = ctx->GetBackend()->GetMemSize(MemorySpace::Acc);
+    if (!bytes || capacity == 0 || *bytes > capacity) return nullptr;
+    auto comparable = MutableCopy(mm);
+    comparable->op_ = mac->op_;
+    comparable->args_ = mac->args_;
+    // Compare the complete metadata, without alpha-mapping free captures.
+    if (!structural_equal(comparable, mac)) return nullptr;
+    auto shared = MutableCopy(mac);
+    shared->args_.push_back(inverted ? MakeNot(op->condition_, op->span_) : op->condition_);
+    return std::make_shared<AssignStmt>(op->return_vars_[0], shared, op->span_);
+  }
+
+  const BranchSharingReadCounter& reads_;
+  ForStmtPtr loop_;
+};
+
+FunctionPtr ShareMatmulBranches(const FunctionPtr& func) {
+  const auto* ctx = PassContext::Current();
+  if (!ctx || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS) return func;
+  BranchSharingReadCounter reads;
+  reads.VisitStmt(func->body_);
+  SharedMatmulBranchMutator mutator(reads);
+  auto body = mutator.VisitStmt(func->body_);
+  if (body == func->body_) return func;
+  auto result = MutableCopy(func);
+  result->body_ = body;
+  return result;
 }
 
 /// ``hints`` is optional: when supplied, an otherwise-canonical *predicated*
@@ -2701,7 +2848,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& 
   // Canonical loop-carried split-K output tiling changes both the Acc inventory
   // and loop identities. Rewrite it first so the #2131 dbC capacity/placement
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.
-  auto canonical = RewriteCanonicalSplitKAcc(func, hints);
+  auto canonical = ShareMatmulBranches(RewriteCanonicalSplitKAcc(func, hints));
   // Read counts are immutable for each original SSA definition during the
   // ordinary rewrite. Count once, including nested captures, then only index
   // direct consumers in each region. Recursive per-region censuses repeatedly
@@ -2709,6 +2856,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& 
   SiblingUseCounter uses;
   uses.VisitStmt(canonical->body_);
   AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), uses, AnalyzeDelayedInputHazards(canonical));
+
   auto new_body = mutator.VisitStmt(canonical->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == canonical->body_) return canonical;
