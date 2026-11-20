@@ -196,37 +196,48 @@ def remainder_entry(
 
 def check_remainders(handle):
     """Divergent lanes cover exponent extremes, signed zero and invalid inputs."""
+    # Use IEEE-754 bits for the oracle: CPU torch.fmod can produce NaN for
+    # extreme finite ratios. Host flush-to-zero can also turn a subnormal
+    # divisor into zero. Neither behavior is the FP32 fmod contract tested here.
+    # Each row is (positive dividend bits, positive divisor bits, result bits).
+    # None denotes NaN, whose payload/sign are intentionally unspecified.
     pairs = [
-        (0, 0x40400000),  # +0 / 3
-        (0x40F00000, 0x40400000),  # 7.5 / 3
-        (0x3F800000, 0x40400000),  # |x| < |y|
-        (0x40400000, 0x40400000),  # equal magnitudes
-        (0x7F7FFFFF, 0x40400000),  # ratio too large for a float quotient
-        (0x7F7FFFFF, 3),  # maximum normal / subnormal
-        (0x800000, 3),  # minimum normal / subnormal
-        (0x7FFFFF, 3),  # maximum subnormal / subnormal
-        (3, 2),  # nonzero subnormal remainder
-        (1, 0x800000),  # minimum subnormal / normal
-        (0x800001, 0x800000),  # normal operands, subnormal remainder
-        (0x3F800000, 0x7F800000),  # finite / infinity
-        (0x7F800000, 0x3F800000),  # infinity / finite
-        (0x3F800000, 0),  # zero divisor
-        (0x7FC00001, 0x3F800000),  # NaN dividend
-        (0x3F800000, 0x7FC00001),  # NaN divisor
+        (0, 0x40400000, 0),  # +0 / 3
+        (0x40F00000, 0x40400000, 0x3FC00000),  # 7.5 / 3 = 1.5
+        (0x3F800000, 0x40400000, 0x3F800000),  # |x| < |y|
+        (0x40400000, 0x40400000, 0),  # equal magnitudes
+        (0x7F7FFFFF, 0x40400000, 0),  # (2^24 - 1) * 2^104 is divisible by 3
+        (0x7F7FFFFF, 3, 0),  # maximum normal / (3 * 2^-149)
+        (0x800000, 3, 2),  # 2^23 % 3 = 2, in units of 2^-149
+        (0x7FFFFF, 3, 1),  # (2^23 - 1) % 3 = 1
+        (3, 2, 1),  # nonzero subnormal remainder
+        (1, 0x800000, 1),  # minimum subnormal / normal
+        (0x800001, 0x800000, 1),  # normal operands, subnormal remainder
+        (0x3F800000, 0x7F800000, 0x3F800000),  # finite / infinity
+        (0x7F800000, 0x3F800000, None),  # infinity / finite
+        (0x3F800000, 0, None),  # zero divisor
+        (0x7FC00001, 0x3F800000, None),  # NaN dividend
+        (0x3F800000, 0x7FC00001, None),  # NaN divisor
     ]
     for divisor_sign in (0, 0x80000000):
-        signed_pairs = [(x | sign, y | divisor_sign) for sign in (0, 0x80000000) for x, y in pairs]
+        signed_pairs = [(x | sign, y | divisor_sign) for sign in (0, 0x80000000) for x, y, _ in pairs]
         lhs, rhs = (
             torch.tensor(bits, dtype=torch.int64).to(torch.int32).view(torch.float32).reshape(1, 32)
             for bits in zip(*signed_pairs, strict=True)
         )
         output = torch.zeros_like(lhs)
         handle(lhs, rhs, output)
-        expected = torch.fmod(lhs, rhs)
-        invalid = torch.isnan(expected)
-        assert torch.equal(torch.isnan(output), invalid)
-        # Numerical equality misses signed zero and can hide subnormal flushing.
-        assert torch.equal(output.view(torch.int32)[~invalid], expected.view(torch.int32)[~invalid])
+        actual_bits = output.view(torch.int32).reshape(-1).to(torch.int64) & 0xFFFFFFFF
+        expected_bits = [
+            None if result is None else result | sign for sign in (0, 0x80000000) for _, _, result in pairs
+        ]
+        for lane, (actual, expected) in enumerate(zip(actual_bits.tolist(), expected_bits, strict=True)):
+            # Integer classification also avoids depending on the host's FP mode.
+            matches = (actual & 0x7FFFFFFF) > 0x7F800000 if expected is None else actual == expected
+            assert matches, (
+                f"lane {lane}: rem({signed_pairs[lane][0]:#010x}, {signed_pairs[lane][1]:#010x}) "
+                f"returned {actual:#010x}; expected {'NaN' if expected is None else hex(expected)}"
+            )
 
 
 def compile_case(directory: Path, *, entry=interface_entry):

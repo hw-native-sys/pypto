@@ -79,6 +79,9 @@ JIT 回归 `test_simt_interfaces_device_compile` 将扩展接口用例和动态�
 余数内核送入生产 PTOAS、Bisheng 辅助函数编译路径。通过
 `PYPTO_RUN_VPTO_VF_VALIDATION=1` 启用，无需 NPU。主机 LLVM 回归将实际生成的
 算术与 `fmod` 对比；上板用例按位检查不同符号和指数边界的结果。
+上板余数验收使用精确的 IEEE-754 位模式，不依赖主机 CPU 的次正规数清零模式。
+`ftof` 的位置参数和关键字形式的值操作数均按有类型表达式解析，支持 `math.inf`
+等数值属性；目标 dtype 仍按数据类型解析。
 主机执行和设备编译不能替代上板数值验收。
 
 ## 剩余范围

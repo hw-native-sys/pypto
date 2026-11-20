@@ -1337,16 +1337,26 @@ def test_ftof_preserves_positional_dtype_and_omitted_defaults(attributes):
     ir.assert_structural_equal(program, parse_program(str(program)))
 
 
-@pytest.mark.parametrize("arguments", ["value=1.0, dtype=pl.FP16", "dtype=pl.FP16, value=1.0"])
-def test_ftof_keyword_literal_matches_positional_operand(arguments):
+@pytest.mark.parametrize("value", ["1.0", "math.inf", "-math.inf", "math.pi", "-math.pi"])
+@pytest.mark.parametrize(
+    "arguments",
+    ["VALUE, pl.FP16", "VALUE, dtype=pl.FP16", "value=VALUE, dtype=pl.FP16", "dtype=pl.FP16, value=VALUE"],
+)
+def test_ftof_scalar_operands_match_across_argument_spellings(value, arguments):
+    # Numeric attributes used to escape as Python floats only in positional
+    # slots. All value spellings must match an explicitly typed FP32 operand.
     body = """
-        y = pl.simt.ftof(ARGUMENTS)
+        y = pl.simt.ftof(ARGUMENTS, saturate=True)
         z = pl.simt.ftof(y, pl.FP32)
         pl.simt.store(dst, (0, 0), z)
     """
-    positional = scalar_program(body.replace("ARGUMENTS", "1.0, pl.FP16"), "FP32")
-    keyword = scalar_program(body.replace("ARGUMENTS", arguments), "FP32")
-    ir.assert_structural_equal(positional, keyword)
+    expected = scalar_program(
+        body.replace("ARGUMENTS", f"pl.const({value}, pl.FP32), pl.FP16"), "FP32", preamble="import math"
+    )
+    actual = scalar_program(
+        body.replace("ARGUMENTS", arguments.replace("VALUE", value)), "FP32", preamble="import math"
+    )
+    ir.assert_structural_equal(expected, actual)
 
 
 if __name__ == "__main__":

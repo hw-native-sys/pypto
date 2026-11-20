@@ -979,5 +979,66 @@ assert len(objects) == 1 and objects[0].stat().st_size > 0
     assert not re.search(r"\bfrem\b", (tmp_path / "vpto_0.ll").read_text())
 
 
+@pytest.mark.parametrize("flush", [False, True])
+@pytest.mark.parametrize("corruption", ["none", "subnormal", "signed_zero", "nan"])
+def test_remainder_acceptance_ignores_host_fp_mode(flush, corruption):
+    """A correct device result must pass even when the host flushes denormals.
+
+    Use double-precision libm with flushing disabled as an independent reference
+    for the fixed bit-pattern oracle. Wrong results must still fail it.
+    Keep FP control-register changes in a child process to isolate other tests.
+    """
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    script = """
+import math
+import runpy
+import sys
+import pytest
+import torch
+
+fixture = runpy.run_path(sys.argv[1])
+flush = sys.argv[2] == "True"
+corruption = sys.argv[3]
+if not torch.set_flush_denormal(flush):
+    sys.exit(77)
+
+def device_result(lhs, rhs, output):
+    torch.set_flush_denormal(False)
+    results = []
+    for x, y in zip(lhs.reshape(-1).tolist(), rhs.reshape(-1).tolist(), strict=True):
+        try:
+            results.append(math.fmod(x, y))
+        except ValueError:
+            results.append(math.nan)
+    expected = torch.tensor(results, dtype=torch.float32).reshape_as(output)
+    output.view(torch.int32).copy_(expected.view(torch.int32))
+    torch.set_flush_denormal(flush)
+    bits = output.view(torch.int32).reshape(-1)
+    if corruption == "subnormal":
+        bits[6] = 0
+    elif corruption == "signed_zero":
+        bits[16] = 0
+    elif corruption == "nan":
+        bits[12] = 0x7F800000
+
+if corruption == "none":
+    fixture["check_remainders"](device_result)
+else:
+    with pytest.raises(AssertionError):
+        fixture["check_remainders"](device_result)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(flush), corruption],
+        env={**os.environ, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("Host does not support controlling denormal flushing")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -94,6 +94,10 @@ fixture and a dynamic-divisor remainder kernel through the production PTOAS and
 Bisheng helper path. Enable it with `PYPTO_RUN_VPTO_VF_VALIDATION=1`; no NPU is
 needed. A host LLVM regression checks the emitted arithmetic against `fmod`, while
 the onboard fixture checks bitwise results across signs and exponent boundaries.
+The onboard remainder oracle uses exact IEEE-754 bit patterns, independent of
+the host CPU's flush-to-zero mode. Positional and keyword `ftof` value operands
+use typed expression parsing, including numeric attributes such as `math.inf`;
+the destination dtype retains dtype resolution.
 Host execution and device compilation do not substitute for onboard acceptance.
 
 ## Remaining scope

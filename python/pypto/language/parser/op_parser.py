@@ -172,6 +172,7 @@ class OpParser:
                 "pl.simt",
                 name,
                 call,
+                expression_arg_indices=frozenset({0}) if name == "ftof" else frozenset(),
                 expression_keywords=frozenset({"value"}) if name == "ftof" else frozenset(),
                 preserve_omitted_kwargs=name
                 in {"atomic_min", "atomic_max", "redux_min", "redux_max", "ftof"},
@@ -720,6 +721,7 @@ class OpParser:
         call: ast.Call,
         *,
         expression_args: bool = False,
+        expression_arg_indices: frozenset[int] = frozenset(),
         expression_keywords: frozenset[str] = frozenset(),
         preserve_omitted_kwargs: bool = False,
     ) -> ir.Expr:
@@ -737,6 +739,7 @@ class OpParser:
             op_name: Name of the operation to look up on the module.
             call: Call AST node.
             expression_args: Parse all positional operands as typed IR expressions.
+            expression_arg_indices: Positional operand slots requiring typed expressions.
             expression_keywords: Keyword operands parsed as typed IR expressions.
             preserve_omitted_kwargs: Preserve implicit IR defaults during text round trips.
 
@@ -752,8 +755,14 @@ class OpParser:
         # SIMT math requires typed scalar operands. Generic wrappers retain
         # Python numeric values for slots such as full/padding and choose their
         # own literal dtype, so keep the two argument contracts explicit.
-        parse_arg = self.callbacks.expression if expression_args else self.parse_op_positional_arg
-        args = [parse_arg(arg) for arg in call.args]
+        # Mixed signatures such as ftof(value, dtype) need typed value operands
+        # while retaining dtype/enum resolution in their other positional slots.
+        args = [
+            self.callbacks.expression(arg)
+            if expression_args or index in expression_arg_indices
+            else self.parse_op_positional_arg(arg)
+            for index, arg in enumerate(call.args)
+        ]
         kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
         attrs = self.attrs.parse_op_attrs(call)
         op_func = getattr(module, op_name)
