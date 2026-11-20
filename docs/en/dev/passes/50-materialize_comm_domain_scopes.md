@@ -247,13 +247,13 @@ A5 Host domains map local and peer windows for synchronous MTE reads on
 Simpler #3174, which preserves the local window base for Host URMA domains.
 
 `MaterializeDistTensorCtx` rejects a domain used by both `put_async`/`get_async`
-and remote MTE `remote_load`/`remote_store` or `put`/`get` primitives, including
-lowered tile forms and uses forwarded through `Call`/`Submit`. All window slots
-in a domain share this restriction; Host and Device domains are checked alike.
-Only the remote operand of a transfer contributes to the check. Ordinary local
-loads/stores and MTE primitives whose peer is provably `rank(get_comm_ctx(window))`
-for the same domain are allowed. Constant peer `0` is also local in a statically
-single-rank domain. Peers not proven local are conservatively treated as remote.
+and MTE `remote_load`/`remote_store` or `put`/`get` primitives, including lowered
+tile forms and uses forwarded through `Call`/`Submit`. All window slots in a
+domain share this restriction; Host and Device domains are checked alike.
+The check classifies the primitives without inspecting peer values: even an
+explicit local rank or peer `0` in a single-rank domain does not exempt them.
+Only the operand identifying the peer's communication domain contributes to
+the check. Ordinary local loads/stores are outside these primitive families.
 
 This first check covers those explicit primitives, not hidden communication in
 builtin collective templates, notify/wait, or arbitrary external kernels. It

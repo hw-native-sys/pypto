@@ -2428,7 +2428,7 @@ def test_host_peer_mte_through_chip_call(use_urma):
     # Both transfers address the same Host domain's remote rank.
     program = passes.simplify()(Prog)
     if use_urma:
-        with pytest.raises(ValueError, match="cannot combine URMA async transfers with remote MTE"):
+        with pytest.raises(ValueError, match="cannot combine URMA async transfers with MTE"):
             _lower(program)
         return
     code = _lower(program)
@@ -2574,8 +2574,8 @@ def _primitive_engine_program(
             mte_window: pld.DistributedTensor[[1, 64], pl.FP32],
             local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
         ) -> pl.Tensor[[1, 64], pl.FP32]:
-            # Query a different slot's context: locality is a domain property,
-            # not window identity. Aliases must preserve the rank expression.
+            # Query another slot in the same domain. Explicit local rank and
+            # single-rank peer zero must still reject mixed primitives.
             ctx = pld.get_comm_ctx(async_window)
             rank = pld.rank(ctx)
             if single_rank:
@@ -2640,12 +2640,9 @@ def test_primitive_remote_engines_same_domain(mte_op, async_op, memory_source, l
     program = _primitive_engine_program(
         mte_op, async_op, local_peer=local_peer, same_domain=True, memory_source=memory_source
     )
-    if not local_peer:
-        with pytest.raises(ValueError, match="Communication domain.*cannot combine URMA.*remote MTE"):
-            _lower(program)
-    else:
-        code = _lower(program)
-        assert code.count('workspace_engines=("urma",)') == 1
+    # Primitive mixing is rejected even when peer explicitly names this rank.
+    with pytest.raises(ValueError, match="Communication domain.*cannot combine URMA.*MTE"):
+        _lower(program)
 
 
 @pytest.mark.parametrize("mte_op", ["get", "put", "remote_load", "remote_store"])
@@ -2665,26 +2662,24 @@ def test_async_local_window_does_not_require_remote_urma(async_op, same_domain):
         "get", async_op, local_peer=False, same_domain=same_domain, window_local=True
     )
     if same_domain:
-        with pytest.raises(ValueError, match="cannot combine URMA.*remote MTE"):
+        with pytest.raises(ValueError, match="cannot combine URMA.*MTE"):
             _lower(program)
     else:
         assert _lower(program).count("with (_domain_provider or orch.allocate_domain)(") == 2
 
 
 @pytest.mark.parametrize("async_op", ["get", "put"])
-def test_single_rank_domain_allows_constant_local_peer(async_op):
+def test_single_rank_domain_rejects_mixed_primitives(async_op):
     program = _primitive_engine_program("get", async_op, local_peer=True, same_domain=True, rank_count=1)
-    assert 'workspace_engines=("urma",)' in _lower(program)
+    with pytest.raises(ValueError, match="cannot combine URMA.*MTE"):
+        _lower(program)
 
 
 @pytest.mark.parametrize("local_peer", [False, True])
 def test_primitive_remote_engines_through_submit(local_peer):
     program = _primitive_engine_program("get", "put", local_peer=local_peer, same_domain=True, submit=True)
-    if local_peer:
-        assert 'workspace_engines=("urma",)' in _lower(program)
-    else:
-        with pytest.raises(ValueError, match="cannot combine URMA.*remote MTE"):
-            _lower(program)
+    with pytest.raises(ValueError, match="cannot combine URMA.*MTE"):
+        _lower(program)
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
@@ -2694,12 +2689,8 @@ def test_primitive_remote_engines_default_pipeline(tmp_path, mte_op, local_peer)
     # The normal pipeline lowers tensor put/get/store into tile operations
     # before checking domains. Exercise that path as well as the focused passes.
     program = _primitive_engine_program(mte_op, "get", local_peer=local_peer, same_domain=True)
-    if local_peer:
-        result = ir.compile(program, output_dir=str(tmp_path), platform="a5", skip_ptoas=True)
-        assert (result.output_dir / "orchestration" / "host_orch.py").exists()
-    else:
-        with pytest.raises(ValueError, match="cannot combine URMA.*remote MTE"):
-            ir.compile(program, output_dir=str(tmp_path), platform="a5", skip_ptoas=True)
+    with pytest.raises(ValueError, match="cannot combine URMA.*MTE"):
+        ir.compile(program, output_dir=str(tmp_path), platform="a5", skip_ptoas=True)
 
 
 if __name__ == "__main__":

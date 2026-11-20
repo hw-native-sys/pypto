@@ -202,12 +202,11 @@ Host 代码生成向 Simpler 请求 `AddressSpace.HOST`。引擎需求与 Device
 支持 `tensormap_and_ringbuffer`、`host_build_graph` 和 `percounter` 的同步 MTE 读取。
 同时包含 #3174，为 Host URMA 域保留本地窗口基地址。
 
-`MaterializeDistTensorCtx` 拒绝同一通信域同时使用 `put_async`/`get_async` 和远端 MTE
+`MaterializeDistTensorCtx` 拒绝同一通信域同时使用 `put_async`/`get_async` 和 MTE
 `remote_load`/`remote_store` 或 `put`/`get` 原语，包括 lowering 后的 tile 形式以及通过
 `Call`/`Submit` 转发的调用。域内所有窗口共享此限制，Host 和 Device 域均会检查。
-只统计传输的远端操作数。普通本地 load/store，以及能证明 peer 为同一域的
-`rank(get_comm_ctx(window))` 的 MTE 原语仍然允许。静态单 rank 域中的常量 peer `0`
-也属于本卡访问；无法证明为本卡的 peer 保守视为远端。
+检查只按原语分类，不分析 peer 的值：显式本卡 rank，以及单 rank 域中的 peer `0`，
+均不能豁免混用限制。只统计指定 peer 通信域的操作数；普通本地 load/store 不属于这些原语。
 
 首版只检查这些显式原语，不分析 builtin 集合通信模板、notify/wait 或外部 kernel 内隐藏的通信。
 检查依据实际操作，而不是保守申请的引擎列表；不同域上的操作不会因此冲突。

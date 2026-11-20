@@ -3,8 +3,8 @@
 Materializes one explicit `CommCtxType` parameter and argument for each
 `DistributedTensorType` function parameter, except in SIMT helpers.
 
-Before extending signatures, the pass checks explicit URMA async transfers and remote MTE
-primitives per communication domain. Local-rank MTE access remains allowed; see
+Before extending signatures, the pass rejects mixing explicit URMA async transfers and MTE
+communication primitives in one domain, regardless of peer rank; see
 [Host DDR windows](50-materialize_comm_domain_scopes.md#host-ddr-windows) for the scope.
 
 ## Overview
