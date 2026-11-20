@@ -3206,11 +3206,6 @@ class TestTileAssembleCodegen:
         ("before", "after", "loop"),
         [
             ("        narrowed = pl.tile.set_validshape(source, 16, 255)\n", "", False),
-            (
-                "        alias = source\n        narrowed = pl.tile.set_validshape(alias, 16, 255)\n",
-                "",
-                False,
-            ),
             ("        narrowed = pl.tile.set_validshape(source, 16, width)\n", "", False),
             (
                 "        if width > 0:\n"
@@ -3222,31 +3217,59 @@ class TestTileAssembleCodegen:
             ),
             ("", "        narrowed = pl.tile.set_validshape(source, 16, 255)\n", True),
         ],
-        ids=["original_alias", "assigned_alias", "dynamic_width", "branch", "loop_backedge"],
+        ids=["original_alias", "dynamic_width", "branch", "loop_backedge"],
     )
-    def test_a5_bf16_nz_insert_rejects_unsafe_descriptor_updates(self, before, after, loop):
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_a5_bf16_nz_insert_rejects_unsafe_descriptor_updates(self, before, after, loop, planner):
         """An old IR alias must not conceal the source handle's live width."""
         backend.set_backend_type(BackendType.Ascend950)
         program = self._bf16_nz_vec_mat_program(before_insert=before, after_insert=after, loop=loop)
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        with passes.PassContext([], memory_planner=planner):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
         with pytest.raises(ValueError, match="every valid column update.*multiple of 16"):
-            codegen.PTOCodegen().generate(optimized)
+            codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_a5_bf16_nz_insert_assignment_descriptor_identity(self, planner):
+        """Equal storage alone is not proof of shared mutable descriptor validity."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(
+            before_insert="        alias = source\n"
+            "        narrowed = pl.tile.set_validshape(alias, 16, 255)\n"
+        )
+        with passes.PassContext([], memory_planner=planner):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        if planner == passes.MemoryPlanner.PTOAS:
+            # Address-free codegen shares one handle, so the old source sees 255.
+            with pytest.raises(ValueError, match="every valid column update.*multiple of 16"):
+                codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+        else:
+            # Baked-address codegen creates two descriptors over the same bytes.
+            mlir = codegen.PTOCodegen().generate(optimized)
+            update = re.search(r"pto.set_validshape (%\w+),", mlir)
+            insert = re.search(r"pto.tinsert ins\((%\w+),", mlir)
+            assert update is not None and insert is not None, mlir
+            assert update[1] != insert[1]
+            for handle in (update[1], insert[1]):
+                assert f"{handle} = pto.alloc_tile" in mlir
 
     @pytest.mark.ptoas_compile
     @pytest.mark.parametrize("updated_width", [128, 256])
-    def test_a5_bf16_nz_insert_accepts_aligned_descriptor_updates(self, tmp_path, updated_width):
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_a5_bf16_nz_insert_accepts_aligned_descriptor_updates(self, tmp_path, updated_width, planner):
         """Aligned shared-handle updates remain valid through the default pipeline."""
         backend.set_backend_type(BackendType.Ascend950)
         program = self._bf16_nz_vec_mat_program(
             before_insert=f"        narrowed = pl.tile.set_validshape(source, 16, {updated_width})\n"
         )
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
-        mlir = codegen.PTOCodegen().generate(optimized)
+        with passes.PassContext([], memory_planner=planner):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
         assert "pto.kernel_kind<vector>" in mlir
         assert "pto.set_validshape" in mlir and "pto.tinsert" in mlir
         if find_ptoas_binary() is None:
             pytest.skip("PTOAS is not available")
-        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
         assert "TINSERT(" in cpp
 
     def test_a5_bf16_nz_insert_ignores_other_descriptor_updates(self):
