@@ -94,6 +94,13 @@ This allows extensible operation codegen without modifying the core visitor.
 ```
 
 The runtime SDK supplies include paths and helper sources from its `build_config.py`.
+On A5, compiling a Program with `RuntimeKind.HOST_BUILD_GRAPH` selects Simpler's
+`percounter` implementation. Select `RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL`
+to compile for the original A5 `host_build_graph` implementation. A2/A3 HBG
+continues to use `host_build_graph`. Each chip sub-build records the selected
+implementation in `kernel_config.py`, including built-in collectives. Loading a
+previously compiled artifact uses the implementation recorded in that artifact.
+
 HBG's orchestration API lives under `src/common/host_build_graph/host/orchestration/`;
 Graph code also includes `host_build_graph/host/graph_boundary_match.h`.
 Builtin entry templates access the HBG context through `current_orch_context()`

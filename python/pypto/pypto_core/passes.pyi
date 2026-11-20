@@ -129,11 +129,15 @@ class RuntimeKind(Enum):
     HOST_BUILD_GRAPH = ...
     """Host CPU builds the whole task graph up front; required for Graph Execution."""
 
+    HOST_BUILD_GRAPH_EXPERIMENTAL = ...
+    """Original A5 host graph implementation."""
+
+def is_host_build_graph(kind: RuntimeKind) -> bool: ...
 def runtime_kind_to_name(kind: RuntimeKind) -> str:
-    """Wire name written to ``RUNTIME_CONFIG["runtime"]``, e.g. ``"host_build_graph"``."""
+    """Application-facing runtime selection, e.g. ``"host_build_graph"``."""
 
 def runtime_kind_from_name(name: str) -> RuntimeKind:
-    """Parse a ``RUNTIME_CONFIG["runtime"]`` wire name back into a :class:`RuntimeKind`."""
+    """Parse an application-facing runtime selection into a :class:`RuntimeKind`."""
 
 class DiagnosticPhase(Enum):
     """Controls when DiagnosticInstrument runs registered checks (warnings + perf hints)."""

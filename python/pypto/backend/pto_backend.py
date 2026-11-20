@@ -51,6 +51,7 @@ from pypto._function_attrs import (
     EXTERNAL_PREFLIGHT_SOURCE_ATTR,
     EXTERNAL_SOURCE_ATTR,
 )
+from pypto._target import runtime_implementation_name
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
 from pypto.backend._ptoas_config import PTOAS_TIMEOUT_ENV as _PTOAS_TIMEOUT_ENV
 from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
@@ -1447,6 +1448,13 @@ def _format_signature(directions: list[str]) -> str:
     return ", ".join(f"_D.{d}" for d in directions)
 
 
+def _runtime_name_for_codegen(runtime: _passes.RuntimeKind) -> str:
+    arch = (
+        _backend_core.get_handler().get_pto_target_arch() if _backend_core.is_backend_configured() else None
+    )
+    return runtime_implementation_name(runtime, arch)
+
+
 def _generate_config_file(
     orch_func_name: str,
     kernel_registrations: list[_codegen_core.KernelRegistration],
@@ -1489,7 +1497,7 @@ def _generate_config_file(
     reports and the one the ``ChipWorker`` reuse lookup matches against, so a
     program compiled for one runtime never binds to a worker running another.
     """
-    runtime_name = _passes.runtime_kind_to_name(runtime)
+    runtime_name = _runtime_name_for_codegen(runtime)
     func_name_to_external_source = func_name_to_external_source or {}
     func_name_to_external_include_dirs = func_name_to_external_include_dirs or {}
     orchestration_signature = orchestration_signature or []
@@ -2356,13 +2364,11 @@ def _materialize_builtin_next_levels(
             "entry": spec.entry_symbol,
             "kernel_name": spec.entry_symbol + "_kernel",
             "template_package": spec.template_dir[1:],
-            "runtime": _passes.runtime_kind_to_name(runtime),
+            "runtime": _runtime_name_for_codegen(runtime),
             # HBG orchestration has a host-only context; TMR uses its runtime
             # context. Templates must select the API of their compiled runtime.
             "orchestration_context_accessor": (
-                "current_orch_context"
-                if runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH
-                else "current_runtime"
+                "current_orch_context" if _passes.is_host_build_graph(runtime) else "current_runtime"
             ),
         }
         variables.update(spec.template_vars)
@@ -2799,9 +2805,7 @@ def _generate_single_chip(
                 r.code_name in codegen_free_kernels for r in orch_result.kernel_registrations
             )
             if not skip_ptoas or all_kernels_external:
-                host_indices = (
-                    _host_tensor_indices(orch_func) if runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH else []
-                )
+                host_indices = _host_tensor_indices(orch_func) if _passes.is_host_build_graph(runtime) else []
                 result_files["kernel_config.py"] = _generate_config_file(
                     orch_func.name,
                     orch_result.kernel_registrations,

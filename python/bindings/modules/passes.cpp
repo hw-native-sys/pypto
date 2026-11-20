@@ -231,12 +231,16 @@ void BindPass(nb::module_& m) {
              "Task graph built on the AICPU, dependencies auto-derived through the TensorMap "
              "(default)")
       .value("HOST_BUILD_GRAPH", RuntimeKind::HostBuildGraph,
-             "Host CPU builds the whole task graph up front; required for Graph Execution");
+             "Host CPU builds the whole task graph up front; required for Graph Execution")
+      .value("HOST_BUILD_GRAPH_EXPERIMENTAL", RuntimeKind::HostBuildGraphExperimental,
+             "Explicit original A5 host graph implementation");
+
+  passes.def("is_host_build_graph", &IsHostBuildGraph, nb::arg("kind"));
 
   passes.def("runtime_kind_to_name", &RuntimeKindToName, nb::arg("kind"),
-             R"(Wire name written to RUNTIME_CONFIG["runtime"], e.g. "host_build_graph")");
+             R"(Application-facing runtime selection, e.g. "host_build_graph")");
   passes.def("runtime_kind_from_name", &RuntimeKindFromName, nb::arg("name"),
-             "Parse a RUNTIME_CONFIG[\"runtime\"] wire name back into a RuntimeKind");
+             "Parse an application-facing runtime selection into a RuntimeKind");
 
   // Bind DiagnosticPhase enum
   nb::enum_<DiagnosticPhase>(passes, "DiagnosticPhase",

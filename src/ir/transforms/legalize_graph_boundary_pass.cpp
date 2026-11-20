@@ -1767,7 +1767,7 @@ class ReturnOnlyPhiRewriter : public IRMutator {
   // cause. Reported here instead, where the function the user wrote can be named.
   const auto* ctx = PassContext::Current();
   const RuntimeKind runtime = ctx != nullptr ? ctx->GetRuntime() : kDefaultRuntimeKind;
-  if (runtime != RuntimeKind::HostBuildGraph) {
+  if (!IsHostBuildGraph(runtime)) {
     for (const auto& [gvar, func] : program->functions_) {
       if (!func || func->func_type_ != FunctionType::Graph) continue;
       CHECK_SPAN(false, func->span_)

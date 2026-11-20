@@ -121,11 +121,11 @@ def stub_ptoas(monkeypatch):
     )
 
 
-def _compile_and_read_config(out_dir) -> str:
+def _compile_and_read_config(out_dir, platform="a2a3") -> str:
     ir_compile(
         VectorAdd,
         skip_ptoas=False,
-        platform="a2a3",
+        platform=platform,
         output_dir=str(out_dir),
         dump_passes=False,
     )
@@ -139,6 +139,20 @@ def test_context_runtime_reaches_kernel_config(tmp_path, runtime, stub_ptoas):
     name = passes.runtime_kind_to_name(runtime)
     assert f'"runtime": "{name}"' in config
     assert f"# Runtime configuration for {name}." in config
+
+
+@pytest.mark.parametrize(
+    ("runtime", "implementation"),
+    [
+        (passes.RuntimeKind.HOST_BUILD_GRAPH, "percounter"),
+        (passes.RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL, "host_build_graph"),
+        (passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, "tensormap_and_ringbuffer"),
+    ],
+)
+def test_a5_compile_records_scheduler_implementation(tmp_path, runtime, implementation, stub_ptoas):
+    with passes.PassContext([], runtime=runtime):
+        config = _compile_and_read_config(tmp_path / implementation, platform="a5")
+    assert f'"runtime": "{implementation}"' in config
 
 
 def test_compile_without_explicit_runtime_defaults_to_tensormap(tmp_path, stub_ptoas):
