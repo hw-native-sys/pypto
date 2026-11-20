@@ -574,6 +574,11 @@ class PTOCodegen : public CodegenBase {
   /// of such a handle. Subviews and control-flow arguments are not eligible.
   void RegisterMutableTileName(const std::string& ssa_name);
   bool IsMutableTileName(const std::string& ssa_name) const;
+  /// Require all live valid-column updates of this BF16 NZ insert source to
+  /// remain multiples of 16. Checked after the whole function is emitted so
+  /// aliases, branches, and loop backedges cannot evade the requirement.
+  void RequireNZInsertSourceAlignment(const std::string& ssa_name, const ir::Span& span);
+  void RecordTileValidColumnUpdate(const std::string& ssa_name, const ir::ExprPtr& valid_cols);
   /// Record a FIFO-backed descriptor accepted as a local source by PTOAS >= 0.74.
   /// This does not grant user-facing mutation of arbitrary derived views.
   void RegisterTpopTileName(const std::string& ssa_name, int c2v_pipe = -1);
@@ -1247,6 +1252,10 @@ class PTOCodegen : public CodegenBase {
     std::map<std::string, std::string> tile_view_names;
     /// Handles whose runtime valid extents can be updated by pto.set_validshape.
     std::set<std::string> mutable_tile_names;
+    /// Actual descriptor names, not IR Vars/MemRefs: aliases share updates,
+    /// whereas independently initialized views of the same storage do not.
+    std::map<std::string, ir::Span> nz_insert_sources;
+    std::set<std::string> unaligned_valid_column_updates;
     /// FIFO storage is borrowed, but a TPOP descriptor can root initialized views.
     std::set<std::string> tpop_tile_names;
     struct C2VView {
@@ -1390,6 +1399,8 @@ class PTOCodegen : public CodegenBase {
       truncating_floor_div_mod.clear();
       tile_view_names.clear();
       mutable_tile_names.clear();
+      nz_insert_sources.clear();
+      unaligned_valid_column_updates.clear();
       tpop_tile_names.clear();
       c2v_views.clear();
       vec_reservations.clear();

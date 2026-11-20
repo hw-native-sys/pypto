@@ -156,6 +156,8 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
       source_view.blayout == ir::TileLayout::col_major && source_view.slayout == ir::TileLayout::row_major &&
       source_view.fractal == 512 && source_view.compact == ir::CompactMode::null;
   if (a5_bf16_mat_insert) {
+    CHECK_SPAN(codegen.IsAIVFunction(), op->span_)
+        << "tile.assemble: A5 BF16 NZ Vec->Mat insertion requires an explicit FunctionType.AIV function";
     // A5's MTE3 TINSERT takes the parent Mat tile and explicit offsets. A
     // source-typed subview would incorrectly turn the Mat destination into Vec.
     // CheckSubviewTileCompat above keeps this path within matching BF16 NZ
@@ -175,6 +177,7 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
                op->span_)
         << "tile.assemble: A5 BF16 NZ Vec->Mat insertion requires a compile-time valid column count "
            "and column offset that are each a multiple of 16";
+    codegen.RequireNZInsertSourceAlignment(src, op->span_);
   }
 
   if (source_tile_type->dtype_.IsPackedFp4()) {
@@ -2007,6 +2010,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     codegen.RegisterTileBufType(tile_buf, tile_buf_type);
     codegen.SetCurrentResultBuf(tile_buf);
+    // Every alias observes this descriptor mutation. Record it by emitted SSA,
+    // since an earlier alias's TileType retains its old compile-time validity.
+    codegen.RecordTileValidColumnUpdate(tile_buf, valid_dims[1]);
     codegen.Emit("pto.set_validshape " + tile_buf + ", " + vr + ", " + vc + " : " + tile_buf_type);
     return std::string("");
   });

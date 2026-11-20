@@ -100,9 +100,10 @@ class SplitRegionFinder : public IRVisitor {
 
 // Native Vec-to-Mat transfers run on AIV. Automatic expansion binds Mat
 // handles on AIC, loses Vec operands of insert/extract, and stages moves via a
-// generic NZ-to-NZ copy that uses incorrect FP4 byte strides. Explicit AIV
-// kernels retain both handles and use the supported native transfer directly.
-class PackedFp4CrossCoreTransferValidator : public IRVisitor {
+// generic NZ-to-NZ copy that uses incorrect FP4 byte strides. BF16 NZ inserts
+// also need both handles on AIV; classifying them from the Mat target would
+// place MTE3 work on AIC. Explicit AIV kernels retain both handles.
+class NativeVecToMatTransferValidator : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& call) override {
     const bool insert = IsOp(call, "tile.assemble");
@@ -110,11 +111,19 @@ class PackedFp4CrossCoreTransferValidator : public IRVisitor {
         ((IsOp(call, "tile.move") || IsOp(call, "tile.extract")) && !call->args_.empty())) {
       auto target = As<TileType>(insert ? call->args_[0]->GetType() : call->GetType());
       auto source = As<TileType>(call->args_[insert ? 1 : 0]->GetType());
-      CHECK_SPAN(!target || !source || !source->dtype_.IsPackedFp4() ||
+      bool bf16_insert = false;
+      if (source && insert && source->dtype_ == DataType::BF16 &&
+          PassContext::Current()->GetBackendHandler()->GetPtoTargetArch() == "a5") {
+        const auto view = tile_view_semantics::GetEffectiveTileView(*source);
+        bf16_insert = view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major &&
+                      view.fractal == 512 && view.compact == CompactMode::null;
+      }
+      CHECK_SPAN(!target || !source || (!source->dtype_.IsPackedFp4() && !bf16_insert) ||
                      source->GetMemorySpace() != MemorySpace::Vec ||
                      target->GetMemorySpace() != MemorySpace::Mat,
                  call->span_)
-          << "Packed FP4 Vec-to-Mat transfer in a generic InCore function is unsupported "
+          << (bf16_insert ? "A5 BF16 NZ" : "Packed FP4")
+          << " Vec-to-Mat transfer in a generic InCore function is unsupported "
              "by mixed-core expansion; use an explicit FunctionType.AIV function to keep both tile "
              "handles on the vector core";
     }
@@ -2999,8 +3008,8 @@ Pass ExpandMixedKernel() {
         continue;
       }
 
-      PackedFp4CrossCoreTransferValidator packed_transfer_validator;
-      packed_transfer_validator.VisitStmt(func->body_);
+      NativeVecToMatTransferValidator native_transfer_validator;
+      native_transfer_validator.VisitStmt(func->body_);
 
       SplitRegionConsumer consumer;
       SplitRegionFinder finder;

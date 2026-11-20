@@ -3157,7 +3157,17 @@ class TestTileAssembleCodegen:
     """Tests for destination preservation and target-specific tile insertion."""
 
     def _bf16_nz_vec_mat_program(
-        self, offsets=((16, 0),), valid_shape=(16, 256), result_base="l1", dtype="BF16", source_cols=256
+        self,
+        offsets=((16, 0),),
+        valid_shape=(16, 256),
+        result_base="l1",
+        dtype="BF16",
+        source_cols=256,
+        *,
+        function_type="AIV",
+        before_insert="",
+        after_insert="",
+        loop=False,
     ):
         """Explicit storage isolates instruction selection from memory planning."""
         layout = "blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major, fractal=512"
@@ -3178,16 +3188,94 @@ class TestTileAssembleCodegen:
                 f"        {result}: {result_type} = pl.tile.assemble({target}, source, [{row}, {col}])"
             )
             target = result
+        body = before_insert + "\n".join(writes) + "\n" + after_insert
+        if loop:
+            body = "        for i in pl.range(2):\n" + "\n".join("    " + line for line in body.splitlines())
         return pl.parse_program(
             "@pl.program\n"
             "class Repro:\n"
-            "    @pl.function(type=pl.FunctionType.AIV)\n"
-            "    def kernel(self):\n"
+            f"    @pl.function(type=pl.FunctionType.{function_type})\n"
+            "    def kernel(self, width: pl.Scalar[pl.INDEX]):\n"
             f"        target: {target_type} = pl.tile.create([128, 256], dtype=pl.{dtype}, "
             "target_memory=pl.Mem.Mat)\n"
             f"        source: {source_type} = pl.tile.create([16, {source_cols}], dtype=pl.{dtype}, "
-            "target_memory=pl.Mem.Vec)\n" + "\n".join(writes)
+            "target_memory=pl.Mem.Vec)\n" + body
         )
+
+    @pytest.mark.parametrize(
+        ("before", "after", "loop"),
+        [
+            ("        narrowed = pl.tile.set_validshape(source, 16, 255)\n", "", False),
+            (
+                "        alias = source\n        narrowed = pl.tile.set_validshape(alias, 16, 255)\n",
+                "",
+                False,
+            ),
+            ("        narrowed = pl.tile.set_validshape(source, 16, width)\n", "", False),
+            (
+                "        if width > 0:\n"
+                "            pl.tile.set_validshape(source, 16, 255)\n"
+                "        else:\n"
+                "            pl.tile.set_validshape(source, 16, 128)\n",
+                "",
+                False,
+            ),
+            ("", "        narrowed = pl.tile.set_validshape(source, 16, 255)\n", True),
+        ],
+        ids=["original_alias", "assigned_alias", "dynamic_width", "branch", "loop_backedge"],
+    )
+    def test_a5_bf16_nz_insert_rejects_unsafe_descriptor_updates(self, before, after, loop):
+        """An old IR alias must not conceal the source handle's live width."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(before_insert=before, after_insert=after, loop=loop)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        with pytest.raises(ValueError, match="every valid column update.*multiple of 16"):
+            codegen.PTOCodegen().generate(optimized)
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("updated_width", [128, 256])
+    def test_a5_bf16_nz_insert_accepts_aligned_descriptor_updates(self, tmp_path, updated_width):
+        """Aligned shared-handle updates remain valid through the default pipeline."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(
+            before_insert=f"        narrowed = pl.tile.set_validshape(source, 16, {updated_width})\n"
+        )
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        mlir = codegen.PTOCodegen().generate(optimized)
+        assert "pto.kernel_kind<vector>" in mlir
+        assert "pto.set_validshape" in mlir and "pto.tinsert" in mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TINSERT(" in cpp
+
+    def test_a5_bf16_nz_insert_ignores_other_descriptor_updates(self):
+        """An unrelated mutable descriptor cannot taint the insert's source."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(
+            before_insert="        other = pl.tile.create([16, 256], dtype=pl.BF16)\n"
+            "        pl.tile.set_validshape(other, 16, 255)\n"
+        )
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        mlir = codegen.PTOCodegen().generate(optimized)
+        assert "pto.set_validshape" in mlir and "pto.tinsert" in mlir
+
+    @pytest.mark.parametrize("vector_work", [False, True])
+    def test_a5_bf16_nz_insert_rejects_automatic_mixed_expansion(self, vector_work):
+        """Both shared inputs and a vector-produced source must avoid AIC placement."""
+        backend.set_backend_type(BackendType.Ascend950)
+        program = self._bf16_nz_vec_mat_program(
+            function_type="InCore",
+            before_insert="        source = pl.tile.add(source, source)\n" if vector_work else "",
+        )
+        with pytest.raises(ValueError, match="A5 BF16 NZ.*use an explicit FunctionType.AIV"):
+            PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+
+    def test_a5_bf16_nz_insert_rejects_explicit_aic(self):
+        """The emitter also rejects callers that bypass mixed-core expansion."""
+        backend.set_backend_type(BackendType.Ascend950)
+        with pytest.raises(ValueError, match="requires an explicit FunctionType.AIV"):
+            codegen.PTOCodegen().generate(self._bf16_nz_vec_mat_program(function_type="AIC"))
 
     @pytest.mark.ptoas_compile
     @pytest.mark.parametrize(
