@@ -23,8 +23,9 @@ from pypto.backend.pto_backend import (
 )
 
 
-@pytest.mark.ptoas_compile
 def test_urma_adapter_compiles_with_a5_runtime(tmp_path):
+    if not os.environ.get("ASCEND_HOME_PATH"):
+        pytest.skip("A5 device compilation requires CANN (ASCEND_HOME_PATH)")
     pytest.importorskip("simpler_setup")
     pto_isa_root = os.environ.get("PTO_ISA_ROOT")
     if not pto_isa_root or not os.path.isdir(pto_isa_root):
