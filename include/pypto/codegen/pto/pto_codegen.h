@@ -916,6 +916,13 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::Var*, std::vector<std::string>> reg_tuple_values_;
   /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
+  // VMI cannot consume/produce physical VPTO values. A streaming scope uses
+  // one physical register lowering path for its entire producer chain.
+  bool micro_reg_scope_ = false;
+  bool TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& result);
+  ir::ExprPtr squeeze_destination_;
+  std::string squeeze_cursor_;
+  std::string squeeze_pointer_type_;
   bool separate_vf_ = false;
   bool supported_vf_entries_ = false;
   std::vector<VFHelper> vf_helpers_;

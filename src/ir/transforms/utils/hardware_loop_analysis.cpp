@@ -160,7 +160,7 @@ class Analyzer : public IRVisitor {
     for (const auto& arg : op->iter_args_) {
       const auto& type = arg->GetType();
       const bool allowed = (As<ScalarType>(type) && profile_.allow_scalar_carry) ||
-                           (As<RegType>(type) && profile_.allow_reg_carry) ||
+                           ((As<RegType>(type) || As<SqueezeStoreType>(type)) && profile_.allow_reg_carry) ||
                            (As<TileType>(type) && profile_.allow_tile_carry);
       summary_.unsupported_carry |= !allowed;
     }

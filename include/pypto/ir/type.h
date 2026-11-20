@@ -1073,6 +1073,21 @@ inline AsyncSessionTypePtr GetAsyncSessionType() {
   return async_session_type;
 }
 
+/// Linear, region-local state for a squeeze store. The backend carries the
+/// physical alignment value in SSA; the destination is an explicit operand of
+/// every state operation so memory and alias analyses retain the write effects.
+class SqueezeStoreType : public Type {
+ public:
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SqueezeStoreType; }
+  [[nodiscard]] std::string TypeName() const override { return "SqueezeStoreType"; }
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+using SqueezeStoreTypePtr = std::shared_ptr<const SqueezeStoreType>;
+inline SqueezeStoreTypePtr GetSqueezeStoreType() {
+  static const auto type = std::make_shared<SqueezeStoreType>();
+  return type;
+}
+
 }  // namespace ir
 }  // namespace pypto
 

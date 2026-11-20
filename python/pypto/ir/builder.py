@@ -160,14 +160,26 @@ class IRBuilder:
             name, begin_span, type, level, role, attrs or {}, requires_runtime_binding, ir_stage
         )
         builder_obj = FunctionBuilder(self)
+        failed = False
         try:
             yield builder_obj
+        except BaseException:
+            failed = True
+            raise
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.end_function(combined_span)
-            builder_obj._result = result
-            del self._begin_spans[ctx_id]
+            try:
+                result = self._builder.end_function(combined_span)
+                builder_obj._result = result
+            except Exception:
+                # A malformed append can stop parsing between init and flush.
+                # Verifying that incomplete body during cleanup must not hide
+                # the original type/argument diagnostic with a lifetime error.
+                if not failed:
+                    raise
+            finally:
+                del self._begin_spans[ctx_id]
 
     @contextmanager
     def for_loop(

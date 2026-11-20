@@ -47,6 +47,19 @@ VF 代码生成仍由 PR3 实现。
 
 `Simplify` 可消除已证明零次执行的 Sequential Require 循环，并返回初始携带值；非空 Require（包括单次循环）必须保留。
 
+### Squeeze-store 状态
+
+`ir.SqueezeStoreType.get()` 是局限于 register 作用域的不透明 SSA 值，表示 UReg 追加状态。
+公开的 `squeeze_store_init/step/flush` 操作直接表达这条状态链。`init` 接收目标 Tile
+和元素 offset，并初始化 UReg 状态；它不初始化 Tile 存储。每个操作都显式关联目标
+Tile，以便内存效果与别名分析识别写入；前端不暴露指针。step 消费当前循环携带的 UReg
+值并返回后继值；`pl.range(..., init_values=...)` 在顺序循环中携带它。该类型下沉为
+`!pto.align`，不能跨 RegScope 或函数边界、不能重复消费，必须恰好收尾一次，即使没有执行
+step 或循环为空。当前基于 AR 的 lowering 同时支持一条活动链，关闭后可在同一区域开启
+下一条；这个实现限制与硬件非对齐寄存器数量不同。编译器
+消除零次循环等场景产生的线性 SSA 转发会消费旧名称，后续复用旧名称仍会报错。该类型
+没有实例字段，支持结构比较和序列化。
+
 ### 内部 Buffer 类型
 
 `BufferType` 描述最终设备 IR 中的可变片上缓冲区，直接继承 `Type`，

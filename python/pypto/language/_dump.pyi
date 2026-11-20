@@ -23,6 +23,7 @@ from .typing import Ptr
 
 WindowBuffer: ir.WindowBufferType
 Unknown: ir.UnknownType
+SqueezeStore: ir.SqueezeStoreType
 
 def float64(bits: str) -> float: ...
 def window_ref(key: str) -> ir.WindowBuffer: ...

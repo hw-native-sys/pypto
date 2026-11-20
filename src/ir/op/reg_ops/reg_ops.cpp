@@ -28,6 +28,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir {
@@ -39,6 +40,34 @@ bool Supported(DataType t) {
   return t == DataType::FP16 || t == DataType::BF16 || t == DataType::FP32 || t == DataType::INT8 ||
          t == DataType::UINT8 || t == DataType::INT16 || t == DataType::UINT16 || t == DataType::INT32 ||
          t == DataType::UINT32;
+}
+
+bool IsLinearContiguousVecTile(const TileType& tile) {
+  if (tile.shape_.empty() || tile.shape_.size() > 2) return false;
+  const TileView view = tile_view_semantics::GetEffectiveTileView(tile);
+  if (view.pad != PadValue::null || view.compact != CompactMode::null ||
+      view.slayout != TileLayout::none_box ||
+      (!view.stride.empty() && view.stride.size() != tile.shape_.size())) {
+    return false;
+  }
+  // Append follows flattened row-major element order. Explicit dense strides
+  // describe the same storage as implicit ones; singleton axes create no gaps.
+  int64_t expected_stride = 1;
+  bool vector_shaped = tile.shape_.size() == 1;
+  for (size_t i = tile.shape_.size(); i > 0; --i) {
+    const auto dimension = As<ConstInt>(tile.shape_[i - 1]);
+    if (!dimension || dimension->value_ <= 0 ||
+        dimension->value_ > std::numeric_limits<int64_t>::max() / expected_stride) {
+      return false;
+    }
+    vector_shaped |= dimension->value_ == 1;
+    if (!view.stride.empty() && dimension->value_ != 1) {
+      const auto stride = As<ConstInt>(view.stride[i - 1]);
+      if (!stride || stride->value_ != expected_stride) return false;
+    }
+    expected_stride *= dimension->value_;
+  }
+  return view.blayout == TileLayout::row_major || (view.blayout == TileLayout::col_major && vector_shaped);
 }
 
 RegTypePtr Register(const ExprPtr& e, RegKind kind, bool allow_fp8 = false) {
@@ -102,7 +131,7 @@ int64_t StoreExtent(const Args& args, const Kwargs& kwargs) {
   return (last / block) * stride * block + tail;
 }
 
-TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
+TileTypePtr Memory(const Args& args, int64_t lanes, bool read, bool linear_destination = false) {
   auto t = As<TileType>(args[0]->GetType());
   CHECK_SPAN(t, args[0]->span_) << "reg.load/store requires a Vec Tile";
   CHECK(t->GetMemorySpace() == MemorySpace::Vec) << "reg.load/store requires Vec UB memory";
@@ -114,17 +143,23 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
   int64_t offset = offset_const ? offset_const->value_ : 0;
   CHECK(lanes <= capacity && (!offset_const || (offset >= 0 && offset <= capacity - lanes)))
       << "Register access exceeds capacity bounds";
+  if (linear_destination) {
+    CHECK_SPAN(IsLinearContiguousVecTile(*t), args[0]->span_)
+        << "squeeze_store destination requires a contiguous one- or two-dimensional Vec Tile view";
+  }
   if (t->tile_view_) {
     const auto& v = *t->tile_view_;
     // Offsets and block strides address flat storage. A boxed/padded View
     // needs a separate physical-layout contract; block_stride alone does not
     // make its logical indexing contiguous.
-    CHECK(v.blayout == TileLayout::row_major && v.slayout == TileLayout::none_box &&
-          v.compact == CompactMode::null)
-        << "Register memory requires a contiguous row-major View";
+    if (!linear_destination) {
+      CHECK(v.blayout == TileLayout::row_major && v.slayout == TileLayout::none_box &&
+            v.compact == CompactMode::null)
+          << "Register memory requires a contiguous row-major View";
+    }
     // Verify the full physical stride, not just the last dimension: flattening
     // a padded row would otherwise read padding as the next logical row.
-    if (!v.stride.empty()) {
+    if (!linear_destination && !v.stride.empty()) {
       CHECK(v.stride.size() == t->shape_.size()) << "View stride rank mismatch";
       int64_t stride = 1;
       for (size_t i = t->shape_.size(); i > 0; --i) {
@@ -155,7 +190,10 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
       }
     }
   } else {
-    CHECK(t->shape_.size() == 1) << "2D register memory access requires an explicit contiguous View";
+    // Stream destinations have already proved their effective (possibly
+    // implicit) layout above; ordinary register accesses retain their contract.
+    CHECK(linear_destination || t->shape_.size() == 1)
+        << "2D register memory access requires an explicit contiguous View";
   }
   if (t->memref_ && !(*t->memref_)->is_pinned_ && offset_const) {
     // A View may be smaller than its allocation, but its base offset still
@@ -903,7 +941,99 @@ REGISTER_OP("reg.scatter")
       return IndexedMemory(a, false);
     });
 
+// A stream is represented by explicit state edges, including through loop
+// carries. It is not an ordinary Tile version or a per-call compress_store.
+REGISTER_OP("reg.squeeze")
+    .set_op_category("RegOp")
+    .set_description("Pack selected UINT16/UINT32 lanes in stable order")
+    .set_reg_op("pto.vmi.compress")
+    .add_argument("value", "One physical UINT16/UINT32 VecReg")
+    .add_argument("mask", "Matching MaskReg")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "reg.squeeze expects value and mask";
+      auto value = Register(a[0], RegKind::VecReg);
+      CHECK(value->dtype_ == DataType::UINT16 || value->dtype_ == DataType::UINT32)
+          << "reg.squeeze requires UINT16/UINT32";
+      CHECK(value->shape_ == 256 / value->dtype_.GetByte())
+          << "reg.squeeze requires one full 256-byte register";
+      CHECK(Register(a[1], RegKind::MaskReg)->shape_ == value->shape_) << "Squeeze mask lane mismatch";
+      return value;
+    });
+
+REGISTER_OP("reg.squeeze_store_init")
+    .set_op_category("RegOp")
+    .set_description("Initialize a region-local UReg squeeze-store state")
+    .set_reg_op("pto.init_align")
+    .add_argument("dst", "Destination Vec Tile")
+    .add_argument("offset", "Initial element offset")
+    .set_input_memory(0, MemorySpace::Vec)
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "squeeze_store_init expects destination and offset";
+      auto tile = Memory(a, 0, false, /*linear_destination=*/true);
+      CHECK(tile->dtype_ == DataType::UINT16 || tile->dtype_ == DataType::UINT32)
+          << "squeeze_store requires UINT16/UINT32 destination";
+      return GetSqueezeStoreType();
+    });
+
+REGISTER_OP("reg.squeeze_store_step")
+    .set_op_category("RegOp")
+    .set_description("Append selected lanes and return the next UReg squeeze-store state")
+    .set_reg_op("pto.vstur")
+    .add_argument("ureg", "Current UReg squeeze-store state")
+    .add_argument("dst", "The stream destination")
+    .add_argument("value", "One physical UINT16/UINT32 VecReg")
+    .add_argument("mask", "Matching MaskReg")
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_arg_effect(1, ArgEffect::Write)
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 4) << "squeeze_store_step expects UReg value, destination, VecReg and MaskReg";
+      CHECK(As<SqueezeStoreType>(a[0]->GetType())) << "Expected current UReg squeeze-store state";
+      auto packed = OpRegistry::GetInstance().Create("reg.squeeze", {a[2], a[3]}, k, a[2]->span_);
+      auto tile = As<TileType>(a[1]->GetType());
+      CHECK(tile && tile->GetMemorySpace() == MemorySpace::Vec) << "Expected Vec Tile destination";
+      CHECK(tile->dtype_ == As<RegType>(packed->GetType())->dtype_) << "Squeeze destination dtype mismatch";
+      CHECK(IsLinearContiguousVecTile(*tile))
+          << "squeeze_store destination must have a contiguous linear Vec Tile view; flatten the Tile or "
+             "use a contiguous row-major view";
+      return GetSqueezeStoreType();
+    });
+
+REGISTER_OP("reg.squeeze_store_flush")
+    .set_op_category("RegOp")
+    .set_description("Finalize the UReg squeeze-store state and return the destination alias")
+    .set_reg_op("pto.vstar")
+    .add_argument("ureg", "Final UReg squeeze-store state")
+    .add_argument("dst", "The stream destination")
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_output_reuses_input(1)
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "squeeze_store_flush expects final UReg value and destination";
+      CHECK(As<SqueezeStoreType>(a[0]->GetType())) << "Expected final UReg squeeze-store state";
+      auto tile = As<TileType>(a[1]->GetType());
+      CHECK(tile && tile->GetMemorySpace() == MemorySpace::Vec &&
+            (tile->dtype_ == DataType::UINT16 || tile->dtype_ == DataType::UINT32))
+          << "Expected UINT16/UINT32 Vec Tile destination";
+      CHECK(IsLinearContiguousVecTile(*tile))
+          << "squeeze_store destination must have a contiguous linear Vec Tile view; flatten the Tile or "
+             "use a contiguous row-major view";
+      return tile;
+    });
+
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
+  if (IsOp(call, "reg.squeeze_store_step") || IsOp(call, "reg.squeeze_store_flush")) {
+    (void)OpRegistry::GetInstance().Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
+    auto tile = As<TileType>(call->args_[1]->GetType());
+    // Selected counts and the post-updated cursor are dynamic. Neither a full
+    // Tile overwrite nor initialization of its untouched tail can be inferred.
+    return {call->args_[1],   tile->memref_ ? (*tile->memref_)->base_ : nullptr,
+            ArgEffect::Write, std::nullopt,
+            std::nullopt,     IsOp(call, "reg.squeeze_store_step") ? call->args_[3] : nullptr};
+  }
+
   CHECK(IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter"))
       << "Memory effect requires reg.load/store/gather/scatter";
