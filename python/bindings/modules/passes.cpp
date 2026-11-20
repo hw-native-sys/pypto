@@ -17,6 +17,7 @@
 #include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers std::string casters
 #include <nanobind/stl/vector.h>      // NOLINT(misc-include-cleaner) -- registers std::vector casters
 
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -599,6 +600,8 @@ void BindPass(nb::module_& m) {
              "Applies three patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
              "strides (attach TensorView to Out params), and assemble-loop rewrite\n"
              "(convert tile.assemble loops to tile.store loops).");
+  passes.def("prepare_intermediate_tensor_layouts", &pass::PrepareIntermediateTensorLayouts,
+             "Defer NZ blocking when an internal allocation can participate in layout selection.");
   passes.def("block_nz_tensor_views", &pass::BlockNzTensorViews,
              "Create a pass that rewrites logical pl.NZ tensors into pto-isa's blocked NZ form\n\n"
              "An NZ TensorType shape [B, R, C] becomes [B, C/c0, R/16, 16, c0] and [R, C]\n"
@@ -656,12 +659,22 @@ void BindPass(nb::module_& m) {
              "The dead tile.slice is then dropped, unifying Mat->Left/Right on pto.textract.");
   passes.def(
       "auto_layout",
-      []() {
+      [](bool allow_external_input_relayout, const std::vector<std::string>& reusable_tensors,
+         int64_t expected_uses, bool reselect_internal_layouts, const std::vector<std::string>& nz_inputs) {
+        if (expected_uses < 1) throw ValueError("AutoLayout expected_uses must be positive");
         pass::AutoLayoutOptions options;
         options.fail_on_writeback_issues = true;
+        options.cost_model.allow_external_input_relayout = allow_external_input_relayout;
+        options.cost_model.expected_uses = expected_uses;
+        options.cost_model.reselect_internal_layouts = reselect_internal_layouts;
+        options.nz_inputs.insert(nz_inputs.begin(), nz_inputs.end());
+        options.reusable_tensors.insert(reusable_tensors.begin(), reusable_tensors.end());
         return pass::AutoLayout(std::move(options));
       },
-      "Select GM and on-chip layouts with the native solver, requiring a writable assignment.");
+      nb::kw_only(), nb::arg("allow_external_input_relayout") = false,
+      nb::arg("reusable_tensors") = std::vector<std::string>{}, nb::arg("expected_uses") = 1,
+      nb::arg("reselect_internal_layouts") = false, nb::arg("nz_inputs") = std::vector<std::string>{},
+      "Select native layouts. External input relayout requires caller-side packing.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
   passes.def("insert_mx_scale_addr", &pass::InsertMxScaleAddr,

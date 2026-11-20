@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR Pass transformations."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import Enum
 from types import TracebackType
 from typing import Any, overload
@@ -572,6 +572,10 @@ def convert_tensor_to_tile_ops() -> Pass:
 def optimize_orch_tensors() -> Pass:
     """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
 
+def prepare_intermediate_tensor_layouts() -> Pass:
+    """Prepare logical NZ intermediates for native layout selection."""
+    ...
+
 def block_nz_tensor_views() -> Pass:
     """Create a pass that rewrites logical ``pl.NZ`` tensors into blocked NZ form.
 
@@ -672,7 +676,14 @@ def canonicalize_tile_slice() -> Pass:
     on ``tile.extract`` / ``pto.textract``.
     """
 
-def auto_layout() -> Pass:
+def auto_layout(
+    *,
+    allow_external_input_relayout: bool = False,
+    reusable_tensors: Sequence[str] = (),
+    expected_uses: int = 1,
+    reselect_internal_layouts: bool = False,
+    nz_inputs: Sequence[str] = (),
+) -> Pass:
     """Select GM and on-chip layouts with the native solver, requiring a writable assignment."""
     ...
 
@@ -1178,6 +1189,7 @@ __all__ = [
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
     "block_nz_tensor_views",
+    "prepare_intermediate_tensor_layouts",
     "block_mx_scale_tensor_views",
     "legalize_mx_scale_tensor_views",
     "flatten_tile_nd_to_2d",

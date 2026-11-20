@@ -88,6 +88,7 @@ from .param_info import (  # noqa: F401  -- re-export
     _ParamInfo,
     _to_torch_dtype,
     bind_complete_args,
+    block_nz_shape,
     collect_output_values,
 )
 from .param_info import (
@@ -544,6 +545,59 @@ class _RuntimeFacade:
         """Assembly signature used for NZ argument shape validation."""
         assert self._artifact.metadata is not None
         return self._artifact.metadata.lowered_parameters
+
+    def prepare_inputs(
+        self, weights: dict[str, torch.Tensor], *, source_layouts: dict[str, str] | None = None
+    ) -> dict[str, torch.Tensor]:
+        """Prepare named read-only weights for the compiled ABI once, for reuse across calls.
+
+        Supply logical ND tensors, or specify the physical order of saved inputs in
+        source_layouts. The dispatch buffers retain the original logical shape.
+        Reject an artifact that requires relayout of any other external parameter.
+        """
+        params, _, _ = self._get_metadata()
+        source_layouts = source_layouts or {}
+        if source_layouts.keys() - weights.keys():
+            raise ValueError("Source layouts must name supplied weights")
+        prepared: dict[str, torch.Tensor] = {}
+        for param, lowered in zip(params, self._lowered_param_infos, strict=True):
+            name = param.name
+            if name != lowered.name or lowered.direction != param.direction or lowered.dtype != param.dtype:
+                raise ValueError(f"Incompatible lowered metadata for {name!r}")
+            if name not in weights:
+                if param.layout != lowered.layout:
+                    raise ValueError(f"Input layout policy does not permit changing {name!r}")
+                continue
+            tensor = weights[name]
+            if param.direction != ParamDirection.In or param.shape is None:
+                raise ValueError(f"{name!r} must be a read-only tensor")
+            if (
+                not _matches_torch_dtype(param.dtype, tensor.dtype)
+                or len(param.shape) != tensor.ndim
+                or any(
+                    expected >= 0 and expected != actual
+                    for expected, actual in zip(param.shape, tensor.shape)
+                )
+            ):
+                raise ValueError(
+                    f"{name!r} expects {param.dtype} {param.shape}, got {tensor.dtype} {tensor.shape}"
+                )
+            source = source_layouts.get(name, "ND")
+            target = lowered.layout
+            if source not in ("ND", "NZ") or target not in ("ND", "NZ"):
+                raise ValueError(f"Unsupported input layout for {name!r}: {source} to {target}")
+            if source == target:
+                prepared[name] = tensor.contiguous()
+                continue
+            batch, blocks, groups, rows, cols = block_nz_shape(tensor.shape, tensor.dtype)
+            if source == "ND":
+                ordered = tensor.reshape(batch, groups, rows, blocks, cols).permute(0, 3, 1, 2, 4)
+            else:
+                ordered = tensor.reshape(batch, blocks, groups, rows, cols).permute(0, 2, 3, 1, 4)
+            prepared[name] = ordered.contiguous().reshape(tensor.shape)
+        if missing := weights.keys() - prepared.keys():
+            raise ValueError(f"Unknown entry weights: {sorted(missing)}")
+        return prepared
 
     @property
     def param_names(self) -> list[str]:

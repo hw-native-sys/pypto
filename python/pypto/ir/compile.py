@@ -35,7 +35,7 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import log_debug as _log_debug
 from pypto.pypto_core import passes as _passes
 
-from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
+from .pass_manager import InputLayoutPolicy, OptimizationStrategy, PassDumpLevel, PassManager
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     enable_software_pipeline: bool | None = None,
     runtime: _passes.RuntimeKind | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    input_layout_policy: InputLayoutPolicy | None = None,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
     inherit_outer_report_instruments: bool = True,
     dump_passes: bool | PassDumpLevel = False,
@@ -285,6 +286,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         pm = PassManager.get_strategy(
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            input_layout_policy=input_layout_policy,
         )
         with passes_stage:
             transformed_program = pm.run_passes(
@@ -341,6 +343,7 @@ def compile(  # noqa: PLR0913
     execution_mode: ExecutionMode | None = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
+    input_layout_policy: InputLayoutPolicy | None = None,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
@@ -486,6 +489,7 @@ def compile(  # noqa: PLR0913
         platform=platform,
         execution_mode=execution_mode,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        input_layout_policy=input_layout_policy,
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
@@ -494,6 +498,10 @@ def compile(  # noqa: PLR0913
     # Entry selection and execution wrappers belong to the public program API.
     # Inspect lowered IR because outlining can introduce HOST functions.
     if _is_distributed(lowered_program):
+        if input_layout_policy is not None and input_layout_policy.nz_inputs:
+            raise ValueError(
+                "Loader-selected NZ inputs require a single-chip program with physical parameter metadata"
+            )
         from .distributed_compiled_program import (  # noqa: PLC0415
             DistributedCompiledProgram,
             DistributedConfig,
@@ -602,6 +610,7 @@ def _compile_to_files(  # noqa: PLR0913
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    input_layout_policy: InputLayoutPolicy | None = None,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
@@ -667,6 +676,7 @@ def _compile_to_files(  # noqa: PLR0913
             enable_software_pipeline=enable_software_pipeline,
             runtime=runtime,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            input_layout_policy=input_layout_policy,
             extra_instruments=(report_instrument,),
             dump_passes=dump_passes,
             passes_dump_dir=os.path.join(output_dir, "passes_dump"),

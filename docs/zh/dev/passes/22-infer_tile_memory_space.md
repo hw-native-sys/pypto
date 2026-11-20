@@ -289,6 +289,16 @@ tile *参数* 在阶段 1 起始处按函数类型分别处理：
 
 默认保留外部参数声明的布局。提取器沿 SSA 赋值和已证实的调用结果别名跟踪每次内部分配。传给不透明外部内核的缓冲区保留该内核声明的表示。只有当调用方能按所选物理布局提供数据时，才应设置 `options.cost_model.allow_external_input_relayout`。边界打包由调用方负责。在 `options.reusable_tensors` 中标注权重可摊销打包成本。自动提升为 DN 仅适用于符合条件的内部缓冲区。要在写回前检查分配及其转换需求，可调用 `auto_layout::ExtractLayoutInstance` 和 `auto_layout::SolveAutoLayout`。
 
+比较同一份模型源码时，使用 `OptimizationStrategy.Default` 和 `OptimizationStrategy.AutoLayoutIntermediates`。后者保留入口输入、输出、InOut 状态和返回缓冲区的物理布局。辅助函数参数也可能指向私有中间缓冲区，其资格由实际存储决定。该策略同时选择私有 GM 分配支持的 ND、DN、逻辑 NZ 布局以及片上 tile 布局。不透明调用、视图语义和后端要求仍然约束候选。当内部缓冲区标注逻辑 NZ 时可推迟分块。
+
+加载器可用 `ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), expected_uses=100)`
+声明只读入口参数允许使用 ND 或 NZ。将其作为 `input_layout_policy` 传给启用 AutoLayout 的
+`ir.compile` 或 `RunConfig`，并将权重声明为普通的逻辑 ND 输入。提取器在求解前将入口参数绑定到实际存储，
+其他外部缓冲区保留声明的布局。复用次数只影响打包成本。对单芯片程序，
+`compiled.prepare_inputs({"w": logical_w})["w"]` 根据编译结果生成可多次使用的输入缓冲区。
+
+Python pass 工厂支持相同的输入打包选项，例如 `passes.auto_layout(allow_external_input_relayout=True, reusable_tensors=["w"], expected_uses=100)`。这允许符合条件的 ND 输入采用 NZ。若要从 ND 起点评估原先按 NZ 打包的权重，请先提供逻辑 ND 声明和数据，再根据编译后的布局元数据准备上传的缓冲区。
+
 对于稠密平坦的 Vec 矩阵，当形状和数据类型支持物理转置时，可以在行主序和列主序之间转换。写回阶段发出一次转置和一个零拷贝转置视图。保留较大底层跨距的切片维持原有表示；行主序切片若保留完整行宽则仍可转置。改变形状的 reshape 保持原有逻辑元素顺序，位打包的谓词保留原有布局。
 
 提取器在每个内核调用点估算各转换位置仍然存活的 Vec 存储。切片和其他零拷贝视图使底层分配保持存活，直到视图的最后一次使用。多个视图共享同一底层分配时只计算一次。整块转置需要目标 tile 和临时 tile，行广播每行需要一个 32 字节块，仅调整元数据的 reshape 复用现有存储。降低和内存复用完成后，分配器检查最终占用量。

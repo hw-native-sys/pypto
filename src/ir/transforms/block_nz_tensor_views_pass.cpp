@@ -104,6 +104,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/auto_layout/extractor.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -922,21 +923,52 @@ ProgramPtr tensor_view_semantics::RestoreLegacyBlockedNzViews(const ProgramPtr& 
   return std::make_shared<Program>(std::move(functions), program->name_, program->span_);
 }
 
+namespace {
+
+ProgramPtr BlockProgramNzViews(const ProgramPtr& program) {
+  bool modified = false;
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
+  for (const auto& [gvar, func] : program->functions_) {
+    auto new_func = TransformFunction(func);
+    if (new_func.get() != func.get()) modified = true;
+    new_functions[gvar] = std::move(new_func);
+  }
+  if (!modified) return program;
+  return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+}
+
+}  // namespace
+
 namespace pass {
 
 Pass BlockNzTensorViews() {
-  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    bool modified = false;
-    std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
-    for (const auto& [gvar, func] : program->functions_) {
-      auto new_func = TransformFunction(func);
-      if (new_func.get() != func.get()) modified = true;
-      new_functions[gvar] = std::move(new_func);
+  return CreateProgramPass(BlockProgramNzViews, "BlockNzTensorViews", kBlockNzTensorViewsProperties);
+}
+
+Pass PrepareIntermediateTensorLayouts() {
+  auto prepare = [](const ProgramPtr& program) -> ProgramPtr {
+    const auto storage = auto_layout::AnalyzeOrchestration(program);
+    const auto has_private_nz = [&](const auto& names) {
+      return std::any_of(names.begin(), names.end(), [&](const auto& binding) {
+        const auto& [var, name] = binding;
+        if (!storage.internal_buffers.count(name) || storage.external_outputs.count(name) ||
+            storage.nz_ineligible_names.count(name))
+          return false;
+        const auto tensor = As<TensorType>(var->GetType());
+        return tensor && IsNzTensorType(tensor) && !tensor_view_semantics::IsNzBlocked(*tensor);
+      });
+    };
+    // A callee can be shared by an external and a private buffer, so keep
+    // logical coordinates across the call graph until AutoLayout specializes it.
+    if (has_private_nz(storage.gm_names)) return program;
+    for (const auto& [_, sites] : storage.call_sites) {
+      for (const auto& site : sites) {
+        if (has_private_nz(site.gm_names)) return program;
+      }
     }
-    if (!modified) return program;
-    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+    return BlockProgramNzViews(program);
   };
-  return CreateProgramPass(pass_func, "BlockNzTensorViews", kBlockNzTensorViewsProperties);
+  return CreateProgramPass(prepare, "PrepareIntermediateTensorLayouts", kBlockNzTensorViewsProperties);
 }
 
 }  // namespace pass

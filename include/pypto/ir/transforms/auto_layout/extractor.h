@@ -113,7 +113,8 @@ LayoutSpec EffectiveTileLayout(const TileTypePtr& tile_type);
 
 /// Extract a `LayoutProblemInstance` from a post-`InferTileMemorySpace` `Program`.
 LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const LayoutCostModel& cost_model = {},
-                                            const std::unordered_set<std::string>& reusable_tensors = {});
+                                            const std::unordered_set<std::string>& reusable_tensors = {},
+                                            const std::unordered_set<std::string>& nz_inputs = {});
 
 }  // namespace auto_layout
 }  // namespace ir

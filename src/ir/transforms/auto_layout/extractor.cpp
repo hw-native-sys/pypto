@@ -961,6 +961,14 @@ class GmBindings {
     return name ? std::optional<std::string>(Canonical(*name)) : std::nullopt;
   }
 
+  void RecordReturnedStorage(const StmtPtr& stmt, std::unordered_set<std::string>& outputs) {
+    if (!stmt) return;
+    if (auto ret = As<ReturnStmt>(stmt)) {
+      for (const auto& value : ret->value_) CollectTensorRoots(value, value->GetType(), outputs);
+    }
+    for (const auto& child : IterChildStmts(stmt)) RecordReturnedStorage(child, outputs);
+  }
+
   void PinLayouts(OrchCallAnalysis& analysis) const {
     for (const auto& name : pinned_) {
       analysis.nz_ineligible_names.insert(Canonical(name));
@@ -1070,15 +1078,16 @@ class GmBindings {
   // Tuple phis may contain any number of independent tensor descriptors.
   // Keep those alternatives at the declared layout when we cannot forward the
   // tuple as one value. Later projections get their own pinned identities.
-  void PinTupleElements(const ExprPtr& expr, const TypePtr& type, std::vector<size_t> path = {}) {
+  void CollectTensorRoots(const ExprPtr& expr, const TypePtr& type, std::unordered_set<std::string>& roots,
+                          std::vector<size_t> path = {}) {
     if (auto tuple = As<TupleType>(type)) {
       for (size_t i = 0; i < tuple->types_.size(); ++i) {
         auto element = path;
         element.insert(element.begin(), i);
-        PinTupleElements(expr, tuple->types_[i], std::move(element));
+        CollectTensorRoots(expr, tuple->types_[i], roots, std::move(element));
       }
     } else if (AsTensorTypeLike(type)) {
-      if (auto key = Resolve(expr, std::move(path))) pinned_.insert(*key);
+      if (auto key = Resolve(expr, std::move(path))) roots.insert(Canonical(*key));
     }
   }
 
@@ -1088,9 +1097,9 @@ class GmBindings {
                const std::optional<std::string>& self = std::nullopt) {
     if (!AsTensorTypeLike(result->GetType())) {
       if (As<TupleType>(result->GetType())) {
-        if (initial) PinTupleElements(initial, initial->GetType());
+        if (initial) CollectTensorRoots(initial, initial->GetType(), pinned_);
         for (const auto& values : yields) {
-          if (index < values.size()) PinTupleElements(values[index], values[index]->GetType());
+          if (index < values.size()) CollectTensorRoots(values[index], values[index]->GetType(), pinned_);
         }
       }
       return;
@@ -1350,6 +1359,8 @@ class OrchAnalyzer {
     const std::vector<std::optional<std::string>> empty;
     const auto& overrides = caller != analysis_.call_arg_names.end() ? caller->second : empty;
     GmBindings bindings(program_, func, definitions_, overrides);
+    if (caller == analysis_.call_arg_names.end())
+      bindings.RecordReturnedStorage(func->body_, analysis_.external_outputs);
     bindings_ = &bindings;
     bindings.PinLayouts(analysis_);
     analysis_.gm_names.insert(bindings.Names().begin(), bindings.Names().end());
@@ -1675,6 +1686,7 @@ class PostInferInstanceExtractor {
  public:
   PostInferInstanceExtractor(const LayoutCostModel& model, const backend::Backend* backend,
                              const std::unordered_set<std::string>& reusable,
+                             const std::unordered_set<std::string>& nz_input_roots,
                              const std::unordered_set<std::string>& external_out_names,
                              const std::unordered_set<std::string>& reshaped_names,
                              const std::unordered_set<std::string>& nz_ineligible_names,
@@ -1687,6 +1699,7 @@ class PostInferInstanceExtractor {
       : model_(model),
         backend_(backend),
         reusable_(reusable),
+        nz_input_roots_(nz_input_roots),
         external_out_names_(external_out_names),
         reshaped_names_(reshaped_names),
         nz_ineligible_names_(nz_ineligible_names),
@@ -1734,27 +1747,42 @@ class PostInferInstanceExtractor {
         tt->tensor_view_.has_value() ? LayoutSpec::Tensor(tt->tensor_view_->layout) : LayoutSpec::ND();
     const bool is_ext_out = external_out_names_.count(name) != 0;
     const bool is_reusable = reusable_.count(name) != 0 ||
-                             reusable_.count(CleanName(param->name_hint_)) != 0 ||
-                             reusable_.count(param->name_hint_) != 0;
+                             (nz_input_roots_.empty() && (reusable_.count(CleanName(param->name_hint_)) ||
+                                                          reusable_.count(param->name_hint_)));
     // Reuse affects amortization. Changing a caller-owned buffer also requires
     // explicit permission to change the input or output representation.
     const bool owned = internal_buffers_.count(name) != 0;
     // A packed FP4 layout change retargets the dtype's carrier axis. This
     // pass can keep a declared packed descriptor but cannot reuse its shape
     // to introduce a different GM layout.
-    const bool allow_relayout = !is_distributed && !tt->dtype_.IsPackedFp4() &&
-                                (is_ext_out ? model_.allow_external_output_relayout
-                                            : (owned || (formal && model_.allow_external_input_relayout)));
-    const bool allow_nz = !is_distributed && is_static && cur_layout == LayoutSpec::ND() &&
+    const bool allow_relayout =
+        !is_distributed && !tt->dtype_.IsPackedFp4() &&
+        (is_ext_out
+             ? model_.allow_external_output_relayout
+             : (owned || (formal && (model_.allow_external_input_relayout || nz_input_roots_.count(name)))));
+    // The logical NZ selection pipeline reaches this point before blocking. Only
+    // private, dense, unaliased-by-opaque-code storage may shed its declared layout.
+    const auto& view = tt->tensor_view_;
+    const bool compact_dn_stride = cur_layout == LayoutSpec::DN() && is_static && shape.size() == 2 && view &&
+                                   StaticShape(view->stride) == std::vector<int64_t>{1, shape[0]};
+    const bool private_dense = model_.reselect_internal_layouts && owned && !is_ext_out && allow_relayout &&
+                               is_static && view && !view->nz_blocked &&
+                               (view->stride.empty() || compact_dn_stride) && view->valid_shape.empty() &&
+                               view->pad == PadValue::null && reshaped_names_.count(name) == 0;
+    const bool reopen =
+        private_dense && ((cur_layout == LayoutSpec::NZ() && nz_ineligible_names_.count(name) == 0) ||
+                          (cur_layout == LayoutSpec::DN() && dn_ineligible_names_.count(name) == 0));
+    const bool allow_nz = !is_distributed && is_static && (cur_layout == LayoutSpec::ND() || reopen) &&
                           reshaped_names_.count(name) == 0 && nz_ineligible_names_.count(name) == 0 &&
                           IsNzCompatibleShape(shape, tt->dtype_) && allow_relayout;
     // Promoting a host argument to DN changes its physical strides. Only introduce
     // DN for buffers owned by the orchestration, where the pass controls both ends.
     const bool allow_dn = owned && !is_ext_out && !is_distributed && is_static && shape.size() == 2 &&
-                          (cur_layout == LayoutSpec::ND() || cur_layout == LayoutSpec::DN()) &&
+                          (cur_layout == LayoutSpec::ND() || cur_layout == LayoutSpec::DN() || reopen) &&
                           reshaped_names_.count(name) == 0 && dn_ineligible_names_.count(name) == 0 &&
                           allow_relayout;
     std::vector<LayoutSpec> adm_list{cur_layout};
+    if (reopen) adm_list.push_back(LayoutSpec::ND());
     if (allow_dn && cur_layout != LayoutSpec::DN()) {
       adm_list.push_back(LayoutSpec::DN());
     }
@@ -3070,6 +3098,7 @@ class PostInferInstanceExtractor {
   const LayoutCostModel& model_;
   const backend::Backend* backend_;
   const std::unordered_set<std::string>& reusable_;
+  const std::unordered_set<std::string>& nz_input_roots_;
   const std::unordered_set<std::string>& external_out_names_;
   const std::unordered_set<std::string>& reshaped_names_;
   const std::unordered_set<std::string>& nz_ineligible_names_;
@@ -3160,6 +3189,8 @@ void PruneUnsupportedGmAndFractalLayouts(LayoutProblemInstance& instance,
           if (lay == LayoutSpec::NZ()) {
             keep = nz_ineligible_names.count(val_name) == 0 && reshaped_names.count(val_name) == 0 &&
                    IsGmLayoutSupportedByOps(val_name, lay, participating);
+          } else if (lay == LayoutSpec::ND()) {
+            keep = !participating.empty() && IsGmLayoutSupportedByOps(val_name, lay, participating);
           } else if (lay == LayoutSpec::DN()) {
             keep = dn_ineligible_names.count(val_name) == 0 && reshaped_names.count(val_name) == 0 &&
                    !participating.empty() && IsGmLayoutSupportedByOps(val_name, lay, participating);
@@ -3318,6 +3349,53 @@ void SanitizeInstanceInvariants(LayoutProblemInstance& instance) {
   }
 }
 
+// Bind loader permissions at the public entry. All downstream decisions use the
+// canonical storage keys propagated through call sites and proven aliases.
+struct InputLayoutRoots {
+  std::unordered_set<std::string> nz;
+  std::unordered_set<std::string> reusable;
+};
+
+InputLayoutRoots ResolveInputLayoutRoots(const ProgramPtr& program, const OrchCallAnalysis& orch,
+                                         const LayoutCostModel& model,
+                                         const std::unordered_set<std::string>& requested,
+                                         const std::unordered_set<std::string>& reusable_names) {
+  if (requested.empty()) return {{}, reusable_names};
+  if (model.allow_external_input_relayout || model.allow_external_output_relayout) {
+    throw ValueError("Named NZ inputs cannot be combined with unrestricted external relayout");
+  }
+  FunctionPtr entry;
+  for (const auto& [_, fn] : program->functions_) {
+    if (program->functions_.size() == 1 ||
+        (fn->func_type_ == FunctionType::Orchestration && !orch.call_counts.count(fn->name_))) {
+      if (entry) throw ValueError("Named NZ inputs require a unique entry function");
+      entry = fn;
+    }
+  }
+  if (!entry) throw ValueError("Named NZ inputs require an entry function");
+  InputLayoutRoots roots;
+  auto missing = requested;
+  for (size_t i = 0; i < entry->params_.size(); ++i) {
+    const auto& param = entry->params_[i];
+    const auto name = CleanName(param->name_hint_);
+    const auto root = orch.gm_names.find(param.get());
+    if (root != orch.gm_names.end() && reusable_names.count(name)) roots.reusable.insert(root->second);
+    if (!requested.count(name)) continue;
+    const auto tensor = AsTensorTypeLike(param->GetType());
+    if (!tensor || entry->param_directions_[i] != ParamDirection::In || root == orch.gm_names.end() ||
+        orch.external_outputs.count(root->second) ||
+        (tensor->tensor_view_ &&
+         (tensor->tensor_view_->layout != TensorLayout::ND || !tensor->tensor_view_->stride.empty() ||
+          !tensor->tensor_view_->valid_shape.empty() || tensor->tensor_view_->pad != PadValue::null))) {
+      throw ValueError("Named NZ input '" + name + "' must be a read-only logical ND entry tensor");
+    }
+    if (!missing.erase(name)) throw ValueError("Ambiguous NZ entry input '" + name + "'");
+    roots.nz.insert(root->second);
+  }
+  if (!missing.empty()) throw ValueError("Unknown NZ entry input '" + *missing.begin() + "'");
+  return roots;
+}
+
 }  // namespace
 
 LayoutSpec EffectiveTileLayout(const TileTypePtr& tile_type) {
@@ -3410,6 +3488,7 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
       const auto& names = bindings.Names();
       analysis.gm_names.insert(names.begin(), names.end());
       register_local_buffers(fn, names);
+      bindings.RecordReturnedStorage(fn->body_, analysis.external_outputs);
       for (size_t i = 0; i < fn->params_.size(); ++i) {
         if (fn->param_directions_[i] != ParamDirection::In) {
           auto key = names.find(fn->params_[i].get());
@@ -3422,7 +3501,8 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
 }
 
 LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const LayoutCostModel& cost_model,
-                                            const std::unordered_set<std::string>& reusable_tensors) {
+                                            const std::unordered_set<std::string>& reusable_tensors,
+                                            const std::unordered_set<std::string>& nz_inputs) {
   LayoutCostModel resolved_model = cost_model;
   const backend::Backend* be = ResolveBackend(resolved_model);
   if (!resolved_model.backend_type.has_value() && be != nullptr) {
@@ -3444,6 +3524,8 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const Lay
   }
 
   auto orch = AnalyzeOrchestration(program);
+  const auto input_roots =
+      ResolveInputLayoutRoots(program, orch, resolved_model, nz_inputs, reusable_tensors);
   if (!non_incore_funcs.empty()) {
     std::stable_sort(
         incore_funcs.begin(), incore_funcs.end(), [&](const FunctionPtr& a, const FunctionPtr& b) {
@@ -3486,10 +3568,11 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const Lay
       for (size_t site_idx = 0; site_idx < sites_it->second.size(); ++site_idx) {
         const auto& site = sites_it->second[site_idx];
         const std::string prefix = detail::TileLayoutPrefix(program, func->name_, multi_incore, site_idx);
-        PostInferInstanceExtractor ext(
-            resolved_model, be, reusable_tensors, orch.external_outputs, orch.reshaped_names,
-            orch.nz_ineligible_names, orch.dn_ineligible_names, orch.internal_buffers, instance,
-            consumed_values, op_counter, prefix, site.multiplicity, site.gm_names, orch.param_steps);
+        PostInferInstanceExtractor ext(resolved_model, be, input_roots.reusable, input_roots.nz,
+                                       orch.external_outputs, orch.reshaped_names, orch.nz_ineligible_names,
+                                       orch.dn_ineligible_names, orch.internal_buffers, instance,
+                                       consumed_values, op_counter, prefix, site.multiplicity, site.gm_names,
+                                       orch.param_steps);
         ext.Extract(func);
       }
       continue;
@@ -3498,10 +3581,10 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const Lay
     const std::string prefix = detail::TileLayoutPrefix(program, func->name_, multi_incore);
     auto cnt_it = orch.call_counts.find(func->name_);
     const int64_t call_mult = (cnt_it != orch.call_counts.end()) ? cnt_it->second : 1;
-    PostInferInstanceExtractor ext(resolved_model, be, reusable_tensors, orch.external_outputs,
-                                   orch.reshaped_names, orch.nz_ineligible_names, orch.dn_ineligible_names,
-                                   orch.internal_buffers, instance, consumed_values, op_counter, prefix,
-                                   call_mult, orch.gm_names, orch.param_steps);
+    PostInferInstanceExtractor ext(resolved_model, be, input_roots.reusable, input_roots.nz,
+                                   orch.external_outputs, orch.reshaped_names, orch.nz_ineligible_names,
+                                   orch.dn_ineligible_names, orch.internal_buffers, instance, consumed_values,
+                                   op_counter, prefix, call_mult, orch.gm_names, orch.param_steps);
     ext.Extract(func);
   }
 

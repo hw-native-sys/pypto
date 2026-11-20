@@ -38,12 +38,19 @@ def main(self, x: pl.Tensor[[64,64], pl.FP32], w: pl.Tensor[[64,64], pl.FP32],
 """
 
 
-def _compile(output: Path, functions: str) -> str:
+def _compile(
+    output: Path,
+    functions: str,
+    strategy: ir.OptimizationStrategy = ir.OptimizationStrategy.AutoLayout,
+    *,
+    input_layout_policy: ir.InputLayoutPolicy | None = None,
+) -> str:
     program = pl.parse("@pl.program\nclass Kernel:\n" + indent(functions, "    "), filename=__file__)
     assert isinstance(program, ir.Program)
     ir.compile(
         program,
-        strategy=ir.OptimizationStrategy.AutoLayout,
+        strategy=strategy,
+        input_layout_policy=input_layout_policy,
         backend_type=backend.BackendType.Ascend910,
         skip_ptoas=True,
         dump_passes=ir.PassDumpLevel.EXPLICIT,
@@ -278,3 +285,91 @@ def main(self, x: pl.Tensor[[512,64], pl.FP32],
     # Either view fits on its own. Its destination and scratch coexist with
     # the original 128 KiB backing on a target with 184 KiB of Vec.
     _compile(tmp_path, program)
+
+
+@pytest.mark.parametrize("layout", ["NZ", "DN"])
+def test_reselect_private_intermediate_preserves_caller_state(tmp_path, ascend_backend, layout):
+    plain = "pl.Tensor[[64,64], pl.FP32]"
+    view = "pl.NZ" if layout == "NZ" else "pl.TensorView(stride=[1,64], layout=pl.TensorLayout.DN)"
+    intermediate = f"pl.Tensor[[64,64], pl.FP32, {view}]"
+    # The helper's Out formal is bound to private storage. The entry's InOut
+    # formal is the caller's allocation throughout the complete call chain.
+    source = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def produce(self, x: {plain}, scratch: pl.Out[{intermediate}]) -> {intermediate}:
+    tile = pl.load(x, [0,0], [64,64], target_memory=pl.Mem.Vec)
+    return pl.store(tile, [0,0], scratch)
+@pl.function(type=pl.FunctionType.InCore)
+def consume(self, scratch: {intermediate}, state: pl.InOut[{plain}]) -> {plain}:
+    tile = pl.load(scratch, [0,0], [64,64], target_memory=pl.Mem.Vec)
+    old = pl.load(state, [0,0], [64,64], target_memory=pl.Mem.Vec)
+    return pl.store(pl.tile.add(tile, old), [0,0], state)
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: {plain}, state: pl.InOut[{plain}]) -> {plain}:
+    scratch = pl.tensor.create([64,64], dtype=pl.FP32, layout=pl.TensorLayout.{layout})
+    alias = self.produce(x, scratch)
+    return self.consume(alias, state)
+"""
+    dump = _compile(tmp_path, source, ir.OptimizationStrategy.AutoLayoutIntermediates)
+    allocation = next(line for line in dump.splitlines() if "tensor.create(" in line)
+    assert "layout=pl.TensorLayout.ND" in allocation
+    meta = json.loads((tmp_path / "compiled_meta.json").read_text())
+    assert meta["params"] == meta["lowered_params"]
+    assert [(p["name"], p["direction"], p["layout"]) for p in meta["params"]] == [
+        ("x", "In", "ND"),
+        ("state", "InOut", "ND"),
+    ]
+
+
+def test_returned_allocation_keeps_entry_layout(tmp_path, ascend_backend):
+    packed = "pl.Tensor[[64,64], pl.FP32, pl.NZ]"
+    source = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def fill(self, x: pl.Tensor[[64,64], pl.FP32], dst: pl.Out[{packed}]) -> {packed}:
+    lhs = pl.load(x, [0,0], [64,64], target_memory=pl.Mem.Mat)
+    rhs = pl.load(x, [0,0], [64,64], target_memory=pl.Mem.Mat)
+    return pl.store(pl.matmul(lhs, rhs), [0,0], dst)
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: pl.Tensor[[64,64], pl.FP32]) -> {packed}:
+    scratch = pl.tensor.create([64,64], dtype=pl.FP32, layout=pl.TensorLayout.NZ)
+    final = self.fill(x, scratch)
+    return final
+"""
+    dump = _compile(tmp_path, source, ir.OptimizationStrategy.AutoLayoutIntermediates)
+    entry = next(line for line in dump.splitlines() if "def main(" in line)
+    assert "layout=pl.TensorLayout.NZ, nz_blocked=True" in entry.split(" -> ")[1]
+    scratch = next(line for line in dump.splitlines() if line.strip().startswith("scratch__ssa_v0:"))
+    assert "layout=pl.TensorLayout.NZ, nz_blocked=True" in scratch
+
+
+@pytest.mark.parametrize("allowed", ["x", "w"])
+def test_only_named_entry_input_can_be_packed(tmp_path, ascend_backend, allowed):
+    # The entry's w feeds helper a, and x feeds helper w. Reuse the site in a
+    # loop so packing either operand pays off if the loader can supply it.
+    body = """
+    alias = x
+    for i in pl.range(64):
+        dst = self.mm(w, alias, dst)
+    return dst
+"""
+    _compile(
+        tmp_path,
+        _matmul() + _ENTRY + body,
+        input_layout_policy=ir.InputLayoutPolicy((allowed,), ("x", "w"), 100),
+    )
+    params = json.loads((tmp_path / "compiled_meta.json").read_text())["lowered_params"]
+    assert {p["name"]: p["layout"] for p in params} == {
+        "x": "NZ" if allowed == "x" else "ND",
+        "w": "NZ" if allowed == "w" else "ND",
+        "dst": "ND",
+    }
+
+
+@pytest.mark.parametrize("name", ["a", "dst"])
+def test_loader_permission_requires_read_only_entry_input(tmp_path, ascend_backend, name):
+    with pytest.raises(ValueError, match="NZ (entry )?input"):
+        _compile(
+            tmp_path,
+            _matmul() + _ENTRY + "    return self.mm(x, w, dst)\n",
+            input_layout_policy=ir.InputLayoutPolicy((name,)),
+        )

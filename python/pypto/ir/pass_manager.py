@@ -12,7 +12,9 @@
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum, unique
+from functools import partial
 from pathlib import Path
 
 from pypto.compile_profiling import CompileProfiler
@@ -100,12 +102,33 @@ def _write_ir_dump(program: core_ir.Program, path: str, prefix: str, explicit_la
 PassFactory = Callable[[], passes.Pass]
 
 
+@dataclass(frozen=True)
+class InputLayoutPolicy:
+    """Loader capabilities for logical ND entry inputs and the packing cost horizon.
+
+    An input named in nz_inputs may also be supplied in NZ. Reusable tensors
+    can amortize one pack across expected_uses invocations.
+    """
+
+    nz_inputs: tuple[str, ...]
+    reusable_tensors: tuple[str, ...] = ()
+    expected_uses: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.expected_uses) is not int or self.expected_uses < 1:
+            raise ValueError("expected_uses must be a positive integer")
+        for names in (self.nz_inputs, self.reusable_tensors):
+            if type(names) is not tuple or any(type(n) is not str or not n for n in names):
+                raise ValueError("Input layout names must be a tuple of nonempty parameter names")
+
+
 @unique
 class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
 
     Default = "Default"  # Full tensor-oriented PTO pipeline
     AutoLayout = "AutoLayout"  # Default pipeline with native layout selection
+    AutoLayoutIntermediates = "AutoLayoutIntermediates"  # Select layouts before logical NZ is blocked
 
 
 class PassDumpLevel(Enum):
@@ -163,9 +186,14 @@ class PassManager:
         strategy: OptimizationStrategy,
         *,
         analyze_auto_scopes_for_deps: bool,
+        input_layout_policy: InputLayoutPolicy | None = None,
     ) -> tuple[PassFactory, ...]:
         """Build the immutable pass-factory recipe for an optimization strategy."""
-        if strategy not in (OptimizationStrategy.Default, OptimizationStrategy.AutoLayout):
+        if strategy not in (
+            OptimizationStrategy.Default,
+            OptimizationStrategy.AutoLayout,
+            OptimizationStrategy.AutoLayoutIntermediates,
+        ):
             raise ValueError(f"Unsupported optimization strategy: {strategy!r}")
         tensor_prefix_passes: tuple[PassFactory, ...] = (
             passes.lower_graph_for_runtime,
@@ -194,9 +222,23 @@ class PassManager:
             passes.convert_tensor_to_tile_ops,
             passes.optimize_orch_tensors,
         )
+        reselect_intermediates = strategy == OptimizationStrategy.AutoLayoutIntermediates
+        layout_factory = passes.auto_layout
+        if input_layout_policy is not None:
+            if strategy == OptimizationStrategy.Default:
+                raise ValueError("input_layout_policy requires an AutoLayout strategy")
+            layout_factory = partial(
+                passes.auto_layout,
+                nz_inputs=input_layout_policy.nz_inputs,
+                reusable_tensors=input_layout_policy.reusable_tensors,
+                expected_uses=input_layout_policy.expected_uses,
+                reselect_internal_layouts=reselect_intermediates,
+            )
+        elif reselect_intermediates:
+            layout_factory = partial(passes.auto_layout, reselect_internal_layouts=True)
         layout_passes = (
-            (passes.auto_layout, passes.block_nz_tensor_views)
-            if strategy == OptimizationStrategy.AutoLayout
+            (layout_factory, passes.block_nz_tensor_views)
+            if strategy in (OptimizationStrategy.AutoLayout, OptimizationStrategy.AutoLayoutIntermediates)
             else ()
         )
         tile_pto_passes: tuple[PassFactory, ...] = (
@@ -209,7 +251,10 @@ class PassManager:
             # annotation and argument ranks cannot both be printed. Flatten skips
             # its ND2NZ window collapse for NZ sources so the logical window is
             # still intact here.
-            passes.block_nz_tensor_views,
+            # Delay blocking in intermediate selection so the solver sees logical GM layouts.
+            passes.prepare_intermediate_tensor_layouts
+            if reselect_intermediates
+            else passes.block_nz_tensor_views,
             # PTOAS v0.74 packs logical MX views. Keep alignment/offset proofs
             # in IR, but leave tensor shapes and windows in logical rank-2 form.
             passes.legalize_mx_scale_tensor_views,
@@ -333,6 +378,7 @@ class PassManager:
         strategy: OptimizationStrategy = OptimizationStrategy.Default,
         *,
         analyze_auto_scopes_for_deps: bool = False,
+        input_layout_policy: InputLayoutPolicy | None = None,
     ) -> "PassManager":
         """Get a PassManager configured for the specified strategy.
 
@@ -351,6 +397,7 @@ class PassManager:
         return cls(
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            input_layout_policy=input_layout_policy,
         )
 
     def __init__(
@@ -358,6 +405,7 @@ class PassManager:
         strategy: OptimizationStrategy,
         *,
         analyze_auto_scopes_for_deps: bool = False,
+        input_layout_policy: InputLayoutPolicy | None = None,
     ):
         """Initialize PassManager with a specific strategy.
 
@@ -403,6 +451,7 @@ class PassManager:
         pass_factories = self._get_pass_factories(
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            input_layout_policy=input_layout_policy,
         )
         phase_properties = passes.IRPropertySet()
         phase_properties.insert(passes.IRProperty.AccStorePhaseValid)

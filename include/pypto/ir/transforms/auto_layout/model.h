@@ -205,6 +205,7 @@ struct LayoutCostModel {
   double onchip_relayout_bytes_per_cycle = 256.0;
   bool allow_external_input_relayout = false;
   bool allow_external_output_relayout = false;
+  bool reselect_internal_layouts = false;
 
   [[nodiscard]] std::string TargetArch() const;
   [[nodiscard]] int64_t GmAccessGranularityBytes() const;

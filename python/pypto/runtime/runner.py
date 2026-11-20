@@ -59,7 +59,7 @@ from pypto._target import (
     _warn_deprecated_platform,
 )
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
+from pypto.ir.pass_manager import InputLayoutPolicy, OptimizationStrategy, PassDumpLevel
 from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
 
 from .device_tensor import DeviceTensor
@@ -399,6 +399,7 @@ class RunConfig:
     cache_config: CacheConfig | None = None
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
+    input_layout_policy: InputLayoutPolicy | None = field(default=None, kw_only=True)
     memory_planner: MemoryPlanner | None = None
     dump_ptoas_passes: bool = False
     enable_software_pipeline: bool | None = None
@@ -447,6 +448,7 @@ class RunConfig:
             cache_config: CacheConfig | None = ...,
             distributed_config: "DistributedConfig | None" = ...,
             analyze_auto_scopes_for_deps: bool = ...,
+            input_layout_policy: InputLayoutPolicy | None = ...,
             memory_planner: MemoryPlanner | None = ...,
             dump_ptoas_passes: bool = ...,
             enable_software_pipeline: bool | None = ...,
@@ -597,6 +599,7 @@ class RunConfig:
             backend_type=self.backend_type,
             execution_mode=self.execution_mode,
             strategy=self.strategy,
+            input_layout_policy=self.input_layout_policy,
             dump_passes=self.dump_passes,
             dump_ptoas_passes=self.dump_ptoas_passes,
             profiling=self.compile_profiling,
@@ -916,6 +919,7 @@ class CompileOptions:
     diagnostic_phase: DiagnosticPhase | None = None
     disabled_diagnostics: DiagnosticCheckSet | None = None
     analyze_auto_scopes_for_deps: bool = False
+    input_layout_policy: InputLayoutPolicy | None = field(default=None, kw_only=True)
     # Absent rather than ``None`` in ``as_compile_kwargs`` when unset, so
     # ``ir.compile``'s own default applies. That is load-bearing for
     # ``memory_planner`` and ``enable_software_pipeline``: explicit values are
@@ -950,7 +954,13 @@ class CompileOptions:
             "disabled_diagnostics": self.disabled_diagnostics,
             "analyze_auto_scopes_for_deps": self.analyze_auto_scopes_for_deps,
         }
-        for name in ("output_dir", "memory_planner", "distributed_config", "enable_software_pipeline"):
+        for name in (
+            "input_layout_policy",
+            "output_dir",
+            "memory_planner",
+            "distributed_config",
+            "enable_software_pipeline",
+        ):
             value = getattr(self, name)
             if value is not None:
                 kwargs[name] = value

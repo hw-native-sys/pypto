@@ -206,6 +206,8 @@ def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
         "disabled_diagnostics": run_config.disabled_diagnostics,
         "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
     }
+    if run_config.input_layout_policy is not None:
+        kwargs["input_layout_policy"] = run_config.input_layout_policy
     if run_config.memory_planner is not None:
         kwargs["memory_planner"] = run_config.memory_planner
     if run_config.enable_software_pipeline is not None:
@@ -1246,6 +1248,7 @@ class JITFunction:
             tensor_dtypes={n: m.dtype for n, m in specialization.tensor_meta.items()},
             tensor_layouts={n: m.layout for n, m in specialization.tensor_meta.items()},
             dep_layouts=self._dep_declared_layouts(),
+            input_layout_policy=compile_kwargs.get("input_layout_policy"),
             dynamic_dims={
                 (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
             },

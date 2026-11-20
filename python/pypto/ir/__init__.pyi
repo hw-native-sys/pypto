@@ -46,7 +46,7 @@ from .directions import make_call
 from .distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 from .instruments import make_roundtrip_instrument
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
-from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
+from .pass_manager import InputLayoutPolicy, OptimizationStrategy, PassDumpLevel, PassManager
 from .printer import python_print
 
 # Per-call-site direction aliases re-exported at the top level.
@@ -97,6 +97,7 @@ __all__ = [
     "DistributedConfig",
     "PassManager",
     "OptimizationStrategy",
+    "InputLayoutPolicy",
     "PassDumpLevel",
     "VerificationMode",
     "VerificationLevel",

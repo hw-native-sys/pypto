@@ -290,6 +290,19 @@ From its first decision, FM compares changing one active operator with switching
 
 By default, external arguments keep their declared layout. The extractor tracks each internal allocation through SSA assignments and proven call-result aliases. Buffers passed to opaque external kernels retain the representation declared by the kernel. Set `options.cost_model.allow_external_input_relayout` only when the caller can supply the selected physical representation. The caller owns boundary packing. Marking a weight in `options.reusable_tensors` amortizes the packing cost. Automatic DN promotion is restricted to eligible internal buffers. To inspect an assignment and its conversion requirements before applying it, use `auto_layout::ExtractLayoutInstance` and `auto_layout::SolveAutoLayout`.
 
+For a paired comparison on the same authored source, use `OptimizationStrategy.Default` and `OptimizationStrategy.AutoLayoutIntermediates`. The latter keeps the physical layout of entry inputs, outputs, InOut state and returned storage. A helper parameter can refer to a private intermediate. Its storage identity determines eligibility. The strategy reconsiders supported ND, DN and logical NZ layouts of private GM allocations together with on-chip tiles. Opaque calls, view semantics and backend layout requirements constrain the candidates. NZ blocking can be deferred when an internal allocation has a logical NZ layout.
+
+A loader can offer ND or NZ for individual read-only entry tensors. For example,
+`policy = ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), expected_uses=100)`
+can be passed as `input_layout_policy=policy` to `ir.compile` or `RunConfig` with an AutoLayout
+strategy. Declare the logical weight as an ordinary dense input. The native extractor resolves
+the named entry parameter to its storage before solving. Other external buffers retain their
+declared representations. Reuse only changes the price of packing. For a single-chip program,
+`compiled.prepare_inputs({"w": logical_w})["w"]` returns the physical buffer to pass on
+subsequent invocations. It can also prepare buffers after reloading the compiled program.
+
+The Python pass factory accepts the same input-packing options through keyword arguments, for example `passes.auto_layout(allow_external_input_relayout=True, reusable_tensors=["w"], expected_uses=100)`. This allows eligible ND inputs to become NZ. To evaluate a previously NZ-packed weight from an ND starting point, first supply its logical ND declaration and bytes. Use the compiled layout metadata to prepare each upload.
+
 A dense flat Vec matrix can switch between row-major and column-major when its geometry and dtype support a physical transpose. Writeback emits a transpose and a zero-copy transpose view. Narrowed-pitch slices retain their original representation; an equal-pitch row-major slice can still be transposed. Shape-changing reshapes preserve their original logical element order, and packed predicates keep their original lane geometry.
 
 The extractor estimates live Vec storage at each conversion site within a kernel call site. Slices and other zero-copy views keep their backing allocation live through their last use. Several views of the same backing count that storage once. A full-tile transpose needs a destination and a scratch tile. A row broadcast needs one 32-byte block per row, and a metadata-only reshape uses the existing storage. The allocator checks the final footprint after lowering and reuse.

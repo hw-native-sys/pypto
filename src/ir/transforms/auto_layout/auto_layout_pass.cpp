@@ -34,8 +34,8 @@ Pass AutoLayout(AutoLayoutOptions options) {
   const std::string pass_name = options.name.empty() ? std::string("AutoLayout") : options.name;
   return CreateProgramPass(
       [opts = std::move(options)](const ProgramPtr& program) -> ProgramPtr {
-        auto_layout::LayoutProblemInstance instance =
-            auto_layout::ExtractLayoutInstance(program, opts.cost_model, opts.reusable_tensors);
+        auto_layout::LayoutProblemInstance instance = auto_layout::ExtractLayoutInstance(
+            program, opts.cost_model, opts.reusable_tensors, opts.nz_inputs);
         instance.custom_conversion_costs = opts.custom_conversion_costs;
         auto_layout::LayoutSolverConfig solver_cfg;
         solver_cfg.max_treewidth = opts.max_treewidth;
