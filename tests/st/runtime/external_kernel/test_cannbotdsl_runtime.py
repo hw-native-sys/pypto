@@ -12,6 +12,7 @@
 Run with --platform=a5; --codegen-only builds both device and orchestration
 binaries and constructs callables without starting a Worker. Both modes require
 the pinned Simpler package and CANN toolchain: KernelCompiler uses simpler_setup.
+Both modes also require CANNBotDSL with public device export; the tests skip otherwise.
 This tests the direct bridge under the external-kernel test policy exception,
 independently of automatic PyPTO JIT provider discovery.
 """
@@ -23,6 +24,24 @@ from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
 from pypto.jit.external.contracts import CompileTarget, KernelRequest, ParameterSpec, TensorSpec
 from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
+
+
+def _runtime_target(prepared):
+    return RuntimeTarget(
+        "tmr",
+        "1",
+        prepared.request.target,
+        frozenset({("cannbotdsl.device_callable", 1)}),
+        frozenset(
+            {
+                *(f"core:{core.value}" for core in prepared.execution.cores),
+                f"aiv_lanes:{prepared.execution.aiv_lanes}",
+                "completion:entry_return_visible",
+                "tensor_writeback",
+                "partial_write",
+            }
+        ),
+    )
 
 
 @pytest.mark.platforms("a5", reason="CANNBotDSL direct bridge requires real A5 text-only loading")
@@ -67,21 +86,7 @@ def test_cannbotdsl_runtime_chain(tmp_path, test_config, dynamic, core_type):
             {"aic": cube_add_one, "aiv": add_one, "mixed": mixed_add_one}[kind], request
         )
         assert prepared.execution.aiv_lanes == {"aic": 0, "aiv": 1, "mixed": 2}[kind]
-        target = RuntimeTarget(
-            "tmr",
-            "1",
-            request.target,
-            frozenset({("cannbotdsl.device_callable", 1)}),
-            frozenset(
-                {
-                    *(f"core:{core.value}" for core in prepared.execution.cores),
-                    f"aiv_lanes:{prepared.execution.aiv_lanes}",
-                    "completion:entry_return_visible",
-                    "tensor_writeback",
-                    "partial_write",
-                }
-            ),
-        )
+        target = _runtime_target(prepared)
         task = TMRBridge().lower(prepared, target)
         binaries = compile_task(task, compiler, pto_isa_root=str(tmp_path))
         tasks.append(task)
@@ -175,6 +180,244 @@ void cann_chain(const ChipTaskArgs& args) {{
             for buffer in buffers:
                 worker.free(buffer)
             buffers = []
+    finally:
+        for buffer in buffers:
+            worker.free(buffer)
+        worker.close()
+
+
+def _compute_kernels(cb):
+    """Use actual Cube and SIMD instructions with callback-owned on-chip buffers."""
+
+    @cb.jit
+    def matmul_body(a, b, out):
+        a_l1 = cb.Buffer(cb.MemLoc.L1, cb.dtypes.float16, cb.make_layout((16, 32)))
+        b_l1 = cb.Buffer(cb.MemLoc.L1, cb.dtypes.float16, cb.make_layout((32, 16)))
+        a_l0 = cb.Buffer(cb.MemLoc.L0A, cb.dtypes.float16, cb.make_layout((16, 32)))
+        b_l0 = cb.Buffer(cb.MemLoc.L0B, cb.dtypes.float16, cb.make_layout((16, 32))).permute(1, 0)
+        acc = cb.Buffer(cb.MemLoc.L0C, cb.dtypes.float32, cb.make_layout((16, 16)))
+        cb.mem_copy(a_l1, a)
+        cb.mem_copy(b_l1, b)
+        cb.cube_sync_all()
+        cb.mem_copy(a_l0, a_l1)
+        cb.mem_copy(b_l0, b_l1)
+        cb.cube_sync_all()
+        result = cb.matmul(acc, a_l0, b_l0)
+        cb.cube_sync_all()
+        cb.mem_copy(out, result)
+
+    @cb.jit
+    def vector_body(x, y, out, tile):
+        x_ub = cb.Buffer(cb.MemLoc.UB, cb.dtypes.float32, cb.make_layout((128,)))
+        y_ub = cb.Buffer(cb.MemLoc.UB, cb.dtypes.float32, cb.make_layout((128,)))
+        cb.mem_copy(x_ub, cb.tile_slice(x, (128,), (tile,)))
+        cb.mem_copy(y_ub, cb.tile_slice(y, (128,), (tile,)))
+        cb.vec_sync_all()
+        with cb.vf():
+            mask = cb.reg.full_mask()
+            # A5 registers hold 256 bytes: process both 64-FP32 halves of the tile.
+            # Keep buffer bases as VF arguments: unrolling adds per-half pointers
+            # and spills a callee-saved scalar register in the MIX wrapper.
+            for half in cb.range(2, unroll=1):
+                offset = half * 64
+                vx = cb.reg.vload(x_ub, offset)
+                vy = cb.reg.vload(y_ub, offset)
+                summed = cb.reg.vadd(vx, vy, mask=mask)
+                result = cb.reg.vmul(summed, vx, mask=mask)
+                cb.reg.vstore(x_ub, offset, result, mask)
+        cb.vec_sync_all()
+        cb.mem_copy(cb.tile_slice(out, (128,), (tile,)), x_ub)
+        cb.vec_sync_all()
+
+    @cb.kernel
+    def cube_matmul(a, b, out):
+        matmul_body(a, b, out)
+
+    @cb.kernel
+    def vector_compute(x, y, out):
+        # Keep one tile live to fit the callback's zero-stack register budget.
+        for tile in cb.range(2, unroll=1):
+            vector_body(x, y, out, tile)
+
+    @cb.kernel
+    def mixed_compute(a, b, x, y, product, vector):
+        matmul_body(a, b, product)
+        # Each AIV writes 128 FP32 elements (eight whole 64-byte lines).
+        vector_body(x, y, vector, cb.get_subblock_id())
+
+    return cube_matmul, vector_compute, mixed_compute
+
+
+def _compile_compute(tmp_path, entries, specs, flat, kind):
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+    compiler = KernelCompiler("a5")
+    tasks, ids, images, bindings, signatures = [], [], [], [], []
+    for index, (kernel, names, slots, outputs) in enumerate(entries):
+        parameters = tuple(
+            ParameterSpec(name, flat if index else specs[slot]) for name, slot in zip(names, slots)
+        )
+        request = KernelRequest(parameters, CompileTarget("a5", "ccec", "runtime-test"))
+        prepared = CANNBotDSLProvider().prepare(kernel, request)
+        target = _runtime_target(prepared)
+        expected_kind = "aiv" if index else kind
+        assert prepared.execution.aiv_lanes == {"aic": 0, "aiv": 1, "mixed": 2}[expected_kind]
+        exported_source = next(
+            file.content.decode() for file in prepared.artifact.files if file.path == "device_callable.hpp"
+        )
+        if expected_kind != "aiv":
+            assert "asc_mmad(" in exported_source
+        if expected_kind != "aic":
+            assert "asc_add(" in exported_source and "asc_mul(" in exported_source
+        # Retain the real export for ISA/resource inspection in compile-only CI.
+        for artifact in prepared.artifact.files:
+            path = tmp_path / f"export_{index}" / artifact.path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(artifact.content)
+        task = TMRBridge().lower(prepared, target)
+        binaries = compile_task(task, compiler, pto_isa_root=str(tmp_path))
+        tasks.append(task)
+        ids.append(tuple(range(len(images), len(images) + len(binaries))))
+        images.extend(binaries)
+        signatures.extend([(slots, outputs)] * len(binaries))
+        bindings.append((slots, outputs))
+    submitter = build_submitter(tuple(tasks), tuple(ids))
+    for file in submitter.files:
+        path = tmp_path / file.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(file.content)
+    calls = []
+    for index, (slots, outputs) in enumerate(bindings):
+        for slot in slots:
+            direction = "output" if slot in outputs else "input"
+            tensor = f"args.tensor({slot}).ref()"
+            if index and slot == 4:
+                tensor = "flat_product"
+            calls.append(f"    calls[{index}].add_{direction}({tensor});")
+    call_args = ", ".join(f"&calls[{i}]" for i in range(len(tasks)))
+    source = tmp_path / "compute.cpp"
+    source.write_text(
+        f'''#include "{submitter.entry}"
+extern "C" __attribute__((visibility("default")))
+OrchestrationConfig cann_compute_config(const ChipTaskArgs&) {{
+    return OrchestrationConfig{{.expected_arg_count = 7}};
+}}
+extern "C" __attribute__((visibility("default")))
+void cann_compute(const ChipTaskArgs& args) {{
+    uint32_t flat_shape[] = {{256}};
+    auto flat_product = args.tensor(4).ref().reshape(flat_shape, 1);
+    CoreTaskArgs calls[{len(tasks)}];
+{chr(10).join(calls)}
+    {submitter.symbol}({{{call_args}}});
+}}
+'''
+    )
+    orchestration = compiler.compile_orchestration(
+        runtime_name="tensormap_and_ringbuffer", source_path=str(source)
+    )
+    return images, signatures, orchestration
+
+
+@pytest.mark.platforms("a5", reason="CANNBotDSL direct bridge requires A5 text-only loading")
+@pytest.mark.parametrize("kind", ["aic", "aiv", "mixed"])
+def test_cannbotdsl_compute(tmp_path, test_config, kind):
+    """Check Cube matmul, SIMD arithmetic, and a consumer of both MIX outputs."""
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    cube, vector, mixed = _compute_kernels(cb)
+    matrix_a = TensorSpec((16, 32), DataType.FP16, strides=(32, 1), alignment=64)
+    matrix_b = TensorSpec((32, 16), DataType.FP16, strides=(16, 1), alignment=64)
+    matrix_out = TensorSpec((16, 16), DataType.FP32, strides=(16, 1), alignment=64)
+    flat = TensorSpec((256,), DataType.FP32, strides=(1,), alignment=64)
+    specs = (matrix_a, matrix_b, flat, flat, matrix_out, flat, flat)
+    # The consumer reads both MIX outputs, so an early group completion is visible.
+    entries = {
+        "aic": [(cube, ("a", "b", "out"), (0, 1, 4), {4})],
+        "aiv": [(vector, ("x", "y", "out"), (2, 3, 5), {5})],
+        "mixed": [
+            (mixed, ("a", "b", "x", "y", "product", "vector"), (0, 1, 2, 3, 4, 5), {4, 5}),
+            (vector, ("x", "y", "out"), (4, 5, 6), {6}),
+        ],
+    }[kind]
+    images, signatures, orchestration = _compile_compute(tmp_path, entries, specs, flat, kind)
+    import torch  # noqa: PLC0415
+    from simpler.task_interface import (  # noqa: PLC0415
+        ArgDirection,
+        CallConfig,
+        ChipCallable,
+        CoreCallable,
+        TaskArgs,
+        Tensor,
+        TensorArgType,
+    )
+    from simpler.task_interface import DataType as RuntimeDType  # noqa: PLC0415
+    from simpler.worker import Worker  # noqa: PLC0415
+
+    cores = []
+    for image, (slots, outputs) in zip(images, signatures):
+        cores.append(
+            CoreCallable.build(
+                signature=[ArgDirection.OUT if slot in outputs else ArgDirection.IN for slot in slots],
+                binary=image,
+            )
+        )
+    chip = ChipCallable.build(
+        signature=[ArgDirection.IN] * 4 + [ArgDirection.INOUT] * 2 + [ArgDirection.OUT],
+        func_name="cann_compute",
+        binary=orchestration,
+        children=list(enumerate(cores)),
+    )
+    if test_config.codegen_only:
+        return
+    worker = Worker(
+        level=2, platform="a5", runtime="tensormap_and_ringbuffer", device_id=test_config.device_id
+    )
+    buffers = []
+    try:
+        handle = worker.register(chip)
+        worker.init()
+        for spec in specs:
+            count = 1
+            for extent in spec.shape:
+                count *= extent
+            buffers.append(worker.malloc(count * (2 if spec.dtype == DataType.FP16 else 4)))
+        args = TaskArgs()
+        for slot, (buffer, spec) in enumerate(zip(buffers, specs)):
+            args.add_tensor(
+                Tensor(
+                    buffer,
+                    shapes=spec.shape,
+                    dtype=RuntimeDType.FLOAT16 if spec.dtype == DataType.FP16 else RuntimeDType.FLOAT32,
+                ),
+                TensorArgType.INPUT
+                if slot < 4
+                else TensorArgType.OUTPUT_EXISTING
+                if slot == 6
+                else TensorArgType.INOUT,
+            )
+        for repeat in range(3):
+            a = ((torch.arange(512).reshape(16, 32) % 7 - 3 + repeat) / 4).half()
+            b = ((torch.arange(512).reshape(32, 16) % 5 - 2 - repeat) / 4).half()
+            x = (torch.arange(256) % 11 - 5 + repeat).float()
+            y = (torch.arange(256) % 13 - 6 - repeat).float()
+            for buffer, value in zip(buffers[:4], (a, b, x, y)):
+                worker.copy_to(buffer, value)
+            for buffer in buffers[4:]:
+                worker.copy_to(buffer, torch.full((256,), float("nan")))
+            worker.run(handle, args, CallConfig())
+            product = (a.float() @ b.float()).flatten()
+            vector_result = (x + y) * x
+            expected = {
+                "aic": {4: product},
+                "aiv": {5: vector_result},
+                "mixed": {4: product, 5: vector_result, 6: (product + vector_result) * product},
+            }[kind]
+            for slot, golden in expected.items():
+                actual = torch.empty_like(golden)
+                worker.copy_from(actual, buffers[slot])
+                torch.testing.assert_close(actual, golden, rtol=0, atol=0)
     finally:
         for buffer in buffers:
             worker.free(buffer)

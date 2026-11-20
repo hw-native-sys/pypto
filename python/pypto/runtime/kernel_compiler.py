@@ -234,7 +234,9 @@ class KernelCompiler:
                 toolchain.cxx_path,
                 *compile_flags,
                 *(_vpto.CALLER_FLAGS if helpers or text_only else ()),
-                *(("-fdata-sections", "-fstack-usage") if text_only else ()),
+                # CCEC otherwise keeps a frame-pointer save around VF calls even
+                # without spills. Still require compiler evidence of zero stack.
+                *(("-fdata-sections", "-fstack-usage", "-fomit-frame-pointer") if text_only else ()),
                 *self._sanitizer_flags(toolchain),
                 *self._include_flags(includes),
                 "-o",

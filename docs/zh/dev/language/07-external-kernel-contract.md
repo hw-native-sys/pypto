@@ -1,7 +1,7 @@
 # 外部 Kernel 契约（内部 v1）
 
-本文是任务 34.1–34.3 和 [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293) 的接口基线。
-范围是数据交接与可执行 IR 原型，不是公开 provider 注册 API，也不代表已经接入 CANNBotDSL runtime。
+本文是任务 34.1–34.4 和 [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293) 的接口基线。
+范围是数据交接与可执行 IR 原型，不是公开 provider 注册 API，也不提供已安装的 CANNBotDSL runtime adapter。
 
 ## 职责
 
@@ -122,8 +122,11 @@ A5 TMR bridge 支持下述单 block AIC/AIV/MIX 子集的直接执行。JIT 程�
 
 `TMRBridge.lower(prepared, target)` 在 `a5/ccec` 的 TMR v1 上支持
 `cannbotdsl.device_callable` v1。支持单 AIC、单 AIV，或一个硬件配对的 AIC + 两个
-AIV 组（MIX）。要求无隐式 workspace、无本地分配，以及与导出器完全一致的资源、
-状态、加载和完成声明。
+AIV 组（MIX）。要求无隐式 workspace，以及与导出器完全一致的资源、状态、加载和完成声明。
+支持 AIV UB 和 AIC L1/L0A/L0B/L0C 中静态且互不重叠的分配。Bridge 校验整数大小与偏移、
+空间和核的归属、对齐（UB 为 32 字节，Cube 空间为 512 字节）、容量和每个空间的精确最高使用地址。
+容量上限为 UB 248 KiB、L1 512 KiB、L0A/L0B 各 64 KiB、L0C 256 KiB。
+暂不支持动态分配、重叠的分配记录、共享 SSBUF 或其他内存空间。
 未知或更强的要求在编译前被拒绝。每次提交只能包含一个逻辑 block，且不得同步启动。
 
 TMR 持久化 executor 在每个物理核上同步、串行调用 kernel，排队任务也不例外。
@@ -142,8 +145,17 @@ pto_isa_root=...)` 按 `task.prepared.execution.cores` 顺序返回 text 镜像�
 返回一个镜像，MIX 返回 `(aic_image, aiv_image)`。每个镜像注册为 `CoreCallable`，
 MIX 的两个 AIV lane 复用 AIV 镜像。所有镜像均通过准入后才返回元组。它从编译器选定的 CANN SDK
 获取 C API 头文件，在编译期间保留拥有所有权的源码，并强制执行 text-only ELF 准入和
-静态零栈报告检查。普通 JIT `configure_context` 路径会拒绝该任务的二进制策略，
+静态零栈报告检查。Text-only 编译省略可选的帧指针维护，使无寄存器溢出的 SIMD VF 调用
+能够通过同样的零栈检查；实际栈使用仍然被拒绝。普通 JIT `configure_context` 路径会拒绝该任务的二进制策略，
 防止绕过准入检查。
+
+直接 runtime 系统测试覆盖 FP16 Cube matmul（FP32 累加）、SIMD FP32 `(x + y) * x`，
+以及同时执行两个计算流水线的 MIX 任务。MIX 生产任务的每个 AIV lane 负责一个 128 元素 tile。
+独立 SIMD 任务和后续依赖 AIV 任务都在单个 AIV 上处理两个 tile（256 个元素）；依赖任务在整组
+完成后读取 MIX 的两个输出。A5 向量寄存器为 256 字节，因此每个 tile 分两次执行 64 元素的
+寄存器计算。重复执行时更换输入并用 NaN 填充输出，以检测陈旧数据。
+这些用例使用分配的片上 buffer 和真实计算指令，尚不覆盖组内 Cube 到 vector 的 buffer 交接。
+仅编译模式会构建设备和编排二进制；数值验收需要在 A5 设备上运行相同测试。
 
 `build_submitter(tasks, function_ids)` 返回拥有所有权的编排头文件。每个任务对应一个
 function-ID 元组，顺序与编译镜像一致；例如 `((10,), (20, 21), (30,))` 表示

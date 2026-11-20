@@ -518,7 +518,9 @@ def test_text_only_compile_validates_before_return_and_cleans_outputs(
             compiler.compile_incore(_source(tmp_path), **kwargs)
     else:
         assert compiler.compile_incore(_source(tmp_path), **kwargs) == _text_only_elf()
-    assert {"-fstack-usage", "-ffunction-sections", "-fdata-sections"} <= set(commands[0])
+    assert {"-fstack-usage", "-ffunction-sections", "-fdata-sections", "-fomit-frame-pointer"} <= set(
+        commands[0]
+    )
     assert "--gc-sections" in commands[1]
     assert not list(tmp_path.glob("pypto-incore-*"))
 

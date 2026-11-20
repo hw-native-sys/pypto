@@ -19,7 +19,7 @@ is published by TMR only after AIC, AIV0 and AIV1 have all returned.
 import hashlib
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from pypto.jit.external.contracts import Core, PreparedKernel, SourceArtifact
 from pypto.jit.external.validation import ContractError
@@ -62,6 +62,68 @@ _COMPLETION = {
 }
 
 
+# A5 CANN platform limits; UB excludes the SDK's reserved 8 KiB. Only
+# callback-private spaces are admitted: SSBUF and other shared state stay out.
+_LOCAL_SPACES = {
+    "UB": (1, "aiv", 32, 248 * 1024),
+    "L1": (2, "aic", 512, 512 * 1024),
+    "L0A": (3, "aic", 512, 64 * 1024),
+    "L0B": (4, "aic", 512, 64 * 1024),
+    "L0C": (5, "aic", 512, 256 * 1024),
+}
+
+
+def _validate_local_memory(resources: dict[str, Any], cores: tuple[Core, ...]) -> None:
+    """Admit static, disjoint local allocations and verify their high-water marks."""
+    allocations = resources.get("allocations")
+    if not isinstance(allocations, list):
+        raise ContractError("CANNBotDSL runtime allocations must be a list")
+    intervals: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    for allocation in cast("list[Any]", allocations):
+        if not isinstance(allocation, dict):
+            raise ContractError("CANNBotDSL runtime local allocation must be an object")
+        item = cast("dict[str, Any]", allocation)
+        if set(item) != {
+            "byte_offset",
+            "bytes",
+            "core",
+            "max_bytes",
+            "memory_space",
+            "memory_space_name",
+        }:
+            raise ContractError("CANNBotDSL runtime requires exact static local allocation metadata")
+        name = item["memory_space_name"]
+        if not isinstance(name, str) or name not in _LOCAL_SPACES:
+            raise ContractError(f"CANNBotDSL runtime unsupported local memory space: {name!r}")
+        space, core, alignment, capacity = _LOCAL_SPACES[name]
+        offset, size = item["byte_offset"], item["bytes"]
+        if (
+            any(type(item[key]) is not int for key in ("byte_offset", "bytes", "max_bytes", "memory_space"))
+            or item["memory_space"] != space
+            or item["core"] != core
+            or Core(core) not in cores
+            or size <= 0
+            or item["max_bytes"] != size
+            or offset < 0
+            or offset % alignment
+            or offset + size > capacity
+        ):
+            raise ContractError(f"CANNBotDSL runtime invalid static allocation in {name}: {item!r}")
+        ranges = intervals.setdefault((core, name), [])
+        ranges.append((offset, offset + size))
+    for (_, name), ranges in intervals.items():
+        ranges.sort()
+        if any(start < previous_end for (_, previous_end), (start, _) in zip(ranges, ranges[1:])):
+            raise ContractError(f"CANNBotDSL runtime overlapping allocations in {name}")
+    expected = [
+        {"core": core, "memory_space_name": name, "bytes": max(end for _, end in ranges)}
+        for (core, name), ranges in sorted(intervals.items())
+    ]
+    from pypto.jit.external.providers.cannbotdsl import _expect_metadata  # noqa: PLC0415
+
+    _expect_metadata(resources.get("local_memory_bytes"), expected, "runtime local memory high-water marks")
+
+
 def _validate(prepared: PreparedKernel, target: RuntimeTarget) -> None:
     validate_target(prepared, target)
     if (
@@ -83,8 +145,11 @@ def _validate(prepared: PreparedKernel, target: RuntimeTarget) -> None:
     manifest = _manifest(prepared)
     resources = manifest["resources"]
     mixed = execution.cores == (Core.AIC, Core.AIV)
+    _validate_local_memory(resources, execution.cores)
     expected = {
         **_RESOURCES,
+        "allocations": resources["allocations"],
+        "local_memory_bytes": resources["local_memory_bytes"],
         "topology": "hardware_paired_aic_and_two_aiv" if mixed else "single_core",
         "gm_write_isolation": resources.get("gm_write_isolation"),
     }
@@ -100,7 +165,7 @@ def _validate(prepared: PreparedKernel, target: RuntimeTarget) -> None:
     ):
         raise ContractError("CANNBotDSL runtime: unsupported CANN source includes")
     for actual, required, label in (
-        (resources, expected, "runtime resources (no local allocations or workspace)"),
+        (resources, expected, "runtime resources (static local allocations, no workspace)"),
         (manifest["state"], _STATE, "runtime state"),
         (manifest["completion"], {**_COMPLETION, "wait_for_all_participants": mixed}, "runtime completion"),
         (
