@@ -544,8 +544,10 @@ class TestMakeCacheKey:
     def test_a5_hbg_cache_names_physical_implementation(self):
         hbg = self._make_key(platform="a5", runtime=passes.RuntimeKind.HOST_BUILD_GRAPH)
         experimental = self._make_key(platform="a5", runtime=passes.RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL)
-        assert dict(hbg.compile_opts)["runtime"] == "percounter"
-        assert dict(experimental.compile_opts)["runtime"] == "host_build_graph"
+        assert hbg.compile_opts is not None
+        assert ("runtime", "percounter") in hbg.compile_opts
+        assert experimental.compile_opts is not None
+        assert ("runtime", "host_build_graph") in experimental.compile_opts
 
 
 class TestResolveRuntime:
