@@ -813,17 +813,26 @@ def quant_mx(
 
 
 def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) -> Tensor:
-    """MXFP8 matrix multiplication returning an FP32 tensor.
+    """MXFP8/MXFP4 matrix multiplication returning an FP32 tensor.
 
-    Inputs must use the oriented outputs of :func:`quant_mx`: A data/scale as
-    ``[M, K]`` / ``MX_A_ZZ[M, K/32]`` and B data/scale as
-    ``[K, N]`` / ``MX_B_NN[K/32, N]``.
+    Both data tensors must be FP8E4M3FN or both packed FP4 (E2M1x2,
+    E1M2x2, or one of each). FP4 ND carriers have shapes ``[M, K/2]``
+    and ``[K, N/2]``; DN carriers have ``[M/2, K]`` and ``[K/2, N]``.
+    Each operand may independently use ND or DN. Scale shapes always count
+    logical values: ``[M, K/32]`` and ``[K/32, N]``. Both operands must have
+    matching logical valid K extents. For packed FP4, valid K must be
+    positive and use the same number of 32-element scale groups as physical K.
+    Packed A and B scale layouts require fully valid M and N respectively.
+    Row-major MX_A_ND scales may match a partial logical M. To form complete
+    pairs during the Mat load, the valid extent on axis 0 (ND) or axis 1 (DN)
+    must be provably even. Native FP4 requires Ascend950 and PTOAS v0.74 or a
+    compatible newer build.
 
     Args:
-        lhs: A-side quantized data tensor with shape ``[M, K]``.
+        lhs: A-side quantized data tensor (logical shape ``[M, K]``).
         lhs_scale: A-side ``MX_A_ZZ`` or row-major ``MX_A_ND`` FP8E8M0 scale tensor with shape
             ``[M, K/32]``.
-        rhs: B-side quantized data tensor with shape ``[K, N]``.
+        rhs: B-side quantized data tensor (logical shape ``[K, N]``).
         rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
             ``[K/32, N]``.
 
@@ -832,8 +841,8 @@ def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) ->
 
     Raises:
         ValueError: If the operands are not supported static 2D MX tensors, the
-            M/N/K dimensions are inconsistent, M is not divisible by 16, N is
-            not divisible by 32, K is not divisible by 64, or the scale tensors
+            M/N/K dimensions are inconsistent, M is not divisible by 16 (32 for FP4), N is
+            not divisible by 32 (64 for FP4), K is not divisible by 64, or the scale tensors
             have the wrong dtype, shape, or MX layout.
     """
     return Tensor(expr=_ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()))
