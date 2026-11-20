@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "src/codegen/pto/pto_scalar_floor_div_mod_plan.h"
 
 namespace pypto::codegen {
 namespace {
@@ -322,6 +323,7 @@ std::string PTOCodegen::GenerateSimtFunction(const ir::FunctionPtr& function) {
   body.inside_simt_function_ = true;
   body.emit_source_loc_ = emit_source_loc_;
   body.fs_.current_function = function;
+  body.fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(function->body_, function->params_);
   body.IncreaseIndent();
   body.IncreaseIndent();
   body.fs_.constants_indent = body.GetIndent();

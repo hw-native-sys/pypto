@@ -31,6 +31,7 @@
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
+#include "src/codegen/pto/pto_scalar_floor_div_mod_plan.h"
 
 namespace pypto::codegen {
 namespace {
@@ -168,6 +169,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   helper.emit_source_loc_ = emit_source_loc_;
   helper.inside_reg_scope_ = true;
   helper.fs_.current_function = fs_.current_function;
+  helper.fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(scope->body_);
   helper.fs_.constants_indent = "    ";
   helper.indent_level_ = 2;
   VFHelper artifact;

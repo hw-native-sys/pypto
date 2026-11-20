@@ -826,6 +826,11 @@ tile_c = pl.mul(tile_a, tile_b)
 | `DataType::INT8` | `i8` |
 | `DataType::UINT8` | `ui8` |
 
+Tile 和 Buffer 代码生成在发射函数之前确定有符号 `FloorDiv` 和 `FloorMod` 的展开方式。
+准备阶段依据字面量或外层循环下界证明被除数非负，且除数为正的常量时，发射器可以使用
+`arith.divsi` 或 `arith.remsi`。证明须在发射位宽下成立，否则发射器使用
+`arith.floordivsi` 或带符号修正的余数。
+
 ### 标量布尔转换
 
 `pl.cast(flag, dtype)` 将标量 `False` 转为数值零，将 `True` 转为数值一，

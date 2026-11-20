@@ -10,8 +10,6 @@
  */
 
 #include <cstddef>
-#include <cstdint>
-#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -20,7 +18,6 @@
 
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -740,44 +737,6 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       BindVarToMemRef(iter_arg, memref->base_.get());
       BindVarToMemRef(return_var, memref->base_.get());
     }
-  }
-
-  // Record the induction variable's constant lower bound for the body, so an
-  // index expression derived from it can be proven non-negative and lower to a
-  // truncating division/remainder instead of a flooring correction. The loop is
-  // ascending -- a non-positive step is rejected above -- so the variable never
-  // goes below its start. Scoped to the body, and skipped if an enclosing loop
-  // already bound the same Var, so that loop keeps ownership of the entry.
-  //
-  // The start must fit the dtype it is *emitted* at, which is the literal's own
-  // -- `EmitArithOperand` narrows an operand into its own type before the loop
-  // header is formed. A stored literal need not fit: an INT32 start of
-  // 4294967295 is emitted as -1, so recording the positive stored value would
-  // claim a lower bound the hardware never has. Checking it against the loop
-  // variable's dtype instead is not enough, because a wide induction variable
-  // admits a narrow literal that still changes sign.
-  const auto* loop_var_key = op->loop_var_.get();
-  auto constant_start = As<ir::ConstInt>(op->start_);
-  if (constant_start &&
-      !ir::arith::detail::ConstIntFitsDtype(constant_start->value_, ir::GetScalarDtype(op->start_))) {
-    constant_start = nullptr;
-  }
-  struct LowerBoundScope {
-    std::map<const ir::Var*, int64_t>* bounds = nullptr;
-    const ir::Var* key = nullptr;
-    LowerBoundScope() = default;
-    LowerBoundScope(const LowerBoundScope&) = delete;
-    LowerBoundScope& operator=(const LowerBoundScope&) = delete;
-    ~LowerBoundScope() {
-      if (bounds != nullptr) bounds->erase(key);
-    }
-  } lower_bound_scope;
-  if (constant_start && fs_.loop_var_lower_bound.count(loop_var_key) == 0) {
-    fs_.loop_var_lower_bound[loop_var_key] = constant_start->value_;
-    // Assign the members directly: constructing a temporary here would run its
-    // destructor at the end of this statement and erase the entry at once.
-    lower_bound_scope.bounds = &fs_.loop_var_lower_bound;
-    lower_bound_scope.key = loop_var_key;
   }
 
   if (!has_ssa_iter_args) {

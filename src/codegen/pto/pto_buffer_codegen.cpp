@@ -51,6 +51,7 @@
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 #include "src/backend/common/pto_ops_internal.h"
+#include "src/codegen/pto/pto_scalar_floor_div_mod_plan.h"
 #include "src/codegen/pto/pto_tensor_view_plan.h"
 
 namespace pypto {
@@ -471,6 +472,7 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   fs_.Reset();
   fs_.buffer_ir = true;
   fs_.current_function = func;
+  fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(func->body_, func->params_);
   // Match PTOParam's existing GM ABI: tensor pointers precede scalar values,
   // regardless of IR parameter order. The first GM recipe has static shapes,
   // so it needs no implicit trailing dynamic-shape parameters.
