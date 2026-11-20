@@ -145,7 +145,7 @@ class KernelCompiler:
         """Translate include directories to paths visible to the SDK compiler."""
         return [f"-I{compiler_visible_path(Path(path).absolute())}" for path in include_dirs]
 
-    def _run(self, cmd: list[str], output: Path, label: str) -> bytes:
+    def _run(self, cmd: list[str], output: Path, label: str, *, env: dict[str, str] | None = None) -> bytes:
         """Run a bounded compiler process and return its nonempty binary output."""
         logger.debug(f"[{label}] Command: {cmd}")
         try:
@@ -156,6 +156,7 @@ class KernelCompiler:
                 text=True,
                 check=False,
                 timeout=self._timeout_s,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"{label}: compiler timed out after {self._timeout_s:g} seconds") from exc
@@ -322,10 +323,11 @@ class KernelCompiler:
         # self-contained PTO modules, with no C/C++ include closure.
         digest = hashlib.sha256()
         metadata = (
-            # Revalidate binaries admitted before the SIMT inline-asm check.
+            # Cache identities include the native SIMT object/alias contract.
             "reg-auto-sync-v1",
             repr(effective_flags),
-            "intrinsic-simt-abi-v1",
+            "native-simt-object-abi-v1",
+            repr(_vpto.SIMT_OBJECT_FLAGS),
             "bisheng-memory-attrs-v1",
             check_ptoas_version(ptoas),
             result.stdout,
@@ -361,15 +363,6 @@ class KernelCompiler:
             obj = directory / f"vpto_{index}.o"
             self._run([ptoas, str(snapshot_path), *flags, "-o", str(llvm)], llvm, "VPTO lowering")
             llvm_text = llvm.read_text()
-            # LLVM export bypasses PTOAS's object-level VF_SIMT size patcher.
-            # Bisheng computes intrinsic-only bodies correctly, but inline asm
-            # can leave the 0xffff size sentinel. Reject that unsupported path
-            # before linking; never patch device instruction bytes here.
-            if "simt_entry" in llvm_text and re.search(r"\basm\s", llvm_text):
-                raise ValueError(
-                    f"SIMT helper {source} contains inline assembly; LLVM export cannot guarantee "
-                    "its VF_SIMT launch size. Use intrinsic-only SIMT operations."
-                )
             # LLVM text export does not link PTOAS's generated Bridge wrappers.
             # Reject all non-intrinsic declarations instead of producing an
             # object that only fails later or depends on hidden runtime support.
@@ -382,6 +375,30 @@ class KernelCompiler:
                     f"VPTO helper {source} is not self-contained: {', '.join(unsupported)}. "
                     "Bridge operations and external helper dependencies are not supported."
                 )
+            if re.search(r"^define\s+[^@\n]*\bsimt_entry\b", llvm_text, re.MULTILINE) and re.search(
+                r"\basm\s", llvm_text
+            ):
+                # Preserve the LLVM admission checks above, then let PTOAS own
+                # native ABI lowering and VF_SIMT size validation/repair. A
+                # relocatable link adds logical-name aliases without rewriting
+                # instruction bytes. The final linked image is still validated.
+                native = directory / f"vpto_{index}.native.o"
+                object_flags = [flag for flag in flags if flag != "--emit-vpto-llvm-ir"]
+                native_data = self._run(
+                    [ptoas, str(snapshot_path), *object_flags, *_vpto.SIMT_OBJECT_FLAGS, "-o", str(native)],
+                    native,
+                    "SIMT native object compilation",
+                    env={**os.environ, "ASCEND_HOME_PATH": str(Path(bisheng).parent.parent)},
+                )
+                aliases = _vpto.simt_object_aliases(llvm_text, native_data)
+                assert self.sdk.ccec is not None
+                self._run(
+                    [self.sdk.ccec.linker_path, "-r", *aliases, str(native), "-o", str(obj)],
+                    obj,
+                    "SIMT logical export linking",
+                )
+                objects.append(obj)
+                continue
             llvm.write_text(_vpto.prepare_llvm_for_bisheng(llvm_text))
             # PTOAS owns VF dependency analysis, including ordering through SSA
             # values. Do not re-infer synchronization from emitted LLVM text.

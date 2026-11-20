@@ -27,8 +27,10 @@ PyPTO SIMT IR 已能 lowering 为可执行代码。
 探针检查 GM 地址空间、线程/寄存器注解、无 UB 中转的直接 `LDG`/`STG`、SIMT
 入口保留，以及链接后的 callee 大小与 `VF_SIMT` 长度操作数是否一致。LLVM 导出
 绕过了 PTOAS 对象生成阶段的长度修正器。本仅使用 intrinsic 的夹具必须在不修补
-二进制的情况下正确编译。通用 SIMT 函数，尤其是需要长度修正的内联汇编，必须先
-建立受支持的对象生成契约，才能使用这条路径。P3 明确拒绝内联汇编。
+二进制的情况下正确编译。通用 SIMT 函数，尤其是需要长度修正的内联汇编，走
+[SIMT lowering](05-simt-lowering.md) 中的独立原生对象输出路径。
+`tests/ut/codegen/test_simt_codegen.py` 中配对的 `keep/resume` 回归通过生产编译器和最终
+设备链接验证 i32/i64/f16/bf16/f32，检查两次链接后 launch 的长度，不执行 NPU 运算。
 
 ## 聚焦验收
 

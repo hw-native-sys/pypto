@@ -38,12 +38,13 @@ def _string(table: bytes, offset: int) -> bytes:
     return table[offset:end]
 
 
-def _sections(data: bytes) -> tuple[int, list[_Section], bytes]:
+def _sections(data: bytes, *, relocatable: bool = False) -> tuple[int, list[_Section], bytes]:
     if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
         raise ValueError("Device image requires a little-endian ELF64 device image")
     elf_type, machine = struct.unpack_from("<HH", data, 16)
-    if elf_type != 2 or machine != 0x1029:
-        raise ValueError("Device image requires an executable AI Core ELF, not a host fatobj")
+    if elf_type != (1 if relocatable else 2) or machine != 0x1029:
+        kind = "relocatable" if relocatable else "executable"
+        raise ValueError(f"Device image requires a {kind} AI Core ELF, not a host fatobj")
     (entry,) = struct.unpack_from("<Q", data, 24)
     (offset,) = struct.unpack_from("<Q", data, 40)
     size, count, names_index = cast(tuple[int, int, int], struct.unpack_from("<HHH", data, 58))
@@ -60,6 +61,27 @@ def _sections(data: bytes) -> tuple[int, list[_Section], bytes]:
     if names.kind != 3 or not names.size:
         raise ValueError("Device image has an invalid section-name string table")
     return entry, sections, names.payload(data)
+
+
+def device_object_exports(data: bytes) -> frozenset[str]:
+    """Read defined, externally visible function names from an AI Core object."""
+    _, sections, _ = _sections(data, relocatable=True)
+    exports: set[str] = set()
+    for section in sections:
+        if section.kind != 2:
+            continue
+        if section.stride != 24 or section.size % 24:
+            raise ValueError("Device object has an invalid symbol table")
+        if not 0 < section.link < len(sections) or sections[section.link].kind != 3:
+            raise ValueError("Device object has an invalid symbol string table")
+        strings = sections[section.link].payload(data)
+        for position in range(section.offset, section.offset + section.size, 24):
+            name, info, visibility, defined_in, _, _ = struct.unpack_from("<IBBHQQ", data, position)
+            if info & 15 == 2 and info >> 4 in (1, 2) and visibility & 3 in (0, 3) and defined_in:
+                if not 0 < defined_in < len(sections):
+                    raise ValueError("Device object has a function outside its sections")
+                exports.add(_function_name(_string(strings, name)))
+    return frozenset(exports)
 
 
 def _text_section(
