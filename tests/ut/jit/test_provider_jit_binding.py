@@ -32,8 +32,9 @@ from pypto.runtime import ExecutionMode, RunConfig
 
 
 class _Binding:
-    def __init__(self, core):
+    def __init__(self, core, *, require_completion=True):
         self.core = core
+        self.require_completion = require_completion
         self.requests = []
 
     def prepare(self, context, platform, runtime, output_dir):
@@ -49,7 +50,9 @@ class _Binding:
         ctx.external_aic_source = str(path) if self.core != "aiv" else None
         ctx.external_aiv_source = str(path) if self.core != "aic" else None
         ctx.external_dual_aiv_dispatch = self.core == "mixed"
-        ctx.external_binary_policy = "a5-text-only"
+        ctx.external_binary_policy = "a5-text-only" if self.require_completion else "ordinary"
+        ctx.external_preflight_symbol = "test_native_preflight"
+        ctx.external_preflight_source = "inline void test_native_preflight(const CoreTaskArgs&) {}"
         ctx.external_contract = KernelContract(
             request.parameters,
             (TensorEffect(0, Access.READ), TensorEffect(1, Access.WRITE, Coverage.FULL)),
@@ -99,6 +102,66 @@ def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, core):
     assert orchestration.count(".set_allow_early_resolve(false)") >= 2
     if core == "mixed":
         assert "MixedKernels" in orchestration
+
+
+@pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
+@pytest.mark.parametrize("core_num,sync_start", [(2, False), (1, True)])
+def test_binding_preflight_observes_explicit_launch(monkeypatch, core, core_num, sync_start):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+
+    @pl.jit.extern(binding=_Binding(core))
+    def native(x: pl.Tensor, out: pl.Tensor): ...
+
+    @pl.jit
+    def entry(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]):
+        pl.spmd_submit(native, x, out, core_num=core_num, sync_start=sync_start)
+        return out
+
+    config = RunConfig(backend_type=backend.BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+    compiled = entry.compile(config=config)
+    source = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.cpp"))
+    # Native launch validation must see the explicit settings, not the default
+    # one-block launch. These requests violate the real binding's contract.
+    checker = source.index("test_native_preflight(params_t0);")
+    assert source.index(f".launch_spec.set_block_num({core_num})") < checker
+    if sync_start:
+        assert source.index(".launch_spec.set_require_sync_start(true)") < checker
+    assert checker < source.index("rt_submit_")
+
+
+@pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
+@pytest.mark.parametrize("producer_style", ["submit", "at"])
+@pytest.mark.parametrize("require_completion", [False, True])
+def test_binding_completion_overrides_explicit_hints(monkeypatch, core, producer_style, require_completion):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+
+    @pl.jit.extern(binding=_Binding(core, require_completion=require_completion))
+    def native(x: pl.Tensor, out: pl.Tensor): ...
+
+    @pl.jit.incore
+    def producer(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return pl.store(pl.add(pl.load(x, [0, 0], [16, 16]), 1.0), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+        tmp = pl.create_tensor([16, 16], dtype=pl.FP32)
+        if producer_style == "submit":
+            tmp, done = pl.submit(producer, x, tmp, allow_early_resolve=True)
+        else:
+            with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True):
+                tmp = pl.store(pl.add(pl.load(x, [0, 0], [16, 16]), 1.0), [0, 0], tmp)
+        pl.submit(native, tmp, out, allow_early_resolve=True)
+        return out
+
+    config = RunConfig(backend_type=backend.BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+    compiled = entry.compile(config=config)
+    source = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.cpp"))
+    # Both the ordinary producer and native task opt in. Policy-bearing programs
+    # must keep both tasks completion-based; ordinary programs retain the hints.
+    assert source.count(".set_allow_early_resolve(true)") == (0 if require_completion else 2)
+    assert source.count(".set_allow_early_resolve(false)") == (2 if require_completion else 0)
 
 
 def test_binding_rejects_source_options_and_targetless_specialization():

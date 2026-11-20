@@ -190,6 +190,7 @@ responsible for reusable preparation identities.
 
 All tasks in such an orchestration disable early dispatch, including ordinary
 PyPTO consumers, so dependencies wait for producer completion and all MIX FINs.
+Explicit `allow_early_resolve=True` hints cannot override this requirement.
 Whole-cache-line native views ensure logical non-overlap also excludes cache-line
 false sharing. Per-core serialization and the bridge's entry/exit drain and
 state restoration retain callback-local resource exclusivity.
