@@ -2207,7 +2207,7 @@ def test_put_async_emits_urma_helper_call():
         def kernel(
             self,
             dst: pld.DistributedTensor[[16, 64], pl.FP16],
-            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pl.Tensor[[16, 64], pl.FP16],
             peer: pl.Scalar[pl.INT32],
         ):
             pld.tensor.put_async(dst, peer, src)
@@ -2245,7 +2245,7 @@ def test_get_async_uses_the_get_symbol_and_element_bytes():
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            dst: pld.DistributedTensor[[8, 32], pl.FP32],
+            dst: pl.Tensor[[8, 32], pl.FP32],
             src: pld.DistributedTensor[[8, 32], pl.FP32],
             peer: pl.Scalar[pl.INT32],
         ):
@@ -2259,6 +2259,27 @@ def test_get_async_uses_the_get_symbol_and_element_bytes():
     # 8 * 32 * 4 bytes.
     assert "arith.constant 1024 : i64" in mlir, mlir
     assert "pto.comm.tget" not in mlir, mlir
+
+
+def test_get_async_plain_tensor_result_preserves_base_pointer():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pl.Tensor[[8, 32], pl.FP32],
+            src: pld.DistributedTensor[[8, 32], pl.FP32],
+        ):
+            result = pld.tensor.get_async(dst, 1, src)
+            pld.tensor.get_async(result, 1, src)
+
+    mlir = _generate_mlir_a5(P)
+    calls = [line.strip() for line in mlir.splitlines() if "func.call @pypto_urma_get_async_f32" in line]
+    assert len(calls) == 2, mlir
+    # Reusing the result must retain both dst's pointer and src's communication context.
+    for call in calls:
+        args = call.split("(", 1)[1].split(")", 1)[0].split(", ")
+        assert args[:4] == ["%__pypto_deferred_raw_args", "%arg2", "%arg0", "%arg1"], mlir
 
 
 def test_put_async_subregion_offsets_are_bytes_not_elements():
@@ -2275,7 +2296,7 @@ def test_put_async_subregion_offsets_are_bytes_not_elements():
         def kernel(
             self,
             dst: pld.DistributedTensor[[16, 64], pl.FP16],
-            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pl.Tensor[[16, 64], pl.FP16],
             peer: pl.Scalar[pl.INT32],
         ):
             pld.tensor.put_async(
@@ -2320,7 +2341,7 @@ def test_put_async_dynamic_subregion_guards_each_dimension():
         def kernel(
             self,
             dst: pld.DistributedTensor[[16, 64], pl.FP32],
-            src: pld.DistributedTensor[[16, 64], pl.FP32],
+            src: pl.Tensor[[16, 64], pl.FP32],
             col: pl.Scalar[pl.INT32],
         ):
             pld.tensor.put_async(
