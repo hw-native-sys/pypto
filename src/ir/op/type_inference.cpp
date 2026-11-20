@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -477,6 +478,28 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
     }
   }
   return errors;
+}
+
+void ValidateDmaInnerStride(const TensorTypePtr& tensor, const Span& span, const std::string& op_name,
+                            bool transpose) {
+  if (!tensor->tensor_view_) return;
+  const auto& view = *tensor->tensor_view_;
+  if (!transpose &&
+      (view.stride.empty() || (view.layout != TensorLayout::ND && view.layout != TensorLayout::DN))) {
+    return;
+  }
+  const auto strides = view.stride.empty()
+                           ? tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, view.layout)
+                           : view.stride;
+  const size_t trailing_axes = !transpose && view.layout == TensorLayout::DN ? 2 : 1;
+  CHECK_SPAN(strides.size() == tensor->shape_.size() && strides.size() >= trailing_axes, span)
+      << op_name << ": invalid tensor stride rank";
+  const auto& stride = strides[strides.size() - trailing_axes];
+  auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  CHECK_SPAN(arith::Analyzer().CanProveEqual(stride, one), span)
+      << op_name
+      << ": PTO-ISA native tile DMA does not support a non-unit physical inner stride; "
+         "the inner stride must be provably 1";
 }
 
 void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
