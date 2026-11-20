@@ -147,7 +147,7 @@ class RegionContext:
     def distributed_hierarchy_context(
         self, scope_kind: ir.ScopeKind, level: ir.Level | None
     ) -> Generator[None, None, None]:
-        """Track the caller level for worker dispatch inside hierarchy scopes."""
+        """Use the innermost hierarchy level while parsing the scope body."""
         saved = self.effective_level
         if scope_kind == ir.ScopeKind.Hierarchy:
             self.effective_level = level
