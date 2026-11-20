@@ -26,7 +26,7 @@ from _orchestration_codegen_common import (
 )
 from pypto import backend
 from pypto.backend.external_bridge import RuntimeTarget
-from pypto.backend.tmr_bridge import TMRBridge, materialize
+from pypto.backend.tmr_bridge import TMRBridge, materialize, publish
 from pypto.jit._specialize_types import DynDim, TensorMeta
 from pypto.jit.external.compatibility import request_from_context
 from pypto.jit.external.contracts import (
@@ -548,3 +548,20 @@ def test_reject_descriptor_abi(prepared):
     )
     with pytest.raises(ContractError, match="does not define descriptor layout"):
         TMRBridge().lower(replace(prepared, native_abi=abi), _target(prepared))
+
+
+def test_publish_owns_sources_and_removes_failed_publication(prepared, tmp_path):
+    task = TMRBridge().lower(prepared, _target(prepared))
+    first = publish(task, tmp_path)
+    second = publish(task, tmp_path)
+    assert first.source != second.source
+    assert Path(first.source).read_bytes() == Path(second.source).read_bytes()
+    children = set(tmp_path.iterdir())
+    with pytest.raises(ContractError, match="unmodified bridge output"):
+        publish(replace(task, bridge_version="tampered"), tmp_path)
+    assert set(tmp_path.iterdir()) == children
+    assert Path(first.source).is_file()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

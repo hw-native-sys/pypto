@@ -907,6 +907,9 @@ void OrchestrationStmtCodegen::EmitTaskSubmitAndBind(const std::string& submit_e
 /// generated file rather than anything a codegen text assertion would catch.
 void OrchestrationStmtCodegen::EmitTaskParamsDecl(const std::string& task_var, const std::string& args_type) {
   EmitIndentedLine(args_type + " " + task_var + ";");
+  // The consumer must wait for producer FIN, including every MIX participant.
+  // Apply to ordinary PyPTO tasks too, not only the native callback itself.
+  if (require_task_completion_) EmitIndentedLine(task_var + ".set_allow_early_resolve(false);");
 }
 
 std::string OrchestrationStmtCodegen::CurrentTaskVarName() const {

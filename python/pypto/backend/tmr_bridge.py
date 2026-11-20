@@ -18,11 +18,12 @@ The callable must be an inline device function, not a host launch stub.
 import hashlib
 import json
 import re
+import shutil
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 from typing import TYPE_CHECKING
 
 from pypto.jit.external.compatibility import request_from_context
@@ -414,7 +415,7 @@ class TMRBridge:
 
 @dataclass(frozen=True)
 class MaterializedTask:
-    """Private source paths valid only for the surrounding materialize() lease."""
+    """Private paths owned by a materialize() lease or a published program tree."""
 
     task: ExternalTask
     source: str
@@ -424,8 +425,8 @@ class MaterializedTask:
         """Attach the checked bridge output to the existing specialization path."""
         if self.task.binary_policy != "ordinary":
             raise ContractError(
-                "TMR bridge: descriptor JIT integration is not supported; "
-                "use compile_task and build_submitter"
+                "TMR bridge: descriptor JIT integration requires an owned provider binding; "
+                "use pl.jit.extern(binding=...) or compile_task and build_submitter"
             )
         if ctx.func_type != "extern":
             raise ContractError("TMR bridge: configure_context requires an extern declaration")
@@ -442,6 +443,7 @@ class MaterializedTask:
         ctx.external_contract = self.task.prepared.contract
         ctx.external_preflight_source = self.task.preflight_source
         ctx.external_preflight_symbol = self.task.preflight_symbol
+        ctx.external_binary_policy = self.task.binary_policy
 
 
 @contextmanager
@@ -452,15 +454,35 @@ def materialize(task: ExternalTask) -> Iterator[MaterializedTask]:
     paths before disk access. A fresh private directory has no inherited links.
     Persistent artifact storage and provider caching are separate concerns.
     """
+    with TemporaryDirectory(prefix="pypto-tmr-bridge-") as directory:
+        yield _write_materialized(task, Path(directory))
+
+
+def publish(task: ExternalTask, output_dir: str | Path) -> MaterializedTask:
+    """Publish validated source under a program-owned tree for later lazy loading.
+
+    Each publication gets a fresh child directory. Its lifetime belongs to the
+    compiled program's output, independently of provider objects and temporary
+    preparation leases. Failed publications leave no partial source bundle.
+    """
+    root = Path(output_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    directory = Path(mkdtemp(prefix="external-", dir=root))
+    try:
+        return _write_materialized(task, directory)
+    except BaseException:
+        shutil.rmtree(directory)
+        raise
+
+
+def _write_materialized(task: ExternalTask, root: Path) -> MaterializedTask:
     if task != TMRBridge().lower(task.prepared, task.target):
         raise ContractError("TMR bridge: materialize requires unmodified bridge output")
-    with TemporaryDirectory(prefix="pypto-tmr-bridge-") as directory:
-        root = Path(directory)
-        for source in task.source.files:
-            path = root / source.path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("xb") as stream:
-                stream.write(source.content)
-        yield MaterializedTask(
-            task, str(root / task.source.entry), tuple(str(root / p) for p in task.source.include_dirs)
-        )
+    for source in task.source.files:
+        path = root / source.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as stream:
+            stream.write(source.content)
+    return MaterializedTask(
+        task, str(root / task.source.entry), tuple(str(root / p) for p in task.source.include_dirs)
+    )

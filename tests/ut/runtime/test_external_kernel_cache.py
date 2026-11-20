@@ -18,6 +18,7 @@ from pypto._external_source import external_source_digest, kernel_binary_cache_p
 class _Compiler:
     def __init__(self, *, runtime_include_dirs=()):
         self.calls = []
+        self.sdk: Any = None
         self.runtime_include_dirs = list(runtime_include_dirs)
 
     def get_incore_include_dirs(self):
@@ -279,6 +280,40 @@ def test_vpto_publication_uses_precompile_identity(tmp_path, monkeypatch, device
     assert before != after
     assert before.read_bytes() == b"snapshot binary"
     assert not after.exists()
+
+
+@pytest.mark.parametrize("core", ["aic", "aiv"])
+def test_strict_external_compilation_never_uses_stripped_cache(tmp_path, device_runner, monkeypatch, core):
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    source = tmp_path / "entry.cpp"
+    source.write_text("// native callback\n")
+    source.with_suffix(".o").write_bytes(b"stale object")
+    header = tmp_path / "asc/include/c_api/asc_simd.h"
+    header.parent.mkdir(parents=True)
+    header.touch()
+    compiler = _Compiler()
+    compiler.sdk = SimpleNamespace(ccec=SimpleNamespace(ascend_home_path=str(tmp_path)))
+    kernel = {**_kernel(source, core, 0), "binary_policy": "a5-text-only"}
+    monkeypatch.setattr(device_runner._device_image, "validate_device_entry", lambda raw: None)
+    monkeypatch.setattr(device_runner, "extract_text_section", lambda raw: raw)
+    for _ in range(2):
+        device_runner._compile_single_kernel(
+            kernel, compiler, "a5", "isa", "tensormap_and_ringbuffer", cache_dir=tmp_path / "cache"
+        )
+    assert len(compiler.calls) == 2
+    assert all(options["text_only"] for _, options in compiler.calls)
+    assert not (tmp_path / "cache").exists()
+    assert source.with_suffix(".o").read_bytes() == b"stale object"
+    assert str(header.parents[1]) in compiler.calls[0][1]["extra_include_dirs"]
+
+
+def test_unknown_binary_policy_fails_before_compilation(tmp_path, device_runner):
+    compiler = _Compiler()
+    kernel = {**_kernel(tmp_path / "entry.cpp", "aiv", 0), "binary_policy": "future-policy"}
+    with pytest.raises(ValueError, match="Unsupported external binary policy"):
+        device_runner._compile_single_kernel(kernel, compiler, "a5", "isa", "runtime")
+    assert not compiler.calls
 
 
 if __name__ == "__main__":

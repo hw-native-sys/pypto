@@ -17,6 +17,7 @@ This tests the direct bridge under the external-kernel test policy exception,
 independently of automatic PyPTO JIT provider discovery.
 """
 
+import pypto.language as pl
 import pytest
 from pypto import DataType
 from pypto.backend.cannbotdsl_runtime import build_submitter, compile_task
@@ -422,6 +423,115 @@ def test_cannbotdsl_compute(tmp_path, test_config, kind):
         for buffer in buffers:
             worker.free(buffer)
         worker.close()
+
+
+@pl.jit.incore
+def _jit_prepare(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    tile = pl.load(x, [0, 0], [x.shape[0], x.shape[1]])
+    value = pl.tile.adds(tile, 1.0)
+    return pl.store(value, [0, 0], out)
+
+
+@pl.jit.incore
+def _jit_consume(x: pl.Tensor, y: pl.Tensor, out: pl.Out[pl.Tensor]):
+    lhs = pl.load(x, [0, 0], [16, 16])
+    rhs = pl.load(y, [0, 0], [16, 16])
+    value = pl.tile.mul(pl.tile.add(lhs, rhs), lhs)
+    return pl.store(value, [0, 0], out)
+
+
+def _jit_compute_chain(cb, kind):
+    cube, vector, mixed = _compute_kernels(cb)
+    provider = CANNBotDSLProvider()
+
+    @pl.jit.extern(binding=provider.bind(cube))
+    def native_cube(a: pl.Tensor, b: pl.Tensor, out: pl.Tensor): ...
+
+    @pl.jit.extern(binding=provider.bind(vector))
+    def native_vector(x: pl.Tensor, y: pl.Tensor, out: pl.Tensor): ...
+
+    @pl.jit.extern(binding=provider.bind(mixed))
+    def native_mixed(
+        a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, product: pl.Tensor, vector: pl.Tensor
+    ): ...
+
+    @pl.jit
+    def cube_chain(a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        a1 = pl.create_tensor([16, 32], dtype=pl.FP16)
+        b1 = pl.create_tensor([32, 16], dtype=pl.FP16)
+        a1 = _jit_prepare(a, a1)
+        b1 = _jit_prepare(b, b1)
+        product = pl.create_tensor([16, 16], dtype=pl.FP32)
+        native_cube(a1, b1, product)
+        out = _jit_consume(product, product, out)
+        return out
+
+    @pl.jit
+    def vector_chain(a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        x1 = pl.create_tensor([16, 16], dtype=pl.FP32)
+        y1 = pl.create_tensor([16, 16], dtype=pl.FP32)
+        x1 = _jit_prepare(x, x1)
+        y1 = _jit_prepare(y, y1)
+        vector = pl.create_tensor([256], dtype=pl.FP32)
+        native_vector(pl.reshape(x1, [256]), pl.reshape(y1, [256]), vector)
+        value = pl.reshape(vector, [16, 16])
+        out = _jit_consume(value, value, out)
+        return out
+
+    @pl.jit
+    def mixed_chain(a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        a1 = pl.create_tensor([16, 32], dtype=pl.FP16)
+        b1 = pl.create_tensor([32, 16], dtype=pl.FP16)
+        x1 = pl.create_tensor([16, 16], dtype=pl.FP32)
+        y1 = pl.create_tensor([16, 16], dtype=pl.FP32)
+        a1 = _jit_prepare(a, a1)
+        b1 = _jit_prepare(b, b1)
+        x1 = _jit_prepare(x, x1)
+        y1 = _jit_prepare(y, y1)
+        product = pl.create_tensor([16, 16], dtype=pl.FP32)
+        vector = pl.create_tensor([256], dtype=pl.FP32)
+        native_mixed(a1, b1, pl.reshape(x1, [256]), pl.reshape(y1, [256]), product, vector)
+        out = _jit_consume(product, pl.reshape(vector, [16, 16]), out)
+        return out
+
+    return {"aic": cube_chain, "aiv": vector_chain, "mixed": mixed_chain}[kind]
+
+
+@pytest.mark.platforms("a5", reason="CANNBotDSL JIT requires A5 text-only callbacks")
+@pytest.mark.parametrize("kind", ["aic", "aiv", "mixed"])
+def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
+    """Ordinary JIT producers and consumers surround real native Cube/SIMD work."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+    chain = _jit_compute_chain(cb, kind)
+    config = replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path))
+    a = torch.zeros((16, 32), dtype=torch.float16)
+    b = torch.zeros((32, 16), dtype=torch.float16)
+    x = torch.zeros((16, 16), dtype=torch.float32)
+    y = torch.zeros_like(x)
+    out = torch.empty_like(x)
+    compiled = chain.compile(a, b, x, y, out, config=config)
+    del chain
+    compiled.load()
+    # Loading after compile() returns also verifies exported source ownership.
+    if config.codegen_only:
+        return
+    for repeat in range(4):
+        a.copy_(((torch.arange(512).reshape(16, 32) % 7 - 3 + repeat) / 4).half())
+        b.copy_(((torch.arange(512).reshape(32, 16) % 5 - 2 - repeat) / 4).half())
+        x.copy_((torch.arange(256).reshape(16, 16) % 11 - 5 + repeat).float())
+        y.copy_((torch.arange(256).reshape(16, 16) % 13 - 6 - repeat).float())
+        out.fill_(float("nan"))
+        compiled(a, b, x, y, out, config=config)
+        product = (a.float() + 1) @ (b.float() + 1)
+        vector = (x + y + 2) * (x + 1)
+        lhs, rhs = {"aic": (product, product), "aiv": (vector, vector), "mixed": (product, vector)}[kind]
+        torch.testing.assert_close(out, (lhs + rhs) * lhs, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
