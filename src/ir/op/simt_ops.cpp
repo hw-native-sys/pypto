@@ -33,12 +33,13 @@ namespace pypto::ir {
 namespace {
 using Kwargs = std::vector<std::pair<std::string, std::any>>;
 
-// Unsigned mode changes how an INT32 bit carrier is compared, not its dtype.
+// Unsigned mode changes how an integer bit carrier is compared, not its dtype.
 void ValidateUnsigned(const Kwargs& kwargs, DataType dtype) {
   for (const auto& [key, value] : kwargs) {
     if (key == "unsigned") {
-      CHECK(!AnyCast<bool>(value, key) || dtype == DataType::INT32)
-          << "SIMT unsigned comparison requires an INT32 bit carrier";
+      CHECK(!AnyCast<bool>(value, key) ||
+            (dtype != DataType::INDEX && dtype.IsInt() && (dtype.GetBit() == 32 || dtype.GetBit() == 64)))
+          << "SIMT unsigned comparison requires a 32-bit or 64-bit integer carrier";
     }
   }
 }
@@ -124,10 +125,14 @@ TypePtr AtomicType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
   }
   MemoryType({args[0], args[1], args.back()}, cache_kwargs, true);
   const auto value = As<ScalarType>(args.back()->GetType());
-  CHECK(value->dtype_ == DataType::INT32 || value->dtype_ == DataType::FP32)
-      << "SIMT atomic requires INT32 or FP32 storage and values";
-  CHECK(!integer_only || value->dtype_ == DataType::INT32)
-      << "SIMT bitwise atomic requires INT32 storage and values";
+  const auto dtype = value->dtype_;
+  const bool integer =
+      dtype != DataType::INDEX && dtype.IsInt() && (dtype.GetBit() == 32 || dtype.GetBit() == 64);
+  CHECK(integer || dtype == DataType::FP32 || (!cas && (dtype == DataType::FP16 || dtype == DataType::BF16)))
+      << "SIMT atomic requires 32/64-bit integer or FP16/BF16/FP32 storage; CAS floats require FP32";
+  CHECK(!integer_only || integer) << "SIMT bitwise atomic requires 32-bit or 64-bit integer storage";
+  CHECK(!As<TileType>(args[0]->GetType()) || dtype.GetBit() != 64)
+      << "SIMT UB atomics do not support 64-bit integers";
   ValidateUnsigned(kwargs, value->dtype_);
   if (cas) {
     const auto compare = As<ScalarType>(args[2]->GetType());
@@ -136,13 +141,13 @@ TypePtr AtomicType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
   return args.back()->GetType();
 }
 
-TypePtr LaneMaskType(const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
-  CHECK(args.empty() && kwargs.empty()) << "SIMT lane mask takes no arguments or attributes";
+TypePtr NullaryInt32Type(const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+  CHECK(args.empty() && kwargs.empty()) << "SIMT query takes no arguments or attributes";
   return std::make_shared<ScalarType>(DataType::INT32);
 }
 
 TypePtr SynchronizationType(const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
-  CHECK(args.empty() && kwargs.empty()) << "SIMT synchronization takes no arguments or attributes";
+  CHECK(args.empty() && kwargs.empty()) << "SIMT effect takes no arguments or attributes";
   return GetVoidType();
 }
 
@@ -163,8 +168,12 @@ TypePtr CollectiveType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, c
     // The ballot is an INT32 bit carrier, including bit 31, not a lane count.
     return std::make_shared<ScalarType>(kind == CollectiveKind::Ballot ? DataType::INT32 : DataType::BOOL);
   }
-  CHECK(value && (value->dtype_ == DataType::INT32 || value->dtype_ == DataType::FP32))
-      << name << " requires an INT32 or FP32 scalar value";
+  CHECK(value) << name << " requires a scalar value";
+  const auto dtype = value->dtype_;
+  CHECK(dtype == DataType::FP16 || dtype == DataType::FP32 ||
+        (dtype != DataType::INDEX && dtype.IsInt() &&
+         (dtype.GetBit() == 32 || (shuffle && dtype.GetBit() == 64))))
+      << name << " requires FP16/FP32 or 32-bit integer payloads; shuffle also accepts 64-bit integers";
   if (shuffle) {
     const auto control = As<ScalarType>(args[1]->GetType());
     CHECK(control && control->dtype_ == DataType::INT32) << name << " requires an INT32 lane control";
@@ -237,51 +246,81 @@ REGISTER_OP("simt.lanemask_eq")
     .no_argument()
     .no_arg_writes()
     .no_execution_memory_access()
-    .f_deduce_type(LaneMaskType);
+    .f_deduce_type(NullaryInt32Type);
+REGISTER_OP("simt.veccore_id")
+    .set_description("Physical vector core identifier on the current target")
+    .set_op_category("SimtOp")
+    .no_argument()
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type(NullaryInt32Type);
+REGISTER_OP("simt.trap")
+    .set_description("Request device termination; host error reporting is runtime-dependent")
+    .set_op_category("SimtOp")
+    .set_output_arity(0)
+    .no_argument()
+    // An ordered runtime effect, not a pure expression or a memory guard.
+    .no_arg_writes()
+    .f_deduce_type(SynchronizationType);
+REGISTER_OP("simt.assert_")
+    .set_description("Request a device trap when the runtime predicate is false")
+    .set_op_category("SimtOp")
+    .set_output_arity(0)
+    .add_argument("cond", "BOOL scalar predicate")
+    .no_arg_writes()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      CHECK(args.size() == 1 && kwargs.empty()) << "simt.assert_ requires one BOOL predicate";
+      const auto predicate = As<ScalarType>(args[0]->GetType());
+      CHECK(predicate && predicate->dtype_ == DataType::BOOL) << "simt.assert_ requires a BOOL predicate";
+      return GetVoidType();
+    });
 REGISTER_OP("simt.lanemask_le")
     .set_description("Physical lane relation mask as an INT32 bit carrier")
     .set_op_category("SimtOp")
     .no_argument()
     .no_arg_writes()
     .no_execution_memory_access()
-    .f_deduce_type(LaneMaskType);
+    .f_deduce_type(NullaryInt32Type);
 REGISTER_OP("simt.lanemask_lt")
     .set_description("Physical lane relation mask as an INT32 bit carrier")
     .set_op_category("SimtOp")
     .no_argument()
     .no_arg_writes()
     .no_execution_memory_access()
-    .f_deduce_type(LaneMaskType);
+    .f_deduce_type(NullaryInt32Type);
 REGISTER_OP("simt.lanemask_ge")
     .set_description("Physical lane relation mask as an INT32 bit carrier")
     .set_op_category("SimtOp")
     .no_argument()
     .no_arg_writes()
     .no_execution_memory_access()
-    .f_deduce_type(LaneMaskType);
+    .f_deduce_type(NullaryInt32Type);
 REGISTER_OP("simt.lanemask_gt")
     .set_description("Physical lane relation mask as an INT32 bit carrier")
     .set_op_category("SimtOp")
     .no_argument()
     .no_arg_writes()
     .no_execution_memory_access()
-    .f_deduce_type(LaneMaskType);
+    .f_deduce_type(NullaryInt32Type);
 REGISTER_OP("simt.bitcast")
-    .set_description("Reinterpret FP32/INT32 scalar bits without numeric conversion")
+    .set_description("Reinterpret equal-width unpacked numeric scalar bits without numeric conversion")
     .set_op_category("SimtOp")
-    .add_argument("value", "FP32 or INT32 scalar")
+    .add_argument("value", "Unpacked numeric scalar")
     .set_attr<DataType>("dtype")
     .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
       CHECK(args.size() == 1) << "simt.bitcast requires exactly one argument";
       const auto input = As<ScalarType>(args[0]->GetType());
-      CHECK(input && (input->dtype_ == DataType::FP32 || input->dtype_ == DataType::INT32))
-          << "simt.bitcast requires an FP32 or INT32 scalar";
+      auto supported = [](DataType dtype) {
+        return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32 ||
+               (dtype != DataType::INDEX && dtype.IsInt() && dtype.GetBit() >= 8 && dtype.GetBit() <= 64);
+      };
+      CHECK(input && supported(input->dtype_)) << "simt.bitcast requires an unpacked numeric scalar";
       CHECK(kwargs.size() == 1 && kwargs[0].first == "dtype") << "simt.bitcast requires dtype";
       const auto dtype = AnyCast<DataType>(kwargs[0].second, "dtype");
-      CHECK(dtype == DataType::FP32 || dtype == DataType::INT32)
-          << "simt.bitcast destination must be FP32 or INT32";
+      CHECK(supported(dtype) && dtype.GetBit() == input->dtype_.GetBit())
+          << "simt.bitcast destination must be a supported numeric scalar of the same bit width";
       return std::make_shared<ScalarType>(dtype);
     });
 REGISTER_OP("simt.load")

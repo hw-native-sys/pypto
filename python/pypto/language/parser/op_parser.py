@@ -10,6 +10,7 @@
 """DSL operator dispatch, argument conversion and buffer metadata."""
 
 import ast
+import inspect
 from typing import Any, TypeGuard, cast
 
 from pypto.ir import op as ir_op
@@ -120,6 +121,9 @@ class OpParser:
             "fma",
             "prmt",
             "mulhi",
+            "mul_i32toi64",
+            "div",
+            "rem",
             "ftoi",
             "itof",
         }:
@@ -134,6 +138,9 @@ class OpParser:
             )
         if name in {
             "bitcast",
+            "ftof",
+            "trap",
+            "assert_",
             "atomic_sub",
             "atomic_and",
             "atomic_or",
@@ -165,7 +172,10 @@ class OpParser:
                 "pl.simt",
                 name,
                 call,
-                preserve_omitted_kwargs=name in {"atomic_min", "atomic_max", "redux_min", "redux_max"},
+                expression_arg_indices=frozenset({0}) if name == "ftof" else frozenset(),
+                expression_keywords=frozenset({"value"}) if name == "ftof" else frozenset(),
+                preserve_omitted_kwargs=name
+                in {"atomic_min", "atomic_max", "redux_min", "redux_max", "ftof"},
             )
         kwargs = self.parse_op_kwargs(call)
         args = call.args
@@ -711,6 +721,7 @@ class OpParser:
         call: ast.Call,
         *,
         expression_args: bool = False,
+        expression_arg_indices: frozenset[int] = frozenset(),
         expression_keywords: frozenset[str] = frozenset(),
         preserve_omitted_kwargs: bool = False,
     ) -> ir.Expr:
@@ -728,6 +739,7 @@ class OpParser:
             op_name: Name of the operation to look up on the module.
             call: Call AST node.
             expression_args: Parse all positional operands as typed IR expressions.
+            expression_arg_indices: Positional operand slots requiring typed expressions.
             expression_keywords: Keyword operands parsed as typed IR expressions.
             preserve_omitted_kwargs: Preserve implicit IR defaults during text round trips.
 
@@ -743,8 +755,14 @@ class OpParser:
         # SIMT math requires typed scalar operands. Generic wrappers retain
         # Python numeric values for slots such as full/padding and choose their
         # own literal dtype, so keep the two argument contracts explicit.
-        parse_arg = self.callbacks.expression if expression_args else self.parse_op_positional_arg
-        args = [parse_arg(arg) for arg in call.args]
+        # Mixed signatures such as ftof(value, dtype) need typed value operands
+        # while retaining dtype/enum resolution in their other positional slots.
+        args = [
+            self.callbacks.expression(arg)
+            if expression_args or index in expression_arg_indices
+            else self.parse_op_positional_arg(arg)
+            for index, arg in enumerate(call.args)
+        ]
         kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
         attrs = self.attrs.parse_op_attrs(call)
         op_func = getattr(module, op_name)
@@ -755,7 +773,9 @@ class OpParser:
                 # DSL wrappers materialize conversion defaults, but raw IR may
                 # intentionally omit them. Keep only attributes present in the
                 # source so printing/reparsing preserves structural identity.
-                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in kwargs}
+                # Attributes such as ftof's dtype can also be passed positionally.
+                supplied = inspect.signature(op_func).bind(*args, **kwargs).arguments
+                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in supplied}
                 if len(explicit_kwargs) != len(result.kwargs):
                     result = ir.create_op_call(result.op.name, result.args, explicit_kwargs, span)
             return self.attrs.attach_op_attrs(result, attrs)

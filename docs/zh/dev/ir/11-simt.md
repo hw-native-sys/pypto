@@ -29,7 +29,7 @@ def copy(src: pl.Tensor[[1, 128], pl.FP32],
 `pl.simt.Axis` 与 `ir.SimtAxis` 是同一枚举。坐标查询必须传入类型化 axis，支持位置
 参数或 `axis=`；`lane_id()` 无参数。dims 是三个编译期正整数，描述线程维度，不分配
 元素或创建 grid；边界保护必须显式编写。GM Tensor 和 Vec/UB Tile 复用既有存储。
-初始 API 支持当前后端标量子集及下述 INT32/FP32 lane 协作、原子和同步操作；标量数学和显式转换见下文。
+各操作支持不同的标量类型，见[覆盖矩阵](../codegen/06-simt-interface-coverage.md)。
 
 标量赋值属于线程私有绑定，包括对外层标量的遮蔽，scope 外不能读取私有值。store
 自动重新绑定外层存储句柄，每个可写捕获只产生一个结果。Tile 更新之前保存的别名
@@ -82,7 +82,7 @@ updated_dst = pl.simt.launch(
 | 操作 | 结果 | 契约 |
 | ---- | ---- | ---- |
 | `simt.thread_idx`、`block_idx`、`block_dim`、`grid_dim` | INT32 | 必须显式传入 typed `SimtAxis.X/Y/Z` kwarg |
-| `simt.lane_id` | INT32 | 无 axis |
+| `simt.lane_id`、`simt.veccore_id` | INT32 | 无 axis；物理 lane 或 vector core ID |
 | `simt.load(storage, indices)` | 元素标量 | Vec/UB Tile 或 GM Tensor |
 | `simt.store(storage, indices, value)` | VoidType | 标量类型与存储元素类型一致 |
 
@@ -109,15 +109,20 @@ GM 接受 PTOAS 的 `l1cache="cache"/"uncache"` 以及分别验证的 load/store
 | `pow(x, y)`、`fma(x, y, z)` | FP32 → FP32 | 幂；只进行一次最终舍入的融合乘加 |
 | `prmt(x, y, selector)` | INT32 → INT32 | 使用选择器低四个半字节进行字节置换 |
 | `mulhi(x, y, *, unsigned=False)` | INT32 → INT32 | 有符号/无符号 64 位乘积的高 32 位 |
-| `ftoi(x, *, rounding="z", unsigned=False)` | FP32 → INT32 | 饱和浮点转整数 |
-| `itof(x, *, rounding="r", unsigned=False)` | INT32 → FP32 | 显式舍入的整数转浮点 |
+| `ftoi(x, *, dtype=None, rounding="z", unsigned=False)` | FP16/BF16/FP32 → 32 位整数；FP32 → 64 位整数 | 强制饱和；默认 INT32 |
+| `itof(x, *, dtype=None, rounding="r", unsigned=False)` | 32 位整数 → FP16/BF16/FP32；64 位整数 → FP32 | 默认 FP32 |
+| `ftof(x, dtype, *, rounding="r", saturate=False)` | 不同 FP16/BF16/FP32 类型对 | 可选有限溢出饱和 |
+| `mul_i32toi64(x, y, *, unsigned=False)` | INT32 → INT64 | INT64 位载体中的完整有符号/无符号乘积 |
+| `div(x, y, *, precision="intrinsic")` | FP32 → FP32 | 也支持 `precision_0ulp_ftz_true`，遵循目标 flush-to-zero 行为 |
+| `rem(x, y)` | FP32 → FP32 | 截断商的余数，符号随被除数；不是 floor modulo |
 
 `rounding` 为编译期字符串：`r` = 最近且中点取偶；`a` = 最近且中点远离零；
 `f` = 向 −∞；`c` = 向 +∞；`z` = 向零。
-其他取值以及非布尔 `unsigned` 均拒绝。PTOAS 要求 FP32 转整数必须饱和：
-越界值截断到目标整数范围，A5 上 NaN 的饱和转换结果为零。`unsigned=True` 将 INT32
-载体解释为 32 个无符号位，IR 类型仍为 INT32，因此结果的普通算术和比较仍为
-有符号操作。该选项不启用 UINT32 存储或通用无符号算术。
+`ftof` 仅在 FP32→FP16 时额外支持 `o`（舍入到奇数）。拒绝同类型 `ftof`、
+混合模式 `h`、未支持的转换对和非布尔标志。PTOAS 要求浮点转整数必须饱和：
+越界值截断到目标整数范围，A5 上 NaN 的饱和转换结果为零。`unsigned=True` 将
+有符号整数载体按无符号解释，不改变 IR 类型。显式 UINT32/UINT64 始终使用无符号
+转换，包括标志为默认值时；普通算术遵循 IR 类型。
 
 文本解析器对位置形式和关键字形式的标量操作数使用相同的解析规则。
 `math.pi`、`math.inf` 和 `-math.inf` 等求值后的数值属性，与数值字面量及闭包名称
@@ -132,8 +137,8 @@ A5 忽略半字节的第 3 位及选择器的高 16 位。
 PTOAS sin/cos 使用 FP32 范围归约的软件数学实现。数值验收覆盖 `[-4, 4]` 弧度，
 不保证大角度输入的精度。
 
-不进行隐式类型提升。FP16/BF16、INT64、packed 值和其他转换组合不属于当前可执行
-子集；packed 支持归短向量里程碑。浮点函数遵循目标精度和特殊值行为，不保证
+不进行隐式类型提升。现有显式数学函数仍仅支持 FP32。扩展存储、集合操作、原子和
+转换遵循逐操作支持矩阵；packed 支持归短向量里程碑。浮点函数遵循目标精度和特殊值行为，不保证
 可移植的 NaN payload。`pl.cast`、有符号向下整除/取模和标量 `**` 诊断维持既有
 语义；显式 FP32 幂运算使用 `pl.simt.pow`。
 
@@ -145,7 +150,8 @@ index = pl.simt.ftoi(y, rounding="f")
 
 ### 标量 bitcast 与物理 lane 掩码
 
-`pl.simt.bitcast(value, dtype)` 的源和目标类型支持 FP32/INT32。
+`pl.simt.bitcast(value, dtype)` 支持位宽相同的 FP16/BF16/FP32 和
+8/16/32/64 位有符号、无符号整数。
 它保留全部位模式，包括 NaN payload 和有符号零，不执行数值转换或存储视图重解释。
 普通 `pl.cast` 的行为不变。
 
@@ -161,10 +167,10 @@ index = pl.simt.ftoi(y, rounding="f")
 | ---- | ----------- | ---- |
 | `vote_all`、`vote_any`、`vote_uni` | BOOL → BOOL | 全部为真、至少一个为真、所有谓词相同 |
 | `vote_ballot` | BOOL → INT32 | 活跃 lane i 的谓词为真时置位 bit i |
-| `shuffle_idx(value, index, *, width=32, bound=None)` | INT32/FP32 → 同类型 | 读取子组内相对索引指定的源 lane |
-| `shuffle_up`、`shuffle_down` | INT32/FP32 → 同类型 | 按偏移读取更低/更高的源 lane |
-| `shuffle_bfly(value, mask, *, width=32, bound=None)` | INT32/FP32 → 同类型 | 读取子组内 lane 编号与 mask 异或指定的源 lane |
-| `redux_add`、`redux_min`、`redux_max` | INT32/FP32 → 同类型 | 归约活跃 lane，并将结果返回每个参与 lane |
+| `shuffle_idx(value, index, *, width=32, bound=None)` | FP16/FP32 或 32/64 位整数 → 同类型 | 读取子组内相对索引指定的源 lane |
+| `shuffle_up`、`shuffle_down` | FP16/FP32 或 32/64 位整数 → 同类型 | 按偏移读取更低/更高的源 lane |
+| `shuffle_bfly(value, mask, *, width=32, bound=None)` | FP16/FP32 或 32/64 位整数 → 同类型 | 读取子组内 lane 编号与 mask 异或指定的源 lane |
+| `redux_add`、`redux_min`、`redux_max` | FP16/FP32 或 32 位整数 → 同类型 | 归约活跃 lane，并将结果返回每个参与 lane |
 
 A5 warp 含 32 个 lane。参与集合是指令执行时的活跃掩码（active execution mask），
 没有显式参与掩码参数；非活跃 lane 不贡献数值。这些是寄存器协作操作，不提供内存
@@ -180,7 +186,8 @@ vote/redux 的参与集合。lane 控制参数为 INT32（Python 整数字面量
 Ballot 返回 INT32 位载体，bit 31 可能使数值为负，应使用位运算读取。INT32 min/max
 默认按有符号数比较；`unsigned=True` 将同一 INT32 位载体按无符号数比较（FP32 拒绝此选项）。
 加法按 32 位回绕。FP32 遵循目标平台的归约顺序及特殊值规则，不保证
-顺序求和或跨平台一致的 NaN/正负零选择。初始前后端子集暂不支持 FP16、UINT32 或 packed 值。
+顺序求和或跨平台一致的 NaN/正负零选择。UINT32 min/max 自动使用无符号比较。
+不支持 BF16 协作、64 位 redux 和 packed 值。
 
 原生映射为 `pto.vote_*`、`pto.shuffle_*` 和 `pto.redux_{add,min,max}{i,f}`；整数
 min/max 显式携带 `signed` 或 `unsigned`。测试经公共 JIT 和 PTOAS LLVM 导出编译所有形式。
@@ -233,8 +240,9 @@ MTE/Vector/helper 依赖，不添加手工 fence。
 
 `pl.simt.atomic_add/sub/and/or/xor/min/max/exch(storage, indices, value)` 和
 `pl.simt.atomic_cas(storage, indices, compare, value)` 返回**更新前的标量值**。
-`pypto.ir.op.simt` 提供同名接口。操作数必须与存储的 INT32/FP32 类型一致。
-索引沿用 `load`/`store` 的逻辑坐标和物理步长；地址必须满足 4 字节自然对齐且不越界。
+`pypto.ir.op.simt` 提供同名接口。操作数必须与存储类型一致。
+索引沿用 `load`/`store` 的逻辑坐标和物理步长；地址必须按元素宽度自然对齐且不越界。
+下表描述原有 32 位形式。
 
 | 操作 | INT32 | FP32 | 存储与返回值 |
 | ---- | ----- | ---- | ------------ |
@@ -245,8 +253,9 @@ MTE/Vector/helper 依赖，不添加手工 fence。
 | `atomic_cas` | 按位比较 | 按位比较，包括 NaN 载荷及正负零 | GM 和 Vec/UB；返回旧标量 |
 
 已验证的 A5 目标比较正负零时，min 选择负零，max 选择正零。不保证算术结果的
-NaN 载荷。UINT32/INT64、FP16/BF16 和 packed 原子不属于当前前端子集，
-即使 PTOAS 支持其中部分组合。没有可选内存顺序或 scope 参数：操作使用目标地址空间
+NaN 载荷。add/sub/min/max/exch 还支持 FP16/BF16 和 32/64 位有符号、无符号整数；
+位原子支持 32/64 位整数；CAS 仅支持 32/64 位整数及 FP32。所有 64 位原子仅允许 GM，
+UB 会拒绝。无符号类型自动选择无符号 min/max；不支持 packed 原子。没有可选内存顺序或 scope 参数：操作使用目标地址空间
 的原生原子契约，不对其他地址额外提供 acquire/release 或顺序一致性保证。
 可选 `l2cache=` 使用 store 缓存策略，仅允许用于 GM。
 `DistributedTensor` 窗口按当前 rank 的本地 GM 切片访问，沿用相同的物理 stride、
@@ -336,3 +345,10 @@ Ascend950 的三个维度乘积不得超过 2,048，寄存器数量按以下规�
 [SIMT lowering 与执行](../codegen/05-simt-lowering.md)说明 ABI、同步、支持类型
 和验收测试。独立的[原生 SIMT 探针](../codegen/04-simt-native-validation.md)
 保留此前 P0 ABI 测试。公共 scope 路径复用相同后端和 runtime 契约。
+
+## 运行时诊断
+
+`pl.simt.trap()` 和 `pl.simt.assert_(cond)` 是返回 void 的运行时操作，`cond` 必须为 BOOL。
+即使没有使用标量结果，其执行副作用仍会保留。它们不同于 Python assert 和编译期检查。
+设备终止与宿主错误传播依赖 runtime，尚未完成硬件验证。非法访问必须使用显式控制流
+保护；assert/trap 不向编译器保证后续代码绝不会执行。

@@ -112,6 +112,35 @@ def test_simplify_preserves_nested_atomic_occurrences(expression, name):
     assert len(collect_calls(simplified, f"simt.{name}")) == count
 
 
+def test_simplify_retains_runtime_diagnostics_in_order():
+    predicate = ir.Var("predicate", ir.ScalarType(DataType.BOOL), SPAN)
+    function = ir.Function(
+        "helper",
+        [predicate],
+        [],
+        ir.SeqStmts(
+            [
+                ir.EvalStmt(simt.assert_(predicate), SPAN),
+                ir.EvalStmt(simt.trap(), SPAN),
+                ir.EvalStmt(simt.assert_(predicate), SPAN),
+            ],
+            SPAN,
+        ),
+        SPAN,
+        ir.FunctionType.SIMT,
+    )
+    simplified = passes.simplify()(ir.Program([function], "Diagnostics", SPAN))
+    assert len(collect_calls(simplified, "simt.assert_")) == 2
+    assert len(collect_calls(simplified, "simt.trap")) == 1
+    helper = simplified.get_function("helper")
+    assert helper is not None and isinstance(helper.body, ir.SeqStmts)
+    names = []
+    for stmt in helper.body.stmts:
+        assert isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call)
+        names.append(stmt.expr.op.name)
+    assert names == [ir.get_op(name).name for name in ("simt.assert_", "simt.trap", "simt.assert_")]
+
+
 @pytest.mark.parametrize("effect_position", [0, 1])
 @pytest.mark.parametrize("via_alias", [False, True])
 @pytest.mark.parametrize("call_kind", ["call", "submit"])

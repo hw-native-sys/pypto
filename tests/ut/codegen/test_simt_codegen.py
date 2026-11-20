@@ -9,7 +9,12 @@
 
 """SIMT pointer ABI, physical addressing and module reachability from explicit IR."""
 
+import ctypes
+import math
+import random
 import re
+import shutil
+import struct
 import subprocess
 import textwrap
 
@@ -271,9 +276,9 @@ def test_unused_simt_definition_does_not_select_vpto():
     assert "pto.simt_entry" not in source
 
 
-def test_unsupported_unsigned_arithmetic_fails_before_native_compilation():
-    with pytest.raises(ValueError, match="SIMT.*currently supports"):
-        codegen.PTOCodegen().generate_bundle(make_copy(dtype=DataType.UINT32))
+def test_unsupported_fp8_storage_fails_before_native_compilation():
+    with pytest.raises(ValueError, match="SIMT.*supports"):
+        codegen.PTOCodegen().generate_bundle(make_copy(dtype=DataType.FP8E4M3FN))
 
 
 def test_grouped_simt_execution_remains_rejected():
@@ -289,17 +294,17 @@ def test_grouped_simt_execution_remains_rejected():
         )
 
 
-def scalar_program(body, dtype="INT32", *, preamble=""):
+def scalar_program(body, dtype="INT32", *, preamble="", scalar_dtype="INT32"):
     program = parse_program(f"""
 {preamble}
 @pl.program
 class Scalars:
     @pl.function(type=pl.FunctionType.SIMT)
-    def helper(self, dst: pl.InOut[pl.Tensor[[1, 128], pl.{dtype}]], n: pl.Scalar[pl.INT32]):
+    def helper(self, dst: pl.InOut[pl.Tensor[[1, 128], pl.{dtype}]], n: pl.Scalar[pl.{scalar_dtype}]):
 {textwrap.indent(textwrap.dedent(body).strip(), "        ")}
 
     @pl.function(type=pl.FunctionType.AIV)
-    def kernel(self, dst: pl.InOut[pl.Tensor[[1, 128], pl.{dtype}]], n: pl.Scalar[pl.INT32]):
+    def kernel(self, dst: pl.InOut[pl.Tensor[[1, 128], pl.{dtype}]], n: pl.Scalar[pl.{scalar_dtype}]):
         updated = pl.simt.launch(self.helper, dst, n, block_dims=(128, 1, 1), result_param_indices=(0,))
         return updated
 """)
@@ -1009,6 +1014,349 @@ def test_unsigned_extrema_codegen_round_trip(name, attribute):
     source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
     signedness = "unsigned" if "True" in attribute else "signed"
     assert f" {signedness} :" in source
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "dtype", ["FP16", "BF16", "INT8", "UINT8", "INT16", "UINT16", "UINT32", "INT64", "UINT64"]
+)
+@pytest.mark.parametrize("ub_source", [False, True])
+def test_extended_scalar_storage_native_compile(tmp_path, dtype, ub_source):
+    program = make_copy(dtype=getattr(DataType, dtype), ub_source=ub_source)
+    if ub_source:
+        program = passes.init_mem_ref()(program)
+    bundle = codegen.PTOCodegen().generate_bundle(program)
+    _compile_extended_simt(tmp_path, bundle.helpers[0].source)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dtype", ["FP16", "BF16", "INT64", "UINT8", "UINT16", "UINT32", "UINT64"])
+def test_extended_scalar_parameter_native_compile(tmp_path, dtype):
+    program = scalar_program("pl.simt.store(dst, (0, 0), n)", dtype, scalar_dtype=dtype)
+    _compile_extended_simt(tmp_path, codegen.PTOCodegen().generate_bundle(program).helpers[0].source)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "source,destination",
+    [
+        ("UINT8", "INT8"),
+        ("UINT16", "FP16"),
+        ("UINT16", "BF16"),
+        ("UINT32", "FP32"),
+        ("UINT64", "INT64"),
+        ("BF16", "FP16"),
+    ],
+)
+def test_extended_bitcast_native_compile(tmp_path, source, destination):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        y = pl.simt.bitcast(x, pl.{destination})
+        z = pl.simt.bitcast(y, pl.{source})
+        pl.simt.store(dst, (0, 0), z)
+    """,
+        source,
+    )
+    _compile_extended_simt(tmp_path, codegen.PTOCodegen().generate_bundle(program).helpers[0].source)
+
+
+def _compile_extended_simt(tmp_path, source):
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    input_path = tmp_path / "extended.pto"
+    input_path.write_text(source)
+    output_path = tmp_path / "extended.ll"
+    result = subprocess.run(
+        [
+            binary,
+            str(input_path),
+            "--pto-arch=a5",
+            "--pto-backend=vpto",
+            "--emit-vpto-llvm-ir",
+            "-o",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return output_path.read_text()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dtype", ["UINT8", "UINT16", "UINT32", "UINT64", "INT64"])
+def test_extended_integer_arithmetic_native_compile(tmp_path, dtype):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        one = pl.const(1, pl.{dtype})
+        two = pl.const(2, pl.{dtype})
+        y = ((x + one) * two) ^ x
+        z = (y >> one) // two
+        if pl.cast(x, pl.BOOL) and x >= two:
+            z = z | (x % two)
+        pl.simt.store(dst, (0, 0), z)
+    """,
+        dtype,
+    )
+    _compile_extended_simt(tmp_path, codegen.PTOCodegen().generate_bundle(program).helpers[0].source)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dtype,other", [("FP16", "BF16"), ("BF16", "FP16")])
+def test_half_arithmetic_and_ordinary_cast_native_compile(tmp_path, dtype, other):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        y = pl.cast(x, pl.{other})
+        z = pl.cast(y, pl.{dtype})
+        pl.simt.store(dst, (0, 0), (x + z) * x)
+    """,
+        dtype,
+    )
+    _compile_extended_simt(tmp_path, codegen.PTOCodegen().generate_bundle(program).helpers[0].source)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dtype", ["FP16", "BF16", "UINT32", "INT64", "UINT64"])
+def test_extended_atomic_collective_native_compile(tmp_path, dtype):
+    lines = ["x = pl.simt.load(dst, (0, 0))"]
+    operations = ["add", "sub", "min", "max", "exch"]
+    if dtype not in ("FP16", "BF16"):
+        operations += ["and", "or", "xor", "cas"]
+    for operation in operations:
+        extra = ", x" if operation == "cas" else ""
+        lines.append(f"x = pl.simt.atomic_{operation}(dst, (0, 0), x{extra})")
+    if dtype != "BF16":
+        lines.append("x = pl.simt.shuffle_idx(x, 0)")
+    if dtype in ("FP16", "UINT32"):
+        lines.append("x = pl.simt.redux_max(x)")
+    lines.append("pl.simt.store(dst, (0, 0), x)")
+    program = scalar_program("\n".join(lines), dtype)
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    if dtype.startswith("UINT"):
+        assert " unsigned :" in source
+    _compile_extended_simt(tmp_path, source)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "source,destination",
+    [
+        ("FP32", "FP16"),
+        ("FP32", "BF16"),
+        ("BF16", "FP16"),
+        ("FP16", "BF16"),
+        ("FP16", "FP32"),
+        ("BF16", "FP32"),
+    ],
+)
+@pytest.mark.parametrize("rounding", ["r", "a", "f", "c", "z"])
+def test_ftof_native_compile(tmp_path, source, destination, rounding):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        y = pl.simt.ftof(x, pl.{destination}, rounding="{rounding}", saturate=True)
+        z = pl.simt.ftof(y, pl.{source})
+        pl.simt.store(dst, (0, 0), z)
+    """,
+        source,
+    )
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    _compile_extended_simt(tmp_path, codegen.PTOCodegen().generate_bundle(program).helpers[0].source)
+
+
+@pytest.mark.ptoas_compile
+def test_ftof_round_to_odd_native_compile(tmp_path):
+    test_ftof_native_compile(tmp_path, "FP32", "FP16", "o")
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "floating,integer", [("FP16", "INT32"), ("BF16", "UINT32"), ("FP32", "INT64"), ("FP32", "UINT64")]
+)
+def test_extended_integer_conversion_native_compile(tmp_path, floating, integer):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        y = pl.simt.ftoi(x, dtype=pl.{integer}, rounding="f")
+        z = pl.simt.itof(y, dtype=pl.{floating}, rounding="c")
+        pl.simt.store(dst, (0, 0), z)
+    """,
+        floating,
+    )
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    _compile_extended_simt(tmp_path, codegen.PTOCodegen().generate_bundle(program).helpers[0].source)
+
+
+@pytest.mark.ptoas_compile
+def test_explicit_precision_and_runtime_diagnostics_native_compile(tmp_path):
+    program = scalar_program(
+        """
+        x = pl.simt.load(dst, (0, 0))
+        y = pl.simt.div(x, x, precision="precision_0ulp_ftz_true")
+        z = pl.simt.rem(y, x)
+        core = pl.simt.veccore_id()
+        pl.simt.assert_(n >= core)
+        if n < 0:
+            pl.simt.trap()
+        pl.simt.store(dst, (0, 0), z)
+    """,
+        "FP32",
+    )
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    assert "precision_0ulp_ftz_true" in source and "pto.remf" not in source
+    assert "pto.assert" in source and "pto.trap" in source and "pto.get_veccoreid" in source
+    llvm = _compile_extended_simt(tmp_path, source)
+    assert "llvm.hivm.TRAP" in llvm
+
+
+@pytest.mark.ptoas_compile
+def test_remainder_lowering_numerics(tmp_path):
+    """Execute the emitted integer algorithm, with only GM access adapted to host memory.
+
+    This checks lowering semantics independently of device availability. Device
+    selection is covered separately through KernelCompiler, and the onboard
+    fixture checks execution on A5, including divergent lanes and subnormals.
+    """
+    clang = shutil.which("clang")
+    if clang is None:
+        pytest.skip("Host clang is required to execute exported LLVM")
+    program = scalar_program(
+        """
+        x = pl.simt.load(dst, (0, 0))
+        value = pl.simt.rem(x, n)
+        pl.simt.store(dst, (0, 0), value)
+        """,
+        "FP32",
+        scalar_dtype="FP32",
+    )
+    source = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False).helpers[0].source
+    assert "pto.remf" not in source
+    llvm = _compile_extended_simt(tmp_path, source)
+    assert not re.search(r"\bfrem\b", llvm)
+    entry = re.search(
+        r"^define linkonce_odr simt_entry void @[^ (]+\(([^\n]*)\)[^\n]*\{\n(.*?)^\}",
+        llvm,
+        re.M | re.S,
+    )
+    assert entry, llvm
+    arguments, body = entry.groups()
+    # Retain every arithmetic instruction, branch and phi from PTOAS. Replacing
+    # one load/store intrinsic with one LLVM instruction preserves SSA numbering.
+    arguments = arguments.replace("ptr addrspace(1)", "ptr")
+    body = body.replace("ptr addrspace(1)", "ptr")
+    body, loads = re.subn(
+        r"call i32 @llvm\.hivm\.ldg\.cache\.s32\(ptr (%\w+), i32 0\)",
+        r"load i32, ptr \1",
+        body,
+    )
+    body, stores = re.subn(
+        r"call void @llvm\.hivm\.stg\.cache\.b32\(ptr (%\w+), i32 (%\w+), i32 0\)",
+        r"store i32 \2, ptr \1",
+        body,
+    )
+    assert loads == stores == 1
+    assert "llvm.hivm" not in body
+    host_llvm = tmp_path / "remainder-host.ll"
+    host_llvm.write_text(f"define void @remainder({arguments}) {{\n{body}}}\n")
+    library = tmp_path / "remainder-host.so"
+    result = subprocess.run(
+        [clang, "-shared", "-fPIC", "-O2", str(host_llvm), "-o", str(library)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    function = ctypes.CDLL(str(library)).remainder
+    function.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_float]
+    function.restype = None
+    # Cross all signs and magnitude boundaries, then sample arbitrary bit
+    # patterns. Comparing bits catches negative zero and one-ULP errors.
+    magnitudes = [
+        0,
+        1,
+        3,
+        0x7FFFFF,
+        0x800000,
+        0x800001,
+        0x3F800000,
+        0x40400000,
+        0x7F7FFFFF,
+        0x7F800000,
+        0x7FC00001,
+    ]
+    edges = [bits | sign for bits in magnitudes for sign in (0, 0x80000000)]
+    pairs = [(x, y) for x in edges for y in edges]
+    rng = random.Random(3505)
+    pairs.extend((rng.getrandbits(32), rng.getrandbits(32)) for _ in range(10000))
+    for x_bits, y_bits in pairs:
+        x, y = (struct.unpack("=f", struct.pack("=I", bits))[0] for bits in (x_bits, y_bits))
+        output = ctypes.c_float(x)
+        function(ctypes.byref(output), y)
+        if not math.isfinite(x) or math.isnan(y) or y == 0:
+            assert math.isnan(output.value), (hex(x_bits), hex(y_bits), output.value)
+        else:
+            expected = struct.pack("=f", math.fmod(x, y))
+            assert bytes(output) == expected, (hex(x_bits), hex(y_bits), output.value, expected.hex())
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_widened_product_native_compile(tmp_path, unsigned):
+    program = scalar_program(
+        f"""
+        x = pl.simt.lane_id()
+        value = pl.simt.mul_i32toi64(x, n, unsigned={unsigned})
+        pl.simt.store(dst, (0, 0), value)
+    """,
+        "INT64",
+    )
+    ir.assert_structural_equal(program, parse_program(str(program)))
+    _compile_extended_simt(tmp_path, codegen.PTOCodegen().generate_bundle(program).helpers[0].source)
+
+
+@pytest.mark.parametrize("attributes", ["pl.FP16", "dtype=pl.FP16", 'pl.FP16, rounding="o"'])
+def test_ftof_preserves_positional_dtype_and_omitted_defaults(attributes):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        y = pl.simt.ftof(x, {attributes})
+        z = pl.simt.ftof(y, pl.FP32)
+        pl.simt.store(dst, (0, 0), z)
+    """,
+        "FP32",
+    )
+    ir.assert_structural_equal(program, parse_program(str(program)))
+
+
+@pytest.mark.parametrize("value", ["1.0", "math.inf", "-math.inf", "math.pi", "-math.pi"])
+@pytest.mark.parametrize(
+    "arguments",
+    ["VALUE, pl.FP16", "VALUE, dtype=pl.FP16", "value=VALUE, dtype=pl.FP16", "dtype=pl.FP16, value=VALUE"],
+)
+def test_ftof_scalar_operands_match_across_argument_spellings(value, arguments):
+    # Numeric attributes used to escape as Python floats only in positional
+    # slots. All value spellings must match an explicitly typed FP32 operand.
+    body = """
+        y = pl.simt.ftof(ARGUMENTS, saturate=True)
+        z = pl.simt.ftof(y, pl.FP32)
+        pl.simt.store(dst, (0, 0), z)
+    """
+    expected = scalar_program(
+        body.replace("ARGUMENTS", f"pl.const({value}, pl.FP32), pl.FP16"), "FP32", preamble="import math"
+    )
+    actual = scalar_program(
+        body.replace("ARGUMENTS", arguments.replace("VALUE", value)), "FP32", preamble="import math"
+    )
+    ir.assert_structural_equal(expected, actual)
 
 
 if __name__ == "__main__":

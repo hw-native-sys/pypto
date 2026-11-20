@@ -8,7 +8,7 @@ persistent runtime. See the [canonical SIMT IR](../ir/11-simt.md).
 
 - A5 AIV callers, with constant three-dimensional block sizes specialized by
   `SpecializeSimtHelpers` (up to 2,048 threads).
-- Borrowed GM Tensor and UB Vec Tile storage with FP32 or INT32 elements.
+- Borrowed GM Tensor and UB Vec Tile storage with supported non-packed numeric elements.
   Tiles require affine, unboxed layouts. Physical strides and Tile start offsets
   determine addressing; logical `valid_shape` never replaces the physical stride.
   Borrowed `tile.slice`/reshape view handles are rejected because their types
@@ -20,16 +20,16 @@ persistent runtime. See the [canonical SIMT IR](../ir/11-simt.md).
   updates to dense storage remain supported while updates to views remain rejected.
   Explicit strides on supported storage take precedence; dense DN Tensor fallback transposes only the trailing
   two axes and keeps batch axes outermost.
-- FP32, INT32, INDEX and BOOL scalar values; structured `if`, `for`, and `while`.
+- FP16/BF16/FP32, signed/unsigned 8/16/32/64-bit integers, INDEX and BOOL scalar values; structured `if`, `for`, and `while`.
   Signed integer floor division/modulo retain floor semantics. FP32 inequality
   treats NaN as unequal, and numeric-to-BOOL conversion compares against zero.
 - Thread/block/grid coordinates and extents, lane ID, and scalar loads/stores.
   GM cache policies pass through unchanged to native PTOAS operations.
-- Active-lane votes/ballot, INT32/FP32 shuffle (width 16 or 32), and
-  INT32/FP32 add/min/max redux. Integer min/max lower with explicit signed or unsigned
-  comparison of INT32 carriers. Shuffle accepts a source-window `bound`. See the [collective contract](../ir/11-simt.md#warp-collectives).
+- Active-lane votes/ballot, FP16/FP32 and 32/64-bit integer shuffle (width 16 or 32), and
+  FP16/FP32 and 32-bit integer add/min/max redux. Integer min/max lower with explicit signed or unsigned
+  comparison, inferred from unsigned dtypes or the explicit carrier flag. Shuffle accepts a source-window `bound`. See the [collective contract](../ir/11-simt.md#warp-collectives).
 
-Unsigned arithmetic, other storage dtypes, scalar exponentiation (`**`), floating-point floor division/modulo,
+FP8 and packed storage, scalar exponentiation (`**`), floating-point floor division/modulo,
 early return, break/continue, boxed Tile layouts and grouped kernel execution
 currently produce explicit diagnostics. CPU simulation (`a5sim`) and other device
 backends cannot execute these native helpers. As in canonical IR, indexing must
@@ -131,10 +131,10 @@ calls remain ordered effects; `no_arg_writes` does not declare them pure.
 | `syncthreads` and both fences | LLVM workitem synchronization/fence intrinsics | Four-warp UB/GM publication and consumption; subsequent MTE output |
 
 This matrix was validated on Ascend950DT_9581, PTOAS v0.72, CANN 9.3.0 and
-runtime `391b2fbcd4dd053204a677662c39b6b7636e8043`. Supported atomic locations
-are naturally aligned four-byte elements; UINT32/INT64, half/bfloat16, packed
-values, selectable ordering/scope and cross-AIV synchronization remain outside
-this frontend contract. See [API semantics and limits](../ir/11-simt.md#atomics-and-synchronization).
+runtime `391b2fbcd4dd053204a677662c39b6b7636e8043`. These device results cover naturally aligned four-byte atomic elements. Wider
+and half/bfloat16 interfaces now have separate compile coverage; see the
+[per-operation matrix](06-simt-interface-coverage.md). Packed values, selectable
+ordering/scope and cross-AIV synchronization remain outside this frontend contract. See [API semantics and limits](../ir/11-simt.md#atomics-and-synchronization).
 The publication test uses a rendezvous; it does not establish that a fence alone
 is a synchronization protocol or promise system-wide visibility.
 

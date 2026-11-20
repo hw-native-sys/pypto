@@ -11,6 +11,7 @@
 
 import ast
 import json
+import os
 import re
 import runpy
 import subprocess
@@ -878,7 +879,7 @@ def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("entry_name", ["interface_entry", "subtraction_entry"])
+@pytest.mark.parametrize("entry_name", ["interface_entry", "subtraction_entry", "extended_entry"])
 def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entry_name):
     binary = find_ptoas_binary()
     if binary is None:
@@ -900,9 +901,21 @@ def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entr
             assert text.count(" unsigned :") == 6
             assert "bound = 3 : i32" in text and "bound = 11 : i32" in text
             assert "pto.bitcast" in text
-        else:
+        elif entry_name == "subtraction_entry":
             assert text.count("pto.atomic_sub ") == 4
             assert "l2cache(nmfv)" in text
+        else:
+            for operation in (
+                "divf",
+                "ftof",
+                "ftoi",
+                "itof",
+                "mul_i32toi64",
+                "assert",
+                "get_veccoreid",
+            ):
+                assert f"pto.{operation}" in text
+            assert "precision_0ulp_ftz_true" in text
         output = tmp_path / "interfaces.ll"
         result = subprocess.run(
             [
@@ -924,6 +937,107 @@ def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entr
         assert "asm sideeffect" not in output.read_text()
     finally:
         backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("entry_name", ["extended_entry", "remainder_entry"])
+def test_simt_interfaces_device_compile(tmp_path, entry_name):
+    """LLVM export alone accepted frem, which Bisheng then rejected on A5.
+
+    Use the actual runtime helper compiler and flags, without requiring an NPU.
+    Cover both the original failing kernel and a nonconstant divisor so LLVM
+    cannot remove exceptional-input paths before device instruction selection.
+    """
+    if os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1":
+        pytest.skip("Opt in to the A5 compiler with PYPTO_RUN_VPTO_VF_VALIDATION=1")
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    # The unit-suite import hooks stub the SDK. A subprocess must import the
+    # installed runtime so this exercises real compiler discovery and execution.
+    script = """
+import runpy
+import sys
+from pathlib import Path
+from pypto.runtime.kernel_compiler import KernelCompiler
+
+fixture = runpy.run_path(sys.argv[1])
+output = Path(sys.argv[2])
+fixture["compile_case"](output, entry=fixture[sys.argv[3]])
+helpers = tuple(str(path) for path in (output / "vpto").rglob("*.pto"))
+assert len(helpers) == 1
+objects = KernelCompiler("a5")._compile_vpto_helpers(helpers, output)
+assert len(objects) == 1 and objects[0].stat().st_size > 0
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(tmp_path), entry_name],
+        env={**os.environ, "PYPTO_SKIP_RUNTIME_PIN_CHECK": "0", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not re.search(r"\bfrem\b", (tmp_path / "vpto_0.ll").read_text())
+
+
+@pytest.mark.parametrize("flush", [False, True])
+@pytest.mark.parametrize("corruption", ["none", "subnormal", "signed_zero", "nan"])
+def test_remainder_acceptance_ignores_host_fp_mode(flush, corruption):
+    """A correct device result must pass even when the host flushes denormals.
+
+    Use double-precision libm with flushing disabled as an independent reference
+    for the fixed bit-pattern oracle. Wrong results must still fail it.
+    Keep FP control-register changes in a child process to isolate other tests.
+    """
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    script = """
+import math
+import runpy
+import sys
+import pytest
+import torch
+
+fixture = runpy.run_path(sys.argv[1])
+flush = sys.argv[2] == "True"
+corruption = sys.argv[3]
+if not torch.set_flush_denormal(flush):
+    sys.exit(77)
+
+def device_result(lhs, rhs, output):
+    torch.set_flush_denormal(False)
+    results = []
+    for x, y in zip(lhs.reshape(-1).tolist(), rhs.reshape(-1).tolist(), strict=True):
+        try:
+            results.append(math.fmod(x, y))
+        except ValueError:
+            results.append(math.nan)
+    expected = torch.tensor(results, dtype=torch.float32).reshape_as(output)
+    output.view(torch.int32).copy_(expected.view(torch.int32))
+    torch.set_flush_denormal(flush)
+    bits = output.view(torch.int32).reshape(-1)
+    if corruption == "subnormal":
+        bits[6] = 0
+    elif corruption == "signed_zero":
+        bits[16] = 0
+    elif corruption == "nan":
+        bits[12] = 0x7F800000
+
+if corruption == "none":
+    fixture["check_remainders"](device_result)
+else:
+    with pytest.raises(AssertionError):
+        fixture["check_remainders"](device_result)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(flush), corruption],
+        env={**os.environ, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("Host does not support controlling denormal flushing")
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 if __name__ == "__main__":

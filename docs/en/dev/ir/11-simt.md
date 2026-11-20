@@ -31,8 +31,8 @@ def copy(src: pl.Tensor[[1, 128], pl.FP32],
 typed axis, positional or `axis=`; `lane_id()` takes none. Dimensions are three
 positive compile-time integers. They describe threads, not an element allocation
 or grid; bounds checks remain explicit. GM Tensor and Vec/UB Tile operands use
-their existing storage. The initial API supports the backend's scalar subset;
-INT32/FP32 lane collectives, atomics and synchronization are described below. Scalar math and explicit conversions are described below.
+their existing storage. Supported scalar types vary by operation; see the
+[coverage matrix](../codegen/06-simt-interface-coverage.md).
 
 Scalar assignments are thread-private, including shadowing an outer scalar.
 A private scalar cannot be read after the scope. Stores automatically rebind the
@@ -92,7 +92,7 @@ level programming interface derives output mappings during outlining.
 | Operation | Result | Contract |
 | --------- | ------ | -------- |
 | `simt.thread_idx`, `block_idx`, `block_dim`, `grid_dim` | INT32 | Required typed `SimtAxis.X/Y/Z` kwarg |
-| `simt.lane_id` | INT32 | No axis |
+| `simt.lane_id`, `simt.veccore_id` | INT32 | No axis; physical lane or vector core ID |
 | `simt.load(storage, indices)` | Element scalar | Tile in Vec/UB or Tensor in GM |
 | `simt.store(storage, indices, value)` | VoidType | Scalar dtype must match storage |
 
@@ -120,17 +120,22 @@ They operate independently in each thread and add no synchronization.
 | `pow(x, y)`, `fma(x, y, z)` | FP32 → FP32 | Power; fused multiply-add with one final rounding |
 | `prmt(x, y, selector)` | INT32 → INT32 | Byte permutation using four low selector nibbles |
 | `mulhi(x, y, *, unsigned=False)` | INT32 → INT32 | High 32 bits of a signed/unsigned 64-bit product |
-| `ftoi(x, *, rounding="z", unsigned=False)` | FP32 → INT32 | Saturating float-to-integer conversion |
-| `itof(x, *, rounding="r", unsigned=False)` | INT32 → FP32 | Integer-to-float conversion with explicit rounding |
+| `ftoi(x, *, dtype=None, rounding="z", unsigned=False)` | FP16/BF16/FP32 → 32-bit integer; FP32 → 64-bit integer | Mandatory saturation; default INT32 |
+| `itof(x, *, dtype=None, rounding="r", unsigned=False)` | 32-bit integer → FP16/BF16/FP32; 64-bit integer → FP32 | Default FP32 |
+| `ftof(x, dtype, *, rounding="r", saturate=False)` | Distinct FP16/BF16/FP32 pairs | Optional finite-overflow saturation |
+| `mul_i32toi64(x, y, *, unsigned=False)` | INT32 → INT64 | Full signed/unsigned product in an INT64 bit carrier |
+| `div(x, y, *, precision="intrinsic")` | FP32 → FP32 | Also accepts `precision_0ulp_ftz_true`; target flush-to-zero behavior |
+| `rem(x, y)` | FP32 → FP32 | Truncated quotient, fmod-style dividend sign; not floor modulo |
 
 `rounding` is a compile-time string: `r` = nearest, ties to even; `a` = nearest,
 ties away from zero; `f` = toward −∞; `c` = toward +∞; `z` = toward zero.
-Other tokens and non-boolean `unsigned` are rejected. FP32-to-integer saturation
+`ftof` additionally accepts `o` (round to odd) only for FP32→FP16. Identity
+`ftof`, hybrid `h`, unsupported pairs and non-boolean flags are rejected. Float-to-integer saturation
 is mandatory in PTOAS: out-of-range values clamp to the destination integer
 range. On A5, saturated NaN conversion yields zero. `unsigned=True` interprets
-the INT32 carrier as 32 unsigned bits; the IR type remains INT32, so ordinary
-arithmetic and comparisons on that result are still signed. This flag does not
-enable UINT32 storage or general unsigned arithmetic.
+a signed integer carrier as unsigned without changing its IR dtype. Explicit
+UINT32/UINT64 dtypes always use unsigned conversion, including with the default
+flag; ordinary arithmetic follows the IR dtype.
 
 The text parser treats positional and keyword scalar operands identically.
 Evaluated numeric attributes such as `math.pi`, `math.inf`, and `-math.inf`
@@ -146,9 +151,9 @@ bits above the low 16 selector bits are ignored on A5.
 PTOAS sin/cos use software math with FP32 range reduction. Numerical acceptance
 covers angles in `[-4, 4]` radians; large-angle accuracy is not guaranteed.
 
-No implicit dtype promotion is performed. FP16/BF16, INT64, packed values and
-additional conversion pairs remain outside this executable subset; packed
-support belongs to the short-vector milestone. Floating functions follow target
+No implicit dtype promotion is performed. Existing explicit math functions
+remain FP32-only. Wider storage, collectives, atomics and conversions use the
+per-operation matrix; packed support belongs to the short-vector milestone. Floating functions follow target
 math accuracy and special-value behavior, without portable NaN payload guarantees.
 `pl.cast`, signed floor division/modulo and the diagnostic for scalar `**` retain
 their existing semantics; use `pl.simt.pow` for explicitly supported FP32 power.
@@ -161,7 +166,8 @@ index = pl.simt.ftoi(y, rounding="f")
 
 ### Scalar bitcast and physical lane masks
 
-`pl.simt.bitcast(value, dtype)` accepts FP32/INT32 input and destination types.
+`pl.simt.bitcast(value, dtype)` accepts FP16/BF16/FP32 and signed/unsigned
+8/16/32/64-bit integer types with equal source/destination bit widths.
 It preserves every bit, including NaN payloads and signed zeros; no numerical
 conversion or memory reinterpretation occurs. Ordinary `pl.cast` is unchanged.
 
@@ -178,10 +184,10 @@ The public `pl.simt` and IR `pypto.ir.op.simt` namespaces expose:
 | --------- | -------------- | ------- |
 | `vote_all`, `vote_any`, `vote_uni` | BOOL → BOOL | All true, any true, or all predicates equal |
 | `vote_ballot` | BOOL → INT32 | Bit i is set for active lane i with a true predicate |
-| `shuffle_idx(value, index, *, width=32, bound=None)` | INT32/FP32 → same type | Read subgroup-relative source lane |
-| `shuffle_up`, `shuffle_down` | INT32/FP32 → same type | Read lower/higher source lane by an offset |
-| `shuffle_bfly(value, mask, *, width=32, bound=None)` | INT32/FP32 → same type | Read source lane selected by local-lane XOR mask |
-| `redux_add`, `redux_min`, `redux_max` | INT32/FP32 → same type | Reduce active lanes; return the result to each active lane |
+| `shuffle_idx(value, index, *, width=32, bound=None)` | FP16/FP32 or 32/64-bit integer → same type | Read subgroup-relative source lane |
+| `shuffle_up`, `shuffle_down` | FP16/FP32 or 32/64-bit integer → same type | Read lower/higher source lane by an offset |
+| `shuffle_bfly(value, mask, *, width=32, bound=None)` | FP16/FP32 or 32/64-bit integer → same type | Read source lane selected by local-lane XOR mask |
+| `redux_add`, `redux_min`, `redux_max` | FP16/FP32 or 32-bit integer → same type | Reduce active lanes; return the result to each active lane |
 
 The A5 warp contains 32 lanes. Participation is the current active execution
 mask at the instruction; there is no explicit participation-mask argument.
@@ -203,8 +209,8 @@ negative. Use bit operations to inspect it. INT32 min/max default to signed
 comparisons; `unsigned=True` selects unsigned comparison of the same INT32 bit carriers (FP32 rejects this option);
 integer sums wrap at 32 bits. FP32 follows the target reduction order and
 special-value rules, without a promise of sequential summation or portable
-NaN/signed-zero selection. FP16, UINT32 and packed values remain unsupported
-in this initial frontend/backend subset.
+NaN/signed-zero selection. UINT32 min/max automatically use unsigned comparison.
+BF16 collectives, 64-bit redux and packed values remain unsupported.
 
 The native mapping is `pto.vote_*`, `pto.shuffle_*` and `pto.redux_{add,min,max}{i,f}`;
 integer min/max explicitly carry `signed` or `unsigned`. Tests compile all forms
@@ -268,8 +274,9 @@ for device checks and the timing methodology.
 `pl.simt.atomic_add/sub/and/or/xor/min/max/exch(storage, indices, value)` and
 `pl.simt.atomic_cas(storage, indices, compare, value)` return the **old scalar**.
 The same names exist in `pypto.ir.op.simt`. All operands must match the storage
-INT32/FP32 dtype. Indices use the same logical coordinates and physical strides
-as `load`/`store`; addresses must be naturally aligned to four bytes and in bounds.
+dtype. Indices use the same logical coordinates and physical strides
+as `load`/`store`; addresses must be naturally aligned to the element width and in bounds.
+The following table describes the original 32-bit forms.
 
 | Operation | INT32 | FP32 | Storage / result |
 | --------- | ----- | ---- | ---------------- |
@@ -281,8 +288,10 @@ as `load`/`store`; addresses must be naturally aligned to four bytes and in boun
 
 On the validated A5 target, min selects negative zero and max positive zero when
 comparing opposite signed zeros. NaN result payloads from arithmetic are not
-promised. UINT32/INT64, FP16/BF16 and packed atomics are not part of this frontend
-subset, even when PTOAS supports some of them. There is no selectable memory-order
+promised. Add/sub/min/max/exch also accept FP16/BF16 and signed/unsigned
+32/64-bit integers; bitwise atomics accept 32/64-bit integers; CAS accepts
+32/64-bit integers and FP32 only. All 64-bit atomics require GM: UB rejects them.
+Unsigned dtypes automatically select unsigned min/max. Packed atomics are excluded. There is no selectable memory-order
 or scope argument: each operation uses the native address-space atomic contract.
 No acquire/release or sequential-consistency guarantee is added for other addresses.
 Optional `l2cache=` uses store cache tokens and is allowed only on GM.
@@ -391,3 +400,12 @@ resource specialization and the A5 executable subset are implemented.
 synchronization, supported types and acceptance tests. The independent
 [native SIMT probe](../codegen/04-simt-native-validation.md) retains the earlier
 P0 ABI fixture. The public scope path uses the same backend and runtime contract.
+
+## Runtime diagnostics
+
+`pl.simt.trap()` and `pl.simt.assert_(cond)` are void runtime operations; `cond`
+must be BOOL. They retain their execution effects even when no scalar result is
+used. They are distinct from Python assertions and compile-time checks. Device
+termination and host error propagation depend on the runtime and are not yet
+validated on hardware. Guard invalid accesses with explicit control flow;
+assert/trap do not establish a compiler guarantee that following code cannot run.

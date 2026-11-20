@@ -15,6 +15,113 @@ from pypto.language.parser import parse_program
 SPAN = ir.Span.unknown()
 
 
+@pytest.mark.parametrize(
+    "source,destination",
+    [
+        (DataType.FP16, DataType.BF16),
+        (DataType.UINT16, DataType.FP16),
+        (DataType.UINT64, DataType.INT64),
+        (DataType.UINT8, DataType.INT8),
+    ],
+)
+def test_extended_bitcast_round_trip(source, destination):
+    value = ir.Var("value", ir.ScalarType(source), SPAN)
+    call = simt.bitcast(value, destination)
+    ir.assert_structural_equal(call, pl.simt.bitcast(value, destination).unwrap())
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize(
+    "name,source,destination",
+    [
+        ("ftof", DataType.FP32, DataType.FP16),
+        ("ftof", DataType.BF16, DataType.FP16),
+        ("ftoi", DataType.FP16, DataType.UINT32),
+        ("ftoi", DataType.FP32, DataType.INT64),
+        ("itof", DataType.UINT64, DataType.FP32),
+        ("itof", DataType.INT32, DataType.BF16),
+    ],
+)
+def test_extended_conversion_round_trip(name, source, destination):
+    value = ir.Var("value", ir.ScalarType(source), SPAN)
+    call = getattr(simt, name)(value, dtype=destination, rounding="f")
+    assert call.type.dtype == destination
+    ir.assert_structural_equal(call, getattr(pl.simt, name)(value, dtype=destination, rounding="f").unwrap())
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize(
+    "name,source,destination",
+    [
+        ("ftof", DataType.FP32, DataType.FP32),
+        ("ftoi", DataType.FP16, DataType.INT64),
+        ("itof", DataType.INT64, DataType.BF16),
+        ("ftoi", DataType.FP32, DataType.INT16),
+        ("ftoi", DataType.FP32, DataType.INDEX),
+        ("itof", DataType.INDEX, DataType.FP32),
+    ],
+)
+def test_conversion_rejects_unsupported_pairs(name, source, destination):
+    with pytest.raises(
+        ValueError, match="different destination|only with FP32|unsupported destination|input"
+    ):
+        getattr(simt, name)(ir.Var("value", ir.ScalarType(source), SPAN), dtype=destination)
+
+
+def test_ftof_rounding_and_saturation_contract():
+    value = ir.Var("value", ir.ScalarType(DataType.FP32), SPAN)
+    assert simt.ftof(value, DataType.FP16, rounding="o", saturate=True).kwargs["saturate"]
+    for dtype, rounding in ((DataType.BF16, "o"), (DataType.FP16, "h")):
+        with pytest.raises(ValueError, match="rounding"):
+            simt.ftof(value, dtype, rounding=rounding)
+
+
+def test_explicit_division_and_runtime_diagnostics():
+    value = ir.Var("value", ir.ScalarType(DataType.FP32), SPAN)
+    for call in (simt.div(value, value, precision="precision_0ulp_ftz_true"), simt.rem(value, value)):
+        assert isinstance(call.type, ir.ScalarType) and call.type.dtype == DataType.FP32
+    with pytest.raises(ValueError, match="precision"):
+        simt.div(value, value, precision="fast")
+    query = simt.veccore_id()
+    assert isinstance(query.type, ir.ScalarType) and query.type.dtype == DataType.INT32
+    for call, dsl in ((simt.trap(), pl.simt.trap()), (simt.assert_(True), pl.simt.assert_(True))):
+        assert isinstance(call.type, ir.VoidType)
+        ir.assert_structural_equal(call, dsl)
+        ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)))
+    with pytest.raises(ValueError, match="BOOL"):
+        simt.assert_(simt.lane_id())
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT64, DataType.UINT64])
+def test_64_bit_atomics_and_collectives_have_distinct_limits(dtype):
+    value = ir.Var("value", ir.ScalarType(dtype), SPAN)
+    gm = ir.Var("gm", ir.TensorType([32], dtype), SPAN)
+    ub = ir.Var("ub", ir.TileType([32], dtype), SPAN)
+    for call in (simt.atomic_add(gm, [0], value), simt.shuffle_idx(value, 0)):
+        assert isinstance(call.type, ir.ScalarType) and call.type.dtype == dtype
+    with pytest.raises(ValueError, match="64-bit"):
+        simt.atomic_add(ub, [0], value)
+    with pytest.raises(ValueError, match="payloads"):
+        simt.redux_add(value)
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP16, DataType.BF16])
+def test_half_precision_cas_is_rejected(dtype):
+    storage = ir.Var("storage", ir.TensorType([32], dtype), SPAN)
+    value = ir.Var("value", ir.ScalarType(dtype), SPAN)
+    with pytest.raises(ValueError, match="CAS floats require FP32"):
+        simt.atomic_cas(storage, [0], value, value)
+
+
+@pytest.mark.parametrize(
+    "source,destination", [(DataType.INDEX, DataType.INT64), (DataType.INT64, DataType.INDEX)]
+)
+def test_bitcast_rejects_index_despite_machine_word_width(source, destination):
+    value = ir.Var("value", ir.ScalarType(source), SPAN)
+    with pytest.raises(ValueError, match="unpacked numeric|supported numeric"):
+        simt.bitcast(value, destination)
+
+
 @pytest.mark.parametrize("query", [simt.thread_idx, simt.block_idx, simt.block_dim, simt.grid_dim])
 @pytest.mark.parametrize("axis", [ir.SimtAxis.X, ir.SimtAxis.Y, ir.SimtAxis.Z])
 def test_typed_queries_round_trip(query, axis):
@@ -126,7 +233,7 @@ def test_vote_predicate_and_round_trip(name):
 
 
 @pytest.mark.parametrize("name", SHUFFLES + REDUCTIONS)
-@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.FP32])
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.UINT32, DataType.FP16, DataType.FP32])
 def test_numeric_collective_type_and_round_trip(name, dtype):
     value = ir.Var("value", ir.ScalarType(dtype), SPAN)
     args = [value, 1] if name in SHUFFLES else [value]
@@ -138,11 +245,11 @@ def test_numeric_collective_type_and_round_trip(name, dtype):
 
 
 @pytest.mark.parametrize("name", SHUFFLES + REDUCTIONS)
-@pytest.mark.parametrize("dtype", [DataType.BOOL, DataType.INDEX, DataType.UINT32, DataType.FP16])
+@pytest.mark.parametrize("dtype", [DataType.BOOL, DataType.INDEX, DataType.BF16, DataType.INT16])
 def test_collective_rejects_unsupported_payload(name, dtype):
     value = ir.Var("value", ir.ScalarType(dtype), SPAN)
     args = [value, 1] if name in SHUFFLES else [value]
-    with pytest.raises(ValueError, match="INT32 or FP32"):
+    with pytest.raises(ValueError, match="requires FP16/FP32"):
         getattr(simt, name)(*args)
 
 
@@ -213,7 +320,7 @@ def test_bitwise_atomic_contract(name, storage_type):
     test_atomic_types_effects_and_round_trip(name, storage_type, DataType.INT32)
     storage = ir.Var("target", storage_type([ir.ConstInt(32, DataType.INDEX, SPAN)], DataType.FP32), SPAN)
     value = ir.ConstFloat(1.0, DataType.FP32, SPAN)
-    with pytest.raises(ValueError, match="bitwise atomic requires INT32"):
+    with pytest.raises(ValueError, match="bitwise atomic requires 32-bit or 64-bit"):
         getattr(simt, name)(storage, [0], value)
     with pytest.raises(ValueError, match="requires exactly"):
         ir.create_op_call(f"simt.{name}", [], {}, SPAN)
@@ -284,10 +391,10 @@ def test_scalar_bitcast_contract(source, destination):
     assert call.type.dtype == destination
     ir.assert_structural_equal(call, pl.simt.bitcast(value, destination).unwrap())
     ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
-    for dtype in (DataType.FP16, DataType.INT64, DataType.UINT32, DataType.BOOL):
+    for dtype in (DataType.FP16, DataType.INT64, DataType.BOOL):
         with pytest.raises(ValueError, match="destination must be"):
             simt.bitcast(value, dtype)
-        with pytest.raises(ValueError, match="requires an FP32 or INT32 scalar"):
+        with pytest.raises(ValueError, match="same bit width|unpacked numeric scalar"):
             simt.bitcast(ir.Var("bad", ir.ScalarType(dtype), SPAN), destination)
     with pytest.raises(ValueError, match="requires dtype"):
         ir.create_op_call("simt.bitcast", [value], {}, SPAN)
@@ -323,11 +430,11 @@ def test_atomic_types_effects_and_round_trip(name, storage_type, dtype):
 
 
 @pytest.mark.parametrize("name", ATOMICS)
-@pytest.mark.parametrize("dtype", [DataType.INT64, DataType.UINT32, DataType.FP16, DataType.BOOL])
+@pytest.mark.parametrize("dtype", [DataType.INT8, DataType.INT16, DataType.FP8E4M3FN, DataType.BOOL])
 def test_atomic_rejects_unsupported_types(name, dtype):
     storage = ir.Var("target", ir.TensorType([8], dtype), SPAN)
     value = ir.Var("value", ir.ScalarType(dtype), SPAN)
-    with pytest.raises(ValueError, match="INT32 or FP32|byte-addressable"):
+    with pytest.raises(ValueError, match="requires 32/64-bit|byte-addressable"):
         getattr(simt, name)(storage, [0], *([value] * (2 if name == "atomic_cas" else 1)))
 
 
@@ -386,22 +493,27 @@ MATH_ARITIES = {
     "mulhi": 2,
     "ftoi": 1,
     "itof": 1,
+    "div": 2,
+    "rem": 2,
+    "mul_i32toi64": 2,
 }
 
 
 @pytest.mark.parametrize("name,arity", MATH_ARITIES.items())
 def test_scalar_math_types_and_round_trip(name, arity):
-    dtype = DataType.INT32 if name in {"prmt", "mulhi", "itof"} else DataType.FP32
+    dtype = DataType.INT32 if name in {"prmt", "mulhi", "itof", "mul_i32toi64"} else DataType.FP32
     args = [ir.Var(f"x{i}", ir.ScalarType(dtype), SPAN) for i in range(arity)]
     call = getattr(simt, name)(*args)
     expected = DataType.INT32 if name == "ftoi" else DataType.FP32 if name == "itof" else dtype
+    if name == "mul_i32toi64":
+        expected = DataType.INT64
     assert call.type.dtype == expected
     ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
     ir.assert_structural_equal(call, getattr(pl.simt, name)(*args).unwrap())
     for count in (0, arity + 1):
         with pytest.raises(ValueError, match="requires exactly"):
             ir.create_op_call(f"simt.{name}", (args * 4)[:count], {}, SPAN)
-    with pytest.raises(ValueError, match="does not accept|Unknown|unknown"):
+    with pytest.raises(ValueError, match="does not accept|only accepts|Unknown|unknown"):
         ir.create_op_call(f"simt.{name}", args, {"fastmath": True}, SPAN)
 
 
@@ -411,8 +523,13 @@ def test_scalar_math_types_and_round_trip(name, arity):
 )
 def test_scalar_math_rejects_unverified_dtypes(name, arity, dtype):
     args = [ir.Var(f"x{i}", ir.ScalarType(dtype), SPAN) for i in range(arity)]
-    with pytest.raises(ValueError, match="scalar operands"):
-        getattr(simt, name)(*args)
+    if (name == "ftoi" and dtype in (DataType.FP16, DataType.BF16)) or (
+        name == "itof" and dtype in (DataType.INT64, DataType.UINT32)
+    ):
+        assert getattr(simt, name)(*args).type.dtype in (DataType.INT32, DataType.FP32)
+    else:
+        with pytest.raises(ValueError, match="scalar operands|input"):
+            getattr(simt, name)(*args)
 
 
 @pytest.mark.parametrize("name", ["ftoi", "itof"])
@@ -479,7 +596,7 @@ def test_conversion_signedness_is_boolean(name, unsigned):
 
 @pytest.mark.parametrize("name,arity", MATH_ARITIES.items())
 def test_scalar_math_rejects_storage_and_mixed_operands(name, arity):
-    dtype = DataType.INT32 if name in {"prmt", "mulhi", "itof"} else DataType.FP32
+    dtype = DataType.INT32 if name in {"prmt", "mulhi", "itof", "mul_i32toi64"} else DataType.FP32
     values = [ir.Var(f"x{i}", ir.ScalarType(dtype), SPAN) for i in range(arity)]
     invalid = [
         ir.Var("storage", ir.TensorType([32], dtype), SPAN),
@@ -487,7 +604,7 @@ def test_scalar_math_rejects_storage_and_mixed_operands(name, arity):
     ]
     for value in invalid:
         # Put the mismatch last so a deducer checking only the first operand fails.
-        with pytest.raises(ValueError, match="scalar operands"):
+        with pytest.raises(ValueError, match="scalar operand|input"):
             getattr(simt, name)(*values[:-1], value)
 
 

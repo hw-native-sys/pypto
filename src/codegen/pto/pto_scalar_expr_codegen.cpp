@@ -431,8 +431,18 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   } else if (inside_simt_function_ && dst_dtype == DataType::BOOL) {
     // Numeric truth is nonzero (including NaN), not the low bit of an integer
     // or an fptosi conversion into i1. Keep Python scalar semantics in SIMT.
-    const auto zero =
-        src_is_float ? GetOrEmitConstant(0.0, src_dtype) : GetOrEmitConstant(int64_t{0}, src_dtype);
+    std::string zero;
+    if (src_is_uint) {
+      const auto signless = NewTemp();
+      const auto type = src_type.substr(1);
+      Emit(signless + " = builtin.unrealized_conversion_cast " + src + " : " + src_type + " to " + type);
+      src = signless;
+      src_type = type;
+      zero = NewTemp();
+      Emit(zero + " = arith.constant 0 : " + type);
+    } else {
+      zero = src_is_float ? GetOrEmitConstant(0.0, src_dtype) : GetOrEmitConstant(int64_t{0}, src_dtype);
+    }
     Emit(result + (src_is_float ? " = arith.cmpf une, " : " = arith.cmpi ne, ") + src + ", " + zero + " : " +
          src_type);
     fs_.current_expr_value = result;
@@ -481,7 +491,17 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
     }
     mlir_op = "arith.index_cast";
   } else if (src_is_float && dst_is_float) {
-    mlir_op = (dst_dtype.GetBit() > src_dtype.GetBit()) ? "arith.extf" : "arith.truncf";
+    if (inside_simt_function_ && src_dtype.GetBit() == dst_dtype.GetBit()) {
+      // FP16 and BF16 have equal width but different exponent/significand
+      // layouts. arith.truncf cannot express this conversion directly.
+      const auto wide = NewTemp();
+      Emit(wide + " = arith.extf " + src + " : " + src_type + " to f32");
+      src = wide;
+      src_type = "f32";
+      mlir_op = "arith.truncf";
+    } else {
+      mlir_op = (dst_dtype.GetBit() > src_dtype.GetBit()) ? "arith.extf" : "arith.truncf";
+    }
   } else if (!src_is_float && !dst_is_float) {
     if (dst_dtype.GetBit() == src_dtype.GetBit()) {
       // MLIR arithmetic casts only change integer width and require signless
