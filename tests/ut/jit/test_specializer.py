@@ -4249,6 +4249,89 @@ def test_unpack_keeps_one_equal_folded_dimension(nested, rhs):
     _specialize_loop_tile_shape(update)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if count > 0:\n    width = 32\n    observed = width + 1\n    width = 64",
+        "if count > 0:\n    width: pl.Scalar[pl.INDEX] = 64",
+        "for i, (state,) in pl.range(0, init_values=(width,)):\n    width = pl.yield_(state + 1)",
+        "width, width = (32, 64)",
+        "if count > 0:\n    width = pl.yield_(64)\nelse:\n    width = pl.yield_(64)",
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True])
+def test_invariant_dimension_at_control_flow_exit(body, nested):
+    if nested:
+        body = "if count > 1:\n" + textwrap.indent(body, "    ")
+    _specialize_loop_tile_shape(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if count > 0:\n    width = 32\n    if count > 1:\n        width = 64",
+        "if count > 0:\n    width: pl.Scalar[pl.INDEX] = count",
+        "for i, (state,) in pl.range(0, init_values=(count,)):\n    width = pl.yield_(64)",
+        "width, width = (64, count)",
+        "if count > 0:\n    width = pl.yield_(32)\nelse:\n    width = pl.yield_(64)",
+    ],
+)
+def test_runtime_dimension_at_control_flow_exit(body):
+    with pytest.raises(ParserError, match="compile-time constant"):
+        _specialize_loop_tile_shape(body)
+
+
+def test_restoration_preserves_intermediate_reads_and_rhs_evaluation():
+    src = """def f(a, flag):
+        width = a.shape[1]
+        if flag:
+            width = 32
+            observe(width)
+            width = 64
+        width, width = observe(width), 64
+        return width
+    """
+    calls = []
+    namespace = {"observe": calls.append}
+    transformer = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set())
+    exec(ast.unparse(transformer.visit(ast.parse(src))), namespace)
+    assert namespace["f"](None, True) == 64
+    assert calls == [32, 64]
+    calls.clear()
+    assert namespace["f"](None, False) == 64
+    assert calls == [64]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "for i, (index, size) in pl.range(0, init_values=(count, width)):\n"
+        "    result, width = pl.yield_(index + 1, size + 1)",
+        "if count > 0:\n    result, width = pl.yield_(count, width)\n"
+        "else:\n    result, width = pl.yield_(count + 1, 64)",
+    ],
+)
+def test_constant_output_with_dynamic_sibling(body):
+    _specialize_loop_tile_shape(body)
+
+
+def test_repeated_unpack_uses_last_changed_value():
+    source = """def f(a):
+        width = a.shape[1]
+        width, width = (64, 48)
+        return width
+    """
+    namespace: dict = {}
+    transformer = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set())
+    exec(ast.unparse(transformer.visit(ast.parse(source))), namespace)
+    assert namespace["f"](None) == 48
+
+
+def test_folded_annotated_store_still_validates_annotation():
+    with pytest.raises(ParserError, match="dtype|type|Type"):
+        _specialize_loop_tile_shape("if count > 0:\n    width: pl.Tensor[[1], pl.FP32] = 64")
+
+
 def test_optional_loop_publishes_to_existing_binding():
     @pl.jit.incore
     def select_row(
