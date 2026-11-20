@@ -17,9 +17,9 @@ import sys
 import types
 from typing import Any
 
+from pypto.language.diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError
 from pypto.pypto_core import ir
 
-from .diagnostics.exceptions import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP
 from .span_tracker import active_source_map, ast_column_to_span_column
 

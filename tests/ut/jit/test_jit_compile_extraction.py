@@ -27,7 +27,7 @@ from pypto.compile_profiling import CompileProfiler
 from pypto.ir import OptimizationStrategy, PassDumpLevel
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import jit
-from pypto.language.parser.diagnostics.exceptions import ParserTypeError
+from pypto.language.diagnostics import ParserTypeError
 from pypto.pypto_core import ir, passes
 from pypto.runtime.runner import ExecutionMode, RunConfig
 

@@ -15,7 +15,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.language.parser.ast_parser import ASTParser
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.language.parser.text_parser import parse_program
 
 _OP_SYSTEM_TASK_INVALID = ir.get_op("system.task_invalid").name
