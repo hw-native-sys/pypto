@@ -1551,8 +1551,8 @@ class TestRemainderFamilyCodegen:
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[2, 784], pl.FP32] = pl.tile.create(
-                        [2, 784], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 912], pl.FP32] = pl.tile.create(
+                        [2, 912], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     return pl.store(result, [0, 0], out)
@@ -2060,9 +2060,9 @@ class TestRemainderFamilyCodegen:
             # INT32 keeps three (TREM) or two (TREMS) data areas in tmp.
             ("rem", pl.INT32, 64, False, 208),
             ("rems", pl.INT32, 64, False, 144),
-            ("rem", pl.FP32, 64, True, 784),
-            ("rem", pl.FP32, 128, True, 1424),
-            ("rem", pl.FP32, 256, True, 2832),
+            ("rem", pl.FP32, 64, True, 912),
+            ("rem", pl.FP32, 128, True, 1680),
+            ("rem", pl.FP32, 256, True, 3344),
         ],
     )
     @pytest.mark.parametrize("shortfall", [0, 1])

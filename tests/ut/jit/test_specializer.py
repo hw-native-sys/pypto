@@ -43,7 +43,7 @@ from pypto.jit.specializer import (
     specialize,
     tile_annotation_fingerprints,
 )
-from pypto.language.parser.diagnostics import UndefinedVariableError
+from pypto.language.parser.diagnostics import ParserError, UndefinedVariableError
 from pypto.pypto_core import DataType, ir, passes
 from pypto.runtime.runner import ExecutionMode, RunConfig
 
@@ -379,6 +379,7 @@ class TestBodyTransformer:
             tensor_meta=tensor_meta,
             dep_names=dep_names or set(),
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = []
         for stmt in func_def.body:
             result = transformer.visit(stmt)
@@ -595,6 +596,7 @@ class TestBodyTransformer:
             dep_names=set(),
             py_globals=py_globals,
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = []
         for stmt in func_def.body:
             result = transformer.visit(stmt)
@@ -1490,6 +1492,7 @@ class TestVariableRebinding:
             param_names=param_names,
             initial_used_names=all_defined,
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = []
         for stmt in func_def.body:
             result = transformer.visit(stmt)
@@ -1550,6 +1553,262 @@ class TestVariableRebinding:
             for node in ast.walk(ast.parse(transformed))
             if isinstance(node, ast.Assign)
         )
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ("x = 1\nx = 2\na, x = (x + 1, x + 2)\nreturn a, x", (3, 4)),
+            ("a, x = (1, 2)\nx = x + 1\nreturn a, x", (1, 3)),
+            ("x = 1\ny = 2\nx, y = y, x\nreturn x, y", (2, 1)),
+            ("x = 0\nx, x = (1, 2)\nreturn x", 2),
+            ("x = 0\nx = 1\nfor i in range(3):\n    unused, x = (i, x + 1)\nreturn x", 4),
+            ("x = 1\na, (b, x) = (2, (3, 4))\nreturn a, b, x", (2, 3, 4)),
+        ],
+    )
+    def test_tuple_rebinding_preserves_python_values(self, body, expected):
+        source = "def f():\n" + textwrap.indent(body, "    ")
+        namespace: dict = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"]() == expected
+
+    def test_tuple_rebinding_replaces_folded_shape(self):
+        source = """
+            def f(a):
+                width = a.shape[1]
+                width, half = observe(width)
+                return width, half
+        """
+        calls = []
+
+        def observe(value):
+            calls.append(value)
+            return value + 1, value // 2
+
+        namespace: dict = {"observe": observe}
+        exec(self._transform(source, {"a": TensorMeta((1, 128), DataType.FP32)}), namespace)
+        assert namespace["f"](None) == (129, 64)
+        assert calls == [128]
+
+    def test_unpack_preserves_fold_without_eliding_sibling_call(self):
+        source = """
+            def f(a, change, observe):
+                width = a.shape[1]
+                width, other = width + 0, observe(width)
+                if change:
+                    width, other = 32, observe(width)
+                return width, other
+        """
+        values = []
+
+        def observe(value):
+            values.append(value)
+            return value + 1
+
+        namespace: dict = {}
+        exec(self._transform(source, {"a": TensorMeta((1, 64), DataType.FP32)}), namespace)
+        assert namespace["f"](None, False, observe) == (64, 65)
+        assert namespace["f"](None, True, observe) == (32, 65)
+        assert values == [64, 64, 64]
+
+    @pytest.mark.parametrize("other_arm", ["x = 4", "x = 3\nx, y = x + 1, 0"])
+    def test_tuple_rebound_branch_local_is_available_after_if(self, other_arm):
+        source = "def f(flag):\n    if flag:\n        x = 1\n        x, y = x + 1, 0\n    else:\n"
+        source += textwrap.indent(other_arm, "        ") + "\n    return x\n"
+        namespace: dict = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](True) == 2
+        assert namespace["f"](False) == 4
+
+    @pytest.mark.parametrize(
+        ("nested", "result"),
+        [
+            ("if inner:\n    row = 10\nelse:\n    y = 20\n    y = y + 1\n    row = y", "row"),
+            ("if inner:\n    y = 10\n    y = y + 1\n    row = y\nelse:\n    row = 20", "row"),
+            ("for i in pl.range(inner):\n    y = i\n    y = y + 1\nrow = 10", "row"),
+            (
+                "for i in pl.range(1):\n    if inner:\n        break\n    y = i\n    y = y + 1\nrow = 10",
+                "row",
+            ),
+            ("if inner:\n    y = 10\n    y = y + 1\nelse:\n    y = 20\n    y = y + 1", "y"),
+            ("if inner:\n    return 5\nelse:\n    y = 20\n    y = y + 1", "y"),
+            ("for i in pl.range(1):\n    y = 10\n    y = y + 1", "y"),
+            ("while True:\n    y = 10\n    y = y + 1\n    break", "y"),
+        ],
+    )
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_branch_merge_reads_only_definite_bindings(self, nested, result, reverse):
+        other = "y = 30\ny = y + 1\nrow = y"
+        left, right = (other, nested) if reverse else (nested, other)
+        source = "def f(outer, inner):\n    if outer:\n" + textwrap.indent(left, "        ")
+        source += "\n    else:\n" + textwrap.indent(right, "        ") + f"\n    return {result}"
+        original: dict = {"pl": SimpleNamespace(range=range)}
+        transformed = original.copy()
+        exec(source, original)
+        exec(self._transform(source), transformed)
+        for outer in (False, True):
+            for inner in (0, 1):
+                assert transformed["f"](outer, inner) == original["f"](outer, inner)
+
+    def test_sibling_spmd_scatter_temporaries_can_change_type(self):
+        """Independent scatter kernels use the same local for INDEX and INT32."""
+
+        @pl.jit
+        def scatter(positions: pl.Tensor[[4], pl.INT32], output: pl.Out[pl.Tensor[[4], pl.INT32]]):
+            for phase in pl.spmd(1):
+                if phase >= 0:
+                    for row in pl.range(4):
+                        if row >= 0:
+                            relative = row + phase
+                            output = pl.write(output, [row], pl.cast(relative, pl.INT32))
+            for phase in pl.spmd(1):
+                if phase >= 0:
+                    for row in pl.range(4):
+                        if row >= 0:
+                            relative = pl.read(positions, [row])
+                            output = pl.write(output, [row], relative)
+            return output
+
+        assert isinstance(scatter.specialize(), ir.Program)
+
+    def test_conditional_overwrite_keeps_loop_back_edge(self):
+        source = """
+            def f(flags):
+                for setup in range(1):
+                    x = 1
+                    x = x + 1
+                seen = []
+                for flag in flags:
+                    seen.append(x)
+                    if flag:
+                        x = 7
+                    else:
+                        x = 9
+                return seen
+        """
+        namespace: dict = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"]([True, False, True]) == [2, 7, 9]
+
+    def test_conditional_unpack_preserves_previous_loop_binding(self):
+        # The incoming x already has an alias from a preceding sibling loop.
+        source = """
+            def f(seed, flag, update):
+                for i in range(1):
+                    x = seed
+                    x = x + 1
+                if flag:
+                    x, y = x + 10, 0
+                else:
+                    x, y = x + 20, 0
+                if update:
+                    x, y = x + 100, 0
+                return x
+        """
+        namespace: dict = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](1, True, False) == 12
+        assert namespace["f"](1, False, False) == 22
+        assert namespace["f"](1, True, True) == 112
+
+    @pytest.mark.parametrize("transfer", ["break", "continue"])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_branch_alias_publication_keeps_loop_transfer_last(self, transfer, reverse):
+        escape = f"x = i + 1\nx = x + 2\n{transfer}"
+        normal = "x = i + 1\nx = x + 3"
+        left, right = (normal, escape) if reverse else (escape, normal)
+        branch = (
+            "if i == flag:\n" + textwrap.indent(left, "    ") + "\nelse:\n" + textwrap.indent(right, "    ")
+        )
+        body = "total = flag - flag\nfor i in pl.range(3):\n" + textwrap.indent(
+            branch + "\ntotal = total + x", "    "
+        )
+        source = "def f(a: pl.Tensor[[32, 64], pl.FP32], flag: pl.Scalar[pl.INDEX]):\n"
+        source += textwrap.indent(body + "\ntile = pl.load(a, [total, 0], [1, 64])\nreturn a", "    ")
+        ctx = _make_ctx(
+            "f",
+            source,
+            func_type="incore",
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((32, 64), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INDEX},
+            auto_scope=False,
+        )
+        rendered = specialize("_TestClass", [ctx])
+        program = pl.parse(rendered)
+        assert isinstance(program, ir.Program)
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            passes.convert_to_ssa()(passes.ctrl_flow_transform()(program))
+        arm = next(stmt for stmt in ast.walk(ast.parse(rendered)) if isinstance(stmt, ast.If))
+        assert isinstance((arm.orelse if reverse else arm.body)[-1], (ast.Break, ast.Continue))
+
+    @pytest.mark.parametrize(
+        "setup", ["if flag:\n    x = 1\nelse:\n    x = 2", "for i in range(1):\n    x = 0\n    x = 1"]
+    )
+    def test_write_before_unpack_keeps_zero_trip_predecessor(self, setup):
+        body = setup + "\nfor j in range(count):\n    x = 10\n    x, y = x + 1, 0\nreturn x"
+        namespace: dict = {}
+        exec(self._transform("def f(flag, count):\n" + textwrap.indent(body, "    ")), namespace)
+        assert namespace["f"](True, 0) == 1
+        assert namespace["f"](True, 2) == 11
+
+    @pytest.mark.parametrize(
+        ("statement", "expected"),
+        [
+            ("for i in range(count):", 66),
+            ("while next(steps, False) and width < 64 + count:", 66),
+            ("if count:", 65),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "assignment", ["width = width + 1", "width: int = width + 1", "width, other = (width + 1, 0)"]
+    )
+    def test_conditional_write_to_folded_shape(self, statement, expected, assignment):
+        body = f"width = a.shape[1]\n{statement}\n    {assignment}\nreturn width"
+        source = "def f(a, count, steps):\n" + textwrap.indent(body, "    ")
+        namespace: dict = {}
+        exec(self._transform(source, {"a": TensorMeta((1, 64), DataType.FP32)}), namespace)
+        assert namespace["f"](None, 0, iter([True])) == 64
+        assert namespace["f"](None, 2, iter([True] * 3)) == expected
+
+    @pytest.mark.parametrize(
+        ("update", "expected_trace"),
+        [("x = 3", [1, 3]), ("x = x + 1", [1, 2, 3]), ("x, _ = (x + 1, 0)", [1, 2, 3])],
+    )
+    def test_while_preserves_previous_loop_binding(self, update, expected_trace):
+        source = f"""
+            def f(seed, guard):
+                for i in range(1):
+                    x = seed
+                    x = x + 1
+                while guard(x):
+                    {update}
+                return x
+        """
+        namespace: dict = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](0, lambda x: False) == 1
+        observed = []
+
+        def guard(x):
+            observed.append(x)
+            assert len(observed) <= 3
+            return x < 3
+
+        assert namespace["f"](0, guard) == 3
+        assert observed == expected_trace
+
+    @pytest.mark.parametrize("scope", ["for width in pl.range(2):", "with pl.simt_scope():"])
+    def test_private_write_keeps_outer_dimension_folded(self, scope):
+        source = f"""
+            def f(a, flag):
+                width = a.shape[1]
+                if flag:
+                    {scope}
+                        width = 32
+                return width
+        """
+        out = self._transform(source, {"a": TensorMeta((1, 64), DataType.FP32)})
+        assert "return 64" in out
 
     def test_rebind_generates_fresh_name(self):
         src = """
@@ -3885,10 +4144,455 @@ def test_constexpr_branch_discards_incompatible_dead_tile_store(mode):
     _specialized_function(ctx, source)
 
 
+@pytest.mark.parametrize("outer", ["if count > 0:", "for i in pl.range(count):"])
+@pytest.mark.parametrize("dead", ["False", "MODE != 0", "width != 64"])
+def test_dead_nested_write_preserves_static_tile_shape(outer, dead):
+    ctx = _make_ctx(
+        "kernel",
+        f"""
+        def kernel(a: pl.Tensor[[1, 64], pl.FP32], count: pl.Scalar[pl.INDEX], MODE: pl.constexpr):
+            width = a.shape[1]
+            {outer}
+                if {dead}:
+                    width = 32
+            tile = pl.tile.create([1, width], pl.FP32)
+            return tile
+        """,
+        func_type="inline",
+        param_names=["a", "count", "MODE"],
+        tensor_meta={"a": TensorMeta((1, 64), DataType.FP32)},
+        scalar_dtypes={"count": DataType.INDEX},
+        auto_scope=False,
+    )
+    ctx.constexpr_values = {"MODE": "0"}
+    source = specialize("_TestClass", [ctx])
+    _specialized_function(ctx, source)
+    assert "pl.tile.create([1, 64]" in source
+
+
+@pytest.mark.parametrize(
+    "loop",
+    [
+        "for i in pl.range(0):",
+        "for i in pl.range(2, 4, -1):",
+        "for i in pl.range(width // 128):",
+        "while False:",
+        "while width // 128 > 0:",
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True])
+def test_static_empty_loop_preserves_folded_dimension(loop, nested):
+    body = f"{loop}\n    width = 32"
+    if nested:
+        body = "if flag:\n" + textwrap.indent(body, "    ")
+    source = (
+        "def f(a, flag):\n    width = a.shape[1]\n" + textwrap.indent(body, "    ") + "\n    return width"
+    )
+    tree = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set(), param_names=["a", "flag"]).visit(
+        ast.parse(source)
+    )
+    assert "return 64" in ast.unparse(ast.fix_missing_locations(tree))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("yield_result", [False, True])
+@pytest.mark.parametrize(
+    ("initial", "condition"), [("count", "False"), ("0", "state > 0"), ("count", "width != 64")]
+)
+def test_false_explicit_while_preserves_static_tile_shape(nested, yield_result, initial, condition):
+    body = textwrap.dedent(f"""\
+        for (state,) in pl.while_(init_values=({initial},)):
+            pl.cond({condition})
+            width = 32""")
+    if yield_result:
+        body += "\n    result = pl.yield_(state + 1)\ncount = result"
+    if nested:
+        body = "if count > 0:\n" + textwrap.indent(body, "    ")
+    source = _specialize_loop_tile_shape(body)
+    if yield_result:
+        assert "result = pl.yield_(state)" in source
+
+
+def _specialize_loop_tile_shape(body):
+    ctx = _make_ctx(
+        "kernel",
+        "def kernel(a: pl.Tensor[[1, 64], pl.FP32], count: pl.Scalar[pl.INDEX]):\n"
+        "    width = a.shape[1]\n"
+        + textwrap.indent(body, "    ")
+        + "\n    tile = pl.tile.create([1, width], pl.FP32)\n    return tile",
+        func_type="inline",
+        param_names=["a", "count"],
+        tensor_meta={"a": TensorMeta((1, 64), DataType.FP32)},
+        scalar_dtypes={"count": DataType.INDEX},
+        auto_scope=False,
+    )
+    source = specialize("_TestClass", [ctx])
+    program = pl.parse(source)
+    assert isinstance(program, ir.Program)
+    passes.convert_to_ssa()(program)
+    assert "pl.tile.create([1, 64]" in source
+    return source
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    ("iterator", "has_carry"),
+    [
+        ("pl.pipeline(0, stage=2)", False),
+        ('pl.range(0, attrs={"tag": 1})', False),
+        ("pl.range(0, init_values=(count,))", True),
+        ("pl.parallel(4, 0, init_values=(count,))", True),
+        ("pl.unroll(0, init_values=(count,))", True),
+        ("pl.pipeline(0, stage=2, init_values=(count,))", True),
+    ],
+)
+def test_empty_range_with_keywords_preserves_static_tile_shape(iterator, has_carry, nested):
+    target = "i, (state,)" if has_carry else "i"
+    body = f"for {target} in {iterator}:\n    width = 32"
+    if has_carry:
+        body += "\n    result = pl.yield_(state + 1)\ncount = result"
+    if nested:
+        body = "if count > 0:\n" + textwrap.indent(body, "    ")
+    source = _specialize_loop_tile_shape("state = a.shape[0]\n" + body)
+    if has_carry:
+        assert "result = pl.yield_(state)" in source
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_empty_hardware_loop_keeps_its_required_scope_and_carry(ascend_backend):
+    loop = "for i, (state,) in pl.hardware_loop(stop=0, init_values=(count,)):\n"
+    loop += "    width = 32\n    result = pl.yield_(state + 1)"
+    source = _specialize_loop_tile_shape("with pl.reg_scope():\n" + textwrap.indent(loop, "    "))
+    assert "pl.hardware_loop(stop=0, init_values=(count,))" in source
+    assert "result = pl.yield_(state)" in source
+    with pytest.raises(ParserError, match="requires an enclosing pl.reg_scope"):
+        _specialize_loop_tile_shape(loop)
+
+
+@pytest.mark.parametrize("rhs", ["64", "a.shape[1]", "width + 0"])
+@pytest.mark.parametrize("header", ["if count > 0:", "for i in pl.range(count):"])
+def test_value_preserving_shape_write_keeps_static_tile(rhs, header):
+    _specialize_loop_tile_shape(f"{header}\n    width = {rhs}")
+
+
+@pytest.mark.parametrize(
+    "update",
+    ["height, width = a.shape", "height, width = (1, 64)", "width = same_width = 64"],
+)
+def test_value_preserving_multi_target_shape_write(update):
+    _specialize_loop_tile_shape("height, same_width = a.shape\nif count > 0:\n    " + update)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("rhs", ["(64, 0)", "(width + 0, count + 1)", "(a.shape[1], count)"])
+def test_unpack_keeps_one_equal_folded_dimension(nested, rhs):
+    update = f"width, other = {rhs}"
+    if nested:
+        update = "if count > 0:\n    " + update
+    _specialize_loop_tile_shape(update)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if count > 0:\n    width = 32\n    observed = width + 1\n    width = 64",
+        "if count > 0:\n    width: pl.Scalar[pl.INDEX] = 64",
+        "for i, (state,) in pl.range(0, init_values=(width,)):\n    width = pl.yield_(state + 1)",
+        "width, width = (32, 64)",
+        "if count > 0:\n    width = pl.yield_(64)\nelse:\n    width = pl.yield_(64)",
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True])
+def test_invariant_dimension_at_control_flow_exit(body, nested):
+    if nested:
+        body = "if count > 1:\n" + textwrap.indent(body, "    ")
+    _specialize_loop_tile_shape(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if count > 0:\n    width = 32\n    if count > 1:\n        width = 64",
+        "if count > 0:\n    width: pl.Scalar[pl.INDEX] = count",
+        "for i, (state,) in pl.range(0, init_values=(count,)):\n    width = pl.yield_(64)",
+        "width, width = (64, count)",
+        "if count > 0:\n    width = pl.yield_(32)\nelse:\n    width = pl.yield_(64)",
+    ],
+)
+def test_runtime_dimension_at_control_flow_exit(body):
+    with pytest.raises(ParserError, match="compile-time constant"):
+        _specialize_loop_tile_shape(body)
+
+
+def test_restoration_preserves_intermediate_reads_and_rhs_evaluation():
+    src = """def f(a, flag):
+        width = a.shape[1]
+        if flag:
+            width = 32
+            observe(width)
+            width = 64
+        width, width = observe(width), 64
+        return width
+    """
+    calls = []
+    namespace = {"observe": calls.append}
+    transformer = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set())
+    exec(ast.unparse(transformer.visit(ast.parse(src))), namespace)
+    assert namespace["f"](None, True) == 64
+    assert calls == [32, 64]
+    calls.clear()
+    assert namespace["f"](None, False) == 64
+    assert calls == [64]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "for i, (index, size) in pl.range(0, init_values=(count, width)):\n"
+        "    result, width = pl.yield_(index + 1, size + 1)",
+        "if count > 0:\n    result, width = pl.yield_(count, width)\n"
+        "else:\n    result, width = pl.yield_(count + 1, 64)",
+    ],
+)
+def test_constant_output_with_dynamic_sibling(body):
+    _specialize_loop_tile_shape(body)
+
+
+def test_repeated_unpack_uses_last_changed_value():
+    source = """def f(a):
+        width = a.shape[1]
+        width, width = (64, 48)
+        return width
+    """
+    namespace: dict = {}
+    transformer = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set())
+    exec(ast.unparse(transformer.visit(ast.parse(source))), namespace)
+    assert namespace["f"](None) == 48
+
+
+def test_folded_annotated_store_still_validates_annotation():
+    with pytest.raises(ParserError, match="dtype|type|Type"):
+        _specialize_loop_tile_shape("if count > 0:\n    width: pl.Tensor[[1], pl.FP32] = 64")
+
+
+def test_optional_loop_publishes_to_existing_binding():
+    @pl.jit.incore
+    def select_row(
+        src: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]], count: pl.Scalar[pl.INDEX]
+    ):
+        row = count + 2
+        if count >= 0:
+            for i, (state,) in pl.range(count, init_values=(row,)):
+                row = pl.yield_(state + 1)
+        pl.store(pl.load(src, [row, 0], [1, 64]), [0, 0], out)
+        return out
+
+    @pl.jit
+    def entry(
+        src: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]], count: pl.Scalar[pl.INDEX]
+    ):
+        return select_row(src, out, count)
+
+    assert entry.compile(config=RunConfig(backend_type=BackendType.Ascend910)).program is not None
+
+
+def test_value_preserving_shape_write_does_not_drop_calls_or_changed_values():
+    source = """def f(a, flag):
+        width = a.shape[1]
+        if flag:
+            width = 32
+            width = observe(width)
+        else:
+            width = 64
+        return width
+    """
+    calls = []
+
+    def observe(width):
+        calls.append(width)
+        return 64
+
+    namespace: dict = {"observe": observe}
+    transformer = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set(), param_names=["a", "flag"])
+    exec(ast.unparse(transformer.visit(ast.parse(source))), namespace)
+    assert namespace["f"](None, False) == 64
+    assert namespace["f"](None, True) == 64
+    assert calls == [32]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_folded_writes_in_opposite_arms_keep_static_shape(reverse, nested):
+    write = "height = 2"
+    guarded = "if height != 1:\n    width = 32"
+    left, right = (guarded, write) if reverse else (write, guarded)
+    branch = "if count > 1:\n" + textwrap.indent(left, "    ") + "\nelse:\n" + textwrap.indent(right, "    ")
+    if nested:
+        branch = "if count > 0:\n" + textwrap.indent(branch, "    ")
+    _specialize_loop_tile_shape("height = a.shape[0]\n" + branch)
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "if count > 1:\n    height = 2\nelse:\n    for i in pl.range(height // 2):\n        width = 32",
+        "for i in pl.range(count):\n    if i > 0:\n        height = 2\n        break\n"
+        "    if height != 1:\n        width = 32",
+    ],
+)
+def test_folded_writes_on_unreachable_loop_paths_keep_static_shape(branch):
+    _specialize_loop_tile_shape("height = a.shape[0]\n" + branch)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if flag:\n    height = 2\n    if height != 1:\n        width = 32",
+        "if flag:\n    height = 2\nif height != 1:\n    width = 32",
+        "for i in range(2):\n    if i == 0:\n        height = 2\n    elif height != 1:\n        width = 32",
+        "for i in range(2):\n    if i == 0:\n        height = 2\n        continue\n"
+        "    if height != 1:\n        width = 32",
+    ],
+)
+def test_folded_guard_observes_writes_on_reaching_paths(body):
+    source = (
+        "def f(a, flag):\n    height, width = a.shape\n"
+        + textwrap.indent(body, "    ")
+        + "\n    return width"
+    )
+    transformer = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set(), param_names=["a", "flag"])
+    namespace: dict = {}
+    exec(ast.unparse(transformer.visit(ast.parse(source))), namespace)
+    assert namespace["f"](None, True) == 32
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("update", ["width = 32", "width = width + 1"])
+@pytest.mark.parametrize(
+    "header",
+    [
+        "for i, (state,) in pl.range(count, init_values=(count,)):",
+        "for (state,) in pl.while_(init_values=(count,)):\n    pl.cond(state > 1)",
+    ],
+)
+def test_iter_arg_loop_only_publishes_yield_outputs(update, nested, header):
+    body = f"{header}\n    {update}\n"
+    body += "    result = pl.yield_(state + width)\ncount = result"
+    if nested:
+        body = "if count > 0:\n" + textwrap.indent(body, "    ")
+    source = _specialize_loop_tile_shape(body)
+    assert "width_v1 = 64\n" not in source
+
+
+@pytest.mark.parametrize(
+    "transfer", ["break", "continue", "if True:\n    break", "if count > 0:\n    break\nelse:\n    continue"]
+)
+def test_unreachable_write_after_loop_control_keeps_tile_shape(transfer):
+    body = "for i in pl.range(count):\n" + textwrap.indent(transfer + "\nwidth = 32", "    ")
+    _specialize_loop_tile_shape(body)
+
+
+@pytest.mark.parametrize(
+    "transfer",
+    ["if flag:\n    break", "for j in range(1):\n    break"],
+)
+def test_reachable_write_after_conditional_or_nested_break(transfer):
+    body = "width = a.shape[1]\nfor i in range(2):\n" + textwrap.indent(transfer + "\nwidth = 32", "    ")
+    source = "def f(a, flag):\n" + textwrap.indent(body + "\nreturn width", "    ")
+    transformer = BodyTransformer({"a": TensorMeta((1, 64), DataType.FP32)}, set(), param_names=["a", "flag"])
+    tree = transformer.visit(ast.parse(source))
+    namespace: dict = {}
+    exec(ast.unparse(tree), namespace)
+    assert namespace["f"](None, False) == 32
+    assert namespace["f"](None, True) == (64 if transfer.startswith("if") else 32)
+
+
+def test_explicit_while_condition_uses_iteration_argument():
+    source = """
+        def f(a, count):
+            state, width = a.shape
+            for (state,) in pl.while_(init_values=(count,)):
+                pl.cond(state > 1)
+                width = 32
+                result = pl.yield_(state - 1)
+            return width
+    """
+    transformer = BodyTransformer(
+        {"a": TensorMeta((1, 64), DataType.FP32)}, set(), param_names=["a", "count"]
+    )
+    tree = transformer.visit(ast.parse(textwrap.dedent(source)))
+    # The incoming state is dynamic despite the same-named outer dimension being 1.
+    rendered = ast.unparse(tree)
+    assert "pl.cond(state > 1)" in rendered
+    assert "width_v1 = 32" in rendered
+    assert "return 64" in rendered
+
+
+def test_jit_nested_if_only_merges_definitely_bound_locals():
+    """Every path defines row. An unconditional merge of y introduces a free SSA variable."""
+
+    @pl.jit.incore
+    def select_row(
+        src: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]], flag: pl.Scalar[pl.INDEX]
+    ):
+        if flag > 0:
+            if flag > 1:
+                row = flag - flag
+            else:
+                y = flag + 1
+                y = y + 1
+                row = y
+        else:
+            y = flag + 2
+            y = y + 1
+            row = y
+        tile = pl.load(src, [row, 0], [1, 64])
+        pl.store(tile, [0, 0], out)
+        return out
+
+    @pl.jit
+    def entry(
+        src: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]], flag: pl.Scalar[pl.INDEX]
+    ):
+        return select_row(src, out, flag)
+
+    assert entry.compile(config=RunConfig(backend_type=BackendType.Ascend910)).program is not None
+
+
 def test_runtime_condition_remains_an_ir_branch():
     tree = ast.parse("if count == 2:\n    x = 1\nelse:\n    x = 3\n")
     transformed = BodyTransformer({}, set(), param_names=["count"]).visit(tree)
     assert any(isinstance(node, ast.If) for node in ast.walk(transformed))
+
+
+@pytest.mark.parametrize(
+    ("setup", "output"),
+    [("pass", "result = pl.yield_(width)"), ("result = 1", "result, other = pl.yield_(width, width)")],
+)
+def test_runtime_if_keeps_explicit_yields_last(setup, output):
+    ctx = _make_ctx(
+        "select",
+        f"""
+        def select(a: pl.Tensor[[8, 64], pl.FP32], flag: pl.Scalar[pl.BOOL]):
+            if flag:
+                width = a.shape[1]
+                {setup}
+                {output}
+            else:
+                width = a.shape[0]
+                {setup}
+                {output}
+            return result
+        """,
+        func_type="inline",
+        param_names=["a", "flag"],
+        tensor_meta={"a": TensorMeta((8, 64), DataType.FP32)},
+        scalar_dtypes={"flag": DataType.BOOL},
+        auto_scope=False,
+    )
+    program = pl.parse(specialize("_TestClass", [ctx]))
+    assert isinstance(program, ir.Program)
+    passes.convert_to_ssa()(program)
 
 
 @pytest.mark.parametrize(

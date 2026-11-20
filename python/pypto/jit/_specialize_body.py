@@ -16,6 +16,8 @@ and rebinding rules stay aligned with emitted source.
 
 import ast
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from copy import deepcopy
 from typing import Any, TypeVar, cast
 
 from pypto.language.diagnostics import ParserError
@@ -44,11 +46,11 @@ def _scope_call_name(value: ast.expr | None) -> str | None:
     return None
 
 
-def _constant_condition(node: ast.expr) -> bool | None:
-    """Resolve a literal-only condition using the DSL's expression semantics."""
+def _constant_scalar(node: ast.expr) -> int | bool | None:
+    """Resolve literal integer and boolean expressions using the DSL's semantics."""
     if isinstance(node, ast.Constant):
-        return node.value if isinstance(node.value, bool) else None
-    if not isinstance(node, (ast.Compare, ast.BoolOp, ast.UnaryOp)):
+        return node.value if isinstance(node.value, int) else None
+    if not isinstance(node, (ast.Compare, ast.BoolOp, ast.UnaryOp, ast.BinOp)):
         return None
     literal_nodes = (
         ast.Constant,
@@ -69,11 +71,16 @@ def _constant_condition(node: ast.expr) -> bool | None:
     # Names and calls would need the actual function scope. Let the normal
     # parser handle those conditions, and retain diagnostics for invalid DSL.
     try:
-        condition = ASTParser("<JIT condition>", []).parse_expression(ast.fix_missing_locations(node))
-        folded = arith.Analyzer().simplify(condition)
+        expr = ASTParser("<JIT constant>", []).parse_expression(ast.fix_missing_locations(node))
+        folded = arith.Analyzer().simplify(expr)
     except (ParserError, TypeError, ValueError, OverflowError):
         return None
-    return folded.value if isinstance(folded, ir.ConstBool) else None
+    return folded.value if isinstance(folded, (ir.ConstInt, ir.ConstBool)) else None
+
+
+def _constant_condition(node: ast.expr) -> bool | None:
+    value = _constant_scalar(node)
+    return value if isinstance(value, bool) else None
 
 
 class BodyTransformer(ast.NodeTransformer):
@@ -141,6 +148,7 @@ class BodyTransformer(ast.NodeTransformer):
         # constant values when all dimensions are static.  Used by visit_Name
         # to inline constants and by visit_Assign to suppress the assignment.
         self._shape_inlined: dict[str, int] = {}
+        self._proven_empty_loops: set[ast.For | ast.While] = set()
         # Alpha-renaming support: tracks how many times each local has been assigned
         # (so we can generate x_v1, x_v2, ... on rebindings).
         self._assign_count: dict[str, int] = {}
@@ -150,6 +158,7 @@ class BodyTransformer(ast.NodeTransformer):
         # Reverse map: generated alias → original user variable name.
         # Used to rewrite error messages so users see their original names.
         self._alias_to_original: dict[str, str] = {}
+        self._conditional_inputs: dict[ast.stmt, set[str]] = {}
         # Tracks the scope depth at which each variable was first assigned.
         # Rebindings at a deeper scope (e.g. inside a for/with) are loop-carried
         # updates and must NOT be renamed.
@@ -181,13 +190,8 @@ class BodyTransformer(ast.NodeTransformer):
             self._assign_depth[var_name] = self._scope_depth
         self._used_names.add(var_name)
 
-    def _rebind(self, var_name: str) -> str:
-        """Generate a fresh name for a rebinding of ``var_name``.
-
-        Returns the new name and updates ``_var_renames`` so subsequent reads
-        of ``var_name`` resolve to the new alias.  Skips candidate names that
-        are already used by the user to avoid collisions.
-        """
+    def _fresh_alias(self, var_name: str) -> str:
+        """Reserve a unique spelling without changing the current binding."""
         count = self._assign_count[var_name]
         new_name = f"{var_name}_v{count}"
         # Skip any candidate that collides with a user-defined name.
@@ -195,13 +199,23 @@ class BodyTransformer(ast.NodeTransformer):
             count += 1
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
+        self._alias_to_original[new_name] = var_name
+        self._used_names.add(new_name)
+        return new_name
+
+    def _rebind(self, var_name: str) -> str:
+        """Generate a fresh name for a rebinding of ``var_name``.
+
+        Returns the new name and updates ``_var_renames`` so subsequent reads
+        of ``var_name`` resolve to the new alias.  Skips candidate names that
+        are already used by the user to avoid collisions.
+        """
+        new_name = self._fresh_alias(var_name)
         if self._graph_captures is not None:
             folded = self._active_shape_fold(var_name)
             previous = self._var_renames.get(var_name, var_name)
             self.graph_rebinds[new_name] = previous if folded is None else folded
         self._var_renames[var_name] = new_name
-        self._alias_to_original[new_name] = var_name
-        self._used_names.add(new_name)
         return new_name
 
     @property
@@ -257,41 +271,29 @@ class BodyTransformer(ast.NodeTransformer):
             and (self._active_shape_fold(name) is not None or self._is_folded_graph_capture(name))
         )
 
+    def _bind_assign_name(self, target: ast.Name, value_meta: TensorMeta | None) -> ast.Name:
+        """Bind a store target after the RHS has been visited."""
+        name = target.id
+        if self._simt_depth:
+            self._shape_inlined.pop(name, None)
+        if name not in self._assign_count:
+            self._record_first_assign(name)
+        elif self._needs_alpha_rename(name):
+            target = ast.copy_location(ast.Name(id=self._rebind(name), ctx=ast.Store()), target)
+        else:
+            # Loop-carried writes must update the active outer binding.
+            current = self._var_renames.get(name, name)
+            self._record_tensor_meta(current, value_meta, reuses_name=True)
+            return ast.copy_location(ast.Name(id=current, ctx=ast.Store()), target)
+        self._record_tensor_meta(target.id, value_meta)
+        return target
+
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
-        var_name = cast(ast.Name, node.targets[0]).id
         source = self._known_tensor_name(node.value.id) if isinstance(node.value, ast.Name) else None
         value_meta = self._meta.get(source) if source is not None else None
-        visited_value = self.visit(node.value)
-        if self._simt_depth:
-            self._shape_inlined.pop(var_name, None)
-        if var_name in self._assign_count:
-            # Only rename at the same scope where the variable was first defined.
-            # Rebindings at a deeper scope (inside for/with) are loop-carried
-            # updates — do not rename them.
-            if self._needs_alpha_rename(var_name):
-                new_name = self._rebind(var_name)
-                self._record_tensor_meta(new_name, value_meta)
-                new_node = ast.Assign(
-                    targets=[ast.Name(id=new_name, ctx=ast.Store())],
-                    value=visited_value,
-                )
-                ast.copy_location(new_node, node)
-                ast.fix_missing_locations(new_node)
-                return new_node
-            # Deeper scope: if the variable has an active rename (from a bridge
-            # assignment), apply it to the LHS so the loop body consistently
-            # uses the renamed alias (e.g. x_v1 = some_op(x_v1)).
-            if var_name in self._var_renames:
-                renamed = self._var_renames[var_name]
-                node.targets = [ast.Name(id=renamed, ctx=ast.Store())]
-            self._record_tensor_meta(self._var_renames.get(var_name, var_name), value_meta, reuses_name=True)
-            node.value = visited_value
-            return node
-        # First assignment: record and keep original name.
-        self._record_first_assign(var_name)
-        self._record_tensor_meta(var_name, value_meta)
-        node.value = visited_value
+        node.value = self.visit(node.value)
+        node.targets[0] = self._bind_assign_name(cast(ast.Name, node.targets[0]), value_meta)
         return node
 
     def _visit_chained_assign(self, node: ast.Assign) -> list[ast.stmt]:
@@ -306,6 +308,41 @@ class BodyTransformer(ast.NodeTransformer):
             self._shape_inlined.pop(cast(ast.Name, target).id, None)
             value = ast.copy_location(ast.Name(id=first_name, ctx=ast.Load()), node.value)
         return assignments
+
+    def _same_shape_value(self, name: str, value: ast.expr | None) -> bool:
+        folded = self._active_shape_fold(name)
+        if folded is None or value is None:
+            return False
+        constant = _constant_scalar(value)
+        return type(constant) is int and folded == constant
+
+    def _restore_shape_folds(self, folded: dict[str, int]) -> None:
+        """Resume constant reads after all reaching paths restore a dimension."""
+        for name, value in folded.items():
+            self._var_renames.pop(name, None)
+            self._shape_inlined[name] = value
+
+    def _visit_unpack_target(self, target: ast.expr, value: ast.expr | None) -> ast.expr:
+        """Bind tuple elements using the same scope policy as a simple assignment."""
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(value.elts):
+                target.elts = [
+                    self._visit_unpack_target(elt, rhs)
+                    for elt, rhs in zip(target.elts, value.elts, strict=True)
+                ]
+            else:
+                target.elts = [self._visit_unpack_target(elt, None) for elt in target.elts]
+        elif isinstance(target, ast.Name):
+            # The RHS has already been visited in the incoming scope. Keep
+            # the full unpack so sibling values and calls are evaluated once.
+            if self._same_shape_value(target.id, value):
+                return target
+            bound = self._bind_assign_name(target, None)
+            self._shape_inlined.pop(target.id, None)
+            return bound
+        else:
+            target = cast(ast.expr, self.visit(target))
+        return target
 
     def _dyn_dim_expr(self, param_name: str, dim_idx: int) -> ast.expr:
         """Emit ``pl.tensor.dim(<param>, <dim_idx>)`` for a dynamic dim.
@@ -489,6 +526,16 @@ class BodyTransformer(ast.NodeTransformer):
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             return self._visit_simple_assign(node)
 
+        if len(node.targets) == 1 and isinstance(node.targets[0], (ast.Tuple, ast.List)):
+            folded = {}
+            if self._shape_inlined:
+                _, unchanged, _ = self._shape_write_effects(node, set())
+                folded = {name: self._shape_inlined[name] for name in unchanged}
+            node.value = self.visit(node.value)
+            node.targets[0] = self._visit_unpack_target(node.targets[0], node.value)
+            self._restore_shape_folds(folded)
+            return node
+
         return cast("ast.stmt", self.generic_visit(node))
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt | None:
@@ -497,7 +544,6 @@ class BodyTransformer(ast.NodeTransformer):
             return cast("ast.stmt", self.generic_visit(node))
         if not isinstance(node.target, ast.Name):
             return cast("ast.stmt", self.generic_visit(node))
-        var_name = node.target.id
         source = self._known_tensor_name(node.value.id) if isinstance(node.value, ast.Name) else None
         value_meta = self._meta.get(source) if source is not None else None
         node.value = self.visit(node.value)
@@ -506,27 +552,7 @@ class BodyTransformer(ast.NodeTransformer):
         # int). Without this the un-inlined name leaks into the generated source
         # and the parser rejects it ("Unknown shape variable: W_PAD").
         node.annotation = self.visit(node.annotation)
-        if self._simt_depth:
-            self._shape_inlined.pop(var_name, None)
-        if var_name in self._assign_count:
-            if self._needs_alpha_rename(var_name):
-                new_name = self._rebind(var_name)
-                self._record_tensor_meta(new_name, value_meta)
-                new_node = ast.AnnAssign(
-                    target=ast.Name(id=new_name, ctx=ast.Store()),
-                    annotation=node.annotation,
-                    value=node.value,
-                    simple=node.simple,
-                )
-                ast.copy_location(new_node, node)
-                ast.fix_missing_locations(new_node)
-                return new_node
-            current_name = self._var_renames.get(var_name, var_name)
-            node.target = ast.copy_location(ast.Name(id=current_name, ctx=ast.Store()), node.target)
-            self._record_tensor_meta(current_name, value_meta, reuses_name=True)
-        else:
-            self._record_first_assign(var_name)
-            self._record_tensor_meta(var_name, value_meta)
+        node.target = self._bind_assign_name(node.target, value_meta)
         return cast("ast.stmt", node)
 
     # ------------------------------------------------------------------
@@ -704,6 +730,17 @@ class BodyTransformer(ast.NodeTransformer):
             return cast("ast.expr", self.generic_visit(new_node))
         return cast("ast.expr", self.generic_visit(node))
 
+    @classmethod
+    def _terminates_suite(cls, stmt: ast.stmt) -> bool:
+        if isinstance(stmt, (ast.Break, ast.Continue, ast.Return)):
+            return True
+        if isinstance(stmt, ast.If):
+            condition = values.literal_condition(stmt.test)
+            if condition is not None:
+                return any(map(cls._terminates_suite, stmt.body if condition else stmt.orelse))
+            return any(map(cls._terminates_suite, stmt.body)) and any(map(cls._terminates_suite, stmt.orelse))
+        return isinstance(stmt, ast.With) and any(map(cls._terminates_suite, stmt.body))
+
     def _visit_scoped_body(self, statements: list[ast.stmt]) -> list[ast.stmt]:
         """Visit statements within a nested scope, flattening lists and dropping None."""
         result: list[ast.stmt] = []
@@ -715,6 +752,8 @@ class BodyTransformer(ast.NodeTransformer):
                 result.extend(cast("list[ast.stmt]", visited))
             else:
                 result.append(visited)
+            if result and self._terminates_suite(result[-1]):
+                break
         return result or [ast.Pass()]
 
     @staticmethod
@@ -729,7 +768,8 @@ class BodyTransformer(ast.NodeTransformer):
         exposed: set[str],
         *,
         may_skip_loops: bool = False,
-    ) -> None:
+        loop_exits: list[set[str]] | None = None,
+    ) -> bool:
         """Record names *read before being written* within ``statements``.
 
         A name whose first appearance (in execution order) is a read is
@@ -743,9 +783,10 @@ class BodyTransformer(ast.NodeTransformer):
 
         ``written`` and ``exposed`` are accumulators threaded through nested
         bodies so execution order is respected across compound statements.
+        Return whether control can reach the statement after this suite.
 
-        SIMT callers set ``may_skip_loops`` because an assignment in a loop
-        body does not initialize a private scalar when the loop runs zero times.
+        SIMT and branch-merge callers set ``may_skip_loops`` because a loop
+        body cannot initialize a local when the loop runs zero times.
 
         Names bound only inside a comprehension or lambda are not
         statement-level assignments, so they never enter ``_assign_count`` and
@@ -770,40 +811,70 @@ class BodyTransformer(ast.NodeTransformer):
                 tgt_names = self._names_by_ctx(stmt.target, ast.Store)
                 exposed.update(tgt_names - written)
                 written.update(tgt_names)
-            elif isinstance(stmt, ast.For):
-                exposed.update(self._names_by_ctx(stmt.iter, ast.Load) - written)
-                body_written = set(written) if may_skip_loops else written
-                body_written.update(self._names_by_ctx(stmt.target, ast.Store))
-                self._collect_upward_exposed(stmt.body, body_written, exposed, may_skip_loops=may_skip_loops)
-                self._collect_upward_exposed(stmt.orelse, written, exposed, may_skip_loops=may_skip_loops)
-            elif isinstance(stmt, ast.While) and may_skip_loops:
-                exposed.update(self._names_by_ctx(stmt.test, ast.Load) - written)
-                self._collect_upward_exposed(stmt.body, set(written), exposed, may_skip_loops=may_skip_loops)
-                self._collect_upward_exposed(stmt.orelse, written, exposed, may_skip_loops=may_skip_loops)
+            elif isinstance(stmt, ast.For) or (may_skip_loops and isinstance(stmt, ast.While)):
+                self._collect_loop_writes(stmt, written, exposed, may_skip_loops)
             elif isinstance(stmt, ast.If):
                 exposed.update(self._names_by_ctx(stmt.test, ast.Load) - written)
                 # then/else are alternative paths: analyze each from the same
                 # incoming ``written`` so a read in one branch is not masked by
                 # a write in the other.  A name is exposed if read-before-write
-                # on either path; it is definitely written after the ``if``
-                # only if written on both (no ``else`` → no definite write).
+                # on either path. Only arms reaching the next statement can
+                # supply its value. Copies before an unconditional transfer
+                # must also be valid when both arms terminate.
                 then_written = set(written)
-                self._collect_upward_exposed(stmt.body, then_written, exposed, may_skip_loops=may_skip_loops)
-                if stmt.orelse:
-                    else_written = set(written)
-                    self._collect_upward_exposed(
-                        stmt.orelse, else_written, exposed, may_skip_loops=may_skip_loops
-                    )
+                then_reaches = self._collect_upward_exposed(
+                    stmt.body, then_written, exposed, may_skip_loops=may_skip_loops, loop_exits=loop_exits
+                )
+                else_written = set(written)
+                else_reaches = self._collect_upward_exposed(
+                    stmt.orelse, else_written, exposed, may_skip_loops=may_skip_loops, loop_exits=loop_exits
+                )
+                if not may_skip_loops or then_reaches == else_reaches:
                     written.update(then_written & else_written)
+                else:
+                    written.update(then_written if then_reaches else else_written)
             elif isinstance(stmt, ast.With):
                 for item in stmt.items:
                     exposed.update(self._names_by_ctx(item.context_expr, ast.Load) - written)
                     if item.optional_vars is not None:
                         written.update(self._names_by_ctx(item.optional_vars, ast.Store))
-                self._collect_upward_exposed(stmt.body, written, exposed, may_skip_loops=may_skip_loops)
+                self._collect_upward_exposed(
+                    stmt.body, written, exposed, may_skip_loops=may_skip_loops, loop_exits=loop_exits
+                )
             else:
                 # Expr / Return / Assert / ... — pure reads.
                 exposed.update(self._names_by_ctx(stmt, ast.Load) - written)
+            if loop_exits is not None and isinstance(stmt, (ast.Break, ast.Continue)):
+                loop_exits.append(written.copy())
+            if self._terminates_suite(stmt):
+                return False
+        return True
+
+    def _collect_loop_writes(
+        self, stmt: ast.For | ast.While, written: set[str], exposed: set[str], may_skip_loops: bool
+    ) -> None:
+        header = stmt.iter if isinstance(stmt, ast.For) else stmt.test
+        exposed.update(self._names_by_ctx(header, ast.Load) - written)
+        body_written = written.copy() if may_skip_loops else written
+        targets = self._names_by_ctx(stmt.target, ast.Store) if isinstance(stmt, ast.For) else set[str]()
+        body_written.update(targets)
+        exits: list[set[str]] = []
+        self._collect_upward_exposed(
+            stmt.body,
+            body_written,
+            exposed,
+            may_skip_loops=may_skip_loops,
+            loop_exits=exits if may_skip_loops else None,
+        )
+        if may_skip_loops:
+            # An explicit carry has an initial value even when the loop is
+            # skipped. Ordinary locals must also be defined on early exits.
+            outputs = self._loop_yield_targets(stmt.body)
+            if isinstance(stmt, ast.For) and self._private_loop_body(stmt, outputs):
+                written.update(outputs)
+            elif self._loop_enters(stmt) is True:
+                written.update(body_written.intersection(*exits) - targets)
+        self._collect_upward_exposed(stmt.orelse, written, exposed, may_skip_loops=may_skip_loops)
 
     def _classify_loop_locals(self, statements: list[ast.stmt]) -> tuple[list[str], list[str]]:
         """Classify same-depth name collisions in a loop body into ``(carried, fresh)``.
@@ -821,9 +892,8 @@ class BodyTransformer(ast.NodeTransformer):
           renamed (the alias would be undefined when the loop runs zero times).
 
         Depth alone cannot tell these apart — two sibling loop bodies share a
-        depth.  ``visit_For`` drops *fresh* names from the rename bookkeeping so
-        the body re-declares them cleanly, exactly how the ``@pl.program``
-        parser scopes sibling loop bodies.
+        depth.  Fresh writes reuse the existing spelling throughout the loop,
+        leaving a valid predecessor intact when the loop executes zero times.
         """
         carried: list[str] = []
         fresh: list[str] = []
@@ -832,6 +902,8 @@ class BodyTransformer(ast.NodeTransformer):
         exposed: set[str] = set()
         self._collect_upward_exposed(statements, set(), exposed)
         for stmt in statements:
+            if self._terminates_suite(stmt):
+                break
             if isinstance(stmt, ast.Assign):
                 targets = stmt.targets
             elif isinstance(stmt, ast.AnnAssign):
@@ -864,6 +936,23 @@ class BodyTransformer(ast.NodeTransformer):
         self._var_renames.pop(name, None)
         self._meta.pop(name, None)
 
+    def _binding_value(self, name: str) -> str | int:
+        folded = self._active_shape_fold(name)
+        return folded if folded is not None else self._var_renames.get(name, name)
+
+    @staticmethod
+    def _copy_binding(target: str, value: str | int) -> ast.Assign:
+        return ast.fix_missing_locations(
+            ast.Assign(
+                targets=[ast.Name(id=target, ctx=ast.Store())],
+                value=ast.Constant(value=value)
+                if isinstance(value, int)
+                else ast.Name(id=value, ctx=ast.Load()),
+                lineno=0,
+                col_offset=0,
+            )
+        )
+
     def _make_bridge_assignments(self, rebind_vars: list[str]) -> list[ast.stmt]:
         """Create bridge assignments (``x_v1 = x``) and apply renames for each variable.
 
@@ -878,35 +967,409 @@ class BodyTransformer(ast.NodeTransformer):
         bridges: list[ast.stmt] = []
         for var_name in rebind_vars:
             # Get the current read-name for this variable (could already be an alias)
-            current_name = self._var_renames.get(var_name, var_name)
+            value = self._binding_value(var_name)
             source = self._known_tensor_name(var_name)
             value_meta = self._meta.get(source) if source is not None else None
             new_name = self._rebind(var_name)
-            self._record_tensor_meta(new_name, value_meta)
+            if isinstance(value, int):
+                self._shape_inlined.pop(var_name)
+            self._record_tensor_meta(new_name, None if isinstance(value, int) else value_meta)
             # Update assign_depth to the outer scope so the loop body sees a
             # depth mismatch and does NOT trigger another rebind.
             self._assign_depth[var_name] = self._scope_depth
-            bridge = ast.Assign(
-                targets=[ast.Name(id=new_name, ctx=ast.Store())],
-                value=ast.Name(id=current_name, ctx=ast.Load()),
-                lineno=0,
-                col_offset=0,
-            )
-            ast.fix_missing_locations(bridge)
-            bridges.append(bridge)
+            bridges.append(self._copy_binding(new_name, value))
         return bridges
+
+    def _materialize_folded_writes(self, statements: list[ast.stmt]) -> tuple[list[ast.stmt], dict[str, int]]:
+        """Give folded dimensions scalar bindings before conditional assignments."""
+        if not self._shape_inlined:
+            return [], {}
+        written = {name for stmt in statements for name in self._names_by_ctx(stmt, ast.Store)}
+        folded = {name for name in written if self._active_shape_fold(name) is not None}
+        if not folded:
+            return [], {}
+        live, restored = self._reachable_folded_writes(statements)
+        recovered = {name: self._shape_inlined[name] for name in folded & restored}
+        return self._make_bridge_assignments(sorted(folded & live)), recovered
+
+    @staticmethod
+    def _initial_while_test(stmt: ast.For, call: ast.Call) -> ast.expr | None:
+        """Express the first pl.cond test in terms of the incoming initializers."""
+        from pypto.language.parser.syntax_helpers import is_pl_call  # noqa: PLC0415
+
+        first = stmt.body[0] if stmt.body else None
+        init = next((kw.value for kw in call.keywords if kw.arg == "init_values"), None)
+        if not (
+            isinstance(stmt.target, ast.Tuple)
+            and isinstance(init, (ast.Tuple, ast.List))
+            and len(stmt.target.elts) == len(init.elts)
+            and all(isinstance(elt, ast.Name) for elt in stmt.target.elts)
+            and isinstance(first, ast.Expr)
+            and is_pl_call(first.value, "cond")
+            and len(first.value.args) == 1
+            and not first.value.keywords
+        ):
+            return None
+        # Substitute simultaneously: each initializer sees the outer scope,
+        # even when names are swapped or shadow a folded dimension.
+        initial = {
+            cast(ast.Name, arg).id: value for arg, value in zip(stmt.target.elts, init.elts, strict=True)
+        }
+
+        class InitialValues(ast.NodeTransformer):
+            def visit_Name(self, node: ast.Name) -> ast.expr:
+                return initial.get(node.id, node)
+
+        return InitialValues().visit(deepcopy(first.value.args[0]))
+
+    def _loop_enters(self, stmt: ast.For | ast.While, unstable: set[str] | None = None) -> bool | None:
+        """Resolve the first iteration from the header, or return None for a dynamic bound."""
+        from pypto.language.parser.control_flow_parser import ITERATOR_TO_KIND  # noqa: PLC0415
+        from pypto.language.parser.syntax_helpers import is_pl_call  # noqa: PLC0415
+
+        explicit_while = False
+        if isinstance(stmt, ast.While):
+            values_to_check = [stmt.test]
+        elif is_pl_call(stmt.iter, "while_"):
+            test = self._initial_while_test(stmt, stmt.iter)
+            if test is None:
+                return None
+            explicit_while = True
+            values_to_check = [test]
+        else:
+            call = stmt.iter
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "pl"
+                and call.func.attr in ITERATOR_TO_KIND
+            ):
+                return None
+            values_to_check = call.args
+            if call.func.attr == "hardware_loop" and not values_to_check:
+                values_to_check = [kw.value for kw in call.keywords if kw.arg == "stop"]
+            if not 1 <= len(values_to_check) <= 3:
+                return None
+        if any(
+            isinstance(part, ast.Call)
+            or (isinstance(part, ast.Name) and unstable is not None and part.id in unstable)
+            for expr in values_to_check
+            for part in ast.walk(expr)
+        ):
+            return None
+        # Reachability previews source expressions. Branch-merge analysis sees
+        # the specialized header, whose names must not be rewritten a second time.
+        bounds = (
+            values_to_check if unstable is None else [self.visit(deepcopy(expr)) for expr in values_to_check]
+        )
+        if isinstance(stmt, ast.While) or explicit_while:
+            folded = _constant_scalar(bounds[0])
+            return bool(folded) if folded is not None else values.literal_condition(bounds[0])
+        args: list[int] = []
+        for bound in bounds:
+            value = _constant_scalar(bound)
+            if type(value) is not int:
+                return None
+            args.append(value)
+        return None if len(args) == 3 and args[2] == 0 else bool(range(*args))
+
+    def _empty_loop(self, stmt: ast.For | ast.While, unstable: set[str]) -> bool:
+        return self._loop_enters(stmt, unstable) is False and (
+            (isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Tuple))
+            or not self._loop_yield_targets(stmt.body)
+        )
+
+    def _preview_shape_rhs(self, value: ast.expr, changed: set[str]) -> ast.expr | None:
+        if any(
+            isinstance(part, (ast.Call, ast.NamedExpr)) or (isinstance(part, ast.Name) and part.id in changed)
+            for part in ast.walk(value)
+        ):
+            return None
+        return self.visit(deepcopy(value))
+
+    def _shape_write_effects(
+        self, stmt: ast.Assign | ast.AnnAssign, changed: set[str]
+    ) -> tuple[set[str], set[str], bool]:
+        """Classify final stores against the entry folds, using the pre-assignment RHS."""
+        stores = {item.id for item in self._yield_stores(stmt)}
+        if stmt.value is None or not any(self._active_shape_fold(name) is not None for name in stores):
+            return stores, set(), False
+        unchanged: set[str] = set()
+
+        def inspect(target: ast.expr, rhs: ast.expr) -> bool:
+            if isinstance(target, (ast.Tuple, ast.List)):
+                # Inspect explicit elements separately: a dynamic sibling
+                # cannot invalidate a known constant. A shape can also fold
+                # to a tuple during the preview.
+                value = (
+                    rhs if isinstance(rhs, (ast.Tuple, ast.List)) else self._preview_shape_rhs(rhs, changed)
+                )
+                if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(value.elts):
+                    untouched = True
+                    for lhs, elt in zip(target.elts, value.elts, strict=True):
+                        if not inspect(lhs, elt):
+                            untouched = False
+                    return untouched
+            elif isinstance(target, ast.Name):
+                if self._same_shape_value(target.id, self._preview_shape_rhs(rhs, changed)):
+                    unchanged.add(target.id)
+                    return target.id not in changed
+            unchanged.difference_update(self._names_by_ctx(target, ast.Store))
+            return False
+
+        # Always emit annotated stores so the parser still validates the type.
+        elide = isinstance(stmt, ast.Assign)
+        for target in stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]:
+            if not inspect(target, stmt.value):
+                elide = False
+        return stores - unchanged, unchanged, elide
+
+    def _constant_outputs(
+        self, statements: list[ast.stmt], changed: set[str], *, loop: ast.For | None = None
+    ) -> dict[str, int]:
+        """Find constant values published by explicit yields, or by zero-trip initializers."""
+        bindings = self._yield_bindings(statements)
+        if not bindings:
+            return {}
+        initial = None
+        if loop is not None:
+            initial = next(
+                (kw.value for kw in cast(ast.Call, loop.iter).keywords if kw.arg == "init_values"), None
+            )
+            if not isinstance(initial, (ast.List, ast.Tuple)):
+                return {}
+        else:
+            # Yield targets name outputs, not private assignments inside the arms.
+            targets = {target for stmt in bindings for target in self._yield_stores(stmt)}
+            changed = changed | {
+                part.id
+                for stmt in statements
+                for part in ast.walk(stmt)
+                if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store) and part not in targets
+            }
+        constants: dict[str, int] = {}
+        unknown: set[str] = set()
+        for stmt, names in bindings.items():
+            args = initial.elts if initial is not None else cast(ast.Call, stmt.value).args
+            if len(names) != len(args):
+                return {}
+            for name, arg in zip(names, args, strict=True):
+                expr = self._preview_shape_rhs(arg, changed)
+                value = _constant_scalar(expr) if expr is not None else None
+                if type(value) is int and constants.get(name, value) == value:
+                    constants[name] = value
+                else:
+                    unknown.add(name)
+        return {name: value for name, value in constants.items() if name not in unknown}
+
+    def _branch_output_constants(self, stmt: ast.If, changed: set[str]) -> dict[str, int]:
+        left = self._constant_outputs(stmt.body, changed)
+        if not left:
+            return {}
+        right = self._constant_outputs(stmt.orelse, changed)
+        return {name: value for name, value in left.items() if right.get(name) == value}
+
+    def _reachable_folded_writes(self, statements: list[ast.stmt]) -> tuple[set[str], set[str]]:
+        """Track possible writes separately along each arm and loop backedge."""
+
+        # A dimension can need a real binding for intermediate reads even
+        # when every path restores its entry value before leaving the scope.
+        temporary: set[str] = set()
+
+        def publish(
+            changed: set[str], outputs: set[str], constants: dict[str, int], record: bool
+        ) -> set[str]:
+            same = {name for name, val in constants.items() if self._active_shape_fold(name) == val}
+            if record:
+                temporary.update(changed & same)
+            return (changed | outputs) - same
+
+        def join_paths(left: set[str] | None, right: set[str] | None) -> set[str] | None:
+            if left is None:
+                return right
+            return left if right is None else left | right
+
+        def visit_branch(
+            stmt: ast.If, changed: set[str], exits: dict[type[ast.stmt], set[str]], record: bool
+        ) -> set[str] | None:
+            condition = None
+            if not any(
+                isinstance(part, ast.Call) or (isinstance(part, ast.Name) and part.id in changed)
+                for part in ast.walk(stmt.test)
+            ):
+                test = self.visit(deepcopy(stmt.test))
+                condition = values.literal_condition(test)
+                if condition is None:
+                    condition = _constant_condition(test)
+                if record and condition is not None:
+                    # Retain the path's incoming constants when another
+                    # arm later needs a scalar binding for this name.
+                    stmt.test = test
+            if condition is not None:
+                after = visit_suite(stmt.body if condition else stmt.orelse, changed, exits, record)
+            elif outputs := self._loop_yield_targets([*stmt.body, *stmt.orelse]):
+                # Both arms have private bindings and explicit outputs.
+                after = publish(changed, outputs, self._branch_output_constants(stmt, changed), record)
+            else:
+                left = visit_suite(stmt.body, changed, exits, record)
+                right = visit_suite(stmt.orelse, changed, exits, record)
+                after = join_paths(left, right)
+            return after
+
+        def visit_loop(
+            stmt: ast.For | ast.While, changed: set[str], exits: dict[type[ast.stmt], set[str]], record: bool
+        ) -> set[str] | None:
+            outputs = self._loop_yield_targets(stmt.body)
+            breaks = None
+            if self._empty_loop(stmt, changed):
+                if record:
+                    self._proven_empty_loops.add(stmt)
+                if isinstance(stmt, ast.For) and outputs:
+                    changed = publish(
+                        changed, outputs, self._constant_outputs(stmt.body, changed, loop=stmt), record
+                    )
+            elif isinstance(stmt, ast.For) and self._private_loop_body(stmt, outputs):
+                changed.update(outputs)
+            else:
+                scoped = (
+                    self._names_by_ctx(stmt.target, ast.Store) if isinstance(stmt, ast.For) else set[str]()
+                )
+                entry = changed | scoped
+                while True:
+                    transfers: dict[type[ast.stmt], set[str]] = {}
+                    end = visit_suite(stmt.body, entry, transfers, False)
+                    backedge = (end or set[str]()) | transfers.get(ast.Continue, set())
+                    if backedge <= entry:
+                        break
+                    entry |= backedge
+                if record:
+                    visit_suite(stmt.body, entry, transfers, True)
+                # Breaks exit this loop. Returns exit the surrounding
+                # function. Header names stay local unless yielded.
+                if ast.Return in transfers:
+                    exits.setdefault(ast.Return, set()).update((transfers[ast.Return] - scoped) | changed)
+                hidden = scoped - outputs
+                if ast.Break in transfers:
+                    breaks = changed | (transfers[ast.Break] - hidden)
+                changed |= entry - hidden
+            # A break bypasses the loop's else suite.
+            after = join_paths(breaks, visit_suite(stmt.orelse, changed, exits, record))
+            return after
+
+        def visit_suite(
+            suite: list[ast.stmt], incoming: set[str], exits: dict[type[ast.stmt], set[str]], record: bool
+        ) -> set[str] | None:
+            # Each arm starts with the facts at its own entry. Only paths
+            # that can reach a subsequent statement affect its condition.
+            changed = incoming.copy()
+            for index, stmt in enumerate(suite):
+                if isinstance(stmt, (ast.Break, ast.Continue, ast.Return)):
+                    exits.setdefault(type(stmt), set()).update(changed)
+                    return None
+                if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+                    writes, unchanged, elide = self._shape_write_effects(stmt, changed)
+                    if record:
+                        temporary.update(changed & unchanged)
+                        if elide:
+                            suite[index] = ast.copy_location(ast.Pass(), stmt)
+                    changed.difference_update(unchanged)
+                    changed.update(writes)
+                elif isinstance(stmt, ast.AugAssign):
+                    changed.update(self._names_by_ctx(stmt.target, ast.Store))
+                elif isinstance(stmt, ast.If):
+                    after = visit_branch(stmt, changed, exits, record)
+                    if after is None:
+                        return None
+                    changed = after
+                elif isinstance(stmt, (ast.For, ast.While)):
+                    after = visit_loop(stmt, changed, exits, record)
+                    if after is None:
+                        return None
+                    changed = after
+                elif isinstance(stmt, ast.With) and not any(
+                    _scope_call_name(item.context_expr) == "simt_scope" for item in stmt.items
+                ):
+                    for item in stmt.items:
+                        if item.optional_vars is not None:
+                            changed.update(self._names_by_ctx(item.optional_vars, ast.Store))
+                    after = visit_suite(stmt.body, changed, exits, record)
+                    if after is None:
+                        return None
+                    changed = after
+            return changed
+
+        exits: dict[type[ast.stmt], set[str]] = {}
+        end = visit_suite(statements, set(), exits, True)
+        # Transfers can observe a changed value even if the fallthrough paths
+        # restore it. Keep their runtime binding until the enclosing scope exits.
+        live = (end or set[str]()).union(*exits.values())
+        return live | temporary, temporary - live
+
+    @staticmethod
+    def _yield_stores(stmt: ast.Assign | ast.AnnAssign) -> list[ast.Name]:
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        return [
+            item
+            for target in targets
+            for item in ast.walk(target)
+            if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+        ]
 
     @classmethod
     def _loop_yield_targets(cls, statements: list[ast.stmt]) -> set[str]:
         """Collect outputs using the parser's yield ownership boundaries."""
         from pypto.language.parser.control_flow_parser import ControlFlowParser  # noqa: PLC0415
 
-        names: set[str] = set()
-        for stmt in ControlFlowParser.iter_yield_assignments(statements):
-            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
-            for target in targets:
-                names.update(cls._names_by_ctx(target, ast.Store))
-        return names
+        return {
+            item.id
+            for stmt in ControlFlowParser.iter_yield_assignments(statements)
+            for item in cls._yield_stores(stmt)
+        }
+
+    @staticmethod
+    def _private_loop_body(node: ast.For, outputs: set[str]) -> bool:
+        """Mirror the parser scopes that export only assignment-form yields."""
+        from pypto.language.parser.control_flow_parser import ITERATOR_TO_KIND  # noqa: PLC0415
+
+        kind = _scope_call_name(node.iter)
+        return kind == "while_" or (
+            kind in ITERATOR_TO_KIND and (isinstance(node.target, ast.Tuple) or bool(outputs))
+        )
+
+    @staticmethod
+    def _loop_header_names(node: ast.For, is_explicit_while: bool) -> tuple[str | None, list[ast.Name]]:
+        """Return the induction name (range only) and ordered loop-carried arguments."""
+        if is_explicit_while:
+            induction, carries = None, node.target
+        elif isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2:
+            induction, carries = node.target.elts
+        else:
+            induction, carries = node.target, None
+        return (
+            induction.id if isinstance(induction, ast.Name) else None,
+            [elt for elt in carries.elts if isinstance(elt, ast.Name)]
+            if isinstance(carries, ast.Tuple)
+            else [],
+        )
+
+    def _publish_loop_updates(
+        self, yields: dict[ast.Assign | ast.AnnAssign, list[str]], incoming: set[str]
+    ) -> list[ast.stmt]:
+        """Copy private loop results into the bindings visible on the enclosing scope's skipped path."""
+        # Loop return_vars have their own IR identity. An ordinary store to
+        # the incoming binding lets the enclosing SSA join see the update.
+        results = {name: self._fresh_alias(name) for name in sorted(incoming)}
+        for stmt, names in yields.items():
+            for target, name in zip(self._yield_stores(stmt), names, strict=True):
+                if name in results:
+                    target.id = results[name]
+        copies: list[ast.stmt] = []
+        for name, result in results.items():
+            bound = self._bind_assign_name(ast.Name(id=name, ctx=ast.Store()), None)
+            self._shape_inlined.pop(name, None)
+            copies.append(self._copy_binding(bound.id, result))
+        return copies
 
     def visit_For(self, node: ast.For) -> ast.stmt | list[ast.stmt]:
         """Visit For loop, incrementing scope depth for its body.
@@ -915,30 +1378,62 @@ class BodyTransformer(ast.NodeTransformer):
         (:meth:`_classify_loop_locals`).  A *carried* name gets a bridge
         assignment (``x_v1 = x``) before the loop plus a rename inside it,
         preserving loop-carried semantics across two sibling loops.  A *fresh*
-        name — a new body-local that merely reuses a sibling loop's name — is
-        dropped from the rename bookkeeping so the body re-declares it cleanly:
-        neither bridged nor renamed.
+        name keeps its incoming spelling for every write without an entry read.
         """
+        is_explicit_while = _scope_call_name(node.iter) == "while_"
+        induction, carries = self._loop_header_names(node, is_explicit_while)
+        after_loop: list[ast.stmt] = []
+        recovered: dict[str, int] = {}
+        if node in self._proven_empty_loops or (self._shape_inlined and self._empty_loop(node, set())):
+            # Keep the header for initializer evaluation and iterator validation
+            # (e.g. pipeline stage or hardware-loop policy). Only the initial
+            # carries can reach the parser's yield-LHS names on a zero-trip path.
+            from pypto.language.parser.control_flow_parser import ControlFlowParser  # noqa: PLC0415
+
+            recovered = {
+                name: value
+                for name, value in self._constant_outputs(node.body, set(), loop=node).items()
+                if self._active_shape_fold(name) == value or self._scope_depth == 0
+            }
+            outputs = list(ControlFlowParser.iter_yield_assignments(node.body))
+            for output in outputs:
+                call = cast(ast.Call, output.value)
+                call.args = [
+                    ast.copy_location(ast.Name(id=carry.id, ctx=ast.Load()), carry) for carry in carries
+                ]
+            node.body = (node.body[:1] if is_explicit_while else []) + outputs
+            after_loop, node.orelse = node.orelse, []
         node.iter = self.visit(node.iter)
         # Range-like iterators bind an induction variable; pl.while_ binds only
         # carries. Both shadow incoming aliases/folds inside the body, but the
         # parser publishes assignment-form yield targets as post-loop results.
-        is_explicit_while = _scope_call_name(node.iter) == "while_"
-        target = node.target
-        if isinstance(target, ast.Tuple) and target.elts:
-            target = target.elts[0]
-        induction_names: set[str] = (
-            {target.id} if isinstance(target, ast.Name) and not is_explicit_while else set()
-        )
-        scoped_names = self._names_by_ctx(node.target, ast.Store) if is_explicit_while else induction_names
-        yielded_names = self._loop_yield_targets(node.body)
+        scoped_names = {carry.id for carry in carries}
+        if induction is not None:
+            scoped_names.add(induction)
+        yields = self._yield_bindings(node.body)
+        yielded_names = {name for names in yields.values() for name in names}
+        private = self._private_loop_body(node, yielded_names)
+        # An optional enclosing scope needs the pre-loop binding on its
+        # skipped path. Keep private body writes separate from that binding.
+        incoming_outputs = {
+            name
+            for name in yielded_names
+            if private and self._assign_depth.get(name, self._scope_depth) < self._scope_depth
+        }
+        local_names = scoped_names.copy()
+        if private:
+            for stmt in node.body:
+                local_names.update(self._names_by_ctx(stmt, ast.Store))
+        restore_names = (local_names - yielded_names) | incoming_outputs
+        meta_names = restore_names | {self._var_renames.get(name, name) for name in restore_names}
         saved = (
-            {name: self._meta[name] for name in scoped_names if name in self._meta},
-            {name: self._shape_inlined[name] for name in scoped_names if name in self._shape_inlined},
-            {name: self._assign_count[name] for name in scoped_names if name in self._assign_count},
-            {name: self._assign_depth[name] for name in scoped_names if name in self._assign_depth},
-            {name: self._var_renames[name] for name in scoped_names if name in self._var_renames},
+            {name: self._meta[name] for name in meta_names if name in self._meta},
+            {name: self._shape_inlined[name] for name in restore_names if name in self._shape_inlined},
+            {name: self._assign_count[name] for name in restore_names if name in self._assign_count},
+            {name: self._assign_depth[name] for name in restore_names if name in self._assign_depth},
+            {name: self._var_renames[name] for name in restore_names if name in self._var_renames},
         )
+        captures = self._graph_captures.copy() if private and self._graph_captures is not None else None
         outer_depth = self._scope_depth
         for name in scoped_names:
             self._forget_rename_bookkeeping(name)
@@ -947,48 +1442,127 @@ class BodyTransformer(ast.NodeTransformer):
             self._assign_count[name] = 1
             # Carry updates belong to the loop's incoming binding. Marking
             # them body-local would alpha-rename the yield target unnecessarily.
-            self._assign_depth[name] = outer_depth if is_explicit_while else outer_depth + 1
+            self._assign_depth[name] = outer_depth + 1 if name == induction else outer_depth
+        fresh_depths: dict[str, int] = {}
         try:
             self._scope_depth += 1
-            carried, fresh = self._classify_loop_locals(node.body)
-            carried = [name for name in carried if name not in scoped_names]
-            fresh = [name for name in fresh if name not in scoped_names]
-            self._scope_depth -= 1
-            # Carried names: bridge + rename so the carried value threads across.
-            bridges = self._make_bridge_assignments(carried)
-            # Fresh names: forget the same-depth sibling binding so the body's
-            # assignment is treated as a first binding (no rename, no bridge).
-            for name in fresh:
-                self._forget_rename_bookkeeping(name)
-            self._scope_depth += 1
+            bridges: list[ast.stmt] = []
+            if private:
+                # Each iteration reads outer values until it shadows them.
+                # Only yield outputs are visible after leaving the parser scope.
+                for name in (local_names - scoped_names) & self._assign_depth.keys():
+                    self._assign_depth[name] = self._scope_depth
+            else:
+                carried, fresh = self._classify_loop_locals(node.body)
+                self._scope_depth -= 1
+                bridges = self._make_bridge_assignments(
+                    [name for name in carried if name not in scoped_names]
+                )
+                # A fresh write reuses the incoming spelling on both the zero-trip
+                # and executed paths without reading a sibling's private local.
+                fresh_depths = {name: self._assign_depth[name] for name in fresh if name not in scoped_names}
+                self._assign_depth.update(dict.fromkeys(fresh_depths, outer_depth))
+                folded_bridges, recovered = self._materialize_folded_writes([node])
+                bridges.extend(folded_bridges)
+                self._scope_depth += 1
             node.body = self._visit_scoped_body(node.body)
-            self._scope_depth -= 1
-            if bridges:
-                return bridges + [node]
-            return node
         finally:
             self._scope_depth = outer_depth
-            # A yield-LHS is an output definition even when it reuses a target
-            # name. Only unpublished loop-local bindings restore the outer value.
-            restore_names = scoped_names - yielded_names
-            _restore_bindings(self._meta, saved[0], restore_names)
+            self._assign_depth.update(fresh_depths)
+            if captures is not None and self._graph_captures is not None:
+                _restore_bindings(self._graph_captures, captures, restore_names)
+            _restore_bindings(self._meta, saved[0], meta_names)
             _restore_bindings(self._shape_inlined, saved[1], restore_names)
             _restore_bindings(self._assign_count, saved[2], restore_names)
             _restore_bindings(self._assign_depth, saved[3], restore_names)
             _restore_bindings(self._var_renames, saved[4], restore_names)
+        copies = self._publish_loop_updates(yields, incoming_outputs) if incoming_outputs else []
+        self._restore_shape_folds(recovered)
+        if after_loop:
+            copies.extend(self._visit_scoped_body(after_loop))
+        return [*bridges, node, *copies] if bridges or copies else node
 
-    def visit_While(self, node: ast.While) -> ast.stmt:
-        """Keep SIMT while-body updates on the incoming private binding."""
-        if not self._simt_depth:
-            return cast("ast.stmt", self.generic_visit(node))
-        node.test = self.visit(node.test)
+    def track_conditional_inputs(self, statements: list[ast.stmt]) -> None:
+        """Record which sibling bindings must keep their spelling across each conditional."""
+        self._live_before(statements, set(), set(), record=True)
+
+    def _live_before(
+        self, statements: list[ast.stmt], live_out: set[str], loop_live: set[str], *, record: bool
+    ) -> set[str]:
+        live: set[str] = live_out.copy()
+        for stmt in reversed(statements):
+            if isinstance(stmt, ast.If):
+                then_live = self._live_before(stmt.body, live, loop_live, record=record)
+                else_live = self._live_before(stmt.orelse, live, loop_live, record=record)
+                inputs = then_live | else_live | self._names_by_ctx(stmt.test, ast.Load)
+                # Even when both arms overwrite a live-out, they need a common target.
+                if record:
+                    self._conditional_inputs[stmt] = live | inputs
+                live = inputs
+            elif isinstance(stmt, (ast.For, ast.While)):
+                # A back edge observes reads before the body's first write. A
+                # break can take the old value straight to the continuation.
+                header = stmt.iter if isinstance(stmt, ast.For) else stmt.test
+                loop_inputs = self._live_before(stmt.orelse, live, loop_live, record=record) | live
+                loop_inputs.update(self._names_by_ctx(header, ast.Load))
+                # Find the reads before a write in one iteration, then use
+                # those as live-outs of the preceding iteration.
+                live = loop_inputs | self._live_before(stmt.body, loop_inputs, loop_inputs, record=False)
+                if record:
+                    self._live_before(stmt.body, live, live, record=True)
+                    if isinstance(stmt, ast.While):
+                        self._conditional_inputs[stmt] = live.copy()
+            elif isinstance(stmt, ast.With):
+                # Some DSL regions keep body bindings private. Conservatively
+                # keep live-outs across the region as well as its header reads.
+                live |= self._live_before(stmt.body, live, loop_live, record=record)
+                for item in stmt.items:
+                    live.update(self._names_by_ctx(item.context_expr, ast.Load))
+            elif isinstance(stmt, (ast.Break, ast.Continue)):
+                live = loop_live.copy()
+            else:
+                if isinstance(stmt, ast.Return):
+                    live.clear()
+                if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+                    targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                    for target in targets:
+                        live.difference_update(self._names_by_ctx(target, ast.Store))
+                elif isinstance(stmt, ast.AugAssign):
+                    live.update(self._names_by_ctx(stmt.target, ast.Store))
+                live.update(self._names_by_ctx(stmt, ast.Load))
+        return live
+
+    @contextmanager
+    def _conditional_scope(self, stmt: ast.If | ast.While) -> Iterator[None]:
+        """Treat visible bindings as incoming on every path through an if or while."""
+        # Sibling temporaries can have different types. Share their spelling
+        # only when the conditional reads the predecessor or exports the result.
+        incoming = self._conditional_inputs.get(stmt)
+        sibling_depths = {
+            name: depth
+            for name, depth in self._assign_depth.items()
+            if depth > self._scope_depth and (incoming is None or name in incoming)
+        }
+        self._assign_depth.update(dict.fromkeys(sibling_depths, self._scope_depth))
         self._scope_depth += 1
         try:
-            node.body = self._visit_scoped_body(node.body)
+            yield
         finally:
             self._scope_depth -= 1
-        node.orelse = self._visit_scoped_body(node.orelse)
-        return node
+            self._assign_depth.update(sibling_depths)
+
+    def visit_While(self, node: ast.While) -> ast.stmt | list[ast.stmt]:
+        """Keep while-body writes on the binding used by the loop condition."""
+        if node in self._proven_empty_loops or (self._shape_inlined and self._empty_loop(node, set())):
+            return self._visit_scoped_body(node.orelse)
+        bridges, recovered = self._materialize_folded_writes([node])
+        node.test = self.visit(node.test)
+        with self._conditional_scope(node):
+            node.body = self._visit_scoped_body(node.body)
+        if node.orelse:
+            node.orelse = self._visit_scoped_body(node.orelse)
+        self._restore_shape_folds(recovered)
+        return [*bridges, node] if bridges else node
 
     @staticmethod
     def _is_attribute_call(expr: ast.expr | None, name: str) -> bool:
@@ -1022,8 +1596,10 @@ class BodyTransformer(ast.NodeTransformer):
             elif isinstance(stmt, ast.For) and cls._is_attribute_call(stmt.iter, "split_aiv"):
                 yield from cls.selected_yield_assignments(stmt.body)
 
-    def _visit_inactive_branch(self, statements: list[ast.stmt]) -> list[ast.stmt]:
-        """Transform a constexpr-dead branch without publishing its bindings."""
+    def _visit_isolated_branch(
+        self, statements: list[ast.stmt], *, materialize: bool = False
+    ) -> list[ast.stmt]:
+        """Transform a branch whose local bindings do not escape."""
         state = (
             self._meta.copy(),
             self._shape_inlined.copy(),
@@ -1035,7 +1611,8 @@ class BodyTransformer(ast.NodeTransformer):
         if graph_captures is not None:
             self._graph_captures = graph_captures.copy()
         try:
-            return self._visit_scoped_body(statements)
+            prefix, _ = self._materialize_folded_writes(statements) if materialize else ([], {})
+            return prefix + self._visit_scoped_body(statements)
         finally:
             self._meta, self._shape_inlined, self._assign_count, self._assign_depth, self._var_renames = state
             self._graph_captures = graph_captures
@@ -1046,6 +1623,42 @@ class BodyTransformer(ast.NodeTransformer):
         for assignment, value in self.selected_yield_assignments(selected):
             assignment.value = value
         return self._visit_scoped_body(selected)
+
+    def _visit_yielding_if(self, node: ast.If, yields: dict[ast.Assign | ast.AnnAssign, list[str]]) -> ast.If:
+        # The parser exports only yield targets. Give both arms the same
+        # output names while keeping their temporaries inside each arm.
+        recovered = {}
+        if self._shape_inlined:
+            recovered = {
+                name: value
+                for name, value in self._branch_output_constants(node, set()).items()
+                if self._active_shape_fold(name) == value
+            }
+        self._scope_depth += 1
+        try:
+            node.body = self._visit_isolated_branch(node.body, materialize=True)
+            if node.orelse:
+                node.orelse = self._visit_isolated_branch(node.orelse, materialize=True)
+        finally:
+            self._scope_depth -= 1
+        published: dict[str, str] = {}
+        for stmt, names in yields.items():
+            for target, name in zip(self._yield_stores(stmt), names, strict=True):
+                if name not in published:
+                    published[name] = self._bind_assign_name(ast.Name(id=name, ctx=ast.Store()), None).id
+                    self._shape_inlined.pop(name, None)
+                target.id = published[name]
+        self._restore_shape_folds(recovered)
+        return node
+
+    @classmethod
+    def _yield_bindings(cls, statements: list[ast.stmt]) -> dict[ast.Assign | ast.AnnAssign, list[str]]:
+        from pypto.language.parser.control_flow_parser import ControlFlowParser  # noqa: PLC0415
+
+        return {
+            stmt: [target.id for target in cls._yield_stores(stmt)]
+            for stmt in ControlFlowParser.iter_yield_assignments(statements)
+        }
 
     def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
@@ -1074,29 +1687,86 @@ class BodyTransformer(ast.NodeTransformer):
             self._scope_depth += 1
             if capture_condition:
                 if node.orelse:
-                    node.orelse = self._visit_inactive_branch(node.orelse)
+                    node.orelse = self._visit_isolated_branch(node.orelse)
                 node.body = self._visit_scoped_body(node.body)
             else:
-                node.body = self._visit_inactive_branch(node.body)
+                node.body = self._visit_isolated_branch(node.body)
                 if node.orelse:
                     node.orelse = self._visit_scoped_body(node.orelse)
             self._scope_depth -= 1
             return node
 
-        condition = values.literal_condition(node.test)
+        condition = (
+            capture_condition if capture_condition is not None else values.literal_condition(node.test)
+        )
         if condition is not None:
             return self._visit_literal_if(node, condition)
-        self._scope_depth += 1
+        statements = [*node.body, *node.orelse]
+        yields = self._yield_bindings(statements)
+        if yields:
+            return self._visit_yielding_if(node, yields)
+        bridges, recovered = self._materialize_folded_writes([node])
+        with self._conditional_scope(node):
+            self._visit_if_branches(node)
+        self._restore_shape_folds(recovered)
+        return [*bridges, node] if bridges else node
+
+    @classmethod
+    def _publish_branch_alias(cls, body: list[ast.stmt], alias: str, value: str | int) -> None:
+        """Keep copies on executable paths with a control transfer at the tail."""
+        last = body[-1]
+        if not cls._terminates_suite(last):
+            body.append(cls._copy_binding(alias, value))
+        elif isinstance(last, ast.If):
+            cls._publish_branch_alias(last.body, alias, value)
+            if last.orelse:
+                cls._publish_branch_alias(last.orelse, alias, value)
+        elif isinstance(last, ast.With):
+            cls._publish_branch_alias(last.body, alias, value)
+        else:
+            body.insert(-1, cls._copy_binding(alias, value))
+
+    def _visit_if_branches(self, node: ast.If) -> None:
+        """Merge implicit outputs of runtime branches at their shared scope depth."""
         before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)
         if node.orelse:
             # then-branch locals are invisible to the else-branch: forget them
             # so a same-named else-branch assignment is a fresh first binding.
-            for name in set(self._assign_count) - before:
+            then_locals = {name: self._binding_value(name) for name in set(self._assign_count) - before}
+            then_meta = {
+                name: self._meta.get(value) for name, value in then_locals.items() if isinstance(value, str)
+            }
+            for name in then_locals:
                 self._forget_rename_bookkeeping(name)
+                self._shape_inlined.pop(name, None)
             node.orelse = self._visit_scoped_body(node.orelse)
-        self._scope_depth -= 1
-        return node
+            candidates: dict[str, str | int] = {}
+            for name in then_locals.keys() & self._assign_count.keys():
+                right = self._binding_value(name)
+                if then_locals[name] != right:
+                    candidates[name] = right
+            if not candidates:
+                return
+            # A visited alias can belong to just one arm of a nested if. A
+            # merge copy reads its source unconditionally at the branch exit.
+            then_written: set[str] = set()
+            else_written: set[str] = set()
+            self._collect_upward_exposed(node.body, then_written, set(), may_skip_loops=True)
+            self._collect_upward_exposed(node.orelse, else_written, set(), may_skip_loops=True)
+            for name, right in sorted(candidates.items()):
+                left = then_locals[name]
+                if (isinstance(left, str) and left not in then_written) or (
+                    isinstance(right, str) and right not in else_written
+                ):
+                    continue
+                merged = self._rebind(name)
+                self._publish_branch_alias(node.body, merged, left)
+                self._publish_branch_alias(node.orelse, merged, right)
+                if isinstance(right, str) and self._meta.get(right) == then_meta.get(name):
+                    self._record_tensor_meta(merged, then_meta.get(name))
+                self._shape_inlined.pop(name, None)
+                self._assign_depth[name] = self._scope_depth - 1
 
     def _visit_with_captures(self, node: ast.With) -> tuple[dict[str, str], list[ast.stmt]]:
         """Rewrite capture names and materialize folded host predecessors."""

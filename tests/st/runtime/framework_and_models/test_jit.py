@@ -217,6 +217,36 @@ def test_deduplicated_inline_kernel_executes_twice(test_config):
         torch.testing.assert_close(out, x * 4)
 
 
+@pl.jit.inline(auto_scope=False)
+def _tuple_rebind_helper(zero: pl.Tensor, one: pl.Tensor):
+    one = pl.add(zero, 1.0)
+    power = pl.mul(one, 2.0)
+    return power, one
+
+
+@pl.jit
+def _tuple_rebind_kernel(x: pl.Tensor[[1, 8], pl.FP32], y: pl.Out[pl.Tensor[[1, 8], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        zero = pl.create_tensor([1, 8], dtype=pl.FP32)
+        zero = pl.sub(x, x)
+        one = pl.create_tensor([1, 8], dtype=pl.FP32)
+        one = zero
+        power, one = _tuple_rebind_helper(zero, one)
+        y[:, :] = pl.add(power, one)
+    return y
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+def test_tuple_return_rebinds_previous_alias(test_config):
+    if test_config.codegen_only:
+        pytest.skip("Tuple rebinding acceptance requires execution")
+    x = torch.arange(8, dtype=torch.float32).reshape(1, 8)
+    y = torch.zeros_like(x)
+    compiled = _tuple_rebind_kernel.compile(x, y, config=test_config)
+    compiled(x, y, config=test_config)
+    torch.testing.assert_close(y, torch.full_like(y, 3.0), rtol=0, atol=0)
+
+
 class TestJITExecution:
     """End-to-end tests for @pl.jit compile + execute on device."""
 

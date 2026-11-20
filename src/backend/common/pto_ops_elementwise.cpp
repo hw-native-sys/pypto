@@ -486,7 +486,7 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   return "";
 }
 
-// PTO-ISA 83b1b2b52 uses one scratch row: candidate values, a 32-byte-aligned
+// PTO-ISA 6065c782 uses one scratch row: candidate values, a 32-byte-aligned
 // comparison mask, and a 32-byte address buffer. INT32 keeps the FP32 dividend,
 // divisor and quotient chain in tmp so the sources stay read-only: three data
 // areas for TREM, two for TREMS. High-precision TREM adds staged vector state
@@ -506,7 +506,7 @@ static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::Ti
     const int64_t width = valid_columns ? valid_columns->value_ : columns->value_;
     const int64_t vectors = std::max<int64_t>(width / 64, 1);
     const int64_t staged = 192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? 64 : 0) +
-                           512 * std::min<int64_t>(vectors, 8);
+                           640 * std::min<int64_t>(vectors, 8);
     required = std::max(required, staged);
   }
   return required;

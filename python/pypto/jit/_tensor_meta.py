@@ -2024,7 +2024,9 @@ def _preview_static_expressions(
     )
     emitted: list[ast.stmt] = []
     try:
-        for stmt in copy.deepcopy(func_def.body):
+        body = copy.deepcopy(func_def.body)
+        transformer.track_conditional_inputs(body)
+        for stmt in body:
             rewritten = transformer.visit(stmt)
             if summarize_return and rewritten is not None:
                 emitted.extend(
