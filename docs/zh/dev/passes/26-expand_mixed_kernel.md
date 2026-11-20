@@ -25,6 +25,11 @@ mixed 函数级 AUTO 拆半已移除，包括跳过 `LowerAutoVectorSplit` 直�
 
 该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
+A5 BF16 NZ Vec-to-Mat `tile.assemble` 要求显式 `FunctionType.AIV` 函数。
+本 Pass 在核心分类前拒绝通用 InCore 函数中的此操作：按 Mat 目标分类会将 MTE3
+插入错误地放到 AIC，还可能丢弃由向量计算产生的源数据。
+显式 AIV 函数跳过展开，保留原生搬运所需的两个句柄。
+
 ### 动态参数类型与返回类型
 
 生成的 AIC、AIV 和 Group 各自拥有独立的参数身份（parameter identity）。

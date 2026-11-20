@@ -26,6 +26,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -362,6 +363,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         ret_name = PrepareTileDestination(return_var, ret_name, "if result").name;
         BindVarToMlir(return_var, ret_name);
         if (has_dynamic_valid_shape) {
+          // The PTOAS planner can reuse an existing descriptor for this phi.
+          // Its validity reset must participate in NZ insertion alignment too.
+          const auto valid_shape = ir::tile_view_semantics::GetEffectiveTileView(*tile_type).valid_shape;
+          RecordTileValidColumnUpdate(ret_name, valid_shape.back());
           deferred_tile_valid_shapes.emplace_back(ret_name, std::move(logical_fields));
         }
       } else if (ir::AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {

@@ -291,6 +291,13 @@ The result must reuse the Mat target; a separate result is rejected because
 preserving the other target elements would require an unsupported Mat-to-Mat
 copy. The source valid column count and column offset must be compile-time
 multiples of 16: the NZ transfer copies whole 32-byte BF16 column blocks.
+The same alignment requirement applies to every `set_validshape` update of
+the source handle, including updates through aliases. This conservative check
+covers the whole function, including later updates and loop backedges; a
+dynamic or unaligned update is rejected even if a later update restores alignment.
+Use an explicit `FunctionType.AIV` function. Generic InCore expansion rejects
+this transfer because it cannot keep both handles on the vector core; an
+explicit AIC function is rejected by codegen as well.
 This path does not enable ND-to-NZ conversion, other dtypes, or A2/A3
 Vec-to-Mat insertion. Shared L1 lifetime and synchronization with a Cube
 consumer remain the mixed kernel's responsibility.
