@@ -380,13 +380,6 @@ mismatched pop dtypes are rejected; PTOAS checks peer and split compatibility.
 The reserved buffer and FIFO slot sizes must describe the transmitted dtype,
 not the FP32 accumulator. The accumulator itself remains FP32 for other users.
 
-Explicit AIC/AIV Fixpipe kernels use `@pl.jit.incore(level=pl.Level.AIC)` and
-`@pl.jit.incore(level=pl.Level.AIV)`, called by a
-`@pl.jit.incore(level=pl.Level.CORE_GROUP)` wrapper and an `@pl.jit` entry.
-Return the output tensor explicitly from each endpoint. The system cases in
-`tests/st/runtime/ops/test_c2v_fixpipe.py` compile and run this JIT path for
-scalar/vector quantization, ring reuse, nested pipelines and NZ2NZ forwarding.
-
 **Notes:**
 
 - Push ops use an `ins()` clause with a typed tile buffer; frontend pop ops produce an SSA result with a `-> !pto.tile_buf<...>` result type
