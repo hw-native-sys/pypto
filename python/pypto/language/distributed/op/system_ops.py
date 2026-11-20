@@ -9,10 +9,10 @@
 
 """``pld.system.*`` — distributed system-level op DSL wrappers.
 
-System-level ops cover host-only queries, CommContext scalar accessors, and
+System-level ops cover topology queries, CommContext scalar accessors, and
 cross-rank synchronisation primitives:
 
-* :func:`world_size` — host-only scalar returning the number of devices in the
+* :func:`world_size` — scalar returning the number of devices in the
   current distributed execution. Returns a :class:`Scalar` wrapping an
   :class:`ir.Expr` of type ``ScalarType(INT64)``. Codegen lowers each call
   site to the ``world_size`` kwarg bound in the host_orch signature.
@@ -60,17 +60,14 @@ def num_workers() -> Scalar:
 def world_size() -> Scalar:
     """Return the distributed world size as an ``INT64`` :class:`Scalar`.
 
-    Parser context (host-only, not inside a nested device-side scope) is
-    validated by the parser before this wrapper is invoked. The DSL-side
-    return wrapping lets call sites compose naturally with Python operators
+    The DSL-side return wrapping lets call sites compose naturally with Python operators
     (``pld.world_size() * 4``, ``pl.range(pld.world_size())``), which the
     parser's ``invoke_dsl`` unwraps back to the underlying Call.
 
     .. warning::
 
-       This function is callable **only** inside HOST-level orchestration
-       (``level=pl.Level.HOST, role=pl.Role.Orchestrator``). Calling it
-       inside InCore (``type=pl.FunctionType.InCore``) raises a parser error.
+       The parser accepts this call in HOST and CLUSTER_0 orchestration,
+       outside nested InCore and SPMD scopes.
 
     .. seealso::
 

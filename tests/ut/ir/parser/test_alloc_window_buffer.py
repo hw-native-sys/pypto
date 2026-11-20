@@ -86,9 +86,8 @@ def test_alloc_window_buffer_lhs_is_plain_ptr_var():
     assert var.name_hint == "buf"
 
 
-def test_alloc_window_buffer_rejected_outside_host_function():
-    """``pld.alloc_window_buffer()`` is host-only — calling it from a
-    CORE_GROUP-level function body is a parse error."""
+def test_alloc_window_buffer_rejected_in_core_group():
+    """Calling ``pld.alloc_window_buffer()`` in a CORE_GROUP scope is a parse error."""
     with pytest.raises(ParserSyntaxError, match="HOST"):
 
         @pl.program

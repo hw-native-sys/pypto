@@ -40,8 +40,7 @@ def num_workers(*, span: Span | None = None) -> Call:
 def world_size(*, span: Span | None = None) -> Call:
     """Build a ``pld.system.world_size()`` Call returning ``ScalarType(INT64)``.
 
-    Host-only — the parser already validates the call site, so this builder
-    is unconditional.
+    The DSL parser checks the HOST or CLUSTER_0 call site.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("pld.system.world_size", [], {}, actual_span)

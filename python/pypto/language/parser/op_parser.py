@@ -1092,24 +1092,24 @@ class OpParser:
             )
 
         if op_name in ("world_size", "num_workers"):
-            in_device_scope = any(
-                self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+            self.validate_host_or_cluster_scope(f"pld.system.{op_name}", span)
+
+    def validate_host_or_cluster_scope(self, op_name: str, span: ir.Span) -> None:
+        level = self.function.func_level
+        in_device_scope = any(
+            self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+        )
+        if (
+            level is None
+            or level.value not in (ir.Level.HOST.value, ir.Level.CLUSTER_0.value)
+            or in_device_scope
+        ):
+            raise ParserSyntaxError(
+                f"{op_name}() can only be called in HOST or CLUSTER_0 orchestration context "
+                f"(not inside InCore / SPMD scopes); current function level: {level}",
+                span=span,
+                hint="Call from a HOST or CLUSTER_0 orchestrator outside any nested device-side scope",
             )
-            level = self.function.func_level
-            allowed = level == ir.Level.HOST
-            allowed_levels = "HOST"
-            if op_name == "num_workers":
-                allowed = level is not None and level.value in (ir.Level.HOST.value, ir.Level.CLUSTER_0.value)
-                allowed_levels = "HOST or CLUSTER_0"
-            if not allowed or in_device_scope:
-                raise ParserSyntaxError(
-                    f"pld.system.{op_name}() can only be called in {allowed_levels} orchestration context "
-                    "(not inside InCore / SPMD scopes); "
-                    f"current function level: {self.function.func_level}",
-                    span=span,
-                    hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                    "on the enclosing function and call outside any nested device-side scope",
-                )
 
     def parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse ``pld.<op>(...)`` — 2-segment unified short form.
