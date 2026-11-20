@@ -2359,33 +2359,47 @@ class Program:
         else:
             ir.assert_structural_equal(passes.optimize_orch_tensors()(program), program)
 
-    @pytest.mark.parametrize("join", [False, True], ids=["direct", "branch"])
-    def test_external_aiv_rejects_pitched_reshape(self, tmp_path, join):
+    @pytest.mark.parametrize("operation", ["reshape", "view"])
+    @pytest.mark.parametrize("path", ["direct", "branch", "helper"])
+    @pytest.mark.parametrize("pitch", [256, 288], ids=["packed", "pitched"])
+    def test_external_aiv_shape_changes_require_packed_input(self, tmp_path, operation, path, pitch):
         cpp = tmp_path / "external.cpp"
         cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
-        source = "chunk"
+        dispatch = f"self.kernel(pl.tensor.{operation}(chunk, [4, 512]))"
+        helper = ""
         choose = ""
-        if join:
-            source = "selected"
+        if path == "branch":
             choose = """if take_packed:
             selected = pl.yield_(packed)
         else:
             selected = pl.yield_(chunk)"""
+            dispatch = f"self.kernel(pl.tensor.{operation}(selected, [4, 512]))"
+        elif path == "helper":
+            helper = f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def dispatch(self, x: pl.Tensor[[8, 256], pl.FP32]):
+        self.kernel(pl.tensor.{operation}(x, [4, 512]))
+"""
+            dispatch = "self.dispatch(packed)\n        self.dispatch(chunk)"
         program = pl.parse_program(f"""
 @pl.program
 class Program:
     @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
     def kernel(self, x: pl.Tensor[[4, 512], pl.FP32]):
         ...
+{helper}
 
     @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, parent: pl.Tensor[[10, 288], pl.FP32], packed: pl.Tensor[[8, 256], pl.FP32],
+    def main(self, parent: pl.Tensor[[10, {pitch}], pl.FP32], packed: pl.Tensor[[8, 256], pl.FP32],
              take_packed: pl.Scalar[pl.BOOL]):
-        chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+        chunk = pl.tensor.slice(parent, [8, 256], [1, 0])
         {choose}
-        self.kernel(pl.tensor.reshape({source}, [4, 512]))
+        {dispatch}
 """)
-        with pytest.raises(ValueError, match="tensor.reshape requires packed ND storage"):
+        if pitch == 256:
+            passes.optimize_orch_tensors()(program)
+            return
+        with pytest.raises(ValueError, match="packed ND storage"):
             passes.optimize_orch_tensors()(program)
 
     def test_refined_tile_store_preserves_attrs(self):

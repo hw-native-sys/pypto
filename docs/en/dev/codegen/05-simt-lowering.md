@@ -309,6 +309,7 @@ parent and use parent-relative indices. An external C++ AIV parameter with
 static inner extents and no explicit tensor view can use runtime descriptor
 strides. With dynamic inner extents, runtime strides require packed ND storage
 on all incoming paths. Explicit parameter views enforce their storage contract.
+Reshapes and shape-bearing ND views require packed storage on every incoming path.
 Nested slices, aliases, tuple projections, dropped axes, and manual `Submit`
 calls have pass-level regression coverage. Packed short vectors remain outside
 this executable subset; this acceptance does not add packed storage or APIs.

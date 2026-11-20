@@ -1816,7 +1816,7 @@ class SliceInputStridesOptimizer {
       const Span* span;
       std::vector<size_t> parents;
       bool uses_inherited_pitch = false;
-      bool reshape = false;
+      bool requires_packed_nd = false;
     };
     struct ExternalRoot {
       const Function* function;
@@ -1881,14 +1881,14 @@ class SliceInputStridesOptimizer {
         if (visited[index]) continue;
         visited[index] = true;
         const auto& constraint = constraints_[index];
-        if (!require_consensus && constraint.reshape) {
+        if (!require_consensus && constraint.requires_packed_nd) {
           constraint_roots_.push_back(index);
           continue;
         }
         if (require_consensus) {
           CHECK_SPAN(constraint.consistent, *constraint.span)
               << "AIV tensor argument requires consistent physical strides across loop carries and branches, "
-                 "and graph calls; tensor.reshape requires packed ND storage; "
+                 "and graph calls; tensor.reshape requires packed ND storage, as does shaped ND tensor.view; "
                  "pass the full parent tensor and use parent-relative indices instead";
         }
         pending.insert(pending.end(), constraint.parents.begin(), constraint.parents.end());
@@ -2202,11 +2202,13 @@ class SliceInputStridesOptimizer {
               auto view = tensor->tensor_view_.value_or(TensorView(std::vector<ExprPtr>{}, source.layout));
               view.layout = source.layout;
               view.stride = source.strides;
-              // Record unsupported physical reshapes on their result, rather
-              // than rejecting unrelated InCore paths during the eager scan.
-              // Only constraints reachable from an AIV operand are diagnosed.
-              const bool reshape = IsOp(call, "tensor.reshape");
-              if (reshape &&
+              // Shape-bearing ND views also lower to Tensor::reshape. Record
+              // their constraints on the result for reachable AIV operands.
+              const bool requires_packed_nd =
+                  IsOp(call, "tensor.reshape") ||
+                  (IsOp(call, "tensor.view") && call->args_.size() >= 2 && info.layout == TensorLayout::ND &&
+                   (!tensor->tensor_view_ || tensor->tensor_view_->layout == TensorLayout::ND));
+              if (requires_packed_nd &&
                   (source.layout != TensorLayout::ND ||
                    !AreExprVectorsEqual(source.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
                                                             tensor->shape_, TensorLayout::ND)))) {
@@ -2214,7 +2216,7 @@ class SliceInputStridesOptimizer {
                 info.consistent = false;
                 info.packed_nd = false;
                 info.constraint = source.constraint;
-                constraints_[AddConstraint(info, call->span_)].reshape = true;
+                constraints_[AddConstraint(info, call->span_)].requires_packed_nd = true;
                 return info;
               }
               auto args = call->args_;
@@ -2227,9 +2229,9 @@ class SliceInputStridesOptimizer {
               info.packed_nd &= source.packed_nd;
               info.consistent = source.consistent;
               info.constraint = source.constraint;
-              if (reshape && info.constraint) {
+              if (requires_packed_nd && info.constraint) {
                 auto& constraint = constraints_[AddConstraint(info, call->span_)];
-                constraint.reshape = true;
+                constraint.requires_packed_nd = true;
                 constraint.uses_inherited_pitch = info.packed_nd;
               } else {
                 RecordInheritedPitch(info, call->span_);
