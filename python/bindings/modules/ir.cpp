@@ -57,7 +57,6 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
-#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
@@ -1071,10 +1070,6 @@ void BindIR(nb::module_& m) {
   ir.def(
       "get_op", [](const std::string& op_name) { return OpRegistry::GetInstance().GetOp(op_name); },
       nb::arg("op_name"), "Get an operator instance by name");
-
-  ir.def("_distributed_op_context_error", &op_predicates::DistributedOpContextError, nb::arg("op"),
-         nb::arg("level").none(), nb::arg("role").none(), nb::arg("in_device_scope"),
-         "Return the distributed operation's context error, or an empty string when legal");
 
   ir.def(
       "get_op_output_arity",

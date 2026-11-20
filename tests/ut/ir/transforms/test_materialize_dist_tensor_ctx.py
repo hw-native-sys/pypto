@@ -734,6 +734,16 @@ def test_device_get_comm_ctx_is_replaced_by_materialized_context():
     assert len(host_queries) == 1, "host orchestration must keep the runtime query"
 
 
+# ---------------------------------------------------------------------------
+# The one Before below is hand-built rather than DSL-authored, and deliberately
+# so: the program under test is one the DSL frontend refuses to author. It
+# allocates a window inside a *chip* orchestration function, and the parser
+# rejects ``pld.alloc_window_buffer`` outside HOST orchestration with its own
+# diagnostic — which is a different error from the pass-level one this test
+# pins. Reaching pass 46 with that shape therefore requires raw ``ir.*``.
+# ---------------------------------------------------------------------------
+
+
 def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     span = ir.Span("test_materialize_dist_tensor_ctx.py", 1, 1)
     data_ty = ir.DistributedTensorType([4], pl.FP32)
@@ -750,9 +760,15 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
         ir.FunctionType.InCore,
     )
 
-    # A raw buffer pointer carries no communication context for the local window.
+    # `local_data` is a window created inside a chip-orchestration function, so
+    # it is a genuine new DistributedTensor rather than a view of a parameter —
+    # there is no context for it to inherit, and outside host orchestration the
+    # pass cannot query one either.
     buffer = ir.Var("buffer", ir.PtrType.get(), span)
     local_data = ir.Var("local_data", data_ty, span)
+    alloc = ir.create_op_call(
+        "pld.tensor.alloc_window_buffer", [ir.ConstInt(16, DataType.INDEX, span)], {"name": "buf"}, span
+    )
     window = ir.create_op_call(
         "pld.tensor.window",
         [buffer, ir.MakeTuple([ir.ConstInt(4, DataType.INDEX, span)], span)],
@@ -769,10 +785,11 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     )
     main = ir.Function(
         "main",
-        [(buffer, ir.ParamDirection.In)],
+        [],
         [],
         ir.SeqStmts(
             [
+                ir.AssignStmt(buffer, alloc, span),
                 ir.AssignStmt(local_data, window, span),
                 ir.EvalStmt(predicate_call, span),
             ],
