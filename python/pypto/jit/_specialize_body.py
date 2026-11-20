@@ -158,6 +158,7 @@ class BodyTransformer(ast.NodeTransformer):
         # Reverse map: generated alias → original user variable name.
         # Used to rewrite error messages so users see their original names.
         self._alias_to_original: dict[str, str] = {}
+        self._conditional_inputs: dict[ast.stmt, set[str]] = {}
         # Tracks the scope depth at which each variable was first assigned.
         # Rebindings at a deeper scope (e.g. inside a for/with) are loop-carried
         # updates and must NOT be renamed.
@@ -1481,13 +1482,66 @@ class BodyTransformer(ast.NodeTransformer):
             copies.extend(self._visit_scoped_body(after_loop))
         return [*bridges, node, *copies] if bridges or copies else node
 
+    def track_conditional_inputs(self, statements: list[ast.stmt]) -> None:
+        """Record which sibling bindings must keep their spelling across each conditional."""
+        self._live_before(statements, set(), set(), record=True)
+
+    def _live_before(
+        self, statements: list[ast.stmt], live_out: set[str], loop_live: set[str], *, record: bool
+    ) -> set[str]:
+        live: set[str] = live_out.copy()
+        for stmt in reversed(statements):
+            if isinstance(stmt, ast.If):
+                then_live = self._live_before(stmt.body, live, loop_live, record=record)
+                else_live = self._live_before(stmt.orelse, live, loop_live, record=record)
+                inputs = then_live | else_live | self._names_by_ctx(stmt.test, ast.Load)
+                # Even when both arms overwrite a live-out, they need a common target.
+                if record:
+                    self._conditional_inputs[stmt] = live | inputs
+                live = inputs
+            elif isinstance(stmt, (ast.For, ast.While)):
+                # A back edge observes reads before the body's first write. A
+                # break can take the old value straight to the continuation.
+                header = stmt.iter if isinstance(stmt, ast.For) else stmt.test
+                loop_inputs = self._live_before(stmt.orelse, live, loop_live, record=record) | live
+                loop_inputs.update(self._names_by_ctx(header, ast.Load))
+                # Find the reads before a write in one iteration, then use
+                # those as live-outs of the preceding iteration.
+                live = loop_inputs | self._live_before(stmt.body, loop_inputs, loop_inputs, record=False)
+                if record:
+                    self._live_before(stmt.body, live, live, record=True)
+                    if isinstance(stmt, ast.While):
+                        self._conditional_inputs[stmt] = live.copy()
+            elif isinstance(stmt, ast.With):
+                # Some DSL regions keep body bindings private. Conservatively
+                # keep live-outs across the region as well as its header reads.
+                live |= self._live_before(stmt.body, live, loop_live, record=record)
+                for item in stmt.items:
+                    live.update(self._names_by_ctx(item.context_expr, ast.Load))
+            elif isinstance(stmt, (ast.Break, ast.Continue)):
+                live = loop_live.copy()
+            else:
+                if isinstance(stmt, ast.Return):
+                    live.clear()
+                if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+                    targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                    for target in targets:
+                        live.difference_update(self._names_by_ctx(target, ast.Store))
+                elif isinstance(stmt, ast.AugAssign):
+                    live.update(self._names_by_ctx(stmt.target, ast.Store))
+                live.update(self._names_by_ctx(stmt, ast.Load))
+        return live
+
     @contextmanager
-    def _conditional_scope(self) -> Iterator[None]:
+    def _conditional_scope(self, stmt: ast.If | ast.While) -> Iterator[None]:
         """Treat visible bindings as incoming on every path through an if or while."""
-        # A binding established by a completed sibling can have the same depth
-        # as the body we are entering. Both paths must update its current alias.
+        # Sibling temporaries can have different types. Share their spelling
+        # only when the conditional reads the predecessor or exports the result.
+        incoming = self._conditional_inputs.get(stmt)
         sibling_depths = {
-            name: depth for name, depth in self._assign_depth.items() if depth > self._scope_depth
+            name: depth
+            for name, depth in self._assign_depth.items()
+            if depth > self._scope_depth and (incoming is None or name in incoming)
         }
         self._assign_depth.update(dict.fromkeys(sibling_depths, self._scope_depth))
         self._scope_depth += 1
@@ -1503,7 +1557,7 @@ class BodyTransformer(ast.NodeTransformer):
             return self._visit_scoped_body(node.orelse)
         bridges, recovered = self._materialize_folded_writes([node])
         node.test = self.visit(node.test)
-        with self._conditional_scope():
+        with self._conditional_scope(node):
             node.body = self._visit_scoped_body(node.body)
         if node.orelse:
             node.orelse = self._visit_scoped_body(node.orelse)
@@ -1652,7 +1706,7 @@ class BodyTransformer(ast.NodeTransformer):
         if yields:
             return self._visit_yielding_if(node, yields)
         bridges, recovered = self._materialize_folded_writes([node])
-        with self._conditional_scope():
+        with self._conditional_scope(node):
             self._visit_if_branches(node)
         self._restore_shape_folds(recovered)
         return [*bridges, node] if bridges else node

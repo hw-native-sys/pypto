@@ -379,6 +379,7 @@ class TestBodyTransformer:
             tensor_meta=tensor_meta,
             dep_names=dep_names or set(),
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = []
         for stmt in func_def.body:
             result = transformer.visit(stmt)
@@ -595,6 +596,7 @@ class TestBodyTransformer:
             dep_names=set(),
             py_globals=py_globals,
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = []
         for stmt in func_def.body:
             result = transformer.visit(stmt)
@@ -1490,6 +1492,7 @@ class TestVariableRebinding:
             param_names=param_names,
             initial_used_names=all_defined,
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = []
         for stmt in func_def.body:
             result = transformer.visit(stmt)
@@ -1645,6 +1648,46 @@ class TestVariableRebinding:
         for outer in (False, True):
             for inner in (0, 1):
                 assert transformed["f"](outer, inner) == original["f"](outer, inner)
+
+    def test_sibling_spmd_scatter_temporaries_can_change_type(self):
+        """Independent scatter kernels use the same local for INDEX and INT32."""
+
+        @pl.jit
+        def scatter(positions: pl.Tensor[[4], pl.INT32], output: pl.Out[pl.Tensor[[4], pl.INT32]]):
+            for phase in pl.spmd(1):
+                if phase >= 0:
+                    for row in pl.range(4):
+                        if row >= 0:
+                            relative = row + phase
+                            output = pl.write(output, [row], pl.cast(relative, pl.INT32))
+            for phase in pl.spmd(1):
+                if phase >= 0:
+                    for row in pl.range(4):
+                        if row >= 0:
+                            relative = pl.read(positions, [row])
+                            output = pl.write(output, [row], relative)
+            return output
+
+        assert isinstance(scatter.specialize(), ir.Program)
+
+    def test_conditional_overwrite_keeps_loop_back_edge(self):
+        source = """
+            def f(flags):
+                for setup in range(1):
+                    x = 1
+                    x = x + 1
+                seen = []
+                for flag in flags:
+                    seen.append(x)
+                    if flag:
+                        x = 7
+                    else:
+                        x = 9
+                return seen
+        """
+        namespace: dict = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"]([True, False, True]) == [2, 7, 9]
 
     def test_conditional_unpack_preserves_previous_loop_binding(self):
         # The incoming x already has an alias from a preceding sibling loop.

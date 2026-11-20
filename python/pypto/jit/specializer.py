@@ -2586,6 +2586,7 @@ class Specializer:
                 else {}
             ),
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         self._graph_rebinds[ctx.func_name] = (
             transformer.graph_rebinds if transformer.graph_rebinds or transformer.has_scope_capture else None
