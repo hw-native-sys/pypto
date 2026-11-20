@@ -43,7 +43,6 @@ from .parser_state import (
     ProgramBindings,
 )
 from .region_context import RegionContext
-from .scope_parser import GRAPH_FORBIDDEN_FUNC_TYPES
 from .syntax_helpers import (
     ENUM_VALUE_TYPES,
     PLD_CATEGORIES,
@@ -51,12 +50,6 @@ from .syntax_helpers import (
 )
 from .type_resolver import (
     _is_dump_call,  # noqa: PLC2701
-)
-
-# These orchestration intrinsics have parser-level context diagnostics.
-_ORCHESTRATION_INTRINSICS = frozenset(
-    ir.get_op(name).name
-    for name in ("pld.system.world_size", "pld.system.num_workers", "pld.tensor.alloc_window_buffer")
 )
 
 
@@ -1085,6 +1078,7 @@ class OpParser:
 
         - ``alloc_window_buffer``: must be intercepted at assignment-LHS.
           Reaching here means it was used outside that context.
+        - ``world_size`` and ``num_workers``: orchestration-level topology queries.
         """
         span = self.services.span_tracker.get_span(call)
 
@@ -1096,6 +1090,26 @@ class OpParser:
                 hint="Write 'buf = pld.tensor.alloc_window_buffer(N)' "
                 "(or the short form 'buf = pld.alloc_window_buffer(N)')",
             )
+
+        if op_name in ("world_size", "num_workers"):
+            in_device_scope = any(
+                self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+            )
+            level = self.function.func_level
+            allowed = level == ir.Level.HOST
+            allowed_levels = "HOST"
+            if op_name == "num_workers":
+                allowed = level is not None and level.value in (ir.Level.HOST.value, ir.Level.CLUSTER_0.value)
+                allowed_levels = "HOST or CLUSTER_0"
+            if not allowed or in_device_scope:
+                raise ParserSyntaxError(
+                    f"pld.system.{op_name}() can only be called in {allowed_levels} orchestration context "
+                    "(not inside InCore / SPMD scopes); "
+                    f"current function level: {self.function.func_level}",
+                    span=span,
+                    hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
+                    "on the enclosing function and call outside any nested device-side scope",
+                )
 
     def parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse ``pld.<op>(...)`` — 2-segment unified short form.
@@ -1115,8 +1129,7 @@ class OpParser:
                 "pld.remote_store",
             )
 
-        result = self.dispatch_op(_dsl_pld, "pld", op_name, call)
-        return self.check_orchestration_intrinsic(result, call)
+        return self.dispatch_op(_dsl_pld, "pld", op_name, call)
 
     def parse_pld_category_op(self, category: str, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse ``pld.<category>.<op>(...)`` — 3-segment canonical form.
@@ -1142,8 +1155,7 @@ class OpParser:
                 hint=f"Check spelling, or list available ops in pypto.language.distributed.op.{category}_ops",
             )
 
-        result = self.dispatch_op(submodule, f"pld.{category}", op_name, call)
-        return self.check_orchestration_intrinsic(result, call)
+        return self.dispatch_op(submodule, f"pld.{category}", op_name, call)
 
     def parse_builtin_op(self, segments: list[str], call: ast.Call) -> ir.Expr:
         """Parse printer-emitted ``pl.builtin.<category>.<op>(...)``.
@@ -1378,18 +1390,3 @@ class OpParser:
             )
 
         return ir.ConstInt(cache[dtype_name], DataType.INDEX, span)
-
-    def check_orchestration_intrinsic(self, result: ir.Expr, call: ast.Call) -> ir.Expr:
-        if isinstance(result, ir.Call) and result.op.name in _ORCHESTRATION_INTRINSICS:
-            self.validate_distributed_op_context(result.op, self.services.span_tracker.get_span(call))
-        return result
-
-    def validate_distributed_op_context(self, op: ir.Op, span: ir.Span) -> None:
-        in_device_scope = self.function.func_type in GRAPH_FORBIDDEN_FUNC_TYPES or any(
-            self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
-        )
-        message = ir._distributed_op_context_error(
-            op, self.regions.effective_level, self.regions.effective_role, in_device_scope
-        )
-        if message:
-            raise ParserSyntaxError(message, span=span)

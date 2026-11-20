@@ -33,10 +33,7 @@ class RegionContext:
         self.flow = flow
         self.services = services
         self.scope_kind_stack: list[ir.ScopeKind] = []
-        # Constant-time membership keeps per-call validation independent of nesting depth.
-        self.scope_kind_depths: dict[ir.ScopeKind, int] = {}
         self.effective_level: ir.Level | None = None
-        self.effective_role: ir.Role | None = None
 
         # Set while parsing the body of an InCore scope the user declared with an
         # explicit ``optimizations=[pl.split(MODE)]`` — MODE included when it is
@@ -61,21 +58,14 @@ class RegionContext:
     def scope_kind_context(self, scope_kind: ir.ScopeKind) -> Generator[None, None, None]:
         """Track scope nesting during parsing for context-sensitive validation."""
         self.scope_kind_stack.append(scope_kind)
-        self.scope_kind_depths[scope_kind] = self.scope_kind_depths.get(scope_kind, 0) + 1
         try:
             yield
         finally:
             self.scope_kind_stack.pop()
-            # Repeated kinds stay active until the outermost context exits.
-            remaining = self.scope_kind_depths[scope_kind] - 1
-            if remaining:
-                self.scope_kind_depths[scope_kind] = remaining
-            else:
-                del self.scope_kind_depths[scope_kind]
 
     def is_inside_scope(self, scope_kind: ir.ScopeKind) -> bool:
         """Return whether parsing is currently nested inside the given scope kind."""
-        return self.scope_kind_depths.get(scope_kind, 0) > 0
+        return scope_kind in self.scope_kind_stack
 
     @contextmanager
     def incore_user_split_context(
@@ -155,13 +145,13 @@ class RegionContext:
 
     @contextmanager
     def distributed_hierarchy_context(
-        self, scope_kind: ir.ScopeKind, level: ir.Level | None, role: ir.Role | None
+        self, scope_kind: ir.ScopeKind, level: ir.Level | None
     ) -> Generator[None, None, None]:
-        """Only hierarchy regions replace the effective distributed context."""
-        saved = self.effective_level, self.effective_role
+        """Track the caller level for worker dispatch inside hierarchy scopes."""
+        saved = self.effective_level
         if scope_kind == ir.ScopeKind.Hierarchy:
-            self.effective_level, self.effective_role = level, role
+            self.effective_level = level
         try:
             yield
         finally:
-            self.effective_level, self.effective_role = saved
+            self.effective_level = saved

@@ -34,7 +34,6 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
-#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verification_error.h"
@@ -179,9 +178,6 @@ void TypeChecker::RecordError(typecheck::ErrorType type, const std::string& mess
 
 void TypeChecker::VisitFunction(const FunctionPtr& func) {
   if (!func) return;
-  for (const auto& [message, span] : op_predicates::DistributedOpContextErrors(func)) {
-    diagnostics_.emplace_back(DiagnosticSeverity::Error, "DistributedOperationContext", 0, message, span);
-  }
   func_ = func;
   var_values_.clear();
   func_params_.clear();

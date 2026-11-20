@@ -3376,12 +3376,6 @@ def is_op_registered(op_name: str) -> bool:
         True if the operator is registered, False otherwise
     """
 
-def _distributed_op_context_error(
-    op: Op, level: Level | None, role: Role | None, in_device_scope: bool
-) -> str:
-    """Return a resolved distributed operation's context error, or an empty string."""
-    ...
-
 def get_op(op_name: str) -> Op:
     """Get an operator instance by name.
 
