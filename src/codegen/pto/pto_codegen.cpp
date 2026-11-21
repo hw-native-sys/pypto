@@ -1750,6 +1750,15 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     VisitStmt(func->body_);
   }
 
+  // A later textual update may execute before an insertion on a loop backedge.
+  // Conservatively require every update to a consumed descriptor to be aligned;
+  // an aligned write in another branch must not erase an unsafe possibility.
+  for (const auto& [source, span] : fs_.nz_insert_sources) {
+    CHECK_SPAN(fs_.unaligned_valid_column_updates.count(source) == 0, span)
+        << "tile.assemble: A5 BF16 NZ Vec->Mat insertion requires every valid column update to its "
+           "source handle (including aliases) to be a compile-time multiple of 16";
+  }
+
   CHECK_SPAN(fs_.vf_received_tiles.empty() || !fs_.has_explicit_pipe_flags, func->span_)
       << "VF C2V capture requires automatic caller synchronization; explicit pipe flags disable it";
   std::string body_content = stream_.str();
@@ -2662,6 +2671,15 @@ void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::st
 
 bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
   return fs_.tile_view_names.count(ssa_name) > 0;
+}
+
+void PTOCodegen::RequireNZInsertSourceAlignment(const std::string& ssa_name, const ir::Span& span) {
+  fs_.nz_insert_sources.emplace(ssa_name, span);
+}
+
+void PTOCodegen::RecordTileValidColumnUpdate(const std::string& ssa_name, const ir::ExprPtr& valid_cols) {
+  const auto cols = As<ir::ConstInt>(valid_cols);
+  if (!cols || cols->value_ % 16 != 0) fs_.unaligned_valid_column_updates.insert(ssa_name);
 }
 
 void PTOCodegen::RegisterMutableTileName(const std::string& ssa_name) {

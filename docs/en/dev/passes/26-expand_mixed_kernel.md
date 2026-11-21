@@ -26,6 +26,12 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
+A5 BF16 NZ Vec-to-Mat `tile.assemble` requires an explicit `FunctionType.AIV`
+function. This pass rejects it in a generic InCore function before core
+classification: dispatching from its Mat target would place the MTE3 insertion
+on AIC and can discard a vector-produced source. Explicit AIV functions bypass
+expansion and retain both handles for the native transfer.
+
 ### Dynamic parameter and return types
 
 Each generated AIC, AIV, and Group owns fresh parameter identities. Types that
