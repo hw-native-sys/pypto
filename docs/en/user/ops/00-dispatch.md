@@ -37,12 +37,25 @@ still correct if the surrounding code later descends to tile level.
 | `pl.tensor.*` | `Tensor` (DDR) | The compiler |
 | `pl.tile.*` | `Tile` (on-chip) | You |
 
-Two further namespaces are not levels but families:
+Three further namespaces are not levels but families:
 
 | Namespace | Contents |
 | --------- | -------- |
 | `pl.system.*` | Cross-core transfer, pipes, device geometry queries, synchronization |
 | `pl.array.*` | On-core array create / read / update |
+| `pld.*` | Cross-rank collectives, window buffers, P2P transfers, rank/signal queries |
+
+`pld` is chosen by **what the data does, not where it lives**: it is the namespace for
+distributed operations. Cross-rank transfers and collectives are `pld`, as are the
+window/rank/context primitives that support them even when a particular call stays
+local (`pld.window`, `pld.rank`); everything outside that distributed surface is `pl`.
+The namespace split mirrors `pl` — `pld.tile.*` on tile operands inside an InCore
+function, `pld.tensor.*` on whole tensors (orchestration or an InCore composite
+collective), `pld.system.*` for rank/signal primitives — and a 2-segment short form
+dispatches by name for `world_size`, `alloc_window_buffer`, `window`, `get_comm_ctx`,
+`rank`, `nranks`, `remote_load`, and `remote_store`; every other `pld` op needs its
+3-segment spelling. See [Distributed Programming](../distributed/index.md) for the
+model these operate on.
 
 ```python
 c = pl.add(a, b)          # dispatches on the type of a and b
