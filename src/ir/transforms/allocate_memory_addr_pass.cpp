@@ -57,6 +57,7 @@
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -595,6 +596,9 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
     return func;
   }
 
+  const auto planner = GetFunctionMemoryPlanner(func);
+  if (planner == MemoryPlanner::PtoAS) return func;
+
   // Obtain the allocation policy from the backend (or fall back to the default).
   auto policy = backend::BackendConfig::IsConfigured() ? backend::GetBackend()->CreateMemoryAllocatorPolicy()
                                                        : std::make_unique<DefaultMemoryAllocatorPolicy>();
@@ -606,9 +610,6 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 2: Collect all unique MemRef objects from TileType variables
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
   const RelativeMemRefOffsets relative_offsets = FoldRelativeMemRefOffsets(memrefs, func->body_);
-
-  const PassContext* context = PassContext::Current();
-  const MemoryPlanner planner = context == nullptr ? MemoryPlanner::PyPTO : context->GetMemoryPlanner();
 
   // Step 3: use the selected in-tree allocator. PTOAS never reaches this pass.
   std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;

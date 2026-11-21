@@ -33,7 +33,7 @@ import subprocess
 from pathlib import Path
 
 from pypto._environment import env_flag_disabled
-from pypto.backend._ptoas_config import get_ptoas_timeout
+from pypto.backend._ptoas_config import PTOAS_BUFFER_ID_SYNC_MARKER, get_ptoas_timeout
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
@@ -81,7 +81,9 @@ def _ptoas_flags(pto_content: str) -> list[str]:
     ``ir.compile()`` instead of a ``.pto`` splice.
     """
     level = "level3" if _ALLOC_TILE_ADDR_RE.search(pto_content) else "level2"
-    return ["--enable-insert-sync", f"--pto-level={level}"]
+    buffer_id_sync = PTOAS_BUFFER_ID_SYNC_MARKER in pto_content.splitlines()
+    sync = "--enable-bufid_sync" if buffer_id_sync else "--enable-insert-sync"
+    return [sync, f"--pto-level={level}"]
 
 
 def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:

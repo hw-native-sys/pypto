@@ -102,6 +102,7 @@ def tpush_to_aiv(
     tile: Expr,
     *,
     split: int,
+    split_valid_rows: bool = False,
     lane_stride: int | None = None,
     id: int | None = None,
     span: Span | None = None,
@@ -114,11 +115,19 @@ def tpush_to_aiv(
             axes over an odd extent)
         lane_stride: Partition stride carried when a ragged boundary was
             balanced across the two AIV lanes; omit for the box partition
+        split_valid_rows: On A5, split an FP32 Acc tile at half its actual valid
+            rows. Requires UP_DOWN, an even positive row count and full columns.
+            Each consumer must only use the first half of the producer's valid
+            row count in its own slot.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs: dict[str, Any] = {"split": split}
+    if type(split_valid_rows) is not bool:
+        raise TypeError("tpush_to_aiv: split_valid_rows must be a bool")
+    if split_valid_rows:
+        kwargs["split_valid_rows"] = True
     if lane_stride is not None:
         kwargs["lane_stride"] = lane_stride
     if id is not None:

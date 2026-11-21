@@ -117,6 +117,95 @@ def test_explicit_nz_gather_keeps_the_producer_tile():
     ir.assert_structural_equal(after, passes.expand_mixed_kernel()(after))
 
 
+def test_mixed_pipe_propagates_ptoas_planning_and_buffer_sync_options():
+    """Both initializers in an InCore mixed kernel opt in; outlined peers keep both options."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+            c2v_import = pl.import_peer_buffer(name="c2v", peer_func="")
+            pl.aic_initialize_pipe(
+                c2v_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=512,
+                slot_num=2,
+                ptoas_plan_memory=True,
+                ptoas_buffer_id_sync=True,
+            )
+            c2v_local = pl.reserve_buffer(name="c2v", size=1024, base=pl.AUTO)
+            pl.aiv_initialize_pipe(
+                c2v_local,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=512,
+                slot_num=2,
+                ptoas_plan_memory=True,
+                ptoas_buffer_id_sync=True,
+            )
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.Mem.Left)
+            y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.Mem.Right)
+            _acc = pl.matmul(x_left, y_right)
+
+    after = _expand_raw(Before)
+    for name, buffer_op in (
+        ("main_aic", "system.import_peer_buffer"),
+        ("main_aiv", "system.reserve_buffer"),
+    ):
+        function = after.get_function(name)
+        assert function is not None
+        attrs = dict(function.attrs)
+        assert attrs.get("ptoas_plan_memory") is True
+        assert attrs.get("ptoas_buffer_id_sync") is True
+        buffers = [
+            stmt.value
+            for stmt in _flatten_top_level_stmts(function.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and _get_stmt_op_name(stmt) in _AUTO_PIPE_SETUP_OPS
+        ]
+        assert len(buffers) == 1
+        assert buffers[0].op.name == buffer_op
+        assert buffers[0].kwargs["name"] == "c2v"
+        if name == "main_aic":
+            assert buffers[0].kwargs["peer_func"] == "main_aiv"
+
+
+@pytest.mark.parametrize("option", ["ptoas_plan_memory", "ptoas_buffer_id_sync"])
+def test_mixed_pipe_rejects_disagreeing_ptoas_options(option):
+    """PTOAS options are group-wide and must agree across AIC and AIV."""
+
+    plan_memory_aic = option == "ptoas_plan_memory"
+    buffer_sync_aic = option == "ptoas_buffer_id_sync"
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+            c2v_import = pl.import_peer_buffer(name="c2v", peer_func="")
+            pl.aic_initialize_pipe(
+                c2v_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=512,
+                ptoas_plan_memory=plan_memory_aic,
+                ptoas_buffer_id_sync=buffer_sync_aic,
+            )
+            c2v_local = pl.reserve_buffer(name="c2v", size=4096, base=pl.AUTO)
+            pl.aiv_initialize_pipe(c2v_local, pl.const(0, pl.INT32), dir_mask=1, slot_size=512)
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.Mem.Left)
+            y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.Mem.Right)
+            _acc = pl.matmul(x_left, y_right)
+
+    with pytest.raises(ValueError, match=f"Mixed kernel initializers must agree on {option}"):
+        _expand_raw(Before)
+
+
 @pytest.mark.parametrize(
     ("layout", "out_rows", "out_cols"),
     [(pl.TileLayout.row_major, 64, 4), (pl.TileLayout.col_major, 4, 64)],

@@ -53,6 +53,7 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
@@ -2452,6 +2453,56 @@ class ParameterTypeRemapper : public IRMutator {
   }
 };
 
+// Authored pipe buffers are shared during affinity analysis: each core can
+// reserve a local buffer or import one from its peer. Once the two core bodies
+// are known, keep a copied declaration only where its initializer uses it.
+void PrunePeerPipeBuffers(std::vector<StmtPtr>& body, const std::vector<StmtPtr>& peer, CoreSide peer_side) {
+  std::unordered_set<const Var*> peer_buffers;
+  for (const auto& stmt : peer) {
+    auto eval = As<EvalStmt>(stmt);
+    auto call = eval ? As<Call>(eval->expr_) : nullptr;
+    if (!IsOp(call, core_side_ops::InitializePipeOp(peer_side))) continue;
+    for (const auto& arg : call->args_) {
+      if (auto var = AsVarLike(arg)) peer_buffers.insert(var.get());
+    }
+  }
+  if (peer_buffers.empty()) return;
+
+  var_collectors::VarDefUseCollector uses;
+  for (const auto& stmt : body) uses.VisitStmt(stmt);
+  body.erase(std::remove_if(body.begin(), body.end(),
+                            [&](const StmtPtr& stmt) {
+                              auto assign = As<AssignStmt>(stmt);
+                              if (!assign || !peer_buffers.count(assign->var_.get()) ||
+                                  uses.var_uses.count(assign->var_.get())) {
+                                return false;
+                              }
+                              auto call = As<Call>(assign->value_);
+                              return IsOp(call, "system.reserve_buffer") ||
+                                     IsOp(call, "system.import_peer_buffer");
+                            }),
+             body.end());
+}
+
+void ResolveOutlinedPipePeer(std::vector<StmtPtr>& body, const std::string& peer_name) {
+  for (auto& stmt : body) {
+    auto assign = As<AssignStmt>(stmt);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    if (!IsOp(call, "system.import_peer_buffer") || !call->GetKwarg<std::string>("peer_func", "").empty()) {
+      continue;
+    }
+    auto updated = MutableCopy(call);
+    auto& kwargs = updated->kwargs_;
+    kwargs.erase(std::remove_if(kwargs.begin(), kwargs.end(),
+                                [](const auto& entry) { return entry.first == "peer_func"; }),
+                 kwargs.end());
+    kwargs.emplace_back("peer_func", peer_name);
+    auto rebound = MutableCopy(assign);
+    rebound->value_ = updated;
+    stmt = rebound;
+  }
+}
+
 struct ExpandedKernel {
   FunctionPtr aic_func;
   FunctionPtr aiv_func;
@@ -2602,6 +2653,24 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap, program);
 
+  PrunePeerPipeBuffers(aic_final, aiv_final, CoreSide::AIV);
+  PrunePeerPipeBuffers(aiv_final, aic_final, CoreSide::AIC);
+
+  auto requests_ptoas_option = [](const std::vector<StmtPtr>& body, CoreSide side, const char* attr) {
+    return std::any_of(body.begin(), body.end(), [side, attr](const StmtPtr& stmt) {
+      auto eval = As<EvalStmt>(stmt);
+      auto call = eval ? As<Call>(eval->expr_) : nullptr;
+      return IsOp(call, core_side_ops::InitializePipeOp(side)) && call->GetKwarg<bool>(attr, false);
+    });
+  };
+  auto core_attrs = func->attrs_;
+  for (const char* attr : {kAttrPtoasPlanMemory, "ptoas_buffer_id_sync"}) {
+    const bool requested = requests_ptoas_option(aic_final, CoreSide::AIC, attr);
+    CHECK_SPAN(requested == requests_ptoas_option(aiv_final, CoreSide::AIV, attr), func->span_)
+        << "Mixed kernel initializers must agree on " << attr;
+    if (requested && !func->HasAttr(attr)) core_attrs.emplace_back(attr, true);
+  }
+
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery
   // failed to recognise it — fail loudly here, not later in codegen.
@@ -2610,6 +2679,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";
+  ResolveOutlinedPipePeer(aic_final, aiv_name);
+  ResolveOutlinedPipePeer(aiv_final, aic_name);
   // Pipe depths from pl.cross_core_slot, propagated as function attrs by the
   // outliner. Omission preserves the default transport depth and local footprint.
   std::optional<int> slot_num_override =
@@ -2708,7 +2779,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   (void)aic_clone_map_unused;
   auto aic_func = std::make_shared<Function>(aic_name, aic_params, func->param_directions_,
                                              std::vector<TypePtr>{}, aic_cloned_body, func->span_,
-                                             FunctionType::AIC, std::nullopt, std::nullopt, func->attrs_);
+                                             FunctionType::AIC, std::nullopt, std::nullopt, core_attrs);
 
   // Create AIV function with deep clone (fresh Vars for all params and locals,
   // ensuring no shared Var pointers with AIC for structural equality)
@@ -2762,7 +2833,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(aiv_body_stmt, aiv_map);
   (void)aiv_clone_map_unused;
-  auto aiv_attrs = func->attrs_;
+  auto aiv_attrs = std::move(core_attrs);
   if (needs_dual_aiv_dispatch) {
     aiv_attrs.erase(std::remove_if(aiv_attrs.begin(), aiv_attrs.end(),
                                    [](const auto& kv) { return kv.first == kAttrDualAivDispatch; }),

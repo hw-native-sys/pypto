@@ -303,11 +303,18 @@ class _CrossCoreRuntime:
 
         return merged
 
-    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0):
+    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0, *, split_valid_rows=False):
         split = int(split)
         lane_stride = int(lane_stride)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
+            if split_valid_rows:
+                if split != 1 or lane_stride or queues.c2v_dtype is not None or tile.dtype != torch.float32:
+                    raise ValueError("split_valid_rows requires an untyped UP_DOWN split of an FP32 tile")
+                rows, cols = getattr(tile, "_pypto_valid_shape", tile.shape)
+                if rows <= 0 or rows % 2 or cols != tile.shape[1]:
+                    raise ValueError("split_valid_rows requires a positive even row count and full columns")
+                lane_stride = rows // 2
             # Configuration follows the executed pipe initialization, so a
             # push delegated to an inline helper sees the same contract.
             if queues.c2v_dtype is not None:
@@ -1058,7 +1065,11 @@ def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any]) -> str:
     # other kernel keeps the two-argument form.
     stride = _lane_stride_kwarg(kw)
     stride_arg = f", {stride}" if stride else ""
-    return f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}{_pipe_id_kwarg(kw)})"
+    valid_rows_arg = ", split_valid_rows=True" if kw.get("split_valid_rows", False) else ""
+    return (
+        f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}"
+        f"{_pipe_id_kwarg(kw)}{valid_rows_arg})"
+    )
 
 
 def _handle_aic_initialize_pipe(_a: list[str], kw: dict[str, Any]) -> str:

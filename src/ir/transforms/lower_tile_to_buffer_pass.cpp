@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
@@ -1523,7 +1524,6 @@ class TileToBufferMutator : public IRMutator {
 
 ProgramPtr TransformProgram(const ProgramPtr& program) {
   const auto* context = PassContext::Current();
-  const bool addressed = !context || context->GetMemoryPlanner() != MemoryPlanner::PtoAS;
   auto& verifiers = PropertyVerifierRegistry::GetInstance();
   std::vector<FunctionPtr> selected;
   for (const auto& [global, function] : program->functions_) {
@@ -1533,7 +1533,9 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
   verifiers.VerifyOrThrow({IRProperty::NoNestedCalls},
                           std::make_shared<Program>(selected, program->name_, program->span_));
   verifiers.VerifyOrThrow({IRProperty::TileStorageLegalized}, program);
-  if (addressed) verifiers.VerifyOrThrow({IRProperty::TileStorageAllocated}, program);
+  if (!context || context->GetMemoryPlanner() != MemoryPlanner::PtoAS) {
+    verifiers.VerifyOrThrow({IRProperty::TileStorageAllocated}, program);
+  }
   std::vector<FunctionPtr> functions;
   functions.reserve(program->functions_.size());
   for (const auto& [global, function] : program->functions_) {
@@ -1546,6 +1548,7 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
       CHECK_SPAN(!As<TileType>(param->GetType()), param->span_)
           << "LowerTileToBuffer: device Tile parameters require the Buffer helper ABI recipe";
     }
+    const bool addressed = GetFunctionMemoryPlanner(function) != MemoryPlanner::PtoAS;
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
     storage.Finalize();

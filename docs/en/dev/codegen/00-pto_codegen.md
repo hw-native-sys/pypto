@@ -42,6 +42,15 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 - **MemRef-based Allocation**: Maps IR MemRef objects to `pto.alloc_tile` operations
 - **Type-aware Conversion**: Derives tile_buf/tensor_view types from TileType metadata
 
+### Synchronization selection
+
+An outlined mixed A5 kernel can set `ptoas_buffer_id_sync=True` in both
+`aic_initialize_pipe` and `aiv_initialize_pipe`. The setting applies to the
+entire mixed module and selects PTOAS's `--enable-bufid_sync` flag. The emitted
+PTO records the selection for artifact rebuilds. Setting
+`ptoas_plan_memory=True` on both initializers also delegates that module's
+on-chip memory planning to PTOAS at `--pto-level=level2`.
+
 ### Generation Order
 
 Floating-point constants use decimal scientific notation for finite values and
