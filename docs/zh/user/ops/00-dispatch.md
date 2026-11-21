@@ -30,12 +30,24 @@
 | `pl.tensor.*` | `Tensor`（DDR） | 编译器 |
 | `pl.tile.*` | `Tile`（片上） | 你 |
 
-另有两个命名空间不是层级而是家族：
+另有三个命名空间不是层级而是家族：
 
 | 命名空间 | 内容 |
 | -------- | ---- |
 | `pl.system.*` | 跨核传输、管道、设备规模查询、同步 |
 | `pl.array.*` | 核内数组的创建 / 读取 / 更新 |
+| `pld.*` | 跨 rank 集合通信、窗口缓冲区、点对点传输、rank/信号查询 |
+
+`pld` 的选择标准是**数据做什么，而不是数据在哪里**：它是分布式操作的命名空间。
+跨 rank 的传输与集合通信属于 `pld`；支撑它们的 window/rank/context 原语也属于
+`pld`，即使某次调用本身不跨 rank（例如 `pld.window`、`pld.rank`）。这一分布式范围
+之外的操作使用 `pl`。命名空间的切分与 `pl` 一致 —— `pld.tile.*` 用于 InCore 函数内部的
+tile 操作，`pld.tensor.*` 用于整张张量（编排层或 InCore composite 集合通信），
+`pld.system.*` 用于 rank/信号原语 ——
+`world_size`、`num_workers`、`alloc_window_buffer`、`window`、`get_comm_ctx`、`rank`、`nranks`、
+`remote_load`、`remote_store` 这几个名字有按名字派发的 2 段式简写；其余 `pld` 算子
+都需要完整的 3 段式写法。这些操作所基于的模型见
+[分布式编程](../distributed/index.md)。
 
 ```python
 c = pl.add(a, b)          # dispatches on the type of a and b
