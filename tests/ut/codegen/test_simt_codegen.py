@@ -1379,7 +1379,7 @@ module attributes {{pto.target_arch = "a5", pto.backend = "vpto"}} {{
       attributes {{pto.simt_entry, pto.simt_max_threads = 32 : i32, pto.simt_max_regs = 128 : i32}} {{
     %tid = pto.get_tid_x : i32
     %index = arith.index_cast %tid : i32 to index
-    %value = pto.ldg %src[%index] : !pto.ptr<{dtype}, gm> -> {dtype}
+    %value = pto.ldg %src[%index] : !pto.ptr<{dtype}, gm>, index -> {dtype}
     pto.keep %value {{slot = 0 : i64}} : {dtype}
     return
   }}
@@ -1388,7 +1388,7 @@ module attributes {{pto.target_arch = "a5", pto.backend = "vpto"}} {{
     %value = pto.resume {{slot = 0 : i64}} : {dtype}
     %tid = pto.get_tid_x : i32
     %index = arith.index_cast %tid : i32 to index
-    pto.stg %value, %dst[%index] : !pto.ptr<{dtype}, gm>, {dtype}
+    pto.stg %value, %dst[%index] : !pto.ptr<{dtype}, gm>, index, {dtype}
     return
   }}
 }}
