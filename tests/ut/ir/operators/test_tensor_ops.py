@@ -4947,6 +4947,42 @@ def test_tensor_gather_rejects_non_matching_outer_dim():
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
+def test_tensor_gather_axis_form_roundtrips_through_printer():
+    """Regression test for #3024.
+
+    The printer used to emit the axis form's ``index`` operand positionally
+    (``pl.tensor.gather(input, index, dim=-1)``) regardless of how the call
+    was originally written, because it prints ``Call::args_`` positionally and
+    the ``dim`` kwarg trails after. That shape collides with the DSL wrapper's
+    own positional ``dim`` parameter (``gather(input, dim=None, index=None,
+    ...)``): the printed ``index`` silently fills the wrapper's ``dim`` slot,
+    so the explicit ``dim=-1`` keyword then raises ``TypeError: gather() got
+    multiple values for argument 'dim'`` the moment the printed source is
+    re-executed. Written with ``index=`` explicit below (one valid spelling
+    the wrapper accepts) so construction itself does not hit that collision --
+    this isolates the printer's own output as the thing under test. The fix
+    prints ``index`` as a keyword too whenever ``dim`` is present.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            x: pl.Tensor[[8, 16], pl.FP32],
+            idx: pl.Tensor[[8, 4], pl.INT32],
+        ) -> pl.Tensor[[8, 4], pl.FP32]:
+            return pl.tensor.gather(x, index=idx, dim=-1)
+
+    printed = Before.as_python()
+    assert "index=" in printed, f"expected `index=` keyword in printed gather call:\n{printed}"
+
+    # Re-executing the printed source must not raise -- this is the exact
+    # failure mode reported in #3024.
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(reparsed, Before)
+
+
 # ---- tensor.gather_mask (mask-pattern form) -----------------------------------
 
 
