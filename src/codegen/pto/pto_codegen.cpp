@@ -1758,6 +1758,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // shape/stride expression (e.g. the 2 in M * 2) are declared before use.
   stream_.str("");
   stream_.clear();
+  const ir::Span* prologue_span = func->span_.is_valid() ? &func->span_ : nullptr;
+  SpanScope prologue_loc(this, prologue_span);
   EmitMakeTensorViews(tensor_views);
   EmitExtraAllocTiles();
   std::string prologue_content = stream_.str();
@@ -1822,7 +1824,6 @@ void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& vie
   for (const auto& view : views) {
     const auto& param = view.parameter;
     const auto& tensor_type = view.type;
-    SpanScope param_loc(this, &param->span_);
     const auto& tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
     auto emit_index = [&](const ExprPtr& expr) {
@@ -1854,8 +1855,8 @@ void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& vie
       }
     }
 
-    // Buffer the statement so Emit() writes it as one line and can suffix the
-    // parameter's source location.
+    // Buffer the statement so Emit() writes it as one line. The enclosing
+    // function span is active while this synthesized prologue is emitted.
     std::ostringstream view_line;
     view_line << tensor_view << " = pto.make_tensor_view ";
     view_line << GetVarName(param);

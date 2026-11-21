@@ -531,6 +531,8 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   fs_.constants_indent = GetIndent();
   auto saved_stream = std::move(stream_);
   stream_ = std::move(fs_.body_section);
+  const ir::Span* prologue_span = func->span_.is_valid() ? &func->span_ : nullptr;
+  SpanScope prologue_loc(this, prologue_span);
   EmitMakeTensorViews(tensor_views);
   if (func->body_) VisitStmt(func->body_);
   const std::string body = stream_.str();

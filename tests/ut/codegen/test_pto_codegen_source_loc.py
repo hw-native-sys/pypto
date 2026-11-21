@@ -129,6 +129,24 @@ _MULTILINE_ADD_RANGE = (
 
 
 @pl.program
+class PrologueProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_prologue(  # PROLOGUE_DEF_LINE
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],  # PROLOGUE_PARAM_LINE
+        o: pl.Tensor[[128, 128], pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+        return pl.store(t, [0, 0], o)
+
+
+# Lines the prologue assertions resolve to: the ``def`` line owns the synthesized
+# preamble, and the parameter declaration lines deliberately differ from it.
+_PROLOGUE_DEF_LINE = next(i for i, ln in enumerate(_SOURCE_LINES, 1) if "# PROLOGUE_DEF_LINE" in ln)
+_PROLOGUE_PARAM_LINE = next(i for i, ln in enumerate(_SOURCE_LINES, 1) if "# PROLOGUE_PARAM_LINE" in ln)
+
+
+@pl.program
 class ControlFlowProg:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_loop(
@@ -198,6 +216,30 @@ class TestSourceLocEmission:
         constants = [ln for ln in mlir.splitlines() if "arith.constant" in ln]
         assert constants, f"no constants section in:\n{mlir}"
         assert not [ln.strip() for ln in constants if "loc(" in ln]
+
+
+class TestPrologueSpan:
+    """Compiler-synthesized prologue ops carry the enclosing function's span.
+
+    ``pto.make_tensor_view`` lines are generated from the parameter declarations,
+    not from any user statement, so the function definition line is their only
+    truthful location. A per-parameter span scope in codegen used to shadow the
+    prologue's function span, pointing these lines at the signature instead.
+    """
+
+    def test_make_tensor_view_carries_the_function_span(self):
+        assert _PROLOGUE_DEF_LINE != _PROLOGUE_PARAM_LINE, "markers collapsed onto one line"
+        mlir = _generate(PrologueProg)
+        views = [ln for ln in mlir.splitlines() if "pto.make_tensor_view" in ln]
+        assert views, f"no make_tensor_view in:\n{mlir}"
+        for line in views:
+            match = _LOC_RE.search(line)
+            assert match is not None, f"make_tensor_view carries no loc: {line.strip()}"
+            reported = int(match.group(2))
+            assert reported == _PROLOGUE_DEF_LINE, (
+                f"{line.strip()} reports line {reported}, expected the function def line "
+                f"{_PROLOGUE_DEF_LINE} (param line is {_PROLOGUE_PARAM_LINE})"
+            )
 
 
 class TestSourceLocDisabled:
