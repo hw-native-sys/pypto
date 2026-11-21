@@ -39,6 +39,7 @@ from pypto.pypto_core.passes import (
 
 from . import directions as directions
 from . import op as op
+from ._distributed_input_layout import DistributedInputLayout, PreparedDistributedInput
 from .builder import IRBuilder
 from .compile import compile
 from .compiled_program import CompiledProgram
@@ -95,6 +96,8 @@ __all__ = [
     "CompiledProgram",
     "DistributedCompiledProgram",
     "DistributedConfig",
+    "DistributedInputLayout",
+    "PreparedDistributedInput",
     "PassManager",
     "OptimizationStrategy",
     "InputLayoutPolicy",

@@ -919,8 +919,9 @@ Pass PrepareIntermediateTensorLayouts() {
       return std::any_of(names.begin(), names.end(), [&](const auto& binding) {
         const auto& [var, name] = binding;
         if (!storage.internal_buffers.count(name) || storage.external_outputs.count(name) ||
-            storage.nz_ineligible_names.count(name))
+            storage.nz_ineligible_names.count(name)) {
           return false;
+        }
         const auto tensor = As<TensorType>(var->GetType());
         return tensor && IsNzTensorType(tensor) && !tensor_view_semantics::IsNzBlocked(*tensor);
       });

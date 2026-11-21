@@ -511,7 +511,7 @@ struct VecCopy {
 struct VecCapacityConflicts {
   std::vector<std::string> issues;
   std::vector<VecCopy> copies;
-  std::vector<std::pair<size_t, OperatorConfig>> transposes;
+  std::vector<std::pair<size_t, OperatorConfig>> operation_configs;
 };
 
 bool FitsVecCapacity(int64_t occupied, uint64_t capacity, uint64_t extra) {
@@ -546,6 +546,28 @@ VecCapacityConflicts FindVecCapacityConflicts(const LayoutProblemInstance& insta
       if (position >= original.size()) {
         throw pypto::ValueError("Vec pressure operation is outside its timeline");
       }
+      // Private copies live through this read only. Their destinations can
+      // overlap, and each conversion may release its scratch before the next.
+      uint64_t local_destinations = 0;
+      uint64_t local_scratch = 0;
+      if (cfg.local_vec_load_layout) {
+        const auto& value = instance.values.at(op.output);
+        const auto storage =
+            instance.cost_model.GetVecConversionStorage(value, *cfg.local_vec_load_layout, cfg.output_layout);
+        if (!storage) throw pypto::InternalError("Mutable Vec load has no modeled conversion storage");
+        // The region already accounts for the backing defined by the load.
+        // The native load's temporary has the same size as that backing.
+        local_destinations += storage->destination_bytes;
+        local_scratch = storage->scratch_bytes;
+      }
+      for (const auto& [operand, target] : cfg.local_vec_conversions) {
+        const auto& value = instance.values.at(op.inputs.at(operand));
+        const auto storage =
+            instance.cost_model.GetVecConversionStorage(value, cfg.input_layouts.at(operand), target);
+        if (!storage) throw pypto::InternalError("Mutable Vec read has no modeled conversion storage");
+        local_destinations += storage->destination_bytes;
+        local_scratch = std::max(local_scratch, storage->scratch_bytes);
+      }
       for (size_t j = 0; j < op.inputs.size() && j < cfg.input_layouts.size(); ++j) {
         const auto& name = op.inputs[j];
         const auto* value = instance.FindValue(name);
@@ -576,18 +598,25 @@ VecCapacityConflicts FindVecCapacityConflicts(const LayoutProblemInstance& insta
         }
         // An explicit Vec move can also lower to a physical transpose. Its
         // result is already in the baseline, so only its scratch is additional.
-        if (j == 0 && op.op_name == "tile.move" && IsFlatVecTransposePair(target, cfg.output_layout)) {
+        if (j == 0 && op.op_name == "tile.move") {
+          const LayoutSpec execution_layout = cfg.ExecutionInputLayout(0);
           const auto* output = instance.FindValue(op.output);
           const auto workspace =
-              instance.cost_model.GetVecConversionStorage(*value, target, cfg.output_layout);
-          if (output && output->memory_space == MemorySpace::Vec && workspace) {
-            if (!FitsVecCapacity(original[position], region.capacity, workspace->scratch_bytes)) {
-              conflicts.issues.push_back("Vec capacity exceeded by transpose at '" + op.op_id + "'");
-              conflicts.transposes.emplace_back(region.first_operation + i, cfg);
-            }
-            original[position] += static_cast<int64_t>(workspace->scratch_bytes);
+              instance.cost_model.GetVecConversionStorage(*value, execution_layout, cfg.output_layout);
+          if (output && output->memory_space == MemorySpace::Vec && workspace &&
+              IsFlatVecTransposePair(execution_layout, cfg.output_layout)) {
+            local_scratch = std::max(local_scratch, workspace->scratch_bytes);
           }
         }
+      }
+      const uint64_t operation_bytes = local_destinations + local_scratch;
+      if (operation_bytes != 0) {
+        if (!FitsVecCapacity(original[position], region.capacity, operation_bytes)) {
+          conflicts.issues.push_back("Vec capacity exceeded by local layout conversion at '" + op.op_id +
+                                     "'");
+          conflicts.operation_configs.emplace_back(region.first_operation + i, cfg);
+        }
+        original[position] += static_cast<int64_t>(operation_bytes);
       }
     }
     if (copies.empty()) continue;
@@ -1674,14 +1703,15 @@ void VisitBlockMoveFactors(const IncrementalState& state, const IncrementalState
 }
 
 void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_ops,
-                       const std::vector<ValueId>& comp_factors, const LayoutSolverConfig& config,
-                       int64_t& evaluated_moves, int64_t& moves_applied, int64_t& greedy_sweeps,
-                       std::string& termination_reason) {
+                       const std::vector<ValueId>& comp_factors, const std::vector<OpId>& topo_ops,
+                       const LayoutSolverConfig& config, bool locally_optimal, int64_t& evaluated_moves,
+                       int64_t& moves_applied, int64_t& greedy_sweeps, std::string& termination_reason) {
   const size_t n = comp_ops.size();
   FMMoveFrontier singles(state, comp_ops, config, evaluated_moves);
   FMFanoutFrontier groups(state, comp_factors, config, evaluated_moves);
   std::vector<bool> marked(n, false);
   std::vector<bool> seen(n, false);
+  size_t seen_count = 0;
   std::unordered_set<ValueId> expanded_values;
   std::vector<size_t> affected;
   std::vector<IncrementalState::ChoiceChange> history;
@@ -1698,6 +1728,7 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
   const auto activate = [&](size_t local) {
     if (seen[local]) return true;
     seen[local] = true;
+    ++seen_count;
     if (!singles.Refresh(local)) return false;
     const auto& op = problem.Ops()[comp_ops[local]];
     groups.Admit(op.output_value);
@@ -1724,6 +1755,7 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
   const auto record_and_lock = [&](size_t local, uint16_t choice, std::optional<double> singleton_gain) {
     const OpId op = comp_ops[local];
     history.emplace_back(op, state.Choices()[op]);
+    seen_count += !seen[local];
     seen[local] = true;
     singles.Lock(local);
     groups.Lock(op, choice, singleton_gain);
@@ -1747,30 +1779,71 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
     }
   };
 
-  size_t seed = 0;
-  bool tried_fanout_seed = false;
-  bool tried_midpoint = false;
+  // Sample regularly spaced positions in extraction order. A stalled pass
+  // broadens the sample and a rotation also changes it when its size stays
+  // fixed. Cap the initial work independently of component size.
+  constexpr size_t kInitialSeeds = 4;
+  constexpr size_t kMaxSeeds = 16;
+  const size_t initial_seeds = std::min(n, kInitialSeeds);
+  const size_t max_seeds = std::min(n, kMaxSeeds);
+  size_t seed_count = initial_seeds;
+  size_t rotation = 0;
+  std::vector<size_t> seeds;
+  seeds.reserve(max_seeds);
+  std::optional<size_t> preferred_seed;
+  std::optional<FMMoveFrontier::Move> failed_full_frontier_start;
+  bool tried_fanout_restart = false;
   for (int64_t pass = 0; pass < config.max_greedy_sweeps; ++pass) {
     ++greedy_sweeps;
     history.clear();
     move_starts.clear();
     std::fill(seen.begin(), seen.end(), false);
+    seen_count = 0;
     expanded_values.clear();
     double best_prefix_cost = state.Cost();
     size_t best_prefix_len = 0;
-    const auto& seed_op = problem.Ops()[comp_ops[seed]];
     std::optional<size_t> fanout_seed;
+    std::optional<FMMoveFrontier::Move> full_frontier_start;
     double fanout_seed_gain = config.tolerance;
-    // Rebuild both frontiers from a single operator after rollback. Its incident
-    // fan-outs compete with that operator's alternatives from the first move.
+    seeds.clear();
+    const auto add_seed = [&](size_t local) {
+      if (seeds.size() < seed_count && std::find(seeds.begin(), seeds.end(), local) == seeds.end()) {
+        seeds.push_back(local);
+      }
+    };
+    if (preferred_seed) add_seed(*preferred_seed);
+    if (failed_full_frontier_start) add_seed(failed_full_frontier_start->local);
+    for (size_t i = 0; seeds.size() < seed_count; ++i) {
+      add_seed((i * n / seed_count + rotation) % n);
+    }
+    rotation = (rotation + 1) % n;
+    const auto initially_incident = [&](ValueId value) {
+      return std::any_of(seeds.begin(), seeds.end(), [&](size_t local) {
+        const auto& op = problem.Ops()[comp_ops[local]];
+        return op.output_value == value ||
+               std::any_of(op.config_uses.front().begin(), op.config_uses.front().end(),
+                           [&](const auto& use) { return use.value_id == value; });
+      });
+    };
+
+    // Every seed and its incident fan-outs contend before the first move.
+    // Other operators enter only through the usual move-driven expansion.
     singles.Reset();
     groups.Reset();
-    bool budget_hit = !activate(seed) || !groups.Refresh();
+    bool budget_hit = !std::all_of(seeds.begin(), seeds.end(), activate) || !groups.Refresh();
     while (!budget_hit && !singles.Empty()) {
       const auto single = singles.Best();
       const FMFanoutFrontier::Proposal* group = nullptr;
       if (!groups.Best(single.gain, group)) {
         budget_hit = true;
+        break;
+      }
+      // Wider samples can offer a different first move. If the same singleton
+      // wins and previously opened the whole component, the exact frontier
+      // and its tie-breaking after that move are unchanged.
+      if (history.empty() && group == nullptr && failed_full_frontier_start &&
+          single.local == failed_full_frontier_start->local &&
+          single.choice == failed_full_frontier_start->choice) {
         break;
       }
       move_starts.push_back(history.size());
@@ -1780,15 +1853,10 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
         // A profitable block discovered after moving away from the seed may
         // have arrived too late to recover earlier losses. Remember one of its
         // consumers so the block can compete before those operations lock.
-        if (!tried_fanout_seed && group->evaluation.gain > fanout_seed_gain &&
-            group->value != seed_op.output_value &&
-            std::none_of(seed_op.config_uses.front().begin(), seed_op.config_uses.front().end(),
-                         [&](const auto& use) { return use.value_id == group->value; })) {
-          const size_t consumer = local_index(group->choices.front().first);
-          if (consumer != 0 && (!tried_midpoint || consumer != n / 2)) {
-            fanout_seed = consumer;
-            fanout_seed_gain = group->evaluation.gain;
-          }
+        if (!tried_fanout_restart && group->evaluation.gain > fanout_seed_gain &&
+            !initially_incident(group->value)) {
+          fanout_seed = local_index(group->choices.front().first);
+          fanout_seed_gain = group->evaluation.gain;
         }
         for (const auto& [op, choice] : group->choices) {
           record_and_lock(local_index(op), choice, std::nullopt);
@@ -1817,6 +1885,17 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
       // Explore every incident value once, even when the move changes only
       // intrinsic cost. A compatible block can lock undiscovered consumers.
       if (!budget_hit && (!expand_move() || !groups.Refresh())) budget_hit = true;
+      if (!budget_hit && move_starts.size() == 1 && group == nullptr && seen_count == n) {
+        // The first move must reach the whole component on its own. The only
+        // operators it may not have brought into the frontier are the seeds.
+        const auto reached_by_first_move = [&](size_t local) {
+          const auto& op = problem.Ops()[comp_ops[local]];
+          return expanded_values.count(op.output_value) != 0 ||
+                 std::any_of(op.config_uses.front().begin(), op.config_uses.front().end(),
+                             [&](const auto& use) { return expanded_values.count(use.value_id) != 0; });
+        };
+        if (std::all_of(seeds.begin(), seeds.end(), reached_by_first_move)) full_frontier_start = single;
+      }
     }
 
     // A whole move is the smallest unit of either the retained prefix or the
@@ -1833,29 +1912,38 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
       }
       history.resize(begin);
     }
+    const int64_t previous_moves = moves_applied;
     moves_applied += static_cast<int64_t>(best_prefix_len);
-    if (budget_hit) {
+    // FM locks can hide a profitable second change to an operator. Polish the
+    // retained assignment before choosing the next seeds, even after complete
+    // rollback unless a prior sweep already verified the same assignment.
+    locally_optimal &= best_prefix_len == 0;
+    if (!locally_optimal && evaluated_moves < config.max_evaluations) {
+      GreedyRefineOps(state, topo_ops, config, evaluated_moves, moves_applied, greedy_sweeps,
+                      termination_reason);
+      if (termination_reason == "evaluation_budget") return;
+      locally_optimal = termination_reason == "local_optimum";
+    }
+    if (budget_hit || (!locally_optimal && evaluated_moves == config.max_evaluations)) {
       termination_reason = "evaluation_budget";
       return;
     }
-    if (best_prefix_len == 0) {
-      if (fanout_seed) {
-        seed = *fanout_seed;
-        tried_fanout_seed = true;
-        tried_midpoint |= seed == n / 2;
-        continue;
+
+    preferred_seed = best_prefix_len == 0 ? fanout_seed : std::nullopt;
+    if (moves_applied != previous_moves) {
+      seed_count = initial_seeds;
+      tried_fanout_restart = false;
+      failed_full_frontier_start.reset();
+    } else {
+      if (full_frontier_start) failed_full_frontier_start = full_frontier_start;
+      if (seed_count < max_seeds) {
+        seed_count = std::min(2 * seed_count, max_seeds);
+      } else if (!preferred_seed) {
+        termination_reason = "fm_no_improving_prefix";
+        return;
       }
-      if (!tried_midpoint && n > 1 && pass + 1 < config.max_greedy_sweeps) {
-        seed = n / 2;
-        tried_midpoint = true;
-        continue;
-      }
-      termination_reason = "fm_no_improving_prefix";
-      return;
     }
-    seed = 0;
-    tried_fanout_seed = false;
-    tried_midpoint = false;
+    tried_fanout_restart |= preferred_seed.has_value();
   }
   termination_reason = "greedy_sweep_budget";
 }
@@ -1865,17 +1953,22 @@ void GreedyIncumbentAndFM(IncrementalState& state, const ActiveDecomposition& gr
                           int64_t& evaluated_moves, int64_t& moves_applied, int64_t& greedy_sweeps,
                           std::string& termination_reason) {
   const auto seed_choices = state.Choices();
-  std::vector<bool> in_search(state.Problem().NumOps(), false);
+  std::vector<size_t> component_by_op(state.Problem().NumOps(), graph.components.size());
   for (size_t component : components) {
-    for (OpId op : graph.components[component]) in_search[op] = true;
+    for (OpId op : graph.components[component]) component_by_op[op] = component;
   }
+  std::vector<std::vector<OpId>> topo_components(graph.components.size());
   std::vector<OpId> greedy_ops;
   for (OpId op : state.Problem().TopoOrder()) {
-    if (in_search[op]) greedy_ops.push_back(op);
+    const size_t component = component_by_op[op];
+    if (component == graph.components.size()) continue;
+    greedy_ops.push_back(op);
+    topo_components[component].push_back(op);
   }
   GreedyRefineOps(state, greedy_ops, config, evaluated_moves, moves_applied, greedy_sweeps,
                   termination_reason);
   if (termination_reason == "evaluation_budget") return;
+  const bool greedy_converged = termination_reason == "local_optimum";
 
   // Start FM from the original seed to retain paths through choices that
   // coordinate descent has already changed. Retain the greedy assignment
@@ -1893,8 +1986,9 @@ void GreedyIncumbentAndFM(IncrementalState& state, const ActiveDecomposition& gr
     if (!restore.empty()) state.ApplyBlock(restore, state.EvaluateBlock(restore));
 
     int64_t retained = 0;
-    FMRefineComponent(state, ops, graph.component_factors[component], config, evaluated_moves, retained,
-                      greedy_sweeps, termination_reason);
+    FMRefineComponent(state, ops, graph.component_factors[component], topo_components[component], config,
+                      greedy_converged && restore.empty(), evaluated_moves, retained, greedy_sweeps,
+                      termination_reason);
     if (state.Cost() < incumbent_cost - config.tolerance) {
       moves_applied += retained;
     } else {
@@ -2931,10 +3025,10 @@ LayoutSolverResult SolveWithVecCapacity(const LayoutProblemInstance& instance,
         changed = true;
       }
     }
-    for (const auto& [index, transpose] : conflicts.transposes) {
+    for (const auto& [index, selected] : conflicts.operation_configs) {
       auto& configs = constrained.operations[index].configs;
       if (configs.size() <= 1) continue;
-      if (auto it = std::find(configs.begin(), configs.end(), transpose); it != configs.end()) {
+      if (auto it = std::find(configs.begin(), configs.end(), selected); it != configs.end()) {
         configs.erase(it);
         changed = true;
       }

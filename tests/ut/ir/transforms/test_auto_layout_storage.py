@@ -157,6 +157,84 @@ def test_opaque_kernel_pins_buffer_layout(tmp_path, ascend_backend):
     assert "TensorLayout.DN" not in dump
 
 
+@pytest.mark.parametrize("use", ["matrix_only", "orchestration", "incore", "prefetch", "prefetch_and_read"])
+def test_private_whole_flatten_preserves_logical_element_order(tmp_path, ascend_backend, use):
+    inspection = ""
+    inspect_call = ""
+    if use == "orchestration":
+        inspection = """
+@pl.function(type=pl.FunctionType.InCore)
+def inspect(self, src: pl.Tensor[[4096], pl.FP32],
+            dst: pl.InOut[pl.Tensor[[64,64], pl.FP32]]) -> pl.Tensor[[64,64], pl.FP32]:
+    value = pl.load(src, [0], [64], target_memory=pl.Mem.Vec)
+    return pl.store(pl.tile.reshape(value, [1,64]), [0,0], dst)
+"""
+        inspect_call = """\
+    flat = pl.tensor.reshape(scratch, [4096])
+    bundle = (w, flat)
+    dst = self.inspect(bundle[1], dst)
+"""
+    elif use != "matrix_only":
+        inspection = """
+@pl.function(type=pl.FunctionType.InCore)
+def inspect(self, src: pl.Tensor[[64,64], pl.FP32],
+            dst: pl.InOut[pl.Tensor[[64,64], pl.FP32]]) -> pl.Tensor[[64,64], pl.FP32]:
+    flat = pl.tensor.reshape(src, [4096])
+    alias = flat
+"""
+        if use in {"prefetch", "prefetch_and_read"}:
+            inspection += """\
+    ctx = pl.prefetch.make_context()
+    event = pl.prefetch.async_prefetch(alias, ctx)
+    session = pl.prefetch.session(ctx)
+    pl.prefetch.wait(event, session)
+"""
+        if use != "prefetch":
+            inspection += """\
+    value = pl.load(alias, [0], [64], target_memory=pl.Mem.Vec)
+    dst = pl.store(pl.tile.reshape(value, [1,64]), [0,0], dst)
+"""
+        inspection += "    return dst\n"
+        inspect_call = "    dst = self.inspect(scratch, dst)\n"
+
+    # Matrix reads make the private allocation profitable to pack. A flat
+    # element load must still see its logical ND order, whereas prefetch only
+    # warms the contiguous byte range.
+    source = (
+        _matmul()
+        + inspection
+        + _ENTRY
+        + """\
+    scratch = pl.tensor.create([64,64], dtype=pl.FP32)
+    scratch = self.mm(x, w, scratch)
+    for i in pl.range(64):
+        dst = self.mm(w, scratch, dst)
+"""
+        + inspect_call
+        + "    return dst\n"
+    )
+    if use in {"matrix_only", "orchestration"}:
+        dump = _compile(tmp_path, source)
+    else:
+        # Exercise a GM reshape already present in the InCore input to
+        # AutoLayout. The frontend tensor conversion interprets an InCore
+        # tensor.reshape as a tile computation instead of a GM view.
+        program = _host_program(source)
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            for transform in (
+                passes.ctrl_flow_transform,
+                passes.convert_to_ssa,
+                passes.flatten_call_expr,
+                passes.infer_tile_memory_space,
+                passes.auto_layout,
+            ):
+                program = transform()(program)
+        dump = program.as_python()
+    allocation = next(line for line in dump.splitlines() if "tensor.create(" in line)
+    assert ("layout=pl.TensorLayout.NZ" in allocation) == (use in {"matrix_only", "prefetch"})
+    assert "layout=pl.TensorLayout.DN" not in allocation
+
+
 def test_tuple_positions_keep_their_returned_buffers(tmp_path, ascend_backend):
     # Return the two Out parameters in reverse order. Only the first tuple
     # element is the compiler-owned tensor consumed at the next matmul.
@@ -260,6 +338,45 @@ def offset_mm(self, w: pl.Tensor[[128,64], pl.FP32], b: pl.Tensor[[64,64], pl.FP
     attrs = [line for line in dump.splitlines() if "source_offset" in line]
     assert len(attrs) == 2
     assert all("p_aligned" not in line for line in attrs)
+
+
+@pytest.mark.parametrize(("saturation", "layout"), [("off", "ND"), ("on", "DN")])
+def test_cast_workspace_overlaps_live_conversion(tmp_path, ascend_backend, saturation, layout):
+    # Both stores keep the original 48 KiB tile live. The DN copy fits only
+    # when the intervening cast can execute without its 48,960-byte workspace.
+    tile = "pl.Tensor[[256,48], pl.FP32]"
+    mid = "pl.Tensor[[256,96], pl.FP32]"
+    narrow = "pl.Tensor[[256,48], pl.INT16]"
+    held = "pl.Tensor[[128,64], pl.FP32]"
+    functions = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def produce(self, x: {tile}, h: {held}, mid: pl.Out[{mid}], original: pl.Out[{tile}],
+            narrowed: pl.Out[{narrow}], heldout: pl.Out[{held}]) -> pl.Tuple[{mid},{tile},{narrow},{held}]:
+    live = pl.load(h, [0,0], [128,64], target_memory=pl.Mem.Vec)
+    data = pl.load(x, [0,0], [256,48], target_memory=pl.Mem.Vec)
+    small = pl.cast(data, pl.INT16, mode="round", saturation_mode="{saturation}")
+    mid = pl.store(data, [0,0], mid)
+    original = pl.store(data, [0,0], original)
+    narrowed = pl.store(small, [0,0], narrowed)
+    heldout = pl.store(live, [0,0], heldout)
+    return mid, original, narrowed, heldout
+
+@pl.function(type=pl.FunctionType.InCore)
+def consume(self, mid: {mid}, out: pl.Out[{tile}]) -> {tile}:
+    data = pl.load(mid, [0,0], [256,48], target_memory=pl.Mem.Vec)
+    return pl.store(data, [0,0], out)
+
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: {tile}, h: {held}, out: pl.Out[{tile}], original: pl.Out[{tile}],
+         narrowed: pl.Out[{narrow}], heldout: pl.Out[{held}]) -> pl.Tuple[{tile},{tile},{narrow},{held}]:
+    mid = pl.tensor.create([256,96], dtype=pl.FP32)
+    mid, original, narrowed, heldout = self.produce(x, h, mid, original, narrowed, heldout)
+    out = self.consume(mid, out)
+    return out, original, narrowed, heldout
+"""
+    dump = _compile(tmp_path, functions)
+    allocation = next(line for line in dump.splitlines() if "pl.tensor.create(" in line)
+    assert f"layout=pl.TensorLayout.{layout}" in allocation
 
 
 @pytest.mark.parametrize("rows", [128, 256])
@@ -378,6 +495,35 @@ def test_loader_permission_requires_read_only_entry_input(tmp_path, ascend_backe
         )
 
 
+def test_prepare_weight_with_inferred_output(tmp_path, ascend_backend):
+    torch = pytest.importorskip("torch")
+    entry = _ENTRY.replace("pl.Out[pl.Tensor[[64,64], pl.FP32]]", "pl.Tensor[[64,64], pl.FP32]")
+    artifact = ir.compile(
+        _host_program(_matmul() + entry + "    return self.mm(x, w, dst)\n"),
+        strategy=ir.OptimizationStrategy.AutoLayout,
+        input_layout_policy=ir.InputLayoutPolicy(("w",), ("w",), 100),
+        backend_type=backend.BackendType.Ascend910,
+        output_dir=str(tmp_path),
+        skip_ptoas=True,
+    )
+    assert isinstance(artifact, ir.CompiledProgram)
+    meta = json.loads((tmp_path / "compiled_meta.json").read_text())
+    assert (meta["params"][2]["direction"], meta["lowered_params"][2]["direction"]) == ("In", "Out")
+    assert meta["lowered_params"][1]["layout"] == "NZ"
+    weight = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    for compiled in (artifact, ir.CompiledProgram.from_dir(tmp_path)):
+        packed = compiled.prepare_inputs({"w": weight})["w"]
+        unpacked = packed.reshape(8, 4, 16, 8).permute(1, 2, 0, 3).reshape(64, 64)
+        assert torch.equal(unpacked, weight)
+        with pytest.raises(ValueError, match="'dst' must be a read-only tensor"):
+            compiled.prepare_inputs({"w": weight, "dst": weight})
+    meta["params"][2]["direction"] = "Out"
+    meta["lowered_params"][2]["direction"] = "In"
+    (tmp_path / "compiled_meta.json").write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="Incompatible lowered direction for 'dst'"):
+        ir.CompiledProgram.from_dir(tmp_path).prepare_inputs({"w": weight})
+
+
 def test_steady_state_requires_per_forward_horizon():
     with pytest.raises(ValueError, match="steady_state requires expected_uses=1"):
         ir.InputLayoutPolicy(("w",), ("w",), expected_uses=2, steady_state=True)
@@ -434,10 +580,14 @@ def _lower_host(output: Path, program: ir.Program, policy: ir.InputLayoutPolicy)
     )
 
 
-def _chip_has_nz(dump: str, name: str = "chip") -> tuple[bool, bool, bool]:
-    chip = next(
+def _dump_function(dump: str, name: str) -> ast.FunctionDef:
+    return next(
         node for node in ast.walk(ast.parse(dump)) if isinstance(node, ast.FunctionDef) and node.name == name
     )
+
+
+def _chip_has_nz(dump: str, name: str = "chip") -> tuple[bool, bool, bool]:
+    chip = _dump_function(dump, name)
     a, b, dst = chip.args.args[1:]
 
     def has_nz(param: ast.arg) -> bool:
@@ -641,23 +791,47 @@ def main(self, weight: pl.Tensor[[2,64,64], pl.FP4E2M1X2]):
         _lower_host(tmp_path, program, ir.InputLayoutPolicy(("weight",)))
 
 
-@pytest.mark.parametrize("uses", [1, 100])
-def test_host_named_input_layout_with_rank_and_layer_axes(tmp_path, ascend_backend, uses):
+@pytest.mark.parametrize(
+    ("uses", "steady_state", "representation"),
+    [
+        (1, False, "authored_nz"),
+        (100, False, "authored_nz"),
+        (1, False, "implicit_nd"),
+        (1, True, "implicit_nd"),
+        (1, True, "explicit_nd"),
+    ],
+)
+def test_host_named_input_layout_with_rank_and_layer_axes(
+    tmp_path, ascend_backend, monkeypatch, uses, steady_state, representation
+):
     dense = "pl.Tensor[[64,64], pl.FP32]"
     nz = "pl.Tensor[[64,64], pl.FP32, pl.NZ]"
-    layer_bank = "pl.Tensor[[3,64,64], pl.FP32, pl.NZ]"
+    authored_nz = representation == "authored_nz"
+    layer_bank = "pl.Tensor[[3,64,64], pl.FP32, pl.NZ]" if authored_nz else "pl.Tensor[[3,64,64], pl.FP32]"
     chip = _HOST_CHIP.replace(f"a: {dense}", f"a: {layer_bank}").replace(f"b: {dense}", f"b: {layer_bank}")
     chip = chip.replace("self.mm(a, b, dst)", "self.mm(a[i], b[i], dst)")
-    mm = _matmul().replace(f"a: {dense}", f"a: {nz}").replace(f"w: {dense}", f"w: {nz}")
+    mm = _matmul()
+    if authored_nz:
+        mm = mm.replace(f"a: {dense}", f"a: {nz}").replace(f"w: {dense}", f"w: {nz}")
     entry = _HOST_ENTRY.replace("x: pl.Tensor[[2,64,64]", "x: pl.Tensor[[2,3,64,64]")
     entry = entry.replace("w: pl.Tensor[[2,64,64]", "w: pl.Tensor[[2,3,64,64]")
+    if representation == "explicit_nd":
+        entry = entry.replace(
+            "x: pl.Tensor[[2,3,64,64], pl.FP32]",
+            "x: pl.Tensor[[2,3,64,64], pl.FP32, pl.TensorView(stride=[12288,4096,64,1])]",
+        )
     program = _host_program(mm + chip + entry)
-    policy = ir.InputLayoutPolicy(("x",), ("x",), uses)
-    lowered, _, after = _lower_host(tmp_path, program, policy)
-    assert _chip_has_nz(after) == (True, uses > 1, False)
+    policy = ir.InputLayoutPolicy(("x",), ("x",), uses, steady_state=steady_state)
+    lowered, before, after = _lower_host(tmp_path, program, policy)
+    packed = uses > 1 or steady_state
+    assert _chip_has_nz(after) == (authored_nz, packed, False)
+    if not authored_nz:
+        # The layer slice acquires explicit inherited pitches in the InCore
+        # formal even though the runtime supplies a compact plane.
+        assert "stride=[64, 1]" in ast.unparse(_dump_function(before, "mm").args.args[1])
     restored = ir.deserialize(ir.serialize(lowered))
     assert isinstance(restored, ir.Program)
-    selected = "NZ" if uses > 1 else "ND"
+    selected = "NZ" if packed else "ND"
     assert _host_layout_proof(restored) == f"v1;0={selected}"
     artifact_dir = tmp_path / "compiled"
     compiled = ir.compile(
@@ -676,6 +850,40 @@ def test_host_named_input_layout_with_rank_and_layer_axes(tmp_path, ascend_backe
     assert descriptor.physical_shape == ((6, 8, 4, 16, 8) if selected == "NZ" else (2, 3, 64, 64))
     reloaded = ir.DistributedCompiledProgram.from_dir(str(artifact_dir))
     assert reloaded.input_layouts == compiled.input_layouts
+    if not authored_nz:
+        torch = pytest.importorskip("torch")
+        logical = torch.arange(2 * 3 * 64 * 64, dtype=torch.float32).reshape(descriptor.logical_shape)
+        expected = logical
+        if packed:
+            # Compute physical offsets independently, including each matrix's
+            # rank/layer base. FP32 NZ has eight columns per 32-byte block.
+            row = torch.arange(64)[:, None]
+            col = torch.arange(64)[None, :]
+            offset = ((col // 8) * 4 + row // 16) * (16 * 8) + (row % 16) * 8 + col % 8
+            expected = torch.empty_like(logical)
+            expected.reshape(6, -1)[:, offset.flatten()] = logical.reshape(6, -1)
+
+        dispatched = []
+
+        def record_dispatch(_compiled, args, _config):
+            dispatched.extend(args)
+
+        monkeypatch.setattr("pypto.runtime.distributed_runner._execute_distributed", record_dispatch)
+        reloaded(logical, torch.empty_like(logical), torch.empty((2, 64, 64), dtype=torch.float32))
+        assert torch.equal(dispatched[0].view(torch.uint8), expected.view(torch.uint8))
+
+
+def test_host_layered_bank_rejects_noncompact_matrix_pitch(tmp_path, ascend_backend):
+    dense = "pl.Tensor[[64,64], pl.FP32]"
+    chip = _HOST_CHIP.replace(f"b: {dense}", "b: pl.Tensor[[3,64,80], pl.FP32]")
+    chip = chip.replace("self.mm(a, b, dst)", "self.mm(a, b[i, :, :64], dst)")
+    entry = _HOST_ENTRY.replace("x: pl.Tensor[[2,64,64]", "x: pl.Tensor[[2,3,64,80]")
+    program = _host_program(_matmul() + chip + entry)
+    policy = ir.InputLayoutPolicy(("x",), ("x",), steady_state=True)
+    lowered, before, after = _lower_host(tmp_path, program, policy)
+    assert "stride=[80, 1]" in ast.unparse(_dump_function(before, "mm").args.args[1])
+    assert _chip_has_nz(after) == (False, False, False)
+    assert _host_layout_proof(lowered) == "v1;0=UNSUPPORTED"
 
 
 def test_host_layout_proof_rejects_conflicting_authored_dispatches(tmp_path, ascend_backend):

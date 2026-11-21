@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <functional>
 #include <iterator>
-#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -39,6 +38,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/auto_layout/extractor.h"
 #include "pypto/ir/transforms/auto_layout/model.h"
 #include "pypto/ir/transforms/auto_layout/solver.h"
@@ -474,6 +474,15 @@ class LayoutAssignmentWriter : public IRMutator {
   LayoutAssignmentWriter(const LayoutProblemInstance& instance, LayoutWritebackBindings& bindings,
                          const LayoutAssignment& assignment, LayoutAssignment* inferred = nullptr)
       : op_configs_(assignment.op_configs), instance_(instance), bindings_(bindings), inferred_(inferred) {
+    if (inferred_) {
+      for (const auto& op : instance_.operations) {
+        auto config = op_configs_.find(op.op_id);
+        if (config != op_configs_.end() && HasMutableVecBacking(op) &&
+            std::find(op.configs.begin(), op.configs.end(), config->second) == op.configs.end()) {
+          throw ValueError("Illegal AutoLayout configuration for mutable Vec backing at '" + op.op_id + "'");
+        }
+      }
+    }
     std::unordered_set<std::string> unsupported_host_inputs;
     for (const auto& [_, root] : bindings.host_input_roots) {
       const auto* value = instance.FindValue(root);
@@ -497,39 +506,30 @@ class LayoutAssignmentWriter : public IRMutator {
         if (unsupported_host_inputs.count(name)) continue;
         tensor_layouts_.emplace(name, spec.tensor_layout);
       } else {
+        if (const auto* value = instance_.FindValue(name);
+            inferred_ && value && value->has_mutable_vec_backing && spec != value->current_layout) {
+          throw ValueError("AutoLayout cannot relayout the mutable Vec backing of '" + name + "'");
+        }
         tile_layouts_.emplace(name, spec);
       }
     }
   }
 
   ProgramPtr Rewrite(const ProgramPtr& program) {
-    std::vector<FunctionPtr> funcs;
-    funcs.reserve(program->functions_.size());
     std::unordered_map<std::string, FunctionPtr> func_by_name;
     std::vector<FunctionPtr> incore_funcs;
-    std::vector<FunctionPtr> other_funcs;
-    std::vector<FunctionPtr> top_orch;
-    std::vector<FunctionPtr> sub_orch;
-
-    for (const auto& [gv, fn] : program->functions_) {
-      (void)gv;
-      funcs.push_back(fn);
+    for (const auto& [_, fn] : program->functions_) {
       func_by_name.emplace(fn->name_, fn);
       if (IsInCoreType(fn->func_type_)) {
         incore_funcs.push_back(fn);
-      } else {
-        other_funcs.push_back(fn);
-        if (fn->func_type_ == FunctionType::Orchestration) {
-          top_orch.push_back(fn);
-        } else {
-          sub_orch.push_back(fn);
-        }
       }
     }
 
+    auto& orch = bindings_.orch;
     {
       return_lineage::ScopedTraceCache trace_cache;
-      for (const auto& func : other_funcs) {
+      for (const auto& name : orch.caller_first_order) {
+        const auto& func = func_by_name.at(name);
         if (IsWrapperType(func->func_type_) && !func->return_types_.empty()) {
           wrapper_returns_.emplace(func.get(), return_lineage::ReturnedParamIndices(func, program));
         }
@@ -541,57 +541,28 @@ class LayoutAssignmentWriter : public IRMutator {
       tile_prefixes_.emplace(fn->name_, detail::TileLayoutPrefix(program, fn->name_, multi_incore));
     }
     std::vector<FunctionPtr> extra_incore;
-    auto& orch = bindings_.orch;
     gm_names_ = std::move(orch.gm_names);
-    if (!other_funcs.empty()) {
+    if (!orch.caller_first_order.empty()) {
       param_steps_ = std::move(orch.param_steps);
-      std::sort(sub_orch.begin(), sub_orch.end(), [&](const FunctionPtr& a, const FunctionPtr& b) {
-        auto it_a = orch.call_order.find(a->name_);
-        auto it_b = orch.call_order.find(b->name_);
-        const size_t oa = it_a != orch.call_order.end() ? it_a->second : std::numeric_limits<size_t>::max();
-        const size_t ob = it_b != orch.call_order.end() ? it_b->second : std::numeric_limits<size_t>::max();
-        return oa < ob;
-      });
       extra_incore = RegisterCalleeSpecializations(program, func_by_name, orch);
     }
 
-    std::unordered_map<std::string, FunctionPtr> rewritten_by_name;
-
-    auto visit_all = [&](const std::vector<FunctionPtr>& list) {
-      for (const auto& fn : list) {
-        rewritten_by_name.emplace(fn->name_, VisitFunction(fn));
-      }
-    };
-    visit_all(incore_funcs);
-    visit_all(extra_incore);
-    // Visit sub_orch in reverse call_order (callees before callers) or sub_orch order.
-    visit_all(sub_orch);
-    visit_all(top_orch);
-
     std::vector<FunctionPtr> new_funcs;
-    new_funcs.reserve(incore_funcs.size() + extra_incore.size() + other_funcs.size());
-    for (const auto& fn : incore_funcs) {
-      new_funcs.push_back(rewritten_by_name.at(fn->name_));
+    new_funcs.reserve(program->functions_.size() + extra_incore.size());
+    bool changed = !extra_incore.empty();
+    auto rewrite = [&](const FunctionPtr& func) {
+      auto rewritten = VisitFunction(func);
+      changed |= rewritten.get() != func.get();
+      new_funcs.push_back(std::move(rewritten));
+    };
+    for (const auto& func : incore_funcs) rewrite(func);
+    for (const auto& func : extra_incore) rewrite(func);
+    // After the InCore signatures and specializations, publish each callee's
+    // result layouts before visiting the wrappers and callers that use them.
+    for (auto it = orch.caller_first_order.rbegin(); it != orch.caller_first_order.rend(); ++it) {
+      rewrite(func_by_name.at(*it));
     }
-    for (const auto& fn : extra_incore) {
-      new_funcs.push_back(rewritten_by_name.at(fn->name_));
-    }
-    for (const auto& fn : other_funcs) {
-      new_funcs.push_back(rewritten_by_name.at(fn->name_));
-    }
-
-    if (new_funcs.size() == funcs.size()) {
-      bool all_same = true;
-      for (size_t i = 0; i < funcs.size(); ++i) {
-        if (new_funcs[i].get() != funcs[i].get()) {
-          all_same = false;
-          break;
-        }
-      }
-      if (all_same) {
-        return program;
-      }
-    }
+    if (!changed) return program;
     return std::make_shared<Program>(std::move(new_funcs), program->name_, program->span_);
   }
 
@@ -1307,12 +1278,18 @@ class LayoutAssignmentWriter : public IRMutator {
     return std::nullopt;
   }
 
-  std::optional<LayoutSpec> LookupTileDesc(const VarPtr& var) const {
-    if (!current_tile_site_) return std::nullopt;
+  const ValueNode* LookupTileValue(const VarPtr& var) const {
+    if (!current_tile_site_) return nullptr;
     const auto& values = current_tile_site_->value_names;
     auto key = values.find(var.get());
-    if (key == values.end()) return std::nullopt;
-    auto layout = tile_layouts_.find(key->second);
+    return key == values.end() ? nullptr : instance_.FindValue(key->second);
+  }
+
+  std::optional<LayoutSpec> LookupTileDesc(const VarPtr& var) const {
+    const auto* node = LookupTileValue(var);
+    if (!node) return std::nullopt;
+    if (node->has_mutable_vec_backing) return node->current_layout;
+    auto layout = tile_layouts_.find(node->name);
     if (layout == tile_layouts_.end()) return std::nullopt;
     return layout->second;
   }
@@ -1717,6 +1694,13 @@ class LayoutAssignmentWriter : public IRMutator {
       return;
     }
     tile_var = VecAliasRoot(tile_var);
+    if (current_tile_site_) {
+      auto name = current_tile_site_->value_names.find(tile_var);
+      if (name != current_tile_site_->value_names.end() &&
+          instance_.values.at(name->second).has_mutable_vec_backing) {
+        return;
+      }
+    }
     auto prod_it = vec_prod_lay_.find(tile_var);
     if (prod_it == vec_prod_lay_.end() || prod_it->second == req_lay ||
         prod_it->second == LayoutSpec::FractalNZ() || req_lay == LayoutSpec::FractalNZ()) {
@@ -1829,6 +1813,18 @@ class LayoutAssignmentWriter : public IRMutator {
                        const std::vector<std::pair<VarPtr, ParamDirection>>& new_params) {
     ClearPrescanState();
     std::unordered_map<const Var*, TensorLayout> var_tensor_lays;
+    const auto& site = *current_tile_site_;
+    std::unordered_map<std::string, const Var*> vec_definitions;
+    auto record_vec_binding = [&](const VarPtr& var) {
+      if (!IsVecTileType(var->GetType())) return;
+      const auto name = site.value_names.find(var.get());
+      if (name == site.value_names.end()) return;
+      const auto [original, inserted] = vec_definitions.try_emplace(name->second, var.get());
+      if (!inserted && original->second != var.get()) {
+        AliasVarPrescanInfo(var, original->second, var_tensor_lays);
+        vec_alias_roots_[var.get()] = VecAliasRoot(original->second);
+      }
+    };
     for (size_t i = 0; i < new_params.size() && i < func->params_.size(); ++i) {
       const VarPtr& new_p = new_params[i].first;
       const VarPtr& old_p = func->params_[i];
@@ -1845,10 +1841,10 @@ class LayoutAssignmentWriter : public IRMutator {
         if (lay == LayoutSpec::FractalNZ() && shape.has_value()) {
           vec_logical_shapes_[old_p.get()] = *shape;
         }
+        record_vec_binding(old_p);
       }
     }
 
-    const auto& site = *current_tile_site_;
     size_t next = site.begin;
     auto take_op = [&](const std::string& name, const VarPtr& output,
                        const CallPtr& call = nullptr) -> const OperationNode* {
@@ -1922,8 +1918,11 @@ class LayoutAssignmentWriter : public IRMutator {
       }
       const auto* modeled = take_op(op_name, lhs_var, rhs);
       auto cfg = selected(modeled);
-      if (!cfg && !has_op_configs) {
+      if (!cfg && (!has_op_configs || (inferred_ && modeled && HasMutableVecBacking(*modeled)))) {
         cfg = InferOpConfig(rhs, lhs_var, var_tensor_lays);
+        if (cfg && modeled) {
+          cfg = ResolveMutableVecConfig(*modeled, std::move(*cfg), rhs->span_);
+        }
         if (cfg) remember(modeled, *cfg);
       }
       if (!cfg.has_value()) {
@@ -2004,7 +2003,11 @@ class LayoutAssignmentWriter : public IRMutator {
           if (IsVecTileType(asg->var_->GetType())) {
             vec_alias_roots_[asg->var_.get()] = VecAliasRoot(rhs_var.get());
           }
+        } else if (auto tile = As<TileType>(asg->var_->GetType());
+                   tile && IsVecTileType(tile) && As<TupleGetItemExpr>(asg->value_)) {
+          vec_prod_lay_.insert_or_assign(asg->var_.get(), EffectiveTileLayout(tile));
         }
+        record_vec_binding(asg->var_);
       } else if (auto fs = As<ForStmt>(stmt)) {
         prescan_loop(self, fs->iter_args_, fs->body_, fs->return_vars_);
         return;
@@ -2125,6 +2128,42 @@ class LayoutAssignmentWriter : public IRMutator {
     walk(walk, func->body_);
   }
 
+  bool HasMutableVecBacking(const OperationNode& op) const {
+    auto mutable_backing = [&](const std::string& name) {
+      return instance_.values.at(name).has_mutable_vec_backing;
+    };
+    return mutable_backing(op.output) || std::any_of(op.inputs.begin(), op.inputs.end(), mutable_backing);
+  }
+
+  OperatorConfig ResolveMutableVecConfig(const OperationNode& modeled, OperatorConfig inferred,
+                                         const Span& span) const {
+    if (!HasMutableVecBacking(modeled)) return inferred;
+    // Value-only writeback infers layout requirements as seen by the
+    // instruction. Recover the catalog's original backing and private copy.
+    for (const auto& config : modeled.configs) {
+      if (modeled.op_name == kOpTileStore && config.input_layouts.size() == 2) {
+        if (inferred.output_layout == config.input_layouts[1] &&
+            inferred.input_layouts[0] == config.ExecutionInputLayout(0)) {
+          return config;
+        }
+        continue;
+      }
+      if (config.local_vec_load_layout.value_or(config.output_layout) != inferred.output_layout ||
+          config.input_layouts.size() != inferred.input_layouts.size()) {
+        continue;
+      }
+      size_t operand = 0;
+      while (operand < config.input_layouts.size() &&
+             config.ExecutionInputLayout(operand) == inferred.input_layouts[operand]) {
+        ++operand;
+      }
+      if (operand == config.input_layouts.size()) return config;
+    }
+    CHECK_SPAN(false, span) << "AutoLayout cannot infer a legal configuration for mutable Vec backing at '"
+                            << modeled.op_id << "'";
+    return inferred;
+  }
+
   std::pair<VarPtr, std::vector<StmtPtr>> MaterializeFlatVecTranspose(
       const VarPtr& source, const LayoutSpec& src_layout, const LayoutSpec& dst_layout, const Span& span,
       const std::vector<std::pair<std::string, std::any>>& attrs = {}) {
@@ -2167,8 +2206,12 @@ class LayoutAssignmentWriter : public IRMutator {
                                                             const LayoutSpec& target_lay,
                                                             const std::vector<int64_t>& orig_shape,
                                                             const Span& span) {
-    if (auto it = vec_conv_vars_.find({orig_var, target_lay}); it != vec_conv_vars_.end()) {
-      return {it->second, {}};
+    // A null key denotes a private read of mutable storage. Its contents are
+    // specific to this use and must never be entered in the SSA copy cache.
+    if (orig_var) {
+      if (auto it = vec_conv_vars_.find({orig_var, target_lay}); it != vec_conv_vars_.end()) {
+        return {it->second, {}};
+      }
     }
     if (prod_lay == target_lay) {
       return {src_var, {}};
@@ -2200,7 +2243,7 @@ class LayoutAssignmentWriter : public IRMutator {
       exp_call = WithCallType(exp_call, WithVecMemorySpace(exp_call->GetType()));
       auto exp_var = std::make_shared<Var>(base_name + "_bcast", exp_call->GetType(), span);
       stmts.push_back(std::make_shared<AssignStmt>(exp_var, std::move(exp_call), span));
-      vec_conv_vars_.emplace(std::make_pair(orig_var, LayoutSpec::RowBcastFlat()), exp_var);
+      if (orig_var) vec_conv_vars_.emplace(std::make_pair(orig_var, target_lay), exp_var);
       return {exp_var, std::move(stmts)};
     }
 
@@ -2208,7 +2251,7 @@ class LayoutAssignmentWriter : public IRMutator {
 
     if (IsFlatVecTransposePair(prod_lay, target_lay)) {
       auto [converted, transpose_stmts] = MaterializeFlatVecTranspose(src_var, prod_lay, target_lay, span);
-      vec_conv_vars_.emplace(std::make_pair(orig_var, target_lay), converted);
+      if (orig_var) vec_conv_vars_.emplace(std::make_pair(orig_var, target_lay), converted);
       return {std::move(converted), std::move(transpose_stmts)};
     }
 
@@ -2248,6 +2291,28 @@ class LayoutAssignmentWriter : public IRMutator {
     }
     auto it = local_var_remap_.find(orig_arg.get());
     return it != local_var_remap_.end() ? it->second : orig_arg;
+  }
+
+  VarPtr GetVecOperand(const VarPtr& original, const LayoutSpec& backing_layout, const OperatorConfig& cfg,
+                       size_t index, const Span& span, std::vector<StmtPtr>& prefix) {
+    auto source = GetTileVarForLayout(original, backing_layout);
+    if (cfg.local_vec_conversions.empty() || index >= cfg.input_layouts.size()) return source;
+    const auto target = cfg.ExecutionInputLayout(index);
+    if (target == cfg.input_layouts[index]) return source;
+    const auto type = As<TileType>(source->GetType());
+    const auto shape = type ? detail::StaticShape(type->shape_) : std::nullopt;
+    INTERNAL_CHECK_SPAN(shape && EffectiveTileLayout(type) == backing_layout, span)
+        << "Mutable Vec read does not have its modeled backing layout";
+    auto [copy, setup] = EmitVecConversion(nullptr, source, backing_layout, target, *shape, span);
+    INTERNAL_CHECK_SPAN(!setup.empty(), span) << "Could not materialize the modeled mutable Vec read";
+    prefix.insert(prefix.end(), std::make_move_iterator(setup.begin()), std::make_move_iterator(setup.end()));
+    return copy;
+  }
+
+  static StmtPtr WithVecOperandSetup(std::vector<StmtPtr> setup, StmtPtr statement, const Span& span) {
+    if (setup.empty()) return statement;
+    setup.push_back(std::move(statement));
+    return std::make_shared<SeqStmts>(std::move(setup), span);
   }
 
   std::pair<VarPtr, std::vector<StmtPtr>> GetNzNdBackingVar(const Var* orig_var, const ExprPtr& remapped_nz,
@@ -2466,13 +2531,14 @@ class LayoutAssignmentWriter : public IRMutator {
     }
 
     std::vector<ExprPtr> new_args;
+    std::vector<StmtPtr> prefix;
     new_args.reserve(rhs->args_.size());
     bool args_changed = false;
     for (size_t idx = 0; idx < rhs->args_.size(); ++idx) {
       const ExprPtr& arg = rhs->args_[idx];
       if (idx == 0 && cfg != nullptr && !cfg->input_layouts.empty()) {
         if (auto av = AsVarLike(arg); av && IsVecTileType(av->GetType())) {
-          VarPtr tv = GetTileVarForLayout(av, cfg->input_layouts[0]);
+          VarPtr tv = GetVecOperand(av, cfg->input_layouts[0], *cfg, 0, span, prefix);
           if (tv.get() != arg.get()) {
             args_changed = true;
           }
@@ -2490,7 +2556,7 @@ class LayoutAssignmentWriter : public IRMutator {
       return {rhs, {}, nullptr};
     }
     CallPtr store_call = CreateOpCallWithAttrs(kOpTileStore, new_args, rhs->kwargs_, rhs->attrs_, rhs->span_);
-    return {std::move(store_call), {}, nullptr};
+    return {std::move(store_call), std::move(prefix), nullptr};
   }
 
   // A Vec NZ store writes the flattened ND backing. Restore the logical
@@ -2603,15 +2669,31 @@ class LayoutAssignmentWriter : public IRMutator {
       }
       new_args.push_back(std::move(visited));
     }
-    const bool need_col_view = !lhs_tt->dtype_.IsPackedFp4() &&
-                               cfg.output_layout == LayoutSpec::ColMajorFlat() &&
-                               EffectiveTileLayout(lhs_tt) != LayoutSpec::ColMajorFlat();
+    const auto load_layout = cfg.local_vec_load_layout.value_or(cfg.output_layout);
+    const bool change_flat_layout =
+        !lhs_tt->dtype_.IsPackedFp4() && IsFlatVecTransposePair(EffectiveTileLayout(lhs_tt), load_layout);
     ExprPtr new_value = rhs;
-    if (args_changed || need_col_view) {
-      TypePtr load_type =
-          need_col_view ? WithVecMemorySpace(lhs_tt, ColMajorTileView(lhs_tt)) : op->var_->GetType();
+    if (args_changed || change_flat_layout) {
+      auto load_type = op->var_->GetType();
+      if (change_flat_layout) {
+        auto view = tile_view_semantics::GetEffectiveTileView(*lhs_tt);
+        view.blayout = load_layout.blayout;
+        load_type = WithVecMemorySpace(lhs_tt, view);
+      }
       new_value = std::make_shared<Call>(rhs->op_, std::move(new_args), rhs->kwargs_, rhs->attrs_,
                                          std::move(load_type), rhs->span_);
+    }
+    if (cfg.local_vec_load_layout) {
+      const auto shape = detail::StaticShape(lhs_tt->shape_);
+      INTERNAL_CHECK_SPAN(shape, op->span_) << "Mutable Vec load requires a static shape";
+      auto loaded = std::make_shared<Var>(detail::CleanName(op->var_->name_hint_) + "_loaded",
+                                          new_value->GetType(), op->span_);
+      auto [backing, setup] =
+          EmitVecConversion(nullptr, loaded, load_layout, cfg.output_layout, *shape, op->span_);
+      INTERNAL_CHECK_SPAN(!setup.empty(), op->span_) << "Could not initialize the modeled mutable Vec load";
+      setup.insert(setup.begin(), std::make_shared<AssignStmt>(loaded, std::move(new_value), op->span_));
+      auto assignment = FinishVecAssign(op->var_, std::move(backing), cfg.output_layout, op->span_, op);
+      return WithVecOperandSetup(std::move(setup), std::move(assignment), op->span_);
     }
     return FinishVecAssign(op->var_, std::move(new_value), cfg.output_layout, op->span_, op);
   }
@@ -2622,12 +2704,13 @@ class LayoutAssignmentWriter : public IRMutator {
     const bool dst_is_vec = lhs_tt->GetMemorySpace() == MemorySpace::Vec;
     const bool packed = lhs_tt->dtype_.IsPackedFp4();
     std::vector<ExprPtr> new_args;
+    std::vector<StmtPtr> prefix;
     new_args.reserve(rhs->args_.size());
     bool args_changed = false;
     VarPtr in_arg = !rhs->args_.empty() ? AsVarLike(rhs->args_[0]) : nullptr;
     if (!packed && dst_is_vec && cfg != nullptr && !cfg->input_layouts.empty() && in_arg &&
         IsVecTileType(in_arg->GetType())) {
-      VarPtr new_src = GetTileVarForLayout(in_arg, cfg->input_layouts[0]);
+      VarPtr new_src = GetVecOperand(in_arg, cfg->input_layouts[0], *cfg, 0, op->span_, prefix);
       if (new_src.get() != in_arg.get()) {
         args_changed = true;
       }
@@ -2659,13 +2742,26 @@ class LayoutAssignmentWriter : public IRMutator {
       if (source_type && IsVecTileType(source_type)) {
         auto source_layout = EffectiveTileLayout(source_type);
         auto geometry = detail::VecTransposeGeometry(source_type);
-        geometry.is_vec_slice = vec_slices_.count(in_arg.get()) != 0;
+        // A copy has fresh geometry. For the original backing use the
+        // extractor's pitch and slice provenance, including tuple projections.
+        const auto remap = local_var_remap_.find(in_arg.get());
+        if (source == (remap == local_var_remap_.end() ? in_arg : remap->second)) {
+          if (const auto* node = LookupTileValue(in_arg)) {
+            geometry.is_vec_slice = node->is_vec_slice;
+            geometry.is_strided_subview = node->is_strided_subview;
+            geometry.has_dense_vec_span &= node->has_dense_vec_span;
+          } else {
+            geometry.is_vec_slice = vec_slices_.count(in_arg.get()) != 0;
+          }
+        }
         if (IsFlatVecTransposePair(source_layout, *chosen_desc) &&
             LayoutCostModel{}.SupportsVecTileConversion(geometry, source_layout, *chosen_desc)) {
           auto [converted, stmts] =
               MaterializeFlatVecTranspose(source, source_layout, *chosen_desc, op->span_, rhs->attrs_);
-          stmts.push_back(FinishVecAssign(op->var_, std::move(converted), chosen_desc, op->span_, op));
-          return std::make_shared<SeqStmts>(std::move(stmts), op->span_);
+          prefix.insert(prefix.end(), std::make_move_iterator(stmts.begin()),
+                        std::make_move_iterator(stmts.end()));
+          auto assignment = FinishVecAssign(op->var_, std::move(converted), chosen_desc, op->span_, op);
+          return WithVecOperandSetup(std::move(prefix), std::move(assignment), op->span_);
         }
       }
     }
@@ -2678,8 +2774,9 @@ class LayoutAssignmentWriter : public IRMutator {
     if (dst_is_vec) {
       new_call = WithCallType(new_call, WithVecMemorySpace(new_call->GetType()));
     }
-    return FinishVecAssign(op->var_, std::move(new_call),
-                           dst_is_vec ? chosen_desc : std::optional<LayoutSpec>{}, op->span_, op);
+    auto assignment = FinishVecAssign(op->var_, std::move(new_call),
+                                      dst_is_vec ? chosen_desc : std::optional<LayoutSpec>{}, op->span_, op);
+    return WithVecOperandSetup(std::move(prefix), std::move(assignment), op->span_);
   }
 
   StmtPtr RewriteSingletonRowSum(const AssignStmtPtr& op, const CallPtr& rhs) {
@@ -2747,6 +2844,7 @@ class LayoutAssignmentWriter : public IRMutator {
       if (auto compact = RewriteCompactColumnFill(op, rhs)) return compact;
     }
     std::vector<ExprPtr> new_args;
+    std::vector<StmtPtr> prefix;
     new_args.reserve(rhs->args_.size());
     size_t tile_idx = 0;
     const bool preserve_descriptors = detail::PreservesTileDescriptors(rhs);
@@ -2756,8 +2854,7 @@ class LayoutAssignmentWriter : public IRMutator {
             preserve_descriptors
                 ? EffectiveTileLayout(As<TileType>(av->GetType()))
                 : (tile_idx < cfg.input_layouts.size() ? cfg.input_layouts[tile_idx] : cfg.output_layout);
-        ++tile_idx;
-        new_args.push_back(GetTileVarForLayout(av, req));
+        new_args.push_back(GetVecOperand(av, req, cfg, tile_idx++, op->span_, prefix));
       } else {
         new_args.push_back(VisitExpr(arg));
       }
@@ -2792,7 +2889,8 @@ class LayoutAssignmentWriter : public IRMutator {
     }
     const auto output =
         preserve_descriptors ? EffectiveTileLayout(As<TileType>(op->var_->GetType())) : cfg.output_layout;
-    return FinishVecAssign(op->var_, std::move(new_value), output, op->span_, op);
+    auto assignment = FinishVecAssign(op->var_, std::move(new_value), output, op->span_, op);
+    return WithVecOperandSetup(std::move(prefix), std::move(assignment), op->span_);
   }
 
   std::unordered_map<std::string, TensorLayout> tensor_layouts_;

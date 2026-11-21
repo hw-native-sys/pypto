@@ -730,6 +730,84 @@ void TestVecCopyLifetime(int64_t a_columns, int64_t b_columns, bool overlap, boo
   assert(transposes == expected_copies);
 }
 
+void TestMutableVecPartialAssignment(bool project_tuple) {
+  const auto span = ir::Span::unknown();
+  const auto tensor =
+      std::make_shared<ir::TensorType>(std::vector<int64_t>{32, 64}, DataType::FP32, std::nullopt);
+  const auto zero = std::make_shared<ir::ConstInt>(0, DataType::INDEX, span);
+  const auto one = std::make_shared<ir::ConstInt>(1, DataType::INDEX, span);
+  ir::TensorView dn;
+  dn.layout = ir::TensorLayout::DN;
+  dn.stride = {one, tensor->shape_[0]};
+  const auto dn_tensor = std::make_shared<ir::TensorType>(tensor->shape_, DataType::FP32, std::nullopt, dn);
+  const auto input = std::make_shared<ir::Var>("input", tensor, span);
+  const auto before = std::make_shared<ir::Var>("before", dn_tensor, span);
+  const auto after = std::make_shared<ir::Var>("after", dn_tensor, span);
+  const auto shape = std::make_shared<ir::MakeTuple>(tensor->shape_, span);
+  const auto offsets = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{zero, zero}, span);
+  const auto& registry = ir::OpRegistry::GetInstance();
+  const auto load = registry.Create("tile.load", {input, offsets, shape, shape},
+                                    {{"target_memory", ir::MemorySpace::Vec}}, span);
+  const auto tile = std::make_shared<ir::Var>("tile", load->GetType(), span);
+  const auto patch = std::make_shared<ir::Var>("patch", load->GetType(), span);
+  auto store = [&](const ir::VarPtr& dst) {
+    return std::make_shared<ir::EvalStmt>(registry.Create("tile.store", {tile, offsets, dst}, {}, span),
+                                          span);
+  };
+  std::vector<ir::StmtPtr> statements{std::make_shared<ir::AssignStmt>(tile, load, span),
+                                      std::make_shared<ir::AssignStmt>(patch, load, span), store(before)};
+  ir::VarPtr target = tile;
+  if (project_tuple) {
+    // A nested projection aliases only its selected tile, including through
+    // a separate SSA binding of the outer tuple.
+    auto pair = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{patch, tile}, span);
+    auto outer = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{patch, pair}, span);
+    auto tuple = std::make_shared<ir::Var>("tuple", outer->GetType(), span);
+    auto tuple_alias = std::make_shared<ir::Var>("tuple_alias", outer->GetType(), span);
+    auto nested = std::make_shared<ir::TupleGetItemExpr>(tuple_alias, 1, span);
+    auto projection = std::make_shared<ir::TupleGetItemExpr>(nested, 1, span);
+    target = std::make_shared<ir::Var>("target", projection->GetType(), span);
+    statements.insert(statements.end(), {std::make_shared<ir::AssignStmt>(tuple, outer, span),
+                                         std::make_shared<ir::AssignStmt>(tuple_alias, tuple, span),
+                                         std::make_shared<ir::AssignStmt>(target, projection, span)});
+  }
+  const auto update = registry.Create("tile.assemble", {target, patch, offsets}, {}, span);
+  statements.insert(statements.end(), {std::make_shared<ir::EvalStmt>(update, span), store(after),
+                                       std::make_shared<ir::ReturnStmt>(span)});
+  auto body = std::make_shared<ir::SeqStmts>(std::move(statements), span);
+  auto kernel = std::make_shared<ir::Function>(
+      "kernel", std::vector<ir::VarPtr>{input, before, after},
+      std::vector<ir::ParamDirection>{ir::ParamDirection::In, ir::ParamDirection::Out,
+                                      ir::ParamDirection::Out},
+      std::vector<ir::TypePtr>{}, body, span, ir::FunctionType::InCore);
+  auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel}, "mutable_vec", span);
+  const auto instance = al::ExtractLayoutInstance(program);
+  assert(instance.values.at("tile").has_mutable_vec_backing);
+  assert(!instance.values.at("patch").has_mutable_vec_backing);
+  if (project_tuple) assert(instance.values.at("target").has_mutable_vec_backing);
+  const auto& load_op = instance.operations.front();
+  for (bool partial : {false, true}) {
+    al::LayoutAssignment assignment;
+    if (partial) assignment.op_configs.emplace(load_op.op_id, load_op.configs.front());
+    const auto written = al::ApplyLayoutAssignment(program, assignment);
+    std::vector<std::string> order;
+    auto collect = [&](auto& self, const ir::StmtPtr& stmt) -> void {
+      if (auto assign = ir::As<ir::AssignStmt>(stmt);
+          assign && ir::IsOp(ir::As<ir::Call>(assign->value_), "tile.transpose")) {
+        order.push_back("transpose");
+      }
+      if (auto eval = ir::As<ir::EvalStmt>(stmt)) {
+        auto call = ir::As<ir::Call>(eval->expr_);
+        if (ir::IsOp(call, "tile.store")) order.push_back("store");
+        if (ir::IsOp(call, "tile.assemble")) order.push_back("write");
+      }
+      for (const auto& child : al::detail::IterChildStmts(stmt)) self(self, child);
+    };
+    collect(collect, written->GetFunction("kernel")->body_);
+    assert((order == std::vector<std::string>{"transpose", "store", "write", "transpose", "store"}));
+  }
+}
+
 void TestVecConversionPressure() {
   const auto span = ir::Span::unknown();
   const auto tensor =
@@ -770,7 +848,7 @@ void TestVecConversionPressure() {
   assert(!instance.cost_model.SupportsVecTileConversion(second, rm, cm));
 }
 
-void TestSubviewStore(bool narrowed_pitch) {
+void TestSubviewStore(bool narrowed_pitch, bool project_tuple = false, bool inline_store = false) {
   const auto span = ir::Span::unknown();
   const auto source_dims = narrowed_pitch ? std::vector<int64_t>{16, 64} : std::vector<int64_t>{32, 32};
   const auto source_type = std::make_shared<ir::TensorType>(source_dims, DataType::INT32, std::nullopt);
@@ -795,14 +873,36 @@ void TestSubviewStore(bool narrowed_pitch) {
   const auto slice_var = std::make_shared<ir::Var>("first_view", slice->GetType(), span);
   const auto nested = registry.Create("tile.slice", {slice_var, slice_shape, offsets}, {}, span);
   const auto nested_var = std::make_shared<ir::Var>("nested_view", nested->GetType(), span);
-  const auto store = registry.Create("tile.store", {nested_var, offsets, dest}, {}, span);
-  const auto kernel_body = std::make_shared<ir::SeqStmts>(
-      std::vector<ir::StmtPtr>{std::make_shared<ir::AssignStmt>(tile, load, span),
-                               std::make_shared<ir::AssignStmt>(slice_var, slice, span),
-                               std::make_shared<ir::AssignStmt>(nested_var, nested, span),
-                               std::make_shared<ir::EvalStmt>(store, span),
-                               std::make_shared<ir::ReturnStmt>(span)},
-      span);
+  std::vector<ir::StmtPtr> stmts{std::make_shared<ir::AssignStmt>(tile, load, span),
+                                 std::make_shared<ir::AssignStmt>(slice_var, slice, span),
+                                 std::make_shared<ir::AssignStmt>(nested_var, nested, span)};
+  ir::VarPtr source_view = nested_var;
+  ir::ExprPtr inline_view;
+  if (project_tuple) {
+    auto pair = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{tile, nested_var}, span);
+    auto pair_var = std::make_shared<ir::Var>("pair", pair->GetType(), span);
+    stmts.push_back(std::make_shared<ir::AssignStmt>(pair_var, pair, span));
+    auto projection = std::make_shared<ir::TupleGetItemExpr>(pair_var, 1, span);
+    inline_view = projection;
+    source_view = std::make_shared<ir::Var>("projected_view", projection->GetType(), span);
+    stmts.push_back(std::make_shared<ir::AssignStmt>(source_view, projection, span));
+  }
+  const auto store = registry.Create("tile.store", {source_view, offsets, dest}, {}, span);
+  stmts.push_back(std::make_shared<ir::EvalStmt>(store, span));
+  if (project_tuple) {
+    auto move = registry.Create(
+        "tile.move", {source_view},
+        {{"target_memory", ir::MemorySpace::Vec}, {"blayout", ir::TileLayout::col_major}}, span);
+    stmts.push_back(std::make_shared<ir::AssignStmt>(
+        std::make_shared<ir::Var>("moved", move->GetType(), span), move, span));
+    // A later read through an inline projection keeps the entire backing live.
+    // An inline store also observes its destination's declared format.
+    auto inline_read = inline_store ? registry.Create("tile.store", {inline_view, offsets, dest}, {}, span)
+                                    : registry.Create("tile.read", {inline_view, offsets}, {}, span);
+    stmts.push_back(std::make_shared<ir::EvalStmt>(inline_read, span));
+  }
+  stmts.push_back(std::make_shared<ir::ReturnStmt>(span));
+  const auto kernel_body = std::make_shared<ir::SeqStmts>(std::move(stmts), span);
   const auto kernel = std::make_shared<ir::Function>(
       "store_view", std::vector<ir::VarPtr>{source, dest},
       std::vector<ir::ParamDirection>{ir::ParamDirection::In, ir::ParamDirection::Out},
@@ -832,13 +932,29 @@ void TestSubviewStore(bool narrowed_pitch) {
   assert(backing_headroom.has_value());
   assert(instance.values.at("first_view").vec_conversion_headroom == backing_headroom);
   assert(instance.values.at("nested_view").vec_conversion_headroom == backing_headroom);
+  if (project_tuple) {
+    const auto& view = instance.values.at("projected_view");
+    assert(view.is_vec_slice && view.is_strided_subview == narrowed_pitch);
+    assert(view.vec_conversion_headroom == backing_headroom);
+    assert(!instance.values.at("backing_tile").is_strided_subview);
+    assert(instance.vec_memory_regions.front().original_bytes.back() ==
+           instance.values.at("backing_tile").ByteSize());
+    const auto& move = instance.operations.back();
+    assert(move.op_name == "tile.move");
+    const bool offers_transpose = std::any_of(move.configs.begin(), move.configs.end(), [](const auto& cfg) {
+      return cfg.input_layouts.front() == al::LayoutSpec::RowMajorFlat() &&
+             cfg.output_layout == al::LayoutSpec::ColMajorFlat();
+    });
+    assert(offers_transpose == !narrowed_pitch);
+  }
   const auto result = al::SolveAutoLayout(instance);
   // DN makes the write contiguous, but requires a compact column-major tile.
   // An equal-pitch window can convert as before. A nested view of a narrowed
   // pitch inherits the original stride even with the same shape as its parent.
-  const auto expected_layout = narrowed_pitch ? al::LayoutSpec::ND() : al::LayoutSpec::DN();
+  const bool choose_dn = !narrowed_pitch && !inline_store;
+  const auto expected_layout = choose_dn ? al::LayoutSpec::DN() : al::LayoutSpec::ND();
   assert(result.Assignment().value_layouts.at("buffer") == expected_layout);
-  assert(result.conversions.size() == (narrowed_pitch ? 0 : 1));
+  assert(result.conversions.size() == (choose_dn ? 1 : 0));
 }
 
 void TestVecLoopConversions(bool column_carry, int64_t trip_count, bool while_loop = false,
@@ -949,6 +1065,62 @@ void TestVecLoopConversions(bool column_carry, int64_t trip_count, bool while_lo
   assert(al::EvaluateAssignment(instance, solution.Assignment()).conversion_cost_cycles == expected);
 }
 
+void TestUnmodeledVecLoopConversion(bool peel_first_iteration) {
+  const auto span = ir::Span::unknown();
+  const auto index = [&](int64_t value) {
+    return std::make_shared<ir::ConstInt>(value, DataType::INDEX, span);
+  };
+  const auto shape = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{index(32), index(32)}, span);
+  const auto offsets = std::make_shared<ir::MakeTuple>(std::vector<ir::ExprPtr>{index(0), index(0)}, span);
+  const auto dn =
+      std::make_shared<ir::TensorType>(std::vector<int64_t>{32, 32}, DataType::FP32, std::nullopt,
+                                       ir::TensorView(std::vector<int64_t>{1, 32}, ir::TensorLayout::DN));
+  const auto output = std::make_shared<ir::Var>("output", dn, span);
+  const auto& registry = ir::OpRegistry::GetInstance();
+  const auto diagonal = std::make_shared<ir::ConstInt>(0, DataType::INT32, span);
+  const auto tri = registry.Create("tile.tri", {diagonal, shape}, {{"dtype", DataType::FP32}}, span);
+  const auto mask = std::make_shared<ir::Var>("mask", tri->GetType(), span);
+  // The generic operation first introduces the unmodeled mask to the solver.
+  // The DN store requests its column-major representation.
+  const auto scale = std::make_shared<ir::ConstFloat>(2.0, DataType::FP32, span);
+  const auto use_mask = [&](const char* name) {
+    const auto mul = registry.Create("tile.muls", {mask, scale}, {}, span);
+    const auto store = registry.Create("tile.store", {mask, offsets, output}, {}, span);
+    const auto scaled = std::make_shared<ir::Var>(name, mul->GetType(), span);
+    return std::vector<ir::StmtPtr>{std::make_shared<ir::AssignStmt>(scaled, mul, span),
+                                    std::make_shared<ir::EvalStmt>(store, span)};
+  };
+  std::vector<ir::StmtPtr> stmts{std::make_shared<ir::AssignStmt>(mask, tri, span)};
+  if (peel_first_iteration) {
+    auto first_iteration = use_mask("first_scaled");
+    stmts.insert(stmts.end(), first_iteration.begin(), first_iteration.end());
+  }
+  constexpr int64_t trip_count = 4;
+  const auto induction = std::make_shared<ir::Var>("i", index(0)->GetType(), span);
+  const auto loop_body = std::make_shared<ir::SeqStmts>(use_mask("scaled"), span);
+  stmts.push_back(std::make_shared<ir::ForStmt>(induction, index(peel_first_iteration ? 1 : 0),
+                                                index(trip_count), index(1), std::vector<ir::IterArgPtr>{},
+                                                loop_body, std::vector<ir::VarPtr>{}, span));
+  stmts.push_back(std::make_shared<ir::ReturnStmt>(span));
+  const auto kernel = std::make_shared<ir::Function>(
+      "kernel", std::vector<ir::VarPtr>{output}, std::vector<ir::ParamDirection>{ir::ParamDirection::Out},
+      std::vector<ir::TypePtr>{}, std::make_shared<ir::SeqStmts>(stmts, span), span,
+      ir::FunctionType::InCore);
+  const auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel}, "tri_loop", span);
+  const auto instance = al::ExtractLayoutInstance(program);
+  const auto& value = instance.values.at("mask");
+  const auto row = al::LayoutSpec::RowMajorFlat();
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  const auto one_transpose = instance.EstimateConversionCost(value, row, col);
+  const auto solution = al::SolveAutoLayout(instance);
+  // Peeling changes where the mask is first registered. Both programs define
+  // the mask just once and reuse its converted copy for every store.
+  assert(value.conversion_invocations == 1);
+  assert(solution.conversions.size() == 1);
+  assert(solution.breakdown.conversion_cost_cycles == one_transpose);
+  assert(al::EvaluateAssignment(instance, solution.Assignment()).conversion_cost_cycles == one_transpose);
+}
+
 }  // namespace
 
 int main() {
@@ -1043,12 +1215,19 @@ int main() {
   TestVecCopyLifetime(384, 576, true, false, 0, VecPressureScope::Reserved);
   TestVecCopyLifetime(384, 768, true, false, 0, VecPressureScope::UnmodeledGenerator);
   TestVecConversionPressure();
+  TestMutableVecPartialAssignment(false);
+  TestMutableVecPartialAssignment(true);
   TestSubviewStore(true);
   TestSubviewStore(false);
+  TestSubviewStore(true, true);
+  TestSubviewStore(false, true);
+  TestSubviewStore(false, true, /*inline_store=*/true);
   TestVecLoopConversions(true, 2);
   TestVecLoopConversions(true, 0);
   TestVecLoopConversions(false, 2);
   TestVecLoopConversions(true, 1, /*while_loop=*/true);
   TestVecLoopConversions(true, 0, /*while_loop=*/true);
   TestVecLoopConversions(false, 2, /*while_loop=*/false, /*column_input=*/true);
+  TestUnmodeledVecLoopConversion(false);
+  TestUnmodeledVecLoopConversion(true);
 }

@@ -96,6 +96,8 @@ struct OrchCallAnalysis {
   std::unordered_map<std::string, std::vector<std::optional<std::string>>> call_arg_names;
   std::unordered_map<std::string, std::vector<CallSite>> call_sites;
   std::unordered_map<std::string, size_t> call_order;
+  /// Non-InCore functions in topological order, including those with no caller.
+  std::vector<std::string> caller_first_order;
   std::map<std::pair<std::string, size_t>, int64_t> param_steps;
   std::unordered_set<std::string> reshaped_names;
   std::unordered_set<std::string> nz_ineligible_names;

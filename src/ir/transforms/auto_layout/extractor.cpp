@@ -27,6 +27,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -34,6 +35,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -48,12 +50,16 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/implicit_vec_scratch.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -229,8 +235,8 @@ ValueNode VecTransposeGeometry(const TileTypePtr& tile) {
 }
 
 std::optional<size_t> TileBackingOperand(const CallPtr& call) {
-  if (IsOp(call, "tile.slice") || IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") ||
-      IsOp(call, "tile.transpose_view")) {
+  // TSETVAL returns its destination, including writes through an earlier alias.
+  if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) || IsOp(call, "tile.write")) {
     return 0;
   }
   return ResultAliasedArgIndex(call);
@@ -507,9 +513,80 @@ bool IsWholeTensorFlatten(const CallPtr& call) {
   }
   int64_t prod = 1;
   for (int64_t d : *src_shape) {
+    if (d <= 0 || prod > std::numeric_limits<int64_t>::max() / d) return false;
     prod *= d;
   }
   return prod == flat_ext->value_;
+}
+
+// A whole flatten keeps the backing bytes but gives them a different logical
+// index space. Follow ordinary SSA copies in the function. Any other exposure
+// (including tuples, control-flow carries, and call/return boundaries) must
+// preserve the backing's declared layout unless it only warms those bytes.
+class WholeFlattenUses : public IRVisitor {
+ public:
+  std::unordered_set<ExprPtr> escaped_sources;
+
+ private:
+  void VisitStmt_(const AssignStmtPtr& assign) override {
+    if (auto call = As<Call>(assign->value_); IsWholeTensorFlatten(call)) {
+      flat_sources_.emplace(assign->var_.get(), call->args_[0]);
+      IRVisitor::VisitExpr_(call);
+      return;
+    }
+    if (auto rhs = AsVarLike(assign->value_)) {
+      if (auto flat = flat_sources_.find(rhs.get()); flat != flat_sources_.end()) {
+        flat_sources_.emplace(assign->var_.get(), flat->second);
+        return;
+      }
+    }
+    IRVisitor::VisitStmt_(assign);
+  }
+
+  void VisitVarLike_(const VarPtr& var) override {
+    if (auto flat = flat_sources_.find(var.get()); flat != flat_sources_.end()) {
+      escaped_sources.insert(flat->second);
+    }
+    IRVisitor::VisitVarLike_(var);
+  }
+
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "prefetch.async_prefetch") && call->args_.size() == 2 && AsVarLike(call->args_[0])) {
+      // Only the flat source operand of async_prefetch is layout agnostic.
+      VisitExpr(call->args_[1]);
+      for (const auto& [_, attr] : call->attrs_) {
+        ForEachAttrExpr(attr, [this](const ExprPtr& expr) { VisitExpr(expr); });
+      }
+      return;
+    }
+    // Normal pass input binds the reshape result to a Var. Treat an inline
+    // reshape conservatively when there is no SSA descriptor to track.
+    if (IsWholeTensorFlatten(call)) escaped_sources.insert(call->args_[0]);
+    IRVisitor::VisitExpr_(call);
+  }
+
+  std::unordered_map<const Var*, ExprPtr> flat_sources_;
+};
+
+// OptimizeOrchTensors materializes inherited strides on sliced device formals.
+// Selecting a complete matrix from a dense bank yields the same ND strides as
+// an implicit matrix descriptor. A window into a wider plane keeps its pitch.
+bool HasImplicitOrDenseNdStrides(const TensorType& tensor) {
+  const auto& view = tensor.tensor_view_;
+  if (!view || view->stride.empty()) return true;
+  const size_t rank = tensor.shape_.size();
+  if (view->layout != TensorLayout::ND || view->stride.size() != rank) return false;
+  int64_t expected = 1;
+  for (size_t i = rank; i > 0; --i) {
+    const auto stride = As<ConstInt>(view->stride[i - 1]);
+    const auto extent = As<ConstInt>(tensor.shape_[i - 1]);
+    if (!stride || stride->value_ != expected || !extent || extent->value_ <= 0) return false;
+    if (i > 1) {
+      if (expected > std::numeric_limits<int64_t>::max() / extent->value_) return false;
+      expected *= extent->value_;
+    }
+  }
+  return true;
 }
 
 std::optional<std::vector<int64_t>> IsNzCompatibleTensorType(const TypePtr& type, size_t max_rank = 3) {
@@ -520,8 +597,8 @@ std::optional<std::vector<int64_t>> IsNzCompatibleTensorType(const TypePtr& type
   if (!tensor_type || tensor_view_semantics::IsNzBlocked(*tensor_type)) {
     return std::nullopt;
   }
-  if (tensor_type->tensor_view_.has_value() &&
-      (!tensor_type->tensor_view_->valid_shape.empty() || !tensor_type->tensor_view_->stride.empty())) {
+  if (!HasImplicitOrDenseNdStrides(*tensor_type) ||
+      (tensor_type->tensor_view_ && !tensor_type->tensor_view_->valid_shape.empty())) {
     return std::nullopt;
   }
   auto shape = StaticShape(tensor_type->shape_);
@@ -540,7 +617,7 @@ bool HasDenseLogicalInputLayout(const TensorTypePtr& tensor) {
   const auto& view = tensor->tensor_view_;
   return !view ||
          ((view->layout == TensorLayout::ND || view->layout == TensorLayout::NZ) && !view->nz_blocked &&
-          view->stride.empty() && view->valid_shape.empty() && view->pad == PadValue::null);
+          HasImplicitOrDenseNdStrides(*tensor) && view->valid_shape.empty() && view->pad == PadValue::null);
 }
 
 bool IsNzCompatibleTensorSliceCall(const CallPtr& call, const TypePtr& tensor_type, size_t max_rank = 3) {
@@ -984,6 +1061,11 @@ class GmBindings {
     }
     Walk(func->body_);
     for (auto& [_, name] : names_) name = Canonical(name);
+    WholeFlattenUses flattens;
+    flattens.VisitFunction(func);
+    for (const auto& source : flattens.escaped_sources) {
+      if (auto name = Resolve(source)) escaped_flatten_backings_.insert(*name);
+    }
   }
 
   const GmNames& Names() const { return names_; }
@@ -1008,6 +1090,14 @@ class GmBindings {
   }
 
   void PinLayouts(OrchCallAnalysis& analysis, bool track_named_inputs = false) const {
+    for (const auto& name : escaped_flatten_backings_) {
+      analysis.nz_ineligible_names.insert(name);
+      analysis.dn_ineligible_names.insert(name);
+      if (track_named_inputs) {
+        analysis.nz_restrictions.try_emplace(name,
+                                             "a whole-tensor flatten exposes the backing's element order");
+      }
+    }
     for (const auto& name : pinned_) {
       analysis.nz_ineligible_names.insert(Canonical(name));
       analysis.dn_ineligible_names.insert(Canonical(name));
@@ -1230,6 +1320,7 @@ class GmBindings {
   std::unordered_map<const Var*, ExprPtr> tuples_;
   std::unordered_map<std::string, std::string> forwarded_;
   std::unordered_set<std::string> pinned_;
+  std::unordered_set<std::string> escaped_flatten_backings_;
   std::unordered_map<const Expr*, size_t> call_ids_;
   std::vector<Yields> yield_frames_;
 };
@@ -1380,8 +1471,10 @@ FuncGmIneligible CollectFuncGmIneligible(const FunctionPtr& func, const LayoutCo
         ok_dn = (target_mem == MemorySpace::Vec);
       } else if (IsOp(call, "tile.store") && i == 2) {
         out.written.insert(name->second);
-        ok_nz = IsNzCompatibleTileStoreCall(call, arg_v->GetType(), facts, model);
-        auto src_tile = !call->args_.empty() ? As<TileType>(call->args_[0]->GetType()) : nullptr;
+        // ExtractStore can rewrite the source representation only for a named tile.
+        const auto source = AsVarLike(call->args_.front());
+        const auto src_tile = source ? As<TileType>(source->GetType()) : nullptr;
+        ok_nz = src_tile && IsNzCompatibleTileStoreCall(call, arg_v->GetType(), facts, model);
         ok_dn = src_tile && src_tile->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec;
       }
       if (!ok_nz) {
@@ -1601,9 +1694,10 @@ class OrchAnalyzer {
         }
       }
       for (size_t i = 0; track_named_inputs_ && i < std::min(resolved.size(), callee->params_.size()); ++i) {
-        if (!resolved[i]) continue;
+        const auto& root = resolved[i];
+        if (!root) continue;
         if (callee->param_directions_[i] != ParamDirection::In) {
-          analysis_.written_storage.insert(*resolved[i]);
+          analysis_.written_storage.insert(*root);
         }
         // Both ends of a call describe the same projected matrix. Equal byte
         // sizes alone do not establish identical NZ block boundaries.
@@ -1614,7 +1708,7 @@ class OrchAnalyzer {
         if (!actual || !formal || actual != formal || !HasDenseLogicalInputLayout(actual_tensor) ||
             !HasDenseLogicalInputLayout(formal_tensor) || actual_tensor->dtype_ != formal_tensor->dtype_) {
           analysis_.nz_restrictions.try_emplace(
-              *resolved[i], "incompatible tensor parameter " + std::to_string(i) + " of '" + name + "'");
+              *root, "incompatible tensor parameter " + std::to_string(i) + " of '" + name + "'");
         }
       }
       for (size_t i = resolved.size(); i < callee->params_.size(); ++i) {
@@ -1805,8 +1899,9 @@ class OrchAnalyzer {
         RecordGlobalCall(sub, gv->name_, sub->args_);
       } else if (track_named_inputs_) {
         for (const auto& arg : sub->args_) {
-          for (const auto& root : bindings_->Roots(arg))
+          for (const auto& root : bindings_->Roots(arg)) {
             Pin(root, "unmodeled submit to '" + sub->op_->name_ + "'");
+          }
         }
       }
       for (const auto& arg : sub->args_) {
@@ -1921,13 +2016,26 @@ struct UnmodeledVecTile {
   size_t definition;
   size_t last;
   int64_t bytes;
+  int64_t conversion_invocations;
   std::optional<std::string> registered_name;
+};
+
+// A projected tuple slot may select several physical allocations across
+// branches or loop iterations. Each allocation can reach the last projected
+// read, while the projection descriptor itself consumes no Vec memory.
+struct ProjectedVecStorage {
+  std::unordered_set<std::string> names;
+  std::unordered_set<std::string> descriptors;
+  std::unordered_set<size_t> unmodeled;
+  bool unknown_source = false;
 };
 
 void RecordVecMemoryRegion(LayoutProblemInstance& instance, VecMemoryRegion region,
                            const std::unordered_map<std::string, size_t>& definitions,
                            const std::unordered_map<std::string, size_t>& other_uses, size_t event_count,
-                           uint64_t reserved_bytes, const std::vector<UnmodeledVecTile>& unmodeled_tiles) {
+                           uint64_t reserved_bytes, std::vector<UnmodeledVecTile>& unmodeled_tiles,
+                           const std::vector<std::pair<size_t, int64_t>>& implicit_scratch,
+                           const std::unordered_map<const Var*, ProjectedVecStorage>& projected_storage) {
   const size_t count = region.operation_positions.size();
   if (region.capacity == 0 || count == 0) return;
   std::unordered_map<std::string, size_t> first_uses;
@@ -1948,6 +2056,30 @@ void RecordVecMemoryRegion(LayoutProblemInstance& instance, VecMemoryRegion regi
   }
   for (const auto& [name, position] : other_uses) record(name, position);
   if (first_uses.empty()) return;
+  for (const auto& [_, group] : projected_storage) {
+    size_t last = 0;
+    for (const auto& name : group.names) {
+      if (auto it = region.last_uses.find(name); it != region.last_uses.end()) {
+        const auto def = definitions.find(name);
+        const size_t first = def == definitions.end() ? first_uses.at(name) : def->second;
+        last = std::max(last, region.EffectiveLastUse(first, it->second));
+      }
+    }
+    for (const auto index : group.unmodeled) {
+      const auto& tile = unmodeled_tiles[index];
+      last = std::max(last, region.EffectiveLastUse(tile.definition, tile.last));
+    }
+    for (const auto& name : group.names) {
+      auto def = definitions.find(name);
+      if (region.last_uses.count(name) || def != definitions.end()) {
+        record(name, def == definitions.end() ? last : std::max(last, def->second));
+      }
+    }
+    for (const auto index : group.unmodeled) unmodeled_tiles[index].last = last;
+    if (!group.unknown_source) {
+      for (const auto& descriptor : group.descriptors) region.backings.try_emplace(descriptor);
+    }
+  }
   for (size_t i = count; i > 0; --i) {
     const auto& output = instance.operations[region.first_operation + i - 1].output;
     if (const auto it = region.backings.find(output); it != region.backings.end()) {
@@ -1961,6 +2093,10 @@ void RecordVecMemoryRegion(LayoutProblemInstance& instance, VecMemoryRegion regi
 
   std::vector<int64_t> original_bytes(event_count + 1, 0);
   original_bytes.front() = static_cast<int64_t>(std::min(reserved_bytes, region.capacity));
+  for (const auto& [position, bytes] : implicit_scratch) {
+    original_bytes[position] += bytes;
+    original_bytes[position + 1] -= bytes;
+  }
   for (const auto& tile : unmodeled_tiles) {
     if (tile.registered_name) continue;
     original_bytes[tile.definition] += tile.bytes;
@@ -1992,7 +2128,7 @@ void RecordVecMemoryRegion(LayoutProblemInstance& instance, VecMemoryRegion regi
 class PostInferInstanceExtractor {
  public:
   PostInferInstanceExtractor(const LayoutCostModel& model, const backend::Backend* backend,
-                             const std::unordered_set<std::string>& reusable,
+                             const ProgramPtr& program, const std::unordered_set<std::string>& reusable,
                              const std::unordered_set<std::string>& nz_input_roots,
                              const std::unordered_map<std::string, TensorTypePtr>& host_inputs,
                              const std::unordered_map<std::string, double>& projected_dispatches,
@@ -2007,6 +2143,7 @@ class PostInferInstanceExtractor {
                              const std::map<std::pair<std::string, size_t>, int64_t>& param_steps)
       : model_(model),
         backend_(backend),
+        program_(program),
         reusable_(reusable),
         nz_input_roots_(nz_input_roots),
         host_inputs_(host_inputs),
@@ -2036,6 +2173,7 @@ class PostInferInstanceExtractor {
     const size_t begin = instance_.operations.size();
     vec_memory_.first_operation = begin;
     WalkStmt(func->body_);
+    FinalizeMutableVecConfigs(begin);
     if (backend_) {
       vec_memory_.capacity = backend_->GetMemSize(MemorySpace::Vec);
       uint64_t reserved_bytes = 0;
@@ -2048,7 +2186,8 @@ class PostInferInstanceExtractor {
         }
       }
       RecordVecMemoryRegion(instance_, std::move(vec_memory_), vec_definitions_, vec_other_uses_,
-                            vec_position_ + 1, reserved_bytes, unmodeled_vec_tiles_);
+                            vec_position_ + 1, reserved_bytes, unmodeled_vec_tiles_, implicit_vec_scratch_,
+                            projected_vec_storage_);
     }
     if (bindings) {
       auto& site = bindings->sites[tile_prefix_];
@@ -2059,6 +2198,233 @@ class PostInferInstanceExtractor {
   }
 
  private:
+  void AliasVecStorage(const VarPtr& result, const VarPtr& input) {
+    if (!result || !input) return;
+    const auto output_type = As<TileType>(result->GetType());
+    const auto input_type = As<TileType>(input->GetType());
+    if (output_type && output_type->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec &&
+        input_type && input_type->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
+      vec_storage_.Union(result.get(), input.get());
+    }
+  }
+
+  void AliasVecStorageExpression(const VarPtr& result, const ExprPtr& input) {
+    if (auto source = AsVarLike(input)) {
+      AliasVecStorage(result, source);
+    } else if (const auto type = As<TileType>(result->GetType());
+               type && type->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec &&
+               As<TupleGetItemExpr>(input)) {
+      vec_projection_aliases_.emplace_back(result, input);
+    }
+  }
+
+  void BindVecValueAlias(const VarPtr& result, const VarPtr& input) {
+    AliasVecStorage(result, input);
+    if (const auto modeled = var_to_name_.find(input.get()); modeled != var_to_name_.end()) {
+      var_to_name_[result.get()] = modeled->second;
+    } else if (const auto allocation = unmodeled_vec_vars_.find(input.get());
+               allocation != unmodeled_vec_vars_.end()) {
+      unmodeled_vec_vars_.emplace(result.get(), allocation->second);
+    }
+  }
+
+  // Process each projected expression and slot once across all queries. A
+  // previous alias stands for the same possible backing group. A null alias
+  // denotes a write through an inline projection with no result SSA binding.
+  using VecProjectionAliases = std::map<std::pair<const Expr*, std::vector<size_t>>, const Var*>;
+
+  void TraceVecProjection(const Var* alias, const ExprPtr& expression, VecProjectionAliases& projections,
+                          std::optional<size_t> read_position = std::nullopt) {
+    auto resolve = [&](auto& self, const ExprPtr& expr, std::vector<size_t> path) -> void {
+      if (!expr) return;
+      auto [prior, inserted] = projections.try_emplace(std::make_pair(expr.get(), path), alias);
+      if (!inserted) {
+        if (alias && prior->second) {
+          vec_storage_.Union(alias, prior->second);
+        } else if (const auto* written = alias ? alias : prior->second) {
+          vec_written_vars_.insert(written);
+        }
+        return;
+      }
+      if (auto item = As<TupleGetItemExpr>(expr)) {
+        path.push_back(static_cast<size_t>(item->index_));
+        self(self, item->tuple_, std::move(path));
+      } else if (auto tuple = As<MakeTuple>(expr);
+                 tuple && !path.empty() && path.back() < tuple->elements_.size()) {
+        const auto index = path.back();
+        path.pop_back();
+        self(self, tuple->elements_[index], std::move(path));
+      } else if (auto var = AsVarLike(expr)) {
+        const auto type = As<TileType>(var->GetType());
+        if (path.empty() && type && type->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
+          if (read_position) {
+            RecordOtherVecUse(var, *read_position);
+            inline_vec_sources_.insert(var.get());
+          } else if (alias) {
+            vec_storage_.Union(alias, var.get());
+            if (!var_to_name_.count(var.get()) && !unmodeled_vec_vars_.count(var.get())) {
+              unresolved_vec_projections_.insert(alias);
+            }
+          } else {
+            vec_written_vars_.insert(var.get());
+          }
+        } else if (auto sources = vec_tuple_sources_.find(var.get()); sources != vec_tuple_sources_.end()) {
+          for (const auto& source : sources->second) self(self, source, path);
+        } else if (alias) {
+          unresolved_vec_projections_.insert(alias);
+        }
+      } else if (alias) {
+        unresolved_vec_projections_.insert(alias);
+      }
+    };
+    resolve(resolve, expression, {});
+  }
+
+  static bool WritesVecOperand(const CallPtr& call, size_t index) {
+    const auto* entry = LookupOpEntry(call->op_);
+    if (!entry) return true;  // An opaque call can write through a tile argument.
+    if (entry->GetIRStage() == OpIRStage::Buffer) {
+      const auto access = entry->GetBufferArgEffect(index).data;
+      return access == BufferAccess::Write || access == BufferAccess::ReadWrite;
+    }
+    return IsTileWorkspace(call, index) || ArgEffectWrites(entry->GetArgEffect(index, call->kwargs_));
+  }
+
+  void RecordVecAccesses(const CallPtr& call) {
+    for (size_t index = 0; index < call->args_.size(); ++index) {
+      const auto& arg = call->args_[index];
+      if (auto type = As<TileType>(arg->GetType());
+          type && type->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
+        if (As<TupleGetItemExpr>(arg)) {
+          vec_projected_reads_.emplace_back(arg, vec_position_ + 1);
+          if (WritesVecOperand(call, index)) vec_written_projections_.push_back(arg);
+        } else if (auto var = AsVarLike(arg); var && WritesVecOperand(call, index)) {
+          vec_written_vars_.insert(var.get());
+        }
+      }
+    }
+  }
+
+  void FinalizeMutableVecConfigs(size_t first_op) {
+    // Backedge definitions can occur after the projection in source order.
+    // Resolve inline readers latest-first so shared tuple paths are visited
+    // only for the last use. They extend the actual slot's allocation.
+    VecProjectionAliases read_paths;
+    for (auto it = vec_projected_reads_.rbegin(); it != vec_projected_reads_.rend(); ++it) {
+      TraceVecProjection(nullptr, it->first, read_paths, it->second);
+    }
+    VecProjectionAliases projections;
+    for (const auto& [result, expression] : vec_projection_aliases_) {
+      TraceVecProjection(result.get(), expression, projections);
+    }
+    for (const auto& projection : vec_written_projections_) {
+      TraceVecProjection(nullptr, projection, projections);
+    }
+    if (vec_written_vars_.empty() && vec_projection_aliases_.empty() && inline_vec_sources_.empty()) return;
+    std::unordered_set<const Var*> written_roots;
+    for (const auto* var : vec_written_vars_) written_roots.insert(vec_storage_.Find(var));
+    for (const auto& [result, _] : vec_projection_aliases_) {
+      auto& group = projected_vec_storage_[vec_storage_.Find(result.get())];
+      if (const auto* node = LookupTileValue(result.get())) group.descriptors.insert(node->name);
+    }
+    for (const auto* var : inline_vec_sources_) projected_vec_storage_.try_emplace(vec_storage_.Find(var));
+    for (const auto* var : unresolved_vec_projections_) {
+      projected_vec_storage_.at(vec_storage_.Find(var)).unknown_source = true;
+    }
+    std::unordered_set<std::string> pinned;
+    for (const auto& [var, name] : var_to_name_) {
+      const auto* root = vec_storage_.Find(var);
+      if (written_roots.count(root) != 0) {
+        instance_.values.at(name).has_mutable_vec_backing = true;
+      }
+      // Tuple descriptors can be observed by projections outside the layout
+      // model. Keep the representation of each projected slot consistent.
+      if (auto group = projected_vec_storage_.find(root); group != projected_vec_storage_.end()) {
+        group->second.names.insert(name);
+        pinned.insert(name);
+      }
+    }
+    for (const auto& [var, index] : unmodeled_vec_vars_) {
+      if (unmodeled_vec_tiles_[index].registered_name) continue;
+      if (auto group = projected_vec_storage_.find(vec_storage_.Find(var));
+          group != projected_vec_storage_.end()) {
+        group->second.unmodeled.insert(index);
+      }
+    }
+    for (const auto& [_, group] : projected_vec_storage_) {
+      bool strided = group.unknown_source || !group.unmodeled.empty();
+      bool slice = false;
+      bool dense = true;
+      for (const auto& name : group.names) {
+        const auto& node = instance_.values.at(name);
+        strided |= node.is_strided_subview;
+        slice |= node.is_vec_slice;
+        dense &= node.has_dense_vec_span;
+      }
+      // A projection's printed descriptor does not encode the parent's pitch.
+      // Apply the most restrictive possible geometry to it and its views;
+      // independently allocated roots retain their own descriptor.
+      for (const auto& name : group.names) {
+        if (!group.descriptors.count(name) && !vec_memory_.backings.count(name)) continue;
+        auto& node = instance_.values.at(name);
+        node.is_strided_subview |= strided;
+        node.is_vec_slice |= slice;
+        node.has_dense_vec_span &= dense;
+        if (strided && model_.TargetArch() == "a2a3") node.admissible_layouts = {node.current_layout};
+      }
+    }
+    for (size_t index = first_op; index < instance_.operations.size(); ++index) {
+      auto& op = instance_.operations[index];
+      const auto& output = instance_.values.at(op.output);
+      const auto reserved = vec_storage_inputs_.find(op.op_id);
+      const bool control =
+          op.op_name == "control.if_join" || op.op_name == kVecLoopInitOp || op.op_name == kVecLoopYieldOp;
+      auto configure = [&](OperatorConfig& cfg) {
+        if (op.op_name == "tile.move" && !op.inputs.empty() && pinned.count(op.inputs.front()) &&
+            !model_.IsValidMoveConfig(instance_.values.at(op.inputs.front()), output,
+                                      cfg.input_layouts.front(), cfg.output_layout)) {
+          return false;
+        }
+        // Preserve physical descriptors throughout a mutable alias group. A
+        // converted view or write target would redirect later writes to a copy.
+        if ((output.has_mutable_vec_backing || pinned.count(output.name) != 0) &&
+            cfg.output_layout != output.current_layout) {
+          // A load defines fresh storage, so it can first use its native
+          // transfer layout and initialize the backing that its aliases expect.
+          if (op.op_name != "tile.load" ||
+              !IsFlatVecTransposePair(cfg.output_layout, output.current_layout) ||
+              !model_.SupportsVecTileConversion(output, cfg.output_layout, output.current_layout)) {
+            return false;
+          }
+          cfg.op_cost_cycles +=
+              model_.EstimateConversionCost(output, cfg.output_layout, output.current_layout);
+          cfg.local_vec_load_layout = cfg.output_layout;
+          cfg.output_layout = output.current_layout;
+        }
+        for (size_t i = 0; i < op.inputs.size(); ++i) {
+          const auto& input = instance_.values.at(op.inputs[i]);
+          if (!input.has_mutable_vec_backing) continue;
+          const auto required = cfg.input_layouts[i];
+          if (required == input.current_layout) continue;
+          if (control || (reserved != vec_storage_inputs_.end() && reserved->second.count(i) != 0) ||
+              !model_.SupportsVecTileConversion(input, input.current_layout, required)) {
+            return false;
+          }
+          cfg.op_cost_cycles += model_.EstimateConversionCost(input, input.current_layout, required);
+          cfg.local_vec_conversions.emplace_back(i, required);
+          cfg.input_layouts[i] = input.current_layout;
+        }
+        return true;
+      };
+      std::vector<OperatorConfig> supported;
+      supported.reserve(op.configs.size());
+      for (auto& cfg : op.configs) {
+        if (configure(cfg)) supported.push_back(std::move(cfg));
+      }
+      op.configs = std::move(supported);
+    }
+  }
+
   void RegisterGmVar(const VarPtr& param, bool formal = false, size_t param_index = 0) {
     auto tt = AsTensorTypeLike(param->GetType());
     if (!tt) {
@@ -2628,6 +2994,9 @@ class PostInferInstanceExtractor {
           return instance_.FindValue(*tile.registered_name);
         }
         definition = tile.definition;
+        // Writeback places a shared conversion at the definition, which may
+        // execute less often than the consumer that first registers the tile.
+        node.conversion_invocations = tile.conversion_invocations;
         vec_other_uses_[name] = tile.last;
         tile.registered_name = name;
       }
@@ -2736,6 +3105,7 @@ class PostInferInstanceExtractor {
         RegisterTileVar(op->var_, op_id, {src_name}, src_node->is_strided_subview, src_node->is_vec_slice);
     if (!dst_node) return;
     RecordVecBacking(*dst_node, *src_node);
+    vec_storage_inputs_[op_id].insert(0);
 
     OperationNode op_node;
     op_node.op_id = op_id;
@@ -2784,6 +3154,8 @@ class PostInferInstanceExtractor {
     const ValueNode* dst_node = RegisterTileVar(op->var_, op_id, {src_name});
     const ValueNode* src_node = instance_.FindValue(src_name);
     if (!src_node || !dst_node) return;
+    // Cross-space move and extract do not lower private Vec operands.
+    if (dst_node->memory_space != MemorySpace::Vec) vec_storage_inputs_[op_id].insert(0);
 
     OperationNode op_node;
     op_node.op_id = op_id;
@@ -3074,9 +3446,7 @@ class PostInferInstanceExtractor {
     if (!IsOp(call, "tile.slice")) {
       // These operations reuse the first operand's storage. A new logical
       // descriptor alone cannot make a strided window a compact allocation.
-      return source.is_strided_subview &&
-             (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") ||
-              IsOp(call, "tile.set_validshape") || IsOp(call, "tile.assemble"));
+      return source.is_strided_subview && detail::AliasesFirstTileOperand(call);
     }
     if (source.is_strided_subview) {
       return true;
@@ -3132,12 +3502,12 @@ class PostInferInstanceExtractor {
                                                           detail::AliasesFirstTileOperand(rhs));
     const ValueNode* dst_node = RegisterTileVar(op->var_, op_id, inp_names, is_strided_subview, is_vec_slice);
     if (!dst_node) return;
-    if (const auto backing = detail::TileBackingOperand(rhs)) {
-      for (const auto& [index, _, input] : tile_inputs) {
-        if (index == *backing) {
-          RecordVecBacking(*dst_node, *input);
-          break;
-        }
+    const auto backing = detail::TileBackingOperand(rhs);
+    for (size_t i = 0; i < tile_inputs.size(); ++i) {
+      const auto& [index, _, input] = tile_inputs[i];
+      if (index == backing) RecordVecBacking(*dst_node, *input);
+      if (index == backing || WritesVecOperand(rhs, index) || dst_node->memory_space != MemorySpace::Vec) {
+        vec_storage_inputs_[op_id].insert(i);
       }
     }
 
@@ -3218,11 +3588,45 @@ class PostInferInstanceExtractor {
                                InvocationCount(model_.expected_uses, loop_multiplier_), std::move(configs)});
   }
 
+  void RecordImplicitVecScratch(const CallPtr& call, size_t position) {
+    if (!backend_) return;
+    const auto query = QueryImplicitVecScratch(call, *backend_);
+    if (std::holds_alternative<std::monostate>(query)) return;
+    // A later lowering or PTOAS allocates the workspace only for this
+    // instruction. A loop does not extend its lifetime into the next iteration.
+    const uint64_t capacity = backend_->GetMemSize(MemorySpace::Vec);
+    uint64_t bytes = capacity;
+    if (const auto* scratch = std::get_if<ImplicitVecScratch>(&query)) {
+      const auto tile = std::make_shared<TileType>(scratch->shape, scratch->dtype);
+      bytes = utils::StaticPhysicalAllocationBytes(tile, MemorySpace::Vec, backend_->GetHandler())
+                  .value_or(capacity);
+    }
+    implicit_vec_scratch_.emplace_back(position, static_cast<int64_t>(std::min(bytes, capacity)));
+  }
+
   void WalkAssignStmt(const AssignStmtPtr& op) {
     if (As<ScalarType>(op->var_->GetType())) {
       scalar_defs_[op->var_.get()] = op->value_;
     }
     if (auto rhs = As<Call>(op->value_)) {
+      RecordImplicitVecScratch(rhs, vec_position_ + 1);
+      RecordVecAccesses(rhs);
+      if (const auto helper = ResolveVFCall(rhs, program_)) {
+        auto aliases = VFReturnedArguments(helper, rhs);
+        if (As<TupleType>(op->var_->GetType())) {
+          vec_tuple_sources_[op->var_.get()].push_back(
+              std::make_shared<MakeTuple>(std::move(aliases), rhs->span_));
+        } else if (aliases.size() == 1) {
+          if (auto source = AsVarLike(aliases.front())) {
+            BindVecValueAlias(op->var_, source);
+          } else {
+            AliasVecStorageExpression(op->var_, aliases.front());
+          }
+        }
+      } else if (const auto backing = detail::TileBackingOperand(rhs);
+                 backing && *backing < rhs->args_.size()) {
+        AliasVecStorageExpression(op->var_, rhs->args_[*backing]);
+      }
       const std::string& op_name = rhs->op_->name_;
       if (IsOp(rhs, "tile.create")) {
         ++vec_position_;
@@ -3244,13 +3648,16 @@ class PostInferInstanceExtractor {
       } else if (op_name.rfind("tile.", 0) == 0) {
         ExtractGenericTileOp(op, rhs);
       }
-    } else if (auto rv = AsVarLike(op->value_)) {
-      auto it = var_to_name_.find(rv.get());
-      if (!AsTensorTypeLike(op->var_->GetType()) && it != var_to_name_.end()) {
-        var_to_name_[op->var_.get()] = it->second;
-      } else if (auto allocation = unmodeled_vec_vars_.find(rv.get());
-                 allocation != unmodeled_vec_vars_.end()) {
-        unmodeled_vec_vars_.emplace(op->var_.get(), allocation->second);
+    } else if (As<TupleType>(op->var_->GetType())) {
+      vec_tuple_sources_[op->var_.get()].push_back(op->value_);
+    } else if (As<TileType>(op->var_->GetType())) {
+      if (auto source = AsVarLike(op->value_)) {
+        BindVecValueAlias(op->var_, source);
+      } else if (As<TupleGetItemExpr>(op->value_)) {
+        vec_projection_aliases_.emplace_back(op->var_, op->value_);
+        ++vec_position_;
+        RegisterTileVar(op->var_, std::nullopt);
+        ++vec_position_;
       }
     }
   }
@@ -3263,12 +3670,18 @@ class PostInferInstanceExtractor {
   void RecordOtherVecUse(const ExprPtr& expression, size_t position) {
     if (const auto var = AsVarLike(expression)) {
       if (const auto* value = LookupTileValue(var.get()); value && value->memory_space == MemorySpace::Vec) {
-        vec_other_uses_[value->name] = position;
+        auto& last = vec_other_uses_[value->name];
+        last = std::max(last, position);
       } else if (auto it = unmodeled_vec_vars_.find(var.get()); it != unmodeled_vec_vars_.end()) {
         auto& tile = unmodeled_vec_tiles_[it->second];
-        tile.last = position;
-        if (tile.registered_name) vec_other_uses_[*tile.registered_name] = position;
+        tile.last = std::max(tile.last, position);
+        if (tile.registered_name) {
+          auto& last = vec_other_uses_[*tile.registered_name];
+          last = std::max(last, position);
+        }
       }
+    } else if (As<TupleGetItemExpr>(expression) && As<TileType>(expression->GetType())) {
+      vec_projected_reads_.emplace_back(expression, position);
     } else if (const auto call = As<Call>(expression)) {
       if (IsOp(call, "system.reserve_buffer")) has_reserve_buffer_ = true;
       for (const auto& arg : call->args_) RecordOtherVecUse(arg, position);
@@ -3281,8 +3694,9 @@ class PostInferInstanceExtractor {
 
   void WalkEffect(const ExprPtr& expr) {
     const size_t previous = vec_position_;
-    if (auto call = As<Call>(expr); call && IsOp(call, "tile.store")) {
-      ExtractStore(call);
+    if (auto call = As<Call>(expr)) {
+      RecordVecAccesses(call);
+      if (IsOp(call, "tile.store")) ExtractStore(call);
     }
     if (vec_position_ == previous) RecordOtherVecUse(expr, ++vec_position_);
   }
@@ -3332,9 +3746,22 @@ class PostInferInstanceExtractor {
     }
     for (size_t i = 0; i < iter_args.size(); ++i) {
       const auto& ia = iter_args[i];
+      if (As<TupleType>(ia->GetType())) {
+        auto& sources = vec_tuple_sources_[ia.get()];
+        sources.push_back(ia->initValue_);
+        if (may_repeat && backedge && i < backedge->value_.size()) sources.push_back(backedge->value_[i]);
+        if (i < return_vars.size()) {
+          auto& exits = vec_tuple_sources_[return_vars[i].get()];
+          exits.push_back(ia->initValue_);
+          if (backedge && i < backedge->value_.size()) exits.push_back(backedge->value_[i]);
+        }
+      }
       auto type = As<TileType>(ia->GetType());
       if (!type) continue;
       auto init = AsVarLike(ia->initValue_);
+      AliasVecStorageExpression(ia, ia->initValue_);
+      if (backedge && i < backedge->value_.size()) AliasVecStorageExpression(ia, backedge->value_[i]);
+      if (i < return_vars.size()) AliasVecStorage(return_vars[i], ia);
       const auto* init_node = LookupTileValue(init.get());
       const auto result_type = i < return_vars.size() ? As<TileType>(return_vars[i]->GetType()) : nullptr;
       if (type->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec &&
@@ -3390,7 +3817,9 @@ class PostInferInstanceExtractor {
             node.shape = *shape;
             node.dtype = tile->dtype_;
             unmodeled_vec_vars_.emplace(as->var_.get(), unmodeled_vec_tiles_.size());
-            unmodeled_vec_tiles_.push_back({vec_position_, vec_position_, node.ByteSize(), std::nullopt});
+            unmodeled_vec_tiles_.push_back({vec_position_, vec_position_, node.ByteSize(),
+                                            InvocationCount(model_.expected_uses, loop_multiplier_),
+                                            std::nullopt});
             ++vec_position_;  // A later modeled consumer can request a copy after this definition.
           }
         }
@@ -3436,6 +3865,18 @@ class PostInferInstanceExtractor {
       for (size_t i = 0; i < ifs->return_vars_.size(); ++i) {
         const auto& rv = ifs->return_vars_[i];
         if (AsTensorTypeLike(rv->GetType())) continue;
+        auto alias_branch = [&](const StmtPtr& branch) {
+          const auto yield = transform_utils::GetLastYieldStmt(branch);
+          if (yield && i < yield->value_.size()) {
+            if (As<TupleType>(rv->GetType())) {
+              vec_tuple_sources_[rv.get()].push_back(yield->value_[i]);
+            } else {
+              AliasVecStorageExpression(rv, yield->value_[i]);
+            }
+          }
+        };
+        alias_branch(ifs->then_body_);
+        if (has_else) alias_branch(*ifs->else_body_);
         const Var* tv = i < then_y.size() ? then_y[i] : nullptr;
         const Var* ev = i < else_y.size() ? else_y[i] : nullptr;
         auto it_t = (tv != nullptr) ? var_to_name_.find(tv) : var_to_name_.end();
@@ -3532,6 +3973,7 @@ class PostInferInstanceExtractor {
 
   const LayoutCostModel& model_;
   const backend::Backend* backend_;
+  const ProgramPtr& program_;
   const std::unordered_set<std::string>& reusable_;
   const std::unordered_set<std::string>& nz_input_roots_;
   const std::unordered_map<std::string, TensorTypePtr>& host_inputs_;
@@ -3551,6 +3993,16 @@ class PostInferInstanceExtractor {
   const std::map<std::pair<std::string, size_t>, int64_t>& param_steps_;
 
   std::unordered_map<const Var*, std::string> var_to_name_;
+  VarUnionFind vec_storage_;
+  std::unordered_set<const Var*> vec_written_vars_;
+  std::unordered_map<const Var*, std::vector<ExprPtr>> vec_tuple_sources_;
+  std::vector<std::pair<VarPtr, ExprPtr>> vec_projection_aliases_;
+  std::unordered_set<const Var*> unresolved_vec_projections_;
+  std::unordered_map<const Var*, ProjectedVecStorage> projected_vec_storage_;
+  std::vector<ExprPtr> vec_written_projections_;
+  std::vector<std::pair<ExprPtr, size_t>> vec_projected_reads_;
+  std::unordered_set<const Var*> inline_vec_sources_;
+  std::unordered_map<std::string, std::unordered_set<size_t>> vec_storage_inputs_;
   VecMemoryRegion vec_memory_{};
   std::optional<size_t> vec_loop_scope_;
   bool has_reserve_buffer_ = false;
@@ -3558,6 +4010,7 @@ class PostInferInstanceExtractor {
   std::unordered_map<const Var*, size_t> unmodeled_vec_vars_;
   std::unordered_map<std::string, size_t> vec_definitions_;
   std::unordered_map<std::string, size_t> vec_other_uses_;
+  std::vector<std::pair<size_t, int64_t>> implicit_vec_scratch_;
   size_t vec_position_ = 0;
   std::unordered_map<const Var*, ExprPtr> scalar_defs_;
   std::vector<std::vector<const Var*>> yield_stack_;
@@ -3863,7 +4316,7 @@ InputLayoutRoots ResolveInputLayoutRoots(const ProgramPtr& program, const OrchCa
     if (!tensor || entry->param_directions_[i] != ParamDirection::In || root == orch.gm_names.end() ||
         orch.external_outputs.count(root->second) || (host_entry && !HasDenseLogicalInputLayout(tensor)) ||
         (tensor->tensor_view_ &&
-         (tensor->tensor_view_->layout != TensorLayout::ND || !tensor->tensor_view_->stride.empty() ||
+         (tensor->tensor_view_->layout != TensorLayout::ND || !HasImplicitOrDenseNdStrides(*tensor) ||
           !tensor->tensor_view_->valid_shape.empty() || tensor->tensor_view_->pad != PadValue::null))) {
       throw ValueError("Named NZ input '" + name + "' must be a read-only logical ND entry tensor");
     }
@@ -3918,12 +4371,12 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program, bool track_name
   for (const auto& [_, func] : program->functions_) {
     if (IsInCoreType(func->func_type_)) {
       incore.push_back(func);
-    } else if (track_named_inputs) {
-      orchestration.emplace(func->name_, func);
-    } else if (func->func_type_ == FunctionType::Orchestration) {
-      top_orch.push_back(func);
-    } else {
-      sub_orch.push_back(func);
+      continue;
+    }
+    orchestration.emplace(func->name_, func);
+    if (!track_named_inputs) {
+      auto& functions = func->func_type_ == FunctionType::Orchestration ? top_orch : sub_orch;
+      functions.push_back(func);
     }
   }
 
@@ -3939,13 +4392,14 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program, bool track_name
     }
   }
   std::vector<std::string> ready;
+  ready.reserve(orchestration.size());
   for (const auto& [name, _] : orchestration) {
     if (!pending_callers.count(name)) ready.push_back(name);
   }
   OrchAnalyzer analyzer(program, definitions, track_named_inputs, host_world_size);
   for (size_t i = 0; i < ready.size(); ++i) {
     const auto& name = ready[i];
-    analyzer.Walk(orchestration.at(name));
+    if (track_named_inputs) analyzer.Walk(orchestration.at(name));
     auto children = callees.find(name);
     if (children == callees.end()) continue;
     for (const auto& callee : children->second) {
@@ -3969,6 +4423,7 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program, bool track_name
     for (const auto& fn : sub_orch) analyzer.Walk(fn);
   }
   auto analysis = std::move(analyzer).Result();
+  analysis.caller_first_order = std::move(ready);
   const std::vector<std::optional<std::string>> empty;
   auto register_local_buffers = [&](const FunctionPtr& func, const GmNames& names) {
     auto walk = [&](auto& self, const StmtPtr& stmt) -> void {
@@ -4028,6 +4483,7 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
                                             const std::unordered_set<std::string>& reusable_tensors,
                                             const std::unordered_set<std::string>& nz_inputs,
                                             LayoutWritebackBindings* bindings) {
+  return_lineage::ScopedTraceCache trace_cache;
   cost_model.ValidateUseHorizon();
   auto program = tensor_view_semantics::RestoreLegacyBlockedNzViews(input);
   if (bindings) {
@@ -4136,7 +4592,7 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
         const auto& site = sites_it->second[site_idx];
         const std::string prefix = detail::TileLayoutPrefix(program, func->name_, multi_incore, site_idx);
         PostInferInstanceExtractor ext(
-            resolved_model, be, input_roots.reusable, input_roots.nz, input_roots.host_inputs,
+            resolved_model, be, program, input_roots.reusable, input_roots.nz, input_roots.host_inputs,
             orch.projected_dispatches, orch.external_outputs, orch.reshaped_names, orch.nz_ineligible_names,
             orch.dn_ineligible_names, orch.internal_buffers, instance, consumed_values, op_counter, prefix,
             site.multiplicity, site.gm_names, orch.param_steps);
@@ -4148,7 +4604,7 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
     const std::string prefix = detail::TileLayoutPrefix(program, func->name_, multi_incore);
     auto cnt_it = orch.call_counts.find(func->name_);
     const int64_t call_mult = (cnt_it != orch.call_counts.end()) ? cnt_it->second : 1;
-    PostInferInstanceExtractor ext(resolved_model, be, input_roots.reusable, input_roots.nz,
+    PostInferInstanceExtractor ext(resolved_model, be, program, input_roots.reusable, input_roots.nz,
                                    input_roots.host_inputs, orch.projected_dispatches, orch.external_outputs,
                                    orch.reshaped_names, orch.nz_ineligible_names, orch.dn_ineligible_names,
                                    orch.internal_buffers, instance, consumed_values, op_counter, prefix,

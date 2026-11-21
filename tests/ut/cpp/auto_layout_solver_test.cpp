@@ -662,30 +662,29 @@ void TestCachedFMDemandMultiplicityAndBudget() {
     RequireNear(al::SolveGreedy(inst, std::nullopt, config).TotalCostCycles(), 8.0, 1e-9,
                 "Greedy must stop at the conversion barrier");
 
-    // Seven seed scores, three greedy scores and one FM gain for P.
-    // Moving P activates both consumers.
-    // A then changes the ND demand from 2 to 1
+    // Seven topological scores, three greedy scores and three initial FM gains.
+    // Moving P refreshes both consumers. A then changes the ND demand from 2 to 1
     // (from 4 to 2 for repeats), leaving the same support but making B the last user.
     config.max_evaluations = 10;
     const auto incomplete_initial = al::SolveGreedyFM(inst, config);
     RequireNear(incomplete_initial.TotalCostCycles(), 8.0, 1e-9, "FM requires a complete initial frontier");
     Require(incomplete_initial.stats.termination_reason == "evaluation_budget", "Initial frontier budget");
 
-    config.max_evaluations = 13;
+    config.max_evaluations = 15;
     const auto incomplete_update = al::SolveGreedyFM(inst, config);
     RequireNear(incomplete_update.TotalCostCycles(), 7.0, 1e-9,
                 "FM retains the best prefix on update budget");
     Require(incomplete_update.stats.termination_reason == "evaluation_budget",
             "Stale consumer update budget");
-    Require(incomplete_update.stats.moves_applied == 2 && incomplete_update.stats.evaluated_moves == 13,
+    Require(incomplete_update.stats.moves_applied == 2 && incomplete_update.stats.evaluated_moves == 15,
             "FM counts retained moves when the evaluation budget is exhausted");
     Require(incomplete_update.Assignment().op_configs.at("B") == inst.operations[2].configs[0],
             "FM must refresh B before choosing its move");
 
-    config.max_evaluations = 14;
+    config.max_evaluations = 16;
     const auto complete = al::SolveGreedyFM(inst, config);
     RequireNear(complete.TotalCostCycles(), 1.0, 1e-9, "FM must take all three coordinated moves");
-    Require(complete.stats.moves_applied == 3 && complete.stats.evaluated_moves == 14,
+    Require(complete.stats.moves_applied == 3 && complete.stats.evaluated_moves == 16,
             "FM charges the initial frontier and affected inputs only");
 
     // The fourth operation is connected through B's output and never profitable.
@@ -752,18 +751,26 @@ void TestFMExpandsOneHopPerMove() {
   inst.AddValue(MakeValue("c", "C"));
   inst.custom_conversion_costs["a"] = {{{nd, nz}, 10.0}, {{nz, nd}, 0.0}};
   inst.custom_conversion_costs["b"] = {{{nd, nz}, 10.0}, {{nz, nd}, 0.0}};
+  inst.custom_conversion_costs["c"][{nz, nd}] = 0.0;
   inst.operations = {
       MakeOp("A", {}, "a", {{{}, nd, 0.0}, {{}, nz, 1.0}}),
       MakeOp("B", {"a"}, "b", {{{nd}, nd, 5.0}, {{nz}, nz, 0.0}}),
       MakeOp("C", {"b"}, "c", {{{nd}, nd, 8.0}, {{nz}, nz, 0.0}}),
   };
+  std::string previous = "c";
+  constexpr int tail_size = 9;
+  for (int i = 0; i < tail_size; ++i) {
+    const std::string tail = "tail" + std::to_string(i);
+    inst.AddValue(MakeValue(tail, tail));
+    inst.operations.push_back(MakeOp(tail, {previous}, tail, {{{nd}, nd, 0.0}, {{nd}, nd, 100.0}}));
+    previous = tail;
+  }
 
   al::LayoutSolverConfig cfg;
   cfg.max_greedy_sweeps = 1;
-  // Six seed scores and three greedy scores leave all values in ND. The
-  // remaining two scores permit the uphill A move and then profitable B.
-  // C only becomes profitable and is activated after B moves.
-  cfg.max_evaluations = 11;
+  // The four distributed seeds include A and three tail operators. A is
+  // the least costly uphill move and activates B. Only B's move admits C.
+  cfg.max_evaluations = 3 * (3 + tail_size) + 4 + 1;
   const auto limited = al::SolveGreedyFM(inst, cfg);
   const auto& selected = limited.Assignment().op_configs;
   Require(selected.at("A").output_layout == nz && selected.at("B").output_layout == nz &&
@@ -822,12 +829,12 @@ void TestFanoutBlockEscapesFMLocks() {
   Require(automatic.Assignment().op_configs == fm.Assignment().op_configs,
           "Auto fallback must consider the fan-out block");
 
-  // Fourteen seed scores, ten greedy scores, four single moves at seed A,
+  // Fourteen topological scores, ten greedy scores, ten initial singleton scores,
   // two NZ choices to rank for A and four members to score.
-  config.max_evaluations = 14 + 10 + 4 + 2 + 4;
+  config.max_evaluations = 14 + 10 + 10 + 2 + 4;
   const auto first = al::SolveGreedyFM(inst, config);
   Require(first.Assignment().op_configs == fm.Assignment().op_configs && first.stats.moves_applied == 4,
-          "Fan-out must be able to win the very first decision with only A active");
+          "Fan-out must be able to win the very first decision against all four singleton seeds");
   --config.max_evaluations;
   const auto limited = al::SolveGreedyFM(inst, config);
   Require(limited.stats.termination_reason == "evaluation_budget" &&
@@ -862,9 +869,9 @@ void TestSeedComparesPositiveSingleAndFanoutGains() {
 
   al::LayoutSolverConfig config;
   config.max_greedy_sweeps = 1;
-  // Ten topological and five greedy scores, then two single changes at A
-  // and four grouped consumers. No neighbor is evaluated as a singleton by FM.
-  config.max_evaluations = 10 + 5 + 2 + 4;
+  // Ten topological and five greedy scores, then five singleton scores
+  // across four seeded consumers and four scores for the group.
+  config.max_evaluations = 10 + 5 + 5 + 4;
   for (const double cost : {2.0, 2.5, 3.0}) {
     inst.custom_conversion_costs["a"][{nd, nz}] = cost;
     const auto result = al::SolveGreedyFM(inst, config);
@@ -924,10 +931,29 @@ void TestFMRestartsAtLateFanout() {
   al::LayoutSolverConfig config;
   config.max_treewidth = 0;
   config.max_greedy_sweeps = 1;
+  const auto exact = al::SolveTreewidthDP(inst);
+  const auto distributed = al::SolveGreedyFM(inst, config);
+  Require(distributed.Assignment().op_configs == exact.Assignment().op_configs &&
+              distributed.stats.moves_applied == 2,
+          "Distributed seeds must admit the shared weight before locking the upstream chain");
+
+  // Hide the two consumers from the first four seeds (0, 5, 10, 15) and
+  // from the next eight rotated seeds. The profitable fan-out becomes visible
+  // only after a move at C, so the wider restart must explicitly seed D or E.
+  for (int i = 0; i < 15; ++i) {
+    const auto tail = "tail" + std::to_string(i);
+    inst.AddValue(MakeValue(tail, tail));
+    inst.operations.push_back(MakeOp(tail, {"C"}, tail, {{{nd}, nd, 0.0}, {{nd}, nd, 100.0}}, 10));
+  }
+  std::swap(inst.operations[1], inst.operations[5]);
+  std::swap(inst.operations[2], inst.operations[10]);
+  std::swap(inst.operations[3], inst.operations[17]);
+  std::swap(inst.operations[4], inst.operations[19]);
+
   const auto greedy = al::SolveGreedy(inst, std::nullopt, config);
   const auto first = al::SolveGreedyFM(inst, config);
-  // The group saves 568 cycles but reaching it from A or the midpoint C
-  // first locks in a 700-cycle increase. One FM pass must keep the incumbent.
+  // The group saves 568 cycles but reaching it by moving C first locks in
+  // a 700-cycle increase. One FM pass must keep the incumbent.
   RequireNear(first.TotalCostCycles(), 1700.0, 1e-9, "An upstream seed misses the profitable prefix");
   Require(first.Assignment().op_configs == greedy.Assignment().op_configs &&
               first.stats.termination_reason == "greedy_sweep_budget",
@@ -935,9 +961,10 @@ void TestFMRestartsAtLateFanout() {
 
   config.max_greedy_sweeps = 2;
   const auto fm = al::SolveGreedyFM(inst, config);
-  const auto exact = al::SolveTreewidthDP(inst);
   RequireNear(fm.TotalCostCycles(), 1132.0, 1e-9, "Restart at the shared weight before locking the chain");
-  Require(fm.Assignment().op_configs == exact.Assignment().op_configs && fm.stats.moves_applied == 2,
+  Require(fm.Assignment().op_configs.at("D") == exact.Assignment().op_configs.at("D") &&
+              fm.Assignment().op_configs.at("E") == exact.Assignment().op_configs.at("E") &&
+              fm.stats.moves_applied == 2,
           "Only the two weight consumers belong to the best prefix");
   Require(al::SolveGreedyFM(inst).Assignment().op_configs == fm.Assignment().op_configs,
           "The default solver must find the fan-out improvement");
@@ -945,9 +972,9 @@ void TestFMRestartsAtLateFanout() {
       al::SolveAutoLayout(inst, std::nullopt, config).Assignment().op_configs == fm.Assignment().op_configs,
       "Auto fallback must use the fan-out restart");
 
-  // Restarting needs a singleton score and two block scores. Leave the
+  // Restarting needs eight singleton scores and two block scores. Leave the
   // restart one score short of considering the whole block.
-  config.max_evaluations = first.stats.evaluated_moves + 2;
+  config.max_evaluations = first.stats.evaluated_moves + 8 + 1;
   const auto limited = al::SolveGreedyFM(inst, config);
   Require(limited.stats.termination_reason == "evaluation_budget" &&
               limited.stats.evaluated_moves <= config.max_evaluations && limited.stats.moves_applied == 0 &&
@@ -961,6 +988,36 @@ void TestFMRestartsAtLateFanout() {
           "Exhaustion after scoring the restart block must keep the new best prefix");
 }
 
+void TestFMPolishesRetainedPrefix() {
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  al::LayoutProblemInstance inst;
+  inst.AddValue(MakeValue("weight"));
+  inst.AddValue(MakeValue("shared", "P"));
+  inst.AddValue(MakeValue("a", "A"));
+  inst.AddValue(MakeValue("b", "B"));
+  inst.custom_conversion_costs["weight"][{nd, nz}] = 10.0;
+  inst.custom_conversion_costs["shared"] = {{{nd, nz}, 12.0}, {{nz, nd}, 3.0}};
+  inst.operations = {
+      MakeOp("P", {}, "shared", {{{}, nd, 0.0}, {{}, nz, 1.0}}),
+      MakeOp("A", {"weight", "shared"}, "a", {{{nd, nd}, nd, 9.0}, {{nz, nd}, nd, 2.0}, {{nz, nz}, nd, 0.0}}),
+      MakeOp("B", {"weight", "shared"}, "b", {{{nd, nd}, nd, 22.0}, {{nz, nz}, nd, 0.0}}),
+  };
+  PinThirdLayout(inst);
+
+  al::LayoutSolverConfig config;
+  config.max_greedy_sweeps = 1;
+  const auto greedy = al::SolveGreedy(inst, std::nullopt, config);
+  RequireNear(greedy.TotalCostCycles(), 31.0, 1e-9, "Neither consumer can improve on its own");
+  // The weight group locks A in its second choice while P still produces ND.
+  // B then makes P prefer NZ, which enables A's third choice after FM unlocks A.
+  const auto result = al::SolveGreedyFM(inst, config);
+  RequireNear(result.TotalCostCycles(), 11.0, 1e-9, "Greedy must polish even the last FM pass");
+  Require(result.Assignment().op_configs.at("A") == inst.operations[1].configs[2] &&
+              result.stats.moves_applied == 4 && result.stats.greedy_sweeps == 3,
+          "Account for the retained FM prefix and the greedy change after it");
+}
+
 void TestUphillFanoutMovesAndRollsBackAtomically() {
   const auto nd = al::LayoutSpec::ND();
   const auto nz = al::LayoutSpec::NZ();
@@ -972,11 +1029,11 @@ void TestUphillFanoutMovesAndRollsBackAtomically() {
     inst.AddValue(MakeValue(id, id));
     inst.operations.push_back(MakeOp(id, {"value"}, id, {{{nd}, nd, 4.0}, {{nz}, nd, 0.0}}));
   }
-  // P is the seed. Moving P alone costs 3; switching both its consumers costs 2.
+  // Moving P alone costs 3; switching both its consumers costs 2.
   // The winning group must survive as a single speculative move until P is rescored.
   al::LayoutSolverConfig config;
   config.max_greedy_sweeps = 1;
-  config.max_evaluations = 6 + 3 + 1 + 2;
+  config.max_evaluations = 6 + 3 + 3 + 2;
   const auto interrupted = al::SolveGreedyFM(inst, config);
   RequireNear(interrupted.TotalCostCycles(), 8.0, 1e-9, "Roll back the entire uphill group on exhaustion");
   Require(interrupted.stats.moves_applied == 0, "Neither group member belongs to the best prefix yet");
@@ -1003,7 +1060,9 @@ void TestFMReusesShrinkingFanoutGain() {
   const auto result = al::SolveGreedyFM(inst, config);
   RequireNear(result.TotalCostCycles(), 10.0 + 0.5 * consumers, 1e-9, "Unify the wide fan-out");
   // On the second pass each single move toward ND leaves the all-ND group's
-  // final assignment unchanged. Re-evaluating its remaining members costs quadratic time.
+  // final assignment unchanged. Re-evaluating its remaining members costs
+  // quadratic work. Wider restarts can also skip replay when the same first
+  // move wins and already opens the whole component.
   Require(result.stats.termination_reason == "fm_no_improving_prefix",
           "The shrinking fan-out must fit a linear budget");
 }
@@ -1289,6 +1348,7 @@ int main() {
     TestFanoutBlockEscapesFMLocks();
     TestSeedComparesPositiveSingleAndFanoutGains();
     TestFMRestartsAtLateFanout();
+    TestFMPolishesRetainedPrefix();
     TestCapacityRepairOfExplicitTranspose();
     TestUphillFanoutMovesAndRollsBackAtomically();
     TestFMReusesShrinkingFanoutGain();

@@ -562,14 +562,25 @@ class _RuntimeFacade:
         prepared: dict[str, torch.Tensor] = {}
         for param, lowered in zip(params, self._lowered_param_infos, strict=True):
             name = param.name
-            if name != lowered.name or lowered.direction != param.direction or lowered.dtype != param.dtype:
+            if name != lowered.name or lowered.dtype != param.dtype:
                 raise ValueError(f"Incompatible lowered metadata for {name!r}")
             if name not in weights:
+                # Lowering can discover writes to a tensor or reads of an
+                # authored output. It must preserve existing write access.
+                if lowered.direction != param.direction and (
+                    param.shape is None
+                    or (param.direction != ParamDirection.In and lowered.direction != ParamDirection.InOut)
+                ):
+                    raise ValueError(f"Incompatible lowered direction for {name!r}")
                 if param.layout != lowered.layout:
                     raise ValueError(f"Input layout policy does not permit changing {name!r}")
                 continue
             tensor = weights[name]
-            if param.direction != ParamDirection.In or param.shape is None:
+            if (
+                param.direction != ParamDirection.In
+                or lowered.direction != ParamDirection.In
+                or param.shape is None
+            ):
                 raise ValueError(f"{name!r} must be a read-only tensor")
             if (
                 not _matches_torch_dtype(param.dtype, tensor.dtype)

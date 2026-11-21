@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/auto_layout/extractor.h"

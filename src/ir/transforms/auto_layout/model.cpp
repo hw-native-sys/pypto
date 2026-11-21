@@ -264,7 +264,16 @@ int64_t ValueNode::ByteSize() const {
 bool OperatorConfig::operator==(const OperatorConfig& other) const {
   return op_id == other.op_id && op_name == other.op_name && input_layouts == other.input_layouts &&
          output_layout == other.output_layout && op_cost_cycles == other.op_cost_cycles &&
-         notes == other.notes;
+         notes == other.notes && local_vec_conversions == other.local_vec_conversions &&
+         local_vec_load_layout == other.local_vec_load_layout;
+}
+
+LayoutSpec OperatorConfig::ExecutionInputLayout(size_t index) const {
+  const auto conversion =
+      std::lower_bound(local_vec_conversions.begin(), local_vec_conversions.end(), index,
+                       [](const auto& entry, size_t operand) { return entry.first < operand; });
+  return conversion != local_vec_conversions.end() && conversion->first == index ? conversion->second
+                                                                                 : input_layouts.at(index);
 }
 
 void LayoutCostModel::ValidateUseHorizon() const {

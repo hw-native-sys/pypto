@@ -135,6 +135,8 @@ struct ValueNode {
   std::vector<std::pair<LayoutSpec, LayoutSpec>> blocked_vec_conversions;
   // The loader explicitly offers to supply this read-only entry input in NZ.
   bool is_named_nz_input = false;
+  // A write through a tile or any of its aliases prevents cached copies.
+  bool has_mutable_vec_backing = false;
 
   [[nodiscard]] int64_t NumElements() const;
   [[nodiscard]] int64_t ByteSize() const;
@@ -153,6 +155,15 @@ struct OperatorConfig {
   LayoutSpec output_layout = LayoutSpec::ND();
   double op_cost_cycles = 0.0;
   std::string notes;
+  // A read of mutable storage can convert privately at the operation. The
+  // indexed input layout still describes the original backing, and this pair
+  // describes the operand index and the layout read by the instruction.
+  std::vector<std::pair<size_t, LayoutSpec>> local_vec_conversions = {};
+  // A load may need its GM layout's native Vec representation before copying
+  // into the layout used by the mutable result and its aliases.
+  std::optional<LayoutSpec> local_vec_load_layout = std::nullopt;
+
+  [[nodiscard]] LayoutSpec ExecutionInputLayout(size_t index) const;
 
   bool operator==(const OperatorConfig& other) const;
   bool operator!=(const OperatorConfig& other) const { return !(*this == other); }

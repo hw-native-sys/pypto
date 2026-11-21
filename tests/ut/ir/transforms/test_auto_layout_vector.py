@@ -235,3 +235,111 @@ class CopyMatrix:
     exec(torch_codegen(_select(program), check_shapes=True), namespace)
     namespace["main"](data, output)
     torch.testing.assert_close(output, data)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "source_dn"),
+    [
+        ("none", False),
+        ("direct", False),
+        ("branch", False),
+        ("write_result", False),
+        ("direct", True),
+        ("branch", True),
+    ],
+)
+def test_vec_conversion_reads_the_current_backing(tmp_path, ascend_backend, mutation, source_dn):
+    nd = "pl.Tensor[[32,64], pl.FP32]"
+    dn = "pl.Tensor[[32,64], pl.FP32, pl.TensorView(stride=[1,32], layout=pl.TensorLayout.DN)]"
+    source = dn if source_dn else nd
+    alias = (
+        "pl.tile.write(a, [0,0], pl.const(0.0, pl.FP32))"
+        if mutation == "write_result"
+        else "pl.tile.reshape(a, [32,64])"
+    )
+    observed = "alias" if mutation == "write_result" else "a"
+    update = {
+        "none": "        changed = alias",
+        "direct": "        changed = pl.tile.assemble(a, patch_tile, [8, 0])",
+        "write_result": "        changed = pl.tile.assemble(a, patch_tile, [8, 0])",
+        "branch": """        if replace:
+            changed = pl.tile.assemble(alias, patch_tile, [8, 0])
+        else:
+            changed = alias""",
+    }[mutation]
+    program = pl.parse(
+        f"""
+@pl.program
+class BackingReads:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: {source},
+        patch: pl.Tensor[[8,64], pl.FP32],
+        replace: pl.Scalar[pl.BOOL],
+        before: pl.Out[{dn}],
+        after: pl.Out[{dn}],
+        final: pl.Out[pl.Tensor[[32,64], pl.FP32]],
+    ) -> pl.Tensor[[32,64], pl.FP32]:
+        a = pl.load(x, [0,0], [32,64], target_memory=pl.Mem.Vec)
+        alias = {alias}
+        patch_tile = pl.load(patch, [0,0], [8,64], target_memory=pl.Mem.Vec)
+        before = pl.store({observed}, [0,0], before)
+{update}
+        after = pl.store({observed}, [0,0], after)
+        return pl.store(changed, [0,0], final)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: {source},
+        patch: pl.Tensor[[8,64], pl.FP32],
+        replace: pl.Scalar[pl.BOOL],
+        before: pl.Out[{dn}],
+        after: pl.Out[{dn}],
+        final: pl.Out[pl.Tensor[[32,64], pl.FP32]],
+    ) -> pl.Tensor[[32,64], pl.FP32]:
+        return self.kernel(x, patch, replace, before, after, final)
+""",
+        filename=__file__,
+    )
+    assert isinstance(program, ir.Program)
+    ir.compile(
+        program,
+        strategy=ir.OptimizationStrategy.AutoLayout,
+        backend_type=backend.BackendType.Ascend910,
+        skip_ptoas=True,
+        output_dir=str(tmp_path),
+    )
+    pto = next(tmp_path.rglob("*.pto")).read_text()
+    instructions = [
+        "transpose" if "pto.ttrans " in line else "store"
+        for line in pto.splitlines()
+        if "pto.ttrans " in line or "pto.tstore " in line
+    ]
+    # The fixed DN stores share one transpose only when the backing is immutable.
+    expected = ["transpose", "store", "store", "store"]
+    if mutation != "none":
+        expected.insert(2, "transpose")
+    if source_dn:
+        expected.insert(0, "transpose")  # Initialize the row-major mutable backing from a DN load.
+    assert instructions == expected
+
+    torch = pytest.importorskip("torch")
+    namespace = {}
+    exec(torch_codegen(_select(program), check_shapes=True), namespace)
+    data = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64)
+    if source_dn:
+        data = data.T.contiguous().T
+    patch = torch.full((8, 64), -42.0)
+    for replace in [True, False] if mutation == "branch" else [True]:
+        before = torch.empty_strided((32, 64), (1, 32), dtype=torch.float32)
+        after = torch.empty_like(before)
+        final = torch.empty_like(data)
+        namespace["main"](data, patch, replace, before, after, final)
+        expected_data = data.clone()
+        if mutation in {"direct", "write_result"} or (mutation == "branch" and replace):
+            expected_data[8:16] = patch
+        torch.testing.assert_close(before, data)
+        torch.testing.assert_close(after, expected_data)
+        torch.testing.assert_close(final, expected_data)
