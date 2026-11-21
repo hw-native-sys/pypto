@@ -218,19 +218,22 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 
 | 操作 | API | 模式 | ReduceOp | Atomic | 支持的 dtype | 说明 |
 | ---- | --- | ---- | -------- | ------ | ------------ | ---- |
-| AllReduce | `pld.tensor.allreduce` | `mesh`（InCore + HOST），`ring`（InCore + HOST） | `Sum`、`Max`、`Min`、`Prod`（mesh）；仅 `Sum`（HOST ring） | — | FP16、FP32（mesh；编译期硬性检查）；HOST ring：仅 FP32（4 字节） | Mesh: 每步 O(N) 远程流量。Ring: 每步 O(N/P) 远程流量，2(P-1) 步。 |
-| AllGather | `pld.tensor.allgather` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 推式。输入和 target 必须是不同的 buffer。 |
-| ReduceScatter | `pld.tensor.reduce_scatter` | — | `Sum`、`Max`、`Min`、`Prod`（InCore）；仅 `Sum`（HOST builtin） | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 每个 rank 在调用前将全部 NR 个数据块写入。 |
-| Broadcast | `pld.tensor.broadcast` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | Root 在调用前将数据写入。 |
-| All-to-All | `pld.tensor.all_to_all` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 个性化交换。输入和 target 必须是不同的 buffer。 |
-| Barrier | `pld.tensor.barrier` | — | — | — | — | Signal 为 INT32，每次调用单次使用。 |
-| Put | `pld.tensor.put` | — | — | `None_` / `Add` | 所有 GM dtype | `dst` 必须是 window-bound。支持分块和流水线 staging。 |
-| Get | `pld.tensor.get` | — | — | — | 所有 GM dtype | `src` 必须是 window-bound。支持分块和流水线 staging。 |
-| Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | 仅副作用的信号投递。 |
-| Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | 仅副作用的信号阻塞。 |
-| Deferred Wait | `pld.system.defer_wait` | 仅 `Ge` | — | — | INT32 signal | 注册单调 counter 条件而不让 AIV 自旋；Simpler 保持普通 waiter TaskId 未完成，后续工作使用普通 `deps=[wait_tid]`。 |
-| Remote Load | `pld.tile.remote_load` | — | — | — | 任意（tile） | Tile 级跨 rank 加载。 |
-| Remote Store | `pld.tile.remote_store` | — | — | — | 任意（tile） | Tile 级跨 rank 写入。 |
+| AllReduce | [`pld.tensor.allreduce`][pypto.language.distributed.op.tensor_ops.allreduce] | `mesh`（InCore + HOST），`ring`（InCore + HOST） | `Sum`、`Max`、`Min`、`Prod`（mesh）；仅 `Sum`（HOST ring） | — | FP16、FP32（mesh；编译期硬性检查）；HOST ring：仅 FP32（4 字节） | Mesh: 每步 O(N) 远程流量。Ring: 每步 O(N/P) 远程流量，2(P-1) 步。 |
+| AllGather | [`pld.tensor.allgather`][pypto.language.distributed.op.tensor_ops.allgather] | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 推式。输入和 target 必须是不同的 buffer。 |
+| ReduceScatter | [`pld.tensor.reduce_scatter`][pypto.language.distributed.op.tensor_ops.reduce_scatter] | — | `Sum`、`Max`、`Min`、`Prod`（InCore）；仅 `Sum`（HOST builtin） | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 每个 rank 在调用前将全部 NR 个数据块写入。 |
+| Broadcast | [`pld.tensor.broadcast`][pypto.language.distributed.op.tensor_ops.broadcast] | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | Root 在调用前将数据写入。 |
+| All-to-All | [`pld.tensor.all_to_all`][pypto.language.distributed.op.tensor_ops.all_to_all] | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 个性化交换。输入和 target 必须是不同的 buffer。 |
+| All-to-All-V | [`pld.tensor.all_to_all_v`][pypto.language.distributed.op.tensor_ops.all_to_all_v] | — | — | — | FP32、INT8（HOST/CHIP builtin）；InCore composite 无 FP32/INT8 白名单（input/target dtype 必须一致；基于 [`pld.tile.put`][pypto.language.distributed.op.tile_ops.put] 构建） | 可变长度个性化交换（`MPI_Alltoallv`）。`send_counts`/`recv_counts` 是运行期行数，由两轮 credit barrier 交换；window-as-result（无内建读回阶段）。 |
+| Indexed All-to-All-V | [`pld.tensor.indexed_all_to_all_v`][pypto.language.distributed.op.tensor_ops.indexed_all_to_all_v] | — | — | — | FP32、INT8（仅 A5 URMA、L2；HOST 与 InCore 不支持） | 通过 INT32 的 `index[P,C]` 读取 `input[Nmax,H]` 的行；无打包 send buffer。`core_num` 是精确的启动宽度。 |
+| Barrier | [`pld.tensor.barrier`][pypto.language.distributed.op.tensor_ops.barrier] | — | — | — | — | Signal 为 INT32，每次调用单次使用。 |
+| Put | [`pld.tensor.put`][pypto.language.distributed.op.tensor_ops.put] | — | — | `None_` / `Add` | 所有 GM dtype | `dst` 必须是 window-bound。支持分块和流水线 staging。 |
+| Get | [`pld.tensor.get`][pypto.language.distributed.op.tensor_ops.get] | — | — | — | 所有 GM dtype | `src` 必须是 window-bound。支持分块和流水线 staging。 |
+| Notify | [`pld.system.notify`][pypto.language.distributed.op.system_ops.notify] | `AtomicAdd` / `Set` | — | — | — | 仅副作用的信号投递。 |
+| Wait | [`pld.system.wait`][pypto.language.distributed.op.system_ops.wait] | `Eq` / `Ge` | — | — | — | 仅副作用的信号阻塞。 |
+| Deferred Wait | [`pld.system.defer_wait`][pypto.language.distributed.op.system_ops.defer_wait] | 仅 `Ge` | — | — | INT32 signal | 注册单调 counter 条件而不让 AIV 自旋；Simpler 保持普通 waiter TaskId 未完成，后续工作使用普通 `deps=[wait_tid]`。 |
+| Remote Load | [`pld.tile.remote_load`][pypto.language.distributed.op.tile_ops.remote_load] | — | — | — | 任意（tile） | Tile 级跨 rank 加载。 |
+| Remote Store（tile） | [`pld.tile.remote_store`][pypto.language.distributed.op.tile_ops.remote_store] | — | — | `None_` / `Add` | 任意（tile）用于 `None_`；`Add` 要求目标为 `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8`（`bf16` 需要 Ascend910 A2/A3） | Tile 级跨 rank 写入。 |
+| Remote Store（tensor） | [`pld.tensor.remote_store`][pypto.language.distributed.op.tensor_ops.remote_store] | — | — | `None_` / `Add` | 所有 GM dtype；`Add` 要求目标为 `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8`（`bf16` 需要 Ascend910 A2/A3） | 将一个*计算得到*的张量级值跨 rank 写入；1:1 lower 为 [`pld.tile.remote_store`][pypto.language.distributed.op.tile_ops.remote_store]，中间没有 GM 往返。 |
 
 ## 配套示例
 

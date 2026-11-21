@@ -16,8 +16,14 @@ lower-level primitives only when building a custom protocol.
 | `WaitCmp` | `Eq`, `Ge` | Wait predicate. `Eq`: block until signal slot equals expected value. `Ge`: block until signal slot >= expected value. |
 | `ReduceOp` | `Sum`, `Max`, `Min`, `Prod` | Reduction operator for collective operations. Support is per-operation: `allreduce` accepts all four; `reduce_scatter` accepts all four on the InCore rail, while the HOST builtin rail currently lowers only `Sum`. |
 | `AtomicType` | `None_`, `Add` | Remote-store combine mode. `None_`: plain store. `Add`: atomically accumulate into peer's destination — requires an `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8` destination, and a `bf16` destination requires the Ascend910 (A2/A3) profile. |
+| `CommEngine` | `URMA` | Compile-time engine selector for the async transfer ops' `engine=` kwarg. `URMA` is the only variant today. Those ops are not covered by this chapter yet — see [Distributed Operators](../../dev/distributed_ops.md) for their current status. |
 | `DistributedTensor` | — | A tensor view bound to a comm-domain window buffer. Every collective and RMA op requires this type on the window side. |
 | `CommCtx` | — | Communication context handle. Produced by `get_comm_ctx()`; consumed by `rank()` and `nranks()`. |
+
+> **Note:** the five enums above are an **append-only ABI** — their underlying
+> `int` values are serialised into compiled IR, so a new variant can only be
+> added at the end, never inserted or renumbered. See
+> [ABI enums](../../dev/distributed_ops.md) for the full numbering.
 
 ## System Substrate (`pld.system.*`)
 

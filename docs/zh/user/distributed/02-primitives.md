@@ -15,8 +15,13 @@
 | `WaitCmp` | `Eq`, `Ge` | 等待谓词。`Eq`：等于时解除阻塞。`Ge`：大于等于时解除阻塞。 |
 | `ReduceOp` | `Sum`, `Max`, `Min`, `Prod` | 集合通信的规约算子。支持情况按操作而定：`allreduce` 支持全部四种；`reduce_scatter` 在 InCore 通道支持全部四种（HOST builtin 通道目前仅 lower `Sum`）。 |
 | `AtomicType` | `None_`, `Add` | 远程存储合并模式。`None_`：普通存储。`Add`：原子累加——要求目标为 `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8`，其中 `bf16` 目标仅支持 Ascend910（A2/A3）。 |
+| `CommEngine` | `URMA` | 异步传输算子 `engine=` 参数的编译期引擎选择。目前仅 `URMA` 一种取值。这两个算子本章暂未覆盖——现状见 [Distributed Operators](../../dev/distributed_ops.md)。 |
 | `DistributedTensor` | — | 绑定到通信域 window buffer 的 tensor 视图。 |
 | `CommCtx` | — | 通信上下文句柄。 |
+
+> **说明：** 上述五个枚举是**只能追加的 ABI**——其底层 `int` 值被序列化进编译后的
+> IR，因此新增取值只能加在末尾，不能插入或重新编号。完整编号见
+> [ABI enums](../../dev/distributed_ops.md)。
 
 ## 系统基础设施 (`pld.system.*`)
 
