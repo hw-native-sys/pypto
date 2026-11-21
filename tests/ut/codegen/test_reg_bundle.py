@@ -511,7 +511,7 @@ def test_group_packaging_routes_helpers_by_entry_not_group_name(tmp_path, monkey
     original = pto_backend._generate_config_file
 
     def record_config(*args, **kwargs):
-        captured.update(kwargs["func_name_to_vpto_sources"])
+        captured.update(kwargs["compile_requirements"].vpto_sources)
         return original(*args, **kwargs)
 
     # Exercise production partitioning/manifest/config routing; native compiler

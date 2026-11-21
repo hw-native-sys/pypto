@@ -331,4 +331,5 @@ def build_contexts(
                 ),
             )
         )
+        contexts[-1].external_binding = function._external_binding
     return contexts

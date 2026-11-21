@@ -39,6 +39,9 @@ EXTERNAL_SOURCE_ATTR = "external_source"
 # Ordered parameter references returned by a declaration-only external kernel.
 EXTERNAL_RETURN_PARAMS_ATTR = "external_return_params"
 
+# Required binary admission and completion policy for native callbacks.
+EXTERNAL_BINARY_POLICY_ATTR = "external_binary_policy"
+
 # Bridge-generated host checker definition and symbol; see function.h.
 EXTERNAL_PREFLIGHT_SOURCE_ATTR = "external_preflight_source"
 EXTERNAL_PREFLIGHT_SYMBOL_ATTR = "external_preflight_symbol"
@@ -70,6 +73,7 @@ __all__ = [
     "BUILTIN_TEMPLATE_DIR_ATTR",
     "BUILTIN_TEMPLATE_VARS_ATTR",
     "DUAL_AIV_DISPATCH_ATTR",
+    "EXTERNAL_BINARY_POLICY_ATTR",
     "EXTERNAL_PREFLIGHT_SOURCE_ATTR",
     "EXTERNAL_PREFLIGHT_SYMBOL_ATTR",
     "EXTERNAL_RETURN_PARAMS_ATTR",

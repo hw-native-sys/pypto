@@ -48,6 +48,7 @@ from pypto._function_attrs import (
     BUILTIN_TEMPLATE_DIR_ATTR,
     BUILTIN_TEMPLATE_VARS_ATTR,
     DUAL_AIV_DISPATCH_ATTR,
+    EXTERNAL_BINARY_POLICY_ATTR,
     EXTERNAL_PREFLIGHT_SOURCE_ATTR,
     EXTERNAL_SOURCE_ATTR,
 )
@@ -1455,6 +1456,14 @@ def _runtime_name_for_codegen(runtime: _passes.RuntimeKind) -> str:
     return runtime_implementation_name(runtime, arch)
 
 
+@dataclass
+class _KernelCompileRequirements:
+    """Per-member binary requirements retained in the generated runtime config."""
+
+    vpto_sources: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
+    binary_policy: dict[str, str] = field(default_factory=dict[str, str])
+
+
 def _generate_config_file(
     orch_func_name: str,
     kernel_registrations: list[_codegen_core.KernelRegistration],
@@ -1465,7 +1474,7 @@ def _generate_config_file(
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     host_tensor_indices: list[int] | None = None,
     unshared_code_names: set[str] | None = None,
-    func_name_to_vpto_sources: dict[str, list[str]] | None = None,
+    compile_requirements: _KernelCompileRequirements | None = None,
 ) -> str:
     """Generate kernel_config.py content.
 
@@ -1497,6 +1506,7 @@ def _generate_config_file(
     reports and the one the ``ChipWorker`` reuse lookup matches against, so a
     program compiled for one runtime never binds to a worker running another.
     """
+    compile_requirements = compile_requirements or _KernelCompileRequirements()
     runtime_name = _runtime_name_for_codegen(runtime)
     func_name_to_external_source = func_name_to_external_source or {}
     func_name_to_external_include_dirs = func_name_to_external_include_dirs or {}
@@ -1557,6 +1567,9 @@ def _generate_config_file(
         )
         if ext_source is not None:
             entry += ', "external": True'
+            policy = compile_requirements.binary_policy.get(name, "ordinary")
+            if policy != "ordinary":
+                entry += f', "binary_policy": {policy!r}'
             include_dirs = func_name_to_external_include_dirs.get(name)
             if include_dirs:
                 entry += f', "extra_include_dirs": {list(include_dirs)!r}'
@@ -1565,7 +1578,7 @@ def _generate_config_file(
                 entry += ', "builtin": True'
             else:
                 entry += f', "code_name": "{name}"'
-        helpers = (func_name_to_vpto_sources or {}).get(name, [])
+        helpers = compile_requirements.vpto_sources.get(name, [])
         if helpers:
             paths = ", ".join(f"str(_ROOT_DIR / {path!r})" for path in helpers)
             entry += f', "vpto_sources": [{paths}]'
@@ -2817,17 +2830,24 @@ def _generate_single_chip(
                     runtime=runtime,
                     host_tensor_indices=host_indices,
                     unshared_code_names=codegen_free_kernels,
-                    func_name_to_vpto_sources={
-                        # Registration lookup uses each member's code_name. A
-                        # group name is not a callable entry and would silently
-                        # drop AIV dependencies (or attach them to the AIC).
-                        func.name: [
-                            f"vpto/{unit.name}/{symbol}.pto" for symbol in unit.entry_helpers[func.name]
-                        ]
-                        for unit in units
-                        if unit.helpers
-                        for func in unit.funcs
-                    },
+                    compile_requirements=_KernelCompileRequirements(
+                        binary_policy={
+                            f.name: f.attrs[EXTERNAL_BINARY_POLICY_ATTR]
+                            for f in transformed_program.functions.values()
+                            if EXTERNAL_BINARY_POLICY_ATTR in f.attrs
+                        },
+                        vpto_sources={
+                            # Registration lookup uses each member's code_name. A
+                            # group name is not a callable entry and would silently
+                            # drop AIV dependencies (or attach them to the AIC).
+                            func.name: [
+                                f"vpto/{unit.name}/{symbol}.pto" for symbol in unit.entry_helpers[func.name]
+                            ]
+                            for unit in units
+                            if unit.helpers
+                            for func in unit.funcs
+                        },
+                    ),
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

@@ -102,6 +102,7 @@ from .specializer import (
 )
 
 if TYPE_CHECKING:
+    from pypto.jit.external.protocols import ExternalJITBinding
     from pypto.runtime.kernel.session import KernelConfig
 
 # ---------------------------------------------------------------------------
@@ -470,6 +471,7 @@ class JITFunction:
         external_aiv_source: str | None = None,
         external_dual_aiv_dispatch: bool = False,
         external_include_dirs: tuple[str, ...] = (),
+        external_binding: "ExternalJITBinding | None" = None,
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
@@ -482,6 +484,7 @@ class JITFunction:
         self._external_aiv_source = external_aiv_source
         self._external_dual_aiv_dispatch = external_dual_aiv_dispatch
         self._external_include_dirs = external_include_dirs
+        self._external_binding = external_binding
         self._dep_graph_state: _CachedDepGraph | None = None
         self._cache: dict[CacheKey, Any] = {}  # CacheKey → CompiledProgram
         self._artifact_objects: dict[Any, Any] = {}
@@ -1219,7 +1222,9 @@ class JITFunction:
                     ),
                 )
 
-        if bypass_cache:
+        # Direct providers retain live inputs without a complete capture identity.
+        # Neither an L1 hit nor a persistent artifact may skip preparation.
+        if bypass_cache or any(f._external_binding is not None for f in [self, *self._get_dep_graph()[0]]):
             if _lookup_only:
                 raise RuntimeError("Kernel capture cannot request recompilation; prepare outside capture")
             record_stats(forced_rebuilds=1)
@@ -1658,6 +1663,16 @@ class JITFunction:
         preflight = ir_compile_kwargs.pop("_preflight", None)
         contexts = self._build_contexts(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
         class_name = f"_jit_{self.__name__}"
+        if any(ctx.external_binding is not None for ctx in contexts):
+            if ir_compile_kwargs.get("output_dir") is None:
+                ir_compile_kwargs["output_dir"] = make_default_output_dir(class_name)
+            platform = _platform_string(
+                ir_compile_kwargs["backend_type"], ir_compile_kwargs["execution_mode"]
+            )
+            runtime = ir_compile_kwargs.get("runtime", _resolve_runtime())
+            for ctx in contexts:
+                if ctx.external_binding is not None:
+                    ctx.external_binding.prepare(ctx, platform, runtime, ir_compile_kwargs["output_dir"])
         specializer = Specializer(class_name, contexts)
         source = specializer.specialize()
         rename_map = specializer.rename_map
@@ -1709,6 +1724,8 @@ class JITFunction:
     ) -> tuple[Any, dict[str, str]]:
         """Return the parsed pre-pass program and specializer rename map."""
         contexts = self._build_contexts(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
+        if any(ctx.external_binding is not None for ctx in contexts):
+            raise ValueError("Provider bindings require compile() with an explicit target platform")
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts)
         source = specializer.specialize()
@@ -2317,6 +2334,10 @@ class _ExternKernelDecorator:
         @pl.jit.extern(source="k.cpp", core_type="aiv",        # extra headers
                        include_dirs=["include", "third_party/include"])
 
+    ``binding=provider.bind(kernel)`` supplies an owned export during specialization.
+    It determines topology, writebacks and binary admission; source/core/include
+    options cannot accompany a binding. Direct bindings bypass JIT caches.
+
     A ``mixed`` kernel is dispatched as one ``MixedKernels`` submit: the
     specializer emits an AIC member, an AIV member, and a Group wrapper.
     Set ``dual_aiv_dispatch=True`` only when the external implementation is
@@ -2329,19 +2350,36 @@ class _ExternKernelDecorator:
         self,
         func: Any = None,
         *,
-        core_type: str = "aiv",
+        core_type: str | None = None,
         source: str | Any = None,
         aic_source: str | Any = None,
         aiv_source: str | Any = None,
         dual_aiv_dispatch: bool = False,
         include_dirs: Sequence[str | os.PathLike[str]] | None = None,
+        binding: "ExternalJITBinding | None" = None,
     ) -> Any:
+        if binding is not None and core_type is not None:
+            raise ValueError("@pl.jit.extern binding determines core_type from its export")
+        if core_type is None:
+            core_type = "aiv"
+        if binding is not None and not callable(getattr(binding, "prepare", None)):
+            raise TypeError("@pl.jit.extern binding must implement prepare()")
         if core_type not in ("aic", "aiv", "mixed"):
             raise ValueError(f"@pl.jit.extern core_type must be 'aic', 'aiv', or 'mixed', got {core_type!r}")
         if dual_aiv_dispatch and core_type != "mixed":
             raise ValueError("@pl.jit.extern dual_aiv_dispatch=True requires core_type='mixed'")
 
         def _make(f: Any) -> JITFunction:
+            if binding is not None:
+                if (
+                    any(value is not None for value in (source, aic_source, aiv_source, include_dirs))
+                    or dual_aiv_dispatch
+                ):
+                    raise ValueError("@pl.jit.extern binding cannot be combined with native source options")
+                # Reserve member names before provider preparation determines topology.
+                return JITFunction(
+                    f, func_type="extern", external_core_type="mixed", external_binding=binding
+                )
             if core_type == "mixed":
                 if aic_source is None or aiv_source is None:
                     raise ValueError(

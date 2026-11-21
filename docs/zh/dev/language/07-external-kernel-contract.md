@@ -1,7 +1,7 @@
 # 外部 Kernel 契约（内部 v1）
 
 本文是任务 34.1–34.4 和 [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293) 的接口基线。
-范围是数据交接与可执行 IR 原型，不是公开 provider 注册 API，也不提供已安装的 CANNBotDSL runtime adapter。
+范围是数据交接与可执行 IR，不是公开 provider 注册 API。下文的 CANNBotDSL 显式 JIT 绑定支持经过校验的 A5 子集。
 
 ## 职责
 
@@ -115,8 +115,49 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 每次准备都重新导出；由于尚未建立完整的 Python 闭包/输入快照，身份明确标记为不完整。
 因此该 provider 尚未注册到仅支持 capture 的 registry，也不声明 preparation 缓存复用。
 
-A5 TMR bridge 支持下述单 block AIC/AIV/MIX 子集的直接执行。JIT 程序中的自动发现和
-生命周期安全绑定仍属后续工作；设备数值及性能验收单独跟踪。准备和二进制编译不使用缓存。
+A5 TMR bridge 支持下述单 block AIC/AIV/MIX 子集的直接执行和普通 JIT 显式绑定。
+原生对象自动发现、完整输入捕获、持久复用及性能验收仍单独跟踪。准备和原生二进制编译不使用缓存。
+
+### 普通 JIT 绑定
+
+通过 Python 签名声明绑定原生 kernel，随后在普通 `@pl.jit` 编排中调用：
+
+```python
+from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
+
+@pl.jit.extern(binding=CANNBotDSLProvider().bind(native_kernel))
+def native(x: pl.Tensor, out: pl.Tensor):
+    ...
+
+@pl.jit
+def pipeline(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    native(x, out)
+    return out
+```
+
+参数名与顺序必须与原生 kernel 一致。声明无返回值，使用普通 tensor 注解；读写方向与
+隐藏 SSA 回写由经过校验的原生导出决定。AIC/AIV/MIX 拓扑也从导出推导，MIX 生成为
+包含一个 AIC 和双 lane AIV 成员的 Group。调用前后可以使用普通 PyPTO 生产者与消费者。
+
+使用 `compile(..., config=RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD))` 或携带相同配置的普通 JIT 执行，
+运行时必须为 TMR。绑定暂不支持 `specialize()`/`lower()`；可查看编译后的程序。首版要求正的静态
+ND shape、连续紧凑 strides、首元素地址 64 字节对齐，且整个视图占据完整的 64 字节缓存行。
+每次提交前均检查 shape/stride/alignment/存储边界，包括已加载程序的复用；签名不是实际
+存储的证明。启动检查要求单 block 且无同步启动。动态 shape、非连续或非对齐视图会明确失败。
+
+每次编译重新准备，在程序输出目录的独立子目录保存拥有所有权的导出源码，因此准备结束后
+仍可调用 `CompiledProgram.load()`。由于 Python 闭包捕获尚不完整，含绑定的程序绕过两级
+JIT 缓存。每个原生成员也绕过原始及剥离后二进制缓存，使用编译器选定的 SDK 重新执行
+零栈与 text-only ELF 准入。可复用的准备阶段身份仍由任务 34.6 负责。
+
+这类编排的全部任务均关闭 early dispatch，包括普通 PyPTO 消费者，确保依赖等待生产者完成
+及 MIX 全部 FIN。显式 `allow_early_resolve=True` 提示不能覆盖此要求。
+原生视图覆盖完整缓存行，保证逻辑不重叠时也不存在缓存行伪共享。
+逐核串行执行与桥接层入口/出口的流水线排空、状态恢复共同保证 callback 局部资源独占。
+
+A5 系统测试在三种拓扑的真实 matmul/vec kernel 前后加入普通 JIT 计算，并编译、加载和重复
+执行。每次更换输入、用 NaN 填充输出；MIX 消费者同时使用两个原生结果。
+原生对象自动发现、完整输入捕获、持久复用及性能验收仍为后续工作。
 
 ### A5 AIC/AIV/MIX runtime 路径
 
@@ -146,8 +187,8 @@ pto_isa_root=...)` 按 `task.prepared.execution.cores` 顺序返回 text 镜像�
 MIX 的两个 AIV lane 复用 AIV 镜像。所有镜像均通过准入后才返回元组。它从编译器选定的 CANN SDK
 获取 C API 头文件，在编译期间保留拥有所有权的源码，并强制执行 text-only ELF 准入和
 静态零栈报告检查。Text-only 编译省略可选的帧指针维护，使无寄存器溢出的 SIMD VF 调用
-能够通过同样的零栈检查；实际栈使用仍然被拒绝。普通 JIT `configure_context` 路径会拒绝该任务的二进制策略，
-防止绕过准入检查。
+能够通过同样的零栈检查；实际栈使用仍然被拒绝。旧 `configure_context` helper 仍拒绝该二进制策略。使用上述显式 JIT 绑定，
+即可在普通编译路径中保留完整的准入要求。
 
 直接 runtime 系统测试覆盖 FP16 Cube matmul（FP32 累加）、SIMD FP32 `(x + y) * x`，
 以及同时执行两个计算流水线的 MIX 任务。MIX 生产任务的每个 AIV lane 负责一个 128 元素 tile。
@@ -255,7 +296,8 @@ runtime 完成正确性验收。
 不支持 FP8 runtime scalar，也不支持 FP16/BF16 runtime scalar。
 
 通过校验器**不代表已允许设备执行**：字节级不重叠无法证明任务间的 64 字节缓存行
-隔离。资源所有权、栈/加载校验、任务完成以及 JIT/runtime 提交路径接入仍须实现。
+隔离。资源所有权、栈/加载校验与任务完成保证需要使用上述共享 runtime bridge；
+显式 JIT 绑定也执行同样的检查。
 
 ### CANNBotDSL 跨调用缓存行冲突
 
@@ -283,7 +325,8 @@ offset、shape、stride 和元素宽度计算各访问 tensor 的保守字节包
 绑定在执行完成前必须保持不变，存储必须保持有效；绑定变化后必须重新检查。
 返回 `false` 仅证明这一对调用没有 GM 冲突，不证明本地资源、栈/加载要求或完成
 可见性。协议之外的调用也需要依赖或隔离策略。下述批量辅助层将判定结果转换为
-TMR 依赖；接入 JIT 仍是后续工作。
+TMR 依赖。显式 JIT 子集则要求视图覆盖完整缓存行，并使用等待任务完成的普通数据依赖；
+任意非连续视图的调度仍不支持。
 
 ### CANNBotDSL 有序批量提交
 
@@ -311,7 +354,7 @@ ID。辅助层不负责加载 kernel 或授权执行；回调所接入的 runtim
 结果。辅助层只约束本批次，其他可能并发的调用仍需独立的依赖或隔离策略。它不证明
 组内安全、资源所有权、栈限制、二进制加载或完成可见性。上述直接 runtime 路径将
 该辅助层与 `TMRBridge.lower`、受检查的编译以及真实 TMR 提交组合，用于支持的子集。
-自动 JIT 发现和绑定仍属后续工作。
+显式 JIT 绑定使用上述受限视图策略；原生对象自动发现仍属后续工作。
 
 ## 请求与编译结果
 
@@ -547,7 +590,7 @@ C++ 类型须匹配声明。维度、stride 和 offset 使用 1/2/4/8 字节无�
 `native.configure_context(context)` 校验请求，并给既有 extern 特化附加源码、include、
 契约及检查器。保持租约直到既有 runtime 完成源码编译/发布。AIC/AIV、mixed Group
 和向量 lane 数来自执行契约。注册对象接入仍属任务 34.5，持久化
-复用属任务 34.6。CANNBotDSL 使用上文的专用 runtime 直接执行路径。
+复用属任务 34.6。CANNBotDSL 支持上文的直接 runtime 与显式 JIT 绑定路径。
 
 每次调用都在实际参数打包后、提交前检查 rank/dtype、固定及共享维度、正 stride、
 offset、对齐、存储/地址边界和原生元数据位宽，支持普通调用、显式 submit 及参数重排的
