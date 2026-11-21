@@ -362,7 +362,7 @@ class PTOCodegen : public CodegenBase {
   void RegisterTensorView(const ir::VarPtr& var, const std::string& tensor_view_name);
 
   /// Record the base pointer SSA for a tensor var (keyed by Var, like tensor_to_view).
-  void RegisterBasePtr(const ir::VarPtr& var, const std::string& ptr_name);
+  void RegisterBasePtr(const ir::VarPtr& var, const std::string& ptr_name, bool window_origin = false);
 
   /// Base pointer SSA for a tensor var; lets element-wise pl.read/pl.write recover
   /// the underlying !pto.ptr even after a slice-assign rebound the var to a view,
@@ -1208,6 +1208,7 @@ class PTOCodegen : public CodegenBase {
     /// path to name the parameter the unbindable symbol came from.
     std::map<const ir::Var*, std::string> valid_shape_symbol_origin;
     std::map<const ir::Var*, std::string> tensor_to_view;
+    std::set<std::string> window_origins;  ///< Adjusted GM pointer SSAs for sampled tensor views
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
     std::map<std::string, std::string>
         view_ssa_to_base_ptr;  ///< tensor_view SSA → base ptr SSA (for rebinding IfStmt phi return_vars)
@@ -1374,6 +1375,7 @@ class PTOCodegen : public CodegenBase {
       var_to_mlir.clear();
       valid_shape_symbol_origin.clear();
       tensor_to_view.clear();
+      window_origins.clear();
       tensor_to_base_ptr.clear();
       view_ssa_to_base_ptr.clear();
       memref_to_mlir.clear();
@@ -1536,6 +1538,7 @@ class PTOCodegen : public CodegenBase {
   /// Rebuilt per function: preserve caller storage instead of allocating locally.
   /// Unlike reg_addresses_, this tracks ownership, not emitted pointer SSA names.
   std::set<const ir::Var*> parameter_backed_tile_bases_;
+  void CheckLoopTensorYields(const std::vector<ir::IterArgPtr>& iter_args, const ir::Span& span) const;
   std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
 };
 

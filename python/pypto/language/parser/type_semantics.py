@@ -193,6 +193,16 @@ class ShapeDimAliasExpander(ir.IRMutator):
         super().__init__()
         self.aliases = aliases
 
+    def views_match(self, lhs: ir.TensorView, rhs: ir.TensorView) -> bool:
+        if lhs.layout != rhs.layout or lhs.pad != rhs.pad:
+            return False
+        for left, right in ((lhs.stride, rhs.stride), (lhs.valid_shape, rhs.valid_shape)):
+            if len(left) != len(right) or any(
+                not ir.structural_equal(self.visit_expr(a), self.visit_expr(b)) for a, b in zip(left, right)
+            ):
+                return False
+        return True
+
     def visit_var(self, op: ir.Var) -> ir.Expr:
         return self.aliases.get(op.unique_id, op)
 

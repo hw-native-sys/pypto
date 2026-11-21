@@ -886,6 +886,53 @@ class ASTParser:
                     override_type = ir.TileType(
                         resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
                     )
+            elif (
+                isinstance(resolved, ir.TensorType)
+                and isinstance(value_expr, ir.Call)
+                and value_expr.op.name == ir.get_op("tensor.view").name
+                and len(value_expr.args) >= 4
+                and isinstance(value_expr.type, ir.TensorType)
+            ):
+                # The parent and window operands determine the address map. A
+                # printed allocation may contribute a MemRef, but an annotation
+                # must never replace the computed strides or valid region.
+                inferred = value_expr.type
+                view = inferred.tensor_view
+                assert view is not None
+                ann_view = resolved.tensor_view
+                annotated_view = view
+                if ann_view is not None:
+                    annotated_view = ir.TensorView(
+                        ann_view.stride or view.stride,
+                        ann_view.layout,
+                        ann_view.valid_shape or view.valid_shape,
+                        ann_view.pad if ann_view.pad != ir.PadValue.null else view.pad,
+                    )
+                if isinstance(inferred, ir.DistributedTensorType):
+                    assert isinstance(resolved, ir.DistributedTensorType)
+                    window = inferred.window_buffer
+                    if resolved.window_buffer is not None and resolved.window_buffer is not window:
+                        raise ParserTypeError(
+                            f"WindowBuffer annotation for '{var_name}' conflicts with the parent window",
+                            span=span,
+                        )
+                    override_type = ir.DistributedTensorType(
+                        inferred.shape, inferred.dtype, resolved.memref, annotated_view, window
+                    )
+                else:
+                    override_type = ir.TensorType(
+                        inferred.shape, inferred.dtype, resolved.memref, annotated_view
+                    )
+                # FlattenCallExpr can bind a dimension read in the operands while
+                # the printed descriptor still carries the original expression.
+                if not types_match(override_type, inferred) and not ShapeDimAliasExpander(
+                    self.function.shape_dim_aliases
+                ).views_match(annotated_view, view):
+                    raise ParserTypeError(
+                        f"TensorView annotation for '{var_name}' conflicts with the sampled window",
+                        span=span,
+                        hint=f"Use the inferred descriptor: {ir.python_print_type(inferred)}",
+                    )
             elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
                 override_type = resolved
             elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:

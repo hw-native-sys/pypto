@@ -25,6 +25,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -465,6 +466,8 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
   // constructor, so shape-changing orchestration views lower to reshape only
   // for ND layouts. Layout-only keeps the legacy ND/DN alias/transpose
   // behavior.
+  CHECK_SPAN(!IsWindowTensorView(op), op->span_)
+      << "tensor.view with offsets or steps requires an InCore function";
   INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 3, op->span_)
       << "tensor.view requires 1 to 3 args (input[, shape[, valid_shape]])";
 

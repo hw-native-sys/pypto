@@ -385,6 +385,21 @@ codegen 之间统一为单一可机械读取的形式：
   ND / DN 各定义 packed canonical（紧致存储）与 strided 家族（sub-view 继承
   父 stride）两种合法形态。
 
+在 InCore 中，`pl.tensor.view` 可以按窗口形状、父视图坐标中的起点和正采样步长创建视图。
+以下示例从形状为 `[2000, 1024]` 的连续 BF16 张量 `x` 的第 3、503 行选取第 0、2、…、1022 列：
+
+```python
+v = pl.tensor.view(x, [2, 512], offsets=[3, 0], steps=[500, 2])
+```
+
+视图共享源存储，起点距 `x` 的基址 6144 字节，元素步长为 `[512000, 2]`。
+嵌套窗口的各轴偏移以直接父视图的坐标计算。创建描述符时没有数据读写。
+依赖设备运行时值的窗口参数须满足边界条件。如果形状、偏移、步长或有效范围来自内存读取，先将读取结果赋给标量，再用它创建视图。
+如果源张量是分布式张量，视图保留分布式类型和原来的窗口缓冲区。
+标量 `tensor.read` 和 `tensor.write` 按视图的物理 stride 寻址。在上例中，下标 `[1, 1]` 对应 `x[503, 2]`。
+使用原生 tile DMA 时，`pl.load`、`pl.store` 和 `pl.gather_row` 要求编译器能证明物理内轴的步长为 1。ND 的内轴是最后一维，DN 的内轴是倒数第二维。
+`pl.gather_row(..., transpose=True)` 生成的 DN 描述符沿用源窗口调整后的基址，并交换物理步长。转置后的内轴对应源窗口的最后一维。
+
 Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
 [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h)）：
 

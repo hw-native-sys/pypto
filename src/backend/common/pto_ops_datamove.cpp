@@ -41,6 +41,7 @@
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -591,16 +592,21 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
     // layout (wrong results / AICore 507018 at scale).
     INTERNAL_CHECK_SPAN(src_tensor_type->shape_.size() == 2, op->span_)
         << "tile.gather_row transpose requires a 2D src";
-    std::string src_ptr = codegen.GetVarName(src);
-    std::string rows_code = codegen.GetExprAsCode(src_tensor_type->shape_[0]);
-    std::string cols_code = codegen.GetExprAsCode(src_tensor_type->shape_[1]);
-    std::string one_code = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+    const auto& view = src_tensor_type->tensor_view_;
+    const auto strides = view && !view->stride.empty()
+                             ? view->stride
+                             : ir::tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                   src_tensor_type->shape_, view ? view->layout : ir::TensorLayout::ND);
+    INTERNAL_CHECK_SPAN(strides.size() == 2, op->span_) << "tile.gather_row transpose requires two strides";
+    const auto shape_codes = GetSizeCodes(src_tensor_type->shape_, codegen);
+    const auto stride_codes = GetSizeCodes(strides, codegen);
     std::string dn_view = codegen.NewNamedTemp(src->name_hint_ + "_dn_view");
     std::ostringstream mv;
-    // DN view: shape [C, R], strides [1, C] -> DN[i, j] aliases src[j, i].
-    mv << dn_view << " = pto.make_tensor_view " << src_ptr << ", shape = [" << cols_code << ", " << rows_code
-       << "], strides = [" << one_code << ", " << cols_code
-       << "] {layout = #pto.layout<dn>} : " << src_view_type;
+    // Swapping the physical strides preserves DN[i, j] = src[j, i] even when
+    // sampling leaves a gap between source rows.
+    mv << dn_view << " = pto.make_tensor_view " << codegen.GetTensorBasePtr(src) << ", shape = ["
+       << shape_codes[1] << ", " << shape_codes[0] << "], strides = [" << stride_codes[1] << ", "
+       << stride_codes[0] << "] {layout = #pto.layout<dn>} : " << src_view_type;
     codegen.Emit(mv.str());
     // Read src[phys, col_off : col_off + c] presented as the DN column [c, 1]:
     // offsets [col_off, phys] (swapped). xfer_elems/xfer_codes are already in

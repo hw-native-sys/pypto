@@ -435,6 +435,29 @@ interpretation across passes / verifiers / codegen:
   independent description. ND and DN each have a packed canonical and a
   strided family (sub-views inheriting the parent's stride).
 
+In InCore code, `pl.tensor.view` accepts a window shape, parent-relative offsets,
+and positive sampling steps. For a packed BF16 tensor `x` of shape
+`[2000, 1024]`, this view selects columns 0, 2, ..., 1022 from rows 3 and 503:
+
+```python
+v = pl.tensor.view(x, [2, 512], offsets=[3, 0], steps=[500, 2])
+```
+
+The view shares the source allocation. Its origin is 6144 bytes from the base
+of `x`, and its element strides are `[512000, 2]`. For a nested window, each
+offset is measured in the immediate parent's coordinates. Creating the
+descriptor has no payload memory effect. Bounds that depend on device values
+must hold at execution time. When a shape, offset, step or valid extent comes from a
+memory read, assign the read to a scalar before constructing the view.
+If the source is a distributed tensor, the view retains its distributed type
+and its original window buffer. Scalar `tensor.read` and `tensor.write` use
+the view's physical strides. In the example above, index `[1, 1]` addresses
+`x[503, 2]`. Native tile DMA in `pl.load`, `pl.store`, and `pl.gather_row` requires a
+provable unit physical inner stride (last axis for ND, penultimate for DN).
+For `pl.gather_row(..., transpose=True)`, the transposed DN descriptor uses the
+source window's adjusted base and swaps its physical strides. Its inner axis
+is the source window's last axis.
+
 The packed canonical formulas (`BuildLogicalStridesFromLayout` in
 [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h)):
 

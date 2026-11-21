@@ -30,13 +30,16 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/reinterpret_view_semantics.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
@@ -129,6 +132,110 @@ bool IsNdLeadingCollapseTo2D(const std::vector<ExprPtr>& source_shape,
     }
   }
   return true;
+}
+
+// Compare the last sampled coordinate against its bound. In the all-static
+// case compare by division so an overflowing (count - 1) * step cannot wrap
+// back into the parent. Dynamic bounds follow the existing tensor contract.
+bool WindowExceedsBound(const ExprPtr& count, const ExprPtr& offset, const ExprPtr& step,
+                        const ExprPtr& bound, arith::Analyzer& analyzer) {
+  auto n = As<ConstInt>(count);
+  auto start = As<ConstInt>(offset);
+  auto increment = As<ConstInt>(step);
+  auto limit = As<ConstInt>(bound);
+  if (n && start && increment && limit) {
+    if (n->value_ == 0) return false;
+    return start->value_ >= limit->value_ ||
+           n->value_ - 1 > (limit->value_ - 1 - start->value_) / increment->value_;
+  }
+  auto one = std::make_shared<ConstInt>(1, DataType::INDEX, count->span_);
+  auto last = MakeAdd(offset, MakeMul(MakeSub(count, one), step));
+  return analyzer.CanProve(MakeGe(last, bound));
+}
+
+// Window geometry consumes scalar values. Bind payload reads before constructing the descriptor.
+class WindowGeometryChecker : public IRVisitor {
+ protected:
+  void VisitExpr_(const VarPtr&) override {}
+  void VisitExpr_(const IterArgPtr&) override {}
+
+  void VisitExpr_(const CallPtr& call) override {
+    const auto* entry = LookupOpEntry(call->op_);
+    CHECK_SPAN(entry && entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess,
+               call->span_)
+        << "tensor.view: bind the result of " << call->op_->name_
+        << " to a scalar variable before using it in window shape, offsets, steps or valid_shape";
+    IRVisitor::VisitExpr_(call);
+  }
+
+  void VisitExpr_(const SubmitPtr& submit) override {
+    CHECK_SPAN(false, submit->span_) << "tensor.view: bind a submit result to a scalar variable before using "
+                                        "it in window shape, offsets, steps or valid_shape";
+  }
+};
+
+// A sampled window preserves the source layout. All geometry operands use the
+// immediate parent's coordinates, including when that parent is itself sampled.
+TypePtr DeduceTensorWindowView(const std::vector<ExprPtr>& args, TensorLayout new_layout) {
+  auto source = AsTensorTypeLike(args[0]->GetType());
+  CHECK(source) << "tensor.view window requires a GM tensor";
+  const auto rank = source->shape_.size();
+  CHECK(rank > 0) << "tensor.view window requires rank >= 1";
+  TensorView view = source->tensor_view_.value_or(TensorView{});
+  CHECK(new_layout == view.layout && (new_layout == TensorLayout::ND || new_layout == TensorLayout::DN))
+      << "tensor.view window must preserve its parent ND or DN layout";
+  CHECK(view.layout != TensorLayout::DN || rank >= 2) << "tensor.view DN window requires rank >= 2";
+  CHECK(!source->dtype_.IsPackedFp4() && storage_size::GetStorageBitWidth(source->dtype_) % 8 == 0)
+      << "tensor.view window requires a byte-addressable scalar element";
+  WindowGeometryChecker geometry_checker;
+  auto geometry = [&](size_t operand) {
+    auto tuple = As<MakeTuple>(args[operand]);
+    CHECK(tuple && tuple->elements_.size() == rank) << "tensor.view window geometry must match parent rank";
+    for (const auto& dim : tuple->elements_) {
+      auto scalar = As<ScalarType>(dim->GetType());
+      CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
+          << "tensor.view window geometry must contain integers";
+      geometry_checker.VisitExpr(dim);
+    }
+    return tuple->elements_;
+  };
+  const auto shape = geometry(1);
+  const auto offsets = geometry(2);
+  const auto steps = geometry(3);
+  const auto valid_shape = args.size() == 5 ? geometry(4) : shape;
+  const auto& parent_valid = view.valid_shape.empty() ? source->shape_ : view.valid_shape;
+  CHECK(parent_valid.size() == rank) << "tensor.view parent valid shape rank mismatch";
+  if (view.stride.empty()) {
+    view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(source->shape_, view.layout);
+  }
+  auto canonical = tensor_view_semantics::CheckCanonicalView(source->shape_, view.stride, view.layout);
+  CHECK(canonical.ok) << "tensor.view window has an invalid parent stride: " << canonical.reason;
+  arith::Analyzer analyzer;
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, args[0]->span_);
+  for (size_t i = 0; i < rank; ++i) {
+    CHECK(!analyzer.CanProve(MakeLe(shape[i], zero))) << "tensor.view window shape must be positive";
+    CHECK(!analyzer.CanProve(MakeLe(steps[i], zero))) << "tensor.view window steps must be positive";
+    CHECK(!analyzer.CanProve(MakeLt(offsets[i], zero))) << "tensor.view window offsets must be nonnegative";
+    CHECK(!analyzer.CanProve(MakeLt(valid_shape[i], zero)) &&
+          !analyzer.CanProve(MakeGt(valid_shape[i], shape[i])))
+        << "invalid tensor.view window valid shape";
+    CHECK(!WindowExceedsBound(shape[i], offsets[i], steps[i], source->shape_[i], analyzer))
+        << "tensor.view window exceeds parent shape";
+    if (!view.valid_shape.empty() && !analyzer.CanProveEqual(valid_shape[i], zero)) {
+      CHECK(!WindowExceedsBound(valid_shape[i], offsets[i], steps[i], parent_valid[i], analyzer))
+          << "tensor.view window exceeds parent validity";
+    }
+    auto child_stride = MakeIndexMul(view.stride[i], steps[i]);
+    CHECK(!(As<ConstInt>(view.stride[i]) && As<ConstInt>(steps[i])) || As<ConstInt>(child_stride))
+        << "tensor.view window stride overflows index range";
+    view.stride[i] = std::move(child_stride);
+  }
+  view.valid_shape = args.size() == 5 ? valid_shape : std::vector<ExprPtr>{};
+  if (auto dist = As<DistributedTensorType>(source)) {
+    return std::make_shared<DistributedTensorType>(shape, dist->dtype_, std::nullopt, std::move(view),
+                                                   dist->window_buffer_);
+  }
+  return std::make_shared<TensorType>(shape, source->dtype_, std::nullopt, std::move(view));
 }
 
 }  // anonymous namespace
@@ -469,8 +576,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   // same physical memory. shape-only derives a canonical view for that shape
   // with the source layout; layout-only preserves the legacy layout-only trailing
   // pair flip; both derive canonical strides from the requested shape+layout.
-  CHECK(args.size() >= 1 && args.size() <= 3)
-      << "tensor.view requires 1 to 3 positional args (src[, shape[, valid_shape]]), but got " << args.size();
+  CHECK(!args.empty() && args.size() <= 5) << "invalid tensor.view operand count: " << args.size();
 
   auto src_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(src_type) << "tensor.view: src must be TensorType or DistributedTensorType, got "
@@ -489,6 +595,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   TensorLayout src_layout =
       src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
   TensorLayout new_layout = requested_layout.value_or(src_layout);
+  if (args.size() >= 4) return DeduceTensorWindowView(args, new_layout);
   const bool has_shape = args.size() >= 2;
   // FP8E8M0 scale buffers may alias between packed ND storage and the Cube
   // consumer layouts. MX_A_ZZ covers LeftScale boxes; MX_B_NN covers RightScale.
@@ -723,14 +830,15 @@ REGISTER_OP("tensor.transpose")
 
 REGISTER_OP("tensor.view")
     .set_op_category("TensorOp")
-    .set_description(
-        "Reinterpret a TensorType over the same physical memory with a canonical shape/layout view. "
-        "Pure metadata: in-core codegen emits a new make_tensor_view over the input buffer.")
+    .set_description("Describe a shape/layout reinterpretation or sampled window over the same storage")
     .add_argument("input", "Input tensor (TensorType or DistributedTensorType, packed canonical or bare)")
     .add_argument("shape", "Optional target shape dimensions (TupleType of integer scalars)")
-    .add_argument("valid_shape", "Optional explicit target valid shape for shape reinterpretation")
+    .add_argument("valid_shape_or_offsets", "Target valid shape for reinterpretation or origin of a window")
+    .add_argument("steps", "Optional per-axis parent coordinate steps for a window")
+    .add_argument("window_valid_shape", "Optional valid extents for a window")
     .set_attr<TensorLayout>("layout")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorViewType(args, kwargs);
