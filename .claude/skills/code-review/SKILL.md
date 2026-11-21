@@ -175,6 +175,11 @@ Use these four sections in order. Follow
    Record the reviewed SHA for a PR, build and test results, and verification limits. Base any
    verdict on the verified findings and state the limits on coverage.
 
+## GitHub Review Comments
+
+Prefix each GitHub review comment that requires author action with the literal Unicode text
+**&#x5F85;&#x89E3;&#x51B3;**. Keep the thread unresolved. Resolve it only after verifying the fix on the updated PR head.
+
 ## Decision Criteria
 
 - **PASS** applies when the reviewed scope was verified and only minor suggestions remain.
