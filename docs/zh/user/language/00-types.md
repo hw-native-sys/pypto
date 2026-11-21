@@ -92,6 +92,10 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.Scalar[pl.FP32]` | 单个值，不是缓冲区 |
 | `M = pl.dynamic("M")` | 该维编译期未知，每次启动时绑定 |
 
+通过原生运行时传入 host tensor 时，`Out` 不会上传缓冲区的初始内容，未写入的
+元素没有定义。如果 kernel 只更新部分输出，并要求保留其余 host 数据，应将
+该参数声明为 `InOut`，外层入口和被调用函数也应保持这一契约。
+
 ## Mechanics
 
 ### 数据类型
