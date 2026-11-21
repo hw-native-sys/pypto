@@ -235,19 +235,22 @@ tutorial at [distributed/00-model.md](../distributed/00-model.md).
 
 | Operation | API | Modes | ReduceOp | Atomic | Supported dtypes | Notes |
 | --------- | --- | ----- | -------- | ------ | ---------------- | ----- |
-| AllReduce | `pld.tensor.allreduce` | `mesh` (InCore + HOST), `ring` (InCore + HOST) | `Sum`, `Max`, `Min`, `Prod` (mesh); `Sum` only (HOST ring) | — | FP16, FP32 (mesh; hard compile-time check); HOST ring: FP32 only (4-byte) | Mesh: O(N) remote traffic per step. Ring: O(N/P) remote traffic per step, 2(P-1) steps. |
-| AllGather | `pld.tensor.allgather` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Push-based. Input and target must be different buffers. |
-| ReduceScatter | `pld.tensor.reduce_scatter` | — | `Sum`, `Max`, `Min`, `Prod` (InCore); `Sum` only (HOST builtin) | — | FP32 only (HOST builtin); any GM dtype (InCore) | Every rank stages all NR chunks before the call. |
-| Broadcast | `pld.tensor.broadcast` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Root stages data before the call. |
-| All-to-All | `pld.tensor.all_to_all` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Personalized exchange. Input and target must be different buffers. |
-| Barrier | `pld.tensor.barrier` | — | — | — | — | Signal is INT32, single-shot per call. |
-| Put | `pld.tensor.put` | — | — | `None_` / `Add` | All GM dtypes | `dst` must be window-bound. Supports chunked + pipelined staging. |
-| Get | `pld.tensor.get` | — | — | — | All GM dtypes | `src` must be window-bound. Supports chunked + pipelined staging. |
-| Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | Side-effect-only signal deposit. |
-| Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | Side-effect-only signal block. |
-| Deferred Wait | `pld.system.defer_wait` | `Ge` only | — | — | INT32 signal | Register a monotonic counter condition without spinning the AIV; Simpler keeps the ordinary waiter TaskId incomplete and later work uses ordinary `deps=[wait_tid]`. |
-| Remote Load | `pld.tile.remote_load` | — | — | — | Any (tile) | Tile-level cross-rank load. |
-| Remote Store | `pld.tile.remote_store` | — | — | — | Any (tile) | Tile-level cross-rank store. |
+| AllReduce | [`pld.tensor.allreduce`][pypto.language.distributed.op.tensor_ops.allreduce] | `mesh` (InCore + HOST), `ring` (InCore + HOST) | `Sum`, `Max`, `Min`, `Prod` (mesh); `Sum` only (HOST ring) | — | FP16, FP32 (mesh; hard compile-time check); HOST ring: FP32 only (4-byte) | Mesh: O(N) remote traffic per step. Ring: O(N/P) remote traffic per step, 2(P-1) steps. |
+| AllGather | [`pld.tensor.allgather`][pypto.language.distributed.op.tensor_ops.allgather] | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Push-based. Input and target must be different buffers. |
+| ReduceScatter | [`pld.tensor.reduce_scatter`][pypto.language.distributed.op.tensor_ops.reduce_scatter] | — | `Sum`, `Max`, `Min`, `Prod` (InCore); `Sum` only (HOST builtin) | — | FP32 only (HOST builtin); any GM dtype (InCore) | Every rank stages all NR chunks before the call. |
+| Broadcast | [`pld.tensor.broadcast`][pypto.language.distributed.op.tensor_ops.broadcast] | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Root stages data before the call. |
+| All-to-All | [`pld.tensor.all_to_all`][pypto.language.distributed.op.tensor_ops.all_to_all] | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Personalized exchange. Input and target must be different buffers. |
+| All-to-All-V | [`pld.tensor.all_to_all_v`][pypto.language.distributed.op.tensor_ops.all_to_all_v] | — | — | — | FP32, INT8 (HOST/CHIP builtin); no FP32/INT8 allowlist on the InCore composite (matching input/target dtype required; built from [`pld.tile.put`][pypto.language.distributed.op.tile_ops.put]) | Variable-size personalized exchange (`MPI_Alltoallv`). `send_counts`/`recv_counts` are runtime row counts exchanged via a two-round credit barrier; window-as-result (no built-in read-back). |
+| Indexed All-to-All-V | [`pld.tensor.indexed_all_to_all_v`][pypto.language.distributed.op.tensor_ops.indexed_all_to_all_v] | — | — | — | FP32, INT8 (A5 URMA, L2 only — HOST and InCore unsupported) | Reads `input[Nmax,H]` rows through an INT32 `index[P,C]`; no packed send buffer. `core_num` is an exact launch width. |
+| Barrier | [`pld.tensor.barrier`][pypto.language.distributed.op.tensor_ops.barrier] | — | — | — | — | Signal is INT32, single-shot per call. |
+| Put | [`pld.tensor.put`][pypto.language.distributed.op.tensor_ops.put] | — | — | `None_` / `Add` | All GM dtypes | `dst` must be window-bound. Supports chunked + pipelined staging. |
+| Get | [`pld.tensor.get`][pypto.language.distributed.op.tensor_ops.get] | — | — | — | All GM dtypes | `src` must be window-bound. Supports chunked + pipelined staging. |
+| Notify | [`pld.system.notify`][pypto.language.distributed.op.system_ops.notify] | `AtomicAdd` / `Set` | — | — | — | Side-effect-only signal deposit. |
+| Wait | [`pld.system.wait`][pypto.language.distributed.op.system_ops.wait] | `Eq` / `Ge` | — | — | — | Side-effect-only signal block. |
+| Deferred Wait | [`pld.system.defer_wait`][pypto.language.distributed.op.system_ops.defer_wait] | `Ge` only | — | — | INT32 signal | Register a monotonic counter condition without spinning the AIV; Simpler keeps the ordinary waiter TaskId incomplete and later work uses ordinary `deps=[wait_tid]`. |
+| Remote Load | [`pld.tile.remote_load`][pypto.language.distributed.op.tile_ops.remote_load] | — | — | — | Any (tile) | Tile-level cross-rank load. |
+| Remote Store (tile) | [`pld.tile.remote_store`][pypto.language.distributed.op.tile_ops.remote_store] | — | — | `None_` / `Add` | Any (tile) for `None_`; `Add` requires an `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8` destination (`bf16` needs Ascend910 A2/A3) | Tile-level cross-rank store. |
+| Remote Store (tensor) | [`pld.tensor.remote_store`][pypto.language.distributed.op.tensor_ops.remote_store] | — | — | `None_` / `Add` | All GM dtypes; `Add` requires an `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8` destination (`bf16` needs Ascend910 A2/A3) | Pushes a *computed* tensor-level value cross-rank; lowers 1:1 to [`pld.tile.remote_store`][pypto.language.distributed.op.tile_ops.remote_store], so no GM round-trip in between. |
 
 ## Worked examples
 
