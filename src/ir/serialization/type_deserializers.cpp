@@ -1067,6 +1067,19 @@ static IRNodePtr DeserializeCommDomainScopeStmt(const msgpack::object& fields_ob
     }
   }
 
+  // Reflection serializes the inherited ScopeStmt body and attrs before slots.
+  // A body-local DistributedTensor type can define a WindowBuffer (and shared
+  // shape/base nodes) that slots only references. Decode in that same order so
+  // valid references are already registered; unknown IDs still remain errors.
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
+  }
+
   std::vector<WindowBufferPtr> slots;
   auto slots_obj = GetOptionalFieldObj(fields_obj, "slots", ctx);
   if (slots_obj.has_value() && slots_obj->type == msgpack::type::ARRAY) {
@@ -1075,15 +1088,6 @@ static IRNodePtr DeserializeCommDomainScopeStmt(const msgpack::object& fields_ob
       slots.push_back(std::static_pointer_cast<const WindowBuffer>(
           ctx.DeserializeNode(slots_obj->via.array.ptr[i], zone)));
     }
-  }
-
-  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
-  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-
-  std::vector<std::pair<std::string, std::any>> attrs;
-  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
-  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
   }
 
   std::vector<std::string> engines;
