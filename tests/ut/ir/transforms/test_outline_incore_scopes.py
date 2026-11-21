@@ -1119,7 +1119,9 @@ class Expected:
 
         A captured destination is a write *and* a read, so it becomes ``InOut``;
         ``src`` stays ``In``. This is the dependency carrier the V1 completion
-        model relies on.
+        model relies on. The structural comparison also pins the outlined body
+        and the caller's argument binding — a direction-only check would still
+        pass if the pass dropped or rewrote ``put_async``.
         """
 
         @pl.program
@@ -1134,7 +1136,37 @@ class Expected:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
 
-        directions = self._outlined_directions(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.InOut[pld.DistributedTensor[[16, 64], pl.FP16]],
+                peer: pl.Scalar[pl.INT32],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+            ):
+                _out = pld.tensor.put_async(dst, peer, src, engine=pld.CommEngine.URMA)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                self.main_incore_0(dst, peer, src)
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+        callee = After.get_function("main_incore_0")
+        assert callee is not None
+        directions = {
+            param.name_hint.split("__ssa_v")[0]: direction
+            for param, direction in zip(callee.params, callee.param_directions, strict=True)
+        }
         assert directions["dst"] == ir.ParamDirection.InOut
         assert directions["src"] == ir.ParamDirection.In
 
