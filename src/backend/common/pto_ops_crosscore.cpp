@@ -610,6 +610,48 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
   return "";
 }
 
+static std::string MakeIntraBlockSyncCodegenPTO(const char* action, const CallPtr& op,
+                                                codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() <= 1, op->span_)
+      << "Named intra-block sync accepts at most one dynamic event-id operand";
+  const bool has_static_event_id = op->HasKwarg("event_id");
+  INTERNAL_CHECK_SPAN(has_static_event_id != !op->args_.empty(), op->span_)
+      << "Named intra-block sync requires exactly one static or dynamic event-id form";
+  INTERNAL_CHECK_SPAN(!op->HasKwarg("ffts_mode"), op->span_)
+      << "Named intra-block sync does not accept ffts_mode";
+  const int pipe = op->GetKwarg<int>("pipe");
+  INTERNAL_CHECK_SPAN(pipe >= static_cast<int>(ir::PipeType::MTE1) &&
+                          pipe <= static_cast<int>(ir::PipeType::FIX) && pipe != ir::PipeType::M,
+                      op->span_)
+      << "Named intra-block sync requires FIX, MTE1, MTE2, MTE3, V, or S";
+  if (has_static_event_id) {
+    const int event_id = op->GetKwarg<int>("event_id");
+    INTERNAL_CHECK_SPAN(event_id >= 0 && event_id <= 31, op->span_)
+        << "Named intra-block static event_id must be in [0, 31]";
+  }
+  if (codegen.GetBackendHandler()->GetPtoTargetArch() != "a5") {
+    CHECK_SPAN(pipe != static_cast<int>(ir::PipeType::S), op->span_)
+        << "Named intra-block PIPE_S requires A5; A2/A3 supports FIX, MTE1, MTE2, MTE3, or V";
+    CHECK_SPAN(!op->HasKwarg("event_id") || op->GetKwarg<int>("event_id") <= 15, op->span_)
+        << "Named intra-block static event_id on A2/A3 must be in [0, 15]";
+  }
+  std::ostringstream oss;
+  oss << "pto." << action << "_intra_block <PIPE_" << ir::PipeTypeToString(static_cast<ir::PipeType>(pipe))
+      << ">, ";
+  if (op->args_.empty()) {
+    oss << op->GetKwarg<int>("event_id");
+  } else {
+    auto type = ir::As<ScalarType>(op->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(type && (type->dtype_ == DataType::INT32 || type->dtype_ == DataType::INT64),
+                        op->span_)
+        << "Named intra-block dynamic event id must be INT32 or INT64";
+    oss << codegen.GetExprAsCode(op->args_[0]) << " : " << (type->dtype_ == DataType::INT32 ? "i32" : "i64");
+  }
+  codegen.Emit(oss.str());
+  return "";
+}
+
 static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
@@ -689,6 +731,12 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
   });
   reg("system.sync_wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCrossCoreSyncCodegenPTO("wait", op, codegen);
+  });
+  reg("system.set_intra_block", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeIntraBlockSyncCodegenPTO("set", op, codegen);
+  });
+  reg("system.wait_intra_block", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeIntraBlockSyncCodegenPTO("wait", op, codegen);
   });
   reg("system.set_ffts", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeSetFFTSCodegenPTO(op, codegen);

@@ -106,6 +106,11 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.Scalar[pl.FP32]` | A single value, not a buffer |
 | `M = pl.dynamic("M")` | The dimension is unknown at compile time and bound per launch |
 
+For host tensors passed through the native runtime, `Out` does not upload the
+host buffer's initial contents; unwritten elements are undefined. If a kernel
+updates only part of an output and must preserve the remaining host values,
+declare that parameter `InOut`, including on its enclosing entry and callees.
+
 ## Mechanics
 
 ### Data types

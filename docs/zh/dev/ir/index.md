@@ -20,6 +20,7 @@ IR 定义是整个编译器的真源：pass 可以重写，IR 节点定义不可
 | [多输出算子](09-multi_output_ops.md) | 产生多个值的算子：`TupleType` 结果、为什么目的地绝不作为参数，以及注册表强制的规则 |
 | [算子效应](10-operator-effects.md) | Functional 参数访问、写通道及核放置/复制契约 |
 | [标量 SIMT IR](11-simt.md) | 无返回值 helper、显式 launch 输出、GM/UB 标量访问及自动资源推导 |
+| [块内跨核同步（intra-block synchronization）](12-intra-block-sync.md) | 同一执行块内 AIC/AIV 的事件同步、流水线顺序、核归属及事件资源 |
 
 ## 另请参阅
 
