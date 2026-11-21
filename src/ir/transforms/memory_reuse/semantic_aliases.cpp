@@ -50,6 +50,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
@@ -3199,14 +3200,14 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     // Retargeted producers no longer use their original allocations. Removing
     // those now is also necessary for PTOAS, which skips MemoryReuse entirely.
     new_body = RemoveUnusedAllocStatements(new_body, memref_collectors::CollectUsedBasePtrs(new_body));
-  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
+  } else if (GetFunctionMemoryPlanner(func) == MemoryPlanner::DsaRP) {
     // Identity-copy normalization brackets YieldFixup on both sides; see the
     // matching step in TransformMemoryReuse for why each side is needed.
     new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
     new_body = FixupYields(new_body, func->params_, /*fixup_if_stmts=*/true);
     new_body = NormalizeIdentityCopyBuffers(new_body);
-  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+  } else if (GetFunctionMemoryPlanner(func) == MemoryPlanner::PtoAS) {
     new_body = FixupYields(new_body, func->params_, /*fixup_if_stmts=*/false);
   }
 

@@ -214,7 +214,7 @@ class _CrossCoreRuntime:
             self._cv.wait(timeout=min(0.05, remaining))
 
     @staticmethod
-    def _split_tile(tile, split, lane_stride=None):
+    def _split_tile(tile, split, lane_stride=None, *, valid_shape=None):
         # Partition a pushed tile between the two AIV lanes exactly the way the
         # compiler did: lane L owns [L * S, L * S + S) of the split axis, where S
         # is the partition stride (`lane_stride` when a ragged boundary was
@@ -236,7 +236,8 @@ class _CrossCoreRuntime:
                 f"Split mode {split} got an out-of-range lane stride {stride} for a {size}-wide "
                 f"axis (per-lane box {box_half})"
             )
-        valid_shape = getattr(tile, "_pypto_valid_shape", None)
+        if valid_shape is None:
+            valid_shape = getattr(tile, "_pypto_valid_shape", None)
         valid = int(valid_shape[dim]) if valid_shape is not None else size
         lane0 = min(valid, stride)
         lane1 = min(max(valid - stride, 0), stride)
@@ -268,7 +269,6 @@ class _CrossCoreRuntime:
             part0._pypto_full_shape = tuple(full0)
             part1._pypto_full_shape = tuple(full1)
 
-        valid_shape = getattr(tile, "_pypto_valid_shape", None)
         if valid_shape is not None:
             valid0 = list(int(s) for s in valid_shape)
             valid1 = list(int(s) for s in valid_shape)
@@ -303,11 +303,23 @@ class _CrossCoreRuntime:
 
         return merged
 
-    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0):
+    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0, *, split_valid_rows=False, valid_shape=None):
         split = int(split)
         lane_stride = int(lane_stride)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
+            if split_valid_rows:
+                if split != 1 or lane_stride or queues.c2v_dtype is not None or tile.dtype != torch.float32:
+                    raise ValueError("split_valid_rows requires an untyped UP_DOWN split of an FP32 tile")
+                if valid_shape is None:
+                    valid_shape = getattr(tile, "_pypto_valid_shape", tile.shape)
+                rows, cols = _coerce_shape(valid_shape)
+                if not 0 < rows <= tile.shape[0] or rows % 2 or cols != tile.shape[1]:
+                    raise ValueError(
+                        "split_valid_rows requires a positive even row count within the tile and full columns"
+                    )
+                valid_shape = (rows, cols)
+                lane_stride = rows // 2
             # Configuration follows the executed pipe initialization, so a
             # push delegated to an inline helper sees the same contract.
             if queues.c2v_dtype is not None:
@@ -322,7 +334,7 @@ class _CrossCoreRuntime:
                 else:
                     queues.to_aiv.append(_copy_region_attrs(tile, tile.clone()))
             elif split in _SPLIT_CODES:
-                lane0, lane1 = self._split_tile(tile, split, lane_stride)
+                lane0, lane1 = self._split_tile(tile, split, lane_stride, valid_shape=valid_shape)
                 queues.to_aiv_split[split][0].append(lane0)
                 queues.to_aiv_split[split][1].append(lane1)
             else:
@@ -1064,12 +1076,17 @@ def _pipe_id_kwarg(kw: dict[str, Any]) -> str:
     return f", pipe_id={pipe_id}" if pipe_id else ""
 
 
-def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any]) -> str:
+def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any], *, valid_shape: str | None = None) -> str:
     # The stride is emitted only when a ragged boundary was rebalanced, so every
     # other kernel keeps the two-argument form.
     stride = _lane_stride_kwarg(kw)
     stride_arg = f", {stride}" if stride else ""
-    return f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}{_pipe_id_kwarg(kw)})"
+    valid_rows_arg = ", split_valid_rows=True" if kw.get("split_valid_rows", False) else ""
+    valid_shape_arg = f", valid_shape={valid_shape}" if valid_shape is not None else ""
+    return (
+        f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}"
+        f"{_pipe_id_kwarg(kw)}{valid_rows_arg}{valid_shape_arg})"
+    )
 
 
 def _handle_aic_initialize_pipe(_a: list[str], kw: dict[str, Any]) -> str:
@@ -1969,6 +1986,13 @@ class TorchCodegen(_ir.IRVisitor):
             return False
         return True
 
+    def _tpush_valid_shape(self, tile_type: _ir.Type) -> str | None:
+        if not isinstance(tile_type, _ir.TileType) or len(tile_type.shape) != 2:
+            return None
+        view = tile_type.get_effective_tile_view()
+        rows, cols = (self._visit_expr_str(dim) for dim in view.valid_shape)
+        return f"({rows}, {cols})"
+
     def visit_call(self, op: _ir.Call) -> None:
         _validate_reference_type(op.type)
         op_name = op.op.name
@@ -1996,6 +2020,9 @@ class TorchCodegen(_ir.IRVisitor):
                     self._expr_result = f"{arg_strs[0]}.mT"
                 else:
                     self._expr_result = arg_strs[0]
+        elif op_name == _ir.get_op("tile.tpush_to_aiv").name and kw.get("split_valid_rows", False):
+            valid_shape = self._tpush_valid_shape(op.args[0].type)
+            self._expr_result = _handle_tpush_to_aiv(arg_strs, kw, valid_shape=valid_shape)
         elif handler is not None:
             self._expr_result = handler(arg_strs, kw)
         elif isinstance(op.op, _ir.GlobalVar):

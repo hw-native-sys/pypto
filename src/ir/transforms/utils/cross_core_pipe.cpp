@@ -30,9 +30,11 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/core_side_ops.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -43,6 +45,19 @@ namespace cross_core_pipe {
 namespace {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
+
+class PipeInitializerCollector : public IRVisitor {
+ public:
+  std::vector<CallPtr> calls;
+
+ private:
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
+      calls.push_back(call);
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+};
 
 struct ConsumerFifo {
   std::vector<const Var*> pops;
@@ -104,6 +119,23 @@ int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::Core
 }
 
 }  // namespace
+
+std::vector<CallPtr> CollectPipeInitializers(const std::vector<StmtPtr>& stmts) {
+  PipeInitializerCollector collector;
+  for (const auto& stmt : stmts) collector.VisitStmt(stmt);
+  return std::move(collector.calls);
+}
+
+MixedPipePtoasOptions CollectMixedPipePtoasOptions(const StmtPtr& body) {
+  MixedPipePtoasOptions options;
+  if (!body) return options;
+  for (const auto& call : CollectPipeInitializers(FlattenBody(body))) {
+    auto& side = IsOp(call, "system.aic_initialize_pipe") ? options.aic : options.aiv;
+    side.plan_memory |= call->GetKwarg<bool>(kAttrPtoasPlanMemory, false);
+    side.buffer_id_sync |= call->GetKwarg<bool>(kAttrPtoasBufferIdSync, false);
+  }
+  return options;
+}
 
 std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr) {
   auto value = transform_utils::EvalConstInt(expr);

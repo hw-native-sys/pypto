@@ -53,6 +53,7 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
@@ -2479,6 +2480,63 @@ class NamedEventPlacementValidator : public IRVisitor {
   }
 };
 
+class OutlinedPipeBufferRewriter : public IRMutator {
+ public:
+  OutlinedPipeBufferRewriter(const std::unordered_set<const Var*>& peer_buffers,
+                             const var_collectors::VarDefUseCollector& uses, const std::string& peer_name)
+      : peer_buffers_(peer_buffers), uses_(uses), peer_name_(peer_name) {}
+
+ protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& assign) override {
+    auto call = As<Call>(assign->value_);
+    const bool is_import = IsOp(call, "system.import_peer_buffer");
+    if (!is_import && !IsOp(call, "system.reserve_buffer")) return assign;
+    if (peer_buffers_.count(assign->var_.get()) && !uses_.var_uses.count(assign->var_.get())) {
+      return MakeBody({}, assign->span_);
+    }
+    if (!is_import || !call->GetKwarg<std::string>("peer_func", "").empty()) return assign;
+
+    auto updated = MutableCopy(call);
+    auto& kwargs = updated->kwargs_;
+    kwargs.erase(std::remove_if(kwargs.begin(), kwargs.end(),
+                                [](const auto& entry) { return entry.first == "peer_func"; }),
+                 kwargs.end());
+    kwargs.emplace_back("peer_func", peer_name_);
+    auto rebound = MutableCopy(assign);
+    rebound->value_ = updated;
+    return rebound;
+  }
+
+ private:
+  const std::unordered_set<const Var*>& peer_buffers_;
+  const var_collectors::VarDefUseCollector& uses_;
+  const std::string& peer_name_;
+};
+
+// Affinity analysis can copy authored pipe buffers to both peers. Keep each
+// declaration where it is used and resolve omitted import peers in the same
+// recursive walk, including pipe setup inside control flow.
+void RewriteOutlinedPipeBuffers(std::vector<StmtPtr>& body, const std::vector<StmtPtr>& peer,
+                                CoreSide peer_side, const std::string& peer_name) {
+  if (body.empty()) return;
+
+  std::unordered_set<const Var*> peer_buffers;
+  const auto initializer = core_side_ops::InitializePipeOp(peer_side);
+  for (const auto& call : cross_core_pipe::CollectPipeInitializers(peer)) {
+    if (!IsOp(call, initializer)) continue;
+    for (const auto& arg : call->args_) {
+      if (auto var = AsVarLike(arg)) peer_buffers.insert(var.get());
+    }
+  }
+
+  var_collectors::VarDefUseCollector uses;
+  if (!peer_buffers.empty()) {
+    for (const auto& stmt : body) uses.VisitStmt(stmt);
+  }
+  OutlinedPipeBufferRewriter rewriter(peer_buffers, uses, peer_name);
+  body = FlattenBody(rewriter.VisitStmt(MakeBody(body, body.front()->span_)));
+}
+
 struct ExpandedKernel {
   FunctionPtr aic_func;
   FunctionPtr aiv_func;
@@ -2630,6 +2688,24 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap, program);
 
+  const auto options = cross_core_pipe::CollectMixedPipePtoasOptions(func->body_);
+  auto core_attrs = func->attrs_;
+  auto apply_ptoas_option = [&](const char* attr, bool aic_requested, bool aiv_requested) {
+    CHECK_SPAN(aic_requested == aiv_requested, func->span_)
+        << "Mixed kernel initializers must agree on " << attr;
+    if (!aic_requested) return;
+    auto existing = std::find_if(core_attrs.begin(), core_attrs.end(),
+                                 [attr](const auto& entry) { return entry.first == attr; });
+    if (existing == core_attrs.end()) {
+      core_attrs.emplace_back(attr, true);
+    } else {
+      existing->second = true;
+    }
+  };
+  apply_ptoas_option(kAttrPtoasPlanMemory, options.aic.plan_memory, options.aiv.plan_memory);
+  apply_ptoas_option(cross_core_pipe::kAttrPtoasBufferIdSync, options.aic.buffer_id_sync,
+                     options.aiv.buffer_id_sync);
+
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery
   // failed to recognise it — fail loudly here, not later in codegen.
@@ -2638,6 +2714,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";
+  RewriteOutlinedPipeBuffers(aic_final, aiv_final, CoreSide::AIV, aiv_name);
+  RewriteOutlinedPipeBuffers(aiv_final, aic_final, CoreSide::AIC, aic_name);
   // Pipe depths from pl.cross_core_slot, propagated as function attrs by the
   // outliner. Omission preserves the default transport depth and local footprint.
   std::optional<int> slot_num_override =
@@ -2736,7 +2814,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   (void)aic_clone_map_unused;
   auto aic_func = std::make_shared<Function>(aic_name, aic_params, func->param_directions_,
                                              std::vector<TypePtr>{}, aic_cloned_body, func->span_,
-                                             FunctionType::AIC, std::nullopt, std::nullopt, func->attrs_);
+                                             FunctionType::AIC, std::nullopt, std::nullopt, core_attrs);
 
   // Create AIV function with deep clone (fresh Vars for all params and locals,
   // ensuring no shared Var pointers with AIC for structural equality)
@@ -2790,7 +2868,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(aiv_body_stmt, aiv_map);
   (void)aiv_clone_map_unused;
-  auto aiv_attrs = func->attrs_;
+  auto aiv_attrs = std::move(core_attrs);
   if (needs_dual_aiv_dispatch) {
     aiv_attrs.erase(std::remove_if(aiv_attrs.begin(), aiv_attrs.end(),
                                    [](const auto& kv) { return kv.first == kAttrDualAivDispatch; }),

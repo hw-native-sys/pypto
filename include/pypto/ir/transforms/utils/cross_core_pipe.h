@@ -55,6 +55,23 @@ struct AutomaticPipeSetup {
   std::vector<StmtPtr> aiv_stmts;
 };
 
+inline constexpr auto kAttrPtoasBufferIdSync = "ptoas_buffer_id_sync";
+
+struct PtoasPipeOptions {
+  bool plan_memory = false;
+  bool buffer_id_sync = false;
+};
+
+struct MixedPipePtoasOptions {
+  PtoasPipeOptions aic;
+  PtoasPipeOptions aiv;
+};
+
+std::vector<CallPtr> CollectPipeInitializers(const std::vector<StmtPtr>& stmts);
+
+// Collect the module-wide requests for each core side before or after outlining.
+MixedPipePtoasOptions CollectMixedPipePtoasOptions(const StmtPtr& body);
+
 constexpr int kAutoBufferBase = -1;
 
 /// Ring depth an automatically built cross-core pipe gets when the enclosing scope carries no

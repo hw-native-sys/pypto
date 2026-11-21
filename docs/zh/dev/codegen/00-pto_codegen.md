@@ -42,6 +42,15 @@ ISA 将 INT32 中间结果保存在 scratch 中，不会写回输入。
 - **基于 Tile 变量的分配**: 为每个 Tile 变量生成带显式 `addr` 的 `pto.alloc_tile` 操作
 - **类型 (Type) 感知转换**: 从 TileType 元数据推导 tile_buf/tensor_view 类型
 
+### 同步模式选择
+
+自动提取的 A5 混合内核可以在 `aic_initialize_pipe` 和
+`aiv_initialize_pipe` 中同时设置 `ptoas_buffer_id_sync=True`，让整个混合模块
+通过 PTOAS 的 `--enable-bufid_sync` 使用 buffer ID 同步。生成的 PTO 会记录这一
+选择，重编产物时使用相同模式。两个初始化器同时设置
+`ptoas_plan_memory=True` 时，由 PTOAS 通过 `--pto-level=level2` 负责该模块的
+片上内存规划。
+
 ### 生成顺序
 
 有限浮点常量使用十进制科学计数法，NaN 和无穷使用目标类型位宽的十六进制位模式。
