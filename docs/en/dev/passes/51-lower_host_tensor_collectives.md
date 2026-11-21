@@ -71,8 +71,9 @@ pld.system.world_size()` loop.
 
 Each generated builtin call carries the collective-specific args and kwarg
 attributes from the source `pld.tensor.*` call.  Window-bound INOUT tensors
-are threaded through as-is; scalar kwarg values (`op`, `root`, `dtype`, and
-mesh-AllReduce `core_num`) are forwarded to the builtin. `all_to_all_v`'s
+are threaded through as-is; scalar kwarg values (`op`, `root`, `dtype`, and the
+`core_num` of allreduce, broadcast, and reduce_scatter) are forwarded to the
+builtin. `all_to_all_v`'s
 `MAX_RECV` is not a lowering-time attribute: the HOST kernel derives it at
 entry as `target.shape[0] / nranks` (the runtime comm-domain size), so no
 per-`MAX_RECV` codegen variant mangling is needed and the block layout stays
@@ -133,6 +134,15 @@ core count — the builtin is submitted as a standalone AIV kernel with
 would hang instead of failing. The bound is skipped when no backend is
 configured (pure-IR tests). Multicore is mesh-only: `mode="ring"` requires
 `core_num == 1`.
+
+`pld.tensor.broadcast` and `pld.tensor.reduce_scatter` use the same block-indexed
+multicore launch for their HOST builtins. Their `core_num` is forwarded, a
+rank-1 signal is valid only when `core_num == 1`, and a rank-2 signal needs a
+constant `signal_stride >= core_num` (a wider stride is accepted). They are
+submitted with `require_sync_start` and the same AIV capacity bound as mesh
+allreduce: an over-subscribed launch is rejected before it can be admitted and
+hang. InCore calls must keep `core_num == 1`; use an enclosing `pl.spmd` for
+InCore multi-core execution.
 
 Ring allreduce (`mode="ring"`) uses a rank-2 signal shaped
 `[2 * (NR - 1) + 1, NR]`, whose `shape[0]` must equal `2 * (NR - 1) + 1` when both

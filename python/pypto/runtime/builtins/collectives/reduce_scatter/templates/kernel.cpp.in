@@ -24,6 +24,11 @@
 #endif
 #endif
 
+// Keep this after the qualifier fallbacks so hardware builds retain the
+// [aicore] entry annotation while using simpler's logical SPMD context.
+// get_block_idx/get_block_num (RFC #2521 plan 85/B6b) come from here.
+#include "intrinsic.h"
+
 #include <pto/pto-inst.hpp>
 #include "tensor.h"
 #include "platform_comm/comm_context.h"
@@ -78,6 +83,9 @@ namespace {
 // SIZE is unconstrained.
 static constexpr int64_t kTileCount = 256;
 static constexpr int kMaxSupportedRanks = 16;
+static constexpr int kTransferAlignmentBytes = 32;
+static_assert(kTransferAlignmentBytes % sizeof({{dtype_cpp}}) == 0,
+              "transfer alignment must be a whole number of elements");
 
 // UB addresses of the two tiles. 64KB apart, so they never overlap at any
 // supported tile width.
@@ -108,8 +116,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
+  int32_t block_idx = get_block_idx(args);
+  int32_t block_num = get_block_num(args);
 
-  if (nranks <= 0 || nranks > kMaxSupportedRanks || target_tensor->ndims < 2) {
+  if (nranks <= 0 || nranks > kMaxSupportedRanks || target_tensor->ndims < 2 || block_num <= 0 ||
+      block_idx < 0 || block_idx >= block_num) {
     pipe_barrier(PIPE_ALL);
     return;
   }
@@ -129,6 +140,22 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ int32_t *signal_base =
       reinterpret_cast<__gm__ int32_t *>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
 
+  // RFC #2521 plan 85/B6b: same block-indexed signal-lane contract as
+  // allreduce's mesh kernel (#2160) — every signal lane is addressed as
+  // `peer * signal_stride + block_idx`, so a block index at or beyond
+  // `signal_stride` would run off the end of its own peer row. Clamp the
+  // participating block count instead of letting that corruption happen
+  // silently; `signal_stride` is identical on every rank, so the same
+  // minimum on each rank keeps the protocol symmetric.
+  const int64_t signal_stride =
+      signal_tensor->ndims == 1 ? 1 : static_cast<int64_t>(signal_tensor->shapes[1]);
+  const int32_t active_blocks =
+      block_num < static_cast<int32_t>(signal_stride) ? block_num : static_cast<int32_t>(signal_stride);
+  if (block_idx >= active_blocks) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
 #if defined(__DAV_VEC__)
   set_mask_norm();
   set_vector_mask(-1, -1);
@@ -144,15 +171,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   // Phase 1: ready barrier — publish that this rank's input rows are written,
   // and wait until every peer's are too, before any remote read starts.
+  // Block-indexed lane: `block_idx` picks this block's column in the
+  // [peer, signal_stride] signal, so concurrent blocks never share a cell.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
+    pto::comm::Signal cell(
+        CommRemotePtr(comm_ctx, signal_base + my_rank * signal_stride + block_idx, peer));
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal cell(signal_base + peer);
+    pto::comm::Signal cell(signal_base + peer * signal_stride + block_idx);
     pto::comm::TWAIT(cell, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
     dcci((__gm__ void *)0, cache_line_t::ENTIRE_DATA_CACHE);
   }
@@ -162,25 +192,38 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // no peer ever reads row r there, so reads and writes are region-disjoint
   // across ranks. That is why the store can stay inside the tile loop and the
   // read-complete barrier below runs once for the whole row — the credit total
-  // is a constant 2 no matter how many tiles the row splits into.
-  for (int64_t off = 0; off < row_elems; off += kTileCount) {
+  // is a constant 2 no matter how many tiles the row splits into. Each block
+  // owns a disjoint, strided slice of the row (`active_blocks`-wide stride),
+  // so blocks are also region-disjoint from each other within the row.
+  for (int64_t off = static_cast<int64_t>(block_idx) * kTileCount; off < row_elems;
+       off += static_cast<int64_t>(active_blocks) * kTileCount) {
     const int64_t remaining = row_elems - off;
     const int64_t chunk = remaining < kTileCount ? remaining : kTileCount;
+    const int chunk_i = static_cast<int>(chunk);
+    const int transfer_chunk =
+        ((chunk_i * static_cast<int>(sizeof({{dtype_cpp}})) + kTransferAlignmentBytes - 1) /
+         kTransferAlignmentBytes) *
+        (kTransferAlignmentBytes / static_cast<int>(sizeof({{dtype_cpp}})));
 
-    RowSlice my_slice(my_row + off, RowShape(1, 1, 1, 1, chunk),
-                      RowStride(row_elems, row_elems, row_elems, row_elems, 1));
-    DataTile acc(1, chunk);
+    RowSlice my_load_slice(my_row + off, RowShape(1, 1, 1, 1, transfer_chunk),
+                           RowStride(row_elems, row_elems, row_elems, row_elems, 1));
+    RowSlice my_store_slice(my_row + off, RowShape(1, 1, 1, 1, chunk),
+                            RowStride(row_elems, row_elems, row_elems, row_elems, 1));
+    DataTile acc(1, kTileCount);
     TASSIGN(acc, kAccTileAddr);
+    acc.SetValidShape(1, transfer_chunk);
 
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    TLOAD(acc, my_slice);
+    TLOAD(acc, my_load_slice);
     set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
 
     for (int64_t peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
-      DataTile recv(1, chunk);
+      DataTile recv(1, kTileCount);
       TASSIGN(recv, kRecvTileAddr);
-      RowSlice peer_slice(CommRemotePtr(comm_ctx, my_row + off, peer), RowShape(1, 1, 1, 1, chunk),
+      recv.SetValidShape(1, transfer_chunk);
+      RowSlice peer_slice(CommRemotePtr(comm_ctx, my_row + off, peer),
+                          RowShape(1, 1, 1, 1, transfer_chunk),
                           RowStride(row_elems, row_elems, row_elems, row_elems, 1));
       wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
       TLOAD(recv, peer_slice);
@@ -194,7 +237,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-    TSTORE(my_slice, acc);
+    acc.SetValidShape(1, chunk_i);
+    TSTORE(my_store_slice, acc);
     // Order this store ahead of the next tile's load of the same row.
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     dcci((__gm__ void *)(my_row + off), cache_line_t::SINGLE_CACHE_LINE);
@@ -206,13 +250,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // this window, until every peer has finished reading from it.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
+    pto::comm::Signal cell(
+        CommRemotePtr(comm_ctx, signal_base + my_rank * signal_stride + block_idx, peer));
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal cell(signal_base + peer);
+    pto::comm::Signal cell(signal_base + peer * signal_stride + block_idx);
     pto::comm::TWAIT(cell, static_cast<int32_t>(2), pto::comm::WaitCmp::GE);
     dcci((__gm__ void *)0, cache_line_t::ENTIRE_DATA_CACHE);
   }
@@ -223,7 +268,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // Set(0) here would wipe it and deadlock that peer's following wait.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal cell(signal_base + peer);
+    pto::comm::Signal cell(signal_base + peer * signal_stride + block_idx);
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(-2), pto::comm::NotifyOp::AtomicAdd);
   }
