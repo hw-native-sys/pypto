@@ -106,7 +106,7 @@ Host execution and device compilation do not substitute for onboard acceptance.
 | Coordinates and extents, lane ID | Existing DSL/IR/native lowering | No duplicate implementation needed |
 | `get_clock32/64` | Not exposed | Pinned PTOAS treats reads as pure and merges distinct samples; see below |
 | Runtime trap/assert | DSL/IR/native lowering implemented | Device termination and host error propagation unverified |
-| `keep/resume` | Not exposed | Requires paired launch representation, slot verification and per-thread lifetime enforcement |
+| `keep/resume` | Native paired-object compilation validated; DSL/IR not exposed | Requires paired launch representation, slot verification and per-thread lifetime enforcement |
 | `addui_extended`, `mul_extended` | No direct tuple-result API | Existing arithmetic/bit operations and `mulhi` express portions; do not claim full type coverage |
 | `ceildiv`, `select` | Can be expressed using arithmetic/control flow for supported scalars | Direct API absence is not itself missing computation |
 | Packed values and short vectors | Deferred task 11.6 | Not a prerequisite for 11.7 |
@@ -138,8 +138,21 @@ Compile inside a `pto.simt_entry` function with PTOAS v0.77 and `--pto-arch=a5
 
 ### Cross-entry state blocker
 
-Native `keep/resume` compile individually, but their contract requires adjacent
-SIMT entries in the same outer launch sequence. Executable PyPTO bundles emit a
+Native `keep/resume` require adjacent SIMT entries in the same outer launch
+sequence. A paired native fixture now passes LLVM lowering and production device
+compilation/linking for i32/i64/f16/bf16/f32. These operations emit inline assembly;
+the runtime routes them through PTOAS's native device-object emission so launch
+sizes receive PTOAS validation/repair, then restores logical export names with
+linker aliases. The regression checks both launch sizes against the linked entry
+symbols, including the two-word i64 state slot. Run it without an NPU using:
+
+```bash
+PYPTO_RUN_VPTO_VF_VALIDATION=1 python -m pytest \
+  tests/ut/codegen/test_simt_codegen.py -k keep_resume --require-ptoas -v
+```
+
+This resolves the compilation prerequisite, not the public state-lifetime
+contract or numerical acceptance. Executable PyPTO bundles still emit a
 separate module and outer wrapper for each helper. They currently carry memory
 effects, not a typed per-thread state dependency between helper artifacts.
 Exposing the instructions alone would leave launch pairing and state lifetime

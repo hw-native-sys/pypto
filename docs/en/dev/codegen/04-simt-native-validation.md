@@ -31,9 +31,12 @@ The probe checks GM address spaces, thread/register annotations, direct
 `LDG`/`STG` without UB staging, retention of the SIMT entry, and agreement
 between the linked callee size and the `VF_SIMT` size operand. LLVM export
 bypasses PTOAS' object-emission size patcher. This intrinsic-only fixture must
-compile correctly without patching. Arbitrary SIMT bodies, especially inline
-assembly that needs size repair, require a separate supported object-emission
-contract before they can use this path. P3 rejects inline assembly explicitly.
+compile correctly without patching. SIMT helpers containing inline assembly
+use the separate native object-emission path with launch-size validation/repair
+described in [SIMT lowering](05-simt-lowering.md). The paired `keep/resume`
+regression in `tests/ut/codegen/test_simt_codegen.py` exercises that path through
+the production compiler and final device linking for i32/i64/f16/bf16/f32.
+It checks both linked launch sizes; it does not execute on an NPU.
 
 ## Focused acceptance
 

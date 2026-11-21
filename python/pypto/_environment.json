@@ -1,6 +1,11 @@
 {
   "dynamic_reads": [
     {
+      "function": "_compile_vpto_helpers",
+      "path": "python/pypto/runtime/kernel_compiler.py",
+      "reason": "Forwards the caller environment to native SIMT object compilation while replacing ASCEND_HOME_PATH with the selected SDK root. Actual compiler processes retain loader injection and diagnostics; tool resolution remains classified at its consumer."
+    },
+    {
       "function": "_temporary_env",
       "path": "python/pypto/runtime/device_runner.py",
       "reason": "Restores caller-provided runtime overrides; each actual compilation input still needs classification at its consumer."
