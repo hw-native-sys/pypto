@@ -448,6 +448,7 @@ REGISTER_OP("tile.tpush_to_aiv")
     // Optional partition stride (see tile.aiv_shard); consumed by the torch
     // reference runtime, ignored by PTO codegen.
     .set_attr<int>("lane_stride")
+    .set_attr<bool>("split_valid_rows")
     .set_attr<int>("id")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);

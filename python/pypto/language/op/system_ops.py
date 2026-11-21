@@ -329,6 +329,7 @@ def tpush_to_aiv(
     tile: Tile,
     *,
     split: int,
+    split_valid_rows: bool = False,
     lane_stride: int | None = None,
     id: int | None = None,
     span: Span | None = None,
@@ -344,12 +345,22 @@ def tpush_to_aiv(
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
             axes over an odd extent). Selects the axis along which the two AIV
             lanes divide the tile, and how their extents relate; 0 sends it whole.
+        split_valid_rows: On A5, divide an FP32 Acc tile at half its actual valid
+            rows. Use split=1 with a positive even valid row count and full columns.
+            Each AIV lane receives valid_rows // 2 rows at the start of its tile.
         lane_stride: Partition stride carried when a ragged boundary was balanced
             across the two AIV lanes; omit for the default box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
-    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, lane_stride=lane_stride, id=id, span=span)
+    return _ir_ops.tpush_to_aiv(
+        tile.unwrap(),
+        split=split,
+        split_valid_rows=split_valid_rows,
+        lane_stride=lane_stride,
+        id=id,
+        span=span,
+    )
 
 
 def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
@@ -473,12 +484,13 @@ def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None 
     return Scalar(DataType.INT32, call)
 
 
-def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Scalar:
+def import_peer_buffer(*, name: str, peer_func: str = "", span: Span | None = None) -> Scalar:
     """Import a buffer from a peer function in the same group.
 
     Args:
         name: Buffer name to import (must match peer's reserve_buffer name).
-        peer_func: Name of the peer function that owns the buffer.
+        peer_func: Name of the peer function that owns the buffer. Omit it in
+            an automatically outlined mixed kernel to select the other member.
         span: Optional source span.
 
     Returns:

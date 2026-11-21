@@ -790,7 +790,15 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
     def _row_narrowed_acc_push_program(
-        self, valid_rows, valid_cols, compact, split=0, rows=64, backend_type=BackendType.Ascend910
+        self,
+        valid_rows,
+        valid_cols,
+        compact,
+        split=0,
+        rows=64,
+        backend_type=BackendType.Ascend910,
+        *,
+        split_valid_rows=False,
     ):
         """One AIC function that pushes a row-narrowed Acc tile into the C2V FIFO.
 
@@ -808,11 +816,12 @@ class TestCrossCoreTpushTpopCodegen:
         shape = ir.MakeTuple([rows, cols], span)
         valid_shape = ir.MakeTuple([v_rows, v_cols], span)
 
-        src = ir.Var("src", ir.TensorType([box_rows, 128], pl.INT32), span)
+        dtype = pl.FP32 if split_valid_rows else pl.INT32
+        src = ir.Var("src", ir.TensorType([box_rows, 128], dtype), span)
         acc_memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, pl.INT64, span), box_rows * 128 * 4, 0)
         acc_type = ir.TileType(
             [rows, cols],
-            pl.INT32,
+            dtype,
             acc_memref,
             ir.TileView(valid_shape=[v_rows, v_cols], compact=compact),
             ir.MemorySpace.Acc,
@@ -825,7 +834,10 @@ class TestCrossCoreTpushTpopCodegen:
             acc_type,
             span,
         )
-        push_call = ir.Call(ir.Op("tile.tpush_to_aiv"), [acc_tile], {"split": split}, ir.UnknownType(), span)
+        kwargs = {"split": split}
+        if split_valid_rows:
+            kwargs["split_valid_rows"] = True
+        push_call = ir.Call(ir.Op("tile.tpush_to_aiv"), [acc_tile], kwargs, ir.UnknownType(), span)
         producer = ir.Function(
             "narrow_acc_producer",
             [(src, ir.ParamDirection.In)]
@@ -936,6 +948,33 @@ class TestCrossCoreTpushTpopCodegen:
         ):
             self._row_narrowed_acc_push_program(
                 16, 128, ir.CompactMode.normal, split=1, backend_type=BackendType.Ascend950
+            )
+
+    @pytest.mark.parametrize("valid_rows", [16, None])
+    def test_hardware_split_at_valid_rows_preserves_accumulator_pitch(self, valid_rows):
+        code = self._row_narrowed_acc_push_program(
+            valid_rows,
+            128,
+            ir.CompactMode.normal,
+            split=1,
+            backend_type=BackendType.Ascend950,
+            split_valid_rows=True,
+        )
+        assert "pto.tpush_to_aiv" in code
+        assert "pto.set_validshape" not in code
+
+    @pytest.mark.parametrize(
+        "rows, cols, error", [(17, 128, "even row count"), (16, 64, "full valid columns")]
+    )
+    def test_hardware_split_at_valid_rows_rejects_invalid_extents(self, rows, cols, error):
+        with pytest.raises(ValueError, match=error):
+            self._row_narrowed_acc_push_program(
+                rows,
+                cols,
+                ir.CompactMode.normal,
+                split=1,
+                backend_type=BackendType.Ascend950,
+                split_valid_rows=True,
             )
 
     def test_hardware_split_acc_to_vec_non_compact_transport_keeps_the_full_box(self):
