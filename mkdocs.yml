@@ -262,6 +262,7 @@ nav:
       - en/api/array.md
       - en/api/prefetch.md
       - en/api/optimizations.md
+      - en/api/distributed.md
   - Reference:
       - en/reference/index.md
       - PTO ISA:
