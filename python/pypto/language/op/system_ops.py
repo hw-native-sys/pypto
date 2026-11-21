@@ -45,6 +45,8 @@ __all__ = [
     "SyncAllMode",
     "sync_src",
     "sync_dst",
+    "get_buf",
+    "rls_buf",
     "set_flag",
     "wait_flag",
     "sync_set",
@@ -114,6 +116,46 @@ def wait_flag(
     """Block ``dst_pipe`` until the matching source event is signalled."""
     event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
+
+
+def get_buf(buf_id: IntLike, *, pipe: PipeType, mode: int = 0, span: Span | None = None) -> Call:
+    """Acquire a same-core local buffer on A5 using a Buffer-ID.
+
+    Args:
+        buf_id: Static integer in [0, 31], or an INDEX expression (including
+            INDEX constants). The kernel author must keep dynamic IDs in range
+            and pair acquisitions/releases on every control-flow path.
+        pipe: Concrete MTE1, MTE2, MTE3, M, V, S or FIX endpoint; ALL is rejected.
+        mode: Static integer; only 0 is supported.
+        span: Optional source span for debugging (auto-captured if omitted).
+
+    Returns:
+        A side-effecting, no-result Call for use as a statement. Requires an
+        explicitly typed AIC/AIV kernel; A2/A3 and mixed kernels are unsupported.
+        Automatic event synchronization remains enabled in the default pipeline.
+    """
+    id_expr = buf_id.unwrap() if isinstance(buf_id, Scalar) else buf_id
+    return _ir_ops.get_buf(id_expr, pipe=pipe, mode=mode, span=span)
+
+
+def rls_buf(buf_id: IntLike, *, pipe: PipeType, mode: int = 0, span: Span | None = None) -> Call:
+    """Release a same-core local buffer on A5 using a Buffer-ID.
+
+    Args:
+        buf_id: Static integer in [0, 31], or an INDEX expression (including
+            INDEX constants). The kernel author must keep dynamic IDs in range
+            and pair acquisitions/releases on every control-flow path.
+        pipe: Concrete MTE1, MTE2, MTE3, M, V, S or FIX endpoint; ALL is rejected.
+        mode: Static integer; only 0 is supported.
+        span: Optional source span for debugging (auto-captured if omitted).
+
+    Returns:
+        A side-effecting, no-result Call for use as a statement. Requires an
+        explicitly typed AIC/AIV kernel; A2/A3 and mixed kernels are unsupported.
+        Automatic event synchronization remains enabled in the default pipeline.
+    """
+    id_expr = buf_id.unwrap() if isinstance(buf_id, Scalar) else buf_id
+    return _ir_ops.rls_buf(id_expr, pipe=pipe, mode=mode, span=span)
 
 
 def sync_set(

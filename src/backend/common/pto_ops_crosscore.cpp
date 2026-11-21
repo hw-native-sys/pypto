@@ -34,6 +34,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -610,6 +611,28 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
   return "";
 }
 
+static std::string MakeBufferSyncCodegenPTO(const char* action, const CallPtr& op,
+                                            codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  const auto target = codegen.GetBackendHandler()->GetPtoTargetArch();
+  CHECK_SPAN(target == "a5", op->span_) << op->op_->name_ << " requires A5/Ascend950, got target " << target;
+  CHECK_SPAN(codegen.IsAICFunction() || codegen.IsAIVFunction(), op->span_)
+      << op->op_->name_ << " requires an explicitly typed AIC/AIV kernel";
+  // Raw Call construction and constant folding can bypass initial deduction.
+  // Reuse the registration contract instead of inventing a second validator.
+  const auto& entry = ir::OpRegistry::GetInstance().GetEntry(op->op_->name_);
+  (void)entry.GetDeduceType()(op->args_, op->kwargs_);
+  INTERNAL_CHECK_SPAN(op->args_.size() <= 1, op->span_) << "Buffer-ID operand count";
+  const bool dynamic = !op->args_.empty();
+  const auto pipe = static_cast<ir::PipeType>(op->GetKwarg<int>("pipe"));
+  const std::string id =
+      dynamic ? codegen.GetExprAsCode(op->args_[0]) : std::to_string(op->GetKwarg<int>("buf_id"));
+  codegen.Emit(std::string("pto.") + action + (dynamic ? "_dyn" : "") + " \"PIPE_" +
+               ir::PipeTypeToString(pipe) + "\", " + id + ", " +
+               std::to_string(op->GetKwarg<int>("mode", 0)));
+  return "";
+}
+
 static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
@@ -683,6 +706,12 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
   });
   reg("system.aiv_initialize_pipe", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeInitializePipeCodegenPTO("aiv", op, codegen);
+  });
+  reg("system.get_buf", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeBufferSyncCodegenPTO("get_buf", op, codegen);
+  });
+  reg("system.rls_buf", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeBufferSyncCodegenPTO("rls_buf", op, codegen);
   });
   reg("system.sync_set", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCrossCoreSyncCodegenPTO("set", op, codegen);

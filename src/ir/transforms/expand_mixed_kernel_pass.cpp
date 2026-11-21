@@ -2911,6 +2911,18 @@ bool FunctionCallsFunction(const FunctionPtr& func, const std::string& callee_na
   return false;
 }
 
+// Buffer-ID endpoints alone do not identify the owning core (e.g. MTE2).
+// Until mixed-kernel placement is defined, require author-written AIC/AIV.
+class BufferSyncPlacementValidator : public IRVisitor {
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    CHECK_SPAN(!(IsOp(op, "system.get_buf") || IsOp(op, "system.rls_buf")), op->span_)
+        << op->op_->name_
+        << " requires an explicitly typed AIC/AIV kernel; InCore/mixed placement is unsupported";
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
 }  // namespace
 
 namespace pass {
@@ -2998,6 +3010,9 @@ Pass ExpandMixedKernel() {
         new_functions.push_back(func);
         continue;
       }
+
+      BufferSyncPlacementValidator buffer_sync_validator;
+      buffer_sync_validator.VisitStmt(func->body_);
 
       PackedFp4CrossCoreTransferValidator packed_transfer_validator;
       packed_transfer_validator.VisitStmt(func->body_);

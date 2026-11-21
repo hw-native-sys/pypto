@@ -657,6 +657,7 @@ SHARED，两个 kernel 中都会出现。屏障在 **`pl.pipeline` 内被拒绝*
 | `system.cacheinvalid` | 使 tensor 子区域基地址所在的那一条 cache line 失效。参数：`tensor`、`shapes`（N 维）、`offsets`（N 维）。任意区域大小（包括单个元素）都下降为 `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>`；`shapes` 不会让它遍历区域内的所有 cache line。无参数形式使全部 GM cache 失效。 | 无 |
 | `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。属性 `mode` 取 `"hard"`（FFTS，无 operand）或 `"soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |
 | `system.sync_src` | 设置同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
+| `system.get_buf` / `system.rls_buf` | A5 核内 Buffer-ID 获取/释放；[契约与后端要求](05-buffer-id-sync.md) | 静态 `buf_id` 或一个 INDEX operand；`pipe`、整数 `mode=0` |
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.set_flag` / `system.wait_flag` | 显式核内流水线事件 | `src_pipe`、`dst_pipe`、静态 `event_id` 或一个动态 INDEX 操作数；可选 `core_type` |
 | `system.task_invalid` | `TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
