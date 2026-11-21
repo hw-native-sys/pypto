@@ -118,21 +118,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
   __gm__ Tensor *send_counts_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
   __gm__ Tensor *recv_counts_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
-  // args[5] is the CommContext on BOTH rails, and the rank count comes from the
-  // context rather than from a scalar argument:
-  //
-  //   HOST/L3 builtin dispatch : args[5] = CommContext* (the dispatch emits no
-  //                              rank-count scalar for this builtin)
-  //   CHIP/L2 managed task     : args[5] = CommContext* — MaterializeDistTensorCtx
-  //                              appends one ctx per DistributedTensor param;
-  //                              all of them hold the same pointer, and args[6..]
-  //                              are the unread duplicates
-  //
-  // `rankNum` is the domain's rank count: the context is derived per comm
-  // domain, so it is exactly the `domain_size` the dispatch used to pass. One
-  // GM load at entry buys an argument layout — and therefore a kernel source —
-  // that is identical on both rails.
-  __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[5]);
+  // One context for each remote operand, in target/signal/send-count order.
+  __gm__ CommContext* comm_ctx = reinterpret_cast<__gm__ CommContext*>(args[5]);
+  __gm__ CommContext* signal_ctx = reinterpret_cast<__gm__ CommContext*>(args[6]);
+  __gm__ CommContext* counts_ctx = reinterpret_cast<__gm__ CommContext*>(args[7]);
   int nranks = static_cast<int>(comm_ctx->rankNum);
   int32_t block_idx = get_block_idx(args);
   int32_t block_num = get_block_num(args);
@@ -251,7 +240,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // whether block_num is 1 or many — no per-block ordering (e.g. block 0
   // leading the rest) is required for this barrier's own correctness.
   // Threshold GE(1): first of this call's two credit rounds.
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(1));
+  ExchangeBarrier(signal_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(1));
 
   // ==================================================================
   // Phase 2 - scalar counts pull. Barrier A guarantees every peer's send
@@ -290,7 +279,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
       for (int src = 0; src < nranks; ++src) {
         if (src == my_rank) continue;
-        __gm__ int32_t *remote_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
+        __gm__ int32_t *remote_slot = CommRemotePtr(counts_ctx, send_counts_base + my_rank, src);
         int32_t pulled = static_cast<int32_t>(ld_dev(reinterpret_cast<__gm__ uint32_t *>(remote_slot), 0));
         if (pulled > max_recv) pulled = static_cast<int32_t>(max_recv);
         if (pulled < 0) pulled = 0;
@@ -440,7 +429,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   dsb(DSB_DDR);
   // Second credit round: credits accumulate across the call's two barrier
   // phases, so this rendezvous waits for GE(2) rather than GE(1).
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(2));
+  ExchangeBarrier(signal_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(2));
 
   // Credit epilogue: this block added +1 (A) and +1 (B) to every peer's lane;
   // drop both in ONE AtomicAdd(-2) per lane. Never reset to zero - a credit

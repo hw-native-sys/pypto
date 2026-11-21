@@ -64,8 +64,9 @@ return data
 SDMA、URMA、RDMA、CCU。CCU 槽位扩展了此前的 1088 字节布局，rank 和 window 的偏移保持不变。
 该变化是全局的（包括 A2/A3 构建），codegen 与 runtime 必须一起
 升级。异步 helper 通过 `comm_workspace<CommWorkspaceKind::URMA>(*ctx)` 读取
-URMA workspace，并要求通信域申请 `workspace_engines=("urma",)`（目前为程序级
-保守策略）。
+URMA workspace，并要求通信域申请 `workspace_engines=("urma",)`。
+`MaterializeCommDomainScopes` 将该需求追踪到远端 buffer，并与 MTE buffer 分到不同域；
+同一分配同时被两类原语使用时直接报错。
 
 **失败诊断。** 容量按 `分配 >= 窗口视图 >= 传输区域` 传递地约束。窗口具化时，
 其连续布局字节数（`product(shape) * dtype_bytes`）必须不超过分配的逻辑大小；即使程序只访问前缀，

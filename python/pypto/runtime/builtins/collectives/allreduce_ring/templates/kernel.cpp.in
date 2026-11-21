@@ -18,7 +18,8 @@
 //   tensor(0) = data   window-bound FP32 buffer (InOut)
 //   tensor(1) = signal window-bound INT32 matrix [2*(NR-1) + 1, NR] (InOut)
 //   scalar(0) = nranks
-//   scalar(1) = CommContext device pointer
+//   scalar(1) = data CommContext device pointer
+//   scalar(2) = signal CommContext device pointer
 //
 // Each rank's data buffer holds numel elements (product of tensor shapes). The
 // ring partitions data into NR balanced, potentially ragged chunks — chunk r
@@ -183,6 +184,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
+  __gm__ CommContext *signal_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
 
   int64_t numel = 1;
   for (uint32_t dim = 0; dim < data_tensor->ndims; ++dim) {
@@ -257,7 +259,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // guarantees the left neighbour's previous-step push has landed before this
   // rank reads its own slot, and that every rank has drained its own pushes.
   for (int step = 1; step < nranks; ++step) {
-    StepBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    StepBarrier(signal_ctx, signal_base + round * signal_cols, my_rank, nranks);
     ++round;
 
     const int right = (my_rank + 1) % nranks;
@@ -292,7 +294,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // chunk value is already the fully reduced sum).  The receiver does nothing
   // locally; the push performs the store.
   for (int step = 1; step < nranks; ++step) {
-    StepBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    StepBarrier(signal_ctx, signal_base + round * signal_cols, my_rank, nranks);
     ++round;
 
     const int right = (my_rank + 1) % nranks;
@@ -324,7 +326,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // (and drained) before any rank returns to the host — otherwise a fast rank
   // could return, have its buffer reused by the next host statement, and
   // corrupt a slow peer's pending read of the pushed data.
-  StepBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+  StepBarrier(signal_ctx, signal_base + round * signal_cols, my_rank, nranks);
 
   // Self-clearing epilogue: restore every used barrier row to 0 so the signal is
   // reusable across calls (the InCore credit-barrier protocol).  The credits a

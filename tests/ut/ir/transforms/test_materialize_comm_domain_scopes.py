@@ -204,8 +204,8 @@ def _assert_rank2_signal_type(value: ir.Expr, world_size_name: str) -> None:
 
 @pytest.mark.parametrize("pre_materialized", [False, True])
 @pytest.mark.parametrize("uses_urma", [False, True])
-def test_program_wide_engine_requirements(uses_urma, pre_materialized):
-    """Even an uncalled function contributes engines to every host domain."""
+def test_uncalled_collective_does_not_provision_domains(uses_urma, pre_materialized):
+    """Only uses reaching an allocation contribute its engine requirements."""
 
     @pl.program
     class Before:
@@ -246,17 +246,11 @@ def test_program_wide_engine_requirements(uses_urma, pre_materialized):
     after = passes.materialize_comm_domain_scopes()(program)
     scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
     assert len(scopes) == 2
-    assert all(list(scope.engines) == (["urma"] if uses_urma else []) for scope in scopes)
+    assert all(list(scope.engines) == [] for scope in scopes)
 
 
-def test_put_async_requests_the_urma_engine():
-    """An async transfer anywhere in the program provisions URMA on every domain.
-
-    The URMA descriptor is fixed at window-allocation time and the transfer has
-    no synchronous fallback, so a host domain that omits the engine would abort
-    at run time. The requirement therefore has to reach the IR ``engines``
-    field here — codegen only renders what this pass records.
-    """
+def test_uncalled_put_async_does_not_request_engines():
+    """An uncalled async transfer has no allocation to provision."""
 
     @pl.program
     class Before:
@@ -285,10 +279,10 @@ def test_put_async_requests_the_urma_engine():
     after = passes.materialize_comm_domain_scopes()(program)
     scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
     assert len(scopes) == 2
-    assert all(list(scope.engines) == ["urma"] for scope in scopes)
+    assert all(list(scope.engines) == [] for scope in scopes)
 
 
-def test_get_async_requests_the_urma_engine():
+def test_uncalled_get_async_does_not_request_engines():
     """GET is the second async op the engine scan must recognise."""
 
     @pl.program
@@ -318,7 +312,7 @@ def test_get_async_requests_the_urma_engine():
     after = passes.materialize_comm_domain_scopes()(program)
     scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
     assert len(scopes) == 2
-    assert all(list(scope.engines) == ["urma"] for scope in scopes)
+    assert all(list(scope.engines) == [] for scope in scopes)
 
 
 def test_single_alloc_all_devices_world_size_loop():
@@ -2485,7 +2479,6 @@ def test_host_and_device_windows_have_separate_domains():
                         memory_source="host",
                     ),
                 ],
-                engines=["urma"],
             ):
                 with pl._dump.comm_domain(
                     name="comm_d1",
@@ -2540,7 +2533,7 @@ def test_host_and_device_windows_have_separate_domains():
     scope = _get_func(after, "host").body
     assert isinstance(scope, ir.CommDomainScopeStmt)
     assert [slot.memory_source for slot in scope.slots] == ["host", "host"]
-    assert list(scope.engines) == ["urma"]
+    assert list(scope.engines) == []
     assert scope.slots[0].init == "engram_l1"
     ir.assert_structural_equal(
         scope.slots[0], ir.deserialize(ir.serialize(scope.slots[0])), enable_auto_mapping=True

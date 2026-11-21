@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/collective_operand_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/window_alias_utils.h"
 #include "pypto/ir/type.h"
@@ -79,9 +80,6 @@ static constexpr size_t kMaxSupportedRanks = 16;
       << "LowerHostTensorCollectives: " << context << " must be DistributedTensorType";
   INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), expr->span_)
       << "LowerHostTensorCollectives: " << context << " must have materialized WindowBuffer back-references";
-  CHECK_SPAN((*dist_type->window_buffer_)->memory_source_ == "device", expr->span_)
-      << "Host communication windows require URMA for peer access; " << context
-      << " belongs to an MTE collective, which requires Device windows";
   return *dist_type->window_buffer_;
 }
 
@@ -96,30 +94,6 @@ static constexpr size_t kMaxSupportedRanks = 16;
       std::make_shared<const DistributedTensorType>(lhs_type->shape_, lhs_type->dtype_, lhs_type->memref_,
                                                     lhs_type->tensor_view_, src_type->window_buffer_);
   return std::make_shared<Var>(old_var->name_hint_, new_type, old_var->span_);
-}
-
-[[nodiscard]] bool ScopeContainsSlot(const CommDomainScopeStmtPtr& scope, const WindowBufferPtr& wb) {
-  for (const auto& slot : scope->slots_) {
-    if (slot.get() == wb.get()) return true;
-  }
-  return false;
-}
-
-[[nodiscard]] CommDomainScopeStmtPtr FindScopeForBuffers(
-    const std::vector<CommDomainScopeStmtPtr>& scope_stack, const std::vector<NamedWindowBuffer>& buffers) {
-  INTERNAL_CHECK(!buffers.empty()) << "LowerHostTensorCollectives: scope lookup needs at least one buffer";
-  for (auto it = scope_stack.rbegin(); it != scope_stack.rend(); ++it) {
-    const auto& scope = *it;
-    bool all_present = true;
-    for (const auto& named : buffers) {
-      if (!ScopeContainsSlot(scope, named.buffer)) {
-        all_present = false;
-        break;
-      }
-    }
-    if (all_present) return scope;
-  }
-  return nullptr;
 }
 
 // broadcast's `root` kwarg selects a specific rank; the type deducer only
@@ -617,9 +591,9 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
 class LowerHostTensorCollectivesMutator : public IRMutator {
  public:
   StmtPtr VisitStmt_(const CommDomainScopeStmtPtr& op) override {
-    scope_stack_.push_back(op);
+    for (const auto& slot : op->slots_) buffer_scopes_[slot.get()] = op;
     auto new_body = VisitStmt(op->body_);
-    scope_stack_.pop_back();
+    for (const auto& slot : op->slots_) buffer_scopes_.erase(slot.get());
     if (new_body.get() == op->body_.get()) return op;
     auto result = MutableCopy(op);
     result->body_ = new_body;
@@ -662,20 +636,27 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
                           const std::vector<std::string>& leading_comments) {
     const auto* rule = LookupHostCollectiveRule(call->op_->name_);
     INTERNAL_CHECK(rule) << "LowerHostTensorCollectives: missing rule for " << call->op_->name_;
-    INTERNAL_CHECK_SPAN(!scope_stack_.empty(), call->span_)
+    INTERNAL_CHECK_SPAN(!buffer_scopes_.empty(), call->span_)
         << "LowerHostTensorCollectives: " << call->op_->name_ << " must appear inside a CommDomainScopeStmt";
     for (const auto& [arg_idx, role] : rule->host_bound_args) {
       CheckHostWindowBoundArg(call->args_[arg_idx], call->op_->name_.c_str(), role);
     }
     auto buffers = rule->scope_buffers(call);
     CheckPairwiseDistinctWindows(buffers, call->span_, call->op_->name_.c_str());
-    auto scope = FindScopeForBuffers(scope_stack_, buffers);
-    INTERNAL_CHECK_SPAN(scope, call->span_) << "LowerHostTensorCollectives: " << call->op_->name_
-                                            << " window buffers must resolve to the same comm-domain scope";
-    return EmitPerDeviceBuiltinCalls(call, *rule, scope, span, leading_comments);
+    // Schedule on the data/target domain (signal for a pure barrier).
+    // Every remote operand carries its own context; domain compatibility is
+    // the caller's responsibility, not a same-scope compiler restriction.
+    auto roles = GetCollectiveOperandRoles(call->op_);
+    INTERNAL_CHECK_SPAN(roles.has_value(), call->span_) << "Missing collective operand roles";
+    const auto launch_buffer = GetWindowBuffer(call->args_[roles->context_args.front()], "launch operand");
+    const auto scope = buffer_scopes_.find(launch_buffer.get());
+    INTERNAL_CHECK_SPAN(scope != buffer_scopes_.end(), call->span_)
+        << "LowerHostTensorCollectives: launch operand must resolve to a comm-domain scope";
+    return EmitPerDeviceBuiltinCalls(call, *rule, scope->second, span, leading_comments);
   }
 
-  std::vector<CommDomainScopeStmtPtr> scope_stack_;
+  // Index enclosing slots once, avoiding a scan of all scopes per collective.
+  std::unordered_map<const WindowBuffer*, CommDomainScopeStmtPtr> buffer_scopes_;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func) {

@@ -22,16 +22,38 @@ the IR types so downstream codegen has O(1) access.
 ## Async workspace engines
 
 `CommDomainScopeStmt.engines` records the async workspace engines required by a
-communication domain. Before materializing domains, this pass scans every function
-in the Program once, including Call and Submit nodes. If any function uses
-`pld.tensor.indexed_all_to_all_v` or its lowered builtin, every materialized domain
-receives `engines=["urma"]`. Otherwise the list is empty.
+communication domain. Before grouping allocations, this pass traces engine uses
+through `Call`/`Submit` arguments, returned aliases, views and loop carries to
+each underlying window-buffer allocation. Uncalled functions do not configure
+unrelated buffers.
 
-This deliberately conservative policy includes unused functions and unrelated
-domains. Precise per-domain matching is deferred. Distributed codegen only emits
-`workspace_engines` from this IR field; it does not infer communication requirements.
-The field is preserved by structural comparison, serialization, and printed IR
-round trips.
+`put_async`/`get_async` require URMA on their remote operand. `remote_load`/
+`remote_store` and `put`/`get` require MTE on their remote operand, including
+lowered tile forms. An allocation requiring both is rejected, regardless of
+peer rank; two views of one allocation cannot be separated into different domains.
+MTE is an internal classification, not a runtime workspace-engine name.
+
+Domains are grouped by **device coverage, memory source and engine category**.
+Independent MTE and URMA buffers with identical coverage therefore get separate
+domains: MTE uses an empty workspace list, and URMA uses `engines=["urma"]`.
+Local-only buffers with no engine requirement join a compatible group: an
+otherwise URMA-only group can include them; when both categories are present,
+they join the default non-URMA group. Source order determines domain/slot order.
+
+Collectives contribute requirements per operand: ordinary collective remote
+payloads, signals and remotely read send counts require MTE; indexed all-to-all-v
+requires URMA only for its target, and MTE for signal and send counts. Local
+input, receive counts and index operands impose no remote-engine requirement.
+The same rules cover public ops, HOST builtins and synthesized CHIP kernels;
+lowered `notify` operations retain the signal's MTE requirement. Each remote
+operand receives its own context. Operands need not share a domain; callers
+ensure compatible participants, rank ordering and collective semantics.
+
+Re-running the pass refreshes requirements and splits existing scopes when
+needed, preserving the `WindowBuffer` objects referenced by tensor views.
+Distributed codegen only renders `workspace_engines` from the resulting IR;
+it does not infer requirements. Structural comparison, serialization and text
+round trips preserve the field.
 
 ## Position in the pipeline
 
@@ -106,9 +128,10 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    `shared_ptr<const WindowBuffer>`. Chip-orch / InCore parameter types are
    not touched.
 
-7. **Cluster into comm domains.** Walk the allocation list in source order;
-   append a slot to the first existing comm domain whose merged device
-   descriptor matches, or open a new one.
+7. **Cluster into comm domains.** Reject incompatible engine uses of one
+   allocation, then walk allocations in source order. Append a slot to the
+   matching device-coverage, memory-source and engine-category group, or open
+   a new one. Engine requirements are collected before this grouping.
 
 8. **Wrap the body in scope statements.** Build a chain of nested
    `CommDomainScopeStmt`s — one per comm domain, outer = first declared,
@@ -121,6 +144,7 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
 
 The pass raises `pypto::ValueError` (carrying the alloc's span) if:
 
+- An allocation is used by both URMA and MTE communication primitives.
 - An allocation has no `pld.tensor.window` materialisation (dead alloc).
 - An allocation has at least one view but no chip-orch dispatch consumes it.
 - A `pld.tensor.window` view's dense byte size (`product(shape) * dtype_bytes`)
@@ -232,24 +256,28 @@ absent definitions are outside this contract. Legacy informational
 and the private `window_buffer` text descriptor. Slots are grouped by both device
 coverage and memory source: Host and Device allocations never share a physical domain.
 
-Host codegen requests `AddressSpace.HOST` and `workspace_engines=("urma",)` from
-Simpler, and obtains the per-rank context with the URMA workspace. This requires
-Simpler #2913 or later and its supported same-machine A5 `tensormap_and_ringbuffer`
-configuration. Runtime API capabilities are checked once when loading the generated
-entry during worker setup, including `initializer` support when needed; dispatch does
-not repeat signature inspection. Simpler validates the platform and runtime combination. The current runtime submodule already provides this API.
+Host codegen requests `AddressSpace.HOST` from Simpler. Host and Device buffers
+use the same per-allocation engine analysis and grouping rules described above.
+Host backing alone does not request URMA. The per-rank `device_context(rank)` accessor
+uses the engines already provisioned on the domain and tracks context lifetime.
 
-The owning rank may use its device-mapped tensor locally. Host peer windows are not
-MTE mappings: peer access requires URMA. Existing peer-MTE primitives and collectives
-are rejected when their remote operands originate from Host windows, including through
-forwarded chip/InCore parameters. URMA asynchronous operators are not classified as
-peer MTE. Host peer URMA reads remain a separate execution feature.
+Runtime API capabilities are checked once when loading the generated entry during
+worker setup, including `initializer` support when needed; dispatch does not repeat
+signature inspection. Simpler validates the platform and runtime combination. The
+current runtime submodule includes Simpler #3146: with no workspace engines,
+A5 Host domains map local and peer windows for synchronous MTE reads on
+`tensormap_and_ringbuffer`, `host_build_graph`, and `percounter`. It also includes
+Simpler #3174, which preserves the local window base for Host URMA domains.
 
-The check also covers CHIP `all_to_all_v` and `indexed_all_to_all_v` after builtin
-lowering: `target` supplies the peer-mapped context, and `signal` / `send_counts`
-are accessed directly on peers. These operands cannot use Host windows, including
-`send_counts` whose synthesized formal is a plain Tensor. Local-only `input` and
-`recv_counts` may use Host windows.
+Engine conflicts are rejected by this pass before domains are created. Separate
+buffers using MTE and URMA are separated even when their device coverage and
+memory source match. The check classifies the explicit primitives without
+inspecting peer values: local rank and single-rank peer `0` are not exemptions
+for conflicting uses of one buffer. Ordinary local loads/stores are outside
+these primitive families. Notify/wait, builtin internals and external kernels
+are outside this conflict check; their own domain and hardware contracts still
+apply. `MaterializeDistTensorCtx` only materializes contexts for the resulting
+domains.
 
 ### Runtime source initialization
 

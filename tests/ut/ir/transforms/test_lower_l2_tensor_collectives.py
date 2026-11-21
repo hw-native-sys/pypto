@@ -302,17 +302,14 @@ def test_kernel_signature_is_canonical_not_call_site_typed():
     kernel = _get_func(passes.lower_l2_tensor_collectives()(DistributedInput), _KERNEL_NAME)
     assert kernel is not None
     kinds = [type(p.type).__name__ for p in kernel.params]
-    # input and send_counts canonical to plain Tensor even though the call site
-    # passed DistributedTensors; the other three stay distributed, which is what
-    # supplies the CommCtx parameters. core_num is not a parameter at all: the
-    # kernel ABI is five operands plus the ctx suffix, so `args[5]` stays the
-    # CommContext the shared kernel template reads.
+    # Local input/receive counts need no context; remote target, signal and
+    # send counts each get their own context in the canonical suffix.
     assert kinds == [
         "TensorType",
         "DistributedTensorType",
         "DistributedTensorType",
-        "TensorType",
         "DistributedTensorType",
+        "TensorType",
     ], kinds
 
 
@@ -909,7 +906,7 @@ def test_indexed_collective_lowers_local_receive_counts():
     assert kernel is not None
     assert isinstance(kernel.params[4].type, ir.TensorType)
     assert kernel.param_directions[4] == ir.ParamDirection.InOut
-    assert sum(isinstance(p.type, ir.DistributedTensorType) for p in kernel.params) == 2
+    assert sum(isinstance(p.type, ir.DistributedTensorType) for p in kernel.params) == 3
 
 
 @pytest.mark.parametrize("cores", [3, 5])

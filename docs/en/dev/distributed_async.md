@@ -75,8 +75,9 @@ issuer, not the peer's reads.
 without changing the rank or window offsets. The change is global, including
 A2/A3 builds, so codegen and the runtime must move together. The async helper
 reads the URMA workspace from `comm_workspace<CommWorkspaceKind::URMA>(*ctx)` and requires the domain
-to request `workspace_engines=("urma",)` (the program-wide conservative
-policy).
+to request `workspace_engines=("urma",)`. `MaterializeCommDomainScopes` traces
+this requirement to the remote buffer and groups it separately from MTE buffers;
+a single allocation used by both primitive families is rejected.
 
 **Failure diagnostics.** Capacity is enforced transitively:
 `allocation >= window view >= transfer region`. When a window is

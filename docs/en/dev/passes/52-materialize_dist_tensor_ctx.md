@@ -3,6 +3,11 @@
 Materializes one explicit `CommCtxType` parameter and argument for each
 `DistributedTensorType` function parameter, except in SIMT helpers.
 
+Engine requirements, per-buffer conflict checks and domain grouping belong to
+[MaterializeCommDomainScopes](50-materialize_comm_domain_scopes.md#async-workspace-engines).
+This pass only materializes contexts for those domains. Both passes share the
+distributed-tensor alias tracing utility.
+
 ## Overview
 
 Distributed tensors need a communication context at every dispatch boundary:

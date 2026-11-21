@@ -21,12 +21,28 @@
 ## 异步工作区引擎
 
 `CommDomainScopeStmt.engines` 记录通信域需要的异步工作区引擎 (async workspace engines)。
-物化通信域之前，此 Pass 扫描整个 Program 中每个函数的 Call 和 Submit。
-只要发现 `pld.tensor.indexed_all_to_all_v` 或其降低后的 builtin，所有物化通信域都设置
-`engines=["urma"]`；否则为空列表。
+分组合并前，本 Pass 沿 `Call`/`Submit` 实参、返回别名、视图和循环携带值，将引擎需求
+追踪到每个底层窗口 buffer 分配。未调用函数不会为无关 buffer 申请引擎。
 
-当前采用保守策略，包括未调用函数和无关通信域。精确匹配留待后续实现。
-分布式代码生成仅根据该 IR 字段输出 `workspace_engines`，不再分析通信需求。
+`put_async`/`get_async` 的远端操作数需要 URMA；`remote_load`/`remote_store` 和
+`put`/`get` 的远端操作数需要 MTE，包括 lowering 后的 tile 形式。同一分配同时需要两者
+时直接报错，不分析 peer rank；同一分配的两个 view 不能靠拆域解决冲突。
+MTE 只是编译器内部分类，不是运行时 workspace engine 名称。
+
+通信域按 **设备覆盖范围、内存来源、引擎类别** 分组。范围相同的独立 MTE 和 URMA
+buffer 会分到不同域：MTE 的工作区列表为空，URMA 使用 `engines=["urma"]`。
+没有引擎需求的本地 buffer 可加入兼容分组：只有 URMA 的分组可以包含它们；两类引擎
+都存在时，它们加入默认的非 URMA 分组。域和 slot 的顺序由分配顺序确定。
+
+集合通信（collective）逐操作数收集引擎需求：普通 collective 的远端数据、signal
+和远端读取的 send counts 使用 MTE；indexed all-to-all-v 仅 target 使用 URMA，
+signal 和 send counts 使用 MTE。本地 input、receive counts 和 index 不产生远端引擎需求。
+此规则覆盖公开算子、HOST builtin 和合成的 CHIP kernel；lowering 后的 `notify`
+仍保留 signal 的 MTE 需求。每个远端操作数传递各自的 context，不要求操作数属于同域；
+参与设备、rank 顺序以及 collective 语义的兼容性由调用者保证。
+
+再次运行会刷新需求，必要时拆分已有 scope，并保持 tensor view 引用的 `WindowBuffer`
+对象身份不变。分布式代码生成只输出结果 IR 中的 `workspace_engines`，不再推断需求。
 结构比较、序列化和打印解析往返均保留该字段。
 
 ## 流水线位置
@@ -91,14 +107,16 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
    `pld.tensor.window` 物化的多个 view 共享同一 `shared_ptr<const WindowBuffer>`。
    chip-orch / InCore 形参类型不动。
 
-7. **聚类成 group**。按源代码顺序遍历 alloc 列表，匹配描述符已存在的
-   comm-domain scope 则追加 slot，否则新开一个。`CommDomainScopeStmt wrappers in each host_orch body` 最终
+7. **聚类成 group**。先拒绝单个分配的引擎冲突，再按源代码顺序遍历 alloc 列表，
+   按设备覆盖范围、内存来源和引擎类别匹配分组；匹配则追加 slot，否则新开一个。
+   引擎需求在分组前收集。`CommDomainScopeStmt wrappers in each host_orch body` 最终
    填充该列表。
 
 ## Sanity 校验
 
 下列情况抛 `pypto::ValueError`（携带 alloc 的 span）：
 
+- 同一分配被 URMA 和 MTE 通信原语共同使用。
 - 某 alloc 没有任何 `pld.tensor.window` 物化（dead alloc）。
 - 某 alloc 有 view 但没有 chip-orch dispatch 消费它。
 - `pld.tensor.window` 视图的连续布局字节数（`product(shape) * dtype_bytes`）超过分配的逻辑大小。
@@ -191,21 +209,22 @@ pass 运行之后：
 `WindowBuffer.memory_source` 在克隆、序列化和私有 `window_buffer` 文本描述符中保留。
 通信域按设备覆盖范围和内存来源共同分组：Host 与 Device 分配不共享物理通信域。
 
-Host 代码生成向 Simpler 请求 `AddressSpace.HOST` 和 `workspace_engines=("urma",)`，
-并获取带 URMA 工作区的各 rank 通信上下文。这要求 Simpler #2913 或更新版本，以及其支持的
-同机 A5 `tensormap_and_ringbuffer` 配置。运行时 API 能力在 worker 初始化加载入口时检查一次，
-需要初始化时也检查 `initializer` 参数；每次派发不再重复反射函数签名。平台和运行时组合由
-Simpler 校验。当前 runtime 子模块已提供此 API。
+Host 代码生成向 Simpler 请求 `AddressSpace.HOST`。Host 与 Device buffer 使用上文相同的
+按分配分析引擎及分组规则；仅使用 Host 存储不会申请 URMA。
+各 rank 的 `device_context(rank)` 使用通信域已配置的引擎，并跟踪上下文生命周期。
 
-所属 rank 可以通过设备映射的 tensor 进行本地访问。Host peer 窗口不是 MTE 映射，
-远端访问必须走 URMA。现有 peer-MTE 原语和集合通信在远端操作数来自 Host 窗口时会被拒绝，
-包括通过 chip/InCore 参数转发的情况。URMA 异步算子不被归类为 peer MTE。
-Host peer URMA 读取的执行接入仍是独立的后续工作。
+运行时 API 能力在 worker 初始化加载入口时检查一次，需要初始化时也检查 `initializer`
+参数；每次派发不再重复反射函数签名。平台和运行时组合由 Simpler 校验，当前 runtime
+子模块包含 Simpler #3146：未申请工作区引擎时，A5 Host 域会映射本地及 peer 窗口，
+支持 `tensormap_and_ringbuffer`、`host_build_graph` 和 `percounter` 的同步 MTE 读取。
+同时包含 #3174，为 Host URMA 域保留本地窗口基地址。
 
-检查也覆盖 builtin lowering 后的 CHIP `all_to_all_v` 和 `indexed_all_to_all_v`：
-`target` 提供带 peer 映射的通信上下文，`signal` / `send_counts` 会被直接远端访问。
-这些操作数不能使用 Host 窗口；即使 `send_counts` 的合成形参是普通 Tensor，也会检查其来源。
-只做本地访问的 `input` 和 `recv_counts` 可以使用 Host 窗口。
+引擎冲突由本 Pass 在创建通信域前拒绝。独立 buffer 分别使用 MTE 和 URMA 时，即使
+设备覆盖范围、内存来源相同，也会分到不同域。检查只按显式原语分类，不分析 peer 值：
+本卡 rank 和单 rank 域的 peer `0` 都不能豁免同一 buffer 的冲突。
+普通本地 load/store 不属于这些原语。Notify/wait、builtin 内部操作和外部 kernel
+不在此冲突检查范围内，仍需满足自身的通信域与硬件约束。
+`MaterializeDistTensorCtx` 只负责为生成的通信域物化上下文。
 
 ### 运行时来源初始化
 

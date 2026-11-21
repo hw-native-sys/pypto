@@ -33,7 +33,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
-#include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/dist_tensor_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -43,11 +43,10 @@ namespace ir {
 
 namespace {
 
-struct FunctionCtxPlan {
-  std::vector<size_t> dist_param_indices;
-  std::unordered_map<const Var*, VarPtr> param_to_ctx;
-  std::vector<std::optional<size_t>> returned_param_indices;
-};
+using dist_tensor_alias::CtxInheritingArgIndex;
+using dist_tensor_alias::DistParamAliasCollector;
+using dist_tensor_alias::FunctionCtxPlan;
+using dist_tensor_alias::ResolveResultCtxs;
 
 [[nodiscard]] bool IsDistTensor(const ExprPtr& expr) {
   return expr && As<DistributedTensorType>(expr->GetType());
@@ -97,25 +96,6 @@ class LocalNameCollector : public IRVisitor {
   return name;
 }
 
-// Return the yield that terminates a structured control-flow branch.  The
-// branch body may be wrapped in a SeqStmts or in one of the transparent scope
-// statements inserted by earlier passes.  This intentionally does not change
-// IfStmt lowering: it only lets this pass recover an already-existing context
-// when both branches yield the same DistributedTensor backing/context.
-[[nodiscard]] YieldStmtPtr FindBranchYield(const StmtPtr& body) {
-  if (!body) return nullptr;
-  if (auto yield = As<YieldStmt>(body)) return yield;
-  if (auto seq = As<SeqStmts>(body)) {
-    for (auto it = seq->stmts_.rbegin(); it != seq->stmts_.rend(); ++it) {
-      if (auto yield = FindBranchYield(*it)) return yield;
-    }
-  }
-  if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(body)) {
-    return FindBranchYield(scope->body_);
-  }
-  return nullptr;
-}
-
 /// Host orchestration is the one place where get_comm_ctx is a real runtime
 /// query: host codegen resolves it from the window's per-rank device context.
 /// Chip orchestration and all lower/device functions must have the query
@@ -162,248 +142,11 @@ class LocalNameCollector : public IRVisitor {
   return dirs;
 }
 
-/// Index of the argument whose communication context @p call inherits.
-///
-/// Two builtin families bind a fresh SSA var to a DistributedTensor that
-/// already exists, so the result keeps the original's window — and with it its
-/// context:
-///   - output-side writebacks (`tile.store`, `tensor.assemble`, ...), which
-///     write into an existing tensor and return it;
-///   - zero-copy buffer-aliasing views (`tensor.view`, `tile.slice`,
-///     `tensor.reshape`, ...), whose deduced result type propagates
-///     `DistributedTensorType::window_buffer_` straight from `args[0]`.
-///
-/// Neither reaches the callee-return machinery below: their op is an `Op`, not
-/// a `GlobalVar`, so without this the context would look unresolvable.
-[[nodiscard]] std::optional<size_t> CtxInheritingArgIndex(const CallPtr& call) {
-  if (!call || !call->op_) return std::nullopt;
-  if (auto writeback = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-    return writeback;
-  }
-  if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
-    return 0;
-  }
-  return std::nullopt;
-}
-
 /// Describe a DistributedTensor value for a user-facing diagnostic.
 [[nodiscard]] std::string DescribeDistValue(const ExprPtr& expr) {
   if (auto var = AsVarLike(expr)) return "'" + var->name_hint_ + "'";
   return "a DistributedTensor value";
 }
-
-/// Map each result position of a `Call` / `Submit` to the caller-side CommCtx
-/// of the callee parameter that result writes back.
-///
-/// `Call` and `Submit` share one result-position map: a `Submit`'s type is
-/// `TupleType([*<callee returns>, Scalar[TASK_ID]])`, so the trailing TASK_ID
-/// simply falls off the end of the returned vector.  Positions that write back
-/// a *runtime-allocated* Out param — one the caller never passed, per the
-/// `Submit` args-prefix invariant (`pass-submit-awareness.md` rule 5) — have no
-/// caller-side argument and resolve to null.
-///
-/// @param lookup_arg_ctx resolves the ctx of one caller-side argument
-/// @return one entry per callee return position (null = unresolved)
-template <typename LookupArgCtx>
-[[nodiscard]] std::vector<VarPtr> ResolveResultCtxs(
-    const ExprPtr& expr, const ProgramPtr& program,
-    const std::unordered_map<std::string, FunctionCtxPlan>& plans, const LookupArgCtx& lookup_arg_ctx) {
-  OpPtr op;
-  const std::vector<ExprPtr>* args = nullptr;
-  if (auto call = As<Call>(expr)) {
-    op = call->op_;
-    args = &call->args_;
-  } else if (auto submit = As<Submit>(expr)) {
-    op = submit->op_;
-    args = &submit->args_;
-  } else {
-    return {};
-  }
-
-  auto gvar = As<GlobalVar>(op);
-  if (!gvar || !program) return {};
-  auto callee = program->GetFunction(gvar->name_);
-  if (!callee) return {};
-  auto plan_it = plans.find(callee->name_);
-  if (plan_it == plans.end()) return {};
-
-  std::vector<VarPtr> result(plan_it->second.returned_param_indices.size());
-  for (size_t result_idx = 0; result_idx < result.size(); ++result_idx) {
-    const auto& param_idx = plan_it->second.returned_param_indices[result_idx];
-    if (!param_idx || *param_idx >= args->size() || *param_idx >= callee->params_.size()) continue;
-    if (!As<DistributedTensorType>(callee->params_[*param_idx]->GetType())) continue;
-    result[result_idx] = lookup_arg_ctx((*args)[*param_idx]);
-  }
-  return result;
-}
-
-class DistParamAliasCollector : public IRVisitor {
- public:
-  DistParamAliasCollector(ProgramPtr program, const std::unordered_map<std::string, FunctionCtxPlan>* plans,
-                          const FunctionCtxPlan* plan)
-      : program_(std::move(program)), plans_(plans), plan_(plan) {}
-  std::unordered_map<const Var*, VarPtr> alias_to_ctx;
-  std::unordered_map<const Var*, std::vector<VarPtr>> tuple_to_ctx;
-
-  VarPtr ResolveCtx(const ExprPtr& expr) const { return LookupCtx(expr); }
-
- protected:
-  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
-    // A writable GM launch result is a new SSA name for the same allocation.
-    // Follow the explicit result-to-argument mapping so later context queries
-    // and dispatches retain the window's context, including successive launches.
-    for (size_t i = 0; i < op->results_.size(); ++i) {
-      const auto& result = op->results_[i];
-      if (!As<DistributedTensorType>(result->GetType())) continue;
-      if (auto ctx = LookupCtx(op->args_[op->result_param_indices_[i]])) {
-        alias_to_ctx[result.get()] = std::move(ctx);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (op && op->var_ && As<DistributedTensorType>(op->var_->GetType())) {
-      if (auto ctx = LookupCtx(op->value_)) {
-        alias_to_ctx[op->var_.get()] = ctx;
-      }
-    } else if (op && op->var_ && As<TupleType>(op->var_->GetType())) {
-      auto returned_ctxs = ReturnedCtxs(op->value_);
-      if (!returned_ctxs.empty()) tuple_to_ctx[op->var_.get()] = std::move(returned_ctxs);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    // Visit the branches first so aliases created inside each branch are
-    // available when the merged return var is inspected below.
-    IRVisitor::VisitStmt_(op);
-    if (!op || !op->else_body_.has_value()) return;
-    auto then_yield = FindBranchYield(op->then_body_);
-    auto else_yield = FindBranchYield(*op->else_body_);
-    if (!then_yield || !else_yield) return;
-
-    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      const auto& return_var = op->return_vars_[i];
-      if (!return_var || !As<DistributedTensorType>(return_var->GetType())) continue;
-      if (i >= then_yield->value_.size() || i >= else_yield->value_.size()) continue;
-
-      auto then_ctx = LookupCtx(then_yield->value_[i]);
-      auto else_ctx = LookupCtx(else_yield->value_[i]);
-      if (!then_ctx || !else_ctx) continue;
-      CHECK_SPAN(then_ctx.get() == else_ctx.get(), op->span_)
-          << "Assigning a different DistributedTensor in each branch of an `if` is not supported: '"
-          << return_var->name_hint_
-          << "' would take its data pointer from one allocation and its communication context from "
-             "another. Assign a single DistributedTensor before the `if`, and branch on the data "
-             "read from it instead (see GitHub issue #2027).";
-      alias_to_ctx[return_var.get()] = std::move(then_ctx);
-    }
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    RecordLoopCarries(op->iter_args_, op->return_vars_);
-    IRVisitor::VisitStmt_(op);
-    ValidateLoopCarries(op->iter_args_, op->body_, op->span_);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    RecordLoopCarries(op->iter_args_, op->return_vars_);
-    IRVisitor::VisitStmt_(op);
-    ValidateLoopCarries(op->iter_args_, op->body_, op->span_);
-  }
-
- private:
-  VarPtr LookupVarCtx(const Var* var) const {
-    if (!plan_) return nullptr;
-    auto param_it = plan_->param_to_ctx.find(var);
-    if (param_it != plan_->param_to_ctx.end()) return param_it->second;
-    auto alias_it = alias_to_ctx.find(var);
-    if (alias_it != alias_to_ctx.end()) return alias_it->second;
-    return nullptr;
-  }
-
-  VarPtr LookupCtx(const ExprPtr& expr) const {
-    if (auto var = AsVarLike(expr)) return LookupVarCtx(var.get());
-
-    if (auto get_item = As<TupleGetItemExpr>(expr); get_item && get_item->index_ >= 0) {
-      auto tuple_var = AsVarLike(get_item->tuple_);
-      const auto index = static_cast<size_t>(get_item->index_);
-      if (tuple_var) {
-        auto tuple_it = tuple_to_ctx.find(tuple_var.get());
-        if (tuple_it == tuple_to_ctx.end() || index >= tuple_it->second.size()) return nullptr;
-        return tuple_it->second[index];
-      }
-      auto returned_ctxs = ReturnedCtxs(get_item->tuple_);
-      return index < returned_ctxs.size() ? returned_ctxs[index] : nullptr;
-    }
-
-    if (auto call = As<Call>(expr)) {
-      if (auto inherited = CtxInheritingArgIndex(call)) {
-        return LookupCtx(call->args_[*inherited]);
-      }
-    }
-
-    auto returned_ctxs = ReturnedCtxs(expr);
-    return returned_ctxs.size() == 1 ? returned_ctxs[0] : nullptr;
-  }
-
-  std::vector<VarPtr> ReturnedCtxs(const ExprPtr& expr) const {
-    if (auto tuple_var = AsVarLike(expr)) {
-      auto it = tuple_to_ctx.find(tuple_var.get());
-      return it == tuple_to_ctx.end() ? std::vector<VarPtr>{} : it->second;
-    }
-    if (!plans_) return {};
-    return ResolveResultCtxs(expr, program_, *plans_, [this](const ExprPtr& arg) { return LookupCtx(arg); });
-  }
-
-  /// A loop carry is seeded from its init value *before* the body is visited so
-  /// a self-carry (`data = self.comm(data)`) can resolve at all.  That seed is
-  /// only sound while the value yielded back into the carry still names the
-  /// same context: a loop that rebinds the carry to a different
-  /// DistributedTensor would take its data pointer from one allocation and its
-  /// communication context from another — the same unsupported program the
-  /// `IfStmt` merge above diagnoses.
-  ///
-  /// A yield this pass cannot trace at all leaves the seed in place; that value
-  /// came from an op with no modelled ctx lineage, and rejecting it here would
-  /// turn programs that compile today into hard errors.
-  void ValidateLoopCarries(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body, const Span& span) {
-    auto yield = FindBranchYield(body);
-    if (!yield) return;
-    for (size_t i = 0; i < iter_args.size() && i < yield->value_.size(); ++i) {
-      const auto& iter_arg = iter_args[i];
-      if (!iter_arg) continue;
-      auto seeded = alias_to_ctx.find(iter_arg.get());
-      if (seeded == alias_to_ctx.end()) continue;
-      auto yield_ctx = LookupCtx(yield->value_[i]);
-      if (!yield_ctx) continue;
-      CHECK_SPAN(yield_ctx.get() == seeded->second.get(), span)
-          << "Rebinding loop-carried DistributedTensor '" << iter_arg->name_hint_
-          << "' to a different DistributedTensor inside the loop is not supported: it would enter the "
-             "loop with the communication context of its initial value and leave with another. Carry a "
-             "single DistributedTensor through the loop, and vary the data read from it instead (see "
-             "GitHub issue #2027).";
-    }
-  }
-
-  void RecordLoopCarries(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
-    for (size_t i = 0; i < iter_args.size(); ++i) {
-      const auto& iter_arg = iter_args[i];
-      if (!iter_arg || !As<DistributedTensorType>(iter_arg->GetType())) continue;
-      auto ctx = LookupCtx(iter_arg->initValue_);
-      if (!ctx) continue;
-      alias_to_ctx[iter_arg.get()] = ctx;
-      if (i < return_vars.size() && As<DistributedTensorType>(return_vars[i]->GetType())) {
-        alias_to_ctx[return_vars[i].get()] = std::move(ctx);
-      }
-    }
-  }
-
-  ProgramPtr program_;
-  const std::unordered_map<std::string, FunctionCtxPlan>* plans_;
-  const FunctionCtxPlan* plan_;
-};
 
 class MaterializeDistTensorCtxMutator : public IRMutator {
  public:
@@ -707,123 +450,6 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
                                     func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
 }
 
-// Trace Host provenance along context forwarding edges. Each node/edge is
-// visited once; shared device functions can accept both Host and Device windows.
-// Reject only parameters used by peer-MTE operations, not unrelated HBM args.
-class HostPeerAccessChecker : public IRVisitor {
- public:
-  HostPeerAccessChecker(ProgramPtr program, const std::unordered_map<std::string, FunctionCtxPlan>& plans)
-      : program_(std::move(program)), plans_(plans) {}
-
-  void Check() {
-    for (const auto& [gvar, func] : program_->functions_) {
-      auto it = plans_.find(func->name_);
-      DistParamAliasCollector aliases(program_, &plans_, it == plans_.end() ? nullptr : &it->second);
-      aliases.VisitStmt(func->body_);
-      aliases_ = &aliases;
-      VisitStmt(func->body_);
-    }
-    aliases_ = nullptr;
-    std::unordered_set<const Var*> visited;
-    while (!host_nodes_.empty()) {
-      const Var* node = host_nodes_.back();
-      host_nodes_.pop_back();
-      if (!visited.insert(node).second) continue;
-      auto bad = peer_uses_.find(node);
-      CHECK_SPAN(bad == peer_uses_.end(), node->span_)
-          << "Host communication windows require URMA for peer access; " << bad->second
-          << " uses peer MTE and cannot access memory_source='host'.";
-      auto edge = edges_.find(node);
-      if (edge != edges_.end()) {
-        host_nodes_.insert(host_nodes_.end(), edge->second.begin(), edge->second.end());
-      }
-    }
-  }
-
- protected:
-  void VisitExpr_(const CallPtr& call) override {
-    CheckCall(call->op_, call->args_);
-    IRVisitor::VisitExpr_(call);
-  }
-  void VisitExpr_(const SubmitPtr& submit) override {
-    CheckCall(submit->op_, submit->args_);
-    IRVisitor::VisitExpr_(submit);
-  }
-
- private:
-  const Var* Resolve(const ExprPtr& expr) {
-    if (auto type = As<DistributedTensorType>(expr->GetType()); type && type->window_buffer_) {
-      const auto& window = *type->window_buffer_;
-      if (window->memory_source_ == "host") host_nodes_.push_back(window.get());
-      return window.get();
-    }
-    auto ctx = aliases_->ResolveCtx(expr);
-    return ctx.get();
-  }
-
-  void CheckBuiltinPeerAccess(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
-    const auto template_dir = callee->GetAttr<std::string>(kAttrBuiltinTemplateDir);
-    if (template_dir.empty()) return;
-    const auto& registry = OpRegistry::GetInstance();
-    if (template_dir != registry.GetEntry("builtin.tensor.all_to_all_v").GetTemplateDir() &&
-        template_dir != registry.GetEntry("pld.tensor.indexed_all_to_all_v").GetTemplateDir()) {
-      return;
-    }
-    // LowerL2TensorCollectives replaces these ops with return-only IR stubs.
-    // Both templates access peer signal/count memory directly, even though the
-    // indexed variant transfers payloads over URMA. Target supplies their ctx,
-    // which must also have peer-MTE mappings. Input/recv_counts are local-only.
-    // Inspect actual send_counts (arg 3): its canonical formal is plain Tensor,
-    // so distributed-parameter forwarding alone loses its Host provenance.
-    for (size_t index = 1; index <= 3 && index < args.size(); ++index) {
-      if (auto source = Resolve(args[index])) peer_uses_.emplace(source, callee->name_);
-    }
-  }
-
-  void CheckCall(const OpPtr& op, const std::vector<ExprPtr>& args) {
-    if (auto global = As<GlobalVar>(op)) {
-      auto callee = program_->GetFunction(global->name_);
-      if (!callee) return;
-      CheckBuiltinPeerAccess(callee, args);
-      auto plan = plans_.find(global->name_);
-      if (plan == plans_.end()) return;
-      for (size_t index : plan->second.dist_param_indices) {
-        if (index >= args.size()) continue;
-        if (auto source = Resolve(args[index])) {
-          edges_[source].push_back(plan->second.param_to_ctx.at(callee->params_[index].get()).get());
-        }
-      }
-      return;
-    }
-    if (!op || op->name_.rfind("pld.", 0) != 0) return;
-    if (IsOp(op, "pld.tensor.window") || IsOp(op, "pld.tensor.alloc_window_buffer") ||
-        IsOp(op, "pld.system.get_comm_ctx") || IsOp(op, "pld.system.rank") || IsOp(op, "pld.system.nranks") ||
-        IsOp(op, "pld.system.world_size") || IsOp(op, "pld.system.wait") ||
-        IsOp(op, "pld.system.defer_wait") || IsOp(op, "pld.tensor.put_async") ||
-        IsOp(op, "pld.tensor.get_async")) {
-      return;
-    }
-    std::optional<size_t> remote_arg;
-    if (IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) remote_arg = 2;
-    if (IsOp(op, "pld.tensor.put") || IsOp(op, "pld.tile.put") || IsOp(op, "pld.tile.remote_load") ||
-        IsOp(op, "pld.system.notify")) {
-      remote_arg = 0;
-    }
-    if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) remote_arg = 1;
-    for (size_t i = 0; i < args.size(); ++i) {
-      if (remote_arg && i != *remote_arg) continue;
-      if (auto source = Resolve(args[i])) peer_uses_.emplace(source, op->name_);
-    }
-  }
-
-  ProgramPtr program_;
-  const std::unordered_map<std::string, FunctionCtxPlan>& plans_;
-  const DistParamAliasCollector* aliases_ = nullptr;
-  std::unordered_map<const Var*, std::vector<const Var*>> edges_;
-  std::unordered_map<const Var*, std::string> peer_uses_;
-  std::vector<const Var*> host_nodes_;
-};
-
 [[nodiscard]] ProgramPtr TransformProgram(const ProgramPtr& program) {
   std::unordered_map<std::string, FunctionCtxPlan> plans;
   for (const auto& [gvar, func] : program->functions_) {
@@ -831,7 +457,6 @@ class HostPeerAccessChecker : public IRVisitor {
     auto plan = BuildFunctionCtxPlan(func);
     if (!plan.dist_param_indices.empty()) plans.emplace(func->name_, std::move(plan));
   }
-  HostPeerAccessChecker(program, plans).Check();
   if (plans.empty()) return program;
 
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> extended;

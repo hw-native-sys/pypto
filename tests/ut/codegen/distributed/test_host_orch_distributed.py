@@ -45,7 +45,7 @@ from importlib import resources
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import codegen
+from pypto import codegen, ir
 from pypto.backend import BackendType, pto_backend
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import passes  # match the import path used by ut/conftest.py
@@ -1323,10 +1323,10 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
     entry_cpp = files[f"{base}/orchestration/builtin_tensor_allreduce__sum__fp32.cpp"]
     assert "builtin_tensor_allreduce__sum__fp32" in entry_cpp
     assert "submit_allreduce_kernel<ReduceOp::kSum>" in entry_cpp
-    assert "orch_args.scalar(2)" in entry_cpp
+    assert "orch_args.scalar(3)" in entry_cpp
     assert "params.launch_spec.set_block_num(core_num)" in entry_cpp
     assert "params.launch_spec.set_require_sync_start(true)" in entry_cpp
-    assert ".expected_arg_count = 5" in entry_cpp
+    assert ".expected_arg_count = 6" in entry_cpp
 
     kernel_config = files[f"{base}/kernel_config.py"]
     assert '"aicpu_thread_num": 0' in kernel_config
@@ -2336,7 +2336,7 @@ def test_if_cross_branch_phi_yields_tensors() -> None:
     )
 
 
-def test_host_window_requests_urma_and_context():
+def test_host_window_without_urma_uses_domain_context():
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -2353,8 +2353,8 @@ def test_host_window_requests_urma_and_context():
     code = _lower(Prog)
     compile(code, "host_domain.py", "exec")
     assert "memory_source=AddressSpace.HOST" in code
-    assert 'workspace_engines=("urma",)' in code
-    assert '__comm_d0.device_context(0, workspace_engines=("urma",))' in code
+    assert "workspace_engines" not in code
+    assert "__comm_d0.device_context(0)" in code
     assert "host._requires_host_domain = True" in code
     assert "validate_host_domain_runtime" not in code
 
@@ -2395,25 +2395,47 @@ def test_host_window_initializer_is_only_a_runtime_binding(key, monkeypatch):
     assert "open(" not in code
 
 
-def test_host_peer_mte_is_rejected_through_chip_call():
+@pytest.mark.parametrize("use_urma", [False, True])
+def test_host_peer_mte_through_chip_call(use_urma):
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.InCore)
-        def read(self, x: pld.DistributedTensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+        def read(
+            self,
+            x: pld.DistributedTensor[[1, 64], pl.FP32],
+            out: pl.Out[pld.DistributedTensor[[1, 64], pl.FP32]],
+        ):
+            if use_urma:
+                pld.tensor.get_async(out, 1, x)
             pld.tensor.get(out, 1, x)
 
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip(self, x: pld.DistributedTensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+        def chip(
+            self,
+            x: pld.DistributedTensor[[1, 64], pl.FP32],
+            out: pl.Out[pld.DistributedTensor[[1, 64], pl.FP32]],
+        ):
             self.read(x, out)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host(self, out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+        def host(self):
             buf = pld.alloc_window_buffer(256, memory_source="host")
+            out_buf = pld.alloc_window_buffer(256)
             table = pld.window(buf, [1, 64], dtype=pl.FP32)
+            out = pld.window(out_buf, [1, 64], dtype=pl.FP32)
             self.chip(table, out, device=0)
 
-    with pytest.raises(ValueError, match="Host communication windows require URMA"):
-        _lower(Prog)
+    # Both transfers address the same Host domain's remote rank.
+    program = passes.simplify()(Prog)
+    if use_urma:
+        with pytest.raises(ValueError, match="cannot combine URMA async transfers with MTE"):
+            _lower(program)
+        return
+    code = _lower(program)
+    compile(code, "host_peer_access.py", "exec")
+    assert "memory_source=AddressSpace.HOST" in code
+    assert code.count('workspace_engines=("urma",)') == (2 if use_urma else 0)
+    assert "__comm_d0.device_context(0)" in code
 
 
 def test_host_local_window_can_share_chip_with_device_peer_access():
@@ -2449,7 +2471,7 @@ def test_host_local_window_can_share_chip_with_device_peer_access():
     assert code.count("memory_source=AddressSpace.HOST") == 1
 
 
-def test_host_collective_rejects_peer_mte_before_builtin_lowering():
+def test_host_collective_allows_peer_mte_before_builtin_lowering():
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -2464,14 +2486,16 @@ def test_host_collective_rejects_peer_mte_before_builtin_lowering():
                 self.chip(signal, device=rank)
             pld.tensor.barrier(signal)
 
-    with pytest.raises(ValueError, match="Host communication windows require URMA"):
-        _lower_host_collectives(Prog)
+    code, _ = _lower_host_collectives(Prog)
+    compile(code, "host_collective.py", "exec")
+    assert "memory_source=AddressSpace.HOST" in code
+    assert "workspace_engines" not in code
 
 
 @pytest.mark.parametrize("indexed", [False, True], ids=["all_to_all_v", "indexed_all_to_all_v"])
 @pytest.mark.parametrize("host_operand", ["input", "target", "signal", "send_counts", "recv_counts"])
-def test_l2_collective_checks_host_peer_access_after_builtin_lowering(indexed, host_operand):
-    """Builtin stubs hide peer accesses, including a plain-Tensor send_counts formal."""
+def test_l2_collective_allows_host_peer_access_after_builtin_lowering(indexed, host_operand):
+    """Host backing does not force URMA or reject builtins that also use MTE."""
     input_source = "host" if host_operand == "input" else "device"
     target_source = "host" if host_operand == "target" else "device"
     signal_source = "host" if host_operand == "signal" else "device"
@@ -2516,14 +2540,229 @@ def test_l2_collective_checks_host_peer_access_after_builtin_lowering(indexed, h
     program = passes.simplify()(Prog)
     program = passes.normalize_return_order()(program)
     program = passes.lower_l2_tensor_collectives()(program)
-    if host_operand in {"target", "signal", "send_counts"}:
-        with pytest.raises(ValueError, match="Host communication windows require URMA.*__builtin_"):
+    code = _lower(program)
+    compile(code, "host_l2_collective.py", "exec")
+    assert code.count("memory_source=AddressSpace.HOST") == 1
+    assert ('workspace_engines=("urma",)' in code) == indexed
+
+
+def _primitive_engine_program(
+    mte_op,
+    async_op,
+    *,
+    local_peer,
+    same_domain,
+    memory_source="host",
+    submit=False,
+    window_local=False,
+    rank_count=2,
+    same_buffer=False,
+    enable_engines=True,
+):
+    mte_source = memory_source if same_domain else ("device" if memory_source == "host" else "host")
+    async_get = async_op == "get"
+    single_rank = rank_count == 1
+    async_peer = 0 if single_rank else 1
+    mte_get = mte_op == "get"
+    mte_put = mte_op == "put"
+    mte_load = mte_op == "remote_load"
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def transfers(
+            self,
+            async_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            mte_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            # Query another slot in the same domain. Explicit local rank and
+            # single-rank peer zero must still reject mixed primitives.
+            ctx = pld.get_comm_ctx(async_window)
+            rank = pld.rank(ctx)
+            if single_rank:
+                peer = pl.const(0, pl.INT32)
+            elif local_peer:
+                peer = rank
+            else:
+                peer = pl.const(1, pl.INT32)
+            if enable_engines:
+                if async_get:
+                    if window_local:
+                        mte_window = pld.tensor.get_async(mte_window, async_peer, async_window)
+                    else:
+                        local = pld.tensor.get_async(local, async_peer, async_window)
+                elif window_local:
+                    pld.tensor.put_async(async_window, async_peer, mte_window)
+                else:
+                    pld.tensor.put_async(async_window, async_peer, local)
+                if mte_get:
+                    pld.tensor.get(local, peer, mte_window)
+                elif mte_put:
+                    pld.tensor.put(mte_window, peer, local)
+                elif mte_load:
+                    tile = pld.tile.remote_load(mte_window, peer, [0, 0], [1, 64])
+                    local = pl.tile.store(tile, [0, 0], local)
+                else:
+                    pld.tensor.remote_store(local, mte_window, peer, [0, 0])
+            return local
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            async_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            mte_window: pld.DistributedTensor[[1, 64], pl.FP32],
+            local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            if submit:
+                with pl.manual_scope():
+                    local, _tid = pl.submit(self.transfers, async_window, mte_window, local)
+            else:
+                local = self.transfers(async_window, mte_window, local)
+            return local
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]]):
+            async_buf = pld.alloc_window_buffer(256, memory_source=memory_source)
+            mte_buf = pld.alloc_window_buffer(256, memory_source=mte_source)
+            for rank in pl.range(rank_count):
+                async_window = pld.window(async_buf, [1, 64], dtype=pl.FP32)
+                mte_window = pld.window(mte_buf, [1, 64], dtype=pl.FP32)
+                local = self.chip(async_window, mte_window, local, device=rank)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_shared(self, local: pl.InOut[pl.Tensor[[1, 64], pl.FP32]]):
+            buf = pld.alloc_window_buffer(256, memory_source=memory_source)
+            for rank in pl.range(rank_count):
+                async_window = pld.window(buf, [1, 64], dtype=pl.FP32)
+                mte_window = pld.window(buf, [1, 64], dtype=pl.FP32)
+                local = self.chip(async_window, mte_window, local, device=rank)
+
+    excluded = "host" if same_buffer else "host_shared"
+    selected = ir.Program([f for f in Prog.functions.values() if f.name != excluded], "engines", Prog.span)
+    program = passes.convert_to_ssa()(selected)
+    program = passes.simplify()(program)
+    return passes.normalize_return_order()(program)
+
+
+@pytest.mark.parametrize("mte_op", ["get", "put", "remote_load", "remote_store"])
+@pytest.mark.parametrize("async_op", ["get", "put"])
+@pytest.mark.parametrize("memory_source", ["host", "device"])
+@pytest.mark.parametrize("local_peer", [False, True])
+@pytest.mark.parametrize("same_buffer", [False, True])
+def test_primitive_engines_split_buffers_or_reject_aliases(
+    mte_op, async_op, memory_source, local_peer, same_buffer
+):
+    program = _primitive_engine_program(
+        mte_op,
+        async_op,
+        local_peer=local_peer,
+        same_domain=True,
+        memory_source=memory_source,
+        same_buffer=same_buffer,
+    )
+    if same_buffer:
+        # Two views of one allocation cannot be separated by domain grouping.
+        with pytest.raises(ValueError, match="Communication buffer.*cannot combine URMA.*MTE"):
             _lower(program)
     else:
-        # Local-only Host input/recv_counts must not be rejected with peer operands.
         code = _lower(program)
-        compile(code, "host_l2_collective.py", "exec")
-        assert code.count("memory_source=AddressSpace.HOST") == 1
+        assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
+        assert code.count('workspace_engines=("urma",)') == 1
+        assert 'workspace_engines=("mte",)' not in code
+
+
+@pytest.mark.parametrize("mte_op", ["get", "put", "remote_load", "remote_store"])
+@pytest.mark.parametrize("async_op", ["get", "put"])
+def test_primitive_remote_engines_different_domains(mte_op, async_op):
+    program = _primitive_engine_program(mte_op, async_op, local_peer=False, same_domain=False)
+    code = _lower(program)
+    assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
+
+
+@pytest.mark.parametrize("async_op", ["get", "put"])
+@pytest.mark.parametrize("same_domain", [False, True])
+def test_async_local_window_does_not_require_remote_urma(async_op, same_domain):
+    # The async local operand is also the MTE remote operand. Only the async
+    # peer's domain requires URMA; get_async's result preserves window lineage.
+    program = _primitive_engine_program(
+        "get", async_op, local_peer=False, same_domain=same_domain, window_local=True
+    )
+    code = _lower(program)
+    assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
+    assert code.count('workspace_engines=("urma",)') == 1
+
+
+@pytest.mark.parametrize("async_op", ["get", "put"])
+def test_single_rank_domain_rejects_mixed_primitives(async_op):
+    program = _primitive_engine_program(
+        "get", async_op, local_peer=True, same_domain=True, rank_count=1, same_buffer=True
+    )
+    with pytest.raises(ValueError, match="cannot combine URMA.*MTE"):
+        _lower(program)
+
+
+@pytest.mark.parametrize("local_peer", [False, True])
+def test_primitive_remote_engines_through_submit(local_peer):
+    program = _primitive_engine_program(
+        "get", "put", local_peer=local_peer, same_domain=True, submit=True, same_buffer=True
+    )
+    with pytest.raises(ValueError, match="cannot combine URMA.*MTE"):
+        _lower(program)
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("mte_op", ["get", "put", "remote_load", "remote_store"])
+@pytest.mark.parametrize("local_peer", [False, True])
+@pytest.mark.parametrize("same_buffer", [False, True])
+def test_primitive_remote_engines_default_pipeline(tmp_path, mte_op, local_peer, same_buffer):
+    # The normal pipeline lowers tensor put/get/store into tile operations
+    # before checking domains. Exercise that path as well as the focused passes.
+    program = _primitive_engine_program(
+        mte_op, "get", local_peer=local_peer, same_domain=True, same_buffer=same_buffer
+    )
+    if same_buffer:
+        with pytest.raises(ValueError, match="cannot combine URMA.*MTE"):
+            ir.compile(program, output_dir=str(tmp_path), platform="a5", skip_ptoas=True)
+    else:
+        result = ir.compile(program, output_dir=str(tmp_path), platform="a5", skip_ptoas=True)
+        code = (result.output_dir / "orchestration" / "host_orch.py").read_text()
+        assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
+        assert code.count('workspace_engines=("urma",)') == 1
+
+
+def test_materialized_scope_splits_when_buffers_gain_distinct_engines():
+    before = _primitive_engine_program("get", "put", local_peer=False, same_domain=True, enable_engines=False)
+    initial = passes.materialize_comm_domain_scopes()(before)
+    host = initial.get_function("host")
+    assert host is not None
+    assert isinstance(host.body, ir.CommDomainScopeStmt)
+    original_slots = list(host.body.slots)
+    assert len(original_slots) == 2
+    assert list(host.body.engines) == []
+
+    # Replace the initially communication-free callable while keeping the
+    # already materialized HOST buffers and views. The pass must split the
+    # original scope, not replace the WindowBuffer identities its views hold.
+    with_engines = _primitive_engine_program("get", "put", local_peer=False, same_domain=True)
+    program = ir.Program(
+        [host, *[f for f in with_engines.functions.values() if f.name != "host"]], "rerun", host.span
+    )
+    updated = passes.materialize_comm_domain_scopes()(program)
+    updated_host = updated.get_function("host")
+    assert updated_host is not None
+    outer = updated_host.body
+    assert isinstance(outer, ir.CommDomainScopeStmt)
+    inner = outer.body
+    assert isinstance(inner, ir.CommDomainScopeStmt)
+    assert list(outer.engines) == ["urma"]
+    assert list(inner.engines) == []
+    assert outer.slots[0] is original_slots[0]
+    assert inner.slots[0] is original_slots[1]
+    ir.assert_structural_equal(updated, passes.materialize_comm_domain_scopes()(updated))
+    code = _lower(updated)
+    assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
+    assert code.count('workspace_engines=("urma",)') == 1
 
 
 if __name__ == "__main__":
