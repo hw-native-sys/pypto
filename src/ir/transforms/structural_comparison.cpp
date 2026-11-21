@@ -36,6 +36,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -711,6 +712,12 @@ class Projection {
     return Intern("attrs", "", std::move(fields));
   }
 
+  Id Value(const AccPushEpilogue& values) {
+    Fields fields;
+    for (const auto& [key, value] : values) fields.emplace_back(key, Value(value));
+    return Intern("AccPushEpilogue", "", std::move(fields));
+  }
+
   Id Value(const std::any& value) {
 #define PROJECT_ANY(...)                                                                              \
   if (value.type() == typeid(__VA_ARGS__)) {                                                          \
@@ -723,6 +730,7 @@ class Projection {
     PROJECT_ANY(float)
     PROJECT_ANY(DataType)
     PROJECT_ANY(SimtAxis)
+    PROJECT_ANY(AccPushEpilogue)
     PROJECT_ANY(MemorySpace)
     PROJECT_ANY(TensorLayout)
     PROJECT_ANY(TileLayout)

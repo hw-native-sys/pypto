@@ -11,7 +11,9 @@
 - **单次往返、生产者角色** —— 恰好一个 `tpush` 和一个 `tpop`，且 `tpush` 的反向切片不通过 SSA 边喂给 body（cube：`QK → tpush`，`tpop → SV`）。两半仅通过有序的跨核 FIFO 关联，于是让生产者**提前 `D = max(2, stage-1)` 个迭代**运行（跨核默认 depth-2）：`produce(start … start+(D-1)·step)` 序言（prologue）、一个 `ForKind::Sequential` 稳态循环（其循环变量 `k` 作为每组的首个 produce 索引，把该组的 `D` 个 produce `produce(k+i·step)` 与滞后的 `D` 个 consume `consume(k-(D-i)·step)` 配对，`k` 以 `D·step` 为步长取值 `[start+D·step, start+trip·step)`）、以及 `consume(最后 D 个)` 尾声（epilogue）。cube 发出第 k 组的 `D` 个 `QK` 时，vector 正在跑第 k-D 组的 `D` 个 softmax。详见 [skew 深度](#skew-深度stage)。
 - **消费者角色，或多次往返** —— lead 算子通过 SSA 喂给 body（vector：弹出的 scores 喂给 softmax），或某个 FIFO 方向上有多于一条消息。此时**降级为普通的 `ForKind::Sequential` 循环**（body 不变）。这消除了 unroll 的背靠背 `tpop`，同时保持 FIFO 的有序性；跨核重叠则来自**对端**核的生产者 skew —— 它提前一步把每个 tile 放入 FIFO，使本核有序的 `tpop` 不再 block。
 
-每个**非跨核**的 pipeline 循环（同核 GM→L1、L1→L0、嵌套 matmul stage 循环 —— 没有 `tpush`/`tpop`）保持不变，交给 `LowerPipelineLoops` 复制。
+每个**非跨核**的 pipeline 循环（同核 GM→L1、L1→L0、嵌套 matmul stage 循环 —— 没有 `tpush`/`tpop`）保持不变，交给 `LowerPipelineLoops` 复制，包含显式量化配置的循环除外。
+
+包含 `system.set_quant_scalar` 或 `system.set_quant_vector` 的 pipeline 循环会首先降为 Sequential，包括单向 C2V 和 stage=1。量化寄存器是 TPUSH 的隐式输入，skew 的 SSA 切片与单向 unroll/IO 调度器都未建模这些依赖；此回退策略保持每次迭代配置与 push 的顺序。 嵌套控制流内的 setter 会保护所有 pipeline 祖先，利用现有遍历中的计数器避免重复扫描子树；不含 setter 的兄弟流水循环保持原行为。
 
 输出为 `ForKind::Sequential` 且不带 `pipeline_stages` 标记，因此 `LowerPipelineLoops`（触发条件 `kind == Pipeline`）会跳过它，`CanonicalizeIOOrder`（作用域限定在 pipeline body）也不会再去重排已手工排好序的 skew。
 

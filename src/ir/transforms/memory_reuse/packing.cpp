@@ -372,7 +372,8 @@ ReuseMap IdentifyReuseOpportunities(
   // fit; the predicate is retained verbatim only as the never-worse-than-legacy floor.
   auto is_l0_space = [](MemorySpace s) {
     return s == MemorySpace::Left || s == MemorySpace::Right || s == MemorySpace::Acc ||
-           s == MemorySpace::Bias || s == MemorySpace::LeftScale || s == MemorySpace::RightScale;
+           s == MemorySpace::Bias || s == MemorySpace::LeftScale || s == MemorySpace::RightScale ||
+           s == MemorySpace::Scaling;
   };
   // Capacity-gated (#1475): keep software-pipelined operands in separate buffers so the pipeline
   // stages double-buffer instead of serializing on a shared buffer. #1900's `pipeline_membership` tags

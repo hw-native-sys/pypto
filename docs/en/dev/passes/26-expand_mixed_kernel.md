@@ -785,3 +785,75 @@ true last use of that tile.
 | Auto-generated pipe setup | Tensor-level mixed kernels do not need handwritten `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`; the pass derives them from cross-core tile ops |
 | Auto-generated tfree chains | Consumer-side split kernels insert missing `tfree` calls, rewrite them to free the canonical popped tile value, and delay obviously early frees within the same block without reordering independent `tpop` chains |
 | Max-slot-size policy | Uses `max(all tile byte sizes)` as the single `initialize_pipe.slot_size`, matching the backend assumption of one automatic reserve/import buffer per direction while preserving legacy bidirectional `dir_mask=3` behavior |
+
+## C2V Fixpipe contract
+
+A5 `system.aic_initialize_pipe` / `system.aiv_initialize_pipe` accept `nosplit`
+and `acc_push_epilogue` (`ir::AccPushEpilogue`), a value-semantic string dictionary.
+All three keys are required; unknown keys/values are rejected:
+
+| Field | Values |
+| ----- | ------ |
+| `layout` | `nz2nd`, `nz2dn`, `nz2nz` |
+| `quant` | `no_convert`, `f32_f16`, `f32_bf16`, `deqf16_scalar`, `deqf16_vec`, `qf322f16_pre_scalar` |
+| `relu` | `no_relu`, `normal_relu` |
+
+| Layout | Physical Vec layout | Supported conversion |
+| ------ | ------------------- | -------------------- |
+| `nz2nd` | row-major, unboxed | All listed modes; `no_convert` keeps FP32/INT32 |
+| `nz2dn` | column-major, unboxed | Same as NZ2ND |
+| `nz2nz` | column-major, row-major sublayout | FP32 `no_convert` only |
+
+Both ReLU modes are supported; `normal_relu` acts before quantization.
+Fixpipe requires Acc input, C2V-only `dir_mask=1`, `nosplit=true`, and `split=0`
+on push/pop/free. A2/A3, bidirectional Fixpipe and other NZ2NZ conversions are rejected.
+Without an epilogue, omitted `nosplit` remains omitted; with one, Python defaults
+it to true and rejects false. Raw IR must explicitly carry true.
+
+Peers must agree on epilogue, id, slot size/count and nosplit. The producer imports
+the consumer's named reserve buffer. `MixedKernelExpanded` checks dtype, physical
+shape/layout, post-conversion slot bytes and backend-sized local-ring capacity.
+Identity SSA buffer aliases retain provenance in O(N log N); arithmetic addresses
+are rejected. Duplicate init ids cannot be hidden by a legacy init. Current PTOAS
+requires one consumer tile type per id; differing payloads need separate ids.
+
+`set_quant_scalar(scale, id=...)` takes FP32: `deqf16_scalar` converts INT32 to FP16,
+`qf322f16_pre_scalar` converts FP32 to FP16. Direct FP16/BF16 conversion needs no setter.
+`set_quant_vector` uses packed INT64/UINT64 hardware words in `MemorySpace.Scaling`,
+distinct from MX `LeftScale`/`RightScale`. Stage unboxed row-major Mat controls, then
+move to Scaling: shape `[1, N]`, positive `N % 16 == 0`, full valid extent and
+128-byte alignment. The planner's conservative 4 KiB budget is not a hardware
+capacity claim. `deqf16_vec` converts INT32 to FP16.
+
+Setters must dominate TPUSH in the same block and match its pipe id and quant mode.
+Control flow, another id's configuration or an intervening `pre_quant` writeback
+invalidates state. Keep vector controls immutable through TPUSH completion and
+outside ring-reuse loops; Scaling allocations stay live for the entire function.
+Quant-setting pipeline loops and their ancestors are demoted to sequential loops,
+including stage=1, until schedulers model register dependencies; sibling pipelines
+remain eligible. Setter counting uses the existing traversal without subtree rescans.
+
+Automatic column-major Acc→Vec moves propagate the physical layout to both init
+calls; changing only TPOP's declaration is insufficient. Incompatible automatic
+layouts, mixed non-Acc producers and split transfers are rejected. Default Buffer
+selection preserves this policy. Transpose scratch uses its own SSA type.
+`c2v_dtype` / `pre_relu` remain the mutually exclusive ND FP32 shorthand;
+`tile.store` / `tile.assemble` writeback controls are separate interfaces.
+
+Serialization, comparison/hash and Python printing preserve the epilogue record.
+For subsequent FIFO work, `PipeDirectionMetadata.acc_push_layouts` records physical
+layouts; `has_acc_push`, `has_non_acc_push`, `has_nonzero_split` constrain setup.
+`CreateInitializePipe` stamps the optional epilogue and nosplit on both peers.
+No GlobalTensor FIFO entry model is introduced.
+
+### Regression and evidence
+
+`tests/ut/codegen/test_c2v_fixpipe.py` covers schema/peer/state/capacity failures,
+round trips and real PTOAS compilation, including both Buffer IR modes.
+System kernels use `@pl.jit`: explicit endpoints select `pl.Level.AIC` / `AIV`
+through `jit.incore`, with a `CORE_GROUP` wrapper and JIT entry.
+The non-square DN/transpose regression uses independent integer goldens at zero
+tolerance; row-major plus real transpose is its control. The dependent acceptance
+change preserves legacy-byte replay and advanced quantization/ring/pipeline/NZ2NZ
+cases with unchanged goldens. Record version pins and device results in the PR;
+emitted text alone is not numerical evidence. CPU simulation is skipped by user instruction.

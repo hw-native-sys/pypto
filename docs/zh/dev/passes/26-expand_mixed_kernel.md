@@ -676,3 +676,65 @@ class After:
 | 自动生成 pipe setup | tensor 级 mixed kernel 无需手写 `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`；Pass 会根据跨核 tile 操作自动推导 |
 | 自动生成 tfree 链 | 消费侧拆分内核会补齐缺失的 `tfree`、将其改写为释放 canonical 的 popped tile，并在需要时把明显过早的 free 延后到同一个 block 内更靠后的位置；但不会重排彼此独立的 `tpop` 链顺序 |
 | Max-slot-size 策略 | 取所有 tile 字节大小的最大值作为单一 `initialize_pipe.slot_size`，对齐后端自动生成 setup 的假设，并保留旧有双向 `dir_mask=3` 行为 |
+
+## C2V Fixpipe 契约
+
+A5 的 `system.aic_initialize_pipe` / `system.aiv_initialize_pipe` 接受 `nosplit`
+和 `acc_push_epilogue`；后者是值语义字符串字典（`ir::AccPushEpilogue`），
+必须完整提供三个字段，未知字段和值均被拒绝：
+
+| 字段 | 值 |
+| ---- | -- |
+| `layout` | `nz2nd`、`nz2dn`、`nz2nz` |
+| `quant` | `no_convert`、`f32_f16`、`f32_bf16`、`deqf16_scalar`、`deqf16_vec`、`qf322f16_pre_scalar` |
+| `relu` | `no_relu`、`normal_relu` |
+
+| 布局 | Vec 物理布局 | 转换范围 |
+| ---- | ------------ | -------- |
+| `nz2nd` | 行优先、无分形 | 全部列出的模式；`no_convert` 保持 FP32/INT32 |
+| `nz2dn` | 列优先、无分形 | 同 NZ2ND |
+| `nz2nz` | 列优先、行优先子布局 | 仅 FP32 `no_convert` |
+
+两种 ReLU 模式均支持，`normal_relu` 在量化前作用于累加器。
+Fixpipe 要求 Acc 输入、仅 C2V 的 `dir_mask=1`、`nosplit=true` 和 push/pop/free 的
+`split=0`。A2/A3、双向 Fixpipe 和其他 NZ2NZ 转换被拒绝。没有 epilogue 时省略
+`nosplit` 会保留原策略；提供 epilogue 时 Python 默认 true、拒绝 false，原始 IR 必须明确 true。
+
+两端必须保持 epilogue、id、slot_size/slot_num 和 nosplit 一致，生产者导入消费者
+具名 reserve buffer。`MixedKernelExpanded` 验证类型、物理形状/布局、转换后槽位
+字节数及后端定义的本地环容量。恒等 SSA 缓冲区别名按 O(N log N) 追溯来源，拒绝
+算术地址；legacy init 不能隐藏重复 id。当前 PTOAS 要求同 id 使用同一消费者 tile
+类型，不同 payload 形状必须使用独立 id。
+
+`set_quant_scalar(scale, id=...)` 接受 FP32：`deqf16_scalar` 为 INT32→FP16，
+`qf322f16_pre_scalar` 为 FP32→FP16；直接 FP16/BF16 转换不需要 setter。
+`set_quant_vector` 使用 `MemorySpace.Scaling` 的 packed INT64/UINT64 硬件控制字，
+与 MX `LeftScale`/`RightScale` 独立。先将无分形行优先 Mat 控制字 move 到 Scaling：
+形状 `[1, N]`、`N > 0`、`N % 16 == 0`、完整 valid extent、128 字节对齐。
+planner 的保守 4 KiB 预算不是硬件容量声明；`deqf16_vec` 为 INT32→FP16。
+
+setter 必须在同一块内支配 TPUSH，并匹配 pipe id 和量化模式。控制流、另一 id 的配置
+或中间带 `pre_quant` 的写回会使旧状态失效。控制字须在 TPUSH 完成前保持不变，
+并在 ring 复用循环之外加载；Scaling 分配保守地存活至函数结束。
+包含 setter 的 pipeline 及其祖先（包括 stage=1）降为顺序循环，直到调度器能建模
+寄存器依赖；兄弟 pipeline 不受影响。setter 计数复用现有遍历，不反复扫描子树。
+
+自动 column-major Acc→Vec move 会把物理布局传给两端 init，不能仅修改 TPOP 声明。
+布局不一致、混入非 Acc 生产者或 split 传输会被拒绝；默认 Buffer 选择保留该策略。
+transpose scratch 使用自身 SSA 类型。`c2v_dtype` / `pre_relu` 是互斥的 ND FP32
+简写；`tile.store` / `tile.assemble` 的写回控制属于独立接口。
+
+序列化、结构比较/哈希和 Python 打印保留 epilogue 记录。后续 FIFO 工作可使用
+`PipeDirectionMetadata.acc_push_layouts` 和 `has_acc_push`、`has_non_acc_push`、
+`has_nonzero_split` 限制自动 setup；`CreateInitializePipe` 在两端写入可选 epilogue
+及 nosplit。本任务不引入 GlobalTensor FIFO entry 模型。
+
+### 回归与证据
+
+`tests/ut/codegen/test_c2v_fixpipe.py` 覆盖 schema/peer/状态/容量负例、往返及两种
+Buffer IR 模式的真实 PTOAS 编译。系统内核使用 `@pl.jit`，显式端点由
+`jit.incore(level=pl.Level.AIC/AIV)`、`CORE_GROUP` 包装和 JIT 入口共同构成。
+非方形 DN/transpose 回归使用零容差独立整数 golden，row-major 加真实 transpose
+作为正对照。依赖本实现的后续验收改动保留旧字节回放及高级量化/ring/pipeline/
+NZ2NZ 真机用例，golden 和精度不变。PR 记录版本 pin 和
+设备结果；字符串输出不能代替数值证据。CPU 模拟器按用户要求跳过。

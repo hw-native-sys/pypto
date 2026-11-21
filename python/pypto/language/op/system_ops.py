@@ -51,6 +51,8 @@ __all__ = [
     "sync_wait",
     "set_ffts",
     "barrier",
+    "set_quant_scalar",
+    "set_quant_vector",
     "fence",
     "cacheinvalid",
     "syncall",
@@ -114,6 +116,29 @@ def wait_flag(
     """Block ``dst_pipe`` until the matching source event is signalled."""
     event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
+
+
+def set_quant_scalar(scale: Scalar | Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set an FP32 scalar scale for a C2V Fixpipe pipe.
+
+    The matching init must select a scalar quant mode. Configure in the same
+    block before TPUSH; the state belongs to ``id``. This is separate from the
+    packed ``pre_quant`` operand of Acc-to-GM/Mat writebacks.
+    """
+    return _ir_ops.set_quant_scalar(scale.unwrap() if isinstance(scale, Scalar) else scale, id=id, span=span)
+
+
+def set_quant_vector(controls: Tile | Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set packed 64-bit per-channel Fixpipe controls for a C2V pipe.
+
+    ``controls`` must be an INT64/UINT64 tile in MemorySpace.Scaling
+    (PTO loc=scaling), containing hardware control words, not floating scales.
+    The matching init must select deqf16_vec. Configure in the same block
+    before TPUSH; the state belongs to ``id``.
+    """
+    return _ir_ops.set_quant_vector(
+        controls.unwrap() if isinstance(controls, Tile) else controls, id=id, span=span
+    )
 
 
 def sync_set(

@@ -716,6 +716,25 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     tile_view.pad = source_view.pad;
   }
 
+  if (space == MemorySpace::Scaling) {
+    CHECK(tile_type->memory_space_ == MemorySpace::Mat && input_shape.size() == 2)
+        << "Fixpipe Scaling controls require a 2D Mat source";
+    CHECK(tile_type->dtype_ == DataType::INT64 || tile_type->dtype_ == DataType::UINT64)
+        << "Fixpipe Scaling controls require packed INT64/UINT64 payloads";
+    auto rows = As<ConstInt>(input_shape[0]);
+    auto cols = As<ConstInt>(input_shape[1]);
+    CHECK(rows && rows->value_ == 1 && cols && cols->value_ > 0 && cols->value_ % 16 == 0)
+        << "Fixpipe Scaling controls require shape [1, N] with N a positive multiple of 16 (128 bytes)";
+    const auto valid_rows =
+        tile_view.valid_shape.size() == 2 ? As<ConstInt>(tile_view.valid_shape[0]) : nullptr;
+    const auto valid_cols =
+        tile_view.valid_shape.size() == 2 ? As<ConstInt>(tile_view.valid_shape[1]) : nullptr;
+    CHECK(valid_rows && valid_rows->value_ == 1 && valid_cols && valid_cols->value_ == cols->value_)
+        << "Fixpipe Scaling controls require valid_shape to cover the full [1, N] shape";
+    CHECK(source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::none_box)
+        << "Fixpipe Scaling controls require a row-major unboxed Mat source";
+  }
+
   // MX LeftScale/RightScale must be !pto.f8E8M0 so EmitC maps loc=scaling → ScaleLeft
   // (ui8+scaling wrongly becomes Fixpipe TileType::Scaling). Host-prequant may load UINT8.
   DataType out_dtype = tile_type->dtype_;
