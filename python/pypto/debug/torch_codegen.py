@@ -1383,12 +1383,10 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.matmul_acc"] = _tile_matmul_acc
     m["tile.batch_matmul_acc"] = _tile_matmul_acc
     m["tile.matmul_bias"] = lambda a, kw: f"({_matmul_expr(a[0], a[1], kw)}.float() + {a[2]})"
-    # GEMV carries no tf32_mode, so it cannot share _matmul_expr, but it must not
-    # diverge from it either: tile.gemv_acc already routes through _cube_matmul
-    # via _tile_matmul_acc. The three forms are identical today -- GEMV's type
-    # deduction admits only identical INT8 / FP16 / BF16 / FP32 operands
-    # (ValidateGemvInputDtypes), for which _cube_matmul falls through to
-    # torch.matmul unchanged -- and stay identical if GEMV ever opens to FP8.
+    # The GEMV family is the M==1 Cube matmul and shares its operand-pair table,
+    # so it needs the same widening of 1-byte / mixed float operands. gemv_acc
+    # reaches it through `_tile_matmul_acc` -> `_matmul_expr`; neither gemv form
+    # carries tf32_mode (an FP32-operand feature the ops do not expose).
     m["tile.gemv"] = lambda a, _kw: f"_cube_matmul({a[0]}, {a[1]}).float()"
     m["tile.gemv_acc"] = _tile_matmul_acc
     m["tile.gemv_bias"] = lambda a, _kw: f"(_cube_matmul({a[0]}, {a[1]}).float() + {a[2]})"
