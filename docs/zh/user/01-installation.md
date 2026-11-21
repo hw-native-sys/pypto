@@ -52,6 +52,33 @@ claude plugin install pypto-developer@pypto-skills
 
 ## Quickstart
 
+### uv 安装
+
+安装 uv 后，在仓库根目录执行：
+
+```bash
+git submodule update --init --recursive
+uv sync
+uv run python examples/intermediate/05_assemble.py
+```
+
+uv 使用兼容的 Python 3.10+ 解释器创建 `.venv`，并安装 `pyproject.toml` 中的依赖。
+默认的 `dev` 组包含开发依赖，以及不使用构建隔离时编译 PyPTO 和 runtime 所需的工具。
+
+PyTorch（`torch>=2.0.0`）从官方 CPU wheel 索引下载。其他包使用默认源，可在用户级 uv 配置中设置，
+也可用 `UV_DEFAULT_INDEX` 或 `uv sync --default-index <index-url>` 指定。
+
+`uv sync` 会更新环境，并生成或更新本地 `uv.lock`。Git 会忽略这个文件。
+新检出的仓库会在声明的版本范围内重新解析依赖，因此不同环境中的版本可能不同。
+`--locked` 要求锁文件已存在，且与项目配置一致。
+
+ptoas 单独安装：从 `toolchain/versions.env` 查到对应版本后，选择与工具所用 Python 解释器和平台
+兼容的 wheel，再运行 `uv tool install <wheel>`。
+
+runtime 的安装步骤和平台要求见 [runtime 文档](https://hw-native-sys.github.io/simpler/)。
+
+### pip 安装
+
 ```bash
 git clone https://github.com/hw-native-sys/pypto.git
 cd pypto

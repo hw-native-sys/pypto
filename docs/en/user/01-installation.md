@@ -54,6 +54,39 @@ The verification below deliberately stays in the first row.
 
 ## Quickstart
 
+### uv installation
+
+With uv installed, run from the repository root:
+
+```bash
+git submodule update --init --recursive
+uv sync
+uv run python examples/intermediate/05_assemble.py
+```
+
+uv uses any compatible Python 3.10+ interpreter to create `.venv` and installs
+the dependencies in `pyproject.toml`. The default `dev` group includes the
+development dependencies and the tools needed to build PyPTO and the runtime
+without build isolation.
+
+PyTorch (`torch>=2.0.0`) comes from the official CPU wheel index. Other packages
+use your default index, set through your user-level uv configuration,
+`UV_DEFAULT_INDEX`, or `uv sync --default-index <index-url>`.
+
+`uv sync` updates the environment and writes a local `uv.lock`, which Git
+ignores. New checkouts resolve dependencies within their declared version
+ranges, so versions may differ between environments. `--locked` requires an
+existing lockfile that matches the project.
+
+Install ptoas separately with `uv tool install <wheel>`. The release is pinned
+in `toolchain/versions.env`; choose a wheel that matches the tool's Python
+interpreter and platform.
+
+For runtime installation and platform requirements, see the
+[runtime documentation](https://hw-native-sys.github.io/simpler/).
+
+### pip installation
+
 ```bash
 git clone https://github.com/hw-native-sys/pypto.git
 cd pypto

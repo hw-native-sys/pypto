@@ -27,6 +27,10 @@ venv/
 env/
 ENV/
 .venv
+.toolchains/
+
+# Local uv dependency resolution
+/uv.lock
 
 # IDEs
 .vscode/
