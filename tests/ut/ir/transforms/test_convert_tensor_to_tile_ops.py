@@ -916,9 +916,9 @@ class TestConvertTensorToTileOps:
         ir.assert_structural_equal(After, Expected)
         kernel = After.get_function("kernel")
         assert kernel is not None
-        assert _find_first_call_to(kernel, "tile.create") is None
-        assert _find_first_call_to(kernel, "tile.load") is None
-        call = _find_first_call_to(kernel, "pld.tensor.put_async")
+        assert _find_first_call_to(kernel, ir.get_op("tile.create").name) is None
+        assert _find_first_call_to(kernel, ir.get_op("tile.load").name) is None
+        call = _find_first_call_to(kernel, ir.get_op("pld.tensor.put_async").name)
         assert call is not None
         assert call.kwargs["engine"] == int(ir.CommEngine.URMA)
         # The result aliases dst and the ReadWrite destination upgrades the param.
@@ -6592,8 +6592,8 @@ class TestSubmitCallSiteUpdate:
         main = After.get_function("main")
         assert kernel is not None and main is not None
         assert kernel.param_directions[0] == ir.ParamDirection.InOut
-        assert _find_first_call_to(kernel, "tile.create") is None
-        assert _find_first_call_to(kernel, "pld.tensor.put_async") is not None
+        assert _find_first_call_to(kernel, ir.get_op("tile.create").name) is None
+        assert _find_first_call_to(kernel, ir.get_op("pld.tensor.put_async").name) is not None
 
         class _SubmitFinder(ir.IRVisitor):
             def __init__(self) -> None:
