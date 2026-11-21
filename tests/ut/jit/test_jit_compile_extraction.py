@@ -24,7 +24,13 @@ import pypto.language as pl
 import pytest
 from pypto.backend import BackendType
 from pypto.compile_profiling import CompileProfiler
-from pypto.ir import OptimizationStrategy, PassDumpLevel
+from pypto.ir import (
+    DistributedCompiledProgram,
+    DistributedConfig,
+    InputLayoutPolicy,
+    OptimizationStrategy,
+    PassDumpLevel,
+)
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import jit
 from pypto.language.diagnostics import ParserTypeError
@@ -149,6 +155,47 @@ class TestCompileReturnsCompiledProgram:
 
 class TestLowerReturnsProgram:
     """Verify ``lower()`` specializes and runs passes without compiling."""
+
+    @pytest.mark.parametrize("device_ids", [None, [5], [5, 6]])
+    def test_lower_and_compile_agree_on_host_weight_layout(self, tmp_path, device_ids):
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def mm(x: pl.Tensor, w: pl.Tensor, out: pl.Out[pl.Tensor]):
+            a = pl.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+            b = pl.load(w, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+            out = pl.store(pl.matmul(a, b), [0, 0], out)
+            return out
+
+        @jit
+        def chip(x: pl.Tensor, w: pl.Tensor, out: pl.Out[pl.Tensor]):
+            for _ in pl.range(3):
+                out = mm(x, w, out)
+            return out
+
+        @jit.host
+        def entry(x: pl.Tensor, w: pl.Tensor, out: pl.Out[pl.Tensor]):
+            chip(x, w, out)
+
+        cfg = RunConfig(
+            strategy=OptimizationStrategy.AutoLayout,
+            input_layout_policy=InputLayoutPolicy(("w",), ("w",), expected_uses=100),
+            distributed_config=DistributedConfig(device_ids=device_ids) if device_ids is not None else None,
+            save_kernels=True,
+            save_kernels_dir=str(tmp_path),
+        )
+        args = [torch.empty(64, 64) for _ in range(3)]
+        lowered = entry.lower(*args, config=cfg)
+        host = next(f for f in lowered.functions.values() if f.level == ir.Level.HOST)
+        if device_ids is not None and len(device_ids) > 1:
+            assert host.attrs["auto_layout_host_inputs"] == "v1;1=UNSUPPORTED"
+            with pytest.raises(ValueError, match="unsupported"):
+                entry.compile(*args, config=cfg)
+        else:
+            compiled = entry.compile(*args, config=cfg)
+            assert isinstance(compiled, DistributedCompiledProgram)
+            assert compiled.input_layouts[1].layout == "NZ"
+            assert host.attrs["auto_layout_host_inputs"] == f"v1;1={compiled.input_layouts[1].layout}"
 
     def test_lower_runs_the_pipeline_for_a_valueless_entry(self):
         """A kernel that writes its Out parameter and returns nothing lowers.

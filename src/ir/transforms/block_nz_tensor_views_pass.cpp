@@ -138,7 +138,9 @@ class NzTypeRewriter {
 
   TypePtr Rewrite(const TypePtr& type, const Span& span) {
     if (!type) return type;
-    if (auto it = cache_.find(type); it != cache_.end()) return it->second;
+    if (auto it = cache_.find(type); it != cache_.end()) {
+      return it->second;
+    }
     auto rewritten = RewriteType(type, span);
     cache_.emplace(type, rewritten);
     return rewritten;
@@ -310,39 +312,9 @@ constexpr size_t kNzRowFractalDim = 2;
 /// ``srcStride`` operand is a 16-bit field counting 32-byte blocks.
 constexpr int64_t kNzMaxGmGapBlocks = 65535;
 
-/// TEMPORARY correctness guard for an upstream pto-isa defect — delete this
-/// function and its call site once hw-native-sys/pto-isa#317 lands.
-///
-/// ``TLoadGm2L1Nz2nz`` computes the GM gap between consecutive column blocks as
-/// a ``uint32_t`` and hands it to ``TLoadInstrGm2L1``'s ``uint16_t gmGap`` with
-/// no range test, so a gap above ``kNzMaxGmGapBlocks`` wraps and the load reads
-/// the wrong fractals. Nothing below this pass notices: PTOAS assembles it, the
-/// CCE compiler accepts it, and the kernel returns wrong numbers with no error.
-/// This pass is the only layer that still knows which ``pl.NZ`` annotation in
-/// the user's own source is responsible, which is why the guard lives here.
-///
-/// For a blocked view the gap reduces to the row extent the load leaves behind:
-///
-/// ```text
-///   gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
-///         = (R/16 - TR/16) * 16 * c0 * sizeof(T) / 32
-///         = R - TR                                      (32-byte blocks)
-/// ```
-///
-/// because ``c0 * sizeof(T) == 32`` holds for every NZ view by construction —
-/// so the bound is dtype-independent, and a *wider* row tile is what lowers the
-/// gap, not a narrower one.
-///
-/// The gap is the stride *between* bursts, and ``nBurst`` is the load's own
-/// column-block extent, so a single-column-block load never consumes it — it
-/// is exempt no matter how large the gap computes to.
-///
-/// ``blocked_partition`` must be the tuple codegen turns into the
-/// ``pto.partition_view`` — ``valid_shape`` when the load carries one, else
-/// ``shapes`` (``src/backend/common/pto_ops_memory.cpp``). That view *is*
-/// pto-isa's ``gShape``, so reading ``shapes`` unconditionally would measure a
-/// window the hardware never sees: a narrowed ``valid_shape`` loads *fewer*
-/// row fractals and therefore leaves a *larger* gap behind.
+/// A2/A3 can advance full-width addresses between individual column-block
+/// bursts. For other targets, require the source gap to fit the strided DMA.
+/// In a dense NZ view one logical row occupies one 32-byte block per C0.
 void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, const ExprPtr& blocked_partition,
                                  const Span& span) {
   auto sizes = As<MakeTuple>(blocked_partition);
@@ -378,17 +350,9 @@ void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, cons
   const int64_t loaded_rows = loaded ? loaded->value_ * tensor_view_semantics::kNzFractalRow : 0;
   const int64_t gap = whole_rows - loaded_rows;
   CHECK_SPAN(gap <= kNzMaxGmGapBlocks, span)
-      << "NZ layout: this tile.load is refused because it would silently return wrong data. Its GM row "
-      << "gap is " << gap << " 32-byte blocks (" << whole_rows << " tensor rows - " << loaded_rows
-      << " loaded rows), above the " << kNzMaxGmGapBlocks
-      << " that the hardware's strided GM->L1 copy can encode. pto-isa's TLoadGm2L1Nz2nz truncates that "
-      << "gap to 16 bits with no range check, so the load would read the wrong fractals and the kernel "
-      << "would return wrong numbers with no error at run time.\n"
-      << "This is NOT an expected pl.NZ limitation: it is a temporary correctness guard, and it is "
-      << "removed once pto-isa fixes the truncation (hw-native-sys/pto-isa#317).\n"
-      << "Workarounds: load a taller row tile -- the gap is (rows - loaded rows), so it shrinks as the "
-      << "tile grows -- or annotate the tensor rank-3 with the stacked axis as the batch "
-      << "([LAYERS, K, N]), whose extent then rides the batch stride instead of the burst gap.";
+      << "NZ layout: the multi-burst tile.load requires a GM row gap of " << gap
+      << " 32-byte blocks, exceeding the 16-bit stride supported for this target."
+      << " Load more rows per tile or keep the weight in ND.";
 }
 
 /// Rewrite the elements of a ``MakeTuple`` coordinate argument into blocked NZ
@@ -836,7 +800,10 @@ class BlockNzMutator : public IRMutator {
     // otherwise (``src/backend/common/pto_ops_memory.cpp``). Measure the same
     // tuple: a narrowed valid_shape loads fewer row fractals and leaves a
     // larger gap than shapes alone would suggest.
-    CheckNzGmGapFitsBurstStride(tensor_type->shape_, args.size() >= 4 ? args[3] : args[2], op->span_);
+    if (!backend::BackendConfig::IsConfigured() ||
+        backend::BackendConfig::GetBackendType() != backend::BackendType::Ascend910) {
+      CheckNzGmGapFitsBurstStride(tensor_type->shape_, args.size() >= 4 ? args[3] : args[2], op->span_);
+    }
     return args;
   }
 

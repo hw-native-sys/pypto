@@ -45,6 +45,8 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/auto_layout/model.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
@@ -510,7 +512,7 @@ bool IsWholeTensorFlatten(const CallPtr& call) {
   return prod == flat_ext->value_;
 }
 
-std::optional<std::vector<int64_t>> IsNzCompatibleTensorType(const TypePtr& type) {
+std::optional<std::vector<int64_t>> IsNzCompatibleTensorType(const TypePtr& type, size_t max_rank = 3) {
   if (IsA<DistributedTensorType>(type)) {
     return std::nullopt;
   }
@@ -523,17 +525,26 @@ std::optional<std::vector<int64_t>> IsNzCompatibleTensorType(const TypePtr& type
     return std::nullopt;
   }
   auto shape = StaticShape(tensor_type->shape_);
-  if (!shape.has_value() || (shape->size() != 2 && shape->size() != 3)) {
+  if (!shape || shape->size() < 2 || shape->size() > max_rank ||
+      std::any_of(shape->begin(), shape->end(), [](int64_t extent) { return extent <= 0; })) {
     return std::nullopt;
   }
-  if (!IsNzCompatibleShape(*shape, tensor_type->dtype_)) {
+  if (!IsNzCompatibleShape({(*shape)[shape->size() - 2], shape->back()}, tensor_type->dtype_)) {
     return std::nullopt;
   }
   return shape;
 }
 
-bool IsNzCompatibleTensorSliceCall(const CallPtr& call, const TypePtr& tensor_type) {
-  auto shape = IsNzCompatibleTensorType(tensor_type);
+bool HasDenseLogicalInputLayout(const TensorTypePtr& tensor) {
+  if (!tensor || IsA<DistributedTensorType>(tensor) || tensor->dtype_.IsPackedFp4()) return false;
+  const auto& view = tensor->tensor_view_;
+  return !view ||
+         ((view->layout == TensorLayout::ND || view->layout == TensorLayout::NZ) && !view->nz_blocked &&
+          view->stride.empty() && view->valid_shape.empty() && view->pad == PadValue::null);
+}
+
+bool IsNzCompatibleTensorSliceCall(const CallPtr& call, const TypePtr& tensor_type, size_t max_rank = 3) {
+  auto shape = IsNzCompatibleTensorType(tensor_type, max_rank);
   auto tt = As<TensorType>(tensor_type);
   if (!shape.has_value() || !tt || call->args_.size() < 3) {
     return false;
@@ -546,15 +557,30 @@ bool IsNzCompatibleTensorSliceCall(const CallPtr& call, const TypePtr& tensor_ty
     return false;
   }
   auto shapes_static = StaticShape(shapes_arg->elements_);
-  if (!shapes_static.has_value() || !IsNzCompatibleShape(*shapes_static, tt->dtype_)) {
-    return false;
-  }
-  if ((*shapes_static)[rank - 2] != (*shape)[rank - 2] || (*shapes_static)[rank - 1] != (*shape)[rank - 1]) {
+  if (!shapes_static || (*shapes_static)[rank - 2] != (*shape)[rank - 2] ||
+      (*shapes_static)[rank - 1] != (*shape)[rank - 1]) {
     return false;
   }
   if (!IsConstValue(offsets_arg->elements_[rank - 2], 0) ||
       !IsConstValue(offsets_arg->elements_[rank - 1], 0)) {
     return false;
+  }
+  // NZ blocking folds the leading axes into one batch coordinate. After any
+  // leading axis spans multiple planes, the more minor axes must remain whole
+  // for this window to denote a contiguous run of complete matrices.
+  bool spans_planes = false;
+  for (size_t axis = 0; axis + 2 < rank; ++axis) {
+    const int64_t count = (*shapes_static)[axis];
+    const int64_t extent = (*shape)[axis];
+    if (count <= 0 || count > extent ||
+        (spans_planes && (count != extent || !IsConstValue(offsets_arg->elements_[axis], 0)))) {
+      return false;
+    }
+    if (auto offset = As<ConstInt>(offsets_arg->elements_[axis]);
+        offset && (offset->value_ < 0 || offset->value_ > extent - count)) {
+      return false;
+    }
+    spans_planes |= count > 1;
   }
   if (call->args_.size() >= 4) {
     if (auto valid_arg = As<MakeTuple>(call->args_[3]); valid_arg && !valid_arg->elements_.empty()) {
@@ -570,7 +596,8 @@ bool IsNzCompatibleTensorSliceCall(const CallPtr& call, const TypePtr& tensor_ty
     }
     for (const auto& d_expr : drop_arg->elements_) {
       auto ci = As<ConstInt>(d_expr);
-      if (!ci || ci->value_ < 0 || ci->value_ + 2 >= static_cast<int64_t>(rank)) {
+      if (!ci || ci->value_ < 0 || ci->value_ + 2 >= static_cast<int64_t>(rank) ||
+          (*shapes_static)[ci->value_] != 1) {
         return false;
       }
     }
@@ -651,7 +678,8 @@ bool IsNzCompatibleValidShape(const ExprPtr& valid_arg, size_t rank, int c0,
 }
 
 bool IsNzCompatibleTileLoadCall(const CallPtr& call, const TypePtr& tensor_type,
-                                const tensor_view_semantics::NzOffsetFacts& facts) {
+                                const tensor_view_semantics::NzOffsetFacts& facts,
+                                const LayoutCostModel& model) {
   auto shape = IsNzCompatibleTensorType(tensor_type);
   auto tt = As<TensorType>(tensor_type);
   if (!shape.has_value() || !tt || call->args_.size() < 3) {
@@ -711,7 +739,8 @@ bool IsNzCompatibleTileLoadCall(const CallPtr& call, const TypePtr& tensor_type,
   const int64_t loaded_rows = As<ConstInt>(part_tuple->elements_[rank - 2])
                                   ? As<ConstInt>(part_tuple->elements_[rank - 2])->value_
                                   : 0;
-  return !(col_blocks > 1 && ((*shape)[rank - 2] - loaded_rows) > 65535);
+  return (target_mem == MemorySpace::Mat && model.SupportsWideNzMatLoad()) ||
+         !(col_blocks > 1 && ((*shape)[rank - 2] - loaded_rows) > 65535);
 }
 
 bool IsNzCompatibleVecTileStoreCall(const CallPtr& call, const TypePtr& tensor_type,
@@ -959,6 +988,12 @@ class GmBindings {
 
   const GmNames& Names() const { return names_; }
 
+  std::unordered_set<std::string> Roots(const ExprPtr& expr) {
+    std::unordered_set<std::string> roots;
+    CollectTensorRoots(expr, expr->GetType(), roots);
+    return roots;
+  }
+
   std::optional<std::string> Resolve(const ExprPtr& expr) {
     auto name = Resolve(expr, {});
     return name ? std::optional<std::string>(Canonical(*name)) : std::nullopt;
@@ -972,10 +1007,14 @@ class GmBindings {
     for (const auto& child : IterChildStmts(stmt)) RecordReturnedStorage(child, outputs);
   }
 
-  void PinLayouts(OrchCallAnalysis& analysis) const {
+  void PinLayouts(OrchCallAnalysis& analysis, bool track_named_inputs = false) const {
     for (const auto& name : pinned_) {
       analysis.nz_ineligible_names.insert(Canonical(name));
       analysis.dn_ineligible_names.insert(Canonical(name));
+      if (track_named_inputs) {
+        analysis.nz_restrictions.try_emplace(Canonical(name),
+                                             "control-flow alternatives bind different storage");
+      }
     }
   }
 
@@ -1224,11 +1263,14 @@ std::unordered_set<std::string> CollectFuncExpandsGmNames(const FunctionPtr& fun
 struct FuncGmIneligible {
   std::unordered_set<std::string> nz;
   std::unordered_set<std::string> dn;
+  std::unordered_set<std::string> written;
+  std::unordered_map<std::string, std::string> nz_restrictions;
 };
 
-FuncGmIneligible CollectFuncGmIneligible(
-    const FunctionPtr& func, const LayoutCostModel& model, const GmNames& gm_names,
-    const std::map<std::pair<std::string, size_t>, int64_t>& param_steps) {
+FuncGmIneligible CollectFuncGmIneligible(const FunctionPtr& func, const LayoutCostModel& model,
+                                         const GmNames& gm_names,
+                                         const std::map<std::pair<std::string, size_t>, int64_t>& param_steps,
+                                         bool track_named_inputs) {
   FuncGmIneligible out;
   NzFactContext fact_ctx;
 
@@ -1287,6 +1329,12 @@ FuncGmIneligible CollectFuncGmIneligible(
     if (auto sub = As<Submit>(expr)) {
       for (const auto& arg : sub->args_) {
         self(self, arg);
+        if (track_named_inputs) {
+          const auto var = AsVarLike(arg);
+          if (auto root = gm_names.find(var.get()); root != gm_names.end()) {
+            out.nz_restrictions.try_emplace(root->second, "unmodeled submit to '" + sub->op_->name_ + "'");
+          }
+        }
       }
       return;
     }
@@ -1296,6 +1344,15 @@ FuncGmIneligible CollectFuncGmIneligible(
       self(self, arg);
     }
     if (As<GlobalVar>(call->op_)) {
+      if (track_named_inputs) {
+        for (const auto& arg : call->args_) {
+          const auto var = AsVarLike(arg);
+          if (auto root = gm_names.find(var.get()); root != gm_names.end()) {
+            out.nz_restrictions.try_emplace(root->second,
+                                            "unmodeled in-core call to '" + call->op_->name_ + "'");
+          }
+        }
+      }
       return;
     }
     for (size_t i = 0; i < call->args_.size(); ++i) {
@@ -1312,19 +1369,27 @@ FuncGmIneligible CollectFuncGmIneligible(
         ok_dn = true;
       } else if (IsOp(call, "tensor.reshape") && i == 0) {
         ok_nz = IsWholeTensorFlatten(call);
+        if (track_named_inputs) {
+          out.nz_restrictions.try_emplace(name->second, "tensor.reshape changes the matrix coordinates");
+        }
       } else if (IsOp(call, "tensor.slice") && i == 0) {
         ok_nz = IsNzCompatibleTensorSliceCall(call, arg_v->GetType());
       } else if (IsOp(call, "tile.load") && i == 0) {
-        ok_nz = IsNzCompatibleTileLoadCall(call, arg_v->GetType(), facts);
+        ok_nz = IsNzCompatibleTileLoadCall(call, arg_v->GetType(), facts, model);
         const MemorySpace target_mem = GetMemorySpaceKwarg(call->kwargs_, "target_memory", MemorySpace::Vec);
         ok_dn = (target_mem == MemorySpace::Vec);
       } else if (IsOp(call, "tile.store") && i == 2) {
+        out.written.insert(name->second);
         ok_nz = IsNzCompatibleTileStoreCall(call, arg_v->GetType(), facts, model);
         auto src_tile = !call->args_.empty() ? As<TileType>(call->args_[0]->GetType()) : nullptr;
         ok_dn = src_tile && src_tile->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec;
       }
       if (!ok_nz) {
         out.nz.insert(name->second);
+        if (track_named_inputs) {
+          out.nz_restrictions.try_emplace(name->second,
+                                          "incompatible '" + call->op_->name_ + "' in '" + func->name_ + "'");
+        }
       }
       if (!ok_dn) {
         out.dn.insert(name->second);
@@ -1352,12 +1417,18 @@ FuncGmIneligible CollectFuncGmIneligible(
 
 class OrchAnalyzer {
  public:
-  OrchAnalyzer(const ProgramPtr& program, const GmNames& definitions)
-      : program_(program), definitions_(definitions) {}
+  OrchAnalyzer(const ProgramPtr& program, const GmNames& definitions, bool track_named_inputs = false,
+               std::optional<int64_t> host_world_size = std::nullopt)
+      : program_(program),
+        definitions_(definitions),
+        track_named_inputs_(track_named_inputs),
+        host_world_size_(host_world_size) {}
 
   void Walk(const FunctionPtr& func) {
     in_host_func_ = func->level_.has_value() && LevelToLinquLevel(*func->level_) >= 3;
     host_whole_matrix_vars_.clear();
+    host_rank_stack_params_.clear();
+    host_shard_offsets_.clear();
     const auto caller = analysis_.call_arg_names.find(func->name_);
     const std::vector<std::optional<std::string>> empty;
     const auto& overrides = caller != analysis_.call_arg_names.end() ? caller->second : empty;
@@ -1366,17 +1437,30 @@ class OrchAnalyzer {
       bindings.RecordReturnedStorage(func->body_, analysis_.external_outputs);
     }
     bindings_ = &bindings;
-    bindings.PinLayouts(analysis_);
+    bindings.PinLayouts(analysis_, track_named_inputs_);
     analysis_.gm_names.insert(bindings.Names().begin(), bindings.Names().end());
     for (size_t i = 0; i < func->params_.size(); ++i) {
       const auto& param = func->params_[i];
       auto name = bindings.Names().find(param.get());
       if (name != bindings.Names().end()) {
-        if (in_host_func_) host_whole_matrix_vars_.insert(param.get());
+        if (in_host_func_) {
+          host_whole_matrix_vars_.insert(param.get());
+          if (caller == analysis_.call_arg_names.end()) {
+            host_rank_stack_params_.insert(param.get());
+            if (track_named_inputs_) {
+              if (auto shape = IsNzCompatibleTensorType(param->GetType(), 4)) {
+                host_input_shapes_.emplace(name->second, std::move(*shape));
+              }
+            }
+          }
+        }
         if (caller == analysis_.call_arg_names.end() && func->param_directions_[i] != ParamDirection::In) {
           analysis_.external_outputs.insert(name->second);
         }
-        if (HasFixedGmSignature(func)) Pin(name->second);
+        if (track_named_inputs_ && func->param_directions_[i] != ParamDirection::In) {
+          analysis_.written_storage.insert(name->second);
+        }
+        if (HasFixedGmSignature(func)) Pin(name->second, "fixed parameter layout in '" + func->name_ + "'");
       }
       auto step_it = analysis_.param_steps.find({func->name_, i});
       if (step_it != analysis_.param_steps.end() && step_it->second > 1) {
@@ -1389,12 +1473,18 @@ class OrchAnalyzer {
     bindings_ = nullptr;
   }
 
-  OrchCallAnalysis Result() && { return std::move(analysis_); }
+  OrchCallAnalysis Result() && {
+    for (const auto& [name, visits] : fixed_dispatches_) {
+      analysis_.projected_dispatches[name] += static_cast<double>(visits.size());
+    }
+    return std::move(analysis_);
+  }
 
  private:
-  void Pin(const std::string& name) {
+  void Pin(const std::string& name, const std::string& reason = {}) {
     analysis_.nz_ineligible_names.insert(name);
     analysis_.dn_ineligible_names.insert(name);
+    if (track_named_inputs_ && !reason.empty()) analysis_.nz_restrictions.try_emplace(name, reason);
   }
 
   std::optional<int64_t> ArgAlignmentStep(const ExprPtr& arg) {
@@ -1427,6 +1517,66 @@ class OrchAnalyzer {
     return 1;
   }
 
+  void RecordHostProjection(const ExprPtr& expr, const VarPtr& arg, const TypePtr& formal_type,
+                            const std::string& root, int64_t invocations) {
+    const auto input = host_input_shapes_.find(root);
+    const auto projection = IsNzCompatibleTensorType(arg->GetType());
+    const bool is_matrix = input != host_input_shapes_.end() && input->second.size() == 2;
+    const auto device_expr = As<Call>(expr) ? As<Call>(expr)->GetAttr<ExprPtr>(kAttrDevice, nullptr)
+                                            : As<Submit>(expr)->GetAttr<ExprPtr>(kAttrDevice, nullptr);
+    const auto device = EvalScalarExpr(device_expr, scalar_defs_, std::nullopt);
+    if (is_matrix) {
+      if (projection != input->second) {
+        Pin(root, "device dispatch must forward the complete HOST matrix");
+        return;
+      }
+      const auto rank = AsVarLike(ResolveScalarDefinition(device_expr));
+      // With a single configured worker, an unpinned dispatch resolves to it
+      // and a canonical range(world_size()) loop has only rank zero.
+      if (host_world_size_ != 1 ||
+          (device_expr && device != 0 && (!rank || !world_size_indices_.count(rank.get())))) {
+        Pin(root, "whole-matrix HOST input requires a proven single-device dispatch");
+        return;
+      }
+    } else {
+      if (input == host_input_shapes_.end() || !host_shard_offsets_.count(arg.get()) || !projection ||
+          projection->size() + 1 != input->second.size() ||
+          !std::equal(projection->begin(), projection->end(), input->second.begin() + 1)) {
+        analysis_.nz_restrictions.try_emplace(root, "device dispatch must select a complete rank shard");
+        return;
+      }
+      if (host_world_size_ && *host_world_size_ != input->second.front()) {
+        analysis_.nz_restrictions.try_emplace(root,
+                                              "rank-indexed bank extent must match the HOST world size");
+        return;
+      }
+    }
+    const auto layout = detail::TensorTypeLayout(AsTensorTypeLike(formal_type));
+    const auto [old, inserted] = host_dispatch_layouts_.try_emplace(root, layout);
+    if (!inserted && old->second != layout) {
+      analysis_.nz_restrictions.try_emplace(root,
+                                            "device dispatches disagree on the declared storage layout");
+    }
+    if (is_matrix) {
+      fixed_dispatches_[root].emplace(0, 0);
+      if (!device_expr) analysis_.unpinned_host_matrix_dispatches[root].push_back(expr.get());
+      return;
+    }
+    const auto& shard_expr = host_shard_offsets_.at(arg.get());
+    if (auto index = AsVarLike(ResolveScalarDefinition(shard_expr));
+        !host_world_size_ && index && world_size_indices_.count(index.get())) {
+      analysis_.unknown_rank_counts.insert(root);
+    }
+    const auto fixed_shard = EvalScalarExpr(shard_expr, scalar_defs_, std::nullopt);
+    if (fixed_shard && device) {
+      fixed_dispatches_[root].emplace(*device, *fixed_shard);
+    } else {
+      // Without a fixed projection and device, every dispatch may fetch new
+      // bytes. Rereads inside the CHIP can still receive the normal discount.
+      analysis_.projected_dispatches[root] += static_cast<double>(invocations);
+    }
+  }
+
   void RecordGlobalCall(const ExprPtr& expr, const std::string& name, const std::vector<ExprPtr>& args) {
     const int64_t call_mult = mult_ * CallCoreMultiplier(expr);
     if (analysis_.call_order.count(name) == 0) {
@@ -1441,6 +1591,32 @@ class OrchAnalyzer {
     }
     const auto callee = program_->GetFunction(name);
     if (callee) {
+      if (track_named_inputs_ && args.size() != callee->params_.size()) {
+        // Before IO canonicalization, an omitted Out can shift the actuals.
+        // A positional guess cannot authorize repacking any of them.
+        for (const auto& arg : args) {
+          for (const auto& root : bindings_->Roots(arg)) {
+            Pin(root, "call to '" + name + "' omits a formal argument");
+          }
+        }
+      }
+      for (size_t i = 0; track_named_inputs_ && i < std::min(resolved.size(), callee->params_.size()); ++i) {
+        if (!resolved[i]) continue;
+        if (callee->param_directions_[i] != ParamDirection::In) {
+          analysis_.written_storage.insert(*resolved[i]);
+        }
+        // Both ends of a call describe the same projected matrix. Equal byte
+        // sizes alone do not establish identical NZ block boundaries.
+        const auto actual = IsNzCompatibleTensorType(args[i]->GetType(), 4);
+        const auto formal = IsNzCompatibleTensorType(callee->params_[i]->GetType(), 4);
+        const auto actual_tensor = AsTensorTypeLike(args[i]->GetType());
+        const auto formal_tensor = AsTensorTypeLike(callee->params_[i]->GetType());
+        if (!actual || !formal || actual != formal || !HasDenseLogicalInputLayout(actual_tensor) ||
+            !HasDenseLogicalInputLayout(formal_tensor) || actual_tensor->dtype_ != formal_tensor->dtype_) {
+          analysis_.nz_restrictions.try_emplace(
+              *resolved[i], "incompatible tensor parameter " + std::to_string(i) + " of '" + name + "'");
+        }
+      }
       for (size_t i = resolved.size(); i < callee->params_.size(); ++i) {
         auto omitted = bindings_->OmittedArgument(expr, i);
         Pin(omitted);
@@ -1448,8 +1624,12 @@ class OrchAnalyzer {
       }
     }
     if (!callee || HasFixedGmSignature(callee)) {
-      for (const auto& arg : resolved) {
-        if (arg) Pin(*arg);
+      for (const auto& arg : args) {
+        if (track_named_inputs_) {
+          for (const auto& root : bindings_->Roots(arg)) Pin(root, "opaque consumer '" + name + "'");
+        } else if (const auto root = bindings_->Resolve(arg)) {
+          Pin(*root);
+        }
       }
     }
     const auto [first, inserted_call] = analysis_.call_arg_names.try_emplace(name, resolved);
@@ -1461,8 +1641,9 @@ class OrchAnalyzer {
         const auto& first_binding = first->second[i];
         const auto& current_binding = resolved[i];
         if (first_binding != current_binding) {
-          if (first_binding.has_value()) Pin(*first_binding);
-          if (current_binding.has_value()) Pin(*current_binding);
+          const auto reason = "shared parameter of '" + name + "' binds different storage across calls";
+          if (first_binding.has_value()) Pin(*first_binding, reason);
+          if (current_binding.has_value()) Pin(*current_binding, reason);
         }
       }
     }
@@ -1484,7 +1665,8 @@ class OrchAnalyzer {
     }
 
     if (in_host_func_ && callee && (!callee->level_.has_value() || LevelToLinquLevel(*callee->level_) < 3)) {
-      const bool is_device_dispatch = [&]() {
+      const bool is_chip_dispatch = callee->level_ == Level::CHIP && callee->role_ == Role::Orchestrator;
+      const bool has_device = [&]() {
         if (auto c = As<Call>(expr)) return c->HasAttr(kAttrDevice);
         if (auto s = As<Submit>(expr)) return s->HasAttr(kAttrDevice);
         return false;
@@ -1492,11 +1674,21 @@ class OrchAnalyzer {
       for (size_t i = 0; i < args.size() && i < resolved.size(); ++i) {
         const auto& name_opt = resolved[i];
         if (!name_opt.has_value()) continue;
+        const auto input = host_input_shapes_.find(*name_opt);
+        const bool is_matrix = input != host_input_shapes_.end() && input->second.size() == 2;
+        const bool is_device_dispatch =
+            track_named_inputs_ ? is_chip_dispatch && (has_device || is_matrix) : has_device;
         analysis_.dn_ineligible_names.insert(*name_opt);
         auto arg_v = AsVarLike(args[i]);
         const bool whole_host = arg_v && host_whole_matrix_vars_.count(arg_v.get()) != 0;
         if (!is_device_dispatch || !whole_host) {
           analysis_.nz_ineligible_names.insert(*name_opt);
+          if (track_named_inputs_) {
+            analysis_.nz_restrictions.try_emplace(
+                *name_opt, "dispatch to '" + name + "' does not forward a whole HOST matrix");
+          }
+        } else if (track_named_inputs_ && i < callee->params_.size()) {
+          RecordHostProjection(expr, arg_v, callee->params_[i]->GetType(), *name_opt, call_mult);
         }
       }
     }
@@ -1511,6 +1703,29 @@ class OrchAnalyzer {
       site.multiplicity += call_mult;
       site.calls.push_back(expr.get());
     }
+  }
+
+  ExprPtr DirectHostShardOffset(const CallPtr& call, const VarPtr& source,
+                                const std::vector<int64_t>& bank_shape) const {
+    // The runtime indexes a StackedDeviceTensor once. It accepts a scalar
+    // rank index followed by full slices and returns a DeviceTensor.
+    if (bank_shape.size() < 3 || !source || !host_rank_stack_params_.count(source.get()) ||
+        call->args_.size() != 5) {
+      return nullptr;
+    }
+    const auto drop = As<MakeTuple>(call->args_[4]);
+    if (!drop || drop->elements_.size() != 1 || !IsConstValue(drop->elements_[0], 0)) return nullptr;
+    const auto window = As<MakeTuple>(call->args_[1]);
+    const auto offsets = As<MakeTuple>(call->args_[2]);
+    if (!window || !offsets || offsets->elements_.size() != bank_shape.size()) return nullptr;
+    const auto shape = StaticShape(window->elements_);
+    if (!shape || shape->size() != bank_shape.size() || shape->front() != 1 ||
+        !std::equal(shape->begin() + 1, shape->end(), bank_shape.begin() + 1) ||
+        !std::all_of(offsets->elements_.begin() + 1, offsets->elements_.end(),
+                     [](const ExprPtr& offset) { return IsConstValue(offset, 0); })) {
+      return nullptr;
+    }
+    return offsets->elements_[0];
   }
 
   void RecordLocalTensorCall(const CallPtr& call, const VarPtr& assign_var) {
@@ -1529,11 +1744,35 @@ class OrchAnalyzer {
     for (size_t i = 0; i < call->args_.size(); ++i) {
       const auto& arg = call->args_[i];
       auto source = bindings_->Resolve(arg);
-      if (!source) continue;
+      if (!source) {
+        if (track_named_inputs_) {
+          for (const auto& root : bindings_->Roots(arg)) {
+            Pin(root, "unmodeled tuple argument to '" + call->op_->name_ + "'");
+          }
+        }
+        continue;
+      }
       const bool ok_nz =
           (IsOp(call, "tensor.reshape") && i == 0 && IsWholeTensorFlatten(call)) ||
-          (IsOp(call, "tensor.slice") && i == 0 && IsNzCompatibleTensorSliceCall(call, arg->GetType()));
-      auto arg_var = AsVarLike(arg);
+          (IsOp(call, "tensor.slice") && i == 0 &&
+           IsNzCompatibleTensorSliceCall(call, arg->GetType(), in_host_func_ && track_named_inputs_ ? 4 : 3));
+      if (track_named_inputs_ && IsOp(call, "tensor.reshape")) {
+        analysis_.nz_restrictions.try_emplace(*source, "tensor.reshape changes the matrix coordinates");
+      }
+      const auto arg_var = AsVarLike(arg);
+      if (in_host_func_ && track_named_inputs_ && IsOp(call, "tensor.slice")) {
+        const auto input = host_input_shapes_.find(*source);
+        if (input != host_input_shapes_.end()) {
+          const auto rank =
+              ok_nz && assign_var ? DirectHostShardOffset(call, arg_var, input->second) : nullptr;
+          if (rank) {
+            host_shard_offsets_.emplace(assign_var.get(), rank);
+          } else {
+            analysis_.nz_restrictions.try_emplace(
+                *source, "HOST must index the original rank bank once with a whole-shard selection");
+          }
+        }
+      }
       if (in_host_func_ && assign_var && arg_var && IsOp(call, "tensor.slice") && ok_nz &&
           host_whole_matrix_vars_.count(arg_var.get()) != 0) {
         host_whole_matrix_vars_.insert(assign_var.get());
@@ -1541,6 +1780,11 @@ class OrchAnalyzer {
       analysis_.dn_ineligible_names.insert(*source);
       if (!ok_nz) {
         analysis_.nz_ineligible_names.insert(*source);
+        if (track_named_inputs_) {
+          analysis_.nz_restrictions.try_emplace(
+              *source, IsOp(call, "tensor.slice") ? "tensor.slice does not preserve both matrix axes"
+                                                  : "incompatible consumer '" + call->op_->name_ + "'");
+        }
         if (!IsOp(call, "tensor.slice")) analysis_.reshaped_names.insert(*source);
       }
       if (assign_var) {
@@ -1559,6 +1803,11 @@ class OrchAnalyzer {
     if (auto sub = As<Submit>(expr)) {
       if (auto gv = As<GlobalVar>(sub->op_)) {
         RecordGlobalCall(sub, gv->name_, sub->args_);
+      } else if (track_named_inputs_) {
+        for (const auto& arg : sub->args_) {
+          for (const auto& root : bindings_->Roots(arg))
+            Pin(root, "unmodeled submit to '" + sub->op_->name_ + "'");
+        }
       }
       for (const auto& arg : sub->args_) {
         RecordCalls(arg);
@@ -1585,12 +1834,26 @@ class OrchAnalyzer {
         var_steps_[fs->loop_var_.get()] = *step_val;
       }
       const int64_t prev_mult = mult_;
-      mult_ = prev_mult * ForTripCount(fs, scalar_defs_);
+      const bool world_size_loop =
+          in_host_func_ && track_named_inputs_ && IsConstValue(fs->start_, 0) && IsConstValue(fs->step_, 1) &&
+          IsOp(As<Call>(ResolveScalarDefinition(fs->stop_)), "pld.system.world_size");
+      const int64_t trip_count =
+          world_size_loop ? host_world_size_.value_or(1) : ForTripCount(fs, scalar_defs_);
+      if (world_size_loop) world_size_indices_.insert(fs->loop_var_.get());
+      mult_ = InvocationCount(prev_mult, trip_count);
       WalkStmt(fs->body_);
       mult_ = prev_mult;
+      if (world_size_loop) world_size_indices_.erase(fs->loop_var_.get());
       return;
     } else if (auto as = As<AssignStmt>(stmt)) {
       RecordCalls(as->value_, as->var_);
+      if (auto source = AsVarLike(as->value_); source && host_whole_matrix_vars_.count(source.get())) {
+        host_whole_matrix_vars_.insert(as->var_.get());
+        if (host_rank_stack_params_.count(source.get())) host_rank_stack_params_.insert(as->var_.get());
+        if (auto shard = host_shard_offsets_.find(source.get()); shard != host_shard_offsets_.end()) {
+          host_shard_offsets_.emplace(as->var_.get(), shard->second);
+        }
+      }
     } else if (auto es = As<EvalStmt>(stmt)) {
       RecordCalls(es->expr_);
     } else if (auto rs = As<ReturnStmt>(stmt)) {
@@ -1603,8 +1866,23 @@ class OrchAnalyzer {
     }
   }
 
+  ExprPtr ResolveScalarDefinition(ExprPtr expr) const {
+    // FlattenCallExpr can hoist world_size() out of a bound. Follow SSA
+    // bindings without guessing the result of any other dynamic expression.
+    for (int depth = 0; depth < 64; ++depth) {
+      auto var = AsVarLike(expr);
+      auto definition = scalar_defs_.find(var.get());
+      if (!var || definition == scalar_defs_.end()) break;
+      expr = definition->second;
+    }
+    return expr;
+  }
+
   const ProgramPtr& program_;
   const GmNames& definitions_;
+  bool track_named_inputs_;
+  std::optional<int64_t> host_world_size_;
+  std::unordered_set<const Var*> world_size_indices_;
   GmBindings* bindings_ = nullptr;
   OrchCallAnalysis analysis_;
   int64_t mult_ = 1;
@@ -1614,6 +1892,11 @@ class OrchAnalyzer {
   std::unordered_map<std::string, std::map<std::vector<std::optional<std::string>>, size_t>> site_index_;
   bool in_host_func_ = false;
   std::unordered_set<const Var*> host_whole_matrix_vars_;
+  std::unordered_set<const Var*> host_rank_stack_params_;
+  std::unordered_map<std::string, std::vector<int64_t>> host_input_shapes_;
+  std::unordered_map<std::string, TensorLayout> host_dispatch_layouts_;
+  std::unordered_map<const Var*, ExprPtr> host_shard_offsets_;
+  std::unordered_map<std::string, std::set<std::pair<int64_t, int64_t>>> fixed_dispatches_;
 };
 
 std::vector<LayoutSpec> AdmissibleTileLayouts(const TileTypePtr& tile_type) {
@@ -1711,6 +1994,8 @@ class PostInferInstanceExtractor {
   PostInferInstanceExtractor(const LayoutCostModel& model, const backend::Backend* backend,
                              const std::unordered_set<std::string>& reusable,
                              const std::unordered_set<std::string>& nz_input_roots,
+                             const std::unordered_map<std::string, TensorTypePtr>& host_inputs,
+                             const std::unordered_map<std::string, double>& projected_dispatches,
                              const std::unordered_set<std::string>& external_out_names,
                              const std::unordered_set<std::string>& reshaped_names,
                              const std::unordered_set<std::string>& nz_ineligible_names,
@@ -1724,6 +2009,8 @@ class PostInferInstanceExtractor {
         backend_(backend),
         reusable_(reusable),
         nz_input_roots_(nz_input_roots),
+        host_inputs_(host_inputs),
+        projected_dispatches_(projected_dispatches),
         external_out_names_(external_out_names),
         reshaped_names_(reshaped_names),
         nz_ineligible_names_(nz_ineligible_names),
@@ -1785,8 +2072,24 @@ class PostInferInstanceExtractor {
     auto name_it = gm_names_.find(param.get());
     if (name_it == gm_names_.end()) return;
     std::string name = name_it->second;
-    const LayoutSpec cur_layout =
-        tt->tensor_view_.has_value() ? LayoutSpec::Tensor(tt->tensor_view_->layout) : LayoutSpec::ND();
+    // A device formal describes one matrix. The GM decision represents the
+    // entire public input, including any bank ranks not used by this site.
+    bool selectable_host_projection = false;
+    const auto declared_layout = LayoutSpec::Tensor(detail::TensorTypeLayout(tt));
+    if (auto input = host_inputs_.find(name);
+        input != host_inputs_.end() && projected_dispatches_.count(name) &&
+        nz_ineligible_names_.count(name) == 0 && reshaped_names_.count(name) == 0 &&
+        HasDenseLogicalInputLayout(tt) && tt->dtype_ == input->second->dtype_) {
+      const auto input_shape = IsNzCompatibleTensorType(input->second, 4);
+      if (input_shape && is_static && shape.size() == 2 &&
+          std::equal(shape.begin(), shape.end(), input_shape->end() - 2)) {
+        selectable_host_projection = true;
+        shape = *input_shape;
+      }
+    }
+    // The supplier starts with logical ND bytes even where a device formal
+    // contains an authored NZ preference. A proven projection can reopen it.
+    const LayoutSpec cur_layout = selectable_host_projection ? LayoutSpec::ND() : declared_layout;
     const bool is_ext_out = external_out_names_.count(name) != 0;
     const bool is_reusable = reusable_.count(name) != 0 ||
                              (nz_input_roots_.empty() && (reusable_.count(CleanName(param->name_hint_)) ||
@@ -1801,7 +2104,8 @@ class PostInferInstanceExtractor {
         !is_distributed && !tt->dtype_.IsPackedFp4() &&
         (is_ext_out
              ? model_.allow_external_output_relayout
-             : (owned || (formal && (model_.allow_external_input_relayout || nz_input_roots_.count(name)))));
+             : (owned || (formal && (model_.allow_external_input_relayout || selectable_host_projection ||
+                                     (host_inputs_.count(name) == 0 && nz_input_roots_.count(name))))));
     // The logical NZ selection pipeline reaches this point before blocking. Only
     // private, dense, unaliased-by-opaque-code storage may shed its declared layout.
     const auto& view = tt->tensor_view_;
@@ -1816,7 +2120,8 @@ class PostInferInstanceExtractor {
                           (cur_layout == LayoutSpec::DN() && dn_ineligible_names_.count(name) == 0));
     const bool allow_nz = !is_distributed && is_static && (cur_layout == LayoutSpec::ND() || reopen) &&
                           reshaped_names_.count(name) == 0 && nz_ineligible_names_.count(name) == 0 &&
-                          IsNzCompatibleShape(shape, tt->dtype_) && allow_relayout;
+                          (selectable_host_projection || IsNzCompatibleShape(shape, tt->dtype_)) &&
+                          allow_relayout;
     // Promoting a host argument to DN changes its physical strides. Only introduce
     // DN for buffers owned by the orchestration, where the pass controls both ends.
     const bool allow_dn = owned && !is_ext_out && !is_distributed && is_static && shape.size() == 2 &&
@@ -1877,6 +2182,7 @@ class PostInferInstanceExtractor {
     node.producer_op_id = std::nullopt;
     node.is_reusable_weight = is_reusable;
     node.is_external_output = is_ext_out;
+    node.is_named_nz_input = nz_input_roots_.count(name) != 0;
     instance_.AddValue(std::move(node));
   }
 
@@ -2088,7 +2394,7 @@ class PostInferInstanceExtractor {
                     LayoutSpec::NZ()) != gm_node->admissible_layouts.end();
       const bool nz_ok = gm_allows_nz && gm_v &&
                          (is_store ? IsNzCompatibleVecTileStoreCall(call, gm_v->GetType(), facts)
-                                   : IsNzCompatibleTileLoadCall(call, gm_v->GetType(), facts));
+                                   : IsNzCompatibleTileLoadCall(call, gm_v->GetType(), facts, model_));
       if (!nz_ok) {
         mark_disqualified(tile_var.get());
       }
@@ -2359,6 +2665,16 @@ class PostInferInstanceExtractor {
     const ValueNode* src_node = instance_.FindValue(src_name);
     if (!src_node || !dst_node) return;
 
+    std::optional<ValueNode> projected_source;
+    if (host_inputs_.count(src_name)) {
+      if (auto projected_shape = StaticShape(AsTensorTypeLike(src_arg->GetType())->shape_);
+          projected_shape && *projected_shape != src_node->shape) {
+        projected_source = *src_node;
+        projected_source->shape = std::move(*projected_shape);
+      }
+    }
+    const auto& load_source = projected_source ? *projected_source : *src_node;
+
     const auto facts = nz_fact_ctx_.Facts();
     OperationNode op_node;
     op_node.op_id = op_id;
@@ -2366,17 +2682,27 @@ class PostInferInstanceExtractor {
     op_node.inputs = {src_name};
     op_node.output = dst_node->name;
     op_node.invocations = InvocationCount(model_.expected_uses, loop_multiplier_);
+    if (projected_source) {
+      if (auto visits = projected_dispatches_.find(src_name); visits != projected_dispatches_.end()) {
+        // A rank receives its layer bank. Counting each layer as potentially
+        // fresh avoids crediting an unrelated layer as an L2 reread.
+        const double layers = src_node->shape.size() == 4 ? static_cast<double>(src_node->shape[1]) : 1.0;
+        op_node.projected_mte2_source_bytes =
+            static_cast<double>(load_source.ByteSize()) * visits->second * layers;
+      }
+    }
 
     for (const auto& s_lay : src_node->admissible_layouts) {
       for (const auto& d_lay : dst_node->admissible_layouts) {
-        if (!model_.IsValidLoadConfig(*src_node, *dst_node, s_lay, d_lay)) {
+        if (!model_.IsValidLoadConfig(load_source, *dst_node, s_lay, d_lay)) {
           continue;
         }
         if (!dst_node->dtype.IsPackedFp4() && dst_node->memory_space == MemorySpace::Vec &&
-            s_lay == LayoutSpec::NZ() && !IsNzCompatibleTileLoadCall(rhs, src_arg->GetType(), facts)) {
+            s_lay == LayoutSpec::NZ() &&
+            !IsNzCompatibleTileLoadCall(rhs, src_arg->GetType(), facts, model_)) {
           continue;
         }
-        const double cost = model_.EstimateLoadCost(*src_node, *dst_node, s_lay, d_lay);
+        const double cost = model_.EstimateLoadCost(load_source, *dst_node, s_lay, d_lay);
         std::string kind = "ND2NZ";
         if (s_lay == LayoutSpec::NZ()) {
           kind = "NZ2NZ";
@@ -2955,7 +3281,9 @@ class PostInferInstanceExtractor {
 
   void WalkEffect(const ExprPtr& expr) {
     const size_t previous = vec_position_;
-    if (auto call = As<Call>(expr); call && IsOp(call, "tile.store")) ExtractStore(call);
+    if (auto call = As<Call>(expr); call && IsOp(call, "tile.store")) {
+      ExtractStore(call);
+    }
     if (vec_position_ == previous) RecordOtherVecUse(expr, ++vec_position_);
   }
 
@@ -3206,6 +3534,8 @@ class PostInferInstanceExtractor {
   const backend::Backend* backend_;
   const std::unordered_set<std::string>& reusable_;
   const std::unordered_set<std::string>& nz_input_roots_;
+  const std::unordered_map<std::string, TensorTypePtr>& host_inputs_;
+  const std::unordered_map<std::string, double>& projected_dispatches_;
   const std::unordered_set<std::string>& external_out_names_;
   const std::unordered_set<std::string>& reshaped_names_;
   const std::unordered_set<std::string>& nz_ineligible_names_;
@@ -3238,6 +3568,24 @@ class PostInferInstanceExtractor {
   std::unordered_set<const Var*> vec_row_reduction_vars_;
   std::unordered_set<const Var*> vec_nz_eligible_vars_;
   NzFactContext nz_fact_ctx_;
+};
+
+// Bind every caller before its callee so shared helper formals see all incoming
+// storage roots and their execution counts before their body is analyzed.
+class OrchestrationCallees : public IRVisitor {
+ public:
+  std::set<std::string> names;
+
+ private:
+  void VisitExpr_(const CallPtr& op) override {
+    if (auto callee = As<GlobalVar>(op->op_)) names.insert(callee->name_);
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    if (auto callee = As<GlobalVar>(op->op_)) names.insert(callee->name_);
+    IRVisitor::VisitExpr_(op);
+  }
 };
 
 bool IsGmLayoutSupportedByOps(const std::string& val_name, const LayoutSpec& lay,
@@ -3468,18 +3816,30 @@ void SanitizeInstanceInvariants(LayoutProblemInstance& instance) {
 struct InputLayoutRoots {
   std::unordered_set<std::string> nz;
   std::unordered_set<std::string> reusable;
+  std::unordered_map<std::string, TensorTypePtr> host_inputs;
+  std::string host_entry;
+  std::map<size_t, std::string> host_slots;
 };
 
 InputLayoutRoots ResolveInputLayoutRoots(const ProgramPtr& program, const OrchCallAnalysis& orch,
                                          const LayoutCostModel& model,
                                          const std::unordered_set<std::string>& requested,
                                          const std::unordered_set<std::string>& reusable_names) {
-  if (requested.empty()) return {{}, reusable_names};
+  if (requested.empty()) return {{}, reusable_names, {}, {}, {}};
   if (model.allow_external_input_relayout || model.allow_external_output_relayout) {
     throw ValueError("Named NZ inputs cannot be combined with unrestricted external relayout");
   }
   FunctionPtr entry;
   for (const auto& [_, fn] : program->functions_) {
+    if (fn->level_ != Level::HOST || fn->role_ != Role::Orchestrator || orch.call_counts.count(fn->name_)) {
+      continue;
+    }
+    if (entry) throw ValueError("Named NZ inputs require a unique HOST entry function");
+    entry = fn;
+  }
+  const bool host_entry = entry != nullptr;
+  for (const auto& [_, fn] : program->functions_) {
+    if (host_entry) break;
     if (program->functions_.size() == 1 ||
         (fn->func_type_ == FunctionType::Orchestration && !orch.call_counts.count(fn->name_))) {
       if (entry) throw ValueError("Named NZ inputs require a unique entry function");
@@ -3488,6 +3848,7 @@ InputLayoutRoots ResolveInputLayoutRoots(const ProgramPtr& program, const OrchCa
   }
   if (!entry) throw ValueError("Named NZ inputs require an entry function");
   InputLayoutRoots roots;
+  if (host_entry) roots.host_entry = entry->name_;
   auto missing = requested;
   for (size_t i = 0; i < entry->params_.size(); ++i) {
     const auto& param = entry->params_[i];
@@ -3496,8 +3857,11 @@ InputLayoutRoots ResolveInputLayoutRoots(const ProgramPtr& program, const OrchCa
     if (root != orch.gm_names.end() && reusable_names.count(name)) roots.reusable.insert(root->second);
     if (!requested.count(name)) continue;
     const auto tensor = AsTensorTypeLike(param->GetType());
+    if (host_entry && tensor && tensor->dtype_.IsPackedFp4()) {
+      throw ValueError("Named NZ input '" + name + "' cannot select a layout for a packed FP4 bank");
+    }
     if (!tensor || entry->param_directions_[i] != ParamDirection::In || root == orch.gm_names.end() ||
-        orch.external_outputs.count(root->second) ||
+        orch.external_outputs.count(root->second) || (host_entry && !HasDenseLogicalInputLayout(tensor)) ||
         (tensor->tensor_view_ &&
          (tensor->tensor_view_->layout != TensorLayout::ND || !tensor->tensor_view_->stride.empty() ||
           !tensor->tensor_view_->valid_shape.empty() || tensor->tensor_view_->pad != PadValue::null))) {
@@ -3505,6 +3869,10 @@ InputLayoutRoots ResolveInputLayoutRoots(const ProgramPtr& program, const OrchCa
     }
     if (!missing.erase(name)) throw ValueError("Ambiguous NZ entry input '" + name + "'");
     roots.nz.insert(root->second);
+    if (host_entry) {
+      roots.host_inputs.emplace(root->second, tensor);
+      roots.host_slots.emplace(i, root->second);
+    }
   }
   if (!missing.empty()) throw ValueError("Unknown NZ entry input '" + *missing.begin() + "'");
   return roots;
@@ -3537,40 +3905,70 @@ LayoutSpec EffectiveTileLayout(const TileTypePtr& tile_type) {
   return (implicit == TileLayout::col_major) ? LayoutSpec::ColMajorFlat() : LayoutSpec::RowMajorFlat();
 }
 
-OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
+namespace {
+
+OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program, bool track_named_inputs,
+                                      std::optional<int64_t> host_world_size) {
   return_lineage::ScopedTraceCache trace_cache;
   const auto definitions = MakeGmDefinitionNames(program);
+  std::map<std::string, FunctionPtr> orchestration;
   std::vector<FunctionPtr> top_orch;
   std::vector<FunctionPtr> sub_orch;
   std::vector<FunctionPtr> incore;
   for (const auto& [_, func] : program->functions_) {
     if (IsInCoreType(func->func_type_)) {
       incore.push_back(func);
+    } else if (track_named_inputs) {
+      orchestration.emplace(func->name_, func);
     } else if (func->func_type_ == FunctionType::Orchestration) {
       top_orch.push_back(func);
     } else {
       sub_orch.push_back(func);
     }
   }
-  // Walk sub_orch after top_orch; sort by discovered call order.
-  OrchAnalyzer top_analyzer(program, definitions);
-  for (const auto& fn : top_orch) top_analyzer.Walk(fn);
-  OrchCallAnalysis top_res = std::move(top_analyzer).Result();
-  std::sort(sub_orch.begin(), sub_orch.end(), [&](const FunctionPtr& a, const FunctionPtr& b) {
-    auto it_a = top_res.call_order.find(a->name_);
-    auto it_b = top_res.call_order.find(b->name_);
-    const size_t oa = it_a != top_res.call_order.end() ? it_a->second : std::numeric_limits<size_t>::max();
-    const size_t ob = it_b != top_res.call_order.end() ? it_b->second : std::numeric_limits<size_t>::max();
-    return oa < ob;
-  });
-  OrchAnalyzer final_analyzer(program, definitions);
-  for (const auto& fn : top_orch) {
-    final_analyzer.Walk(fn);
+
+  std::map<std::string, std::set<std::string>> callees;
+  std::unordered_map<std::string, size_t> pending_callers;
+  for (const auto& [name, fn] : orchestration) {
+    OrchestrationCallees collector;
+    if (fn->body_) collector.VisitStmt(fn->body_);
+    for (const auto& callee : collector.names) {
+      if (!orchestration.count(callee)) continue;
+      callees[name].insert(callee);
+      ++pending_callers[callee];
+    }
   }
-  for (const auto& fn : sub_orch) {
-    final_analyzer.Walk(fn);
+  std::vector<std::string> ready;
+  for (const auto& [name, _] : orchestration) {
+    if (!pending_callers.count(name)) ready.push_back(name);
   }
-  auto analysis = std::move(final_analyzer).Result();
+  OrchAnalyzer analyzer(program, definitions, track_named_inputs, host_world_size);
+  for (size_t i = 0; i < ready.size(); ++i) {
+    const auto& name = ready[i];
+    analyzer.Walk(orchestration.at(name));
+    auto children = callees.find(name);
+    if (children == callees.end()) continue;
+    for (const auto& callee : children->second) {
+      if (--pending_callers.at(callee) == 0) ready.push_back(callee);
+    }
+  }
+  INTERNAL_CHECK(ready.size() == orchestration.size()) << "AutoLayout requires acyclic function calls";
+  if (!track_named_inputs) {
+    // Preserve baseline call-site specialization and operation ordering when
+    // the caller has offered no named layout choices.
+    OrchAnalyzer top_analyzer(program, definitions);
+    for (const auto& fn : top_orch) top_analyzer.Walk(fn);
+    const auto top = std::move(top_analyzer).Result();
+    auto order = [&](const FunctionPtr& fn) {
+      const auto it = top.call_order.find(fn->name_);
+      return it != top.call_order.end() ? it->second : std::numeric_limits<size_t>::max();
+    };
+    std::sort(sub_orch.begin(), sub_orch.end(),
+              [&](const auto& a, const auto& b) { return order(a) < order(b); });
+    for (const auto& fn : top_orch) analyzer.Walk(fn);
+    for (const auto& fn : sub_orch) analyzer.Walk(fn);
+  }
+  auto analysis = std::move(analyzer).Result();
   const std::vector<std::optional<std::string>> empty;
   auto register_local_buffers = [&](const FunctionPtr& func, const GmNames& names) {
     auto walk = [&](auto& self, const StmtPtr& stmt) -> void {
@@ -3590,7 +3988,7 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
         auto& site = sites->second[i];
         std::string scope = sites->second.size() > 1 ? ".site." + std::to_string(i) : "";
         GmBindings bindings(program, fn, definitions, site.arg_names, scope);
-        bindings.PinLayouts(analysis);
+        bindings.PinLayouts(analysis, track_named_inputs);
         site.gm_names = bindings.Names();
         register_local_buffers(fn, site.gm_names);
       }
@@ -3598,7 +3996,7 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
       analysis.gm_names.insert(names.begin(), names.end());
     } else {
       GmBindings bindings(program, fn, definitions, empty);
-      bindings.PinLayouts(analysis);
+      bindings.PinLayouts(analysis, track_named_inputs);
       const auto& names = bindings.Names();
       analysis.gm_names.insert(names.begin(), names.end());
       register_local_buffers(fn, names);
@@ -3614,6 +4012,12 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
   return analysis;
 }
 
+}  // namespace
+
+OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program) {
+  return AnalyzeOrchestration(program, false, std::nullopt);
+}
+
 LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& program, const LayoutCostModel& cost_model,
                                             const std::unordered_set<std::string>& reusable_tensors,
                                             const std::unordered_set<std::string>& nz_inputs) {
@@ -3624,15 +4028,21 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
                                             const std::unordered_set<std::string>& reusable_tensors,
                                             const std::unordered_set<std::string>& nz_inputs,
                                             LayoutWritebackBindings* bindings) {
+  cost_model.ValidateUseHorizon();
   auto program = tensor_view_semantics::RestoreLegacyBlockedNzViews(input);
   if (bindings) {
     bindings->program = program;
     bindings->sites.clear();
+    bindings->host_input_roots.clear();
+    bindings->host_input_entry.clear();
   }
   LayoutCostModel resolved_model = cost_model;
+  if (resolved_model.host_world_size && *resolved_model.host_world_size < 1) {
+    throw ValueError("AutoLayout host_world_size must be positive");
+  }
   const backend::Backend* be = ResolveBackend(resolved_model);
   if (!resolved_model.backend_type.has_value() && be != nullptr) {
-    resolved_model.resolved_arch_hint = be->GetHandler()->GetPtoTargetArch();
+    resolved_model.backend_type = backend::BackendConfig::GetBackendType();
   }
 
   LayoutProblemInstance instance;
@@ -3649,7 +4059,11 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
     }
   }
 
-  auto orch = AnalyzeOrchestration(program);
+  const bool has_host = std::any_of(program->functions_.begin(), program->functions_.end(),
+                                    [](const auto& fn) { return fn.second->level_ == Level::HOST; });
+  const bool track_host_inputs = has_host && !nz_inputs.empty();
+  auto orch = AnalyzeOrchestration(program, track_host_inputs,
+                                   track_host_inputs ? cost_model.host_world_size : std::nullopt);
   const auto input_roots =
       ResolveInputLayoutRoots(program, orch, resolved_model, nz_inputs, reusable_tensors);
   if (!non_incore_funcs.empty()) {
@@ -3663,24 +4077,51 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
         });
   }
 
+  auto merge_eligibility = [&](FuncGmIneligible inelig) {
+    orch.nz_ineligible_names.merge(inelig.nz);
+    orch.dn_ineligible_names.merge(inelig.dn);
+    orch.written_storage.merge(inelig.written);
+    orch.nz_restrictions.merge(inelig.nz_restrictions);
+  };
+  auto check_host_matrix_formals = [&](const FunctionPtr& func, const GmNames& names) {
+    if (input_roots.host_inputs.empty()) return;
+    for (const auto& param : func->params_) {
+      const auto name = names.find(param.get());
+      if (name == names.end() || !input_roots.host_inputs.count(name->second)) continue;
+      const auto tensor = As<TensorType>(param->GetType());
+      if (!tensor || tensor->shape_.size() != 2) {
+        orch.nz_restrictions.try_emplace(name->second,
+                                         "kernel '" + func->name_ + "' does not receive one complete matrix");
+      }
+    }
+  };
   for (const auto& func : incore_funcs) {
     auto sites_it = orch.call_sites.find(func->name_);
     if (sites_it != orch.call_sites.end() && !sites_it->second.empty()) {
       for (const auto& site : sites_it->second) {
-        auto inelig = CollectFuncGmIneligible(func, resolved_model, site.gm_names, orch.param_steps);
-        orch.nz_ineligible_names.insert(inelig.nz.begin(), inelig.nz.end());
-        orch.dn_ineligible_names.insert(inelig.dn.begin(), inelig.dn.end());
+        check_host_matrix_formals(func, site.gm_names);
+        merge_eligibility(CollectFuncGmIneligible(func, resolved_model, site.gm_names, orch.param_steps,
+                                                  track_host_inputs));
         auto exp_gm = CollectFuncExpandsGmNames(func, site.gm_names);
         orch.nz_ineligible_names.insert(exp_gm.begin(), exp_gm.end());
         orch.reshaped_names.insert(exp_gm.begin(), exp_gm.end());
       }
     } else {
-      auto inelig = CollectFuncGmIneligible(func, resolved_model, orch.gm_names, orch.param_steps);
-      orch.nz_ineligible_names.insert(inelig.nz.begin(), inelig.nz.end());
-      orch.dn_ineligible_names.insert(inelig.dn.begin(), inelig.dn.end());
+      check_host_matrix_formals(func, orch.gm_names);
+      merge_eligibility(
+          CollectFuncGmIneligible(func, resolved_model, orch.gm_names, orch.param_steps, track_host_inputs));
       auto exp_gm = CollectFuncExpandsGmNames(func, orch.gm_names);
       orch.nz_ineligible_names.insert(exp_gm.begin(), exp_gm.end());
       orch.reshaped_names.insert(exp_gm.begin(), exp_gm.end());
+    }
+  }
+
+  for (const auto& name : input_roots.nz) {
+    if (orch.written_storage.count(name)) {
+      orch.nz_restrictions.try_emplace(name, "storage is written through an alias or mutable parameter");
+    }
+    if (orch.nz_restrictions.count(name)) {
+      orch.nz_ineligible_names.insert(name);
     }
   }
 
@@ -3694,11 +4135,11 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
       for (size_t site_idx = 0; site_idx < sites_it->second.size(); ++site_idx) {
         const auto& site = sites_it->second[site_idx];
         const std::string prefix = detail::TileLayoutPrefix(program, func->name_, multi_incore, site_idx);
-        PostInferInstanceExtractor ext(resolved_model, be, input_roots.reusable, input_roots.nz,
-                                       orch.external_outputs, orch.reshaped_names, orch.nz_ineligible_names,
-                                       orch.dn_ineligible_names, orch.internal_buffers, instance,
-                                       consumed_values, op_counter, prefix, site.multiplicity, site.gm_names,
-                                       orch.param_steps);
+        PostInferInstanceExtractor ext(
+            resolved_model, be, input_roots.reusable, input_roots.nz, input_roots.host_inputs,
+            orch.projected_dispatches, orch.external_outputs, orch.reshaped_names, orch.nz_ineligible_names,
+            orch.dn_ineligible_names, orch.internal_buffers, instance, consumed_values, op_counter, prefix,
+            site.multiplicity, site.gm_names, orch.param_steps);
         ext.Extract(func, bindings);
       }
       continue;
@@ -3708,16 +4149,56 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
     auto cnt_it = orch.call_counts.find(func->name_);
     const int64_t call_mult = (cnt_it != orch.call_counts.end()) ? cnt_it->second : 1;
     PostInferInstanceExtractor ext(resolved_model, be, input_roots.reusable, input_roots.nz,
-                                   orch.external_outputs, orch.reshaped_names, orch.nz_ineligible_names,
-                                   orch.dn_ineligible_names, orch.internal_buffers, instance, consumed_values,
-                                   op_counter, prefix, call_mult, orch.gm_names, orch.param_steps);
+                                   input_roots.host_inputs, orch.projected_dispatches, orch.external_outputs,
+                                   orch.reshaped_names, orch.nz_ineligible_names, orch.dn_ineligible_names,
+                                   orch.internal_buffers, instance, consumed_values, op_counter, prefix,
+                                   call_mult, orch.gm_names, orch.param_steps);
     ext.Extract(func, bindings);
   }
 
+  for (const auto& [name, _] : input_roots.host_inputs) {
+    if (!consumed_values.count(name)) {
+      orch.nz_ineligible_names.insert(name);
+      orch.nz_restrictions.try_emplace(name, "no modeled device load uses this storage");
+    }
+  }
   PruneUnsupportedGmAndFractalLayouts(instance, orch.nz_ineligible_names, orch.dn_ineligible_names,
                                       orch.reshaped_names);
   SanitizeInstanceInvariants(instance);
-  if (bindings) bindings->orch = std::move(orch);
+  if (bindings) {
+    bindings->host_input_roots = input_roots.host_slots;
+    bindings->host_input_entry = input_roots.host_entry;
+    std::vector<Diagnostic> hints;
+    for (const auto& [name, input] : input_roots.host_inputs) {
+      if (orch.unknown_rank_counts.count(name)) {
+        hints.emplace_back(
+            DiagnosticSeverity::PerfHint, "AutoLayout", 0, "PH-AL-002",
+            "Using one modeled HOST rank for input '" + name + "' because no topology was supplied",
+            program->span_);
+      }
+      const auto* value = instance.FindValue(name);
+      if (value && value->admissible_layouts.size() == 2) continue;
+      const auto restriction = orch.nz_restrictions.find(name);
+      const auto shape = IsNzCompatibleTensorType(input, 4);
+      std::string reason;
+      if (restriction != orch.nz_restrictions.end()) {
+        reason = restriction->second;
+      } else if (!shape) {
+        reason = "entry parameter is not an aligned, static rank-2 matrix or rank-3 or rank-4 matrix bank";
+      } else if (orch.reshaped_names.count(name)) {
+        reason = "a reshape or expanded tile view changes the matrix geometry";
+      } else if (!value) {
+        reason = "no modeled device load uses this storage";
+      } else {
+        reason = "the device loads have no jointly supported ND and NZ configurations";
+      }
+      hints.emplace_back(DiagnosticSeverity::PerfHint, "AutoLayout", 0, "PH-AL-001",
+                         "Keeping the declared representation for input '" + name + "' because " + reason,
+                         program->span_);
+    }
+    if (!hints.empty()) EmitDiagnostics(hints, "AutoLayout");
+    bindings->orch = std::move(orch);
+  }
   return instance;
 }
 

@@ -198,7 +198,7 @@ class _Specialization(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
-def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
+def _run_config_lower_kwargs(run_config: Any, program: _ir.Program) -> dict[str, Any]:
     """Extract pass-only keyword arguments from a ``pypto.runtime.RunConfig``."""
     kwargs: dict[str, Any] = {
         "strategy": run_config.strategy,
@@ -207,7 +207,14 @@ def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
         "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
     }
     if run_config.input_layout_policy is not None:
+        from pypto.ir.compile import _host_input_layout_config  # noqa: PLC0415
+
         kwargs["input_layout_policy"] = run_config.input_layout_policy
+        layout_config = _host_input_layout_config(
+            program, run_config.input_layout_policy, run_config.distributed_config
+        )
+        if layout_config is not None:
+            kwargs["host_world_size"] = len(layout_config.device_ids)
     if run_config.memory_planner is not None:
         kwargs["memory_planner"] = run_config.memory_planner
     if run_config.enable_software_pipeline is not None:
@@ -1587,7 +1594,8 @@ class JITFunction:
 
         A ``config=RunConfig(...)`` keyword controls pass execution through its
         strategy, diagnostics, dependency-analysis, memory-planner, and platform
-        fields. Runtime and artifact fields are ignored. This method does not
+        fields. Named HOST input layout selection uses the configured device
+        count. Runtime and artifact fields are otherwise ignored. This method does not
         run code generation, invoke ``ptoas``, execute on a device, write
         artifacts, or access the compiled-program cache.
 
@@ -1616,7 +1624,7 @@ class JITFunction:
             specialization.per_func_dyn,
             pl,
         )
-        lower_kwargs = _run_config_lower_kwargs(run_config) if run_config is not None else {}
+        lower_kwargs = _run_config_lower_kwargs(run_config, pre_pass) if run_config is not None else {}
         platform = run_config.platform if run_config is not None else None
         try:
             return _run_pass_pipeline(

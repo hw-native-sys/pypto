@@ -69,7 +69,11 @@ REQUIRE_CONTIGUOUS_OPERANDS_ATTR = "require_contiguous_operands"
 # True, so only the opt-out (False) is ever stored.
 AUTO_SCOPE_ATTR = "auto_scope"
 
+# Versioned slot decisions stamped by AutoLayout on the lowered HOST entry.
+AUTO_LAYOUT_HOST_INPUTS_ATTR = "auto_layout_host_inputs"
+
 __all__ = [
+    "AUTO_LAYOUT_HOST_INPUTS_ATTR",
     "AUTO_SCOPE_ATTR",
     "BUFFER_IR_SELECTED_ATTR",
     "BUILTIN_TEMPLATE_DIR_ATTR",

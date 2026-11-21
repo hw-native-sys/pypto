@@ -39,6 +39,7 @@ from . import directions as _directions
 # Import operation modules
 from . import op  # noqa: F401
 from . import operators as operators
+from ._distributed_input_layout import DistributedInputLayout, PreparedDistributedInput
 
 # Import IR Builder
 from .builder import IRBuilder
@@ -109,6 +110,8 @@ __all__ = [
     "CompiledProgram",
     "DistributedCompiledProgram",
     "DistributedConfig",
+    "DistributedInputLayout",
+    "PreparedDistributedInput",
     "PassManager",
     "InputLayoutPolicy",
     "OptimizationStrategy",

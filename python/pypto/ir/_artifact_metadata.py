@@ -168,7 +168,12 @@ def _read_capabilities(
 
 
 def _load_meta(
-    meta_path: Path, *, filename: str, schema: int, require_program: bool = True
+    meta_path: Path,
+    *,
+    filename: str,
+    schema: int,
+    require_program: bool = True,
+    legacy_schemas: Sequence[int] = (),
 ) -> dict[str, Any]:
     """Read and fully validate the fields the L2 and L3 sidecars share.
 
@@ -214,7 +219,7 @@ def _load_meta(
 
     found_schema = meta.get("schema")
     if type(found_schema) is not int or found_schema not in (
-        (1, 2, 3) if filename == _COMPILED_META_FILENAME else (schema,)
+        (1, 2, 3) if filename == _COMPILED_META_FILENAME else (*legacy_schemas, schema)
     ):
         raise ValueError(
             f"Incompatible {filename} schema {found_schema!r} (expected "

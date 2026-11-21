@@ -17,6 +17,9 @@ from textwrap import dedent, indent
 import pypto.language as pl
 import pytest
 from pypto import backend, ir
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import generate
+from pypto.pypto_core import passes
 
 
 def _matmul(name: str = "mm", rows: int = 64) -> str:
@@ -373,3 +376,330 @@ def test_loader_permission_requires_read_only_entry_input(tmp_path, ascend_backe
             _matmul() + _ENTRY + "    return self.mm(x, w, dst)\n",
             input_layout_policy=ir.InputLayoutPolicy((name,)),
         )
+
+
+def test_steady_state_requires_per_forward_horizon():
+    with pytest.raises(ValueError, match="steady_state requires expected_uses=1"):
+        ir.InputLayoutPolicy(("w",), ("w",), expected_uses=2, steady_state=True)
+    with pytest.raises(ValueError, match="steady_state requires expected_uses=1"):
+        passes.auto_layout(nz_inputs=["w"], reusable_tensors=["w"], expected_uses=2, steady_state=True)
+
+
+@pytest.mark.parametrize(("steady_state", "layout"), [(False, "ND"), (True, "NZ")])
+def test_steady_state_waives_only_reusable_input_packing(tmp_path, ascend_backend, steady_state, layout):
+    _compile(
+        tmp_path,
+        _matmul() + _ENTRY + "    return self.mm(x, w, dst)\n",
+        input_layout_policy=ir.InputLayoutPolicy(("x", "w"), ("w",), steady_state=steady_state),
+    )
+    meta = json.loads((tmp_path / "compiled_meta.json").read_text())
+    assert {p["name"]: p["layout"] for p in meta["params"]} == {"x": "ND", "w": "ND", "dst": "ND"}
+    assert {p["name"]: p["layout"] for p in meta["lowered_params"]} == {"x": "ND", "w": layout, "dst": "ND"}
+
+
+_HOST_CHIP = """
+@pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+def chip(self, a: pl.Tensor[[64,64], pl.FP32], b: pl.Tensor[[64,64], pl.FP32],
+         dst: pl.Out[pl.Tensor[[64,64], pl.FP32]]) -> pl.Tensor[[64,64], pl.FP32]:
+    for i in pl.range(3):
+        dst = self.mm(a, b, dst)
+    return dst
+"""
+
+_HOST_ENTRY = """
+@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+def main(self, x: pl.Tensor[[2,64,64], pl.FP32], w: pl.Tensor[[2,64,64], pl.FP32],
+         dst: pl.Out[pl.Tensor[[2,64,64], pl.FP32]]):
+    for r in pl.range(2):
+        shard = x[r]
+        self.chip(w[r], shard, dst[r], device=r)
+"""
+
+
+def _host_program(functions: str) -> ir.Program:
+    program = pl.parse("@pl.program\nclass Kernel:\n" + indent(functions, "    "), filename=__file__)
+    assert isinstance(program, ir.Program)
+    return program
+
+
+def _lower_host(output: Path, program: ir.Program, policy: ir.InputLayoutPolicy):
+    dumps = output / "passes_dump"
+    lowered = ir.PassManager.get_strategy(
+        ir.OptimizationStrategy.AutoLayout, input_layout_policy=policy
+    ).run_passes(program, dump_ir=ir.PassDumpLevel.EXPLICIT, output_dir=str(dumps))
+    return (
+        lowered,
+        next(dumps.glob("*_after_InferTileMemorySpace.py")).read_text(),
+        next(dumps.glob("*_after_AutoLayout.py")).read_text(),
+    )
+
+
+def _chip_has_nz(dump: str, name: str = "chip") -> tuple[bool, bool, bool]:
+    chip = next(
+        node for node in ast.walk(ast.parse(dump)) if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    a, b, dst = chip.args.args[1:]
+
+    def has_nz(param: ast.arg) -> bool:
+        return param.annotation is not None and "TensorLayout.NZ" in ast.unparse(param.annotation)
+
+    return (has_nz(a), has_nz(b), has_nz(dst))
+
+
+def _host_layout_proof(program: ir.Program) -> str:
+    host = program.get_function("main")
+    assert host is not None
+    proof = host.attrs["auto_layout_host_inputs"]
+    assert isinstance(proof, str)
+    return proof
+
+
+@pytest.mark.parametrize(("uses", "layout"), [(1, "ND"), (100, "NZ")])
+def test_whole_host_weight_crosses_implicit_single_chip_dispatch(tmp_path, ascend_backend, uses, layout):
+    entry = """
+@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+def main(self, x: pl.Tensor[[64,64], pl.FP32], w: pl.Tensor[[64,64], pl.FP32],
+         dst: pl.Tensor[[64,64], pl.FP32]):
+    weight = w
+    self.chip(x, weight, dst)
+"""
+    compiled = ir.compile(
+        _host_program(_matmul() + _HOST_CHIP + entry),
+        strategy=ir.OptimizationStrategy.AutoLayout,
+        input_layout_policy=ir.InputLayoutPolicy(("w",), ("w",), uses),
+        output_dir=str(tmp_path),
+        skip_ptoas=True,
+        distributed_config=ir.DistributedConfig(device_ids=[5], num_sub_workers=0),
+    )
+    assert isinstance(compiled, ir.DistributedCompiledProgram)
+    descriptor = compiled.input_layouts[1]
+    assert descriptor.layout == layout
+    assert descriptor.logical_shape == (64, 64)
+    metadata = json.loads((tmp_path / "distributed_meta.json").read_text())
+    assert [param["direction"] for param in metadata["params"]] == ["In", "In", "Out"]
+    # Device affinity is logical rank zero, independently of the sole physical
+    # device ID, and is needed only for the selected NZ crossing.
+    orchestrator = (tmp_path / "orchestration/host_orch.py").read_text()
+    dispatch = next(
+        line for line in orchestrator.splitlines() if '_submit_chip(orch, callables["chip"]' in line
+    )
+    assert dispatch.endswith(", 0)" if layout == "NZ" else ", None)")
+
+
+@pytest.mark.parametrize("allowed", ["x", "w"])
+@pytest.mark.parametrize(("uses", "steady_state"), [(1, False), (100, False), (1, True)])
+def test_named_host_input_layout(tmp_path, ascend_backend, allowed, uses, steady_state):
+    entry = _HOST_ENTRY.replace("    for r", "    bank = x\n    for r").replace(
+        "shard = x[r]", "shard = bank[r]"
+    )
+    lowered, before, after = _lower_host(
+        tmp_path,
+        _host_program(_matmul() + _HOST_CHIP + entry),
+        ir.InputLayoutPolicy((allowed,), ("x", "w"), uses, steady_state=steady_state),
+    )
+    # HOST dispatch coordinates and types must stay in the logical ABI even
+    # when the device interprets one input's bytes in NZ order.
+    marker = "@pl.function(level=pl.Level.HOST"
+    before_host = [line for line in before.split(marker)[1].splitlines() if "pl.func_attr" not in line]
+    after_host = [line for line in after.split(marker)[1].splitlines() if "pl.func_attr" not in line]
+    assert before_host == after_host
+    packed = uses > 1 or steady_state
+    expected = (allowed == "w" and packed, allowed == "x" and packed, False)
+    assert _chip_has_nz(after) == expected
+    slot = 0 if allowed == "x" else 1
+    assert _host_layout_proof(lowered) == f"v1;{slot}={'NZ' if packed else 'ND'}"
+    if find_ptoas_binary() is not None:
+        files = generate(lowered, str(tmp_path), skip_ptoas=False)
+        assert any(path.startswith("next_levels/chip/kernels/") and path.endswith(".cpp") for path in files)
+        pto = (tmp_path / "next_levels/chip/ptoas/mm.pto").read_text()
+        for i, is_nz in enumerate(expected):
+            view = next(line for line in pto.splitlines() if f"pto.make_tensor_view %arg{i}," in line)
+            layout = "nz" if is_nz else "nd"
+            assert f"layout = #pto.layout<{layout}>" in view
+
+
+@pytest.mark.parametrize("forged_proof", [False, True])
+def test_distributed_named_input_guard_preserves_artifacts(tmp_path, ascend_backend, forged_proof):
+    entry = _HOST_ENTRY.replace("x: pl.Tensor[[2,64,64]", "x: pl.Tensor[[2,128,64]")
+    entry = entry.replace("shard = x[r]", "shard = x[r, :64, :]")
+    program = _host_program(_matmul() + _HOST_CHIP + entry)
+    compiled = ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    assert isinstance(compiled, ir.DistributedCompiledProgram)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert (tmp_path / "distributed_meta.json") in before
+    if forged_proof:
+        entry = entry.replace(
+            "    for r", '    pl.func_attr({"auto_layout_host_inputs": "v1;0=NZ"})\n    for r'
+        )
+        program = _host_program(_matmul() + _HOST_CHIP + entry)
+    with pytest.raises(ValueError, match="Distributed input layout"):
+        ir.compile(
+            program,
+            strategy=ir.OptimizationStrategy.AutoLayout,
+            input_layout_policy=ir.InputLayoutPolicy(("x",), ("x",), 100),
+            output_dir=str(tmp_path),
+            skip_ptoas=True,
+        )
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    reloaded = ir.DistributedCompiledProgram.from_dir(str(tmp_path))
+    assert reloaded.execution_capabilities == compiled.execution_capabilities
+
+
+@pytest.mark.parametrize("uses", [1, 100])
+def test_host_permission_reopens_one_authored_nz_operand(tmp_path, ascend_backend, uses):
+    dense = "pl.Tensor[[64,64], pl.FP32]"
+    nz = "pl.Tensor[[64,64], pl.FP32, pl.NZ]"
+    chip = _HOST_CHIP.replace(f"a: {dense}", f"a: {nz}").replace(f"b: {dense}", f"b: {nz}")
+    mm = _matmul().replace(f"a: {dense}", f"a: {nz}").replace(f"w: {dense}", f"w: {nz}")
+    _, before, after = _lower_host(
+        tmp_path, _host_program(mm + chip + _HOST_ENTRY), ir.InputLayoutPolicy(("x",), ("x",), uses)
+    )
+    assert _chip_has_nz(before) == (True, True, False)
+    assert _chip_has_nz(after) == (True, uses > 1, False)
+
+
+@pytest.mark.parametrize(
+    "restriction",
+    [
+        "partial_matrix",
+        "rank_window",
+        "second_slice",
+        "opaque_use",
+        "write_alias",
+        "bank_dispatch",
+        "reshape",
+    ],
+)
+def test_host_permission_requires_compatible_readers(tmp_path, ascend_backend, restriction):
+    auxiliary = ""
+    chip = _HOST_CHIP
+    entry = _HOST_ENTRY
+    if restriction == "partial_matrix":
+        entry = entry.replace("x: pl.Tensor[[2,64,64]", "x: pl.Tensor[[2,128,64]")
+        entry = entry.replace("shard = x[r]", "shard = x[r, :64, :]")
+    elif restriction == "rank_window":
+        entry = entry.replace("shard = x[r]", "window = x[0:1]\n        shard = window[0]")
+    elif restriction == "second_slice":
+        entry = entry.replace("shard = x[r]", "whole = x[r]\n        shard = whole[0:64, 0:64]")
+    elif restriction in {"opaque_use", "reshape"}:
+        fixtures = Path(__file__).resolve().parents[3] / "st/runtime/external_kernel/kernels/aiv"
+        fixture = fixtures / "spmd_write.cpp"
+        shape = "64,64" if restriction == "opaque_use" else "4096"
+        actual = "b" if restriction == "opaque_use" else "pl.tensor.reshape(b, [4096])"
+        auxiliary = f"""
+@pl.function(type=pl.FunctionType.AIV, external_source={str(fixture)!r})
+def inspect(self, weight: pl.Tensor[[{shape}], pl.FP32]): ...
+"""
+        chip = chip.replace("    for i", f"    self.inspect({actual})\n    for i")
+    elif restriction == "write_alias":
+        auxiliary = """
+@pl.function(type=pl.FunctionType.InCore)
+def overwrite(self, weight: pl.InOut[pl.Tensor[[64,64], pl.FP32]]) -> pl.Tensor[[64,64], pl.FP32]:
+    tile = pl.tile.full([64,64], dtype=pl.FP32, value=1.0)
+    return pl.store(tile, [0,0], weight)
+"""
+        chip = chip.replace("    for i", "    alias = b\n    b = self.overwrite(alias)\n    for i")
+    else:
+        auxiliary = """
+@pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+def inspect_bank(self, bank: pl.Tensor[[2,64,64], pl.FP32]):
+    pass
+"""
+        entry += "    self.inspect_bank(x, device=0)\n"
+
+    lowered, _, after = _lower_host(
+        tmp_path,
+        _host_program(_matmul() + auxiliary + chip + entry),
+        ir.InputLayoutPolicy(("x",), ("x",), 100),
+    )
+    assert _chip_has_nz(after) == (False, False, False)
+    assert _host_layout_proof(lowered) == "v1;0=UNSUPPORTED"
+
+
+@pytest.mark.parametrize("devices", [1, 3])
+def test_offered_rank_extent_must_match_device_count(tmp_path, ascend_backend, devices):
+    program = _host_program(_matmul() + _HOST_CHIP + _HOST_ENTRY)
+    with pytest.raises(ValueError, match="Distributed input layout for 'x' is unsupported"):
+        ir.compile(
+            program,
+            strategy=ir.OptimizationStrategy.AutoLayout,
+            input_layout_policy=ir.InputLayoutPolicy(("x",), ("x",), steady_state=True),
+            output_dir=str(tmp_path),
+            skip_ptoas=True,
+            distributed_config=ir.DistributedConfig(device_ids=list(range(devices)), num_sub_workers=0),
+        )
+    assert not (tmp_path / "distributed_meta.json").exists()
+
+
+def test_host_policy_rejects_packed_fp4_bank(tmp_path, ascend_backend):
+    program = _host_program("""
+@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+def main(self, weight: pl.Tensor[[2,64,64], pl.FP4E2M1X2]):
+    pass
+""")
+    with pytest.raises(ValueError, match="cannot select a layout for a packed FP4 bank"):
+        _lower_host(tmp_path, program, ir.InputLayoutPolicy(("weight",)))
+
+
+@pytest.mark.parametrize("uses", [1, 100])
+def test_host_named_input_layout_with_rank_and_layer_axes(tmp_path, ascend_backend, uses):
+    dense = "pl.Tensor[[64,64], pl.FP32]"
+    nz = "pl.Tensor[[64,64], pl.FP32, pl.NZ]"
+    layer_bank = "pl.Tensor[[3,64,64], pl.FP32, pl.NZ]"
+    chip = _HOST_CHIP.replace(f"a: {dense}", f"a: {layer_bank}").replace(f"b: {dense}", f"b: {layer_bank}")
+    chip = chip.replace("self.mm(a, b, dst)", "self.mm(a[i], b[i], dst)")
+    mm = _matmul().replace(f"a: {dense}", f"a: {nz}").replace(f"w: {dense}", f"w: {nz}")
+    entry = _HOST_ENTRY.replace("x: pl.Tensor[[2,64,64]", "x: pl.Tensor[[2,3,64,64]")
+    entry = entry.replace("w: pl.Tensor[[2,64,64]", "w: pl.Tensor[[2,3,64,64]")
+    program = _host_program(mm + chip + entry)
+    policy = ir.InputLayoutPolicy(("x",), ("x",), uses)
+    lowered, _, after = _lower_host(tmp_path, program, policy)
+    assert _chip_has_nz(after) == (True, uses > 1, False)
+    restored = ir.deserialize(ir.serialize(lowered))
+    assert isinstance(restored, ir.Program)
+    selected = "NZ" if uses > 1 else "ND"
+    assert _host_layout_proof(restored) == f"v1;0={selected}"
+    artifact_dir = tmp_path / "compiled"
+    compiled = ir.compile(
+        program,
+        strategy=ir.OptimizationStrategy.AutoLayout,
+        input_layout_policy=policy,
+        output_dir=str(artifact_dir),
+        skip_ptoas=True,
+        distributed_config=ir.DistributedConfig(device_ids=[0, 1], num_sub_workers=0),
+    )
+    assert isinstance(compiled, ir.DistributedCompiledProgram)
+    assert set(compiled.input_layouts) == {0}
+    descriptor = compiled.input_layouts[0]
+    assert descriptor.layout == selected
+    assert descriptor.logical_shape == (2, 3, 64, 64)
+    assert descriptor.physical_shape == ((6, 8, 4, 16, 8) if selected == "NZ" else (2, 3, 64, 64))
+    reloaded = ir.DistributedCompiledProgram.from_dir(str(artifact_dir))
+    assert reloaded.input_layouts == compiled.input_layouts
+
+
+def test_host_layout_proof_rejects_conflicting_authored_dispatches(tmp_path, ascend_backend):
+    dense = "pl.Tensor[[64,64], pl.FP32]"
+    nz = "pl.Tensor[[64,64], pl.FP32, pl.NZ]"
+    chip_nz = _HOST_CHIP.replace("def chip(", "def chip_nz(").replace("self.mm(", "self.mm_nz(")
+    chip_nz = chip_nz.replace(f"b: {dense}", f"b: {nz}")
+    matmul_nz = _matmul("mm_nz").replace(f"w: {dense}", f"w: {nz}")
+    out = "pl.Out[pl.Tensor[[2,64,64], pl.FP32]]"
+    entry = _HOST_ENTRY.replace(f"dst: {out}", f"dst: {out}, dst_nz: {out}")
+    entry += "        self.chip_nz(w[r], shard, dst_nz[r], device=r)\n"
+    program = _host_program(_matmul() + matmul_nz + _HOST_CHIP + chip_nz + entry)
+    policy = ir.InputLayoutPolicy(("w", "x"), ("w", "x"), 100)
+    lowered, _, after = _lower_host(tmp_path, program, policy)
+    assert _host_layout_proof(lowered) == "v1;0=UNSUPPORTED;1=NZ"
+    assert _chip_has_nz(after) == (True, False, False)
+    assert _chip_has_nz(after, "chip_nz") == (True, True, False)
+    artifact = tmp_path / "compiled"
+    with pytest.raises(ValueError, match="Distributed input layout for 'x' is unsupported"):
+        ir.compile(
+            program,
+            strategy=ir.OptimizationStrategy.AutoLayout,
+            input_layout_policy=policy,
+            output_dir=str(artifact),
+            skip_ptoas=True,
+        )
+    assert not (artifact / "distributed_meta.json").exists()

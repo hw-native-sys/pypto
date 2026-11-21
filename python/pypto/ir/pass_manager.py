@@ -107,16 +107,23 @@ class InputLayoutPolicy:
     """Loader capabilities for logical ND entry inputs and the packing cost horizon.
 
     An input named in nz_inputs may also be supplied in NZ. Reusable tensors
-    can amortize one pack across expected_uses invocations.
+    can amortize one pack across expected_uses invocations. With steady_state,
+    the objective scores one forward and excludes packing for inputs named in
+    both tuples. Keep expected_uses at its default for steady_state.
     """
 
     nz_inputs: tuple[str, ...]
     reusable_tensors: tuple[str, ...] = ()
     expected_uses: int = 1
+    steady_state: bool = False
 
     def __post_init__(self) -> None:
         if type(self.expected_uses) is not int or self.expected_uses < 1:
             raise ValueError("expected_uses must be a positive integer")
+        if type(self.steady_state) is not bool:
+            raise ValueError("steady_state must be a bool")
+        if self.steady_state and self.expected_uses != 1:
+            raise ValueError("steady_state requires expected_uses=1")
         for names in (self.nz_inputs, self.reusable_tensors):
             if type(names) is not tuple or any(type(n) is not str or not n for n in names):
                 raise ValueError("Input layout names must be a tuple of nonempty parameter names")
@@ -187,6 +194,7 @@ class PassManager:
         *,
         analyze_auto_scopes_for_deps: bool,
         input_layout_policy: InputLayoutPolicy | None = None,
+        host_world_size: int | None = None,
     ) -> tuple[PassFactory, ...]:
         """Build the immutable pass-factory recipe for an optimization strategy."""
         if strategy not in (
@@ -232,6 +240,8 @@ class PassManager:
                 nz_inputs=input_layout_policy.nz_inputs,
                 reusable_tensors=input_layout_policy.reusable_tensors,
                 expected_uses=input_layout_policy.expected_uses,
+                steady_state=input_layout_policy.steady_state,
+                host_world_size=host_world_size,
                 reselect_internal_layouts=reselect_intermediates,
             )
         elif reselect_intermediates:
@@ -240,6 +250,18 @@ class PassManager:
             (layout_factory, passes.block_nz_tensor_views)
             if strategy in (OptimizationStrategy.AutoLayout, OptimizationStrategy.AutoLayoutIntermediates)
             else ()
+        )
+        # The named-input solver first proves storage and use compatibility in
+        # logical coordinates. Its subsequent blocking pass handles fixed and
+        # selected layouts together, including any authored NZ views it kept.
+        early_gm_layout_passes = (
+            ()
+            if input_layout_policy is not None and input_layout_policy.nz_inputs
+            else (
+                passes.prepare_intermediate_tensor_layouts
+                if reselect_intermediates
+                else passes.block_nz_tensor_views,
+            )
         )
         tile_pto_passes: tuple[PassFactory, ...] = (
             passes.lower_composite_ops,
@@ -251,10 +273,7 @@ class PassManager:
             # annotation and argument ranks cannot both be printed. Flatten skips
             # its ND2NZ window collapse for NZ sources so the logical window is
             # still intact here.
-            # Delay blocking in intermediate selection so the solver sees logical GM layouts.
-            passes.prepare_intermediate_tensor_layouts
-            if reselect_intermediates
-            else passes.block_nz_tensor_views,
+            *early_gm_layout_passes,
             # PTOAS v0.74 packs logical MX views. Keep alignment/offset proofs
             # in IR, but leave tensor shapes and windows in logical rank-2 form.
             passes.legalize_mx_scale_tensor_views,
@@ -379,6 +398,7 @@ class PassManager:
         *,
         analyze_auto_scopes_for_deps: bool = False,
         input_layout_policy: InputLayoutPolicy | None = None,
+        host_world_size: int | None = None,
     ) -> "PassManager":
         """Get a PassManager configured for the specified strategy.
 
@@ -390,6 +410,8 @@ class PassManager:
                 dependency mechanism. User-written manual scopes are skipped:
                 they do not get compiler deps or automatic NoDep/OutputExisting
                 direction rewrites.
+            host_world_size: Number of devices assumed by named input layout
+                costing for HOST loops over ``pld.world_size()``.
 
         Returns:
             A PassManager instance configured with the appropriate passes
@@ -398,6 +420,7 @@ class PassManager:
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             input_layout_policy=input_layout_policy,
+            host_world_size=host_world_size,
         )
 
     def __init__(
@@ -406,6 +429,7 @@ class PassManager:
         *,
         analyze_auto_scopes_for_deps: bool = False,
         input_layout_policy: InputLayoutPolicy | None = None,
+        host_world_size: int | None = None,
     ):
         """Initialize PassManager with a specific strategy.
 
@@ -452,6 +476,7 @@ class PassManager:
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             input_layout_policy=input_layout_policy,
+            host_world_size=host_world_size,
         )
         phase_properties = passes.IRPropertySet()
         phase_properties.insert(passes.IRProperty.AccStorePhaseValid)

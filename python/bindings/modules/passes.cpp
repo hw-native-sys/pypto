@@ -13,11 +13,13 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>    // NOLINT(misc-include-cleaner) -- registers std::function casters
+#include <nanobind/stl/optional.h>    // NOLINT(misc-include-cleaner) -- registers std::optional casters
 #include <nanobind/stl/shared_ptr.h>  // NOLINT(misc-include-cleaner) -- registers shared_ptr casters
 #include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers std::string casters
 #include <nanobind/stl/vector.h>      // NOLINT(misc-include-cleaner) -- registers std::vector casters
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -28,7 +30,6 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
-#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
@@ -660,12 +661,16 @@ void BindPass(nb::module_& m) {
   passes.def(
       "auto_layout",
       [](bool allow_external_input_relayout, const std::vector<std::string>& reusable_tensors,
-         int64_t expected_uses, bool reselect_internal_layouts, const std::vector<std::string>& nz_inputs) {
-        if (expected_uses < 1) throw ValueError("AutoLayout expected_uses must be positive");
+         int64_t expected_uses, bool reselect_internal_layouts, const std::vector<std::string>& nz_inputs,
+         std::optional<int64_t> host_world_size, bool steady_state) {
+        if (host_world_size && *host_world_size < 1)
+          throw ValueError("AutoLayout host_world_size must be positive");
         pass::AutoLayoutOptions options;
         options.fail_on_writeback_issues = true;
         options.cost_model.allow_external_input_relayout = allow_external_input_relayout;
         options.cost_model.expected_uses = expected_uses;
+        options.cost_model.steady_state = steady_state;
+        options.cost_model.host_world_size = host_world_size;
         options.cost_model.reselect_internal_layouts = reselect_internal_layouts;
         options.nz_inputs.insert(nz_inputs.begin(), nz_inputs.end());
         options.reusable_tensors.insert(reusable_tensors.begin(), reusable_tensors.end());
@@ -674,6 +679,7 @@ void BindPass(nb::module_& m) {
       nb::kw_only(), nb::arg("allow_external_input_relayout") = false,
       nb::arg("reusable_tensors") = std::vector<std::string>{}, nb::arg("expected_uses") = 1,
       nb::arg("reselect_internal_layouts") = false, nb::arg("nz_inputs") = std::vector<std::string>{},
+      nb::arg("host_world_size") = nb::none(), nb::arg("steady_state") = false,
       "Select native layouts. External input relayout requires caller-side packing.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");

@@ -15,6 +15,7 @@ without a Worker. Resident tensors require a prepared Worker because their
 owner Buffer/provenance cannot belong to a temporary one-shot Worker.
 """
 
+import importlib
 import json
 import warnings
 from unittest.mock import patch
@@ -25,11 +26,14 @@ import torch
 from pypto import DataType, ir
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto.backend import BackendType
+from pypto.backend.pto_backend import PartialCodegenError
+from pypto.ir._distributed_input_layout import _artifact_marker, _make_layout
 from pypto.ir.distributed_compiled_program import (
     _DISTRIBUTED_META_FILENAME,
     DistributedCompiledProgram,
     DistributedConfig,
 )
+from pypto.ir.param_info import ParamInfo
 from pypto.pypto_core.ir import ParamDirection
 from pypto.runtime import DeviceTensor, ExecutionMode, StackedDeviceTensor
 
@@ -499,6 +503,204 @@ def test_reload_platform_warns_but_explicit_mode_and_metadata_are_silent(compile
         assert explicit.platform == legacy.platform == "a2a3"
         assert persisted.execution_mode is ExecutionMode.SIM
     assert (tmp_path / _DISTRIBUTED_META_FILENAME).read_bytes() == metadata
+
+
+def _packing_artifact(tmp_path, logical_shape, dtype, target):
+    world_size = 1 if len(logical_shape) == 2 else logical_shape[0]
+    weight = ParamInfo("weight_0", ParamDirection.In, logical_shape, dtype, "ND")
+    scales = ParamInfo("scales", ParamDirection.In, (world_size, 1), DataType.FP32, "ND")
+    fixed = ParamInfo("fixed_nz", ParamDirection.In, logical_shape, dtype, "ND")
+    params = [weight, scales, fixed]
+    layouts = {0: _make_layout(0, "weight", weight, target)}
+    host = tmp_path / "orchestration" / "host_orch.py"
+    host.parent.mkdir(parents=True)
+    host.write_bytes(_artifact_marker(params, layouts, world_size) + b"# generated HOST entry\n")
+    compiled = DistributedCompiledProgram(
+        None,
+        str(tmp_path),
+        distributed_config=DistributedConfig(device_ids=list(range(world_size))),
+        _param_infos=params,
+        _output_indices=[],
+        _return_types=[],
+        _input_layouts=layouts,
+        _input_layout_world_size=world_size,
+    )
+    compiled._persist_metadata()
+    return compiled
+
+
+def _blocked_offset_oracle(logical):
+    """Place every individual cell using the hardware row/column block offsets."""
+    matrix_rows, matrix_cols = logical.shape[-2:]
+    matrix_area = matrix_rows * matrix_cols
+    c0 = 32 // logical.element_size()
+    row_blocks = matrix_rows // 16
+    indices = []
+    for m in range(logical.numel() // matrix_area):
+        for r in range(matrix_rows):
+            for c in range(matrix_cols):
+                offset = ((c // c0) * row_blocks + r // 16) * 16 * c0 + (r % 16) * c0 + c % c0
+                indices.append(m * matrix_area + offset)
+    packed = torch.empty(logical.numel(), dtype=logical.dtype)
+    packed[torch.tensor(indices)] = logical.flatten()
+    return packed.reshape(logical.shape)
+
+
+@pytest.mark.parametrize("shape", [(32, 96), (2, 32, 96), (2, 3, 32, 96)])
+@pytest.mark.parametrize("torch_dtype,dtype", [(torch.bfloat16, DataType.BF16), (torch.int8, DataType.INT8)])
+def test_distributed_input_storage_oracle_and_roundtrip(tmp_path, shape, torch_dtype, dtype):
+    compiled = _packing_artifact(tmp_path, shape, dtype, "NZ")
+    reloaded = DistributedCompiledProgram.from_dir(tmp_path)
+    assert compiled.input_layouts == reloaded.input_layouts
+    world_size = len(reloaded._distributed_config.device_ids)
+    layers = shape[1] if len(shape) == 4 else 1
+    dtype_bytes = torch.empty((), dtype=torch_dtype).element_size()
+    assert reloaded.input_layouts[0].physical_shape == (
+        world_size * layers,
+        96 * dtype_bytes // 32,
+        2,
+        16,
+        32 // dtype_bytes,
+    )
+
+    rows = torch.arange(32)[:, None]
+    cols = torch.arange(96)[None, :]
+    matrices = [
+        (rows * 13 + cols * 7 + 19 * rank + 41 * layer).remainder(127).to(torch_dtype)
+        for rank in range(world_size)
+        for layer in range(layers)
+    ]
+    logical = torch.stack(matrices).reshape(shape)
+    expected = _blocked_offset_oracle(logical)
+    scale = torch.randn(world_size, 1)
+    fixed = expected.clone()
+    with patch("pypto.runtime.distributed_runner._execute_distributed") as execute:
+        compiled(logical, scale, fixed)
+        args = execute.call_args.args[1]
+        assert torch.equal(args[0], expected)
+        assert args[1] is scale and args[2] is fixed
+
+        prepared = reloaded.prepare_input(0, expected, source_layout="NZ")
+        expected.zero_()
+        reloaded(prepared, scale, fixed)
+        first = execute.call_args.args[1][0]
+        reloaded(prepared, scale, fixed)
+        assert first is execute.call_args.args[1][0]
+        assert torch.equal(first, fixed)
+
+        nd = _packing_artifact(tmp_path / "nd", shape, dtype, "ND")
+        nd(first, scale, fixed)  # Bare tensors have the ND caller contract.
+        assert torch.equal(execute.call_args.args[1][0], first)
+        nd(nd.prepare_input(0, first, source_layout="NZ"), scale, fixed)
+        assert torch.equal(execute.call_args.args[1][0], logical)
+        with pytest.raises(ValueError, match="does not match"):
+            nd(prepared, scale, fixed)
+
+
+def test_distributed_input_nd_snapshot_and_validation(tmp_path):
+    shape = (2, 32, 96)
+    compiled = _packing_artifact(tmp_path, shape, DataType.INT8, "ND")
+    logical = torch.ones(shape, dtype=torch.int8)
+    prepared = compiled.prepare_input(0, logical)
+    logical.zero_()
+    assert torch.count_nonzero(prepared._tensor) == logical.numel()
+    assert not logical.is_shared()
+    with pytest.raises(ValueError, match="logical shape"):
+        compiled.prepare_input(0, logical[:, :, :-1])
+    with pytest.raises(ValueError, match="dtype int8"):
+        compiled.prepare_input(0, logical.to(torch.bfloat16))
+    with pytest.raises(ValueError, match="contiguous"):
+        compiled.prepare_input(
+            0, logical.transpose(-2, -1).contiguous().transpose(-2, -1), source_layout="NZ"
+        )
+    with pytest.raises(ValueError, match="source layout"):
+        compiled.prepare_input(0, logical, source_layout="DN")
+    with pytest.raises(ValueError, match="no selectable"):
+        compiled.prepare_input(1, logical)
+
+
+@pytest.mark.parametrize("corruption", ["missing", "empty", "physical", "layout", "dtype", "index", "legacy"])
+def test_distributed_input_manifest_rejects_stale_metadata(tmp_path, corruption):
+    _packing_artifact(tmp_path, (2, 32, 96), DataType.BF16, "NZ")
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    meta = json.loads(meta_path.read_text())
+    if corruption == "missing":
+        del meta["input_layouts"]
+    elif corruption == "empty":
+        meta["input_layouts"] = []
+    elif corruption == "legacy":
+        del meta["input_layouts"]
+        meta["schema"] = 3
+    else:
+        weight = meta["input_layouts"][0]
+        if corruption == "physical":
+            weight["physical_shape"][1] += 1
+        elif corruption == "layout":
+            weight["layout"] = "ND"
+            weight["physical_shape"] = weight["logical_shape"]
+        elif corruption == "dtype":
+            weight["dtype"] = "int8"
+        else:
+            weight["index"] = len(meta["params"])
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match=r"Invalid distributed_meta.json"):
+        DistributedCompiledProgram.from_dir(tmp_path)
+
+
+def test_failed_codegen_cannot_reload_previous_packing_artifact(tmp_path, monkeypatch, ascend_backend):
+    compiled = _packing_artifact(tmp_path, (2, 32, 96), DataType.BF16, "NZ")
+    partial = {"orchestration/host_orch.py": "# no layout marker\n", "partial.pto": "partial kernel"}
+
+    def fail(*args, **kwargs):
+        raise PartialCodegenError("codegen failed", partial)
+
+    compile_module = importlib.import_module("pypto.ir.compile")
+    monkeypatch.setattr(compile_module, "generate", fail)
+    with pytest.raises(PartialCodegenError, match="codegen failed"):
+        ir.compile(_L3AddProgram, output_dir=str(tmp_path), skip_ptoas=True)
+    assert (tmp_path / "partial.pto").read_text() == "partial kernel"
+    with pytest.raises(FileNotFoundError, match="distributed_meta.json"):
+        DistributedCompiledProgram.from_dir(tmp_path)
+    with pytest.raises(ValueError, match="does not match the generated HOST"):
+        compiled._validate_artifact_layouts(compiled._get_metadata()[0], world_size=2)
+
+
+def test_reload_selected_input_requires_compiled_rank_count(tmp_path):
+    compiled = _packing_artifact(tmp_path, (2, 32, 96), DataType.BF16, "NZ")
+    remapped = DistributedConfig(device_ids=[8, 4])
+    reloaded = DistributedCompiledProgram.from_dir(tmp_path, distributed_config=remapped)
+    assert reloaded.input_layouts == compiled.input_layouts
+    assert reloaded._distributed_config.device_ids == [8, 4]
+
+    bigger = DistributedConfig(device_ids=[0, 1, 2])
+    with pytest.raises(ValueError, match="compiled rank count 2, got 3 device IDs"):
+        DistributedCompiledProgram.from_dir(tmp_path, distributed_config=bigger)
+
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    meta = json.loads(meta_path.read_text())
+    meta["distributed_config"]["device_ids"] = bigger.device_ids
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match=r"rank extent \(2\) to match the configured device count \(3\)"):
+        DistributedCompiledProgram.from_dir(tmp_path, distributed_config=bigger)
+
+
+def test_reload_rank_two_input_requires_one_device(tmp_path):
+    compiled = _packing_artifact(tmp_path, (32, 96), DataType.BF16, "NZ")
+    remapped = DistributedConfig(device_ids=[8])
+    reloaded = DistributedCompiledProgram.from_dir(tmp_path, distributed_config=remapped)
+    assert reloaded.input_layouts == compiled.input_layouts
+    assert reloaded._distributed_config.device_ids == [8]
+
+    bigger = DistributedConfig(device_ids=[8, 9])
+    with pytest.raises(ValueError, match="compiled rank count 1, got 2 device IDs"):
+        DistributedCompiledProgram.from_dir(tmp_path, distributed_config=bigger)
+
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    meta = json.loads(meta_path.read_text())
+    meta["distributed_config"]["device_ids"] = bigger.device_ids
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="requires exactly one device, got 2"):
+        DistributedCompiledProgram.from_dir(tmp_path)
 
 
 if __name__ == "__main__":

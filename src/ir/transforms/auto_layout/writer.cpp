@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
@@ -392,7 +393,8 @@ struct ParamSigHash {
 struct LayoutSpecKeyHash {
   size_t operator()(const std::pair<const Var*, LayoutSpec>& key) const {
     size_t h = std::hash<const void*>{}(key.first);
-    h ^= LayoutSpecHash{}(key.second) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    const LayoutSpecHash hash;
+    h ^= hash(key.second) + 0x9e3779b9 + (h << 6) + (h >> 2);
     return h;
   }
 };
@@ -438,13 +440,61 @@ TypePtr SyncGmResultElements(const TypePtr& target, const std::vector<TypePtr>& 
   return changed ? std::make_shared<TupleType>(std::move(types)) : target;
 }
 
+// Tell the ordinary HOST-to-CHIP verifier that an NZ argument crosses a
+// device boundary. For a whole matrix with one configured worker, explicit
+// rank zero has the same placement as the original comm-less dispatch.
+class HostMatrixDispatchWriter : public IRMutator {
+ public:
+  void AddSites(const std::vector<const Expr*>& sites) { sites_.insert(sites.begin(), sites.end()); }
+
+  FunctionPtr VisitFunction(const FunctionPtr& func) override {
+    return sites_.empty() ? func : IRMutator::VisitFunction(func);
+  }
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override { return PinToSoleWorker(op, IRMutator::VisitExpr_(op)); }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override { return PinToSoleWorker(op, IRMutator::VisitExpr_(op)); }
+
+ private:
+  template <typename Dispatch>
+  ExprPtr PinToSoleWorker(const std::shared_ptr<const Dispatch>& original, const ExprPtr& rewritten) {
+    if (!sites_.count(original.get()) || original->HasAttr(kAttrDevice)) return rewritten;
+    const auto pinned = MutableCopy(As<Dispatch>(rewritten));
+    ExprPtr rank = std::make_shared<ConstInt>(0, DataType::INDEX, original->span_);
+    pinned->attrs_.emplace_back(kAttrDevice, std::move(rank));
+    return pinned;
+  }
+
+  std::unordered_set<const Expr*> sites_;
+};
+
 class LayoutAssignmentWriter : public IRMutator {
  public:
   LayoutAssignmentWriter(const LayoutProblemInstance& instance, LayoutWritebackBindings& bindings,
                          const LayoutAssignment& assignment, LayoutAssignment* inferred = nullptr)
       : op_configs_(assignment.op_configs), instance_(instance), bindings_(bindings), inferred_(inferred) {
+    std::unordered_set<std::string> unsupported_host_inputs;
+    for (const auto& [_, root] : bindings.host_input_roots) {
+      const auto* value = instance.FindValue(root);
+      if (!value || value->admissible_layouts.size() != 2) {
+        unsupported_host_inputs.insert(root);
+        continue;
+      }
+      const auto selected = assignment.value_layouts.find(root);
+      if (selected != assignment.value_layouts.end() && selected->second == LayoutSpec::NZ()) {
+        const auto sites = bindings.orch.unpinned_host_matrix_dispatches.find(root);
+        if (sites != bindings.orch.unpinned_host_matrix_dispatches.end()) {
+          host_dispatch_writer_.AddSites(sites->second);
+        }
+      }
+    }
     for (const auto& [name, spec] : assignment.value_layouts) {
       if (spec.IsTensor()) {
+        // An unsupported named HOST root can have different authored device
+        // ABIs. Its canonical fallback is only a solver value and cannot
+        // override any individual parameter's declared representation.
+        if (unsupported_host_inputs.count(name)) continue;
         tensor_layouts_.emplace(name, spec.tensor_layout);
       } else {
         tile_layouts_.emplace(name, spec);
@@ -546,10 +596,13 @@ class LayoutAssignmentWriter : public IRMutator {
   }
 
   FunctionPtr VisitFunction(const FunctionPtr& func) override {
-    if (func->HasAttr(kAttrExternalSource) || func->requires_runtime_binding_ ||
-        (func->level_.has_value() && LevelToLinquLevel(*func->level_) >= 3)) {
+    if (func->HasAttr(kAttrExternalSource) || func->requires_runtime_binding_) {
       func_return_types_[func->name_] = func->return_types_;
       return func;
+    }
+    if (func->level_.has_value() && LevelToLinquLevel(*func->level_) >= 3) {
+      func_return_types_[func->name_] = func->return_types_;
+      return host_dispatch_writer_.VisitFunction(func);
     }
     local_var_remap_.clear();
     current_func_name_ = func->name_;
@@ -1410,7 +1463,9 @@ class LayoutAssignmentWriter : public IRMutator {
           DeepCloneResult cloned = DeepClone(callee->body_, formal_map, /*clone_def_vars=*/true);
           const auto& names = sites[site_idx].gm_names;
           auto copy_name = [&](const Var* original, const Var* copy) {
-            if (auto it = names.find(original); it != names.end()) gm_names_.emplace(copy, it->second);
+            if (auto it = names.find(original); it != names.end()) {
+              gm_names_.emplace(copy, it->second);
+            }
             if (auto it = tile_site.value_names.find(original); it != tile_site.value_names.end()) {
               tile_site.value_names.emplace(copy, it->second);
             }
@@ -1820,7 +1875,9 @@ class LayoutAssignmentWriter : public IRMutator {
     };
     auto selected = [&](const OperationNode* op) -> std::optional<OperatorConfig> {
       if (op) {
-        if (auto it = op_configs_.find(op->op_id); it != op_configs_.end()) return it->second;
+        if (auto it = op_configs_.find(op->op_id); it != op_configs_.end()) {
+          return it->second;
+        }
       }
       return std::nullopt;
     };
@@ -2744,6 +2801,7 @@ class LayoutAssignmentWriter : public IRMutator {
 
   const LayoutProblemInstance& instance_;
   LayoutWritebackBindings& bindings_;
+  HostMatrixDispatchWriter host_dispatch_writer_;
   LayoutAssignment* inferred_;
   const LayoutWritebackBindings::Site* current_tile_site_ = nullptr;
   OrchCallAnalysis::GmNames gm_names_;

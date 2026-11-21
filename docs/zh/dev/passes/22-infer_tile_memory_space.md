@@ -297,7 +297,27 @@ tile *参数* 在阶段 1 起始处按函数类型分别处理：
 其他外部缓冲区保留声明的布局。复用次数只影响打包成本。对单芯片程序，
 `compiled.prepare_inputs({"w": logical_w})["w"]` 根据编译结果生成可多次使用的输入缓冲区。
 
+如果加载器只准备一次权重，并让权重在多次前向执行期间保持驻留，可使用
+`ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), steady_state=True)`。
+稳态目标按一次前向执行计费，省去同时列在两个元组中且符合条件的输入的一次性 ND 到 NZ 打包成本。
+每次执行所需的加载、计算、存储和布局转换仍按原规则计费，并计入循环次数和分派次数。
+布局候选的资格条件及外部 ABI 规则保持一致。设置 `steady_state=True` 时，`expected_uses` 须保持默认值 `1`。
+默认的有限次数目标计入打包成本，并按 `expected_uses` 次前向执行计费。
+
+对于单设备 HOST 入口，策略也可为整块传入设备的稠密只读 `[M, N]` 权重选择 ND 或 NZ。加载器上传一个矩阵，并向核函数传递单个设备张量。
+
+对于分布式 HOST 入口，策略可为形状为 `[rank, M, N]` 或 `[rank, layer, M, N]` 的稠密只读权重提供布局选择，首维长度须等于配置的设备数。HOST 沿输入或其 SSA 别名的首维索引一次，取得完整分片。设备端消费者读取完整矩阵。HOST 索引保留逻辑形状。NZ 按 rank 和 layer 分别打包每个矩阵，每个行块包含 16 行，C0 宽度为 `32 / sizeof(dtype)` 个元素。编译产物记录每个提供选择的参数槽位的布局、逻辑形状、物理形状和数据类型。编译要求原生求解器为每个所选槽位给出存储决策。
+
+对于按名称提供选择的 HOST 输入，AutoLayout 使用编译时 `DistributedConfig.device_ids` 中的设备数估算 `pld.world_size()` 循环的迭代次数。直接调用 PassManager 时可用 `host_world_size` 提供此估计。静态循环仍使用其自身边界，估计不限制产物重新加载时的设备选择。
+
+单次调用 `DistributedCompiledProgram` 时，提供选择的槽位接受逻辑 ND 张量。使用 `compiled.prepare_input(slot, tensor)` 可准备不可变快照并在多次调用中复用。若源数据已按规范打包为 NZ 且仍以原逻辑形状承载，可指定 `source_layout="NZ"`。若要在可复用 worker 上将快照作为主机参数传入，须在创建 worker 前调用 `prepare_input(..., shared=True)`，并将快照列入 `compiled.prepare(inherited_host_tensors=[snapshot])`。
+
+驻留权重使用 `worker.alloc_input_tensor(compiled, slot, tensor)`，也可将已准备好的快照作为最后一个参数。worker 仅上传一次每个分片，并在分派时验证布局来源。若要更新权重，请准备或上传新版本。通过 `DistributedCompiledProgram.from_dir()` 重新加载后继续使用相同的元数据和加载逻辑。可以重新映射设备 ID，但须保留编译时的 rank 数量。未提供选择的参数保留原有 ABI，包括预先打包的权重、量化比例、输出和可变状态。
+
 Python pass 工厂支持相同的输入打包选项，例如 `passes.auto_layout(allow_external_input_relayout=True, reusable_tensors=["w"], expected_uses=100)`。这允许符合条件的 ND 输入采用 NZ。若要从 ND 起点评估原先按 NZ 打包的权重，请先提供逻辑 ND 声明和数据，再根据编译后的布局元数据准备上传的缓冲区。
+
+稳态目标可通过 `passes.auto_layout(nz_inputs=["w"], reusable_tensors=["w"], steady_state=True)` 启用。
+对应的 C++ 字段为 `options.nz_inputs`、`options.reusable_tensors` 和 `options.cost_model.steady_state`。
 
 对于稠密平坦的 Vec 矩阵，当形状和数据类型支持物理转置时，可以在行主序和列主序之间转换。写回阶段发出一次转置和一个零拷贝转置视图。保留较大底层跨距的切片维持原有表示；行主序切片若保留完整行宽则仍可转置。改变形状的 reshape 保持原有逻辑元素顺序，位打包的谓词保留原有布局。
 

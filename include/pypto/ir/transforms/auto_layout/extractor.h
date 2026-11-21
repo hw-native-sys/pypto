@@ -102,6 +102,16 @@ struct OrchCallAnalysis {
   std::unordered_set<std::string> dn_ineligible_names;
   std::unordered_set<std::string> internal_buffers;
   std::unordered_set<std::string> external_outputs;
+  // A caller's In parameter can still be supplied to an Out or InOut formal.
+  // Track writes separately so named input permissions never change its representation.
+  std::unordered_set<std::string> written_storage;
+  std::unordered_map<std::string, std::string> nz_restrictions;
+  std::unordered_set<std::string> unknown_rank_counts;
+  // Distinct device/whole-matrix projections, or an upper bound if dynamic.
+  std::unordered_map<std::string, double> projected_dispatches;
+  // Unpinned dispatches proven to forward a whole rank-2 input to the sole
+  // worker, keyed by that input's public storage root.
+  std::unordered_map<std::string, std::vector<const Expr*>> unpinned_host_matrix_dispatches;
   GmNames gm_names;
 };
 
@@ -114,6 +124,8 @@ struct LayoutWritebackBindings {
   };
   ProgramPtr program;
   OrchCallAnalysis orch;
+  std::string host_input_entry;
+  std::map<size_t, std::string> host_input_roots;
   std::unordered_map<std::string, Site> sites;  // Indexed by TileLayoutPrefix.
 };
 

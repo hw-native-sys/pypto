@@ -683,6 +683,8 @@ def auto_layout(
     expected_uses: int = 1,
     reselect_internal_layouts: bool = False,
     nz_inputs: Sequence[str] = (),
+    host_world_size: int | None = None,
+    steady_state: bool = False,
 ) -> Pass:
     """Select GM and on-chip layouts with the native solver, requiring a writable assignment."""
     ...

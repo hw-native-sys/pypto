@@ -10,12 +10,15 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend_config.h"
@@ -32,6 +35,228 @@ namespace al = ir::auto_layout;
 using pypto::DataType;
 
 namespace {
+
+enum class HostMatrixDispatch { Implicit, RankZero, UnknownRank, PartialSlice, FullSlice, Mutable };
+
+void TestHostMatrixLayout(HostMatrixDispatch dispatch, std::optional<int64_t> world_size,
+                          bool expect_selectable, bool wide = false,
+                          pypto::backend::BackendType backend = pypto::backend::BackendType::Ascend910) {
+  const auto span = ir::Span::unknown();
+  using Exprs = std::vector<ir::ExprPtr>;
+  using Stmts = std::vector<ir::StmtPtr>;
+  using Attrs = std::vector<std::pair<std::string, std::any>>;
+  const auto index = [&](int64_t n) { return std::make_shared<ir::ConstInt>(n, DataType::INDEX, span); };
+  const auto tuple = [&](Exprs values) { return std::make_shared<ir::MakeTuple>(std::move(values), span); };
+  const auto tensor = [](std::vector<int64_t> dims) {
+    return std::make_shared<ir::TensorType>(std::move(dims), DataType::BF16, std::nullopt);
+  };
+  const int64_t rows = wide ? 152064 : 64;
+  const int64_t cols = wide ? 5120 : 32;
+  const auto matrix = tensor({rows, cols});
+  const auto weight = std::make_shared<ir::Var>("weight", matrix, span);
+  const auto device_type = dispatch == HostMatrixDispatch::PartialSlice ? tensor({rows / 2, cols}) : matrix;
+  const auto chip_param = std::make_shared<ir::Var>("chip_weight", device_type, span);
+  const auto kernel_param = std::make_shared<ir::Var>("kernel_weight", device_type, span);
+  const auto load_shape = wide ? tuple({index(192), index(512)}) : tuple(device_type->shape_);
+  const auto offsets = wide ? tuple({index(192), index(512)}) : tuple({index(0), index(0)});
+  const auto& registry = ir::OpRegistry::GetInstance();
+  const auto load = registry.Create("tile.load", {kernel_param, offsets, load_shape, load_shape},
+                                    {{"target_memory", ir::MemorySpace::Mat}}, span);
+  const auto loaded = std::make_shared<ir::Var>("loaded", load->GetType(), span);
+  const auto function = [&](const char* name, std::vector<ir::VarPtr> params,
+                            std::vector<ir::ParamDirection> directions, Stmts body, ir::FunctionType type,
+                            ir::Level level, ir::Role role) {
+    return std::make_shared<ir::Function>(
+        name, std::move(params), std::move(directions), std::vector<ir::TypePtr>{},
+        std::make_shared<ir::SeqStmts>(std::move(body), span), span, type, level, role);
+  };
+  const auto in = ir::ParamDirection::In;
+  const auto kernel =
+      function("load_weight", {kernel_param}, {in}, {std::make_shared<ir::AssignStmt>(loaded, load, span)},
+               ir::FunctionType::InCore, ir::Level::CHIP_DIE, ir::Role::SubWorker);
+  const auto kernel_call =
+      std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>(kernel->name_), Exprs{chip_param}, span);
+  const auto chip = function("chip", {chip_param},
+                             {dispatch == HostMatrixDispatch::Mutable ? ir::ParamDirection::InOut : in},
+                             {std::make_shared<ir::EvalStmt>(kernel_call, span)},
+                             ir::FunctionType::Orchestration, ir::Level::CHIP, ir::Role::Orchestrator);
+  Stmts host_body;
+  ir::VarPtr argument = weight;
+  if (dispatch == HostMatrixDispatch::PartialSlice || dispatch == HostMatrixDispatch::FullSlice) {
+    const auto slice = registry.Create(
+        "tensor.slice", {weight, tuple(device_type->shape_), tuple({index(0), index(0)})}, {}, span);
+    argument = std::make_shared<ir::Var>("view", slice->GetType(), span);
+    host_body.push_back(std::make_shared<ir::AssignStmt>(argument, slice, span));
+  }
+  std::vector<ir::VarPtr> params{weight};
+  std::vector<ir::ParamDirection> directions{in};
+  Attrs attrs;
+  if (dispatch == HostMatrixDispatch::UnknownRank) {
+    const auto rank =
+        std::make_shared<ir::Var>("rank", std::make_shared<ir::ScalarType>(DataType::INDEX), span);
+    params.push_back(rank);
+    directions.push_back(in);
+    attrs.emplace_back(ir::kAttrDevice, ir::ExprPtr{rank});
+  } else if (dispatch == HostMatrixDispatch::RankZero) {
+    attrs.emplace_back(ir::kAttrDevice, ir::ExprPtr{index(0)});
+  }
+  const auto forward = std::make_shared<ir::Var>("forwarded", argument->GetType(), span);
+  host_body.push_back(std::make_shared<ir::AssignStmt>(forward, argument, span));
+  const auto chip_call =
+      std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>(chip->name_), Exprs{forward}, Attrs{},
+                                 std::move(attrs), ir::GetUnknownType(), span);
+  host_body.push_back(std::make_shared<ir::EvalStmt>(chip_call, span));
+  const auto host = function("host", std::move(params), std::move(directions), std::move(host_body),
+                             ir::FunctionType::Opaque, ir::Level::HOST, ir::Role::Orchestrator);
+  const auto program =
+      std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel, chip, host}, "test", span);
+  ir::pass::AutoLayoutOptions options;
+  options.nz_inputs = {"weight"};
+  options.reusable_tensors = {"weight"};
+  options.cost_model.host_world_size = world_size;
+  options.cost_model.backend_type = backend;
+  // Force NZ where legal so this checks writeback as well as extraction.
+  options.cost_model.gm_pack_fixed_cycles = 0;
+  options.cost_model.gm_pack_bytes_per_cycle = 1e12;
+  const auto rewritten = ir::pass::AutoLayout(options)(program);
+  const auto host_out = rewritten->GetFunction("host");
+  assert(al::detail::TensorTypeLayout(ir::As<ir::TensorType>(host_out->params_[0]->GetType())) ==
+         ir::TensorLayout::ND);
+  assert(host_out->GetAttr<std::string>(ir::kAttrAutoLayoutHostInputs) ==
+         (expect_selectable ? "v1;0=NZ" : "v1;0=UNSUPPORTED"));
+  const auto host_statements = ir::As<ir::SeqStmts>(host_out->body_);
+  const auto emitted_call = ir::As<ir::Call>(ir::As<ir::EvalStmt>(host_statements->stmts_.back())->expr_);
+  const auto rank = emitted_call->GetAttr<ir::ExprPtr>(ir::kAttrDevice, nullptr);
+  if (expect_selectable) {
+    assert(ir::IsConstValue(rank, 0));
+  } else {
+    assert(rank.get() == chip_call->GetAttr<ir::ExprPtr>(ir::kAttrDevice, nullptr).get());
+  }
+  const auto chip_out = rewritten->GetFunction("chip");
+  const auto chip_type = ir::As<ir::TensorType>(chip_out->params_[0]->GetType());
+  assert(al::detail::TensorTypeLayout(chip_type) ==
+         (expect_selectable ? ir::TensorLayout::NZ : ir::TensorLayout::ND));
+}
+
+void TestHostInputProjectionCost(bool same_rank, int64_t layers, int64_t configured_ranks = 0,
+                                 int64_t bank_ranks = 4) {
+  const auto span = ir::Span::unknown();
+  using Exprs = std::vector<ir::ExprPtr>;
+  using Stmts = std::vector<ir::StmtPtr>;
+  using Attrs = std::vector<std::pair<std::string, std::any>>;
+  auto index = [&](int64_t n) -> ir::ExprPtr {
+    return std::make_shared<ir::ConstInt>(n, DataType::INDEX, span);
+  };
+  auto tuple = [&](Exprs values) { return std::make_shared<ir::MakeTuple>(std::move(values), span); };
+  auto tensor = [&](std::vector<int64_t> dims) {
+    return std::make_shared<ir::TensorType>(std::move(dims), DataType::FP16, std::nullopt);
+  };
+  const auto matrix_type = tensor({64, 32});
+  const auto formal = std::make_shared<ir::Var>("matrix", matrix_type, span);
+  const auto shard_type = layers > 1 ? tensor({layers, 64, 32}) : matrix_type;
+  const auto chip_param = std::make_shared<ir::Var>("shard", shard_type, span);
+  const auto bank_type = layers > 1 ? tensor({bank_ranks, layers, 64, 32}) : tensor({bank_ranks, 64, 32});
+  const auto bank = std::make_shared<ir::Var>("weight", bank_type, span);
+  const auto& registry = ir::OpRegistry::GetInstance();
+  auto select = [&](const ir::VarPtr& source, Exprs shape, Exprs offsets) {
+    return registry.Create(
+        "tensor.slice",
+        {source, tuple(std::move(shape)), tuple(std::move(offsets)), tuple({}), tuple({index(0)})}, {}, span);
+  };
+  auto load = registry.Create(
+      "tile.load",
+      {formal, tuple({index(0), index(0)}), tuple(matrix_type->shape_), tuple(matrix_type->shape_)},
+      {{"target_memory", ir::MemorySpace::Mat}}, span);
+  auto loaded = std::make_shared<ir::Var>("loaded", load->GetType(), span);
+  using FuncType = ir::FunctionType;
+  auto function = [&](const char* name, const ir::VarPtr& param, Stmts body, FuncType type, ir::Level level,
+                      ir::Role role) {
+    return std::make_shared<ir::Function>(
+        name, std::vector<ir::VarPtr>{param}, std::vector<ir::ParamDirection>{ir::ParamDirection::In},
+        std::vector<ir::TypePtr>{}, std::make_shared<ir::SeqStmts>(std::move(body), span), span, type, level,
+        role);
+  };
+  auto kernel = function("load_matrix", formal, {std::make_shared<ir::AssignStmt>(loaded, load, span)},
+                         FuncType::InCore, ir::Level::CHIP_DIE, ir::Role::SubWorker);
+  Stmts chip_body;
+  for (int64_t layer = 0; layer < layers; ++layer) {
+    auto matrix = chip_param;
+    if (layers > 1) {
+      const auto slice =
+          select(chip_param, {index(1), index(64), index(32)}, {index(layer), index(0), index(0)});
+      matrix = std::make_shared<ir::Var>("plane_" + std::to_string(layer), slice->GetType(), span);
+      chip_body.push_back(std::make_shared<ir::AssignStmt>(matrix, slice, span));
+    }
+    auto call =
+        std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>(kernel->name_), Exprs{matrix}, span);
+    chip_body.push_back(std::make_shared<ir::EvalStmt>(call, span));
+  }
+  auto chip = function("chip", chip_param, std::move(chip_body), FuncType::Orchestration, ir::Level::CHIP,
+                       ir::Role::Orchestrator);
+  Stmts dispatches;
+  auto dispatch = [&](const ir::ExprPtr& rank, int64_t i) {
+    Exprs extents{index(1)};
+    extents.insert(extents.end(), shard_type->shape_.begin(), shard_type->shape_.end());
+    Exprs offsets(extents.size(), index(0));
+    offsets[0] = rank;
+    auto slice = select(bank, std::move(extents), std::move(offsets));
+    auto shard = std::make_shared<ir::Var>("shard_" + std::to_string(i), slice->GetType(), span);
+    dispatches.push_back(std::make_shared<ir::AssignStmt>(shard, slice, span));
+    auto call =
+        std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>(chip->name_), Exprs{shard}, Attrs{},
+                                   Attrs{{ir::kAttrDevice, rank}}, ir::GetUnknownType(), span);
+    dispatches.push_back(std::make_shared<ir::EvalStmt>(call, span));
+  };
+  if (configured_ranks > 0) {
+    const auto world_size = registry.Create("pld.system.world_size", {}, {}, span);
+    const auto stop = std::make_shared<ir::Var>("world_size", world_size->GetType(), span);
+    const auto rank = std::make_shared<ir::Var>("rank", world_size->GetType(), span);
+    dispatch(rank, 0);
+    auto loop = std::make_shared<ir::ForStmt>(rank, index(0), stop, index(1), std::vector<ir::IterArgPtr>{},
+                                              std::make_shared<ir::SeqStmts>(std::move(dispatches), span),
+                                              std::vector<ir::VarPtr>{}, span);
+    dispatches = {std::make_shared<ir::AssignStmt>(stop, world_size, span), loop};
+  } else {
+    for (int64_t i = 0; i < 2; ++i) dispatch(index(same_rank ? 0 : i), i);
+  }
+  auto host = function("host", bank, std::move(dispatches), FuncType::Opaque, ir::Level::HOST,
+                       ir::Role::Orchestrator);
+  auto program =
+      std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel, chip, host}, "test", span);
+  al::LayoutCostModel model;
+  model.expected_uses = 8;
+  if (configured_ranks > 0) model.host_world_size = configured_ranks;
+  auto instance = al::ExtractLayoutInstance(program, model, {"weight"}, {"weight"});
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  if (configured_ranks > 0 && configured_ranks != bank_ranks) {
+    assert(instance.values.at("weight").admissible_layouts == std::vector<al::LayoutSpec>{nd});
+    return;
+  }
+  constexpr double matrix_bytes = 64 * 32 * 2;
+  assert(instance.values.at("weight").ByteSize() == bank_ranks * layers * matrix_bytes);
+  assert(instance.operations.size() == 1);
+  const auto& op = instance.operations.front();
+  const int64_t launches = configured_ranks > 0 ? configured_ranks : 2;
+  assert(op.invocations == launches * layers * model.expected_uses);
+  assert(op.projected_mte2_source_bytes == (same_rank ? 1 : launches) * layers * matrix_bytes);
+  const auto solutions = al::EnumerateAssignments(instance);
+  assert(solutions.size() == 2);
+  for (const auto& solution : solutions) {
+    const auto selected = solution.assignment.value_layouts.at("weight");
+    const double pack = selected == nz ? model.gm_pack_fixed_cycles + bank_ranks * layers * matrix_bytes /
+                                                                          model.gm_pack_bytes_per_cycle
+                                       : 0;
+    assert(std::abs(solution.conversion_cost_cycles - pack) < 1e-9);
+    const double loads =
+        layers * model.expected_uses * (same_rank ? 1 + model.mte2_l2_reread_discount : launches);
+    const double bandwidth =
+        selected == nd ? model.mte2_nd2nz_contiguous_bytes_per_cycle : model.mte2_nz2nz_bytes_per_cycle;
+    assert(std::abs(solution.operator_cost_cycles - loads * matrix_bytes / bandwidth) < 1e-9);
+  }
+  assert(solutions[0].assignment.value_layouts.at("weight") !=
+         solutions[1].assignment.value_layouts.at("weight"));
+}
 
 void TestDistinctTileDefinitionsWithRepeatedHints() {
   const auto span = ir::Span::unknown();
@@ -728,6 +953,25 @@ void TestVecLoopConversions(bool column_carry, int64_t trip_count, bool while_lo
 
 int main() {
   pypto::backend::BackendConfig::SetBackendType(pypto::backend::BackendType::Ascend910);
+  TestHostMatrixLayout(HostMatrixDispatch::Implicit, 1, true);
+  TestHostMatrixLayout(HostMatrixDispatch::RankZero, 1, true);
+  TestHostMatrixLayout(HostMatrixDispatch::Implicit, std::nullopt, false);
+  TestHostMatrixLayout(HostMatrixDispatch::RankZero, 2, false);
+  TestHostMatrixLayout(HostMatrixDispatch::UnknownRank, 1, false);
+  TestHostMatrixLayout(HostMatrixDispatch::PartialSlice, 1, false);
+  TestHostMatrixLayout(HostMatrixDispatch::FullSlice, 1, false);
+  TestHostMatrixLayout(HostMatrixDispatch::Mutable, 1, false);
+  // A Qwen-size NZ source needs multiple bursts with a gap over 16 bits.
+  TestHostMatrixLayout(HostMatrixDispatch::Implicit, 1, true, true);
+  TestHostMatrixLayout(HostMatrixDispatch::Implicit, 1, false, true, pypto::backend::BackendType::Ascend950);
+  TestHostInputProjectionCost(false, 1);
+  TestHostInputProjectionCost(true, 1);
+  TestHostInputProjectionCost(false, 3);
+  TestHostInputProjectionCost(true, 3);
+  TestHostInputProjectionCost(false, 3, 1, 1);
+  TestHostInputProjectionCost(false, 3, 2, 2);
+  TestHostInputProjectionCost(false, 3, 2);
+  TestHostInputProjectionCost(false, 3, 5);
   const auto span = ir::Span::unknown();
   const std::vector<int64_t> dims{64, 64};
   const auto tensor = std::make_shared<ir::TensorType>(dims, DataType::FP16, std::nullopt);

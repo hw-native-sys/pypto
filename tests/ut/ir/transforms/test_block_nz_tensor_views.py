@@ -2211,9 +2211,7 @@ def test_a_sliced_shard_reaches_its_kernel_unstrided():
     assert _values(_elements(slices[0].args[2])) == [1, 0, 0, 0, 0]  # offsets
 
 
-# -- Temporary guard for hw-native-sys/pto-isa#317 ----------------------------
-# Delete this block together with ``CheckNzGmGapFitsBurstStride`` once the
-# upstream truncation is fixed.
+# -- Source stride on multi-burst NZ loads ------------------------------------
 
 
 def _gap_program(rows: int, tile_rows: int):
@@ -2272,41 +2270,28 @@ def test_accepts_the_largest_encodable_gm_gap():
     _run(_gap_program(rows=65536, tile_rows=16))
 
 
-def test_rejects_a_gm_gap_above_the_burst_stride_field():
-    """Above 65535 blocks pto-isa truncates the gap and reads wrong fractals.
-
-    The message must say this is a temporary guard, not an NZ limitation — a
-    user who reads it as "NZ tops out here" would design around a cap that is
-    about to disappear.
-    """
-    assert 65552 - 16 == 65536
-    with pytest.raises(ValueError) as excinfo:
-        _run(_gap_program(rows=65552, tile_rows=16))
-    message = str(excinfo.value)
-    assert "65536 32-byte blocks" in message
-    assert "NOT an expected pl.NZ limitation" in message
-    assert "pto-isa#317" in message
+@pytest.mark.parametrize("backend", [BackendType.Ascend910, BackendType.Ascend950])
+def test_oversized_gm_gap_uses_target_capability(backend):
+    reset_for_testing()
+    set_backend_type(backend)
+    program = _gap_program(rows=65552, tile_rows=16)
+    if backend == BackendType.Ascend910:
+        _run(program)
+    else:
+        with pytest.raises(ValueError, match="65536 32-byte blocks"):
+            _run(program)
 
 
 def test_a_taller_row_tile_rescues_the_same_tensor():
-    """The gap, not the row extent, is the limit.
-
-    Same 65552-row weight the test above refuses, read in a 32-row tile instead
-    of a 16-row one: the gap drops to 65520 and it compiles. This is why the
-    diagnostic offers a *wider* tile as the workaround.
-    """
+    """The wider row tile fits the stride field even on a target with the conservative guard."""
+    set_backend_type(BackendType.Ascend950)
     assert 65552 - 32 == 65520
     _run(_gap_program(rows=65552, tile_rows=32))
 
 
 def test_a_single_column_block_load_is_exempt_from_the_gap_limit():
-    """``gmGap`` is the stride *between* bursts, so one burst never reads it.
-
-    Verified on device in pto-isa's own tload_gm2mat ST suite: an NZ int16 load
-    with ``gShape1 = 1`` and a 65536-block gap returns bit-exact data, while the
-    identical load at ``gShape1 = 2`` corrupts 1837/4096 elements. Rejecting the
-    single-block case would refuse a load that is actually correct.
-    """
+    """One burst needs no source stride, even on a target with the conservative guard."""
+    set_backend_type(BackendType.Ascend950)
     assert 65552 - 16 == 65536
     _run(_single_column_block_program(rows=65552, tile_rows=16))
 
@@ -2337,13 +2322,8 @@ def _valid_shape_program(rows: int, tile_rows: int, valid_rows: int):
 
 
 def test_a_narrowed_valid_shape_drives_the_gap_check():
-    """The gap follows ``valid_shape``, not ``shapes``.
-
-    ``shapes`` alone puts this load at 65520 blocks — under the bound — while
-    the partition codegen actually emits (``1x2x1x16x32``, from ``valid_shape``)
-    puts it at 65536. Measuring ``shapes`` would wave through a load that
-    truncates on device, which is the whole failure this guard exists to stop.
-    """
+    """The conservative target checks the 65536-block gap of the emitted valid partition."""
+    set_backend_type(BackendType.Ascend950)
     assert 65552 - 32 == 65520  # what `shapes` alone would report
     assert 65552 - 16 == 65536  # what pto-isa actually computes
     with pytest.raises(ValueError) as excinfo:

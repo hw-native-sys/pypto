@@ -133,6 +133,8 @@ struct ValueNode {
   std::optional<int64_t> conversion_invocations;
   // Conversion pairs penalized in a capacity-repair solve.
   std::vector<std::pair<LayoutSpec, LayoutSpec>> blocked_vec_conversions;
+  // The loader explicitly offers to supply this read-only entry input in NZ.
+  bool is_named_nz_input = false;
 
   [[nodiscard]] int64_t NumElements() const;
   [[nodiscard]] int64_t ByteSize() const;
@@ -169,11 +171,16 @@ struct OperationNode {
   std::string output;
   int64_t invocations = 1;
   std::vector<OperatorConfig> configs;
+  // Per forward, across the projected matrices and devices that can read them.
+  std::optional<double> projected_mte2_source_bytes = std::nullopt;
 };
 
 /// Calibratable analytical cost model for GM, L1 (`Mat`), UB (`Vec`), and L0 (`Left`/`Right`/`Acc`).
 struct LayoutCostModel {
   int64_t expected_uses = 1;
+  // Compile-time topology for named HOST inputs. It also proves that a
+  // whole matrix forwarded by HOST can use one resident device allocation.
+  std::optional<int64_t> host_world_size;
   std::optional<backend::BackendType> backend_type;
   std::string resolved_arch_hint = "a2a3";
 
@@ -213,9 +220,13 @@ struct LayoutCostModel {
   bool allow_external_input_relayout = false;
   bool allow_external_output_relayout = false;
   bool reselect_internal_layouts = false;
+  // Score one forward after the loader prepares named reusable NZ inputs.
+  bool steady_state = false;
 
+  void ValidateUseHorizon() const;
   [[nodiscard]] std::string TargetArch() const;
   [[nodiscard]] int64_t GmAccessGranularityBytes() const;
+  [[nodiscard]] bool SupportsWideNzMatLoad() const;
 
   [[nodiscard]] bool SupportsAccNzStore(const ValueNode& src_node, const ValueNode& dst_node) const;
   [[nodiscard]] double EstimateVbrcbCost(int64_t rows) const;
@@ -227,7 +238,7 @@ struct LayoutCostModel {
   [[nodiscard]] bool IsValidMoveConfig(const ValueNode& src_node, const ValueNode& dst_node,
                                        const LayoutSpec& src_layout, const LayoutSpec& dst_layout) const;
 
-  [[nodiscard]] double EffectiveMte2LoadMultiplier(const ValueNode& src_node, const ValueNode& dst_node,
+  [[nodiscard]] double EffectiveMte2LoadMultiplier(double source_bytes, const ValueNode& dst_node,
                                                    double per_run_inv) const;
   [[nodiscard]] double EstimateLoadCost(const ValueNode& src_node, const ValueNode& dst_node,
                                         const LayoutSpec& src_layout, const LayoutSpec& dst_layout) const;

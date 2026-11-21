@@ -260,6 +260,60 @@ void TestCostModelHardwareEquations() {
   Require(!al::IsNzCompatibleShape(vec_bool.shape, DataType::BOOL), "BOOL must not be NZ-compatible");
 }
 
+void TestSteadyStateInputPacking() {
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  al::LayoutProblemInstance instance;
+  instance.forbid_unmaterializable_gm_conversions = true;
+  auto resident = MakeValue("resident", std::nullopt, MemorySpace::DDR, true);
+  resident.is_named_nz_input = true;
+  auto transient = MakeValue("transient");
+  transient.is_named_nz_input = true;
+  instance.AddValue(resident);
+  instance.AddValue(transient);
+  instance.AddValue(MakeValue("unoffered", std::nullopt, MemorySpace::DDR, true));
+  instance.AddValue(MakeValue("out", "use", MemorySpace::DDR, false, true));
+  instance.operations = {MakeOp("use", {"resident", "transient", "unoffered"}, "out",
+                                {{{nd, nd, nd}, nd, 20.0},
+                                 {{nz, nd, nd}, nd, 10.0},
+                                 {{nz, nz, nd}, nd, 8.0},
+                                 {{nz, nd, nz}, nd, 6.0},
+                                 {{nz, nd, nd}, nz, 4.0}},
+                                3)};
+  const auto& configs = instance.operations.front().configs;
+  const double pack = instance.cost_model.EstimateConversionCost(resident, nd, nz);
+  auto evaluate = [&](size_t choice) {
+    return al::EvaluateAssignment(instance, al::LayoutAssignment{{}, {{"use", configs[choice]}}});
+  };
+
+  RequireNear(evaluate(1).total_cost_cycles, 30.0 + pack, 1e-9, "Finite horizon charges for packing");
+  RequireNear(al::SolveAutoLayout(instance).TotalCostCycles(), 60.0, 1e-9,
+              "Finite one-forward objective retains ND");
+
+  instance.cost_model.steady_state = true;
+  RequireNear(evaluate(1).total_cost_cycles, 30.0, 1e-9,
+              "Steady state still charges all three operator calls");
+  RequireNear(evaluate(2).per_value_conversion_costs.at("transient"), pack, 1e-9,
+              "A transient input still pays for packing");
+  RequireNear(evaluate(3).per_value_conversion_costs.at("unoffered"), pack, 1e-9,
+              "An unoffered reusable input still pays for packing");
+  RequireNear(evaluate(4).per_value_conversion_costs.at("out"), pack, 1e-9,
+              "The declared output still constrains the producer");
+  for (const auto& result : {al::SolveAutoLayout(instance), al::SolveGreedy(instance)}) {
+    RequireNear(result.TotalCostCycles(), 30.0, 1e-9, "The solver waives only resident input preparation");
+    Require(result.WritebackAssignment().op_configs.at("use") == configs[1],
+            "Only the offered reusable input should switch to NZ");
+  }
+  instance.cost_model.expected_uses = 2;
+  bool threw = false;
+  try {
+    (void)evaluate(1);
+  } catch (const pypto::ValueError&) {
+    threw = true;
+  }
+  Require(threw, "Direct evaluation rejects a finite horizon in steady-state mode");
+}
+
 void TestTreewidthStatsChainDiamondAndMultiComponent() {
   // Chain: P -> Q -> R (tw=1)
   al::LayoutProblemInstance chain;
@@ -1223,6 +1277,7 @@ void TestIfJoinAndClassFCrossLoopForbidden() {
 int main() {
   try {
     TestCostModelHardwareEquations();
+    TestSteadyStateInputPacking();
     TestTreewidthStatsChainDiamondAndMultiComponent();
     TestSharedConversionBarrierAndOracle();
     TestIncrementalStateAndAsymmetricCosts();

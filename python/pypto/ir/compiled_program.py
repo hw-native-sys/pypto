@@ -86,9 +86,9 @@ from .param_info import (  # noqa: F401  -- re-export
     _param_info_from_dict,
     _param_info_to_dict,
     _ParamInfo,
+    _reorder_nd_nz,
     _to_torch_dtype,
     bind_complete_args,
-    block_nz_shape,
     collect_output_values,
 )
 from .param_info import (
@@ -586,15 +586,7 @@ class _RuntimeFacade:
             target = lowered.layout
             if source not in ("ND", "NZ") or target not in ("ND", "NZ"):
                 raise ValueError(f"Unsupported input layout for {name!r}: {source} to {target}")
-            if source == target:
-                prepared[name] = tensor.contiguous()
-                continue
-            batch, blocks, groups, rows, cols = block_nz_shape(tensor.shape, tensor.dtype)
-            if source == "ND":
-                ordered = tensor.reshape(batch, groups, rows, blocks, cols).permute(0, 3, 1, 2, 4)
-            else:
-                ordered = tensor.reshape(batch, blocks, groups, rows, cols).permute(0, 2, 3, 1, 4)
-            prepared[name] = ordered.contiguous().reshape(tensor.shape)
+            prepared[name] = _reorder_nd_nz(tensor, source, target)
         if missing := weights.keys() - prepared.keys():
             raise ValueError(f"Unknown entry weights: {sorted(missing)}")
         return prepared

@@ -9,11 +9,13 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/auto_layout/extractor.h"
 #include "pypto/ir/transforms/auto_layout/model.h"
@@ -21,12 +23,62 @@
 #include "pypto/ir/transforms/auto_layout/writer.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 
 namespace pypto {
 namespace ir {
 namespace pass {
 
+namespace {
+
+// HOST tensor types describe transport geometry. Publish the device ABI as a
+// separate, versioned slot map only after the solver's writeback succeeds.
+ProgramPtr PublishHostInputLayouts(const ProgramPtr& program, const std::string& entry,
+                                   const std::string& layouts) {
+  if (entry.empty()) return program;
+  const auto key = program->GetGlobalVar(entry);
+  INTERNAL_CHECK(key) << "Missing HOST entry during AutoLayout writeback";
+  auto function = MutableCopy(program->functions_.at(key));
+  auto& attrs = function->attrs_;
+  attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                             [](const auto& attr) { return attr.first == kAttrAutoLayoutHostInputs; }),
+              attrs.end());
+  attrs.emplace_back(kAttrAutoLayoutHostInputs, layouts);
+  auto updated = MutableCopy(program);
+  updated->functions_.at(key) = std::move(function);
+  return updated;
+}
+
+std::string HostInputLayouts(const auto_layout::LayoutWritebackBindings& bindings,
+                             const auto_layout::LayoutProblemInstance& instance,
+                             const auto_layout::LayoutAssignment* assignment) {
+  using auto_layout::LayoutSpec;
+  std::string descriptor = "v1";
+  for (const auto& [slot, name] : bindings.host_input_roots) {
+    std::string layout = "UNSUPPORTED";
+    if (const auto* value = instance.FindValue(name); assignment && value) {
+      const auto& choices = value->admissible_layouts;
+      const auto contains = [&](const LayoutSpec& candidate) {
+        return std::find(choices.begin(), choices.end(), candidate) != choices.end();
+      };
+      // Neither a pinned baseline nor the HOST annotation proves that the
+      // loader can deliver the only representation the device expects.
+      const auto selected = assignment->value_layouts.find(name);
+      if (contains(LayoutSpec::ND()) && contains(LayoutSpec::NZ()) &&
+          selected != assignment->value_layouts.end()) {
+        if (selected->second == LayoutSpec::ND()) layout = "ND";
+        if (selected->second == LayoutSpec::NZ()) layout = "NZ";
+      }
+    }
+    descriptor += ";" + std::to_string(slot) + "=" + layout;
+  }
+  return descriptor;
+}
+
+}  // namespace
+
 Pass AutoLayout(AutoLayoutOptions options) {
+  options.cost_model.ValidateUseHorizon();
   if (options.solver != "auto" && options.solver != "greedy" && options.solver != "treewidth_dp") {
     throw ValueError("Unknown AutoLayout solver '" + options.solver +
                      "'; expected 'auto', 'greedy', or 'treewidth_dp'");
@@ -51,10 +103,14 @@ Pass AutoLayout(AutoLayoutOptions options) {
           result = auto_layout::SolveAutoLayout(instance, std::nullopt, solver_cfg);
         }
         if (!opts.fail_on_writeback_issues && !result.writeback_issues.empty()) {
-          return program;
+          return PublishHostInputLayouts(program, bindings.host_input_entry,
+                                         HostInputLayouts(bindings, instance, nullptr));
         }
-        return auto_layout::detail::ApplySolvedLayout(instance, std::move(bindings),
-                                                      result.WritebackAssignment());
+        const auto& assignment = result.WritebackAssignment();
+        const auto entry = bindings.host_input_entry;
+        const auto layouts = HostInputLayouts(bindings, instance, &assignment);
+        auto rewritten = auto_layout::detail::ApplySolvedLayout(instance, std::move(bindings), assignment);
+        return PublishHostInputLayouts(rewritten, entry, layouts);
       },
       pass_name, kAutoLayoutProperties);
 }

@@ -1954,9 +1954,7 @@ int IndexedProblem::ValueInfo::FindLayoutIndex(const LayoutSpec& spec) const {
 }
 
 IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance_(instance) {
-  if (instance_.cost_model.expected_uses < 1) {
-    throw pypto::ValueError("expected_uses must be at least 1");
-  }
+  instance_.cost_model.ValidateUseHorizon();
 
   // Deterministic value indexing following value_order first, then sorted remaining keys.
   std::vector<std::string> ordered_names;

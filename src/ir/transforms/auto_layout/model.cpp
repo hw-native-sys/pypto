@@ -179,8 +179,9 @@ size_t LayoutSpecHash::operator()(const LayoutSpec& spec) const noexcept {
 }
 
 size_t LayoutPairHash::operator()(const std::pair<LayoutSpec, LayoutSpec>& p) const noexcept {
-  size_t seed = LayoutSpecHash{}(p.first);
-  HashCombine(seed, LayoutSpecHash{}(p.second));
+  const LayoutSpecHash hash;
+  size_t seed = hash(p.first);
+  HashCombine(seed, hash(p.second));
   return seed;
 }
 
@@ -266,6 +267,13 @@ bool OperatorConfig::operator==(const OperatorConfig& other) const {
          notes == other.notes;
 }
 
+void LayoutCostModel::ValidateUseHorizon() const {
+  if (expected_uses < 1) throw pypto::ValueError("AutoLayout expected_uses must be positive");
+  if (steady_state && expected_uses != 1) {
+    throw pypto::ValueError("AutoLayout steady_state requires expected_uses=1");
+  }
+}
+
 std::string LayoutCostModel::TargetArch() const {
   if (backend_type.has_value()) {
     return (*backend_type == backend::BackendType::Ascend950) ? "a5" : "a2a3";
@@ -275,6 +283,12 @@ std::string LayoutCostModel::TargetArch() const {
 
 int64_t LayoutCostModel::GmAccessGranularityBytes() const {
   return TargetArch() == "a5" ? 128 : l2_cache_line_bytes;
+}
+
+bool LayoutCostModel::SupportsWideNzMatLoad() const {
+  // The pinned A2/A3 TLOAD implementation splits wide NZ Mat gaps into
+  // individual bursts. Other targets keep the 16-bit gap restriction.
+  return backend_type == backend::BackendType::Ascend910;
 }
 
 bool LayoutCostModel::SupportsAccNzStore(const ValueNode& src_node, const ValueNode& dst_node) const {
@@ -317,7 +331,7 @@ bool LayoutCostModel::IsValidLoadConfig(const ValueNode& src_node, const ValueNo
         const int64_t col_blocks = dst_node.shape.back() / c0;
         const int64_t gap =
             src_node.shape[src_node.shape.size() - 2] - dst_node.shape[dst_node.shape.size() - 2];
-        if (col_blocks > 1 && gap > 65535) {
+        if (!SupportsWideNzMatLoad() && col_blocks > 1 && gap > 65535) {
           return false;
         }
       }
@@ -404,18 +418,17 @@ bool LayoutCostModel::IsValidMoveConfig(const ValueNode& src_node, const ValueNo
   return true;
 }
 
-double LayoutCostModel::EffectiveMte2LoadMultiplier(const ValueNode& src_node, const ValueNode& dst_node,
+double LayoutCostModel::EffectiveMte2LoadMultiplier(double source_bytes, const ValueNode& dst_node,
                                                     double per_run_inv) const {
   if (per_run_inv <= 1.0 || mte2_l2_reread_discount >= 1.0) {
     return 1.0;
   }
   const double tile_b = static_cast<double>(dst_node.ByteSize());
-  const double uniq_b = static_cast<double>(src_node.ByteSize());
   const double load_b = per_run_inv * tile_b;
-  if (load_b <= uniq_b || load_b <= 0.0) {
+  if (load_b <= source_bytes || load_b <= 0.0) {
     return 1.0;
   }
-  return (uniq_b + mte2_l2_reread_discount * (load_b - uniq_b)) / load_b;
+  return (source_bytes + mte2_l2_reread_discount * (load_b - source_bytes)) / load_b;
 }
 
 double LayoutCostModel::EstimateLoadCost(const ValueNode& src_node, const ValueNode& dst_node,
@@ -621,6 +634,12 @@ double LayoutProblemInstance::EstimateConversionCost(const ValueNode& val_node, 
     return 0.0;
   }
   if (val_node.dtype.IsPackedFp4()) return cost_model.vec_unsupported_conversion_cycles;
+  if (cost_model.steady_state && val_node.is_named_nz_input && val_node.is_reusable_weight &&
+      val_node.memory_space == MemorySpace::DDR && !val_node.producer_op_id && !val_node.is_external_output &&
+      src_layout == val_node.current_layout && src_layout == LayoutSpec::ND() &&
+      dst_layout == LayoutSpec::NZ() && ContainsLayout(val_node.admissible_layouts, dst_layout)) {
+    return 0.0;
+  }
   auto val_it = custom_conversion_costs.find(val_node.name);
   if (val_it != custom_conversion_costs.end()) {
     auto pair_it = val_it->second.find(std::make_pair(src_layout, dst_layout));
@@ -652,7 +671,9 @@ double OperatorCostMultiplier(const LayoutProblemInstance& instance, const Opera
     if (src_val != nullptr && dst_val != nullptr && dst_val->memory_space == MemorySpace::Mat) {
       const double per_run_inv = static_cast<double>(op.invocations) /
                                  static_cast<double>(std::max<int64_t>(1, instance.cost_model.expected_uses));
-      load_scale = instance.cost_model.EffectiveMte2LoadMultiplier(*src_val, *dst_val, per_run_inv);
+      const double source_bytes =
+          op.projected_mte2_source_bytes.value_or(static_cast<double>(src_val->ByteSize()));
+      load_scale = instance.cost_model.EffectiveMte2LoadMultiplier(source_bytes, *dst_val, per_run_inv);
     }
   }
   return static_cast<double>(op.invocations) * load_scale;
@@ -698,6 +719,7 @@ double ConversionMultiplier(const LayoutProblemInstance& instance, const ValueNo
 
 CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const LayoutAssignment& assignment) {
   const auto& model = instance.cost_model;
+  model.ValidateUseHorizon();
   std::unordered_map<std::string, double> per_op_costs;
   double op_cost_total = 0.0;
 

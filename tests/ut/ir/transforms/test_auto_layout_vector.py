@@ -14,6 +14,9 @@ import pytest
 from pypto import backend, ir, passes
 from pypto.debug import torch_codegen
 
+_TILE_RESHAPE = ir.get_op("tile.reshape").name
+_TILE_SELS = ir.get_op("tile.sels").name
+
 
 def _select(program: ir.Program) -> ir.Program:
     prefix = passes.PassPipeline()
@@ -74,7 +77,7 @@ def test_shape_changing_reshape_preserves_flat_element_order(ascend_backend):
     call = next(
         s.value
         for s in body.stmts
-        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call) and s.value.op.name == "tile.reshape"
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call) and s.value.op.name == _TILE_RESHAPE
     )
     src = call.args[0].type
     dst = call.type
@@ -184,7 +187,7 @@ def test_sels_keeps_packed_predicate_geometry(ascend_backend):
     selected = next(
         s.value
         for s in body.stmts
-        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call) and s.value.op.name == "tile.sels"
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call) and s.value.op.name == _TILE_SELS
     )
     # The constant 1 selects the first column of each 32-element group per logical row.
     # Treating each INT32 word as an ordinary NZ element changes which bits apply.

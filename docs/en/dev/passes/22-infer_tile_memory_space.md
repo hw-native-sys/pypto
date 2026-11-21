@@ -301,7 +301,56 @@ declared representations. Reuse only changes the price of packing. For a single-
 `compiled.prepare_inputs({"w": logical_w})["w"]` returns the physical buffer to pass on
 subsequent invocations. It can also prepare buffers after reloading the compiled program.
 
+When the loader prepares a weight once and keeps it resident across forwards, use
+`ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), steady_state=True)`.
+The objective scores one forward and excludes the one-time ND-to-NZ packing cost for
+eligible inputs named in both tuples. Recurring loads, computation, stores and layout
+conversions keep their normal costs, including loop and dispatch multiplicities. The same
+layout eligibility and external ABI rules apply. Leave `expected_uses` at `1` with
+`steady_state=True`. The default finite objective includes the pack and scores
+`expected_uses` forwards.
+
+On a single-device HOST entry, the policy may also select ND or NZ for a dense,
+read-only `[M, N]` weight passed whole to the device. The loader uploads one
+matrix and supplies the kernel with a single device tensor.
+
+For a distributed HOST entry, the policy can offer a dense read-only weight of shape
+`[rank, M, N]` or `[rank, layer, M, N]` when the leading extent matches the configured
+device count. HOST selects a whole shard with one leading-axis index on the input or
+an SSA alias. Device-side consumers read whole matrices. HOST indexing retains the logical shape. NZ
+packing uses independent matrices at each rank and layer, with 16-row blocks
+and a C0 width of `32 / sizeof(dtype)` elements. The artifact records the
+selected layout, logical shape, physical shape, and dtype for every offered
+slot. Compilation requires a native storage decision for each slot.
+
+For named HOST inputs, AutoLayout estimates loops over `pld.world_size()`
+using the compile-time `DistributedConfig.device_ids`. Pass-manager callers
+can supply the same estimate as `host_world_size`. Static loop bounds retain
+their own counts. The estimate does not bind artifact replay to those devices.
+
+A one-shot `DistributedCompiledProgram` call accepts logical ND tensors at
+offered slots. Use `compiled.prepare_input(slot, tensor)` to prepare an immutable
+snapshot once and pass it to repeated calls. Use `source_layout="NZ"` when the
+source is already canonically packed and carried in the original logical
+shape. If dispatching a snapshot as a host argument on a reusable worker, use
+`prepare_input(..., shared=True)` before creating the worker and include the
+snapshot in `compiled.prepare(inherited_host_tensors=[snapshot])`.
+
+For resident weights, use `worker.alloc_input_tensor(compiled, slot, tensor)`
+or pass an existing snapshot as the last argument. The worker uploads the
+selected representation once per shard and verifies its provenance at dispatch.
+To supply a new weight version, prepare or upload a new input. The same
+metadata and loader apply after `DistributedCompiledProgram.from_dir()`.
+Device IDs can be remapped while preserving the compiled rank count.
+All unoffered parameters retain the authored ABI, including prepacked weights,
+quantization scales, outputs and mutable state.
+
 The Python pass factory accepts the same input-packing options through keyword arguments, for example `passes.auto_layout(allow_external_input_relayout=True, reusable_tensors=["w"], expected_uses=100)`. This allows eligible ND inputs to become NZ. To evaluate a previously NZ-packed weight from an ND starting point, first supply its logical ND declaration and bytes. Use the compiled layout metadata to prepare each upload.
+
+For the steady-state objective, call
+`passes.auto_layout(nz_inputs=["w"], reusable_tensors=["w"], steady_state=True)`.
+The corresponding C++ fields are `options.nz_inputs`, `options.reusable_tensors`,
+and `options.cost_model.steady_state`.
 
 A dense flat Vec matrix can switch between row-major and column-major when its geometry and dtype support a physical transpose. Writeback emits a transpose and a zero-copy transpose view. Narrowed-pitch slices retain their original representation; an equal-pitch row-major slice can still be transposed. Shape-changing reshapes preserve their original logical element order, and packed predicates keep their original lane geometry.
 
