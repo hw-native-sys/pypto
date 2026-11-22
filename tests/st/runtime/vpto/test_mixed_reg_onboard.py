@@ -284,7 +284,19 @@ def _run_onboard(dual, fifo):
     assert len(json.loads((output / "result.json").read_text())["checks"]) == 32
 
 
-@pytest.mark.parametrize("dual", [False, True], ids=["single-lane", "dual-lane"])
+@pytest.mark.parametrize(
+    "dual",
+    [
+        pytest.param(
+            False,
+            marks=pytest.mark.skip(
+                reason="Temporarily disabled: A5 S1:running-stalled on first dispatch (CI run 44912968436)"
+            ),
+            id="single-lane",
+        ),
+        pytest.param(True, id="dual-lane"),
+    ],
+)
 def test_mixed_reg_persistent_onboard(dual):
     _run_onboard(dual, fifo=False)
 
