@@ -293,6 +293,84 @@ def wait_flag(
     return _pipeline_flag("system.wait_flag", src_pipe, dst_pipe, event_id, core_type=core_type, span=span)
 
 
+# Concrete hardware endpoints supported by the A5 Buffer-ID instructions.
+_BUFFER_SYNC_PIPES = (
+    PipeType.MTE1,
+    PipeType.MTE2,
+    PipeType.MTE3,
+    PipeType.M,
+    PipeType.V,
+    PipeType.S,
+    PipeType.FIX,
+)
+
+
+def _create_buffer_sync_op(
+    op_name: str, buf_id: int | Expr, *, pipe: object, mode: int, span: Span | None
+) -> Call:
+    if not isinstance(pipe, PipeType):
+        raise TypeError(f"{op_name} pipe must be a PipeType member, got {pipe!r}")
+    if pipe not in _BUFFER_SYNC_PIPES:
+        raise ValueError(f"{op_name} pipe must be a concrete pipe; ALL is unsupported")
+    if type(mode) is not int:
+        raise TypeError(f"{op_name} mode must be a static integer, got {mode!r}")
+    if mode != 0:
+        raise ValueError(f"{op_name} supports only mode=0, got {mode}")
+    kwargs: dict[str, Any] = {"pipe": pipe, "mode": mode}
+    args: list[Expr] = []
+    if type(buf_id) is int:
+        if not 0 <= buf_id <= 31:
+            raise ValueError(f"{op_name} buf_id must be in [0, 31], got {buf_id}")
+        kwargs["buf_id"] = buf_id
+    elif isinstance(buf_id, Expr):
+        if not isinstance(buf_id.type, ScalarType) or buf_id.type.dtype != DataType.INDEX:
+            raise TypeError(f"{op_name} dynamic buf_id must have ScalarType(INDEX)")
+        if isinstance(buf_id, ConstInt) and not 0 <= buf_id.value <= 31:
+            raise ValueError(f"{op_name} buf_id must be in [0, 31], got {buf_id.value}")
+        args.append(buf_id)
+    else:
+        raise TypeError(f"{op_name} buf_id must be an int or INDEX Expr, got {buf_id!r}")
+    return _ir_core.create_op_call(op_name, args, kwargs, _get_span_or_capture(span, frame_offset=2))
+
+
+def get_buf(buf_id: int | Expr, *, pipe: PipeType, mode: int = 0, span: Span | None = None) -> Call:
+    """Acquire a same-core local buffer on A5 using a Buffer-ID.
+
+    Args:
+        buf_id: Static integer in [0, 31], or an INDEX expression (including
+            INDEX constants). The kernel author must keep dynamic IDs in range
+            and pair acquisitions/releases on every control-flow path.
+        pipe: Concrete MTE1, MTE2, MTE3, M, V, S or FIX endpoint; ALL is rejected.
+        mode: Static integer; only 0 is supported.
+        span: Optional source span for debugging (auto-captured if omitted).
+
+    Returns:
+        A side-effecting, no-result Call for use as a statement. Requires an
+        explicitly typed AIC/AIV kernel; A2/A3 and mixed kernels are unsupported.
+        Automatic event synchronization remains enabled in the default pipeline.
+    """
+    return _create_buffer_sync_op("system.get_buf", buf_id, pipe=pipe, mode=mode, span=span)
+
+
+def rls_buf(buf_id: int | Expr, *, pipe: PipeType, mode: int = 0, span: Span | None = None) -> Call:
+    """Release a same-core local buffer on A5 using a Buffer-ID.
+
+    Args:
+        buf_id: Static integer in [0, 31], or an INDEX expression (including
+            INDEX constants). The kernel author must keep dynamic IDs in range
+            and pair acquisitions/releases on every control-flow path.
+        pipe: Concrete MTE1, MTE2, MTE3, M, V, S or FIX endpoint; ALL is rejected.
+        mode: Static integer; only 0 is supported.
+        span: Optional source span for debugging (auto-captured if omitted).
+
+    Returns:
+        A side-effecting, no-result Call for use as a statement. Requires an
+        explicitly typed AIC/AIV kernel; A2/A3 and mixed kernels are unsupported.
+        Automatic event synchronization remains enabled in the default pipeline.
+    """
+    return _create_buffer_sync_op("system.rls_buf", buf_id, pipe=pipe, mode=mode, span=span)
+
+
 _MIN_FFTS_WORKSPACE_ELEMENTS = 256
 
 

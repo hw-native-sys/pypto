@@ -884,5 +884,57 @@ class TestCanonicalizeCrossCore:
         ir.assert_structural_equal(_run_lower_then_canon(Before), Expected)
 
 
+@pytest.mark.parametrize("double_buffer_c", [False, True], ids=["full-depth", "dbC"])
+def test_manual_sync_keeps_order_and_normalizes_acc_membership(double_buffer_c):
+    """Manual fences preserve scheduling, while dbC still bounds Acc rotation."""
+
+    # Loop attrs require literal values in DSL source.
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIC)
+    def main(self, a: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat],
+             b: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat],
+             out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+        for _ in pl.pipeline(4, stage=4, attrs={{"pipeline_double_buffer_c": {double_buffer_c}}}):
+            pl.system.get_buf(0, pipe=pl.PipeType.M)
+            left = pl.tile.move(a, target_memory=pl.Mem.Left)
+            right = pl.tile.move(b, target_memory=pl.Mem.Right)
+            product = pl.tile.matmul(left, right)
+            pl.system.rls_buf(0, pipe=pl.PipeType.M)
+            pl.tile.store(product, [0, 0], out)
+""")
+
+    def operations(program):
+        calls = []
+
+        class Collector(ir.IRVisitor):
+            def visit_call(self, op):
+                calls.append(op)
+                super().visit_call(op)
+
+        Collector().visit_program(program)
+        return calls
+
+    lowered = passes.lower_pipeline_loops()(before)
+    after = _run_pass(lowered)
+    before_calls, after_calls = operations(lowered), operations(after)
+    assert [call.op.name for call in after_calls] == [call.op.name for call in before_calls]
+    matmul = ir.get_op("tile.matmul").name
+    move = ir.get_op("tile.move").name
+    before_acc = [call.attrs for call in before_calls if call.op.name == matmul]
+    after_acc = [call.attrs for call in after_calls if call.op.name == matmul]
+    assert len(after_acc) == 4
+    if double_buffer_c:
+        assert [int(attrs["pipeline_membership"].split(":")[-1]) for attrs in before_acc] == [0, 1, 2, 3]
+        assert [int(attrs["pipeline_membership"].split(":")[-1]) for attrs in after_acc] == [0, 1, 0, 1]
+    else:
+        assert after_acc == before_acc
+    assert [call.attrs for call in after_calls if call.op.name == move] == [
+        call.attrs for call in before_calls if call.op.name == move
+    ]
+    assert "ForKind.Pipeline" not in after.as_python()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

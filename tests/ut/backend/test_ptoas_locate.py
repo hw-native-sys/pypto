@@ -36,7 +36,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pypto.backend import _ptoas_fp4, pto_backend
+from pypto.backend import _ptoas_fp4, _ptoas_locate, pto_backend
 from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION, check_ptoas_version, find_ptoas_binary
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -525,6 +525,92 @@ def test_native_fp4_probe_timeout_is_actionable(fp4_probe, monkeypatch):
     with pytest.raises(RuntimeError, match="Native FP4 MX.*Capability probe failed") as exc:
         _ptoas_fp4.check_native_fp4_mx_support()
     assert isinstance(exc.value.__cause__, subprocess.TimeoutExpired)
+
+
+def _buffer_sync_probe_result(cmd, **kwargs):
+    output = (
+        'func.func @__pypto_bufid_dynamic(%id: index) {\npto.get_buf_dyn "PIPE_MTE2", %id, 0\nreturn\n}\n'
+        if "--emit-pto-ir" in cmd
+        else "get_buf(PIPE_MTE2, 0, 0);\nrls_buf(PIPE_MTE2, 0, 0);\n"
+    )
+    return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+
+def test_buffer_sync_capability_is_cached_after_both_probes(tmp_path, monkeypatch):
+    executable = _make_executable(tmp_path / "ptoas")
+    monkeypatch.setattr(_ptoas_locate, "_verified_buffer_sync_binaries", set())
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return _buffer_sync_probe_result(cmd, **kwargs)
+
+    monkeypatch.setattr(_ptoas_locate.subprocess, "run", run)
+    _ptoas_locate.check_ptoas_buffer_sync(str(executable))
+    _ptoas_locate.check_ptoas_buffer_sync(str(executable))
+    assert len(calls) == 2
+    assert "--emit-pto-ir" not in calls[0]
+    assert "--emit-pto-ir" in calls[1]
+
+
+def test_buffer_sync_lowering_failure_is_not_cached(tmp_path, monkeypatch):
+    executable = _make_executable(tmp_path / "ptoas")
+    monkeypatch.setattr(_ptoas_locate, "_verified_buffer_sync_binaries", set())
+    monkeypatch.setattr(
+        _ptoas_locate.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="failed to legalize pto.get_buf"
+        ),
+    )
+    with pytest.raises(RuntimeError, match=r"Manual Buffer-ID.*PTOAS_ROOT.*failed to legalize"):
+        _ptoas_locate.check_ptoas_buffer_sync(str(executable))
+
+    monkeypatch.setattr(_ptoas_locate.subprocess, "run", _buffer_sync_probe_result)
+    _ptoas_locate.check_ptoas_buffer_sync(str(executable))
+
+
+def test_buffer_sync_rejects_automatic_insertion_into_dynamic_function(tmp_path, monkeypatch):
+    executable = _make_executable(tmp_path / "ptoas")
+    monkeypatch.setattr(_ptoas_locate, "_verified_buffer_sync_binaries", set())
+
+    def run(cmd, **kwargs):
+        result = _buffer_sync_probe_result(cmd, **kwargs)
+        if "--emit-pto-ir" in cmd:
+            result.stdout = result.stdout.replace("return", 'pto.get_buf "PIPE_MTE2", 1, 0\nreturn', 1)
+        return result
+
+    monkeypatch.setattr(_ptoas_locate.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="BufidSync inserted static synchronization"):
+        _ptoas_locate.check_ptoas_buffer_sync(str(executable))
+
+
+@pytest.mark.parametrize("error", [OSError("cannot execute"), subprocess.TimeoutExpired("ptoas", 60)])
+def test_buffer_sync_reports_unavailable_probe(tmp_path, monkeypatch, error):
+    executable = _make_executable(tmp_path / "ptoas")
+    monkeypatch.setattr(_ptoas_locate, "_verified_buffer_sync_binaries", set())
+
+    def run(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(_ptoas_locate.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match=r"Manual Buffer-ID.*Capability probe could not run"):
+        _ptoas_locate.check_ptoas_buffer_sync(str(executable))
+
+
+@pytest.mark.parametrize("operation", [None, "get_buf", "rls_buf", "get_buf_dyn", "rls_buf_dyn"])
+def test_run_ptoas_probes_only_manual_buffer_sync(tmp_path, monkeypatch, operation):
+    executable = _make_executable(tmp_path / "ptoas")
+    source = tmp_path / "kernel.pto"
+    source.write_text(f'  pto.{operation} "PIPE_V", 0, 0\n' if operation else "module {}\n")
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: str(executable))
+    monkeypatch.setattr(pto_backend, "_check_ptoas_version", lambda _: f"ptoas {_PINNED}")
+    probes = []
+    monkeypatch.setattr(pto_backend, "_check_ptoas_buffer_sync", probes.append)
+    monkeypatch.setattr(pto_backend.subprocess, "run", _buffer_sync_probe_result)
+
+    pto_backend._run_ptoas(str(source), str(tmp_path / "kernel.cpp"))
+    assert probes == ([str(executable)] if operation else [])
 
 
 if __name__ == "__main__":

@@ -927,6 +927,14 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (gather_kw_index && i == 1) continue;
     if (i > 0) stream_ << ", ";
 
+    // A bare INDEX constant would be reparsed as a Python int and select the
+    // static attribute layout. Keep a dynamic Buffer-ID operand explicitly typed.
+    if ((IsOp(op, "system.get_buf") || IsOp(op, "system.rls_buf")) && As<ConstInt>(op->args_[i])) {
+      auto id = As<ConstInt>(op->args_[i]);
+      stream_ << prefix_ << ".const(" << id->value_ << ", " << prefix_ << ".INDEX)";
+      continue;
+    }
+
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
     if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {
       // Try to extract the integer value and convert it to MemorySpace enum
@@ -1036,9 +1044,10 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       int int_val = AnyCast<int>(value, "printing kwarg: " + key);
       // Print pipe kwargs as PipeType enum names for readability
       if (key == "set_pipe" || key == "wait_pipe" ||
-          (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait")))) {
+          (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") ||
+                             IsOp(op, "system.get_buf") || IsOp(op, "system.rls_buf")))) {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
-      } else if (key == "mode") {
+      } else if (key == "mode" && !(IsOp(op, "system.get_buf") || IsOp(op, "system.rls_buf"))) {
         stream_ << "'" << CastModeToString(int_val) << "'";
       } else if (key == "saturation_mode") {
         // Print the DSL spelling ('off'/'on') rather than the raw code, the

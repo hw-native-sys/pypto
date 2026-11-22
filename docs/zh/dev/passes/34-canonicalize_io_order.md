@@ -2,6 +2,12 @@
 
 仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，沿**同核硬件单元阶段阶梯**（标量 → load → compute → store）重排语句 —— 受 SSA 依赖图约束。把各克隆的 load 聚到前面，使两个 stage 的预取先于 compute 发射，于是 MTE load 引擎能跑在 Vector/Cube compute 引擎之前（双缓冲重叠）；compute/store 这一档再按 pipeline **stage** 排序，使每个 stage 算完立刻 store。注意：stage 之间的缓冲**分离**不再是这种聚集的副作用 —— 它现在是 [`MemoryReuse`](40-memory_reuse.md) 的显式约束（`pipeline_membership`）；本 pass 只塑造**调度顺序**。跨核（cube/vector）流水线由 [`SkewCrossCorePipeline`](31-skew_cross_core_pipeline.md) 在上游软流水，到达本 pass 时已是 `ForKind::Sequential`，故此处不含跨核处理。非流水线循环则保持不变。
 
+包含手写 `system.get_buf` / `system.rls_buf` 的区域（含嵌套控制流）保留
+原有顺序。本 pass 仍消费 pipeline 标记，但不会将访问调度到这些同步
+边界之外。启用 `pipeline_double_buffer_c=True` 时，cube 产生的 Acc membership
+仍归一化为 `stage % 2`，操作数 membership 保留完整流水线深度；此元数据
+归一化不改变语句顺序。同步摘要在现有遍历中收集。
+
 ## 概述
 
 `LowerPipelineLoops` 生成的外层 `ForStmt`（kind=Pipeline 标记）体是 `F` 份克隆体的 `SeqStmts`，自然顺序为 `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]`（每个克隆的地址运算先于其 load）。这种布局下，每个克隆的 load 排在上一个克隆的 store 之后，MTE load 引擎无法跑在 compute 引擎之前 —— 没有预取重叠。

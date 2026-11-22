@@ -51,6 +51,7 @@ from .distributed_compiled_program import DistributedCompiledProgram, Distribute
 
 # Import roundtrip instrument factory
 from .instruments import make_roundtrip_instrument
+from .op import system as system
 
 # Import op conversion utilities
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
@@ -122,6 +123,7 @@ __all__ = [
     "op_conversion",
     "register_op_conversion",
     "make_roundtrip_instrument",
+    "system",
     "directions",
     "make_call",
     "input",

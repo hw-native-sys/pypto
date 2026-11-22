@@ -58,6 +58,7 @@ from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
 from pypto.backend._ptoas_fp4 import check_native_fp4_mx_support, uses_native_fp4_mx
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
+from pypto.backend._ptoas_locate import check_ptoas_buffer_sync as _check_ptoas_buffer_sync
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
@@ -223,7 +224,8 @@ def _run_ptoas(
     Raises:
         FileNotFoundError: If the ptoas binary cannot be found
         ValueError: If PYPTO_PTOAS_TIMEOUT_SECONDS is not a positive integer
-        RuntimeError: If ptoas is older than the pinned minimum, or compilation fails
+        RuntimeError: If ptoas is older than the pinned minimum, lacks a required
+            manual Buffer-ID capability, or compilation fails
     """
     ptoas_bin = _find_ptoas_binary()
     if ptoas_bin is None:
@@ -239,6 +241,10 @@ def _run_ptoas(
             f"or add ptoas to your PATH.\nDownload from: {_PTOAS_RELEASES_URL}"
         )
     _check_ptoas_version(ptoas_bin)
+    if os.path.isfile(pto_path):
+        with open(pto_path) as source:
+            if re.search(r"(?m)^\s*pto\.(?:get|rls)_buf(?:_dyn)?\b", source.read()):
+                _check_ptoas_buffer_sync(ptoas_bin)
 
     timeout = _get_ptoas_timeout()
     cmd = [ptoas_bin, pto_path, "-o", output_path]

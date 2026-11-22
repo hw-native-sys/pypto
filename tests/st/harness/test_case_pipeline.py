@@ -25,12 +25,18 @@ Runs card-free under ``--codegen-only``; on a device it is one small kernel in
 the batched pool.
 """
 
-from concurrent.futures import Future
+import importlib.util
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
+from threading import Event
 
 import pypto.language as pl
 import pytest
 import torch
+from pypto import ir
+from pypto.backend import pto_backend
+from pypto.runtime import ExecutionMode
 
 from harness import st
 from harness.core import test_runner as tr
@@ -164,6 +170,61 @@ class TestSharedRun:
         tr._schedule_exec_after_golden(_StubCase(1e-5, 1e-5), "dup@a2a3@default", artifact)
         with pytest.raises(AssertionError, match="disagree on tolerance"):
             tr._schedule_exec_after_golden(_StubCase(1e-3, 1e-3), "dup@a2a3@default", artifact)
+
+
+def test_manual_sync_fixture_drains_compiles_and_uses_item_mode(monkeypatch):
+    """Other compiles must finish with their original mode and flags first."""
+    # Isolate this regression's stubs from the suite's real compile pool too.
+    wait(tuple(tr._compile_futures.values()))
+    path = Path(__file__).parents[1] / "runtime/ops/test_buffer_sync.py"
+    spec = importlib.util.spec_from_file_location("manual_sync_acceptance", path)
+    assert spec is not None and spec.loader is not None
+    acceptance = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(acceptance)
+    modes = []
+
+    def original_compile(*args, **kwargs):
+        modes.append(kwargs["execution_mode"])
+
+    def original_flags(*args, **kwargs):
+        return ["--enable-insert-sync", "--pto-level=level3"]
+
+    monkeypatch.setattr(ir, "compile", original_compile)
+    monkeypatch.setattr(pto_backend, "_get_ptoas_flags", original_flags)
+    start = Event()
+
+    def background_compile():
+        assert start.wait(timeout=5), "fixture did not drain the pending compile"
+        flags = pto_backend._get_ptoas_flags()
+        ir.compile(execution_mode=ExecutionMode.SIM)
+        return flags
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(background_compile)
+        monkeypatch.setattr(tr, "_compile_futures", {"unrelated": future})
+
+        def drain(futures):
+            assert tuple(futures) == (future,)
+            assert ir.compile is original_compile
+            assert pto_backend._get_ptoas_flags is original_flags
+            start.set()
+            return wait(futures, timeout=5)
+
+        monkeypatch.setattr(acceptance, "wait", drain)
+        try:
+            # The item's a5 mode must win even when the session chose SIM.
+            seen = acceptance.manual_sync_only.__wrapped__(monkeypatch, "a5")
+            assert future.done()
+            assert future.result() == ["--enable-insert-sync", "--pto-level=level3"]
+        finally:
+            start.set()
+
+    ir.compile(execution_mode=ExecutionMode.SIM)
+    assert modes == [ExecutionMode.SIM, ExecutionMode.ONBOARD]
+    assert pto_backend._get_ptoas_flags() == ["--pto-level=level3"]
+    assert seen == [["--pto-level=level3"]]
+    case = acceptance.BufferSyncCase(False, 0, platform="a5")
+    assert case.get_platform() == "a5"
 
 
 if __name__ == "__main__":
