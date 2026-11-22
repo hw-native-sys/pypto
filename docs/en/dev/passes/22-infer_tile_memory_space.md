@@ -282,7 +282,7 @@ A parameter's space is part of the signature — the caller decides where the ti
 
 After `InferTileMemorySpace`, the C++ pass `pypto::ir::pass::AutoLayout()` can select layouts for GM tensors and on-chip tiles. Run `BlockNzTensorViews()` again after selection to lower newly annotated NZ tensors, then continue to backend layout legalization.
 
-The pass minimizes modeled operator cycles. Consumers of immutable values share one conversion per value and requested layout. Each read of mutable Vec storage pays for its own required conversion. The automatic solver uses exact dynamic programming for connected components within the configured width and evaluation budgets. Wider components use local search. Operators sharing a value form a clique in the solver graph, so a tensor with many consumers can reach the width limit even in a shallow kernel.
+The solver ranks assignments by the number of modeled writeback violations, then by estimated cycles. For example, a GM input that the loader supplies in one physical layout must satisfy all its readers. A larger cycle estimate for the feasible assignment does not override that requirement. Consumers of immutable values share one conversion per value and requested layout. Each read of mutable Vec storage pays for its own required conversion. The automatic solver uses exact dynamic programming for connected components within the configured width and evaluation budgets. Wider components use local search. Operators sharing a value form a clique in the solver graph, so a tensor with many consumers can reach the width limit even in a shallow kernel.
 
 On Ascend910, the backend can issue separate bursts for an NZ GM-to-Mat load whose source gap exceeds the 16-bit DMA stride field. The model uses the same NZ bandwidth for both paths. A separate timing calibration is needed to estimate the cost of the split bursts.
 
@@ -301,9 +301,13 @@ strategy. Declare the logical weight as an ordinary dense input. For ND matrix b
 accepts both implicit strides and explicit contiguous row-major strides, including those inferred
 for a complete layer slice. The native extractor resolves
 the named entry parameter to its storage before solving. Other external buffers retain their
-declared representations. Reuse only changes the price of packing. For a single-chip program,
-`compiled.prepare_inputs({"w": logical_w})["w"]` returns the physical buffer to pass on
-subsequent invocations. It can also prepare buffers after reloading the compiled program.
+declared representations. Reuse only changes the price of packing. A single-chip program
+accepts weights in their authored layout and packs changed inputs before dispatch, including
+after artifact reload. Call `compiled.prepare_inputs({"w": logical_w})["w"]` to prepare
+the weight once for repeated calls. Pass the returned tensor directly to retain its layout marker.
+For an existing NZ buffer with the original logical shape, specify
+`source_layouts={"w": "NZ"}` when preparing it. A resident `DeviceTensor` must already
+use the compiled layout.
 
 When the loader prepares a weight once and keeps it resident across forwards, use
 `ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), steady_state=True)`.

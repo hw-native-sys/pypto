@@ -118,6 +118,8 @@ class IndexedProblem {
     double max_conversion_cost = 0.0;
     uint64_t incompatible_target_mask = 0;
     bool forbid_multi_rep = false;
+    /// Per-source masks of layout pairs that writeback cannot materialize.
+    std::vector<uint64_t> unsupported_target_masks;
     bool has_repeated_operand = false;
 
     [[nodiscard]] int FindLayoutIndex(const LayoutSpec& spec) const;
@@ -136,6 +138,7 @@ class IndexedProblem {
     int64_t invocations = 1;
     ValueId output_value = 0;
     std::vector<double> costs;
+    std::vector<bool> incompatible_configs;
     std::vector<uint16_t> output_layout_indices;
     /// One entry per distinct input value, in the same order for every configuration.
     std::vector<std::vector<OpConfigUse>> config_uses;
@@ -162,6 +165,13 @@ class IndexedProblem {
   std::unordered_map<std::string, OpId> op_by_id_;
 };
 
+/// Search orders writeback violations before the modeled cycle cost. A gain
+/// uses the same fields for the reductions in each part of that cost.
+struct LayoutSearchScore {
+  int64_t violations = 0;
+  double cycles = 0.0;
+};
+
 /// Demand counts and conversion terms for incremental move evaluation.
 class IncrementalState {
  public:
@@ -176,6 +186,7 @@ class IncrementalState {
     };
 
     double gain = 0.0;
+    int64_t violation_reduction = 0;
     std::vector<Factor> factors;
   };
 
@@ -184,6 +195,8 @@ class IncrementalState {
   /// Omit a factor when ranking choices within a fan-out move with a prescribed input layout.
   [[nodiscard]] double Gain(OpId op_idx, uint16_t new_choice,
                             std::optional<ValueId> omitted_factor = std::nullopt) const;
+  [[nodiscard]] LayoutSearchScore GainScore(OpId op_idx, uint16_t new_choice,
+                                            std::optional<ValueId> omitted_factor = std::nullopt) const;
   void Apply(OpId op_idx, uint16_t new_choice);
   /// Stage the net changes from distinct operations without changing the current assignment.
   [[nodiscard]] BlockEvaluation EvaluateBlock(const std::vector<ChoiceChange>& choices) const;
@@ -194,6 +207,7 @@ class IncrementalState {
   [[nodiscard]] LayoutAssignment ToAssignment() const;
 
   [[nodiscard]] double Cost() const { return cost_.Value(); }
+  [[nodiscard]] LayoutSearchScore SearchCost() const { return {cost_.violations, Cost()}; }
   [[nodiscard]] const std::vector<uint16_t>& Choices() const { return choices_; }
   [[nodiscard]] const std::vector<uint16_t>& Sources() const { return sources_; }
   [[nodiscard]] const std::vector<uint64_t>& DemandMasks() const { return demand_masks_; }
@@ -210,6 +224,7 @@ class IncrementalState {
 
     double sum = 0.0;
     double correction = 0.0;
+    int64_t violations = 0;
   };
 
   void AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t old_source, uint64_t old_mask,

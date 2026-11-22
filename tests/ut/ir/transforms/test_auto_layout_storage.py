@@ -20,6 +20,7 @@ from pypto import backend, ir
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import generate
 from pypto.pypto_core import passes
+from pypto.runtime import runner
 
 
 def _matmul(name: str = "mm", rows: int = 64) -> str:
@@ -522,6 +523,61 @@ def test_prepare_weight_with_inferred_output(tmp_path, ascend_backend):
     (tmp_path / "compiled_meta.json").write_text(json.dumps(meta))
     with pytest.raises(ValueError, match="Incompatible lowered direction for 'dst'"):
         ir.CompiledProgram.from_dir(tmp_path).prepare_inputs({"w": weight})
+
+
+@pytest.mark.parametrize("reload", [False, True])
+def test_program_dispatch_packs_selected_weight(tmp_path, ascend_backend, monkeypatch, reload):
+    torch = pytest.importorskip("torch")
+
+    compiled = ir.compile(
+        _host_program(_matmul() + _ENTRY + "    return self.mm(x, w, dst)\n"),
+        strategy=ir.OptimizationStrategy.AutoLayout,
+        input_layout_policy=ir.InputLayoutPolicy(("w",), ("w",), 100),
+        backend_type=backend.BackendType.Ascend910,
+        output_dir=str(tmp_path),
+        skip_ptoas=True,
+    )
+    assert isinstance(compiled, ir.CompiledProgram)
+    meta = json.loads((tmp_path / "compiled_meta.json").read_text())
+    assert [p["layout"] for p in meta["lowered_params"]] == ["ND", "NZ", "ND"]
+    if reload:
+        compiled = ir.CompiledProgram.from_dir(tmp_path)
+
+    identity = torch.eye(64)
+    logical = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    # NZ puts all rows of each eight-element C0 column block together.
+    physical = torch.cat([block.flatten() for block in logical.split(8, dim=1)]).reshape_as(logical)
+    assert not torch.equal(physical, logical)
+
+    def _execute(_directory, args, **_kwargs):
+        activation, weight, output = args
+        assert activation is identity
+        assert torch.equal(weight, physical)
+        logical_weight = torch.cat([block.reshape(64, 8) for block in weight.flatten().split(512)], dim=1)
+        output.copy_(activation @ logical_weight)
+
+    monkeypatch.setattr(runner, "_execute_compiled", _execute)
+    explicit = compiled.prepare_inputs({"w": logical})["w"]
+    attested = compiled.prepare_inputs({"w": physical}, source_layouts={"w": "NZ"})["w"]
+    assert attested.data_ptr() == physical.data_ptr()
+    for arg in (logical, explicit, attested):
+        out = torch.empty_like(logical)
+        compiled(identity, arg, out)
+        torch.testing.assert_close(out, logical, atol=0, rtol=0)
+    torch.testing.assert_close(compiled(identity, explicit), logical, atol=0, rtol=0)
+
+    args = compiled._prepare_benchmark_args((identity, logical, out))
+    monkeypatch.setattr(runner, "_coerced_to_orch_args", lambda coerced, _worker, _indices: coerced)
+    for _ in range(2):
+        _, coerced, _ = compiled._build_orch_args(*args, worker=object())
+        assert coerced[1] is args[1]
+        assert torch.equal(coerced[1], physical)
+
+    # A plain input is packed from its current bytes on every call.
+    logical.add_(1)
+    physical.add_(1)
+    compiled(identity, logical, out)
+    torch.testing.assert_close(out, logical, atol=0, rtol=0)
 
 
 def test_steady_state_requires_per_forward_horizon():

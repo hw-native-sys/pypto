@@ -545,6 +545,60 @@ void TestConversionPenaltyRollbackPreservesSmallCosts() {
   }
 }
 
+void TestWritebackFeasibilityPrecedesCycleCost() {
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  al::LayoutProblemInstance instance;
+  instance.forbid_unmaterializable_gm_conversions = true;
+  instance.AddValue(MakeValue("weight"));
+  instance.AddValue(MakeValue("a", "A"));
+  instance.AddValue(MakeValue("b", "B"));
+  instance.AddValue(MakeValue("fixed", "Fixed"));
+  instance.custom_conversion_costs["weight"][{nd, nz}] = 1.0;
+
+  al::LayoutSolverConfig heuristic;
+  heuristic.max_treewidth = 0;
+  for (double nd_cycles : {2e8, 2e12}) {
+    // The first two readers prefer NZ. The last reader pins the shared GM
+    // representation to ND, even when NZ plus the old penalty would win.
+    instance.operations = {
+        MakeOp("A", {"weight"}, "a", {{{nz}, nd, 0}, {{nd}, nd, nd_cycles}}),
+        MakeOp("B", {"weight"}, "b", {{{nz}, nd, 0}, {{nd}, nd, 0}}),
+        MakeOp("Fixed", {"weight"}, "fixed", {{{nd}, nd, 0}}),
+    };
+    al::LayoutAssignment mixed;
+    for (const auto& op : instance.operations) mixed.op_configs.emplace(op.op_id, op.configs.front());
+    mixed.op_configs.at("B") = instance.operations[1].configs.back();
+
+    for (const auto& result :
+         {al::SolveTreewidthDP(instance), al::SolveAutoLayout(instance), al::SolveGreedy(instance),
+          al::SolveGreedy(instance, mixed), al::SolveGreedyFM(instance, heuristic),
+          al::SolveAutoLayout(instance, std::nullopt, heuristic)}) {
+      const auto& assignment = result.WritebackAssignment();
+      Require(result.stats.termination_reason != "feasible_declared_layouts",
+              "Each search path must find feasible layouts without using the declared fallback");
+      Require(assignment.op_configs.at("A").input_layouts.front() == nd &&
+                  assignment.op_configs.at("B").input_layouts.front() == nd,
+              "All readers must use the only materializable GM representation");
+      RequireNear(result.TotalCostCycles(), nd_cycles, 1e-9, "Report the cost of the feasible ND assignment");
+    }
+  }
+
+  // A budget cutoff can leave a topological seed incomplete. The declared
+  // assignment is already known to have a single representation.
+  heuristic.max_evaluations = 1;
+  const auto budget_limited = al::SolveAutoLayout(instance, std::nullopt, heuristic);
+  Require(budget_limited.WritebackAssignment().op_configs.at("A").input_layouts.front() == nd &&
+              budget_limited.stats.evaluated_moves == 1,
+          "Retain feasible declared layouts within the search budget");
+
+  instance.operations[0].configs.pop_back();
+  const auto impossible = al::SolveTreewidthDP(instance);
+  Require(impossible.writeback_issues ==
+              std::vector<std::string>{"GM input 'weight' needs multiple representations"},
+          "Report the GM writeback restriction when no layout satisfies both pinned readers");
+}
+
 void TestFMRetainsGreedyIncumbent() {
   const auto nd = al::LayoutSpec::ND();
   const auto nz = al::LayoutSpec::NZ();
@@ -908,6 +962,16 @@ void TestCapacityRepairOfExplicitTranspose() {
     Require(result.writeback_issues.empty() && result.Assignment().op_configs.at("move").output_layout == col,
             "Repair the explicit move even though the load has no declared-layout configuration");
   }
+
+  // One greedy evaluation can choose the faster transpose, leaving no budget
+  // for repair. The caller's feasible seed must remain available.
+  initial.op_configs.at("move") = instance.operations[1].configs.back();
+  al::LayoutSolverConfig limited;
+  limited.max_evaluations = 1;
+  const auto incumbent = al::SolveGreedy(instance, initial, limited);
+  Require(incumbent.WritebackAssignment().op_configs == initial.op_configs &&
+              incumbent.stats.evaluated_moves == 1,
+          "Keep the feasible caller-provided assignment when repair cannot run");
 }
 
 void TestFMRestartsAtLateFanout() {
@@ -1341,6 +1405,7 @@ int main() {
     TestSharedConversionBarrierAndOracle();
     TestIncrementalStateAndAsymmetricCosts();
     TestConversionPenaltyRollbackPreservesSmallCosts();
+    TestWritebackFeasibilityPrecedesCycleCost();
     TestFMRetainsGreedyIncumbent();
     TestCachedFMDemandMultiplicityAndBudget();
     TestCachedFMToleranceScanOrder();

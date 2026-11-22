@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pypto.ir import distributed_compiled_program as dcp_mod
+from pypto.ir.compiled_program import CompiledProgram, _SubChipCallable
 from pypto.runtime import RunConfig
 from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_BEGIN,
@@ -1072,6 +1073,7 @@ def _run_benchmark(
     rounds: int,
     warmup: int,
     artifact_enable_sdma: bool = False,
+    compiled: MagicMock | None = None,
     **kwargs: Any,
 ):
     """Run ``benchmark`` with the worker, log-level, and parse seams patched."""
@@ -1084,7 +1086,7 @@ def _run_benchmark(
         patch("pypto.runtime.bench._parse_stats_from_strace", return_value=sentinel) as parse,
     ):
         stats = benchmark(
-            _compiled_mock(enable_sdma=artifact_enable_sdma),
+            _compiled_mock(enable_sdma=artifact_enable_sdma) if compiled is None else compiled,
             [MagicMock(name="arg")],
             rounds=rounds,
             warmup=warmup,
@@ -1101,6 +1103,17 @@ def test_benchmark_registers_once_and_loops_warmup_plus_rounds():
     # L2/L3 selector (a plain CompiledProgram mock -> distributed=False).
     assert parse.call_args.kwargs == {"rounds": 3, "warmup": 2, "distributed": False}
     assert stats.rounds == 3
+
+
+@pytest.mark.parametrize("artifact_type", [CompiledProgram, _SubChipCallable])
+def test_benchmark_prepares_weights_once_for_each_l2_entry(artifact_type):
+    artifact = MagicMock(spec=artifact_type)
+    artifact.platform = "a2a3sim"
+    prepared = object()
+    artifact._prepare_benchmark_args.return_value = [prepared]
+    _, worker, _, _, _ = _run_benchmark(rounds=2, warmup=1, compiled=artifact)
+    artifact._prepare_benchmark_args.assert_called_once()
+    assert [call.args for call in worker.handle.call_args_list] == [(prepared,)] * 3
 
 
 def test_benchmark_captures_markers_drained_during_worker_teardown():

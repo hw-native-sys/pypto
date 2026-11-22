@@ -1421,6 +1421,7 @@ def benchmark(
         raise ValueError(f"warmup must be non-negative, got {warmup}")
 
     # L3 distributed programs run through DistributedWorker, not ChipWorker.
+    from pypto.ir.compiled_program import _RuntimeFacade  # noqa: PLC0415
     from pypto.ir.distributed_compiled_program import (  # noqa: PLC0415
         DistributedCompiledProgram,
     )
@@ -1494,6 +1495,8 @@ def benchmark(
                         ChipWorker(rc, runtime=compiled.runtime_name, enable_sdma=enable_sdma) as worker,
                     ):
                         handle = worker.register(compiled)  # register once; cid cached
+                        if isinstance(compiled, _RuntimeFacade):
+                            args = compiled._prepare_benchmark_args(args)
                         _dispatch_loop(handle, args, rounds=rounds, warmup=warmup, dispatch_config=rc)
             except Exception:
                 _replay_captured_stderr(log_path)

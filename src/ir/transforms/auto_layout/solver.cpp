@@ -49,6 +49,40 @@ double RequireFiniteNonNegative(double value, const std::string& context) {
 
 bool StartsWithTile(const std::string& op_name) { return op_name.rfind("tile.", 0) == 0; }
 
+bool SupportsVecConversionPlacement(const std::string& name) {
+  return StartsWithTile(name) || name == "control.if_join" || name == kVecLoopInitOp ||
+         name == kVecLoopYieldOp;
+}
+
+bool HasIncompatibleJoinLayouts(const OperatorConfig& config) {
+  return config.op_name == "control.if_join" &&
+         std::any_of(config.input_layouts.begin(), config.input_layouts.end(),
+                     [&](const LayoutSpec& input) { return input != config.output_layout; });
+}
+
+constexpr LayoutSearchScore kWorstCost{std::numeric_limits<int64_t>::max(),
+                                       std::numeric_limits<double>::infinity()};
+constexpr LayoutSearchScore kWorstGain{std::numeric_limits<int64_t>::min(),
+                                       -std::numeric_limits<double>::infinity()};
+
+bool BetterCost(LayoutSearchScore lhs, LayoutSearchScore rhs, double tolerance) {
+  if (lhs.violations != rhs.violations) return lhs.violations < rhs.violations;
+  return lhs.cycles < rhs.cycles - tolerance;
+}
+
+bool BetterGain(LayoutSearchScore lhs, LayoutSearchScore rhs, double tolerance = 0.0) {
+  if (lhs.violations != rhs.violations) return lhs.violations > rhs.violations;
+  return lhs.cycles > rhs.cycles + tolerance;
+}
+
+bool HasMultipleRepresentations(uint64_t mask) { return (mask & (mask - 1)) != 0; }
+
+int64_t FactorViolations(const IndexedProblem::ValueInfo& value, uint16_t source, uint64_t mask) {
+  const int64_t multiple = value.forbid_multi_rep && HasMultipleRepresentations(mask);
+  if (value.unsupported_target_masks.empty()) return multiple;
+  return multiple + __builtin_popcountll(mask & value.unsupported_target_masks[source]);
+}
+
 /// Compact bitset with an inline 64-bit fast path for graphs with <= 64 vertices.
 struct SmallBitset {
   uint64_t w0 = 0;
@@ -282,10 +316,21 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
     requested[v] = problem.Values()[v].boundary_demand_mask;
   }
 
+  // Pinned readers constrain a GM input even when they occur later in
+  // topological order. Seed those demands before scoring movable readers.
+  if (problem.Instance().forbid_unmaterializable_gm_conversions) {
+    for (const auto& op : problem.Ops()) {
+      if (op.costs.size() != 1) continue;
+      for (const auto& use : op.config_uses.front()) {
+        if (problem.Values()[use.value_id].forbid_multi_rep) requested[use.value_id] |= use.demand_mask;
+      }
+    }
+  }
+
   for (OpId op_idx : problem.TopoOrder()) {
     const auto& op = problem.Ops()[op_idx];
     uint16_t best_choice = 0;
-    double best_cost = std::numeric_limits<double>::infinity();
+    LayoutSearchScore best_cost = kWorstCost;
     const auto& out_info = problem.Values()[op.output_value];
     const size_t out_num_layouts = out_info.layouts.size();
     for (uint16_t q = 0; q < static_cast<uint16_t>(op.costs.size()); ++q) {
@@ -295,13 +340,14 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
         return std::vector<OpId>(choices.begin(), choices.end());
       }
       ++evaluated_moves;
-      double cost = op.costs[q];
+      LayoutSearchScore cost{op.incompatible_configs[q], op.costs[q]};
       const uint16_t out_lay = op.output_layout_indices[q];
       uint64_t out_mask = requested[op.output_value];
+      cost.violations += FactorViolations(out_info, out_lay, out_mask);
       while (out_mask != 0) {
         const int dst_idx = __builtin_ctzll(out_mask);
         if (static_cast<uint16_t>(dst_idx) != out_lay) {
-          cost +=
+          cost.cycles +=
               out_info
                   .conv_costs[static_cast<size_t>(out_lay) * out_num_layouts + static_cast<size_t>(dst_idx)];
         }
@@ -312,19 +358,23 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
         const auto& v_info = problem.Values()[v];
         const size_t num_layouts = v_info.layouts.size();
         const uint16_t src_idx = (v == op.output_value) ? out_lay : produced[v];
-        if (v_info.forbid_multi_rep && __builtin_popcountll(requested[v]) <= 1 &&
-            __builtin_popcountll(requested[v] | use.demand_mask) > 1) {
-          cost += problem.Instance().cost_model.vec_unsupported_conversion_cycles;
+        const auto old_mask = requested[v];
+        const auto new_mask = old_mask | use.demand_mask;
+        cost.violations +=
+            FactorViolations(v_info, src_idx, new_mask) - FactorViolations(v_info, src_idx, old_mask);
+        if (v_info.forbid_multi_rep && !HasMultipleRepresentations(old_mask) &&
+            HasMultipleRepresentations(new_mask)) {
+          cost.cycles += problem.Instance().cost_model.vec_unsupported_conversion_cycles;
         }
         uint64_t new_bits = use.demand_mask & ~requested[v];
         while (new_bits != 0) {
           const int dst_idx = __builtin_ctzll(new_bits);
-          cost +=
+          cost.cycles +=
               v_info.conv_costs[static_cast<size_t>(src_idx) * num_layouts + static_cast<size_t>(dst_idx)];
           new_bits &= new_bits - 1;
         }
       }
-      if (cost < best_cost - config.tolerance) {
+      if (BetterCost(cost, best_cost, config.tolerance)) {
         best_cost = cost;
         best_choice = q;
       }
@@ -358,13 +408,8 @@ std::pair<std::vector<LayoutConversion>, std::vector<std::string>> BuildConversi
     if (v_info.producer_op.has_value()) {
       const auto producer = *v_info.producer_op;
       const auto& op = instance.operations[producer];
-      if (op.op_name == "control.if_join") {
-        const auto& selected = op.configs[state.Choices()[producer]];
-        // A join has no instruction that converts one branch to the result layout.
-        if (std::any_of(selected.input_layouts.begin(), selected.input_layouts.end(),
-                        [&](const LayoutSpec& input) { return input != selected.output_layout; })) {
-          issues.push_back("Conditional join '" + op.op_id + "' has incompatible branch layouts");
-        }
+      if (HasIncompatibleJoinLayouts(op.configs[state.Choices()[producer]])) {
+        issues.push_back("Conditional join '" + op.op_id + "' has incompatible branch layouts");
       }
     }
     const bool external_input = !node->producer_op_id.has_value() && node->memory_space == MemorySpace::DDR;
@@ -401,14 +446,10 @@ std::pair<std::vector<LayoutConversion>, std::vector<std::string>> BuildConversi
       if (!boundary) {
         const std::string& prod_op_name =
             v_info.producer_op.has_value() ? problem.Ops()[*v_info.producer_op].op_name : std::string();
-        auto supports_vec_conversion = [](const std::string& name) {
-          return StartsWithTile(name) || name == "control.if_join" || name == kVecLoopInitOp ||
-                 name == kVecLoopYieldOp;
-        };
-        const bool producer_ok = !v_info.producer_op.has_value() || supports_vec_conversion(prod_op_name);
+        const bool producer_ok = !v_info.producer_op || SupportsVecConversionPlacement(prod_op_name);
         const bool consumers_ok =
             std::all_of(consumer_indices.begin(), consumer_indices.end(),
-                        [&](OpId idx) { return supports_vec_conversion(problem.Ops()[idx].op_name); });
+                        [&](OpId idx) { return SupportsVecConversionPlacement(problem.Ops()[idx].op_name); });
         const bool compat_invs = (v_info.incompatible_target_mask & (uint64_t{1} << dst_idx)) == 0;
         const bool realizable_vec =
             node->memory_space == MemorySpace::Vec &&
@@ -937,7 +978,7 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
     sep_sizes[s] = stride;
   }
 
-  std::vector<std::vector<double>> messages(num_bags);
+  std::vector<std::vector<LayoutSearchScore>> messages(num_bags);
   std::vector<std::vector<uint16_t>> backpointers(num_bags);
 
   std::unordered_map<OpId, size_t> bag_pos;
@@ -1015,7 +1056,7 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
       factor_descs.push_back(std::move(fd));
     }
 
-    messages[s].assign(sep_size, std::numeric_limits<double>::infinity());
+    messages[s].resize(sep_size);
     backpointers[s].assign(sep_size, 0);
     sep_q.assign(sep_len, 0);
     bag_q.assign(bag.size(), 0);
@@ -1025,7 +1066,7 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
       for (size_t j = 0; j < sep_len; ++j) {
         bag_q[j + 1] = sep_q[j];
       }
-      double best_val = std::numeric_limits<double>::infinity();
+      LayoutSearchScore best_val = kWorstCost;
       uint16_t best_q = 0;
       for (uint16_t q_elim = 0; q_elim < static_cast<uint16_t>(elim_dom); ++q_elim) {
         if (evaluated_moves + 1 > config.max_evaluations) {
@@ -1033,7 +1074,7 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
         }
         ++evaluated_moves;
         bag_q[0] = q_elim;
-        double val = elim_costs[q_elim];
+        LayoutSearchScore val{problem.Ops()[elim_u].incompatible_configs[q_elim], elim_costs[q_elim]};
 
         for (const auto& fd : factor_descs) {
           const auto& v_info = problem.Values()[fd.value_id];
@@ -1048,13 +1089,14 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
           for (const auto& ce : fd.consumers) {
             mask |= ce.demand_by_choice[bag_q[ce.bag_pos]];
           }
-          if (v_info.forbid_multi_rep && __builtin_popcountll(mask) > 1) {
-            val += problem.Instance().cost_model.vec_unsupported_conversion_cycles;
+          val.violations += FactorViolations(v_info, src_idx, mask);
+          if (v_info.forbid_multi_rep && HasMultipleRepresentations(mask)) {
+            val.cycles += problem.Instance().cost_model.vec_unsupported_conversion_cycles;
           }
           const double* row = v_info.conv_costs.data() + static_cast<size_t>(src_idx) * num_layouts;
           while (mask != 0) {
             const int dst = __builtin_ctzll(mask);
-            val += row[dst];
+            val.cycles += row[dst];
             mask &= mask - 1;
           }
         }
@@ -1064,10 +1106,12 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
           for (size_t j = 0; j < sep_len; ++j) {
             c_idx += static_cast<size_t>(sep_q[j]) * cd.sep_strides[j];
           }
-          val += messages[cd.child_step][c_idx];
+          const auto& child_score = messages[cd.child_step][c_idx];
+          val.violations += child_score.violations;
+          val.cycles += child_score.cycles;
         }
 
-        if (val < best_val - config.tolerance) {
+        if (BetterCost(val, best_val, config.tolerance)) {
           best_val = val;
           best_q = q_elim;
         }
@@ -1126,7 +1170,7 @@ void GreedyRefineOps(IncrementalState& state, const std::vector<OpId>& ops, cons
     bool improved = false;
     for (OpId op_idx : ops) {
       const size_t num_cfg = problem.Ops()[op_idx].costs.size();
-      double best_gain = 0.0;
+      LayoutSearchScore best_gain;
       uint16_t best_choice = 0;
       bool found = false;
       for (uint16_t q = 0; q < static_cast<uint16_t>(num_cfg); ++q) {
@@ -1138,14 +1182,14 @@ void GreedyRefineOps(IncrementalState& state, const std::vector<OpId>& ops, cons
           return;
         }
         ++evaluated_moves;
-        const double gain = state.Gain(op_idx, q);
-        if (!found || gain > best_gain + config.tolerance) {
+        const auto gain = state.GainScore(op_idx, q);
+        if (!found || BetterGain(gain, best_gain, config.tolerance)) {
           best_gain = gain;
           best_choice = q;
           found = true;
         }
       }
-      if (found && best_gain > config.tolerance) {
+      if (found && BetterGain(best_gain, {}, config.tolerance)) {
         state.Apply(op_idx, best_choice);
         ++moves_applied;
         improved = true;
@@ -1191,12 +1235,11 @@ void ForEachDemandDelta(const IndexedProblem::OpConfigUse& old_use,
 class FMMoveFrontier {
  public:
   static constexpr uint16_t kNoChoice = std::numeric_limits<uint16_t>::max();
-  static constexpr double kNoGain = -std::numeric_limits<double>::infinity();
 
   struct Move {
     size_t local = 0;
     uint16_t choice = kNoChoice;
-    double gain = kNoGain;
+    LayoutSearchScore gain = kWorstGain;
   };
 
   FMMoveFrontier(const IncrementalState& state, const std::vector<OpId>& ops,
@@ -1241,8 +1284,8 @@ class FMMoveFrontier {
     const size_t first = first_node - leaf_base_;
     const uint16_t first_choice = state_.Choices()[ops_[first]] == 0 ? 1 : 0;
     Move best{first, first_choice, gains_[offsets_[first] + first_choice]};
-    // After a NaN first gain, every comparison in the original scan is false.
-    if (std::isnan(best.gain)) return best;
+    // An unordered cycle comparison can only affect moves with equal feasibility.
+    if (std::isnan(best.gain.cycles) && best.gain.violations == winner.gain.violations) return best;
     if (config_.tolerance == 0.0 || (best.local == winner.local && best.choice == winner.choice)) {
       return winner;
     }
@@ -1250,11 +1293,11 @@ class FMMoveFrontier {
     // If the maximum beats every preceding alternative by more than tolerance,
     // the scan must accept it and cannot replace it. Query only the left siblings
     // on its path and the cached prefix within its operation.
-    double before = before_best_[winner.local];
+    auto before = before_best_[winner.local];
     for (size_t node = leaf_base_ + winner.local; node > 1; node /= 2) {
-      if ((node & 1) != 0) before = std::max(before, tree_[node - 1].gain);
+      if ((node & 1) != 0 && BetterGain(tree_[node - 1].gain, before)) before = tree_[node - 1].gain;
     }
-    if (winner.gain > before + config_.tolerance) return winner;
+    if (BetterGain(winner.gain, before, config_.tolerance)) return winner;
     Scan(1, best);
     return best;
   }
@@ -1263,19 +1306,20 @@ class FMMoveFrontier {
   bool Evaluate(size_t local) {
     const OpId op = ops_[local];
     const uint16_t current = state_.Choices()[op];
-    Move winner{local, kNoChoice, kNoGain};
+    Move winner{local, kNoChoice, kWorstGain};
     const auto num_choices = static_cast<uint16_t>(offsets_[local + 1] - offsets_[local]);
     for (uint16_t q = 0; q < num_choices; ++q) {
       if (q == current) continue;
       if (evaluated_moves_ >= config_.max_evaluations) return false;
       ++evaluated_moves_;
-      const double gain = state_.Gain(op, q);
+      const auto gain = state_.GainScore(op, q);
       gains_[offsets_[local] + q] = gain;
       // Ignore NaNs for maxima. Best() separately handles a NaN in the first
       // unlocked candidate, which is the only way the ordered scan can pick one.
-      if (winner.choice == kNoChoice || gain > winner.gain) {
+      if (winner.choice == kNoChoice || BetterGain(gain, winner.gain)) {
         before_best_[local] = winner.gain;
-        winner = {local, q, std::isnan(gain) ? kNoGain : gain};
+        winner = {local, q,
+                  std::isnan(gain.cycles) ? LayoutSearchScore{gain.violations, kWorstGain.cycles} : gain};
       }
     }
     tree_[leaf_base_ + local] = winner;
@@ -1285,7 +1329,7 @@ class FMMoveFrontier {
   void UpdateNode(size_t node) {
     const Move left = tree_[2 * node];
     const Move right = tree_[2 * node + 1];
-    tree_[node] = left.choice == kNoChoice || right.gain > left.gain ? right : left;
+    tree_[node] = left.choice == kNoChoice || BetterGain(right.gain, left.gain) ? right : left;
   }
 
   void UpdatePath(size_t local) {
@@ -1293,7 +1337,7 @@ class FMMoveFrontier {
   }
 
   void Scan(size_t node, Move& best) const {
-    if (!(tree_[node].gain > best.gain + config_.tolerance)) return;
+    if (!BetterGain(tree_[node].gain, best.gain, config_.tolerance)) return;
     if (node < leaf_base_) {
       Scan(2 * node, best);
       Scan(2 * node + 1, best);
@@ -1303,8 +1347,8 @@ class FMMoveFrontier {
     const uint16_t current = state_.Choices()[ops_[local]];
     const auto num_choices = static_cast<uint16_t>(offsets_[local + 1] - offsets_[local]);
     for (uint16_t q = 0; q < num_choices; ++q) {
-      const double gain = gains_[offsets_[local] + q];
-      if (q != current && gain > best.gain + config_.tolerance) best = {local, q, gain};
+      const auto gain = gains_[offsets_[local] + q];
+      if (q != current && BetterGain(gain, best.gain, config_.tolerance)) best = {local, q, gain};
     }
   }
 
@@ -1315,8 +1359,8 @@ class FMMoveFrontier {
   size_t leaf_base_ = 1;
   std::vector<Move> tree_;
   std::vector<size_t> offsets_;
-  std::vector<double> gains_;
-  std::vector<double> before_best_;
+  std::vector<LayoutSearchScore> gains_;
+  std::vector<LayoutSearchScore> before_best_;
 };
 
 // The group neighborhood proposes one configuration per changing consumer for
@@ -1330,9 +1374,10 @@ class FMFanoutFrontier {
     std::vector<IncrementalState::ChoiceChange> choices;
     IncrementalState::BlockEvaluation evaluation;
     long double rebased_gain = 0.0L;
+    int64_t rebased_violation_reduction = 0;
     long double rounding_margin = 0.0L;
     long double rounding_margin_per_lock = 0.0L;
-    double priority = 0.0;
+    LayoutSearchScore priority;
     bool unique_choices = false;
     bool needs_restaging = false;
   };
@@ -1397,7 +1442,7 @@ class FMFanoutFrontier {
     dirty_.insert(it->second);
   }
 
-  void Lock(OpId op_id, uint16_t new_choice, std::optional<double> singleton_gain) {
+  void Lock(OpId op_id, uint16_t new_choice, std::optional<LayoutSearchScore> singleton_gain) {
     const auto& op = state_.Problem().Ops()[op_id];
     const auto& old_uses = op.config_uses[state_.Choices()[op_id]];
     const auto& new_uses = op.config_uses[new_choice];
@@ -1415,7 +1460,7 @@ class FMFanoutFrontier {
       }
       if (singleton_gain && old_mask != new_mask && (allowed & group.scored_targets) != 0) {
         auto& proposal = group.proposals[__builtin_ctzll(allowed)];
-        if (proposal.unique_choices && std::isfinite(proposal.priority) &&
+        if (proposal.unique_choices && std::isfinite(proposal.priority.cycles) &&
             std::isfinite(proposal.rounding_margin_per_lock)) {
           // The indexed consumer order and every subsequent filter preserve OpId order.
           const IncrementalState::ChoiceChange move{op_id, new_choice};
@@ -1425,7 +1470,8 @@ class FMFanoutFrontier {
             // Each remaining member has a unique choice, so the proposal's
             // endpoint survives unchanged even when side factors are shared.
             group.rebased_target = allowed;
-            proposal.rebased_gain -= *singleton_gain;
+            proposal.rebased_gain -= singleton_gain->cycles;
+            proposal.rebased_violation_reduction -= singleton_gain->violations;
             proposal.rounding_margin += proposal.rounding_margin_per_lock;
           }
         }
@@ -1474,12 +1520,13 @@ class FMFanoutFrontier {
           // Treat a rebased score as an upper bound. An ambiguous comparison
           // or potential winner forces a fresh exact score before selection.
           const auto upper = static_cast<double>(proposal.rebased_gain + proposal.rounding_margin);
-          proposal.priority = std::nextafter(upper, std::numeric_limits<double>::infinity());
+          proposal.priority = {proposal.rebased_violation_reduction,
+                               std::nextafter(upper, std::numeric_limits<double>::infinity())};
           proposal.needs_restaging = true;
         } else if (!Evaluate(group.value, bit, block_size, proposal)) {
           return false;
         }
-        if (std::isnan(proposal.priority)) continue;
+        if (std::isnan(proposal.priority.cycles)) continue;
         group.scored_targets |= bit;
         scores_.insert({proposal.priority, index, target});
       }
@@ -1488,9 +1535,9 @@ class FMFanoutFrontier {
     return true;
   }
 
-  bool Best(double singleton_gain, const Proposal*& winner) {
+  bool Best(LayoutSearchScore singleton_gain, const Proposal*& winner) {
     winner = nullptr;
-    while (!scores_.empty() && scores_.begin()->gain > singleton_gain + config_.tolerance) {
+    while (!scores_.empty() && BetterGain(scores_.begin()->gain, singleton_gain, config_.tolerance)) {
       const auto score = *scores_.begin();
       auto& group = groups_[score.group];
       auto& proposal = group.proposals[score.target];
@@ -1510,7 +1557,7 @@ class FMFanoutFrontier {
       choices.erase(std::remove_if(choices.begin(), choices.end(), already_applied), choices.end());
       scores_.erase(scores_.begin());
       SetExactScore(proposal);
-      if (!std::isnan(proposal.priority)) {
+      if (!std::isnan(proposal.priority.cycles)) {
         scores_.insert({proposal.priority, score.group, score.target});
       } else {
         group.scored_targets &= ~(uint64_t{1} << score.target);
@@ -1534,12 +1581,14 @@ class FMFanoutFrontier {
   };
 
   struct Score {
-    double gain;
+    LayoutSearchScore gain;
     size_t group;
     uint16_t target;
 
     bool operator<(const Score& other) const {
-      if (gain != other.gain) return gain > other.gain;
+      if (gain.violations != other.gain.violations || gain.cycles != other.gain.cycles) {
+        return BetterGain(gain, other.gain);
+      }
       return std::tie(group, target) < std::tie(other.group, other.target);
     }
   };
@@ -1548,8 +1597,9 @@ class FMFanoutFrontier {
 
   void SetExactScore(Proposal& proposal) {
     proposal.evaluation = state_.EvaluateBlock(proposal.choices);
-    proposal.priority = proposal.evaluation.gain;
-    proposal.rebased_gain = proposal.priority;
+    proposal.priority = {proposal.evaluation.violation_reduction, proposal.evaluation.gain};
+    proposal.rebased_gain = proposal.priority.cycles;
+    proposal.rebased_violation_reduction = proposal.priority.violations;
     proposal.needs_restaging = false;
     if (!proposal.unique_choices) return;
 
@@ -1616,12 +1666,12 @@ class FMFanoutFrontier {
       uint16_t choice = matching_choices.front();
       if (matching_choices.size() > 1) {
         proposal.unique_choices = false;
-        double best_gain = FMMoveFrontier::kNoGain;
+        auto best_gain = kWorstGain;
         for (uint16_t q : matching_choices) {
           if (evaluated_moves_ == config_.max_evaluations) return false;
           ++evaluated_moves_;
-          const double gain = state_.Gain(op, q, value);
-          if (gain > best_gain + config_.tolerance) {
+          const auto gain = state_.GainScore(op, q, value);
+          if (BetterGain(gain, best_gain, config_.tolerance)) {
             best_gain = gain;
             choice = q;
           }
@@ -1752,7 +1802,8 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
     }
     return true;
   };
-  const auto record_and_lock = [&](size_t local, uint16_t choice, std::optional<double> singleton_gain) {
+  const auto record_and_lock = [&](size_t local, uint16_t choice,
+                                   std::optional<LayoutSearchScore> singleton_gain) {
     const OpId op = comp_ops[local];
     history.emplace_back(op, state.Choices()[op]);
     seen_count += !seen[local];
@@ -1800,11 +1851,11 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
     std::fill(seen.begin(), seen.end(), false);
     seen_count = 0;
     expanded_values.clear();
-    double best_prefix_cost = state.Cost();
+    auto best_prefix_cost = state.SearchCost();
     size_t best_prefix_len = 0;
     std::optional<size_t> fanout_seed;
     std::optional<FMMoveFrontier::Move> full_frontier_start;
-    double fanout_seed_gain = config.tolerance;
+    LayoutSearchScore fanout_seed_gain;
     seeds.clear();
     const auto add_seed = [&](size_t local) {
       if (seeds.size() < seed_count && std::find(seeds.begin(), seeds.end(), local) == seeds.end()) {
@@ -1853,10 +1904,11 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
         // A profitable block discovered after moving away from the seed may
         // have arrived too late to recover earlier losses. Remember one of its
         // consumers so the block can compete before those operations lock.
-        if (!tried_fanout_restart && group->evaluation.gain > fanout_seed_gain &&
-            !initially_incident(group->value)) {
+        const LayoutSearchScore gain{group->evaluation.violation_reduction, group->evaluation.gain};
+        if (!tried_fanout_restart && BetterGain(gain, {}, config.tolerance) &&
+            BetterGain(gain, fanout_seed_gain) && !initially_incident(group->value)) {
           fanout_seed = local_index(group->choices.front().first);
-          fanout_seed_gain = group->evaluation.gain;
+          fanout_seed_gain = gain;
         }
         for (const auto& [op, choice] : group->choices) {
           record_and_lock(local_index(op), choice, std::nullopt);
@@ -1869,8 +1921,8 @@ void FMRefineComponent(IncrementalState& state, const std::vector<OpId>& comp_op
         if (history.size() < n) VisitSingleMoveFactors(state, op, single.choice, mark_factor);
         state.Apply(op, single.choice);
       }
-      if (state.Cost() < best_prefix_cost - config.tolerance) {
-        best_prefix_cost = state.Cost();
+      if (BetterCost(state.SearchCost(), best_prefix_cost, config.tolerance)) {
+        best_prefix_cost = state.SearchCost();
         best_prefix_len = history.size();
       }
       if (history.size() == n) break;
@@ -1978,7 +2030,7 @@ void GreedyIncumbentAndFM(IncrementalState& state, const ActiveDecomposition& gr
   bool sweep_budget_hit = false;
   for (size_t component : components) {
     const auto& ops = graph.components[component];
-    const double incumbent_cost = state.Cost();
+    const auto incumbent_cost = state.SearchCost();
     restore.clear();
     for (OpId op : ops) {
       if (seed_choices[op] != greedy_choices[op]) restore.emplace_back(op, seed_choices[op]);
@@ -1989,7 +2041,7 @@ void GreedyIncumbentAndFM(IncrementalState& state, const ActiveDecomposition& gr
     FMRefineComponent(state, ops, graph.component_factors[component], topo_components[component], config,
                       greedy_converged && restore.empty(), evaluated_moves, retained, greedy_sweeps,
                       termination_reason);
-    if (state.Cost() < incumbent_cost - config.tolerance) {
+    if (BetterCost(state.SearchCost(), incumbent_cost, config.tolerance)) {
       moves_applied += retained;
     } else {
       restore.clear();
@@ -2144,6 +2196,7 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
     op_info.invocations = op.invocations;
     op_info.output_value = out_vid;
     op_info.costs.reserve(op.configs.size());
+    op_info.incompatible_configs.reserve(op.configs.size());
     op_info.output_layout_indices.reserve(op.configs.size());
     op_info.config_uses.resize(op.configs.size());
     std::vector<uint64_t> single_layouts_by_input;
@@ -2175,6 +2228,8 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
 
       op_info.costs.push_back(
           RequireFiniteNonNegative(cost_mult * cfg.op_cost_cycles, "Cost of '" + op.op_id + "'"));
+      op_info.incompatible_configs.push_back(instance_.forbid_unmaterializable_gm_conversions &&
+                                             HasIncompatibleJoinLayouts(cfg));
       const int out_lay_idx = values_[out_vid].FindLayoutIndex(cfg.output_layout);
       if (out_lay_idx < 0) {
         throw pypto::ValueError("Internal layout indexing failure for '" + op.output + "'");
@@ -2418,12 +2473,34 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
             : std::vector<int64_t>(conv_invs_set.begin(), conv_invs_set.end());
     const double mult = ConversionMultiplier(instance_, node, op_ptr_by_id, conv_invs);
     v_info.conv_costs.assign(num_layouts * num_layouts, 0.0);
+    const bool check_writeback = instance_.forbid_unmaterializable_gm_conversions;
+    const bool check_conversion = check_writeback || !node.blocked_vec_conversions.empty();
+    if (check_conversion) v_info.unsupported_target_masks.resize(num_layouts);
+    const bool external_input = !node.producer_op_id && node.memory_space == MemorySpace::DDR;
+    const bool producer_ok =
+        !v_info.producer_op || SupportsVecConversionPlacement(ops_[*v_info.producer_op].op_name);
     for (uint16_t src_idx : source_indices) {
       for (uint16_t dst_idx : target_indices) {
         if (src_idx == dst_idx) {
           continue;
         }
         const uint64_t dst_bit = uint64_t{1} << dst_idx;
+        if (check_conversion) {
+          const auto& src = v_info.layouts[src_idx];
+          const auto& dst = v_info.layouts[dst_idx];
+          // An external output's declared layout may also be requested by a
+          // consumer. Leave that ambiguity to the selected-consumer check.
+          const bool boundary_layout = node.is_external_output && dst == node.current_layout;
+          const bool supports_conversion = node.memory_space == MemorySpace::Vec && producer_ok &&
+                                           (incompatible_target_mask & dst_bit) == 0 &&
+                                           instance_.cost_model.SupportsVecTileConversion(node, src, dst);
+          const bool blocked =
+              std::find(node.blocked_vec_conversions.begin(), node.blocked_vec_conversions.end(),
+                        std::make_pair(src, dst)) != node.blocked_vec_conversions.end();
+          if (blocked || (check_writeback && !external_input && !boundary_layout && !supports_conversion)) {
+            v_info.unsupported_target_masks[src_idx] |= dst_bit;
+          }
+        }
         if ((incompatible_target_mask & dst_bit) != 0 ||
             (mult == 0 && node.memory_space == MemorySpace::Vec &&
              !instance_.cost_model.SupportsVecTileConversion(node, v_info.layouts[src_idx],
@@ -2523,7 +2600,9 @@ IncrementalState::IncrementalState(const IndexedProblem& problem, std::vector<ui
   }
 
   for (OpId u = 0; u < num_ops; ++u) {
-    cost_.Add(problem_.Ops()[u].costs[choices_[u]]);
+    const auto& op = problem_.Ops()[u];
+    cost_.Add(op.costs[choices_[u]]);
+    cost_.violations += op.incompatible_configs[choices_[u]];
   }
   for (ValueId v = 0; v < num_vals; ++v) {
     source_costs_[v].resize(problem_.Values()[v].layouts.size());
@@ -2550,6 +2629,8 @@ void IncrementalState::AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t
   uint64_t changed = old_source == new_source ? old_mask ^ new_mask : old_mask | new_mask;
   if (changed == 0) return;
   const auto& info = problem_.Values()[value];
+  cost.violations +=
+      FactorViolations(info, new_source, new_mask) - FactorViolations(info, old_source, old_mask);
   const size_t layout_count = info.layouts.size();
   const double* old_row = info.conv_costs.data() + old_source * layout_count;
   const double* new_row = info.conv_costs.data() + new_source * layout_count;
@@ -2561,19 +2642,25 @@ void IncrementalState::AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t
   }
   if (info.forbid_multi_rep) {
     const double penalty = problem_.Instance().cost_model.vec_unsupported_conversion_cycles;
-    cost.Replace(__builtin_popcountll(old_mask) > 1 ? penalty : 0.0,
-                 __builtin_popcountll(new_mask) > 1 ? penalty : 0.0);
+    cost.Replace(HasMultipleRepresentations(old_mask) ? penalty : 0.0,
+                 HasMultipleRepresentations(new_mask) ? penalty : 0.0);
   }
 }
 
 double IncrementalState::Gain(OpId op_idx, uint16_t new_choice, std::optional<ValueId> omitted_factor) const {
+  return GainScore(op_idx, new_choice, omitted_factor).cycles;
+}
+
+LayoutSearchScore IncrementalState::GainScore(OpId op_idx, uint16_t new_choice,
+                                              std::optional<ValueId> omitted_factor) const {
   const auto& op = problem_.Ops()[op_idx];
   const uint16_t old_choice = choices_[op_idx];
   if (old_choice == new_choice) {
-    return 0.0;
+    return {};
   }
   CostSum delta;
   delta.Replace(op.costs[old_choice], op.costs[new_choice]);
+  delta.violations += op.incompatible_configs[new_choice] - op.incompatible_configs[old_choice];
 
   const auto& old_uses = op.config_uses[old_choice];
   const auto& new_uses = op.config_uses[new_choice];
@@ -2656,7 +2743,7 @@ double IncrementalState::Gain(OpId op_idx, uint16_t new_choice, std::optional<Va
     add_value_delta(op.output_value, nullptr, nullptr);
   }
 
-  return -delta.Value();
+  return {-delta.violations, -delta.Value()};
 }
 
 void IncrementalState::Apply(OpId op_idx, uint16_t new_choice) {
@@ -2678,6 +2765,7 @@ void IncrementalState::Apply(OpId op_idx, uint16_t new_choice) {
 
   CommitFactor(op.output_value, demand_masks_[op.output_value], op.output_layout_indices[new_choice]);
   cost_.Replace(op.costs[old_choice], op.costs[new_choice]);
+  cost_.violations += op.incompatible_configs[new_choice] - op.incompatible_configs[old_choice];
   choices_[op_idx] = new_choice;
 }
 
@@ -2699,6 +2787,7 @@ IncrementalState::BlockEvaluation IncrementalState::EvaluateBlock(
     const auto& op = problem_.Ops()[op_idx];
     const auto old_choice = choices_[op_idx];
     delta.Replace(op.costs[old_choice], op.costs[new_choice]);
+    delta.violations += op.incompatible_configs[new_choice] - op.incompatible_configs[old_choice];
     const uint16_t new_source = op.output_layout_indices[new_choice];
     if (new_source != sources_[op.output_value]) get_factor(op.output_value).source = new_source;
 
@@ -2718,6 +2807,7 @@ IncrementalState::BlockEvaluation IncrementalState::EvaluateBlock(
                        factor.source, factor.demand_mask);
   }
   evaluation.gain = -delta.Value();
+  evaluation.violation_reduction = -delta.violations;
   return evaluation;
 }
 
@@ -2730,15 +2820,16 @@ void IncrementalState::ApplyBlock(const std::vector<ChoiceChange>& choices,
     CommitFactor(factor.value, old_mask, factor.source);
   }
   for (const auto& [op_idx, new_choice] : choices) {
-    const auto& costs = problem_.Ops()[op_idx].costs;
-    cost_.Replace(costs[choices_[op_idx]], costs[new_choice]);
+    const auto& op = problem_.Ops()[op_idx];
+    cost_.Replace(op.costs[choices_[op_idx]], op.costs[new_choice]);
+    cost_.violations += op.incompatible_configs[new_choice] - op.incompatible_configs[choices_[op_idx]];
     choices_[op_idx] = new_choice;
   }
 }
 
 bool IncrementalState::ApplyImprovingBlock(const std::vector<ChoiceChange>& choices, double tolerance) {
   const auto evaluation = EvaluateBlock(choices);
-  if (!(evaluation.gain > tolerance)) return false;
+  if (!BetterGain({evaluation.violation_reduction, evaluation.gain}, {}, tolerance)) return false;
   ApplyBlock(choices, evaluation);
   return true;
 }
@@ -2996,13 +3087,16 @@ std::optional<LayoutAssignment> DeclaredLayoutAssignment(const LayoutProblemInst
 
 template <typename Solve>
 LayoutSolverResult SolveWithVecCapacity(const LayoutProblemInstance& instance,
-                                        const LayoutSolverConfig& config, Solve solve) {
+                                        const LayoutSolverConfig& config,
+                                        const std::optional<LayoutAssignment>& initial, Solve solve) {
   auto result = solve(instance, config, false);
-  if (instance.vec_memory_regions.empty()) return result;
   const auto original_conflicts = FindVecCapacityConflicts(instance, result.Assignment());
-  if (original_conflicts.issues.empty()) return result;
+  const bool capacity_conflict = !original_conflicts.issues.empty();
+  if (!capacity_conflict &&
+      (!instance.forbid_unmaterializable_gm_conversions || result.writeback_issues.empty())) {
+    return result;
+  }
 
-  auto constrained = instance;
   auto totals = result.stats;
   auto restore_original_score = [&](const LayoutAssignment& assignment, const std::string& reason) {
     IndexedProblem problem(instance);
@@ -3010,6 +3104,28 @@ LayoutSolverResult SolveWithVecCapacity(const LayoutProblemInstance& instance,
     return BuildResult(state, totals.evaluated_moves, totals.moves_applied, totals.greedy_sweeps,
                        totals.initial_cost_cycles, reason, result.treewidth_stats, result.stats.treewidth);
   };
+  auto feasible_incumbent = [&]() -> std::optional<LayoutSolverResult> {
+    std::optional<LayoutSolverResult> best;
+    const auto consider = [&](const LayoutAssignment& assignment, const std::string& reason) {
+      auto candidate = restore_original_score(assignment, reason);
+      if (candidate.writeback_issues.empty() &&
+          (!best || candidate.TotalCostCycles() < best->TotalCostCycles() - config.tolerance) &&
+          CheckVecConversionCapacity(instance, candidate.Assignment()).empty()) {
+        best = std::move(candidate);
+      }
+    };
+    if (initial) consider(*initial, "feasible_initial_layouts");
+    if (const auto declared = DeclaredLayoutAssignment(instance)) {
+      consider(*declared, capacity_conflict ? "vec_capacity_declared_layouts" : "feasible_declared_layouts");
+    }
+    return best;
+  };
+  if (!capacity_conflict) {
+    if (auto incumbent = feasible_incumbent()) return std::move(*incumbent);
+    return result;
+  }
+
+  auto constrained = instance;
   auto retry_config = config;
   auto conflicts = original_conflicts;
   constexpr int kMaxCapacityRetries = 3;
@@ -3041,18 +3157,22 @@ LayoutSolverResult SolveWithVecCapacity(const LayoutProblemInstance& instance,
     conflicts = FindVecCapacityConflicts(instance, candidate.Assignment());
     if (conflicts.issues.empty()) {
       auto repaired = restore_original_score(candidate.Assignment(), "vec_capacity_repaired");
-      if (repaired.writeback_issues.empty()) return repaired;
+      if (repaired.writeback_issues.empty()) {
+        if (initial) {
+          auto incumbent = restore_original_score(*initial, "feasible_initial_layouts");
+          if (incumbent.writeback_issues.empty() &&
+              incumbent.TotalCostCycles() < repaired.TotalCostCycles() - config.tolerance &&
+              CheckVecConversionCapacity(instance, incumbent.Assignment()).empty()) {
+            return incumbent;
+          }
+        }
+        return repaired;
+      }
       break;
     }
   }
 
-  if (const auto declared = DeclaredLayoutAssignment(instance)) {
-    auto baseline = restore_original_score(*declared, "vec_capacity_declared_layouts");
-    if (baseline.writeback_issues.empty() &&
-        CheckVecConversionCapacity(instance, baseline.Assignment()).empty()) {
-      return baseline;
-    }
-  }
+  if (auto incumbent = feasible_incumbent()) return std::move(*incumbent);
   totals.termination_reason = "vec_capacity_conflict";
   result.stats = std::move(totals);
   result.writeback_issues.insert(result.writeback_issues.end(), original_conflicts.issues.begin(),
@@ -3065,30 +3185,34 @@ LayoutSolverResult SolveWithVecCapacity(const LayoutProblemInstance& instance,
 LayoutSolverResult SolveGreedy(const LayoutProblemInstance& instance,
                                const std::optional<LayoutAssignment>& initial,
                                const LayoutSolverConfig& config) {
-  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool retry) {
-    return SolveLocalSearch(constrained, retry ? std::nullopt : initial, limits, false);
-  });
+  return SolveWithVecCapacity(
+      instance, config, initial, [&](const auto& constrained, const auto& limits, bool retry) {
+        return SolveLocalSearch(constrained, retry ? std::nullopt : initial, limits, false);
+      });
 }
 
 LayoutSolverResult SolveGreedyFM(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
-  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool) {
-    return SolveLocalSearch(constrained, std::nullopt, limits, true);
-  });
+  return SolveWithVecCapacity(instance, config, std::nullopt,
+                              [&](const auto& constrained, const auto& limits, bool) {
+                                return SolveLocalSearch(constrained, std::nullopt, limits, true);
+                              });
 }
 
 LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance, const LayoutSolverConfig& config) {
-  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool retry) {
-    if (retry) return SolveAutoLayoutCore(constrained, std::nullopt, limits);
-    return SolveTreewidthDPCore(constrained, limits);
-  });
+  return SolveWithVecCapacity(instance, config, std::nullopt,
+                              [&](const auto& constrained, const auto& limits, bool retry) {
+                                if (retry) return SolveAutoLayoutCore(constrained, std::nullopt, limits);
+                                return SolveTreewidthDPCore(constrained, limits);
+                              });
 }
 
 LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
                                    const std::optional<LayoutAssignment>& initial,
                                    const LayoutSolverConfig& config) {
-  return SolveWithVecCapacity(instance, config, [&](const auto& constrained, const auto& limits, bool retry) {
-    return SolveAutoLayoutCore(constrained, retry ? std::nullopt : initial, limits);
-  });
+  return SolveWithVecCapacity(
+      instance, config, initial, [&](const auto& constrained, const auto& limits, bool retry) {
+        return SolveAutoLayoutCore(constrained, retry ? std::nullopt : initial, limits);
+      });
 }
 
 }  // namespace auto_layout
