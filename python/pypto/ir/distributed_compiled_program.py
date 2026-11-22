@@ -532,6 +532,35 @@ class DistributedCompiledProgram:
             packed.share_memory_()
         return PreparedDistributedInput(layout, packed)
 
+    def _prepare_benchmark_inputs(
+        self, args: "Sequence[CallArg | PreparedDistributedInput]"
+    ) -> "tuple[list[CallArg | PreparedDistributedInput], list[PreparedDistributedInput]]":
+        """Prepare shared snapshots once, before the benchmark forks its worker."""
+        dispatch_args = list(args)
+        inherited: list[PreparedDistributedInput] = []
+        for index, arg in enumerate(args):
+            layout = self.input_layouts.get(index)
+            if layout is None:
+                continue
+            if isinstance(arg, PreparedDistributedInput):
+                physical = arg._for_layout(layout)
+                # An unshared snapshot already contains physical bytes. Copy it
+                # into shared storage without interpreting those bytes as ND.
+                snapshot = (
+                    arg
+                    if physical.is_shared()
+                    else self.prepare_input(index, physical, source_layout=layout.layout, shared=True)
+                )
+            elif isinstance(arg, torch.Tensor):
+                snapshot = self.prepare_input(index, arg, shared=True)
+            else:
+                raise TypeError(
+                    f"Benchmark weight {layout.name!r} requires a host tensor or a prepared input"
+                )
+            inherited.append(snapshot)
+            dispatch_args[index] = snapshot
+        return dispatch_args, inherited
+
     def __call__(
         self,
         *args: "CallArg | PreparedDistributedInput",

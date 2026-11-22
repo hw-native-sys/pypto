@@ -74,9 +74,11 @@ int main(int argc, char** argv) {
         }
       } catch (const pypto::ValueError& e) {
         const std::string reason(e.what());
-        const bool budget = reason.find("exceeds max_") != std::string::npos ||
-                            reason.find("exceeded max_evaluations=") != std::string::npos;
-        if (mode != "dp" || !budget) throw;
+        const bool dp_limit =
+            reason.find("exceeds max_") != std::string::npos ||
+            reason.find("exceeded max_evaluations=") != std::string::npos ||
+            reason.find("exceeding the min-fill decomposition limit of ") != std::string::npos;
+        if (mode != "dp" || !dp_limit) throw;
         rejected = reason.substr(0, reason.find('\n'));
       }
       const double ms =

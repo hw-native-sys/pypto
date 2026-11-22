@@ -16,14 +16,20 @@ without the optional ``simpler`` runtime package.
 from __future__ import annotations
 
 import importlib
+import json
 import warnings
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import torch
+from pypto import ir
 from pypto.backend import BackendType
-from pypto.runtime import ExecutionMode, RunConfig
+from pypto.ir._artifact_metadata import ArtifactMetadata
+from pypto.ir.param_info import ParamInfo
+from pypto.pypto_core import DataType
+from pypto.runtime import ExecutionMode, RunConfig, execute_compiled, runner
 
 # ``pypto.runtime.debug.__init__`` re-exports ``replay`` (the function),
 # which shadows the ``replay`` submodule on attribute lookup. Resolve the
@@ -50,6 +56,31 @@ def _make_build_output(tmp_path: Path) -> Path:
     """Minimal build_output skeleton with just the marker file."""
     (tmp_path / "kernel_config.py").write_text("KERNELS = []\nORCHESTRATION = {}\n")
     return tmp_path
+
+
+def _make_selected_layout_artifact(tmp_path: Path) -> None:
+    _make_build_output(tmp_path)
+    weight = ParamInfo("w", ir.ParamDirection.In, (16, 16), DataType.FP32, "ND")
+    output = ParamInfo("dst", ir.ParamDirection.Out, (16, 16), DataType.FP32, "ND")
+    packed = replace(weight, layout="NZ", shape=(1, 2, 1, 16, 8))
+    ArtifactMetadata((weight, output), (packed, output), 0, "a2a3", BackendType.Ascend910).write(tmp_path)
+    (tmp_path / "golden.py").write_text(
+        "import torch\n"
+        "__outputs__ = ['dst']\n"
+        "def generate_inputs(params):\n"
+        "    return [('w', torch.arange(256, dtype=torch.float32).reshape(16, 16)),\n"
+        "            ('dst', torch.zeros(16, 16))]\n"
+        "def compute_golden(tensors, params):\n"
+        "    tensors['dst'].copy_(tensors['w'])\n"
+    )
+
+
+def _emulate_nz_weight(args: list[torch.Tensor]) -> None:
+    weight, output = args
+    logical = torch.arange(256, dtype=torch.float32).reshape(16, 16)
+    expected = torch.cat([block.flatten() for block in logical.split(8, dim=1)]).reshape_as(logical)
+    torch.testing.assert_close(weight, expected, rtol=0, atol=0)
+    output.copy_(torch.cat([block.reshape(16, 8) for block in weight.flatten().split(128)], dim=1))
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +153,68 @@ def test_invalidate_binary_cache_prints_status_when_nothing_to_do(tmp_path: Path
 # ---------------------------------------------------------------------------
 # replay
 # ---------------------------------------------------------------------------
+
+
+def test_directory_calls_prepare_selected_weight_and_preserve_output(tmp_path: Path) -> None:
+    _make_selected_layout_artifact(tmp_path)
+    logical = torch.arange(256, dtype=torch.float32).reshape(16, 16)
+    prepared = ir.CompiledProgram.from_dir(tmp_path).prepare_inputs({"w": logical})["w"]
+    output = torch.zeros_like(logical)
+
+    def execute(_directory, args, **_kwargs):
+        assert args[1] is output
+        _emulate_nz_weight(args)
+
+    with patch.object(replay_module, "_execute_compiled", side_effect=execute):
+        for weight in (logical, prepared):
+            output.zero_()
+            replay(tmp_path, weight, output, validate=True, recompile=False, rebuild_from_pto=False)
+            torch.testing.assert_close(output, logical)
+
+    output.zero_()
+    config = RunConfig(platform="a2a3sim", ring_heap=1024 * 1024)
+    with (
+        patch.object(runner, "_execute_compiled", side_effect=execute) as runtime,
+        pytest.warns(DeprecationWarning),
+    ):
+        execute_compiled(
+            tmp_path, [logical, output], platform="a2a3", device_id=3, aicpu_thread_num=2, config=config
+        )
+    assert runtime.call_args.kwargs["platform"] == "a2a3"
+    assert runtime.call_args.kwargs["device_id"] == 3
+    assert runtime.call_args.kwargs["aicpu_thread_num"] == 2
+    assert runtime.call_args.kwargs["config"] is config
+    torch.testing.assert_close(output, logical)
+
+
+def test_artifact_golden_and_dep_capture_prepare_selected_weight(tmp_path, monkeypatch, device_runner):
+    from pypto.runtime import _dep_gen_capture, _execution_mode  # noqa: PLC0415
+    from pypto.runtime.execute_artifact import execute_artifact_dir  # noqa: PLC0415
+
+    _make_selected_layout_artifact(tmp_path)
+    calls = []
+
+    def execute(_chip, args, *_runtime_args, **kwargs):
+        calls.append(kwargs["enable_dep_gen"])
+        _emulate_nz_weight(args)
+
+    def capture(spec, *_args):
+        path = tmp_path / "dep_spec.json"
+        path.write_text(json.dumps(spec))
+        assert _dep_gen_capture.main([str(path)]) == 0
+
+    monkeypatch.setattr(_execution_mode, "_gate", _execution_mode._ModeGate())
+    monkeypatch.setattr(runner, "_collect_dfx_artifacts", lambda *_args: None)
+    monkeypatch.setattr(runner, "_capture_deps_subprocess", capture)
+    monkeypatch.setattr(device_runner, "_execute_on_device", execute)
+    monkeypatch.setattr(
+        device_runner, "_compile_and_assemble", lambda *_args: (object(), "tensormap_and_ringbuffer", {})
+    )
+
+    execute_artifact_dir(tmp_path, "a2a3", 0, dfx=runner.DfxOptions(enable_chip_swimlane=2))
+    assert calls == [True, False]
+    actual = torch.load(tmp_path / "data" / "actual" / "dst.pt", weights_only=True)
+    torch.testing.assert_close(actual, torch.arange(256, dtype=torch.float32).reshape(16, 16))
 
 
 def test_replay_routes_to_execute_compiled(tmp_path: Path) -> None:

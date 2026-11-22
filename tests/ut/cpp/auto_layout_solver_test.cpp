@@ -1306,6 +1306,77 @@ void TestTreewidthAbove64AndPerComponentDPFallback() {
   Require(rejected_clique, "Strict DP must still reject a component skipped by the clique bound");
 }
 
+void TestMinFillDecompositionSizeLimit() {
+  constexpr int kOversized = 257;
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  al::LayoutProblemInstance small;
+  small.cost_model.gm_pack_fixed_cycles = 10.0;
+  small.cost_model.gm_pack_bytes_per_cycle = 1e18;
+  small.AddValue(MakeValue("source"));
+  small.AddValue(MakeValue("intermediate", "producer"));
+  small.AddValue(MakeValue("result", "consumer"));
+  small.operations = {
+      MakeOp("producer", {"source"}, "intermediate", {{{nd}, nd, 0.0}, {{nd}, nz, 1.0}}),
+      MakeOp("consumer", {"intermediate"}, "result", {{{nd}, nd, 6.0}, {{nz}, nd, 0.0}}),
+  };
+
+  for (bool chain : {true, false}) {
+    auto mixed = small;
+    mixed.AddValue(MakeValue("shared"));
+    std::string input = "shared";
+    for (int i = 0; i < kOversized; ++i) {
+      const std::string id = "Large" + std::to_string(i);
+      const std::string output = "large" + std::to_string(i);
+      mixed.AddValue(MakeValue(output, id));
+      mixed.operations.push_back(MakeOp(id, {input}, output, {{{nd}, nd, 2.0}, {{nd}, nd, 1.0}}));
+      if (chain) input = output;
+    }
+
+    al::LayoutSolverConfig config;
+    // A chain has width one. A shared value creates a clique even though all
+    // readers keep the same physical layout. The size cap handles both before
+    // any dense min-fill work, independently of the configured width limit.
+    config.max_treewidth = kOversized;
+    config.max_greedy_sweeps = 1;
+    for (bool collect_stats : {true, false}) {
+      config.collect_treewidth_stats = collect_stats;
+      const auto automatic = al::SolveAutoLayout(mixed, std::nullopt, config);
+      Require(automatic.stats.termination_reason != "optimal", "Oversized components use local search");
+      Require(!automatic.treewidth_stats && automatic.stats.treewidth == -1 &&
+                  automatic.stats.active_treewidth == -1,
+              "Report no min-fill widths when whole-graph diagnostics are unavailable");
+      Require(automatic.Assignment().op_configs.at("producer") == small.operations[0].configs[1] &&
+                  automatic.Assignment().op_configs.at("consumer") == small.operations[1].configs[1],
+              "The independent shared-conversion barrier still needs the exact component solution");
+      RequireNear(automatic.TotalCostCycles(), 1.0 + kOversized, 1e-9,
+                  "Combine the exact component and the large component's cheaper local choices");
+
+      bool size_limit_reported = false;
+      try {
+        (void)al::SolveTreewidthDP(mixed, config);
+      } catch (const pypto::ValueError& error) {
+        size_limit_reported =
+            std::string(error.what()).find("min-fill decomposition limit of 256") != std::string::npos;
+      }
+      Require(size_limit_reported, "Explicit DP reports the decomposition size limit");
+    }
+
+    if (chain) continue;
+    // The fixed consumers alone make whole-graph diagnostics too large.
+    // They do not enlarge the single movable component.
+    for (size_t i = small.operations.size(); i < mixed.operations.size(); ++i) {
+      mixed.operations[i].configs.erase(mixed.operations[i].configs.begin());
+    }
+    config.collect_treewidth_stats = true;
+    const auto exact = al::SolveTreewidthDP(mixed, config);
+    Require(exact.stats.termination_reason == "optimal" && !exact.treewidth_stats,
+            "Exact DP can solve a graph whose full diagnostics exceed the size limit");
+    RequireNear(exact.TotalCostCycles(), 1.0 + kOversized, 1e-9,
+                "Omitting whole-graph diagnostics must preserve the exact cost");
+  }
+}
+
 void TestIfJoinAndClassFCrossLoopForbidden() {
   const auto RM = al::LayoutSpec::RowMajorFlat();
   const auto CM = al::LayoutSpec::ColMajorFlat();
@@ -1417,6 +1488,7 @@ int main() {
     TestBudgetAndTreewidthLimits();
     TestIndexCapacityLimits();
     TestTreewidthAbove64AndPerComponentDPFallback();
+    TestMinFillDecompositionSizeLimit();
     TestIfJoinAndClassFCrossLoopForbidden();
     std::cout << "All pypto_auto_layout_solver_test checks passed!\n";
     return 0;

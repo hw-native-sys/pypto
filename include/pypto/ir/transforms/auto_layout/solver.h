@@ -36,8 +36,8 @@ struct LayoutSolverConfig {
   int64_t max_treewidth = 8;
   int64_t max_bag_states = 100000;
   double tolerance = 1e-9;
-  /// Auto/DP report full min-fill diagnostics by default. Disabling these leaves the
-  /// optional report empty and both reported widths at -1.
+  /// Auto/DP report full min-fill diagnostics for graphs of up to 256 operations.
+  /// When the report is disabled or exceeds this limit, both reported widths are -1.
   bool collect_treewidth_stats = true;
 
   void Validate() const;
@@ -247,12 +247,13 @@ LayoutSolverResult SolveGreedyFM(const LayoutProblemInstance& instance,
                                  const LayoutSolverConfig& config = {});
 
 /// Solve the layout cost factors exactly via connected-component min-fill treewidth DP.
+/// Each movable component can contain at most 256 operations.
 /// When the result exceeds Vec capacity, use bounded capacity repair within the evaluation budget.
 LayoutSolverResult SolveTreewidthDP(const LayoutProblemInstance& instance,
                                     const LayoutSolverConfig& config = {});
 
-/// Solve via exact treewidth DP when `active_treewidth <= max_treewidth` and within budgets, else local
-/// search.
+/// Solve via exact treewidth DP for each component within the decomposition,
+/// width and evaluation limits. Use local search for other components.
 LayoutSolverResult SolveAutoLayout(const LayoutProblemInstance& instance,
                                    const std::optional<LayoutAssignment>& initial = std::nullopt,
                                    const LayoutSolverConfig& config = {});

@@ -112,6 +112,7 @@ def _generated(root: Path, kind: BuildKind) -> None:
             _chip(root / "next_levels" / name)
         meta.update(
             schema=_META_SCHEMA,
+            input_layouts=[],
             distributed_config=dict(
                 device_ids=[0, 1],
                 num_sub_workers=0,

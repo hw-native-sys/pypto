@@ -194,8 +194,21 @@ struct MinFillKey {
   }
 };
 
-MinFillResult MinFillDecomposition(const std::vector<OpId>& vertices,
-                                   const std::vector<std::pair<OpId, OpId>>& edges) {
+// Bound each dense elimination independently. Apply the same cap before
+// collecting whole-graph diagnostics, including their primal clique edges.
+constexpr size_t kMaxMinFillOps = 256;
+
+template <typename AddEdge>
+void AddCliqueEdges(const std::vector<OpId>& scope, const AddEdge& add_edge) {
+  for (size_t i = 0; i < scope.size(); ++i) {
+    for (size_t j = i + 1; j < scope.size(); ++j) {
+      add_edge(scope[i], scope[j]);
+    }
+  }
+}
+
+template <typename VisitEdges>
+MinFillResult MinFillDecomposition(const std::vector<OpId>& vertices, VisitEdges visit_edges) {
   MinFillResult result;
   if (vertices.empty()) {
     return result;
@@ -212,18 +225,15 @@ MinFillResult MinFillDecomposition(const std::vector<OpId>& vertices,
     local_of.emplace(sorted_verts[i], i);
   }
 
+  // Fill the bounded adjacency matrix directly. Multiple values can connect
+  // the same operators without creating duplicate entries in an edge list.
   std::vector<SmallBitset> adj(n, SmallBitset(n));
-  for (const auto& [u_id, v_id] : edges) {
-    if (u_id == v_id) {
-      continue;
-    }
-    auto it_u = local_of.find(u_id);
-    auto it_v = local_of.find(v_id);
-    if (it_u != local_of.end() && it_v != local_of.end()) {
-      adj[it_u->second].Set(it_v->second);
-      adj[it_v->second].Set(it_u->second);
-    }
-  }
+  visit_edges([&](OpId u, OpId v) {
+    const auto local_u = local_of.at(u);
+    const auto local_v = local_of.at(v);
+    adj[local_u].Set(local_v);
+    adj[local_v].Set(local_u);
+  });
 
   auto compute_key = [&](size_t v) -> MinFillKey {
     const SmallBitset& nb = adj[v];
@@ -722,30 +732,18 @@ TreewidthStats ComputeProblemTreewidthInternal(const IndexedProblem& problem,
   const size_t num_ops = problem.NumOps();
   std::vector<OpId> all_ops(num_ops);
   std::iota(all_ops.begin(), all_ops.end(), 0);
-  std::vector<std::pair<OpId, OpId>> dataflow_edges;
-  std::vector<std::pair<OpId, OpId>> primal_edges;
-
-  for (const auto& v_info : problem.Values()) {
-    const auto& pts = v_info.participants;
-    if (v_info.producer_op.has_value()) {
-      const OpId prod = *v_info.producer_op;
-      for (OpId c : pts) {
-        if (c != prod) {
-          dataflow_edges.emplace_back(prod, c);
-        }
+  const auto df_res = MinFillDecomposition(all_ops, [&](const auto& add_edge) {
+    for (const auto& value : problem.Values()) {
+      if (!value.producer_op) continue;
+      const OpId producer = *value.producer_op;
+      for (OpId user : value.participants) {
+        if (user != producer) add_edge(producer, user);
       }
     }
-    for (size_t i = 0; i < pts.size(); ++i) {
-      for (size_t j = i + 1; j < pts.size(); ++j) {
-        const OpId u = pts[i];
-        const OpId w = pts[j];
-        primal_edges.emplace_back(u, w);
-      }
-    }
-  }
-
-  auto df_res = MinFillDecomposition(all_ops, dataflow_edges);
-  auto primal_res = MinFillDecomposition(all_ops, primal_edges);
+  });
+  const auto primal_res = MinFillDecomposition(all_ops, [&](const auto& add_edge) {
+    for (const auto& value : problem.Values()) AddCliqueEdges(value.participants, add_edge);
+  });
 
   int64_t max_bag_size = 0;
   for (const auto& bag : primal_res.bags) {
@@ -829,17 +827,10 @@ ActiveDecomposition ComputeActiveDecomposition(const IndexedProblem& problem,
     // Each factor induces a clique. This bound suffices to reject DP without
     // building the clique or running min-fill on this component.
     dec.treewidth = lower_bound;
-    if (!width_limit || lower_bound > *width_limit) continue;
-    std::vector<std::pair<OpId, OpId>> edges;
-    for (ValueId v : factors) {
-      const auto& scope = scopes[v];
-      for (size_t i = 0; i < scope.size(); ++i) {
-        for (size_t j = i + 1; j < scope.size(); ++j) {
-          edges.emplace_back(scope[i], scope[j]);
-        }
-      }
-    }
-    dec = MinFillDecomposition(ops, edges);
+    if (!width_limit || ops.size() > kMaxMinFillOps || lower_bound > *width_limit) continue;
+    dec = MinFillDecomposition(ops, [&](const auto& add_edge) {
+      for (ValueId v : factors) AddCliqueEdges(scopes[v], add_edge);
+    });
     for (const auto& bag : dec.bags) {
       const auto states = BagStates(problem, bag);
       dec.max_bag_states = std::max(dec.max_bag_states, states);
@@ -2888,17 +2879,24 @@ static LayoutSolverResult SolveTreewidthDPCore(const LayoutProblemInstance& inst
                                                const LayoutSolverConfig& config) {
   config.Validate();
   IndexedProblem problem(instance);
+  const bool collect_stats = config.collect_treewidth_stats && problem.NumOps() <= kMaxMinFillOps;
   const auto decomp = ComputeActiveDecomposition(
-      problem, config.collect_treewidth_stats ? std::numeric_limits<int64_t>::max() : config.max_treewidth);
-  const auto stats = config.collect_treewidth_stats
-                         ? std::optional{ComputeProblemTreewidthInternal(problem, decomp)}
-                         : std::nullopt;
+      problem, collect_stats ? std::numeric_limits<int64_t>::max() : config.max_treewidth);
+  const auto stats =
+      collect_stats ? std::optional{ComputeProblemTreewidthInternal(problem, decomp)} : std::nullopt;
 
   if (problem.NumOps() == 0) {
     IncrementalState empty_state(problem, {});
     return BuildResult(empty_state, 0, 0, 0, 0.0, "optimal", stats, -1);
   }
-  for (const auto& dec : decomp.component_decomps) {
+  for (size_t c = 0; c < decomp.component_decomps.size(); ++c) {
+    const auto size = decomp.components[c].size();
+    if (size > kMaxMinFillOps) {
+      throw pypto::ValueError("Treewidth DP component has " + std::to_string(size) +
+                              " movable operations, exceeding the min-fill decomposition limit of " +
+                              std::to_string(kMaxMinFillOps));
+    }
+    const auto& dec = decomp.component_decomps[c];
     if (dec.treewidth > config.max_treewidth) {
       throw pypto::ValueError("Treewidth DP component exceeds max_treewidth=" +
                               std::to_string(config.max_treewidth));
@@ -2923,11 +2921,11 @@ static LayoutSolverResult SolveAutoLayoutCore(const LayoutProblemInstance& insta
                                               const LayoutSolverConfig& config) {
   config.Validate();
   IndexedProblem problem(instance);
+  const bool collect_stats = config.collect_treewidth_stats && problem.NumOps() <= kMaxMinFillOps;
   const auto decomp = ComputeActiveDecomposition(
-      problem, config.collect_treewidth_stats ? std::numeric_limits<int64_t>::max() : config.max_treewidth);
-  const auto stats = config.collect_treewidth_stats
-                         ? std::optional{ComputeProblemTreewidthInternal(problem, decomp)}
-                         : std::nullopt;
+      problem, collect_stats ? std::numeric_limits<int64_t>::max() : config.max_treewidth);
+  const auto stats =
+      collect_stats ? std::optional{ComputeProblemTreewidthInternal(problem, decomp)} : std::nullopt;
   int64_t evaluated_moves = 0;
 
   if (problem.NumOps() == 0) {
@@ -2940,8 +2938,8 @@ static LayoutSolverResult SolveAutoLayoutCore(const LayoutProblemInstance& insta
   std::vector<size_t> fallback_comps;
   for (size_t c = 0; c < num_comps; ++c) {
     const auto& dec = decomp.component_decomps[c];
-    if (dec.treewidth <= config.max_treewidth && dec.max_bag_states <= config.max_bag_states &&
-        dec.total_states <= config.max_evaluations) {
+    if (!dec.bags.empty() && dec.treewidth <= config.max_treewidth &&
+        dec.max_bag_states <= config.max_bag_states && dec.total_states <= config.max_evaluations) {
       dp_comps.push_back(c);
     } else {
       fallback_comps.push_back(c);
