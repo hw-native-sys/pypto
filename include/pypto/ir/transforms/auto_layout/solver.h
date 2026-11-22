@@ -152,8 +152,6 @@ class IndexedProblem {
   [[nodiscard]] const std::vector<ValueInfo>& Values() const { return values_; }
   [[nodiscard]] const std::vector<OpInfo>& Ops() const { return ops_; }
   [[nodiscard]] const std::vector<OpId>& TopoOrder() const { return topo_order_; }
-  [[nodiscard]] std::optional<OpId> FindOpById(const std::string& op_id) const;
-  [[nodiscard]] std::optional<ValueId> FindValueByName(const std::string& name) const;
   [[nodiscard]] std::vector<uint16_t> InitialChoices(const LayoutAssignment& initial) const;
 
  private:

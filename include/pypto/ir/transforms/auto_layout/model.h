@@ -343,10 +343,6 @@ bool CanShareOnChipConversion(int64_t source_invocations, int64_t consumer_invoc
 /// Evaluate `assignment` under the shared-conversion hyperedge objective.
 CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const LayoutAssignment& assignment);
 
-/// Enumerate all dataflow-consistent, backend-legal layout assignments, sorted by total cost.
-std::vector<CostBreakdown> EnumerateAssignments(const LayoutProblemInstance& instance,
-                                                bool deduplicate = true);
-
 }  // namespace auto_layout
 }  // namespace ir
 }  // namespace pypto

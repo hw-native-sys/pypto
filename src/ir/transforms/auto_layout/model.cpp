@@ -19,7 +19,6 @@
 #include <limits>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -96,23 +95,6 @@ double EstimateVecGmTransferCost(const LayoutCostModel& model, const ValueNode& 
   const double penalty = static_cast<double>(num_bursts) * std::max(0.0, (gran_b - burst_bytes) / gran_b) *
                          model.vec_strided_burst_penalty_cycles;
   return (total_bytes / eff_bw) + penalty;
-}
-
-std::string SignatureString(const LayoutProblemInstance& instance,
-                            const std::unordered_map<std::string, LayoutSpec>& value_layouts) {
-  std::vector<std::string> keys;
-  keys.reserve(value_layouts.size());
-  for (const auto& [k, _] : value_layouts) {
-    keys.push_back(k);
-  }
-  std::sort(keys.begin(), keys.end());
-  std::ostringstream oss;
-  for (const auto& k : keys) {
-    const auto& v = value_layouts.at(k);
-    oss << k << '=' << v.ShortName() << ';';
-  }
-  (void)instance;
-  return oss.str();
 }
 
 }  // namespace
@@ -997,132 +979,6 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
       std::move(full_assignment), op_cost_total + conv_cost_total, op_cost_total, conv_cost_total,
       std::move(per_op_costs),    std::move(per_value_conv),
   };
-}
-
-std::vector<CostBreakdown> EnumerateAssignments(const LayoutProblemInstance& instance, bool deduplicate) {
-  if (instance.operations.empty()) {
-    return {EvaluateAssignment(instance, LayoutAssignment{})};
-  }
-
-  std::vector<CostBreakdown> results;
-  std::unordered_map<std::string, LayoutSpec> val_map;
-  for (const auto& [name, node] : instance.values) {
-    if (!node.producer_op_id.has_value() && node.memory_space != MemorySpace::DDR) {
-      val_map.emplace(name, node.current_layout);
-    }
-  }
-  std::unordered_map<std::string, OperatorConfig> op_map;
-
-  const auto& ops = instance.operations;
-  auto search = [&](auto& self, size_t idx) -> void {
-    if (idx == ops.size()) {
-      results.push_back(EvaluateAssignment(instance, LayoutAssignment{val_map, op_map}));
-      return;
-    }
-    const auto& op = ops[idx];
-    for (const auto& cfg : op.configs) {
-      bool consistent = true;
-      std::vector<std::pair<std::string, LayoutSpec>> newly_bound;
-      for (size_t i = 0; i < op.inputs.size(); ++i) {
-        const std::string& inp_name = op.inputs[i];
-        const LayoutSpec& req_lay = cfg.input_layouts[i];
-        const ValueNode* inp_node = instance.FindValue(inp_name);
-        if (inp_node == nullptr) {
-          consistent = false;
-          break;
-        }
-        auto existing_it = val_map.find(inp_name);
-        if (existing_it != val_map.end()) {
-          const LayoutSpec& existing = existing_it->second;
-          const bool can_relayout =
-              inp_node->memory_space == MemorySpace::Vec &&
-              (op.op_name == "tile.move" ||
-               (op.op_name.rfind("tile.", 0) == 0 &&
-                instance.cost_model.SupportsVecTileConversion(*inp_node, existing, req_lay)));
-          if (!can_relayout && existing != req_lay) {
-            consistent = false;
-            break;
-          }
-        } else {
-          // Only bind if not already added earlier in this same op's input loop
-          auto dup_it = std::find_if(newly_bound.begin(), newly_bound.end(),
-                                     [&](const auto& p) { return p.first == inp_name; });
-          if (dup_it != newly_bound.end()) {
-            const LayoutSpec& existing = dup_it->second;
-            const bool can_relayout =
-                inp_node->memory_space == MemorySpace::Vec &&
-                (op.op_name == "tile.move" ||
-                 (op.op_name.rfind("tile.", 0) == 0 &&
-                  instance.cost_model.SupportsVecTileConversion(*inp_node, existing, req_lay)));
-            if (!can_relayout && existing != req_lay) {
-              consistent = false;
-              break;
-            }
-          } else {
-            newly_bound.emplace_back(inp_name, req_lay);
-          }
-        }
-      }
-      if (!consistent) {
-        continue;
-      }
-
-      auto out_it = val_map.find(op.output);
-      if (out_it != val_map.end() && out_it->second != cfg.output_layout) {
-        continue;
-      }
-      bool out_dup_conflict = false;
-      for (const auto& [k, v] : newly_bound) {
-        if (k == op.output && v != cfg.output_layout) {
-          out_dup_conflict = true;
-          break;
-        }
-      }
-      if (out_dup_conflict) {
-        continue;
-      }
-
-      std::vector<std::string> inserted_keys;
-      for (const auto& [k, v] : newly_bound) {
-        if (val_map.emplace(k, v).second) {
-          inserted_keys.push_back(k);
-        }
-      }
-      if (val_map.emplace(op.output, cfg.output_layout).second) {
-        inserted_keys.push_back(op.output);
-      }
-      op_map[op.op_id] = cfg;
-
-      self(self, idx + 1);
-
-      op_map.erase(op.op_id);
-      for (const auto& k : inserted_keys) {
-        val_map.erase(k);
-      }
-    }
-  };
-  search(search, 0);
-
-  if (deduplicate) {
-    std::unordered_map<std::string, size_t> best_idx_by_sig;
-    std::vector<CostBreakdown> deduped;
-    for (auto& bd : results) {
-      std::string sig = SignatureString(instance, bd.assignment.value_layouts);
-      auto it = best_idx_by_sig.find(sig);
-      if (it == best_idx_by_sig.end()) {
-        best_idx_by_sig.emplace(std::move(sig), deduped.size());
-        deduped.push_back(std::move(bd));
-      } else if (bd.total_cost_cycles < deduped[it->second].total_cost_cycles) {
-        deduped[it->second] = std::move(bd);
-      }
-    }
-    results = std::move(deduped);
-  }
-
-  std::stable_sort(results.begin(), results.end(), [](const CostBreakdown& a, const CostBreakdown& b) {
-    return a.total_cost_cycles < b.total_cost_cycles;
-  });
-  return results;
 }
 
 }  // namespace auto_layout

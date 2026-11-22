@@ -2519,22 +2519,6 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
   }
 }
 
-std::optional<OpId> IndexedProblem::FindOpById(const std::string& op_id) const {
-  auto it = op_by_id_.find(op_id);
-  if (it == op_by_id_.end()) {
-    return std::nullopt;
-  }
-  return it->second;
-}
-
-std::optional<ValueId> IndexedProblem::FindValueByName(const std::string& name) const {
-  auto it = value_by_name_.find(name);
-  if (it == value_by_name_.end()) {
-    return std::nullopt;
-  }
-  return it->second;
-}
-
 std::vector<uint16_t> IndexedProblem::InitialChoices(const LayoutAssignment& initial) const {
   for (const auto& [op_id, _] : initial.op_configs) {
     if (op_by_id_.count(op_id) == 0) {

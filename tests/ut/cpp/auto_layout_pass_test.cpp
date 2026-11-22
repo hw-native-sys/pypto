@@ -17,7 +17,9 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -35,6 +37,147 @@ namespace al = ir::auto_layout;
 using pypto::DataType;
 
 namespace {
+
+std::string SignatureString(const std::unordered_map<std::string, al::LayoutSpec>& value_layouts) {
+  std::vector<std::string> keys;
+  keys.reserve(value_layouts.size());
+  for (const auto& [k, _] : value_layouts) {
+    keys.push_back(k);
+  }
+  std::sort(keys.begin(), keys.end());
+  std::ostringstream oss;
+  for (const auto& k : keys) {
+    const auto& v = value_layouts.at(k);
+    oss << k << '=' << v.ShortName() << ';';
+  }
+  return oss.str();
+}
+
+// Exhaustive reference for small extracted problems, independent of solver search.
+std::vector<al::CostBreakdown> EnumerateAssignments(const al::LayoutProblemInstance& instance) {
+  if (instance.operations.empty()) {
+    return {al::EvaluateAssignment(instance, al::LayoutAssignment{})};
+  }
+
+  std::vector<al::CostBreakdown> results;
+  std::unordered_map<std::string, al::LayoutSpec> val_map;
+  for (const auto& [name, node] : instance.values) {
+    if (!node.producer_op_id.has_value() && node.memory_space != ir::MemorySpace::DDR) {
+      val_map.emplace(name, node.current_layout);
+    }
+  }
+  std::unordered_map<std::string, al::OperatorConfig> op_map;
+
+  const auto& ops = instance.operations;
+  auto search = [&](auto& self, size_t idx) -> void {
+    if (idx == ops.size()) {
+      results.push_back(al::EvaluateAssignment(instance, al::LayoutAssignment{val_map, op_map}));
+      return;
+    }
+    const auto& op = ops[idx];
+    for (const auto& cfg : op.configs) {
+      bool consistent = true;
+      std::vector<std::pair<std::string, al::LayoutSpec>> newly_bound;
+      for (size_t i = 0; i < op.inputs.size(); ++i) {
+        const std::string& inp_name = op.inputs[i];
+        const al::LayoutSpec& req_lay = cfg.input_layouts[i];
+        const al::ValueNode* inp_node = instance.FindValue(inp_name);
+        if (inp_node == nullptr) {
+          consistent = false;
+          break;
+        }
+        auto existing_it = val_map.find(inp_name);
+        if (existing_it != val_map.end()) {
+          const al::LayoutSpec& existing = existing_it->second;
+          const bool can_relayout =
+              inp_node->memory_space == ir::MemorySpace::Vec &&
+              (op.op_name == "tile.move" ||
+               (op.op_name.rfind("tile.", 0) == 0 &&
+                instance.cost_model.SupportsVecTileConversion(*inp_node, existing, req_lay)));
+          if (!can_relayout && existing != req_lay) {
+            consistent = false;
+            break;
+          }
+        } else {
+          // Only bind if not already added earlier in this same op's input loop
+          auto dup_it = std::find_if(newly_bound.begin(), newly_bound.end(),
+                                     [&](const auto& p) { return p.first == inp_name; });
+          if (dup_it != newly_bound.end()) {
+            const al::LayoutSpec& existing = dup_it->second;
+            const bool can_relayout =
+                inp_node->memory_space == ir::MemorySpace::Vec &&
+                (op.op_name == "tile.move" ||
+                 (op.op_name.rfind("tile.", 0) == 0 &&
+                  instance.cost_model.SupportsVecTileConversion(*inp_node, existing, req_lay)));
+            if (!can_relayout && existing != req_lay) {
+              consistent = false;
+              break;
+            }
+          } else {
+            newly_bound.emplace_back(inp_name, req_lay);
+          }
+        }
+      }
+      if (!consistent) {
+        continue;
+      }
+
+      auto out_it = val_map.find(op.output);
+      if (out_it != val_map.end() && out_it->second != cfg.output_layout) {
+        continue;
+      }
+      bool out_dup_conflict = false;
+      for (const auto& [k, v] : newly_bound) {
+        if (k == op.output && v != cfg.output_layout) {
+          out_dup_conflict = true;
+          break;
+        }
+      }
+      if (out_dup_conflict) {
+        continue;
+      }
+
+      std::vector<std::string> inserted_keys;
+      for (const auto& [k, v] : newly_bound) {
+        if (val_map.emplace(k, v).second) {
+          inserted_keys.push_back(k);
+        }
+      }
+      if (val_map.emplace(op.output, cfg.output_layout).second) {
+        inserted_keys.push_back(op.output);
+      }
+      op_map[op.op_id] = cfg;
+
+      self(self, idx + 1);
+
+      op_map.erase(op.op_id);
+      for (const auto& k : inserted_keys) {
+        val_map.erase(k);
+      }
+    }
+  };
+  search(search, 0);
+
+  std::unordered_map<std::string, size_t> best_idx_by_sig;
+  std::vector<al::CostBreakdown> deduped;
+  for (auto& bd : results) {
+    std::string sig = SignatureString(bd.assignment.value_layouts);
+    auto it = best_idx_by_sig.find(sig);
+    if (it == best_idx_by_sig.end()) {
+      best_idx_by_sig.emplace(std::move(sig), deduped.size());
+      deduped.push_back(std::move(bd));
+    } else if (bd.total_cost_cycles < deduped[it->second].total_cost_cycles) {
+      deduped[it->second] = std::move(bd);
+    }
+  }
+  results = std::move(deduped);
+
+  std::stable_sort(results.begin(), results.end(),
+                   [](const al::CostBreakdown& a, const al::CostBreakdown& b) {
+                     return a.total_cost_cycles < b.total_cost_cycles;
+                   });
+  return results;
+}
 
 enum class HostMatrixDispatch { Implicit, RankZero, UnknownRank, PartialSlice, FullSlice, Mutable };
 
@@ -240,7 +383,7 @@ void TestHostInputProjectionCost(bool same_rank, int64_t layers, int64_t configu
   const int64_t launches = configured_ranks > 0 ? configured_ranks : 2;
   assert(op.invocations == launches * layers * model.expected_uses);
   assert(op.projected_mte2_source_bytes == (same_rank ? 1 : launches) * layers * matrix_bytes);
-  const auto solutions = al::EnumerateAssignments(instance);
+  const auto solutions = EnumerateAssignments(instance);
   assert(solutions.size() == 2);
   for (const auto& solution : solutions) {
     const auto selected = solution.assignment.value_layouts.at("weight");
