@@ -2560,8 +2560,6 @@ IncrementalState::IncrementalState(const IndexedProblem& problem, std::vector<ui
   sources_.resize(num_vals);
   demand_masks_.resize(num_vals);
   counts_.resize(num_vals);
-  source_costs_.resize(num_vals);
-  source_cost_masks_.resize(num_vals);
 
   for (ValueId v = 0; v < num_vals; ++v) {
     const auto& v_info = problem_.Values()[v];
@@ -2589,7 +2587,6 @@ IncrementalState::IncrementalState(const IndexedProblem& problem, std::vector<ui
     cost_.violations += op.incompatible_configs[choices_[u]];
   }
   for (ValueId v = 0; v < num_vals; ++v) {
-    source_costs_[v].resize(problem_.Values()[v].layouts.size());
     AddFactorCostDelta(cost_, v, sources_[v], 0, sources_[v], demand_masks_[v]);
   }
 }
@@ -2832,8 +2829,12 @@ void IncrementalState::UpdateDemandCount(ValueId value, uint16_t layout, int del
 }
 
 const std::vector<std::vector<double>>& IncrementalState::SourceCosts() const {
+  source_cost_masks_.resize(problem_.NumValues());
+  source_costs_.resize(problem_.NumValues());
   for (ValueId value = 0; value < problem_.NumValues(); ++value) {
-    if (source_cost_masks_[value] != demand_masks_[value]) RebuildSourceCosts(value);
+    if (source_costs_[value].empty() || source_cost_masks_[value] != demand_masks_[value]) {
+      RebuildSourceCosts(value);
+    }
   }
   return source_costs_;
 }
@@ -2841,6 +2842,7 @@ const std::vector<std::vector<double>>& IncrementalState::SourceCosts() const {
 void IncrementalState::RebuildSourceCosts(ValueId value) const {
   const auto& info = problem_.Values()[value];
   const size_t layout_count = info.layouts.size();
+  source_costs_[value].resize(layout_count);
   for (size_t source = 0; source < layout_count; ++source) {
     const double* row = info.conv_costs.data() + source * layout_count;
     uint64_t targets = demand_masks_[value];

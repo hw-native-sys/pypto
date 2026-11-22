@@ -517,6 +517,19 @@ void TestConversionPenaltyRollbackPreservesSmallCosts() {
   };
   const al::IndexedProblem problem(instance);
   al::IncrementalState state(problem, {0, 0, 0});
+  // The first diagnostic read may come after a move. Both readers now demand ND.
+  state.Apply(1, 1);
+  const auto& rows = state.SourceCosts();
+  for (al::ValueId v = 0; v < problem.NumValues(); ++v) {
+    const auto& value = problem.Values()[v];
+    Require(rows.at(v).size() == value.layouts.size(), "Diagnostics must include every source layout");
+    if (value.name == "input") {
+      RequireNear(rows[v].at(value.FindLayoutIndex(nd)), 0.0, 1e-12, "Use the demands after the move");
+    } else {
+      Require(rows[v] == std::vector<double>(value.layouts.size(), 0.0), "Unused outputs have zero cost");
+    }
+  }
+  state.Apply(1, 0);
   const auto original_rows = state.SourceCosts();
   const auto penalty = instance.cost_model.vec_unsupported_conversion_cycles;
   const auto verify_rollback = [&]() {
