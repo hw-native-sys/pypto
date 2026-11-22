@@ -332,7 +332,7 @@ void TestTreewidthStatsChainDiamondAndMultiComponent() {
              {{{al::LayoutSpec::ND()}, al::LayoutSpec::ND(), 1.0},
               {{al::LayoutSpec::NZ()}, al::LayoutSpec::NZ(), 1.0}}),
   };
-  const auto tw_chain = al::ComputeTreewidth(chain);
+  const auto tw_chain = al::SolveAutoLayout(chain).treewidth_stats.value();
   Require(tw_chain.dataflow_treewidth == 1 && tw_chain.primal_treewidth == 1 &&
               tw_chain.active_primal_treewidth == 1,
           "Chain treewidth must be 1");
@@ -359,7 +359,7 @@ void TestTreewidthStatsChainDiamondAndMultiComponent() {
              {{{al::LayoutSpec::ND(), al::LayoutSpec::ND()}, al::LayoutSpec::ND(), 1.0},
               {{al::LayoutSpec::NZ(), al::LayoutSpec::NZ()}, al::LayoutSpec::NZ(), 1.0}}),
   };
-  const auto tw_diamond = al::ComputeTreewidth(diamond);
+  const auto tw_diamond = al::SolveAutoLayout(diamond).treewidth_stats.value();
   Require(tw_diamond.dataflow_treewidth == 2 && tw_diamond.primal_treewidth == 2,
           "Diamond treewidth must be 2");
   Require(tw_diamond.max_bag_size == 3 && tw_diamond.max_bag_domain_product == 8,
@@ -472,7 +472,7 @@ void TestIncrementalStateAndAsymmetricCosts() {
         RequireNear(state.Cost(), base_cost, 1e-9, "IncrementalState init cost mismatch");
         const auto counts_before = state.Counts();
         const auto sources_before = state.Sources();
-        const auto source_costs_before = state.SourceCosts();
+        const auto masks_before = state.DemandMasks();
 
         for (al::OpId op = 0; op < 3; ++op) {
           const uint16_t old_c = choices[op];
@@ -485,14 +485,15 @@ void TestIncrementalStateAndAsymmetricCosts() {
               next_assign.op_configs[inst.operations[i].op_id] = inst.operations[i].configs[next[i]];
             }
             const double expected = al::EvaluateAssignment(inst, next_assign).total_cost_cycles;
-            RequireNear(state.Gain(op, cand), base_cost - expected, 1e-9, "IncrementalState::Gain mismatch");
+            RequireNear(state.GainScore(op, cand).cycles, base_cost - expected, 1e-9,
+                        "Incremental cycle gain mismatch");
             state.Apply(op, cand);
             RequireNear(state.Cost(), expected, 1e-9, "IncrementalState::Apply cost mismatch");
             state.Apply(op, old_c);
             RequireNear(state.Cost(), base_cost, 1e-9, "IncrementalState undo cost mismatch");
             Require(state.Counts() == counts_before, "Undo counts mismatch");
             Require(state.Sources() == sources_before, "Undo sources mismatch");
-            Require(state.SourceCosts() == source_costs_before, "Undo source_costs mismatch");
+            Require(state.DemandMasks() == masks_before, "Undo demand masks mismatch");
           }
         }
       }
@@ -517,32 +518,17 @@ void TestConversionPenaltyRollbackPreservesSmallCosts() {
   };
   const al::IndexedProblem problem(instance);
   al::IncrementalState state(problem, {0, 0, 0});
-  // The first diagnostic read may come after a move. Both readers now demand ND.
-  state.Apply(1, 1);
-  const auto& rows = state.SourceCosts();
-  for (al::ValueId v = 0; v < problem.NumValues(); ++v) {
-    const auto& value = problem.Values()[v];
-    Require(rows.at(v).size() == value.layouts.size(), "Diagnostics must include every source layout");
-    if (value.name == "input") {
-      RequireNear(rows[v].at(value.FindLayoutIndex(nd)), 0.0, 1e-12, "Use the demands after the move");
-    } else {
-      Require(rows[v] == std::vector<double>(value.layouts.size(), 0.0), "Unused outputs have zero cost");
-    }
-  }
-  state.Apply(1, 0);
-  const auto original_rows = state.SourceCosts();
   const auto penalty = instance.cost_model.vec_unsupported_conversion_cycles;
   const auto verify_rollback = [&]() {
-    Require(state.SourceCosts() == original_rows, "A penalty must not damage the other conversion terms");
     const double independent = al::EvaluateAssignment(instance, state.ToAssignment()).total_cost_cycles;
     RequireNear(state.Cost(), independent, 1e-9, "Rollback must agree with the independent evaluator");
     RequireNear(state.Cost(), 400004.0, 1e-9, "Keep the full normal cost after removing the penalty");
   };
   for (int i = 0; i < 2; ++i) {
-    RequireNear(state.Gain(2, 1), -penalty, 1e-9, "A singleton adds only the large conversion");
+    RequireNear(state.GainScore(2, 1).cycles, -penalty, 1e-9, "A singleton adds only the large conversion");
     state.Apply(2, 1);
-    RequireNear(state.Gain(1, 1), 0.1, 1e-12, "An active penalty cannot hide a small singleton gain");
-    (void)state.SourceCosts();
+    RequireNear(state.GainScore(1, 1).cycles, 0.1, 1e-12,
+                "An active penalty cannot hide a small singleton gain");
     state.Apply(2, 0);
     verify_rollback();
 
@@ -550,8 +536,7 @@ void TestConversionPenaltyRollbackPreservesSmallCosts() {
     const auto evaluation = state.EvaluateBlock(block);
     RequireNear(evaluation.gain, 0.1 - penalty, 1e-9, "A block replaces the small cost with the penalty");
     state.ApplyBlock(block, evaluation);
-    RequireNear(state.Gain(1, 0), -0.1, 1e-12, "A small gain stays precise after a joint move");
-    (void)state.SourceCosts();
+    RequireNear(state.GainScore(1, 0).cycles, -0.1, 1e-12, "A small gain stays precise after a joint move");
     const std::vector<al::IncrementalState::ChoiceChange> undo{{1, 0}, {2, 0}};
     state.ApplyBlock(undo, state.EvaluateBlock(undo));
     verify_rollback();
@@ -668,7 +653,7 @@ std::pair<al::LayoutAssignment, int64_t> ScanFM(const al::LayoutProblemInstance&
         if (locked[op]) continue;
         for (uint16_t q = 0; q < problem.Ops()[op].costs.size(); ++q) {
           if (q == state.Choices()[op]) continue;
-          const double gain = state.Gain(op, q);
+          const double gain = state.GainScore(op, q).cycles;
           if (!winner || gain > best_gain + config.tolerance) {
             winner = {op, q};
             best_gain = gain;
@@ -1159,20 +1144,21 @@ void TestFanoutBlockChangesSourceAndDemandTogether() {
   };
   const al::IndexedProblem problem(inst);
   al::IncrementalState state(problem, {0, 0});
-  Require(state.Gain(0, 1) < 0.0 && state.Gain(1, 1) < 0.0,
+  Require(state.GainScore(0, 1).cycles < 0.0 && state.GainScore(1, 1).cycles < 0.0,
           "Either move alone introduces a conversion of the intermediate value");
   // A changes the source of 'between' and B changes its demand. The final
   // state needs neither the ND-to-NZ nor the NZ-to-ND intermediate conversion.
-  Require(state.ApplyImprovingBlock({{0, 1}, {1, 1}}, 1e-9),
-          "The block must score the new source against the new demand");
+  const std::vector<al::IncrementalState::ChoiceChange> block{{0, 1}, {1, 1}};
+  const auto evaluation = state.EvaluateBlock(block);
+  RequireNear(evaluation.gain, 14.0, 1e-9, "The block saves 24 cycles and pays 10 for the shared input");
+  state.ApplyBlock(block, evaluation);
   const al::IncrementalState rebuilt(problem, {1, 1});
   RequireNear(state.Cost(), 10.0, 1e-9, "Only the shared input conversion remains");
-  Require(!state.ApplyImprovingBlock({{0, 0}, {1, 0}}, 1e-9), "The reverse block increases the total cost");
+  RequireNear(state.EvaluateBlock({{0, 0}, {1, 0}}).gain, -14.0, 1e-9, "The reverse block costs 14 cycles");
   RequireNear(state.Cost(), rebuilt.Cost(), 1e-9, "Incremental block cost must match the rebuilt state");
   Require(state.Choices() == rebuilt.Choices() && state.Sources() == rebuilt.Sources() &&
-              state.Counts() == rebuilt.Counts() && state.DemandMasks() == rebuilt.DemandMasks() &&
-              state.SourceCosts() == rebuilt.SourceCosts(),
-          "Only the improving block may change choices or factor caches");
+              state.Counts() == rebuilt.Counts() && state.DemandMasks() == rebuilt.DemandMasks(),
+          "Applying a block must produce the same state as rebuilding from its choices");
 }
 
 void TestBudgetAndTreewidthLimits() {
@@ -1260,7 +1246,7 @@ void TestIndexCapacityLimits() {
 }
 
 void TestTreewidthAbove64AndPerComponentDPFallback() {
-  // 1) Above 64 operations: ComputeTreewidth and SolveAutoLayout(instance).treewidth_stats must agree.
+  // A 70-operation chain spans two adjacency bitset words and still has treewidth one.
   const auto ND = al::LayoutSpec::ND();
   const auto NZ = al::LayoutSpec::NZ();
   al::LayoutProblemInstance big;
@@ -1272,13 +1258,10 @@ void TestTreewidthAbove64AndPerComponentDPFallback() {
     big.operations.push_back(MakeOp(op_name, {"v" + std::to_string(i)}, out_name,
                                     {{{ND}, ND, (i % 2 == 0) ? 1.0 : 2.0}, {{NZ}, NZ, 1.5}}));
   }
-  const auto expected_tw = al::ComputeTreewidth(big);
   const auto auto_big = al::SolveAutoLayout(big);
   Require(auto_big.treewidth_stats.has_value(), "treewidth_stats must be populated");
-  Require(auto_big.treewidth_stats->primal_treewidth == expected_tw.primal_treewidth,
-          "SolveAutoLayout primal_treewidth must match ComputeTreewidth above 64 ops");
-  Require(auto_big.treewidth_stats->active_primal_treewidth == expected_tw.active_primal_treewidth,
-          "SolveAutoLayout active_primal_treewidth must match ComputeTreewidth above 64 ops");
+  Require(auto_big.treewidth_stats->primal_treewidth == 1, "Chain primal width above 64 ops");
+  Require(auto_big.treewidth_stats->active_primal_treewidth == 1, "Chain active width above 64 ops");
 
   // Both components start at all-ND and need coordinated moves. The two-node
   // chain fits width one. The four consumers form a clique of width three.

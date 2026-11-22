@@ -116,15 +116,6 @@ Pass AutoLayout(AutoLayoutOptions options) {
       pass_name, kAutoLayoutProperties);
 }
 
-Pass AutoLayoutFromAssignment(const auto_layout::LayoutAssignment& assignment, const std::string& name) {
-  const std::string pass_name = name.empty() ? std::string("AutoLayout") : name;
-  return CreateProgramPass(
-      [assignment](const ProgramPtr& program) -> ProgramPtr {
-        return auto_layout::ApplyLayoutAssignment(program, assignment);
-      },
-      pass_name, kAutoLayoutProperties);
-}
-
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

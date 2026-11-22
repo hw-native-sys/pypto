@@ -830,15 +830,6 @@ struct AutoLayoutOptions {
 Pass AutoLayout(AutoLayoutOptions options = {});
 
 /**
- * @brief Apply an explicit LayoutAssignment to a Program
- *
- * Materializes pre-selected GM TensorLayouts and on-chip tile layouts into IR
- * (used for calibration variants and explicit layout tests).
- */
-Pass AutoLayoutFromAssignment(const auto_layout::LayoutAssignment& assignment,
-                              const std::string& name = "AutoLayout");
-
-/**
  * @brief Repair backend-required layouts for constrained elementwise tile ops
  *
  * For current layout-constrained elementwise ops, rewrites `[N, 1]`

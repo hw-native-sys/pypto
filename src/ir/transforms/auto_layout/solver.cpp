@@ -2628,10 +2628,6 @@ void IncrementalState::AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t
   }
 }
 
-double IncrementalState::Gain(OpId op_idx, uint16_t new_choice, std::optional<ValueId> omitted_factor) const {
-  return GainScore(op_idx, new_choice, omitted_factor).cycles;
-}
-
 LayoutSearchScore IncrementalState::GainScore(OpId op_idx, uint16_t new_choice,
                                               std::optional<ValueId> omitted_factor) const {
   const auto& op = problem_.Ops()[op_idx];
@@ -2808,13 +2804,6 @@ void IncrementalState::ApplyBlock(const std::vector<ChoiceChange>& choices,
   }
 }
 
-bool IncrementalState::ApplyImprovingBlock(const std::vector<ChoiceChange>& choices, double tolerance) {
-  const auto evaluation = EvaluateBlock(choices);
-  if (!BetterGain({evaluation.violation_reduction, evaluation.gain}, {}, tolerance)) return false;
-  ApplyBlock(choices, evaluation);
-  return true;
-}
-
 void IncrementalState::UpdateDemandCount(ValueId value, uint16_t layout, int delta) {
   const int previous = counts_[value][layout];
   const int next = previous + delta;
@@ -2826,34 +2815,6 @@ void IncrementalState::UpdateDemandCount(ValueId value, uint16_t layout, int del
   } else {
     demand_masks_[value] &= ~(uint64_t{1} << layout);
   }
-}
-
-const std::vector<std::vector<double>>& IncrementalState::SourceCosts() const {
-  source_cost_masks_.resize(problem_.NumValues());
-  source_costs_.resize(problem_.NumValues());
-  for (ValueId value = 0; value < problem_.NumValues(); ++value) {
-    if (source_costs_[value].empty() || source_cost_masks_[value] != demand_masks_[value]) {
-      RebuildSourceCosts(value);
-    }
-  }
-  return source_costs_;
-}
-
-void IncrementalState::RebuildSourceCosts(ValueId value) const {
-  const auto& info = problem_.Values()[value];
-  const size_t layout_count = info.layouts.size();
-  source_costs_[value].resize(layout_count);
-  for (size_t source = 0; source < layout_count; ++source) {
-    const double* row = info.conv_costs.data() + source * layout_count;
-    uint64_t targets = demand_masks_[value];
-    CostSum cost;
-    while (targets != 0) {
-      cost.Add(row[__builtin_ctzll(targets)]);
-      targets &= targets - 1;
-    }
-    source_costs_[value][source] = cost.Value();
-  }
-  source_cost_masks_[value] = demand_masks_[value];
 }
 
 void IncrementalState::CommitFactor(ValueId value, uint64_t old_mask, uint16_t new_source) {
@@ -2882,12 +2843,6 @@ LayoutAssignment IncrementalState::ToAssignment() const {
     assignment.op_configs.emplace(op.op_id, op.configs[choices_[u]]);
   }
   return assignment;
-}
-
-TreewidthStats ComputeTreewidth(const LayoutProblemInstance& instance) {
-  IndexedProblem problem(instance);
-  return ComputeProblemTreewidthInternal(
-      problem, ComputeActiveDecomposition(problem, std::numeric_limits<int64_t>::max()));
 }
 
 std::vector<std::string> CheckVecConversionCapacity(const LayoutProblemInstance& instance,

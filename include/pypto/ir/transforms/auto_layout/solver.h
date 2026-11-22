@@ -191,8 +191,6 @@ class IncrementalState {
   IncrementalState(const IndexedProblem& problem, std::vector<uint16_t> choices);
 
   /// Omit a factor when ranking choices within a fan-out move with a prescribed input layout.
-  [[nodiscard]] double Gain(OpId op_idx, uint16_t new_choice,
-                            std::optional<ValueId> omitted_factor = std::nullopt) const;
   [[nodiscard]] LayoutSearchScore GainScore(OpId op_idx, uint16_t new_choice,
                                             std::optional<ValueId> omitted_factor = std::nullopt) const;
   void Apply(OpId op_idx, uint16_t new_choice);
@@ -200,8 +198,6 @@ class IncrementalState {
   [[nodiscard]] BlockEvaluation EvaluateBlock(const std::vector<ChoiceChange>& choices) const;
   /// Apply a staged evaluation while its operation choices and factors are still current.
   void ApplyBlock(const std::vector<ChoiceChange>& choices, const BlockEvaluation& evaluation);
-  /// Choices must reference distinct operations. Commit only if the joint gain exceeds tolerance.
-  bool ApplyImprovingBlock(const std::vector<ChoiceChange>& choices, double tolerance);
   [[nodiscard]] LayoutAssignment ToAssignment() const;
 
   [[nodiscard]] double Cost() const { return cost_.Value(); }
@@ -210,8 +206,6 @@ class IncrementalState {
   [[nodiscard]] const std::vector<uint16_t>& Sources() const { return sources_; }
   [[nodiscard]] const std::vector<uint64_t>& DemandMasks() const { return demand_masks_; }
   [[nodiscard]] const std::vector<std::vector<int>>& Counts() const { return counts_; }
-  /// Diagnostic rows for the current demand masks. Call again after changing choices.
-  [[nodiscard]] const std::vector<std::vector<double>>& SourceCosts() const;
   [[nodiscard]] const IndexedProblem& Problem() const { return problem_; }
 
  private:
@@ -227,7 +221,6 @@ class IncrementalState {
 
   void AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t old_source, uint64_t old_mask,
                           uint16_t new_source, uint64_t new_mask) const;
-  void RebuildSourceCosts(ValueId value) const;
   void CommitFactor(ValueId value, uint64_t old_mask, uint16_t new_source);
   void UpdateDemandCount(ValueId value, uint16_t layout, int delta);
 
@@ -236,13 +229,8 @@ class IncrementalState {
   std::vector<uint16_t> sources_;
   std::vector<uint64_t> demand_masks_;
   std::vector<std::vector<int>> counts_;
-  mutable std::vector<std::vector<double>> source_costs_;
-  mutable std::vector<uint64_t> source_cost_masks_;
   CostSum cost_;
 };
-
-/// Compute heuristic min-fill width and DP state-space statistics for `instance`.
-TreewidthStats ComputeTreewidth(const LayoutProblemInstance& instance);
 
 /// Check Vec capacity for the conversion demands in the assignment's selected operation configurations.
 std::vector<std::string> CheckVecConversionCapacity(const LayoutProblemInstance& instance,

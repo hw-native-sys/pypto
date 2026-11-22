@@ -470,7 +470,7 @@ void TestValueOnlyWritebackWithRepeatedHints(const std::string& first_hint, cons
   auto assignment = al::SolveAutoLayout(al::ExtractLayoutInstance(program)).WritebackAssignment();
   for (bool values_only : {false, true}) {
     if (values_only) assignment.op_configs.clear();
-    const auto result = ir::pass::AutoLayoutFromAssignment(assignment)(program);
+    const auto result = al::ApplyLayoutAssignment(program, assignment);
     auto loads = ir::As<ir::SeqStmts>(result->GetFunction("kernel")->body_);
     auto layout = [&](size_t i) {
       auto tile = ir::As<ir::AssignStmt>(loads->stmts_.at(i))->var_;
@@ -522,7 +522,7 @@ void TestStoreBindingAcrossUnmodeledStore(bool return_store) {
   for (bool values_only : {false, true}) {
     auto assignment = al::SolveAutoLayout(instance).WritebackAssignment();
     if (values_only) assignment.op_configs.clear();
-    auto rewritten = ir::pass::AutoLayoutFromAssignment(assignment)(program);
+    auto rewritten = al::ApplyLayoutAssignment(program, assignment);
     const auto body = ir::As<ir::SeqStmts>(rewritten->GetFunction("kernel")->body_);
     size_t stores = 0;
     for (const auto& stmt : body->stmts_) {
