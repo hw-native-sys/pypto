@@ -242,7 +242,7 @@ print(pto_code)
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
-| `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
+| `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / A5 BF16 NZ Vec-to-Mat inserts / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
 | `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc` (`src0 + src1 + carry`) |
@@ -285,6 +285,25 @@ existing whole-tile integer TMOV copies are preserved.
 On A2/A3, the insertion column offset must be 32-byte aligned (8 FP32 or
 16 FP16/BF16 elements). Codegen diagnoses a constant offset violating this
 restriction; callers must preserve it for dynamic offsets too.
+
+A5 BF16 Vec-to-Mat insertion with matching non-compact NZ layouts
+(`col_major`, `row_major`, fractal 512, no padding) also uses `pto.tinsert`
+on MTE3. It keeps the parent Mat tile's physical pitch, allowing successive
+16-row chunks to fill a 128-row target at row offsets 0, 16, ..., 112.
+The result must reuse the Mat target; a separate result is rejected because
+preserving the other target elements would require an unsupported Mat-to-Mat
+copy. The source valid column count and column offset must be compile-time
+multiples of 16: the NZ transfer copies whole 32-byte BF16 column blocks.
+The same alignment requirement applies to every `set_validshape` update of
+the source handle, including updates through aliases. This conservative check
+covers the whole function, including later updates and loop backedges; a
+dynamic or unaligned update is rejected even if a later update restores alignment.
+Use an explicit `FunctionType.AIV` function. Generic InCore expansion rejects
+this transfer because it cannot keep both handles on the vector core; an
+explicit AIC function is rejected by codegen as well.
+This path does not enable ND-to-NZ conversion, other dtypes, or A2/A3
+Vec-to-Mat insertion. Shared L1 lifetime and synchronization with a Cube
+consumer remain the mixed kernel's responsibility.
 
 **FIXPIPE epilogue on the Acc writeback.**  A *converting* `Acc → Mat` assemble
 and every `Acc → GM` store are the cube's fix-pipe draining L0C, which can
