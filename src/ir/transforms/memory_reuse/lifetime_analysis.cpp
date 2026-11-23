@@ -103,8 +103,7 @@ class LifetimeAnalyzer : public IRVisitor {
       VisitStmt(func_body);
     }
 
-    // Asynchronous TPUSH reads the Scaling address set by SET_QUANT_VECTOR.
-    // Keep that storage live until function completion.
+    // Keep Scaling live through function completion for asynchronous TPUSH control reads.
     for (const auto& var : ordered_defs_) {
       auto tile = As<TileType>(var->GetType());
       if (tile && tile->memory_space_ == MemorySpace::Scaling) RecordRawUse(var, current_order_);

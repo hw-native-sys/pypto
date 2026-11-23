@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -99,6 +100,7 @@ std::optional<SplitMode> SplitModeFromInt(int split) {
 class CrossCoreSplitCollector : public IRVisitor {
  public:
   [[nodiscard]] std::optional<SplitMode> GetInferredMode() const { return inferred_mode_; }
+  [[nodiscard]] bool HasFixpipe() const { return has_fixpipe_; }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -113,8 +115,10 @@ class CrossCoreSplitCollector : public IRVisitor {
 
  private:
   std::optional<SplitMode> inferred_mode_;
+  bool has_fixpipe_ = false;
 
   void ConsiderCall(const CallPtr& call) {
+    has_fixpipe_ |= call && call->HasKwarg("acc_push_epilogue");
     if (!call || !call->op_ || !IsCrossCoreSplitOp(call->op_)) return;
 
     auto mode = SplitModeFromInt(call->GetKwarg<int>("split", 0));
@@ -146,9 +150,12 @@ std::optional<SplitMode> ResolveSplitMode(const FunctionPtr& func) {
     if (inferred_mode.has_value() && inferred_mode.value() != func_split_mode.value()) {
       throw pypto::ValueError("SplitVectorKernel found conflicting function split and cross-core op split");
     }
-    return func_split_mode;
+    inferred_mode = func_split_mode;
   }
 
+  CHECK_SPAN(!inferred_mode || !collector.HasFixpipe(), func->span_)
+      << "Structured Fixpipe requires an unsplit standalone kernel. Use separate kernels for split "
+         "transfers.";
   return inferred_mode;
 }
 
@@ -315,8 +322,13 @@ struct NoSplitSharedPrefix {
 
 NoSplitSharedPrefix SplitNoSplitSharedPipeSetupPrefix(const std::vector<StmtPtr>& stmts) {
   NoSplitSharedPrefix result;
+  std::unordered_set<const Var*> setup_values;
   size_t prefix_len = 0;
-  while (prefix_len < stmts.size() && IsNoSplitSharedPipeSetupStmt(stmts[prefix_len])) {
+  while (prefix_len < stmts.size()) {
+    const auto assign = As<AssignStmt>(stmts[prefix_len]);
+    const auto alias = assign ? AsVarLike(assign->value_) : nullptr;
+    if (!IsNoSplitSharedPipeSetupStmt(stmts[prefix_len]) && !setup_values.count(alias.get())) break;
+    if (assign) setup_values.insert(assign->var_.get());
     result.shared_setup_stmts.push_back(stmts[prefix_len]);
     ++prefix_len;
   }

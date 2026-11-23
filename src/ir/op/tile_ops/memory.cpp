@@ -720,6 +720,8 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   }
 
   if (space == MemorySpace::Scaling) {
+    // Fixpipe indexes packed controls as a flat channel row in 128-byte units.
+    // A partial valid extent would leave some of the control words uninitialized.
     CHECK(tile_type->memory_space_ == MemorySpace::Mat && input_shape.size() == 2)
         << "Fixpipe Scaling controls require a 2D Mat source";
     CHECK(tile_type->dtype_ == DataType::INT64 || tile_type->dtype_ == DataType::UINT64)

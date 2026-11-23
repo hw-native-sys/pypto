@@ -867,7 +867,6 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           } else {
             continue;
           }
-          // A nested block may write its own quant registers on either path.
           scalar_state.clear();
           vector_state.clear();
           continue;

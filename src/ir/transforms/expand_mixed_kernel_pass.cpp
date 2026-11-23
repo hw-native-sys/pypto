@@ -2726,7 +2726,6 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   std::optional<int> local_slot_num_override =
       func->HasAttr("local_slot_num") ? std::optional<int>(func->GetAttr<int>("local_slot_num", 0))
                                       : std::nullopt;
-  // A plain Acc-to-Vec move can inherit NZ. Structured Fixpipe needs an explicit layout request.
   const bool explicit_c2v_layout =
       std::any_of(boundary_moves.begin(), boundary_moves.end(), [](const auto& entry) {
         const auto& [stmt, move] = entry;

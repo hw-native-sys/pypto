@@ -173,7 +173,8 @@ def _assemble(mlir, tmp_path, expected_error=None):
 @pytest.mark.parametrize("relu", ["no_relu", "normal_relu"])
 @pytest.mark.ptoas_compile
 def test_explicit_fixpipe_compiles(quant, relu, tmp_path):
-    _, mlir = _generate(_program(quant, relu))
+    slot_size = 2048 if quant == "no_convert" else 1024
+    _, mlir = _generate(_program(quant, relu, slot_size=slot_size))
     cpp = _assemble(mlir, tmp_path)
     assert mlir.count("#pto.acc_push_epilogue<") == 2
     assert "FixpipeParams<" in cpp
@@ -190,7 +191,10 @@ def test_explicit_fixpipe_compiles(quant, relu, tmp_path):
 @pytest.mark.ptoas_compile
 def test_pipe_buffer_aliases_compile(buffer_ir, side, depth, tmp_path):
     aliases = _PipeBufferAliases(depth if side != "consumer" else 0, depth if side != "producer" else 0)
-    _, mlir = _generate(aliases.visit_program(_program()), buffer_ir)
+    lowered, mlir = _generate(aliases.visit_program(_program()), buffer_ir)
+    consumer = lowered.get_function("consumer")
+    assert consumer is not None and consumer.attrs["dual_aiv_dispatch"] is True
+    assert mlir.index("pto.aiv_initialize_pipe") < mlir.index("scf.if")
     _assemble(mlir, tmp_path)
 
 
@@ -210,6 +214,7 @@ def test_buffer_arithmetic_is_not_an_identity_alias():
         ({"peer_quant": "f32_f16", "_aliases": True}, "contract mismatch"),
         ({"slot_size": 128, "_aliases": True}, "exceeds slot_size"),
         ({"consumer_dtype": pl.FP16}, "converted dtype mismatch"),
+        ({"_a2a3": True}, "currently require Ascend950"),
         ({"layout": "nz2dn"}, "consumer layout"),
         ({"layout": "nz2nz", "quant": "f32_f16"}, "NZ2NZ currently supports no_convert"),
         ({"layout": "nz2nz", "consumer_dtype": pl.INT32, "input_dtype_override": pl.INT8}, "FP32 source"),
@@ -218,6 +223,9 @@ def test_buffer_arithmetic_is_not_an_identity_alias():
 def test_invalid_fixpipe_contract(kwargs, message):
     options = kwargs.copy()
     aliases = options.pop("_aliases", False)
+    if options.pop("_a2a3", False):
+        backend.reset_for_testing()
+        backend.set_backend_type(backend.BackendType.Ascend910)
     program = _program(**options)
     with pytest.raises(Error, match=message):
         _generate(_PipeBufferAliases(4, 4).visit_program(program) if aliases else program)
@@ -312,22 +320,20 @@ def test_raw_scalar_setter_does_not_configure_the_pipe(operands, message):
 
 
 @pytest.mark.parametrize(
-    "epilogue",
-    [{"layout": "nz2dn"}, _epilogue(layout="dn2nz"), _epilogue(quant="unknown"), _epilogue(relu="relu")],
+    ("options", "message"),
+    [
+        ({"acc_push_epilogue": {"layout": "nz2dn"}}, "acc_push_epilogue"),
+        ({"acc_push_epilogue": _epilogue(layout="dn2nz")}, "acc_push_epilogue"),
+        ({"acc_push_epilogue": _epilogue(quant="unknown")}, "acc_push_epilogue"),
+        ({"acc_push_epilogue": _epilogue(relu="relu")}, "acc_push_epilogue"),
+        ({"dir_mask": 3}, "C2V only"),
+        ({"nosplit": False}, "nosplit=true"),
+    ],
 )
-def test_schema_rejects_unknown_or_incomplete_fields(epilogue):
-    with pytest.raises(ValueError, match="acc_push_epilogue"):
-        system_ops.aic_initialize_pipe(dir_mask=1, slot_size=2048, acc_push_epilogue=epilogue)
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "message"), [({"dir_mask": 3}, "C2V only"), ({"nosplit": False}, "nosplit=true")]
-)
-def test_schema_rejects_unsupported_transport(kwargs, message):
+def test_init_rejects_invalid_schema_or_transport(options, message):
+    kwargs = {"dir_mask": 1, "slot_size": 2048, "acc_push_epilogue": _epilogue()}
     with pytest.raises(ValueError, match=message):
-        system_ops.aic_initialize_pipe(
-            slot_size=2048, acc_push_epilogue=_epilogue(), **({"dir_mask": 1} | kwargs)
-        )
+        system_ops.aic_initialize_pipe(**(kwargs | options))
 
 
 @pytest.mark.parametrize("initialize", [system_ops.aic_initialize_pipe, system_ops.aiv_initialize_pipe])
@@ -344,16 +350,20 @@ def test_pipe_init_option_contract(initialize, options, message):
         initialize(dir_mask=1, slot_size=2048, **options)
 
 
-@pytest.mark.ptoas_compile
-def test_converted_slot_uses_result_bytes(tmp_path):
-    _, mlir = _generate(_program("f32_f16", slot_size=1024))
-    _assemble(mlir, tmp_path)
-
-
 def test_epilogue_value_round_trip():
     program = _program()
     ir.assert_structural_equal(program, ir.deserialize(ir.serialize(program)))
     ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
+
+    call = ir.Call(
+        ir.get_op("system.aic_initialize_pipe"),
+        [],
+        {"acc_push_epilogue": {}},
+        ir.ScalarType(pl.INT32),
+        ir.Span.unknown(),
+    )
+    with pytest.raises(ValueError, match="Invalid serialized AccPushEpilogue"):
+        ir.deserialize(ir.serialize(call))
 
 
 @pytest.mark.parametrize("use_relu", [False, True])
@@ -398,18 +408,6 @@ class Program:
     assert stmt.expr.attrs["acc_push_epilogue"] == _epilogue()
     if recorded:
         assert stmt.expr.kwargs["acc_push_epilogue"] == _epilogue()
-
-
-def test_deserialize_rejects_incomplete_epilogue():
-    call = ir.Call(
-        ir.get_op("system.aic_initialize_pipe"),
-        [],
-        {"acc_push_epilogue": {}},
-        ir.ScalarType(pl.INT32),
-        ir.Span.unknown(),
-    )
-    with pytest.raises(ValueError, match="Invalid serialized AccPushEpilogue"):
-        ir.deserialize(ir.serialize(call))
 
 
 @pytest.mark.parametrize(
@@ -619,13 +617,6 @@ def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
     )
     _, mlir = _generate(pl.parse_program(source), buffer_ir)
     _assemble(mlir, tmp_path)
-
-
-def test_fixpipe_rejects_unvalidated_a2a3_target():
-    backend.reset_for_testing()
-    backend.set_backend_type(backend.BackendType.Ascend910)
-    with pytest.raises(Error, match="currently require Ascend950"):
-        _generate(_program())
 
 
 if __name__ == "__main__":
