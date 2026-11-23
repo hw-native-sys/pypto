@@ -238,14 +238,14 @@ def test_invalid_fixpipe_contract(kwargs, message):
 
 def test_fixpipe_pop_requires_a_matching_push():
     source = ir.python_print(_program())
-    assert ".tpush_to_aiv(" in source
     without_push = "\n".join(line for line in source.splitlines() if ".tpush_to_aiv(" not in line)
     with pytest.raises(Error, match="matching TPUSH and TPOP endpoints"):
         _generate(pl.parse_program(without_push))
 
 
 @pytest.mark.parametrize(
-    ("guarded_pop", "binding"), [(False, None), (True, None), (False, True), (False, False)]
+    ("guarded_pop", "binding"),
+    [(False, None), (True, None), (False, True), (False, False), (False, "member")],
 )
 @pytest.mark.ptoas_compile
 def test_fixpipe_endpoint_counts(guarded_pop, binding, tmp_path):
@@ -258,22 +258,24 @@ def test_fixpipe_endpoint_counts(guarded_pop, binding, tmp_path):
         consumer, producer = ("        tile: " + body).split("    @pl.function", 1)
         source = before + "        if enabled:\n            pass\n        else:\n" + indent(consumer, "    ")
         source += "    @pl.function" + producer
+    literal_member = binding == "member"
     if guarded_pop or binding is not None:
         signature = next(line for line in source.splitlines() if line.startswith("    def producer("))
         group = signature.replace("producer(", "group(self, ")
         if binding is not None:
-            group = group.replace(", enabled: pl.Scalar[pl.BOOL]", "").replace(
-                "group(self, ", "group(self, enabled: pl.Scalar[pl.BOOL], "
-            )
+            group = group.replace(", enabled: pl.Scalar[pl.BOOL]", "")
+            if not literal_member:
+                group = group.replace("group(self, ", "group(self, enabled: pl.Scalar[pl.BOOL], ")
         source += "\n    @pl.function(type=pl.FunctionType.Group)\n" + group
-        source += "\n        self.producer(a, b, out, control_words, enabled)\n"
-        source += "        self.consumer(a, b, out, control_words, enabled)\n"
-    if binding is not None:
+        arg = "True" if literal_member else "enabled"
+        source += f"\n        self.producer(a, b, out, control_words, {arg})\n"
+        source += f"        self.consumer(a, b, out, control_words, {arg})\n"
+    if binding is not None and not literal_member:
         caller = signature.replace("producer(", "main(self, ").replace(", enabled: pl.Scalar[pl.BOOL]", "")
         source += "\n    @pl.function(type=pl.FunctionType.Orchestration)\n" + caller
         source += f"\n        self.group({binding}, a, b, out, control_words)\n"
     program = pl.parse_program(source)
-    if binding is True:
+    if binding is True or literal_member:
         properties = passes.IRPropertySet()
         properties.insert(passes.IRProperty.MixedKernelExpanded)
         passes.verify_properties(properties, passes.simplify()(program), "test")

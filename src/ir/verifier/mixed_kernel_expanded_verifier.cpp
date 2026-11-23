@@ -43,6 +43,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
@@ -547,8 +548,7 @@ struct FixpipeFunctionInfo : IRVisitor {
     if (auto call = As<Call>(stmt->value_)) {
       definitions[stmt->var_.get()] = call;
     } else if (auto alias = AsVarLike(stmt->value_)) {
-      // SSA definitions precede their uses. Cache the terminal call at each
-      // identity alias so peer lookups remain O(log N), even for shared chains.
+      // Cache alias origins so later peer lookups remain O(log N).
       auto origin = definitions.find(alias.get());
       if (origin != definitions.end()) definitions[stmt->var_.get()] = origin->second;
     }
@@ -560,8 +560,7 @@ struct FixpipeFunctionInfo : IRVisitor {
       auto [it, inserted] = inits.emplace(id, call);
       if (!inserted) {
         duplicate_ids.insert(id);
-        // Keep an epilogue representative: a later legacy init must not hide
-        // the duplicate-id diagnostic or peer contract for an earlier Fixpipe.
+        // Keep the structured init visible to the verifier when ids collide.
         if (!it->second->HasKwarg("acc_push_epilogue")) it->second = call;
       }
     } else if (IsOp(call, "tile.tpush_to_aiv")) {
@@ -573,8 +572,7 @@ struct FixpipeFunctionInfo : IRVisitor {
   }
 };
 
-// Summarize all pipe IDs together. A count is exact only when every endpoint
-// is counted, which excludes loops and unsupported control flow.
+// Count all pipe ids together and leave unsupported control flow uncounted.
 void CountFixpipeEndpoints(const FunctionPtr& func, FixpipeFunctionInfo& local) {
   const std::string op = func->func_type_ == FunctionType::AIC ? "tile.tpush_to_aiv" : "tile.tpop_from_aic";
   std::map<const Var*, std::size_t> bool_params;
@@ -611,6 +609,13 @@ void CountFixpipeEndpoints(const FunctionPtr& func, FixpipeFunctionInfo& local) 
   }
 }
 
+bool SameGroupArguments(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+  return std::equal(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), [](const ExprPtr& a, const ExprPtr& b) {
+    return a == b ||
+           ((IsA<ConstBool>(a) || IsA<ConstInt>(a) || IsA<ConstFloat>(a)) && structural_equal(a, b));
+  });
+}
+
 void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) {
   const auto* context = PassContext::Current();
   const auto* handler =
@@ -629,7 +634,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     if (!IsWrapperType(func->func_type_) && !IsOrchestrationLike(func->func_type_)) continue;
     const auto members = CollectInnerCalls(func, program);
     if (func->func_type_ == FunctionType::Group && members.size() == 2 &&
-        members[0].inner_call->args_ == members[1].inner_call->args_) {
+        SameGroupArguments(members[0].inner_call->args_, members[1].inner_call->args_)) {
       groups.emplace_back(std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_),
                           members[0].inner_call);
     }
@@ -903,7 +908,6 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
             continue;
           }
           try {
-            // Raw calls can bypass the operator builder's operand validation.
             OpRegistry::GetInstance().GetEntry(call->op_->name_).GetDeduceType()(call->args_, call->kwargs_);
             if (scalar) {
               scalar_state.insert(id);
