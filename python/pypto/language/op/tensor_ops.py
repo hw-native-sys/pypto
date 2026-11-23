@@ -815,7 +815,8 @@ def quant_mx(
 def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) -> Tensor:
     """MXFP8 matrix multiplication returning an FP32 tensor.
 
-    Inputs must use the oriented outputs of :func:`quant_mx`: A data/scale as
+    Each data tensor independently accepts FP8E4M3FN or FP8E5M2. Use oriented
+    A data/scale as
     ``[M, K]`` / ``MX_A_ZZ[M, K/32]`` and B data/scale as
     ``[K, N]`` / ``MX_B_NN[K/32, N]``.
 

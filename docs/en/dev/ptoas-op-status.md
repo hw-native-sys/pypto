@@ -165,7 +165,7 @@ output elements outside the valid rectangle.
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A5 also accepts mixed FP8 operand pairs (E4M3FN x E5M2 in either order), E5M2 x E5M2 and HF8 x HF8; see [Cube operand dtype pairs](ir/05-operators.md#cube-operand-dtype-pairs) |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | Same A5 operand pairs as `pto.tmatmul`; acc_in stays FP32 |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | Same A5 operand pairs as `pto.tmatmul`; bias stays FP32 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 host-prequant frontend+codegen+ST for all four E4M3FN/E5M2 pairs; native FP4×FP4 tiles use PTOAS v0.72 logical Cube dimensions; mixed FP4/FP8 requires an explicit cast; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
+| pto.tmatmul.mx | TMATMUL_MX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A5 host-prequant frontend+codegen+ST for all four E4M3FN/E5M2 pairs; native FP4×FP4 tiles use PTOAS v0.72 logical Cube dimensions; mixed FP4/FP8 requires an explicit cast; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
 | pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_acc`) |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_bias`) |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |

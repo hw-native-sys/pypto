@@ -265,7 +265,7 @@ E1M2、FP8E5M2 目标及不满足直接路径约束的 E2M1 源描述符仍使�
 FP16/BF16、区域完全有效、`K%64==0`、axis1 的 `M%16==0` 及 axis0 的 `N%64==0`。
 默认采用 OCP；FP16/BF16 的 NV 仅支持 axis0。不支持 E1M2 量化。
 打包输出需要 PYPTO/DSA_RP 静态分配。`pl.tile.quant_mx_raw` 提供原始 UINT8 指数和显式工作区。
-Tensor `pl.matmul_mx` 要求两侧数据均为 `FP8E4M3FN`；该接口仅支持二维并返回 FP32，
+Tensor `pl.matmul_mx` 的两侧数据分别支持 `FP8E4M3FN` 或 `FP8E5M2`；该接口仅支持二维并返回 FP32，
 仍不支持 tensor MX 累加、bias、transpose 标志、批处理、动态 shape 或原生打包 FP4 矩阵操作数。
 
 ### 动态 shape

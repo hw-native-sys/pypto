@@ -505,6 +505,8 @@ def matmul_mx(
 ) -> Call:
     """MXFP8 matrix multiplication of oriented GM data and scale tensors.
 
+    Each data tensor independently accepts FP8E4M3FN or FP8E5M2.
+
     Args:
         lhs: A-side quantized data tensor with shape ``[M, K]``.
         lhs_scale: A-side ``MX_A_ZZ`` or row-major ``MX_A_ND`` FP8E8M0 scale tensor with shape

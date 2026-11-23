@@ -13,6 +13,7 @@ The mixed FP4×FP8 case explicitly casts FP4 to FP8. Native FP4 cases retain
 both packed formats through GM loading, L0 placement, and MX instructions.
 """
 
+from functools import lru_cache
 from typing import Any
 
 import pypto.language as pl
@@ -324,6 +325,106 @@ class TestMatmulMx:
         case = MatmulMxTestCase(lhs_dtype, rhs_dtype)
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
+
+
+def _tensor_vs_tile_entry(lhs_dtype: DataType, rhs_dtype: DataType):
+    """One entry running both surfaces over the same GM operands, in one kernel.
+
+    The Tile reference lives in the same program on purpose: both outputs come
+    from one device run on one set of bytes, so ``out_tensor != out_tile`` can
+    only mean the surfaces disagree.
+    """
+    lhs_pl = pl.FP8E5M2 if lhs_dtype == DataType.FP8E5M2 else pl.FP8E4M3FN
+    rhs_pl = pl.FP8E5M2 if rhs_dtype == DataType.FP8E5M2 else pl.FP8E4M3FN
+
+    @pl.jit.incore
+    def mx_tile_reference(
+        a: pl.Tensor[[M, K], lhs_pl],
+        a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+        b: pl.Tensor[[K, N], rhs_pl],
+        b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+        out_tile: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        lhs = pl.load(a, [0, 0], [M, K])
+        lhs_scale = pl.load(a_scale, [0, 0], [M, K // 32])
+        rhs = pl.load(b, [0, 0], [K, N])
+        rhs_scale = pl.load(b_scale, [0, 0], [K // 32, N])
+        return pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out_tile)
+
+    @pl.jit
+    def mx_tensor_matmul(
+        a: pl.Tensor[[M, K], lhs_pl],
+        a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+        b: pl.Tensor[[K, N], rhs_pl],
+        b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+        out_tensor: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        out_tile: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out_tensor = pl.assemble(out_tensor, pl.matmul_mx(a, a_scale, b, b_scale), [0, 0])
+        out_tile = mx_tile_reference(a, a_scale, b, b_scale, out_tile)
+        return out_tensor, out_tile
+
+    return mx_tensor_matmul
+
+
+def _tensor_case_tensors(lhs_dtype: DataType, rhs_dtype: DataType) -> list[TensorSpec]:
+    @lru_cache(maxsize=1)
+    def inputs():
+        return MatmulMxTestCase(lhs_dtype, rhs_dtype)._make_case_inputs()
+
+    # Defer tensor creation until execution for the CI pytest-forked worker.
+    input_specs = [
+        ("a", [M, K], lhs_dtype),
+        ("a_scale", [M, K // 32], DataType.FP8E8M0),
+        ("b", [K, N], rhs_dtype),
+        ("b_scale", [K // 32, N], DataType.FP8E8M0),
+    ]
+    return [
+        TensorSpec(name, shape, dtype, init_value=lambda idx=idx: inputs()[idx])
+        for idx, (name, shape, dtype) in enumerate(input_specs)
+    ] + [
+        TensorSpec(name, [M, N], DataType.FP32, is_output=True, init_value=float("nan"))
+        for name in ("out_tensor", "out_tile")
+    ]
+
+
+def _tensor_case_golden(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    base = _matmul_mx_golden(
+        tensors["a"],
+        _unpack_a_scale(tensors["a_scale"].view(torch.uint8)),
+        tensors["b"],
+        _unpack_b_scale(tensors["b_scale"].view(torch.uint8)),
+    )
+    return {"out_tensor": base, "out_tile": base.clone()}
+
+
+def _assert_bitwise_equal(actual, expected) -> None:
+    assert actual.keys() == expected.keys(), f"{sorted(actual)} != {sorted(expected)}"
+    for name in sorted(actual):
+        got = actual[name].contiguous().view(torch.int32)
+        ref = expected[name].contiguous().view(torch.int32)
+        differing = int((got != ref).sum())
+        assert differing == 0, f"{name} differs from the golden in {differing} of {got.numel()} FP32 words"
+
+
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            _tensor_vs_tile_entry(lhs_dtype, rhs_dtype),
+            name=f"tensor_matmul_mx_{lhs_dtype.value}_x_{rhs_dtype.value}_vs_tile",
+            tensors=_tensor_case_tensors(lhs_dtype, rhs_dtype),
+            golden=_tensor_case_golden,
+            compare=_assert_bitwise_equal,
+            platform="a5",
+        )
+        for lhs_dtype in _MX_FP8_DTYPES
+        for rhs_dtype in _MX_FP8_DTYPES
+    ]
+)
+def test_tensor_matmul_mx_matches_the_tile_path(case_run):
+    case_run.assert_passed()
 
 
 def _native_fp4_entry(lhs_dtype, rhs_dtype):
