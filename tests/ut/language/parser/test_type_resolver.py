@@ -348,16 +348,16 @@ class TestTypeResolver:
 
     @pytest.mark.parametrize("shape", [(1, 32), (32, 1)])
     def test_scaling_layout_defaults_round_trip(self, shape):
-        resolver = _make_resolver()
+        """Check Scaling defaults for both singleton axes. Partial valid_shape keeps the view printable."""
         valid = [max(1, extent // 2) for extent in shape]
         annotation = f"pl.Tile[{list(shape)}, pl.UINT64, pl.Mem.Scaling, pl.TileView(valid_shape={valid})]"
-        resolved = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+        resolved = _make_resolver().resolve_type(ast.parse(annotation, mode="eval").body)
         assert isinstance(resolved, ir.TileType) and resolved.tile_view is not None
         view = resolved.tile_view
         assert (view.blayout, view.slayout) == (ir.TileLayout.row_major, ir.TileLayout.none_box)
         printed = ir.python_print_type(resolved)
         assert "valid_shape=" in printed and "blayout=" not in printed and "slayout=" not in printed
-        reparsed = resolver.resolve_type(ast.parse(printed, mode="eval").body)
+        reparsed = _make_resolver().resolve_type(ast.parse(printed, mode="eval").body)
         assert isinstance(reparsed, ir.TileType)
         ir.assert_structural_equal(resolved, reparsed)
 

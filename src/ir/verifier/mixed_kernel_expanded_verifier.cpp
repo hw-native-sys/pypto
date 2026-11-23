@@ -600,9 +600,9 @@ void CountFixpipeEndpoints(const FunctionPtr& func, FixpipeFunctionInfo& local) 
       const auto guard = literal ? std::nullopt : std::optional<std::size_t>(input->second);
       const int then_mask = literal ? (literal->value_ ? kEitherGuard : 0) : kGuardTrue;
       for (const auto& child : FlattenBody(branch->then_body_)) count(child, guard, then_mask);
-      if (branch->else_body_) {
-        const int else_mask = kEitherGuard ^ then_mask;
-        for (const auto& child : FlattenBody(*branch->else_body_)) count(child, guard, else_mask);
+      if (!branch->else_body_) continue;
+      for (const auto& child : FlattenBody(*branch->else_body_)) {
+        count(child, guard, kEitherGuard ^ then_mask);
       }
     } else {
       count(stmt, std::nullopt, kEitherGuard);
@@ -785,7 +785,6 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
               "respectively");
         continue;
       }
-      if (!reserve && !imported) continue;
       if (reserve && (init->GetKwarg<int>("dir_mask", 0) & kDirMaskC2V) && local.pops.count(id)) {
         auto [usage, inserted] = reserve_users.emplace(def.get(), has_epilogue);
         if (!inserted && (usage->second || has_epilogue)) {
@@ -806,7 +805,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
                           " bytes for its local ring");
         }
       }
-      if (!IsOp(def, "system.import_peer_buffer")) continue;
+      if (!imported) continue;
       const auto peer_name = def->GetKwarg<std::string>("peer_func", "");
       const auto members = group_peers.find(func->name_);
       if (has_epilogue && members != group_peers.end() &&
@@ -882,8 +881,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         auto signature = [](const TileTypePtr& tile, DataType dtype) {
           std::vector<int64_t> result{dtype.Code()};
           for (const auto& dim : tile->shape_) {
-            const auto value = cross_core_pipe::TryGetNonNegativeConstInt(dim);
-            result.push_back(value.value_or(-1));
+            result.push_back(cross_core_pipe::TryGetNonNegativeConstInt(dim).value_or(-1));
           }
           return result;
         };
@@ -965,16 +963,11 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         const bool push = IsOp(call, "tile.tpush_to_aiv"), pop = IsOp(call, "tile.tpop_from_aic");
         if (!scalar && !vector && !push && !pop) continue;
         const auto found = visible.find(id);
-        if (found == visible.end()) {
-          if (scalar || vector || local.has_fixpipe) {
-            error(call, "Fixpipe operation requires a dominating initialize_pipe for its pipe id");
-          }
-          continue;
-        }
-        const auto init = found->second;
-        if (!init->HasKwarg("acc_push_epilogue")) {
-          if (scalar || vector) {
-            error(call, "set_quant requires an acc_push_epilogue on the matching pipe id");
+        const auto init = found == visible.end() ? nullptr : found->second;
+        if (!init || !init->HasKwarg("acc_push_epilogue")) {
+          if (scalar || vector || (!init && local.has_fixpipe)) {
+            error(call, init ? "set_quant requires an acc_push_epilogue on the matching pipe id"
+                             : "Fixpipe operation requires a dominating initialize_pipe for its pipe id");
           }
           continue;
         }
@@ -999,7 +992,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         }
         if (call->GetKwarg<int>("split", 0) != 0) error(call, "Fixpipe transfers require split=0");
         if (pop && !call->args_.empty()) error(call, "Fixpipe TPOP takes no operands");
-        if (auto assign = As<AssignStmt>(stmt); pop && assign) {
+        const auto assign = As<AssignStmt>(stmt);
+        if (pop && !assign) error(call, "Fixpipe TPOP requires a result target for TFREE");
+        if (pop && assign) {
           auto& fifo = retained[id];
           fifo.push_back(assign->var_.get());
           const int slots = init->GetKwarg<int>("slot_num", cross_core_pipe::GetPtoasImplicitSlotNum(1));

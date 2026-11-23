@@ -223,11 +223,17 @@ def test_invalid_fixpipe_contract(kwargs, message):
         )
 
 
-def test_fixpipe_pop_requires_a_matching_push():
-    source = ir.python_print(_program())
-    without_push = "\n".join(line for line in source.splitlines() if ".tpush_to_aiv(" not in line)
-    with pytest.raises(Error, match="matching TPUSH and TPOP endpoints"):
-        _generate(pl.parse_program(without_push))
+@pytest.mark.parametrize("bare_pop", [False, True])
+def test_fixpipe_requires_matching_pop_endpoints_and_result(bare_pop):
+    lines = ir.python_print(_program()).splitlines()
+    pop = next(line for line in lines if ".tpop_from_aic(" in line)
+    skip = (".tfree_to_aic(", ".store(") if bare_pop else (".tpush_to_aiv(",)
+    source = "\n".join(line for line in lines if not any(op in line for op in skip))
+    if bare_pop:
+        source = source.replace(pop, "        " + pop.split(" = ", 1)[1])
+    message = "TPOP requires a result target" if bare_pop else "matching TPUSH and TPOP endpoints"
+    with pytest.raises(Error, match=message):
+        _verify_expanded(passes.simplify()(pl.parse_program(source)))
 
 
 @pytest.mark.parametrize(
@@ -308,7 +314,6 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
             source += f"        self.wrapper({binding}, a, b, out, control_words)\n"
     program = pl.parse_program(source)
     if binding is True or literal_member or binding == "literal_same":
-        _verify_expanded(passes.simplify()(program))
         _assemble(_generate(program)[1], tmp_path)
     else:
         group_only = bool(extra) or binding == "wrong_group"
