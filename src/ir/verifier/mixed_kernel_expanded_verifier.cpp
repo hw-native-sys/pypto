@@ -543,7 +543,7 @@ struct FixpipeFunctionInfo : IRVisitor {
   std::map<const Var*, CallPtr> definitions;
   std::map<int, std::vector<CallPtr>> pushes;
   std::map<int, std::vector<CallPtr>> pops;
-  CallPtr FindOrigin(const ExprPtr& operand) const {
+  [[nodiscard]] CallPtr FindOrigin(const ExprPtr& operand) const {
     const auto def = definitions.find(AsVarLike(operand).get());
     return def == definitions.end() ? nullptr : def->second;
   }
