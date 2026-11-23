@@ -130,6 +130,7 @@ DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
 DEFINE_KIND_TRAIT(PtrType, ObjectKind::PtrType)
 DEFINE_KIND_TRAIT(WindowBufferType, ObjectKind::WindowBufferType)
 DEFINE_KIND_TRAIT(CommCtxType, ObjectKind::CommCtxType)
+DEFINE_KIND_TRAIT(CcuRegistrationType, ObjectKind::CcuRegistrationType)
 DEFINE_KIND_TRAIT(PrefetchAsyncContextType, ObjectKind::PrefetchAsyncContextType)
 DEFINE_KIND_TRAIT(AsyncEventType, ObjectKind::AsyncEventType)
 DEFINE_KIND_TRAIT(AsyncSessionType, ObjectKind::AsyncSessionType)
@@ -247,6 +248,7 @@ struct KindTrait<Type> {
                                          ObjectKind::TupleType,
                                          ObjectKind::WindowBufferType,
                                          ObjectKind::CommCtxType,
+                                         ObjectKind::CcuRegistrationType,
                                          ObjectKind::PrefetchAsyncContextType,
                                          ObjectKind::AsyncEventType,
                                          ObjectKind::AsyncSessionType};

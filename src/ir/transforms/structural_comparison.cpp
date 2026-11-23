@@ -603,6 +603,7 @@ class Projection {
     PROJECT_TYPE(PtrType)
     PROJECT_TYPE(WindowBufferType)
     PROJECT_TYPE(CommCtxType)
+    PROJECT_TYPE(CcuRegistrationType)
     PROJECT_TYPE(VoidType)
     PROJECT_TYPE(ScalarType)
     PROJECT_TYPE(RegType)

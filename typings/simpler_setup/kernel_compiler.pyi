@@ -8,13 +8,22 @@
 # -----------------------------------------------------------------------------------------------------------
 """Consumed surface of ``simpler_setup.kernel_compiler``."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
-from .toolchain import GxxToolchain, Toolchain
+from .toolchain import CCUToolchain, GxxToolchain, Toolchain, _CcuCacheInputs
+
+class _CcuCompileCacheToken(_CcuCacheInputs):
+    schema: int
+    logic: str
+    extra_include_dirs: tuple[str, ...]
+    working_directory: str
 
 class KernelCompiler:
     def __init__(self, platform: str = ...) -> None: ...
 
+    _sanitizers: str
+    ccu: CCUToolchain | None
     platform: str
     project_root: Path
     platform_dir: Path
@@ -23,6 +32,13 @@ class KernelCompiler:
     host_gxx: GxxToolchain
     gxx15: Toolchain
 
+    def ccu_compile_cache_token(
+        self,
+        *,
+        extra_include_dirs: list[str] | None = ...,
+        extra_compile_flags: Sequence[str] = ...,
+        extra_link_flags: Sequence[str] = ...,
+    ) -> _CcuCompileCacheToken: ...
     def get_incore_include_dirs(self) -> list[str]: ...
     def incore_compile_cache_token(self, core_type: str) -> dict[str, object]: ...
     def get_orchestration_cache_inputs(self, runtime_name: str) -> tuple[list[str], list[str]]: ...

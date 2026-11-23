@@ -144,6 +144,8 @@ void BindBackend(nb::module_& m) {
   // Per-backend behaviour dispatch. Passes / codegen / Python all consume this
   // interface rather than branching on BackendType.
   nb::class_<BackendHandler>(backend_mod, "BackendHandler", "Per-backend behaviour dispatch interface")
+      .def("support_ccu", &BackendHandler::SupportCcu,
+           "Whether this backend supports compiler-side CCU lowering")
       .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
       .def("has_hardware_loop_evidence", &BackendHandler::HasHardwareLoopEvidence, nb::arg("qualification"),

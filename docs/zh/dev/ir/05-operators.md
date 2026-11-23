@@ -957,3 +957,11 @@ Warp 内协作操作包括 `vote_all/any/uni`、`vote_ballot`、
 [SIMT 数学契约](11-simt.md#数学位操作与显式转换)。
 
 接口类型限制、`lanemask_*`、`bitcast`、shuffle 窗口与无符号比较见[覆盖矩阵](../codegen/06-simt-interface-coverage.md)。
+
+### 内部 CCU 注册
+
+`pld.system.register_ccu(allocation, callee="symbol", chip_callee="chip") -> CcuRegistrationType`
+仅供编译器使用。Ptr 必须可追溯到存活 `CommDomainScopeStmt` 中的
+`alloc_window_buffer`，`callee` 必须解析为 `FunctionType.CCU` 声明，`chip_callee` 指定消费它的 CHIP callable。
+注册具有可观察的资源/失败效果，DCE 保留该操作。必填 `device` Expr attr 选定域内的
+一个设备；返回该设备的本地注册，不启动 mission，消费者必须在同一 device 提交。参见 [CCU lowering](../passes/44-lower_l2_tensor_collectives.md#ccu-allgather)。

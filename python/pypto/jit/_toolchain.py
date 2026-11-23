@@ -882,6 +882,8 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     )
     orchestration = compiler._orchestration_toolchain(runtime_name)
     device = _gcc_inputs(_invocable(orchestration.cxx_path))
+    if compiler.platform == "a5":
+        device.update(_gcc_inputs(_invocable(compiler.sdk.host_gxx.cxx_path)))
     cann_root: Path | None = None
     if compiler.platform.endswith("sim"):
         device.update(_gcc_inputs(_invocable(compiler.sdk.gxx15.cxx_path)))

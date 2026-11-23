@@ -1056,6 +1056,18 @@ static IRNodePtr DeserializeCommDomainScopeStmt(const msgpack::object& fields_ob
                                                 DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
 
+  // Reflection serializes ScopeStmt fields before the derived slots. Window
+  // descriptors may first appear in body DT types, so decode those definitions
+  // before resolving the slot references (including across nested domains).
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
+  }
+
   std::vector<int64_t> devices;
   auto devices_obj = GetOptionalFieldObj(fields_obj, "devices", ctx);
   if (devices_obj.has_value() && devices_obj->type == msgpack::type::ARRAY) {
@@ -1075,15 +1087,6 @@ static IRNodePtr DeserializeCommDomainScopeStmt(const msgpack::object& fields_ob
       slots.push_back(std::static_pointer_cast<const WindowBuffer>(
           ctx.DeserializeNode(slots_obj->via.array.ptr[i], zone)));
     }
-  }
-
-  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
-  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-
-  std::vector<std::pair<std::string, std::any>> attrs;
-  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
-  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
   }
 
   std::vector<std::string> engines;

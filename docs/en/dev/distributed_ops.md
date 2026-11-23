@@ -751,8 +751,15 @@ ready barrier absorbs cross-rank launch skew.
 
 ### `pld.tensor.allgather`
 
+`engine="ccu"` supports code generation for Ascend950 CHIP BF16 allgather with domain registration:
+window input `[1, N]`, target `[NR, N]`, signal INT32 `[NR, 1]`, full packed ND
+static positive shapes, 2–64 ranks and straight-line calls. All windows must
+belong to one domain per call; a CHIP can use multiple domains. Input and target
+must be distinct. Runtime execution awaits simpler domain-binding ABI v2. Defaults retain the
+HOST/InCore implementations. See [CCU lowering and source ABI](passes/44-lower_l2_tensor_collectives.md#ccu-allgather).
+
 ```text
-pld.tensor.allgather(local_data, target, signal) -> DistributedTensorType(target)
+pld.tensor.allgather(local_data, target, signal, *, engine="default") -> DistributedTensorType(target)
 ```
 
 Gathers one `[1, SIZE]` local chunk from every rank into the window-bound

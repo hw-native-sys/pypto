@@ -789,3 +789,10 @@ IR 构建 API 支持：
 - 通过 MemRef 和 TileView 实现硬件感知的内存管理
 - 通过 GlobalVar 实现程序内函数调用
 - 通过 IterArg 实现循环携带依赖
+
+### CcuRegistrationType
+
+`CcuRegistrationType` 是内部 `pld.system.register_ccu` 返回的 HOST 专用不透明
+资源类型，属于 allocation token 选定的存活通信域和必填 `device` 指定的设备。
+只允许别名、SSA 合流选择及同 device HOST dispatch 的 `ccu_bindings` 消费它，不能作为设备实参或逃出所属域。printer 使用
+`pl._dump.CcuRegistration` 保留编译器 IR 的无损往返。

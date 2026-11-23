@@ -578,7 +578,11 @@ class TypeResolver:
             and node.value.attr == "_dump"
             and isinstance(node.value.value, ast.Name)
         ):
-            getters = {"WindowBuffer": ir.WindowBufferType.get, "Unknown": ir.UnknownType}
+            getters = {
+                "WindowBuffer": ir.WindowBufferType.get,
+                "Unknown": ir.UnknownType,
+                "CcuRegistration": ir.CcuRegistrationType.get,
+            }
             getter = getters.get(node.attr)
             return getter() if getter is not None else None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):

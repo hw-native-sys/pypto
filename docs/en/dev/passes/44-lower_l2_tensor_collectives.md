@@ -7,7 +7,8 @@ rewrites a `pld.tensor.*` collective written in a **CHIP orchestration body**
 into a call to a compiler-synthesized AIV kernel, so the collective becomes one
 ordinary task inside the caller's own pipeline.
 
-Today it handles `pld.tensor.all_to_all_v` with a compile-time `core_num`.
+It handles `pld.tensor.all_to_all_v` with a compile-time `core_num`, indexed
+all-to-all-v, and the CCU BF16 allgather path described below.
 
 The HOST rail ([`LowerHostTensorCollectives`](51-lower_host_tensor_collectives.md))
 solves the same problem one level up, and differently: it fans the collective
@@ -169,7 +170,8 @@ passes earlier, so re-reporting them here would blame the wrong pass.
 
 ## What this pass does *not* do
 
-- It does not create a `CommDomain` or allocate any collective staging buffer.
+- It does not create a `CommDomain` or allocate collective payload staging.
+  CCU allgather does synthesize local scheduling tokens.
   L3 still creates the domain, exchanges window addresses and binds the
   windows; L2 consumes local views and an already-built context.
 - It does not fan out per device. The `device=` dispatch stays in the HOST
@@ -269,3 +271,118 @@ Only A5 URMA PER_PEER transport is supported, with one writer per destination.
 Callers must order exchanges sharing queues; reusing the same InOut signal
 creates that dependency even when payload windows differ. HOST and InCore
 calls are unsupported. See the [user contract](../../user/distributed/20-all_to_all.md#indexed-alltoallv-on-a5-urma).
+
+## CCU allgather
+
+`engine="ccu"` lowers Ascend950 CHIP BF16 allgather to an AIV wrapper and a
+`FunctionType.CCU` native builtin declaration. Supported operands are window
+input `[1, N]`, target `[NR, N]`, and INT32 signal `[NR, 1]`, with full contiguous
+ND views, static positive shapes, and 2–64 ranks. Calls must form a straight-line
+CHIP sequence. Input and target must be distinct.
+
+The shared AIV wrapper has `(input, target, signal, order)` parameters; all three
+user windows retain DistributedTensor types. Its body invokes the actual CCU
+callee as an effectful statement and returns the target alias. The declaration
+carries `builtin_template_dir/vars`; native source is deduplicated by implementation
+and specialization, independently of wrapper shapes. Codegen resolves the callee
+to the callable's definition ID, shared by HOST `ccu_id` and device requests.
+There is no call-site identifier, slot parameter or `ccu_slot` attr.
+
+One local InOut order tensor per CHIP conservatively serializes CCU requests.
+Signal remains an InOut scheduling operand even though native allgather does not
+pack it. Directions and dependencies are derived before domain materialization.
+`MaterializeDistTensorCtx` appends one context per DistributedTensor, including
+all three wrapper windows. These compiler-added contexts are excluded from the
+native algorithm parameter pack; the wrapper has seven parameters in total.
+
+### Domain registration
+
+`MaterializeCommDomainScopes` keeps its existing window/device membership rules.
+A temporary provenance analysis follows SSA aliases, tensor views and returned
+parameter aliases to resolve each collective's windows at each HOST dispatch.
+All operands of one request, including signal, must resolve to the same domain;
+one CHIP can contain requests for different domains.
+
+For each used `(device, domain, definition)` combination, the pass inserts a
+HOST-only operation after its representative allocation and inside the domain:
+
+```text
+reg0 = pld.system.register_ccu(buffer, callee="ccu_definition", chip_callee="chip") {device=0}
+reg1 = pld.system.register_ccu(buffer, callee="ccu_definition", chip_callee="chip") {device=1}
+for rank in range(2):
+    window = pld.tensor.window(buffer, ...)
+    if rank == 0:
+        reg = reg0
+    else:
+        reg = reg1
+    chip(window, ..., device=rank, ccu_bindings=[reg])
+```
+
+`device` is required. Each registration returns that worker's local handle.
+All potentially new registrations precede the run's first task submission, even
+when several rank loops dispatch tasks. Window construction and rank loops stay
+intact; a rank selector at each dispatch chooses its local handles. Allocations
+that become available only after the first submission cannot support new CCU
+registrations and are rejected. Each CHIP call gets its own registration SSA
+values, including repeated calls to the same callable. Only repeated requirements
+within one dispatch are coalesced; runtime caching is left to simpler. Handles
+cannot escape their domain.
+
+Registration has resource/failure effects and is preserved by DCE. Handles are
+SSA values in dispatch attrs, never CHIP algorithm arguments. Static participant
+coverage and collective protocol order/count are checked per domain; compatible
+rank-local definition symbols need not be identical. A positive bounded rank loop
+(up to 64 ranks) and statically decidable rank-selection branches are supported.
+Other conditional/repeated dispatch, dynamic rank selection, nested device calls
+and allocations inside control flow remain unsupported.
+
+Generated HOST Python calls
+`domain.get_or_register_ccu(callables[name], ccu_id=N, worker=rank)` and passes
+`ccu_bindings=[local_registration, ...]` to `_submit_chip` for the same rank.
+The sequence is a deduplicated launch requirement set; its positions and order
+have no identity meaning. The IR `device` attr maps to runtime `worker`.
+The register op explicitly names its consuming `chip_callee`. Like AIV `func_id`,
+CCU IDs are assigned on first use within each callable. CHIP codegen produces one
+registration table for packaging and wrapper constants; HOST codegen consumes
+that exact table. The same definition may have different IDs in different
+callables, with separate registrations. Different submissions may use different
+definitions at the same domain/ID; a single submission cannot bind conflicting
+registrations there. No cross-call registration sharing is performed.
+
+### Native source contract and validation boundary
+
+This migration is **codegen-only**. `CCU_DOMAIN_ABI_VERSION = 2` and
+`CCU_RUNTIME_SUPPORTED = False` mark generated artifacts. The runtime builder
+rejects execution before compiling/registering native modules; `_submit_chip`
+also refuses bound submissions pending PyPTO integration and end-to-end validation.
+The pinned simpler runtime includes PR #3093's domain registration and coordinated
+prepare/activation interfaces, including `ChipCallable.build(..., ccu_modules=...)`.
+
+The device call follows simpler PR #3093's checked interface:
+`submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`. The context chooses
+the domain and the definition ID chooses its unique local mission. Repeated
+requests for that pair share the mission and are serialized by task dependencies.
+There is no separate CHIP execution accessor. Wrapper/native ABI guards and the
+runtime execution guard remain until the pinned runtime is integrated and verified.
+
+Requests retain `9 + 3 * NR` uint64 words, aligned to 64 bytes: input address/token,
+byte count, source row byte offset, segment count, four GoSize values, then each
+destination's address/token and **domain-logical rank**. Peers use ordinary scalar
+arguments; `PeerRank` conversion is removed. Registration channels are indexed
+in domain-logical order, including local-copy selection.
+
+The HBM algorithm retains 32 KiB chunks, 16 lanes, 4 GiB segmentation, separate
+main/remainder LoopGroups, readiness/completion handshakes and the resident
+trigger loop. After requests complete and become visible, simpler must stop and
+confirm quiescence before releasing per-run state. No static request count or
+user EXIT request is introduced.
+
+Peer handshakes use notify index `0`, with mask `1` for readiness and mask `2`
+for completion. All requests sharing a domain channel must be serialized to
+reuse this index safely. The callable-local `ccu_id` selects a mission only;
+it does not select the peer notify index and may differ across ranks.
+
+CPU tests cover the full lowering/codegen pipeline, overlapping domains,
+registration reuse, definition-ID consistency, ordinary ctx forwarding, source packaging,
+and generated wrapper/native code with mocked primitives. They do not validate
+hardware scheduling, resource lifetime, or HCOMM instruction synthesis.

@@ -996,6 +996,19 @@ inline CommCtxTypePtr GetCommCtxType() {
   return comm_ctx_type;
 }
 
+/// HOST-only resource handle for a CCU definition registered in a live domain.
+class CcuRegistrationType : public Type {
+ public:
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::CcuRegistrationType; }
+  [[nodiscard]] std::string TypeName() const override { return "CcuRegistrationType"; }
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+using CcuRegistrationTypePtr = std::shared_ptr<const CcuRegistrationType>;
+inline CcuRegistrationTypePtr GetCcuRegistrationType() {
+  static const auto type = std::make_shared<CcuRegistrationType>();
+  return type;
+}
+
 /**
  * @brief Opaque handle to an asynchronous GM->L2 prefetch context.
  *

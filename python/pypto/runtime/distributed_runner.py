@@ -1032,7 +1032,13 @@ def _record_dispatch_program(orch: Any, callable_id: Any, disp_dir: Path) -> Non
 
 # Called from generated host_orch.py code (pyright cannot see those references).
 def _submit_chip(  # pyright: ignore[reportUnusedFunction]
-    orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None
+    orch: Any,
+    callable_id: Any,
+    task_args: Any,
+    config: Any,
+    worker: int | None,
+    *,
+    ccu_bindings: list[Any] | tuple[Any, ...] | None = None,
 ) -> Any:
     """``orch.submit_next_level`` that stamps each dispatch's DFX directory.
 
@@ -1064,6 +1070,11 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     :func:`_resolve_chip_worker`. Resolution happens before the DFX namespacing
     so the artifacts land under the chip that actually ran the dispatch.
     """
+    if ccu_bindings:
+        # Every participating rank must have a prepared CCU registration before submission.
+        raise NotImplementedError(
+            "CCU domain binding ABI v2 is codegen-only; PyPTO runtime integration is pending"
+        )
     worker = _resolve_chip_worker(orch, worker)
     base = config.output_prefix
     if not base:

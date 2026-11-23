@@ -107,6 +107,10 @@ class BackendHandler:
     branching on :class:`BackendType` directly.
     """
 
+    def support_ccu(self) -> bool:
+        """Whether this backend supports compiler-side CCU lowering."""
+        ...
+
     def get_pto_target_arch(self) -> str: ...
     def has_hardware_loop_evidence(self, qualification: ir.HardwareLoopQualification, artifact: str) -> bool:
         """Check final artifact evidence; unsupported targets return false."""

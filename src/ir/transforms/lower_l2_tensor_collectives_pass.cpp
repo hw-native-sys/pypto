@@ -98,6 +98,7 @@
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/lower_l2/ccu_collectives.h"
 
 namespace pypto {
 namespace ir {
@@ -370,6 +371,15 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   LowerL2TensorCollectivesMutator(std::map<std::string, FunctionPtr>* kernels, StmtPtr body,
                                   ProgramPtr program)
       : kernels_(kernels), body_(std::move(body)), program_(std::move(program)) {}
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    if (IsCcuCollective(op)) {
+      for (const auto& arg : op->args_) {
+        CheckOperandIsRowMajor(arg, op->op_->name_, "operand", op->span_);
+      }
+    }
+    return IRMutator::VisitExpr_(op);
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -673,6 +683,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     if (IsOp(call->op_, "tensor.slice")) {
       return SliceKeepsRowMajor(call) ? std::optional<ExprPtr>(call->args_[0]) : std::nullopt;
     }
+    if (IsCcuAllGather(call)) return call->args_[1];
     if (IsManagedCollective(call)) return call->args_[1];  // returns its target
     return ReturnedArgument(call->op_, call->args_, result_index);
   }
@@ -791,8 +802,9 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     if (new_func.get() != func.get()) modified = true;
   }
   if (!modified) {
-    CheckNoResidualCollective(program);
-    return program;
+    auto result = LowerCcuCollectives(program);
+    CheckNoResidualCollective(result);
+    return result;
   }
 
   for (auto& [name, kernel] : kernels) {
@@ -803,7 +815,8 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     new_functions[gvar] = kernel;
   }
 
-  auto result = std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+  auto result = LowerCcuCollectives(
+      std::make_shared<Program>(std::move(new_functions), program->name_, program->span_));
   CheckNoResidualCollective(result);
   return result;
 }
