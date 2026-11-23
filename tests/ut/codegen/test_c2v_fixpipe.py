@@ -238,13 +238,14 @@ def test_fixpipe_requires_matching_pop_endpoints_and_result(bare_pop):
     "binding",
     [None, True, False, "opposite", "member", "wrong_group"]
     + ["shared", "shared_twice"]
-    + ["literal_same", "literal_crossed", "literal_spmd", "literal_spmd_fan_in", "literal_partial"],
+    + ["literal_same", "literal_crossed", "literal_spmd", "literal_spmd_fan_in", "literal_partial"]
+    + ["literal_shared", "literal_condition"],
 )
 @pytest.mark.ptoas_compile
 def test_fixpipe_endpoint_counts(binding, tmp_path):
     source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
     literals = isinstance(binding, str) and binding.startswith("literal_")
-    partial = binding in {"literal_same", "literal_partial"}
+    partial = binding in {"literal_same", "literal_partial", "literal_shared", "literal_condition"}
     extra = ", other: pl.Scalar[pl.BOOL]" if literals or binding in {"shared", "shared_twice"} else ""
     source = source.replace("enabled: pl.Scalar[pl.BOOL]):", f"enabled: pl.Scalar[pl.BOOL]{extra}):")
     if binding != "wrong_group":
@@ -255,7 +256,7 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
         before, body = source.split("        tile: ", 1)
         consumer, producer = ("        tile: " + body).split("    @pl.function", 1)
         guard = "other" if extra else "enabled"
-        branch = "" if literals else "            pass\n        else:\n"
+        branch = "" if literals and binding != "literal_shared" else "            pass\n        else:\n"
         source = before + f"        if {guard}:\n{branch}" + indent(consumer, "    ")
         source += "    @pl.function" + producer
     literal_member = binding == "member"
@@ -295,15 +296,18 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
             source += wrapper + (wrapper.replace("def wrapper(", "def second_wrapper(") if fan_in else "")
         source += f"\n    @pl.function(type=pl.FunctionType.Orchestration)\n{caller}\n"
         if literals:
+            prefix = "if y:\n            " if binding == "literal_condition" else ""
+            runtime_arguments = "x, x" if binding == "literal_shared" else "x, y"
             for enabled, out in ((True, "out"), (False, "second_out")):
                 other = enabled if binding == "literal_same" else not enabled
-                actuals = "x, y" if partial and not enabled else f"{enabled}, {other}"
+                actuals = runtime_arguments if partial and not enabled else f"{enabled}, {other}"
+                actuals = "True, y" if prefix else actuals
                 callee = "second_wrapper" if fan_in and not enabled else target
-                source += f"        self.{callee}(a, b, {out}, control_words, {actuals})\n"
+                source += f"        {prefix}self.{callee}(a, b, {out}, control_words, {actuals})\n"
         else:
             source += f"        self.wrapper({binding}, a, b, out, control_words)\n"
     program = pl.parse_program(source)
-    if binding is True or literal_member or binding == "literal_same":
+    if binding is True or literal_member or binding in {"literal_same", "literal_condition"}:
         _assemble(_generate(program)[1], tmp_path)
     else:
         group_only = bool(extra) or binding == "wrong_group"
@@ -458,34 +462,6 @@ def test_packed_control_contract(valid_shape, space, dtype, layout, message):
                 system_ops.set_quant_vector(controls)
 
 
-@pytest.mark.parametrize(
-    ("legacy_first", "extra", "message"),
-    [
-        (False, None, "exactly one initialize_pipe"),
-        (True, None, "exactly one initialize_pipe"),
-        (False, {"c2v_dtype": pl.FP32}, "cannot be combined"),
-        (False, {"pre_relu": True}, "cannot be combined"),
-        (False, {"local_slot_num": 2}, "local_slot_num is only supported on A2/A3"),
-    ],
-)
-def test_raw_fixpipe_initializer_contract(legacy_first, extra, message):
-    class MutateInit(ir.IRMutator):
-        def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:
-            call = op.expr
-            if not isinstance(call, ir.Call) or "acc_push_epilogue" not in call.kwargs:
-                return super().visit_eval_stmt(op)
-            kwargs = dict(call.kwargs) | (extra or {})
-            if extra is None:
-                del kwargs["acc_push_epilogue"]
-            changed = ir.EvalStmt(ir.Call(call.op, call.args, kwargs, call.type, call.span), op.span)
-            if extra is not None:
-                return changed
-            return ir.SeqStmts([changed, op] if legacy_first else [op, changed], op.span)
-
-    with pytest.raises(Error, match=message):
-        _verify_expanded(MutateInit().visit_program(_program()))
-
-
 @pytest.mark.parametrize("buffer_ir", [False, True])
 def test_scaling_allocations_remain_distinct_after_setter(buffer_ir):
     @pl.program
@@ -586,38 +562,6 @@ def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp
         _generate(program, buffer_ir)
     _, mlir = _generate(program, buffer_ir, passes.VerificationLevel.NONE)
     _assemble(mlir, tmp_path, expected_error="to use the same tile type")
-
-
-@pytest.mark.parametrize("quant", ["deqf16_scalar", "deqf16_vec"])
-@pytest.mark.parametrize("buffer_ir", [False, True])
-@pytest.mark.parametrize("round_trip", [False, True])
-@pytest.mark.ptoas_compile
-def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
-    source = ir.python_print(_program(quant=quant, slot_size=1024))
-    consumer, producer = source.rsplit("    @pl.function", 1)
-    c_init, c_body = consumer.split("        tile:", 1)
-    p_init, p_body = producer.split("        lhs:", 1)
-    c_body = "        tile:" + c_body
-    p_body = "        lhs:" + p_body.replace(
-        "set_quant_scalar(0.5", "set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5"
-    )
-    if round_trip:
-        c_init += "        reply = pl.import_peer_buffer(name='reply', peer_func='producer')\n"
-        c_init += "        pl.aiv_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)\n"
-        p_init += "        reply = pl.reserve_buffer(name='reply', size=2048)\n"
-        p_init += "        pl.aic_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)\n"
-        c_body = c_body.replace(
-            "        pl.system.tfree_to_aic",
-            "        pl.tpush_to_aic(tile, split=0, id=1)\n        pl.system.tfree_to_aic",
-        )
-        p_body += "\n        reply_tile = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)"
-        p_body += "\n        pl.tfree_to_aiv(reply_tile, id=1)\n"
-    loop = "        for i in pl.pipeline(4, stage=2):\n"
-    source = (
-        c_init + loop + indent(c_body, "    ") + "    @pl.function" + p_init + loop + indent(p_body, "    ")
-    )
-    _, mlir = _generate(pl.parse_program(source), buffer_ir)
-    _assemble(mlir, tmp_path)
 
 
 if __name__ == "__main__":

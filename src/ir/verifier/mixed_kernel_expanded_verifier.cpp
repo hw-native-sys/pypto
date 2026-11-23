@@ -630,8 +630,15 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     std::vector<TraceId> launches;
     int mask;
   };
-  // Leaf IDs encode dynamic, false and true. Other IDs store alternatives in call-site order.
+  // IDs 0–2 encode unknown, false and true. Other leaves identify a shared SSA value.
   std::vector<GuardTrace> traces{{{}, kEitherGuard}, {{}, kGuardFalse}, {{}, kGuardTrue}};
+  std::map<const Var*, TraceId> symbols;
+  auto symbol = [&](const Var* var) -> TraceId {
+    if (!var) return 0;
+    auto [it, inserted] = symbols.try_emplace(var, traces.size());
+    if (inserted) traces.push_back({{}, kEitherGuard});
+    return it->second;
+  };
   auto record_trace = [&](std::vector<TraceId> launches) {
     int mask = 0;
     for (const auto launch : launches) mask |= traces[launch].mask;
@@ -640,19 +647,16 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   };
   std::vector<std::pair<KernelPair, CallPtr>> groups;
   std::map<std::string, std::set<std::string>> group_peers;
-  struct GuardArgument {
-    const Var* origin = nullptr;
-    TraceId trace = 0;
-  };
-  std::map<const Var*, GuardArgument> group_bindings;
-  std::map<const Var*, std::vector<std::pair<const Var*, std::size_t>>> launch_inputs;
+  std::map<const Var*, TraceId> resolved;
+  std::map<const Var*, std::vector<std::pair<const Var*, TraceId>>> launch_inputs;
   for (const auto& [gv, func] : program->functions_) {
     if (!func || !func->body_) continue;
     auto& local = info[func->name_];
     local.VisitStmt(func->body_);
     if (!local.pushes.empty() || !local.pops.empty()) CountFixpipeEndpoints(func, local);
     if (!IsWrapperType(func->func_type_) && !IsOrchestrationLike(func->func_type_)) continue;
-    const auto members = CollectInnerCalls(func, program);
+    const auto members =
+        CollectInnerCalls(func, program, /*bind_guards=*/func->func_type_ != FunctionType::Group);
     if (func->func_type_ == FunctionType::Group) {
       const auto aiv = std::find_if(members.begin(), members.end(), [](const auto& member) {
         return member.inner_callee->func_type_ == FunctionType::AIV;
@@ -679,59 +683,53 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         const auto type = As<ScalarType>(target->GetType());
         if (!type || type->dtype_ != DataType::BOOL) continue;
         const auto source = AsVarLike(args[i]);
-        auto [it, inserted] = group_bindings.try_emplace(target, GuardArgument{source.get()});
-        if (!inserted && it->second.origin != source.get()) it->second.origin = nullptr;
         const auto literal = As<ConstBool>(args[i]);
         const bool forwarded = IsWrapperType(func->func_type_) && parameters.count(source);
-        launch_inputs[target].emplace_back(forwarded ? source.get() : nullptr,
-                                           literal ? (literal->value_ ? kGuardTrue : kGuardFalse) : 0);
+        const auto leaf = literal ? (literal->value_ ? kGuardTrue : kGuardFalse) : symbol(source.get());
+        launch_inputs[target].emplace_back(forwarded ? source.get() : nullptr, leaf);
       }
     }
   }
   // A forwarded input references its caller's alternatives without expanding the call tree.
   std::function<TraceId(const Var*)> resolve = [&](const Var* param) -> TraceId {
-    auto& trace = group_bindings[param].trace;
-    auto inputs = launch_inputs.extract(param);  // Cycles and unbound arguments are dynamic leaves.
-    if (inputs.empty()) return trace;
+    auto& trace = resolved[param];
+    auto inputs = launch_inputs.extract(param);
+    if (inputs.empty()) return trace ? trace : symbol(param);
     std::vector<TraceId> launches;
     for (const auto& [source, bit] : inputs.mapped()) launches.push_back(source ? resolve(source) : bit);
     return trace = record_trace(std::move(launches));
   };
   while (!launch_inputs.empty()) resolve(launch_inputs.begin()->first);
-  struct PeerArgument {
-    std::size_t representative = 0;
-    TraceId trace = 0;
-  };
-  // Intersect equal argument positions across Groups, each of which may use a different SSA value.
-  std::map<KernelPair, std::vector<PeerArgument>> peer_bindings;
+  std::map<KernelPair, std::vector<TraceId>> peer_bindings;
   for (const auto& [peers, member] : groups) {
     const auto& args = member->args_;
     auto& allowed = peer_bindings[peers];
     allowed.resize(std::max(allowed.size(), args.size()));
-    std::map<std::size_t, std::map<const Var*, std::size_t>> classes;
     for (std::size_t i = 0; i < args.size(); ++i) {
+      const auto type = As<ScalarType>(args[i]->GetType());
+      if (!type || type->dtype_ != DataType::BOOL) continue;
       const auto value = As<ConstBool>(args[i]);
-      const auto* var = AsVarLike(args[i]).get();
-      const auto found = group_bindings.find(var);
-      const auto known = found != group_bindings.end() ? found->second : GuardArgument{};
-      const auto* identity = known.origin ? known.origin : var;
-      auto& argument = allowed[i];
-      argument.representative =
-          identity ? classes[argument.representative].try_emplace(identity, i).first->second : i;
-      if (!argument.trace) argument.trace = record_trace({});
-      const TraceId launch = value ? (value->value_ ? kGuardTrue : kGuardFalse) : known.trace;
-      auto& column = traces[argument.trace];
+      const auto launch =
+          value ? (value->value_ ? kGuardTrue : kGuardFalse) : resolve(AsVarLike(args[i]).get());
+      if (!allowed[i]) allowed[i] = record_trace({});
+      auto& column = traces[allowed[i]];
       column.launches.push_back(launch);
       column.mask |= traces[launch].mask;
     }
   }
-  // Bits 0–3 record observed literal pairs FF, FT, TF, TT. Ignore only the dynamic alternatives.
+  // Bits 0–3 encode FF, FT, TF, TT. Shared SSA arguments can reach only FF and TT.
+  auto possible_pairs = [](int p, int q) {
+    return (p & kGuardFalse ? q : 0) | (p & kGuardTrue ? q << 2 : 0);
+  };
   std::map<std::pair<TraceId, TraceId>, int> known_pairs;
   std::function<int(TraceId, TraceId)> pair_mask = [&](TraceId p, TraceId q) -> int {
     if (!p || !q) return 0;
-    if (p < kEitherGuard && q < kEitherGuard) return 1 << ((p - 1) * 2 + q - 1);
-    auto [it, inserted] = known_pairs.try_emplace({p, q}, 0);
     const auto &a = traces[p].launches, &b = traces[q].launches;
+    if (a.empty() && b.empty()) {
+      if (p == q && p >= kEitherGuard) return 0b1001;
+      return p < kEitherGuard || q < kEitherGuard ? possible_pairs(traces[p].mask, traces[q].mask) : 0;
+    }
+    auto [it, inserted] = known_pairs.try_emplace({p, q}, 0);
     if (!inserted || (!a.empty() && !b.empty() && a.size() != b.size())) return it->second;
     for (std::size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
       it->second |= pair_mask(a.empty() ? p : a[i], b.empty() ? q : b[i]);
@@ -854,25 +852,21 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           const auto& push = push_count->second;
           const auto& pop = pop_count->second;
           const auto pair = peer_bindings.find(std::minmax(func->name_, peer_name));
-          auto argument = [&](const FixpipeEndpointCounts& flow) -> const PeerArgument* {
+          auto argument = [&](const FixpipeEndpointCounts& flow) -> TraceId {
             return pair != peer_bindings.end() && flow.guard_index && *flow.guard_index < pair->second.size()
-                       ? &pair->second[*flow.guard_index]
-                       : nullptr;
+                       ? pair->second[*flow.guard_index]
+                       : 0;
           };
-          const auto [push_arg, pop_arg] = std::make_pair(argument(push), argument(pop));
-          const auto push_trace = push_arg ? push_arg->trace : 0;
-          const auto pop_trace = pop_arg ? pop_arg->trace : 0;
+          const auto push_trace = argument(push), pop_trace = argument(pop);
           const int p = traces[push_trace].mask, q = traces[pop_trace].mask;
-          const bool shared = push_arg && pop_arg && push_arg->representative == pop_arg->representative;
-          const int possible = (p & kGuardFalse ? q : 0) | (p & kGuardTrue ? q << 2 : 0);
-          const int aligned = shared && possible == 0b1111 ? 0b1001 : possible;
+          const int possible = possible_pairs(p, q);
           const int unequal =
               (push.when_false != pop.when_false) | ((push.when_false != pop.when_true) << 1) |
               ((push.when_true != pop.when_false) << 2) | ((push.when_true != pop.when_true) << 3);
-          const bool comparable = shared || p != kEitherGuard || q != kEitherGuard ||
+          const bool comparable = p != kEitherGuard || q != kEitherGuard ||
                                   push.when_false == push.when_true || pop.when_false == pop.when_true;
           const bool mismatch = (pair_mask(push_trace, pop_trace) & unequal) ||
-                                (comparable ? (aligned & unequal) != 0 : (aligned & unequal) == aligned);
+                                (comparable ? (possible & unequal) != 0 : (possible & unequal) == possible);
           if (push.seen == pushes->second.size() && pop.seen == pops->second.size() && mismatch) {
             error(init, "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
           }
@@ -965,6 +959,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         const auto found = visible.find(id);
         const auto init = found == visible.end() ? nullptr : found->second;
         if (!init || !init->HasKwarg("acc_push_epilogue")) {
+          if (init && (push || pop) && !(init->GetKwarg<int>("dir_mask", 0) & kDirMaskC2V)) {
+            error(call, "C2V transfer requires a C2V-enabled initialize_pipe for its pipe id");
+          }
           if (scalar || vector || (!init && local.has_fixpipe)) {
             error(call, init ? "set_quant requires an acc_push_epilogue on the matching pipe id"
                              : "Fixpipe operation requires a dominating initialize_pipe for its pipe id");

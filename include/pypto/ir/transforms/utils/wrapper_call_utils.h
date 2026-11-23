@@ -79,8 +79,10 @@ GroupCalleeInfo FindGroupCallees(const FunctionPtr& group_func, const ProgramPtr
  * Used by cross-function direction propagation in
  * `ComputeWrapperEffectiveDirections`. Visits the body in order; each inner
  * Call appears once even if its callee is called from multiple sites.
+ * With bind_guards, returned call views reflect simple enclosing Boolean branches.
  */
-std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const ProgramPtr& program);
+std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const ProgramPtr& program,
+                                               bool bind_guards = false);
 
 /**
  * @brief Recover the true param directions of every Group / Spmd wrapper in

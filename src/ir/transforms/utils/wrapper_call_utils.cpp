@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -38,17 +39,29 @@ class CallVisitor : public IRVisitor {
  public:
   using OnMatchFn = std::function<bool(const CallPtr&, const FunctionPtr&)>;
 
-  CallVisitor(const ProgramPtr& program, OnMatchFn on_match, bool reject_submit_dispatch_metadata = false)
+  CallVisitor(const ProgramPtr& program, OnMatchFn on_match, bool reject_submit_dispatch_metadata = false,
+              bool bind_guards = false)
       : program_(program),
         on_match_(std::move(on_match)),
-        reject_submit_dispatch_metadata_(reject_submit_dispatch_metadata) {}
+        reject_submit_dispatch_metadata_(reject_submit_dispatch_metadata),
+        bind_guards_(bind_guards) {}
 
  protected:
+  void VisitStmt_(const IfStmtPtr& stmt) override {
+    const auto condition = bind_guards_ ? AsVarLike(stmt->condition_) : nullptr;
+    if (!condition) return IRVisitor::VisitStmt_(stmt);
+    auto [it, inserted] = guards_.try_emplace(condition.get(), true);
+    if (it->second) VisitStmt(stmt->then_body_);
+    if (inserted) it->second = false;
+    if (!it->second && stmt->else_body_) VisitStmt(*stmt->else_body_);
+    if (inserted) guards_.erase(it);
+  }
+
   void VisitExpr_(const CallPtr& call) override {
     if (stop_) return;
     if (auto gv = As<GlobalVar>(call->op_)) {
       if (auto callee = program_->GetFunction(gv->name_)) {
-        if (on_match_(call, callee)) {
+        if (on_match_(guards_.empty() ? call : BindGuards(call), callee)) {
           stop_ = true;
           return;
         }
@@ -70,10 +83,22 @@ class CallVisitor : public IRVisitor {
   }
 
  private:
+  [[nodiscard]] CallPtr BindGuards(const CallPtr& call) const {
+    auto args = call->args_;
+    for (auto& arg : args) {
+      const auto guard = guards_.find(AsVarLike(arg).get());
+      if (guard != guards_.end()) arg = std::make_shared<ConstBool>(guard->second, arg->span_);
+    }
+    return std::make_shared<Call>(call->op_, std::move(args), call->kwargs_, call->attrs_, call->GetType(),
+                                  call->span_);
+  }
+
   const ProgramPtr& program_;
   OnMatchFn on_match_;
   bool reject_submit_dispatch_metadata_;
+  bool bind_guards_;
   bool stop_ = false;
+  std::map<const Var*, bool> guards_;
 };
 
 }  // namespace
@@ -125,17 +150,21 @@ GroupCalleeInfo FindGroupCallees(const FunctionPtr& group_func, const ProgramPtr
   return info;
 }
 
-std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const ProgramPtr& program) {
+std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const ProgramPtr& program,
+                                               bool bind_guards) {
   std::vector<WrapperCallInfo> result;
   if (!wrapper || !wrapper->body_ || !program) return result;
-  CallVisitor visitor(program, [&](const CallPtr& call, const FunctionPtr& callee) {
-    // Exclude semantics: a Graph callee is a task launch, not a wrapper's
-    // inner kernel call, so it must be skipped alongside Orchestration.
-    if (!IsOrchestrationLike(callee->func_type_) && callee->func_type_ != FunctionType::Opaque) {
-      result.push_back({call, callee});
-    }
-    return false;
-  });
+  CallVisitor visitor(
+      program,
+      [&](const CallPtr& call, const FunctionPtr& callee) {
+        // Exclude semantics: a Graph callee is a task launch, not a wrapper's
+        // inner kernel call, so it must be skipped alongside Orchestration.
+        if (!IsOrchestrationLike(callee->func_type_) && callee->func_type_ != FunctionType::Opaque) {
+          result.push_back({call, callee});
+        }
+        return false;
+      },
+      false, bind_guards);
   visitor.VisitStmt(wrapper->body_);
   return result;
 }
