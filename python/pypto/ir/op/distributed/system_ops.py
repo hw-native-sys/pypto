@@ -22,7 +22,7 @@ from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, NotifyOp, Span, WaitCmp
+from pypto.pypto_core.ir import Call, CommEngine, NotifyOp, Span, WaitCmp
 
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
@@ -142,4 +142,71 @@ def defer_wait(
     )
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+def _normalize_async_engine(engine: object, op_name: str) -> int:
+    """Validate the enum before conversion can erase an invalid input's type.
+
+    Mirrors the helper of the same name in
+    :mod:`pypto.ir.op.distributed.tensor_ops`; the ``object`` parameter is what
+    makes the check reachable for a caller that passes a non-enum.
+    """
+    if not isinstance(engine, CommEngine):
+        raise TypeError(f"{op_name} engine must be CommEngine.URMA, got {engine!r} ({type(engine).__name__})")
+    return int(engine)
+
+
+def make_session(
+    ctx: _ir_core.Expr,
+    peer: int | _ir_core.Expr,
+    *,
+    engine: CommEngine = CommEngine.URMA,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.system.make_session(ctx, peer)`` Call returning an ``AsyncSessionType``.
+
+    The session binds one communication context to one peer rank and owns the
+    engine, so the tile submission ops do not repeat either. Reuse one session
+    across submissions to the same peer.
+
+    The session carries mutable ISA runtime state across posts and waits: it is
+    not a value. Never copy one, rebuild one as a substitute for another, or
+    treat two sessions over the same workspace as independent queues.
+
+    ``ctx`` comes from :func:`get_comm_ctx`. A constant ``peer`` must be
+    non-negative, and ``engine`` must be a :class:`CommEngine` member; V2
+    accepts :attr:`CommEngine.URMA` only.
+    """
+    engine_value = _normalize_async_engine(engine, "pld.system.make_session")
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call(
+        "pld.system.make_session", [ctx, peer_expr], {"engine": engine_value}, actual_span
+    )
+
+
+def wait_event(event: _ir_core.Expr, session: _ir_core.Expr, *, span: Span | None = None) -> Call:
+    """Build a ``pld.system.wait_event(event, session)`` Call returning ``ScalarType(BOOL)``.
+
+    Block until one asynchronous transfer completes within the session that
+    produced its event. Lowers to the ISA ``event.Wait(session)`` and registers
+    **no** task-completion condition — an in-kernel wait is the alternative to
+    handing completion to the task, not a supplement to it.
+
+    ``event`` comes from a submission such as
+    :func:`pypto.ir.op.distributed.tile_ops.put_async`, and ``session`` must be
+    the session that produced it.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.system.wait_event", [event, session], {}, actual_span)
+
+
+__all__ = [
+    "defer_wait",
+    "get_comm_ctx",
+    "make_session",
+    "notify",
+    "nranks",
+    "rank",
+    "wait",
+    "wait_event",
+    "world_size",
+]

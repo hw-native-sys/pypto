@@ -3291,3 +3291,137 @@ def test_async_transfer_rejects_unknown_atomic_kwarg(op_name):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# pld.system.make_session / pld.tile.put_async / pld.system.wait_event
+# (V2 explicit session + event surface)
+# ---------------------------------------------------------------------------
+
+
+def _make_session(span, peer=1):
+    """Build a session over a fresh comm context, as the DSL would."""
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    return dist_system_ops.make_session(ctx, peer, span=span)
+
+
+def test_make_session_returns_async_session_type():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    assert isinstance(session.type, ir.AsyncSessionType)
+    assert session.type is ir.AsyncSessionType.get()
+
+
+def test_make_session_requires_comm_ctx():
+    """The session is built on a CommContext, not on the tensor itself."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    peer = ir.ConstInt(1, DataType.INT32, span)
+    with pytest.raises(ValueError, match="CommContext"):
+        ir.create_op_call(
+            "pld.system.make_session", [target, peer], {"engine": int(ir.CommEngine.URMA)}, span
+        )
+
+
+def test_make_session_requires_urma_engine():
+    """V2 pins the engine exactly as V1 does: URMA only, rejected by name."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    peer = ir.ConstInt(1, DataType.INT32, span)
+    with pytest.raises(ValueError, match="CommEngine.URMA"):
+        ir.create_op_call("pld.system.make_session", [ctx, peer], {"engine": 0}, span)
+
+
+def test_make_session_rejects_negative_constant_peer():
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    peer = ir.ConstInt(-1, DataType.INT32, span)
+    with pytest.raises(ValueError, match="non-negative"):
+        ir.create_op_call("pld.system.make_session", [ctx, peer], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_make_session_rejects_non_enum_engine_in_builder():
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    with pytest.raises(TypeError, match="CommEngine.URMA"):
+        dist_system_ops.make_session(ctx, 1, engine=cast(Any, 1), span=span)
+
+
+def test_tile_put_async_returns_event_not_dst():
+    """V2's explicit form returns an event; only V1 returns dst (D2)."""
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    call = dist_tile_ops.put_async(dst, src, session, span=span)
+    assert isinstance(call.type, ir.AsyncEventType)
+    assert not isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_tile_put_async_requires_session_handle():
+    """A bare peer scalar is not a session: engine and peer live on the session."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    peer = ir.ConstInt(1, DataType.INT32, span)
+    with pytest.raises(ValueError, match="AsyncSession"):
+        ir.create_op_call("pld.tile.put_async", [dst, src, peer], {}, span)
+
+
+def test_tile_put_async_rejects_engine_kwarg():
+    """Engine lives on the session; V3's controls are not V2."""
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    with pytest.raises(ValueError, match="no kwargs"):
+        ir.create_op_call(
+            "pld.tile.put_async", [dst, src, session], {"engine": int(ir.CommEngine.URMA)}, span
+        )
+
+
+def test_tile_put_async_requires_distributed_destination():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    with pytest.raises(ValueError, match="DistributedTensor"):
+        ir.create_op_call("pld.tile.put_async", [dst, src, session], {}, span)
+
+
+def test_tile_put_async_rejects_dtype_mismatch():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP32, span)
+    with pytest.raises(ValueError, match="same element type"):
+        ir.create_op_call("pld.tile.put_async", [dst, src, session], {}, span)
+
+
+def test_wait_event_returns_bool():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    event = dist_tile_ops.put_async(dst, src, session, span=span)
+
+    call = dist_system_ops.wait_event(event, session, span=span)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.BOOL
+
+
+def test_wait_event_rejects_swapped_operands():
+    """Event and session are distinct handle types, so the order is checked."""
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    event = dist_tile_ops.put_async(dst, src, session, span=span)
+
+    with pytest.raises(ValueError, match="AsyncEvent"):
+        ir.create_op_call("pld.system.wait_event", [session, event], {}, span)

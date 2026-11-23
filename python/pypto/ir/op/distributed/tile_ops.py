@@ -228,4 +228,33 @@ def get(
     return _ir_core.create_op_call("pld.tile.get", args, {}, actual_span)
 
 
-__all__ = ["get", "remote_load", "remote_store", "put", "_remote_load_with_physical_tail_padding"]
+def put_async(dst: Expr, src: Expr, session: Expr, *, span: Span | None = None) -> Call:
+    """Build a ``pld.tile.put_async(dst, src, session)`` Call returning an ``AsyncEventType``.
+
+    Submit one asynchronous URMA write of the local ``src`` into the session's
+    peer slice of the window-bound DistributedTensor ``dst``, and return the
+    completion event for that single logical transfer.
+
+    Unlike the V1 ``pld.tensor.put_async``, this returns an **event**, not
+    ``dst``: the explicit-event form is a separate op so one call never changes
+    its return type by context. Returning still does not mean the transfer
+    completed — pair the event with its producing ``session`` in
+    :func:`pypto.ir.op.distributed.system_ops.wait_event`.
+
+    The engine and peer come from ``session``, so they are not repeated here,
+    and submission registers no task-completion condition. ``dst`` and ``src``
+    must share an element type and shape, and both endpoint views must be dense
+    row-major.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.tile.put_async", [dst, src, session], {}, actual_span)
+
+
+__all__ = [
+    "get",
+    "remote_load",
+    "remote_store",
+    "put",
+    "put_async",
+    "_remote_load_with_physical_tail_padding",
+]
