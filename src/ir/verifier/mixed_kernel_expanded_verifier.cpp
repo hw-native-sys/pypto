@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -17,6 +18,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string>
@@ -743,13 +745,28 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         }
       }
       std::size_t varying = 0;
+      int64_t divisor = 0;
       for (const auto& [id, counts] : values) {
-        lower += std::min(counts.first, counts.second);
-        upper += std::max(counts.first, counts.second);
-        varying += counts.first != counts.second;
+        const auto [lo, hi] = std::minmax(counts.first, counts.second);
+        lower += lo;
+        upper += hi;
+        divisor = std::gcd(divisor, hi - lo);
+        varying += lo != hi;
       }
-      // Independent dynamic guards may be correlated beyond the simple SSA relationships we track.
-      return entry->second = lower > 0 || upper < 0 || (!opaque && varying <= 1 && lower != upper);
+      // Unknown relationships may restrict the sums further; only reject provable gaps.
+      const bool impossible = lower > 0 || upper < 0 || (!opaque && varying <= 1 && lower != upper) ||
+                              (divisor && lower % divisor);
+      if (impossible) return entry->second = true;
+      // Bound the exact subset-sum window; the range and divisibility checks have no cutoff.
+      constexpr int64_t kExactLimit = 256;
+      const auto target = std::min(-lower, upper);
+      if (!target || target > kExactLimit) return false;
+      std::bitset<kExactLimit + 1> reachable(1);
+      for (const auto& [id, counts] : values) {
+        const auto [lo, hi] = std::minmax(counts.first, counts.second);
+        if (hi - lo <= target) reachable |= reachable << (hi - lo);
+      }
+      return entry->second = !reachable.test(target);
     };
     return check(initial);
   };

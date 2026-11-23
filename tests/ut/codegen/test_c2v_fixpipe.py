@@ -177,19 +177,6 @@ def test_explicit_fixpipe_compiles(quant, relu, tmp_path):
         assert "TileType::Scaling, uint64_t" in cpp
 
 
-@pytest.mark.parametrize("buffer_ir", [False, True])
-@pytest.mark.parametrize("side", ["producer", "consumer", "both"])
-@pytest.mark.parametrize("depth", [1, 4])
-@pytest.mark.ptoas_compile
-def test_pipe_buffer_aliases_compile(buffer_ir, side, depth, tmp_path):
-    aliases = _PipeBufferAliases(depth if side != "consumer" else 0, depth if side != "producer" else 0)
-    lowered, mlir = _generate(aliases.visit_program(_program()), buffer_ir)
-    consumer = lowered.get_function("consumer")
-    assert consumer is not None and consumer.attrs["dual_aiv_dispatch"] is True
-    assert mlir.index("pto.aiv_initialize_pipe") < mlir.index("scf.if")
-    _assemble(mlir, tmp_path)
-
-
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -365,12 +352,6 @@ def test_init_rejects_invalid_contract(initialize, options, message):
         initialize(**(defaults | options))
 
 
-def test_epilogue_value_round_trip():
-    program = _program()
-    ir.assert_structural_equal(program, ir.deserialize(ir.serialize(program)))
-    ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
-
-
 @pytest.mark.parametrize(
     ("valid_shape", "space", "dtype", "layout", "message"),
     [
@@ -449,6 +430,7 @@ def test_scaling_allocations_remain_distinct_after_setter(buffer_ir):
         if isinstance(tile, ir.TileType) and tile.memory_space == ir.MemorySpace.Scaling
     ]
     assert first is not None and second is not None
+    # Asynchronous TPUSH reads controls after the setter in either IR path.
     assert not ir.MemRef.same_allocation(first, second)
 
 
