@@ -133,6 +133,12 @@ def _generate(program, buffer_ir=False, verification_level=passes.VerificationLe
     return lowered, modules if isinstance(modules, str) else "".join(modules.values())
 
 
+def _verify_expanded(program):
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.MixedKernelExpanded)
+    passes.verify_properties(props, program, "test")
+
+
 def _assemble(mlir, tmp_path, expected_error=None):
     compiler = find_ptoas_binary()
     if not compiler:
@@ -229,32 +235,48 @@ def test_fixpipe_pop_requires_a_matching_push():
 
 @pytest.mark.parametrize(
     ("guarded_pop", "binding"),
-    [(False, None), (True, None), (False, True), (False, False), (False, "member")],
+    [
+        (False, None),
+        (True, None),
+        (False, True),
+        (False, False),
+        (False, "member"),
+        (True, "shared"),
+        (True, "shared_twice"),
+    ],
 )
 @pytest.mark.ptoas_compile
 def test_fixpipe_endpoint_counts(guarded_pop, binding, tmp_path):
     source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
+    extra = ", other: pl.Scalar[pl.BOOL]" if binding in {"shared", "shared_twice"} else ""
+    source = source.replace("enabled: pl.Scalar[pl.BOOL]):", f"enabled: pl.Scalar[pl.BOOL]{extra}):")
     source = source.replace(
         "        pl.tile.tpush_to_aiv(", "        if enabled:\n            pl.tile.tpush_to_aiv("
     )
     if guarded_pop:
         before, body = source.split("        tile: ", 1)
         consumer, producer = ("        tile: " + body).split("    @pl.function", 1)
-        source = before + "        if enabled:\n            pass\n        else:\n" + indent(consumer, "    ")
+        guard = "other" if extra else "enabled"
+        source = before + f"        if {guard}:\n            pass\n        else:\n" + indent(consumer, "    ")
         source += "    @pl.function" + producer
     literal_member = binding == "member"
     if guarded_pop or binding is not None:
         signature = next(line for line in source.splitlines() if line.startswith("    def producer("))
         group = signature.replace("producer(", "group(self, ")
-        if binding is not None:
+        if extra:
+            group = group.replace(extra, "")
+        elif binding is not None:
             group = group.replace(", enabled: pl.Scalar[pl.BOOL]", "")
             if not literal_member:
                 group = group.replace("group(self, ", "group(self, enabled: pl.Scalar[pl.BOOL], ")
-        source += "\n    @pl.function(type=pl.FunctionType.Group)\n" + group
-        arg = "True" if literal_member else "enabled"
-        source += f"\n        self.producer(a, b, out, control_words, {arg})\n"
-        source += f"        self.consumer(a, b, out, control_words, {arg})\n"
-    if binding is not None and not literal_member:
+        arg = "True" if literal_member else ("enabled, enabled" if extra else "enabled")
+        group_source = f"\n    @pl.function(type=pl.FunctionType.Group)\n{group}\n"
+        for callee in ("producer", "consumer"):
+            group_source += f"        self.{callee}(a, b, out, control_words, {arg})\n"
+        source += group_source
+        if binding == "shared_twice":
+            source += group_source.replace("def group(", "def other_group(")
+    if isinstance(binding, bool):
         caller = signature.replace("producer(", "main(self, ").replace(", enabled: pl.Scalar[pl.BOOL]", "")
         source += "\n    @pl.function(type=pl.FunctionType.Spmd)\n" + group.replace("group(", "wrapper(")
         source += "\n        self.group(enabled, a, b, out, control_words)\n"
@@ -262,13 +284,12 @@ def test_fixpipe_endpoint_counts(guarded_pop, binding, tmp_path):
         source += f"\n        self.wrapper({binding}, a, b, out, control_words)\n"
     program = pl.parse_program(source)
     if binding is True or literal_member:
-        properties = passes.IRPropertySet()
-        properties.insert(passes.IRProperty.MixedKernelExpanded)
-        passes.verify_properties(properties, passes.simplify()(program), "test")
+        _verify_expanded(passes.simplify()(program))
         _assemble(_generate(program)[1], tmp_path)
     else:
+        verify = _verify_expanded if extra else _generate
         with pytest.raises(Error, match="endpoint counts differ across control-flow paths"):
-            _generate(program)
+            verify(passes.simplify()(program) if extra else program)
 
 
 @pytest.mark.parametrize("schedule", ["overflow", "reverse", "sequential", "nested"])
@@ -344,13 +365,8 @@ def test_epilogue_value_round_trip():
     ir.assert_structural_equal(program, ir.deserialize(ir.serialize(program)))
     ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
 
-    call = ir.Call(
-        ir.get_op("system.aic_initialize_pipe"),
-        [],
-        {"acc_push_epilogue": {}},
-        ir.ScalarType(pl.INT32),
-        ir.Span.unknown(),
-    )
+    op = ir.get_op("system.aic_initialize_pipe")
+    call = ir.Call(op, [], {"acc_push_epilogue": {}}, ir.ScalarType(pl.INT32), ir.Span.unknown())
     with pytest.raises(ValueError, match="Invalid serialized AccPushEpilogue"):
         ir.deserialize(ir.serialize(call))
 

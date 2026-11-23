@@ -666,8 +666,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     }
   }
   // Each Boolean bit flows over a forwarding edge at most twice.
-  for (const auto& [source, destinations] : forwarded)
-    group_bindings.try_emplace(source, GuardArgument{kEitherGuard});
+  for (const auto& edge : forwarded) group_bindings.try_emplace(edge.first, GuardArgument{kEitherGuard});
   std::vector<const Var*> pending;
   for (const auto& [param, binding] : group_bindings) {
     if (binding.mask) pending.push_back(param);
@@ -682,12 +681,17 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       pending.push_back(target);
     }
   }
-  // Project each Group's bindings to the shared kernel argument order.
-  std::map<KernelPair, std::vector<GuardArgument>> peer_bindings;
+  struct PeerArgument {
+    int mask = 0;
+    std::size_t representative = 0;
+  };
+  // Intersect equal argument positions across Groups, each of which may use a different SSA value.
+  std::map<KernelPair, std::vector<PeerArgument>> peer_bindings;
   for (const auto& [peers, member] : groups) {
     const auto& args = member->args_;
     auto& allowed = peer_bindings[peers];
     allowed.resize(std::max(allowed.size(), args.size()));
+    std::map<std::size_t, std::map<const Var*, std::size_t>> classes;
     for (std::size_t i = 0; i < args.size(); ++i) {
       const auto value = As<ConstBool>(args[i]);
       const auto* var = AsVarLike(args[i]).get();
@@ -695,7 +699,8 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const auto known = found != group_bindings.end() ? found->second : GuardArgument{};
       const auto* identity = known.origin ? known.origin : var;
       auto& argument = allowed[i];
-      argument.origin = argument.mask && argument.origin != identity ? nullptr : identity;
+      argument.representative =
+          identity ? classes[argument.representative].try_emplace(identity, i).first->second : i;
       argument.mask |=
           value ? (value->value_ ? kGuardTrue : kGuardFalse) : (known.mask ? known.mask : kEitherGuard);
     }
@@ -815,20 +820,20 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           const auto& push = push_count->second;
           const auto& pop = pop_count->second;
           const auto pair = peer_bindings.find(std::minmax(func->name_, peer_name));
-          auto argument = [&](const FixpipeEndpointCounts& flow) {
+          auto argument = [&](const FixpipeEndpointCounts& flow) -> const PeerArgument* {
             return pair != peer_bindings.end() && flow.guard_index && *flow.guard_index < pair->second.size()
-                       ? pair->second[*flow.guard_index]
-                       : GuardArgument{kEitherGuard, nullptr};
+                       ? &pair->second[*flow.guard_index]
+                       : nullptr;
           };
-          const auto push_arg = argument(push), pop_arg = argument(pop);
-          auto counts = [](const FixpipeEndpointCounts& flow, int mask) {
+          const auto* push_arg = argument(push);
+          const auto* pop_arg = argument(pop);
+          auto counts = [](const FixpipeEndpointCounts& flow, const PeerArgument* binding) {
+            const auto mask = binding ? binding->mask : kEitherGuard;
             return std::make_pair(mask == kGuardFalse ? flow.when_false : flow.when_true,
                                   mask == kGuardTrue ? flow.when_true : flow.when_false);
           };
-          const auto p = counts(push, push_arg.mask), q = counts(pop, pop_arg.mask);
-          const bool shared =
-              pair != peer_bindings.end() &&
-              (push.guard_index == pop.guard_index || (push_arg.origin && push_arg.origin == pop_arg.origin));
+          const auto p = counts(push, push_arg), q = counts(pop, pop_arg);
+          const bool shared = push_arg && pop_arg && push_arg->representative == pop_arg->representative;
           const bool comparable = p.first == p.second || q.first == q.second || shared;
           const auto p_range = std::minmax(p.first, p.second), q_range = std::minmax(q.first, q.second);
           const bool mismatch =

@@ -15,43 +15,21 @@ import torch
 from harness import st
 
 
-@pl.jit.incore
-def _column_view(
-    a: pl.Tensor[[32, 32], pl.BF16],
-    b: pl.Tensor[[32, 16], pl.BF16],
-    out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-):
-    lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-    rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
-    acc = pl.matmul(lhs, rhs)
-    dn = pl.tile.move(
-        acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
-    )
-    return pl.store(pl.tile.transpose_view(dn), [0, 0], out)
-
-
-@pl.jit.incore
-def _row_transpose(
-    a: pl.Tensor[[32, 32], pl.BF16],
-    b: pl.Tensor[[32, 16], pl.BF16],
-    out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-):
-    lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-    rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
-    acc = pl.matmul(lhs, rhs)
-    nd = pl.tile.move(
-        acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
-    )
-    return pl.store(pl.tile.transpose(nd, 0, 1), [0, 0], out)
-
-
 @pl.jit
 def column_view(
     a: pl.Tensor[[32, 32], pl.BF16],
     b: pl.Tensor[[32, 16], pl.BF16],
     out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
 ):
-    return _column_view(a, b, out)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(lhs, rhs)
+        dn = pl.tile.move(
+            acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
+        )
+        pl.store(pl.tile.transpose_view(dn), [0, 0], out)
+    return out
 
 
 @pl.jit
@@ -60,7 +38,15 @@ def row_transpose(
     b: pl.Tensor[[32, 16], pl.BF16],
     out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
 ):
-    return _row_transpose(a, b, out)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(lhs, rhs)
+        nd = pl.tile.move(
+            acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+        )
+        pl.store(pl.tile.transpose(nd, 0, 1), [0, 0], out)
+    return out
 
 
 def _case(kernel, signed, buffer_ir):
