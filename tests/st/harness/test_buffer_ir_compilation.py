@@ -128,10 +128,11 @@ def test_compile_paths_forward_execution_mode(tmp_path, monkeypatch, target_plat
         raise _CompileCaptured("compile target captured")
 
     monkeypatch.setattr(tr, "_compile_case_program", capture)
+    # A routing probe must not switch the backend for subsequent device tests.
+    monkeypatch.setattr(tr, "_install_backend", lambda _arch: None)
     case = _case(enabled=False)
     case.platform = target_platform
     arch, mode = _parse_platform(target_platform)
-    tr._install_backend(arch)
     if in_pool:
         with pytest.raises(_CompileCaptured, match="compile target captured"):
             tr._compile_for_cache(case, tmp_path, target_platform, False, False)
