@@ -17,15 +17,13 @@ from typing import NoReturn
 
 import pytest
 import torch
+from pypto import ir
 from pypto.runtime.tensor_spec import TensorSpec
 
 
 @pytest.fixture
 def w2_module(monkeypatch: pytest.MonkeyPatch, pytestconfig: pytest.Config) -> ModuleType:
     pytestconfig.addinivalue_line("markers", "platforms(*names): supported system-test platforms")
-    pytestconfig.addinivalue_line(
-        "markers", "platform_xfail(*names, reason, strict=True): expected platform failures"
-    )
     st_dir = Path(__file__).resolve().parents[2] / "st"
     monkeypatch.syspath_prepend(str(st_dir))
     path = st_dir / "runtime" / "cross_core" / "test_w2_fp4_nz_mx_scale.py"
@@ -71,6 +69,15 @@ def test_w2_collection_defers_inputs_and_preserves_bytes(
         # Compare FP8 and scale carriers byte-for-byte, including the sentinel
         # output rows which the partial-row golden must preserve.
         assert torch.equal(actual.view(torch.uint8), reference.view(torch.uint8))
+
+
+@pytest.mark.parametrize("name", ["routed_w2", "w2_group", "w2_cube"])
+def test_w2_partial_output_preserves_host_initial_contents(w2_module: ModuleType, name: str) -> None:
+    program = getattr(w2_module, name).specialize()
+    function = program.get_function(name)
+    assert function is not None
+    # Untouched expert rows retain the host sentinel only with copy-in enabled.
+    assert function.param_directions[-1] == ir.ParamDirection.InOut
 
 
 if __name__ == "__main__":

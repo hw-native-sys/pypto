@@ -1131,6 +1131,49 @@ def _find_ptoas_function(
     return params_start, params_end, body_start, body_end
 
 
+def _honor_runtime_aiv_lane_control(func: _ir_core.Function, ptoas_code: str) -> str:
+    """Retain explicit runtime lane control across PTOAS's no-split lowering.
+
+    PTOAS recognizes its native subblock op as explicit control. PyPTO instead
+    forwards the runtime lane through a synthetic parameter, so pinned PTOAS
+    can add an extra hardware-AIV0 guard around even the shared pipe setup.
+    Remove only that generated prologue guard for an explicitly dual-dispatched
+    AIV function with a dynamic runtime lane. Its authored IR control remains.
+    """
+    if (
+        func.func_type != _ir_core.FunctionType.AIV
+        or not _requires_dual_aiv_dispatch(func)
+        or not _uses_dynamic_subblock_id(func)
+        or _backend_core.get_handler().get_pto_target_arch() != "a5"
+    ):
+        return ptoas_code
+    guard_pattern = re.compile(r"if\s*\(\s*get_subblockid\(\)\s*==\s*0\s*\)\s*\{")
+    if not guard_pattern.search(ptoas_code):
+        return ptoas_code
+    _, _, body_start, body_end = _find_ptoas_function(func.name, ptoas_code)
+    body = ptoas_code[body_start + 1 : body_end]
+    prologue = re.search(
+        r"#if\s+defined\(__DAV_VEC__\)\s*"
+        r"set_mask_norm\(\);\s*set_vector_mask\(-1,\s*-1\);\s*"
+        r"(?P<guard>if\s*\(\s*get_subblockid\(\)\s*==\s*0\s*\)\s*\{)",
+        body,
+    )
+    if prologue is None:
+        if guard_pattern.search(body):
+            raise RuntimeError(f"{func.name}: unrecognized PTOAS single-lane guard with runtime AIV control")
+        return ptoas_code
+    guard_start = body_start + 1 + prologue.start("guard")
+    opening = body_start + prologue.end("guard")
+    closing = _find_matching_delimiter(ptoas_code, opening, "{", "}")
+    if (
+        closing < 0
+        or closing >= body_end
+        or not re.match(r"\s*#endif\s*//\s*__DAV_VEC__", ptoas_code[closing + 1 : body_end])
+    ):
+        raise RuntimeError(f"{func.name}: malformed PTOAS no-split vector prologue guard")
+    return ptoas_code[:guard_start] + ptoas_code[opening + 1 : closing] + ptoas_code[closing + 1 :]
+
+
 _SPLIT_FIFO_TEMPLATE_MARKERS = (
     "TileSplitAxis::TILE_UP_DOWN",
     "TileSplitAxis::TILE_LEFT_RIGHT",
@@ -1318,6 +1361,7 @@ def _generate_kernel_wrapper(
     func_uses_deferred_completion = _uses_deferred_completion(func)
     func_uses_urma_transfer = _uses_urma_transfer(func)
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
+    ptoas_body = _honor_runtime_aiv_lane_control(func, ptoas_body)
     ptoas_body, fifo_uses_subblock = _forward_runtime_lane_to_split_fifo_calls(func, ptoas_body)
     wrapper_uses_subblock = func_uses_subblock or fifo_uses_subblock
     header = _generate_kernel_header(

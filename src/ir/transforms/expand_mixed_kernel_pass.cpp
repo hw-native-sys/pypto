@@ -1438,7 +1438,10 @@ std::vector<StmtPtr> PromoteDirectC2VData(const std::vector<StmtPtr>& stmts,
       auto assign = As<AssignStmt>(stmt);
       auto eval = As<EvalStmt>(stmt);
       auto call = assign ? As<Call>(assign->value_) : eval ? As<Call>(eval->expr_) : nullptr;
-      if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait")) authored_sync = true;
+      if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait") ||
+          IsOp(call, "system.set_intra_block") || IsOp(call, "system.wait_intra_block")) {
+        authored_sync = true;
+      }
       if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe") ||
           IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpop_from_aic") ||
           IsOp(call, "tile.tpush_to_aic") || IsOp(call, "tile.tpop_from_aiv") ||
@@ -2461,6 +2464,21 @@ class ParameterTypeRemapper : public IRMutator {
   }
 };
 
+// Validate the complete body before partitioning: a SHARED loop/branch can be
+// copied as a whole, so checking only leaf statements while splitting misses
+// nested unpinned events. This fixed traversal remains linear in the body size.
+class NamedEventPlacementValidator : public IRVisitor {
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "system.set_intra_block") || IsOp(call, "system.wait_intra_block")) {
+      CHECK_SPAN(call->HasKwarg("core_type"), call->span_)
+          << call->op_->name_ << " in a mixed kernel requires core_type=KernelType.AIC or "
+          << "KernelType.AIV; an unpinned named event cannot be duplicated";
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+};
+
 struct ExpandedKernel {
   FunctionPtr aic_func;
   FunctionPtr aiv_func;
@@ -2469,6 +2487,7 @@ struct ExpandedKernel {
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, const AivPlacement& placement,
                                    bool had_regions, const ProgramPtr& program) {
+  NamedEventPlacementValidator().VisitStmt(func->body_);
   // Custom pipelines may call this pass without LowerAutoVectorSplit. Do not
   // let retired mixed AUTO metadata reach the standalone AIV/AIC halving path.
   const auto split_mode = func->GetSplitMode();

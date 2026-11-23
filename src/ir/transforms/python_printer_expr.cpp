@@ -1043,7 +1043,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       int int_val = AnyCast<int>(value, "printing kwarg: " + key);
       // Print pipe kwargs as PipeType enum names for readability
       if (key == "set_pipe" || key == "wait_pipe" ||
-          (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait")))) {
+          (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") ||
+                             IsOp(op, "system.set_intra_block") || IsOp(op, "system.wait_intra_block")))) {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
       } else if (key == "mode") {
         stream_ << "'" << CastModeToString(int_val) << "'";
@@ -1082,7 +1083,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       // spelling as a string attr. Restore the enum form so the printed call is
       // type-correct for static checkers and re-parses (the DSL rejects strings).
       const bool is_syncall = IsOp(op, "system.syncall");
-      const bool is_sync_event = IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait");
+      const bool is_sync_event = IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") ||
+                                 IsOp(op, "system.set_intra_block") || IsOp(op, "system.wait_intra_block");
       if (key == "core_type" && (is_syncall || is_sync_event)) {
         const char* kernel = CoreTypeToKernelMember(str_val, is_syncall);
         INTERNAL_CHECK_SPAN(kernel != nullptr, op->span_)

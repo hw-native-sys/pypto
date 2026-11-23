@@ -49,6 +49,8 @@ __all__ = [
     "wait_flag",
     "sync_set",
     "sync_wait",
+    "set_intra_block",
+    "wait_intra_block",
     "set_ffts",
     "barrier",
     "fence",
@@ -164,6 +166,54 @@ def sync_wait(
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     kernel = _kernel_or_none(core_type, "sync_wait")
     return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=kernel, span=span)
+
+
+def set_intra_block(
+    event_id: IntLike,
+    *,
+    pipe: PipeType,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Signal an event to synchronize AIC and AIV within one execution block.
+
+    Args:
+        event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.
+            Dynamic INDEX is rejected; cast explicitly before calling. The author must
+            keep dynamic values in range and avoid TPipe's event allocation.
+        pipe: FIX, MTE1, MTE2, MTE3, V, or S on A5. The peer wait may use a
+            different legal pipe to order its own consumer pipeline.
+        core_type: AIC or AIV kernel placement, required for unambiguous mixed
+            kernels. This selects a core type, not AIV0 versus AIV1. Omit in
+            explicitly typed kernels. No lane operand or broadcast is added.
+        span: Optional source span.
+    """
+    event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.set_intra_block(event_expr, pipe=pipe, core_type=core_type, span=span)
+
+
+def wait_intra_block(
+    event_id: IntLike,
+    *,
+    pipe: PipeType,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Wait for an event from the peer core within the same execution block.
+
+    Args:
+        event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.
+            Dynamic INDEX is rejected; cast explicitly before calling. The author must
+            keep dynamic values in range and avoid TPipe's event allocation.
+        pipe: FIX, MTE1, MTE2, MTE3, V, or S on A5. The peer set may use a
+            different legal pipe to order its own producer pipeline.
+        core_type: AIC or AIV kernel placement, required for unambiguous mixed
+            kernels. This selects a core type, not AIV0 versus AIV1. Omit in
+            explicitly typed kernels. No lane operand or broadcast is added.
+        span: Optional source span.
+    """
+    event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.wait_intra_block(event_expr, pipe=pipe, core_type=core_type, span=span)
 
 
 def set_ffts(workspace: object, *, span: Span | None = None) -> Call:

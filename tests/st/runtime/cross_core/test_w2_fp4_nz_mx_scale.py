@@ -9,6 +9,9 @@
 
 """A5 W2 integration: packed weights, NZ slots and compact row-major scales.
 
+The output is InOut because only valid expert rows are overwritten; its other
+rows retain their uploaded sentinel.
+
 The vector peers keep named RAW/NZ ping-pong allocations and transport nine
 ordered weight packets, each assembled from both AIV lanes. The cube loads A
 scales through MX_A_ND and B scales through MX_B_NN, preserving the [rows,72]
@@ -136,7 +139,7 @@ def w2_cube(
     a_scale: pl.Tensor[[ROWS, GROUPS], pl.FP8E8M0],
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
-    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
 ):
     pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
     buffer = pl.reserve_buffer(name="w2_weights", size=BUFFER_BYTES, base=pl.AUTO)
@@ -160,7 +163,7 @@ def w2_group(
     weight: pl.Tensor[[K, N // 2], pl.UINT8],
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
-    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
 ):
     out = w2_cube(a, a_scale, b_scale, counts, out)
     w2_vector(weight)
@@ -174,7 +177,7 @@ def routed_w2(
     weight: pl.Tensor[[K, N // 2], pl.UINT8],
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
-    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
 ):
     with pl.spmd(1):
         out = w2_group(a, a_scale, weight, b_scale, counts, out)
@@ -270,11 +273,6 @@ def _retained_w2_case(_st_case, test_runner, tmp_path, monkeypatch):
 
 
 @pytest.mark.platforms("a5")
-@pytest.mark.platform_xfail(
-    "a5",
-    reason="A5 W2 golden mismatches; see CI run 44087993133, job 134055759472.",
-    strict=True,
-)
 @st.cases(
     *[
         st.case(

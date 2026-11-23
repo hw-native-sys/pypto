@@ -1746,6 +1746,22 @@ def test_type_error_on_invalid_input():
         torch_codegen(ir.ConstInt(42, DataType.INT64, _span()))  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("action", ["set", "wait"])
+@pytest.mark.parametrize("dtype", [None, DataType.INT32, DataType.INT64])
+def test_named_intra_block_debug_rejects_unmodeled_ordering(action, dtype):
+    """Generation must fail before a mixed-thread reference can elide a rendezvous."""
+    event = ir.Var("event", ir.ScalarType(dtype), _span()) if dtype is not None else None
+    params = [event] if event is not None else []
+    args: list[ir.Expr] = list(params)
+    kwargs = {"pipe": int(pl.PipeType.MTE2)}
+    if event is None:
+        kwargs["event_id"] = 17
+    call = _op_call(f"system.{action}_intra_block", args, kwargs)
+    function = _simple_function("named_event", params, ir.EvalStmt(call, _span()))
+    with pytest.raises(ValueError, match="cannot model named intra-block synchronization.*native PTO"):
+        torch_codegen(function)
+
+
 def test_unsupported_op_raises():
     """torch_codegen should raise ValueError for unregistered ops."""
     a = _tensor_var("a", [64])

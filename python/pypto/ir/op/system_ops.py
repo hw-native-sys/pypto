@@ -106,6 +106,7 @@ _SYNCALL_KERNELS: tuple[KernelType, ...] = tuple(_SYNCALL_CORE_TYPE)
 _SYNC_EVENT_KERNELS: tuple[KernelType, ...] = tuple(_SYNC_EVENT_CORE_TYPE)
 
 _SYNC_EVENT_MIX_HINT = ". Omit core_type to leave the event in both kernels"
+_INTRA_BLOCK_MIX_HINT = ". Omit core_type only in an explicitly typed AIC/AIV kernel"
 
 _EnumT = TypeVar("_EnumT", bound=Enum)
 
@@ -324,6 +325,7 @@ def _create_cross_core_sync_op(
     ffts_mode: int | None,
     core_type: KernelType | None,
     span: Span | None,
+    core_type_hint: str = _SYNC_EVENT_MIX_HINT,
 ) -> Call:
     """Create a PTO cross-core sync set/wait operation."""
     args: list[Expr] = []
@@ -344,7 +346,7 @@ def _create_cross_core_sync_op(
             "core_type",
             op_name,
             allowed=_SYNC_EVENT_KERNELS,
-            hint=_SYNC_EVENT_MIX_HINT,
+            hint=core_type_hint,
         )
         kwargs["core_type"] = _SYNC_EVENT_CORE_TYPE[core_type]
 
@@ -386,6 +388,75 @@ def sync_wait(
     """
     return _create_cross_core_sync_op(
         "system.sync_wait", event_id, pipe=pipe, ffts_mode=None, core_type=core_type, span=span
+    )
+
+
+def _intra_block_event_id(event_id: int | Expr) -> int | Expr:
+    """Keep bare DSL integer literals static without casting dynamic INDEX values."""
+    if isinstance(event_id, ConstInt) and event_id.dtype == DataType.INDEX:
+        return event_id.value
+    return event_id
+
+
+def set_intra_block(
+    event_id: int | Expr,
+    *,
+    pipe: PipeType,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Signal an event to synchronize AIC and AIV within one execution block.
+
+    Args:
+        event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.
+            Dynamic INDEX is rejected; cast explicitly before calling. The author must
+            keep dynamic values in range and avoid TPipe's event allocation.
+        pipe: FIX, MTE1, MTE2, MTE3, V, or S on A5. The peer wait may use a
+            different legal pipe to order its own consumer pipeline.
+        core_type: AIC or AIV kernel placement, required for unambiguous mixed
+            kernels. This selects a core type, not AIV0 versus AIV1. Omit in
+            explicitly typed kernels. No lane operand or broadcast is added.
+        span: Optional source span.
+    """
+    return _create_cross_core_sync_op(
+        "system.set_intra_block",
+        _intra_block_event_id(event_id),
+        pipe=pipe,
+        ffts_mode=None,
+        core_type=core_type,
+        span=span,
+        core_type_hint=_INTRA_BLOCK_MIX_HINT,
+    )
+
+
+def wait_intra_block(
+    event_id: int | Expr,
+    *,
+    pipe: PipeType,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Wait for an event from the peer core within the same execution block.
+
+    Args:
+        event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.
+            Dynamic INDEX is rejected; cast explicitly before calling. The author must
+            keep dynamic values in range and avoid TPipe's event allocation.
+        pipe: FIX, MTE1, MTE2, MTE3, V, or S on A5. The peer set may use a
+            different legal pipe to order its own producer pipeline.
+        core_type: AIC or AIV kernel placement, required for unambiguous mixed
+            kernels. This selects a core type, not AIV0 versus AIV1. Omit in
+            explicitly typed kernels. No lane operand or broadcast is added.
+        span: Optional source span.
+    """
+    return _create_cross_core_sync_op(
+        "system.wait_intra_block",
+        _intra_block_event_id(event_id),
+        pipe=pipe,
+        ffts_mode=None,
+        core_type=core_type,
+        span=span,
+        core_type_hint=_INTRA_BLOCK_MIX_HINT,
     )
 
 

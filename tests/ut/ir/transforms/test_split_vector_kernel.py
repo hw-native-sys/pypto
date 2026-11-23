@@ -36,8 +36,8 @@ def _run_split_vector_kernel(program):
     cross-core pipe scaffolding (``aic_initialize_pipe`` / ``aiv_initialize_pipe``
     + ``reserve_buffer`` / ``import_peer_buffer`` and a matching ``tfree_to_aic`` /
     ``tfree_to_aiv``) that ``ExpandMixedKernel`` would add in the real pipeline.
-    The scaffolding is inert for SplitVectorKernel — it is passed through
-    untouched — so the before/after contract still asserts exactly the split
+    Native C2V setup may be shared by both lanes; other scaffolding passes
+    through unchanged. The before/after contract asserts the split
     rewrite (mode inference, shape halving, offset adjustment). Round-trip
     correctness — including def-use closure on Var refs embedded inside type
     annotations — is exercised by the same roundtrip instrument.
@@ -60,14 +60,15 @@ class TestSplitVectorKernelNoSplitPassthrough:
     LowerAutoVectorSplit converts AUTO ``pl.split`` mixed InCore functions into
     the explicit ``split_aiv`` form upstream, and SplitVectorKernel only stamps
     attrs for those (see TestSplitVectorKernelExplicitSplitAivBypass). A function
-    with no split mode (and no no-split dual-AIV marker) is passed through
-    structurally unchanged. The per-op halving tests these classes used to hold
-    moved to ``test_lower_auto_vector_split.py`` (they assert the same facts via
-    the shared ``split_axis`` machinery, now reached through LowerAutoVectorSplit).
+    with no split mode is passed through unchanged unless its native C2V
+    constructor requires both AIV lanes to participate. The per-op halving
+    tests these classes used to hold moved to ``test_lower_auto_vector_split.py``
+    (they assert the same facts via the shared ``split_axis`` machinery, now
+    reached through LowerAutoVectorSplit).
     """
 
-    def test_no_split_when_none(self):
-        """Functions with no split should not be modified."""
+    def test_native_c2v_preserves_primary_body_and_shares_initialization(self):
+        """No-split shapes stay intact while both constructor participants run."""
 
         @pl.program
         class Before:
@@ -85,8 +86,32 @@ class TestSplitVectorKernelNoSplitPassthrough:
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0_store
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                        split=0
+                    )
+                    pl.tfree_to_aic(z_vec)
+                    out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                    return out_0_store
+                else:
+                    return out_0
+
+        _assert_split_matches_expected(Before, Expected)
         result = _run_split_vector_kernel(Before)
-        ir.assert_structural_equal(result, passes.convert_to_ssa()(Before))
+        ir.assert_structural_equal(result, passes.split_vector_kernel()(result))
+        original = Before.get_function("main_aiv")
+        assert original is not None
+        assert "dual_aiv_dispatch" not in original.attrs
 
     def test_reshape_of_rank1_load_unchanged_when_no_split(self):
         """A rank-1 load + reshape is left untouched when the function has no split mode."""
@@ -1151,6 +1176,40 @@ class Program:
     text = python_print(transformed)
     for operation in ("tile.tpop_from_aic", "tile.tpush_to_aic", "system.tfree_to_aic"):
         assert text.count(f"pl.{operation}(") == 2, text
+
+
+def test_native_c2v_data_return_has_actionable_diagnostic():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self) -> pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec]:
+            buf = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            received: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                shape=[16, 16], dtype=pl.FP32, split=0
+            )
+            pl.tfree_to_aic(received)
+            return received
+
+    with pytest.raises(ValueError, match="returns to alias parameters.*explicit split_aiv"):
+        _run_split_vector_kernel(Before)
+
+
+def test_native_c2v_preserves_authored_dual_dispatch():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+        def main(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+            buf = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            received: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                shape=[16, 16], dtype=pl.FP32, split=0
+            )
+            updated = pl.store(received, [0, 0], out)
+            pl.tfree_to_aic(received)
+            return updated
+
+    ir.assert_structural_equal(_run_split_vector_kernel(Before), passes.convert_to_ssa()(Before))
 
 
 if __name__ == "__main__":

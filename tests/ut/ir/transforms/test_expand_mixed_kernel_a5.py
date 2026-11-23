@@ -5880,6 +5880,9 @@ class TestManualPipeVtoCFractalAdapt:
         (4, "relu"),
         (4, "clamp"),
         (4, "events"),
+        (4, "named_set"),
+        (4, "named_wait"),
+        (4, "named_events"),
         (4, "shared_events"),
         (4, "reverse_pipe"),
         (4, "boundary_alias"),
@@ -5942,6 +5945,15 @@ class Before:
         pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
         pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
 """
+    named_set = "\n        pl.system.set_intra_block(4, pipe=pl.PipeType.FIX, core_type=pl.KernelType.AIC)\n"
+    named_wait = (
+        "\n        pl.system.wait_intra_block(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)\n"
+    )
+    stores += {
+        "named_set": named_set,
+        "named_wait": named_wait,
+        "named_events": named_set + named_wait,
+    }.get(invalid, "")
     if invalid == "shared_events":
         # The pre-store shared set may satisfy the later typed wait; matching
         # IDs are not evidence that the consumer sees the completed GM writes.
