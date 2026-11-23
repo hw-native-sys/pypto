@@ -535,7 +535,7 @@ namespace pass {
 Pass InjectGMPipeBuffer() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     if (!backend::BackendConfig::IsConfigured() ||
-        !PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+        !PassContext::GetCurrentBackendHandler()->RequiresGMPipeBuffer()) {
       return program;
     }
     std::vector<FunctionPtr> functions;

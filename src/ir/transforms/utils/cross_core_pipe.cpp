@@ -363,7 +363,7 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   if (local_slot_num_override.has_value()) {
     // Keep allocation and both peer initializers in agreement. Merely shrinking
     // reserve_buffer would leave PTOAS indexing at the full transport depth.
-    CHECK_SPAN(PassContext::Current()->GetBackendHandler()->SupportsLocalPipeDepth(), span)
+    CHECK_SPAN(PassContext::GetCurrentBackendHandler()->SupportsLocalPipeDepth(), span)
         << "pl.cross_core_slot(local_slot_num=...) is only supported on A2/A3; "
            "omit local_slot_num on A5";
     CHECK_SPAN(*local_slot_num_override > 0 && *local_slot_num_override <= effective_slot_num, span)

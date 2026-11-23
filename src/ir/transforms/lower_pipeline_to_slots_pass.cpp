@@ -500,7 +500,7 @@ class SlotBindingMutator : public IRMutator {
   /// can still overflow on their account — that is ptoas' budget to enforce, not a
   /// footprint this pass introduced.
   bool SlotsFitOnChip(const std::vector<Candidate>& candidates, int64_t factor) {
-    const auto* handler = PassContext::Current()->GetBackendHandler();
+    const auto* handler = PassContext::GetCurrentBackendHandler();
     std::map<MemorySpace, uint64_t> added;
     for (const auto& candidate : candidates) {
       const auto& space_opt = candidate.tile_type->memory_space_;

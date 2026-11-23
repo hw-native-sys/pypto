@@ -423,6 +423,9 @@ class PassContext {
    */
   [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
 
+  /// Require the handler of the active context or the process backend for standalone passes.
+  static const backend::BackendHandler* GetCurrentBackendHandler();
+
   /// PTO-specific checks are optional for IR-only targets and unconfigured host code.
   static const backend::BackendHandler* CurrentPtoHandler();
 

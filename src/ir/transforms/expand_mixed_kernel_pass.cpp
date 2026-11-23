@@ -113,7 +113,7 @@ class NativeVecToMatTransferValidator : public IRVisitor {
       auto source = As<TileType>(call->args_[insert ? 1 : 0]->GetType());
       bool bf16_insert = false;
       if (source && insert && source->dtype_ == DataType::BF16 &&
-          PassContext::Current()->GetBackendHandler()->GetPtoTargetArch() == "a5") {
+          PassContext::GetCurrentBackendHandler()->GetPtoTargetArch() == "a5") {
         const auto view = tile_view_semantics::GetEffectiveTileView(*source);
         bf16_insert = view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major &&
                       view.fractal == 512 && view.compact == CompactMode::null;
@@ -961,7 +961,7 @@ MxV2CContracts BuildMxV2CContracts(const std::vector<FunctionPtr>& functions) {
   }
 
   MxV2CContracts contracts;
-  if (!has_mx_push || !PassContext::Current()->GetBackendHandler()->RequiresVtoCFractalAdapt()) {
+  if (!has_mx_push || !PassContext::GetCurrentBackendHandler()->RequiresVtoCFractalAdapt()) {
     return contracts;
   }
 
@@ -1271,7 +1271,7 @@ class AdaptManualVtoCPush : public IRMutator {
 
     // Backend gate lives here, not around the caller's loop: a program with no
     // hand-written push must not require a configured backend to walk this phase.
-    const auto* handler = PassContext::Current()->GetBackendHandler();
+    const auto* handler = PassContext::GetCurrentBackendHandler();
     if (!handler->RequiresVtoCFractalAdapt()) {
       CHECK_SPAN(src_type->dtype_ != DataType::FP8E8M0, op->span_)
           << "Hand-written tile.tpush_to_aic does not support FP8E8M0 MX-scale tiles on this backend";
@@ -1351,7 +1351,7 @@ std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
 /// per-backend implementations in src/backend/910B/backend_910b_handler.cpp
 /// and src/backend/950/backend_950_handler.cpp for the layout rules.
 TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
-  return PassContext::Current()->GetBackendHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
+  return PassContext::GetCurrentBackendHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
 }
 
 // ============================================================================
@@ -1988,7 +1988,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
                                    const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
-  const auto* handler = PassContext::Current()->GetBackendHandler();
+  const auto* handler = PassContext::GetCurrentBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   CoreAffinity skip_affinity = (side == CoreSide::AIC) ? CoreAffinity::VECTOR : CoreAffinity::CUBE;
@@ -2511,7 +2511,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   }
 
   const bool needs_dual_aiv_dispatch =
-      PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() &&
+      PassContext::GetCurrentBackendHandler()->RequiresNoSplitDualAivDispatch() &&
       (!func->GetSplitMode().has_value() || *func->GetSplitMode() == SplitMode::None);
 
   auto stmts = FlattenBody(func->body_);
@@ -2528,7 +2528,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   std::unordered_map<const Var*, ExprPtr> simt_gm_aliases;
   AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs, placement, &simt_gm_aliases);
 
-  if (!PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+  if (!PassContext::GetCurrentBackendHandler()->RequiresGMPipeBuffer()) {
     stmts = PromoteDirectC2VData(stmts, stmt_map, had_regions || func->GetAttr<bool>(kAttrSplitAiv, false));
     tpop_defs = CollectTpopDefs(stmts);
     stmt_map.clear();
@@ -2544,7 +2544,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
   std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
   std::map<const Stmt*, std::vector<GmSyncPop>> gm_sync_pops;
-  if (PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+  if (PassContext::GetCurrentBackendHandler()->RequiresGMPipeBuffer()) {
     CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
   }
 

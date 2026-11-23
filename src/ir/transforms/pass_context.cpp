@@ -401,10 +401,11 @@ const backend::Backend* PassContext::GetBackend() const {
   return type ? backend::GetBackendInstance(*type) : backend::BackendConfig::GetBackend();
 }
 
-const backend::BackendHandler* PassContext::GetBackendHandler() const {
-  // Handler ownership lives with the Backend itself; PassContext is just a
-  // convenient access path that satisfies the "pass-context-config" rule.
-  return GetBackend()->GetHandler();
+const backend::BackendHandler* PassContext::GetBackendHandler() const { return GetBackend()->GetHandler(); }
+
+const backend::BackendHandler* PassContext::GetCurrentBackendHandler() {
+  const auto* ctx = Current();
+  return (ctx ? ctx->GetBackend() : backend::BackendConfig::GetBackend())->GetHandler();
 }
 
 const backend::BackendHandler* PassContext::CurrentPtoHandler() {
