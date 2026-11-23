@@ -238,12 +238,13 @@ def test_fixpipe_requires_matching_pop_endpoints_and_result(bare_pop):
     "binding",
     [None, True, False, "opposite", "member", "wrong_group"]
     + ["shared", "shared_twice"]
-    + ["literal_same", "literal_crossed", "literal_spmd", "literal_spmd_fan_in"],
+    + ["literal_same", "literal_crossed", "literal_spmd", "literal_spmd_fan_in", "literal_partial"],
 )
 @pytest.mark.ptoas_compile
 def test_fixpipe_endpoint_counts(binding, tmp_path):
     source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
     literals = isinstance(binding, str) and binding.startswith("literal_")
+    partial = binding in {"literal_same", "literal_partial"}
     extra = ", other: pl.Scalar[pl.BOOL]" if literals or binding in {"shared", "shared_twice"} else ""
     source = source.replace("enabled: pl.Scalar[pl.BOOL]):", f"enabled: pl.Scalar[pl.BOOL]{extra}):")
     if binding != "wrong_group":
@@ -277,6 +278,7 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
             source += group_source.replace("def group(", "def other_group(")
     if isinstance(binding, bool) or literals:
         extra_output = ", second_out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]" if literals else ""
+        extra_output += ", x: pl.Scalar[pl.BOOL], y: pl.Scalar[pl.BOOL]" if partial else ""
         caller = signature.replace("producer(", "main(self, ").replace(
             f", enabled: pl.Scalar[pl.BOOL]{extra}", extra_output
         )
@@ -295,8 +297,9 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
         if literals:
             for enabled, out in ((True, "out"), (False, "second_out")):
                 other = enabled if binding == "literal_same" else not enabled
+                actuals = "x, y" if partial and not enabled else f"{enabled}, {other}"
                 callee = "second_wrapper" if fan_in and not enabled else target
-                source += f"        self.{callee}(a, b, {out}, control_words, {enabled}, {other})\n"
+                source += f"        self.{callee}(a, b, {out}, control_words, {actuals})\n"
         else:
             source += f"        self.wrapper({binding}, a, b, out, control_words)\n"
     program = pl.parse_program(source)

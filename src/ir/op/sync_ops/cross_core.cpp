@@ -54,8 +54,8 @@ TypePtr DeduceInitializePipeType(const std::vector<ExprPtr>& args,
   std::optional<bool> nosplit;
   for (const auto& [key, value] : kwargs) {
     structured |= key == "acc_push_epilogue";
-    shorthand |= key == "c2v_dtype" || (key == "pre_relu" && AnyCast<bool>(value));
-    if (key == "nosplit") nosplit = AnyCast<bool>(value);
+    shorthand |= key == "c2v_dtype" || (key == "pre_relu" && AnyCast<bool>(value, "kwarg key: pre_relu"));
+    if (key == "nosplit") nosplit = AnyCast<bool>(value, "kwarg key: nosplit");
   }
   CHECK(!structured || !shorthand) << "acc_push_epilogue cannot be combined with c2v_dtype/pre_relu";
   CHECK(!shorthand || !nosplit.has_value() || *nosplit) << "c2v_dtype requires nosplit=true";

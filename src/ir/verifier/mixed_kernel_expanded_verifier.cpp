@@ -625,22 +625,24 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           : nullptr;
   std::map<std::string, FixpipeFunctionInfo> info;
   using KernelPair = std::pair<std::string, std::string>;
-  using LiteralTrace = std::pair<std::size_t, std::size_t>;
-  std::map<LiteralTrace, std::size_t> trace_nodes;
-  // Intern both polarities of each launch column. IDs 1 and 2 denote constants.
-  auto extend = [&](std::size_t prefix, std::size_t next) {
-    return trace_nodes.try_emplace(LiteralTrace{prefix, next}, trace_nodes.size() + 3).first->second;
+  using TraceId = std::size_t;
+  struct GuardTrace {
+    std::vector<TraceId> launches;
+    int mask;
   };
-  auto append_literal = [&](std::optional<LiteralTrace>& trace, LiteralTrace value) {
-    trace = trace && value.first ? std::make_optional(LiteralTrace{extend(trace->first, value.first),
-                                                                   extend(trace->second, value.second)})
-                                 : std::nullopt;
+  // Leaf IDs encode dynamic, false and true. Other IDs store alternatives in call-site order.
+  std::vector<GuardTrace> traces{{{}, kEitherGuard}, {{}, kGuardFalse}, {{}, kGuardTrue}};
+  auto record_trace = [&](std::vector<TraceId> launches) {
+    int mask = 0;
+    for (const auto launch : launches) mask |= traces[launch].mask;
+    traces.push_back({std::move(launches), mask});
+    return traces.size() - 1;
   };
   std::vector<std::pair<KernelPair, CallPtr>> groups;
   std::map<std::string, std::set<std::string>> group_peers;
   struct GuardArgument {
     const Var* origin = nullptr;
-    LiteralTrace trace{};
+    TraceId trace = 0;
   };
   std::map<const Var*, GuardArgument> group_bindings;
   std::map<const Var*, std::vector<std::pair<const Var*, std::size_t>>> launch_inputs;
@@ -686,27 +688,19 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       }
     }
   }
-  // Memoize each input column in call-site order. A forwarded input references its caller's column.
-  std::function<LiteralTrace(const Var*)> resolve = [&](const Var* param) -> LiteralTrace {
+  // A forwarded input references its caller's alternatives without expanding the call tree.
+  std::function<TraceId(const Var*)> resolve = [&](const Var* param) -> TraceId {
     auto& trace = group_bindings[param].trace;
-    auto inputs = launch_inputs.extract(param);  // A cycle or an unbound argument yields an empty trace.
+    auto inputs = launch_inputs.extract(param);  // Cycles and unbound arguments are dynamic leaves.
     if (inputs.empty()) return trace;
-    std::size_t mask = 0;
-    std::optional<LiteralTrace> column = LiteralTrace{};
-    for (const auto& [source, bit] : inputs.mapped()) {
-      const auto value = source ? resolve(source) : LiteralTrace{bit, kEitherGuard ^ bit};
-      if (!value.first) return {};
-      mask |= value.first < kEitherGuard ? value.first : kEitherGuard;
-      append_literal(column, value);
-    }
-    trace = mask == kEitherGuard ? *column : LiteralTrace{mask, kEitherGuard ^ mask};
-    return trace;
+    std::vector<TraceId> launches;
+    for (const auto& [source, bit] : inputs.mapped()) launches.push_back(source ? resolve(source) : bit);
+    return trace = record_trace(std::move(launches));
   };
   while (!launch_inputs.empty()) resolve(launch_inputs.begin()->first);
   struct PeerArgument {
-    int mask = 0;
     std::size_t representative = 0;
-    std::optional<LiteralTrace> trace = LiteralTrace{};
+    TraceId trace = 0;
   };
   // Intersect equal argument positions across Groups, each of which may use a different SSA value.
   std::map<KernelPair, std::vector<PeerArgument>> peer_bindings;
@@ -724,13 +718,26 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       auto& argument = allowed[i];
       argument.representative =
           identity ? classes[argument.representative].try_emplace(identity, i).first->second : i;
-      const std::size_t bit = value && value->value_ ? kGuardTrue : kGuardFalse;
-      const auto trace = value ? LiteralTrace{bit, kEitherGuard ^ bit} : known.trace;
-      argument.mask |=
-          trace.first && trace.first < kEitherGuard ? static_cast<int>(trace.first) : kEitherGuard;
-      append_literal(argument.trace, trace);
+      if (!argument.trace) argument.trace = record_trace({});
+      const TraceId launch = value ? (value->value_ ? kGuardTrue : kGuardFalse) : known.trace;
+      auto& column = traces[argument.trace];
+      column.launches.push_back(launch);
+      column.mask |= traces[launch].mask;
     }
   }
+  // Bits 0–3 record observed literal pairs FF, FT, TF, TT. Ignore only the dynamic alternatives.
+  std::map<std::pair<TraceId, TraceId>, int> known_pairs;
+  std::function<int(TraceId, TraceId)> pair_mask = [&](TraceId p, TraceId q) -> int {
+    if (!p || !q) return 0;
+    if (p < kEitherGuard && q < kEitherGuard) return 1 << ((p - 1) * 2 + q - 1);
+    auto [it, inserted] = known_pairs.try_emplace({p, q}, 0);
+    const auto &a = traces[p].launches, &b = traces[q].launches;
+    if (!inserted || (!a.empty() && !b.empty() && a.size() != b.size())) return it->second;
+    for (std::size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
+      it->second |= pair_mask(a.empty() ? p : a[i], b.empty() ? q : b[i]);
+    }
+    return it->second;
+  };
   std::map<std::tuple<std::string, std::string, int>, int> incoming;
   for (const auto& [name, local] : info) {
     for (const auto& [id, init] : local.inits) {
@@ -853,28 +860,21 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
                        : nullptr;
           };
           const auto [push_arg, pop_arg] = std::make_pair(argument(push), argument(pop));
-          auto counts = [](const FixpipeEndpointCounts& flow, const PeerArgument* binding) {
-            const auto mask = binding ? binding->mask : kEitherGuard;
-            return std::make_pair(mask == kGuardFalse ? flow.when_false : flow.when_true,
-                                  mask == kGuardTrue ? flow.when_true : flow.when_false);
-          };
-          const auto p = counts(push, push_arg), q = counts(pop, pop_arg);
+          const auto push_trace = push_arg ? push_arg->trace : 0;
+          const auto pop_trace = pop_arg ? pop_arg->trace : 0;
+          const int p = traces[push_trace].mask, q = traces[pop_trace].mask;
           const bool shared = push_arg && pop_arg && push_arg->representative == pop_arg->representative;
-          const bool comparable = p.first == p.second || q.first == q.second || shared;
-          const auto p_range = std::minmax(p.first, p.second), q_range = std::minmax(q.first, q.second);
-          const bool literals = push_arg && pop_arg && push_arg->trace && pop_arg->trace;
-          const bool literal_match =
-              literals && ((p == q && push_arg->trace->first == pop_arg->trace->first) ||
-                           (p.first == q.second && p.second == q.first &&
-                            push_arg->trace->first == pop_arg->trace->second));
-          const bool mismatch = comparable ? p != q
-                                           : (literals && !literal_match) || p_range.second < q_range.first ||
-                                                 q_range.second < p_range.first;
+          const int possible = (p & kGuardFalse ? q : 0) | (p & kGuardTrue ? q << 2 : 0);
+          const int aligned = shared && possible == 0b1111 ? 0b1001 : possible;
+          const int unequal =
+              (push.when_false != pop.when_false) | ((push.when_false != pop.when_true) << 1) |
+              ((push.when_true != pop.when_false) << 2) | ((push.when_true != pop.when_true) << 3);
+          const bool comparable = shared || p != kEitherGuard || q != kEitherGuard ||
+                                  push.when_false == push.when_true || pop.when_false == pop.when_true;
+          const bool mismatch = (pair_mask(push_trace, pop_trace) & unequal) ||
+                                (comparable ? (aligned & unequal) != 0 : (aligned & unequal) == aligned);
           if (push.seen == pushes->second.size() && pop.seen == pops->second.size() && mismatch) {
-            const bool excess_pop =
-                comparable ? p.first < q.first || p.second < q.second : p_range.second < q_range.first;
-            error(excess_pop ? pops->second.front() : pushes->second.front(),
-                  "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
+            error(init, "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
           }
         }
         std::set<std::vector<int64_t>> source_signatures;
