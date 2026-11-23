@@ -696,7 +696,7 @@ A5 两端 init 接受 `nosplit` 和 `acc_push_epilogue={layout, quant, relu}`。
 
 标量控制值为 FP32。向量控制字为 packed i64/u64，从无分形行优先 Mat 移至同布局的 Scaling，与 MX 控制区独立。`[1, N]` 必须完全有效，`N > 0`、为 16 的倍数且覆盖生产者列数。Scaling 的规划预算为 4 KiB，控制字在 TPUSH 完成前不可改写，分配保持到函数结束。`deqf16_scalar` 和 `qf322f16_pre_scalar` 用标量 setter，`deqf16_vec` 用向量 setter，其余模式禁止 setter。配置与同 id 的 TPUSH 在同块且先于 TPUSH。控制流、另一 id 的 setter 或 `pre_quant` 写回会使旧状态失效。含 setter 的 pipeline 及祖先（含 stage=1）降为顺序循环。 以 32×16 向量量化为例，两端 init 均传 `dir_mask=1, slot_size=1024, id=0, nosplit=True, acc_push_epilogue={"layout": "nz2nd", "quant": "deqf16_vec", "relu": "no_relu"}`，push 前调用 `pl.set_quant_vector(controls, id=0)`，push/pop 均用 `split=0`。
 
-`MixedKernelExpanded` 校验类型、物理布局、转换后槽位字节数、本地环容量及两端 id。当前 PTOAS 要求同 id 使用同一消费者 tile 类型。验证器检查直线代码和简单布尔分支的端点计数，包括共享 Group 参数和字面量实参。同块内验证手写环的深度及 FIFO 释放顺序。其他手写控制流由作者保证两端消息配对。
+`MixedKernelExpanded` 校验类型、物理布局、转换后槽位字节数、本地环容量及两端 id。当前 PTOAS 要求同 id 使用同一消费者 tile 类型。验证器检查直线代码和简单布尔分支的端点计数，包括共享 Group 参数和字面量实参。跟踪嵌套块内尚未释放的槽位，验证环深度及 FIFO 释放顺序。其他手写控制流由作者保证两端消息配对。
 
 A5 显式非 ND Acc→Vec move 将同一布局传给两端 init，Buffer IR 同样适用。省略布局时保持原管道。transpose scratch 使用自身 SSA 类型。
 

@@ -111,8 +111,6 @@ def _program(
 
 
 class _PipeBufferAliases(ir.IRMutator):
-    """Retain ordinary scalar SSA aliases through the actual compiler pipeline."""
-
     def __init__(self, producer_depth: int, consumer_depth: int, offset: int = 0):
         super().__init__()
         self._offset = offset
@@ -123,10 +121,8 @@ class _PipeBufferAliases(ir.IRMutator):
 
     def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:
         call = op.expr
-        depth = self._depths.get(call.op.name, 0) if isinstance(call, ir.Call) else 0
-        if not depth:
+        if not isinstance(call, ir.Call) or not (depth := self._depths.get(call.op.name, 0)):
             return super().visit_eval_stmt(op)
-        assert isinstance(call, ir.Call)
         value = call.args[0]
         if self._offset:
             value = ir.Add(value, ir.ConstInt(self._offset, DataType.INT32, op.span), DataType.INT32, op.span)
@@ -143,11 +139,7 @@ class _PipeBufferAliases(ir.IRMutator):
 def _generate(program, buffer_ir=False, verification_level=passes.VerificationLevel.BASIC):
     with passes.PassContext([], enable_buffer_ir=buffer_ir, verification_level=verification_level):
         lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
-        core_functions = [
-            func
-            for func in lowered.functions.values()
-            if func.func_type in (pl.FunctionType.InCore, pl.FunctionType.AIC, pl.FunctionType.AIV)
-        ]
+        core_functions = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
         modules = codegen.PTOCodegen().generate(ir.Program(core_functions, "Fixpipe", lowered.span))
     return lowered, modules if isinstance(modules, str) else "".join(modules.values())
 
@@ -268,38 +260,52 @@ def test_fixpipe_endpoint_counts(guarded_pop, binding, tmp_path):
         source += "    @pl.function" + producer
     if guarded_pop or binding is not None:
         signature = next(line for line in source.splitlines() if line.startswith("    def producer("))
-        source += "\n    @pl.function(type=pl.FunctionType.Group)\n" + signature.replace(
-            "producer(", "group(self, "
-        )
+        group = signature.replace("producer(", "group(self, ")
+        if binding is not None:
+            group = group.replace(", enabled: pl.Scalar[pl.BOOL]", "").replace(
+                "group(self, ", "group(self, enabled: pl.Scalar[pl.BOOL], "
+            )
+        source += "\n    @pl.function(type=pl.FunctionType.Group)\n" + group
         source += "\n        self.producer(a, b, out, control_words, enabled)\n"
         source += "        self.consumer(a, b, out, control_words, enabled)\n"
     if binding is not None:
         caller = signature.replace("producer(", "main(self, ").replace(", enabled: pl.Scalar[pl.BOOL]", "")
         source += "\n    @pl.function(type=pl.FunctionType.Orchestration)\n" + caller
-        source += f"\n        self.group(a, b, out, control_words, {binding})\n"
+        source += f"\n        self.group({binding}, a, b, out, control_words)\n"
+    program = pl.parse_program(source)
     if binding is True:
-        _assemble(_generate(pl.parse_program(source))[1], tmp_path)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.MixedKernelExpanded)
+        passes.verify_properties(properties, passes.simplify()(program), "test")
+        _assemble(_generate(program)[1], tmp_path)
     else:
         with pytest.raises(Error, match="endpoint counts differ across control-flow paths"):
-            _generate(pl.parse_program(source))
+            _generate(program)
 
 
-@pytest.mark.parametrize(("slots", "schedule"), [(1, "overflow"), (2, "reverse"), (1, "sequential")])
+@pytest.mark.parametrize("schedule", ["overflow", "reverse", "sequential", "nested"])
 @pytest.mark.ptoas_compile
-def test_fixpipe_retained_slots_and_fifo_order(slots, schedule, tmp_path):
+def test_fixpipe_retained_slots_and_fifo_order(schedule, tmp_path):
+    slots = 1 if schedule in {"overflow", "sequential"} else 2
     source = ir.python_print(_program()).replace("slot_num=2", f"slot_num={slots}")
     push = next(line for line in source.splitlines() if ".tpush_to_aiv(" in line)
     pop = next(line for line in source.splitlines() if ".tpop_from_aic(" in line)
     free = next(line for line in source.splitlines() if ".tfree_to_aic(" in line)
     second, release = pop.replace("tile:", "second:", 1), free.replace("(tile,", "(second,")
     sequence = {"reverse": [second, release, free], "sequential": [free, second, release]}
-    source = source.replace(push, push + "\n" + push)
+    sequence["nested"] = [
+        "        for j in pl.range(2):",
+        indent(second, "    "),
+        indent(release, "    "),
+        free,
+    ]
+    source = source.replace(push, "\n".join([push] * (3 if schedule == "nested" else 2)))
     source = source.replace(free, "\n".join(sequence.get(schedule, [second, free, release])))
     if schedule == "sequential":
         _assemble(_generate(pl.parse_program(source))[1], tmp_path)
     else:
         with pytest.raises(
-            Error, match="oldest outstanding" if schedule == "reverse" else "outstanding TPOP count"
+            Error, match="outstanding TPOP count" if schedule == "overflow" else "oldest outstanding"
         ):
             _generate(pl.parse_program(source))
 
@@ -414,26 +420,20 @@ def test_deserialize_rejects_incomplete_epilogue():
 
 
 @pytest.mark.parametrize(
-    ("dtype", "space"),
+    ("dtype", "space", "valid"),
     [
-        (DataType.FP32, ir.MemorySpace.Scaling),
-        (DataType.UINT64, ir.MemorySpace.Vec),
+        (DataType.FP32, ir.MemorySpace.Scaling, False),
+        (DataType.UINT64, ir.MemorySpace.Vec, False),
+        (DataType.UINT64, ir.MemorySpace.Scaling, True),
     ],
 )
-def test_vector_quant_rejects_float_scale_or_wrong_location(dtype, space):
+def test_vector_quant_controls_dtype_space_and_pipe_id(dtype, space, valid):
     tile = ir.Var("controls", ir.TileType([1, 32], dtype, memory_space=space), ir.Span.unknown())
-    with pytest.raises(ValueError, match="packed 64-bit controls in loc=scaling"):
-        system_ops.set_quant_vector(tile)
-
-
-def test_vector_quant_packed_controls():
-    tile = ir.Var(
-        "controls",
-        ir.TileType([1, 32], DataType.UINT64, memory_space=ir.MemorySpace.Scaling),
-        ir.Span.unknown(),
-    )
-    call = system_ops.set_quant_vector(tile, id=3)
-    assert call.kwargs["id"] == 3
+    if valid:
+        assert system_ops.set_quant_vector(tile, id=3).kwargs["id"] == 3
+    else:
+        with pytest.raises(ValueError, match="packed 64-bit controls in loc=scaling"):
+            system_ops.set_quant_vector(tile)
 
 
 @pytest.mark.parametrize(
@@ -638,7 +638,3 @@ def test_fixpipe_rejects_unvalidated_a2a3_target():
     backend.set_backend_type(backend.BackendType.Ascend910)
     with pytest.raises(Error, match="currently require Ascend950"):
         _generate(_program())
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

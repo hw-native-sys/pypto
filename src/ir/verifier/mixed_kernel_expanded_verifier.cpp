@@ -528,8 +528,7 @@ void VerifyTpopTfreeMatching(const FunctionPtr& func, std::vector<Diagnostic>& d
   VerifyTpopTfreeMatchingInBlock(FlattenBody(func->body_), func, diagnostics);
 }
 
-// Fixpipe contracts are checked before Buffer IR lowering, while both peers and
-// lexical quantization-state dominance are still explicit in the tile IR.
+// Check Fixpipe peer and quant-state contracts before Buffer IR lowering.
 constexpr int kGuardFalse = 1, kGuardTrue = 2, kEitherGuard = kGuardFalse | kGuardTrue;
 
 struct FixpipeEndpointCounts {
@@ -620,8 +619,8 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           : nullptr;
   std::map<std::string, FixpipeFunctionInfo> info;
   using KernelPair = std::pair<std::string, std::string>;
-  std::map<std::string, KernelPair> groups;
-  std::map<std::string, std::vector<int>> group_bindings;
+  std::vector<std::pair<KernelPair, CallPtr>> groups;
+  std::map<const Var*, int> group_bindings;
   for (const auto& [gv, func] : program->functions_) {
     if (!func || !func->body_) continue;
     auto& local = info[func->name_];
@@ -631,28 +630,31 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     const auto members = CollectInnerCalls(func, program);
     if (func->func_type_ == FunctionType::Group && members.size() == 2 &&
         members[0].inner_call->args_ == members[1].inner_call->args_) {
-      groups.emplace(func->name_,
-                     std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_));
+      groups.emplace_back(std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_),
+                          members[0].inner_call);
     }
     for (const auto& member : members) {
       if (member.inner_callee->func_type_ != FunctionType::Group) continue;
       const auto& args = member.inner_call->args_;
-      auto& bindings = group_bindings[member.inner_callee->name_];
-      bindings.resize(std::max(bindings.size(), args.size()));
-      for (std::size_t i = 0; i < args.size(); ++i) {
-        auto value = As<ConstBool>(args[i]);
-        bindings[i] |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
+      const auto& params = member.inner_callee->params_;
+      for (std::size_t i = 0; i < std::min(args.size(), params.size()); ++i) {
+        const auto value = As<ConstBool>(args[i]);
+        group_bindings[params[i].get()] |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
       }
     }
   }
-  // A Group without an IR caller can still be launched with either value.
+  // Project each Group's bindings to the shared kernel argument order.
   std::map<KernelPair, std::vector<int>> peer_bindings;
-  for (const auto& [name, peers] : groups) {
-    auto& bindings = group_bindings[name];
-    bindings.resize(program->GetFunction(name)->params_.size(), kEitherGuard);
+  for (const auto& [peers, member] : groups) {
+    const auto& args = member->args_;
     auto& allowed = peer_bindings[peers];
-    allowed.resize(std::max(allowed.size(), bindings.size()));
-    for (std::size_t i = 0; i < bindings.size(); ++i) allowed[i] |= bindings[i];
+    allowed.resize(std::max(allowed.size(), args.size()));
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      const auto value = As<ConstBool>(args[i]);
+      const auto found = group_bindings.find(AsVarLike(args[i]).get());
+      allowed[i] |= value ? (value->value_ ? kGuardTrue : kGuardFalse)
+                          : (found == group_bindings.end() ? kEitherGuard : found->second);
+    }
   }
   std::map<std::tuple<std::string, std::string, int>, int> incoming;
   for (const auto& [name, local] : info) {
@@ -815,13 +817,13 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       }
     }
     using InitMap = std::map<int, CallPtr>;
+    std::map<int, std::deque<const Var*>> retained;
     std::function<void(const std::vector<StmtPtr>&, InitMap&)> verify_block;
     verify_block = [&](const std::vector<StmtPtr>& stmts, InitMap& visible) {
       std::vector<std::pair<int, std::optional<CallPtr>>> saved_inits;
       // PTOAS quant state must precede TPUSH in the same block, with the same id.
       std::set<int> scalar_state;
       std::map<int, int64_t> vector_state;
-      std::map<int, std::deque<const Var*>> retained;
       for (const auto& stmt : stmts) {
         auto call = transform_utils::GetCallFromStmt(stmt);
         if (!call) {
@@ -885,8 +887,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         }
         const auto init = found->second;
         if (!init->HasKwarg("acc_push_epilogue")) {
-          if (scalar || vector)
+          if (scalar || vector) {
             error(call, "set_quant requires an acc_push_epilogue on the matching pipe id");
+          }
           continue;
         }
         const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
