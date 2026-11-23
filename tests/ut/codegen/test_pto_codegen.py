@@ -2644,6 +2644,22 @@ class TestGenerateKernelWrapper:
         assert "a__ssa_v0_tensor->shapes[0]" in wrapper
         assert "a__ssa_v0_tensor->shapes[1]" in wrapper
 
+    @pytest.mark.parametrize("lane_stride, needs_device", [(20, True), (32, False)])
+    def test_a2a3_valid_row_push_requires_device_fifo(self, lane_stride, needs_device):
+        @pl.program
+        class RowStrideProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube(self):
+                acc = pl.tile.create([64, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc, compact=True)
+                valid_acc = pl.set_validshape(acc, 2 * lane_stride, 64)
+                pl.tpush_to_aiv(valid_acc, split=1, lane_stride=lane_stride)
+
+        func = RowStrideProgram.get_function("cube")
+        assert func is not None
+        wrapper = _generate_kernel_wrapper(func, "AICORE void cube() {}\n")
+
+        assert ('#if defined(__CPU_SIM)\n#error "A2/A3 valid-row C2V' in wrapper) == needs_device
+
     def test_split_aiv_wrapper_uses_runtime_subblock_bridge_on_a2a3(self):
         @pl.program
         class SplitWrapperProgram:

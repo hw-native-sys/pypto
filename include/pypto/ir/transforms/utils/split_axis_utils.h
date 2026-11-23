@@ -109,6 +109,10 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size);
 int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride,
                    const std::string& op_name, const Span& span);
 
+/// Infer an even valid-row stride for an A2/A3 shard whose box partition is
+/// unrepresentable. A zero result keeps the box partition.
+int InferA2A3RowShardStride(const TypePtr& full_type, int split_dim);
+
 /**
  * @brief The pto-isa split code a Vector -> Cube boundary op must carry.
  *

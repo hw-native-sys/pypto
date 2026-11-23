@@ -1040,6 +1040,32 @@ def _requires_dual_aiv_dispatch(func: _ir_core.Function) -> bool:
     return bool(getattr(func, "attrs", {}).get(DUAL_AIV_DISPATCH_ATTR, False))
 
 
+def _requires_native_c2v_row_stride(func: _ir_core.Function) -> bool:
+    """Detect A2/A3 pushes whose valid-row stride differs from the CPU FIFO split."""
+    if func.func_type != _ir_core.FunctionType.AIC:
+        return False
+    if _backend_core.get_handler().get_pto_target_arch() != "a2a3":
+        return False
+
+    class _PushFinder(_ir_core.IRVisitor):
+        found = False
+
+        def visit_call(self, op: _ir_core.Call) -> None:
+            if op.op.name == "tile.tpush_to_aiv" and op.kwargs.get("split") == 1:
+                stride = op.kwargs.get("lane_stride", 0)
+                tile_type = op.args[0].type
+                if stride > 0 and isinstance(tile_type, _ir_core.TileType) and tile_type.shape:
+                    rows = tile_type.shape[0]
+                    if isinstance(rows, _ir_core.ConstInt) and stride < rows.value // 2:
+                        self.found = True
+                        return
+            super().visit_call(op)
+
+    finder = _PushFinder()
+    finder.visit_stmt(func.body)
+    return finder.found
+
+
 def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
     """Return whether the function uses SPMD block identity ops (get_block_idx/num).
 
@@ -1478,8 +1504,17 @@ def _generate_kernel_wrapper(
 
     deferred_completion_adapter = _DEFERRED_COMPLETION_ADAPTER if func_uses_deferred_completion else ""
     urma_transfer_adapter = _generate_urma_transfer_adapter(func) if func_uses_urma_transfer else ""
+    # PTO-ISA's CPU FIFO packs even row splits by the producer's physical half.
+    # The device instead reads the two bands from a contiguous GM slot.
+    native_c2v_guard = ""
+    if _requires_native_c2v_row_stride(func):
+        native_c2v_guard = (
+            "#if defined(__CPU_SIM)\n"
+            '#error "A2/A3 valid-row C2V splitting requires the device GM FIFO"\n'
+            "#endif\n\n"
+        )
     return (
-        f"{header}\n{deferred_completion_adapter}{urma_transfer_adapter}{fifo_lane_arg_bridge}"
+        f"{header}\n{native_c2v_guard}{deferred_completion_adapter}{urma_transfer_adapter}{fifo_lane_arg_bridge}"
         f"// --- ptoas-generated code ---\n{ptoas_body}\n{fifo_lane_arg_cleanup}{wrapper_func}"
     )
 

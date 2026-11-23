@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -38,6 +39,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
@@ -2434,6 +2436,27 @@ bool HasStaticLaneExtents(const TypePtr& full_type, int split_dim, const ExprPtr
   return StaticLaneExtents(full_type, split_dim, lane_stride).has_value();
 }
 
+int InferA2A3RowShardStride(const TypePtr& full_type, int split_dim) {
+  if (split_dim != 0 || !PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+    return 0;
+  }
+  const auto tile = As<TileType>(full_type);
+  if (!tile || tile->shape_.size() != 2) {
+    return 0;
+  }
+  const auto box = ComputeLaneExtents(tile, split_dim, nullptr);
+  // Keep representable partitions, including the case where lane 1 is empty.
+  if (!box || box->lane1 == 0 || box->lane0 <= box->lane1 + 1 || box->valid % 2 != 0 ||
+      box->valid / 2 > std::numeric_limits<int>::max()) {
+    return 0;
+  }
+  const auto valid = tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
+  if (valid.size() != 2 || ProveValidExtentEqual(valid[1], tile->shape_[1]) != ProofResult::kTrue) {
+    return 0;
+  }
+  return static_cast<int>(box->valid / 2);
+}
+
 int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride,
                    const std::string& op_name, const Span& span) {
   if (mode == SplitMode::None) return kSplitNone;
@@ -2480,8 +2503,7 @@ int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, cons
   // that does not reach the second lane at all).
   if (extents->lane1 == 0) return SplitCodeFor(mode, /*odd_extent=*/false);
 
-  // Explicit boundaries retain the authored partition. The compiler does not
-  // rebalance a ragged valid extent; the author must make it representable.
+  // Report partitions that remain unrepresentable after choosing the stride.
   CHECK_SPAN(false, span)
       << op_name << ": the Cube -> Vector boundary tile's valid split-axis extent (" << extents->valid
       << " of a " << PythonPrint(tt->shape_[split_dim]) << "-wide dim " << split_dim
@@ -2764,7 +2786,13 @@ std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_
       INTERNAL_CHECK_SPAN(state.lane_index, call->span_)
           << "Internal error: a pl.split_aiv region with a partially-valid split axis has no "
              "tile.get_subblock_idx binding, so the per-lane extent cannot be materialized";
-      auto localized = LocalizeShardValidForLane(shard, operand, split_dim, state.lane_index);
+      const int stride = call->HasKwarg("lane_stride") ? call->GetKwarg<int>("lane_stride", 0)
+                                                       : InferA2A3RowShardStride(operand, split_dim);
+      const ExprPtr lane_stride =
+          stride > 0
+              ? std::make_shared<ConstInt>(stride, GetScalarDtype(operand_valid[split_dim]), call->span_)
+              : nullptr;
+      auto localized = LocalizeShardValidForLane(shard, operand, split_dim, state.lane_index, lane_stride);
       auto lane_extent =
           tile_view_semantics::GetEffectiveTileView(*std::dynamic_pointer_cast<const TileType>(localized))
               .valid_shape[split_dim];
@@ -2774,7 +2802,7 @@ std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_
       // very tile, and the producer laid its rows at their box positions. A runtime extent
       // leaves the shard full-width and hands the lane's extent to the consumers
       // below (see WithFullSplitAxisValid).
-      const bool deferred = !HasStaticLaneExtents(operand, split_dim, /*lane_stride=*/nullptr);
+      const bool deferred = !HasStaticLaneExtents(operand, split_dim, lane_stride);
       auto new_type = deferred ? WithFullSplitAxisValid(shard, split_dim) : localized;
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
       auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);

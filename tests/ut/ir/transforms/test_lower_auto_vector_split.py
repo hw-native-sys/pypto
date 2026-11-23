@@ -1706,6 +1706,30 @@ def _e2e_kernel_text(fn):
     return body_of(ir.FunctionType.AIC), body_of(ir.FunctionType.AIV)
 
 
+def test_e2e_a2a3_static_row_tail_uses_valid_row_stride():
+    """A 64-row box valid to 40 rows needs two 20-row GM bands."""
+
+    @pl.jit
+    def row_tail(
+        a: pl.Tensor[[64, 64], pl.FP16],
+        b: pl.Tensor[[64, 64], pl.FP16],
+        out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="row_tail", allow_early_resolve=True):
+            lhs = pl.slice(a, [64, 64], [0, 0], valid_shape=[40, 64])
+            acc = pl.matmul(lhs, b, out_dtype=pl.FP32)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                shard = pl.aiv_shard(acc)
+                row = lane * 20
+                out[row : row + 32, :] = pl.add(shard, 1.0)
+        return out
+
+    aic, aiv = _e2e_kernel_text(row_tail)
+    assert '"tile.tpush_to_aiv"' in aic and '"lane_stride": 20' in aic
+    assert "pl.tile.tpop_from_aic(split=1, lane_stride=20)" in aiv
+    assert "valid_shape=[20, 64]" in aiv
+
+
 def test_e2e_none_region_v2c_crossing_lowers_to_split_zero_transport():
     """``pl.aic_gather`` in a NONE region becomes a split=0 tpush/tpop pair.
 
