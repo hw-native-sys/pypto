@@ -21,8 +21,11 @@ Python 整数 0 或 1 转为 INT64 常量；动态操作数必须为
 outlining（函数提取）和拆核后仍保留。省略参数时维持后端物理 lane
 选择和原有管道发射行为。
 
+在已初始化双向管道的 AIV kernel 中：
+
 ```python
 lane = pl.cast(pl.tile.get_subblock_idx(), pl.INT64)
+outgoing = pl.tile.full([16, 16], dtype=pl.FP32, value=1.0)
 pl.system.tpush_to_aic(outgoing, split=1, aiv_subblockid=lane)
 received = pl.system.tpop_from_aic(
     shape=[16, 16], dtype=pl.FP32, split=1, aiv_subblockid=lane

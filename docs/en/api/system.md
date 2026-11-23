@@ -22,8 +22,11 @@ explicitly with `pl.cast(value, pl.INT64)`. The lane is an SSA operand, so it
 survives outlining and kernel splitting. Omitting it preserves the backend's
 physical lane selection and existing pipe emission.
 
+Inside an AIV kernel with a bidirectional pipe already initialized:
+
 ```python
 lane = pl.cast(pl.tile.get_subblock_idx(), pl.INT64)
+outgoing = pl.tile.full([16, 16], dtype=pl.FP32, value=1.0)
 pl.system.tpush_to_aic(outgoing, split=1, aiv_subblockid=lane)
 received = pl.system.tpop_from_aic(
     shape=[16, 16], dtype=pl.FP32, split=1, aiv_subblockid=lane
