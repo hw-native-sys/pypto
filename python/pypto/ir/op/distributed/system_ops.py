@@ -22,10 +22,37 @@ from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, CommEngine, NotifyOp, Span, WaitCmp
+from pypto.pypto_core.ir import Call, CommEngine, Expr, NotifyOp, Span, WaitCmp
 
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 from .tensor_ops import _normalize_async_engine
+
+
+def make_session(comm_ctx: Expr, *, engine: CommEngine = CommEngine.URMA, span: Span | None = None) -> Call:
+    """Build an AIV-local session for a communication workspace, shared across peer operands."""
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    engine_value = _normalize_async_engine(engine, "pld.system.make_session")
+    return _ir_core.create_op_call(
+        "pld.system.make_session", [comm_ctx], {"engine": engine_value}, actual_span
+    )
+
+
+def wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = None) -> Call:
+    """Wait in the current kernel for a distributed PUT or GET and return its BOOL success flag.
+
+    The optional session is the one that issued the transfer. With an implicit session,
+    the event identifies the originating submission.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    args = [event] if session is None else [event, session]
+    return _ir_core.create_op_call("pld.system.wait_event", args, {}, actual_span)
+
+
+def defer_wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = None) -> Call:
+    """Transfer an event's completion to the current task, optionally naming its originating session."""
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    args = [event] if session is None else [event, session]
+    return _ir_core.create_op_call("pld.system.defer_wait_event", args, {}, actual_span)
 
 
 def world_size(*, span: Span | None = None) -> Call:
@@ -143,53 +170,9 @@ def defer_wait(
     )
 
 
-def make_session(
-    ctx: _ir_core.Expr,
-    peer: int | _ir_core.Expr,
-    *,
-    engine: CommEngine = CommEngine.URMA,
-    span: Span | None = None,
-) -> Call:
-    """Build a ``pld.system.make_session(ctx, peer)`` Call returning an ``AsyncSessionType``.
-
-    The session binds one communication context to one peer rank and owns the
-    engine, so the tile submission ops do not repeat either. Reuse one session
-    across submissions to the same peer.
-
-    The session carries mutable ISA runtime state across posts and waits: it is
-    not a value. Never copy one, rebuild one as a substitute for another, or
-    treat two sessions over the same workspace as independent queues.
-
-    ``ctx`` comes from :func:`get_comm_ctx`. A constant ``peer`` must be
-    non-negative, and ``engine`` must be a :class:`CommEngine` member; V2
-    accepts :attr:`CommEngine.URMA` only.
-    """
-    engine_value = _normalize_async_engine(engine, "pld.system.make_session")
-    actual_span = _get_span_or_capture(span, frame_offset=1)
-    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
-    return _ir_core.create_op_call(
-        "pld.system.make_session", [ctx, peer_expr], {"engine": engine_value}, actual_span
-    )
-
-
-def wait_event(event: _ir_core.Expr, session: _ir_core.Expr, *, span: Span | None = None) -> Call:
-    """Build a ``pld.system.wait_event(event, session)`` Call returning ``ScalarType(BOOL)``.
-
-    Block until one asynchronous transfer completes within the session that
-    produced its event. Lowers to the ISA ``event.Wait(session)`` and registers
-    **no** task-completion condition — an in-kernel wait is the alternative to
-    handing completion to the task, not a supplement to it.
-
-    ``event`` comes from a submission such as
-    :func:`pypto.ir.op.distributed.tile_ops.put_async`, and ``session`` must be
-    the session that produced it.
-    """
-    actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.system.wait_event", [event, session], {}, actual_span)
-
-
 __all__ = [
     "defer_wait",
+    "defer_wait_event",
     "get_comm_ctx",
     "make_session",
     "notify",

@@ -1675,14 +1675,17 @@ class TestMultiOutputOps:
                     f"scratch is hardware-written by definition"
                 )
 
-    def test_written_arguments_are_workspaces(self):
+    def test_written_arguments_are_workspaces_or_returned_tensors(self):
         """A written argument is scratch the hardware needs — which must say so —
         or a result the caller reads, which belongs in the TupleType instead."""
         for op_name in self._declared_multi_output_ops():
             for i in range(ir.get_op_argument_count(op_name)):
                 if ir.get_op_arg_effect(op_name, i) == ir.ArgEffect.Read:
                     continue
-                assert ir.op_arg_is_workspace(op_name, i), (
+                assert (
+                    ir.op_arg_is_workspace(op_name, i)
+                    or i in ir.get_op_tuple_result_aliases(op_name).values()
+                ), (
                     f"{op_name} writes argument {i} without declaring it a "
                     f"workspace; a written argument that carries a result is a "
                     f"destination and must be a TupleType element"

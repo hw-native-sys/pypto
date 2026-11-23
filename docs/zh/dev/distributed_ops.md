@@ -47,6 +47,22 @@ SSA 值而存在。
 
 支持的传输矩阵、使用模式、ABI 说明和失败诊断见[异步传输校验](distributed_async.md)。
 
+### PUT 和 GET 的显式完成（前端与 IR）
+
+| 操作 | 结果 |
+| ---- | ---- |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | 当前 AIV 与 workspace 的 `pl.AsyncSession`，可跨 peer 复用 |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | `(dst, event)`，元组第 0 项与本地目标别名相同 |
+| `pld.tile.get_async(dst, peer, src, session)` | 本次提交在指定 session 上产生的 `pl.AsyncEvent` |
+| `pld.tile.put_async(dst, peer, src, session)` | 写入远端目标窗口的 `pl.AsyncEvent` |
+| `pld.system.wait_event(event[, session])` | 在当前核等待，返回 `BOOL` 成功标志 |
+| `pld.system.defer_wait_event(event[, session])` | 将完成责任移交给发起传输的 task |
+
+PUT 和 GET 均接受形状及数据类型匹配的连续 GM 视图，每次提交指定一个 peer。
+PUT 的目标与 GET 的源分别位于远端窗口。两种方向可以在同一 AIV 上复用绑定同一 workspace 的 session。
+event 标识本次提交。等待或移交时显式提供的 session 必须与提交时一致。核内等待返回成功标志；
+移交将完成责任交给 task，依赖方在发起 task 逻辑完成后可以使用目标。这六个操作目前支持 DSL 构造、IR 验证和打印。
+
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
 
 命名空间编码的是算子所在的 IR 层级，而非随意分组：

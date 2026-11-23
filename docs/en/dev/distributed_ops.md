@@ -51,6 +51,25 @@ exist for their cross-rank effect, not for an SSA value a consumer reads.
 
 See [Async transfer validation](distributed_async.md) for the supported transfer matrix, usage pattern, ABI notes and failure diagnostics.
 
+### Explicit PUT and GET completion (frontend and IR)
+
+| Operation | Result |
+| --------- | ------ |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | A peer-independent `pl.AsyncSession` for this AIV and workspace |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | `(dst, event)`; tuple element 0 aliases the local destination |
+| `pld.tile.get_async(dst, peer, src, session)` | A `pl.AsyncEvent` for this submission on the given session |
+| `pld.tile.put_async(dst, peer, src, session)` | A `pl.AsyncEvent` for a write to the remote destination window |
+| `pld.system.wait_event(event[, session])` | A `BOOL` success flag after waiting in the current kernel |
+| `pld.system.defer_wait_event(event[, session])` | A statement handing completion to the issuing task |
+
+PUT and GET submit dense GM views of matching shape and dtype. Each submission selects
+one peer. PUT takes a remote destination window and GET takes a remote source window.
+Both directions can reuse one session bound to the same workspace on the issuing AIV.
+The event identifies its submission. An explicit session supplied to wait or defer must
+match it. An in-kernel wait returns success to the caller. Deferring hands completion
+to the task so its consumers can use the destination after logical completion. These six
+operations currently support DSL construction, IR verification, and printing.
+
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
 The namespace encodes the IR level the op lives at, not an arbitrary grouping:

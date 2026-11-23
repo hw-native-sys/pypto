@@ -45,6 +45,29 @@ from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap
 
 
+def make_session(comm_ctx: CommCtx, *, engine: CommEngine = CommEngine.URMA) -> AsyncSession:
+    """Build an AIV-local communication session that PUT and GET submissions can reuse across peers."""
+    return AsyncSession(expr=_ir_system.make_session(_unwrap(comm_ctx), engine=engine))
+
+
+def wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Scalar:
+    """Wait in the current kernel for a distributed PUT or GET and return its BOOL success flag.
+
+    An explicit session must match the originating submission. A successful wait makes the
+    GET destination available to this kernel and releases the PUT source for reuse.
+    """
+    return Scalar(expr=_ir_system.wait_event(_unwrap(event), _unwrap(session)))
+
+
+def defer_wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Call:
+    """Transfer a distributed transfer's completion to the issuing task.
+
+    The single-operand form uses the session associated with the submission. The explicit
+    form names that same session. Registering the event does not wait inside the current kernel.
+    """
+    return _ir_system.defer_wait_event(_unwrap(event), _unwrap(session))
+
+
 def world_size() -> Scalar:
     """Return the distributed world size as an ``INT64`` :class:`Scalar`.
 
@@ -207,51 +230,9 @@ def defer_wait(
     return _ir_system.defer_wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-def make_session(ctx: CommCtx, peer: IntLike, *, engine: CommEngine = CommEngine.URMA) -> AsyncSession:
-    """Build a per-peer asynchronous submission session.
-
-    The session binds one :class:`pld.CommCtx` to one ``peer`` rank and owns the
-    engine, so the tile submission ops do not repeat either. Reuse one session
-    across submissions to the same peer.
-
-    The session carries mutable ISA runtime state across posts and waits: it is
-    a resource, not a value. Do not copy one, rebuild one as a substitute for
-    another, or treat two sessions over the same workspace as independent queues.
-
-    Args:
-        ctx: A :class:`pld.CommCtx` from :func:`get_comm_ctx`.
-        peer: Peer rank index. A constant must be non-negative.
-        engine: Compile-time engine selector; V2 accepts
-            :attr:`CommEngine.URMA` only and rejects any other value by name.
-
-    Returns:
-        An [`AsyncSession`][pypto.language.AsyncSession] to pass to
-        :func:`pld.tile.put_async` and :func:`wait_event`.
-    """
-    return AsyncSession(expr=_ir_system.make_session(_unwrap(ctx), _unwrap(peer), engine=engine))
-
-
-def wait_event(event: AsyncEvent, session: AsyncSession) -> Scalar:
-    """Block until one asynchronous transfer completes within its session.
-
-    Lowers to the ISA ``event.Wait(session)`` and registers **no**
-    task-completion condition: an in-kernel wait is the alternative to handing
-    completion to the task, not a supplement to it.
-
-    Args:
-        event: An [`AsyncEvent`][pypto.language.AsyncEvent] from a submission
-            such as :func:`pld.tile.put_async`.
-        session: The [`AsyncSession`][pypto.language.AsyncSession] that produced
-            the event.
-
-    Returns:
-        A ``BOOL`` [`Scalar`][pypto.language.Scalar] success flag.
-    """
-    return Scalar(expr=_ir_system.wait_event(_unwrap(event), _unwrap(session)))
-
-
 __all__ = [
     "defer_wait",
+    "defer_wait_event",
     "get_comm_ctx",
     "make_session",
     "notify",

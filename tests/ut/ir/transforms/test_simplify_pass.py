@@ -2384,6 +2384,36 @@ class TestScalarDCE:
         ir.assert_structural_equal(after, Before)
         assert "pld.CommEngine.URMA" in str(after)
 
+    def test_keeps_explicit_get_even_when_event_is_unused(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, dst: pl.Tensor[[32], pl.FP16], src: pld.DistributedTensor[[32], pl.FP16]):
+                ctx = pld.system.get_comm_ctx(src)
+                session = pld.system.make_session(ctx)
+                _event = pld.tile.get_async(dst, 1, src, session)
+                _out, _another_event = pld.tensor.get_async_event(dst, 2, src)
+
+        # Both requests write dst even if the author drops their completion handles.
+        after = str(passes.simplify()(Before))
+        assert after.count("pld.tile.get_async(") == 1
+        assert after.count("pld.tensor.get_async_event(") == 1
+
+    def test_keeps_put_and_wait_when_success_flag_is_unused(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, dst: pld.DistributedTensor[[32], pl.FP16], src: pl.Tensor[[32], pl.FP16]):
+                ctx = pld.system.get_comm_ctx(dst)
+                session = pld.system.make_session(ctx)
+                sent = pld.tile.put_async(dst, 1, src, session)
+                _done = pld.system.wait_event(sent, session)
+
+        # Observing completion is an effect even if the BOOL result has no SSA uses.
+        after = str(passes.simplify()(Before))
+        assert after.count("pld.tile.put_async(") == 1
+        assert after.count("pld.system.wait_event(") == 1
+
     def test_keeps_used_scalar(self):
         """A scalar referenced downstream is preserved even after the
         upstream binding's LHS gets constant-folded away."""

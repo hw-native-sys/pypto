@@ -6,10 +6,13 @@ Some hardware intrinsics produce more than one value. PTOAS `TGATHER` in its
 compare form writes both the gathered indices and a per-row match count;
 `pto.tgather` names them as two `outs(...)` operands. An operator wrapping such
 an intrinsic is a **multi-output operator**, and PyPTO expresses its results as
-a `TupleType`, never as destination arguments.
+a `TupleType`.
 
-**The rule**: register the operator with its *inputs only*. Every output is an
-element of the `TupleType` that `f_deduce_type` returns.
+Every output is an element of the `TupleType` that `f_deduce_type` returns.
+A fresh tile output is allocated by the compiler. An operation that updates
+an existing GM tensor declares the corresponding tuple element and input with
+`set_tuple_result_alias(result, arg)`. For example, element 0 of
+`pld.tensor.get_async_event` aliases its destination and element 1 is a fresh event.
 
 See [Operator System](05-operators.md) for the general registration API and
 [Types and Examples](02-types.md#tupletype) for `TupleType` itself.
@@ -102,7 +105,7 @@ arity > 1 and rejects three shapes:
 | Rejected | Why |
 | -------- | --- |
 | An argument with no declared effect | The default `Read` is indistinguishable from a destination in hiding |
-| A written argument not declared a workspace | It is either scratch that must say so, or a destination that belongs in the `TupleType` |
+| A written argument missing both a workspace and a tuple alias declaration | Scratch and returned destinations have distinct storage and liveness contracts |
 | `set_workspace_arg(i)` naming no argument | An index past the end is a typo that silently protects nothing |
 | A workspace argument the operator never writes | Scratch is hardware-written by definition. Declaring it `Read` — or reaching that through `no_arg_writes()` — is the same dropped dependency edge, wearing a marker that says otherwise |
 | `set_output_reuses_input(N)` | With several results, "the output reuses input N" cannot say which one |
@@ -199,8 +202,8 @@ body rescan per call.
 2. Classify **every** argument with `set_arg_effect`, or `no_arg_writes()` when
    the operator writes through none of them. The import-time check requires a
    verdict on each.
-3. Mark any written argument with `set_workspace_arg(i)` — and if it is not
-   scratch, it is a destination and does not belong in the argument list.
+3. Mark scratch with `set_workspace_arg(i)`. For a result that updates an existing
+   GM tensor, use `set_tuple_result_alias(result, i)` and declare its argument effect.
 4. Return an N-element `TupleType` from `f_deduce_type`.
 5. Write the DSL wrapper to return a tuple of `TupleGetItemExpr(call, i)` over
    one call — the parser's unpacking path recognizes that shape.

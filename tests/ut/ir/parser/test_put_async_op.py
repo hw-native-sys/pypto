@@ -19,6 +19,7 @@ losing the engine or the destination alias.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto import passes
 from pypto.pypto_core import ir
 
 
@@ -108,6 +109,144 @@ def test_get_async_round_trips_engine():
 
     reparsed = pl.parse_program(printed)
     ir.assert_structural_equal(P, reparsed)
+
+
+def _type_diagnostics(program: ir.Program):
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.TypeChecked)
+    return passes.PropertyVerifierRegistry.verify(props, program)
+
+
+def test_tensor_get_event_unpacks_one_submission_and_defers():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]
+        ) -> pl.Tensor[[32], pl.FP32]:
+            out, event = pld.tensor.get_async_event(dst, 1, src, engine=pld.CommEngine.URMA)
+            pld.system.defer_wait_event(event)
+            return out
+
+    call = _find_async_call(P, "pld.tensor.get_async_event")
+    assert isinstance(call.type, ir.TupleType)
+    ir.assert_structural_equal(call.type.types[0], _get_func(P, "kernel").params[0].type)
+    assert isinstance(call.type.types[1], ir.AsyncEventType)
+    assert ir.returned_param_indices(_get_func(P, "kernel"), P) == [0]
+    assert str(P).count("pld.tensor.get_async_event(") == 1
+    assert not _type_diagnostics(P)
+    ir.assert_structural_equal(P, pl.parse_program(str(P)))
+    ir.assert_structural_equal(P, ir.deserialize(ir.serialize(P)))
+
+
+def test_tile_get_event_reuses_session_for_dynamic_peers():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[32], pl.FP32],
+            src: pld.DistributedTensor[[32], pl.FP32],
+            first: pl.Scalar[pl.INT32],
+            second: pl.Scalar[pl.INT32],
+        ):
+            ctx = pld.system.get_comm_ctx(src)
+            session = pld.system.make_session(ctx, engine=pld.CommEngine.URMA)
+            e1 = pld.tile.get_async(dst, first, src, session)
+            e2 = pld.tile.get_async(dst, second, src, session)
+            pld.system.defer_wait_event(e1, session)
+            pld.system.defer_wait_event(e2)
+
+    printed = str(P)
+    assert printed.count("pld.system.make_session(") == 1
+    assert printed.count("pld.tile.get_async(") == 2
+    assert "pld.CommEngine.URMA" in printed
+    assert not _type_diagnostics(P)
+    ir.assert_structural_equal(P, pl.parse_program(printed))
+
+
+def test_put_and_get_share_session_across_peers_and_completion_paths():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            local: pl.Tensor[[32], pl.FP32],
+            window: pld.DistributedTensor[[32], pl.FP32],
+            first: pl.Scalar[pl.INT32],
+            second: pl.Scalar[pl.INT32],
+        ):
+            ctx = pld.system.get_comm_ctx(window)
+            session = pld.system.make_session(ctx)
+            fetched = pld.tile.get_async(local, first, window, session)
+            _ok = pld.system.wait_event(fetched)
+            sent = pld.tile.put_async(window, second, local, session)
+            pld.system.defer_wait_event(sent, session)
+
+    printed = str(P)
+    assert printed.count("pld.system.make_session(") == 1
+    assert ir.get_op_arg_effect("pld.tile.put_async", 0) == ir.ArgEffect.ReadWrite
+    assert ir.get_op_arg_effect("pld.tile.put_async", 2) == ir.ArgEffect.Read
+    assert ir.get_op_arg_effect("pld.tile.put_async", 3) == ir.ArgEffect.ReadWrite
+    assert not _type_diagnostics(P)
+    ir.assert_structural_equal(P, pl.parse_program(printed))
+    ir.assert_structural_equal(P, ir.deserialize(ir.serialize(P)))
+
+
+def test_wait_event_on_a_tensor_get_infers_its_session():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]):
+            _out, fetched = pld.tensor.get_async_event(dst, 1, src)
+            _ok = pld.system.wait_event(fetched)
+
+    assert not _type_diagnostics(P)
+    ir.assert_structural_equal(P, pl.parse_program(str(P)))
+
+
+def test_wait_event_rejects_another_session_for_put():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, dst: pld.DistributedTensor[[32], pl.FP32], src: pl.Tensor[[32], pl.FP32]):
+            ctx = pld.system.get_comm_ctx(dst)
+            session = pld.system.make_session(ctx)
+            other = pld.system.make_session(ctx)
+            event = pld.tile.put_async(dst, 1, src, session)
+            pld.system.wait_event(event, other)
+
+    assert any("same session" in d.message for d in _type_diagnostics(P))
+
+
+def test_defer_wait_event_rejects_another_session_from_the_same_context():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]):
+            ctx = pld.system.get_comm_ctx(src)
+            session = pld.system.make_session(ctx)
+            other = pld.system.make_session(ctx)
+            event = pld.tile.get_async(dst, 1, src, session)
+            pld.system.defer_wait_event(event, other)
+
+    assert any("same session" in d.message for d in _type_diagnostics(P))
+
+
+def test_prefetch_handles_cannot_be_used_for_urma_get_or_defer():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]):
+            ctx = pl.prefetch.make_context()
+            session = pl.prefetch.session(ctx)
+            event = pl.prefetch.async_prefetch(dst, ctx)
+            pld.tile.get_async(dst, 1, src, session)
+            pld.system.defer_wait_event(event)
+
+    diagnostics = _type_diagnostics(P)
+    assert any("session from pld.system.make_session" in d.message for d in diagnostics)
+    assert any("distributed transfer event" in d.message for d in diagnostics)
 
 
 def _subregion_program(op_name: str):

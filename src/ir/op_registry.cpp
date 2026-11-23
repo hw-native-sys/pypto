@@ -199,6 +199,15 @@ const BufferResultSpec& OpRegistryEntry::GetBufferResultSpec(size_t result_index
   return it->second;
 }
 
+OpRegistryEntry& OpRegistryEntry::set_tuple_result_alias(size_t result_index, size_t arg_index) {
+  CHECK(ir_stage_ == OpIRStage::Functional && output_arity_ > 1 && result_index < output_arity_)
+      << "Operator '" << name_ << "' requires a declared tuple element for result alias " << result_index;
+  CHECK(arg_index < GetArgumentCount()) << "Operator '" << name_ << "' has no argument " << arg_index;
+  CHECK(tuple_result_aliases_.emplace(result_index, arg_index).second)
+      << "Operator '" << name_ << "' declares result alias " << result_index << " twice";
+  return *this;
+}
+
 void OpRegistryEntry::ValidateIRStage() const {
   CHECK(!validate_explicit_type_.has_value() || (ir_stage_ == OpIRStage::Buffer && internal_only_))
       << "Operator '" << name_ << "' explicit type validation requires an internal-only Buffer operator";
@@ -256,6 +265,14 @@ void OpRegistryEntry::ValidateCall(const std::vector<ExprPtr>& args, const TypeP
       INTERNAL_CHECK_SPAN(tuple->types_.size() == output_arity_, span)
           << "Operator '" << name_ << "' declares set_output_arity(" << output_arity_
           << ") but deduced a TupleType with " << tuple->types_.size() << " elements";
+      for (const auto& [result, arg] : tuple_result_aliases_) {
+        INTERNAL_CHECK_SPAN(result < tuple->types_.size() && arg < args.size() && args[arg] &&
+                                AsTensorTypeLike(args[arg]->GetType()) &&
+                                (tuple->types_[result] == args[arg]->GetType() ||
+                                 structural_equal(tuple->types_[result], args[arg]->GetType())),
+                            span)
+            << "Operator '" << name_ << "' tuple result " << result << " must return tensor argument " << arg;
+      }
     } else {
       INTERNAL_CHECK_SPAN(!tuple, span)
           << "Operator '" << name_ << "' deduced a TupleType result without declaring set_output_arity("
@@ -676,9 +693,12 @@ void OpRegistry::ValidateMultiOutputOps() const {
         continue;
       }
       // A written argument is either scratch the hardware needs or a result the
-      // caller reads. The first is legitimate and must say so; the second is a
-      // destination that belongs in the TupleType.
-      if (entry.MayWriteArg(i) && !entry.IsWorkspaceArg(i)) {
+      // caller reads. An existing destination tensor must appear explicitly
+      // as an aliased tuple element; an ordinary result needs no destination argument.
+      const auto& aliases = entry.GetTupleResultAliases();
+      const bool returned =
+          std::any_of(aliases.begin(), aliases.end(), [i](const auto& alias) { return alias.second == i; });
+      if (entry.MayWriteArg(i) && !entry.IsWorkspaceArg(i) && !returned) {
         leaked_destinations.push_back(name + " (argument " + std::to_string(i) + ")");
       }
     }
@@ -716,11 +736,9 @@ void OpRegistry::ValidateMultiOutputOps() const {
   }
   if (!leaked_destinations.empty()) {
     fail(
-        "The following multi-output ops write through an argument that was never declared "
-        "scratch. A written argument is either a workspace the hardware needs — say so with "
-        ".set_workspace_arg(<index>) — or a destination the caller reads, which must be an "
-        "element of the deduced TupleType instead. A destination in the argument list makes "
-        "the caller pre-allocate a buffer InitMemRef owns:",
+        "The following multi-output ops write an argument without declaring its role. Use "
+        "set_workspace_arg for scratch, or set_tuple_result_alias for an existing destination tensor "
+        "returned as a tuple element. Fresh tile outputs belong in the TupleType:",
         std::move(leaked_destinations));
   }
   if (!workspace_out_of_range.empty()) {

@@ -22,6 +22,20 @@ from pypto.pypto_core.ir import AtomicType, Call, Expr, Span
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
+def put_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Span | None = None) -> Call:
+    """Submit a single-peer PUT between GM views on an explicit session and return its event."""
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call("pld.tile.put_async", [dst, peer_expr, src, session], {}, actual_span)
+
+
+def get_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Span | None = None) -> Call:
+    """Submit a single-peer GET between GM views on an explicit session and return its event."""
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call("pld.tile.get_async", [dst, peer_expr, src, session], {}, actual_span)
+
+
 def remote_load(
     target: Expr,
     peer: Expr,
@@ -228,34 +242,12 @@ def get(
     return _ir_core.create_op_call("pld.tile.get", args, {}, actual_span)
 
 
-def put_async(dst: Expr, src: Expr, session: Expr, *, span: Span | None = None) -> Call:
-    """Build a ``pld.tile.put_async(dst, src, session)`` Call returning an ``AsyncEventType``.
-
-    Submit one asynchronous URMA write of the local ``src`` into the session's
-    peer slice of the window-bound DistributedTensor ``dst``, and return the
-    completion event for that single logical transfer.
-
-    Unlike the V1 ``pld.tensor.put_async``, this returns an **event**, not
-    ``dst``: the explicit-event form is a separate op so one call never changes
-    its return type by context. Returning still does not mean the transfer
-    completed — pair the event with its producing ``session`` in
-    :func:`pypto.ir.op.distributed.system_ops.wait_event`.
-
-    The engine and peer come from ``session``, so they are not repeated here,
-    and pairing the event with :func:`wait_event` registers no task-completion
-    condition. ``dst`` and ``src``
-    must share an element type and shape, and both endpoint views must be dense
-    row-major.
-    """
-    actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.tile.put_async", [dst, src, session], {}, actual_span)
-
-
 __all__ = [
     "get",
+    "get_async",
+    "put_async",
     "remote_load",
     "remote_store",
     "put",
-    "put_async",
     "_remote_load_with_physical_tail_padding",
 ]

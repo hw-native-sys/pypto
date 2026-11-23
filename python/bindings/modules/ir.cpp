@@ -10,6 +10,7 @@
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
@@ -1071,6 +1072,12 @@ void BindIR(nb::module_& m) {
       "get_op", [](const std::string& op_name) { return OpRegistry::GetInstance().GetOp(op_name); },
       nb::arg("op_name"), "Get an operator instance by name");
 
+  ir.def(
+      "get_op_tuple_result_aliases",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetTupleResultAliases();
+      },
+      nb::arg("op_name"), "Map tuple result indices to the input tensor arguments they alias.");
   ir.def(
       "get_op_output_arity",
       [](const std::string& op_name) { return OpRegistry::GetInstance().GetEntry(op_name).GetOutputArity(); },

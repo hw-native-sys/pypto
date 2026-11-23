@@ -70,6 +70,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "TILE_VIEW_MISMATCH";
     case ErrorType::BUFFER_DESCRIPTOR_MISMATCH:
       return "BUFFER_DESCRIPTOR_MISMATCH";
+    case ErrorType::ASYNC_HANDLE_MISMATCH:
+      return "ASYNC_HANDLE_MISMATCH";
     case ErrorType::TENSOR_LAYOUT_MISMATCH:
       return "TENSOR_LAYOUT_MISMATCH";
     default:
@@ -115,7 +117,7 @@ class TypeChecker : public IRVisitor {
   /// The function being checked; its body is where a dispatch argument is traced.
   FunctionPtr func_;
   /// Every value each Var can hold in ``func_``, and ``func_``'s parameters,
-  /// built on first use: only an ND-to-NZ dispatch argument needs tracing.
+  /// built on first use for layout or async-handle provenance checks.
   std::unordered_map<const Var*, std::vector<ExprPtr>> var_values_;
   std::unordered_set<const Var*> func_params_;
   bool var_values_built_ = false;
@@ -137,6 +139,16 @@ class TypeChecker : public IRVisitor {
    * an NZ parameter
    */
   NzDispatchArg ClassifyNzDispatchArg(const ExprPtr& arg);
+  void CollectVarValues();
+  // Keep the SSA definition as well as its RHS: two executions of an identical
+  // make_session call still produce distinct mutable session objects.
+  struct Definition {
+    ExprPtr identity;
+    ExprPtr value;
+  };
+  std::unordered_map<const Var*, Definition> async_definitions_;
+  Definition ResolveAsyncDefinition(const ExprPtr& expr);
+  void CheckAsyncOperands(const CallPtr& op);
 
   /**
    * @brief Record an error
@@ -183,6 +195,7 @@ void TypeChecker::VisitFunction(const FunctionPtr& func) {
   func_params_.clear();
   var_values_built_ = false;
   nz_dispatch_args_.clear();
+  async_definitions_.clear();
 
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
@@ -328,17 +341,80 @@ bool SliceKeepsMatrixWhole(const CallPtr& slice) {
 
 }  // namespace
 
+void TypeChecker::CollectVarValues() {
+  if (var_values_built_) return;
+  VarValueCollector collector;
+  if (func_ && func_->body_) collector.VisitStmt(func_->body_);
+  var_values_ = std::move(collector.values);
+  if (func_) {
+    for (const auto& param : func_->params_) func_params_.insert(param.get());
+  }
+  var_values_built_ = true;
+}
+
+TypeChecker::Definition TypeChecker::ResolveAsyncDefinition(const ExprPtr& expr) {
+  auto var = AsVarLike(expr);
+  if (!var) return {expr, expr};
+  // Insert an unknown result first to bound cycles in pre-SSA IR. Ambiguous
+  // control-flow merges and cross-function handles have no unique local owner.
+  auto [entry, inserted] = async_definitions_.try_emplace(var.get());
+  if (!inserted) return entry->second;
+  CollectVarValues();
+  auto found = var_values_.find(var.get());
+  if (found == var_values_.end() || found->second.size() != 1) return {};
+  const auto& rhs = found->second.front();
+  auto& definition = entry->second;
+  definition = AsVarLike(rhs) ? ResolveAsyncDefinition(rhs) : Definition{var, rhs};
+  return definition;
+}
+
+void TypeChecker::CheckAsyncOperands(const CallPtr& op) {
+  const auto mismatch = [&](const std::string& message) {
+    RecordError(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH, op->op_->name_ + " " + message, op->span_);
+  };
+  if ((IsOp(op, "pld.tile.get_async") || IsOp(op, "pld.tile.put_async")) && op->args_.size() == 4) {
+    if (!IsOp(As<Call>(ResolveAsyncDefinition(op->args_[3]).value), "pld.system.make_session")) {
+      mismatch("requires a session from pld.system.make_session in this function");
+    }
+    return;
+  }
+  if (!IsOp(op, "pld.system.wait_event") && !IsOp(op, "pld.system.defer_wait_event") &&
+      !IsOp(op, "prefetch.wait"))
+    return;
+  if (op->args_.empty()) return;
+  auto event = ResolveAsyncDefinition(op->args_[0]).value;
+  auto get_event = As<TupleGetItemExpr>(event);
+  const bool implicit_session =
+      get_event && get_event->index_ == 1 &&
+      IsOp(As<Call>(ResolveAsyncDefinition(get_event->tuple_).value), "pld.tensor.get_async_event");
+  auto submit = As<Call>(event);
+  const bool explicit_session = IsOp(submit, "pld.tile.get_async") || IsOp(submit, "pld.tile.put_async");
+  if (IsOp(op, "prefetch.wait")) {
+    // Preserve existing prefetch handles, but reject mixing a known URMA
+    // producer into a wait whose result and completion contract are SDMA-specific.
+    if (implicit_session || explicit_session ||
+        (op->args_.size() == 2 &&
+         IsOp(As<Call>(ResolveAsyncDefinition(op->args_[1]).value), "pld.system.make_session"))) {
+      mismatch("requires prefetch event and session handles");
+    }
+  } else if (!implicit_session && !explicit_session) {
+    mismatch("requires a statically traceable distributed transfer event from this function");
+  } else if (op->args_.size() == 2) {
+    const auto session = ResolveAsyncDefinition(op->args_[1]);
+    if (!IsOp(As<Call>(session.value), "pld.system.make_session")) {
+      mismatch("requires an explicit session from pld.system.make_session");
+    } else if (explicit_session && submit->args_.size() == 4 &&
+               ResolveAsyncDefinition(submit->args_[3]).identity != session.identity) {
+      mismatch("requires the same session that submitted the transfer");
+    }
+    // Tensor GET has no session SSA operand until materialization. Its optional
+    // explicit operand constrains that binding; a tile submission already has an owner.
+  }
+}
+
 NzDispatchArg TypeChecker::ClassifyNzDispatchArg(const ExprPtr& arg) {
   if (auto var = AsVarLike(arg)) {
-    if (!var_values_built_) {
-      VarValueCollector collector;
-      if (func_ && func_->body_) collector.VisitStmt(func_->body_);
-      var_values_ = std::move(collector.values);
-      if (func_) {
-        for (const auto& param : func_->params_) func_params_.insert(param.get());
-      }
-      var_values_built_ = true;
-    }
+    CollectVarValues();
     // Only a parameter is the buffer as the host holds it. The trace stays in
     // this function, so a window passed into a helper arrives there as a
     // parameter and is not followed back to the caller.
@@ -498,6 +574,11 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
 
 void TypeChecker::VisitExpr_(const CallPtr& op) {
   if (op) {
+    // Limit provenance lookups to event producers and consumers.
+    if (As<AsyncEventType>(op->GetType()) ||
+        (!op->args_.empty() && op->args_.front() && As<AsyncEventType>(op->args_.front()->GetType()))) {
+      CheckAsyncOperands(op);
+    }
     CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, false);
   }

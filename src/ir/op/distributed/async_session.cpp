@@ -11,49 +11,11 @@
 
 /**
  * @file async_session.cpp
- * @brief Explicit session/event surface for URMA async transfers - the V2 stage of the URMA async RFC.
+ * @brief Peer-independent URMA sessions, explicit PUT, and event completion.
  *
- * V1 (``pld.tensor.put_async`` / ``get_async``) returns ``dst`` and lets the
- * enclosing task own completion; there is no user-visible session or event.
- * V2 is **additive**: it adds an explicit session, an explicit event, and an
- * in-kernel wait, while V1 keeps its return type and completion guarantee
- * unchanged.
- *
- * IR signatures::
- *
- *     pld.system.make_session(ctx, peer, *, engine: int) -> AsyncSession
- *     pld.tile.put_async(dst, src, session)              -> AsyncEvent
- *     pld.system.wait_event(event, session)              -> bool
- *
- * Four invariants shape the op definitions below:
- *
- * * **The session owns the engine and the peer.** The tile op does not repeat
- *   them, so one session backs many submissions to the same peer.
- * * **A session is a resource, not a value.** ISA updates its runtime state
- *   across posts and waits, so it is never pure: it must not be CSE'd, hoisted
- *   as a pure op, copied, or substituted for another session over the same
- *   workspace. Hence ``set_no_duplicate`` on ``make_session``.
- * * **One event covers one logical transfer.** PyPTO neither splits a transfer
- *   nor aggregates per-chunk events; failure and empty-request semantics follow
- *   the ISA event contract.
- * * **An in-kernel wait registers no task condition.** ``wait_event`` lowers to
- *   the ISA ``event.Wait(session)``; it observes completion on this core instead
- *   of handing it over, and the two are alternatives, not a pair.
- *
- * The *deferred* completion path is deliberately absent. It is not merely
- * unimplemented: its submission site is still being settled with the runtime,
- * and the candidate shapes disagree in a way that reaches back into this op.
- * One keeps submission a native ISA call and registers at the completion op;
- * the other submits *and* registers at the submission site, leaving the
- * completion op to emit nothing. Under the second, this op's lowering would
- * depend on how its event is consumed downstream. Until that is fixed, the IR
- * contract here is only that a submission yields one event -- a pass or codegen
- * must not assume either shape.
- *
- * Also out of scope here: descriptor materialization and native Gather emission
- * in the backend, the session-materialization pass, and GET. GET's counterpart
- * is the ISA Scatter ``TGET_ASYNC<URMA>`` overload, which PTOAS does not yet
- * expose as an op, so there is no lowering target for it.
+ * Sessions carry mutable AIV-local state. Each submission supplies the peer
+ * for its remote view and produces one event. Waiting observes completion on
+ * the issuing core; deferring hands the completion condition to the task.
  */
 
 #include <any>
@@ -104,12 +66,8 @@ void CheckHandle(const char* op_name, const char* arg_role, const ExprPtr& arg, 
 
 TypePtr DeduceMakeSessionType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CheckArity(kMakeSessionOp, "ctx, peer", 2, args);
-  CheckHandle<CommCtxType>(kMakeSessionOp, "ctx to be a CommContext", args[0], "pld.system.get_comm_ctx");
-  // One session binds exactly one peer: the backend writes that peer into the
-  // single remote descriptor. A dynamic peer is allowed - the materialization
-  // pass keys session reuse on it - but it must be an integer rank index.
-  comm_op::ValidateAsyncPeer(args[1], kMakeSessionOp);
+  CheckArity(kMakeSessionOp, "comm_ctx", 1, args);
+  CheckHandle<CommCtxType>(kMakeSessionOp, "a CommCtx", args[0], "pld.system.get_comm_ctx");
   comm_op::ValidateAsyncEngine(kwargs, kMakeSessionOp);
   return GetAsyncSessionType();
 }
@@ -120,23 +78,20 @@ TypePtr DeduceMakeSessionType(const std::vector<ExprPtr>& args,
 
 TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CheckArity(kPutAsyncOp, "dst, src, session", 3, args);
-  CHECK_SPAN(kwargs.empty(), args[0]->span_)
-      << kPutAsyncOp
-      << " takes no kwargs: engine and peer live on the session, and the V2 "
-         "submission controls (cqe_policy, submit_mode, batch_size) are V3, not V2";
-
+  CheckArity(kPutAsyncOp, "dst, peer, src, session", 4, args);
+  CHECK_SPAN(kwargs.empty(), args[0]->span_) << kPutAsyncOp << " takes no kwargs";
+  comm_op::ValidateAsyncPeer(args[1], kPutAsyncOp);
   auto dst_type = As<DistributedTensorType>(args[0]->GetType());
   CHECK_SPAN(dst_type, args[0]->span_) << kPutAsyncOp << " dst must be a window-bound DistributedTensor, got "
                                        << args[0]->GetType()->TypeName();
-  auto src_type = AsTensorTypeLike(args[1]->GetType());
-  CHECK_SPAN(src_type, args[1]->span_)
-      << kPutAsyncOp << " src must be a Tensor, got " << args[1]->GetType()->TypeName();
+  auto src_type = AsTensorTypeLike(args[2]->GetType());
+  CHECK_SPAN(src_type, args[2]->span_)
+      << kPutAsyncOp << " src must be a Tensor, got " << args[2]->GetType()->TypeName();
   CHECK_SPAN(dst_type->dtype_ == src_type->dtype_, args[0]->span_)
       << kPutAsyncOp << " dst and src must have the same element type, got dst "
-      << args[0]->GetType()->TypeName() << " vs src " << args[1]->GetType()->TypeName();
+      << args[0]->GetType()->TypeName() << " vs src " << args[2]->GetType()->TypeName();
 
-  CheckHandle<AsyncSessionType>(kPutAsyncOp, "session to be an AsyncSession", args[2],
+  CheckHandle<AsyncSessionType>(kPutAsyncOp, "session to be an AsyncSession", args[3],
                                 "pld.system.make_session");
 
   // No packing or staging is provided, so both physical views must be dense
@@ -156,20 +111,22 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
 // pld.system.wait_event
 // --------------------------------------------------------------------------
 
-TypePtr DeduceWaitEventType(const std::vector<ExprPtr>& args,
-                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CheckArity(kWaitEventOp, "event, session", 2, args);
-  CHECK_SPAN(kwargs.empty(), args[0]->span_) << kWaitEventOp << " takes no kwargs, but got " << kwargs.size();
-  CheckHandle<AsyncEventType>(kWaitEventOp, "event to be an AsyncEvent", args[0], "pld.tile.put_async");
-  CheckHandle<AsyncSessionType>(kWaitEventOp, "session to be an AsyncSession", args[1],
-                                "pld.system.make_session");
-  return std::make_shared<ScalarType>(DataType::BOOL);
+// The tensor frontend can leave the originating session implicit. An explicit
+// handle is checked against the submission by the function-level type verifier.
+void CheckCompletionOperands(const char* name, const std::vector<ExprPtr>& args,
+                             const comm_op::Kwargs& kwargs) {
+  CHECK(args.size() == 1 || args.size() == 2) << name << " requires (event[, session])";
+  CHECK(kwargs.empty()) << name << " takes no kwargs";
+  CHECK(args[0] && IsA<AsyncEventType>(args[0]->GetType())) << name << " expects an AsyncEvent";
+  if (args.size() == 2) {
+    CHECK(args[1] && IsA<AsyncSessionType>(args[1]->GetType())) << name << " expects an AsyncSession";
+  }
 }
 
 }  // namespace
 
 // ============================================================================
-// pld.system.make_session — build a per-peer async submission session
+// pld.system.make_session — build an async submission session
 // ============================================================================
 //
 // VECTOR, matching the transfer ops it feeds: the session is constructed and
@@ -180,16 +137,9 @@ TypePtr DeduceWaitEventType(const std::vector<ExprPtr>& args,
 // so an event posted on one would be waited on the other.
 
 REGISTER_OP("pld.system.make_session")
-    .set_description(
-        "Build an asynchronous submission session (AsyncSessionType) bound to one peer rank "
-        "on a CommContext. The session owns the engine and the peer, so the tile submission "
-        "ops do not repeat them, and it is reused across submissions to that peer. The "
-        "session carries mutable ISA state: it is never copied, CSE'd, or substituted for "
-        "another session over the same workspace. `engine` is a compile-time kwarg; V2 "
-        "accepts CommEngine.URMA only.")
+    .set_description("Construct a mutable AIV-local URMA session for a communication workspace.")
     .set_op_category("DistributedOp")
-    .add_argument("ctx", "A CommContext handle (CommCtxType) from pld.system.get_comm_ctx")
-    .add_argument("peer", "Peer rank index (ScalarType, integer)")
+    .add_argument("comm_ctx", "Communication domain context from pld.system.get_comm_ctx")
     .set_attr<int>("engine")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .set_no_duplicate()
@@ -211,23 +161,20 @@ REGISTER_OP("pld.system.make_session")
 // the result is a handle, not a buffer.
 
 REGISTER_OP("pld.tile.put_async")
-    .set_description(
-        "Submit one asynchronous URMA write of local `src` into the session's peer slice of "
-        "the window-bound DistributedTensor `dst`, and return the completion event "
-        "(AsyncEventType) for that single logical transfer. The engine and peer come from "
-        "`session`. Returning does not mean completion: pair the event with its producing "
-        "session in pld.system.wait_event, which registers no task condition.")
+    .set_description("Submit one URMA write to the given peer and return its completion event.")
     .set_op_category("DistributedOp")
-    .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
-    .add_argument("src", "Local source — Tensor or DistributedTensor (same dtype as dst)")
-    .add_argument("session", "The async session (AsyncSessionType) from pld.system.make_session")
+    .add_argument("dst", "Remote window-bound GM destination")
+    .add_argument("peer", "Remote rank for this submission")
+    .add_argument("src", "Local GM source with the destination's shape and dtype")
+    .add_argument("session", "URMA session for the destination communication domain")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     // The destination is written in place; the source is only read. The IR keeps
     // the real payload operands and their effects - descriptors are a backend
     // detail and never appear here.
     .set_arg_effect(0, ArgEffect::ReadWrite)
-    .set_arg_effect(1, ArgEffect::Read)
+    .set_arg_effect(2, ArgEffect::Read)
+    .set_arg_effect(3, ArgEffect::ReadWrite)
     .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeducePutAsyncType);
 
@@ -242,13 +189,29 @@ REGISTER_OP("pld.system.wait_event")
         "task-completion condition. The event must come from a submission on the same "
         "session.")
     .set_op_category("DistributedOp")
-    .add_argument("event", "A completion event (AsyncEventType) from pld.tile.put_async")
-    .add_argument("session", "The matching async session (AsyncSessionType) that produced the event")
+    .add_argument("event", "Distributed PUT or GET completion event")
+    .add_argument("session", "Optional originating async session")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     // Observes completion of an already-submitted request; writes no operand.
     .no_arg_writes()
-    .f_deduce_type(DeduceWaitEventType);
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const comm_op::Kwargs& kwargs) -> TypePtr {
+      CheckCompletionOperands(kWaitEventOp, args, kwargs);
+      return std::make_shared<ScalarType>(DataType::BOOL);
+    });
+
+REGISTER_OP("pld.system.defer_wait_event")
+    .set_description("Hand completion of a distributed transfer to the issuing task.")
+    .set_op_category("DistributedOp")
+    .add_argument("event", "Distributed PUT or GET completion event")
+    .add_argument("session", "Optional originating async session")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .no_memory_spec()
+    .no_arg_writes()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const comm_op::Kwargs& kwargs) -> TypePtr {
+      CheckCompletionOperands("pld.system.defer_wait_event", args, kwargs);
+      return GetUnknownType();
+    });
 
 }  // namespace ir
 }  // namespace pypto

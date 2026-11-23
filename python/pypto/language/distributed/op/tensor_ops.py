@@ -44,7 +44,7 @@ from collections.abc import Sequence
 from typing import overload
 
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
-from pypto.language.typing import IntLike, Ptr
+from pypto.language.typing import AsyncEvent, IntLike, Ptr
 from pypto.language.typing.tensor import Tensor, TensorT
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -664,6 +664,22 @@ def put_async(
             engine=engine,
         )
     return DistributedTensor(expr=call)
+
+
+def get_async_event(
+    dst: TensorT, peer: IntLike, src: DistributedTensor, *, engine: CommEngine = CommEngine.URMA
+) -> tuple[TensorT, AsyncEvent]:
+    """Submit a single-peer GET of dense GM views, returning the local destination and a pending event.
+
+    The first result aliases ``dst``. Use ``pld.system.defer_wait_event(event)`` to hand
+    completion to the task before dependent work consumes the destination.
+    """
+    (src_expr,) = _unwrap_distributed_tensors("pld.tensor.get_async_event", src=src)
+    call = _ir_tensor.get_async_event(_unwrap(dst), _unwrap(peer), src_expr, engine=engine)
+    return (
+        dst.__class__(expr=_ir.TupleGetItemExpr(call, 0, call.span)),
+        AsyncEvent(expr=_ir.TupleGetItemExpr(call, 1, call.span)),
+    )
 
 
 def get_async(
@@ -1333,6 +1349,7 @@ __all__ = [
     "broadcast",
     "get",
     "get_async",
+    "get_async_event",
     "put",
     "put_async",
     "remote_store",

@@ -424,7 +424,16 @@ ExprPtr ResolveTupleElement(const ExprPtr& tuple, int64_t position, const BodyIn
   }
 
   auto call = AsCallLike(source);
-  if (!call.args || IsBuiltinOp(call.op->name_)) return nullptr;
+  if (!call.args) return nullptr;
+  if (const auto* entry = LookupOpEntry(call.op)) {
+    // A functional tuple may return an existing GM destination alongside a
+    // fresh event. Only the declared element inherits the operand's lineage.
+    const auto& aliases = entry->GetTupleResultAliases();
+    auto alias = aliases.find(pos);
+    return alias != aliases.end() && alias->second < call.args->size() ? (*call.args)[alias->second]
+                                                                       : nullptr;
+  }
+  if (IsBuiltinOp(call.op->name_)) return nullptr;
   auto callee = program ? program->GetFunction(call.op->name_) : nullptr;
   if (!callee) return nullptr;
   // A single TupleType return occupies one flat slot. Strict HOST tracing

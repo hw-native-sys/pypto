@@ -23,7 +23,7 @@ from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr
 
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _normalize_intlike, _unwrap
+from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
 
 
 def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
@@ -39,6 +39,26 @@ def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
     here; staging tiles never are.
     """
     return isinstance(x, (list, tuple))
+
+
+def put_async(dst: DistributedTensor, peer: IntLike, src: Tensor | Expr, session: AsyncSession) -> AsyncEvent:
+    """Submit a PUT of a dense local GM source to the remote destination window on the given peer.
+
+    Reuse the session for subsequent PUT or GET submissions. Its event can be waited on
+    in this kernel or handed to the task with ``pld.system.defer_wait_event``.
+    """
+    (dst_expr,) = _unwrap_distributed_tensors("pld.tile.put_async", dst=dst)
+    return AsyncEvent(expr=_ir_tile.put_async(dst_expr, _unwrap(peer), _unwrap(src), _unwrap(session)))
+
+
+def get_async(dst: Tensor, peer: IntLike, src: DistributedTensor, session: AsyncSession) -> AsyncEvent:
+    """Submit a GET on an explicit session. The peer selects the remote source for this transfer.
+
+    Both endpoints are dense GM tensors or views. The event can be handed to the task
+    with ``pld.system.defer_wait_event(event, session)``.
+    """
+    (src_expr,) = _unwrap_distributed_tensors("pld.tile.get_async", src=src)
+    return AsyncEvent(expr=_ir_tile.get_async(_unwrap(dst), _unwrap(peer), src_expr, _unwrap(session)))
 
 
 def remote_load(
@@ -314,32 +334,4 @@ def get(
     return _ir_tile.get(dst_expr, _unwrap(peer), src_expr, stage_expr, stage2=stage2_expr)
 
 
-def put_async(dst: DistributedTensor, src: Tensor | Expr, session: AsyncSession) -> AsyncEvent:
-    """Submit one asynchronous URMA write and return its completion event.
-
-    The V2 explicit-event form of a cross-rank put. ``src`` is written into the
-    session's peer slice of ``dst``, and the call returns the completion event
-    for that single logical transfer.
-
-    Unlike :func:`pld.tensor.put_async`, this returns an
-    [`AsyncEvent`][pypto.language.AsyncEvent] rather than ``dst``, so one call
-    never changes its return type by context. Returning still does **not** mean
-    the transfer completed — pass the event and its producing ``session`` to
-    [`pld.system.wait_event`][pypto.language.distributed.op.system_ops.wait_event].
-
-    The engine and peer come from ``session``, so they are not repeated here.
-
-    Args:
-        dst: Remote window-bound :class:`pld.DistributedTensor` destination.
-        src: Local source — :class:`pl.Tensor` or
-            :class:`pld.DistributedTensor` with the same dtype and shape as ``dst``.
-        session: The [`AsyncSession`][pypto.language.AsyncSession] from
-            [`pld.system.make_session`][pypto.language.distributed.op.system_ops.make_session].
-
-    Returns:
-        An [`AsyncEvent`][pypto.language.AsyncEvent] for this transfer.
-    """
-    return AsyncEvent(expr=_ir_tile.put_async(_unwrap(dst), _unwrap(src), _unwrap(session)))
-
-
-__all__ = ["get", "put_async", "remote_load", "remote_store", "put"]
+__all__ = ["get", "get_async", "put_async", "remote_load", "remote_store", "put"]
