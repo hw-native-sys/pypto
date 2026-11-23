@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -2289,10 +2290,12 @@ class ExplicitLaneValues : public IRVisitor {
  public:
   std::unordered_set<const Var*> Collect(const std::vector<StmtPtr>& stmts) {
     for (const auto& stmt : stmts) VisitStmt(stmt);
-    for (size_t i = 0; i < worklist_.size(); ++i) {
-      const auto next = successors_.find(worklist_[i]);
+    while (!worklist_.empty()) {
+      const auto* value = worklist_.front();
+      worklist_.pop_front();
+      const auto next = successors_.find(value);
       if (next == successors_.end()) continue;
-      for (const auto* value : next->second) Mark(value);
+      for (const auto* successor : next->second) Mark(successor);
     }
     std::unordered_set<const Var*> affected_carries;
     for (const auto* carry : candidate_carries_) {
@@ -2368,7 +2371,7 @@ class ExplicitLaneValues : public IRVisitor {
   std::unordered_map<const Var*, std::vector<const Var*>> successors_;
   std::unordered_set<const Var*> selected_;
   std::unordered_set<const Var*> candidate_carries_;
-  std::vector<const Var*> worklist_;
+  std::deque<const Var*> worklist_;
 };
 
 static std::vector<StmtPtr> ProcessStmtsImpl(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
