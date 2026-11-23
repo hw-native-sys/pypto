@@ -91,7 +91,7 @@ JIT 回归 `test_simt_interfaces_device_compile` 将扩展接口用例和动态�
 | 坐标、维度、lane ID | 已有 DSL/IR/原生降低 | 无需重复实现 |
 | `get_clock32/64` | 未暴露 | 固定 PTOAS 将读取视为纯操作，合并不同采样，详见下文 |
 | 运行时 trap/assert | 已有 DSL/IR/原生降低 | 设备终止和宿主错误传播尚未验证 |
-| `keep/resume` | 未暴露 | 需要配对 launch 表示、slot 验证和线程状态生命周期约束 |
+| `keep/resume` | 已验证原生配对对象编译；DSL/IR 未暴露 | 需要配对 launch 表示、slot 验证和线程状态生命周期约束 |
 | `addui_extended`、`mul_extended` | 无直接多结果 API | 现有算术/位运算和 `mulhi` 可表达部分能力，不宣称完整类型覆盖 |
 | `ceildiv`、`select` | 支持的标量可由算术/控制流组合表达 | 缺少同名 API 不等于缺少计算能力 |
 | packed 与短向量 | 任务 11.6 暂缓 | 不是 11.7 的前置条件 |
@@ -121,7 +121,18 @@ pto.stg %elapsed, %dst[%zero] : !pto.ptr<i32, gm>, index, i32
 
 ### 跨入口状态阻碍
 
-原生 `keep/resume` 可分别编译，但契约要求同一外层 launch 序列中的相邻 SIMT 入口。
+原生 `keep/resume` 要求同一外层 launch 序列中的相邻 SIMT 入口。原生配对测试已通过
+i32/i64/f16/bf16/f32 的 LLVM lowering、生产设备编译与最终链接。这些操作生成内联汇编，
+运行时因此改走 PTOAS 原生设备对象输出，由 PTOAS 验证或修复 launch 长度，再通过链接器
+别名恢复逻辑导出名。回归检查两次 launch 的长度是否匹配链接后的入口符号，也覆盖占用
+两个 word 的 i64 状态 slot。无需 NPU 即可运行：
+
+```bash
+PYPTO_RUN_VPTO_VF_VALIDATION=1 python -m pytest \
+  tests/ut/codegen/test_simt_codegen.py -k keep_resume --require-ptoas -v
+```
+
+这解决了编译前置条件，尚未实现公开的状态生命周期契约或数值验收。
 当前可执行 PyPTO bundle 为每个 helper 生成独立模块和外层 wrapper，只传递内存副作用，
 没有 helper 产物之间带类型的线程状态依赖。仅暴露指令无法验证 launch 配对和状态寿命。
 后续实现需要把配对入口表示为同一 launch 序列，检查维度与 slot 类型一致，拒绝 slot

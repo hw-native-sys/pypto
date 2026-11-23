@@ -65,10 +65,16 @@ ELF, and supplies its `.text` to the persistent runtime. Helper contents and
 compiler identities participate in binary caching; relocating an artifact does
 not require its original helper paths.
 
-LLVM export bypasses PTOAS's object-level SIMT size repair. The supported subset
-uses intrinsics; a SIMT module containing inline assembly is rejected before
-device compilation. The acceptance tests compare the linked `VF_SIMT` size with
-the callee symbol size. No instruction bytes are patched by PyPTO.
+LLVM export bypasses PTOAS's object-level SIMT size repair. Intrinsic-only helpers
+continue through LLVM export and Bisheng. SIMT helpers containing inline assembly
+instead use PTOAS's native device-object emission after the same external-symbol
+admission check. PTOAS validates or repairs `VF_SIMT` sizes; PyPTO adds logical-name
+aliases with a relocatable link for the emitted `.vector` or `_mix_aiv` ABI symbols.
+The selected SDK's CANN installation is passed to PTOAS explicitly. Native object
+flags participate in cache identity, and compilation or alias-link failures do
+not fall back to unchecked LLVM compilation. No instruction bytes are patched by
+PyPTO. Acceptance tests compare each linked `VF_SIMT` size with its callee symbol
+size; this compilation support does not expose a public `keep/resume` API.
 
 ## Focused acceptance
 

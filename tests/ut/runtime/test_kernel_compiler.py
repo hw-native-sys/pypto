@@ -706,7 +706,9 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
         compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
 
 
-@pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "memory_attrs", "bridge", "simt_asm"])
+@pytest.mark.parametrize(
+    "helper_kind", ["empty", "ssa_writeback", "memory_attrs", "bridge", "simt_asm", "bridge_simt_asm"]
+)
 def test_vpto_compilation_links_helpers_and_rejects_bridge(
     compiler_module, monkeypatch, tmp_path, device_elf, helper_kind
 ):
@@ -734,7 +736,13 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
             'attributes #0 = { nounwind memory(none) "comment"="memory(none)" }\n'
         ),
         "bridge": "declare void @bridge()",
-        "simt_asm": 'define simt_entry void @helper() {\n call void asm sideeffect "nop", ""()\n ret void\n}',
+        "simt_asm": (
+            "define void @entry() { ret void }\n"
+            'define simt_entry void @helper() {\n call void asm sideeffect "nop", ""()\n ret void\n}'
+        ),
+        "bridge_simt_asm": (
+            'declare void @bridge()\ndefine simt_entry void @helper() { asm sideeffect "nop", ""() }'
+        ),
     }[helper_kind]
     helpers = [tmp_path / "first.pto", tmp_path / "second.pto"]
     for helper in helpers:
@@ -750,12 +758,19 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
         commands.append(command)
         output = Path(command[command.index("-o") + 1])
         if command[0] == "ptoas":
-            output.write_text(llvm)
+            if "--emit-vpto-device-object" in command:
+                assert "--emit-vpto-llvm-ir" not in command
+                assert "--vpto-fix-vfsimt-size=auto" in command
+                output.write_bytes(_native_simt_object(("entry.vector",)))
+            else:
+                output.write_text(llvm)
         else:
             if command[0] == "bisheng":
                 expected_llvm = llvm.replace("nounwind memory(none) ", "nounwind ")
                 assert Path(command[command.index("ir") + 1]).read_text() == expected_llvm
-            if command[0] == "linker":
+            if command[0] == "linker" and "-r" in command:
+                assert "--defsym=entry=entry.vector" in command
+            elif command[0] == "linker":
                 order = next(
                     arg.split("=", 1)[1] for arg in command if arg.startswith("--symbol-ordering-file=")
                 )
@@ -765,25 +780,112 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     kwargs = dict(pto_isa_root=str(tmp_path), build_dir=str(tmp_path), vpto_sources=list(map(str, helpers)))
-    if helper_kind in ("bridge", "simt_asm"):
-        error = "not self-contained: bridge" if helper_kind == "bridge" else "VF_SIMT launch size"
-        with pytest.raises(ValueError, match=error):
+    if helper_kind.startswith("bridge"):
+        with pytest.raises(ValueError, match="not self-contained: bridge"):
             compiler.compile_incore(_source(tmp_path), **kwargs)
         assert not any(command[0] == "linker" for command in commands)
+        assert not any("--emit-vpto-device-object" in command for command in commands)
     else:
         assert compiler.compile_incore(_source(tmp_path), **kwargs) == device_elf()
+        helper_commands = ["ptoas", "ptoas", "linker"] if helper_kind == "simt_asm" else ["ptoas", "bisheng"]
         assert [command[0] for command in commands] == [
             "compiler",
-            "ptoas",
-            "bisheng",
-            "ptoas",
-            "bisheng",
+            *helper_commands,
+            *helper_commands,
             "linker",
         ]
         assert [Path(p).name for p in commands[-1][-3:]] == ["kernel.o", "vpto_0.o", "vpto_1.o"]
-        assert "--cce-generic-addrspace=off" in commands[2]
+        if helper_kind != "simt_asm":
+            assert "--cce-generic-addrspace=off" in commands[2]
         assert "-ffunction-sections" in commands[0]
     assert not list(tmp_path.glob("pypto-incore-*"))
+
+
+def _native_simt_object(exports):
+    data = _text_only_elf()
+    struct.pack_into("<H", data, 16, 1)
+    strings = b"\0" + b"".join(name.encode() + b"\0" for name in exports)
+    data[160 : 160 + len(strings)] = strings
+    struct.pack_into("<Q", data, 512 + 3 * 64 + 32, len(strings))
+    data[248:296] = bytes(48)
+    offset = 1
+    for index, name in enumerate(exports):
+        struct.pack_into("<IBBHQQ", data, 248 + index * 24, offset, 0x12, 0, 2, index * 8, 4)
+        offset += len(name) + 1
+    return bytes(data)
+
+
+@pytest.mark.parametrize("native", ["entry.vector", "entry_mix_aiv", "entry"])
+def test_simt_object_aliases_follow_emitted_abi(native):
+    from pypto.runtime._vpto import simt_object_aliases  # noqa: PLC0415
+
+    llvm = "define void @entry() { ret void }\ndefine simt_entry void @body() { ret void }"
+    aliases = simt_object_aliases(llvm, _native_simt_object((native,)))
+    assert aliases == (() if native == "entry" else (f"--defsym=entry={native}",))
+
+
+@pytest.mark.parametrize("exports", [("unrelated.vector",), ("entry.vector", "entry_mix_aiv")])
+def test_simt_object_aliases_reject_missing_or_ambiguous_definitions(exports):
+    from pypto.runtime._vpto import simt_object_aliases  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="needs one native definition"):
+        simt_object_aliases("define void @entry() { ret void }", _native_simt_object(exports))
+
+
+@pytest.mark.parametrize("info,visibility,section", [(0x02, 0, 2), (0x12, 2, 2), (0x12, 0, 0), (0x11, 0, 2)])
+def test_simt_object_aliases_require_visible_defined_functions(info, visibility, section):
+    from pypto.runtime._vpto import simt_object_aliases  # noqa: PLC0415
+
+    data = bytearray(_native_simt_object(("entry.vector",)))
+    struct.pack_into("<BBH", data, 252, info, visibility, section)
+    with pytest.raises(ValueError, match="needs one native definition"):
+        simt_object_aliases("define void @entry() { ret void }", bytes(data))
+
+
+@pytest.mark.parametrize(
+    "offset,fmt,value,error",
+    [
+        (16, "H", 2, "relocatable AI Core ELF"),
+        (18, "H", 62, "relocatable AI Core ELF"),
+        (824, "Q", 8, "invalid symbol table"),
+        (808, "I", 99, "invalid symbol string table"),
+        (248, "I", 99, "invalid string-table offset"),
+        (254, "H", 99, "function outside its sections"),
+    ],
+)
+def test_simt_object_rejects_invalid_exports(offset, fmt, value, error):
+    from pypto.runtime._device_image import device_object_exports  # noqa: PLC0415
+
+    data = bytearray(_native_simt_object(("entry.vector",)))
+    struct.pack_into(f"<{fmt}", data, offset, value)
+    with pytest.raises(ValueError, match=error):
+        device_object_exports(bytes(data))
+
+
+@pytest.mark.parametrize("stage", ["SIMT native object compilation", "SIMT logical export linking"])
+def test_simt_object_failure_does_not_fall_back(compiler_module, monkeypatch, tmp_path, stage):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "/selected/cann/bin/bisheng"))
+    source = tmp_path / "helper.pto"
+    source.write_text("module {}")
+    labels = []
+
+    def run(command, output, label, **kwargs):
+        labels.append(label)
+        if label == stage:
+            raise RuntimeError("native compilation failed")
+        if label == "VPTO lowering":
+            output.write_text('define void @entry() { ret void }\ndefine simt_entry void @body() { asm "" }')
+            return output.read_bytes()
+        assert label == "SIMT native object compilation"
+        assert kwargs["env"]["ASCEND_HOME_PATH"] == "/selected/cann"
+        return _native_simt_object(("entry.vector",))
+
+    monkeypatch.setattr(compiler, "_run", run)
+    with pytest.raises(RuntimeError, match="native compilation failed"):
+        compiler._compile_vpto_helpers((str(source),), tmp_path)
+    assert labels[-1] == stage
+    assert "VPTO device compilation" not in labels
 
 
 @pytest.mark.parametrize("platform", ["a2a3", "a5"])
@@ -909,7 +1011,9 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     identities.append(key())
     monkeypatch.setattr(compiler_module._vpto, "PTOAS_FLAGS", ("--enable-vecscope-mem-bar=true",))
     identities.append(key())
-    assert len(set(identities)) == 7
+    monkeypatch.setattr(compiler_module._vpto, "SIMT_OBJECT_FLAGS", ("--emit-vpto-device-object",))
+    identities.append(key())
+    assert len(set(identities)) == 8
 
 
 def test_vpto_identity_excludes_loader_diagnostics(compiler_module, monkeypatch, tmp_path):

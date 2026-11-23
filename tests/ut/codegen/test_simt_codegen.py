@@ -11,11 +11,13 @@
 
 import ctypes
 import math
+import os
 import random
 import re
 import shutil
 import struct
 import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -1357,6 +1359,119 @@ def test_ftof_scalar_operands_match_across_argument_spellings(value, arguments):
         body.replace("ARGUMENTS", arguments.replace("VALUE", value)), "FP32", preamble="import math"
     )
     ir.assert_structural_equal(expected, actual)
+
+
+@pytest.fixture(params=["i32", "i64", "f16", "bf16", "f32"])
+def keep_resume_native_pair(request):
+    # Both entries must belong to one outer launch sequence. This native
+    # contract regression also exercises the two-word, even-aligned i64 slot.
+    dtype = request.param
+    return f"""
+module attributes {{pto.target_arch = "a5", pto.backend = "vpto"}} {{
+  func.func @state_pair(%src: !pto.ptr<{dtype}, gm>, %dst: !pto.ptr<{dtype}, gm>) attributes {{pto.aiv}} {{
+    %width = arith.constant 32 : i32
+    %one = arith.constant 1 : i32
+    pto.simt_launch @state_producer<<<%width, %one, %one>>>(%src) : (!pto.ptr<{dtype}, gm>) -> ()
+    pto.simt_launch @state_consumer<<<%width, %one, %one>>>(%dst) : (!pto.ptr<{dtype}, gm>) -> ()
+    return
+  }}
+  func.func @state_producer(%src: !pto.ptr<{dtype}, gm>)
+      attributes {{pto.simt_entry, pto.simt_max_threads = 32 : i32, pto.simt_max_regs = 128 : i32}} {{
+    %tid = pto.get_tid_x : i32
+    %index = arith.index_cast %tid : i32 to index
+    %value = pto.ldg %src[%index] : !pto.ptr<{dtype}, gm>, index -> {dtype}
+    pto.keep %value {{slot = 0 : i64}} : {dtype}
+    return
+  }}
+  func.func @state_consumer(%dst: !pto.ptr<{dtype}, gm>)
+      attributes {{pto.simt_entry, pto.simt_max_threads = 32 : i32, pto.simt_max_regs = 128 : i32}} {{
+    %value = pto.resume {{slot = 0 : i64}} : {dtype}
+    %tid = pto.get_tid_x : i32
+    %index = arith.index_cast %tid : i32 to index
+    pto.stg %value, %dst[%index] : !pto.ptr<{dtype}, gm>, index, {dtype}
+    return
+  }}
+}}
+"""
+
+
+@pytest.mark.ptoas_compile
+def test_keep_resume_native_pair_contract(tmp_path, keep_resume_native_pair):
+    llvm = _compile_extended_simt(tmp_path, keep_resume_native_pair)
+    assert "@state_producer" in llvm and "@state_consumer" in llvm
+    assert llvm.count("asm sideeffect") >= 2
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("caller_environment", ["unset", "different"])
+def test_keep_resume_device_object_compile(tmp_path, keep_resume_native_pair, caller_environment):
+    """Keep/resume must use native size validation and retain the caller ABI."""
+    if os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1":
+        pytest.skip("Opt in to the A5 compiler with PYPTO_RUN_VPTO_VF_VALIDATION=1")
+    source = tmp_path / "state_pair.pto"
+    source.write_text(keep_resume_native_pair)
+    # Unit-suite SDK stubs must not hide the real toolchain's inline-asm output.
+    script = r"""
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from pypto.runtime.kernel_compiler import KernelCompiler
+from pypto.runtime._device_image import device_object_exports
+from pypto.runtime.pto_isa import ensure_pto_isa_root
+
+output = Path(sys.argv[1])
+compiler = KernelCompiler("a5")
+sources = (str(output / "state_pair.pto"),)
+objects = compiler._compile_vpto_helpers(sources, output)
+assert len(objects) == 1 and objects[0].stat().st_size > 0
+llvm = (output / "vpto_0.ll").read_text()
+assert "@state_producer" in llvm and "@state_consumer" in llvm
+assert llvm.count("asm sideeffect") >= 2
+assert "state_pair" in device_object_exports(objects[0].read_bytes())
+wrapper = output / "wrapper.cpp"
+wrapper.write_text('''#include <cstdint>
+extern "C" __aicore__ void state_pair(__gm__ void*, __gm__ void*);
+extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {
+  state_pair((__gm__ void*)args[0], (__gm__ void*)args[1]);
+}
+''')
+image = output / "kernel.elf"
+image.write_bytes(compiler.compile_incore(str(wrapper), pto_isa_root=ensure_pto_isa_root(),
+                                        vpto_sources=sources, build_dir=str(output)))
+# The SDK already selected the compiler. A later caller override must not
+# redirect inspection to another installation or require the variable to exist.
+os.environ.pop("ASCEND_HOME_PATH", None)
+if sys.argv[2] == "different":
+    os.environ["ASCEND_HOME_PATH"] = str(output / "unselected-cann")
+disassembler = Path(compiler._vpto_toolchain()[1]).with_name("llvm-objdump")
+disassembly = subprocess.check_output([disassembler, "-d", image], text=True, timeout=30)
+symbols = subprocess.check_output(["readelf", "-Ws", image], text=True, timeout=30)
+(output / "kernel.disasm").write_text(disassembly)
+(output / "kernel.symbols").write_text(symbols)
+logical = re.search(r"\s+([0-9a-f]+)\s+\d+\s+FUNC\s+GLOBAL\s+DEFAULT\s+\d+\s+state_pair$", symbols, re.M)
+native = re.search(
+    r"\s+([0-9a-f]+)\s+\d+\s+FUNC\s+GLOBAL\s+DEFAULT\s+\d+\s+state_pair(?:\.vector|_mix_aiv)$",
+    symbols, re.M,
+)
+assert logical is not None and native is not None and logical[1] == native[1]
+sizes = re.findall(r"\bVF_SIMT\s+[^\n#]*#(\d+)", disassembly)
+assert len(sizes) == 2
+for size, name in zip(sizes, ("state_producer", "state_consumer"), strict=True):
+    symbol = re.search(rf"\s+(\d+)\s+FUNC\s+WEAK\s+DEFAULT\s+\d+\s+{name}_simt_entry$", symbols, re.M)
+    assert symbol is not None
+    assert int(size) != 65535 and int(size) * 4 == int(symbol[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), caller_environment],
+        env={**os.environ, "PYPTO_SKIP_RUNTIME_PIN_CHECK": "0", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 if __name__ == "__main__":
