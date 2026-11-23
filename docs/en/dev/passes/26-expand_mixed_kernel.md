@@ -794,11 +794,10 @@ true last use of that tile.
 
 ## C2V Fixpipe contract
 
-A5 `system.aic_initialize_pipe` / `system.aiv_initialize_pipe` accept `nosplit`
-and `acc_push_epilogue` (`ir::AccPushEpilogue`), a value-semantic string dictionary.
-`layout`, `quant`, and `relu` are required. Quant modes are `no_convert`, `f32_f16`,
-`f32_bf16`, `deqf16_scalar`, `deqf16_vec`, and `qf322f16_pre_scalar`. ReLU modes are
-`no_relu` and `normal_relu` (before quantization). Unknown keys or values are rejected.
+On A5, both pipe initializers accept `nosplit` and a structured `acc_push_epilogue`.
+The record requires `layout`, `quant`, `relu`. Quant modes are `no_convert`, `f32_f16`,
+`f32_bf16`, `deqf16_scalar`, `deqf16_vec`, and `qf322f16_pre_scalar`. ReLU is `no_relu`
+or `normal_relu` (before quantization). Unknown keys and values are rejected.
 
 | Layout | Physical Vec layout | Supported conversion |
 | ------ | ------------------- | -------------------- |
@@ -818,34 +817,28 @@ Identity SSA buffer aliases retain provenance in O(N log N); arithmetic addresse
 are rejected. Duplicate init ids cannot be hidden by a legacy init. Current PTOAS
 requires one consumer tile type per id; differing payloads need separate ids.
 
-`set_quant_scalar(scale, id=...)` takes FP32: `deqf16_scalar` converts INT32 to FP16,
-`qf322f16_pre_scalar` converts FP32 to FP16. Direct FP16/BF16 conversion needs no setter.
-`set_quant_vector` uses packed INT64/UINT64 hardware words in `MemorySpace.Scaling`,
-distinct from MX `LeftScale`/`RightScale`. Stage unboxed row-major Mat controls, then
-move to Scaling: shape `[1, N]`, positive `N % 16 == 0`, full valid extent and
-128-byte alignment. The planner's conservative 4 KiB budget is not a hardware
-capacity claim. `deqf16_vec` converts INT32 to FP16.
+Scalar setters accept FP32: `deqf16_scalar` is INT32→FP16 and `qf322f16_pre_scalar`
+is FP32→FP16. `deqf16_vec` (INT32→FP16) uses packed i64/u64 control words, staged from
+unboxed row-major Mat into Scaling. The full `[1, N]` must be valid, with `N > 0`
+and `N % 16 == 0` for 128-byte alignment. Scaling is separate from MX scale sidecars.
+Its conservative 4 KiB planning budget is an allocation policy.
 
-Setters must dominate TPUSH in the same block and match its pipe id and quant mode.
-Control flow, another id's configuration or an intervening `pre_quant` writeback
-invalidates state. Keep vector controls immutable through TPUSH completion and
-outside ring-reuse loops; Scaling allocations stay live for the entire function.
-Quant-setting pipeline loops and their ancestors are demoted to sequential loops,
-including stage=1, until schedulers model register dependencies; sibling pipelines
-remain eligible. Setter counting uses the existing traversal without subtree rescans.
+A setter must dominate TPUSH in the same block, matching its id and quant mode.
+Control flow, another id's setter, or a `pre_quant` writeback invalidates state.
+Vector controls stay immutable through TPUSH and their allocations live to function
+end. Setter-containing pipelines and ancestors run sequentially, including stage=1.
+The pass counts setters in one traversal; sibling pipelines remain eligible.
 
-Automatic column-major Acc→Vec moves propagate the physical layout to both init
-calls; changing only TPOP's declaration is insufficient. Incompatible automatic
-layouts, mixed non-Acc producers and split transfers are rejected. Default Buffer
-selection preserves this policy. Transpose scratch uses its own SSA type.
+On A5, an explicit non-ND Acc→Vec layout propagates to both init calls, including
+with Buffer IR. Legacy implicit layouts use ordinary transport. Explicit Fixpipe
+rejects mixed layouts, non-Acc producers and split transfers. Transpose scratch uses its own SSA type.
 `c2v_dtype` / `pre_relu` remain the mutually exclusive ND FP32 shorthand;
 `tile.store` / `tile.assemble` writeback controls are separate interfaces.
 
-Serialization, comparison/hash and Python printing preserve the epilogue record.
-For subsequent FIFO work, `PipeDirectionMetadata.acc_push_layouts` records physical
-layouts; `has_acc_push`, `has_non_acc_push`, `has_nonzero_split` constrain setup.
-`CreateInitializePipe` stamps the optional epilogue and nosplit on both peers.
-No GlobalTensor FIFO entry model is introduced.
+Serialization, hashing, comparison and printing retain `ir::AccPushEpilogue`.
+`PipeDirectionMetadata.acc_push_layouts`, `has_acc_push`, `has_non_acc_push`, and
+`has_nonzero_split` describe the pipe. `CreateInitializePipe` writes the contract
+on both peers. GlobalTensor FIFO remains separate.
 
 ### Regression coverage
 

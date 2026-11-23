@@ -425,7 +425,8 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
                                            const std::vector<StmtPtr>& aiv_stmts,
                                            std::optional<int> slot_num_override,
-                                           std::optional<int> local_slot_num_override, const Span& span) {
+                                           std::optional<int> local_slot_num_override,
+                                           bool explicit_c2v_layout, const Span& span) {
   CrossCorePipeMetadata aic_metadata;
   CollectCrossCorePipeMetadata(aic_stmts, aic_metadata);
   CrossCorePipeMetadata aiv_metadata;
@@ -439,9 +440,8 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   const int dir_mask = BuildDirMask(combined);
   std::optional<AccPushEpilogue> epilogue;
   const auto& layouts = combined.c2v.acc_push_layouts;
-  const bool needs_fixpipe =
-      std::any_of(layouts.begin(), layouts.end(), [](const auto& layout) { return layout != "nz2nd"; });
-  if (needs_fixpipe && combined.c2v.has_acc_push) {
+  if (explicit_c2v_layout && combined.c2v.has_acc_push &&
+      PassContext::Current()->GetBackendHandler()->SupportsC2VFixpipeEpilogue()) {
     CHECK_SPAN(layouts.size() == 1 && !layouts.count("unsupported"), span)
         << "Automatic C2V pipe requires one consistent supported physical consumer layout; "
            "use separate explicit pipe ids for different layouts";

@@ -138,7 +138,8 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
                                            const std::vector<StmtPtr>& aiv_stmts,
                                            std::optional<int> slot_num_override,
-                                           std::optional<int> local_slot_num_override, const Span& span);
+                                           std::optional<int> local_slot_num_override,
+                                           bool explicit_c2v_layout, const Span& span);
 
 std::vector<StmtPtr> PrependPipeSetup(const std::vector<StmtPtr>& prologue, const std::vector<StmtPtr>& body);
 

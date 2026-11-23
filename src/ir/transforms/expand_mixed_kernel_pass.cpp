@@ -2726,9 +2726,23 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   std::optional<int> local_slot_num_override =
       func->HasAttr("local_slot_num") ? std::optional<int>(func->GetAttr<int>("local_slot_num", 0))
                                       : std::nullopt;
+  // A plain Acc-to-Vec move can inherit NZ. Only an explicit layout request
+  // asks for the structured Fixpipe contract.
+  const bool explicit_c2v_layout =
+      std::any_of(boundary_moves.begin(), boundary_moves.end(), [](const auto& entry) {
+        const auto& [stmt, move] = entry;
+        if (move.op_driven || move.direction != CVDirection::CUBE_TO_VECTOR) return false;
+        const auto* assign = dynamic_cast<const AssignStmt*>(stmt);
+        const auto call = assign ? As<Call>(assign->value_) : nullptr;
+        if (!call || (!call->HasKwarg("blayout") && !call->HasKwarg("slayout"))) return false;
+        const auto tile = As<TileType>(move.result_type);
+        if (!tile) return false;
+        const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+        return view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box;
+      });
   auto automatic_pipe_setup =
       BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final, slot_num_override,
-                              local_slot_num_override, func->span_);
+                              local_slot_num_override, explicit_c2v_layout, func->span_);
   aic_final = PrependPipeSetup(automatic_pipe_setup.aic_stmts, aic_final);
   // Keep a leading get_subblock_idx binding (injected by the auto pl.split
   // LowerAutoVectorSplit path) above the pipe setup, matching the standalone
