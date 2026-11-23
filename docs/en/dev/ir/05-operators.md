@@ -861,6 +861,17 @@ class CrossCoreExample:
 
 See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Buffer Management](../../reference/pto-isa/02-buffer_management.md) for hardware details.
 
+## Distributed PUT and GET completion
+
+| Operator | Result |
+| -------- | ------ |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | An AIV-local session reusable across peers and transfer directions |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | A pair containing an alias of the local destination and a completion event |
+| `pld.tile.get_async(dst, peer, src, session)` | An event for the read from the peer's source window |
+| `pld.tile.put_async(dst, peer, src, session)` | An event for the write to the peer's destination window |
+| `pld.system.wait_event(event[, session])` | A BOOL success flag after waiting in the issuing kernel |
+| `pld.system.defer_wait_event(event[, session])` | A statement registering the event for completion by the issuing task |
+
 ## PrefetchOp: Asynchronous GM→L2 Prefetch
 
 A latency-hiding cache hint. `async_prefetch` starts an SDMA-backed pull of a

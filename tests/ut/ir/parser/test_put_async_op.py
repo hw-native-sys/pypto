@@ -19,7 +19,7 @@ losing the engine or the destination alias.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import passes
+from pypto import Error, passes
 from pypto.pypto_core import ir
 
 
@@ -111,13 +111,14 @@ def test_get_async_round_trips_engine():
     ir.assert_structural_equal(P, reparsed)
 
 
-def _type_diagnostics(program: ir.Program):
-    props = passes.IRPropertySet()
-    props.insert(passes.IRProperty.TypeChecked)
-    return passes.PropertyVerifierRegistry.verify(props, program)
+def _verify_through_ssa(program: ir.Program) -> None:
+    pipeline = passes.PassPipeline()
+    pipeline.add_pass(passes.convert_to_ssa())
+    with passes.PassContext([], passes.VerificationLevel.BASIC):
+        pipeline.run(program)
 
 
-def test_tensor_get_event_unpacks_one_submission_and_defers():
+def test_tensor_get_event_unpacks_one_submission_and_defers(ascend_backend):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
@@ -134,12 +135,12 @@ def test_tensor_get_event_unpacks_one_submission_and_defers():
     assert isinstance(call.type.types[1], ir.AsyncEventType)
     assert ir.returned_param_indices(_get_func(P, "kernel"), P) == [0]
     assert str(P).count("pld.tensor.get_async_event(") == 1
-    assert not _type_diagnostics(P)
+    _verify_through_ssa(P)
     ir.assert_structural_equal(P, pl.parse_program(str(P)))
     ir.assert_structural_equal(P, ir.deserialize(ir.serialize(P)))
 
 
-def test_tile_get_event_reuses_session_for_dynamic_peers():
+def test_tile_get_event_reuses_session_for_dynamic_peers(ascend_backend):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
@@ -161,11 +162,11 @@ def test_tile_get_event_reuses_session_for_dynamic_peers():
     assert printed.count("pld.system.make_session(") == 1
     assert printed.count("pld.tile.get_async(") == 2
     assert "pld.CommEngine.URMA" in printed
-    assert not _type_diagnostics(P)
+    _verify_through_ssa(P)
     ir.assert_structural_equal(P, pl.parse_program(printed))
 
 
-def test_put_and_get_share_session_across_peers_and_completion_paths():
+def test_put_and_get_share_session_across_peers_and_completion_paths(ascend_backend):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
@@ -188,12 +189,30 @@ def test_put_and_get_share_session_across_peers_and_completion_paths():
     assert ir.get_op_arg_effect("pld.tile.put_async", 0) == ir.ArgEffect.ReadWrite
     assert ir.get_op_arg_effect("pld.tile.put_async", 2) == ir.ArgEffect.Read
     assert ir.get_op_arg_effect("pld.tile.put_async", 3) == ir.ArgEffect.ReadWrite
-    assert not _type_diagnostics(P)
+    _verify_through_ssa(P)
     ir.assert_structural_equal(P, pl.parse_program(printed))
     ir.assert_structural_equal(P, ir.deserialize(ir.serialize(P)))
 
 
-def test_wait_event_on_a_tensor_get_infers_its_session():
+def test_reassigned_event_and_session_use_the_reaching_submission(ascend_backend):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, local: pl.Tensor[[32], pl.FP32], window: pld.DistributedTensor[[32], pl.FP32]):
+            ctx = pld.system.get_comm_ctx(window)
+            session = pld.system.make_session(ctx)
+            event = pld.tile.get_async(local, 1, window, session)
+            pld.system.wait_event(event, session)
+            session = pld.system.make_session(ctx)
+            event = pld.tile.put_async(window, 2, local, session)
+            pld.system.defer_wait_event(event, session)
+
+    # The parser reuses each Var on reassignment. Each wait has one reaching
+    # definition once ConvertToSSA splits the two session/event pairs.
+    _verify_through_ssa(P)
+
+
+def test_wait_event_on_a_tensor_get_infers_its_session(ascend_backend):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
@@ -201,11 +220,11 @@ def test_wait_event_on_a_tensor_get_infers_its_session():
             _out, fetched = pld.tensor.get_async_event(dst, 1, src)
             _ok = pld.system.wait_event(fetched)
 
-    assert not _type_diagnostics(P)
+    _verify_through_ssa(P)
     ir.assert_structural_equal(P, pl.parse_program(str(P)))
 
 
-def test_wait_event_rejects_another_session_for_put():
+def test_wait_event_rejects_another_session_for_put(ascend_backend):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
@@ -216,24 +235,26 @@ def test_wait_event_rejects_another_session_for_put():
             event = pld.tile.put_async(dst, 1, src, session)
             pld.system.wait_event(event, other)
 
-    assert any("same session" in d.message for d in _type_diagnostics(P))
+    with pytest.raises(Error, match="(?s)after 'ConvertToSSA'.*same session"):
+        _verify_through_ssa(P)
 
 
-def test_defer_wait_event_rejects_another_session_from_the_same_context():
+def test_defer_wait_event_rejects_a_reassigned_session(ascend_backend):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]):
             ctx = pld.system.get_comm_ctx(src)
             session = pld.system.make_session(ctx)
-            other = pld.system.make_session(ctx)
             event = pld.tile.get_async(dst, 1, src, session)
-            pld.system.defer_wait_event(event, other)
+            session = pld.system.make_session(ctx)
+            pld.system.defer_wait_event(event, session)
 
-    assert any("same session" in d.message for d in _type_diagnostics(P))
+    with pytest.raises(Error, match="(?s)after 'ConvertToSSA'.*same session"):
+        _verify_through_ssa(P)
 
 
-def test_prefetch_handles_cannot_be_used_for_urma_get_or_defer():
+def test_prefetch_handles_cannot_be_used_for_urma_get_or_defer(ascend_backend):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
@@ -244,9 +265,10 @@ def test_prefetch_handles_cannot_be_used_for_urma_get_or_defer():
             pld.tile.get_async(dst, 1, src, session)
             pld.system.defer_wait_event(event)
 
-    diagnostics = _type_diagnostics(P)
-    assert any("session from pld.system.make_session" in d.message for d in diagnostics)
-    assert any("distributed transfer event" in d.message for d in diagnostics)
+    with pytest.raises(Error, match="after 'ConvertToSSA'") as exc:
+        _verify_through_ssa(P)
+    assert "session from pld.system.make_session" in str(exc.value)
+    assert "distributed transfer event" in str(exc.value)
 
 
 def _subregion_program(op_name: str):

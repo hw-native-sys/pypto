@@ -117,7 +117,7 @@ class TypeChecker : public IRVisitor {
   /// The function being checked; its body is where a dispatch argument is traced.
   FunctionPtr func_;
   /// Every value each Var can hold in ``func_``, and ``func_``'s parameters,
-  /// built on first use for layout or async-handle provenance checks.
+  /// built on first use for layout checks.
   std::unordered_map<const Var*, std::vector<ExprPtr>> var_values_;
   std::unordered_set<const Var*> func_params_;
   bool var_values_built_ = false;
@@ -140,16 +140,6 @@ class TypeChecker : public IRVisitor {
    */
   NzDispatchArg ClassifyNzDispatchArg(const ExprPtr& arg);
   void CollectVarValues();
-  // Keep the SSA definition as well as its RHS: two executions of an identical
-  // make_session call still produce distinct mutable session objects.
-  struct Definition {
-    ExprPtr identity;
-    ExprPtr value;
-  };
-  std::unordered_map<const Var*, Definition> async_definitions_;
-  Definition ResolveAsyncDefinition(const ExprPtr& expr);
-  void CheckAsyncOperands(const CallPtr& op);
-
   /**
    * @brief Record an error
    */
@@ -195,7 +185,6 @@ void TypeChecker::VisitFunction(const FunctionPtr& func) {
   func_params_.clear();
   var_values_built_ = false;
   nz_dispatch_args_.clear();
-  async_definitions_.clear();
 
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
@@ -352,25 +341,54 @@ void TypeChecker::CollectVarValues() {
   var_values_built_ = true;
 }
 
-TypeChecker::Definition TypeChecker::ResolveAsyncDefinition(const ExprPtr& expr) {
+// A source-level variable can be rebound. Only ConvertToSSA's output gives each
+// use a unique defining Var pointer. Keep the provenance walk local to its function.
+class AsyncHandleChecker : public IRVisitor {
+ public:
+  AsyncHandleChecker(StmtPtr body, std::vector<Diagnostic>& diagnostics)
+      : body_(std::move(body)), diagnostics_(diagnostics) {}
+
+  void VisitExpr_(const CallPtr& op) override;
+
+ private:
+  StmtPtr body_;
+  std::vector<Diagnostic>& diagnostics_;
+  std::optional<VarValueCollector> var_values_;
+  // Keep the SSA definition as well as its RHS: two executions of an identical
+  // make_session call still produce distinct mutable session objects.
+  struct Definition {
+    ExprPtr identity;
+    ExprPtr value;
+  };
+  std::unordered_map<const Var*, Definition> async_definitions_;
+  Definition ResolveAsyncDefinition(const ExprPtr& expr);
+
+  void CheckAsyncOperands(const CallPtr& op);
+};
+
+AsyncHandleChecker::Definition AsyncHandleChecker::ResolveAsyncDefinition(const ExprPtr& expr) {
   auto var = AsVarLike(expr);
   if (!var) return {expr, expr};
-  // Insert an unknown result first to bound cycles in pre-SSA IR. Ambiguous
-  // control-flow merges and cross-function handles have no unique local owner.
+  // A loop-carried handle can refer back to itself. Merged values and function
+  // parameters without a unique local producer cannot identify a submission.
   auto [entry, inserted] = async_definitions_.try_emplace(var.get());
   if (!inserted) return entry->second;
-  CollectVarValues();
-  auto found = var_values_.find(var.get());
-  if (found == var_values_.end() || found->second.size() != 1) return {};
+  if (!var_values_) {
+    var_values_.emplace().VisitStmt(body_);
+  }
+  auto found = var_values_->values.find(var.get());
+  if (found == var_values_->values.end() || found->second.size() != 1) return {};
   const auto& rhs = found->second.front();
   auto& definition = entry->second;
   definition = AsVarLike(rhs) ? ResolveAsyncDefinition(rhs) : Definition{var, rhs};
   return definition;
 }
 
-void TypeChecker::CheckAsyncOperands(const CallPtr& op) {
+void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   const auto mismatch = [&](const std::string& message) {
-    RecordError(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH, op->op_->name_ + " " + message, op->span_);
+    diagnostics_.emplace_back(DiagnosticSeverity::Error, "AsyncHandleProvenance",
+                              static_cast<int>(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH),
+                              op->op_->name_ + " " + message, op->span_);
   };
   if ((IsOp(op, "pld.tile.get_async") || IsOp(op, "pld.tile.put_async")) && op->args_.size() == 4) {
     if (!IsOp(As<Call>(ResolveAsyncDefinition(op->args_[3]).value), "pld.system.make_session")) {
@@ -412,6 +430,29 @@ void TypeChecker::CheckAsyncOperands(const CallPtr& op) {
     // explicit operand constrains that binding; a tile submission already has an owner.
   }
 }
+
+void AsyncHandleChecker::VisitExpr_(const CallPtr& op) {
+  if (As<AsyncEventType>(op->GetType()) ||
+      (!op->args_.empty() && op->args_.front() && As<AsyncEventType>(op->args_.front()->GetType()))) {
+    CheckAsyncOperands(op);
+  }
+  IRVisitor::VisitExpr_(op);
+}
+
+class AsyncHandleProvenanceVerifier : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "AsyncHandleProvenance"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func && func->body_) {
+        AsyncHandleChecker checker(func->body_, diagnostics);
+        checker.VisitStmt(func->body_);
+      }
+    }
+  }
+};
 
 NzDispatchArg TypeChecker::ClassifyNzDispatchArg(const ExprPtr& arg) {
   if (auto var = AsVarLike(arg)) {
@@ -575,11 +616,6 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
 
 void TypeChecker::VisitExpr_(const CallPtr& op) {
   if (op) {
-    // Limit provenance lookups to event producers and consumers.
-    if (As<AsyncEventType>(op->GetType()) ||
-        (!op->args_.empty() && op->args_.front() && As<AsyncEventType>(op->args_.front()->GetType()))) {
-      CheckAsyncOperands(op);
-    }
     CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, false);
   }
@@ -1032,6 +1068,10 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
     }
   }
 };
+
+PropertyVerifierPtr CreateAsyncHandleProvenanceVerifier() {
+  return std::make_shared<AsyncHandleProvenanceVerifier>();
+}
 
 // Factory function for creating TypeCheck property verifier
 PropertyVerifierPtr CreateTypeCheckPropertyVerifier() {

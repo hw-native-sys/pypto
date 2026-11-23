@@ -112,7 +112,7 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
 // --------------------------------------------------------------------------
 
 // The tensor frontend can leave the originating session implicit. An explicit
-// handle is checked against the submission by the function-level type verifier.
+// handle is checked against the submission after ConvertToSSA resolves reassignments.
 void CheckCompletionOperands(const char* name, const std::vector<ExprPtr>& args,
                              const comm_op::Kwargs& kwargs) {
   CHECK(args.size() == 1 || args.size() == 2) << name << " requires (event[, session])";

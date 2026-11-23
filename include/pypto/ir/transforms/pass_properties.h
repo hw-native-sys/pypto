@@ -148,8 +148,10 @@ inline const PassProperties kCtrlFlowTransformProperties{.produced = {IRProperty
 
 // -- SSA conversion pass ------------------------------------------------------
 
-inline const PassProperties kConvertToSSAProperties{.produced = {IRProperty::SSAForm},
-                                                    .invalidated = {IRProperty::NormalizedStmtStructure}};
+// Handle provenance follows each use to its unique SSA definition.
+inline const PassProperties kConvertToSSAProperties{
+    .produced = {IRProperty::SSAForm, IRProperty::AsyncHandleProvenance},
+    .invalidated = {IRProperty::NormalizedStmtStructure}};
 
 // -- Expression / statement normalisation passes ------------------------------
 

@@ -42,20 +42,32 @@ def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
 
 
 def put_async(dst: DistributedTensor, peer: IntLike, src: Tensor | Expr, session: AsyncSession) -> AsyncEvent:
-    """Submit a PUT of a dense local GM source to the remote destination window on the given peer.
+    """Submit a single-peer PUT from a dense local GM view to a remote window.
 
-    Reuse the session for subsequent PUT or GET submissions. Its event can be waited on
-    in this kernel or handed to the task with ``pld.system.defer_wait_event``.
+    Args:
+        dst: Window-bound destination on the remote rank.
+        peer: Rank receiving the transfer.
+        src: Local GM source with the same shape and dtype as dst.
+        session: AIV-local URMA session created by pld.system.make_session.
+
+    Returns:
+        An AsyncEvent for this PUT. Pass it to wait_event or defer_wait_event.
     """
     (dst_expr,) = _unwrap_distributed_tensors("pld.tile.put_async", dst=dst)
     return AsyncEvent(expr=_ir_tile.put_async(dst_expr, _unwrap(peer), _unwrap(src), _unwrap(session)))
 
 
 def get_async(dst: Tensor, peer: IntLike, src: DistributedTensor, session: AsyncSession) -> AsyncEvent:
-    """Submit a GET on an explicit session. The peer selects the remote source for this transfer.
+    """Submit a single-peer GET from a remote window into a dense local GM view.
 
-    Both endpoints are dense GM tensors or views. The event can be handed to the task
-    with ``pld.system.defer_wait_event(event, session)``.
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        session: AIV-local URMA session created by pld.system.make_session.
+
+    Returns:
+        An AsyncEvent for this GET. Pass it to wait_event or defer_wait_event.
     """
     (src_expr,) = _unwrap_distributed_tensors("pld.tile.get_async", src=src)
     return AsyncEvent(expr=_ir_tile.get_async(_unwrap(dst), _unwrap(peer), src_expr, _unwrap(session)))

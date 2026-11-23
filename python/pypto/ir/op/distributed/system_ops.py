@@ -29,7 +29,16 @@ from .tensor_ops import _normalize_async_engine
 
 
 def make_session(comm_ctx: Expr, *, engine: CommEngine = CommEngine.URMA, span: Span | None = None) -> Call:
-    """Build an AIV-local session for a communication workspace, shared across peer operands."""
+    """Create an AIV-local communication session that PUT and GET can reuse across peers.
+
+    Args:
+        comm_ctx: Communication context identifying the workspace.
+        engine: Communication engine. Currently only URMA is supported.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A call returning an AsyncSessionType handle.
+    """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     engine_value = _normalize_async_engine(engine, "pld.system.make_session")
     return _ir_core.create_op_call(
@@ -38,10 +47,16 @@ def make_session(comm_ctx: Expr, *, engine: CommEngine = CommEngine.URMA, span: 
 
 
 def wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = None) -> Call:
-    """Wait in the current kernel for a distributed PUT or GET and return its BOOL success flag.
+    """Wait in the issuing kernel for a distributed PUT or GET to complete.
 
-    The optional session is the one that issued the transfer. With an implicit session,
-    the event identifies the originating submission.
+    Args:
+        event: Completion event returned by the transfer.
+        session: Originating session. Omit it to use the session associated with the event.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A call returning a BOOL scalar. After success the kernel can read the GET destination or
+        reuse the PUT source.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     args = [event] if session is None else [event, session]
@@ -49,7 +64,16 @@ def wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = 
 
 
 def defer_wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = None) -> Call:
-    """Transfer an event's completion to the current task, optionally naming its originating session."""
+    """Hand completion of a distributed transfer to the issuing task.
+
+    Args:
+        event: Completion event returned by the transfer.
+        session: Originating session. Omit it to use the session associated with the event.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A statement call with UnknownType that registers the event for task completion.
+    """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     args = [event] if session is None else [event, session]
     return _ir_core.create_op_call("pld.system.defer_wait_event", args, {}, actual_span)

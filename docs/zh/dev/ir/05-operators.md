@@ -784,6 +784,17 @@ class CrossCoreExample:
 
 参阅 [TPUSH/TPOP ISA 参考](../../reference/pto-isa/01-tpush_tpop.md) 和[缓冲区管理](../../reference/pto-isa/02-buffer_management.md)了解硬件细节。
 
+## 分布式 PUT 和 GET 的完成操作
+
+| 算子 | 返回值 |
+| ---- | ------ |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | 当前 AIV 的 session，可跨 peer 和传输方向复用 |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | 本地目标张量的别名与完成事件组成的二元组 |
+| `pld.tile.get_async(dst, peer, src, session)` | 从指定 peer 的源窗口读取数据的完成事件 |
+| `pld.tile.put_async(dst, peer, src, session)` | 向指定 peer 的目标窗口写入数据的完成事件 |
+| `pld.system.wait_event(event[, session])` | 发起传输的核等待完成后获得的 BOOL 成功标志 |
+| `pld.system.defer_wait_event(event[, session])` | 将事件登记到发起传输的 task，由该 task 负责完成的语句 |
+
 ## PrefetchOp：GM→L2 异步预取
 
 一种隐藏访存延迟 (latency hiding) 的缓存提示。`async_prefetch` 通过 SDMA 异步地把一段

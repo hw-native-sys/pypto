@@ -669,10 +669,17 @@ def put_async(
 def get_async_event(
     dst: TensorT, peer: IntLike, src: DistributedTensor, *, engine: CommEngine = CommEngine.URMA
 ) -> tuple[TensorT, AsyncEvent]:
-    """Submit a single-peer GET of dense GM views, returning the local destination and a pending event.
+    """Submit a single-peer GET of dense GM views and expose its completion event.
 
-    The first result aliases ``dst``. Use ``pld.system.defer_wait_event(event)`` to hand
-    completion to the task before dependent work consumes the destination.
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        engine: Communication engine. Currently only URMA is supported.
+
+    Returns:
+        A pair containing an alias of dst and the pending AsyncEvent. Wait for the event before
+        reading dst in this kernel, or defer it to the task.
     """
     (src_expr,) = _unwrap_distributed_tensors("pld.tensor.get_async_event", src=src)
     call = _ir_tensor.get_async_event(_unwrap(dst), _unwrap(peer), src_expr, engine=engine)

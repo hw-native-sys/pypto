@@ -11,7 +11,7 @@ This pass transforms IR with multiple assignments to the same variable into SSA 
 - **For loops**: Variables modified inside the loop body
 - **Mixed SSA/non-SSA**: Preserves existing SSA structure while converting non-SSA parts
 
-**Requires**: `TypeChecked` property. `TypeChecked` is verified automatically at BASIC level once produced; use a `VerificationInstrument` via `PassContext` to validate required properties before this pass runs.
+At pipeline input, `TypeChecked` verifies structural types. After this pass, the pipeline verifies `SSAForm` and `AsyncHandleProvenance`. The latter uses each event’s SSA definition to match a wait to the session that issued its transfer.
 
 **When to use**: Run this pass before any optimization or analysis that requires SSA form (e.g., OutlineIncoreScopes, memory optimization passes).
 

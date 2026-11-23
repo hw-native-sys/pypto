@@ -66,6 +66,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **SimtOutputsMaterialized** | SimtOutputsMaterialized | Each writable Tile uses a dedicated initialized SIMT output seed. |
 | **SimtSpecialized** | SimtSpecialized | Each launched helper has derived resources matching its block dimensions and target. |
 | **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency; call-boundary layout agreement |
+| **AsyncHandleProvenance** | AsyncHandleProvenance | After `ConvertToSSA`, trace each distributed event to its submission. Check an explicit tile session by SSA definition identity and reject mixed prefetch and URMA handles. |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
 | **UseAfterDefCheck** | UseAfterDef | Every Var use dominated by a definition (param, AssignStmt, loop var, iter_arg, return_var) |
@@ -439,8 +440,8 @@ Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. 
 | Function | Returns | Description |
 | -------- | ------- | ----------- |
 | `GetStructuralProperties()` | `{TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}` | Invariants verified before/after each pass by `VerificationInstrument` (the subset shared with `GetVerifiedProperties()` is also checked at pipeline start) |
-| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | Default set for `run_verifier()` |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid}` | Lightweight set for `PassPipeline` auto-verify |
+| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped, AsyncHandleProvenance}` | Default set for `run_verifier()` |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid, AsyncHandleProvenance}` | Lightweight set for `PassPipeline` auto-verify |
 
 ### RunVerifier Pass Factory
 

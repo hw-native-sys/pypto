@@ -46,24 +46,42 @@ from ._utils import _normalize_intlike, _unwrap
 
 
 def make_session(comm_ctx: CommCtx, *, engine: CommEngine = CommEngine.URMA) -> AsyncSession:
-    """Build an AIV-local communication session that PUT and GET submissions can reuse across peers."""
+    """Create an AIV-local communication session that PUT and GET can reuse across peers.
+
+    Args:
+        comm_ctx: Communication context identifying the workspace.
+        engine: Communication engine. Currently only URMA is supported.
+
+    Returns:
+        An async session shared by submissions from this AIV.
+    """
     return AsyncSession(expr=_ir_system.make_session(_unwrap(comm_ctx), engine=engine))
 
 
 def wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Scalar:
-    """Wait in the current kernel for a distributed PUT or GET and return its BOOL success flag.
+    """Wait in the issuing kernel for a distributed PUT or GET to complete.
 
-    An explicit session must match the originating submission. A successful wait makes the
-    GET destination available to this kernel and releases the PUT source for reuse.
+    Args:
+        event: Completion event returned by the transfer.
+        session: Originating session. Omit it to use the session associated with the event.
+
+    Returns:
+        A BOOL scalar indicating success. After success the kernel can read the GET destination or
+        reuse the PUT source.
     """
     return Scalar(expr=_ir_system.wait_event(_unwrap(event), _unwrap(session)))
 
 
 def defer_wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Call:
-    """Transfer a distributed transfer's completion to the issuing task.
+    """Hand completion of a distributed transfer to the issuing task.
 
-    The single-operand form uses the session associated with the submission. The explicit
-    form names that same session. Registering the event does not wait inside the current kernel.
+    Args:
+        event: Completion event returned by the transfer.
+        session: Originating session. Omit it to use the session associated with the event.
+
+    Returns:
+        A statement call that registers the event. Dependent tasks can use the data after task
+        completion.
     """
     return _ir_system.defer_wait_event(_unwrap(event), _unwrap(session))
 
