@@ -15,13 +15,14 @@ again. The named descriptor ABI deliberately requires a dedicated runtime bridge
 it must never be relabeled as c_pointer or executed without manifest checks.
 """
 
+import ast
 import hashlib
 import importlib
 import inspect
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_origin
 
 if TYPE_CHECKING:
     from ..discovery import JITDeclaration
@@ -77,6 +78,25 @@ _DTYPES = {
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ContractError(f"CANNBotDSL: {message}")
+
+
+def _is_constexpr(annotation: Any, marker: object) -> bool:
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    if isinstance(annotation, str):
+        # inspect_kernel may expose a postponed annotation without its defining
+        # namespace. Read the marker spelling without evaluating DSL source.
+        try:
+            node = ast.parse(annotation, mode="eval").body
+        except SyntaxError:
+            return False
+        return isinstance(node, ast.Subscript) and (
+            isinstance(node.value, ast.Name)
+            and node.value.id == "Constexpr"
+            or isinstance(node.value, ast.Attribute)
+            and node.value.attr == "Constexpr"
+        )
+    return get_origin(annotation) is marker
 
 
 def _arguments(cb: Any, kernel: object, request: KernelRequest) -> list[Any]:
@@ -469,7 +489,12 @@ class CANNBotDSLProvider:
 
         from ..discovery import JITDeclaration  # noqa: PLC0415
 
-        return JITDeclaration(info.signature, CANNBotDSLBinding(self, kernel))
+        signature: inspect.Signature = info.signature
+        marker = getattr(cb, "Constexpr", inspect.Parameter.empty)
+        constexpr_params = frozenset(
+            p.name for p in signature.parameters.values() if _is_constexpr(p.annotation, marker)
+        )
+        return JITDeclaration(signature, CANNBotDSLBinding(self, kernel), constexpr_params)
 
     def prepare(self, kernel: object, request: KernelRequest) -> PreparedKernel:
         _validate_inputs(request)

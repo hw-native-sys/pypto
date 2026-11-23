@@ -33,6 +33,7 @@ class JITDeclaration:
 
     signature: inspect.Signature
     binding: ExternalJITBinding
+    constexpr_params: frozenset[str] = frozenset()
 
 
 class JITProvider(Protocol):
@@ -80,6 +81,7 @@ def _providers() -> tuple[JITProvider, ...]:
 @cache_in_snapshot
 def _discover(identity: _Identity) -> "JITFunction | None":
     from pypto.jit.decorator import JITFunction  # noqa: PLC0415
+    from pypto.language import constexpr  # noqa: PLC0415
 
     declarations = [
         declaration
@@ -99,15 +101,18 @@ def _discover(identity: _Identity) -> "JITFunction | None":
         for p in parameters
     ):
         raise ContractError("JIT discovery requires explicit positional parameters without defaults or self")
-    # Only names cross this boundary. Tensor/scalar types come from the call
-    # site; provider annotations remain owned and checked by the native exporter.
+    # Preserve the compile-time parameters before JIT binds the call site.
+    # Runtime tensor/scalar types still come from the actual arguments.
     # An owned on-disk declaration lets existing source/AST analysis operate
     # normally, without inspecting or traversing the optional DSL's body.
-    source = f"def native_kernel({', '.join(p.name for p in parameters)}):\n    ...\n"
+    formals = [
+        f"{p.name}: _constexpr" if p.name in declaration.constexpr_params else p.name for p in parameters
+    ]
+    source = f"def native_kernel({', '.join(formals)}):\n    ...\n"
     directory = TemporaryDirectory(prefix="pypto-native-jit-")
     path = Path(directory.name) / "declaration.py"
     path.write_text(source, encoding="utf-8")
-    namespace: dict[str, Any] = {"__name__": __name__}
+    namespace: dict[str, Any] = {"__name__": __name__, "_constexpr": constexpr}
     exec(compile(source, str(path), "exec"), namespace)  # noqa: S102
     return JITFunction(
         namespace["native_kernel"],

@@ -167,7 +167,10 @@ Discovery resolves bare names from globals and closures, including imported alia
 For a module attribute or bound method, bind it to a name before defining the JIT
 function (`native_kernel = module.kernel` or `native_kernel = instance.kernel`).
 The public `inspect_kernel()` API supplies parameter names; call-site metadata
-supplies tensor/scalar types. Parameters must be explicit and positional, without
+supplies tensor/scalar types. A native parameter annotated with `cb.Constexpr[int]`
+receives the Python constant from the call site, including when the annotation is postponed.
+Use the `Constexpr` name for postponed annotations because the public inspection API
+does not expose the namespace for resolving string aliases. Parameters must be explicit and positional, without
 defaults; configured host launch objects are rejected. The native body is never
 traversed by the PyPTO specializer. Importing PyPTO does not import CANNBotDSL.
 

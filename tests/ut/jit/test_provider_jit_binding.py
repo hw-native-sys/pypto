@@ -268,6 +268,7 @@ def test_automatic_discovery_refreshes_rebound_native(monkeypatch, native_api):
     first = _Binding("aic")
     second = _Binding("mixed")
     native = _Native(first)
+    previous = weakref.ref(native)
 
     @pl.jit
     def entry(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]):
@@ -277,6 +278,8 @@ def test_automatic_discovery_refreshes_rebound_native(monkeypatch, native_api):
     config = RunConfig(backend_type=backend.BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
     entry.compile(config=config)
     native = _Native(second)
+    gc.collect()
+    assert previous() is None
     compiled = entry.compile(config=config)
     assert len(first.requests) == len(second.requests) == 1
     sources = [f for f in compiled.program.functions.values() if "external_source" in f.attrs]

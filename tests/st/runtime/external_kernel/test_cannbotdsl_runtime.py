@@ -522,5 +522,34 @@ def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
         torch.testing.assert_close(out, (lhs + rhs) * lhs, rtol=0, atol=0)
 
 
+@pytest.mark.platforms("a5", reason="CANNBotDSL JIT requires A5 text-only callbacks")
+@pytest.mark.parametrize("postponed", [False, True])
+def test_cannbotdsl_jit_constexpr_layout(tmp_path, test_config, postponed, monkeypatch):
+    from dataclasses import replace  # noqa: PLC0415
+
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    def copy_tile(x, out, width):
+        tile = cb.Buffer(cb.MemLoc.UB, cb.dtypes.float32, cb.make_layout((width,)))
+        cb.mem_copy(tile, x)
+        cb.vec_sync_all()
+        cb.mem_copy(out, tile)
+
+    # CANNBotDSL resolves postponed annotations in the kernel module namespace.
+    monkeypatch.setitem(globals(), "cb", cb)
+    copy_tile.__annotations__["width"] = "cb.Constexpr[int]" if postponed else cb.Constexpr[int]
+    native = cb.kernel(copy_tile)
+
+    @pl.jit
+    def entry(x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]):
+        native(x, out, 64)
+        return out
+
+    compiled = entry.compile(config=replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path)))
+    compiled.load()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

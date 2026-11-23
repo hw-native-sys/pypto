@@ -664,7 +664,10 @@ class JITFunction:
             (dep._func, names) for dep in deps_topo if (names := _layout_dependency_names(dep._func))
         )
         state = _CachedDepGraph(graph, bindings, source_hash, layout_dependencies)
-        self._dep_graph_state = state
+        # Discovered wrappers own live provider inputs and declaration files.
+        # cache_in_snapshot already pins their graph for this compilation.
+        if not any(dep._external_binding is not None for dep in deps_topo):
+            self._dep_graph_state = state
         return state
 
     def _get_deps(self) -> list["JITFunction"]:

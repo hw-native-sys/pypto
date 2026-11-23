@@ -137,6 +137,8 @@ AIC、AIV、MIX 均无需注册或编写 `pl.jit.extern` 声明。自动发现�
 解析直接调用的名称，支持导入别名。模块属性或绑定方法先赋给名称，再定义 JIT 函数，
 例如 `native_kernel = module.kernel` 或 `native_kernel = instance.kernel`。
 公开 `inspect_kernel()` API 提供参数名，调用点元数据提供 tensor/scalar 类型。
+标注为 `cb.Constexpr[int]` 的原生参数接收调用点的 Python 常量，包括延迟求值的注解。
+延迟注解请保留 `Constexpr` 名称，因为公开检查接口未提供解析字符串别名所需的命名空间。
 参数必须为无默认值的显式位置参数；已配置 host launch 的对象会被拒绝。
 PyPTO 不遍历原生函数体，导入 PyPTO 也不会导入 CANNBotDSL。
 
