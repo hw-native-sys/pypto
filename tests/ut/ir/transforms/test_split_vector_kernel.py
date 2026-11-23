@@ -1399,5 +1399,37 @@ def test_full_pop_carry_tracks_the_lane_that_produced_the_value():
         _assert_extent_after_substitution(extent, {selector.name_hint: 1}, 15)
 
 
+def test_explicit_pop_leaves_unrelated_loop_carry_without_a_lane_companion():
+    """A pop stored directly to the output has no effect on a separate tile carry."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector(self, steps: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+            buf = pl.system.reserve_buffer(name="c2v", size=65536)
+            pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
+            value = pl.tile.full([32, 16], dtype=pl.FP32, value=0.0)
+            for step in pl.range(steps):
+                received: pl.Tile[[32, 16], pl.FP32, pl.Mem.Vec] = pl.system.tpop_from_aic(
+                    split=1, aiv_subblockid=0
+                )
+                out = pl.tile.store(received, [0, 0], out)
+                pl.system.tfree_to_aic(received)
+                if step == 0:
+                    value = pl.tile.add(value, 1.0)
+                else:
+                    value = pl.tile.full([32, 16], dtype=pl.FP32, value=2.0)
+            return pl.tile.store(value, [0, 0], out)
+
+    program = _run_split_vector_kernel(Before)
+    vector = program.get_function("vector")
+    assert vector is not None
+    assert isinstance(vector.body, ir.SeqStmts)
+    loop = next(stmt for stmt in vector.body.stmts if isinstance(stmt, ir.ForStmt))
+    assert len(loop.iter_args) == 2
+    assert all(not isinstance(arg.type, ir.ScalarType) for arg in loop.iter_args)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

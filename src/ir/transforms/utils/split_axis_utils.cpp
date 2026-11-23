@@ -48,6 +48,7 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -1144,7 +1145,7 @@ static std::vector<StmtPtr> ProcessStmtsImpl(const std::vector<StmtPtr>& stmts, 
                                              const ExprPtr& subblock_idx,
                                              std::unordered_map<const Var*, VarPtr>& var_replacements,
                                              const ExprPtr& lane_stride,
-                                             const std::unordered_set<const ForStmt*>& explicit_pop_loops);
+                                             const std::unordered_set<const Var*>& explicit_lane_values);
 
 static bool HasFullSplitExtent(const TypePtr& type, int split_dim) {
   auto tile = As<TileType>(type);
@@ -1159,7 +1160,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
                            const ExprPtr& subblock_idx,
                            std::unordered_map<const Var*, VarPtr>& var_replacements,
                            const ExprPtr& lane_stride,
-                           const std::unordered_set<const ForStmt*>& explicit_pop_loops) {
+                           const std::unordered_set<const Var*>& explicit_lane_values) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     if (auto projected = RetypeTrackedBinding(assign, tile_vars, var_replacements)) return projected;
 
@@ -1815,9 +1816,9 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     // Full tiles can have identical types even when the scalar lane changes on
     // the backedge. A companion carry follows the source on each iteration
     // and lets a later narrowing use the correct lane, including zero trips.
-    const bool track_lanes = explicit_pop_loops.count(for_stmt.get()) != 0;
-    std::vector<IterArgPtr> lane_args(track_lanes ? new_iter_args.size() : 0);
+    std::vector<IterArgPtr> lane_args(explicit_lane_values.empty() ? 0 : new_iter_args.size());
     for (size_t i = 0; i < lane_args.size(); ++i) {
+      if (explicit_lane_values.count(for_stmt->iter_args_[i].get()) == 0) continue;
       const auto& tile_arg = new_iter_args[i];
       auto it = tile_vars.find(tile_arg.get());
       if (it == tile_vars.end() || !HasFullSplitExtent(tile_arg->GetType(), it->second.split_dim)) continue;
@@ -1837,7 +1838,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       flat.push_back(for_stmt->body_);
     }
     auto new_body_stmts = ProcessStmtsImpl(flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                           var_replacements, lane_stride, explicit_pop_loops);
+                                           var_replacements, lane_stride, explicit_lane_values);
     StmtPtr new_body = (new_body_stmts.size() == 1)
                            ? new_body_stmts[0]
                            : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
@@ -1894,7 +1895,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       then_flat.push_back(if_stmt->then_body_);
     }
     auto new_then = ProcessStmtsImpl(then_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                     var_replacements, lane_stride, explicit_pop_loops);
+                                     var_replacements, lane_stride, explicit_lane_values);
     StmtPtr new_then_body =
         (new_then.size() == 1) ? new_then[0] : std::make_shared<SeqStmts>(new_then, if_stmt->span_);
 
@@ -1908,7 +1909,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         else_flat.push_back(else_body);
       }
       auto new_else_stmts = ProcessStmtsImpl(else_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                             var_replacements, lane_stride, explicit_pop_loops);
+                                             var_replacements, lane_stride, explicit_lane_values);
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
     }
@@ -1928,7 +1929,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
 
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
     auto new_stmts = ProcessStmtsImpl(seq->stmts_, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                      var_replacements, lane_stride, explicit_pop_loops);
+                                      var_replacements, lane_stride, explicit_lane_values);
     return std::make_shared<SeqStmts>(new_stmts, seq->span_);
   }
 
@@ -2282,17 +2283,105 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
 
 namespace {
 
+// Follow values, including loop backedges and branch yields, so a pop only
+// introduces scalar lane state for carries the popped data can reach.
+class ExplicitLaneValues : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> Collect(const std::vector<StmtPtr>& stmts) {
+    for (const auto& stmt : stmts) VisitStmt(stmt);
+    for (size_t i = 0; i < worklist_.size(); ++i) {
+      const auto next = successors_.find(worklist_[i]);
+      if (next == successors_.end()) continue;
+      for (const auto* value : next->second) Mark(value);
+    }
+    std::unordered_set<const Var*> affected_carries;
+    for (const auto* carry : candidate_carries_) {
+      if (selected_.count(carry) != 0) affected_carries.insert(carry);
+    }
+    return affected_carries;
+  }
+
+ private:
+  static bool CanCarryLane(const TypePtr& type) { return As<TileType>(type) || As<TupleType>(type); }
+
+  void Mark(const Var* value) {
+    if (selected_.insert(value).second) worklist_.push_back(value);
+  }
+
+  void Link(const ExprPtr& source, const VarPtr& result) {
+    if (!source || !CanCarryLane(result->GetType())) return;
+    var_collectors::VarDefUseCollector refs;
+    refs.VisitExpr(source);
+    for (const auto* value : refs.var_uses) {
+      if (CanCarryLane(value->GetType())) successors_[value].push_back(result.get());
+    }
+  }
+
+  void LinkYields(const StmtPtr& body, const std::vector<VarPtr>& results) {
+    if (results.empty()) return;
+    const auto yield = transform_utils::GetLastYieldStmt(body);
+    if (!yield || yield->value_.size() != results.size()) return;
+    for (size_t i = 0; i < results.size(); ++i) Link(yield->value_[i], results[i]);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    const auto call = As<Call>(stmt->value_);
+    if (IsOp(call, "tile.tpop_from_aic") && !call->args_.empty()) {
+      Mark(stmt->var_.get());
+    } else {
+      Link(stmt->value_, stmt->var_);
+    }
+  }
+
+  void VisitStmt_(const IfStmtPtr& stmt) override {
+    LinkYields(stmt->then_body_, stmt->return_vars_);
+    if (stmt->else_body_) LinkYields(*stmt->else_body_, stmt->return_vars_);
+    IRVisitor::VisitStmt_(stmt);
+  }
+
+  template <typename LoopPtr>
+  void LinkLoop(const LoopPtr& stmt) {
+    const auto yield = transform_utils::GetLastYieldStmt(stmt->body_);
+    if (stmt->iter_args_.size() != stmt->return_vars_.size()) return;
+    for (size_t i = 0; i < stmt->iter_args_.size(); ++i) {
+      const auto& arg = stmt->iter_args_[i];
+      Link(arg->initValue_, arg);
+      if (yield && i < yield->value_.size()) Link(yield->value_[i], arg);
+      Link(arg, stmt->return_vars_[i]);
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& stmt) override {
+    LinkLoop(stmt);
+    const size_t before = worklist_.size();
+    IRVisitor::VisitStmt_(stmt);
+    if (worklist_.size() != before) {
+      for (const auto& arg : stmt->iter_args_) candidate_carries_.insert(arg.get());
+    }
+  }
+
+  void VisitStmt_(const WhileStmtPtr& stmt) override {
+    LinkLoop(stmt);
+    IRVisitor::VisitStmt_(stmt);
+  }
+
+  std::unordered_map<const Var*, std::vector<const Var*>> successors_;
+  std::unordered_set<const Var*> selected_;
+  std::unordered_set<const Var*> candidate_carries_;
+  std::vector<const Var*> worklist_;
+};
+
 static std::vector<StmtPtr> ProcessStmtsImpl(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
                                              std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
                                              const ExprPtr& subblock_idx,
                                              std::unordered_map<const Var*, VarPtr>& var_replacements,
                                              const ExprPtr& lane_stride,
-                                             const std::unordered_set<const ForStmt*>& explicit_pop_loops) {
+                                             const std::unordered_set<const Var*>& explicit_lane_values) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
   for (const auto& stmt : stmts) {
     result.push_back(ProcessStmt(stmt, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements,
-                                 lane_stride, explicit_pop_loops));
+                                 lane_stride, explicit_lane_values));
   }
   return result;
 }
@@ -2304,31 +2393,10 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
                                   const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements,
                                   const ExprPtr& lane_stride) {
-  class ExplicitPopLoops : public IRVisitor {
-   public:
-    std::unordered_set<const ForStmt*> loops;
-
-   private:
-    void VisitStmt_(const ForStmtPtr& loop) override {
-      const bool enclosing_has_pop = has_pop_;
-      has_pop_ = false;
-      IRVisitor::VisitStmt_(loop);
-      if (has_pop_) loops.insert(loop.get());
-      has_pop_ |= enclosing_has_pop;
-    }
-
-    void VisitExpr_(const CallPtr& call) override {
-      has_pop_ |= IsOp(call, "tile.tpop_from_aic") && !call->args_.empty();
-      if (!has_pop_) IRVisitor::VisitExpr_(call);
-    }
-
-    bool has_pop_ = false;
-  } finder;
-  if (is_aiv && subblock_idx) {
-    for (const auto& stmt : stmts) finder.VisitStmt(stmt);
-  }
+  const auto explicit_lane_values =
+      is_aiv && subblock_idx ? ExplicitLaneValues().Collect(stmts) : std::unordered_set<const Var*>{};
   return ProcessStmtsImpl(stmts, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements,
-                          lane_stride, finder.loops);
+                          lane_stride, explicit_lane_values);
 }
 
 SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) {
