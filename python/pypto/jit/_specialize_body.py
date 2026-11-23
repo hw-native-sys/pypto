@@ -157,6 +157,7 @@ class BodyTransformer(ast.NodeTransformer):
         self.has_scope_capture = False
         self._simt_depth: int = 0
         self._simt_runtime_names: set[str] = set()
+        self._while_runtime_names: set[str] = set()
         # Pre-register function parameters as "already assigned at depth 0" so
         # that body assignments like `x = pl.load(x, ...)` are treated as
         # rebindings and get alpha-renamed to `x_v1`.
@@ -358,6 +359,11 @@ class BodyTransformer(ast.NodeTransformer):
                 return None
         return cast("ast.stmt", self.generic_visit(node))
 
+    def _needs_runtime_shape_write(self, name: str) -> bool:
+        return name in self._while_runtime_names or (
+            self._simt_depth > 0 and name in self._simt_runtime_names
+        )
+
     def _expand_shape_unpacking(
         self, node: ast.Assign, param_name: str, target_names: list[ast.expr]
     ) -> list[ast.stmt]:
@@ -367,7 +373,7 @@ class BodyTransformer(ast.NodeTransformer):
         for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
             if not isinstance(tgt, ast.Name):
                 continue
-            if tgt.id in self._var_renames or (self._simt_depth and tgt.id in self._simt_runtime_names):
+            if tgt.id in self._var_renames or self._needs_runtime_shape_write(tgt.id):
                 # Keep the current binding updated after scalar renaming or a
                 # conditional write. Folding only the source name would leave
                 # reads pointing at its old alias. Expand tuples into scalars
@@ -462,7 +468,7 @@ class BodyTransformer(ast.NodeTransformer):
                 node.targets[0].id not in self._var_renames
                 or self._is_folded_graph_capture(node.targets[0].id)
             )
-            and not (self._simt_depth and node.targets[0].id in self._simt_runtime_names)
+            and not self._needs_runtime_shape_write(node.targets[0].id)
             and isinstance(node.value, ast.Subscript)
             and isinstance(node.value.value, ast.Attribute)
             and node.value.value.attr == "shape"
@@ -882,6 +888,7 @@ class BodyTransformer(ast.NodeTransformer):
         for var_name in rebind_vars:
             # Get the current read-name for this variable (could already be an alias)
             current_name = self._var_renames.get(var_name, var_name)
+            folded = self._active_shape_fold(var_name)
             source = self._known_tensor_name(var_name)
             value_meta = self._meta.get(source) if source is not None else None
             new_name = self._rebind(var_name)
@@ -891,7 +898,9 @@ class BodyTransformer(ast.NodeTransformer):
             self._assign_depth[var_name] = self._scope_depth
             bridge = ast.Assign(
                 targets=[ast.Name(id=new_name, ctx=ast.Store())],
-                value=ast.Name(id=current_name, ctx=ast.Load()),
+                value=ast.Name(id=current_name, ctx=ast.Load())
+                if folded is None
+                else ast.Constant(value=folded),
                 lineno=0,
                 col_offset=0,
             )
@@ -980,18 +989,38 @@ class BodyTransformer(ast.NodeTransformer):
             _restore_bindings(self._assign_depth, saved[3], restore_names)
             _restore_bindings(self._var_renames, saved[4], restore_names)
 
-    def visit_While(self, node: ast.While) -> ast.stmt:
-        """Keep SIMT while-body updates on the incoming private binding."""
+    def visit_While(self, node: ast.While) -> ast.stmt | list[ast.stmt]:
+        """Keep the condition, body writes, and loop exit on the same binding."""
+        bridges: list[ast.stmt] = []
+        outer_runtime_names = self._while_runtime_names
         if not self._simt_depth:
-            return cast("ast.stmt", self.generic_visit(node))
+            # Sibling loops can reuse a body-local name. A read in the
+            # condition counts as a read before the first body assignment.
+            self._scope_depth += 1
+            try:
+                carried, fresh = self._classify_loop_locals([ast.Expr(value=node.test), *node.body])
+            finally:
+                self._scope_depth -= 1
+            # A folded dimension has no defining IR assignment. Materialize
+            # it before testing the condition, including for zero iterations.
+            written = self._names_by_ctx(node, ast.Store) & self._assign_count.keys()
+            runtime_names = written.difference(fresh)
+            folded = sorted(name for name in runtime_names if self._active_shape_fold(name) is not None)
+            bridges = self._make_bridge_assignments(list(dict.fromkeys([*carried, *folded])))
+            self._while_runtime_names = outer_runtime_names | runtime_names
+            for name in fresh:
+                self._forget_rename_bookkeeping(name)
+                self._shape_inlined.pop(name, None)
         node.test = self.visit(node.test)
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
-        node.orelse = self._visit_scoped_body(node.orelse)
-        return node
+            self._while_runtime_names = outer_runtime_names
+        if node.orelse:
+            node.orelse = self._visit_scoped_body(node.orelse)
+        return [*bridges, node] if bridges else node
 
     @staticmethod
     def _is_attribute_call(expr: ast.expr | None, name: str) -> bool:

@@ -96,6 +96,8 @@ Ascend910 与 Ascend950 都使用这些契约。
 `pl.const(value, dtype)`，使打印后重新解析仍保留填充值自身的 dtype，而不依赖 tile
 的 dtype。运行时填充值仍不支持。
 
+在 Ascend950 上，Tile 后端用标量逐元素写入来填充 INT64 或 UINT64 tile。A5 的向量广播指令最多支持 32 位整数元素。
+
 在 Buffer call 边界，标量操作数必须匹配目标元素 dtype，且不具有内存效果。
 降低阶段在构造该 call 之前转换受支持的源标量表达式，为有符号整数、
 INDEX、FP16、BF16 和 FP32 插入显式 `Cast`；INDEX 先转换为 INT64。

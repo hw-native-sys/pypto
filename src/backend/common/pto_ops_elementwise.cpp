@@ -717,6 +717,32 @@ static std::string MakeFullCodegenPTO(const std::string& pto_op_name, const Call
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, 2);
   const ir::ExprPtr& scalar = op->args_[1];
+  auto tile = As<ir::TileType>(op->GetType());
+  if (tile && (tile->dtype_ == DataType::INT64 || tile->dtype_ == DataType::UINT64) &&
+      codegen.GetBackendHandler()->GetPtoTargetArch() == "a5") {
+    // A5 TEXPANDS has no 64-bit integer lane. TSETVAL takes an element
+    // offset and preserves all 64 bits of the scalar without narrowing.
+    int64_t count = 1;
+    for (const auto& dim : tile->shape_) {
+      const auto extent = codegen.GetConstIntValue(dim);
+      INTERNAL_CHECK_SPAN(extent > 0 && count <= std::numeric_limits<int64_t>::max() / extent, op->span_)
+          << "tile.full requires a representable static element count";
+      count *= extent;
+    }
+    const auto end = codegen.GetOrEmitConstant(count, DataType::INDEX);
+    const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    const auto one = codegen.GetOrEmitConstant(int64_t{1}, DataType::INDEX);
+    const auto index = codegen.NewNamedTemp("fill_index");
+    const auto fill =
+        ir::GetScalarDtype(scalar) == tile->dtype_ ? scalar : ir::MakeCast(scalar, tile->dtype_, op->span_);
+    const auto value = codegen.GetExprAsCode(fill);
+    codegen.EmitStructural("scf.for " + index + " = " + zero + " to " + end + " step " + one + " {");
+    codegen.IncreaseIndent();
+    EmitInsOuts(codegen, "pto.tsetval", {{index, "index"}, {value, codegen.GetTypeString(tile->dtype_)}});
+    codegen.DecreaseIndent();
+    codegen.EmitStructural("}");
+    return "";
+  }
   EmitInsOuts(codegen, pto_op_name, {{codegen.GetExprAsCode(scalar), codegen.GetExprTypeAnnotation(scalar)}});
   return "";
 }

@@ -103,6 +103,8 @@ their declared dtype until lowering. The Python printer emits `tile.full` fill
 constants as `pl.const(value, dtype)` so print-to-parse roundtrips preserve the
 fill dtype independently of the tile dtype. Runtime fill values remain invalid.
 
+On Ascend950 the Tile backend fills an INT64 or UINT64 tile with scalar element stores. The A5 vector broadcast instruction supports integer elements up to 32 bits.
+
 At the Buffer-call boundary, scalar operands must match the destination element
 dtype and have no memory effects. Before constructing that call, lowering converts
 supported source scalar expressions using explicit `Cast` expressions for signed integers,

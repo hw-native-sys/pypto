@@ -1511,6 +1511,27 @@ class TestVariableRebinding:
         ast.fix_missing_locations(new_func)
         return ast.unparse(new_func)
 
+    @pytest.mark.parametrize("limit, expected", [(0, (2, 0)), (5, (5, 3))])
+    def test_natural_while_nested_updates_and_zero_trip(self, limit, expected):
+        # The folded starting row must also be available when neither loop runs.
+        src = """
+            def f(a, limit):
+                row = a.shape[0]
+                count = 0
+                while row < limit:
+                    tick()
+                    end = row + 1
+                    while row < end:
+                        tick()
+                        row = row + 1
+                        count = count + 1
+                return row, count
+        """
+        # Bound execution even if a regression drops either counter update.
+        namespace: dict = {"tick": iter(range(10)).__next__}
+        exec(self._transform(src, {"a": TensorMeta((2,), DataType.FP32)}), namespace)
+        assert namespace["f"](None, limit) == expected
+
     def test_single_assignment_unchanged(self):
         src = """
             def f(a):
