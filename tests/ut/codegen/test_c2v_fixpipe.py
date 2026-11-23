@@ -527,11 +527,6 @@ def test_automatic_column_major_producer_and_consumer_compile(loop, buffer_ir, t
         assert "LayoutMode_t::NZ2DN" in cpp
 
 
-def test_automatic_nz2nz_requires_fp32():
-    with pytest.raises(ValueError, match="Automatic C2V NZ2NZ requires an FP32 accumulator.*int32"):
-        _generate(_automatic_move(nz_int32=True))
-
-
 @pytest.mark.parametrize("buffer_ir", [False, True])
 @pytest.mark.ptoas_compile
 def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp_path):

@@ -658,15 +658,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     const auto members =
         CollectInnerCalls(func, program, /*bind_guards=*/func->func_type_ != FunctionType::Group);
     if (func->func_type_ == FunctionType::Group) {
-      const auto aiv = std::find_if(members.begin(), members.end(), [](const auto& member) {
-        return member.inner_callee->func_type_ == FunctionType::AIV;
-      });
-      for (const auto& member : members) {
-        if (member.inner_callee->func_type_ == FunctionType::AIC) {
-          group_peers[member.inner_callee->name_].insert(aiv == members.end() ? ""
-                                                                              : aiv->inner_callee->name_);
-        }
-      }
+      const auto peers = FindGroupCallees(func, program);
+      if (!peers.aic_name.empty()) group_peers[peers.aic_name].insert(peers.aiv_name);
+      if (!peers.aiv_name.empty()) group_peers[peers.aiv_name].insert(peers.aic_name);
     }
     if (func->func_type_ == FunctionType::Group && members.size() == 2 &&
         SameGroupArguments(members[0].inner_call->args_, members[1].inner_call->args_)) {
@@ -735,6 +729,10 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       it->second |= pair_mask(a.empty() ? p : a[i], b.empty() ? q : b[i]);
     }
     return it->second;
+  };
+  auto group_matches = [&](const std::string& kernel, const std::string& peer) {
+    const auto entry = group_peers.find(kernel);
+    return entry == group_peers.end() || (entry->second.size() == 1 && entry->second.count(peer));
   };
   std::map<std::tuple<std::string, std::string, int>, int> incoming;
   for (const auto& [name, local] : info) {
@@ -816,10 +814,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       }
       if (!imported) continue;
       const auto peer_name = def->GetKwarg<std::string>("peer_func", "");
-      const auto members = group_peers.find(func->name_);
-      if (has_epilogue && members != group_peers.end() &&
-          (members->second.size() != 1 || !members->second.count(peer_name))) {
-        error(def, "Fixpipe peer_func must belong to every Group dispatching its producer");
+      if (has_epilogue &&
+          (!group_matches(func->name_, peer_name) || !group_matches(peer_name, func->name_))) {
+        error(def, "Fixpipe peer_func must belong to every Group dispatching either endpoint");
       }
       auto peer = info.find(peer_name);
       if (peer == info.end() || !peer->second.inits.count(id)) {
@@ -1040,7 +1037,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           const auto layout = e.at("layout");
           const auto block = layout == "nz2nd" ? TileLayout::row_major : TileLayout::col_major;
           const auto scatter = layout == "nz2nz" ? TileLayout::row_major : TileLayout::none_box;
-          if (view.blayout != block || view.slayout != scatter) {
+          if (view.blayout != block || view.slayout != scatter ||
+              (layout == "nz2nz" &&
+               view.fractal != tile_view_semantics::GetImplicitFractal(MemorySpace::Vec))) {
             error(call, "Fixpipe consumer layout does not match acc_push_epilogue.layout");
           }
           if (quant != "no_convert" && tile->dtype_ != AccPushResultDtype(quant, DataType::FP32)) {

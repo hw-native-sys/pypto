@@ -81,6 +81,7 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
         validated("tile.tpop_from_aic"), validated("tile.tpop_from_aiv"), validated("tile.store"),
         validated("tile.assemble"), validated("system.tfree_to_aic"), validated("system.tfree_to_aiv"),
         validated("system.reserve_buffer"), validated("system.import_peer_buffer"),
+        // TPUSH reads quantization state outside the SSA use graph.
         validated("system.set_quant_scalar"), validated("system.set_quant_vector"),
         validated("system.aic_initialize_pipe"), validated("system.aiv_initialize_pipe"),
         validated("system.set_intra_block"), validated("system.wait_intra_block"),

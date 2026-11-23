@@ -43,23 +43,25 @@ class CallVisitor : public IRVisitor {
   using OnMatchFn = std::function<bool(const CallPtr&, const FunctionPtr&)>;
 
   CallVisitor(const ProgramPtr& program, OnMatchFn on_match, bool reject_submit_dispatch_metadata = false,
-              bool bind_guards = false)
+              const Function* binding_wrapper = nullptr)
       : program_(program),
         on_match_(std::move(on_match)),
         reject_submit_dispatch_metadata_(reject_submit_dispatch_metadata),
-        bind_guards_(bind_guards) {}
+        binding_wrapper_(binding_wrapper) {}
 
  protected:
   void VisitStmt_(const AssignStmtPtr& stmt) override {
     // A direct SSA copy retains the origin that dominates its uses.
-    if (const auto origin = bind_guards_ ? AliasOrigin(stmt->value_) : nullptr) {
+    if (const auto origin = binding_wrapper_ ? AliasOrigin(stmt->value_) : nullptr) {
       copies_.emplace(stmt->var_.get(), origin);
     }
     IRVisitor::VisitStmt_(stmt);
   }
 
   void VisitStmt_(const IfStmtPtr& stmt) override {
-    const auto condition = bind_guards_ ? AliasOrigin(stmt->condition_) : nullptr;
+    // Spmd and Group dispatchers flatten wrapper calls; orchestration executes branches.
+    const bool executable = binding_wrapper_ && IsOrchestrationLike(binding_wrapper_->func_type_);
+    const auto condition = executable ? AliasOrigin(stmt->condition_) : nullptr;
     if (!condition) return IRVisitor::VisitStmt_(stmt);
     auto [it, inserted] = guards_.try_emplace(condition.get(), true);
     if (it->second) VisitStmt(stmt->then_body_);
@@ -114,7 +116,7 @@ class CallVisitor : public IRVisitor {
   const ProgramPtr& program_;
   OnMatchFn on_match_;
   bool reject_submit_dispatch_metadata_;
-  bool bind_guards_;
+  const Function* binding_wrapper_;
   bool stop_ = false;
   std::map<const Var*, bool> guards_;
   std::map<const Var*, VarPtr> copies_;
@@ -183,7 +185,7 @@ std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const
         }
         return false;
       },
-      false, bind_guards);
+      false, bind_guards ? wrapper.get() : nullptr);
   visitor.VisitStmt(wrapper->body_);
   return result;
 }
