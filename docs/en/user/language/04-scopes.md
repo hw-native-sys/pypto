@@ -590,9 +590,13 @@ run only on an allocated A5 device. The runnable examples default to compile-onl
 | [Strided copy](../../../../examples/advanced/07_simt_strided_copy.py) | Three-dimensional threads, GM subviews with different row pitches, two outputs and preserved guards/tails |
 | [Warp compaction](../../../../examples/advanced/04_simt_compaction.py) | Stable indices/counts using ballot or shuffle scan |
 | [Mixed row update](../../../../examples/advanced/06_simt_row_update.py) | Tile producer → SIMT update → Tile consumer, old Tile preservation and SIMD comparison |
+| [Atomic histogram](../../../../examples/advanced/08_simt_atomic_histogram.py) | Contending atomic counts, old-value tickets and bitwise membership masks |
+| [Scalar conversion](../../../../examples/advanced/09_simt_scalar_conversion.py) | FP16/BF16 conversion, explicit integer rounding, FP32 bitcast and sign-bit manipulation |
 
 ```bash
 python examples/advanced/07_simt_strided_copy.py --dims 8 4 8 --valid 257
+python examples/advanced/08_simt_atomic_histogram.py --valid 47
+python examples/advanced/09_simt_scalar_conversion.py --valid 47
 task-submit --device auto --max-time 600 --run \
   'python examples/advanced/07_simt_strided_copy.py --device "$TASK_DEVICE" --dims 8 4 8 --valid 257'
 ```
@@ -601,6 +605,17 @@ Use the configured project environment for both commands. See the
 [API contracts](../../dev/ir/11-simt.md) for supported math, warp, atomic and
 synchronization operations, and [native acceptance](../../dev/codegen/05-simt-lowering.md)
 for compilation versus hardware evidence.
+
+The histogram initializes its counters and masks on the host. `atomic_add`
+returns a unique per-bin ticket, but thread order is unspecified: validation
+checks the ticket permutation, not a stable ordering. `atomic_or` accumulates
+16 input-position classes per bin, even though its return value is unused.
+The conversion example uses finite inputs with rounding ties, signed zero and
+FP16 overflow. It explicitly clips to the FP16 finite range before `ftof`;
+`ftoi` contrasts truncation with nearest-even rounding, while `bitcast` preserves
+the FP32 representation. Both examples accept `--valid` from 0 to 64 and verify
+untouched output tails when run with `--device`. Their numerical checks require
+A5 execution; compile-only success does not establish numerical correctness.
 
 Use `pl.simt.lanemask_lt()` to select physical lanes below the caller, as in the
 compaction example. `bitcast` preserves FP32/INT32 bits; `atomic_sub` and INT32
