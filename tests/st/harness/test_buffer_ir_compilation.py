@@ -10,6 +10,7 @@
 """Device-free checks of Buffer mode in the real inline and pool compile paths."""
 
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock
 
 import pypto.language as pl
 import pytest
@@ -117,12 +118,7 @@ def test_buffer_case_rejects_a_compiler_that_leaves_functional_device_ir(tmp_pat
 @pytest.mark.parametrize("in_pool", [False, True], ids=["inline", "pool"])
 def test_compile_paths_forward_execution_mode(tmp_path, monkeypatch, target_platform, in_pool):
     """An onboard request must never silently compile simulator artifacts."""
-    captured = {}
-
-    def capture(_case, _program, **kwargs):
-        captured.update(kwargs)
-        raise RuntimeError("compile target captured")
-
+    capture = Mock(side_effect=RuntimeError("compile target captured"))
     monkeypatch.setattr(tr, "_compile_case_program", capture)
     # A routing probe must not switch the backend for subsequent device tests.
     monkeypatch.setattr(tr, "_install_backend", lambda _arch: None)
@@ -136,6 +132,8 @@ def test_compile_paths_forward_execution_mode(tmp_path, monkeypatch, target_plat
         runner = tr.TestRunner(RunConfig(backend_type=arch, execution_mode=mode, codegen_only=True))
         result = runner._run_inline(case, target_platform)
         assert not result.passed and "compile target captured" in result.error
+    assert capture.call_args is not None
+    captured = capture.call_args.kwargs
     assert captured["backend_type"] == arch
     expected_mode = ExecutionMode.SIM if target_platform.endswith("sim") else ExecutionMode.ONBOARD
     assert captured["execution_mode"] == expected_mode

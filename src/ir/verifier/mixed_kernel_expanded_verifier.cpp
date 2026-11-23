@@ -537,6 +537,7 @@ struct FixpipeEndpointCounts {
 };
 
 struct FixpipeFunctionInfo : IRVisitor {
+  bool has_fixpipe = false;
   std::map<int, FixpipeEndpointCounts> counts;
   std::map<int, CallPtr> inits;
   std::set<int> duplicate_ids;
@@ -557,6 +558,7 @@ struct FixpipeFunctionInfo : IRVisitor {
   }
   void VisitExpr_(const CallPtr& call) override {
     if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
+      has_fixpipe |= call->HasKwarg("acc_push_epilogue");
       const int id = call->GetKwarg<int>("id", 0);
       auto [it, inserted] = inits.emplace(id, call);
       if (!inserted) {
@@ -625,7 +627,11 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   std::map<std::string, FixpipeFunctionInfo> info;
   using KernelPair = std::pair<std::string, std::string>;
   std::vector<std::pair<KernelPair, CallPtr>> groups;
-  std::map<const Var*, int> group_bindings;
+  struct GuardArgument {
+    int mask = 0;
+    const Var* origin = nullptr;
+  };
+  std::map<const Var*, GuardArgument> group_bindings;
   std::map<const Var*, std::vector<const Var*>> forwarded;
   for (const auto& [gv, func] : program->functions_) {
     if (!func || !func->body_) continue;
@@ -646,44 +652,52 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const auto& params = member.inner_callee->params_;
       for (std::size_t i = 0; i < std::min(args.size(), params.size()); ++i) {
         const auto* target = params[i].get();
-        auto& binding = group_bindings[target];
         const auto source = AsVarLike(args[i]);
+        auto [it, inserted] = group_bindings.try_emplace(target, GuardArgument{0, source.get()});
+        auto& binding = it->second;
+        if (!inserted && binding.origin != source.get()) binding.origin = nullptr;
         if (IsWrapperType(func->func_type_) && parameters.count(source)) {
           forwarded[source.get()].push_back(target);
         } else {
           const auto value = As<ConstBool>(args[i]);
-          binding |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
+          binding.mask |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
         }
       }
     }
   }
   // Each Boolean bit flows over a forwarding edge at most twice.
-  for (const auto& [source, destinations] : forwarded) group_bindings.try_emplace(source, kEitherGuard);
+  for (const auto& [source, destinations] : forwarded)
+    group_bindings.try_emplace(source, GuardArgument{kEitherGuard});
   std::vector<const Var*> pending;
-  for (const auto& [param, mask] : group_bindings) {
-    if (mask) pending.push_back(param);
+  for (const auto& [param, binding] : group_bindings) {
+    if (binding.mask) pending.push_back(param);
   }
   for (std::size_t i = 0; i < pending.size(); ++i) {
     const auto* param = pending[i];
-    const int mask = group_bindings[param];
+    const int mask = group_bindings[param].mask;
     for (const auto* target : forwarded[param]) {
-      auto& current = group_bindings[target];
+      auto& current = group_bindings[target].mask;
       if ((current | mask) == current) continue;
       current |= mask;
       pending.push_back(target);
     }
   }
   // Project each Group's bindings to the shared kernel argument order.
-  std::map<KernelPair, std::vector<int>> peer_bindings;
+  std::map<KernelPair, std::vector<GuardArgument>> peer_bindings;
   for (const auto& [peers, member] : groups) {
     const auto& args = member->args_;
     auto& allowed = peer_bindings[peers];
     allowed.resize(std::max(allowed.size(), args.size()));
     for (std::size_t i = 0; i < args.size(); ++i) {
       const auto value = As<ConstBool>(args[i]);
-      const auto found = group_bindings.find(AsVarLike(args[i]).get());
-      allowed[i] |= value ? (value->value_ ? kGuardTrue : kGuardFalse)
-                          : (found == group_bindings.end() ? kEitherGuard : found->second);
+      const auto* var = AsVarLike(args[i]).get();
+      const auto found = group_bindings.find(var);
+      const auto known = found != group_bindings.end() ? found->second : GuardArgument{};
+      const auto* identity = known.origin ? known.origin : var;
+      auto& argument = allowed[i];
+      argument.origin = argument.mask && argument.origin != identity ? nullptr : identity;
+      argument.mask |=
+          value ? (value->value_ ? kGuardTrue : kGuardFalse) : (known.mask ? known.mask : kEitherGuard);
     }
   }
   std::map<std::tuple<std::string, std::string, int>, int> incoming;
@@ -733,13 +747,15 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       }
       if (init->args_.empty()) continue;
       const auto def = local.FindOrigin(init->args_[0]);
-      if (!IsOp(def, "system.reserve_buffer") && !IsOp(def, "system.import_peer_buffer")) {
-        if (has_epilogue) {
-          error(init, "Fixpipe c2v_consumer_buf must trace to reserve_buffer/import_peer_buffer");
-        }
+      const bool reserve = IsOp(def, "system.reserve_buffer"),
+                 imported = IsOp(def, "system.import_peer_buffer");
+      if (has_epilogue && !(func->func_type_ == FunctionType::AIV ? reserve : imported)) {
+        error(init,
+              "Fixpipe c2v_consumer_buf must trace to reserve_buffer/import_peer_buffer on AIV/AIC "
+              "respectively");
         continue;
       }
-      const bool reserve = IsOp(def, "system.reserve_buffer");
+      if (!reserve && !imported) continue;
       if (reserve && (init->GetKwarg<int>("dir_mask", 0) & kDirMaskC2V) && local.pops.count(id)) {
         auto [usage, inserted] = reserve_users.emplace(def.get(), has_epilogue);
         if (!inserted && (usage->second || has_epilogue)) {
@@ -799,17 +815,21 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           const auto& push = push_count->second;
           const auto& pop = pop_count->second;
           const auto pair = peer_bindings.find(std::minmax(func->name_, peer_name));
-          auto counts = [&](const FixpipeEndpointCounts& flow) {
-            const auto mask =
-                pair != peer_bindings.end() && flow.guard_index && *flow.guard_index < pair->second.size()
-                    ? pair->second[*flow.guard_index]
-                    : kEitherGuard;
+          auto argument = [&](const FixpipeEndpointCounts& flow) {
+            return pair != peer_bindings.end() && flow.guard_index && *flow.guard_index < pair->second.size()
+                       ? pair->second[*flow.guard_index]
+                       : GuardArgument{kEitherGuard, nullptr};
+          };
+          const auto push_arg = argument(push), pop_arg = argument(pop);
+          auto counts = [](const FixpipeEndpointCounts& flow, int mask) {
             return std::make_pair(mask == kGuardFalse ? flow.when_false : flow.when_true,
                                   mask == kGuardTrue ? flow.when_true : flow.when_false);
           };
-          const auto p = counts(push), q = counts(pop);
-          const bool comparable = p.first == p.second || q.first == q.second ||
-                                  (pair != peer_bindings.end() && push.guard_index == pop.guard_index);
+          const auto p = counts(push, push_arg.mask), q = counts(pop, pop_arg.mask);
+          const bool shared =
+              pair != peer_bindings.end() &&
+              (push.guard_index == pop.guard_index || (push_arg.origin && push_arg.origin == pop_arg.origin));
+          const bool comparable = p.first == p.second || q.first == q.second || shared;
           const auto p_range = std::minmax(p.first, p.second), q_range = std::minmax(q.first, q.second);
           const bool mismatch =
               comparable ? p != q : p_range.second < q_range.first || q_range.second < p_range.first;
@@ -847,6 +867,10 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         }
       }
     }
+    // After peer checks, validate state before Buffer IR lowering. Each block
+    // inherits and restores inits and starts fresh quant state. A nested statement
+    // invalidates its parent's setters. Retained slots stay shared across blocks,
+    // and block-local TPOP/TFREE matching requires each block to free its own pops.
     using InitMap = std::map<int, CallPtr>;
     std::map<int, std::deque<const Var*>> retained;
     std::function<void(const std::vector<StmtPtr>&, InitMap&)> verify_block;
@@ -908,8 +932,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         if (!scalar && !vector && !push && !pop) continue;
         const auto found = visible.find(id);
         if (found == visible.end()) {
-          if (scalar || vector ||
-              (local.inits.count(id) && local.inits.at(id)->HasKwarg("acc_push_epilogue"))) {
+          if (scalar || vector || local.has_fixpipe) {
             error(call, "Fixpipe operation requires a dominating initialize_pipe for its pipe id");
           }
           continue;
@@ -945,6 +968,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           continue;
         }
         if (call->GetKwarg<int>("split", 0) != 0) error(call, "Fixpipe transfers require split=0");
+        if (pop && !call->args_.empty()) error(call, "Fixpipe TPOP takes no operands");
         if (auto assign = As<AssignStmt>(stmt); pop && assign) {
           auto& fifo = retained[id];
           fifo.push_back(assign->var_.get());

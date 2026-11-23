@@ -11,7 +11,6 @@
 
 import subprocess
 from textwrap import indent
-from types import SimpleNamespace
 
 import pypto.language as pl
 import pytest
@@ -52,62 +51,52 @@ def _program(
     input_dtype = input_dtype_override or (pl.INT8 if quant.startswith("deq") else pl.BF16)
     scalar_state = state and quant in ("deqf16_scalar", "qf322f16_pre_scalar")
     closure_scale = quant == "qf322f16_pre_scalar"
-    scalar_config = SimpleNamespace(scale=0.5)
+    setter = (
+        "pl.set_quant_scalar(scalar_config.scale" if closure_scale else "pl.system.set_quant_scalar(scale=0.5"
+    )
     vector_state = state and quant == "deqf16_vec"
     output_dtype = consumer_dtype or (
         pl.FP32 if quant == "no_convert" else (pl.BF16 if quant == "f32_bf16" else pl.FP16)
     )
 
-    @pl.program
-    class Program:
-        @pl.function(type=pl.FunctionType.AIC)
-        def producer(
-            self,
-            a: pl.Tensor[[32, 32], input_dtype],
-            b: pl.Tensor[[16, 32], input_dtype],
-            out: pl.Out[pl.Tensor[[32, 16], output_dtype]],
-            control_words: pl.Tensor[[1, 32], pl.UINT64],
-        ):
-            peer = pl.import_peer_buffer(name="c2v", peer_func="consumer")
-            pl.aic_initialize_pipe(
-                peer, dir_mask=1, slot_size=slot_size, slot_num=2, acc_push_epilogue=epilogue
-            )
-            lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-            rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
-            acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
-            if vector_state:
-                packed: pl.Tile[
-                    [1, 32],
-                    pl.UINT64,
-                    pl.Mem.Mat,
-                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-                ] = pl.load(control_words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
-                controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
-                pl.system.set_quant_vector(controls, id=state_id)
-            if scalar_state:
-                if closure_scale:
-                    pl.set_quant_scalar(scalar_config.scale, id=state_id)
-                else:
-                    pl.system.set_quant_scalar(scale=0.5, id=state_id)
-            pl.tpush_to_aiv(acc, split=split)
+    src = "BF16" if input_dtype == pl.BF16 else str(input_dtype).upper()
+    dst = "BF16" if output_dtype == pl.BF16 else str(output_dtype).upper()
+    signature = (
+        f"a: pl.Tensor[[32, 32], pl.{src}], b: pl.Tensor[[16, 32], pl.{src}], "
+        f"out: pl.Out[pl.Tensor[[32, 16], pl.{dst}]], control_words: pl.Tensor[[1, 32], pl.UINT64]"
+    )
+    return pl.parse_program(f"""
+from types import SimpleNamespace
+scalar_config = SimpleNamespace(scale=0.5)
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def producer(self, {signature}):
+        peer = pl.import_peer_buffer(name="c2v", peer_func="consumer")
+        pl.aic_initialize_pipe(peer, dir_mask=1, slot_size={slot_size}, slot_num=2,
+                               acc_push_epilogue={epilogue!r})
+        lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
+        if {vector_state}:
+            packed: pl.Tile[[1, 32], pl.UINT64, pl.Mem.Mat,
+                            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)
+                            ] = pl.load(control_words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+            controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(controls, id={state_id})
+        if {scalar_state}:
+            {setter}, id={state_id})
+        pl.tpush_to_aiv(acc, split={split})
 
-        @pl.function(type=pl.FunctionType.AIV)
-        def consumer(
-            self,
-            a: pl.Tensor[[32, 32], input_dtype],
-            b: pl.Tensor[[16, 32], input_dtype],
-            out: pl.Out[pl.Tensor[[32, 16], output_dtype]],
-            control_words: pl.Tensor[[1, 32], pl.UINT64],
-        ):
-            buf = pl.reserve_buffer(name="c2v", size=buffer_size)
-            pl.aiv_initialize_pipe(
-                buf, dir_mask=1, slot_size=slot_size, slot_num=2, acc_push_epilogue=peer_epilogue
-            )
-            tile = pl.tpop_from_aic(shape=[32, 16], dtype=output_dtype, split=split)
-            pl.store(tile, [0, 0], out)
-            pl.tfree_to_aic(tile, split=1)  # StampTfreeSplit copies the actual split from TPOP.
-
-    return Program
+    @pl.function(type=pl.FunctionType.AIV)
+    def consumer(self, {signature}):
+        buf = pl.reserve_buffer(name="c2v", size={buffer_size})
+        pl.aiv_initialize_pipe(buf, dir_mask=1, slot_size={slot_size}, slot_num=2,
+                               acc_push_epilogue={peer_epilogue!r})
+        tile = pl.tpop_from_aic(shape=[32, 16], dtype=pl.{dst}, split={split})
+        pl.store(tile, [0, 0], out)
+        pl.tfree_to_aic(tile, split=1)
+""")
 
 
 class _PipeBufferAliases(ir.IRMutator):
@@ -369,20 +358,14 @@ def test_epilogue_value_round_trip():
 @pytest.mark.parametrize("use_relu", [False, True])
 def test_epilogue_rejects_shadowed_runtime_parameter(use_relu):
     with pytest.raises(ParserSyntaxError, match="acc_push_epilogue must be a compile-time record"):
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.AIC)
-            def producer(self, use_relu: pl.Scalar[pl.BOOL]):
-                pl.aic_initialize_pipe(
-                    dir_mask=1,
-                    slot_size=2048,
-                    acc_push_epilogue={
-                        "layout": "nz2nd",
-                        "quant": "no_convert",
-                        "relu": "normal_relu" if use_relu else "no_relu",
-                    },
-                )
+        pl.parse(f"""
+use_relu = {use_relu}
+@pl.function(type=pl.FunctionType.AIC)
+def producer(use_relu: pl.Scalar[pl.BOOL]):
+    pl.aic_initialize_pipe(dir_mask=1, slot_size=2048, acc_push_epilogue={{
+        "layout": "nz2nd", "quant": "no_convert", "relu": "normal_relu" if use_relu else "no_relu",
+    }})
+""")
 
 
 @pytest.mark.parametrize("recorded", [False, True])
@@ -394,15 +377,12 @@ def test_parse_epilogue_dict_metadata(recorded):
         if recorded
         else f"pl.aic_initialize_pipe(dir_mask=1, slot_size=2048, attrs={metadata!r})"
     )
-    program = pl.parse_program(f"""
-@pl.program
-class Program:
-    @pl.function(type=pl.FunctionType.AIC)
-    def producer(self):
-        {call}
+    func = pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIC)
+def producer():
+    {call}
 """)
-    func = program.get_function("producer")
-    assert func is not None
+    assert isinstance(func, ir.Function)
     stmt = func.body.stmts[0] if isinstance(func.body, ir.SeqStmts) else func.body
     assert isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call)
     assert stmt.expr.attrs["acc_push_epilogue"] == _epilogue()
@@ -473,17 +453,15 @@ def test_raw_fixpipe_initializer_contract(legacy_first, extra, message):
     class MutateInit(ir.IRMutator):
         def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:
             call = op.expr
-            if isinstance(call, ir.Call) and "acc_push_epilogue" in call.kwargs:
-                kwargs = dict(call.kwargs)
-                if extra is not None:
-                    return ir.EvalStmt(
-                        ir.Call(call.op, call.args, kwargs | extra, call.type, call.span), op.span
-                    )
+            if not isinstance(call, ir.Call) or "acc_push_epilogue" not in call.kwargs:
+                return super().visit_eval_stmt(op)
+            kwargs = dict(call.kwargs) | (extra or {})
+            if extra is None:
                 del kwargs["acc_push_epilogue"]
-                legacy = ir.Call(call.op, call.args, kwargs, call.type, call.span)
-                statements: list[ir.Stmt] = [op, ir.EvalStmt(legacy, op.span)]
-                return ir.SeqStmts(statements[::-1] if legacy_first else statements, op.span)
-            return super().visit_eval_stmt(op)
+            changed = ir.EvalStmt(ir.Call(call.op, call.args, kwargs, call.type, call.span), op.span)
+            if extra is not None:
+                return changed
+            return ir.SeqStmts([changed, op] if legacy_first else [op, changed], op.span)
 
     properties = passes.IRPropertySet()
     properties.insert(passes.IRProperty.MixedKernelExpanded)
