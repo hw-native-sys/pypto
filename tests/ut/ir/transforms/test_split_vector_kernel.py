@@ -1339,8 +1339,8 @@ class Before:
         _assert_extent_after_substitution(stores[0].args[1].elements[axis], values, physical * 16)
 
 
-@pytest.mark.parametrize("pop_on_backedge", [True, False], ids=["pop_on_backedge", "pop_in_init"])
-def test_full_pop_carry_tracks_the_lane_that_produced_the_value(pop_on_backedge):
+@pytest.mark.parametrize("pop_site", ["backedge", "initializer", "conditional_backedge"])
+def test_full_pop_carry_tracks_the_lane_that_produced_the_value(pop_site):
     """The init and backedge supply different origins without changing the tile type."""
     physical_value = "value = pl.tile.full([32, 16], dtype=pl.FP32, value=0.0)"
     explicit_value = (
@@ -1349,7 +1349,14 @@ def test_full_pop_carry_tracks_the_lane_that_produced_the_value(pop_on_backedge)
         "value = pl.tile.add(received, 1.0)\n"
         "pl.system.tfree_to_aic(received)"
     )
-    init, backedge = (physical_value, explicit_value) if pop_on_backedge else (explicit_value, physical_value)
+    if pop_site == "initializer":
+        init, backedge = explicit_value, physical_value
+    elif pop_site == "conditional_backedge":
+        init = physical_value
+        backedge = "if step == 0:\n    value = pl.tile.add(value, 1.0)\nelse:\n    "
+        backedge += explicit_value.replace("\n", "\n    ")
+    else:
+        init, backedge = physical_value, explicit_value
     init = init.replace("\n", "\n        ")
     backedge = backedge.replace("\n", "\n            ")
     before = pl.parse_program(f"""
@@ -1370,6 +1377,7 @@ class Before:
 """)
     program = _run_split_vector_kernel(before)
     loops = []
+    branches = []
     narrowed = []
     yields = []
     physical = []
@@ -1383,6 +1391,10 @@ class Before:
             yields.append(op)
             super().visit_yield_stmt(op)
 
+        def visit_if_stmt(self, op):
+            branches.append(op)
+            super().visit_if_stmt(op)
+
         def visit_assign_stmt(self, op):
             if isinstance(op.value, ir.Call):
                 if op.value.op.name == ir.get_op("tile.set_validshape").name:
@@ -1392,16 +1404,24 @@ class Before:
             super().visit_assign_stmt(op)
 
     Collect().visit_program(program)
-    assert len(loops) == len(yields) == len(physical) == 1
+    assert len(loops) == len(physical) == 1
     assert len(narrowed) == 2
     lane = loops[0].iter_args[-1]
     exit_lane = loops[0].return_vars[-1]
     assert isinstance(lane.type, ir.ScalarType) and lane.type.dtype == pl.INDEX
-    backedge_lane = yields[0].value[-1]
-    if pop_on_backedge:
+    backedge_lane = yields[-1].value[-1]
+    if pop_site == "conditional_backedge":
+        assert len(branches) == 1 and len(yields) == 3
+        ir.assert_structural_equal(lane.initValue, physical[0])
+        ir.assert_structural_equal(yields[0].value[-1], lane)
+        _assert_extent_after_substitution(yields[1].value[-1], {}, 0)
+        ir.assert_structural_equal(backedge_lane, branches[0].return_vars[-1])
+    elif pop_site == "backedge":
+        assert len(yields) == 1
         ir.assert_structural_equal(lane.initValue, physical[0])
         _assert_extent_after_substitution(backedge_lane, {}, 0)
     else:
+        assert len(yields) == 1
         _assert_extent_after_substitution(lane.initValue, {}, 0)
         ir.assert_structural_equal(backedge_lane, physical[0])
     for tile, selector in zip(narrowed, (lane, exit_lane), strict=True):

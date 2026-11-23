@@ -352,11 +352,12 @@ void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr
                            const ExprPtr& lane_stride = nullptr,
                            const std::vector<IterArgPtr>& lane_args = {});
 
-std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
-                                       const std::optional<StmtPtr>& new_else_body,
+std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, StmtPtr& new_then_body,
+                                       std::optional<StmtPtr>& new_else_body,
                                        std::unordered_map<const Var*, TileInfo>& tile_vars,
                                        std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                       const ExprPtr& lane_stride, const Span& span);
+                                       const ExprPtr& lane_stride, const ExprPtr& subblock_idx,
+                                       const Span& span);
 
 /// The split the pass has already applied to one operand, or nullopt when it is not
 /// lane-local. THE single answer to "did the split partition this operand, and along

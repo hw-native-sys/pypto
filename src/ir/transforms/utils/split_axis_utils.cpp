@@ -1920,7 +1920,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     // following tile.store gets no lane offset and both AIV lanes write from
     // output row 0.
     auto new_return_vars = RepairIfReturnVars(if_stmt->return_vars_, new_then_body, new_else, tile_vars,
-                                              var_replacements, lane_stride, if_stmt->span_);
+                                              var_replacements, lane_stride, subblock_idx, if_stmt->span_);
     auto new_if = MutableCopy(if_stmt);
     new_if->then_body_ = new_then_body;
     new_if->else_body_ = new_else;
@@ -2194,11 +2194,12 @@ void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr
   }
 }
 
-std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
-                                       const std::optional<StmtPtr>& new_else_body,
+std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, StmtPtr& new_then_body,
+                                       std::optional<StmtPtr>& new_else_body,
                                        std::unordered_map<const Var*, TileInfo>& tile_vars,
                                        std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                       const ExprPtr& lane_stride, const Span& span) {
+                                       const ExprPtr& lane_stride, const ExprPtr& subblock_idx,
+                                       const Span& span) {
   std::vector<VarPtr> new_return_vars = return_vars;
   if (return_vars.empty()) return new_return_vars;
 
@@ -2213,6 +2214,8 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
 
   auto then_yield = transform_utils::GetLastYieldStmt(new_then_body);
   auto else_yield = transform_utils::GetLastYieldStmt(*new_else_body);
+  std::vector<VarPtr> merged_lanes;
+  std::vector<ExprPtr> then_lanes, else_lanes;
 
   for (size_t i = 0; i < new_return_vars.size(); ++i) {
     // A tuple merge needs matching exact types and element partition facts from
@@ -2255,10 +2258,15 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
     auto else_info = YieldedTileInfo(else_yield, i, tile_vars, var_replacements);
 
     if (!then_info.has_value() && !else_info.has_value()) continue;
-    CHECK_SPAN(then_info.has_value() && else_info.has_value() &&
-                   SameTileInfo(*then_info, *else_info, lane_stride) &&
-                   structural_equal(EffectiveOperandType(then_yield->value_[i], var_replacements),
-                                    EffectiveOperandType(else_yield->value_[i], var_replacements)),
+    const auto new_type = then_info ? EffectiveOperandType(then_yield->value_[i], var_replacements) : nullptr;
+    const bool same_info = then_info && else_info && SameTileInfo(*then_info, *else_info, lane_stride);
+    // Identical full tile types can merge even if later narrowing needs the
+    // branch's selected lane. Return that lane as a real scalar result.
+    const bool merge_lane = !same_info && subblock_idx && then_info && else_info &&
+                            HasFullSplitExtent(new_type, then_info->split_dim) &&
+                            SameTileInfo(*then_info, *else_info, lane_stride, /*compare_lane=*/false);
+    CHECK_SPAN(then_info.has_value() && else_info.has_value() && (same_info || merge_lane) &&
+                   structural_equal(new_type, EffectiveOperandType(else_yield->value_[i], var_replacements)),
                span)
         << "LowerAutoVectorSplit: the branches of an if inside the automatically split vector region "
            "disagree about merge variable '"
@@ -2269,15 +2277,36 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
            "derived the same way -- load or slice inside the region on both sides, or keep the value "
            "shared by both lanes on both sides -- or move the if outside the automatically split region.";
 
-    tile_vars[new_return_vars[i].get()] = *then_info;
-    auto new_type = EffectiveOperandType(then_yield->value_[i], var_replacements);
+    auto info = *then_info;
+    if (merge_lane) {
+      then_lanes.push_back(then_info->validity_lane ? then_info->validity_lane : subblock_idx);
+      else_lanes.push_back(else_info->validity_lane ? else_info->validity_lane : subblock_idx);
+      const auto& tile_merge = new_return_vars[i];
+      auto lane = std::make_shared<Var>(tile_merge->name_hint_ + "_aiv_lane", subblock_idx->GetType(),
+                                        tile_merge->span_);
+      info.validity_lane = lane;
+      merged_lanes.push_back(lane);
+    }
+    tile_vars[new_return_vars[i].get()] = info;
     if (new_type != new_return_vars[i]->GetType()) {
       auto new_return_var =
           std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
       new_return_vars[i] = new_return_var;
-      tile_vars[new_return_var.get()] = *then_info;
+      tile_vars[new_return_var.get()] = info;
       var_replacements[return_vars[i].get()] = new_return_var;
     }
+  }
+  if (!merged_lanes.empty()) {
+    auto add_lane_yields = [](const StmtPtr& body, const std::vector<ExprPtr>& lanes) {
+      return transform_utils::RewriteLastYieldStmt(body, [&](const YieldStmtPtr& yield) -> StmtPtr {
+        auto result = MutableCopy(yield);
+        result->value_.insert(result->value_.end(), lanes.begin(), lanes.end());
+        return result;
+      });
+    };
+    new_then_body = add_lane_yields(new_then_body, then_lanes);
+    new_else_body = add_lane_yields(*new_else_body, else_lanes);
+    new_return_vars.insert(new_return_vars.end(), merged_lanes.begin(), merged_lanes.end());
   }
   return new_return_vars;
 }
