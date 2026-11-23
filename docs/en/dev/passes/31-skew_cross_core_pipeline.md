@@ -30,6 +30,9 @@ p = passes.skew_cross_core_pipeline()
 
 ## Behavior
 
+Named intra-block events and Fixpipe quant setters demote enclosing loops first,
+including `stage=1`. For the remaining loops:
+
 For a `ForStmt(kind=Pipeline, attrs={"pipeline_stages": F})` with `F > 1`:
 
 1. **Non-cross-core** — body lacks a `tpush`/`tpop` pair → left intact as `ForKind::Pipeline` for `LowerPipelineLoops` to replicate.

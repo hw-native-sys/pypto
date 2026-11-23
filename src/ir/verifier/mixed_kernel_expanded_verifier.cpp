@@ -595,6 +595,12 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const bool has_epilogue = init->HasKwarg("acc_push_epilogue");
       const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
       if (has_epilogue) {
+        if (init->HasKwarg("c2v_dtype") || init->GetKwarg<bool>("pre_relu", false)) {
+          error(init, "acc_push_epilogue cannot be combined with c2v_dtype/pre_relu");
+        }
+        if (init->HasKwarg("local_slot_num")) {
+          error(init, "local_slot_num is only supported on A2/A3; omit it on A5 Fixpipe pipes");
+        }
         if (handler && !handler->SupportsC2VFixpipeEpilogue()) {
           error(init, "Cross-core Fixpipe epilogues currently require Ascend950 (A5); A2/A3 is not enabled");
         }
@@ -669,6 +675,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       }
       auto pushes = local.pushes.find(id);
       auto pops = peer->second.pops.find(id);
+      if ((pushes == local.pushes.end()) != (pops == peer->second.pops.end())) {
+        error(init, "Fixpipe requires matching TPUSH and TPOP endpoints for the same pipe id");
+      }
       if (pushes != local.pushes.end() && pops != peer->second.pops.end()) {
         std::set<std::vector<int64_t>> source_signatures;
         auto signature = [](const TileTypePtr& tile, DataType dtype) {

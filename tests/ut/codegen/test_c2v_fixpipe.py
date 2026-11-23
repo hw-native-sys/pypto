@@ -241,6 +241,14 @@ def test_invalid_fixpipe_contract(kwargs, message):
         _generate(_program(**kwargs))
 
 
+def test_fixpipe_pop_requires_a_matching_push():
+    source = ir.python_print(_program())
+    assert ".tpush_to_aiv(" in source
+    without_push = "\n".join(line for line in source.splitlines() if ".tpush_to_aiv(" not in line)
+    with pytest.raises(Error, match="matching TPUSH and TPOP endpoints"):
+        _generate(pl.parse_program(without_push))
+
+
 @pytest.mark.parametrize(
     "epilogue",
     [{"layout": "nz2dn"}, _epilogue(layout="dn2nz"), _epilogue(quant="unknown"), _epilogue(relu="relu")],
@@ -387,13 +395,26 @@ def test_packed_controls_require_full_valid_extent(valid_shape, setter):
             tile_ops.move(controls, target_memory=ir.MemorySpace.Scaling)
 
 
-@pytest.mark.parametrize("legacy_first", [False, True])
-def test_legacy_init_cannot_hide_duplicate_fixpipe_init(legacy_first):
-    class DuplicateInit(ir.IRMutator):
+@pytest.mark.parametrize(
+    ("legacy_first", "extra", "message"),
+    [
+        (False, None, "exactly one initialize_pipe"),
+        (True, None, "exactly one initialize_pipe"),
+        (False, {"c2v_dtype": pl.FP32}, "cannot be combined"),
+        (False, {"pre_relu": True}, "cannot be combined"),
+        (False, {"local_slot_num": 2}, "local_slot_num is only supported on A2/A3"),
+    ],
+)
+def test_raw_fixpipe_initializer_contract(legacy_first, extra, message):
+    class MutateInit(ir.IRMutator):
         def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:
             call = op.expr
             if isinstance(call, ir.Call) and "acc_push_epilogue" in call.kwargs:
                 kwargs = dict(call.kwargs)
+                if extra is not None:
+                    return ir.EvalStmt(
+                        ir.Call(call.op, call.args, kwargs | extra, call.type, call.span), op.span
+                    )
                 del kwargs["acc_push_epilogue"]
                 legacy = ir.Call(call.op, call.args, kwargs, call.type, call.span)
                 statements: list[ir.Stmt] = [op, ir.EvalStmt(legacy, op.span)]
@@ -402,8 +423,8 @@ def test_legacy_init_cannot_hide_duplicate_fixpipe_init(legacy_first):
 
     properties = passes.IRPropertySet()
     properties.insert(passes.IRProperty.MixedKernelExpanded)
-    with pytest.raises(Error, match="exactly one initialize_pipe"):
-        passes.verify_properties(properties, DuplicateInit().visit_program(_program()), "test")
+    with pytest.raises(Error, match=message):
+        passes.verify_properties(properties, MutateInit().visit_program(_program()), "test")
 
 
 @pytest.mark.parametrize("buffer_ir", [False, True])

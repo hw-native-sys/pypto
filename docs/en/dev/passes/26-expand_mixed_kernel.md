@@ -796,13 +796,9 @@ true last use of that tile.
 
 A5 `system.aic_initialize_pipe` / `system.aiv_initialize_pipe` accept `nosplit`
 and `acc_push_epilogue` (`ir::AccPushEpilogue`), a value-semantic string dictionary.
-All three keys are required; unknown keys/values are rejected:
-
-| Field | Values |
-| ----- | ------ |
-| `layout` | `nz2nd`, `nz2dn`, `nz2nz` |
-| `quant` | `no_convert`, `f32_f16`, `f32_bf16`, `deqf16_scalar`, `deqf16_vec`, `qf322f16_pre_scalar` |
-| `relu` | `no_relu`, `normal_relu` |
+`layout`, `quant`, and `relu` are required. Quant modes are `no_convert`, `f32_f16`,
+`f32_bf16`, `deqf16_scalar`, `deqf16_vec`, and `qf322f16_pre_scalar`. ReLU modes are
+`no_relu` and `normal_relu` (before quantization). Unknown keys or values are rejected.
 
 | Layout | Physical Vec layout | Supported conversion |
 | ------ | ------------------- | -------------------- |
@@ -810,7 +806,6 @@ All three keys are required; unknown keys/values are rejected:
 | `nz2dn` | column-major, unboxed | Same as NZ2ND |
 | `nz2nz` | column-major, row-major sublayout | FP32 `no_convert` only |
 
-Both ReLU modes are supported; `normal_relu` acts before quantization.
 Fixpipe requires Acc input, C2V-only `dir_mask=1`, `nosplit=true`, and `split=0`
 on push/pop/free. A2/A3, bidirectional Fixpipe and other NZ2NZ conversions are rejected.
 Without an epilogue, omitted `nosplit` remains omitted; with one, Python defaults
@@ -852,14 +847,10 @@ layouts; `has_acc_push`, `has_non_acc_push`, `has_nonzero_split` constrain setup
 `CreateInitializePipe` stamps the optional epilogue and nosplit on both peers.
 No GlobalTensor FIFO entry model is introduced.
 
-### Regression and evidence
+### Regression coverage
 
-`tests/ut/codegen/test_c2v_fixpipe.py` covers schema/peer/state/capacity failures,
-round trips and real PTOAS compilation, including both Buffer IR modes.
-System kernels use `@pl.jit`: explicit endpoints select `pl.Level.AIC` / `AIV`
-through `jit.incore`, with a `CORE_GROUP` wrapper and JIT entry.
-The non-square DN/transpose regression uses independent integer goldens at zero
-tolerance; row-major plus real transpose is its control. The dependent acceptance
-change preserves legacy-byte replay and advanced quantization/ring/pipeline/NZ2NZ
-cases with unchanged goldens. Record version pins and device results in the PR;
-emitted text alone is not numerical evidence. CPU simulation is skipped by user instruction.
+`test_c2v_fixpipe.py` covers peer/state/layout validation, round trips, and real
+PTOAS compilation in both Buffer IR modes. System cases use JIT, with explicit
+`jit.incore` AIC/AIV peers under a `CORE_GROUP` wrapper. The non-square DN transpose
+uses exact integer goldens and a row-major real-transpose control.
+The dependent acceptance branch retains the legacy byte replay and advanced A5 cases.

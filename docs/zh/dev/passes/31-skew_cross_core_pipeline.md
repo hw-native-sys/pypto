@@ -30,6 +30,8 @@ p = passes.skew_cross_core_pipeline()
 
 ## 行为
 
+循环体或嵌套控制流中包含具名块内事件或 Fixpipe 量化配置时，优先降为 Sequential，包括 `stage=1`。其余循环按下述规则处理。
+
 对 `ForStmt(kind=Pipeline, attrs={"pipeline_stages": F})` 且 `F > 1`：
 
 1. **非跨核** —— body 不含 `tpush`/`tpop` 对 → 保持为 `ForKind::Pipeline`，交给 `LowerPipelineLoops` 复制。

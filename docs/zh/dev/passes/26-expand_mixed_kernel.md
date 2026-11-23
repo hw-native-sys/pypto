@@ -686,13 +686,9 @@ class After:
 
 A5 的 `system.aic_initialize_pipe` / `system.aiv_initialize_pipe` 接受 `nosplit`
 和 `acc_push_epilogue`；后者是值语义字符串字典（`ir::AccPushEpilogue`），
-必须完整提供三个字段，未知字段和值均被拒绝：
-
-| 字段 | 值 |
-| ---- | -- |
-| `layout` | `nz2nd`、`nz2dn`、`nz2nz` |
-| `quant` | `no_convert`、`f32_f16`、`f32_bf16`、`deqf16_scalar`、`deqf16_vec`、`qf322f16_pre_scalar` |
-| `relu` | `no_relu`、`normal_relu` |
+必填 `layout`、`quant`、`relu`，拒绝未知字段和值。量化模式为 `no_convert`、`f32_f16`、
+`f32_bf16`、`deqf16_scalar`、`deqf16_vec`、`qf322f16_pre_scalar`。ReLU 模式为
+`no_relu` 和 `normal_relu`，后者在量化前作用于累加器。
 
 | 布局 | Vec 物理布局 | 转换范围 |
 | ---- | ------------ | -------- |
@@ -700,7 +696,6 @@ A5 的 `system.aic_initialize_pipe` / `system.aiv_initialize_pipe` 接受 `nospl
 | `nz2dn` | 列优先、无分形 | 同 NZ2ND |
 | `nz2nz` | 列优先、行优先子布局 | 仅 FP32 `no_convert` |
 
-两种 ReLU 模式均支持，`normal_relu` 在量化前作用于累加器。
 Fixpipe 要求 Acc 输入、仅 C2V 的 `dir_mask=1`、`nosplit=true` 和 push/pop/free 的
 `split=0`。A2/A3、双向 Fixpipe 和其他 NZ2NZ 转换被拒绝。没有 epilogue 时省略
 `nosplit` 会保留原策略；提供 epilogue 时 Python 默认 true、拒绝 false，原始 IR 必须明确 true。
@@ -734,12 +729,9 @@ transpose scratch 使用自身 SSA 类型。`c2v_dtype` / `pre_relu` 是互斥�
 `has_nonzero_split` 限制自动 setup；`CreateInitializePipe` 在两端写入可选 epilogue
 及 nosplit。本任务不引入 GlobalTensor FIFO entry 模型。
 
-### 回归与证据
+### 回归覆盖
 
-`tests/ut/codegen/test_c2v_fixpipe.py` 覆盖 schema/peer/状态/容量负例、往返及两种
-Buffer IR 模式的真实 PTOAS 编译。系统内核使用 `@pl.jit`，显式端点由
-`jit.incore(level=pl.Level.AIC/AIV)`、`CORE_GROUP` 包装和 JIT 入口共同构成。
-非方形 DN/transpose 回归使用零容差独立整数 golden，row-major 加真实 transpose
-作为正对照。依赖本实现的后续验收改动保留旧字节回放及高级量化/ring/pipeline/
-NZ2NZ 真机用例，golden 和精度不变。PR 记录版本 pin 和
-设备结果；字符串输出不能代替数值证据。CPU 模拟器按用户要求跳过。
+`test_c2v_fixpipe.py` 覆盖 peer/状态/布局校验、往返及两种 Buffer IR 模式的真实 PTOAS 编译。
+系统用例采用 JIT，显式 AIC/AIV 端点通过 `jit.incore` 声明，由 `CORE_GROUP` 调度。
+非方形 DN 转置使用精确整数 golden，并以行优先加真实转置为对照。
+后续验收分支保留旧字节回放及高级 A5 用例。
