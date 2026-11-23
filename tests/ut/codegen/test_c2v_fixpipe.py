@@ -243,13 +243,14 @@ def test_fixpipe_pop_requires_a_matching_push():
         "literal_same",
         "literal_crossed",
         "literal_spmd",
+        "literal_spmd_fan_in",
         "wrong_group",
     ],
 )
 @pytest.mark.ptoas_compile
 def test_fixpipe_endpoint_counts(binding, tmp_path):
     source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
-    literals = binding in {"literal_same", "literal_crossed", "literal_spmd"}
+    literals = isinstance(binding, str) and binding.startswith("literal_")
     extra = ", other: pl.Scalar[pl.BOOL]" if literals or binding in {"shared", "shared_twice"} else ""
     source = source.replace("enabled: pl.Scalar[pl.BOOL]):", f"enabled: pl.Scalar[pl.BOOL]{extra}):")
     if binding != "wrong_group":
@@ -286,20 +287,23 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
         caller = signature.replace("producer(", "main(self, ").replace(
             f", enabled: pl.Scalar[pl.BOOL]{extra}", extra_output
         )
-        target = "wrapper" if not literals or binding == "literal_spmd" else "group"
+        fan_in = binding == "literal_spmd_fan_in"
+        target = "group" if binding in {"literal_same", "literal_crossed"} else "wrapper"
         if target == "wrapper":
             args = (
                 "a, b, out, control_words, enabled, other"
                 if literals
                 else "enabled, a, b, out, control_words"
             )
-            source += "\n    @pl.function(type=pl.FunctionType.Spmd)\n" + group.replace("group(", "wrapper(")
-            source += f"\n        self.group({args})\n"
+            wrapper = f"\n    @pl.function(type=pl.FunctionType.Spmd)\n{group.replace('group(', 'wrapper(')}"
+            wrapper += f"\n        self.group({args})\n"
+            source += wrapper + (wrapper.replace("def wrapper(", "def second_wrapper(") if fan_in else "")
         source += f"\n    @pl.function(type=pl.FunctionType.Orchestration)\n{caller}\n"
         if literals:
             for enabled, out in ((True, "out"), (False, "second_out")):
                 other = enabled if binding == "literal_same" else not enabled
-                source += f"        self.{target}(a, b, {out}, control_words, {enabled}, {other})\n"
+                callee = "second_wrapper" if fan_in and not enabled else target
+                source += f"        self.{callee}(a, b, {out}, control_words, {enabled}, {other})\n"
         else:
             source += f"        self.wrapper({binding}, a, b, out, control_words)\n"
     program = pl.parse_program(source)

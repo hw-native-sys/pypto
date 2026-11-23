@@ -639,12 +639,11 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   std::vector<std::pair<KernelPair, CallPtr>> groups;
   std::map<std::string, std::set<std::string>> group_peers;
   struct GuardArgument {
-    int mask = 0;
     const Var* origin = nullptr;
-    std::optional<LiteralTrace> trace = LiteralTrace{};
+    LiteralTrace trace{};
   };
   std::map<const Var*, GuardArgument> group_bindings;
-  std::map<const Var*, std::vector<const Var*>> forwarded;
+  std::map<const Var*, std::vector<std::pair<const Var*, std::size_t>>> launch_inputs;
   for (const auto& [gv, func] : program->functions_) {
     if (!func || !func->body_) continue;
     auto& local = info[func->name_];
@@ -675,38 +674,35 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const auto& params = member.inner_callee->params_;
       for (std::size_t i = 0; i < std::min(args.size(), params.size()); ++i) {
         const auto* target = params[i].get();
+        const auto type = As<ScalarType>(target->GetType());
+        if (!type || type->dtype_ != DataType::BOOL) continue;
         const auto source = AsVarLike(args[i]);
-        auto [it, inserted] = group_bindings.try_emplace(target, GuardArgument{0, source.get()});
-        auto& binding = it->second;
+        auto [it, inserted] = group_bindings.try_emplace(target, GuardArgument{source.get()});
+        if (!inserted && it->second.origin != source.get()) it->second.origin = nullptr;
         const auto literal = As<ConstBool>(args[i]);
-        const std::size_t bit = literal ? (literal->value_ ? kGuardTrue : kGuardFalse) : 0;
-        append_literal(binding.trace, {bit, kEitherGuard ^ bit});
-        if (!inserted && binding.origin != source.get()) binding.origin = nullptr;
-        if (IsWrapperType(func->func_type_) && parameters.count(source)) {
-          forwarded[source.get()].push_back(target);
-        } else {
-          binding.mask |= bit ? static_cast<int>(bit) : kEitherGuard;
-        }
+        const bool forwarded = IsWrapperType(func->func_type_) && parameters.count(source);
+        launch_inputs[target].emplace_back(forwarded ? source.get() : nullptr,
+                                           literal ? (literal->value_ ? kGuardTrue : kGuardFalse) : 0);
       }
     }
   }
-  // Each Boolean bit flows over a forwarding edge at most twice.
-  for (const auto& edge : forwarded) group_bindings.try_emplace(edge.first, GuardArgument{kEitherGuard});
-  std::vector<const Var*> pending;
-  for (const auto& [param, binding] : group_bindings) {
-    if (binding.mask) pending.push_back(param);
-  }
-  for (std::size_t i = 0; i < pending.size(); ++i) {
-    const auto* param = pending[i];
-    const int mask = group_bindings[param].mask;
-    for (const auto* target : forwarded[param]) {
-      auto& binding = group_bindings[target];
-      if ((binding.mask | mask) == binding.mask) continue;
-      if (binding.origin == param) binding.trace = group_bindings[param].trace;
-      binding.mask |= mask;
-      pending.push_back(target);
+  // Memoize each input column in call-site order. A forwarded input references its caller's column.
+  std::function<LiteralTrace(const Var*)> resolve = [&](const Var* param) -> LiteralTrace {
+    auto& trace = group_bindings[param].trace;
+    auto inputs = launch_inputs.extract(param);  // A cycle or an unbound argument yields an empty trace.
+    if (inputs.empty()) return trace;
+    std::size_t mask = 0;
+    std::optional<LiteralTrace> column = LiteralTrace{};
+    for (const auto& [source, bit] : inputs.mapped()) {
+      const auto value = source ? resolve(source) : LiteralTrace{bit, kEitherGuard ^ bit};
+      if (!value.first) return {};
+      mask |= value.first < kEitherGuard ? value.first : kEitherGuard;
+      append_literal(column, value);
     }
-  }
+    trace = mask == kEitherGuard ? *column : LiteralTrace{mask, kEitherGuard ^ mask};
+    return trace;
+  };
+  while (!launch_inputs.empty()) resolve(launch_inputs.begin()->first);
   struct PeerArgument {
     int mask = 0;
     std::size_t representative = 0;
@@ -728,11 +724,11 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       auto& argument = allowed[i];
       argument.representative =
           identity ? classes[argument.representative].try_emplace(identity, i).first->second : i;
-      const std::size_t mask =
-          value ? (value->value_ ? kGuardTrue : kGuardFalse) : (known.mask ? known.mask : kEitherGuard);
-      argument.mask |= static_cast<int>(mask);
-      append_literal(argument.trace, mask == kEitherGuard ? known.trace.value_or(LiteralTrace{})
-                                                          : LiteralTrace{mask, kEitherGuard ^ mask});
+      const std::size_t bit = value && value->value_ ? kGuardTrue : kGuardFalse;
+      const auto trace = value ? LiteralTrace{bit, kEitherGuard ^ bit} : known.trace;
+      argument.mask |=
+          trace.first && trace.first < kEitherGuard ? static_cast<int>(trace.first) : kEitherGuard;
+      append_literal(argument.trace, trace);
     }
   }
   std::map<std::tuple<std::string, std::string, int>, int> incoming;
