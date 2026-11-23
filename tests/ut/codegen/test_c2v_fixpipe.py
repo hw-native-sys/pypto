@@ -48,13 +48,11 @@ def _program(
     epilogue = _epilogue(layout=layout, quant=quant, relu=relu)
     peer_epilogue = _epilogue(layout=layout, quant=peer_quant or quant, relu=relu)
     input_dtype = input_dtype_override or (pl.INT8 if quant.startswith("deq") else pl.BF16)
-    scalar_state = state and quant in ("deqf16_scalar", "qf322f16_pre_scalar")
     setter = (
         "pl.set_quant_scalar(scalar_config.scale"
         if quant == "qf322f16_pre_scalar"
         else "pl.system.set_quant_scalar(scale=0.5"
     )
-    vector_state = state and quant == "deqf16_vec"
     output_dtype = consumer_dtype or (
         pl.FP32 if quant == "no_convert" else (pl.BF16 if quant == "f32_bf16" else pl.FP16)
     )
@@ -78,13 +76,13 @@ class Program:
         lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
         rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
         acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
-        if {vector_state}:
+        if {state and quant == "deqf16_vec"}:
             packed: pl.Tile[[1, 32], pl.UINT64, pl.Mem.Mat,
                             pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)
                             ] = pl.load(control_words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
             controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
             pl.system.set_quant_vector(controls, id={state_id})
-        if {scalar_state}:
+        if {state and quant in ("deqf16_scalar", "qf322f16_pre_scalar")}:
             {setter}, id={state_id})
         pl.tpush_to_aiv(acc, split={split})
 
@@ -238,20 +236,9 @@ def test_fixpipe_requires_matching_pop_endpoints_and_result(bare_pop):
 
 @pytest.mark.parametrize(
     "binding",
-    [
-        None,
-        True,
-        False,
-        "opposite",
-        "member",
-        "shared",
-        "shared_twice",
-        "literal_same",
-        "literal_crossed",
-        "literal_spmd",
-        "literal_spmd_fan_in",
-        "wrong_group",
-    ],
+    [None, True, False, "opposite", "member", "wrong_group"]
+    + ["shared", "shared_twice"]
+    + ["literal_same", "literal_crossed", "literal_spmd", "literal_spmd_fan_in"],
 )
 @pytest.mark.ptoas_compile
 def test_fixpipe_endpoint_counts(binding, tmp_path):
@@ -498,27 +485,40 @@ def test_raw_fixpipe_initializer_contract(legacy_first, extra, message):
 
 @pytest.mark.parametrize("buffer_ir", [False, True])
 def test_scaling_allocations_remain_distinct_after_setter(buffer_ir):
-    body = "".join(
-        f"""
-source{i}: pl.Tile[[1, 32], pl.UINT64, pl.Mem.Mat,
-                  pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)
-                  ] = pl.load(packed, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
-controls{i} = pl.tile.move(source{i}, target_memory=pl.Mem.Scaling)
-pl.system.set_quant_vector(controls{i})
-"""
-        for i in range(2)
-    )
-    controls = pl.parse_program(f"""
-@pl.program
-class Controls:
-    @pl.function(type=pl.FunctionType.AIC)
-    def kernel(packed: pl.Tensor[[1, 32], pl.UINT64]):
-{indent(body, "        ")}
-""")
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel():
+            src = pl.tile.create([1, 32], pl.UINT64, target_memory=pl.Mem.Mat, flat_layout=True)
+            first = pl.tile.move(src, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(first)
+            second = pl.tile.move(src, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(second)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel():
+            mat = pl.tile.alloc(pl.Mem.Mat, 256)
+            first_buf = pl.tile.alloc(pl.Mem.Scaling, 256)
+            second_buf = pl.tile.alloc(pl.Mem.Scaling, 256)
+            src: pl.Tile[[1, 32], pl.UINT64, pl.MemRef(mat, 0, 256), pl.Mem.Mat] = pl.tile.create(
+                [1, 32], pl.UINT64, target_memory=pl.Mem.Mat, flat_layout=True
+            )
+            first: pl.Tile[[1, 32], pl.UINT64, pl.MemRef(first_buf, 0, 256), pl.Mem.Scaling] = pl.tile.move(
+                src, target_memory=pl.Mem.Scaling
+            )
+            pl.system.set_quant_vector(first)
+            second: pl.Tile[[1, 32], pl.UINT64, pl.MemRef(second_buf, 0, 256), pl.Mem.Scaling] = pl.tile.move(
+                src, target_memory=pl.Mem.Scaling
+            )
+            pl.system.set_quant_vector(second)
+
     with passes.PassContext([], enable_buffer_ir=buffer_ir):
-        normalized = passes.init_mem_ref()(controls)
-        lowered = passes.memory_reuse()(passes.materialize_semantic_aliases()(normalized))
-    body = next(iter(lowered.functions.values())).body
+        initialized = passes.init_mem_ref()(Before)
+        After = passes.memory_reuse()(passes.materialize_semantic_aliases()(initialized))
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    body = next(iter(After.functions.values())).body
     assert isinstance(body, ir.SeqStmts)
     tiles = [stmt.var.type for stmt in body.stmts if isinstance(stmt, ir.AssignStmt)]
     first, second = [
