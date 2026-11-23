@@ -883,7 +883,14 @@ def test_public_strided_simt_compile(tmp_path, dims):
 
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize(
-    "script", ["04_simt_compaction.py", "06_simt_row_update.py", "07_simt_strided_copy.py"]
+    "script",
+    [
+        "04_simt_compaction.py",
+        "06_simt_row_update.py",
+        "07_simt_strided_copy.py",
+        "08_simt_atomic_histogram.py",
+        "09_simt_scalar_conversion.py",
+    ],
 )
 def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys):
     if find_ptoas_binary() is None:
@@ -905,6 +912,51 @@ def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys
         assert "compiled; pass --device" in capsys.readouterr().out
     finally:
         backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "filename,entry_name",
+    [
+        ("08_simt_atomic_histogram.py", "histogram"),
+        ("09_simt_scalar_conversion.py", "convert_scalars"),
+    ],
+)
+def test_public_simt_interface_examples_device_compile(tmp_path, filename, entry_name):
+    """Compile the examples' real SIMT helpers with Bisheng, without an NPU."""
+    if os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1":
+        pytest.skip("Opt in to the A5 compiler with PYPTO_RUN_VPTO_VF_VALIDATION=1")
+    example = Path(__file__).resolve().parents[3] / "examples/advanced" / filename
+    # Import the real SDK in a child; unit-suite stubs cannot validate device code.
+    script = """
+import runpy
+import sys
+from pathlib import Path
+from pypto import CacheConfig
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
+from pypto.runtime.kernel_compiler import KernelCompiler
+
+entry = runpy.run_path(sys.argv[1])[sys.argv[3]]
+output = Path(sys.argv[2])
+entry.compile(config=RunConfig(
+    backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD,
+    cache_config=CacheConfig(enabled=False), save_kernels_dir=str(output),
+))
+helpers = tuple(str(path) for path in (output / "vpto").rglob("*.pto"))
+assert len(helpers) == 1
+objects = KernelCompiler("a5")._compile_vpto_helpers(helpers, output)
+assert len(objects) == 1 and objects[0].stat().st_size > 0
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(example), str(tmp_path), entry_name],
+        env={**os.environ, "PYPTO_SKIP_RUNTIME_PIN_CHECK": "0", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.ptoas_compile

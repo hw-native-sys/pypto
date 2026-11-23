@@ -522,9 +522,13 @@ A5 设备。以下可运行示例默认只编译：
 | [带步长拷贝](../../../../examples/advanced/07_simt_strided_copy.py) | 三维线程、不同物理行跨度的 GM 子视图、两个输出、保护区与尾部保留 |
 | [Warp 压缩](../../../../examples/advanced/04_simt_compaction.py) | 使用 ballot 或 shuffle scan 生成稳定索引和计数 |
 | [混合行更新](../../../../examples/advanced/06_simt_row_update.py) | Tile 生产 → SIMT 更新 → Tile 消费、旧 Tile 保留及 SIMD 对照 |
+| [原子直方图](../../../../examples/advanced/08_simt_atomic_histogram.py) | 竞争原子计数、旧值返回的桶内序号和按位成员掩码 |
+| [标量转换](../../../../examples/advanced/09_simt_scalar_conversion.py) | FP16/BF16 转换、显式整数舍入、FP32 bitcast 与符号位操作 |
 
 ```bash
 python examples/advanced/07_simt_strided_copy.py --dims 8 4 8 --valid 257
+python examples/advanced/08_simt_atomic_histogram.py --valid 47
+python examples/advanced/09_simt_scalar_conversion.py --valid 47
 task-submit --device auto --max-time 600 --run \
   'python examples/advanced/07_simt_strided_copy.py --device "$TASK_DEVICE" --dims 8 4 8 --valid 257'
 ```
@@ -532,6 +536,14 @@ task-submit --device auto --max-time 600 --run \
 两条命令均使用已配置的项目环境。数学、warp、原子及同步操作参见
 [API 契约](../../dev/ir/11-simt.md)；编译验证与硬件执行证据参见
 [原生验收](../../dev/codegen/05-simt-lowering.md)。
+
+直方图在宿主侧初始化计数器和掩码。`atomic_add` 返回唯一的桶内序号，但线程顺序
+不确定。`atomic_or` 将每桶的输入位置按
+16 类累计为位掩码，即使没有使用其返回值也会保留更新。
+转换示例使用包含舍入中点、有符号零和 FP16 溢出的有限输入。
+示例在 `ftof` 前显式裁剪到 FP16 的有限值范围；`ftoi` 对比向零截断
+与最近偶数舍入，`bitcast` 则保留 FP32 位表示。两个示例的 `--valid` 均支持
+0 到 64，带 `--device` 执行时会打印结果。
 
 使用 `pl.simt.lanemask_lt()` 选择低于当前 lane 的物理 lane，如压缩示例所示。
 `bitcast` 保留 FP32/INT32 位模式；`atomic_sub` 和 INT32 `atomic_and/or/xor`
