@@ -25,6 +25,7 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, CommEngine, NotifyOp, Span, WaitCmp
 
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
+from .tensor_ops import _normalize_async_engine
 
 
 def world_size(*, span: Span | None = None) -> Call:
@@ -140,18 +141,6 @@ def defer_wait(
     return _ir_core.create_op_call(
         "pld.system.defer_wait", [signal, offsets_tuple, expected_expr], {"cmp": int(cmp)}, actual_span
     )
-
-
-def _normalize_async_engine(engine: object, op_name: str) -> int:
-    """Validate the enum before conversion can erase an invalid input's type.
-
-    Mirrors the helper of the same name in
-    :mod:`pypto.ir.op.distributed.tensor_ops`; the ``object`` parameter is what
-    makes the check reachable for a caller that passes a non-enum.
-    """
-    if not isinstance(engine, CommEngine):
-        raise TypeError(f"{op_name} engine must be CommEngine.URMA, got {engine!r} ({type(engine).__name__})")
-    return int(engine)
 
 
 def make_session(

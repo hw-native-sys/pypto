@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from typing import TypeGuard
 
 from pypto.ir.op.distributed import tile_ops as _ir_tile
-from pypto.language.typing import IntLike, Tile
+from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Tile
 from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr
@@ -314,4 +314,32 @@ def get(
     return _ir_tile.get(dst_expr, _unwrap(peer), src_expr, stage_expr, stage2=stage2_expr)
 
 
-__all__ = ["get", "remote_load", "remote_store", "put"]
+def put_async(dst: DistributedTensor, src: Tensor | Expr, session: AsyncSession) -> AsyncEvent:
+    """Submit one asynchronous URMA write and return its completion event.
+
+    The V2 explicit-event form of a cross-rank put. ``src`` is written into the
+    session's peer slice of ``dst``, and the call returns the completion event
+    for that single logical transfer.
+
+    Unlike :func:`pld.tensor.put_async`, this returns an
+    [`AsyncEvent`][pypto.language.AsyncEvent] rather than ``dst``, so one call
+    never changes its return type by context. Returning still does **not** mean
+    the transfer completed — pass the event and its producing ``session`` to
+    [`pld.system.wait_event`][pypto.language.distributed.op.system_ops.wait_event].
+
+    The engine and peer come from ``session``, so they are not repeated here.
+
+    Args:
+        dst: Remote window-bound :class:`pld.DistributedTensor` destination.
+        src: Local source — :class:`pl.Tensor` or
+            :class:`pld.DistributedTensor` with the same dtype and shape as ``dst``.
+        session: The [`AsyncSession`][pypto.language.AsyncSession] from
+            [`pld.system.make_session`][pypto.language.distributed.op.system_ops.make_session].
+
+    Returns:
+        An [`AsyncEvent`][pypto.language.AsyncEvent] for this transfer.
+    """
+    return AsyncEvent(expr=_ir_tile.put_async(_unwrap(dst), _unwrap(src), _unwrap(session)))
+
+
+__all__ = ["get", "put_async", "remote_load", "remote_store", "put"]

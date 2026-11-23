@@ -26,15 +26,20 @@ from importlib import resources
 from typing import Any, cast
 
 import pypto
+import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir
 from pypto.ir.op.distributed import system_ops as dist_system_ops
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.ir.op.distributed import tile_ops as dist_tile_ops
+from pypto.language.distributed.op import system_ops as dsl_dist_system
 from pypto.language.distributed.op import tensor_ops as dsl_tensor_ops
+from pypto.language.distributed.op import tile_ops as dsl_dist_tile
 from pypto.language.distributed.op import unified_ops as dsl_unified
 from pypto.language.distributed.op.tensor_ops import _validate_chunk, _validate_pipeline
 from pypto.language.distributed.typing.distributed_tensor import DistributedTensor
+from pypto.language.typing import AsyncEvent, AsyncSession
 from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import ir as _ir
 
@@ -3352,7 +3357,7 @@ def test_make_session_rejects_non_enum_engine_in_builder():
 
 
 def test_tile_put_async_returns_event_not_dst():
-    """V2's explicit form returns an event; only V1 returns dst (D2)."""
+    """V2's explicit form returns an event; only V1 returns dst."""
     span = ir.Span.unknown()
     session = _make_session(span)
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
@@ -3425,3 +3430,65 @@ def test_wait_event_rejects_swapped_operands():
 
     with pytest.raises(ValueError, match="AsyncEvent"):
         ir.create_op_call("pld.system.wait_event", [session, event], {}, span)
+
+
+def test_v2_session_surface_roundtrips_through_printer():
+    """Printed IR re-parses to a structurally identical program.
+
+    Covers the DSL surface end to end: ``pld.system.make_session`` carries an
+    ``engine`` kwarg, and the two opaque handles (AsyncSession, AsyncEvent)
+    must print and re-parse as named types.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pl.Tensor[[16, 64], pl.FP16],
+        ):
+            ctx = pld.system.get_comm_ctx(dst)
+            session = pld.system.make_session(ctx, 1)
+            evt = pld.tile.put_async(dst, src, session)
+            pld.system.wait_event(evt, session)
+
+    printed = str(Program)
+    assert "pld.system.make_session" in printed
+    assert "pld.tile.put_async" in printed
+    assert "pld.system.wait_event" in printed
+
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(reparsed, Program)
+
+
+def test_v2_dsl_wrappers_return_handle_types():
+    """The DSL layer returns AsyncSession / AsyncEvent wrappers, not raw Calls.
+
+    Exercised through the DSL wrappers directly rather than inside a
+    ``@pl.program``: a program body is *parsed* as DSL, so ordinary Python
+    (an assignment into a captured dict) is not valid there. The wrappers
+    accept raw ``ir.Expr`` through ``_unwrap``'s fallthrough.
+    """
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = dsl_dist_system.get_comm_ctx(DistributedTensor(expr=target))
+    session = dsl_dist_system.make_session(ctx, 1)
+    assert isinstance(session, AsyncSession)
+
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    event = dsl_dist_tile.put_async(DistributedTensor(expr=dst), Tensor(expr=src), session)
+    assert isinstance(event, AsyncEvent)
+
+    done = dsl_dist_system.wait_event(event, session)
+    assert isinstance(done.unwrap().type, ir.ScalarType)
+
+
+def test_v2_dsl_make_session_rejects_non_enum_engine():
+    """The DSL wrapper validates the engine before the IR builder sees it."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = dsl_dist_system.get_comm_ctx(DistributedTensor(expr=target))
+    with pytest.raises(TypeError, match="CommEngine.URMA"):
+        dsl_dist_system.make_session(ctx, 1, engine=cast(Any, "URMA"))

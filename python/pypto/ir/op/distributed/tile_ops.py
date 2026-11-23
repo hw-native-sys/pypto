@@ -242,7 +242,8 @@ def put_async(dst: Expr, src: Expr, session: Expr, *, span: Span | None = None) 
     :func:`pypto.ir.op.distributed.system_ops.wait_event`.
 
     The engine and peer come from ``session``, so they are not repeated here,
-    and submission registers no task-completion condition. ``dst`` and ``src``
+    and pairing the event with :func:`wait_event` registers no task-completion
+    condition. ``dst`` and ``src``
     must share an element type and shape, and both endpoint views must be dense
     row-major.
     """

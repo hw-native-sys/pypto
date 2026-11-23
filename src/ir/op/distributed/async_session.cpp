@@ -11,7 +11,7 @@
 
 /**
  * @file async_session.cpp
- * @brief Explicit session/event surface for URMA async transfers - V2 of task 25.3.
+ * @brief Explicit session/event surface for URMA async transfers - the V2 stage of the URMA async RFC.
  *
  * V1 (``pld.tensor.put_async`` / ``get_async``) returns ``dst`` and lets the
  * enclosing task own completion; there is no user-visible session or event.
@@ -25,36 +25,45 @@
  *     pld.tile.put_async(dst, src, session)              -> AsyncEvent
  *     pld.system.wait_event(event, session)              -> bool
  *
- * Design points, from the #3304 thread (see notes plan 144):
+ * Four invariants shape the op definitions below:
  *
- * * **The session owns engine and peer** (D1). The tile ops do not repeat them,
- *   so one session can back many submissions to the same peer.
- * * **The session is mutable state, not a value** (C12). ISA updates its runtime
- *   state across posts and waits, so it is never pure: it must not be CSE'd,
- *   hoisted as a pure op, copied, or substituted for another session over the
- *   same workspace.
- * * **An event is one logical transfer** (C13). PyPTO never splits a transfer or
- *   aggregates per-chunk events.
- * * **Submission registers nothing.** ``wait_event`` observes completion on this
- *   core. The deferred path (``defer_wait`` on an event) is deliberately **not**
- *   in this change - its emission site is still open upstream (simpler #3186),
- *   and the two candidate shapes emit at different places.
+ * * **The session owns the engine and the peer.** The tile op does not repeat
+ *   them, so one session backs many submissions to the same peer.
+ * * **A session is a resource, not a value.** ISA updates its runtime state
+ *   across posts and waits, so it is never pure: it must not be CSE'd, hoisted
+ *   as a pure op, copied, or substituted for another session over the same
+ *   workspace. Hence ``set_no_duplicate`` on ``make_session``.
+ * * **One event covers one logical transfer.** PyPTO neither splits a transfer
+ *   nor aggregates per-chunk events; failure and empty-request semantics follow
+ *   the ISA event contract.
+ * * **An in-kernel wait registers no task condition.** ``wait_event`` lowers to
+ *   the ISA ``event.Wait(session)``; it observes completion on this core instead
+ *   of handing it over, and the two are alternatives, not a pair.
  *
- * Not in this change: the Gather descriptor materialization and native
- * ``pto.comm.tput_async_gather`` emission (backend), ``MaterializeAsyncSessions``
- * (pass), the event form of ``defer_wait``, and GET. GET's V2 path is the ISA
- * Scatter ``TGET_ASYNC<URMA>`` overload, but PTOAS has no Scatter GET op yet, so
- * there is nothing to lower it to.
+ * The *deferred* completion path is deliberately absent. It is not merely
+ * unimplemented: its submission site is still being settled with the runtime,
+ * and the candidate shapes disagree in a way that reaches back into this op.
+ * One keeps submission a native ISA call and registers at the completion op;
+ * the other submits *and* registers at the submission site, leaving the
+ * completion op to emit nothing. Under the second, this op's lowering would
+ * depend on how its event is consumed downstream. Until that is fixed, the IR
+ * contract here is only that a submission yields one event -- a pass or codegen
+ * must not assume either shape.
+ *
+ * Also out of scope here: descriptor materialization and native Gather emission
+ * in the backend, the session-materialization pass, and GET. GET's counterpart
+ * is the ISA Scatter ``TGET_ASYNC<URMA>`` overload, which PTOAS does not yet
+ * expose as an op, so there is no lowering target for it.
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -84,8 +93,9 @@ void CheckArity(const char* op_name, const char* arg_roles, size_t expected,
 /// Validate that `arg` carries the singleton handle type `HandleType`.
 template <typename HandleType>
 void CheckHandle(const char* op_name, const char* arg_role, const ExprPtr& arg, const char* producer) {
-  CHECK(IsA<HandleType>(arg->GetType())) << op_name << " expects " << arg_role << " (output of " << producer
-                                         << "), got " << arg->GetType()->TypeName();
+  CHECK_SPAN(IsA<HandleType>(arg->GetType()), arg->span_)
+      << op_name << " expects " << arg_role << " (output of " << producer << "), got "
+      << arg->GetType()->TypeName();
 }
 
 // --------------------------------------------------------------------------
@@ -111,16 +121,18 @@ TypePtr DeduceMakeSessionType(const std::vector<ExprPtr>& args,
 TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CheckArity(kPutAsyncOp, "dst, src, session", 3, args);
-  CHECK(kwargs.empty()) << kPutAsyncOp
-                        << " takes no kwargs: engine and peer live on the session, and the V2 "
-                           "submission controls (cqe_policy, submit_mode, batch_size) are V3, not V2";
+  CHECK_SPAN(kwargs.empty(), args[0]->span_)
+      << kPutAsyncOp
+      << " takes no kwargs: engine and peer live on the session, and the V2 "
+         "submission controls (cqe_policy, submit_mode, batch_size) are V3, not V2";
 
   auto dst_type = As<DistributedTensorType>(args[0]->GetType());
-  CHECK(dst_type) << kPutAsyncOp << " dst must be a window-bound DistributedTensor, got "
-                  << args[0]->GetType()->TypeName();
+  CHECK_SPAN(dst_type, args[0]->span_) << kPutAsyncOp << " dst must be a window-bound DistributedTensor, got "
+                                       << args[0]->GetType()->TypeName();
   auto src_type = AsTensorTypeLike(args[1]->GetType());
-  CHECK(src_type) << kPutAsyncOp << " src must be a Tensor, got " << args[1]->GetType()->TypeName();
-  CHECK(dst_type->dtype_ == src_type->dtype_)
+  CHECK_SPAN(src_type, args[1]->span_)
+      << kPutAsyncOp << " src must be a Tensor, got " << args[1]->GetType()->TypeName();
+  CHECK_SPAN(dst_type->dtype_ == src_type->dtype_, args[0]->span_)
       << kPutAsyncOp << " dst and src must have the same element type, got dst "
       << args[0]->GetType()->TypeName() << " vs src " << args[1]->GetType()->TypeName();
 
@@ -136,7 +148,7 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
                                          /*require_same_shape=*/true);
 
   // One submission yields exactly one event covering the whole logical
-  // transfer; PyPTO never splits or aggregates (C13).
+  // transfer; PyPTO never splits or aggregates.
   return GetAsyncEventType();
 }
 
@@ -147,7 +159,7 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
 TypePtr DeduceWaitEventType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CheckArity(kWaitEventOp, "event, session", 2, args);
-  CHECK(kwargs.empty()) << kWaitEventOp << " takes no kwargs, but got " << kwargs.size();
+  CHECK_SPAN(kwargs.empty(), args[0]->span_) << kWaitEventOp << " takes no kwargs, but got " << kwargs.size();
   CheckHandle<AsyncEventType>(kWaitEventOp, "event to be an AsyncEvent", args[0], "pld.tile.put_async");
   CheckHandle<AsyncSessionType>(kWaitEventOp, "session to be an AsyncSession", args[1],
                                 "pld.system.make_session");
@@ -160,14 +172,12 @@ TypePtr DeduceWaitEventType(const std::vector<ExprPtr>& args,
 // pld.system.make_session — build a per-peer async submission session
 // ============================================================================
 //
-// Core placement: VECTOR, matching the async transfer ops it feeds. The session
-// is constructed and posted to from the AIV task that owns the transfer.
+// VECTOR, matching the transfer ops it feeds: the session is constructed and
+// posted to from the AIV task that owns the transfer.
 //
-// `set_no_duplicate()` is load-bearing and not a stylistic choice. A session
-// carries mutable ISA runtime state across posts and waits (C12). Duplicating
-// its construction onto another lane would hand two lanes what looks like the
-// same queue but is two independent ones, and an event posted on one would be
-// waited on the other.
+// `set_no_duplicate()` is load-bearing, not stylistic. Copying the construction
+// onto another lane would give two lanes what looks like one queue but is two,
+// so an event posted on one would be waited on the other.
 
 REGISTER_OP("pld.system.make_session")
     .set_description(
@@ -192,17 +202,13 @@ REGISTER_OP("pld.system.make_session")
 // pld.tile.put_async — submit one URMA write, return its completion event
 // ============================================================================
 //
-// Core placement: VECTOR, as for the V1 async put.
+// VECTOR, as for the V1 async put.
 //
-// Unlike the V1 `pld.tensor.put_async`, this op returns an **event**, not `dst`.
-// That is deliberate (D2): one call never changes its return type by context,
-// so the explicit-event form is a separate op rather than an overload. `dst` is
-// still marked ReadWrite so the write is visible to dependence analysis, but
-// there is no `set_output_reuses_input` - the result is a handle, not a buffer.
-//
-// Returning does **not** mean the transfer completed. Completion is observed by
-// pld.system.wait_event on this core, or (later, not in this change) handed to
-// the task through the event form of defer_wait.
+// This is a separate op rather than an overload of `pld.tensor.put_async`
+// because it returns an event instead of `dst`: an overload would make one call
+// change its return type by context. `dst` stays ReadWrite so the write is
+// visible to dependence analysis, but there is no `set_output_reuses_input` —
+// the result is a handle, not a buffer.
 
 REGISTER_OP("pld.tile.put_async")
     .set_description(
@@ -210,7 +216,7 @@ REGISTER_OP("pld.tile.put_async")
         "the window-bound DistributedTensor `dst`, and return the completion event "
         "(AsyncEventType) for that single logical transfer. The engine and peer come from "
         "`session`. Returning does not mean completion: pair the event with its producing "
-        "session in pld.system.wait_event. Submission registers no task condition.")
+        "session in pld.system.wait_event, which registers no task condition.")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
     .add_argument("src", "Local source — Tensor or DistributedTensor (same dtype as dst)")
@@ -219,7 +225,7 @@ REGISTER_OP("pld.tile.put_async")
     .no_memory_spec()
     // The destination is written in place; the source is only read. The IR keeps
     // the real payload operands and their effects - descriptors are a backend
-    // detail and never appear here (C16).
+    // detail and never appear here.
     .set_arg_effect(0, ArgEffect::ReadWrite)
     .set_arg_effect(1, ArgEffect::Read)
     .set_write_channel(WriteChannel::Dma)
@@ -228,10 +234,6 @@ REGISTER_OP("pld.tile.put_async")
 // ============================================================================
 // pld.system.wait_event — block until one async transfer completes
 // ============================================================================
-//
-// Lowers to the ISA `event.Wait(session)` and registers **no** task-completion
-// condition: an in-kernel wait is the alternative to handing completion over,
-// not a supplement to it.
 
 REGISTER_OP("pld.system.wait_event")
     .set_description(
