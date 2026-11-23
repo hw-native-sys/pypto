@@ -1146,7 +1146,7 @@ static std::vector<StmtPtr> ProcessStmtsImpl(const std::vector<StmtPtr>& stmts, 
                                              const ExprPtr& subblock_idx,
                                              std::unordered_map<const Var*, VarPtr>& var_replacements,
                                              const ExprPtr& lane_stride,
-                                             const std::unordered_set<const Var*>& explicit_lane_values);
+                                             const std::unordered_set<const Var*>& varying_lane_values);
 
 static bool HasFullSplitExtent(const TypePtr& type, int split_dim) {
   auto tile = As<TileType>(type);
@@ -1161,7 +1161,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
                            const ExprPtr& subblock_idx,
                            std::unordered_map<const Var*, VarPtr>& var_replacements,
                            const ExprPtr& lane_stride,
-                           const std::unordered_set<const Var*>& explicit_lane_values) {
+                           const std::unordered_set<const Var*>& varying_lane_values) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     if (auto projected = RetypeTrackedBinding(assign, tile_vars, var_replacements)) return projected;
 
@@ -1817,9 +1817,9 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     // Full tiles can have identical types even when the scalar lane changes on
     // the backedge. A companion carry follows the source on each iteration
     // and lets a later narrowing use the correct lane, including zero trips.
-    std::vector<IterArgPtr> lane_args(explicit_lane_values.empty() ? 0 : new_iter_args.size());
+    std::vector<IterArgPtr> lane_args(varying_lane_values.empty() ? 0 : new_iter_args.size());
     for (size_t i = 0; i < lane_args.size(); ++i) {
-      if (explicit_lane_values.count(for_stmt->iter_args_[i].get()) == 0) continue;
+      if (varying_lane_values.count(for_stmt->iter_args_[i].get()) == 0) continue;
       const auto& tile_arg = new_iter_args[i];
       auto it = tile_vars.find(tile_arg.get());
       if (it == tile_vars.end() || !HasFullSplitExtent(tile_arg->GetType(), it->second.split_dim)) continue;
@@ -1839,7 +1839,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       flat.push_back(for_stmt->body_);
     }
     auto new_body_stmts = ProcessStmtsImpl(flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                           var_replacements, lane_stride, explicit_lane_values);
+                                           var_replacements, lane_stride, varying_lane_values);
     StmtPtr new_body = (new_body_stmts.size() == 1)
                            ? new_body_stmts[0]
                            : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
@@ -1896,7 +1896,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       then_flat.push_back(if_stmt->then_body_);
     }
     auto new_then = ProcessStmtsImpl(then_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                     var_replacements, lane_stride, explicit_lane_values);
+                                     var_replacements, lane_stride, varying_lane_values);
     StmtPtr new_then_body =
         (new_then.size() == 1) ? new_then[0] : std::make_shared<SeqStmts>(new_then, if_stmt->span_);
 
@@ -1910,7 +1910,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         else_flat.push_back(else_body);
       }
       auto new_else_stmts = ProcessStmtsImpl(else_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                             var_replacements, lane_stride, explicit_lane_values);
+                                             var_replacements, lane_stride, varying_lane_values);
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
     }
@@ -1930,7 +1930,7 @@ static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
 
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
     auto new_stmts = ProcessStmtsImpl(seq->stmts_, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                      var_replacements, lane_stride, explicit_lane_values);
+                                      var_replacements, lane_stride, varying_lane_values);
     return std::make_shared<SeqStmts>(new_stmts, seq->span_);
   }
 
@@ -2284,39 +2284,73 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
 
 namespace {
 
-// Follow values, including loop backedges and branch yields, so a pop only
-// introduces scalar lane state for carries the popped data can reach.
-class ExplicitLaneValues : public IRVisitor {
+// Propagate lane origins across initializers, backedges and branch yields.
+// A carry needs the companion only if its value can come from distinct
+// origins. A single fixed logical lane and physical-only carries stay intact.
+class VaryingLaneValues : public IRVisitor {
  public:
   std::unordered_set<const Var*> Collect(const std::vector<StmtPtr>& stmts) {
     for (const auto& stmt : stmts) VisitStmt(stmt);
+    for (const auto& [source, _] : successors_) {
+      if (!origins_.count(source) && !has_predecessor_.count(source)) {
+        Merge(source, LaneOrigins{nullptr, true});
+      }
+    }
     while (!worklist_.empty()) {
       const auto* value = worklist_.front();
       worklist_.pop_front();
       const auto next = successors_.find(value);
       if (next == successors_.end()) continue;
-      for (const auto* successor : next->second) Mark(successor);
+      const auto origin = origins_.at(value);
+      for (const auto* successor : next->second) Merge(successor, origin);
     }
-    std::unordered_set<const Var*> affected_carries;
-    for (const auto* carry : candidate_carries_) {
-      if (selected_.count(carry) != 0) affected_carries.insert(carry);
+    std::unordered_set<const Var*> varying;
+    for (const auto& [value, origin] : origins_) {
+      if (origin.explicit_lane && (origin.physical || origin.distinct_explicit_lanes)) {
+        varying.insert(value);
+      }
     }
-    return affected_carries;
+    return varying;
   }
 
  private:
+  struct LaneOrigins {
+    ExprPtr explicit_lane;
+    bool physical = false;
+    bool distinct_explicit_lanes = false;
+  };
+
   static bool CanCarryLane(const TypePtr& type) { return As<TileType>(type) || As<TupleType>(type); }
 
-  void Mark(const Var* value) {
-    if (selected_.insert(value).second) worklist_.push_back(value);
+  void Merge(const Var* value, const LaneOrigins& incoming) {
+    auto& origin = origins_[value];
+    const bool first_explicit_lane = !origin.explicit_lane && incoming.explicit_lane;
+    const bool new_physical = !origin.physical && incoming.physical;
+    const bool new_distinct = !origin.distinct_explicit_lanes &&
+                              (incoming.distinct_explicit_lanes ||
+                               (origin.explicit_lane && incoming.explicit_lane &&
+                                !structural_equal(origin.explicit_lane, incoming.explicit_lane)));
+    if (first_explicit_lane) origin.explicit_lane = incoming.explicit_lane;
+    origin.physical |= incoming.physical;
+    origin.distinct_explicit_lanes |= new_distinct;
+    if (first_explicit_lane || new_physical || new_distinct) worklist_.push_back(value);
   }
 
   void Link(const ExprPtr& source, const VarPtr& result) {
     if (!source || !CanCarryLane(result->GetType())) return;
     var_collectors::VarDefUseCollector refs;
     refs.VisitExpr(source);
+    bool linked = false;
     for (const auto* value : refs.var_uses) {
-      if (CanCarryLane(value->GetType())) successors_[value].push_back(result.get());
+      if (CanCarryLane(value->GetType())) {
+        successors_[value].push_back(result.get());
+        linked = true;
+      }
+    }
+    if (linked) {
+      has_predecessor_.insert(result.get());
+    } else {
+      Merge(result.get(), LaneOrigins{nullptr, true});
     }
   }
 
@@ -2330,7 +2364,7 @@ class ExplicitLaneValues : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& stmt) override {
     const auto call = As<Call>(stmt->value_);
     if (IsOp(call, "tile.tpop_from_aic") && !call->args_.empty()) {
-      Mark(stmt->var_.get());
+      Merge(stmt->var_.get(), LaneOrigins{call->args_.front()});
     } else {
       Link(stmt->value_, stmt->var_);
     }
@@ -2356,11 +2390,7 @@ class ExplicitLaneValues : public IRVisitor {
 
   void VisitStmt_(const ForStmtPtr& stmt) override {
     LinkLoop(stmt);
-    const size_t before = worklist_.size();
     IRVisitor::VisitStmt_(stmt);
-    if (worklist_.size() != before) {
-      for (const auto& arg : stmt->iter_args_) candidate_carries_.insert(arg.get());
-    }
   }
 
   void VisitStmt_(const WhileStmtPtr& stmt) override {
@@ -2369,8 +2399,8 @@ class ExplicitLaneValues : public IRVisitor {
   }
 
   std::unordered_map<const Var*, std::vector<const Var*>> successors_;
-  std::unordered_set<const Var*> selected_;
-  std::unordered_set<const Var*> candidate_carries_;
+  std::unordered_map<const Var*, LaneOrigins> origins_;
+  std::unordered_set<const Var*> has_predecessor_;
   std::deque<const Var*> worklist_;
 };
 
@@ -2379,12 +2409,12 @@ static std::vector<StmtPtr> ProcessStmtsImpl(const std::vector<StmtPtr>& stmts, 
                                              const ExprPtr& subblock_idx,
                                              std::unordered_map<const Var*, VarPtr>& var_replacements,
                                              const ExprPtr& lane_stride,
-                                             const std::unordered_set<const Var*>& explicit_lane_values) {
+                                             const std::unordered_set<const Var*>& varying_lane_values) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
   for (const auto& stmt : stmts) {
     result.push_back(ProcessStmt(stmt, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements,
-                                 lane_stride, explicit_lane_values));
+                                 lane_stride, varying_lane_values));
   }
   return result;
 }
@@ -2396,10 +2426,10 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
                                   const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements,
                                   const ExprPtr& lane_stride) {
-  const auto explicit_lane_values =
-      is_aiv && subblock_idx ? ExplicitLaneValues().Collect(stmts) : std::unordered_set<const Var*>{};
+  const auto varying_lane_values =
+      is_aiv && subblock_idx ? VaryingLaneValues().Collect(stmts) : std::unordered_set<const Var*>{};
   return ProcessStmtsImpl(stmts, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements,
-                          lane_stride, explicit_lane_values);
+                          lane_stride, varying_lane_values);
 }
 
 SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) {

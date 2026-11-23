@@ -1339,29 +1339,36 @@ class Before:
         _assert_extent_after_substitution(stores[0].args[1].elements[axis], values, physical * 16)
 
 
-def test_full_pop_carry_tracks_the_lane_that_produced_the_value():
-    """The init uses the physical lane, while the backedge selects logical lane zero."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.AIV)
-        def vector(self, steps: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]):
-            pl.func_attr({"split": pl.SplitMode.UP_DOWN})
-            buf = pl.system.reserve_buffer(name="c2v", size=65536)
-            pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
-            value = pl.tile.full([32, 16], dtype=pl.FP32, value=0.0)
-            for step in pl.range(steps):
-                inner = pl.tile.set_validshape(value, 31, 16)
-                out = pl.tile.store(inner, [0, 0], out)
-                received: pl.Tile[[32, 16], pl.FP32, pl.Mem.Vec] = pl.system.tpop_from_aic(
-                    split=1, aiv_subblockid=0
-                )
-                value = pl.tile.add(received, 1.0)
-                pl.system.tfree_to_aic(received)
-            outer = pl.tile.set_validshape(value, 31, 16)
-            return pl.tile.store(outer, [0, 0], out)
-
-    program = _run_split_vector_kernel(Before)
+@pytest.mark.parametrize("pop_on_backedge", [True, False], ids=["pop_on_backedge", "pop_in_init"])
+def test_full_pop_carry_tracks_the_lane_that_produced_the_value(pop_on_backedge):
+    """The init and backedge supply different origins without changing the tile type."""
+    physical_value = "value = pl.tile.full([32, 16], dtype=pl.FP32, value=0.0)"
+    explicit_value = (
+        "received: pl.Tile[[32, 16], pl.FP32, pl.Mem.Vec] = "
+        "pl.system.tpop_from_aic(split=1, aiv_subblockid=0)\n"
+        "value = pl.tile.add(received, 1.0)\n"
+        "pl.system.tfree_to_aic(received)"
+    )
+    init, backedge = (physical_value, explicit_value) if pop_on_backedge else (explicit_value, physical_value)
+    init = init.replace("\n", "\n        ")
+    backedge = backedge.replace("\n", "\n            ")
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector(self, steps: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]):
+        pl.func_attr({{"split": pl.SplitMode.UP_DOWN}})
+        buf = pl.system.reserve_buffer(name="c2v", size=65536)
+        pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
+        {init}
+        for step in pl.range(steps):
+            inner = pl.tile.set_validshape(value, 31, 16)
+            out = pl.tile.store(inner, [0, 0], out)
+            {backedge}
+        outer = pl.tile.set_validshape(value, 31, 16)
+        return pl.tile.store(outer, [0, 0], out)
+""")
+    program = _run_split_vector_kernel(before)
     loops = []
     narrowed = []
     yields = []
@@ -1390,8 +1397,13 @@ def test_full_pop_carry_tracks_the_lane_that_produced_the_value():
     lane = loops[0].iter_args[-1]
     exit_lane = loops[0].return_vars[-1]
     assert isinstance(lane.type, ir.ScalarType) and lane.type.dtype == pl.INDEX
-    ir.assert_structural_equal(lane.initValue, physical[0])
-    _assert_extent_after_substitution(yields[0].value[-1], {}, 0)
+    backedge_lane = yields[0].value[-1]
+    if pop_on_backedge:
+        ir.assert_structural_equal(lane.initValue, physical[0])
+        _assert_extent_after_substitution(backedge_lane, {}, 0)
+    else:
+        _assert_extent_after_substitution(lane.initValue, {}, 0)
+        ir.assert_structural_equal(backedge_lane, physical[0])
     for tile, selector in zip(narrowed, (lane, exit_lane), strict=True):
         assert isinstance(tile.type, ir.TileType)
         extent = tile.type.get_effective_tile_view().valid_shape[0]
