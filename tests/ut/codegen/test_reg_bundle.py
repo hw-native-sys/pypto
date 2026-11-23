@@ -46,7 +46,7 @@ def compile_vf_bundle(bundle, tmp_path):
         (
             f"helper_{index}",
             helper.source,
-            list(ptoas_flags_for_source(helper.source)),
+            list(ptoas_flags_for_source(helper.source, emit_llvm=True)),
         )
         for index, helper in enumerate(bundle.helpers)
     )

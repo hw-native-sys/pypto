@@ -25,12 +25,22 @@ import pytest
 import torch
 from pypto import CacheConfig
 from pypto.backend import BackendType
-from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
+from pypto.runtime import ChipWorker, ExecutionMode, RunConfig, _vpto
 from pypto.runtime.runtime_pin import check_runtime_pin
 from test_tile_helper_sync import _environment, _record_compilation
 from test_vpto_vf_onboard import FIXTURE, ROOT
 
 pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
+
+
+def _diagnostic_llvm(evidence: Path) -> str:
+    """Export IR for barrier assertions from the retained production helper source."""
+    support = runpy.run_path(str(FIXTURE / "test_validation.py"))
+    source = evidence / "helper-0.pto"
+    llvm = evidence / "diagnostic.ll"
+    flags = _vpto.ptoas_flags_for_source(source.read_text(), emit_llvm=True)
+    support["run"](evidence, "diagnostic-llvm", [support["require_ptoas"](), source, *flags, "-o", llvm])
+    return llvm.read_text()
 
 
 def _audit_machine_code(evidence: Path, kind: str, offset: int) -> dict[str, list[str]]:
@@ -151,7 +161,7 @@ def _run(output: Path, device: int) -> None:
                 compiled.load()
                 assert len(calls) == 1
             evidence = case / "objects/compilation-1"
-            llvm = (evidence / "vpto_0.ll").read_text()
+            llvm = _diagnostic_llvm(evidence)
             barriers = [line.strip() for line in llvm.splitlines() if "call " in line and "mem.bar" in line]
             assert len(barriers) == (1 if offset < 64 else 0), barriers
             machine_barriers = _audit_machine_code(evidence, kind, offset)
@@ -478,7 +488,7 @@ def _run_complex(output: Path, device: int, *, extended: bool = False) -> None:
             compiled.load()
             assert len(calls) == 1
         evidence = case / "objects/compilation-1"
-        llvm = (evidence / "vpto_0.ll").read_text()
+        llvm = _diagnostic_llvm(evidence)
         barriers = re.findall(r"call void @llvm.hivm.mem.bar.([a-z.]+)\(\)", llvm)
         if kind not in ("chain", "triangle"):
             assert len(barriers) == (1 if offset < 64 else 0), (name, barriers)

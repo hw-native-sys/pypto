@@ -67,8 +67,8 @@ not require its original helper paths.
 
 LLVM export bypasses PTOAS's object-level SIMT size repair. Intrinsic-only helpers
 continue through LLVM export and Bisheng. SIMT helpers containing inline assembly
-instead use PTOAS's native device-object emission after the same external-symbol
-admission check. PTOAS validates or repairs `VF_SIMT` sizes; PyPTO adds logical-name
+use PTOAS's native device-object emission. PTOAS validates or repairs `VF_SIMT`
+sizes. PyPTO adds logical-name
 aliases with a relocatable link for the emitted `.vector` or `_mix_aiv` ABI symbols.
 The selected SDK's CANN installation is passed to PTOAS explicitly. Native object
 flags participate in cache identity, and compilation or alias-link failures do

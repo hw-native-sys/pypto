@@ -172,13 +172,13 @@ def _build_variants(output: Path, prepare=_prepare):
         calls.append(str(args[0]))
         return binary
 
-    def recorded_run(self, command, path, label):
+    def recorded_run(self, command, path, label, *, env=None):
         # Copy outputs from this compilation only, before its temporary directory
         # is cleaned. The real compiler still produces every returned byte.
         evidence = output / f"compilation-{len(calls) + 1}"
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / f"{path.name}.command.txt").write_text(shlex.join(command) + "\n")
-        binary = original_run(self, command, path, label)
+        binary = original_run(self, command, path, label, env=env)
         (evidence / path.name).write_bytes(binary)
         return binary
 

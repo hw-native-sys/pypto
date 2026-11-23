@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Build contract for separately compiled, self-contained A5 VPTO helpers."""
+"""Build contract for separately compiled A5 VPTO helpers."""
 
 import re
 from collections.abc import Sequence
@@ -16,16 +16,10 @@ from typing import cast
 
 from . import _device_image
 
-# These options are also included in the binary cache identity. Keep LLVM
-# compilation separate from the C++ flags and retain PTOAS's validated device
-# profile. Generic-address-space on/off happened to produce identical code for
-# the add helper; this does not establish ABI equivalence for other helpers.
 PTOAS_FLAGS = (
     "--pto-arch=a5",
     "--pto-backend=vpto",
-    "--emit-vpto-llvm-ir",
     "--vmi-fastmath=false",
-    "--enable-vecscope-mem-bar=true",
 )
 # Tile operations can leave out-of-line functions before kernel_entry in the
 # caller object. Separate their sections so the linker can put the entry first;
@@ -33,15 +27,16 @@ PTOAS_FLAGS = (
 CALLER_FLAGS = ("-ffunction-sections",)
 LINK_SYMBOL_ORDER = ("kernel_entry",)
 
-# Inline-assembly SIMT entries require PTOAS's object-level launch-size check.
-# Keep scheduling deterministic and let PTOAS own any supported size repair.
+LLVM_IR_FLAG = "--emit-vpto-llvm-ir"
+DEVICE_OBJECT_FLAG = "--emit-vpto-device-object"
+# Inline-assembly SIMT entries also require PTOAS's launch-size check and
+# deterministic scheduling. Ordinary register helpers use PTOAS's defaults.
 SIMT_OBJECT_FLAGS = (
-    "--emit-vpto-device-object",
     "--vpto-fix-vfsimt-size=auto",
     "--bisheng-vec-misched=on",
 )
 
-
+# Intrinsic-only SIMT helpers still compile their exported LLVM with Bisheng.
 DEVICE_FLAGS = (
     "--cce-aicore-arch=dav-c310-vec",
     "--cce-aicore-only",
@@ -58,32 +53,22 @@ DEVICE_FLAGS = (
 REG_AUTO_SYNC_PREFIX = "// pypto.reg_auto_sync:"
 
 
-def simt_object_aliases(llvm: str, data: bytes) -> tuple[str, ...]:
-    """Map LLVM logical exports to PTOAS's documented native AIV ABI names.
-
-    Object emission adds .vector (new CANN) or _mix_aiv (old CANN). Inspect
-    the object instead of guessing the installed CANN's suffix. Only alias
-    exports observed in the LLVM input, never unrelated native symbols.
-    """
+def device_object_aliases(data: bytes) -> tuple[str, ...]:
+    """Expose logical names for native AIV functions emitted with a CANN ABI suffix."""
     exports = _device_image.device_object_exports(data)
-    aliases: list[str] = []
-    found_export = False
-    for signature in re.findall(r"^define\s+([^\n{]+)", llvm, re.MULTILINE):
-        if re.search(r"\b(?:simt_entry|internal|private)\b", signature.partition("@")[0]):
-            continue
-        match = re.search(r"@([A-Za-z_][A-Za-z_0-9.]*)\(", signature)
-        if match is None:
-            raise ValueError(f"Unsupported SIMT object export signature: {signature}")
-        name = match[1]
-        candidates = [symbol for symbol in (name, f"{name}.vector", f"{name}_mix_aiv") if symbol in exports]
-        if len(candidates) != 1:
-            raise ValueError(f"SIMT object export {name!r} needs one native definition, got {candidates}")
-        found_export = True
-        if candidates[0] != name:
-            aliases.append(f"--defsym={name}={candidates[0]}")
-    if not found_export:
-        raise ValueError("SIMT object has no logical exports")
-    return tuple(aliases)
+    variants: dict[str, list[str]] = {}
+    for symbol in sorted(exports):
+        for suffix in (".vector", "_mix_aiv"):
+            if symbol.endswith(suffix):
+                variants.setdefault(symbol.removesuffix(suffix), []).append(symbol)
+                break
+    # An existing logical symbol takes precedence. Leave ambiguous references
+    # for the final device link, which also sees the caller and other helpers.
+    return tuple(
+        f"--defsym={name}={symbols[0]}"
+        for name, symbols in variants.items()
+        if name and name not in exports and len(symbols) == 1
+    )
 
 
 def snapshot_sources(sources: tuple[str, ...]) -> tuple[str, ...]:
@@ -91,8 +76,8 @@ def snapshot_sources(sources: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(Path(source).read_text() for source in sources)
 
 
-def ptoas_flags_for_source(source_text: str) -> tuple[str, ...]:
-    """Resolve one helper's policy; legacy/unmarked sources stay automatic.
+def ptoas_flags_for_source(source_text: str, *, emit_llvm: bool = False) -> tuple[str, ...]:
+    """Select the helper's synchronization policy and output mode.
 
     Reserved markers must be exact standalone comments in the file header.
     Reject misplaced or malformed markers rather than silently compiling a
@@ -111,13 +96,18 @@ def ptoas_flags_for_source(source_text: str) -> tuple[str, ...]:
         raise ValueError("Duplicate pypto.reg_auto_sync header markers")
     # Match the actual PTO entry attribute, not user function names, comments
     # or string attributes that happen to mention the same spelling.
-    code_tokens = re.sub(r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/', "", source_text, flags=re.DOTALL)
-    if markers and re.search(r"(?<![\w.])pto\.simt_entry\b", code_tokens):
+    code_tokens = re.sub(
+        r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/',
+        lambda token: "pto.simt_entry" if token[0] == '"pto.simt_entry"' else " ",
+        source_text,
+        flags=re.DOTALL,
+    )
+    simt = re.search(r"[{,]\s*pto\.simt_entry\s*(?=[},=])", code_tokens)
+    if markers and simt:
         raise ValueError("pypto.reg_auto_sync is not valid for SIMT helpers")
     enabled = not markers or markers[0].endswith(" true")
-    # Keep exactly one effective option even if a caller customizes base flags.
-    base = tuple(flag for flag in PTOAS_FLAGS if not flag.startswith("--enable-vecscope-mem-bar="))
-    return (*base, f"--enable-vecscope-mem-bar={str(enabled).lower()}")
+    mode = LLVM_IR_FLAG if simt or emit_llvm else DEVICE_OBJECT_FLAG
+    return (*PTOAS_FLAGS, mode, f"--enable-vecscope-mem-bar={str(enabled).lower()}")
 
 
 def prepare_llvm_for_bisheng(text: str) -> str:

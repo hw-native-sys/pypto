@@ -17,11 +17,11 @@ GM copy。它独立于 [`SimtLaunchStmt` lowering](05-simt-lowering.md)，
 为原生 copy，并以 `vpto_sources` 附加原生模块。这是 ABI 验证夹具，不代表
 PyPTO SIMT IR 已能 lowering 为可执行代码。
 
-未修改的生产路径完成以下步骤：
+该样例仅使用内建指令，生产环境的 SIMT 编译流程如下。
 
-1. PTOAS 导出 VPTO LLVM，并检查外部符号。
+1. PTOAS 导出供毕昇编译的 VPTO LLVM。
 2. 毕昇将 helper 和 C++ wrapper 编译成设备对象。
-3. 设备链接将 `kernel_entry` 排在首位，随后校验 ELF。
+3. 设备链接器解析外部引用，并将 `kernel_entry` 排在首位。随后由 PyPTO 校验 ELF。
 4. 提取 `.text`、注册 `CoreCallable`，通过持久化 A5 runtime 执行。
 
 探针检查 GM 地址空间、线程/寄存器注解、无 UB 中转的直接 `LDG`/`STG`、SIMT

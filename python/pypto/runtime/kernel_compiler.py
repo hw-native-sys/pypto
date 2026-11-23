@@ -188,9 +188,9 @@ class KernelCompiler:
         SDK toolchains supply fixed target flags. PyPTO owns the invocation,
         output validation and cleanup, including failed compiles and links.
         ``build_dir`` optionally selects the parent for temporary build files.
-        ``vpto_sources`` supplies self-contained A5 AIV device functions. They
-        are compiled to device objects and linked before .text extraction;
-        Host fatobjs and C++ Bridge dependencies are not supported here.
+        ``vpto_sources`` supplies A5 AIV device functions. The device linker
+        resolves references across the caller and helper objects before the
+        persistent loader extracts .text.
         ``text_only=True`` admits only A5 compiler-produced, static zero-stack
         callees. It discards unreachable sections and validates the final ELF
         and compiler stack report before returning bytes. It does not establish
@@ -323,10 +323,10 @@ class KernelCompiler:
         # self-contained PTO modules, with no C/C++ include closure.
         digest = hashlib.sha256()
         metadata = (
-            # Cache identities include the native SIMT object/alias contract.
             "reg-auto-sync-v1",
             repr(effective_flags),
-            "native-simt-object-abi-v1",
+            "native-vf-and-simt-object-abi-v2",
+            _vpto.DEVICE_OBJECT_FLAG,
             repr(_vpto.SIMT_OBJECT_FLAGS),
             "bisheng-memory-attrs-v1",
             check_ptoas_version(ptoas),
@@ -355,56 +355,39 @@ class KernelCompiler:
         ptoas, bisheng = self._vpto_toolchain()
         objects: list[Path] = []
         snapshots = snapshot if snapshot is not None else _vpto.snapshot_sources(sources)
-        for index, (source, source_text) in enumerate(zip(sources, snapshots, strict=True)):
+        for index, (_, source_text) in enumerate(zip(sources, snapshots, strict=True)):
             flags = _vpto.ptoas_flags_for_source(source_text)
             snapshot_path = directory / f"vpto_{index}.pto"
             snapshot_path.write_text(source_text)
-            llvm = directory / f"vpto_{index}.ll"
             obj = directory / f"vpto_{index}.o"
-            self._run([ptoas, str(snapshot_path), *flags, "-o", str(llvm)], llvm, "VPTO lowering")
-            llvm_text = llvm.read_text()
-            # LLVM text export does not link PTOAS's generated Bridge wrappers.
-            # Reject all non-intrinsic declarations instead of producing an
-            # object that only fails later or depends on hidden runtime support.
-            declarations = re.findall(r'^declare\b[^\n]*?@(?:"([^"]+)"|([^\s(]+))', llvm_text, re.MULTILINE)
-            unsupported = [
-                quoted or plain for quoted, plain in declarations if not (quoted or plain).startswith("llvm.")
-            ]
-            if unsupported:
-                raise ValueError(
-                    f"VPTO helper {source} is not self-contained: {', '.join(unsupported)}. "
-                    "Bridge operations and external helper dependencies are not supported."
-                )
-            if re.search(r"^define\s+[^@\n]*\bsimt_entry\b", llvm_text, re.MULTILINE) and re.search(
-                r"\basm\s", llvm_text
-            ):
-                # Preserve the LLVM admission checks above, then let PTOAS own
-                # native ABI lowering and VF_SIMT size validation/repair. A
-                # relocatable link adds logical-name aliases without rewriting
-                # instruction bytes. The final linked image is still validated.
-                native = directory / f"vpto_{index}.native.o"
-                object_flags = [flag for flag in flags if flag != "--emit-vpto-llvm-ir"]
-                native_data = self._run(
-                    [ptoas, str(snapshot_path), *object_flags, *_vpto.SIMT_OBJECT_FLAGS, "-o", str(native)],
-                    native,
-                    "SIMT native object compilation",
-                    env={**os.environ, "ASCEND_HOME_PATH": str(Path(bisheng).parent.parent)},
-                )
-                aliases = _vpto.simt_object_aliases(llvm_text, native_data)
-                assert self.sdk.ccec is not None
-                self._run(
-                    [self.sdk.ccec.linker_path, "-r", *aliases, str(native), "-o", str(obj)],
-                    obj,
-                    "SIMT logical export linking",
-                )
-                objects.append(obj)
-                continue
-            llvm.write_text(_vpto.prepare_llvm_for_bisheng(llvm_text))
-            # PTOAS owns VF dependency analysis, including ordering through SSA
-            # values. Do not re-infer synchronization from emitted LLVM text.
-            command = [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)]
-            self._run(command, obj, "VPTO device compilation")
             objects.append(obj)
+            if _vpto.LLVM_IR_FLAG in flags:
+                llvm = directory / f"vpto_{index}.ll"
+                self._run([ptoas, str(snapshot_path), *flags, "-o", str(llvm)], llvm, "VPTO lowering")
+                llvm_text = llvm.read_text()
+                if not re.search(r"\basm\s", llvm_text):
+                    llvm.write_text(_vpto.prepare_llvm_for_bisheng(llvm_text))
+                    command = [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)]
+                    self._run(command, obj, "VPTO device compilation")
+                    continue
+                # PTOAS repairs VF_SIMT launch sizes when compiling inline assembly.
+                flags = tuple(flag for flag in flags if flag != _vpto.LLVM_IR_FLAG)
+                flags = (*flags, _vpto.DEVICE_OBJECT_FLAG, *_vpto.SIMT_OBJECT_FLAGS)
+
+            native = directory / f"vpto_{index}.native.o"
+            native_data = self._run(
+                [ptoas, str(snapshot_path), *flags, "-o", str(native)],
+                native,
+                "VPTO native object compilation",
+                env={**os.environ, "ASCEND_HOME_PATH": str(Path(bisheng).parent.parent)},
+            )
+            aliases = _vpto.device_object_aliases(native_data)
+            assert self.sdk.ccec is not None
+            self._run(
+                [self.sdk.ccec.linker_path, "-r", *aliases, str(native), "-o", str(obj)],
+                obj,
+                "VPTO logical export linking",
+            )
         return objects
 
     def compile_orchestration(
