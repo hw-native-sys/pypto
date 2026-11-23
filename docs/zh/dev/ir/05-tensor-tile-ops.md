@@ -171,6 +171,19 @@ implicit view 一致时会折叠为 `nullopt` —— 这与
 PyPTO 与 DSA-RP 规划器会落实该约束；如果显式 MemRef 绑定或手工构造的 IR 仍留下
 同地址 move，baked-address PTO codegen 会直接报错。
 
+### Linx Tile 存储与操作数角色
+
+`MemorySpace.Local` 表示一个 PE 私有的 CELL 存储，`MemorySpace.Shared` 表示核内共享的描述符及其数据。多个消费者可以读取同一次发布产生的 SSA 值。
+
+| IR 操作 | 输入 | 结果 |
+| --- | --- | --- |
+| `tile.load(..., target_memory=MemorySpace.Local)` | GM tensor 及窗口 | 带所请求有效区的 PE 私有 Tile |
+| `tile.add(a, b)` | dtype、物理 shape、有效区及布局相同的两个 Local Tile | 具有相同几何信息的新 Local Tile |
+| `tile.publish_shared(local)` | 完整的 Local Tile | 已发布的 Shared SSA 值 |
+| `tile.broadcast_shared(shared)` | 已发布的 Shared 值 | 保留发布时布局和有效区的新 Local Tile |
+
+这两个搬运操作表示整 Tile 发布与广播，SSA 边标识消费者读取的是哪一次发布。类型检查允许内联辅助函数传递 Shared 句柄，并拒绝在非内联函数边界传递这类值，包括 tuple 中的句柄。此阶段无需指定槽位、部分更新掩码或物理地址。操作数角色属于每个使用位置。例如，`ir.get_tile_operand_role("tile.matmul", 0)` 返回 `TileOperandRole.Left`，输入 1 的角色为 `Right`。`tile.add` 两个输入的角色均为 `Vec`。
+
 ### 共享存储与结果视图
 
 在 PTOAS 内存规划下，shape 或 layout 不同的变量可以共享一个 MemRef。每个变量

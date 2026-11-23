@@ -205,7 +205,7 @@ def load(
             narrows the tile, but cannot widen it past what the source has. Every
             element must be an integer scalar — one extent per dimension, never a
             nested tuple.
-        target_memory: Target memory space (MemorySpace.Vec or MemorySpace.Mat).
+        target_memory: Target memory space (Vec or Mat on Ascend, Local on Linx).
             ``None`` (the default) leaves an ordinary load unset so
             InferTileMemorySpace places the tile from consumer demand. An
             MX-layout load instead defaults to MemorySpace.Mat, the only memory
@@ -242,11 +242,15 @@ def load(
             f"(omitting target_memory selects Mat automatically); got {target_memory}"
         )
 
-    # Validate target_memory: only Vec and Mat are allowed for load. ``None``
-    # leaves the space unset so InferTileMemorySpace places the tile.
-    if target_memory is not None and target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
+    # Leave the space unset for placement inference when no target is requested.
+    if target_memory is not None and target_memory not in (
+        MemorySpace.Vec,
+        MemorySpace.Mat,
+        MemorySpace.Local,
+    ):
         raise ValueError(
-            f"target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
+            "target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat on Ascend, "
+            f"or MemorySpace.Local on Linx, got {target_memory}"
         )
 
     actual_span = _get_span_or_capture(span)
@@ -461,6 +465,16 @@ def transpose_view(
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.transpose_view", [tile], {}, actual_span)
+
+
+def publish_shared(tile: Expr, span: Span | None = None) -> Call:
+    """Publish the complete PE-local tile and its valid region as a Shared SSA value."""
+    return _ir_core.create_op_call("tile.publish_shared", [tile], {}, _get_span_or_capture(span))
+
+
+def broadcast_shared(tile: Expr, span: Span | None = None) -> Call:
+    """Copy a published Shared tile and its valid region into fresh PE-local storage."""
+    return _ir_core.create_op_call("tile.broadcast_shared", [tile], {}, _get_span_or_capture(span))
 
 
 def move(

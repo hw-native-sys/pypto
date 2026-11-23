@@ -44,6 +44,8 @@ enum class MemorySpace {
   ScalarLocal = 7,  ///< On-core scalar register file / C stack (for ArrayType)
   LeftScale = 8,    ///< L0A-side MX block-scale buffer (A5)
   RightScale = 9,   ///< L0B-side MX block-scale buffer (A5)
+  Local = 10,       ///< PE-private CELL tile storage (Linx)
+  Shared = 11,      ///< Core-shared tile descriptor and payload (Linx)
 };
 
 /**

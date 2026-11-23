@@ -146,6 +146,7 @@ from ._tile_memory import _ir_ops as _ir_ops
 from ._tile_memory import alloc as alloc
 from ._tile_memory import arange as arange
 from ._tile_memory import assemble as assemble
+from ._tile_memory import broadcast_shared as broadcast_shared
 from ._tile_memory import ci as ci
 from ._tile_memory import concat as concat
 from ._tile_memory import create as create
@@ -158,6 +159,7 @@ from ._tile_memory import full as full
 from ._tile_memory import gather_row as gather_row
 from ._tile_memory import load as load
 from ._tile_memory import move as move
+from ._tile_memory import publish_shared as publish_shared
 from ._tile_memory import random as random
 from ._tile_memory import read as read
 from ._tile_memory import reinterpret_view as reinterpret_view
@@ -218,6 +220,8 @@ __all__ = [
     "extract",
     "scatter_update",
     "concat",
+    "publish_shared",
+    "broadcast_shared",
     "move",
     "aiv_shard",
     "aic_gather",

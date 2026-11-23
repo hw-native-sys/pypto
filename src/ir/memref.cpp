@@ -111,6 +111,10 @@ std::string MemorySpaceToString(MemorySpace space) {
       return "LeftScale";
     case MemorySpace::RightScale:
       return "RightScale";
+    case MemorySpace::Local:
+      return "Local";
+    case MemorySpace::Shared:
+      return "Shared";
     case MemorySpace::ScalarLocal:
       return "ScalarLocal";
     default:
@@ -119,6 +123,8 @@ std::string MemorySpaceToString(MemorySpace space) {
 }
 
 MemorySpace StringToMemorySpace(const std::string& str) {
+  if (str == "Local") return MemorySpace::Local;
+  if (str == "Shared") return MemorySpace::Shared;
   if (str == "DDR") return MemorySpace::DDR;
   if (str == "Vec") return MemorySpace::Vec;
   if (str == "Mat") return MemorySpace::Mat;

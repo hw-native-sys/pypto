@@ -187,6 +187,19 @@ must resolve to distinct addresses. The PyPTO and DSA-RP planners enforce this
 constraint, and baked-address PTO codegen reports an error if an explicit
 MemRef binding or hand-built IR still presents a same-address move.
 
+### Linx tile storage and operand roles
+
+`MemorySpace.Local` places a tile in one PE’s CELL storage. `MemorySpace.Shared` names a core-shared descriptor and payload. Multiple consumers can read the same published SSA value.
+
+| IR operation | Inputs | Result |
+| --- | --- | --- |
+| `tile.load(..., target_memory=MemorySpace.Local)` | GM tensor and window | PE-local tile with the requested valid region |
+| `tile.add(a, b)` | Two Local tiles with matching dtype, shape, valid region and layout | Fresh Local tile with the same geometry |
+| `tile.publish_shared(local)` | Complete Local tile | Published Shared SSA value |
+| `tile.broadcast_shared(shared)` | Published Shared value | Fresh Local tile with the published layout and valid region |
+
+The two transfers describe full-tile publication and broadcast. Their SSA edge identifies which publication a consumer reads. The type checker allows Shared handles in inline helper signatures and rejects them at non-inline call boundaries, including inside tuples. They carry no explicit slot, partial-update mask, or physical address. Tile operand roles belong to each use. For example, `ir.get_tile_operand_role("tile.matmul", 0)` returns `TileOperandRole.Left` and input 1 has role `Right`. Both inputs of `tile.add` have role `Vec`.
+
 ### Shared storage and result views
 
 Under PTOAS memory planning, variables with different shapes or layouts can

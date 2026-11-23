@@ -1028,6 +1028,18 @@ class ForKind(enum.Enum):
     persists as a marker through ``CanonicalizeIOOrder`` (which demotes it to
     ``Sequential`` on exit) and must not survive past that pass."""
 
+class TileOperandRole(enum.Enum):
+    """Per-use tile role independent of storage."""
+
+    Vec = ...
+    Left = ...
+    Right = ...
+    Acc = ...
+
+def get_tile_operand_role(op_name: str, index: int) -> TileOperandRole | None:
+    """Return the declared tile role at an input, or None for an unannotated use."""
+    ...
+
 class MemorySpace(enum.Enum):
     """Memory space enumeration."""
 
@@ -1053,6 +1065,12 @@ class MemorySpace(enum.Enum):
     """Bias buffer."""
     LeftScale = ...
     """L0A-side MX block-scale buffer (A5)."""
+    Local = ...
+    """Linx PE-private CELL tile storage."""
+
+    Shared = ...
+    """Linx core-shared tile storage."""
+
     RightScale = ...
     """L0B-side MX block-scale buffer (A5)."""
 

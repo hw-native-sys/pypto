@@ -66,6 +66,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "TENSOR_PADDING_MISMATCH";
     case ErrorType::DISTRIBUTED_WINDOW_IDENTITY_MISMATCH:
       return "DISTRIBUTED_WINDOW_IDENTITY_MISMATCH";
+    case ErrorType::TILE_STORAGE_MISMATCH:
+      return "TILE_STORAGE_MISMATCH";
     case ErrorType::TILE_VIEW_MISMATCH:
       return "TILE_VIEW_MISMATCH";
     case ErrorType::BUFFER_DESCRIPTOR_MISMATCH:
@@ -88,6 +90,27 @@ enum class NzDispatchArg {
   kWindow,         ///< A slice cutting inside the last two axes
 };
 
+// Local placement can still be inferred. A Shared descriptor is a distinct
+// handle even when the other side has no placement yet.
+bool HasIncompatibleLinxStorage(const TypePtr& lhs, const TypePtr& rhs) {
+  const auto left_tile = As<TileType>(lhs);
+  const auto right_tile = As<TileType>(rhs);
+  if (left_tile || right_tile) {
+    const auto left = left_tile ? left_tile->memory_space_ : std::nullopt;
+    const auto right = right_tile ? right_tile->memory_space_ : std::nullopt;
+    if (left == right) return false;
+    if (left == MemorySpace::Shared || right == MemorySpace::Shared) return true;
+    return left && right && (left == MemorySpace::Local || right == MemorySpace::Local);
+  }
+  const auto left_tuple = As<TupleType>(lhs);
+  const auto right_tuple = As<TupleType>(rhs);
+  if (!left_tuple || !right_tuple || left_tuple->types_.size() != right_tuple->types_.size()) return false;
+  for (size_t i = 0; i < left_tuple->types_.size(); ++i) {
+    if (HasIncompatibleLinxStorage(left_tuple->types_[i], right_tuple->types_[i])) return true;
+  }
+  return false;
+}
+
 /**
  * @brief Helper visitor class for type checking
  *
@@ -102,6 +125,7 @@ class TypeChecker : public IRVisitor {
   void VisitExpr(const ExprPtr& expr) override;
   void VisitExpr_(const CallPtr& op) override;
   void VisitExpr_(const SubmitPtr& op) override;
+  void VisitStmt_(const ReturnStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
@@ -167,7 +191,8 @@ class TypeChecker : public IRVisitor {
   /**
    * @brief Recursively validate explicit valid shapes carried by a type
    */
-  void ValidateTypeValidShape(const TypePtr& type, const std::string& context, const Span& span);
+  void ValidateValueType(const TypePtr& type, const std::string& context, const Span& span,
+                         bool non_inline_signature = false);
 };
 
 // TypeChecker implementation
@@ -187,15 +212,15 @@ void TypeChecker::VisitFunction(const FunctionPtr& func) {
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     if (!param) continue;
-    ValidateTypeValidShape(
+    ValidateValueType(
         param->GetType(),
         "Function '" + func->name_ + "' parameter[" + std::to_string(i) + "] '" + param->name_hint_ + "'",
-        param->span_);
+        param->span_, func->func_type_ != FunctionType::Inline);
   }
   for (size_t i = 0; i < func->return_types_.size(); ++i) {
-    ValidateTypeValidShape(func->return_types_[i],
-                           "Function '" + func->name_ + "' return type[" + std::to_string(i) + "]",
-                           func->span_);
+    ValidateValueType(func->return_types_[i],
+                      "Function '" + func->name_ + "' return type[" + std::to_string(i) + "]", func->span_,
+                      func->func_type_ != FunctionType::Inline);
   }
   if (func->body_) {
     VisitStmt(func->body_);
@@ -213,7 +238,7 @@ void TypeChecker::VisitExpr(const ExprPtr& expr) {
   } else if (As<Submit>(expr)) {
     context = "Submit result";
   }
-  ValidateTypeValidShape(expr->GetType(), context, expr->span_);
+  ValidateValueType(expr->GetType(), context, expr->span_);
   IRVisitor::VisitExpr(expr);
 }
 
@@ -392,6 +417,12 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
   for (size_t i = 0; i < n; ++i) {
     const auto& param = callee->params_[i];
     if (!param || !args[i]) continue;
+    if (HasIncompatibleLinxStorage(args[i]->GetType(), param->GetType())) {
+      RecordError(
+          typecheck::ErrorType::TILE_STORAGE_MISMATCH,
+          "Tile storage mismatch for argument " + std::to_string(i) + " of call to '" + callee->name_ + "'",
+          span);
+    }
     auto want = TensorLayoutOf(param->GetType());
     auto got = TensorLayoutOf(args[i]->GetType());
     if (!want || !got || *want == *got) continue;
@@ -496,6 +527,18 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
   }
 }
 
+void TypeChecker::VisitStmt_(const ReturnStmtPtr& op) {
+  if (op && func_ && op->value_.size() == func_->return_types_.size()) {
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      if (HasIncompatibleLinxStorage(op->value_[i]->GetType(), func_->return_types_[i])) {
+        RecordError(typecheck::ErrorType::TILE_STORAGE_MISMATCH,
+                    "Tile storage mismatch in return value of '" + func_->name_ + "'", op->span_);
+      }
+    }
+  }
+  IRVisitor::VisitStmt_(op);
+}
+
 void TypeChecker::VisitExpr_(const CallPtr& op) {
   if (op) {
     CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
@@ -512,13 +555,14 @@ void TypeChecker::VisitExpr_(const SubmitPtr& op) {
   IRVisitor::VisitExpr_(op);
 }
 
-void TypeChecker::ValidateTypeValidShape(const TypePtr& type, const std::string& context, const Span& span) {
+void TypeChecker::ValidateValueType(const TypePtr& type, const std::string& context, const Span& span,
+                                    bool non_inline_signature) {
   if (!type) return;
 
   if (auto tuple_type = As<TupleType>(type)) {
     for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
-      ValidateTypeValidShape(tuple_type->types_[i], context + " TupleType element[" + std::to_string(i) + "]",
-                             span);
+      ValidateValueType(tuple_type->types_[i], context + " TupleType element[" + std::to_string(i) + "]",
+                        span, non_inline_signature);
     }
     return;
   }
@@ -536,6 +580,10 @@ void TypeChecker::ValidateTypeValidShape(const TypePtr& type, const std::string&
     }
     physical_shape = &tensor_type->shape_;
   } else if (auto tile_type = As<TileType>(type)) {
+    if (non_inline_signature && tile_type->memory_space_ == MemorySpace::Shared) {
+      RecordError(typecheck::ErrorType::TILE_STORAGE_MISMATCH,
+                  context + " carries a Linx Shared handle across a non-inline function boundary", span);
+    }
     if (tile_type->tile_view_) {
       valid_shape = &tile_type->tile_view_->valid_shape;
     }
@@ -688,6 +736,12 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
   auto tile1 = As<TileType>(type1);
   auto tile2 = As<TileType>(type2);
   if (!tile1 || !tile2) return;
+  if (HasIncompatibleLinxStorage(tile1, tile2)) {
+    RecordError(typecheck::ErrorType::TILE_STORAGE_MISMATCH,
+                "Tile storage mismatch in " + context + ": " + desc1 + " and " + desc2 +
+                    " have incompatible tile storage classes",
+                span);
+  }
   const auto view1 = tile_view_semantics::GetEffectiveTileView(*tile1);
   const auto view2 = tile_view_semantics::GetEffectiveTileView(*tile2);
   const auto& valid1 = view1.valid_shape.empty() ? tile1->shape_ : view1.valid_shape;

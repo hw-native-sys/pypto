@@ -800,6 +800,8 @@ void BindIR(nb::module_& m) {
 
   // MemorySpace enum
   nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
+      .value("Local", MemorySpace::Local, "Linx PE-private CELL tile storage")
+      .value("Shared", MemorySpace::Shared, "Linx core-shared tile storage")
       .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")
       .value("Vec", MemorySpace::Vec, "Vector/unified buffer (on-chip)")
       .value("Mat", MemorySpace::Mat, "Matrix/L1 buffer")
@@ -811,6 +813,19 @@ void BindIR(nb::module_& m) {
       .value("RightScale", MemorySpace::RightScale, "L0B-side MX block-scale buffer (A5)")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
+
+  nb::enum_<TileOperandRole>(ir, "TileOperandRole", "Per-use tile role, independent of storage")
+      .value("Vec", TileOperandRole::Vec)
+      .value("Left", TileOperandRole::Left)
+      .value("Right", TileOperandRole::Right)
+      .value("Acc", TileOperandRole::Acc);
+
+  ir.def(
+      "get_tile_operand_role",
+      [](const std::string& op_name, size_t index) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetTileOperandRole(index);
+      },
+      nb::arg("op_name"), nb::arg("index"), "Return the tile role declared for an operator input");
 
   // Short alias: ir.Mem = ir.MemorySpace
   ir.attr("Mem") = ir.attr("MemorySpace");

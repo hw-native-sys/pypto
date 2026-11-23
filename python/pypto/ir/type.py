@@ -89,6 +89,8 @@ _MEMREF_NAME_PREFIX_TO_SPACE = {
     "mem_mat_": MemorySpace.Mat,
     "mem_leftscale_": MemorySpace.LeftScale,
     "mem_rightscale_": MemorySpace.RightScale,
+    "mem_local_": MemorySpace.Local,
+    "mem_shared_": MemorySpace.Shared,
     "mem_left_": MemorySpace.Left,
     "mem_right_": MemorySpace.Right,
     "mem_acc_": MemorySpace.Acc,
