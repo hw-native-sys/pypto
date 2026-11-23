@@ -1613,38 +1613,48 @@ class SliceInputStridesOptimizer {
           const bool conflict = pitch_conflict[dependent] || pitch_conflict[index];
           const bool packed_nd = child.packed_nd && constraints_[index].packed_nd &&
                                  !(child.uses_inherited_pitch && pitch_conflict[index]);
+          const bool mixed_layouts = child.mixed_layouts || constraints_[index].mixed_layouts;
           if (sliced == child.sliced && packed_nd == child.packed_nd &&
-              conflict == pitch_conflict[dependent]) {
+              conflict == pitch_conflict[dependent] && mixed_layouts == child.mixed_layouts) {
             continue;
           }
           child.sliced = sliced;
           child.packed_nd = packed_nd;
+          child.mixed_layouts = mixed_layouts;
           pitch_conflict[dependent] = conflict;
           pending.push_back(dependent);
         }
       }
-      for (const auto& root : external_roots_) {
+      std::vector<size_t> descriptor_roots;
+      std::vector<size_t> packed_roots;
+      for (const auto& root : aiv_roots_) {
         const auto& binding = aiv_bindings_.at(root.function->name_).at(root.param);
-        const bool runtime_strides =
-            UsesRuntimeDescriptor(*root.function, root.param) ||
-            UsesPackedRuntimeStrides(*root.function, root.param, binding, pitch_conflict);
-        auto& roots = runtime_strides ? descriptor_roots_ : constraint_roots_;
-        roots.push_back(root.constraint);
+        if (UsesRuntimeDescriptor(*root.function, root.param, binding) ||
+            UsesPackedRuntimeStrides(*root.function, root.param, binding, pitch_conflict)) {
+          descriptor_roots.push_back(root.constraint);
+        } else if (binding.packed_nd && !binding.sliced && binding.constraint &&
+                   constraints_[*binding.constraint].packed_nd && !constraints_[*binding.constraint].sliced &&
+                   root.accepts_packed_shape) {
+          packed_roots.push_back(root.constraint);
+        } else {
+          constraint_roots_.push_back(root.constraint);
+        }
       }
       // Loop backedges are known only after visiting their bodies. Validate the
       // constraints reachable from AIV operands once, including operands used
       // inside the loop. Indexed edges permit cycles without a fixed-point walk.
       // Extern operands can keep different pitches after a join, but a
       // zero-copy reshape still needs packed input on every incoming path.
-      ValidateConstraints(descriptor_roots_, false);
-      ValidateConstraints(std::move(constraint_roots_), true);
+      ValidateConstraints(std::move(descriptor_roots), StrideRequirement::Runtime);
+      ValidateConstraints(std::move(packed_roots), StrideRequirement::Packed);
+      ValidateConstraints(std::move(constraint_roots_), StrideRequirement::Physical);
 
       for (const auto& [name, params] : aiv_bindings_) {
         for (const auto& [index, binding] : params) {
           if (!binding.sliced && (!binding.constraint || !constraints_[*binding.constraint].sliced)) continue;
           const auto& function = *functions_.at(name);
           if (UsesPackedRuntimeStrides(function, index, binding, pitch_conflict)) continue;
-          if (UsesRuntimeDescriptor(function, index)) {
+          if (UsesRuntimeDescriptor(function, index, binding)) {
             if (binding.consistent && !binding.strides.empty() &&
                 (!binding.constraint || !pitch_conflict[*binding.constraint]) &&
                 std::all_of(binding.strides.begin(), binding.strides.end(),
@@ -1817,11 +1827,16 @@ class SliceInputStridesOptimizer {
       std::vector<size_t> parents;
       bool uses_inherited_pitch = false;
       bool requires_packed_nd = false;
+      bool mixed_layouts = false;  // A pitch-only descriptor cannot reconcile different layouts.
+      // Call sites agree on the graph formal's concrete extents and allow packed ND.
+      // Only a consumer of the complete packed tensor may use that equivalence.
+      bool packed_graph_formal = false;
     };
-    struct ExternalRoot {
+    struct AivRoot {
       const Function* function;
       size_t param;
       size_t constraint;
+      bool accepts_packed_shape;
     };
 
     // An opaque kernel receives a runtime descriptor. Its row pitch can vary
@@ -1862,8 +1877,30 @@ class SliceInputStridesOptimizer {
       Bindings bindings;
     };
 
-    static bool UsesRuntimeDescriptor(const Function& func, size_t index) {
-      if (!func.HasAttr(kAttrExternalSource)) return false;
+    // Symbolic extents can acquire different values on each call. Concrete
+    // extents and explicit layout contracts still describe the callee's storage.
+    static bool AcceptsPackedShape(const TypePtr& formal_type, const TypePtr& actual_type) {
+      const auto formal = AsTensorTypeLike(formal_type);
+      const auto actual = AsTensorTypeLike(actual_type);
+      if (!formal || !actual || formal->shape_.size() != actual->shape_.size() ||
+          (formal->tensor_view_ &&
+           (formal->tensor_view_->layout != TensorLayout::ND || !formal->tensor_view_->stride.empty()))) {
+        return false;
+      }
+      for (size_t axis = 0; axis < formal->shape_.size(); ++axis) {
+        if (As<ConstInt>(formal->shape_[axis]) &&
+            !AreExprsEqual(formal->shape_[axis], actual->shape_[axis])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    bool UsesRuntimeDescriptor(const Function& func, size_t index, const Storage& binding) const {
+      if (!func.HasAttr(kAttrExternalSource) ||
+          (binding.constraint && constraints_[*binding.constraint].mixed_layouts)) {
+        return false;
+      }
       auto tensor = AsTensorTypeLike(func.params_[index]->GetType());
       // With dynamic inner extents, packed runtime pitch also depends on the
       // operand's runtime shape. Those operands need the packed-storage proof.
@@ -1872,7 +1909,9 @@ class SliceInputStridesOptimizer {
                          [](const ExprPtr& extent) { return As<ConstInt>(extent) != nullptr; });
     }
 
-    void ValidateConstraints(std::vector<size_t> pending, bool require_consensus) {
+    enum class StrideRequirement { Runtime, Packed, Physical };
+
+    void ValidateConstraints(std::vector<size_t> pending, StrideRequirement requirement) {
       if (pending.empty()) return;
       std::vector<bool> visited(constraints_.size(), false);
       while (!pending.empty()) {
@@ -1881,12 +1920,17 @@ class SliceInputStridesOptimizer {
         if (visited[index]) continue;
         visited[index] = true;
         const auto& constraint = constraints_[index];
-        if (!require_consensus && constraint.requires_packed_nd) {
+        if (requirement != StrideRequirement::Physical && constraint.requires_packed_nd) {
           constraint_roots_.push_back(index);
           continue;
         }
-        if (require_consensus) {
-          CHECK_SPAN(constraint.consistent, *constraint.span)
+        if (requirement != StrideRequirement::Runtime) {
+          // A packed graph formal describes each caller in its own shape
+          // variables. A sliced consumer still needs the actual physical pitch.
+          const bool packed_formal = requirement == StrideRequirement::Packed &&
+                                     constraint.packed_graph_formal && constraint.packed_nd &&
+                                     !constraint.sliced;
+          CHECK_SPAN(constraint.consistent || packed_formal, *constraint.span)
               << "AIV tensor argument requires consistent physical strides across loop carries and branches, "
                  "and graph calls; tensor.reshape requires packed ND storage, as does shaped ND tensor.view; "
                  "pass the full parent tensor and use parent-relative indices instead";
@@ -1953,6 +1997,7 @@ class SliceInputStridesOptimizer {
       auto& constraint = constraints_[index];
       constraint.consistent &= yielded.consistent && initial.layout == yielded.layout &&
                                AreExprVectorsEqual(initial.strides, yielded.strides);
+      constraint.mixed_layouts |= initial.layout != yielded.layout;
       constraint.sliced |= initial.sliced || yielded.sliced;
       constraint.packed_nd &= initial.packed_nd && yielded.packed_nd;
       if (yielded.constraint) constraint.parents.push_back(*yielded.constraint);
@@ -2174,7 +2219,7 @@ class SliceInputStridesOptimizer {
         }
         // Codegen clamps shapes to the source at runtime. A shifted or ragged
         // inner axis could therefore shrink while still inheriting the original
-        // pitch. Only admit slabs retaining every inner extent at offset zero.
+        // pitch. Multi-row slabs must retain every inner extent at offset zero.
         const auto result = AsTensorTypeLike(expr->GetType());
         const auto offsets = ExtractTupleElements(call->args_[2], shape.size());
         bool seen_leading = false;
@@ -2188,11 +2233,22 @@ class SliceInputStridesOptimizer {
           const auto offset = As<ConstInt>(offsets[axis]);
           full_inner_axes = offset && offset->value_ == 0 && AreExprsEqual(shape[axis], source->shape_[axis]);
         }
-        info.packed_nd =
-            info.packed_nd && full_inner_axes && result && info.layout == TensorLayout::ND &&
+        // A one-row window has no transition between rows. Cropping its
+        // contiguous inner axis therefore preserves packed addressing even
+        // when the parent row pitch differs from the window's dynamic width.
+        const bool single_row = result && result->shape_.size() == 2 && info.strides.size() == 2 &&
+                                IsConstValue(result->shape_[0], 1) && IsConstValue(info.strides[1], 1);
+        const bool full_slab =
+            full_inner_axes && result &&
             AreExprVectorsEqual(info.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
                                                   result->shape_, TensorLayout::ND));
-        RecordInheritedPitch(info, call->span_);
+        info.packed_nd &= info.layout == TensorLayout::ND && (single_row || full_slab);
+        // Every packed ND parent has unit pitch on its innermost axis, even
+        // when another caller supplies a different outer pitch.
+        const auto inner_axis = static_cast<int64_t>(shape.size()) - 1;
+        if (!single_row || std::find(dropped.begin(), dropped.end(), inner_axis) != dropped.end()) {
+          RecordInheritedPitch(info, call->span_);
+        }
       } else {
         if (auto call = As<Call>(expr)) {
           if (IsTensorMetadataView(call)) {
@@ -2282,6 +2338,11 @@ class SliceInputStridesOptimizer {
           } else {
             binding->second = MergeStorage(binding->second, *value, span, true);
           }
+          if (callee->func_type_ == FunctionType::Graph && binding->second.constraint) {
+            const bool matches = i < supplied && AcceptsPackedShape(params[i]->GetType(), args[i]->GetType());
+            auto& constraint = constraints_[*binding->second.constraint];
+            constraint.packed_graph_formal = matches && (inserted || constraint.packed_graph_formal);
+          }
         }
         AnalyzeFunction(callee);
         return;
@@ -2299,11 +2360,8 @@ class SliceInputStridesOptimizer {
         if (!value) continue;
         auto info = *value;
         if (info.constraint) {
-          if (callee->HasAttr(kAttrExternalSource)) {
-            external_roots_.push_back({callee.get(), i, *info.constraint});
-          } else {
-            constraint_roots_.push_back(*info.constraint);
-          }
+          aiv_roots_.push_back(
+              {callee.get(), i, *info.constraint, AcceptsPackedShape(params[i]->GetType(), tensor)});
         }
         info.span = &span;
         auto [binding, inserted] = aiv_bindings_[op->name_].emplace(i, info);
@@ -2333,9 +2391,8 @@ class SliceInputStridesOptimizer {
     std::unordered_map<const Function*, std::vector<std::optional<size_t>>> return_params_;
     std::vector<std::unique_ptr<LazyTuple>> lazy_tuples_;
     std::vector<StrideConstraint> constraints_;
-    std::vector<ExternalRoot> external_roots_;
+    std::vector<AivRoot> aiv_roots_;
     std::vector<size_t> constraint_roots_;
-    std::vector<size_t> descriptor_roots_;
   };
 
   InputShapeMap Analyze(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
