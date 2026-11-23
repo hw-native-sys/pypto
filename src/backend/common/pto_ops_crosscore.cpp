@@ -272,7 +272,7 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
     }
     if (op->HasKwarg("acc_push_epilogue")) {
       const auto e = op->GetKwarg<ir::AccPushEpilogue>("acc_push_epilogue");
-      CHECK_SPAN(ir::ValidateAccPushEpilogue(e).empty(), op->span_) << ir::ValidateAccPushEpilogue(e);
+      INTERNAL_CHECK_SPAN(ir::ValidateAccPushEpilogue(e).empty(), op->span_) << "Invalid Fixpipe epilogue";
       oss << ", acc_push_epilogue = #pto.acc_push_epilogue<layout = " << e.at("layout")
           << ", quant = " << e.at("quant") << ", relu = " << e.at("relu") << ">";
     }
