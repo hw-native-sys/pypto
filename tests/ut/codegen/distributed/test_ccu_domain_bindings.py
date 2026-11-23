@@ -632,3 +632,7 @@ def test_registration_cannot_name_another_consuming_callable(ascend_backend):
     # registration: its callable-local ID may differ after code generation.
     with pytest.raises((ValueError, RuntimeError, Error), match="match the required callable"):
         passes.materialize_comm_domain_scopes()(ChangeCallable().visit_program(program))
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

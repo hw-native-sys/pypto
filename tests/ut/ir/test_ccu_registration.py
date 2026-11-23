@@ -39,3 +39,7 @@ def test_registration_op_is_internal_only():
         ir.create_op_call(
             "pld.system.register_ccu", [allocation], {"callee": "kernel", "chip_callee": "chip"}, span
         )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

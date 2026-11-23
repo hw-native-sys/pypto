@@ -105,3 +105,7 @@ def test_ccu_bf16_allgather(test_config, device_ids, size, prepared):
         if "CCU domain binding ABI v2 is codegen-only" not in str(exc):
             raise
         pytest.xfail(str(exc))
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
