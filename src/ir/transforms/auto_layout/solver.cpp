@@ -77,10 +77,37 @@ bool BetterGain(LayoutSearchScore lhs, LayoutSearchScore rhs, double tolerance =
 
 bool HasMultipleRepresentations(uint64_t mask) { return (mask & (mask - 1)) != 0; }
 
-int64_t FactorViolations(const IndexedProblem::ValueInfo& value, uint16_t source, uint64_t mask) {
-  const int64_t multiple = value.forbid_multi_rep && HasMultipleRepresentations(mask);
-  if (value.unsupported_target_masks.empty()) return multiple;
-  return multiple + __builtin_popcountll(mask & value.unsupported_target_masks[source]);
+void AddDemand(LayoutDemands& demands, const IndexedProblem::OpConfigUse& use) {
+  demands.layouts |= use.demand_mask;
+  if (use.incompatible_invocations) demands.incompatible |= use.demand_mask;
+}
+
+void SetDemandPresence(uint64_t& mask, uint16_t layout, int count) {
+  const uint64_t bit = uint64_t{1} << layout;
+  if (count > 0) {
+    mask |= bit;
+  } else {
+    mask &= ~bit;
+  }
+}
+
+uint64_t IncompatibleConversions(uint16_t source, LayoutDemands demands) {
+  return demands.incompatible & ~(uint64_t{1} << source);
+}
+
+int64_t FactorViolations(const IndexedProblem::ValueInfo& value, uint16_t source, LayoutDemands demands) {
+  const int64_t multiple = value.forbid_multi_rep && HasMultipleRepresentations(demands.layouts);
+  uint64_t unsupported = IncompatibleConversions(source, demands);
+  if (!value.unsupported_target_masks.empty()) {
+    unsupported |= demands.layouts & value.unsupported_target_masks[source];
+  }
+  return multiple + __builtin_popcountll(unsupported);
+}
+
+double FactorConversionCost(const IndexedProblem::ValueInfo& value, uint16_t source, uint16_t target,
+                            uint64_t incompatible, double penalty) {
+  if (((incompatible >> target) & 1) != 0 && source != target) return penalty;
+  return value.conv_costs[static_cast<size_t>(source) * value.layouts.size() + target];
 }
 
 /// Compact bitset with an inline 64-bit fast path for graphs with <= 64 vertices.
@@ -181,7 +208,12 @@ struct MinFillResult {
   std::vector<std::optional<size_t>> parents;
   int64_t treewidth = 0;
   int64_t max_bag_states = 0;
-  int64_t total_states = 0;
+  // An empty count represents overflow, which cannot fit any evaluation budget.
+  std::optional<int64_t> total_states = 0;
+
+  [[nodiscard]] bool FitsEvaluationBudget(int64_t remaining) const {
+    return total_states && *total_states <= remaining;
+  }
 };
 
 struct MinFillKey {
@@ -320,10 +352,11 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
   const size_t num_vals = problem.NumValues();
   std::vector<uint16_t> choices(num_ops, 0);
   std::vector<uint16_t> produced(num_vals);
-  std::vector<uint64_t> requested(num_vals, 0);
+  std::vector<LayoutDemands> requested(num_vals);
   for (ValueId v = 0; v < num_vals; ++v) {
     produced[v] = problem.Values()[v].default_source_idx;
-    requested[v] = problem.Values()[v].boundary_demand_mask;
+    const auto& value = problem.Values()[v];
+    requested[v] = {value.boundary_demand_mask, value.incompatible_boundary_demand_mask};
   }
 
   // Pinned readers constrain a GM input even when they occur later in
@@ -332,7 +365,7 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
     for (const auto& op : problem.Ops()) {
       if (op.costs.size() != 1) continue;
       for (const auto& use : op.config_uses.front()) {
-        if (problem.Values()[use.value_id].forbid_multi_rep) requested[use.value_id] |= use.demand_mask;
+        if (problem.Values()[use.value_id].forbid_multi_rep) AddDemand(requested[use.value_id], use);
       }
     }
   }
@@ -342,7 +375,7 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
     uint16_t best_choice = 0;
     LayoutSearchScore best_cost = kWorstCost;
     const auto& out_info = problem.Values()[op.output_value];
-    const size_t out_num_layouts = out_info.layouts.size();
+    const double penalty = problem.Instance().cost_model.vec_unsupported_conversion_cycles;
     for (uint16_t q = 0; q < static_cast<uint16_t>(op.costs.size()); ++q) {
       if (evaluated_moves + 1 > config.max_evaluations) {
         termination_reason = "evaluation_budget";
@@ -352,36 +385,39 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
       ++evaluated_moves;
       LayoutSearchScore cost{op.incompatible_configs[q], op.costs[q]};
       const uint16_t out_lay = op.output_layout_indices[q];
-      uint64_t out_mask = requested[op.output_value];
-      cost.violations += FactorViolations(out_info, out_lay, out_mask);
+      const auto out_demands = requested[op.output_value];
+      cost.violations += FactorViolations(out_info, out_lay, out_demands);
+      uint64_t out_mask = out_demands.layouts;
       while (out_mask != 0) {
-        const int dst_idx = __builtin_ctzll(out_mask);
-        if (static_cast<uint16_t>(dst_idx) != out_lay) {
-          cost.cycles +=
-              out_info
-                  .conv_costs[static_cast<size_t>(out_lay) * out_num_layouts + static_cast<size_t>(dst_idx)];
-        }
+        const auto dst = static_cast<uint16_t>(__builtin_ctzll(out_mask));
+        cost.cycles += FactorConversionCost(out_info, out_lay, dst, out_demands.incompatible, penalty);
         out_mask &= out_mask - 1;
       }
       for (const auto& use : op.config_uses[q]) {
         const ValueId v = use.value_id;
         const auto& v_info = problem.Values()[v];
-        const size_t num_layouts = v_info.layouts.size();
-        const uint16_t src_idx = (v == op.output_value) ? out_lay : produced[v];
-        const auto old_mask = requested[v];
-        const auto new_mask = old_mask | use.demand_mask;
+        const uint16_t src_idx = produced[v];
+        const auto old_demands = requested[v];
+        auto new_demands = old_demands;
+        AddDemand(new_demands, use);
         cost.violations +=
-            FactorViolations(v_info, src_idx, new_mask) - FactorViolations(v_info, src_idx, old_mask);
-        if (v_info.forbid_multi_rep && !HasMultipleRepresentations(old_mask) &&
-            HasMultipleRepresentations(new_mask)) {
-          cost.cycles += problem.Instance().cost_model.vec_unsupported_conversion_cycles;
+            FactorViolations(v_info, src_idx, new_demands) - FactorViolations(v_info, src_idx, old_demands);
+        if (v_info.forbid_multi_rep && !HasMultipleRepresentations(old_demands.layouts) &&
+            HasMultipleRepresentations(new_demands.layouts)) {
+          cost.cycles += penalty;
         }
-        uint64_t new_bits = use.demand_mask & ~requested[v];
-        while (new_bits != 0) {
-          const int dst_idx = __builtin_ctzll(new_bits);
+        uint64_t changed = (old_demands.layouts ^ new_demands.layouts) |
+                           (old_demands.incompatible ^ new_demands.incompatible);
+        while (changed != 0) {
+          const auto dst = static_cast<uint16_t>(__builtin_ctzll(changed));
+          const uint64_t bit = uint64_t{1} << dst;
+          const double before =
+              (old_demands.layouts & bit)
+                  ? FactorConversionCost(v_info, src_idx, dst, old_demands.incompatible, penalty)
+                  : 0.0;
           cost.cycles +=
-              v_info.conv_costs[static_cast<size_t>(src_idx) * num_layouts + static_cast<size_t>(dst_idx)];
-          new_bits &= new_bits - 1;
+              FactorConversionCost(v_info, src_idx, dst, new_demands.incompatible, penalty) - before;
+          changed &= changed - 1;
         }
       }
       if (BetterCost(cost, best_cost, config.tolerance)) {
@@ -392,7 +428,7 @@ std::vector<OpId> TopologicalSeed(const IndexedProblem& problem, const LayoutSol
     choices[op_idx] = best_choice;
     produced[op.output_value] = op.output_layout_indices[best_choice];
     for (const auto& use : op.config_uses[best_choice]) {
-      requested[use.value_id] |= use.demand_mask;
+      AddDemand(requested[use.value_id], use);
     }
   }
   return std::vector<OpId>(choices.begin(), choices.end());
@@ -414,7 +450,8 @@ std::pair<std::vector<LayoutConversion>, std::vector<std::string>> BuildConversi
     }
     const uint16_t src_idx = state.Sources()[v];
     const LayoutSpec& src_spec = v_info.layouts[src_idx];
-    const uint64_t mask = state.DemandMasks()[v];
+    const auto demands = state.Demands(v);
+    const uint64_t mask = demands.layouts;
     if (v_info.producer_op.has_value()) {
       const auto producer = *v_info.producer_op;
       const auto& op = instance.operations[producer];
@@ -426,7 +463,6 @@ std::pair<std::vector<LayoutConversion>, std::vector<std::string>> BuildConversi
     if (external_input && __builtin_popcountll(mask) > 1) {
       issues.push_back("GM input '" + v_info.name + "' needs multiple representations");
     }
-    const size_t num_layouts = v_info.layouts.size();
     uint64_t cur_mask = mask;
     while (cur_mask != 0) {
       const uint16_t dst_idx = static_cast<uint16_t>(__builtin_ctzll(cur_mask));
@@ -450,21 +486,25 @@ std::pair<std::vector<LayoutConversion>, std::vector<std::string>> BuildConversi
       const bool boundary_output =
           consumer_indices.empty() && node->is_external_output && dst_spec == node->current_layout;
       const bool boundary = external_input || boundary_output;
-      const double conv_cost = v_info.conv_costs[static_cast<size_t>(src_idx) * num_layouts + dst_idx];
+      const bool compatible_invocations = ((demands.incompatible >> dst_idx) & 1) == 0;
+      const double conv_cost = FactorConversionCost(v_info, src_idx, dst_idx, demands.incompatible,
+                                                    instance.cost_model.vec_unsupported_conversion_cycles);
       conversions.push_back(
           LayoutConversion{v_info.name, src_spec, dst_spec, conv_cost, consumer_op_ids, boundary});
-      if (!boundary) {
+      if (!compatible_invocations) {
+        issues.push_back("On-chip conversion for '" + v_info.name +
+                         "' has differing producer/consumer execution counts");
+      } else if (!boundary) {
         const std::string& prod_op_name =
             v_info.producer_op.has_value() ? problem.Ops()[*v_info.producer_op].op_name : std::string();
         const bool producer_ok = !v_info.producer_op || SupportsVecConversionPlacement(prod_op_name);
         const bool consumers_ok =
             std::all_of(consumer_indices.begin(), consumer_indices.end(),
                         [&](OpId idx) { return SupportsVecConversionPlacement(problem.Ops()[idx].op_name); });
-        const bool compat_invs = (v_info.incompatible_target_mask & (uint64_t{1} << dst_idx)) == 0;
         const bool realizable_vec =
             node->memory_space == MemorySpace::Vec &&
             instance.cost_model.SupportsVecTileConversion(*node, src_spec, dst_spec) && producer_ok &&
-            consumers_ok && compat_invs;
+            consumers_ok;
         if (!realizable_vec) {
           issues.push_back("Value '" + v_info.name + "' needs an internal conversion " +
                            src_spec.ShortName() + " -> " + dst_spec.ShortName());
@@ -481,7 +521,7 @@ LayoutSolverResult BuildResult(const IncrementalState& state, int64_t evaluated_
                                const std::optional<TreewidthStats>& tw_stats = std::nullopt,
                                int64_t unreported_width = 0) {
   const auto& problem = state.Problem();
-  CostBreakdown breakdown = EvaluateAssignment(problem.Instance(), state.ToAssignment());
+  CostBreakdown breakdown = detail::EvaluateAssignmentForSearch(problem.Instance(), state.ToAssignment());
   const double diff = std::abs(state.Cost() - breakdown.total_cost_cycles);
   if (diff > 1e-7 && diff > 1e-10 * std::max(std::abs(state.Cost()), std::abs(breakdown.total_cost_cycles))) {
     throw pypto::InternalError("Layout gain cache disagrees with evaluator");
@@ -717,11 +757,11 @@ int64_t SaturatingAdd(int64_t a, int64_t b) {
   return a > limit - b ? limit : a + b;
 }
 
-int64_t BagStates(const IndexedProblem& problem, const std::vector<OpId>& bag) {
+std::optional<int64_t> BagStates(const IndexedProblem& problem, const std::vector<OpId>& bag) {
   int64_t states = 1;
   for (OpId op : bag) {
     const auto domain = static_cast<int64_t>(problem.Ops()[op].costs.size());
-    if (states > std::numeric_limits<int64_t>::max() / domain) return std::numeric_limits<int64_t>::max();
+    if (states > std::numeric_limits<int64_t>::max() / domain) return std::nullopt;
     states *= domain;
   }
   return states;
@@ -760,7 +800,8 @@ TreewidthStats ComputeProblemTreewidthInternal(const IndexedProblem& problem,
     stats.active_primal_treewidth = std::max(stats.active_primal_treewidth, dec.treewidth);
     stats.max_active_bag_size = std::max(stats.max_active_bag_size, dec.treewidth + 1);
     stats.max_bag_domain_product = std::max(stats.max_bag_domain_product, dec.max_bag_states);
-    stats.total_dp_states = SaturatingAdd(stats.total_dp_states, dec.total_states);
+    stats.total_dp_states =
+        SaturatingAdd(stats.total_dp_states, dec.total_states.value_or(std::numeric_limits<int64_t>::max()));
   }
   if (num_ops > 0 && decomp.components.empty()) {
     stats.max_bag_domain_product = 1;
@@ -833,8 +874,13 @@ ActiveDecomposition ComputeActiveDecomposition(const IndexedProblem& problem,
     });
     for (const auto& bag : dec.bags) {
       const auto states = BagStates(problem, bag);
-      dec.max_bag_states = std::max(dec.max_bag_states, states);
-      dec.total_states = SaturatingAdd(dec.total_states, states);
+      constexpr auto max_states = std::numeric_limits<int64_t>::max();
+      dec.max_bag_states = std::max(dec.max_bag_states, states.value_or(max_states));
+      if (states && dec.total_states && *dec.total_states <= max_states - *states) {
+        *dec.total_states += *states;
+      } else {
+        dec.total_states.reset();
+      }
     }
   }
   return out;
@@ -845,10 +891,10 @@ struct BagFactorDesc {
   ValueId value_id = 0;
   int prod_bag_pos = -1;  ///< -1 when producer is fixed/external; else index in bag.
   uint16_t fixed_source_idx = 0;
-  uint64_t base_demand_mask = 0;
+  LayoutDemands base_demands;
   struct ConsumerEntry {
     size_t bag_pos = 0;
-    OpId op_id = 0;
+    bool incompatible_invocations = false;
     std::vector<uint64_t> demand_by_choice;
   };
   std::vector<ConsumerEntry> consumers;
@@ -863,7 +909,7 @@ struct ChildMessageDesc {
 
 struct DPContext {
   std::vector<bool> is_movable;
-  std::vector<uint64_t> base_demand;
+  std::vector<LayoutDemands> base_demands;
   std::vector<uint16_t> base_source;
   std::vector<int> comp_of_op;
   std::vector<size_t> step_of_op;
@@ -882,11 +928,12 @@ DPContext BuildDPContext(const IndexedProblem& problem, const ActiveDecompositio
     }
   }
 
-  ctx.base_demand.assign(num_vals, 0);
+  ctx.base_demands.resize(num_vals);
   ctx.base_source.assign(num_vals, 0);
   for (ValueId v = 0; v < num_vals; ++v) {
-    ctx.base_demand[v] = problem.Values()[v].boundary_demand_mask;
-    ctx.base_source[v] = problem.Values()[v].default_source_idx;
+    const auto& info = problem.Values()[v];
+    ctx.base_demands[v] = {info.boundary_demand_mask, info.incompatible_boundary_demand_mask};
+    ctx.base_source[v] = info.default_source_idx;
   }
   for (OpId u = 0; u < num_ops; ++u) {
     if (ctx.is_movable[u]) {
@@ -895,7 +942,7 @@ DPContext BuildDPContext(const IndexedProblem& problem, const ActiveDecompositio
     const auto& op = problem.Ops()[u];
     ctx.base_source[op.output_value] = op.output_layout_indices[0];
     for (const auto& use : op.config_uses[0]) {
-      ctx.base_demand[use.value_id] |= use.demand_mask;
+      AddDemand(ctx.base_demands[use.value_id], use);
     }
   }
 
@@ -937,6 +984,9 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
                                      const DPContext& ctx, size_t comp_idx, const LayoutSolverConfig& config,
                                      int64_t& evaluated_moves, std::vector<uint16_t>& out_choices) {
   const auto& dec = decomp.component_decomps[comp_idx];
+  // Auto can consume part of the budget on earlier components. Check the
+  // remainder before allocating any separator tables for this component.
+  if (!dec.FitsEvaluationBudget(config.max_evaluations - evaluated_moves)) return false;
   const size_t num_bags = dec.bags.size();
   if (num_bags == 0) {
     return true;
@@ -969,6 +1019,7 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
     sep_sizes[s] = stride;
   }
 
+  const double penalty = problem.Instance().cost_model.vec_unsupported_conversion_cycles;
   std::vector<std::vector<LayoutSearchScore>> messages(num_bags);
   std::vector<std::vector<uint16_t>> backpointers(num_bags);
 
@@ -1014,35 +1065,23 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
       const auto& v_info = problem.Values()[v];
       BagFactorDesc fd;
       fd.value_id = v;
-      fd.base_demand_mask = ctx.base_demand[v];
+      fd.base_demands = ctx.base_demands[v];
       fd.fixed_source_idx = ctx.base_source[v];
       if (v_info.producer_op.has_value() && ctx.is_movable[*v_info.producer_op]) {
         fd.prod_bag_pos = static_cast<int>(bag_pos[*v_info.producer_op]);
       }
-      for (OpId p : v_info.participants) {
-        if (!ctx.is_movable[p]) {
-          continue;
-        }
+      for (const auto& consumer : v_info.consumers) {
+        const OpId op_id = consumer.op_id;
+        if (!ctx.is_movable[op_id]) continue;
         BagFactorDesc::ConsumerEntry ce;
-        ce.bag_pos = bag_pos[p];
-        ce.op_id = p;
-        const size_t p_dom = problem.Ops()[p].costs.size();
-        ce.demand_by_choice.assign(p_dom, 0);
-        bool has_any_demand = false;
-        for (uint16_t q = 0; q < static_cast<uint16_t>(p_dom); ++q) {
-          for (const auto& use : problem.Ops()[p].config_uses[q]) {
-            if (use.value_id == v) {
-              ce.demand_by_choice[q] = use.demand_mask;
-              if (use.demand_mask != 0) {
-                has_any_demand = true;
-              }
-              break;
-            }
-          }
+        ce.bag_pos = bag_pos.at(op_id);
+        const auto& configs = problem.Ops()[op_id].config_uses;
+        ce.incompatible_invocations = configs.front()[consumer.input_slot].incompatible_invocations;
+        ce.demand_by_choice.reserve(configs.size());
+        for (const auto& uses : configs) {
+          ce.demand_by_choice.push_back(uses[consumer.input_slot].demand_mask);
         }
-        if (has_any_demand) {
-          fd.consumers.push_back(std::move(ce));
-        }
+        fd.consumers.push_back(std::move(ce));
       }
       factor_descs.push_back(std::move(fd));
     }
@@ -1060,35 +1099,31 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
       LayoutSearchScore best_val = kWorstCost;
       uint16_t best_q = 0;
       for (uint16_t q_elim = 0; q_elim < static_cast<uint16_t>(elim_dom); ++q_elim) {
-        if (evaluated_moves + 1 > config.max_evaluations) {
-          return false;
-        }
         ++evaluated_moves;
         bag_q[0] = q_elim;
         LayoutSearchScore val{problem.Ops()[elim_u].incompatible_configs[q_elim], elim_costs[q_elim]};
 
         for (const auto& fd : factor_descs) {
           const auto& v_info = problem.Values()[fd.value_id];
-          const size_t num_layouts = v_info.layouts.size();
           uint16_t src_idx = fd.fixed_source_idx;
           if (fd.prod_bag_pos >= 0) {
             const OpId prod_op = bag[static_cast<size_t>(fd.prod_bag_pos)];
             const uint16_t prod_q = bag_q[static_cast<size_t>(fd.prod_bag_pos)];
             src_idx = problem.Ops()[prod_op].output_layout_indices[prod_q];
           }
-          uint64_t mask = fd.base_demand_mask;
+          auto demands = fd.base_demands;
           for (const auto& ce : fd.consumers) {
-            mask |= ce.demand_by_choice[bag_q[ce.bag_pos]];
+            const uint64_t demand = ce.demand_by_choice[bag_q[ce.bag_pos]];
+            demands.layouts |= demand;
+            if (ce.incompatible_invocations) demands.incompatible |= demand;
           }
-          val.violations += FactorViolations(v_info, src_idx, mask);
-          if (v_info.forbid_multi_rep && HasMultipleRepresentations(mask)) {
-            val.cycles += problem.Instance().cost_model.vec_unsupported_conversion_cycles;
+          val.violations += FactorViolations(v_info, src_idx, demands);
+          if (v_info.forbid_multi_rep && HasMultipleRepresentations(demands.layouts)) {
+            val.cycles += penalty;
           }
-          const double* row = v_info.conv_costs.data() + static_cast<size_t>(src_idx) * num_layouts;
-          while (mask != 0) {
-            const int dst = __builtin_ctzll(mask);
-            val.cycles += row[dst];
-            mask &= mask - 1;
+          for (uint64_t mask = demands.layouts; mask != 0; mask &= mask - 1) {
+            const auto dst = static_cast<uint16_t>(__builtin_ctzll(mask));
+            val.cycles += FactorConversionCost(v_info, src_idx, dst, demands.incompatible, penalty);
           }
         }
 
@@ -1102,7 +1137,7 @@ bool RunTreewidthDPOnSingleComponent(const IndexedProblem& problem, const Active
           val.cycles += child_score.cycles;
         }
 
-        if (BetterCost(val, best_val, config.tolerance)) {
+        if (BetterCost(val, best_val, 0.0)) {
           best_val = val;
           best_q = q_elim;
         }
@@ -1689,7 +1724,8 @@ class FMFanoutFrontier {
 };
 
 // Exact block scores depend on all count changes. Single-op gains only change
-// when the source, support, or the consumer's ability to remove a layout changes.
+// when the source, support, or a consumer's ability to remove a layout changes.
+// Track those transitions for both total and invocation-incompatible demands.
 struct FMFactorChange {
   bool source_changed = false;
   bool support_changed = false;
@@ -1723,6 +1759,10 @@ void VisitSingleMoveFactors(const IncrementalState& state, OpId op_idx, uint16_t
     FMFactorChange change;
     ForEachDemandDelta(old_uses[slot], new_uses[slot], [&](uint16_t layout, int delta) {
       change.NoteCountChange(counts[layout], counts[layout] + delta, repeated);
+      if (old_uses[slot].incompatible_invocations) {
+        const auto count = state.IncompatibleCounts(value)[layout];
+        change.NoteCountChange(count, count + delta, repeated);
+      }
     });
     visit(value, change);
   }
@@ -1738,6 +1778,10 @@ void VisitBlockMoveFactors(const IncrementalState& state, const IncrementalState
     const bool repeated = state.Problem().Values()[factor.value].has_repeated_operand;
     for (size_t layout = 0; layout < counts.size(); ++layout) {
       change.NoteCountChange(counts[layout], factor.counts[layout], repeated);
+    }
+    const auto& incompatible_counts = state.IncompatibleCounts(factor.value);
+    for (size_t layout = 0; layout < incompatible_counts.size(); ++layout) {
+      change.NoteCountChange(incompatible_counts[layout], factor.incompatible_counts[layout], repeated);
     }
     visit(factor.value, change);
   }
@@ -2330,8 +2374,7 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
   }
 
   // Index conversion factors.
-  for (ValueId v = 0; v < static_cast<ValueId>(values_.size()); ++v) {
-    ValueInfo& v_info = values_[v];
+  for (auto& v_info : values_) {
     const ValueNode& node = instance_.values.at(v_info.name);
     const int default_idx = v_info.FindLayoutIndex(node.current_layout);
     v_info.default_source_idx = default_idx >= 0 ? static_cast<uint16_t>(default_idx) : 0;
@@ -2348,121 +2391,39 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
       source_indices.push_back(v_info.default_source_idx);
     }
 
-    std::set<int64_t> conv_invs_set;
-    std::set<int64_t> compat_conv_invs_set;
-    std::vector<uint16_t> target_indices;
-    uint64_t incompatible_target_mask = 0;
-    auto add_target = [&](uint16_t idx) {
-      if (std::find(target_indices.begin(), target_indices.end(), idx) == target_indices.end()) {
-        target_indices.push_back(idx);
-      }
-    };
-
-    const bool has_onchip_placement =
-        node.memory_space != MemorySpace::DDR && (node.conversion_invocations || v_info.producer_op);
-    const int64_t prod_inv =
-        node.conversion_invocations.value_or(v_info.producer_op ? ops_[*v_info.producer_op].invocations : 0);
-
-    for (OpId p : v_info.participants) {
-      const OpInfo& op_info = ops_[p];
-      const bool inv_compat =
-          !has_onchip_placement || CanShareOnChipConversion(prod_inv, op_info.invocations);
-      for (const auto& uses_vec : op_info.config_uses) {
-        for (const auto& use : uses_vec) {
-          if (use.value_id != v) {
-            continue;
-          }
-          bool any_diff = false;
-          for (const auto& [lay_idx, _] : use.layout_counts) {
-            add_target(lay_idx);
-            bool diff_for_lay = false;
-            for (uint16_t src_idx : source_indices) {
-              if (src_idx != lay_idx) {
-                diff_for_lay = true;
-                any_diff = true;
-                break;
-              }
-            }
-            if (diff_for_lay && !inv_compat) {
-              incompatible_target_mask |= (uint64_t{1} << lay_idx);
-            }
-          }
-          if (any_diff) {
-            conv_invs_set.insert(op_info.invocations);
-            if (inv_compat) {
-              compat_conv_invs_set.insert(op_info.invocations);
-            }
-          }
-        }
+    uint64_t targets = 0;
+    const auto source_invocations = OnChipConversionInvocations(node, op_ptr_by_id);
+    for (const auto& consumer : v_info.consumers) {
+      auto& op_info = ops_[consumer.op_id];
+      const bool incompatible =
+          source_invocations && !CanShareOnChipConversion(*source_invocations, op_info.invocations);
+      v_info.has_incompatible_readers |= incompatible;
+      for (auto& uses : op_info.config_uses) {
+        auto& use = uses[consumer.input_slot];
+        use.incompatible_invocations = incompatible;
+        targets |= use.demand_mask;
       }
     }
 
     const size_t num_layouts = v_info.layouts.size();
     v_info.boundary_counts.assign(num_layouts, 0);
     if (node.is_external_output && !instance_.cost_model.allow_external_output_relayout) {
-      const uint16_t b_idx = v_info.default_source_idx;
-      add_target(b_idx);
-      v_info.boundary_demand_mask |= (uint64_t{1} << b_idx);
-      v_info.boundary_counts[b_idx] = 1;
-      for (uint16_t src_idx : source_indices) {
-        if (src_idx != b_idx) {
-          conv_invs_set.insert(instance_.cost_model.expected_uses);
-          const bool b_compat =
-              !has_onchip_placement || CanShareOnChipConversion(prod_inv, instance_.cost_model.expected_uses);
-          if (b_compat) {
-            compat_conv_invs_set.insert(instance_.cost_model.expected_uses);
-          } else {
-            incompatible_target_mask |= (uint64_t{1} << b_idx);
-          }
-          break;
-        }
+      const uint16_t boundary = v_info.default_source_idx;
+      v_info.boundary_demand_mask = uint64_t{1} << boundary;
+      v_info.boundary_counts[boundary] = 1;
+      targets |= v_info.boundary_demand_mask;
+      if (source_invocations &&
+          !CanShareOnChipConversion(*source_invocations, instance_.cost_model.expected_uses)) {
+        v_info.incompatible_boundary_demand_mask = v_info.boundary_demand_mask;
       }
     }
 
     v_info.forbid_multi_rep = instance_.forbid_unmaterializable_gm_conversions &&
                               !node.producer_op_id.has_value() && node.memory_space == MemorySpace::DDR;
 
-    bool has_conversion_free_layout = false;
-    if (incompatible_target_mask != 0) {
-      for (uint16_t s_idx : source_indices) {
-        if (node.is_external_output && !instance_.cost_model.allow_external_output_relayout &&
-            s_idx != v_info.default_source_idx) {
-          continue;
-        }
-        bool ok_all_consumers = true;
-        for (OpId p : v_info.participants) {
-          const OpInfo& op_info = ops_[p];
-          bool op_consumes_v = false;
-          bool op_has_compat_cfg = false;
-          for (const auto& uses_vec : op_info.config_uses) {
-            for (const auto& use : uses_vec) {
-              if (use.value_id == v) {
-                op_consumes_v = true;
-                if (use.demand_mask == (uint64_t{1} << s_idx)) {
-                  op_has_compat_cfg = true;
-                }
-              }
-            }
-          }
-          if (op_consumes_v && !op_has_compat_cfg) {
-            ok_all_consumers = false;
-            break;
-          }
-        }
-        if (ok_all_consumers) {
-          has_conversion_free_layout = true;
-          break;
-        }
-      }
-    }
-
-    v_info.incompatible_target_mask = incompatible_target_mask;
-
-    const std::vector<int64_t> conv_invs =
-        (incompatible_target_mask != 0 && has_conversion_free_layout)
-            ? std::vector<int64_t>(compat_conv_invs_set.begin(), compat_conv_invs_set.end())
-            : std::vector<int64_t>(conv_invs_set.begin(), conv_invs_set.end());
-    const double mult = ConversionMultiplier(instance_, node, op_ptr_by_id, conv_invs);
+    // The insertion-site cost is independent of the selected readers. Their
+    // counts determine whether they can use the copy, when they demand it.
+    const double mult = ConversionMultiplier(instance_, node, op_ptr_by_id, {});
     v_info.conv_costs.assign(num_layouts * num_layouts, 0.0);
     const bool check_writeback = instance_.forbid_unmaterializable_gm_conversions;
     const bool check_conversion = check_writeback || !node.blocked_vec_conversions.empty();
@@ -2471,7 +2432,8 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
     const bool producer_ok =
         !v_info.producer_op || SupportsVecConversionPlacement(ops_[*v_info.producer_op].op_name);
     for (uint16_t src_idx : source_indices) {
-      for (uint16_t dst_idx : target_indices) {
+      for (uint64_t remaining = targets; remaining != 0; remaining &= remaining - 1) {
+        const auto dst_idx = static_cast<uint16_t>(__builtin_ctzll(remaining));
         if (src_idx == dst_idx) {
           continue;
         }
@@ -2483,7 +2445,6 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
           // consumer. Leave that ambiguity to the selected-consumer check.
           const bool boundary_layout = node.is_external_output && dst == node.current_layout;
           const bool supports_conversion = node.memory_space == MemorySpace::Vec && producer_ok &&
-                                           (incompatible_target_mask & dst_bit) == 0 &&
                                            instance_.cost_model.SupportsVecTileConversion(node, src, dst);
           const bool blocked =
               std::find(node.blocked_vec_conversions.begin(), node.blocked_vec_conversions.end(),
@@ -2492,10 +2453,9 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
             v_info.unsupported_target_masks[src_idx] |= dst_bit;
           }
         }
-        if ((incompatible_target_mask & dst_bit) != 0 ||
-            (mult == 0 && node.memory_space == MemorySpace::Vec &&
-             !instance_.cost_model.SupportsVecTileConversion(node, v_info.layouts[src_idx],
-                                                             v_info.layouts[dst_idx]))) {
+        if (mult == 0 && node.memory_space == MemorySpace::Vec &&
+            !instance_.cost_model.SupportsVecTileConversion(node, v_info.layouts[src_idx],
+                                                            v_info.layouts[dst_idx])) {
           v_info.conv_costs[static_cast<size_t>(src_idx) * num_layouts + dst_idx] =
               instance_.cost_model.vec_unsupported_conversion_cycles;
           continue;
@@ -2507,6 +2467,10 @@ IndexedProblem::IndexedProblem(const LayoutProblemInstance& instance) : instance
       }
     }
     v_info.max_conversion_cost = *std::max_element(v_info.conv_costs.begin(), v_info.conv_costs.end());
+    if (v_info.has_incompatible_readers || v_info.incompatible_boundary_demand_mask != 0) {
+      v_info.max_conversion_cost =
+          std::max(v_info.max_conversion_cost, instance_.cost_model.vec_unsupported_conversion_cycles);
+    }
   }
 }
 
@@ -2551,12 +2515,21 @@ IncrementalState::IncrementalState(const IndexedProblem& problem, std::vector<ui
   sources_.resize(num_vals);
   demand_masks_.resize(num_vals);
   counts_.resize(num_vals);
+  incompatible_demand_masks_.resize(num_vals);
+  incompatible_counts_.resize(num_vals);
 
   for (ValueId v = 0; v < num_vals; ++v) {
     const auto& v_info = problem_.Values()[v];
     sources_[v] = v_info.default_source_idx;
     demand_masks_[v] = v_info.boundary_demand_mask;
     counts_[v] = v_info.boundary_counts;
+    incompatible_demand_masks_[v] = v_info.incompatible_boundary_demand_mask;
+    if (v_info.has_incompatible_readers || v_info.incompatible_boundary_demand_mask != 0) {
+      incompatible_counts_[v].assign(v_info.layouts.size(), 0);
+      if (v_info.incompatible_boundary_demand_mask != 0) {
+        incompatible_counts_[v][v_info.default_source_idx] = 1;
+      }
+    }
   }
 
   for (OpId u = 0; u < num_ops; ++u) {
@@ -2568,7 +2541,9 @@ IncrementalState::IncrementalState(const IndexedProblem& problem, std::vector<ui
       demand_masks_[v] |= use.demand_mask;
       for (const auto& [lay_idx, cnt] : use.layout_counts) {
         counts_[v][lay_idx] += cnt;
+        if (use.incompatible_invocations) incompatible_counts_[v][lay_idx] += cnt;
       }
+      if (use.incompatible_invocations) incompatible_demand_masks_[v] |= use.demand_mask;
     }
   }
 
@@ -2578,7 +2553,7 @@ IncrementalState::IncrementalState(const IndexedProblem& problem, std::vector<ui
     cost_.violations += op.incompatible_configs[choices_[u]];
   }
   for (ValueId v = 0; v < num_vals; ++v) {
-    AddFactorCostDelta(cost_, v, sources_[v], 0, sources_[v], demand_masks_[v]);
+    AddFactorCostDelta(cost_, v, sources_[v], {}, sources_[v], Demands(v));
   }
 }
 
@@ -2597,25 +2572,32 @@ void IncrementalState::CostSum::Replace(double before, double after) {
 }
 
 void IncrementalState::AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t old_source,
-                                          uint64_t old_mask, uint16_t new_source, uint64_t new_mask) const {
-  uint64_t changed = old_source == new_source ? old_mask ^ new_mask : old_mask | new_mask;
+                                          LayoutDemands old_demands, uint16_t new_source,
+                                          LayoutDemands new_demands) const {
+  // A reader can change a layout's invocation compatibility while another
+  // reader still demands that layout. Both masks affect the factor's cost.
+  uint64_t changed = old_source == new_source ? (old_demands.layouts ^ new_demands.layouts) |
+                                                    (old_demands.incompatible ^ new_demands.incompatible)
+                                              : old_demands.layouts | new_demands.layouts;
   if (changed == 0) return;
   const auto& info = problem_.Values()[value];
   cost.violations +=
-      FactorViolations(info, new_source, new_mask) - FactorViolations(info, old_source, old_mask);
-  const size_t layout_count = info.layouts.size();
-  const double* old_row = info.conv_costs.data() + old_source * layout_count;
-  const double* new_row = info.conv_costs.data() + new_source * layout_count;
+      FactorViolations(info, new_source, new_demands) - FactorViolations(info, old_source, old_demands);
+  const double penalty = problem_.Instance().cost_model.vec_unsupported_conversion_cycles;
   while (changed != 0) {
-    const auto target = __builtin_ctzll(changed);
+    const auto target = static_cast<uint16_t>(__builtin_ctzll(changed));
     const uint64_t bit = uint64_t{1} << target;
-    cost.Replace((old_mask & bit) ? old_row[target] : 0.0, (new_mask & bit) ? new_row[target] : 0.0);
+    cost.Replace((old_demands.layouts & bit)
+                     ? FactorConversionCost(info, old_source, target, old_demands.incompatible, penalty)
+                     : 0.0,
+                 (new_demands.layouts & bit)
+                     ? FactorConversionCost(info, new_source, target, new_demands.incompatible, penalty)
+                     : 0.0);
     changed &= changed - 1;
   }
   if (info.forbid_multi_rep) {
-    const double penalty = problem_.Instance().cost_model.vec_unsupported_conversion_cycles;
-    cost.Replace(HasMultipleRepresentations(old_mask) ? penalty : 0.0,
-                 HasMultipleRepresentations(new_mask) ? penalty : 0.0);
+    cost.Replace(HasMultipleRepresentations(old_demands.layouts) ? penalty : 0.0,
+                 HasMultipleRepresentations(new_demands.layouts) ? penalty : 0.0);
   }
 }
 
@@ -2633,82 +2615,26 @@ LayoutSearchScore IncrementalState::GainScore(OpId op_idx, uint16_t new_choice,
   const auto& old_uses = op.config_uses[old_choice];
   const auto& new_uses = op.config_uses[new_choice];
 
-  auto add_value_delta = [&](ValueId v, const IndexedProblem::OpConfigUse* old_u,
-                             const IndexedProblem::OpConfigUse* new_u) {
-    if (v == omitted_factor) return;
-    const uint16_t new_src = (v == op.output_value) ? op.output_layout_indices[new_choice] : sources_[v];
-
-    uint64_t new_mask = demand_masks_[v];
-    if (old_u != nullptr) {
-      for (const auto& [lay_idx, cnt] : old_u->layout_counts) {
-        int net = counts_[v][lay_idx] - cnt;
-        if (new_u != nullptr) {
-          for (const auto& [nl, nc] : new_u->layout_counts) {
-            if (nl == lay_idx) {
-              net += nc;
-              break;
-            }
-          }
-        }
-        if (net > 0) {
-          new_mask |= (uint64_t{1} << lay_idx);
-        } else {
-          new_mask &= ~(uint64_t{1} << lay_idx);
-        }
+  // All configurations of one operation have the same factor scope. The
+  // single-producer graph is acyclic, so the output factor is separate.
+  for (size_t i = 0; i < old_uses.size(); ++i) {
+    const auto& old_use = old_uses[i];
+    const ValueId v = old_use.value_id;
+    if (v == omitted_factor) continue;
+    const auto old_demands = Demands(v);
+    auto new_demands = old_demands;
+    ForEachDemandDelta(old_use, new_uses[i], [&](uint16_t layout, int count_delta) {
+      SetDemandPresence(new_demands.layouts, layout, counts_[v][layout] + count_delta);
+      if (old_use.incompatible_invocations) {
+        SetDemandPresence(new_demands.incompatible, layout, incompatible_counts_[v][layout] + count_delta);
       }
-    }
-    if (new_u != nullptr) {
-      for (const auto& [lay_idx, _] : new_u->layout_counts) {
-        // Any layout present in new_u has net > 0 unless subtracted above (which already handled it).
-        bool in_old = false;
-        if (old_u != nullptr) {
-          for (const auto& [ol, _oc] : old_u->layout_counts) {
-            if (ol == lay_idx) {
-              in_old = true;
-              break;
-            }
-          }
-        }
-        if (!in_old) {
-          new_mask |= (uint64_t{1} << lay_idx);
-        }
-      }
-    }
-
-    AddFactorCostDelta(delta, v, sources_[v], demand_masks_[v], new_src, new_mask);
-  };
-
-  bool out_seen = false;
-  for (const auto& old_u : old_uses) {
-    if (old_u.value_id == op.output_value) {
-      out_seen = true;
-    }
-    const IndexedProblem::OpConfigUse* match_new = nullptr;
-    for (const auto& new_u : new_uses) {
-      if (new_u.value_id == old_u.value_id) {
-        match_new = &new_u;
-        break;
-      }
-    }
-    add_value_delta(old_u.value_id, &old_u, match_new);
+    });
+    AddFactorCostDelta(delta, v, sources_[v], old_demands, sources_[v], new_demands);
   }
-  for (const auto& new_u : new_uses) {
-    bool in_old = false;
-    for (const auto& old_u : old_uses) {
-      if (old_u.value_id == new_u.value_id) {
-        in_old = true;
-        break;
-      }
-    }
-    if (!in_old) {
-      if (new_u.value_id == op.output_value) {
-        out_seen = true;
-      }
-      add_value_delta(new_u.value_id, nullptr, &new_u);
-    }
-  }
-  if (!out_seen) {
-    add_value_delta(op.output_value, nullptr, nullptr);
+  if (op.output_value != omitted_factor) {
+    const auto demands = Demands(op.output_value);
+    AddFactorCostDelta(delta, op.output_value, sources_[op.output_value], demands,
+                       op.output_layout_indices[new_choice], demands);
   }
 
   return {-delta.violations, -delta.Value()};
@@ -2725,13 +2651,19 @@ void IncrementalState::Apply(OpId op_idx, uint16_t new_choice) {
   const auto& new_uses = op.config_uses[new_choice];
   for (size_t i = 0; i < old_uses.size(); ++i) {
     const auto value = old_uses[i].value_id;
-    const auto old_mask = demand_masks_[value];
-    ForEachDemandDelta(old_uses[i], new_uses[i],
-                       [&](uint16_t layout, int delta) { UpdateDemandCount(value, layout, delta); });
-    CommitFactor(value, old_mask, sources_[value]);
+    const auto old_demands = Demands(value);
+    const auto& use = old_uses[i];
+    ForEachDemandDelta(use, new_uses[i], [&](uint16_t layout, int delta) {
+      SetDemandPresence(demand_masks_[value], layout, counts_[value][layout] += delta);
+      if (use.incompatible_invocations) {
+        SetDemandPresence(incompatible_demand_masks_[value], layout,
+                          incompatible_counts_[value][layout] += delta);
+      }
+    });
+    CommitFactor(value, old_demands, sources_[value]);
   }
 
-  CommitFactor(op.output_value, demand_masks_[op.output_value], op.output_layout_indices[new_choice]);
+  CommitFactor(op.output_value, Demands(op.output_value), op.output_layout_indices[new_choice]);
   cost_.Replace(op.costs[old_choice], op.costs[new_choice]);
   cost_.violations += op.incompatible_configs[new_choice] - op.incompatible_configs[old_choice];
   choices_[op_idx] = new_choice;
@@ -2746,7 +2678,9 @@ IncrementalState::BlockEvaluation IncrementalState::EvaluateBlock(
   std::unordered_map<ValueId, size_t> factor_positions;
   const auto get_factor = [&](ValueId value) -> BlockEvaluation::Factor& {
     auto [it, inserted] = factor_positions.try_emplace(value, factors.size());
-    if (inserted) factors.push_back({value, sources_[value], counts_[value]});
+    if (inserted) {
+      factors.push_back({value, sources_[value], counts_[value], incompatible_counts_[value], {}});
+    }
     return factors[it->second];
   };
 
@@ -2763,16 +2697,21 @@ IncrementalState::BlockEvaluation IncrementalState::EvaluateBlock(
     const auto& new_uses = op.config_uses[new_choice];
     for (size_t i = 0; i < old_uses.size(); ++i) {
       ForEachDemandDelta(old_uses[i], new_uses[i], [&](uint16_t layout, int count_delta) {
-        get_factor(old_uses[i].value_id).counts[layout] += count_delta;
+        auto& factor = get_factor(old_uses[i].value_id);
+        factor.counts[layout] += count_delta;
+        if (old_uses[i].incompatible_invocations) factor.incompatible_counts[layout] += count_delta;
       });
     }
   }
   for (auto& factor : factors) {
     for (size_t layout = 0; layout < factor.counts.size(); ++layout) {
-      if (factor.counts[layout] > 0) factor.demand_mask |= uint64_t{1} << layout;
+      if (factor.counts[layout] > 0) factor.demands.layouts |= uint64_t{1} << layout;
+      if (!factor.incompatible_counts.empty() && factor.incompatible_counts[layout] > 0) {
+        factor.demands.incompatible |= uint64_t{1} << layout;
+      }
     }
-    AddFactorCostDelta(delta, factor.value, sources_[factor.value], demand_masks_[factor.value],
-                       factor.source, factor.demand_mask);
+    AddFactorCostDelta(delta, factor.value, sources_[factor.value], Demands(factor.value), factor.source,
+                       factor.demands);
   }
   evaluation.gain = -delta.Value();
   evaluation.violation_reduction = -delta.violations;
@@ -2782,10 +2721,12 @@ IncrementalState::BlockEvaluation IncrementalState::EvaluateBlock(
 void IncrementalState::ApplyBlock(const std::vector<ChoiceChange>& choices,
                                   const BlockEvaluation& evaluation) {
   for (const auto& factor : evaluation.factors) {
-    const auto old_mask = demand_masks_[factor.value];
+    const auto old_demands = Demands(factor.value);
     counts_[factor.value] = factor.counts;
-    demand_masks_[factor.value] = factor.demand_mask;
-    CommitFactor(factor.value, old_mask, factor.source);
+    demand_masks_[factor.value] = factor.demands.layouts;
+    incompatible_counts_[factor.value] = factor.incompatible_counts;
+    incompatible_demand_masks_[factor.value] = factor.demands.incompatible;
+    CommitFactor(factor.value, old_demands, factor.source);
   }
   for (const auto& [op_idx, new_choice] : choices) {
     const auto& op = problem_.Ops()[op_idx];
@@ -2795,22 +2736,8 @@ void IncrementalState::ApplyBlock(const std::vector<ChoiceChange>& choices,
   }
 }
 
-void IncrementalState::UpdateDemandCount(ValueId value, uint16_t layout, int delta) {
-  const int previous = counts_[value][layout];
-  const int next = previous + delta;
-  counts_[value][layout] = next;
-  const int support_delta = static_cast<int>(next > 0) - static_cast<int>(previous > 0);
-  if (support_delta == 0) return;
-  if (next > 0) {
-    demand_masks_[value] |= uint64_t{1} << layout;
-  } else {
-    demand_masks_[value] &= ~(uint64_t{1} << layout);
-  }
-}
-
-void IncrementalState::CommitFactor(ValueId value, uint64_t old_mask, uint16_t new_source) {
-  const auto new_mask = demand_masks_[value];
-  AddFactorCostDelta(cost_, value, sources_[value], old_mask, new_source, new_mask);
+void IncrementalState::CommitFactor(ValueId value, LayoutDemands old_demands, uint16_t new_source) {
+  AddFactorCostDelta(cost_, value, sources_[value], old_demands, new_source, Demands(value));
   sources_[value] = new_source;
 }
 
@@ -2906,11 +2833,19 @@ static LayoutSolverResult SolveTreewidthDPCore(const LayoutProblemInstance& inst
     }
   }
 
+  // Reject the full strict-DP request before allocating tables for any component.
+  int64_t remaining = config.max_evaluations;
+  for (const auto& dec : decomp.component_decomps) {
+    if (!dec.total_states || *dec.total_states > remaining) {
+      throw pypto::ValueError("Treewidth DP exceeded max_evaluations=" +
+                              std::to_string(config.max_evaluations));
+    }
+    remaining -= *dec.total_states;
+  }
   int64_t evaluated_moves = 0;
   std::vector<uint16_t> choices;
   if (!RunTreewidthDPOnComponents(problem, decomp, config, evaluated_moves, choices)) {
-    throw pypto::ValueError("Treewidth DP exceeded max_evaluations=" +
-                            std::to_string(config.max_evaluations));
+    throw pypto::InternalError("Treewidth DP exceeded its prechecked evaluation budget");
   }
   IncrementalState state(problem, std::move(choices));
   return BuildResult(state, evaluated_moves, 0, 0, state.Cost(), "optimal", stats, -1);
@@ -2939,7 +2874,7 @@ static LayoutSolverResult SolveAutoLayoutCore(const LayoutProblemInstance& insta
   for (size_t c = 0; c < num_comps; ++c) {
     const auto& dec = decomp.component_decomps[c];
     if (!dec.bags.empty() && dec.treewidth <= config.max_treewidth &&
-        dec.max_bag_states <= config.max_bag_states && dec.total_states <= config.max_evaluations) {
+        dec.max_bag_states <= config.max_bag_states && dec.FitsEvaluationBudget(config.max_evaluations)) {
       dp_comps.push_back(c);
     } else {
       fallback_comps.push_back(c);

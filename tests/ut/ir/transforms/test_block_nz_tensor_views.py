@@ -30,7 +30,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
-from pypto.ir.op import tile
+from pypto.ir.op import tensor_ops, tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import codegen, passes
@@ -2397,6 +2397,59 @@ def test_rejects_invalid_blocked_nz_descriptor(shape, ascend_backend):
 
     with pytest.raises(ValueError, match="nz_blocked=True requires a physical rank-5 NZ shape"):
         passes.block_nz_tensor_views()(Invalid)
+
+
+@pytest.mark.parametrize("explicit_stride", [[], [8192, 1024, 256, 16, 1]])
+def test_physical_nz_slice_retains_parent_pitch(explicit_stride, ascend_backend):
+    span = ir.Span.unknown()
+    view = ir.TensorView(stride=explicit_stride, layout=ir.TensorLayout.NZ, nz_blocked=True)
+    parent = ir.Var("parent", ir.TensorType([1, 4, 2, 16, 16], DataType.FP16, tensor_view=view), span)
+    with pytest.raises(ValueError, match="gapped block window"):
+        tensor_ops.slice(parent, [1, 2, 1, 16, 16], [0, 0, 0, 0, 0])
+    if not explicit_stride:
+        packed = tensor_ops.slice(parent, [1, 2, 2, 16, 16], [0, 1, 0, 0, 0])
+        assert _shape_values(packed.type) == [1, 2, 2, 16, 16]
+    window = tensor_ops.slice(parent, [1, 4, 2, 16, 16], [0, 0, 0, 0, 0])
+    fn = ir.Function(
+        "main", [parent], [window.type], ir.ReturnStmt([window], span), span, ir.FunctionType.Orchestration
+    )
+    program = passes.materialize_tensor_strides()(
+        passes.block_nz_tensor_views()(ir.Program([fn], "slice", span))
+    )
+    function = program.get_function("main")
+    assert function is not None
+    result = function.return_types[0]
+    assert isinstance(result, ir.TensorType) and result.tensor_view is not None
+    assert result.tensor_view.nz_blocked
+    assert _values(result.tensor_view.stride) == (explicit_stride or [2048, 512, 256, 16, 1])
+
+
+@pytest.mark.parametrize(
+    ("nd_shape", "target", "physical", "blocked_shape"),
+    [
+        ([2, 512], [1, 2, 2, 16, 16], True, [1, 2, 2, 16, 16]),
+        ([2, 256], [1, 2, 1, 16, 16], False, [2, 1, 1, 16, 16]),
+    ],
+)
+def test_nd_to_nz_backing_alias_survives_blocking(nd_shape, target, physical, blocked_shape, ascend_backend):
+    span = ir.Span.unknown()
+    parent = ir.Var("parent", ir.TensorType(nd_shape, DataType.FP16), span)
+    alias = tensor_ops.view(parent, target, layout=ir.TensorLayout.NZ)
+    alias_type = alias.type
+    assert isinstance(alias_type, ir.TensorType) and alias_type.tensor_view is not None
+    assert alias_type.tensor_view.nz_blocked == physical
+    fn = ir.Function(
+        "main", [parent], [alias.type], ir.ReturnStmt([alias], span), span, ir.FunctionType.InCore
+    )
+    program = ir.Program([fn], "alias", span)
+    for source in (program, pl.parse_program(program.as_python())):
+        blocked = passes.block_nz_tensor_views()(source)
+        function = blocked.get_function("main")
+        assert function is not None
+        result = function.return_types[0]
+        assert isinstance(result, ir.TensorType) and result.tensor_view is not None
+        assert result.tensor_view.nz_blocked
+        assert _shape_values(result) == blocked_shape
 
 
 if __name__ == "__main__":

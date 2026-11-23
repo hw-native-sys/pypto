@@ -11,6 +11,10 @@
 
 // Benchmark the native solvers on a pre-layout Program exported by export_auto_layout_input.py.
 // The extraction, IR writeback, warmup and serialization are outside the timed region.
+// Standalone CMake builds configured with BUILD_TESTING=ON expose this target.
+// source .claude/skills/testing/load-env.sh
+// cmake --build build --target auto_layout_solver --parallel "$PYPTO_BUILD_JOBS"
+// build/tests/ut/cpp/auto_layout_solver <pre-layout-program.msgpack>
 #include <algorithm>
 #include <array>
 #include <chrono>

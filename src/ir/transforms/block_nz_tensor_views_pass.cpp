@@ -507,6 +507,12 @@ class BlockNzMutator : public IRMutator {
   }
 
  private:
+  static const backend::BackendHandler* GetConfiguredHandler() {
+    if (!backend::BackendConfig::IsConfigured()) return nullptr;
+    const auto* ctx = PassContext::Current();
+    return ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+  }
+
   /// Lower a proven Acc or supported Vec -> NZ store. Reuse the existing fourth operand
   /// for the physical partition; deriving it in the emitter from the 2-D tile
   /// would lose the NZ column-block / row-fractal axes.
@@ -514,11 +520,7 @@ class BlockNzMutator : public IRMutator {
                                           const std::vector<ExprPtr>& logical_shape) {
     INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, op->span_)
         << "Internal error: tile.store expects (tile, offsets, tensor[, shapes])";
-    const auto* ctx = PassContext::Current();
-    const backend::BackendHandler* handler = nullptr;
-    if (backend::BackendConfig::IsConfigured()) {
-      handler = ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
-    }
+    const auto* handler = GetConfiguredHandler();
     auto tile = As<TileType>(op->args_[0]->GetType());
     auto tensor = AsTensorTypeLike(op->args_[2]->GetType());
     INTERNAL_CHECK_SPAN(tile && tensor, op->span_)
@@ -800,8 +802,8 @@ class BlockNzMutator : public IRMutator {
     // otherwise (``src/backend/common/pto_ops_memory.cpp``). Measure the same
     // tuple: a narrowed valid_shape loads fewer row fractals and leaves a
     // larger gap than shapes alone would suggest.
-    if (!backend::BackendConfig::IsConfigured() ||
-        backend::BackendConfig::GetBackendType() != backend::BackendType::Ascend910) {
+    const auto* handler = GetConfiguredHandler();
+    if (!handler || !handler->SupportsWideNzLoadGap()) {
       CheckNzGmGapFitsBurstStride(tensor_type->shape_, args.size() >= 4 ? args[3] : args[2], op->span_);
     }
     return args;

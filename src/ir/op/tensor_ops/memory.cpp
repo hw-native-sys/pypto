@@ -296,16 +296,43 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
       full_shape.size() == source_rank && new_shape.size() >= 2 && only_leading_axes_dropped;
   const TensorLayout result_layout = trailing_plane_intact ? source_layout : TensorLayout::ND;
 
+  const bool physical_nz = tensor_view_semantics::IsNzBlocked(*tensor_type);
+  if (tensor_type->tensor_view_ && physical_nz) {
+    CHECK_SPAN(full_shape.size() == source_rank && offsets.size() == source_rank && drop_dims.empty() &&
+                   tensor_view_semantics::IsBlockedNzShape(new_shape, tensor_type->dtype_),
+               args[0]->span_)
+        << "tensor.slice of a physical NZ tensor requires a rank-five block window";
+    for (size_t axis = source_rank - 2; axis < source_rank; ++axis) {
+      const auto offset = As<ConstInt>(offsets[axis]);
+      CHECK_SPAN(offset && offset->value_ == 0, args[0]->span_)
+          << "tensor.slice of a physical NZ tensor must begin at a complete fractal";
+    }
+    if (!AreExprVectorsEqual(full_shape, tensor_type->shape_)) {
+      // NZ consumers such as Acc stores derive the column-block pitch from
+      // the window height. Only a packed window has the same address map.
+      const auto& explicit_strides = tensor_type->tensor_view_->stride;
+      auto strides = explicit_strides.empty()
+                         ? tensor_view_semantics::BuildRowMajorStrides(tensor_type->shape_)
+                         : explicit_strides;
+      auto packed = tensor_view_semantics::BuildRowMajorStrides(new_shape);
+      CHECK_SPAN(strides.size() == source_rank, args[0]->span_) << "physical NZ parent stride rank mismatch";
+      for (size_t axis = 0; axis < source_rank; ++axis) {
+        auto extent = As<ConstInt>(new_shape[axis]);
+        CHECK_SPAN((extent && extent->value_ == 1) || AreExprsEqual(strides[axis], packed[axis]),
+                   args[0]->span_)
+            << "tensor.slice of a physical NZ tensor cannot represent a gapped block window";
+      }
+    }
+  }
   std::vector<ExprPtr> result_strides;
-  if (const auto& view = tensor_type->tensor_view_;
-      view && HasRectangularSliceStrides(tensor_type, full_shape.size(), offsets.size())) {
-    result_strides = ApplyDropDims(view->stride, drop_dims);
+  if (tensor_type->tensor_view_ &&
+      HasRectangularSliceStrides(tensor_type, full_shape.size(), offsets.size())) {
+    result_strides = ApplyDropDims(tensor_type->tensor_view_->stride, drop_dims);
   }
   std::optional<TensorView> result_tv;
   if (!result_strides.empty() || result_layout != TensorLayout::ND ||
       !AreExprVectorsEqual(valid_shape, new_shape) || result_pad != PadValue::null) {
-    const bool nz_blocked =
-        result_layout == TensorLayout::NZ && tensor_view_semantics::IsNzBlocked(*tensor_type);
+    const bool nz_blocked = result_layout == TensorLayout::NZ && physical_nz;
     result_tv = TensorView(std::move(result_strides), result_layout, valid_shape, result_pad, nz_blocked);
   }
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {

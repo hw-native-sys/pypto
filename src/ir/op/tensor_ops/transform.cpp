@@ -701,6 +701,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   CHECK(new_layout != TensorLayout::DN || new_shape.size() >= 2)
       << "tensor.view: DN layout requires rank >= 2, got " << new_shape.size();
 
+  bool result_nz_blocked = false;
   if (is_nz_backing_alias_candidate) {
     const int64_t c0 = tensor_view_semantics::NzC0Elems(src_type->dtype_);
     auto nz_plane = [&](const std::vector<ExprPtr>& shape,
@@ -745,10 +746,10 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
     const auto nd_plane = extract_nd_plane(nz_source ? new_shape : src_type->shape_);
     const bool known_blocked = nz_source && tensor_view_semantics::IsNzBlocked(*src_type);
     const auto expected = nz_plane(nz_shape, known_blocked);
-    // Old printed IR can contain a physical backing alias before its legacy
-    // function stamp is migrated. The supplied ND geometry can validate that
-    // alias, but it cannot stamp its NZ type or retarget its coordinates.
+    // The ND backing plane disambiguates a physical result from a logical
+    // rank-five shape when only the blocked interpretation matches.
     const bool legacy_alias = !known_blocked && nz_plane(nz_shape, true) == nd_plane;
+    result_nz_blocked = !nz_source && expected != nd_plane && legacy_alias;
     CHECK(expected == nd_plane || legacy_alias)
         << "tensor.view: NZ<->ND backing alias requires 2D ND shape [B * (C / c0), R * c0], got ["
         << nd_plane.first << ", " << nd_plane.second << "]";
@@ -765,6 +766,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
     // The physical descriptor is supplied by the blocker or a recorded
     // result type. A rank-five shape alone may still be logical.
     new_view = TensorView(std::vector<ExprPtr>{}, TensorLayout::NZ);
+    new_view.nz_blocked = result_nz_blocked;
   } else {
     new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
   }

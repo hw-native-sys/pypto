@@ -29,6 +29,9 @@
 #include "pypto/ir/type.h"
 
 namespace pypto {
+namespace backend {
+class Backend;
+}  // namespace backend
 namespace ir {
 namespace auto_layout {
 
@@ -76,8 +79,9 @@ bool CanCopySingletonRowSum(const CallPtr& call);
 ValueNode VecTransposeGeometry(const TileTypePtr& tile);
 bool AliasesFirstTileOperand(const CallPtr& call);
 
-/// Return true if the configured backend requires `input_index` of `op_name` to be `row_major`.
-bool HasRowMajorInputRequirement(const std::string& op_name, size_t input_index);
+/// Return the input layout requirement from the backend resolved during extraction.
+std::optional<TileLayout> RequiredInputTileLayout(const backend::Backend* be, const std::string& op_name,
+                                                  size_t input_index);
 
 }  // namespace detail
 
@@ -125,6 +129,7 @@ struct LayoutWritebackBindings {
     size_t end = 0;  // Half-open range in LayoutProblemInstance::operations.
   };
   ProgramPtr program;
+  const backend::Backend* backend = nullptr;
   OrchCallAnalysis orch;
   std::string host_input_entry;
   std::map<size_t, std::string> host_input_roots;

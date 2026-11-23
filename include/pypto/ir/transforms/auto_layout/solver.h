@@ -29,6 +29,13 @@ namespace auto_layout {
 using ValueId = uint32_t;
 using OpId = uint32_t;
 
+/// Layouts requested by selected readers, including the subset whose invocation
+/// counts prevent them from sharing a copy at the source.
+struct LayoutDemands {
+  uint64_t layouts = 0;
+  uint64_t incompatible = 0;
+};
+
 /// Deterministic search limits, with costs expressed in modeled cycles.
 struct LayoutSolverConfig {
   int64_t max_evaluations = 100000;
@@ -116,7 +123,8 @@ class IndexedProblem {
     /// Flat `[src_idx * num_layouts + dst_idx]` precomputed conversion costs.
     std::vector<double> conv_costs;
     double max_conversion_cost = 0.0;
-    uint64_t incompatible_target_mask = 0;
+    uint64_t incompatible_boundary_demand_mask = 0;
+    bool has_incompatible_readers = false;
     bool forbid_multi_rep = false;
     /// Per-source masks of layout pairs that writeback cannot materialize.
     std::vector<uint64_t> unsupported_target_masks;
@@ -128,6 +136,7 @@ class IndexedProblem {
   struct OpConfigUse {
     ValueId value_id = 0;
     uint64_t demand_mask = 0;
+    bool incompatible_invocations = false;
     /// Parallel `(local_layout_idx, count)` pairs for incremental reference counting.
     std::vector<std::pair<uint16_t, int>> layout_counts;
   };
@@ -144,7 +153,9 @@ class IndexedProblem {
     std::vector<std::vector<OpConfigUse>> config_uses;
   };
 
+  /// The instance must outlive this index.
   explicit IndexedProblem(const LayoutProblemInstance& instance);
+  explicit IndexedProblem(const LayoutProblemInstance&&) = delete;
 
   [[nodiscard]] const LayoutProblemInstance& Instance() const { return instance_; }
   [[nodiscard]] size_t NumValues() const { return values_.size(); }
@@ -180,7 +191,8 @@ class IncrementalState {
       ValueId value;
       uint16_t source;
       std::vector<int> counts;
-      uint64_t demand_mask = 0;
+      std::vector<int> incompatible_counts;
+      LayoutDemands demands;
     };
 
     double gain = 0.0;
@@ -188,7 +200,9 @@ class IncrementalState {
     std::vector<Factor> factors;
   };
 
+  /// The index must outlive this search state.
   IncrementalState(const IndexedProblem& problem, std::vector<uint16_t> choices);
+  IncrementalState(const IndexedProblem&&, std::vector<uint16_t>) = delete;
 
   /// Omit a factor when ranking choices within a fan-out move with a prescribed input layout.
   [[nodiscard]] LayoutSearchScore GainScore(OpId op_idx, uint16_t new_choice,
@@ -206,6 +220,12 @@ class IncrementalState {
   [[nodiscard]] const std::vector<uint16_t>& Sources() const { return sources_; }
   [[nodiscard]] const std::vector<uint64_t>& DemandMasks() const { return demand_masks_; }
   [[nodiscard]] const std::vector<std::vector<int>>& Counts() const { return counts_; }
+  [[nodiscard]] const std::vector<int>& IncompatibleCounts(ValueId value) const {
+    return incompatible_counts_[value];
+  }
+  [[nodiscard]] LayoutDemands Demands(ValueId value) const {
+    return {demand_masks_[value], incompatible_demand_masks_[value]};
+  }
   [[nodiscard]] const IndexedProblem& Problem() const { return problem_; }
 
  private:
@@ -219,16 +239,18 @@ class IncrementalState {
     int64_t violations = 0;
   };
 
-  void AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t old_source, uint64_t old_mask,
-                          uint16_t new_source, uint64_t new_mask) const;
-  void CommitFactor(ValueId value, uint64_t old_mask, uint16_t new_source);
-  void UpdateDemandCount(ValueId value, uint16_t layout, int delta);
+  void AddFactorCostDelta(CostSum& cost, ValueId value, uint16_t old_source, LayoutDemands old_demands,
+                          uint16_t new_source, LayoutDemands new_demands) const;
+  void CommitFactor(ValueId value, LayoutDemands old_demands, uint16_t new_source);
 
   const IndexedProblem& problem_;
   std::vector<uint16_t> choices_;
   std::vector<uint16_t> sources_;
   std::vector<uint64_t> demand_masks_;
   std::vector<std::vector<int>> counts_;
+  std::vector<uint64_t> incompatible_demand_masks_;
+  // Allocated only for values with readers or a boundary demand that cannot share a copy.
+  std::vector<std::vector<int>> incompatible_counts_;
   CostSum cost_;
 };
 

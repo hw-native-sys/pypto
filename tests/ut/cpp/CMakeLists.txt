@@ -101,3 +101,6 @@ add_executable(pypto_auto_layout_pass_test auto_layout_pass_test.cpp)
 target_link_libraries(pypto_auto_layout_pass_test PRIVATE pypto_native)
 target_compile_options(pypto_auto_layout_pass_test PRIVATE -UNDEBUG)
 add_test(NAME pypto_auto_layout_pass_test COMMAND pypto_auto_layout_pass_test)
+
+add_executable(auto_layout_solver EXCLUDE_FROM_ALL ../../benchmarks/auto_layout_solver.cpp)
+target_link_libraries(auto_layout_solver PRIVATE pypto_native msgpackc-cxx)

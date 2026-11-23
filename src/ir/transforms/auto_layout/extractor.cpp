@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -67,6 +68,20 @@ namespace ir {
 namespace auto_layout {
 
 namespace detail {
+
+namespace {
+
+std::unordered_set<std::string> RegisteredOpNames(std::initializer_list<const char*> names) {
+  std::unordered_set<std::string> registered;
+  registered.reserve(names.size());
+  const auto& registry = OpRegistry::GetInstance();
+  for (const auto* name : names) {
+    registered.insert(registry.GetOp(name)->name_);
+  }
+  return registered;
+}
+
+}  // namespace
 
 std::string CleanName(const std::string& name_hint) { return auto_name::GetBaseName(name_hint); }
 
@@ -155,15 +170,15 @@ bool IsTileWorkspace(const CallPtr& call, size_t index) {
 bool CanUseVecNzPointwise(const CallPtr& call) {
   // These operations visit corresponding elements in the physically flattened
   // NZ allocation. TSELS reads a packed predicate with its own row geometry.
-  static const std::unordered_set<std::string> ops = {
-      "tile.add",      "tile.sub",      "tile.mul",      "tile.div",      "tile.maximum",  "tile.minimum",
-      "tile.part_add", "tile.part_max", "tile.part_min", "tile.part_mul", "tile.addc",     "tile.subc",
-      "tile.selc",     "tile.abs",      "tile.exp",      "tile.neg",      "tile.sqrt",     "tile.rsqrt",
-      "tile.log",      "tile.recip",    "tile.not",      "tile.relu",     "tile.lrelu",    "tile.adds",
-      "tile.subs",     "tile.muls",     "tile.divs",     "tile.maximums", "tile.minimums", "tile.and",
-      "tile.or",       "tile.shl",      "tile.shr",      "tile.ands",     "tile.ors",      "tile.shls",
-      "tile.shrs",     "tile.fmod",     "tile.fmods",    "tile.addsc",    "tile.subsc",
-  };
+  static const auto ops = RegisteredOpNames({
+      "tile.add",      "tile.sub",      "tile.mul",      "tile.div",      "tile.maximum", "tile.minimum",
+      "tile.part_add", "tile.part_max", "tile.part_min", "tile.part_mul", "tile.addc",    "tile.subc",
+      "tile.abs",      "tile.exp",      "tile.neg",      "tile.sqrt",     "tile.rsqrt",   "tile.log",
+      "tile.recip",    "tile.not",      "tile.relu",     "tile.lrelu",    "tile.adds",    "tile.subs",
+      "tile.muls",     "tile.divs",     "tile.maximums", "tile.minimums", "tile.and",     "tile.or",
+      "tile.shl",      "tile.shr",      "tile.ands",     "tile.ors",      "tile.shls",    "tile.shrs",
+      "tile.fmod",     "tile.fmods",    "tile.addsc",    "tile.subsc",
+  });
   const auto result = As<TileType>(call->GetType());
   if (!result || result->dtype_.IsPackedFp4()) return false;
   const bool cast = IsOp(call, "tile.cast");
@@ -245,46 +260,41 @@ std::optional<size_t> TileBackingOperand(const CallPtr& call) {
 bool AliasesFirstTileOperand(const CallPtr& call) { return TileBackingOperand(call) == 0; }
 
 const std::unordered_set<std::string>& RowReductionOps() {
-  static const std::unordered_set<std::string> kOps = {
-      "tile.row_sum", "tile.row_max", "tile.row_min", "tile.row_prod", "tile.row_argmax", "tile.row_argmin",
-  };
+  static const auto kOps = RegisteredOpNames({"tile.row_sum", "tile.row_max", "tile.row_min", "tile.row_prod",
+                                              "tile.row_argmax", "tile.row_argmin"});
   return kOps;
 }
 
 const std::unordered_set<std::string>& ColReductionOps() {
-  static const std::unordered_set<std::string> kOps = {
-      "tile.col_sum", "tile.col_max", "tile.col_min", "tile.col_prod", "tile.col_argmax", "tile.col_argmin",
-  };
+  static const auto kOps = RegisteredOpNames({"tile.col_sum", "tile.col_max", "tile.col_min", "tile.col_prod",
+                                              "tile.col_argmax", "tile.col_argmin"});
   return kOps;
 }
 
 const std::unordered_set<std::string>& OtherRowExpandOps() {
-  static const std::unordered_set<std::string> kOps = {
-      "tile.row_expand",     "tile.row_expand_sub", "tile.row_expand_mul",    "tile.row_expand_div",
-      "tile.row_expand_max", "tile.row_expand_min", "tile.row_expand_expdif",
-  };
+  static const auto kOps = RegisteredOpNames({"tile.row_expand", "tile.row_expand_sub", "tile.row_expand_mul",
+                                              "tile.row_expand_div", "tile.row_expand_max",
+                                              "tile.row_expand_min", "tile.row_expand_expdif"});
   return kOps;
 }
 
 const std::unordered_set<std::string>& ColExpandOps() {
-  static const std::unordered_set<std::string> kOps = {
-      "tile.col_expand",     "tile.col_expand_mul", "tile.col_expand_add", "tile.col_expand_div",
-      "tile.col_expand_sub", "tile.col_expand_max", "tile.col_expand_min", "tile.col_expand_expdif",
-  };
+  static const auto kOps = RegisteredOpNames(
+      {"tile.col_expand", "tile.col_expand_mul", "tile.col_expand_add", "tile.col_expand_div",
+       "tile.col_expand_sub", "tile.col_expand_max", "tile.col_expand_min", "tile.col_expand_expdif"});
   return kOps;
 }
 
-bool HasRowMajorInputRequirement(const std::string& op_name, size_t input_index) {
-  if (!backend::BackendConfig::IsConfigured()) {
-    return false;
-  }
-  const auto* be = backend::BackendConfig::GetBackend();
+std::optional<TileLayout> RequiredInputTileLayout(const backend::Backend* be, const std::string& op_name,
+                                                  size_t input_index) {
   if (be == nullptr) {
-    return false;
+    return std::nullopt;
   }
   const auto* spec = be->GetTileLayoutSpec(op_name);
-  return spec != nullptr && input_index < spec->input_layouts.size() &&
-         spec->input_layouts[input_index] == TileLayout::row_major;
+  if (spec == nullptr || input_index >= spec->input_layouts.size()) {
+    return std::nullopt;
+  }
+  return spec->input_layouts[input_index];
 }
 
 }  // namespace detail
@@ -298,6 +308,7 @@ using detail::ColReductionOps;
 using detail::IsTileWorkspace;
 using detail::IterChildStmts;
 using detail::OtherRowExpandOps;
+using detail::RequiredInputTileLayout;
 using detail::RowReductionOps;
 using detail::StaticShape;
 using detail::TileOperands;
@@ -346,22 +357,9 @@ const backend::Backend* ResolveBackend(const LayoutCostModel& model) {
   if (model.backend_type.has_value()) {
     return backend::GetBackendInstance(*model.backend_type);
   }
-  if (backend::BackendConfig::IsConfigured()) {
-    return backend::BackendConfig::GetBackend();
-  }
-  return nullptr;
-}
-
-std::optional<TileLayout> RequiredInputTileLayout(const backend::Backend* be, const std::string& op_name,
-                                                  size_t input_index) {
-  if (be == nullptr) {
-    return std::nullopt;
-  }
-  const auto* spec = be->GetTileLayoutSpec(op_name);
-  if (spec == nullptr || input_index >= spec->input_layouts.size()) {
-    return std::nullopt;
-  }
-  return spec->input_layouts[input_index];
+  if (!backend::BackendConfig::IsConfigured()) return nullptr;
+  if (auto* context = PassContext::Current()) return context->GetBackend();
+  return backend::BackendConfig::GetBackend();
 }
 
 std::pair<std::vector<int64_t>, bool> TensorShapeWithDynamicFallback(const std::vector<ExprPtr>& exprs,
@@ -427,7 +425,9 @@ std::optional<int64_t> EvalScalarExpr(const ExprPtr& expr,
   if (auto fdiv = As<FloorDiv>(expr)) {
     auto lhs = EvalScalarExpr(fdiv->left_, scalar_defs, default_dyn, depth + 1);
     auto rhs = EvalScalarExpr(fdiv->right_, scalar_defs, default_dyn, depth + 1);
-    return (lhs && rhs && *rhs > 0) ? std::optional<int64_t>(*lhs / *rhs) : std::nullopt;
+    if (!lhs || !rhs || *rhs <= 0) return std::nullopt;
+    const int64_t quotient = *lhs / *rhs;
+    return *lhs % *rhs < 0 ? quotient - 1 : quotient;
   }
   if (auto min_e = As<Min>(expr)) {
     auto lhs = EvalScalarExpr(min_e->left_, scalar_defs, default_dyn, depth + 1);
@@ -487,8 +487,12 @@ int64_t InvocationCount(int64_t enclosing, int64_t repetitions) {
   return enclosing > max_count / repetitions ? max_count : enclosing * repetitions;
 }
 
-bool IsTileMatmulOp(const std::string& op_name) {
-  return op_name == "tile.matmul" || op_name == "tile.matmul_acc" || op_name == "tile.matmul_bias";
+void AccumulateInvocations(int64_t& total, int64_t count) {
+  total += std::min(count, std::numeric_limits<int64_t>::max() - total);
+}
+
+bool IsTileMatmulOp(const CallPtr& call) {
+  return IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.matmul_bias");
 }
 
 bool IsWholeTensorFlatten(const CallPtr& call) {
@@ -1671,11 +1675,11 @@ class OrchAnalyzer {
   }
 
   void RecordGlobalCall(const ExprPtr& expr, const std::string& name, const std::vector<ExprPtr>& args) {
-    const int64_t call_mult = mult_ * CallCoreMultiplier(expr);
+    const int64_t call_mult = InvocationCount(mult_, CallCoreMultiplier(expr));
     if (analysis_.call_order.count(name) == 0) {
       analysis_.call_order[name] = analysis_.call_order.size();
     }
-    analysis_.call_counts[name] += call_mult;
+    AccumulateInvocations(analysis_.call_counts[name], call_mult);
 
     std::vector<std::optional<std::string>> resolved;
     resolved.reserve(args.size());
@@ -1794,7 +1798,7 @@ class OrchAnalyzer {
       sites.push_back(OrchCallAnalysis::CallSite{std::move(resolved), call_mult, {}, {expr.get()}});
     } else {
       auto& site = sites[site_it->second];
-      site.multiplicity += call_mult;
+      AccumulateInvocations(site.multiplicity, call_mult);
       site.calls.push_back(expr.get());
     }
   }
@@ -2623,7 +2627,7 @@ class PostInferInstanceExtractor {
     nz_fact_ctx_ = NzFactContext{};
 
     const auto& tensor_vars = var_to_name_;
-    std::vector<std::pair<const Var*, const Var*>> assign_aliases;
+    std::unordered_map<const Var*, std::vector<const Var*>> assign_aliases;
     VarUnionFind uf;
     std::unordered_set<const Var*> disqualified;
     std::vector<const Var*> disqualified_order;
@@ -2804,7 +2808,8 @@ class PostInferInstanceExtractor {
           visit_call(call, as->var_);
         } else if (auto rv = AsVarLike(as->value_); rv && As<TileType>(as->var_->GetType())) {
           union_nz(as->var_.get(), rv.get());
-          assign_aliases.emplace_back(as->var_.get(), rv.get());
+          assign_aliases[as->var_.get()].push_back(rv.get());
+          assign_aliases[rv.get()].push_back(as->var_.get());
         }
       } else if (auto es = As<EvalStmt>(stmt)) {
         if (auto call = As<Call>(es->expr_)) {
@@ -2845,17 +2850,14 @@ class PostInferInstanceExtractor {
 
     // Propagate non-row-expand consumer usage across Var aliases so aliased row vectors
     // consumed outside `tile.row_expand_add` never receive `ROW_BCAST_FLAT`.
-    for (bool changed = true; changed;) {
-      changed = false;
-      for (const auto& [dst_v, src_v] : assign_aliases) {
-        const bool d_in = vec_non_row_expand_consumer_vars_.count(dst_v) != 0;
-        const bool s_in = vec_non_row_expand_consumer_vars_.count(src_v) != 0;
-        if (d_in && !s_in) {
-          vec_non_row_expand_consumer_vars_.insert(src_v);
-          changed = true;
-        } else if (s_in && !d_in) {
-          vec_non_row_expand_consumer_vars_.insert(dst_v);
-          changed = true;
+    std::vector<const Var*> aliases_to_visit(vec_non_row_expand_consumer_vars_.begin(),
+                                             vec_non_row_expand_consumer_vars_.end());
+    for (size_t i = 0; i < aliases_to_visit.size(); ++i) {
+      auto aliases = assign_aliases.find(aliases_to_visit[i]);
+      if (aliases == assign_aliases.end()) continue;
+      for (const auto* alias : aliases->second) {
+        if (vec_non_row_expand_consumer_vars_.insert(alias).second) {
+          aliases_to_visit.push_back(alias);
         }
       }
     }
@@ -3482,7 +3484,7 @@ class PostInferInstanceExtractor {
         }
       }
     }
-    if (tile_inputs.empty() && op_name != "tile.full") {
+    if (tile_inputs.empty() && !IsOp(rhs, "tile.full")) {
       return;
     }
 
@@ -3543,7 +3545,7 @@ class PostInferInstanceExtractor {
       auto inputs = singleton ? input_layouts() : input_layouts(LayoutSpec::RowMajorFlat());
       configs.push_back(OperatorConfig{op_id, op_name, std::move(inputs), dst_node->current_layout, cost,
                                        "Axis reduction " + op_name});
-    } else if (op_name == "tile.row_expand_add" && tile_inputs.size() >= 2) {
+    } else if (IsOp(rhs, "tile.row_expand_add") && tile_inputs.size() >= 2) {
       const ValueNode* tile_mn = std::get<2>(tile_inputs[0]);
       const ValueNode* row_vec = std::get<2>(tile_inputs[1]);
       const double base_cost =
@@ -3641,7 +3643,7 @@ class PostInferInstanceExtractor {
                   (As<TileType>(op->var_->GetType())->GetMemorySpace() == MemorySpace::Left ||
                    As<TileType>(op->var_->GetType())->GetMemorySpace() == MemorySpace::Right))) {
         ExtractMove(op, rhs);
-      } else if (IsTileMatmulOp(op_name)) {
+      } else if (IsTileMatmulOp(rhs)) {
         ExtractMatmul(op, rhs);
       } else if (IsOp(rhs, "tile.store")) {
         ExtractStore(rhs);
@@ -4391,25 +4393,10 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program, bool track_name
       ++pending_callers[callee];
     }
   }
-  std::vector<std::string> ready;
-  ready.reserve(orchestration.size());
-  for (const auto& [name, _] : orchestration) {
-    if (!pending_callers.count(name)) ready.push_back(name);
-  }
-  OrchAnalyzer analyzer(program, definitions, track_named_inputs, host_world_size);
-  for (size_t i = 0; i < ready.size(); ++i) {
-    const auto& name = ready[i];
-    if (track_named_inputs) analyzer.Walk(orchestration.at(name));
-    auto children = callees.find(name);
-    if (children == callees.end()) continue;
-    for (const auto& callee : children->second) {
-      if (--pending_callers.at(callee) == 0) ready.push_back(callee);
-    }
-  }
-  INTERNAL_CHECK(ready.size() == orchestration.size()) << "AutoLayout requires acyclic function calls";
+  std::unordered_map<std::string, size_t> baseline_order;
   if (!track_named_inputs) {
-    // Preserve baseline call-site specialization and operation ordering when
-    // the caller has offered no named layout choices.
+    // Retain the baseline ordering between ready functions. Every caller must
+    // still be walked before its callee so scalar facts cover all bindings.
     OrchAnalyzer top_analyzer(program, definitions);
     for (const auto& fn : top_orch) top_analyzer.Walk(fn);
     const auto top = std::move(top_analyzer).Result();
@@ -4419,11 +4406,36 @@ OrchCallAnalysis AnalyzeOrchestration(const ProgramPtr& program, bool track_name
     };
     std::sort(sub_orch.begin(), sub_orch.end(),
               [&](const auto& a, const auto& b) { return order(a) < order(b); });
-    for (const auto& fn : top_orch) analyzer.Walk(fn);
-    for (const auto& fn : sub_orch) analyzer.Walk(fn);
+    for (const auto& fn : top_orch) baseline_order.emplace(fn->name_, baseline_order.size());
+    for (const auto& fn : sub_orch) baseline_order.emplace(fn->name_, baseline_order.size());
   }
+
+  std::set<std::pair<size_t, std::string>> ready;
+  std::vector<std::string> caller_first_order;
+  caller_first_order.reserve(orchestration.size());
+  size_t next_ready = 0;
+  const auto enqueue = [&](const std::string& name) {
+    ready.emplace(track_named_inputs ? next_ready++ : baseline_order.at(name), name);
+  };
+  for (const auto& [name, _] : orchestration) {
+    if (!pending_callers.count(name)) enqueue(name);
+  }
+  OrchAnalyzer analyzer(program, definitions, track_named_inputs, host_world_size);
+  while (!ready.empty()) {
+    auto name = ready.begin()->second;
+    ready.erase(ready.begin());
+    caller_first_order.push_back(name);
+    analyzer.Walk(orchestration.at(name));
+    auto children = callees.find(name);
+    if (children == callees.end()) continue;
+    for (const auto& callee : children->second) {
+      if (--pending_callers.at(callee) == 0) enqueue(callee);
+    }
+  }
+  INTERNAL_CHECK(caller_first_order.size() == orchestration.size())
+      << "AutoLayout requires acyclic function calls";
   auto analysis = std::move(analyzer).Result();
-  analysis.caller_first_order = std::move(ready);
+  analysis.caller_first_order = std::move(caller_first_order);
   const std::vector<std::optional<std::string>> empty;
   auto register_local_buffers = [&](const FunctionPtr& func, const GmNames& names) {
     auto walk = [&](auto& self, const StmtPtr& stmt) -> void {
@@ -4497,6 +4509,7 @@ LayoutProblemInstance ExtractLayoutInstance(const ProgramPtr& input, const Layou
     throw ValueError("AutoLayout host_world_size must be positive");
   }
   const backend::Backend* be = ResolveBackend(resolved_model);
+  if (bindings) bindings->backend = be;
   if (!resolved_model.backend_type.has_value() && be != nullptr) {
     resolved_model.backend_type = backend::BackendConfig::GetBackendType();
   }

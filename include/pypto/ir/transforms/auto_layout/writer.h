@@ -33,7 +33,8 @@ ProgramPtr ApplySolvedLayout(const LayoutProblemInstance& instance, LayoutWriteb
                              const LayoutAssignment& assignment);
 }  // namespace detail
 
-/// Synchronize a `Call` or `Submit` return type with updated callee return types.
+/// Copy callee GM layouts into the call result, preserving its geometry and tile results.
+/// Submit synchronizes GM result elements separately to retain its trailing task ID.
 TypePtr SyncCallReturnType(const TypePtr& call_type, const std::vector<TypePtr>& ret_types);
 
 }  // namespace auto_layout

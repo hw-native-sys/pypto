@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,15 @@ namespace al = pypto::ir::auto_layout;
 using pypto::DataType;
 using pypto::backend::BackendType;
 using pypto::ir::MemorySpace;
+
+static_assert(std::is_constructible_v<al::IndexedProblem, const al::LayoutProblemInstance&>);
+static_assert(!std::is_constructible_v<al::IndexedProblem, al::LayoutProblemInstance&&>);
+static_assert(!std::is_constructible_v<al::IndexedProblem, const al::LayoutProblemInstance&&>);
+static_assert(
+    std::is_constructible_v<al::IncrementalState, const al::IndexedProblem&, std::vector<uint16_t>>);
+static_assert(!std::is_constructible_v<al::IncrementalState, al::IndexedProblem&&, std::vector<uint16_t>>);
+static_assert(
+    !std::is_constructible_v<al::IncrementalState, const al::IndexedProblem&&, std::vector<uint16_t>>);
 
 void Require(bool condition, const std::string& message) {
   if (!condition) {
@@ -1161,6 +1171,130 @@ void TestFanoutBlockChangesSourceAndDemandTogether() {
           "Applying a block must produce the same state as rebuilding from its choices");
 }
 
+void TestValueFootprintAndUnorderedLocalConversions() {
+  auto value = MakeValue("tile");
+  value.shape = {int64_t{1} << 30, int64_t{1} << 30};
+  Require(value.NumElements() == (int64_t{1} << 60) && value.ByteSize() == (int64_t{1} << 61),
+          "A representable footprint must remain exact even when its bit count overflows");
+  const auto reject_footprint = [&](std::vector<int64_t> shape, const std::string& message) {
+    value.shape = std::move(shape);
+    try {
+      (void)value.ByteSize();
+    } catch (const pypto::ValueError& e) {
+      return std::string(e.what()).find(message) != std::string::npos;
+    }
+    return false;
+  };
+  Require(reject_footprint({int64_t{1} << 32, int64_t{1} << 32}, "Element count"),
+          "The element product must be checked before multiplication");
+  Require(reject_footprint({int64_t{1} << 62}, "Storage size"),
+          "A representable element count may still overflow when converted to bytes");
+  value.shape = {int64_t{1} << 32, int64_t{1} << 32, 0};
+  Require(value.NumElements() == 0 && value.ByteSize() == 0, "A zero-sized allocation has no footprint");
+
+  const auto row = al::LayoutSpec::RowMajorFlat();
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  al::OperatorConfig config;
+  config.input_layouts = {row, row, row, row};
+  config.local_vec_conversions = {{2, col}, {0, col}, {1, col}};
+  Require(config.ExecutionInputLayout(1) == col && config.ExecutionInputLayout(3) == row,
+          "Private conversions are looked up by operand index regardless of entry order");
+}
+
+void TestExactDPUsesStrictCosts() {
+  const auto nd = al::LayoutSpec::ND();
+  al::LayoutProblemInstance instance;
+  instance.AddValue(MakeValue("x", "producer"));
+  instance.AddValue(MakeValue("y", "consumer"));
+  instance.operations = {
+      MakeOp("producer", {}, "x", {{{}, nd, 1.0}, {{}, nd, 0.25}, {{}, nd, 0.25}}),
+      MakeOp("consumer", {"x"}, "y", {{{nd}, nd, 1.0}, {{nd}, nd, 0.25}}),
+  };
+  instance.operations[0].configs[1].notes = "first minimum";
+  instance.operations[0].configs[2].notes = "second minimum";
+  al::LayoutSolverConfig config;
+  config.tolerance = 1.0;
+  const auto result = al::SolveTreewidthDP(instance, config);
+  Require(result.stats.termination_reason == "optimal", "The small connected graph must run exact DP");
+  RequireNear(result.TotalCostCycles(), 0.5, 0.0, "Exact DP must retain improvements below the tolerance");
+  Require(result.Assignment().op_configs.at("producer") == instance.operations[0].configs[1],
+          "Exact ties must retain the first choice");
+}
+
+void TestSelectedConversionInvocations() {
+  const auto row = al::LayoutSpec::RowMajorFlat();
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  al::LayoutProblemInstance instance;
+  instance.forbid_unmaterializable_gm_conversions = true;
+  instance.AddValue(MakeValue("x", "producer", MemorySpace::Vec));
+  instance.AddValue(MakeValue("y", "col_reader", MemorySpace::Vec));
+  instance.AddValue(MakeValue("z", "flex_reader", MemorySpace::Vec));
+  instance.operations = {
+      MakeOp("producer", {}, "x", {{{}, row, 0.0}}, 4, "tile.load"),
+      MakeOp("col_reader", {"x"}, "y", {{{col}, row, 0.0}}, 4, "tile.add"),
+      MakeOp("flex_reader", {"x"}, "z", {{{col}, row, 0.0}, {{row}, row, 1.0}}, 1, "tile.add"),
+  };
+  instance.custom_conversion_costs["x"][{row, col}] = 2.0;
+
+  const auto check = [&](const al::LayoutSolverResult& result, double expected_cost) {
+    const auto& assignment = result.WritebackAssignment();
+    Require(assignment.op_configs.at("producer").output_layout == row &&
+                assignment.op_configs.at("flex_reader").input_layouts.front() == row,
+            "The once-invoked reader must read the source directly");
+    Require(result.conversions.size() == 1 && result.conversions.front().source_layout == row &&
+                result.conversions.front().target_layout == col &&
+                result.conversions.front().consumer_op_ids == std::vector<std::string>{"col_reader"},
+            "Only the compatible, selected reader needs the shared copy");
+    RequireNear(result.conversions.front().cost_cycles, 8.0, 0.0, "Charge the copy once per insertion");
+    RequireNear(result.TotalCostCycles(), expected_cost, 0.0, "Solver score for selected demands");
+    RequireNear(al::EvaluateAssignment(instance, assignment).total_cost_cycles, expected_cost, 0.0,
+                "Evaluator and solver must agree for the feasible assignment");
+  };
+  check(al::SolveTreewidthDP(instance), 9.0);
+  check(al::SolveAutoLayout(instance), 9.0);
+  check(al::SolveGreedy(instance), 9.0);
+  check(al::SolveGreedyFM(instance), 9.0);
+
+  // Both choices request COL somewhere in the graph. Changing just the
+  // once-invoked reader removes the incompatibility while keeping the copy.
+  const al::IndexedProblem problem(instance);
+  al::IncrementalState state(problem, {0, 0, 0});
+  bool rejected = false;
+  try {
+    (void)al::EvaluateAssignment(instance, state.ToAssignment());
+  } catch (const pypto::ValueError& e) {
+    rejected =
+        std::string(e.what()).find("differing producer/consumer execution counts") != std::string::npos;
+  }
+  Require(rejected, "A selected incompatible copy must be rejected by direct evaluation");
+  Require(state.SearchCost().violations == 1 && state.GainScore(2, 1).violations == 1,
+          "Single moves must see a compatibility change even when COL remains demanded");
+  state.Apply(2, 1);
+  RequireNear(state.Cost(), 9.0, 0.0, "Single move retains the materializable copy");
+  const std::vector<al::IncrementalState::ChoiceChange> undo{{2, 0}};
+  const auto undo_evaluation = state.EvaluateBlock(undo);
+  Require(undo_evaluation.violation_reduction == -1, "Block scoring tracks the same selected demands");
+  state.ApplyBlock(undo, undo_evaluation);
+  const std::vector<al::IncrementalState::ChoiceChange> repair{{2, 1}};
+  state.ApplyBlock(repair, state.EvaluateBlock(repair));
+  Require(state.SearchCost().violations == 0, "Block application restores compatibility");
+  RequireNear(state.Cost(), 9.0, 0.0, "Block application retains the materializable copy");
+
+  al::LayoutSolverConfig limited;
+  limited.max_evaluations = 1;
+  const auto budget = al::SolveGreedy(instance, std::nullopt, limited);
+  Require(budget.stats.termination_reason == "evaluation_budget" && !budget.writeback_issues.empty(),
+          "A budget-limited incompatible incumbent must be reported as unwritable");
+
+  // A producer layout in the catalog can require an incompatible copy for
+  // this now-pinned reader. The selected ROW layout still needs the COL copy.
+  instance.operations[0].configs =
+      MakeOp("producer", {}, "x", {{{}, row, 1.0}, {{}, col, 0.0}}, 4, "tile.load").configs;
+  instance.operations[2].configs = {instance.operations[2].configs.back()};
+  check(al::SolveTreewidthDP(instance), 13.0);
+  check(al::SolveGreedy(instance), 13.0);
+}
+
 void TestBudgetAndTreewidthLimits() {
   al::LayoutProblemInstance inst;
   inst.AddValue(MakeValue("x"));
@@ -1184,6 +1318,32 @@ void TestBudgetAndTreewidthLimits() {
     threw = true;
   }
   Require(threw, "SolveTreewidthDP must throw ValueError on max_evaluations=1");
+
+  budget_cfg.max_evaluations = 2;
+  Require(al::SolveTreewidthDP(inst, budget_cfg).stats.evaluated_moves == 2,
+          "Strict DP must run when the exact state count fits the budget");
+
+  // The width and bag-size limits allow this 25-clique, but the evaluation
+  // limit must reject it before allocating its 16M-entry first separator.
+  al::LayoutProblemInstance clique;
+  const auto nd = al::LayoutSpec::ND();
+  clique.AddValue(MakeValue("shared"));
+  for (size_t i = 0; i < 25; ++i) {
+    const std::string id = "reader" + std::to_string(i);
+    clique.AddValue(MakeValue(id, id));
+    clique.operations.push_back(MakeOp(id, {"shared"}, id, {{{nd}, nd, 0.0}, {{nd}, nd, 1.0}}));
+  }
+  al::LayoutSolverConfig clique_budget;
+  clique_budget.max_treewidth = 24;
+  clique_budget.max_bag_states = int64_t{1} << 25;
+  clique_budget.max_evaluations = 1;
+  bool clique_rejected = false;
+  try {
+    (void)al::SolveTreewidthDP(clique, clique_budget);
+  } catch (const pypto::ValueError& e) {
+    clique_rejected = std::string(e.what()).find("max_evaluations=1") != std::string::npos;
+  }
+  Require(clique_rejected, "A wide strict-DP request must report the evaluation budget");
 
   // Treewidth exceeds limit check.
   al::LayoutProblemInstance k4;
@@ -1215,6 +1375,52 @@ void TestBudgetAndTreewidthLimits() {
     tw_threw = true;
   }
   Require(tw_threw, "SolveTreewidthDP must throw ValueError when active_treewidth > max_treewidth");
+}
+
+void TestDPEvaluationCountOverflow() {
+  const auto nd = al::LayoutSpec::ND();
+  al::LayoutProblemInstance clique;
+  clique.AddValue(MakeValue("shared"));
+  for (size_t i = 0; i < 63; ++i) {
+    const std::string id = "reader" + std::to_string(i);
+    clique.AddValue(MakeValue(id, id));
+    clique.operations.push_back(MakeOp(id, {"shared"}, id, {{{nd}, nd, 0.0}, {{nd}, nd, 1.0}}));
+  }
+
+  const auto check = [&](int64_t width, bool bag_overflows) {
+    auto config = al::LayoutSolverConfig{};
+    config.max_treewidth = width;
+    config.max_bag_states = std::numeric_limits<int64_t>::max();
+    config.max_evaluations = std::numeric_limits<int64_t>::max();
+    bool rejected = false;
+    try {
+      (void)al::SolveTreewidthDP(clique, config);
+    } catch (const pypto::ValueError& e) {
+      rejected = std::string(e.what()).find("max_evaluations=") != std::string::npos;
+    }
+    Require(rejected, "An overflowing strict-DP request exceeds even the maximum budget");
+    const auto automatic = al::SolveAutoLayout(clique, std::nullopt, config);
+    Require(automatic.stats.termination_reason != "optimal" && automatic.stats.evaluated_moves > 0 &&
+                automatic.TotalCostCycles() == 0.0,
+            "Auto must use local search when the exact count overflows");
+    const auto& stats = automatic.treewidth_stats.value();
+    Require(stats.total_dp_states == config.max_evaluations &&
+                (stats.max_bag_domain_product == config.max_bag_states) == bag_overflows,
+            "Report saturated diagnostics for the overflowing counts");
+  };
+
+  // A 63-operation binary clique overflows the first bag product.
+  check(62, true);
+  // With 61 binary operations and one with three choices, the largest bag
+  // fits in int64_t, while the sum across all bags still overflows.
+  clique.values.erase(clique.operations.back().output);
+  clique.value_order.pop_back();
+  clique.operations.pop_back();
+  auto& configs = clique.operations.back().configs;
+  auto config = configs.back();
+  config.op_cost_cycles = 2.0;
+  configs.push_back(std::move(config));
+  check(61, false);
 }
 
 void TestIndexCapacityLimits() {
@@ -1429,7 +1635,7 @@ void TestIfJoinAndClassFCrossLoopForbidden() {
               std::vector<std::string>{"Conditional join 'J_if' has incompatible branch layouts"},
           "An incompatible pinned join must prevent writeback");
 
-  // 2) Class F: on-chip value produced with invocations=1 and consumed with invocations=4
+  // 2) Class F: on-chip value produced with invocations=4 and consumed with invocations=1
   // prefers conversion-free match without throwing.
   al::LayoutProblemInstance loop_mismatch;
   loop_mismatch.AddValue(MakeValue("v", "Prod", MemorySpace::Vec, false, false, {RM, CM}));
@@ -1485,7 +1691,11 @@ int main() {
     TestUphillFanoutMovesAndRollsBackAtomically();
     TestFMReusesShrinkingFanoutGain();
     TestFanoutBlockChangesSourceAndDemandTogether();
+    TestValueFootprintAndUnorderedLocalConversions();
+    TestExactDPUsesStrictCosts();
+    TestSelectedConversionInvocations();
     TestBudgetAndTreewidthLimits();
+    TestDPEvaluationCountOverflow();
     TestIndexCapacityLimits();
     TestTreewidthAbove64AndPerComponentDPFallback();
     TestMinFillDecompositionSizeLimit();

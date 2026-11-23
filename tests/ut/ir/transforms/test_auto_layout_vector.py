@@ -11,20 +11,13 @@
 
 import pypto.language as pl
 import pytest
-from pypto import backend, ir, passes
+from pypto import backend, ir
 from pypto.debug import torch_codegen
+
+from .auto_layout_test_utils import run_through_auto_layout
 
 _TILE_RESHAPE = ir.get_op("tile.reshape").name
 _TILE_SELS = ir.get_op("tile.sels").name
-
-
-def _select(program: ir.Program) -> ir.Program:
-    prefix = passes.PassPipeline()
-    for step in ir.PassManager.get_strategy(ir.OptimizationStrategy.AutoLayout).passes:
-        prefix.add_pass(step)
-        if step.get_name() == "AutoLayout":
-            return prefix.run(program)
-    raise AssertionError("AutoLayout missing from pipeline")
 
 
 def test_each_store_uses_its_own_destination_layout(ascend_backend):
@@ -44,7 +37,7 @@ def test_each_store_uses_its_own_destination_layout(ascend_backend):
             out = pl.store(mask, [0, 0], out)
             dn = pl.store(data, [0, 0], dn)
 
-    body = next(iter(_select(Stores).functions.values())).body
+    body = next(iter(run_through_auto_layout(Stores).functions.values())).body
     assert isinstance(body, ir.SeqStmts)
     layouts = []
     for stmt in body.stmts:
@@ -72,7 +65,7 @@ def test_shape_changing_reshape_preserves_flat_element_order(ascend_backend):
             result = pl.tile.reshape(tile, [16, 64])
             return pl.store(result, [0, 0], out)
 
-    body = next(iter(_select(Reshape).functions.values())).body
+    body = next(iter(run_through_auto_layout(Reshape).functions.values())).body
     assert isinstance(body, ir.SeqStmts)
     call = next(
         s.value
@@ -124,7 +117,7 @@ def test_two_row_reductions_preserve_logical_axis(tmp_path, ascend_backend):
 
     torch = pytest.importorskip("torch")
     scope = {}
-    exec(torch_codegen(_select(Reduce), check_shapes=True), scope)
+    exec(torch_codegen(run_through_auto_layout(Reduce), check_shapes=True), scope)
     data = torch.arange(1024, dtype=torch.float32).reshape(32, 32)
     output = torch.full((32, 1), -777.0)
     scope["main"](data, output)
@@ -180,7 +173,7 @@ def test_sels_keeps_packed_predicate_geometry(ascend_backend):
             u = self.select(t, u)
             return self.consume(u, w, dst)
 
-    kernel = _select(Select).get_function("select")
+    kernel = run_through_auto_layout(Select).get_function("select")
     assert kernel is not None
     body = kernel.body
     assert isinstance(body, ir.SeqStmts)
@@ -195,6 +188,8 @@ def test_sels_keeps_packed_predicate_geometry(ascend_backend):
         tile = operand.type
         assert isinstance(tile, ir.TileType)
         assert [dim.value for dim in tile.shape if isinstance(dim, ir.ConstInt)] == [16, 16]
+        view = tile.get_effective_tile_view()
+        assert (view.blayout, view.slayout) == (ir.TileLayout.row_major, ir.TileLayout.none_box)
 
 
 @pytest.mark.parametrize("to_dn", [True, False])
@@ -232,7 +227,7 @@ class CopyMatrix:
     data = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64)
     output = torch.full_like(data, -1)
     namespace = {}
-    exec(torch_codegen(_select(program), check_shapes=True), namespace)
+    exec(torch_codegen(run_through_auto_layout(program), check_shapes=True), namespace)
     namespace["main"](data, output)
     torch.testing.assert_close(output, data)
 
@@ -313,21 +308,22 @@ class BackingReads:
     )
     pto = next(tmp_path.rglob("*.pto")).read_text()
     instructions = [
-        "transpose" if "pto.ttrans " in line else "store"
+        line.split(maxsplit=1)[0]
         for line in pto.splitlines()
-        if "pto.ttrans " in line or "pto.tstore " in line
+        if line.lstrip().startswith(("pto.ttrans ", "pto.tstore ", "pto.tinsert "))
     ]
-    # The fixed DN stores share one transpose only when the backing is immutable.
-    expected = ["transpose", "store", "store", "store"]
+    # A mutable backing needs a fresh transpose after TINSERT writes the patch.
+    expected = ["pto.ttrans", "pto.tstore"]
     if mutation != "none":
-        expected.insert(2, "transpose")
+        expected.extend(["pto.tinsert", "pto.ttrans"])
+    expected.extend(["pto.tstore", "pto.tstore"])
     if source_dn:
-        expected.insert(0, "transpose")  # Initialize the row-major mutable backing from a DN load.
+        expected.insert(0, "pto.ttrans")  # Initialize the row-major mutable backing from a DN load.
     assert instructions == expected
 
     torch = pytest.importorskip("torch")
     namespace = {}
-    exec(torch_codegen(_select(program), check_shapes=True), namespace)
+    exec(torch_codegen(run_through_auto_layout(program), check_shapes=True), namespace)
     data = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64)
     if source_dn:
         data = data.T.contiguous().T

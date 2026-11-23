@@ -15,6 +15,8 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 
+from .auto_layout_test_utils import run_through_auto_layout
+
 TENSOR_ONLY_PASSES = [
     "OutlineHierarchyScopes",
     "OutlineGraphScopes",
@@ -90,15 +92,6 @@ TENSOR_OPTIMIZATION_PASSES = [
 ]
 
 
-def _run_through_auto_layout(program: ir.Program) -> ir.Program:
-    prefix = passes.PassPipeline()
-    for step in ir.PassManager.get_strategy(ir.OptimizationStrategy.AutoLayout).passes:
-        prefix.add_pass(step)
-        if step.get_name() == "AutoLayout":
-            return prefix.run(program)
-    raise AssertionError("AutoLayout is missing from the pipeline")
-
-
 class TestOptimizationStrategy:
     """Test OptimizationStrategy enum."""
 
@@ -142,7 +135,7 @@ class TestPassManagerBasics:
                 out_y = pl.store(pl.tile.row_expand_add(ty, row), [0, 0], out_y)
                 return out_x, out_y
 
-        printed = ir.python_print(_run_through_auto_layout(SharedRow))
+        printed = ir.python_print(run_through_auto_layout(SharedRow))
         assert printed.count("pl.tile.row_expand_add(") == 2
         assert "pl.tile.row_expand(" not in printed
 
@@ -169,7 +162,7 @@ class TestPassManagerBasics:
                 out = pl.store(joined, [0, 0], out)
                 return out
 
-        result = _run_through_auto_layout(Branch)
+        result = run_through_auto_layout(Branch)
         properties = passes.IRPropertySet()
         for prop in (
             passes.IRProperty.TypeChecked,

@@ -686,7 +686,12 @@ def auto_layout(
     host_world_size: int | None = None,
     steady_state: bool = False,
 ) -> Pass:
-    """Select GM and on-chip layouts with the native solver, requiring a writable assignment."""
+    """Select GM and on-chip layouts with the native solver, requiring a writable assignment.
+
+    With ``allow_external_input_relayout=True``, callers must supply the input bytes in
+    the layout selected by the pass. For example, an ND weight selected for NZ must be
+    packed as NZ by the caller before execution.
+    """
     ...
 
 def infer_tile_memory_space() -> Pass:

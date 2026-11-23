@@ -220,14 +220,14 @@ std::unordered_set<const Var*> NzOffsetScalarVars(
     for (const auto& arg : call->args_) {
       self(self, arg);
     }
-    if (call->op_->name_ == kOpTileLoad && call->args_.size() >= 2) {
+    if (IsOp(call, kOpTileLoad) && call->args_.size() >= 2) {
       if (auto src = AsVarLike(call->args_[0]); src && nz_tensor_vars.count(src.get()) != 0) {
         CollectExprVars(call->args_[1], expanded, worklist);
         if (call->args_.size() >= 4) {
           CollectExprVars(call->args_[3], expanded, worklist);
         }
       }
-    } else if (call->op_->name_ == kOpTileStore && call->args_.size() >= 3) {
+    } else if (IsOp(call, kOpTileStore) && call->args_.size() >= 3) {
       if (auto dst = AsVarLike(call->args_[2]); dst && nz_tensor_vars.count(dst.get()) != 0) {
         CollectExprVars(call->args_[1], expanded, worklist);
       }
@@ -1014,7 +1014,7 @@ class LayoutAssignmentWriter : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
-    if (auto call = As<Call>(op->expr_); call && call->op_->name_ == kOpTileStore) {
+    if (auto call = As<Call>(op->expr_); IsOp(call, kOpTileStore)) {
       const auto cfg = standalone_store_cfgs_.find(op.get());
       const OperatorConfig* cfg_ptr = cfg == standalone_store_cfgs_.end() ? nullptr : &cfg->second.at(0);
       auto [store_call, pre_stmts, nz_src] = RewriteTileStore(call, cfg_ptr, op->span_);
@@ -1073,7 +1073,7 @@ class LayoutAssignmentWriter : public IRMutator {
     const auto target_tensor_layout = LookupTensorLayout(op->var_);
 
     CallPtr rhs = As<Call>(op->value_);
-    if (rhs && rhs->op_->name_ == kOpTensorCreate && target_tensor_layout.has_value() &&
+    if (IsOp(rhs, kOpTensorCreate) && target_tensor_layout.has_value() &&
         !IsA<DistributedTensorType>(op->var_->GetType())) {
       if (auto lhs_tt = As<TensorType>(op->var_->GetType());
           lhs_tt && detail::TensorTypeLayout(lhs_tt) != *target_tensor_layout) {
@@ -1094,12 +1094,12 @@ class LayoutAssignmentWriter : public IRMutator {
     auto cfg_it = assign_op_cfg_.find(op->var_.get());
     const OperatorConfig* cfg = (cfg_it != assign_op_cfg_.end()) ? &cfg_it->second : nullptr;
 
-    if (rhs && rhs->op_->name_ == kOpTileLoad && IsVecTileType(op->var_->GetType()) && cfg != nullptr &&
+    if (IsOp(rhs, kOpTileLoad) && IsVecTileType(op->var_->GetType()) && cfg != nullptr &&
         cfg->output_layout.IsTile()) {
       return RewriteVecLoadAssign(op, rhs, *cfg);
     }
 
-    if (rhs && rhs->op_->name_ == kOpTileStore) {
+    if (IsOp(rhs, kOpTileStore)) {
       std::vector<StmtPtr> prefix;
       auto value = RewriteStoredResult(rhs, cfg, detail::CleanName(op->var_->name_hint_), op->span_, prefix);
       auto assign = FinishVecAssign(op->var_, std::move(value), std::nullopt, op->span_, op);
@@ -1108,14 +1108,14 @@ class LayoutAssignmentWriter : public IRMutator {
       return std::make_shared<SeqStmts>(std::move(prefix), op->span_);
     }
 
-    if (rhs && rhs->op_->name_ == kOpTileMove && As<TileType>(op->var_->GetType())) {
+    if (IsOp(rhs, kOpTileMove) && As<TileType>(op->var_->GetType())) {
       if (StmtPtr moved = RewriteTileMoveAssign(op, rhs, cfg, target_tile_desc)) {
         return moved;
       }
     }
 
-    if (rhs && rhs->op_->name_.rfind("tile.", 0) == 0 && rhs->op_->name_ != kOpTileLoad &&
-        rhs->op_->name_ != kOpTileStore && IsVecTileType(op->var_->GetType()) && cfg != nullptr &&
+    if (rhs && rhs->op_->name_.rfind("tile.", 0) == 0 && !IsOp(rhs, kOpTileLoad) &&
+        !IsOp(rhs, kOpTileStore) && IsVecTileType(op->var_->GetType()) && cfg != nullptr &&
         cfg->output_layout.IsTile()) {
       return RewriteVecGenericAssign(op, rhs, *cfg);
     }
@@ -1344,7 +1344,7 @@ class LayoutAssignmentWriter : public IRMutator {
       std::vector<const Var*> allocation_vars;
       auto find_allocations = [&](auto& self, const StmtPtr& stmt) -> void {
         if (auto assign = As<AssignStmt>(stmt)) {
-          if (auto call = As<Call>(assign->value_); call && call->op_->name_ == kOpTensorCreate) {
+          if (auto call = As<Call>(assign->value_); IsOp(call, kOpTensorCreate)) {
             allocation_vars.push_back(assign->var_.get());
           }
         }
@@ -1590,13 +1590,13 @@ class LayoutAssignmentWriter : public IRMutator {
       const CallPtr& rhs, const VarPtr& lhs_var,
       const std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) const {
     const std::string& op_name = rhs->op_->name_;
-    if (op_name == kOpTileLoad) {
+    if (IsOp(rhs, kOpTileLoad)) {
       return InferLoadConfig(rhs, lhs_var, var_tensor_lays);
     }
-    if (op_name == kOpTileStore) {
+    if (IsOp(rhs, kOpTileStore)) {
       return InferStoreConfig(rhs, var_tensor_lays);
     }
-    if (op_name == kOpTileMove && lhs_var && !rhs->args_.empty()) {
+    if (IsOp(rhs, kOpTileMove) && lhs_var && !rhs->args_.empty()) {
       auto src_arg = AsVarLike(rhs->args_[0]);
       auto src_t = src_arg ? As<TileType>(src_arg->GetType()) : TileTypePtr(nullptr);
       if (!src_t) {
@@ -1671,7 +1671,7 @@ class LayoutAssignmentWriter : public IRMutator {
     for (size_t i = 0; i < tile_args.size(); ++i) {
       const auto& [index, var] = tile_args[i];
       if (detail::IsTileWorkspace(rhs, index)) continue;
-      if (detail::HasRowMajorInputRequirement(op_name, index)) {
+      if (detail::RequiredInputTileLayout(bindings_.backend, op_name, index) == TileLayout::row_major) {
         const auto tile = As<TileType>(var->GetType());
         auto shape = detail::StaticShape(tile->shape_);
         if (!shape || shape->size() != 2 || ((*shape)[0] != 1 && (*shape)[1] != 1)) {
@@ -1687,9 +1687,7 @@ class LayoutAssignmentWriter : public IRMutator {
   std::optional<OperatorConfig> ResolveRequestedVecOutput(
       const OperationNode* modeled, const CallPtr& rhs, const VarPtr& lhs, std::optional<OperatorConfig> cfg,
       const std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) const {
-    if (!lhs || !IsVecTileType(lhs->GetType()) || IsOp(rhs, kOpTileLoad) || IsOp(rhs, kOpTileMove)) {
-      return cfg;
-    }
+    if (!lhs || !IsVecTileType(lhs->GetType())) return cfg;
     auto requested = LookupTileDesc(lhs);
     if (cfg) {
       if (requested && *requested != cfg->output_layout) {
@@ -1697,7 +1695,7 @@ class LayoutAssignmentWriter : public IRMutator {
       }
       requested = cfg->output_layout;
     }
-    if (!requested) return cfg;
+    if (!requested || IsOp(rhs, kOpTileLoad) || IsOp(rhs, kOpTileMove)) return cfg;
     if (!modeled && *requested == EffectiveTileLayout(As<TileType>(lhs->GetType()))) return cfg;
 
     // A tile's conversion domain can be wider than the layouts its producer can emit.
@@ -1754,7 +1752,7 @@ class LayoutAssignmentWriter : public IRMutator {
     RecordVecDemandRaw(tile_var.get(), req_lay);
   }
 
-  void RecordPrescanCallOutputs(const StmtPtr& stmt, const std::string& op_name, const VarPtr& lhs_var,
+  void RecordPrescanCallOutputs(const StmtPtr& stmt, const CallPtr& rhs, const VarPtr& lhs_var,
                                 size_t result_index, const OperatorConfig& cfg,
                                 std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) {
     if (lhs_var) {
@@ -1776,7 +1774,7 @@ class LayoutAssignmentWriter : public IRMutator {
         }
         vec_prod_lay_.insert_or_assign(lhs_var.get(), cfg.output_layout);
       }
-    } else if (op_name == kOpTileStore && AsTensorTypeLike(lhs_var->GetType())) {
+    } else if (IsOp(rhs, kOpTileStore) && AsTensorTypeLike(lhs_var->GetType())) {
       if (cfg.input_layouts.size() >= 2 && cfg.input_layouts[1].IsTensor()) {
         var_tensor_lays[lhs_var.get()] = cfg.input_layouts[1].tensor_layout;
       }
@@ -1784,8 +1782,7 @@ class LayoutAssignmentWriter : public IRMutator {
   }
 
   void RecordPrescanCallDemands(const CallPtr& rhs, const VarPtr& lhs_var, const OperatorConfig& cfg) {
-    const std::string& op_name = rhs->op_->name_;
-    if (op_name == kOpTileLoad && !rhs->args_.empty()) {
+    if (IsOp(rhs, kOpTileLoad) && !rhs->args_.empty()) {
       if (auto gm_var = AsVarLike(rhs->args_[0]);
           gm_var && !UsesBlockedNzCoordinates(gm_var->GetType()) && lhs_var &&
           IsVecTileType(lhs_var->GetType()) && !As<TileType>(lhs_var->GetType())->dtype_.IsPackedFp4() &&
@@ -1793,7 +1790,7 @@ class LayoutAssignmentWriter : public IRMutator {
           cfg.input_layouts[0] == LayoutSpec::Tensor(TensorLayout::NZ)) {
         nz_nd_needed_vars_.insert(gm_var.get());
       }
-    } else if (op_name == kOpTileStore && rhs->args_.size() >= 3) {
+    } else if (IsOp(rhs, kOpTileStore) && rhs->args_.size() >= 3) {
       auto tile_arg = AsVarLike(rhs->args_[0]);
       auto dst_arg = AsVarLike(rhs->args_[2]);
       const bool tile_is_vec = tile_arg && IsVecTileType(tile_arg->GetType());
@@ -1807,7 +1804,7 @@ class LayoutAssignmentWriter : public IRMutator {
           gm_out_lay == LayoutSpec::Tensor(TensorLayout::NZ)) {
         nz_nd_needed_vars_.insert(dst_arg.get());
       }
-    } else if (op_name == kOpTileMove && !rhs->args_.empty()) {
+    } else if (IsOp(rhs, kOpTileMove) && !rhs->args_.empty()) {
       if (auto src_var = AsVarLike(rhs->args_[0]); src_var && !cfg.input_layouts.empty()) {
         RecordVecDemand(src_var, cfg.input_layouts[0]);
       }
@@ -1930,14 +1927,14 @@ class LayoutAssignmentWriter : public IRMutator {
           vec_slices_.insert(lhs_var.get());
         }
       }
-      if (op_name == kOpTensorCreate && lhs_var) {
+      if (IsOp(rhs, kOpTensorCreate) && lhs_var) {
         if (auto lhs_tt = AsTensorTypeLike(lhs_var->GetType())) {
           var_tensor_lays[lhs_var.get()] =
               LookupTensorLayout(lhs_var).value_or(detail::TensorTypeLayout(lhs_tt));
           return;
         }
       }
-      if (op_name == kOpTileCreate && lhs_var) {
+      if (IsOp(rhs, kOpTileCreate) && lhs_var) {
         if (auto lhs_t = As<TileType>(lhs_var->GetType())) {
           if (lhs_t->GetMemorySpace().value_or(MemorySpace::Vec) == MemorySpace::Vec) {
             if (auto shape = detail::StaticShape(lhs_t->shape_)) {
@@ -1973,7 +1970,7 @@ class LayoutAssignmentWriter : public IRMutator {
         return;
       }
       remember(modeled, *cfg);
-      RecordPrescanCallOutputs(stmt, op_name, lhs_var, result_index, *cfg, var_tensor_lays);
+      RecordPrescanCallOutputs(stmt, rhs, lhs_var, result_index, *cfg, var_tensor_lays);
       RecordPrescanCallDemands(rhs, lhs_var, *cfg);
     };
 
@@ -2149,12 +2146,12 @@ class LayoutAssignmentWriter : public IRMutator {
         }
         yield_stacks.back() = std::move(vars);
       } else if (auto es = As<EvalStmt>(stmt)) {
-        if (auto c = As<Call>(es->expr_); c && c->op_->name_ == kOpTileStore) {
+        if (auto c = As<Call>(es->expr_); IsOp(c, kOpTileStore)) {
           handle_call(stmt, c, nullptr);
         }
       } else if (auto rs = As<ReturnStmt>(stmt)) {
         for (size_t i = 0; i < rs->value_.size(); ++i) {
-          if (auto c = As<Call>(rs->value_[i]); c && c->op_->name_ == kOpTileStore) {
+          if (auto c = As<Call>(rs->value_[i]); IsOp(c, kOpTileStore)) {
             handle_call(stmt, c, nullptr, i);
           }
         }

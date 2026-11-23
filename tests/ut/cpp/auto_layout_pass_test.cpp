@@ -15,6 +15,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -593,6 +595,19 @@ void TestStoreBindingAcrossUnmodeledStore(bool return_store) {
   // mask store must receive the mask itself, even when it precedes a returned store.
   const auto instance = al::ExtractLayoutInstance(program);
   assert(instance.operations.size() == 2);
+  const auto& load_op = instance.operations.front();
+  assert(load_op.op_name == "tile.load");
+  auto contradictory = al::SolveAutoLayout(instance).WritebackAssignment();
+  const auto selected = contradictory.op_configs.at(load_op.op_id).output_layout;
+  contradictory.value_layouts.insert_or_assign(load_op.output, selected == al::LayoutSpec::RowMajorFlat()
+                                                                   ? al::LayoutSpec::ColMajorFlat()
+                                                                   : al::LayoutSpec::RowMajorFlat());
+  try {
+    al::ApplyLayoutAssignment(program, contradictory);
+    assert(false && "conflicting Vec load layouts silently accepted");
+  } catch (const pypto::ValueError& error) {
+    assert(std::string(error.what()).find("contradicts its producer configuration") != std::string::npos);
+  }
   for (bool values_only : {false, true}) {
     auto assignment = al::SolveAutoLayout(instance).WritebackAssignment();
     if (values_only) assignment.op_configs.clear();
@@ -1338,10 +1353,102 @@ void TestUnmodeledVecLoopConversion(bool peel_first_iteration) {
   assert(al::EvaluateAssignment(instance, solution.Assignment()).conversion_cost_cycles == one_transpose);
 }
 
+void TestTransitiveParameterAlignment(bool direct_first, bool all_aligned) {
+  const auto span = ir::Span::unknown();
+  const auto offset_type = ir::MakeIndexConst(0)->GetType();
+  const auto entry_offset = std::make_shared<ir::Var>("entry_offset", offset_type, span);
+  const auto a_offset = std::make_shared<ir::Var>("a_offset", offset_type, span);
+  const auto b_offset = std::make_shared<ir::Var>("b_offset", offset_type, span);
+  const auto kernel_offset = std::make_shared<ir::Var>("kernel_offset", offset_type, span);
+
+  const auto dispatch = [&](const char* callee, ir::ExprPtr offset) {
+    auto call = std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>(callee),
+                                           std::vector<ir::ExprPtr>{std::move(offset)}, span);
+    return std::make_shared<ir::EvalStmt>(std::move(call), span);
+  };
+  const auto function = [&](const char* name, ir::VarPtr offset, std::vector<ir::StmtPtr> stmts,
+                            ir::FunctionType type) {
+    return std::make_shared<ir::Function>(name, std::vector<ir::VarPtr>{std::move(offset)},
+                                          std::vector<ir::ParamDirection>{ir::ParamDirection::In},
+                                          std::vector<ir::TypePtr>{},
+                                          std::make_shared<ir::SeqStmts>(std::move(stmts), span), span, type);
+  };
+  const auto kernel =
+      function("kernel", kernel_offset, {std::make_shared<ir::ReturnStmt>(span)}, ir::FunctionType::InCore);
+  const auto b = function("B", b_offset, {dispatch("kernel", b_offset)}, ir::FunctionType::Opaque);
+  const auto a = function("A", a_offset, {dispatch("B", a_offset)}, ir::FunctionType::Opaque);
+  const auto call_b = dispatch("B", ir::MakeIndexConst(32));
+  const auto call_a = dispatch("A", all_aligned ? ir::MakeIndexConst(16) : entry_offset);
+  const auto entry = function(
+      "entry", entry_offset,
+      direct_first ? std::vector<ir::StmtPtr>{call_b, call_a} : std::vector<ir::StmtPtr>{call_a, call_b},
+      ir::FunctionType::Orchestration);
+  const auto program =
+      std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{entry, a, b, kernel}, "alignment", span);
+  const auto analysis = al::AnalyzeOrchestration(program);
+  if (all_aligned) {
+    assert(analysis.param_steps.at({"B", 0}) == 16);
+    assert(analysis.param_steps.at({"kernel", 0}) == 16);
+  } else {
+    assert(analysis.param_steps.count({"B", 0}) == 0);
+    assert(analysis.param_steps.count({"kernel", 0}) == 0);
+  }
+  assert(analysis.call_counts.at("kernel") == 2);
+}
+
+void TestDispatchCounts(int64_t repetitions, int64_t core_count, size_t calls_per_iteration,
+                        int64_t expected) {
+  const auto span = ir::Span::unknown();
+  const auto start = ir::MakeIndexConst(0, span);
+  const auto induction = std::make_shared<ir::Var>("i", start->GetType(), span);
+  const auto kernel = std::make_shared<ir::GlobalVar>("kernel");
+  std::vector<ir::StmtPtr> calls;
+  for (size_t i = 0; i < calls_per_iteration; ++i) {
+    auto call = std::make_shared<ir::Call>(
+        kernel, std::vector<ir::ExprPtr>{}, std::vector<std::pair<std::string, std::any>>{},
+        std::vector<std::pair<std::string, std::any>>{{ir::kAttrCoreNum, ir::MakeIndexConst(core_count)}},
+        ir::GetUnknownType(), span);
+    calls.push_back(std::make_shared<ir::EvalStmt>(std::move(call), span));
+  }
+  const auto loop = std::make_shared<ir::ForStmt>(
+      induction, start, ir::MakeIndexConst(repetitions), ir::MakeIndexConst(1), std::vector<ir::IterArgPtr>{},
+      std::make_shared<ir::SeqStmts>(std::move(calls), span), std::vector<ir::VarPtr>{}, span);
+  const auto entry =
+      std::make_shared<ir::Function>("entry", std::vector<ir::VarPtr>{}, std::vector<ir::ParamDirection>{},
+                                     std::vector<ir::TypePtr>{}, loop, span, ir::FunctionType::Orchestration);
+  const auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{entry}, "counts", span);
+  const auto analysis = al::AnalyzeOrchestration(program);
+  assert(analysis.call_counts.at("kernel") == expected);
+  assert(analysis.call_sites.at("kernel").size() == 1);
+  assert(analysis.call_sites.at("kernel").front().multiplicity == expected);
+}
+
+void TestFloorDivisionAlignment() {
+  const auto span = ir::Span::unknown();
+  const auto c0 = ir::MakeIndexConst(16, span);
+  const auto offset = ir::MakeAdd(c0, ir::MakeFloorDiv(ir::MakeIndexConst(-1, span), c0, span), span);
+  const auto call = std::make_shared<ir::Call>(std::make_shared<ir::GlobalVar>("kernel"),
+                                               std::vector<ir::ExprPtr>{offset}, span);
+  const auto entry = std::make_shared<ir::Function>(
+      "entry", std::vector<ir::VarPtr>{}, std::vector<ir::ParamDirection>{}, std::vector<ir::TypePtr>{},
+      std::make_shared<ir::EvalStmt>(call, span), span, ir::FunctionType::Orchestration);
+  const auto program =
+      std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{entry}, "floor_div_offset", span);
+  assert(al::AnalyzeOrchestration(program).param_steps.count({"kernel", 0}) == 0);
+}
+
 }  // namespace
 
 int main() {
   pypto::backend::BackendConfig::SetBackendType(pypto::backend::BackendType::Ascend910);
+  TestTransitiveParameterAlignment(true, false);
+  TestTransitiveParameterAlignment(false, false);
+  TestTransitiveParameterAlignment(true, true);
+  TestTransitiveParameterAlignment(false, true);
+  TestDispatchCounts(3, 2, 2, 12);
+  TestDispatchCounts(int64_t{1} << 62, 2, 1, std::numeric_limits<int64_t>::max());
+  TestDispatchCounts(int64_t{1} << 62, 1, 2, std::numeric_limits<int64_t>::max());
+  TestFloorDivisionAlignment();
   TestHostMatrixLayout(HostMatrixDispatch::Implicit, 1, true);
   TestHostMatrixLayout(HostMatrixDispatch::RankZero, 1, true);
   TestHostMatrixLayout(HostMatrixDispatch::Implicit, std::nullopt, false);

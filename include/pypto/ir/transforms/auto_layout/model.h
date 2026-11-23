@@ -157,7 +157,8 @@ struct OperatorConfig {
   std::string notes;
   // A read of mutable storage can convert privately at the operation. The
   // indexed input layout still describes the original backing, and this pair
-  // describes the operand index and the layout read by the instruction.
+  // describes the operand index and the layout read by the instruction. Entries
+  // may appear in any order.
   std::vector<std::pair<size_t, LayoutSpec>> local_vec_conversions = {};
   // A load may need its GM layout's native Vec representation before copying
   // into the layout used by the mutable result and its aliases.
@@ -332,7 +333,11 @@ struct CostBreakdown {
 /// Compute operator cost multiplier (invocations * MTE2 L2 reread discount).
 double OperatorCostMultiplier(const LayoutProblemInstance& instance, const OperationNode& op);
 
-/// Compute conversion cost multiplier for `value` given distinct consumer `conversion_invocations`.
+/// Activation count at the copy insertion site, when a conversion has on-chip placement.
+std::optional<int64_t> OnChipConversionInvocations(
+    const ValueNode& value, const std::unordered_map<std::string, const OperationNode*>& ops_by_id);
+
+/// Number of shared conversions executed, validating the selected consumer invocation counts.
 double ConversionMultiplier(const LayoutProblemInstance& instance, const ValueNode& value,
                             const std::unordered_map<std::string, const OperationNode*>& ops_by_id,
                             const std::vector<int64_t>& conversion_invocations);
@@ -342,6 +347,13 @@ bool CanShareOnChipConversion(int64_t source_invocations, int64_t consumer_invoc
 
 /// Evaluate `assignment` under the shared-conversion hyperedge objective.
 CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const LayoutAssignment& assignment);
+
+namespace detail {
+// Scoring must remain defined for unmaterializable assignments so bounded search
+// can compare them and report why its incumbent cannot be written back.
+CostBreakdown EvaluateAssignmentForSearch(const LayoutProblemInstance& instance,
+                                          const LayoutAssignment& assignment);
+}  // namespace detail
 
 }  // namespace auto_layout
 }  // namespace ir

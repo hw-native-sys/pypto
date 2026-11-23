@@ -17,6 +17,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -221,26 +222,32 @@ bool IsNzCompatibleShape(const std::vector<int64_t>& shape, DataType dtype) {
 }
 
 int64_t ValueNode::NumElements() const {
-  if (shape.empty()) {
-    return 1;
+  // A zero dimension makes the whole footprint zero, regardless of dimension order.
+  if (std::find(shape.begin(), shape.end(), 0) != shape.end()) return 0;
+  int64_t product = 1;
+  for (int64_t extent : shape) {
+    if (extent < 0) {
+      throw pypto::ValueError("Value '" + name + "' has negative shape extent " + std::to_string(extent));
+    }
+    if (product > std::numeric_limits<int64_t>::max() / extent) {
+      throw pypto::ValueError("Element count for value '" + name + "' exceeds int64_t");
+    }
+    product *= extent;
   }
-  int64_t prod = 1;
-  for (int64_t d : shape) {
-    prod *= d;
-  }
-  return prod;
+  return product;
 }
 
 int64_t ValueNode::ByteSize() const {
-  const int64_t elems = NumElements();
-  if (elems <= 0) {
-    return 0;
+  const int64_t elements = NumElements();
+  if (elements == 0) return 0;
+  const uint64_t bits = storage_size::GetStorageBitWidth(dtype);
+  // Compute in bytes so a representable size does not overflow in bits.
+  if (bits == 4) return elements / 2 + elements % 2;
+  const auto bytes_per_element = static_cast<int64_t>(bits / 8);
+  if (bytes_per_element == 0 || elements > std::numeric_limits<int64_t>::max() / bytes_per_element) {
+    throw pypto::ValueError("Storage size for value '" + name + "' cannot be represented in bytes");
   }
-  const auto bytes = storage_size::StaticStorageBytes(static_cast<uint64_t>(elems), dtype);
-  if (!bytes.has_value()) {
-    return 0;
-  }
-  return static_cast<int64_t>(*bytes);
+  return elements * bytes_per_element;
 }
 
 bool OperatorConfig::operator==(const OperatorConfig& other) const {
@@ -251,11 +258,9 @@ bool OperatorConfig::operator==(const OperatorConfig& other) const {
 }
 
 LayoutSpec OperatorConfig::ExecutionInputLayout(size_t index) const {
-  const auto conversion =
-      std::lower_bound(local_vec_conversions.begin(), local_vec_conversions.end(), index,
-                       [](const auto& entry, size_t operand) { return entry.first < operand; });
-  return conversion != local_vec_conversions.end() && conversion->first == index ? conversion->second
-                                                                                 : input_layouts.at(index);
+  const auto conversion = std::find_if(local_vec_conversions.begin(), local_vec_conversions.end(),
+                                       [index](const auto& entry) { return entry.first == index; });
+  return conversion != local_vec_conversions.end() ? conversion->second : input_layouts.at(index);
 }
 
 void LayoutCostModel::ValidateUseHorizon() const {
@@ -677,38 +682,38 @@ bool CanShareOnChipConversion(int64_t source_invocations, int64_t consumer_invoc
           consumer_invocations % source_invocations == 0);
 }
 
+std::optional<int64_t> OnChipConversionInvocations(
+    const ValueNode& value, const std::unordered_map<std::string, const OperationNode*>& ops_by_id) {
+  if (value.memory_space == MemorySpace::DDR) return std::nullopt;
+  if (value.conversion_invocations) return value.conversion_invocations;
+  if (!value.producer_op_id) return std::nullopt;
+  const auto prod_it = ops_by_id.find(*value.producer_op_id);
+  if (prod_it == ops_by_id.end()) {
+    throw pypto::ValueError("Unknown producer_op_id '" + *value.producer_op_id + "' for value '" +
+                            value.name + "'");
+  }
+  return prod_it->second->invocations;
+}
+
 double ConversionMultiplier(const LayoutProblemInstance& instance, const ValueNode& value,
                             const std::unordered_map<std::string, const OperationNode*>& ops_by_id,
                             const std::vector<int64_t>& conversion_invocations) {
-  if (value.memory_space == MemorySpace::DDR && value.is_reusable_weight) {
-    return 1.0;
-  }
-  if (value.memory_space != MemorySpace::DDR && (value.conversion_invocations || value.producer_op_id)) {
-    int64_t producer_invocations;
-    if (value.conversion_invocations) {
-      producer_invocations = *value.conversion_invocations;
-    } else {
-      const auto prod_it = ops_by_id.find(*value.producer_op_id);
-      if (prod_it == ops_by_id.end()) {
-        throw pypto::ValueError("Unknown producer_op_id '" + *value.producer_op_id + "' for value '" +
-                                value.name + "'");
-      }
-      producer_invocations = prod_it->second->invocations;
+  if (value.memory_space == MemorySpace::DDR && value.is_reusable_weight) return 1.0;
+  const auto source = OnChipConversionInvocations(value, ops_by_id);
+  if (!source) return static_cast<double>(instance.cost_model.expected_uses);
+  for (int64_t count : conversion_invocations) {
+    if (!CanShareOnChipConversion(*source, count)) {
+      throw pypto::ValueError("On-chip conversion for '" + value.name +
+                              "' has differing producer/consumer execution counts; producer=" +
+                              std::to_string(*source) + ", consumer=" + std::to_string(count));
     }
-    for (int64_t count : conversion_invocations) {
-      if (!CanShareOnChipConversion(producer_invocations, count)) {
-        throw pypto::ValueError("On-chip conversion for '" + value.name +
-                                "' has differing producer/consumer execution counts; producer=" +
-                                std::to_string(producer_invocations) +
-                                ". Execution-domain-aware conversion costing is required");
-      }
-    }
-    return static_cast<double>(producer_invocations);
   }
-  return static_cast<double>(instance.cost_model.expected_uses);
+  return static_cast<double>(*source);
 }
 
-CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const LayoutAssignment& assignment) {
+static CostBreakdown EvaluateAssignmentImpl(const LayoutProblemInstance& instance,
+                                            const LayoutAssignment& assignment,
+                                            bool allow_incompatible_conversions) {
   const auto& model = instance.cost_model;
   model.ValidateUseHorizon();
   std::unordered_map<std::string, double> per_op_costs;
@@ -721,22 +726,11 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
     }
   }
 
-  std::unordered_map<std::string, std::set<LayoutSpec>> consumer_layouts;
-  std::unordered_map<std::string, std::unordered_map<LayoutSpec, std::set<int64_t>, LayoutSpecHash>>
-      consumer_invocations;
+  std::unordered_map<std::string, std::map<LayoutSpec, std::set<int64_t>>> consumer_invocations;
   std::unordered_map<std::string, OperatorConfig> resolved_configs;
   std::unordered_map<std::string, const OperationNode*> ops_by_id;
-  std::unordered_map<std::string, std::vector<const OperationNode*>> val_to_consumers;
   ops_by_id.reserve(instance.operations.size());
-  for (const auto& op : instance.operations) {
-    ops_by_id[op.op_id] = &op;
-    for (const auto& inp_name : op.inputs) {
-      auto& vec = val_to_consumers[inp_name];
-      if (vec.empty() || vec.back() != &op) {
-        vec.push_back(&op);
-      }
-    }
-  }
+  for (const auto& op : instance.operations) ops_by_id[op.op_id] = &op;
 
   for (const auto& op : instance.operations) {
     if (op.configs.empty()) {
@@ -801,7 +795,6 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
     for (size_t i = 0; i < op.inputs.size(); ++i) {
       const std::string& inp_name = op.inputs[i];
       const LayoutSpec& req_layout = chosen_cfg->input_layouts[i];
-      consumer_layouts[inp_name].insert(req_layout);
       consumer_invocations[inp_name][req_layout].insert(op.invocations);
     }
   }
@@ -809,7 +802,6 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
   if (!model.allow_external_output_relayout) {
     for (const auto& [val_name, val_node] : instance.values) {
       if (val_node.is_external_output) {
-        consumer_layouts[val_name].insert(val_node.current_layout);
         consumer_invocations[val_name][val_node.current_layout].insert(model.expected_uses);
       }
     }
@@ -817,143 +809,36 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
 
   std::unordered_map<std::string, double> per_value_conv;
   double conv_cost_total = 0.0;
-  for (const auto& entry : consumer_layouts) {
-    const std::string& val_name = entry.first;
-    const auto& req_set = entry.second;
-    if (req_set.empty()) {
-      continue;
-    }
+  for (const auto& [val_name, demands] : consumer_invocations) {
     const auto* val_node = instance.FindValue(val_name);
-    if (val_node == nullptr) {
-      continue;
+    if (val_node == nullptr) continue;
+    if (val_node->producer_op_id && ops_by_id.count(*val_node->producer_op_id) == 0) {
+      throw pypto::ValueError("Unknown producer_op_id '" + *val_node->producer_op_id + "' for value '" +
+                              val_name + "'");
     }
-    auto prod_it = produced_layout.find(val_name);
-    const LayoutSpec src_lay = prod_it != produced_layout.end() ? prod_it->second : val_node->current_layout;
-    const bool has_onchip_placement = val_node->memory_space != MemorySpace::DDR &&
-                                      (val_node->conversion_invocations || val_node->producer_op_id);
-    int64_t prod_inv = val_node->conversion_invocations.value_or(0);
-    std::vector<LayoutSpec> source_layouts;
-    if (val_node->producer_op_id.has_value()) {
-      const auto p_op_it = ops_by_id.find(*val_node->producer_op_id);
-      if (p_op_it == ops_by_id.end()) {
-        throw pypto::ValueError("Unknown producer_op_id '" + *val_node->producer_op_id + "' for value '" +
-                                val_node->name + "'");
-      }
-      if (has_onchip_placement && !val_node->conversion_invocations) {
-        prod_inv = p_op_it->second->invocations;
-      }
-      for (const auto& cfg : p_op_it->second->configs) {
-        if (std::find(source_layouts.begin(), source_layouts.end(), cfg.output_layout) ==
-            source_layouts.end()) {
-          source_layouts.push_back(cfg.output_layout);
-        }
-      }
-    } else {
-      source_layouts.push_back(val_node->current_layout);
-    }
-
-    const auto cons_it = val_to_consumers.find(val_name);
-    const std::vector<const OperationNode*>* consumers =
-        cons_it != val_to_consumers.end() ? &cons_it->second : nullptr;
-
-    std::set<int64_t> compat_conv_invs_set;
-    std::set<int64_t> all_conv_invs_set;
-    std::set<LayoutSpec> incompatible_targets;
-    if (consumers != nullptr) {
-      for (const auto* cop : *consumers) {
-        const bool inv_compat = !has_onchip_placement || CanShareOnChipConversion(prod_inv, cop->invocations);
-        for (const auto& cfg : cop->configs) {
-          bool any_diff = false;
-          for (size_t i = 0; i < cop->inputs.size(); ++i) {
-            if (cop->inputs[i] != val_name) {
-              continue;
-            }
-            const LayoutSpec& lay = cfg.input_layouts[i];
-            const bool diff_for_lay = std::any_of(source_layouts.begin(), source_layouts.end(),
-                                                  [&](const LayoutSpec& s) { return s != lay; });
-            if (diff_for_lay) {
-              any_diff = true;
-              if (!inv_compat) {
-                incompatible_targets.insert(lay);
-              }
-            }
-          }
-          if (any_diff) {
-            all_conv_invs_set.insert(cop->invocations);
-            if (inv_compat) {
-              compat_conv_invs_set.insert(cop->invocations);
-            }
-          }
-        }
-      }
-    }
-    if (val_node->is_external_output && !model.allow_external_output_relayout) {
-      const LayoutSpec& b_lay = val_node->current_layout;
-      const bool diff_for_b = std::any_of(source_layouts.begin(), source_layouts.end(),
-                                          [&](const LayoutSpec& s) { return s != b_lay; });
-      if (diff_for_b) {
-        all_conv_invs_set.insert(model.expected_uses);
-        const bool b_compat =
-            !has_onchip_placement || CanShareOnChipConversion(prod_inv, model.expected_uses);
-        if (b_compat) {
-          compat_conv_invs_set.insert(model.expected_uses);
-        } else {
-          incompatible_targets.insert(b_lay);
-        }
-      }
-    }
-
-    bool has_conversion_free_layout = false;
-    if (!incompatible_targets.empty()) {
-      for (const auto& s_lay : source_layouts) {
-        if (val_node->is_external_output && !model.allow_external_output_relayout &&
-            s_lay != val_node->current_layout) {
-          continue;
-        }
-        bool ok_all = true;
-        if (consumers != nullptr) {
-          for (const auto* cop : *consumers) {
-            const bool ok_cop =
-                std::any_of(cop->configs.begin(), cop->configs.end(), [&](const OperatorConfig& c) {
-                  for (size_t i = 0; i < cop->inputs.size(); ++i) {
-                    if (cop->inputs[i] == val_name && c.input_layouts[i] != s_lay) {
-                      return false;
-                    }
-                  }
-                  return true;
-                });
-            if (!ok_cop) {
-              ok_all = false;
-              break;
-            }
-          }
-        }
-        if (ok_all) {
-          has_conversion_free_layout = true;
-          break;
-        }
-      }
-    }
-
-    const std::set<int64_t>& selected_invs = (!incompatible_targets.empty() && has_conversion_free_layout)
-                                                 ? compat_conv_invs_set
-                                                 : all_conv_invs_set;
-    const std::vector<int64_t> invs_for_mult(selected_invs.begin(), selected_invs.end());
-    const double multiplier = ConversionMultiplier(instance, *val_node, ops_by_id, invs_for_mult);
+    const auto prod_it = produced_layout.find(val_name);
+    const LayoutSpec& src_lay = prod_it != produced_layout.end() ? prod_it->second : val_node->current_layout;
+    const auto source_invocations = OnChipConversionInvocations(*val_node, ops_by_id);
     double val_conv = 0.0;
-    for (const auto& dst_lay : req_set) {
-      if (dst_lay != src_lay) {
-        if (incompatible_targets.count(dst_lay) != 0 ||
-            (multiplier == 0 && val_node->memory_space == MemorySpace::Vec &&
-             !model.SupportsVecTileConversion(*val_node, src_lay, dst_lay))) {
-          val_conv += model.vec_unsupported_conversion_cycles;
-        } else {
-          val_conv += multiplier * instance.EstimateConversionCost(*val_node, src_lay, dst_lay);
-        }
+    for (const auto& [dst_lay, invocations] : demands) {
+      if (dst_lay == src_lay) continue;
+      if (allow_incompatible_conversions && source_invocations &&
+          std::any_of(invocations.begin(), invocations.end(),
+                      [&](int64_t count) { return !CanShareOnChipConversion(*source_invocations, count); })) {
+        val_conv += model.vec_unsupported_conversion_cycles;
+        continue;
+      }
+      const double multiplier =
+          ConversionMultiplier(instance, *val_node, ops_by_id, {invocations.begin(), invocations.end()});
+      if (multiplier == 0 && val_node->memory_space == MemorySpace::Vec &&
+          !model.SupportsVecTileConversion(*val_node, src_lay, dst_lay)) {
+        val_conv += model.vec_unsupported_conversion_cycles;
+      } else {
+        val_conv += multiplier * instance.EstimateConversionCost(*val_node, src_lay, dst_lay);
       }
     }
     if (instance.forbid_unmaterializable_gm_conversions && !val_node->producer_op_id.has_value() &&
-        val_node->memory_space == MemorySpace::DDR && req_set.size() > 1) {
+        val_node->memory_space == MemorySpace::DDR && demands.size() > 1) {
       val_conv += model.vec_unsupported_conversion_cycles;
     }
     per_value_conv[val_name] = val_conv;
@@ -979,6 +864,15 @@ CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const La
       std::move(full_assignment), op_cost_total + conv_cost_total, op_cost_total, conv_cost_total,
       std::move(per_op_costs),    std::move(per_value_conv),
   };
+}
+
+CostBreakdown EvaluateAssignment(const LayoutProblemInstance& instance, const LayoutAssignment& assignment) {
+  return EvaluateAssignmentImpl(instance, assignment, false);
+}
+
+CostBreakdown detail::EvaluateAssignmentForSearch(const LayoutProblemInstance& instance,
+                                                  const LayoutAssignment& assignment) {
+  return EvaluateAssignmentImpl(instance, assignment, true);
 }
 
 }  // namespace auto_layout
