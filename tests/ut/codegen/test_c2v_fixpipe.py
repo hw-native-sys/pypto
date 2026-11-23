@@ -17,6 +17,7 @@ from pypto import DataType, Error, backend, codegen, ir, passes
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.op import system_ops, tile_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
 @pytest.fixture(autouse=True)
@@ -285,6 +286,62 @@ def test_epilogue_value_round_trip():
     text = ir.python_print(program)
     reparsed = pl.parse_program(text)
     ir.assert_structural_equal(program, reparsed)
+
+
+@pytest.mark.parametrize("use_relu", [False, True])
+def test_epilogue_rejects_shadowed_runtime_parameter(use_relu):
+    with pytest.raises(ParserSyntaxError, match="acc_push_epilogue must be a compile-time record"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIC)
+            def producer(self, use_relu: pl.Scalar[pl.BOOL]):
+                pl.aic_initialize_pipe(
+                    dir_mask=1,
+                    slot_size=2048,
+                    acc_push_epilogue={
+                        "layout": "nz2nd",
+                        "quant": "no_convert",
+                        "relu": "normal_relu" if use_relu else "no_relu",
+                    },
+                )
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_parse_epilogue_dict_metadata(recorded):
+    metadata = {"acc_push_epilogue": _epilogue()}
+    call = (
+        f'pl._dump.call("system.aic_initialize_pipe", [], pl.Scalar[pl.INT32], '
+        f"kwargs={metadata!r}, attrs={metadata!r})"
+        if recorded
+        else f"pl.aic_initialize_pipe(dir_mask=1, slot_size=2048, attrs={metadata!r})"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def producer(self):
+        {call}
+""")
+    func = program.get_function("producer")
+    assert func is not None
+    stmt = func.body.stmts[0] if isinstance(func.body, ir.SeqStmts) else func.body
+    assert isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call)
+    assert stmt.expr.attrs["acc_push_epilogue"] == _epilogue()
+    if recorded:
+        assert stmt.expr.kwargs["acc_push_epilogue"] == _epilogue()
+
+
+def test_deserialize_rejects_incomplete_epilogue():
+    call = ir.Call(
+        ir.get_op("system.aic_initialize_pipe"),
+        [],
+        {"acc_push_epilogue": {}},
+        ir.ScalarType(pl.INT32),
+        ir.Span.unknown(),
+    )
+    with pytest.raises(ValueError, match="Invalid serialized AccPushEpilogue"):
+        ir.deserialize(ir.serialize(call))
 
 
 @pytest.mark.parametrize(

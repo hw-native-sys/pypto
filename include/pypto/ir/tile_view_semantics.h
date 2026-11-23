@@ -285,6 +285,7 @@ inline TileLayoutSpec GetImplicitTileLayout(const std::vector<ExprPtr>& shape,
         layout.slayout = TileLayout::row_major;
         break;
       case MemorySpace::Scaling:
+        // Packed Fixpipe control words use a flat layout regardless of shape.
         layout.blayout = TileLayout::row_major;
         layout.slayout = TileLayout::none_box;
         break;

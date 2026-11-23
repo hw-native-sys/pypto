@@ -221,7 +221,10 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
       if (type_name == "AccPushEpilogue") {
         CHECK(has_value_obj && value_obj_inner.type == msgpack::type::MAP)
             << "Invalid serialized AccPushEpilogue";
-        kwargs.emplace_back(key, value_obj_inner.as<AccPushEpilogue>());
+        auto epilogue = value_obj_inner.as<AccPushEpilogue>();
+        const auto error = ValidateAccPushEpilogue(epilogue);
+        CHECK(error.empty()) << "Invalid serialized AccPushEpilogue: " << error;
+        kwargs.emplace_back(key, std::move(epilogue));
       } else if (type_name == "ArgDirection") {
         if (!has_value_obj || value_obj_inner.type != msgpack::type::POSITIVE_INTEGER) {
           throw TypeError("ArgDirection kwarg '" + key + "' must have integer value");
