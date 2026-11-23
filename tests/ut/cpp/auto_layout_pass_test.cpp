@@ -19,6 +19,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -478,6 +479,79 @@ void TestValueOnlyWritebackWithRepeatedHints(const std::string& first_hint, cons
     };
     assert(layout(0) == al::LayoutSpec::ColMajorFlat());
     assert(layout(1) == al::LayoutSpec::RowMajorFlat());
+  }
+}
+
+void TestGenericVecOutputLayoutAssignment() {
+  const auto span = ir::Span::unknown();
+  const std::vector<int64_t> dims{32, 64};
+  ir::TileView column;
+  column.blayout = ir::TileLayout::col_major;
+  const auto col = al::LayoutSpec::ColMajorFlat();
+  for (const auto& [op_name, column_input, accepts_column] :
+       std::array<std::tuple<std::string, bool, bool>, 3>{
+           {{"tile.fillpad", true, true}, {"tile.fillpad", false, false}, {"tile.abs", true, false}}}) {
+    const auto input_type = std::make_shared<ir::TileType>(
+        dims, DataType::FP32, std::nullopt, column_input ? column : ir::TileView{}, ir::MemorySpace::Vec);
+    const auto input = std::make_shared<ir::Var>("input", input_type, span);
+    const auto call = ir::OpRegistry::GetInstance().Create(op_name, {input}, {}, span);
+    const auto result = std::make_shared<ir::Var>("result", call->GetType(), span);
+    const auto body = std::make_shared<ir::AssignStmt>(result, call, span);
+    const auto kernel = std::make_shared<ir::Function>(
+        "kernel", std::vector<ir::VarPtr>{input}, std::vector<ir::ParamDirection>{ir::ParamDirection::In},
+        std::vector<ir::TypePtr>{}, body, span, ir::FunctionType::InCore);
+    const auto program = std::make_shared<ir::Program>(std::vector<ir::FunctionPtr>{kernel}, "generic", span);
+    const auto instance = al::ExtractLayoutInstance(program);
+    assert(instance.operations.size() == 1);
+    const auto& op = instance.operations.front();
+    assert(std::any_of(op.configs.begin(), op.configs.end(),
+                       [&](const auto& cfg) { return cfg.output_layout == col; }) == accepts_column);
+    al::LayoutAssignment assignment;
+    assignment.value_layouts.emplace(op.output, col);
+    for (bool supply_config : {false, true}) {
+      if (supply_config) {
+        auto cfg = op.configs.front();
+        cfg.output_layout = col;
+        assignment.op_configs.emplace(op.op_id, cfg);
+      }
+      try {
+        const auto written = al::ApplyLayoutAssignment(program, assignment);
+        assert(accepts_column && "unsupported output layout silently accepted");
+        const auto stmt = ir::As<ir::AssignStmt>(written->GetFunction("kernel")->body_);
+        const auto emitted = ir::As<ir::Call>(stmt->value_);
+        assert(emitted->args_.front() == input);
+        assert(al::EffectiveTileLayout(ir::As<ir::TileType>(emitted->GetType())) == col);
+        assert(al::EffectiveTileLayout(ir::As<ir::TileType>(stmt->var_->GetType())) == col);
+      } catch (const pypto::ValueError& error) {
+        assert(!accepts_column);
+        assert(std::string(error.what()).find("for 'result' at " + op_name) != std::string::npos);
+      }
+    }
+
+    if (op_name == "tile.abs") {
+      const auto row = al::LayoutSpec::RowMajorFlat();
+      al::LayoutAssignment compatible;
+      compatible.value_layouts.emplace(op.output, row);
+      const auto written = al::ApplyLayoutAssignment(program, compatible);
+      const auto seq = ir::As<ir::SeqStmts>(written->GetFunction("kernel")->body_);
+      assert(seq && seq->stmts_.size() > 1);
+      const auto stmt = ir::As<ir::AssignStmt>(seq->stmts_.back());
+      const auto emitted = ir::As<ir::Call>(stmt->value_);
+      assert(emitted->op_ == call->op_ && emitted->args_.front() != input);
+      assert(al::EffectiveTileLayout(ir::As<ir::TileType>(emitted->args_.front()->GetType())) == row);
+      assert(al::EffectiveTileLayout(ir::As<ir::TileType>(stmt->var_->GetType())) == row);
+    }
+
+    const auto& producer = op.configs.front();
+    assignment.op_configs.at(op.op_id) = producer;
+    assignment.value_layouts.at(op.output) =
+        producer.output_layout == col ? al::LayoutSpec::RowMajorFlat() : col;
+    try {
+      al::ApplyLayoutAssignment(program, assignment);
+      assert(false && "conflicting value and producer layouts silently accepted");
+    } catch (const pypto::ValueError& error) {
+      assert(std::string(error.what()).find("contradicts its producer configuration") != std::string::npos);
+    }
   }
 }
 
@@ -1338,6 +1412,7 @@ int main() {
   const auto blocked = ir::pass::BlockNzTensorViews()(rewritten);
   assert(weight_type(blocked)->shape_.size() == 5);
   TestDistinctTileDefinitionsWithRepeatedHints();
+  TestGenericVecOutputLayoutAssignment();
   TestValueOnlyWritebackWithRepeatedHints("t", "t");
   TestValueOnlyWritebackWithRepeatedHints("t__ssa_v0", "t__ssa_v1");
   TestValueOnlyWritebackWithRepeatedHints("t_1", "t_2");

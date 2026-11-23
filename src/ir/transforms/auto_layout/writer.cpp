@@ -1684,6 +1684,41 @@ class LayoutAssignmentWriter : public IRMutator {
     return OperatorConfig{"fallback", op_name, std::move(in_lays), out_lay, 0.0};
   }
 
+  std::optional<OperatorConfig> ResolveRequestedVecOutput(
+      const OperationNode* modeled, const CallPtr& rhs, const VarPtr& lhs, std::optional<OperatorConfig> cfg,
+      const std::unordered_map<const Var*, TensorLayout>& var_tensor_lays) const {
+    if (!lhs || !IsVecTileType(lhs->GetType()) || IsOp(rhs, kOpTileLoad) || IsOp(rhs, kOpTileMove)) {
+      return cfg;
+    }
+    auto requested = LookupTileDesc(lhs);
+    if (cfg) {
+      if (requested && *requested != cfg->output_layout) {
+        throw ValueError("Value layout for '" + lhs->name_hint_ + "' contradicts its producer configuration");
+      }
+      requested = cfg->output_layout;
+    }
+    if (!requested) return cfg;
+    if (!modeled && *requested == EffectiveTileLayout(As<TileType>(lhs->GetType()))) return cfg;
+
+    // A tile's conversion domain can be wider than the layouts its producer can emit.
+    if (modeled) {
+      const auto preferred = cfg ? cfg : InferOpConfig(rhs, lhs, var_tensor_lays);
+      const OperatorConfig* fallback = nullptr;
+      for (const auto& candidate : modeled->configs) {
+        if (candidate.output_layout != *requested) continue;
+        if (preferred && candidate.input_layouts == preferred->input_layouts &&
+            candidate.local_vec_conversions == preferred->local_vec_conversions) {
+          return candidate;
+        }
+        // A value-only request leaves the choice of operand layouts to the writer.
+        if (!cfg && !fallback) fallback = &candidate;
+      }
+      if (fallback) return *fallback;
+    }
+    throw ValueError("AutoLayout cannot produce requested layout " + requested->ShortName() + " for '" +
+                     lhs->name_hint_ + "' at " + rhs->op_->name_);
+  }
+
   const Var* VecAliasRoot(const Var* var) const {
     auto it = vec_alias_roots_.find(var);
     return it == vec_alias_roots_.end() ? var : it->second;
@@ -1918,12 +1953,14 @@ class LayoutAssignmentWriter : public IRMutator {
       }
       const auto* modeled = take_op(op_name, lhs_var, rhs);
       auto cfg = selected(modeled);
+      if (inferred_) {
+        cfg = ResolveRequestedVecOutput(modeled, rhs, lhs_var, std::move(cfg), var_tensor_lays);
+      }
       if (!cfg && (!has_op_configs || (inferred_ && modeled && HasMutableVecBacking(*modeled)))) {
         cfg = InferOpConfig(rhs, lhs_var, var_tensor_lays);
         if (cfg && modeled) {
           cfg = ResolveMutableVecConfig(*modeled, std::move(*cfg), rhs->span_);
         }
-        if (cfg) remember(modeled, *cfg);
       }
       if (!cfg.has_value()) {
         if (lhs_var && IsVecTileType(lhs_var->GetType())) {
@@ -1935,6 +1972,7 @@ class LayoutAssignmentWriter : public IRMutator {
         }
         return;
       }
+      remember(modeled, *cfg);
       RecordPrescanCallOutputs(stmt, op_name, lhs_var, result_index, *cfg, var_tensor_lays);
       RecordPrescanCallDemands(rhs, lhs_var, *cfg);
     };
