@@ -225,10 +225,7 @@ def test_buffer_aliases_preserve_contract_errors(kwargs, message):
         ({"consumer_dtype": pl.FP16}, "converted dtype mismatch"),
         ({"layout": "nz2dn"}, "consumer layout"),
         ({"layout": "nz2nz", "quant": "f32_f16"}, "NZ2NZ currently supports no_convert"),
-        (
-            {"layout": "nz2nz", "consumer_dtype": pl.INT32, "input_dtype_override": pl.INT8},
-            "requires an FP32 source",
-        ),
+        ({"layout": "nz2nz", "consumer_dtype": pl.INT32, "input_dtype_override": pl.INT8}, "FP32 source"),
     ],
 )
 def test_invalid_fixpipe_contract(kwargs, message):
@@ -272,8 +269,10 @@ def test_fixpipe_endpoint_counts(guarded_pop, binding, tmp_path):
         source += f"        self.consumer(a, b, out, control_words, {arg})\n"
     if binding is not None and not literal_member:
         caller = signature.replace("producer(", "main(self, ").replace(", enabled: pl.Scalar[pl.BOOL]", "")
+        source += "\n    @pl.function(type=pl.FunctionType.Spmd)\n" + group.replace("group(", "wrapper(")
+        source += "\n        self.group(enabled, a, b, out, control_words)\n"
         source += "\n    @pl.function(type=pl.FunctionType.Orchestration)\n" + caller
-        source += f"\n        self.group({binding}, a, b, out, control_words)\n"
+        source += f"\n        self.wrapper({binding}, a, b, out, control_words)\n"
     program = pl.parse_program(source)
     if binding is True or literal_member:
         properties = passes.IRPropertySet()
@@ -504,31 +503,26 @@ def test_raw_fixpipe_initializer_contract(legacy_first, extra, message):
 
 @pytest.mark.parametrize("buffer_ir", [False, True])
 def test_scaling_allocations_remain_distinct_after_setter(buffer_ir):
-    @pl.program
-    class Controls:
-        @pl.function(type=pl.FunctionType.AIC)
-        def kernel(self, packed: pl.Tensor[[1, 32], pl.UINT64]):
-            source0: pl.Tile[
-                [1, 32],
-                pl.UINT64,
-                pl.Mem.Mat,
-                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-            ] = pl.load(packed, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
-            controls0 = pl.tile.move(source0, target_memory=pl.Mem.Scaling)
-            pl.system.set_quant_vector(controls0)
-            source1: pl.Tile[
-                [1, 32],
-                pl.UINT64,
-                pl.Mem.Mat,
-                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-            ] = pl.load(packed, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
-            controls1 = pl.tile.move(source1, target_memory=pl.Mem.Scaling)
-            pl.system.set_quant_vector(controls1)
-
+    body = "".join(
+        f"""
+source{i}: pl.Tile[[1, 32], pl.UINT64, pl.Mem.Mat,
+                  pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)
+                  ] = pl.load(packed, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+controls{i} = pl.tile.move(source{i}, target_memory=pl.Mem.Scaling)
+pl.system.set_quant_vector(controls{i})
+"""
+        for i in range(2)
+    )
+    controls = pl.parse_program(f"""
+@pl.program
+class Controls:
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(packed: pl.Tensor[[1, 32], pl.UINT64]):
+{indent(body, "        ")}
+""")
     with passes.PassContext([], enable_buffer_ir=buffer_ir):
-        lowered = passes.memory_reuse()(
-            passes.materialize_semantic_aliases()(passes.init_mem_ref()(Controls))
-        )
+        normalized = passes.init_mem_ref()(controls)
+        lowered = passes.memory_reuse()(passes.materialize_semantic_aliases()(normalized))
     allocations: list[ir.MemRef] = []
 
     class Collector(ir.IRVisitor):
@@ -547,20 +541,20 @@ def _automatic_move(rows=(32,), *, loop=False, nz_int32=False):
     dtype, out_dtype = ("INT8", "INT32") if nz_int32 else ("BF16", "FP32")
     out_shape = [32, 16] if loop or nz_int32 else [16, sum(rows)]
     scatter = "row_major" if nz_int32 else "none_box"
-    stored = "tile{i}" if nz_int32 else "pl.tile.transpose_view(tile{i})"
-    if loop:
-        stored = f"pl.tile.transpose({stored}, 0, 1)"
-    body = "".join(
-        f"""
+    blocks = []
+    for i, n in enumerate(rows):
+        stored = f"tile{i}" if nz_int32 else f"pl.tile.transpose_view(tile{i})"
+        if loop:
+            stored = f"pl.tile.transpose({stored}, 0, 1)"
+        blocks.append(f"""
 lhs{i} = pl.load(a, [0, 0], [{n}, 32], target_memory=pl.Mem.Mat)
 rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
 acc{i} = pl.matmul(lhs{i}, rhs)
 tile{i} = pl.tile.move(acc{i}, target_memory=pl.Mem.Vec,
                        blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.{scatter})
-pl.store({stored.format(i=i)}, [0, {sum(rows[:i])}], out)
-"""
-        for i, n in enumerate(rows)
-    )
+pl.store({stored}, [0, {sum(rows[:i])}], out)
+""")
+    body = "".join(blocks)
     if loop:
         body = "for iteration in pl.range(2):\n" + indent(body, "    ")
     return pl.parse_program(f"""

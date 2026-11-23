@@ -60,12 +60,13 @@ class TestSkewCrossCorePipeline:
     def test_quant_configuration_preserves_sequential_order(self, vector, round_trip, stages):
         """Quant registers are side effects outside TPUSH's SSA backward slice."""
 
-        source = f"""
+        def program(loop: str) -> ir.Program:
+            return pl.parse_program(f"""
 @pl.program
 class Program:
     @pl.function(strict_ssa=True)
     def main(q: pl.Tensor[[64, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
-        for i in {{loop}}:
+        for i in {loop}:
             tile = pl.tile.load(q, [i * 16, 0], [16, 64])
             if {vector}:
                 pl.system.set_quant_vector(controls)
@@ -75,20 +76,22 @@ class Program:
             if {round_trip}:
                 reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
                 pl.tfree_to_aiv(reply, id=1)
-"""
-        before = pl.parse_program(source.format(loop=f"pl.pipeline(0, 4, 1, stage={stages})"))
-        expected = pl.parse_program(source.format(loop="pl.range(0, 4, 1)"))
+""")
+
+        before = program(f"pl.pipeline(0, 4, 1, stage={stages})")
+        expected = program("pl.range(0, 4, 1)")
         ir.assert_structural_equal(_skew(passes.simplify()(before)), passes.simplify()(expected))
 
     @pytest.mark.parametrize("vector", [False, True])
     def test_nested_quant_configuration_protects_ancestors_only(self, vector):
-        source = f"""
+        def program(outer: str, middle: str) -> ir.Program:
+            return pl.parse_program(f"""
 @pl.program
 class Program:
     @pl.function(strict_ssa=True)
     def main(q: pl.Tensor[[64, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
-        for i in {{outer}}:
-            for j in {{middle}}:
+        for i in {outer}:
+            for j in {middle}:
                 for k in pl.range(2):
                     tile = pl.tile.load(q, [i * 16, 0], [16, 64])
                     if {vector}:
@@ -99,11 +102,10 @@ class Program:
         for i in pl.pipeline(2, stage=2):
             sibling = pl.tile.load(q, [i * 16, 0], [16, 64])
             pl.tile.store(sibling, [i * 16, 0], q)
-"""
-        before = pl.parse_program(
-            source.format(outer="pl.pipeline(2, stage=2)", middle="pl.pipeline(2, stage=3)")
-        )
-        expected = pl.parse_program(source.format(outer="pl.range(2)", middle="pl.range(2)"))
+""")
+
+        before = program("pl.pipeline(2, stage=2)", "pl.pipeline(2, stage=3)")
+        expected = program("pl.range(2)", "pl.range(2)")
         ir.assert_structural_equal(_skew(passes.simplify()(before)), passes.simplify()(expected))
 
     def test_single_roundtrip_producer_skews(self):

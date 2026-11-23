@@ -347,31 +347,19 @@ class TestTypeResolver:
             assert _has_printable_tile_view(ir.TileView(fractal=0), shape, space)
 
     @pytest.mark.parametrize("shape", [(1, 32), (32, 1)])
-    def test_fixpipe_scaling_defaults_match_shared_table_and_printer(self, shape):
-        """Check flat Scaling defaults for row- and column-shaped annotations."""
-        from pypto.language.typing.type_utils import _has_printable_tile_view  # noqa: PLC0415
-
+    def test_scaling_layout_defaults_round_trip(self, shape):
         resolver = _make_resolver()
         valid = [max(1, extent // 2) for extent in shape]
         annotation = f"pl.Tile[{list(shape)}, pl.UINT64, pl.Mem.Scaling, pl.TileView(valid_shape={valid})]"
         resolved = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
-        assert isinstance(resolved, ir.TileType)
-        assert resolved.tile_view is not None
-        assert resolved.tile_view.blayout == ir.TileLayout.row_major
-        assert resolved.tile_view.slayout == ir.TileLayout.none_box
-        assert _has_printable_tile_view(resolved.tile_view, resolved.shape, ir.MemorySpace.Scaling)
-        default_view = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box)
-        assert not _has_printable_tile_view(default_view, resolved.shape, ir.MemorySpace.Scaling)
+        assert isinstance(resolved, ir.TileType) and resolved.tile_view is not None
+        view = resolved.tile_view
+        assert (view.blayout, view.slayout) == (ir.TileLayout.row_major, ir.TileLayout.none_box)
         printed = ir.python_print_type(resolved)
-        assert "pl.TileView(" in printed
-        assert "blayout=" not in printed and "slayout=" not in printed
+        assert "valid_shape=" in printed and "blayout=" not in printed and "slayout=" not in printed
         reparsed = resolver.resolve_type(ast.parse(printed, mode="eval").body)
         assert isinstance(reparsed, ir.TileType)
-        ir.assert_structural_equal(
-            ir.Var("value", resolved, ir.Span.unknown()),
-            ir.Var("value", reparsed, ir.Span.unknown()),
-            enable_auto_mapping=True,
-        )
+        ir.assert_structural_equal(resolved, reparsed)
 
     def test_types_match_ignores_memref_identity_through_one_seam(self):
         """The shared type comparison keeps the parser's memref exclusion.

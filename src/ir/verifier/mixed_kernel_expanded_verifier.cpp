@@ -529,7 +529,6 @@ void VerifyTpopTfreeMatching(const FunctionPtr& func, std::vector<Diagnostic>& d
   VerifyTpopTfreeMatchingInBlock(FlattenBody(func->body_), func, diagnostics);
 }
 
-// Check Fixpipe peer and quant-state contracts before Buffer IR lowering.
 constexpr int kGuardFalse = 1, kGuardTrue = 2, kEitherGuard = kGuardFalse | kGuardTrue;
 
 struct FixpipeEndpointCounts {
@@ -544,13 +543,15 @@ struct FixpipeFunctionInfo : IRVisitor {
   std::map<const Var*, CallPtr> definitions;
   std::map<int, std::vector<CallPtr>> pushes;
   std::map<int, std::vector<CallPtr>> pops;
+  CallPtr FindOrigin(const ExprPtr& operand) const {
+    const auto def = definitions.find(AsVarLike(operand).get());
+    return def == definitions.end() ? nullptr : def->second;
+  }
   void VisitStmt_(const AssignStmtPtr& stmt) override {
     if (auto call = As<Call>(stmt->value_)) {
       definitions[stmt->var_.get()] = call;
-    } else if (auto alias = AsVarLike(stmt->value_)) {
-      // Cache alias origins so later peer lookups remain O(log N).
-      auto origin = definitions.find(alias.get());
-      if (origin != definitions.end()) definitions[stmt->var_.get()] = origin->second;
+    } else if (auto origin = FindOrigin(stmt->value_)) {
+      definitions[stmt->var_.get()] = origin;
     }
     IRVisitor::VisitStmt_(stmt);
   }
@@ -560,7 +561,6 @@ struct FixpipeFunctionInfo : IRVisitor {
       auto [it, inserted] = inits.emplace(id, call);
       if (!inserted) {
         duplicate_ids.insert(id);
-        // Keep the structured init visible to the verifier when ids collide.
         if (!it->second->HasKwarg("acc_push_epilogue")) it->second = call;
       }
     } else if (IsOp(call, "tile.tpush_to_aiv")) {
@@ -626,6 +626,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   using KernelPair = std::pair<std::string, std::string>;
   std::vector<std::pair<KernelPair, CallPtr>> groups;
   std::map<const Var*, int> group_bindings;
+  std::map<const Var*, std::vector<const Var*>> forwarded;
   for (const auto& [gv, func] : program->functions_) {
     if (!func || !func->body_) continue;
     auto& local = info[func->name_];
@@ -638,14 +639,38 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       groups.emplace_back(std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_),
                           members[0].inner_call);
     }
+    const std::set<VarPtr> parameters(func->params_.begin(), func->params_.end());
     for (const auto& member : members) {
-      if (member.inner_callee->func_type_ != FunctionType::Group) continue;
+      if (!IsWrapperType(member.inner_callee->func_type_)) continue;
       const auto& args = member.inner_call->args_;
       const auto& params = member.inner_callee->params_;
       for (std::size_t i = 0; i < std::min(args.size(), params.size()); ++i) {
-        const auto value = As<ConstBool>(args[i]);
-        group_bindings[params[i].get()] |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
+        const auto* target = params[i].get();
+        auto& binding = group_bindings[target];
+        const auto source = AsVarLike(args[i]);
+        if (IsWrapperType(func->func_type_) && parameters.count(source)) {
+          forwarded[source.get()].push_back(target);
+        } else {
+          const auto value = As<ConstBool>(args[i]);
+          binding |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
+        }
       }
+    }
+  }
+  // Each Boolean bit flows over a forwarding edge at most twice.
+  for (const auto& [source, destinations] : forwarded) group_bindings.try_emplace(source, kEitherGuard);
+  std::vector<const Var*> pending;
+  for (const auto& [param, mask] : group_bindings) {
+    if (mask) pending.push_back(param);
+  }
+  for (std::size_t i = 0; i < pending.size(); ++i) {
+    const auto* param = pending[i];
+    const int mask = group_bindings[param];
+    for (const auto* target : forwarded[param]) {
+      auto& current = group_bindings[target];
+      if ((current | mask) == current) continue;
+      current |= mask;
+      pending.push_back(target);
     }
   }
   // Project each Group's bindings to the shared kernel argument order.
@@ -665,11 +690,8 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   for (const auto& [name, local] : info) {
     for (const auto& [id, init] : local.inits) {
       if (init->args_.empty()) continue;
-      auto buffer = AsVarLike(init->args_[0]);
-      auto def = buffer ? local.definitions.find(buffer.get()) : local.definitions.end();
-      if (def != local.definitions.end() && IsOp(def->second, "system.import_peer_buffer")) {
-        ++incoming[{def->second->GetKwarg<std::string>("peer_func", ""),
-                    def->second->GetKwarg<std::string>("name", ""), id}];
+      if (auto def = local.FindOrigin(init->args_[0]); IsOp(def, "system.import_peer_buffer")) {
+        ++incoming[{def->GetKwarg<std::string>("peer_func", ""), def->GetKwarg<std::string>("name", ""), id}];
       }
     }
   }
@@ -679,6 +701,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   for (const auto& [gv, func] : program->functions_) {
     if (!func || !func->body_) continue;
     const auto& local = info.at(func->name_);
+    std::map<const Call*, bool> reserve_users;
     for (const auto& [id, init] : local.inits) {
       const bool has_epilogue = init->HasKwarg("acc_push_epilogue");
       const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
@@ -709,17 +732,23 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         error(init, "acc_push_epilogue requires C2V-only dir_mask=1 and nosplit=true");
       }
       if (init->args_.empty()) continue;
-      auto buffer = AsVarLike(init->args_[0]);
-      auto def = buffer ? local.definitions.find(buffer.get()) : local.definitions.end();
-      if (def == local.definitions.end() ||
-          (!IsOp(def->second, "system.reserve_buffer") && !IsOp(def->second, "system.import_peer_buffer"))) {
+      const auto def = local.FindOrigin(init->args_[0]);
+      if (!IsOp(def, "system.reserve_buffer") && !IsOp(def, "system.import_peer_buffer")) {
         if (has_epilogue) {
           error(init, "Fixpipe c2v_consumer_buf must trace to reserve_buffer/import_peer_buffer");
         }
         continue;
       }
-      if (has_epilogue && IsOp(def->second, "system.reserve_buffer")) {
-        const auto name = def->second->GetKwarg<std::string>("name", "");
+      const bool reserve = IsOp(def, "system.reserve_buffer");
+      if (reserve && (init->GetKwarg<int>("dir_mask", 0) & kDirMaskC2V) && local.pops.count(id)) {
+        auto [usage, inserted] = reserve_users.emplace(def.get(), has_epilogue);
+        if (!inserted && (usage->second || has_epilogue)) {
+          error(init, "Fixpipe C2V pipe ids require distinct reserve_buffer allocations");
+        }
+        usage->second |= has_epilogue;
+      }
+      if (has_epilogue && reserve) {
+        const auto name = def->GetKwarg<std::string>("name", "");
         if (incoming[{func->name_, name, id}] != 1) {
           error(init, "Fixpipe consumer requires exactly one peer producer importing its buffer and pipe id");
         }
@@ -728,13 +757,13 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         const int local_slots = handler ? handler->GetC2VConsumerRingSlotCount(slots, requested_local_slots)
                                         : requested_local_slots;
         const int64_t required = static_cast<int64_t>(init->GetKwarg<int>("slot_size", 0)) * local_slots;
-        if (required > def->second->GetKwarg<int>("size", 0)) {
+        if (required > def->GetKwarg<int>("size", 0)) {
           error(init, "Fixpipe reserve_buffer requires at least " + std::to_string(required) +
                           " bytes for its local ring");
         }
       }
-      if (!IsOp(def->second, "system.import_peer_buffer")) continue;
-      const auto peer_name = def->second->GetKwarg<std::string>("peer_func", "");
+      if (!IsOp(def, "system.import_peer_buffer")) continue;
+      const auto peer_name = def->GetKwarg<std::string>("peer_func", "");
       auto peer = info.find(peer_name);
       if (peer == info.end() || !peer->second.inits.count(id)) {
         if (has_epilogue) {
@@ -753,12 +782,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         error(init, "Fixpipe peer epilogue/nosplit/slot_size contract mismatch");
         continue;
       }
-      auto peer_buf = peer_init->args_.empty() ? nullptr : AsVarLike(peer_init->args_[0]);
-      auto peer_def =
-          peer_buf ? peer->second.definitions.find(peer_buf.get()) : peer->second.definitions.end();
-      if (peer_def == peer->second.definitions.end() || !IsOp(peer_def->second, "system.reserve_buffer") ||
-          peer_def->second->GetKwarg<std::string>("name", "") !=
-              def->second->GetKwarg<std::string>("name", "")) {
+      const auto peer_def = peer_init->args_.empty() ? nullptr : peer->second.FindOrigin(peer_init->args_[0]);
+      if (!IsOp(peer_def, "system.reserve_buffer") ||
+          peer_def->GetKwarg<std::string>("name", "") != def->GetKwarg<std::string>("name", "")) {
         error(init, "Fixpipe peer init must use the imported named reserve_buffer");
       }
       auto pushes = local.pushes.find(id);
@@ -826,7 +852,6 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     std::function<void(const std::vector<StmtPtr>&, InitMap&)> verify_block;
     verify_block = [&](const std::vector<StmtPtr>& stmts, InitMap& visible) {
       std::vector<std::pair<int, std::optional<CallPtr>>> saved_inits;
-      // PTOAS quant state must precede TPUSH in the same block, with the same id.
       std::set<int> scalar_state;
       std::map<int, int64_t> vector_state;
       for (const auto& stmt : stmts) {
@@ -867,9 +892,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         }
         if (IsOp(call, "system.tfree_to_aic") && !call->args_.empty()) {
           const auto tile = AsVarLike(call->args_[0]);
-          const auto origin = local.definitions.find(tile.get());
-          if (origin == local.definitions.end() || !IsOp(origin->second, "tile.tpop_from_aic")) continue;
-          auto& fifo = retained[origin->second->GetKwarg<int>("id", 0)];
+          const auto origin = local.FindOrigin(call->args_[0]);
+          if (!IsOp(origin, "tile.tpop_from_aic")) continue;
+          auto& fifo = retained[origin->GetKwarg<int>("id", 0)];
           if (fifo.empty()) continue;
           if (fifo.front() != tile.get()) {
             error(call, "Fixpipe TFREE must release the oldest outstanding TPOP of its pipe");
@@ -933,9 +958,12 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
                      (IsVectorAccPushQuant(quant) && !vector_state.count(id)))) {
           error(call, "Fixpipe TPUSH requires preceding set_quant with the same pipe id in the same block");
         }
-        auto tile = push ? (call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType()))
+        auto tile = push ? (call->args_.size() == 1 ? As<TileType>(call->args_[0]->GetType()) : nullptr)
                          : As<TileType>(call->GetType());
-        if (!tile) continue;
+        if (!tile) {
+          if (push) error(call, "Fixpipe TPUSH requires exactly one tile operand");
+          continue;
+        }
         if (push && IsVectorAccPushQuant(quant) && vector_state.count(id)) {
           auto columns = tile->shape_.size() == 2
                              ? cross_core_pipe::TryGetNonNegativeConstInt(tile->shape_[1])

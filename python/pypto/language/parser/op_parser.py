@@ -597,7 +597,6 @@ class OpParser:
             if key == "attrs":
                 continue
 
-            # A Fixpipe contract is a compile-time record, not a tile expression.
             if key == "acc_push_epilogue" and isinstance(value, ast.Dict):
                 kwargs[key] = self.attrs.parse_acc_push_epilogue(value)
             elif key in expression_keywords:
