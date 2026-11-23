@@ -684,47 +684,26 @@ class After:
 
 ## C2V Fixpipe 契约
 
-A5 两端 init 接受 `nosplit` 和结构化 `acc_push_epilogue`。必填 `layout`、`quant`、`relu`，
-拒绝未知字段和值。量化模式为 `no_convert`、`f32_f16`、`f32_bf16`、`deqf16_scalar`、
-`deqf16_vec`、`qf322f16_pre_scalar`。ReLU 为 `no_relu` 或量化前的 `normal_relu`。
+A5 两端 init 接受 `nosplit` 和 `acc_push_epilogue={layout, quant, relu}`。三个字段均必填。两端需匹配 epilogue、id、槽位字节数与数量、nosplit。生产者通过恒等 SSA 别名导入消费者的具名 reserve buffer。
 
-| 布局 | Vec 物理布局 | 转换范围 |
-| ---- | ------------ | -------- |
-| `nz2nd` | 行优先、无分形 | 全部列出的模式；`no_convert` 保持 FP32/INT32 |
-| `nz2dn` | 列优先、无分形 | 同 NZ2ND |
+| 布局 | Vec 物理布局 | 转换 |
+| ---- | ------------ | ---- |
+| `nz2nd` | 行优先、无分形 | 下列全部模式 |
+| `nz2dn` | 列优先、无分形 | 下列全部模式 |
 | `nz2nz` | 列优先、行优先子布局 | 仅 FP32 `no_convert` |
 
-Fixpipe 要求 Acc 输入、仅 C2V 的 `dir_mask=1`、`nosplit=true` 和 push/pop/free 的
-`split=0`。A2/A3、双向 Fixpipe 和其他 NZ2NZ 转换被拒绝。没有 epilogue 时省略
-`nosplit` 会保留原策略；提供 epilogue 时 Python 默认 true、拒绝 false，原始 IR 必须明确 true。
+`no_convert` 保持 FP32/INT32。`f32_f16` 和 `f32_bf16` 转换 FP32。`deqf16_scalar` 和 `deqf16_vec` 将 INT32 转为 FP16。`qf322f16_pre_scalar` 将 FP32 转为 FP16。量化前的 ReLU 可选 `no_relu` 或 `normal_relu`。
 
-两端必须保持 epilogue、id、slot_size/slot_num 和 nosplit 一致，生产者导入消费者
-具名 reserve buffer。`MixedKernelExpanded` 验证类型、物理形状/布局、转换后槽位
-字节数及后端定义的本地环容量。恒等 SSA 缓冲区别名按 O(N log N) 追溯来源，拒绝
-算术地址；legacy init 不能隐藏重复 id。当前 PTOAS 要求同 id 使用同一消费者 tile
-类型，不同 payload 形状必须使用独立 id。
+使用 Acc 输入、`dir_mask=1`、`nosplit=true`，push/pop/free 均用 `split=0`。提供 epilogue 时 Python 默认 `nosplit=true`，其余情况保留省略。`c2v_dtype` 和 `pre_relu` 是 ND FP32 简写，与结构化 epilogue 互斥。
 
-标量 setter 接受 FP32，`deqf16_scalar` 为 INT32→FP16，`qf322f16_pre_scalar` 为 FP32→FP16。
-`deqf16_vec`（INT32→FP16）的 packed i64/u64 控制字从无分形行优先 Mat 搬到 Scaling，
-要求完整 `[1, N]` 有效，`N > 0` 且 `N % 16 == 0`，满足 128 字节对齐。Scaling 与 MX 控制区独立，
-保守的 4 KiB 预算属于分配策略。
+标量控制值为 FP32。向量控制字为 packed i64/u64，从无分形行优先 Mat 移至 Scaling，与 MX 控制区独立。`[1, N]` 必须完全有效，`N > 0` 且为 16 的倍数。Scaling 的规划预算为 4 KiB，控制字在 TPUSH 完成前不可改写，分配保持到函数结束。
 
-setter 在同块内支配 TPUSH，匹配 id 与量化模式。控制流、另一 id 的配置或 `pre_quant` 写回
-会使旧状态失效。向量控制字在 TPUSH 完成前不可改写，分配保持到函数结束。含 setter 的 pipeline
-及祖先（含 stage=1）降为顺序循环。单次遍历计数，兄弟 pipeline 仍可流水化。
+setter 在同块内先于 TPUSH，匹配 id 和量化模式。控制流、另一 id 的 setter 或 `pre_quant` 写回会使旧状态失效。含 setter 的 pipeline 及祖先（含 stage=1）降为顺序循环。
 
-A5 的显式非 ND Acc→Vec 布局会传给两端 init，Buffer IR 同样适用。隐式布局保持原管道。
-显式 Fixpipe 拒绝布局不一致、混入非 Acc 生产者及 split 传输。
-transpose scratch 使用自身 SSA 类型。`c2v_dtype` / `pre_relu` 是互斥的 ND FP32
-简写；`tile.store` / `tile.assemble` 的写回控制属于独立接口。
+`MixedKernelExpanded` 校验类型、物理布局、转换后槽位字节数、本地环容量及两端 id。当前 PTOAS 要求同 id 使用同一消费者 tile 类型。验证器诊断直线代码和简单布尔分支的已知端点计数不匹配，其他手写控制流由作者保证两端消息配对。
 
-序列化、结构比较/哈希与打印保留 `ir::AccPushEpilogue`。`PipeDirectionMetadata` 的
-`acc_push_layouts`、`has_acc_push`、`has_non_acc_push`、`has_nonzero_split` 描述管道。
-`CreateInitializePipe` 在两端写入契约。GlobalTensor FIFO 属于独立工作。
+A5 显式非 ND Acc→Vec move 将同一布局传给两端 init，Buffer IR 同样适用。省略布局时保持原管道。transpose scratch 使用自身 SSA 类型。
 
-### 回归覆盖
+序列化、结构比较/哈希和打印保留 `ir::AccPushEpilogue`。`PipeDirectionMetadata` 记录 `acc_push_layouts`、`has_acc_push`、`has_non_acc_push` 和 `has_nonzero_split`。`CreateInitializePipe` 在两端写入契约。GlobalTensor FIFO 有独立契约。
 
-`test_c2v_fixpipe.py` 覆盖 peer/状态/布局校验、往返及两种 Buffer IR 模式的真实 PTOAS 编译。
-系统用例采用 JIT，显式 AIC/AIV 端点通过 `jit.incore` 声明，由 `CORE_GROUP` 调度。
-非方形 DN 转置使用精确整数 golden，并以行优先加真实转置为对照。
-后续验收分支保留旧字节回放及高级 A5 用例。
+`test_c2v_fixpipe.py` 覆盖两端校验、往返和两种 Buffer IR 模式的真实 PTOAS 编译。JIT 系统用例以精确整数 golden 和行优先真实转置为对照，核对非方形 DN 转置视图。显式 AIC/AIV JIT 核由 `jit.incore` 声明，由 `CORE_GROUP` 调度。

@@ -765,9 +765,11 @@ class OpParser:
             else self.parse_op_positional_arg(arg)
             for index, arg in enumerate(call.args)
         ]
+        op_func = getattr(module, op_name)
+        if op_func is _dsl_system.set_quant_scalar:
+            expression_keywords = frozenset({"scale"})
         kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
         attrs = self.attrs.parse_op_attrs(call)
-        op_func = getattr(module, op_name)
         span = self.services.span_tracker.get_span(call)
         try:
             result = invoke_dsl(op_func, args, kwargs, span)

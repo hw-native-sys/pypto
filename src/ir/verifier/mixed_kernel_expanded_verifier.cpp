@@ -563,6 +563,43 @@ struct FixpipeFunctionInfo : IRVisitor {
   }
 };
 
+// Prove count mismatches for straight-line peers and top-level branches on one
+// boolean input. Loops and other guards can have correlated execution counts.
+std::optional<std::pair<size_t, size_t>> FixpipeEndpointCountRange(const FunctionPtr& func,
+                                                                   const std::vector<CallPtr>& sites) {
+  const std::set<CallPtr> endpoints(sites.begin(), sites.end());
+  auto count = [&](const StmtPtr& body) {
+    const auto stmts = FlattenBody(body);
+    return std::count_if(stmts.begin(), stmts.end(), [&](const auto& stmt) {
+      return endpoints.count(transform_utils::GetCallFromStmt(stmt));
+    });
+  };
+  size_t seen = static_cast<size_t>(count(func->body_));
+  size_t on_true = seen;
+  size_t on_false = seen;
+  VarPtr guard;
+  for (const auto& stmt : FlattenBody(func->body_)) {
+    auto branch = As<IfStmt>(stmt);
+    if (!branch) continue;
+    const auto then_count = static_cast<size_t>(count(branch->then_body_));
+    const auto else_count = branch->else_body_ ? static_cast<size_t>(count(*branch->else_body_)) : 0;
+    seen += then_count + else_count;
+    if (then_count != else_count) {
+      auto param = AsVarLike(branch->condition_);
+      auto type = param ? As<ScalarType>(param->GetType()) : nullptr;
+      if (!type || type->dtype_ != DataType::BOOL || (guard && param != guard) ||
+          std::find(func->params_.begin(), func->params_.end(), param) == func->params_.end()) {
+        return std::nullopt;
+      }
+      guard = param;
+    }
+    on_true += then_count;
+    on_false += else_count;
+  }
+  if (seen != sites.size()) return std::nullopt;
+  return std::minmax(on_true, on_false);
+}
+
 void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) {
   const auto* context = PassContext::Current();
   const auto* handler =
@@ -679,6 +716,14 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         error(init, "Fixpipe requires matching TPUSH and TPOP endpoints for the same pipe id");
       }
       if (pushes != local.pushes.end() && pops != peer->second.pops.end()) {
+        auto push_range = FixpipeEndpointCountRange(func, pushes->second);
+        auto pop_range = FixpipeEndpointCountRange(program->GetFunction(peer_name), pops->second);
+        if (push_range && pop_range && *push_range != *pop_range) {
+          const bool excess_pop =
+              push_range->first < pop_range->first || push_range->second < pop_range->second;
+          error(excess_pop ? pops->second.front() : pushes->second.front(),
+                "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
+        }
         std::set<std::vector<int64_t>> source_signatures;
         auto signature = [](const TileTypePtr& tile, DataType dtype) {
           std::vector<int64_t> result{dtype.Code()};
@@ -761,18 +806,20 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
                   vector_state.clear();
                   if ((scalar && !IsScalarAccPushQuant(quant)) || (vector && !IsVectorAccPushQuant(quant))) {
                     error(call, "set_quant kind does not match acc_push_epilogue.quant");
-                  } else if (scalar) {
-                    scalar_state.insert(id);
                   } else {
-                    auto payload = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
-                    auto columns = payload && payload->shape_.size() == 2
-                                       ? cross_core_pipe::TryGetNonNegativeConstInt(payload->shape_[1])
-                                       : std::nullopt;
-                    if (!columns || payload->memory_space_ != MemorySpace::Scaling ||
-                        (payload->dtype_ != DataType::INT64 && payload->dtype_ != DataType::UINT64)) {
-                      error(call, "set_quant_vector requires static packed 64-bit loc=scaling controls");
-                    } else {
-                      vector_state[id] = *columns;
+                    try {
+                      // Raw calls can bypass the operator builder's operand validation.
+                      OpRegistry::GetInstance()
+                          .GetEntry(call->op_->name_)
+                          .GetDeduceType()(call->args_, call->kwargs_);
+                      if (scalar) {
+                        scalar_state.insert(id);
+                      } else {
+                        auto payload = As<TileType>(call->args_[0]->GetType());
+                        vector_state[id] = As<ConstInt>(payload->shape_[1])->value_;
+                      }
+                    } catch (const Error& exception) {
+                      error(call, exception.what());
                     }
                   }
                 } else {

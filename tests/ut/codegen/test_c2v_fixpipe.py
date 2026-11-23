@@ -81,7 +81,7 @@ def _program(
                 controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
                 pl.system.set_quant_vector(controls, id=state_id)
             if scalar_state:
-                pl.system.set_quant_scalar(pl.const(0.5, pl.FP32), id=state_id)
+                pl.system.set_quant_scalar(scale=0.5, id=state_id)
             pl.tpush_to_aiv(acc, split=split)
 
         @pl.function(type=pl.FunctionType.AIV)
@@ -247,6 +247,25 @@ def test_fixpipe_pop_requires_a_matching_push():
     without_push = "\n".join(line for line in source.splitlines() if ".tpush_to_aiv(" not in line)
     with pytest.raises(Error, match="matching TPUSH and TPOP endpoints"):
         _generate(pl.parse_program(without_push))
+
+
+def test_fixpipe_detects_a_one_sided_guard():
+    source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
+    source = source.replace(
+        "        pl.tile.tpush_to_aiv(", "        if enabled:\n            pl.tile.tpush_to_aiv("
+    )
+    with pytest.raises(Error, match="endpoint counts differ across control-flow paths"):
+        _generate(pl.parse_program(source))
+
+
+@pytest.mark.parametrize(("operands", "message"), [("[]", "exactly one operand"), ("[1]", "FP32 scalar")])
+def test_raw_scalar_setter_does_not_configure_the_pipe(operands, message):
+    source = ir.python_print(_program(quant="deqf16_scalar")).replace(
+        "pl.system.set_quant_scalar(0.5, id=0)",
+        f'pl._dump.call("system.set_quant_scalar", {operands}, pl.Scalar[pl.INT32], kwargs={{"id": 0}})',
+    )
+    with pytest.raises(Error, match=message):
+        _generate(pl.parse_program(source))
 
 
 @pytest.mark.parametrize(
@@ -596,7 +615,7 @@ def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
                 if vector:
                     pl.set_quant_vector(controls)
                 else:
-                    pl.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
+                    pl.set_quant_scalar(scale=pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
                 pl.tpush_to_aiv(acc, split=0)
                 if round_trip:
                     returned = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)

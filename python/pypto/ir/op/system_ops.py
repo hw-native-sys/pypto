@@ -931,24 +931,13 @@ def aiv_initialize_pipe(  # noqa: PLR0913
 
 
 def set_quant_scalar(scale: Expr, *, id: int = 0, span: Span | None = None) -> Call:
-    """Set an FP32 scalar scale for a C2V Fixpipe pipe.
-
-    The matching init must select a scalar quant mode. Configure in the same
-    block before TPUSH; the state belongs to ``id``. This is separate from the
-    packed ``pre_quant`` operand of Acc-to-GM/Mat writebacks.
-    """
+    """Set the FP32 scale for the specified scalar-mode Fixpipe pipe."""
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("system.set_quant_scalar", [scale], {"id": id}, actual_span)
 
 
 def set_quant_vector(controls: Expr, *, id: int = 0, span: Span | None = None) -> Call:
-    """Set packed 64-bit per-channel Fixpipe controls for a C2V pipe.
-
-    ``controls`` must be an INT64/UINT64 tile in MemorySpace.Scaling
-    (PTO loc=scaling), containing hardware control words, not floating scales.
-    The matching init must select deqf16_vec. Configure in the same block
-    before TPUSH; the state belongs to ``id``.
-    """
+    """Set packed INT64/UINT64 Scaling controls for the specified ``deqf16_vec`` pipe."""
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("system.set_quant_vector", [controls], {"id": id}, actual_span)
 

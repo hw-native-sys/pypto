@@ -794,56 +794,26 @@ true last use of that tile.
 
 ## C2V Fixpipe contract
 
-On A5, both pipe initializers accept `nosplit` and a structured `acc_push_epilogue`.
-The record requires `layout`, `quant`, `relu`. Quant modes are `no_convert`, `f32_f16`,
-`f32_bf16`, `deqf16_scalar`, `deqf16_vec`, and `qf322f16_pre_scalar`. ReLU is `no_relu`
-or `normal_relu` (before quantization). Unknown keys and values are rejected.
+A5 pipe initializers accept `nosplit` and `acc_push_epilogue={layout, quant, relu}`. All fields are required. Track matching epilogue, id, slot size/count and nosplit on both peers. The producer imports the consumer's named reserve buffer through identity SSA aliases.
 
-| Layout | Physical Vec layout | Supported conversion |
-| ------ | ------------------- | -------------------- |
-| `nz2nd` | row-major, unboxed | All listed modes; `no_convert` keeps FP32/INT32 |
-| `nz2dn` | column-major, unboxed | Same as NZ2ND |
-| `nz2nz` | column-major, row-major sublayout | FP32 `no_convert` only |
+| Layout | Physical Vec layout | Conversion |
+| ------ | ------------------- | ---------- |
+| `nz2nd` | Row-major, unboxed | All modes below |
+| `nz2dn` | Column-major, unboxed | All modes below |
+| `nz2nz` | Column-major, row-major sublayout | FP32 `no_convert` only |
 
-Fixpipe requires Acc input, C2V-only `dir_mask=1`, `nosplit=true`, and `split=0`
-on push/pop/free. A2/A3, bidirectional Fixpipe and other NZ2NZ conversions are rejected.
-Without an epilogue, omitted `nosplit` remains omitted; with one, Python defaults
-it to true and rejects false. Raw IR must explicitly carry true.
+`no_convert` preserves FP32/INT32. `f32_f16` and `f32_bf16` convert FP32. `deqf16_scalar` and `deqf16_vec` convert INT32 to FP16. `qf322f16_pre_scalar` converts FP32 to FP16. ReLU is `no_relu` or `normal_relu` before quantization.
 
-Peers must agree on epilogue, id, slot size/count and nosplit. The producer imports
-the consumer's named reserve buffer. `MixedKernelExpanded` checks dtype, physical
-shape/layout, post-conversion slot bytes and backend-sized local-ring capacity.
-Identity SSA buffer aliases retain provenance in O(N log N); arithmetic addresses
-are rejected. Duplicate init ids cannot be hidden by a legacy init. Current PTOAS
-requires one consumer tile type per id; differing payloads need separate ids.
+Use an Acc input, `dir_mask=1`, `nosplit=true` and `split=0` for push/pop/free. Python defaults `nosplit` to true with an epilogue and leaves it omitted otherwise. `c2v_dtype` and `pre_relu` are the ND FP32 shorthand and exclude a structured epilogue.
 
-Scalar setters accept FP32: `deqf16_scalar` is INT32→FP16 and `qf322f16_pre_scalar`
-is FP32→FP16. `deqf16_vec` (INT32→FP16) uses packed i64/u64 control words, staged from
-unboxed row-major Mat into Scaling. The full `[1, N]` must be valid, with `N > 0`
-and `N % 16 == 0` for 128-byte alignment. Scaling is separate from MX scale sidecars.
-Its conservative 4 KiB planning budget is an allocation policy.
+Scalar controls are FP32. Vector controls are packed i64/u64 moved from unboxed row-major Mat to Scaling (separate from MX sidecars). They require full-valid `[1, N]` with positive `N` divisible by 16. The planner budgets 4 KiB for Scaling. Keep controls immutable through TPUSH and their allocations live to function end.
 
-A setter must dominate TPUSH in the same block, matching its id and quant mode.
-Control flow, another id's setter, or a `pre_quant` writeback invalidates state.
-Vector controls stay immutable through TPUSH and their allocations live to function
-end. Setter-containing pipelines and ancestors run sequentially, including stage=1.
-The pass counts setters in one traversal; sibling pipelines remain eligible.
+Set quant state in the same block before TPUSH with the same id and quant mode. Control flow, another id's setter, and `pre_quant` writeback invalidate state. Pipelines containing setters and their ancestors run sequentially, including stage=1.
 
-On A5, an explicit non-ND Acc→Vec layout propagates to both init calls, including
-with Buffer IR. Legacy implicit layouts use ordinary transport. Explicit Fixpipe
-rejects mixed layouts, non-Acc producers and split transfers. Transpose scratch uses its own SSA type.
-`c2v_dtype` / `pre_relu` remain the mutually exclusive ND FP32 shorthand;
-`tile.store` / `tile.assemble` writeback controls are separate interfaces.
+`MixedKernelExpanded` checks payload type, physical layout, converted slot bytes, local ring capacity and peer ids. Current PTOAS needs one consumer tile type per id. The verifier diagnoses known endpoint count mismatches in straight-line code and simple Boolean branches. For other manual control flow, the author must balance messages on both peers.
 
-Serialization, hashing, comparison and printing retain `ir::AccPushEpilogue`.
-`PipeDirectionMetadata.acc_push_layouts`, `has_acc_push`, `has_non_acc_push`, and
-`has_nonzero_split` describe the pipe. `CreateInitializePipe` writes the contract
-on both peers. GlobalTensor FIFO remains separate.
+Explicit non-ND A5 Acc→Vec moves carry the layout to both inits with or without Buffer IR. Use one layout for the pipe. Omitted layouts retain legacy transport. Transpose scratch uses its own SSA type.
 
-### Regression coverage
+`ir::AccPushEpilogue` survives serialization, comparison/hash and printing. `PipeDirectionMetadata` records `acc_push_layouts`, `has_acc_push`, `has_non_acc_push`, and `has_nonzero_split`. `CreateInitializePipe` emits the contract on both peers. GlobalTensor FIFO uses a separate contract.
 
-`test_c2v_fixpipe.py` covers peer/state/layout validation, round trips, and real
-PTOAS compilation in both Buffer IR modes. System cases use JIT, with explicit
-`jit.incore` AIC/AIV peers under a `CORE_GROUP` wrapper. The non-square DN transpose
-uses exact integer goldens and a row-major real-transpose control.
-The dependent acceptance branch retains the legacy byte replay and advanced A5 cases.
+`test_c2v_fixpipe.py` covers peer validation, round trips and native PTOAS in both Buffer IR modes. JIT system tests compare non-square DN transpose views with exact integer goldens and a row-major transpose control. Explicit AIC/AIV JIT peers are declared with `jit.incore` and dispatched under `CORE_GROUP`.
