@@ -58,3 +58,21 @@ Python 和 C++ 中的 `BackendType.Ascend910B` 均保留为 `BackendType.Ascend9
 `Ascend910`。包含 `Ascend910B` 的旧产物仍可读取；较旧版本的 PyPTO 可能无法
 识别包含 `Ascend910` 的新产物。平台字符串（`a2a3`、`a2a3sim`、`a5`、
 `a5sim`）与枚举整数值保持不变。
+
+## Linx 超标量后端
+
+使用 `ir.lower(program, backend_type=BackendType.Linx)` 可执行 IR lowering。
+初始流水线依次执行 SSA 转换、表达式简化、语句结构规范化和嵌套调用展平。
+Pass instrument 可通过当前上下文查询 Linx 后端。进程级 PTO 目标保持原有配置。
+JIT 函数可用 `fn.lower(config=RunConfig(backend_type=BackendType.Linx))` 选择目标。
+Linx 的 PTO 代码生成和运行时启动尚未接入。
+
+Linx SoC 有 4 个相同的 die，每个 die 直接包含 36 个 `CoreType.SuperScalar` 核。
+每核有一份 256 KiB Shared 和 4 个 PE。每个 PE 有私有的 256 KiB CELL、标量单元、
+带 Fixpipe 写回的 Cube，以及 v-int、v-fma、v-lnexp 三个向量单元。
+Cube 可读取 CELL 或 Shared，经 Fixpipe 写回 CELL。向量单元访问 CELL，
+CELL 和 Shared 之间支持双向搬运。架构另有核外 100 MB L1，其分配范围尚未确定。
+
+通过 `backend.get_backend_instance(BackendType.Linx).soc` 可查询拓扑。
+`total_core_count()` 返回 144 个物理核，`total_pe_count()` 返回 576 个 PE。
+核上的 `shared_capacity_bytes` 和 PE 上的 `cell_capacity_bytes` 均以字节计量。

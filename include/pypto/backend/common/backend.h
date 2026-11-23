@@ -55,6 +55,7 @@ class BackendHandler;
 enum class BackendType {
   Ascend910,              ///< 910 backend (A2/A3 PTO assembly codegen)
   Ascend950,              ///< 950 PTO backend
+  Linx,                   ///< Superscalar target for IR lowering
   Ascend910B = Ascend910  ///< Compatibility alias; prefer Ascend910
 };
 
@@ -386,6 +387,9 @@ class Backend {
    * @return Pointer to the handler singleton (never null).
    */
   [[nodiscard]] virtual const BackendHandler* GetHandler() const = 0;
+
+  /// Whether this target implements the PTO handler and code generation.
+  [[nodiscard]] virtual bool HasPtoCodegen() const { return true; }
 
   /**
    * @brief Get the SoC structure

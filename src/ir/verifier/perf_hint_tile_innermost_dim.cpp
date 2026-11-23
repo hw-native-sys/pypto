@@ -310,15 +310,10 @@ class TileInnermostDimVerifier : public PropertyVerifier {
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
 
-    // Backend thresholds come from the active PassContext per the
-    // `pass-context-config` rule. With no context (e.g. a verifier run in
-    // isolation), there is no backend to consult — silently skip rather
-    // than emit advice that may be wrong for the real target.
-    // GetBackendHandler() is documented as non-null (throws ValueError if
-    // the backend type has not been configured), so no null-check is needed.
-    const auto* ctx = PassContext::Current();
-    if (ctx == nullptr) return;
-    const auto* handler = ctx->GetBackendHandler();
+    // The recommendation depends on the active target's PTO memory thresholds.
+    if (!PassContext::Current()) return;
+    const auto* handler = PassContext::CurrentPtoHandler();
+    if (!handler) return;
 
     TileInnermostDimVisitor visitor(diagnostics, handler->GetRecommendedInnermostDimBytes(),
                                     handler->GetL2CacheLineBytes(), handler->GetPtoTargetArch());

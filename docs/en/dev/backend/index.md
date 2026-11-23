@@ -68,3 +68,26 @@ The canonical `.name` and newly written artifact metadata use `Ascend910`.
 Existing artifacts containing `Ascend910B` remain readable; older PyPTO releases
 may not recognize new artifacts containing `Ascend910`. Platform strings
 (`a2a3`, `a2a3sim`, `a5`, `a5sim`) and enum integer values are unchanged.
+
+## Linx superscalar backend
+
+Select `BackendType.Linx` with `ir.lower(program, backend_type=...)` for IR-only
+lowering. The initial pipeline converts to SSA, simplifies expressions,
+normalizes statement structure, and flattens nested calls. Instruments see the
+Linx backend through the active pass context. The process-wide PTO target is
+preserved. For a JIT function, use `fn.lower(config=RunConfig(backend_type=BackendType.Linx))`.
+PTO code generation and runtime launch are unavailable for Linx.
+
+The Linx SoC has four identical dies. Each die directly contains 36
+`CoreType.SuperScalar` cores. Each core owns 256 KiB of Shared storage and
+four processing elements (PEs). Each PE owns 256 KiB of CELL storage, a scalar
+unit, Cube with Fixpipe writeback, and three vector engines (v-int, v-fma and
+v-lnexp). Cube can read CELL or Shared and writes back to CELL via Fixpipe.
+Vector engines access CELL, which supports transfers in both directions with
+Shared. The architecture also describes a 100 MB L1 buffer outside the core.
+Its allocation scope is unspecified.
+
+`backend.get_backend_instance(BackendType.Linx).soc` exposes the hierarchy.
+`total_core_count()` counts the 144 physical cores and `total_pe_count()`
+counts the 576 PEs. Per-core `shared_capacity_bytes` and per-PE
+`cell_capacity_bytes` describe physical storage in bytes.

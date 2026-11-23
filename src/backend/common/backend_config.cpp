@@ -26,6 +26,8 @@ std::mutex BackendConfig::mutex_;
 void BackendConfig::SetBackendType(BackendType type) {
   std::scoped_lock<std::mutex> lock(mutex_);
 
+  CHECK(GetBackendInstance(type)->HasPtoCodegen())
+      << "Linx supports IR lowering only. Use ir.lower(program, backend_type=BackendType.Linx).";
   if (backend_type_.has_value()) {
     // Idempotent: allow setting the same type multiple times
     CHECK(*backend_type_ == type) << "Backend type already set to " << BackendTypeToString(*backend_type_)

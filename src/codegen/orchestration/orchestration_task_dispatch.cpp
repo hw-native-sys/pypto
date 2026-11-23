@@ -78,6 +78,7 @@ bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
 // Returns the opening of a rt_submit_{aic,aiv}_task call.
 // Caller appends: func_id << ", " << params << ");".
 std::string CoreTypeToSubmitPrefix(CoreType core_type) {
+  CHECK(core_type == CoreType::CUBE || core_type == CoreType::VECTOR) << "Unsupported PTO dispatch core type";
   std::string func = core_type == CoreType::CUBE ? "rt_submit_aic_task" : "rt_submit_aiv_task";
   return func + "(";
 }

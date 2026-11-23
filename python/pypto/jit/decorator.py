@@ -202,6 +202,7 @@ def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
     """Extract pass-only keyword arguments from a ``pypto.runtime.RunConfig``."""
     kwargs: dict[str, Any] = {
         "strategy": run_config.strategy,
+        "backend_type": run_config.backend_type,
         "diagnostic_phase": run_config.diagnostic_phase,
         "disabled_diagnostics": run_config.disabled_diagnostics,
         "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
@@ -1611,12 +1612,10 @@ class JITFunction:
             pl,
         )
         lower_kwargs = _run_config_lower_kwargs(run_config) if run_config is not None else {}
-        platform = run_config.platform if run_config is not None else None
         try:
             return _run_pass_pipeline(
                 pre_pass,
                 operation="lower",
-                platform=platform,
                 inherit_outer_report_instruments=False,
                 **lower_kwargs,
             ).transformed_program

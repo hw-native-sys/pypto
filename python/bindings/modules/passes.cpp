@@ -13,10 +13,12 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>    // NOLINT(misc-include-cleaner) -- registers std::function casters
+#include <nanobind/stl/optional.h>    // NOLINT(misc-include-cleaner) -- registers std::optional casters
 #include <nanobind/stl/shared_ptr.h>  // NOLINT(misc-include-cleaner) -- registers shared_ptr casters
 #include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers std::string casters
 #include <nanobind/stl/vector.h>      // NOLINT(misc-include-cleaner) -- registers std::vector casters
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -363,21 +365,22 @@ void BindPass(nb::module_& m) {
                           "before/after each pass execution. Also controls automatic\n"
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
-      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool, RuntimeKind, bool, bool, bool>(),
-           nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
-           nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
-           nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
-           nb::arg("memory_planner") = MemoryPlanner::PyPTO,
-           nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
-           nb::arg("enable_buffer_ir") = true, nb::arg("enable_software_pipeline") = false,
-           nb::arg("report_hardware_loops") = false,
-           "Create a PassContext with instruments, verification level, diagnostic phase gate, "
-           "optional disabled diagnostic checks, memory planner selection, the stored legacy "
-           "L0C double-buffer compatibility flag, the target Simpler runtime ABI, and default-on "
-           "whole-kernel Buffer IR selection, plus software pipeline opt-in. Automatic dbC remains disabled "
-           "for PyPTO and DSA-RP; "
-           "PTOAS retains its existing selection regardless of the flag")
+      .def(
+          nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
+                   MemoryPlanner, bool, RuntimeKind, bool, bool, bool, std::optional<backend::BackendType>>(),
+          nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
+          nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
+          nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
+          nb::arg("memory_planner") = MemoryPlanner::PyPTO, nb::arg("enable_pypto_l0c_double_buffer") = false,
+          nb::arg("runtime") = kDefaultRuntimeKind, nb::arg("enable_buffer_ir") = true,
+          nb::arg("enable_software_pipeline") = false, nb::arg("report_hardware_loops") = false,
+          nb::arg("backend_type") = nb::none(),
+          "Create a PassContext with instruments, verification level, diagnostic phase gate, "
+          "optional disabled diagnostic checks, memory planner selection, the stored legacy "
+          "L0C double-buffer compatibility flag, the target Simpler runtime ABI, and default-on "
+          "whole-kernel Buffer IR selection, plus software pipeline opt-in. Automatic dbC remains disabled "
+          "for PyPTO and DSA-RP; "
+          "PTOAS retains its existing selection regardless of the flag")
       .def(
           "__enter__",
           [](PassContext& self) -> PassContext& {
@@ -393,6 +396,7 @@ void BindPass(nb::module_& m) {
       .def("get_disabled_diagnostics", &PassContext::GetDisabledDiagnostics,
            "Get the diagnostic checks suppressed by this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
+      .def("get_scoped_backend_type", &PassContext::GetScopedBackendType)
       .def(
           "get_backend", [](const PassContext& ctx) -> const backend::Backend* { return ctx.GetBackend(); },
           nb::rv_policy::reference,
