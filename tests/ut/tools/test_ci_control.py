@@ -2980,6 +2980,56 @@ def test_a5_command_pins_merge_and_creates_independent_check(a5_control, a5_requ
     assert payload["details_url"].endswith("/runs/1234/attempts/1")
 
 
+@pytest.mark.parametrize(
+    ("distance", "in_main", "error"),
+    [
+        (3, True, None),
+        (10, True, None),
+        (11, True, "11 commits behind"),
+        (None, True, "determine"),
+        (3, False, "no longer contains"),
+    ],
+)
+def test_a5_reports_the_check_for_an_older_test_merge(
+    a5_control, a5_request, monkeypatch, capsys, distance, in_main, error
+):
+    # On PR #3379 GitHub kept the same test merge after three commits landed on main.
+    _, event, writes, outputs = a5_request
+    tested_base = "d" * 40
+    api = a5_control.api
+
+    def snapshot_api(path, *args, **kwargs):
+        if path.endswith(f"/git/commits/{MERGE}"):
+            assert len(writes) == 1
+            assert writes[0][1]["head_sha"] == HEAD and writes[0][1]["status"] == "in_progress"
+            return {"parents": [{"sha": tested_base}, {"sha": HEAD}]}
+        if path == f"repos/{REPO}/compare/{tested_base}...{BASE}?per_page=1":
+            return {"merge_base_commit": {"sha": tested_base if in_main else HEAD}, "ahead_by": distance}
+        return api(path, *args, **kwargs)
+
+    monkeypatch.setattr(a5_control, "api", snapshot_api)
+    monkeypatch.setattr(sys.modules["ci_control"], "api", snapshot_api)
+    monkeypatch.setattr(a5_control.time, "sleep", lambda *_: pytest.fail("Snapshot eligibility is known"))
+    if error is None:
+        a5_control.prepare(REPO, event)
+        assert outputs == {"checkout_sha": MERGE, "check_id": "987"} and len(writes) == 1
+        assert f"base {tested_base}, merge {MERGE}" in capsys.readouterr().out
+        needs = {
+            "changes": {"result": "success", "outputs": outputs},
+            "toolchain": {"result": "success"},
+            a5_control.JOB: {"result": "success"},
+        }
+        a5_control.finish(REPO, needs)
+        assert writes[1][0].endswith("/check-runs/987") and writes[1][1]["conclusion"] == "success"
+    else:
+        with pytest.raises(ValueError, match=error):
+            a5_control.prepare(REPO, event)
+        path, payload, options = writes[1]
+        assert path.endswith("/check-runs/987") and options == {"method": "PATCH"}
+        assert payload["conclusion"] == "failure" and error in payload["output"]["summary"]
+        assert not outputs
+
+
 @pytest.mark.parametrize("status", ["missing", "in_progress", "failure", "cancelled"])
 def test_a5_requires_passing_lint_before_publishing_outputs(a5_control, a5_request, monkeypatch, status):
     pr, event, writes, outputs = a5_request
@@ -3012,7 +3062,7 @@ def test_a5_ignores_unrelated_comments(a5_control, a5_request, monkeypatch, case
     assert not writes and not outputs
 
 
-@pytest.mark.parametrize("case", ["integration", "closed", "repo", "deleted-fork", "conflict", "sha"])
+@pytest.mark.parametrize("case", ["integration", "closed", "repo", "deleted-fork", "sha"])
 def test_a5_rejects_invalid_pr_before_writes(a5_control, a5_request, case):
     pr, event, writes, outputs = a5_request
     if case == "integration":
@@ -3023,8 +3073,6 @@ def test_a5_rejects_invalid_pr_before_writes(a5_control, a5_request, case):
         pr["base"]["repo"]["full_name"] = "different/repo"
     elif case == "deleted-fork":
         pr["head"]["repo"] = None
-    elif case == "conflict":
-        pr["mergeable"] = False
     else:
         pr["head"]["sha"] = "invalid"
     with pytest.raises(ValueError):
@@ -3033,7 +3081,8 @@ def test_a5_rejects_invalid_pr_before_writes(a5_control, a5_request, case):
 
 
 @pytest.mark.parametrize(
-    "case", ["recovers", "head-changed", "base-changed", "during-lookup", "timeout", "api-failure"]
+    "case",
+    ["recovers", "head-changed", "base-changed", "during-lookup", "conflict", "timeout", "api-failure"],
 )
 def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch, case):
     pr, event, writes, outputs = a5_request
@@ -3057,7 +3106,9 @@ def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch,
             if case == "during-lookup":
                 pr["head"]["sha"] = "e" * 40
             elif not elapsed[0] or case == "timeout":
-                result["parents"][0]["sha"] = "d" * 40
+                result["parents"][1]["sha"] = "d" * 40
+        if case == "conflict" and path.endswith("/pulls/123"):
+            result["mergeable"] = False
         if elapsed[0] and case == "head-changed" and path.endswith("/pulls/123"):
             result["head"]["sha"] = "e" * 40
         if elapsed[0] and case == "base-changed" and "/git/ref/" in path:
@@ -3071,17 +3122,23 @@ def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch,
         assert elapsed[0] == 5
         assert outputs["checkout_sha"] == MERGE
     else:
-        # Pin changes abort at the first observation. Only a stale merge waits until timeout.
+        # Only an incomplete merge for this head waits until timeout.
         error, message, seconds = {
             "head-changed": (ValueError, "head or base changed", 5),
             "base-changed": (ValueError, "head or base changed", 5),
             "during-lookup": (ValueError, "changed during validation", 0),
+            "conflict": (ValueError, "merge conflicts", 0),
             "timeout": (ValueError, "test merge is not ready", 60),
             "api-failure": (RuntimeError, "API unavailable", 0),
         }[case]
         with pytest.raises(error, match=message):
             a5_control.prepare(REPO, event)
-        assert not writes and not outputs
+        assert not outputs
+        assert writes[0][1]["head_sha"] == HEAD
+        path, payload, options = writes[1]
+        assert path.endswith("/check-runs/987") and options == {"method": "PATCH"}
+        assert payload["status"] == "completed" and payload["conclusion"] == "failure"
+        assert message in payload["output"]["summary"]
         assert elapsed[0] == seconds
 
 
