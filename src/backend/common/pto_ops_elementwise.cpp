@@ -380,8 +380,7 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string tmp_ssa = codegen.GetExprAsCode(op->args_[3]);
   std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[3]);
-  // A view may carry static valid extents while loop-local scratch allocations
-  // carry dynamic valid extents. Each use must match its own SSA declaration.
+  // Use the scratch declaration even when the source is a view.
   if (src_type.empty()) src_type = tmp_type;
   if (tmp_type.empty()) tmp_type = src_type;
   EmitInsOuts(codegen, GetPtoNativeOpSpec("tile.transpose").native_op,

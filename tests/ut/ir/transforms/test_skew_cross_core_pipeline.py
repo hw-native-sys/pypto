@@ -58,55 +58,69 @@ class TestSkewCrossCorePipeline:
     @pytest.mark.parametrize("round_trip", [False, True])
     @pytest.mark.parametrize("stages", [1, 2, 3])
     def test_quant_configuration_preserves_sequential_order(self, vector, round_trip, stages):
-        """Quant registers are side effects outside TPUSH's SSA backward slice."""
+        """Quant registers are implicit inputs to each iteration's TPUSH."""
 
-        def program(loop: str) -> ir.Program:
-            return pl.parse_program(f"""
-@pl.program
-class Program:
-    @pl.function(strict_ssa=True)
-    def main(q: pl.Tensor[[64, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
-        for i in {loop}:
-            tile = pl.tile.load(q, [i * 16, 0], [16, 64])
-            if {vector}:
-                pl.system.set_quant_vector(controls)
-            else:
-                pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
-            pl.tile.tpush_to_aiv(tile, split=0)
-            if {round_trip}:
-                reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
-                pl.tfree_to_aiv(reply, id=1)
-""")
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(acc: pl.Tile[[16, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
+                for i in pl.pipeline(4, stage=stages):
+                    if vector:
+                        pl.system.set_quant_vector(controls)
+                    else:
+                        pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
+                    pl.tile.tpush_to_aiv(acc, split=0)
+                    if round_trip:
+                        reply = pl.tile.tpop_from_aiv(shape=[16, 64], dtype=pl.FP32, split=0, id=1)
+                        pl.tfree_to_aiv(reply, id=1)
 
-        before = program(f"pl.pipeline(0, 4, 1, stage={stages})")
-        expected = program("pl.range(0, 4, 1)")
-        ir.assert_structural_equal(_skew(passes.simplify()(before)), passes.simplify()(expected))
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(acc: pl.Tile[[16, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
+                for i in pl.range(4):
+                    if vector:
+                        pl.system.set_quant_vector(controls)
+                    else:
+                        pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
+                    pl.tile.tpush_to_aiv(acc, split=0)
+                    if round_trip:
+                        reply = pl.tile.tpop_from_aiv(shape=[16, 64], dtype=pl.FP32, split=0, id=1)
+                        pl.tfree_to_aiv(reply, id=1)
+
+        ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))
 
     @pytest.mark.parametrize("vector", [False, True])
     def test_nested_quant_configuration_protects_ancestors_only(self, vector):
-        def program(outer: str, middle: str) -> ir.Program:
-            return pl.parse_program(f"""
-@pl.program
-class Program:
-    @pl.function(strict_ssa=True)
-    def main(q: pl.Tensor[[64, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
-        for i in {outer}:
-            for j in {middle}:
-                for k in pl.range(2):
-                    tile = pl.tile.load(q, [i * 16, 0], [16, 64])
-                    if {vector}:
-                        pl.system.set_quant_vector(controls)
-                    else:
-                        pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
-                    pl.tile.tpush_to_aiv(tile, split=0)
-        for i in pl.pipeline(2, stage=2):
-            sibling = pl.tile.load(q, [i * 16, 0], [16, 64])
-            pl.tile.store(sibling, [i * 16, 0], q)
-""")
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(acc: pl.Tile[[16, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
+                for i in pl.pipeline(2, stage=2):
+                    for j in pl.pipeline(2, stage=3):
+                        if vector:
+                            pl.system.set_quant_vector(controls)
+                        else:
+                            pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                        pl.tile.tpush_to_aiv(acc, split=0)
+                for i in pl.pipeline(2, stage=2):
+                    pl.tile.tpush_to_aiv(acc, split=0, id=1)
 
-        before = program("pl.pipeline(2, stage=2)", "pl.pipeline(2, stage=3)")
-        expected = program("pl.range(2)", "pl.range(2)")
-        ir.assert_structural_equal(_skew(passes.simplify()(before)), passes.simplify()(expected))
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(acc: pl.Tile[[16, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
+                for i in pl.range(2):
+                    for j in pl.range(2):
+                        if vector:
+                            pl.system.set_quant_vector(controls)
+                        else:
+                            pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                        pl.tile.tpush_to_aiv(acc, split=0)
+                for i in pl.pipeline(2, stage=2):
+                    pl.tile.tpush_to_aiv(acc, split=0, id=1)
+
+        ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))
 
     def test_single_roundtrip_producer_skews(self):
         """AIC-style (cube) produce-first body — one ``tpush_to_aiv`` then one

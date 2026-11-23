@@ -203,25 +203,12 @@ def test_buffer_arithmetic_is_not_an_identity_alias():
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"peer_quant": "f32_f16"}, "contract mismatch"),
-        ({"slot_size": 128}, "exceeds slot_size"),
-    ],
-)
-def test_buffer_aliases_preserve_contract_errors(kwargs, message):
-    program = _PipeBufferAliases(4, 4).visit_program(_program(**kwargs))
-    with pytest.raises(Error, match=message):
-        _generate(program)
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
         ({"quant": "deqf16_scalar", "state": False}, "preceding set_quant"),
         ({"quant": "deqf16_vec", "state": False}, "preceding set_quant"),
         ({"quant": "deqf16_scalar", "state_id": 1}, "dominating initialize_pipe"),
-        ({"peer_quant": "f32_f16"}, "contract mismatch"),
-        ({"slot_size": 128}, "exceeds slot_size"),
         ({"split": 1}, "split=0"),
+        ({"peer_quant": "f32_f16", "_aliases": True}, "contract mismatch"),
+        ({"slot_size": 128, "_aliases": True}, "exceeds slot_size"),
         ({"consumer_dtype": pl.FP16}, "converted dtype mismatch"),
         ({"layout": "nz2dn"}, "consumer layout"),
         ({"layout": "nz2nz", "quant": "f32_f16"}, "NZ2NZ currently supports no_convert"),
@@ -229,8 +216,11 @@ def test_buffer_aliases_preserve_contract_errors(kwargs, message):
     ],
 )
 def test_invalid_fixpipe_contract(kwargs, message):
+    options = kwargs.copy()
+    aliases = options.pop("_aliases", False)
+    program = _program(**options)
     with pytest.raises(Error, match=message):
-        _generate(_program(**kwargs))
+        _generate(_PipeBufferAliases(4, 4).visit_program(program) if aliases else program)
 
 
 def test_fixpipe_pop_requires_a_matching_push():
@@ -341,15 +331,17 @@ def test_schema_rejects_unsupported_transport(kwargs, message):
 
 
 @pytest.mark.parametrize("initialize", [system_ops.aic_initialize_pipe, system_ops.aiv_initialize_pipe])
-@pytest.mark.parametrize("legacy", [{"c2v_dtype": DataType.FP32}, {"pre_relu": True}])
-def test_pipe_contract_forms_cannot_be_combined(initialize, legacy):
-    with pytest.raises(ValueError, match="cannot be combined"):
-        initialize(dir_mask=1, slot_size=2048, acc_push_epilogue=_epilogue(), **legacy)
-
-
-def test_legacy_pipe_dtype_requires_nosplit():
-    with pytest.raises(ValueError, match="requires nosplit=true"):
-        system_ops.aic_initialize_pipe(dir_mask=1, slot_size=2048, c2v_dtype=DataType.FP32, nosplit=False)
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"acc_push_epilogue": _epilogue(), "c2v_dtype": DataType.FP32}, "cannot be combined"),
+        ({"acc_push_epilogue": _epilogue(), "pre_relu": True}, "cannot be combined"),
+        ({"c2v_dtype": DataType.FP32, "nosplit": False}, "requires nosplit=true"),
+    ],
+)
+def test_pipe_init_option_contract(initialize, options, message):
+    with pytest.raises(ValueError, match=message):
+        initialize(dir_mask=1, slot_size=2048, **options)
 
 
 @pytest.mark.ptoas_compile

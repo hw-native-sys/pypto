@@ -328,7 +328,6 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .set_attr<AccPushEpilogue>("acc_push_epilogue")
     .f_deduce_type(DeduceInitializePipeType);
 
-// Stateful Fixpipe controls belong to the Cube; they are not tile writebacks.
 REGISTER_OP("system.set_quant_scalar")
     .set_description("Set the FP32 scalar quantization state of a Fixpipe pipe")
     .set_op_category("CrossCoreOp")

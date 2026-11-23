@@ -103,9 +103,8 @@ class LifetimeAnalyzer : public IRVisitor {
       VisitStmt(func_body);
     }
 
-    // SET_QUANT_VECTOR installs an address consumed implicitly by asynchronous
-    // TPUSH reads. Keep Scaling storage live through function completion until
-    // those reads have explicit completion dependencies in allocation analysis.
+    // Asynchronous TPUSH reads the Scaling address set by SET_QUANT_VECTOR.
+    // Keep that storage live until function completion.
     for (const auto& var : ordered_defs_) {
       auto tile = As<TileType>(var->GetType());
       if (tile && tile->memory_space_ == MemorySpace::Scaling) RecordRawUse(var, current_order_);

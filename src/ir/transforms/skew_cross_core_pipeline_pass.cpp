@@ -264,9 +264,7 @@ class SkewCrossCoreMutator : public IRMutator {
     auto inner_step = VisitExpr(op->step_);
     auto inner_body = VisitStmt(op->body_);
 
-    // Named events order payload accesses and quant setters configure implicit
-    // TPUSH inputs. Neither skew nor IO clustering models these dependencies.
-    // Preserve their order in every enclosing loop, even for stage=1.
+    // Preserve named-event and quant-register order in enclosing pipelines, including stage=1.
     if (ordered_effect_count_ != ordered_effects_before) {
       return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
     }
@@ -311,7 +309,6 @@ class SkewCrossCoreMutator : public IRMutator {
   }
 
  private:
-  // Snapshot/difference per loop avoids rescanning nested bodies (O(N) total).
   // Submit launches functions; the mutator still visits its argument expressions.
   size_t ordered_effect_count_ = 0;
 
