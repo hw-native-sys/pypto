@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -52,7 +51,10 @@ int main(int argc, char** argv) {
 
   al::LayoutSolverConfig cfg;
   cfg.collect_treewidth_stats = false;
-  const std::string name = std::filesystem::path(argv[1]).stem().string();
+  const std::string path = argv[1];
+  const std::string filename = path.substr(path.find_last_of('/') + 1);
+  const auto extension = filename.find_last_of('.');
+  const std::string name = extension == 0 ? filename : filename.substr(0, extension);
   const std::array<std::string, 4> modes = {"dp", "greedy", "greedy_fm", "auto"};
   std::cout << "case\tops\tmovable\tmax_factor_scope\tmode\trepeat\tms\tmodeled_"
                "cycles\tevaluations\ttermination\twriteback\n";

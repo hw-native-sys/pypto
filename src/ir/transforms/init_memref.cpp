@@ -76,6 +76,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
