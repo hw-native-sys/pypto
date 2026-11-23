@@ -24,6 +24,7 @@
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
@@ -80,16 +81,9 @@ TypePtr DeduceQuantConfigType(const std::vector<ExprPtr>& args,
           (tile->dtype_ == DataType::UINT64 || tile->dtype_ == DataType::INT64))
         << "set_quant_vector requires packed 64-bit controls in loc=scaling "
            "(MemorySpace.Scaling), not a floating-point scale tile";
-    CHECK(tile->shape_.size() == 2) << "set_quant_vector requires shape [1, N]";
-    auto rows = As<ConstInt>(tile->shape_[0]);
-    auto cols = As<ConstInt>(tile->shape_[1]);
     const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-    CHECK(rows && rows->value_ == 1 && cols && cols->value_ > 0 && cols->value_ % 16 == 0)
-        << "set_quant_vector requires shape [1, N] with positive N % 16 == 0 (128-byte alignment)";
-    const auto valid_rows = view.valid_shape.size() == 2 ? As<ConstInt>(view.valid_shape[0]) : nullptr;
-    const auto valid_cols = view.valid_shape.size() == 2 ? As<ConstInt>(view.valid_shape[1]) : nullptr;
-    CHECK(valid_rows && valid_rows->value_ == 1 && valid_cols && valid_cols->value_ == cols->value_)
-        << "set_quant_vector requires valid_shape to cover the full [1, N] shape";
+    const auto error = tile_view_semantics::ValidateFixpipeControlRow(tile->shape_, view);
+    CHECK(!error) << "set_quant_vector " << error;
     CHECK(view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box)
         << "set_quant_vector requires unboxed row-major packed controls";
   } else {

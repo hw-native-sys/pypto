@@ -323,6 +323,23 @@ inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
   return implicit_view;
 }
 
+inline const char* ValidateFixpipeControlRow(const std::vector<ExprPtr>& shape, const TileView& view) {
+  const auto cols = shape.size() == 2 ? As<ConstInt>(shape[1]) : nullptr;
+  if (!cols || !IsConstValue(shape[0], 1) || cols->value_ <= 0 || cols->value_ % 16) {
+    return "requires shape [1, N] with N a positive multiple of 16 (128-byte alignment)";
+  }
+  const auto& valid = view.valid_shape.empty() ? shape : view.valid_shape;
+  if (valid.size() != 2 || !IsConstValue(valid[0], 1) || !IsConstValue(valid[1], cols->value_)) {
+    return "requires valid_shape to cover the full [1, N] shape";
+  }
+  const auto& stride = view.stride;
+  if (stride.empty() ||
+      (stride.size() == 2 && IsConstValue(stride[0], cols->value_) && IsConstValue(stride[1], 1))) {
+    return nullptr;
+  }
+  return "requires packed row-major stride [N, 1]";
+}
+
 /// Return whether TileView matches the printer's raw TileView() defaults.
 inline bool IsDefaultPrintedTileView(const TileView& tile_view, const std::vector<ExprPtr>& shape) {
   if (!tile_view.stride.empty() || tile_view.start_offset || tile_view.pad != PadValue::null ||

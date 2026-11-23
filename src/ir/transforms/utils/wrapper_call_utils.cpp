@@ -61,6 +61,11 @@ class CallVisitor : public IRVisitor {
   void VisitStmt_(const IfStmtPtr& stmt) override {
     // Spmd and Group dispatchers flatten wrapper calls; orchestration executes branches.
     const bool executable = binding_wrapper_ && IsOrchestrationLike(binding_wrapper_->func_type_);
+    if (const auto literal = executable ? As<ConstBool>(stmt->condition_) : nullptr) {
+      const auto selected = literal->value_ ? stmt->then_body_ : stmt->else_body_.value_or(nullptr);
+      if (selected) VisitStmt(selected);
+      return;
+    }
     const auto condition = executable ? AliasOrigin(stmt->condition_) : nullptr;
     if (!condition) return IRVisitor::VisitStmt_(stmt);
     auto [it, inserted] = guards_.try_emplace(condition.get(), true);

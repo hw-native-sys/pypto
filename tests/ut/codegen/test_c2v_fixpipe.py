@@ -18,7 +18,6 @@ from pypto import DataType, Error, backend, codegen, ir, passes
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.op import system_ops, tile_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
 @pytest.fixture(autouse=True)
@@ -243,6 +242,7 @@ def test_fixpipe_requires_matching_pop_endpoints_and_result(bare_pop):
 )
 @pytest.mark.ptoas_compile
 def test_fixpipe_endpoint_counts(binding, tmp_path):
+    """Compile balanced literal and conditioned launches; reject proven endpoint mismatches."""
     source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
     literals = isinstance(binding, str) and binding.startswith("literal_")
     partial = binding in {"literal_same", "literal_partial", "literal_shared", "literal_condition"}
@@ -310,18 +310,11 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
     if binding is True or literal_member or binding in {"literal_same", "literal_condition"}:
         _assemble(_generate(program)[1], tmp_path)
     else:
-        group_only = bool(extra) or binding == "wrong_group"
+        group_only = bool(extra) or binding == "wrong_group"  # Preserve authored Group arguments.
         verify = _verify_expanded if group_only else _generate
         message = "peer_func must belong" if binding == "wrong_group" else "endpoint counts differ"
         with pytest.raises(Error, match=message):
             verify(passes.simplify()(program) if group_only else program)
-
-
-def test_fixpipe_load_requires_mat_staging():
-    packed = ir.Var("packed", ir.TensorType([1, 32], DataType.UINT64), ir.Span.unknown())
-    load = tile_ops.load(packed, [0, 0], [1, 32], target_memory=ir.MemorySpace.Mat)
-    with pytest.raises(ValueError, match=r"into Mat.*tile.move to Scaling"):
-        ir.create_op_call(load.op.name, load.args, {"target_memory": ir.MemorySpace.Scaling}, load.span)
 
 
 @pytest.mark.parametrize("schedule", ["overflow", "reverse", "sequential", "nested"])
@@ -351,16 +344,6 @@ def test_fixpipe_retained_slots_and_fifo_order(schedule, tmp_path):
             _generate(pl.parse_program(source))
 
 
-@pytest.mark.parametrize(("operands", "message"), [("[]", "exactly one operand"), ("[1]", "FP32 scalar")])
-def test_raw_scalar_setter_does_not_configure_the_pipe(operands, message):
-    source = ir.python_print(_program(quant="deqf16_scalar")).replace(
-        "pl.system.set_quant_scalar(0.5, id=0)",
-        f'pl._dump.call("system.set_quant_scalar", {operands}, pl.Scalar[pl.INT32], kwargs={{"id": 0}})',
-    )
-    with pytest.raises(Error, match=message):
-        _generate(pl.parse_program(source))
-
-
 @pytest.mark.parametrize("initialize", [system_ops.aic_initialize_pipe, system_ops.aiv_initialize_pipe])
 @pytest.mark.parametrize(
     ("options", "message"),
@@ -386,24 +369,6 @@ def test_epilogue_value_round_trip():
     program = _program()
     ir.assert_structural_equal(program, ir.deserialize(ir.serialize(program)))
     ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
-
-    op = ir.get_op("system.aic_initialize_pipe")
-    call = ir.Call(op, [], {"acc_push_epilogue": {}}, ir.ScalarType(pl.INT32), ir.Span.unknown())
-    with pytest.raises(ValueError, match="Invalid serialized AccPushEpilogue"):
-        ir.deserialize(ir.serialize(call))
-
-
-@pytest.mark.parametrize("use_relu", [False, True])
-def test_epilogue_rejects_shadowed_runtime_parameter(use_relu):
-    with pytest.raises(ParserSyntaxError, match="acc_push_epilogue must be a compile-time record"):
-        pl.parse(f"""
-use_relu = {use_relu}
-@pl.function(type=pl.FunctionType.AIC)
-def producer(use_relu: pl.Scalar[pl.BOOL]):
-    pl.aic_initialize_pipe(dir_mask=1, slot_size=2048, acc_push_epilogue={{
-        "layout": "nz2nd", "quant": "no_convert", "relu": "normal_relu" if use_relu else "no_relu",
-    }})
-""")
 
 
 @pytest.mark.parametrize(

@@ -532,8 +532,9 @@ void VerifyTpopTfreeMatching(const FunctionPtr& func, std::vector<Diagnostic>& d
 constexpr int kGuardFalse = 1, kGuardTrue = 2, kEitherGuard = kGuardFalse | kGuardTrue;
 
 struct FixpipeEndpointCounts {
-  std::size_t seen = 0, when_true = 0, when_false = 0;
-  std::optional<std::size_t> guard_index;
+  std::size_t seen = 0;
+  int64_t unconditional = 0;
+  std::map<std::size_t, std::pair<int64_t, int64_t>> guarded;
 };
 
 struct FixpipeFunctionInfo : IRVisitor {
@@ -586,11 +587,13 @@ void CountFixpipeEndpoints(const FunctionPtr& func, FixpipeFunctionInfo& local) 
     auto call = transform_utils::GetCallFromStmt(stmt);
     if (!IsOp(call, op)) return;
     auto& flow = local.counts[call->GetKwarg<int>("id", 0)];
-    if (guard && flow.guard_index && guard != flow.guard_index) return;
-    if (guard) flow.guard_index = guard;
     ++flow.seen;
-    if (mask & kGuardTrue) ++flow.when_true;
-    if (mask & kGuardFalse) ++flow.when_false;
+    if (!guard) {
+      flow.unconditional += mask != 0;
+    } else {
+      auto& [when_false, when_true] = flow.guarded[*guard];
+      ++(mask == kGuardTrue ? when_true : when_false);
+    }
   };
   for (const auto& stmt : FlattenBody(func->body_)) {
     if (auto branch = As<IfStmt>(stmt)) {
@@ -626,23 +629,17 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   std::map<std::string, FixpipeFunctionInfo> info;
   using KernelPair = std::pair<std::string, std::string>;
   using TraceId = std::size_t;
-  struct GuardTrace {
-    std::vector<TraceId> launches;
-    int mask;
-  };
   // IDs 0–2 encode unknown, false and true. Other leaves identify a shared SSA value.
-  std::vector<GuardTrace> traces{{{}, kEitherGuard}, {{}, kGuardFalse}, {{}, kGuardTrue}};
+  std::vector<std::vector<TraceId>> traces(3);
   std::map<const Var*, TraceId> symbols;
   auto symbol = [&](const Var* var) -> TraceId {
     if (!var) return 0;
     auto [it, inserted] = symbols.try_emplace(var, traces.size());
-    if (inserted) traces.push_back({{}, kEitherGuard});
+    if (inserted) traces.emplace_back();
     return it->second;
   };
   auto record_trace = [&](std::vector<TraceId> launches) {
-    int mask = 0;
-    for (const auto launch : launches) mask |= traces[launch].mask;
-    traces.push_back({std::move(launches), mask});
+    traces.push_back(std::move(launches));
     return traces.size() - 1;
   };
   std::vector<std::pair<KernelPair, CallPtr>> groups;
@@ -706,29 +703,55 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const auto launch =
           value ? (value->value_ ? kGuardTrue : kGuardFalse) : resolve(AsVarLike(args[i]).get());
       if (!allowed[i]) allowed[i] = record_trace({});
-      auto& column = traces[allowed[i]];
-      column.launches.push_back(launch);
-      column.mask |= traces[launch].mask;
+      traces[allowed[i]].push_back(launch);
     }
   }
-  // Bits 0–3 encode FF, FT, TF, TT. Shared SSA arguments can reach only FF and TT.
-  auto possible_pairs = [](int p, int q) {
-    return (p & kGuardFalse ? q : 0) | (p & kGuardTrue ? q << 2 : 0);
-  };
-  std::map<std::pair<TraceId, TraceId>, int> known_pairs;
-  std::function<int(TraceId, TraceId)> pair_mask = [&](TraceId p, TraceId q) -> int {
-    if (!p || !q) return 0;
-    const auto &a = traces[p].launches, &b = traces[q].launches;
-    if (a.empty() && b.empty()) {
-      if (p == q && p >= kEitherGuard) return 0b1001;
-      return p < kEitherGuard || q < kEitherGuard ? possible_pairs(traces[p].mask, traces[q].mask) : 0;
-    }
-    auto [it, inserted] = known_pairs.try_emplace({p, q}, 0);
-    if (!inserted || (!a.empty() && !b.empty() && a.size() != b.size())) return it->second;
-    for (std::size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
-      it->second |= pair_mask(a.empty() ? p : a[i], b.empty() ? q : b[i]);
-    }
-    return it->second;
+  using Term = std::tuple<TraceId, int64_t, int64_t>;
+  auto counts_differ = [&](const std::vector<Term>& initial, int64_t base) {
+    // Call-site branches are aligned. Memoize projected states rather than flattening the call tree.
+    std::set<std::vector<Term>> seen;
+    std::function<bool(const std::vector<Term>&)> check = [&](const std::vector<Term>& terms) {
+      if (!seen.insert(terms).second) return false;
+      std::size_t branches = 0;
+      for (const auto& [id, off, on] : terms) {
+        const auto size = traces[id].size();
+        if (size && branches && size != branches) return false;
+        branches = std::max(branches, size);
+      }
+      if (branches) {
+        for (std::size_t i = 0; i < branches; ++i) {
+          auto next = terms;
+          for (auto& [id, off, on] : next) {
+            if (!traces[id].empty()) id = traces[id][i];
+          }
+          if (check(next)) return true;
+        }
+        return false;
+      }
+      int64_t lower = base, upper = base;
+      bool opaque = false;
+      std::map<TraceId, std::pair<int64_t, int64_t>> values;
+      for (const auto& [id, off, on] : terms) {
+        if (id == kGuardFalse || id == kGuardTrue) {
+          lower += id == kGuardTrue ? on : off;
+          upper += id == kGuardTrue ? on : off;
+        } else {
+          if (!id && off != on) opaque = true;
+          auto& [sum_off, sum_on] = values[id ? id : traces.size() + values.size()];
+          sum_off += off;
+          sum_on += on;
+        }
+      }
+      std::size_t varying = 0;
+      for (const auto& [id, counts] : values) {
+        lower += std::min(counts.first, counts.second);
+        upper += std::max(counts.first, counts.second);
+        varying += counts.first != counts.second;
+      }
+      // Independent dynamic guards may be correlated beyond the simple SSA relationships we track.
+      return lower > 0 || upper < 0 || (!opaque && varying <= 1 && lower != upper);
+    };
+    return check(initial);
   };
   auto group_matches = [&](const std::string& kernel, const std::string& peer) {
     const auto entry = group_peers.find(kernel);
@@ -853,22 +876,24 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           const auto& push = push_count->second;
           const auto& pop = pop_count->second;
           const auto pair = peer_bindings.find(std::minmax(func->name_, peer_name));
-          auto argument = [&](const FixpipeEndpointCounts& flow) -> TraceId {
-            return pair != peer_bindings.end() && flow.guard_index && *flow.guard_index < pair->second.size()
-                       ? pair->second[*flow.guard_index]
-                       : 0;
+          std::vector<Term> terms;
+          auto base = push.unconditional - pop.unconditional;
+          auto collect = [&](const FixpipeEndpointCounts& flow, const FunctionPtr& endpoint, int sign) {
+            for (const auto& [index, counts] : flow.guarded) {
+              const auto trace = pair != peer_bindings.end() && index < pair->second.size()
+                                     ? pair->second[index]
+                                     : symbol(endpoint->params_[index].get());
+              if (counts.first == counts.second) {
+                base += sign * counts.first;
+              } else {
+                terms.emplace_back(trace, sign * counts.first, sign * counts.second);
+              }
+            }
           };
-          const auto push_trace = argument(push), pop_trace = argument(pop);
-          const int p = traces[push_trace].mask, q = traces[pop_trace].mask;
-          const int possible = possible_pairs(p, q);
-          const int unequal =
-              (push.when_false != pop.when_false) | ((push.when_false != pop.when_true) << 1) |
-              ((push.when_true != pop.when_false) << 2) | ((push.when_true != pop.when_true) << 3);
-          const bool comparable = p != kEitherGuard || q != kEitherGuard ||
-                                  push.when_false == push.when_true || pop.when_false == pop.when_true;
-          const bool mismatch = (pair_mask(push_trace, pop_trace) & unequal) ||
-                                (comparable ? (possible & unequal) != 0 : (possible & unequal) == possible);
-          if (push.seen == pushes->second.size() && pop.seen == pops->second.size() && mismatch) {
+          collect(push, func, 1);
+          collect(pop, program->GetFunction(peer_name), -1);
+          if (push.seen == pushes->second.size() && pop.seen == pops->second.size() &&
+              counts_differ(terms, base)) {
             error(init, "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
           }
         }
