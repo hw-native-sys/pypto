@@ -530,7 +530,6 @@ void VerifyTpopTfreeMatching(const FunctionPtr& func, std::vector<Diagnostic>& d
 }
 
 constexpr int kGuardFalse = 1, kGuardTrue = 2, kEitherGuard = kGuardFalse | kGuardTrue;
-
 struct FixpipeEndpointCounts {
   std::size_t seen = 0;
   int64_t unconditional = 0;
@@ -707,11 +706,12 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     }
   }
   using Term = std::tuple<TraceId, int64_t, int64_t>;
+  // Share aligned call-site projections across pipe IDs with the same endpoint counts.
+  std::map<std::pair<int64_t, std::vector<Term>>, bool> count_results;
   auto counts_differ = [&](const std::vector<Term>& initial, int64_t base) {
-    // Call-site branches are aligned. Memoize projected states rather than flattening the call tree.
-    std::set<std::vector<Term>> seen;
     std::function<bool(const std::vector<Term>&)> check = [&](const std::vector<Term>& terms) {
-      if (!seen.insert(terms).second) return false;
+      auto [entry, inserted] = count_results.try_emplace({base, terms}, false);
+      if (!inserted) return entry->second;
       std::size_t branches = 0;
       for (const auto& [id, off, on] : terms) {
         const auto size = traces[id].size();
@@ -724,7 +724,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           for (auto& [id, off, on] : next) {
             if (!traces[id].empty()) id = traces[id][i];
           }
-          if (check(next)) return true;
+          if (check(next)) return entry->second = true;
         }
         return false;
       }
@@ -749,7 +749,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         varying += counts.first != counts.second;
       }
       // Independent dynamic guards may be correlated beyond the simple SSA relationships we track.
-      return lower > 0 || upper < 0 || (!opaque && varying <= 1 && lower != upper);
+      return entry->second = lower > 0 || upper < 0 || (!opaque && varying <= 1 && lower != upper);
     };
     return check(initial);
   };
