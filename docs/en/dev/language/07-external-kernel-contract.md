@@ -2,7 +2,7 @@
 
 This is the interface baseline for tasks 34.1–34.4 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
 It defines data exchange and executable IR prototypes, not a public provider
-registration API. The explicit CANNBotDSL JIT binding below supports a checked A5 subset.
+registration API. The CANNBotDSL JIT integration below supports a checked A5 subset.
 
 ## Responsibilities
 
@@ -142,15 +142,42 @@ its identity is explicitly incomplete because no complete Python closure/input
 snapshot exists. This provider is therefore not registered with the capture-only
 registry and does not claim preparation-cache reuse.
 
-The A5 TMR bridge supports direct execution and explicit ordinary JIT binding of
-single-block AIC/AIV/MIX kernels. Native-object automatic discovery, complete input
-capture, persistent reuse, and performance acceptance remain separate work.
+The A5 TMR bridge supports direct execution and automatic ordinary JIT discovery of
+single-block AIC/AIV/MIX kernels. Complete input capture, persistent reuse, and
+performance acceptance remain separate work.
 Preparation and native binary compilation do not use caches.
 
-### Ordinary JIT binding
+### Ordinary JIT discovery
 
-Bind a native kernel to a Python signature declaration and call it inside an
-ordinary `@pl.jit` orchestration:
+Call an unconfigured `@cb.kernel` object directly inside ordinary `@pl.jit`:
+
+```python
+@cb.kernel
+def native_kernel(x, out):
+    cb.mem_copy(out, x)
+
+@pl.jit
+def pipeline(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    native_kernel(x, out)
+    return out
+```
+
+No registration or `pl.jit.extern` declaration is required for AIC, AIV, or MIX.
+Discovery resolves bare names from globals and closures, including imported aliases.
+For a module attribute or bound method, bind it to a name before defining the JIT
+function (`native_kernel = module.kernel` or `native_kernel = instance.kernel`).
+The public `inspect_kernel()` API supplies parameter names; call-site metadata
+supplies tensor/scalar types. Parameters must be explicit and positional, without
+defaults; configured host launch objects are rejected. The native body is never
+traversed by the PyPTO specializer. Importing PyPTO does not import CANNBotDSL.
+
+Adapters are deduplicated by object identity within each compilation request,
+including unhashable objects, and hold the kernel and internal signature declaration
+until preparation finishes. Rebinding a kernel between requests is rediscovered.
+This direct provider path does not claim immutable input capture or enable caches.
+
+Existing explicit declarations remain supported:
+
 
 ```python
 from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
@@ -238,7 +265,7 @@ compilation, and requires text-only ELF admission and static zero-stack reports.
 Text-only compilation omits optional frame-pointer bookkeeping so spill-free
 SIMD VF calls can satisfy the same zero-stack check; actual stack use remains rejected.
 The legacy `configure_context` helper still rejects this binary policy. Use the
-explicit JIT binding above to carry admission requirements through ordinary compilation.
+JIT integration above to carry admission requirements through ordinary compilation.
 
 The direct runtime system tests include FP16 Cube matmul with FP32 accumulation,
 SIMD FP32 `(x + y) * x`, and a MIX task executing both pipelines. In the MIX
@@ -386,7 +413,7 @@ FP16/BF16 runtime scalars are unsupported.
 Passing this checker **does not authorize device execution**: byte-level
 non-overlap does not establish 64-byte cache-line isolation between tasks.
 Resource ownership, stack/loading validation and task completion require the
-shared runtime bridge above. The explicit JIT binding enforces the same checks.
+shared runtime bridge above. The JIT integration enforces the same checks.
 
 ### CANNBotDSL cross-invocation cache-line conflicts
 
@@ -422,7 +449,7 @@ until execution completes; changes require another check. A `false` result
 proves only this pair's GM non-conflict and says nothing about local resources,
 stack/loading requirements or completion visibility. Calls outside this protocol
 also require a dependency or isolation policy. The batch helper below converts
-these predicates into TMR dependencies. The explicit JIT subset instead requires
+these predicates into TMR dependencies. The JIT subset instead requires
 whole-cache-line views and completion-based ordinary data dependencies; arbitrary
 strided-view scheduling remains unsupported.
 
@@ -462,8 +489,8 @@ calls need separate ordering or isolation. It does not prove intra-group safety,
 resource ownership, stack limits, binary loading or completion visibility by
 itself. The direct runtime path described above composes this helper with
 `TMRBridge.lower`, checked compilation and actual TMR submission for the supported
-subset. The explicit JIT binding uses the restricted view policy above; automatic
-native-object discovery remains follow-up work.
+subset. Both automatic discovery and explicit JIT binding use the restricted
+view policy above.
 
 ## Requests and prepared kernels
 
@@ -700,9 +727,9 @@ Compilation verifies native argument count, types, sizes and alignments.
 `native.configure_context(context)` checks the prepared request and attaches sources,
 includes, contract and checker to an existing extern specialization. Keep that lease
 alive until the existing runtime has compiled/published its sources. AIC/AIV members,
-mixed Groups and vector lane count come from the execution contract. Registered-object
-automatic discovery remains separate work; persistent reuse remains task 34.6.
-CANNBotDSL supports the direct runtime and explicit JIT binding paths above.
+mixed Groups and vector lane count come from the execution contract.
+Persistent reuse remains task 34.6.
+CANNBotDSL supports the direct runtime, automatic JIT discovery, and explicit binding paths above.
 
 Orchestration invokes the checker after building actual task arguments and before
 submission, including direct calls, explicit submits and reordered SPMD/Group wrappers.

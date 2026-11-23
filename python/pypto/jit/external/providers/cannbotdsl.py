@@ -19,11 +19,14 @@ import hashlib
 import importlib
 import inspect
 import json
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding
+
+    from ..discovery import JITDeclaration
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
@@ -445,7 +448,7 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
 
 
 class CANNBotDSLProvider:
-    """Direct, uncached preparation; automatic JIT discovery remains unsupported.
+    """Direct, uncached preparation and automatic ordinary JIT discovery.
 
     TMRBridge.lower supports the checked single-block A5 AIC/AIV/MIX subset.
     Use bind() for an ordinary JIT extern declaration, or
@@ -453,6 +456,20 @@ class CANNBotDSLProvider:
     Both consume the manifest and require binary admission and completion-based
     ordering. Other resource or launch requirements are rejected.
     """
+
+    def discover(self, kernel: object) -> "JITDeclaration | None":
+        """Recognize native objects through the already-loaded public DSL API."""
+        cb: Any = sys.modules.get("cannbotdsl")
+        inspect_kernel = getattr(cb, "inspect_kernel", None)
+        if not callable(inspect_kernel):
+            return None
+        info = cast(Any, inspect_kernel(kernel))
+        if info is None:
+            return None
+        _require(not info.configured, "expected an unconfigured kernel without host launch dimensions")
+        from ..discovery import JITDeclaration  # noqa: PLC0415
+
+        return JITDeclaration(info.signature, self.bind(kernel))
 
     def bind(self, kernel: object) -> "CANNBotDSLBinding":
         """Bind a native kernel for an ``@pl.jit.extern(binding=...)`` declaration."""

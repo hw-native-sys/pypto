@@ -1987,8 +1987,14 @@ def _discover_dep_bindings(
 
     deps: list[_call_binding.DepBinding] = []
     seen: set[str] = set()
+    local_names = _ast_analysis.body_local_names(func)
     for name in called_names:
-        obj = _resolve_jit_hook(all_vars.get(name))
+        value = all_vars.get(name)
+        obj = _resolve_jit_hook(value)
+        if obj is None and name not in local_names:
+            from .external.discovery import discover_jit  # noqa: PLC0415
+
+            obj = discover_jit(value)
         if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(_call_binding.DepBinding(call_name=name, dep=obj))
             seen.add(name)

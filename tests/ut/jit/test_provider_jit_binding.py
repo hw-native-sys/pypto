@@ -9,13 +9,19 @@
 
 """Provider preparation through ordinary JIT, including all native topologies."""
 
+import gc
+import inspect
+import sys
+import weakref
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 import pypto.language as pl
 import pytest
 from pypto import backend, passes
 from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding
+from pypto.jit._source import capture_namespaces
 from pypto.jit.external.compatibility import request_from_context
 from pypto.jit.external.contracts import (
     Access,
@@ -25,6 +31,7 @@ from pypto.jit.external.contracts import (
     TensorEffect,
     WritebackBinding,
 )
+from pypto.jit.external.discovery import JITDeclaration, discover_jit
 from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
 from pypto.jit.external.validation import ContractError
 from pypto.jit.specializer import TensorMeta, build_specialize_context
@@ -60,6 +67,57 @@ class _Binding:
         )
 
 
+class _Native:
+    __hash__ = None
+
+    def __init__(self, binding):
+        self.binding = binding
+        self.configured = False
+
+    def __call__(self, x, out):
+        raise AssertionError("discovery must not execute the native kernel")
+
+    def __eq__(self, other):
+        raise AssertionError("discovery must compare kernel identity")
+
+
+@pytest.fixture
+def native_api(monkeypatch):
+    """Exercise the real adapter against the optional package's public protocol."""
+    cb = ModuleType("cannbotdsl")
+    cb.inspect_kernel = lambda kernel: (  # type: ignore[attr-defined]
+        SimpleNamespace(signature=inspect.signature(kernel.__call__), configured=kernel.configured)
+        if isinstance(kernel, _Native)
+        else None
+    )
+    monkeypatch.setitem(sys.modules, "cannbotdsl", cb)
+    monkeypatch.setattr(CANNBotDSLProvider, "bind", lambda self, kernel: kernel.binding)
+
+
+def _automatic_entry(native):
+    alias = native
+
+    @pl.jit
+    def entry(
+        x: pl.Tensor[[32], pl.FP32], tmp: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]
+    ):
+        native(x, tmp)
+        alias(tmp, out=out)
+        return out
+
+    return entry
+
+
+def _native_call(binding, automatic):
+    if automatic:
+        return _Native(binding)
+
+    @pl.jit.extern(binding=binding)
+    def native(x: pl.Tensor, out: pl.Tensor): ...
+
+    return native
+
+
 def _entry(binding):
     @pl.jit.extern(binding=binding)
     def native(x: pl.Tensor, out: pl.Tensor): ...
@@ -76,11 +134,12 @@ def _entry(binding):
 
 
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
-def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, core):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, native_api, core, automatic):
     backend.reset_for_testing()
     monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
     binding = _Binding(core)
-    entry = _entry(binding)
+    entry = _automatic_entry(_Native(binding)) if automatic else _entry(binding)
     config = RunConfig(backend_type=backend.BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
     first = entry.compile(config=config)
     second = entry.compile(config=config)
@@ -106,12 +165,14 @@ def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, core):
 
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
 @pytest.mark.parametrize("core_num,sync_start", [(2, False), (1, True)])
-def test_binding_preflight_observes_explicit_launch(monkeypatch, core, core_num, sync_start):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_binding_preflight_observes_explicit_launch(
+    monkeypatch, native_api, core, core_num, sync_start, automatic
+):
     backend.reset_for_testing()
     monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
 
-    @pl.jit.extern(binding=_Binding(core))
-    def native(x: pl.Tensor, out: pl.Tensor): ...
+    native = _native_call(_Binding(core), automatic)
 
     @pl.jit
     def entry(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]):
@@ -133,12 +194,14 @@ def test_binding_preflight_observes_explicit_launch(monkeypatch, core, core_num,
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
 @pytest.mark.parametrize("producer_style", ["submit", "at"])
 @pytest.mark.parametrize("require_completion", [False, True])
-def test_binding_completion_overrides_explicit_hints(monkeypatch, core, producer_style, require_completion):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_binding_completion_overrides_explicit_hints(
+    monkeypatch, native_api, core, producer_style, require_completion, automatic
+):
     backend.reset_for_testing()
     monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
 
-    @pl.jit.extern(binding=_Binding(core, require_completion=require_completion))
-    def native(x: pl.Tensor, out: pl.Tensor): ...
+    native = _native_call(_Binding(core, require_completion=require_completion), automatic)
 
     @pl.jit.incore
     def producer(x: pl.Tensor, out: pl.Out[pl.Tensor]):
@@ -208,6 +271,104 @@ def test_cannbot_binding_rejects_unsupported_target(tmp_path, platform, runtime)
     binding = CANNBotDSLBinding(CANNBotDSLProvider(), object())
     with pytest.raises(ContractError, match="requires platform a5"):
         binding.prepare(_context((32,)), platform, runtime, str(tmp_path))
+
+
+def test_automatic_discovery_is_request_owned_and_identity_based(native_api):
+    first = _Native(_Binding("aic"))
+    second = _Native(_Binding("mixed"))
+    with capture_namespaces():
+        wrapper = discover_jit(first)
+        assert wrapper is not None
+        assert discover_jit(first) is wrapper
+        assert discover_jit(second) is not wrapper
+    with capture_namespaces():
+        assert discover_jit(first) is not wrapper
+    assert discover_jit(object()) is None
+
+
+def test_automatic_discovery_does_not_import_optional_dsl(monkeypatch):
+    monkeypatch.delitem(sys.modules, "cannbotdsl", raising=False)
+    assert discover_jit(object()) is None
+    assert "cannbotdsl" not in sys.modules
+
+
+def test_automatic_discovery_rejects_configured_kernel(native_api):
+    native = _Native(_Binding("aiv"))
+    native.configured = True
+    with pytest.raises(ContractError, match="unconfigured kernel"):
+        discover_jit(native)
+
+
+def test_automatic_discovery_refreshes_rebound_native(monkeypatch, native_api):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+    first = _Binding("aic")
+    second = _Binding("mixed")
+    native = _Native(first)
+
+    @pl.jit
+    def entry(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]):
+        native(x, out)
+        return out
+
+    config = RunConfig(backend_type=backend.BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+    entry.compile(config=config)
+    native = _Native(second)
+    compiled = entry.compile(config=config)
+    assert len(first.requests) == len(second.requests) == 1
+    sources = [f for f in compiled.program.functions.values() if "external_source" in f.attrs]
+    assert len(sources) == 2
+
+
+def test_discovery_releases_native_and_signature_with_wrapper(monkeypatch):
+    class Provider:
+        def discover(self, kernel):
+            if not isinstance(kernel, _Native):
+                return None
+            return JITDeclaration(
+                inspect.signature(kernel.__call__), CANNBotDSLBinding(CANNBotDSLProvider(), kernel)
+            )
+
+    monkeypatch.setattr("pypto.jit.external.discovery._providers", lambda: (Provider(),))
+    native = _Native(_Binding("aiv"))
+    reference = weakref.ref(native)
+    wrapper = discover_jit(native)
+    assert wrapper is not None
+    filename = inspect.getsourcefile(wrapper._func)
+    assert filename is not None
+    path = Path(filename)
+    del native
+    gc.collect()
+    assert reference() is not None
+    assert path.exists()
+    del wrapper
+    gc.collect()
+    assert reference() is None
+    assert not path.exists()
+
+
+def test_discovery_rejects_ambiguous_providers(monkeypatch):
+    class Provider:
+        def discover(self, kernel):
+            return JITDeclaration(inspect.Signature(), _Binding("aiv"))
+
+    monkeypatch.setattr("pypto.jit.external.discovery._providers", lambda: (Provider(), Provider()))
+    with pytest.raises(ContractError, match="ambiguous providers"):
+        discover_jit(object())
+
+
+@pytest.mark.parametrize("signature", ["(x, out=None)", "(x, *, out)", "(*args)", "(self, out)"])
+def test_discovery_rejects_unsupported_signatures(monkeypatch, signature):
+    namespace = {}
+    exec(f"def native{signature}: pass", namespace)
+
+    class Provider:
+        def discover(self, kernel):
+            return JITDeclaration(inspect.signature(namespace["native"]), _Binding("aiv"))
+
+    monkeypatch.setattr("pypto.jit.external.discovery._providers", lambda: (Provider(),))
+    with pytest.raises(ContractError, match="explicit positional parameters"):
+        discover_jit(object())
 
 
 if __name__ == "__main__":

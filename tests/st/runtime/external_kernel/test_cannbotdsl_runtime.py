@@ -440,20 +440,23 @@ def _jit_consume(x: pl.Tensor, y: pl.Tensor, out: pl.Out[pl.Tensor]):
     return pl.store(value, [0, 0], out)
 
 
-def _jit_compute_chain(cb, kind):
+def _jit_compute_chain(cb, kind, *, automatic=True):
     cube, vector, mixed = _compute_kernels(cb)
-    provider = CANNBotDSLProvider()
+    if automatic:
+        native_cube, native_vector, native_mixed = cube, vector, mixed
+    else:
+        provider = CANNBotDSLProvider()
 
-    @pl.jit.extern(binding=provider.bind(cube))
-    def native_cube(a: pl.Tensor, b: pl.Tensor, out: pl.Tensor): ...
+        @pl.jit.extern(binding=provider.bind(cube))
+        def native_cube(a: pl.Tensor, b: pl.Tensor, out: pl.Tensor): ...
 
-    @pl.jit.extern(binding=provider.bind(vector))
-    def native_vector(x: pl.Tensor, y: pl.Tensor, out: pl.Tensor): ...
+        @pl.jit.extern(binding=provider.bind(vector))
+        def native_vector(x: pl.Tensor, y: pl.Tensor, out: pl.Tensor): ...
 
-    @pl.jit.extern(binding=provider.bind(mixed))
-    def native_mixed(
-        a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, product: pl.Tensor, vector: pl.Tensor
-    ): ...
+        @pl.jit.extern(binding=provider.bind(mixed))
+        def native_mixed(
+            a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, product: pl.Tensor, vector: pl.Tensor
+        ): ...
 
     @pl.jit
     def cube_chain(a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, out: pl.InOut[pl.Tensor]):
@@ -499,7 +502,8 @@ def _jit_compute_chain(cb, kind):
 
 @pytest.mark.platforms("a5", reason="CANNBotDSL JIT requires A5 text-only callbacks")
 @pytest.mark.parametrize("kind", ["aic", "aiv", "mixed"])
-def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
+@pytest.mark.parametrize("automatic", [True, False], ids=["automatic", "explicit"])
+def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind, automatic):
     """Ordinary JIT producers and consumers surround real native Cube/SIMD work."""
     from dataclasses import replace  # noqa: PLC0415
 
@@ -508,7 +512,7 @@ def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
     cb = pytest.importorskip("cannbotdsl")
     if not hasattr(cb, "export_device"):
         pytest.skip("installed CANNBotDSL lacks public device export")
-    chain = _jit_compute_chain(cb, kind)
+    chain = _jit_compute_chain(cb, kind, automatic=automatic)
     config = replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path))
     a = torch.zeros((16, 32), dtype=torch.float16)
     b = torch.zeros((32, 16), dtype=torch.float16)
