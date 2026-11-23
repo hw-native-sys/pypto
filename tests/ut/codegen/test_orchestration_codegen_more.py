@@ -2117,13 +2117,11 @@ int main() {{
         assert code.count("params_t0.dump(ext_a);") == 1
 
     def test_mixed_group_emission_order(self):
-        """MixedKernels, launch_spec, and set_dependencies must emit in canonical order.
+        """MixedKernels follows launch configuration and precedes submission.
 
-        Canonical order::
-
-          CoreTaskArgs → params → dump → MixedKernels → launch_spec → set_dependencies → submit
-
-        Guards against unintentional reorder in ``TaskDispatchPlan::Emit``.
+        TaskDispatchPlan emits pre-submit lines after launch settings so external
+        preflight checks see the final configuration. MixedKernels declarations
+        share that phase and must precede the submission that uses them.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)
@@ -2171,16 +2169,16 @@ int main() {{
         assert "params_t0.launch_spec." in code, code
         assert "rt_submit_task(mixed_0" in code, code
 
-        # MixedKernels must appear after CoreTaskArgs (params/dump block ends with
-        # add_* calls; MixedKernels comes next in the old canonical order).
+        # Finalize launch settings before the pre-submit declaration, then submit
+        # only after both the task arguments and kernel bundle are ready.
         assert "CoreTaskArgs params_t0;" in code, code
         l0_index = code.index("CoreTaskArgs params_t0;")
         mixed_index = code.index("MixedKernels mixed_0")
         launch_index = code.index("params_t0.launch_spec.")
         submit_index = code.index("rt_submit_task(mixed_0")
-        assert l0_index < mixed_index, "MixedKernels must appear after CoreTaskArgs"
-        assert mixed_index < launch_index, "MixedKernels must appear before launch_spec"
-        assert launch_index < submit_index, "launch_spec must appear before submit"
+        assert l0_index < launch_index, "launch_spec must appear after CoreTaskArgs"
+        assert launch_index < mixed_index, "MixedKernels must appear after launch_spec"
+        assert mixed_index < submit_index, "MixedKernels must appear before submit"
 
     def test_direct_call_with_deps_emission_order(self):
         """Direct-call path with deps: CoreTaskArgs → deps array → set_dependencies → submit.

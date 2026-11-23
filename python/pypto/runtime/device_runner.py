@@ -330,6 +330,21 @@ def _compile_single_kernel(
     """
     source = Path(kernel["source"])
     core_type = kernel["core_type"]
+    policy = kernel.get("binary_policy", "ordinary")
+    if policy not in ("ordinary", "a5-text-only"):
+        raise ValueError(f"Unsupported external binary policy: {policy!r}")
+    text_only = policy == "a5-text-only"
+    includes: list[str] = list(kernel.get("extra_include_dirs") or ())
+    if text_only:
+        if platform != "a5" or not kernel.get("external"):
+            raise ValueError("a5-text-only requires an external A5 kernel")
+        sdk_root = getattr(compiler.sdk.ccec, "ascend_home_path", None)
+        if not isinstance(sdk_root, str) or not sdk_root:
+            raise ValueError("a5-text-only requires the compiler's CANN SDK root")
+        cann_include = Path(sdk_root) / "asc" / "include"
+        if not (cann_include / "c_api" / "asc_simd.h").is_file():
+            raise ValueError(f"a5-text-only requires C API headers at {cann_include}")
+        includes.extend((str(cann_include), str(cann_include.parent)))
     helpers = _vpto.source_paths(kernel.get("vpto_sources"))
     if helpers:
         _vpto.validate_target(platform, core_type)
@@ -343,7 +358,7 @@ def _compile_single_kernel(
         output_file = source.with_name(f"{source.stem}_{_generated_cache_identity(kernel)}{ext}")
     # Helper builds use only the final content/toolchain-keyed cache. Legacy
     # source-adjacent outputs do not prove which helper objects they contain.
-    if helpers:
+    if helpers or text_only:
         output_file = None
 
     # Resolve the publication key before compilation. For VF helpers this also
@@ -354,7 +369,7 @@ def _compile_single_kernel(
         _kernel_cache_file(
             cache_dir, kernel, platform, pto_isa_root, runtime_name, compiler, helper_snapshot=helper_snapshot
         )
-        if cache_dir is not None
+        if cache_dir is not None and not text_only
         else None
     )
     raw = None if force_rebuild or output_file is None else _load_binary(output_file)
@@ -363,12 +378,14 @@ def _compile_single_kernel(
         helper_options: dict[str, Any] = (
             {"vpto_sources": helpers, "_vpto_snapshot": helper_snapshot} if helpers else {}
         )
+        if text_only:
+            helper_options["text_only"] = True
         raw = compiler.compile_incore(
             kernel["source"],
             core_type=core_type,
             pto_isa_root=pto_isa_root,
             runtime_name=runtime_name,
-            extra_include_dirs=kernel.get("extra_include_dirs"),
+            extra_include_dirs=includes,
             **helper_options,
         )
     assert raw is not None
@@ -644,6 +661,11 @@ def _compile_and_assemble_locked(
     # --- Parallel compilation ---
 
     def _compile_one_kernel(kernel: dict[str, Any]) -> bytes:
+        if kernel.get("binary_policy", "ordinary") != "ordinary":
+            # A stripped cache entry carries no ELF/stack admission proof.
+            return _compile_single_kernel(
+                kernel, compiler, platform, pto_isa_root, runtime_name, force_rebuild=True
+            )[1]
         # Check cache/ for pre-stripped binary (written by prebuild_binaries)
         prebuild_cache = work_dir / "cache"
         cache_file = _kernel_cache_file(

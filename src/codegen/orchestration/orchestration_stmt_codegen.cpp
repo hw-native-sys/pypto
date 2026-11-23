@@ -32,6 +32,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
@@ -56,6 +57,9 @@ OrchestrationStmtCodegen::OrchestrationStmtCodegen(
       param_name_set_(std::move(param_name_set)),
       param_name_to_orch_index_(std::move(param_name_to_orch_index)),
       dist_param_to_ctx_param_(std::move(dist_param_to_ctx_param)) {
+  for (const auto& [_, func] : program_->functions_) {
+    if (func->HasAttr(kAttrExternalBinaryPolicy)) require_task_completion_ = true;
+  }
   declared_var_names_ = param_name_set_;
   const auto first_tensor = std::find_if(params.begin(), params.end(), [](const VarPtr& param) {
     return AsTensorTypeLike(param->GetType()) != nullptr;

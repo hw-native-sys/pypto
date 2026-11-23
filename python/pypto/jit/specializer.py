@@ -45,11 +45,15 @@ import unicodedata
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Any, cast, get_args, get_origin
+
+if TYPE_CHECKING:
+    from pypto.jit.external.protocols import ExternalJITBinding
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import (
     DUAL_AIV_DISPATCH_ATTR,
+    EXTERNAL_BINARY_POLICY_ATTR,
     EXTERNAL_PREFLIGHT_SOURCE_ATTR,
     EXTERNAL_PREFLIGHT_SYMBOL_ATTR,
     EXTERNAL_RETURN_PARAMS_ATTR,
@@ -235,6 +239,8 @@ class SpecializeContext:
     peer_func_scope_ambiguous: bool = False
     external_preflight_source: str = ""
     external_preflight_symbol: str = ""
+    external_binary_policy: str = "ordinary"
+    external_binding: ExternalJITBinding | None = None
 
     @property
     def source_def_name(self) -> str:
@@ -2892,13 +2898,18 @@ class Specializer:
             return [
                 f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
+                *(
+                    [f"    pl.func_attr({{{EXTERNAL_BINARY_POLICY_ATTR!r}: {ctx.external_binary_policy!r}}})"]
+                    if ctx.external_binary_policy != "ordinary"
+                    else []
+                ),
                 *preflight,
                 *result_contract,
                 "    ...",
             ]
 
-        # The @pl.jit.extern decorator guarantees the source(s) for the selected
-        # core_type are set; assert to narrow str | None -> str for the type checker.
+        # The source decorator or provider binding supplies the selected core
+        # sources; assert to narrow str | None -> str for the type checker.
         core = ctx.external_core_type
         if core == "aic":
             assert ctx.external_aic_source is not None
