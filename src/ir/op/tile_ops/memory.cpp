@@ -225,6 +225,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       break;
     }
   }
+  CHECK_SPAN(target_memory_opt != MemorySpace::Shared, args[0]->span_)
+      << "tile.load cannot publish a Shared tile; load into Local and use tile.publish_shared";
   const bool is_mx_load =
       tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout);
   if (is_mx_load) {
@@ -631,6 +633,11 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
 
   // Extract MemorySpace
   MemorySpace space = GetKwarg<MemorySpace>(kwargs, "target_memory");
+  const auto src_space = tile_type->GetMemorySpace();
+  CHECK_SPAN(src_space != MemorySpace::Shared && space != MemorySpace::Shared, args[0]->span_)
+      << "tile.move cannot transfer Shared tiles; use tile.publish_shared or tile.broadcast_shared";
+  CHECK_SPAN((src_space == MemorySpace::Local) == (space == MemorySpace::Local), args[0]->span_)
+      << "Linx tile.move requires Local source and destination";
   const auto& input_shape = tile_type->shape_;
 
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
@@ -889,7 +896,10 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   // stamp memory_space_=Mat at creation so InferTileMemorySpace sees the space
   // is already resolved and preserves the none_box view instead of overwriting
   // it with Mat's implicit boxed layout (see ComputeRewrittenType).
-  std::optional<MemorySpace> creation_space = std::nullopt;
+  CHECK_SPAN(target_memory_opt != MemorySpace::Shared, args[0]->span_)
+      << "tile.create cannot publish a Shared tile; use tile.publish_shared with a Local producer";
+  std::optional<MemorySpace> creation_space;
+  if (target_memory_opt == MemorySpace::Local) creation_space = MemorySpace::Local;
   if (flat_layout) {
     creation_space = MemorySpace::Mat;
   } else if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
@@ -1760,6 +1770,45 @@ REGISTER_OP("tile.mgather")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMgatherType(args, kwargs, "tile.mgather");
+    });
+
+// A published SSA value names a complete core-shared descriptor. Both transfers
+// produce fresh storage and carry the logical layout and valid region.
+static TypePtr DeduceSharedTransfer(const std::vector<ExprPtr>& args, MemorySpace source, MemorySpace dest) {
+  CHECK(args.size() == 1) << "Shared transfer expects one tile, got " << args.size();
+  const auto tile = As<TileType>(args[0]->GetType());
+  CHECK_SPAN(tile && tile->memory_space_ == source, args[0]->span_)
+      << "Shared transfer requires a " << MemorySpaceToString(source) << " tile";
+  auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+  view.stride.clear();
+  view.start_offset = nullptr;
+  return std::make_shared<TileType>(tile->shape_, tile->dtype_, std::nullopt, view, dest);
+}
+
+REGISTER_OP("tile.publish_shared")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description("Publish a complete Local tile as a core-shared SSA value")
+    .add_argument("tile", "Local tile")
+    .set_input_memory(0, MemorySpace::Local)
+    .set_output_memory(MemorySpace::Shared)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>&) {
+      return DeduceSharedTransfer(args, MemorySpace::Local, MemorySpace::Shared);
+    });
+
+REGISTER_OP("tile.broadcast_shared")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description("Read a published Shared value into a fresh PE-local tile")
+    .add_argument("tile", "Shared tile")
+    .set_input_memory(0, MemorySpace::Shared)
+    .set_output_memory(MemorySpace::Local)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>&) {
+      return DeduceSharedTransfer(args, MemorySpace::Shared, MemorySpace::Local);
     });
 
 REGISTER_OP("tile.move")

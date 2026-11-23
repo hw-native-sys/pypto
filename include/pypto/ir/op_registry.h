@@ -395,6 +395,9 @@ struct RegMemoryEffect {
 /// Validate a Reg load/store/gather/scatter and describe its memory effect.
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call);
 
+/// Semantic role of a tile at an operator input, independent of its storage space.
+enum class TileOperandRole { Vec, Left, Right, Acc };
+
 /**
  * @brief Type-erased operator registration entry
  *
@@ -555,15 +558,17 @@ class OpRegistryEntry {
    * argument list.
    *
    * @param name Argument name (for documentation)
-   * @param type Expected type of the argument (nullptr for any type)
+   * @param role Optional compute role for a tile operand
    * @param description Description of the argument's purpose
    * @return Reference to this entry for method chaining
    */
-  inline OpRegistryEntry& add_argument(std::string name, std::string description) {
+  inline OpRegistryEntry& add_argument(std::string name, std::string description,
+                                       std::optional<TileOperandRole> role = std::nullopt) {
     // Initialize the vector if not already initialized
     if (!arguments_.has_value()) {
       arguments_ = std::vector<std::pair<std::string, std::string>>();
     }
+    if (role) tile_operand_roles_.emplace(arguments_->size(), *role);
     arguments_->emplace_back(std::move(name), std::move(description));
     return *this;
   }
@@ -1142,6 +1147,13 @@ class OpRegistryEntry {
   /// catch an index that names no argument at all.
   [[nodiscard]] const std::set<size_t>& GetWorkspaceArgs() const { return workspace_args_; }
 
+  /// Tile compute role at this use, if the argument declares one.
+  [[nodiscard]] std::optional<TileOperandRole> GetTileOperandRole(size_t index) const {
+    auto it = tile_operand_roles_.find(index);
+    if (it == tile_operand_roles_.end()) return std::nullopt;
+    return it->second;
+  }
+
   /// Number of arguments the registration documented. 0 both for an operator
   /// that declared `no_argument()` and for one that declared neither; `Validate()`
   /// is what tells those apart.
@@ -1208,6 +1220,7 @@ class OpRegistryEntry {
   std::optional<std::string> op_category_;  ///< Operator category (e.g., "TensorOp", "TileOp", "ScalarOp")
   std::optional<std::vector<std::pair<std::string, std::string>>>
       arguments_;  ///< Argument specifications (name, description)
+  std::map<size_t, TileOperandRole> tile_operand_roles_;
   std::optional<std::function<TypePtr(const std::vector<ExprPtr>&,
                                       const std::vector<std::pair<std::string, std::any>>&)>>
       deduce_type_;  ///< Type deduction function

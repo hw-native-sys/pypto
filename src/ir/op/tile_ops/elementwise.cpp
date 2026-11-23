@@ -580,19 +580,45 @@ REGISTER_OP("tile.mul")
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.mul");
     });
 
+static TypePtr DeduceTileAddType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 2) << "tile.add requires two arguments, got " << args.size();
+  const auto lhs = As<TileType>(args[0]->GetType());
+  const auto rhs = As<TileType>(args[1]->GetType());
+  const auto is_linx = [](const TileTypePtr& tile) {
+    return tile && (tile->memory_space_ == MemorySpace::Local || tile->memory_space_ == MemorySpace::Shared);
+  };
+  if (!is_linx(lhs) && !is_linx(rhs)) return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.add");
+  CHECK_SPAN(
+      lhs && rhs && lhs->memory_space_ == MemorySpace::Local && rhs->memory_space_ == MemorySpace::Local,
+      args[0]->span_)
+      << "Linx tile.add requires two Local tile operands; broadcast Shared values first";
+  const auto lv = tile_view_semantics::GetEffectiveTileView(*lhs);
+  const auto rv = tile_view_semantics::GetEffectiveTileView(*rhs);
+  CHECK_SPAN(lhs->dtype_ == rhs->dtype_ && PhysicalShapesEqual(lhs->shape_, rhs->shape_) &&
+                 ValidExtentsEqual(GetValidShape(lhs), GetValidShape(rhs)) && lv.blayout == rv.blayout &&
+                 lv.slayout == rv.slayout && lv.fractal == rv.fractal,
+             args[1]->span_)
+      << "Linx tile.add requires matching dtype, physical shape, valid region and layout";
+  TileView result = lv;
+  result.stride.clear();
+  result.start_offset = nullptr;
+  return std::make_shared<TileType>(lhs->shape_, lhs->dtype_, std::nullopt, result, MemorySpace::Local);
+}
+
 REGISTER_OP("tile.add")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise addition of two tiles with broadcasting")
-    .add_argument("lhs", "Left-hand side tile (TileType)")
-    .add_argument("rhs", "Right-hand side tile (TileType)")
+    .add_argument("lhs", "Left-hand side tile (TileType)", TileOperandRole::Vec)
+    .add_argument("rhs", "Right-hand side tile (TileType)", TileOperandRole::Vec)
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.add");
+      return DeduceTileAddType(args, kwargs);
     });
 
 REGISTER_OP("tile.div")

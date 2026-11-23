@@ -514,6 +514,8 @@ void BindPass(nb::module_& m) {
       .value("DISTRIBUTED_WINDOW_IDENTITY_MISMATCH",
              typecheck::ErrorType::DISTRIBUTED_WINDOW_IDENTITY_MISMATCH,
              "Distributed tensors refer to different window buffers")
+      .value("TILE_STORAGE_MISMATCH", typecheck::ErrorType::TILE_STORAGE_MISMATCH,
+             "Incompatible tile storage or Shared handle escape")
       .value("TILE_VIEW_MISMATCH", typecheck::ErrorType::TILE_VIEW_MISMATCH,
              "Effective TileView metadata mismatch")
       .value("BUFFER_DESCRIPTOR_MISMATCH", typecheck::ErrorType::BUFFER_DESCRIPTOR_MISMATCH,

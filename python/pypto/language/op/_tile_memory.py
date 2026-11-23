@@ -181,7 +181,7 @@ def load(
             the tile; cannot widen it past what the source has. Each element must
             be an integer scalar — one extent per dimension, not a nested
             ``[start, extent]`` pair.
-        target_memory: Target memory space (MemorySpace.Vec or MemorySpace.Mat).
+        target_memory: Target memory space (Vec or Mat on Ascend, Local on Linx).
             ``None`` (the default) leaves an ordinary load unset for the compiler
             to place. MX-layout tensors default to MemorySpace.Mat so they can be
             passed directly to ``matmul_mx`` and placed from its operand position.
@@ -472,6 +472,16 @@ def concat(src0: Tile, src1: Tile) -> Tile:
     """
     call_expr = _ir_ops.concat(src0.unwrap(), src1.unwrap())
     return Tile(expr=call_expr)
+
+
+def publish_shared(tile: Tile) -> Tile:
+    """Publish the complete PE-local tile and its valid region as a Shared SSA value."""
+    return Tile(expr=_ir_ops.publish_shared(tile.unwrap()))
+
+
+def broadcast_shared(tile: Tile) -> Tile:
+    """Copy a published Shared tile and its valid region into fresh PE-local storage."""
+    return Tile(expr=_ir_ops.broadcast_shared(tile.unwrap()))
 
 
 def move(
