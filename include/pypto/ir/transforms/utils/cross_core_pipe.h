@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
@@ -39,6 +40,7 @@ struct PipeDirectionMetadata {
   // C2V consumer physical layouts, accumulated across nested scopes and peers.
   std::set<std::string> acc_push_layouts;
   bool has_acc_push = false;
+  std::optional<DataType> non_fp32_acc_push;
   bool has_non_acc_push = false;
   bool has_nonzero_split = false;
 };

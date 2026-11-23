@@ -348,11 +348,7 @@ class TestTypeResolver:
 
     @pytest.mark.parametrize("shape", [(1, 32), (32, 1)])
     def test_fixpipe_scaling_defaults_match_shared_table_and_printer(self, shape):
-        """Scaling type defaults are flat even for a column-shaped annotation.
-
-        This checks type syntax and elision; transfer ops separately require
-        packed control payloads shaped [1, N].
-        """
+        """Check flat Scaling defaults for row- and column-shaped annotations."""
         from pypto.language.typing.type_utils import _has_printable_tile_view  # noqa: PLC0415
 
         resolver = _make_resolver()
@@ -363,7 +359,6 @@ class TestTypeResolver:
         assert resolved.tile_view is not None
         assert resolved.tile_view.blayout == ir.TileLayout.row_major
         assert resolved.tile_view.slayout == ir.TileLayout.none_box
-        # Partial validity keeps a view explicit, while its default layouts elide.
         assert _has_printable_tile_view(resolved.tile_view, resolved.shape, ir.MemorySpace.Scaling)
         default_view = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box)
         assert not _has_printable_tile_view(default_view, resolved.shape, ir.MemorySpace.Scaling)

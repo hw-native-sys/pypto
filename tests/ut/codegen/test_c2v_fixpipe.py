@@ -116,7 +116,6 @@ class _PipeBufferAliases(ir.IRMutator):
     def __init__(self, producer_depth: int, consumer_depth: int, offset: int = 0):
         super().__init__()
         self._offset = offset
-        # Validate names once so renamed operators cannot silently skip aliases.
         self._depths = {
             ir.get_op("system.aic_initialize_pipe").name: producer_depth,
             ir.get_op("system.aiv_initialize_pipe").name: consumer_depth,
@@ -253,8 +252,11 @@ def test_fixpipe_pop_requires_a_matching_push():
         _generate(pl.parse_program(without_push))
 
 
-@pytest.mark.parametrize("guarded_pop", [False, True])
-def test_fixpipe_rejects_mismatched_endpoint_counts(guarded_pop):
+@pytest.mark.parametrize(
+    ("guarded_pop", "binding"), [(False, None), (True, None), (False, True), (False, False)]
+)
+@pytest.mark.ptoas_compile
+def test_fixpipe_endpoint_counts(guarded_pop, binding, tmp_path):
     source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
     source = source.replace(
         "        pl.tile.tpush_to_aiv(", "        if enabled:\n            pl.tile.tpush_to_aiv("
@@ -264,14 +266,42 @@ def test_fixpipe_rejects_mismatched_endpoint_counts(guarded_pop):
         consumer, producer = ("        tile: " + body).split("    @pl.function", 1)
         source = before + "        if enabled:\n            pass\n        else:\n" + indent(consumer, "    ")
         source += "    @pl.function" + producer
+    if guarded_pop or binding is not None:
         signature = next(line for line in source.splitlines() if line.startswith("    def producer("))
         source += "\n    @pl.function(type=pl.FunctionType.Group)\n" + signature.replace(
             "producer(", "group(self, "
         )
         source += "\n        self.producer(a, b, out, control_words, enabled)\n"
         source += "        self.consumer(a, b, out, control_words, enabled)\n"
-    with pytest.raises(Error, match="endpoint counts differ across control-flow paths"):
-        _generate(pl.parse_program(source))
+    if binding is not None:
+        caller = signature.replace("producer(", "main(self, ").replace(", enabled: pl.Scalar[pl.BOOL]", "")
+        source += "\n    @pl.function(type=pl.FunctionType.Orchestration)\n" + caller
+        source += f"\n        self.group(a, b, out, control_words, {binding})\n"
+    if binding is True:
+        _assemble(_generate(pl.parse_program(source))[1], tmp_path)
+    else:
+        with pytest.raises(Error, match="endpoint counts differ across control-flow paths"):
+            _generate(pl.parse_program(source))
+
+
+@pytest.mark.parametrize(("slots", "schedule"), [(1, "overflow"), (2, "reverse"), (1, "sequential")])
+@pytest.mark.ptoas_compile
+def test_fixpipe_retained_slots_and_fifo_order(slots, schedule, tmp_path):
+    source = ir.python_print(_program()).replace("slot_num=2", f"slot_num={slots}")
+    push = next(line for line in source.splitlines() if ".tpush_to_aiv(" in line)
+    pop = next(line for line in source.splitlines() if ".tpop_from_aic(" in line)
+    free = next(line for line in source.splitlines() if ".tfree_to_aic(" in line)
+    second, release = pop.replace("tile:", "second:", 1), free.replace("(tile,", "(second,")
+    sequence = {"reverse": [second, release, free], "sequential": [free, second, release]}
+    source = source.replace(push, push + "\n" + push)
+    source = source.replace(free, "\n".join(sequence.get(schedule, [second, free, release])))
+    if schedule == "sequential":
+        _assemble(_generate(pl.parse_program(source))[1], tmp_path)
+    else:
+        with pytest.raises(
+            Error, match="oldest outstanding" if schedule == "reverse" else "outstanding TPOP count"
+        ):
+            _generate(pl.parse_program(source))
 
 
 @pytest.mark.parametrize(("operands", "message"), [("[]", "exactly one operand"), ("[1]", "FP32 scalar")])
@@ -317,18 +347,14 @@ def test_legacy_pipe_dtype_requires_nosplit():
 
 @pytest.mark.ptoas_compile
 def test_converted_slot_uses_result_bytes(tmp_path):
-    # FP32 source occupies 2048 bytes; the FP16 transport occupies only 1024.
     _, mlir = _generate(_program("f32_f16", slot_size=1024))
     _assemble(mlir, tmp_path)
 
 
 def test_epilogue_value_round_trip():
     program = _program()
-    restored = ir.deserialize(ir.serialize(program))
-    ir.assert_structural_equal(program, restored)
-    text = ir.python_print(program)
-    reparsed = pl.parse_program(text)
-    ir.assert_structural_equal(program, reparsed)
+    ir.assert_structural_equal(program, ir.deserialize(ir.serialize(program)))
+    ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
 
 
 @pytest.mark.parametrize("use_relu", [False, True])
@@ -515,92 +541,63 @@ def test_scaling_allocations_remain_distinct_after_setter(buffer_ir):
     assert not ir.MemRef.same_allocation(allocations[0], allocations[1])
 
 
+def _automatic_move(rows=(32,), *, loop=False, nz_int32=False):
+    dtype, out_dtype = ("INT8", "INT32") if nz_int32 else ("BF16", "FP32")
+    out_shape = [32, 16] if loop or nz_int32 else [16, sum(rows)]
+    scatter = "row_major" if nz_int32 else "none_box"
+    stored = "tile{i}" if nz_int32 else "pl.tile.transpose_view(tile{i})"
+    if loop:
+        stored = f"pl.tile.transpose({stored}, 0, 1)"
+    body = "".join(
+        f"""
+lhs{i} = pl.load(a, [0, 0], [{n}, 32], target_memory=pl.Mem.Mat)
+rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+acc{i} = pl.matmul(lhs{i}, rhs)
+tile{i} = pl.tile.move(acc{i}, target_memory=pl.Mem.Vec,
+                       blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.{scatter})
+pl.store({stored.format(i=i)}, [0, {sum(rows[:i])}], out)
+"""
+        for i, n in enumerate(rows)
+    )
+    if loop:
+        body = "for iteration in pl.range(2):\n" + indent(body, "    ")
+    return pl.parse_program(f"""
 @pl.program
-class ColumnMajorMove:
+class Program:
     @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[32, 32], pl.BF16],
-        b: pl.Tensor[[32, 16], pl.BF16],
-        out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-    ):
-        lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-        rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
-        acc = pl.matmul(lhs, rhs)
-        dn = pl.tile.move(
-            acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
-        )
-        pl.store(pl.tile.transpose_view(dn), [0, 0], out)
+    def kernel(a: pl.Tensor[[{max(rows)}, 32], pl.{dtype}], b: pl.Tensor[[32, 16], pl.{dtype}],
+               out: pl.Out[pl.Tensor[{out_shape}, pl.{out_dtype}]]):
+{indent(body, "        ")}
+""")
 
 
 @pytest.mark.parametrize("buffer_ir", [False, True])
 @pytest.mark.ptoas_compile
 def test_automatic_column_major_producer_and_consumer_compile(buffer_ir, tmp_path):
-    _, mlir = _generate(ColumnMajorMove, buffer_ir)
+    _, mlir = _generate(_automatic_move(), buffer_ir)
     cpp = _assemble(mlir, tmp_path)
     assert mlir.count("layout = nz2dn, quant = no_convert, relu = no_relu") == 2
     assert "LayoutMode_t::NZ2DN" in cpp
 
 
-@pl.program
-class ColumnMajorLoopTranspose:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[32, 32], pl.BF16],
-        b: pl.Tensor[[32, 16], pl.BF16],
-        out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
-    ):
-        for iteration in pl.range(2):
-            lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-            rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
-            acc = pl.matmul(lhs, rhs)
-            dn = pl.tile.move(
-                acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
-            )
-            normal = pl.tile.transpose(pl.tile.transpose_view(dn), 0, 1)
-            pl.store(normal, [0, 0], out)
-
-
 @pytest.mark.ptoas_compile
 def test_transpose_over_popped_view_in_loop_compiles(tmp_path):
-    _, mlir = _generate(ColumnMajorLoopTranspose)
+    _, mlir = _generate(_automatic_move(loop=True))
     _assemble(mlir, tmp_path)
 
 
-@pl.program
-class VaryingColumnMajorMoves:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[64, 32], pl.BF16],
-        b: pl.Tensor[[32, 16], pl.BF16],
-        out: pl.Out[pl.Tensor[[16, 96], pl.FP32]],
-    ):
-        lhs0 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-        rhs0 = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
-        acc0 = pl.matmul(lhs0, rhs0)
-        dn0 = pl.tile.move(
-            acc0, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
-        )
-        pl.store(pl.tile.transpose_view(dn0), [0, 0], out)
-        lhs1 = pl.load(a, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
-        rhs1 = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
-        acc1 = pl.matmul(lhs1, rhs1)
-        dn1 = pl.tile.move(
-            acc1, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
-        )
-        pl.store(pl.tile.transpose_view(dn1), [0, 32], out)
+def test_automatic_nz2nz_requires_fp32():
+    with pytest.raises(ValueError, match="Automatic C2V NZ2NZ requires an FP32 accumulator.*int32"):
+        _generate(_automatic_move(nz_int32=True))
 
 
 @pytest.mark.parametrize("buffer_ir", [False, True])
 @pytest.mark.ptoas_compile
 def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp_path):
+    program = _automatic_move((32, 64))
     with pytest.raises(Error, match="one physical payload shape/converted dtype"):
-        _generate(VaryingColumnMajorMoves, buffer_ir)
-    # Intentionally bypass PyPTO verification only to construct a negative PTOAS
-    # fixture. The real compiler must independently reject the same boundary.
-    _, mlir = _generate(VaryingColumnMajorMoves, buffer_ir, passes.VerificationLevel.NONE)
+        _generate(program, buffer_ir)
+    _, mlir = _generate(program, buffer_ir, passes.VerificationLevel.NONE)
     _assemble(mlir, tmp_path, expected_error="to use the same tile type")
 
 
@@ -609,69 +606,30 @@ def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp
 @pytest.mark.parametrize("round_trip", [False, True])
 @pytest.mark.ptoas_compile
 def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
-    epilogue = _epilogue(quant=quant)
-    vector = quant == "deqf16_vec"
-
-    @pl.program
-    class QuantizedPipeline:
-        @pl.function(type=pl.FunctionType.AIC)
-        def producer(
-            self,
-            a: pl.Tensor[[128, 32], pl.INT8],
-            b: pl.Tensor[[16, 32], pl.INT8],
-            out: pl.Out[pl.Tensor[[128, 16], pl.FP16]],
-            words: pl.Tensor[[1, 32], pl.UINT64],
-        ):
-            forward = pl.import_peer_buffer(name="forward", peer_func="consumer")
-            if round_trip:
-                reply = pl.reserve_buffer(name="reply", size=2048)
-                pl.aic_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
-            pl.aic_initialize_pipe(
-                forward, dir_mask=1, slot_size=1024, slot_num=2, acc_push_epilogue=epilogue
-            )
-            packed: pl.Tile[
-                [1, 32],
-                pl.UINT64,
-                pl.Mem.Mat,
-                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-            ] = pl.load(words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
-            controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
-            for i in pl.pipeline(4, stage=2):
-                lhs = pl.load(a, [i * 32, 0], [32, 32], target_memory=pl.Mem.Mat)
-                rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
-                acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
-                if vector:
-                    pl.set_quant_vector(controls)
-                else:
-                    pl.set_quant_scalar(scale=pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
-                pl.tpush_to_aiv(acc, split=0)
-                if round_trip:
-                    returned = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)
-                    pl.tfree_to_aiv(returned, id=1)
-
-        @pl.function(type=pl.FunctionType.AIV)
-        def consumer(
-            self,
-            a: pl.Tensor[[128, 32], pl.INT8],
-            b: pl.Tensor[[16, 32], pl.INT8],
-            out: pl.Out[pl.Tensor[[128, 16], pl.FP16]],
-            words: pl.Tensor[[1, 32], pl.UINT64],
-        ):
-            forward = pl.reserve_buffer(name="forward", size=2048)
-            if round_trip:
-                reply = pl.import_peer_buffer(name="reply", peer_func="producer")
-                pl.aiv_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
-            pl.aiv_initialize_pipe(
-                forward, dir_mask=1, slot_size=1024, slot_num=2, acc_push_epilogue=epilogue
-            )
-            for i in pl.pipeline(4, stage=2):
-                tile = pl.tpop_from_aic(shape=[32, 16], dtype=pl.FP16, split=0)
-                pl.store(tile, [i * 32, 0], out)
-                if round_trip:
-                    pl.tpush_to_aic(tile, split=0, id=1)
-                pl.tfree_to_aic(tile)
-
-    _, mlir = _generate(QuantizedPipeline, buffer_ir)
+    source = ir.python_print(_program(quant=quant, slot_size=1024))
+    consumer, producer = source.rsplit("    @pl.function", 1)
+    c_init, c_body = consumer.split("        tile:", 1)
+    p_init, p_body = producer.split("        lhs:", 1)
+    c_body = "        tile:" + c_body
+    p_body = "        lhs:" + p_body.replace(
+        "set_quant_scalar(0.5", "set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5"
+    )
+    if round_trip:
+        c_init += "        reply = pl.import_peer_buffer(name='reply', peer_func='producer')\n"
+        c_init += "        pl.aiv_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)\n"
+        p_init += "        reply = pl.reserve_buffer(name='reply', size=2048)\n"
+        p_init += "        pl.aic_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)\n"
+        c_body = c_body.replace(
+            "        pl.system.tfree_to_aic",
+            "        pl.tpush_to_aic(tile, split=0, id=1)\n        pl.system.tfree_to_aic",
+        )
+        p_body += "\n        reply_tile = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)"
+        p_body += "\n        pl.tfree_to_aiv(reply_tile, id=1)\n"
+    loop = "        for i in pl.pipeline(4, stage=2):\n"
+    source = (
+        c_init + loop + indent(c_body, "    ") + "    @pl.function" + p_init + loop + indent(p_body, "    ")
+    )
+    _, mlir = _generate(pl.parse_program(source), buffer_ir)
     _assemble(mlir, tmp_path)
 
 

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <list>
 #include <map>
@@ -529,6 +530,8 @@ void VerifyTpopTfreeMatching(const FunctionPtr& func, std::vector<Diagnostic>& d
 
 // Fixpipe contracts are checked before Buffer IR lowering, while both peers and
 // lexical quantization-state dominance are still explicit in the tile IR.
+constexpr int kGuardFalse = 1, kGuardTrue = 2, kEitherGuard = kGuardFalse | kGuardTrue;
+
 struct FixpipeEndpointCounts {
   std::size_t seen = 0, when_true = 0, when_false = 0;
   std::optional<std::size_t> guard_index;
@@ -581,26 +584,30 @@ void CountFixpipeEndpoints(const FunctionPtr& func, FixpipeFunctionInfo& local) 
     auto type = As<ScalarType>(param->GetType());
     if (type && type->dtype_ == DataType::BOOL) bool_params.emplace(param.get(), i);
   }
-  auto count = [&](const StmtPtr& stmt, std::optional<std::size_t> guard, bool then_taken) {
+  auto count = [&](const StmtPtr& stmt, std::optional<std::size_t> guard, int mask) {
     auto call = transform_utils::GetCallFromStmt(stmt);
     if (!IsOp(call, op)) return;
     auto& flow = local.counts[call->GetKwarg<int>("id", 0)];
     if (guard && flow.guard_index && guard != flow.guard_index) return;
     if (guard) flow.guard_index = guard;
     ++flow.seen;
-    if (!guard || then_taken) ++flow.when_true;
-    if (!guard || !then_taken) ++flow.when_false;
+    if (mask & kGuardTrue) ++flow.when_true;
+    if (mask & kGuardFalse) ++flow.when_false;
   };
   for (const auto& stmt : FlattenBody(func->body_)) {
     if (auto branch = As<IfStmt>(stmt)) {
-      auto guard = bool_params.find(AsVarLike(branch->condition_).get());
-      if (guard == bool_params.end()) continue;
-      for (const auto& child : FlattenBody(branch->then_body_)) count(child, guard->second, true);
+      const auto literal = As<ConstBool>(branch->condition_);
+      const auto input = bool_params.find(AsVarLike(branch->condition_).get());
+      if (!literal && input == bool_params.end()) continue;
+      const auto guard = literal ? std::nullopt : std::optional<std::size_t>(input->second);
+      const int then_mask = literal ? (literal->value_ ? kEitherGuard : 0) : kGuardTrue;
+      for (const auto& child : FlattenBody(branch->then_body_)) count(child, guard, then_mask);
       if (branch->else_body_) {
-        for (const auto& child : FlattenBody(*branch->else_body_)) count(child, guard->second, false);
+        const int else_mask = kEitherGuard ^ then_mask;
+        for (const auto& child : FlattenBody(*branch->else_body_)) count(child, guard, else_mask);
       }
     } else {
-      count(stmt, std::nullopt, false);
+      count(stmt, std::nullopt, kEitherGuard);
     }
   }
 }
@@ -612,18 +619,40 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           ? (context ? context->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler())
           : nullptr;
   std::map<std::string, FixpipeFunctionInfo> info;
-  std::set<std::pair<std::string, std::string>> group_peers;
+  using KernelPair = std::pair<std::string, std::string>;
+  std::map<std::string, KernelPair> groups;
+  std::map<std::string, std::vector<int>> group_bindings;
   for (const auto& [gv, func] : program->functions_) {
     if (!func || !func->body_) continue;
     auto& local = info[func->name_];
     local.VisitStmt(func->body_);
     if (!local.pushes.empty() || !local.pops.empty()) CountFixpipeEndpoints(func, local);
-    if (func->func_type_ == FunctionType::Group) {
-      const auto members = CollectInnerCalls(func, program);
-      if (members.size() == 2 && members[0].inner_call->args_ == members[1].inner_call->args_) {
-        group_peers.insert(std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_));
+    if (!IsWrapperType(func->func_type_) && !IsOrchestrationLike(func->func_type_)) continue;
+    const auto members = CollectInnerCalls(func, program);
+    if (func->func_type_ == FunctionType::Group && members.size() == 2 &&
+        members[0].inner_call->args_ == members[1].inner_call->args_) {
+      groups.emplace(func->name_,
+                     std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_));
+    }
+    for (const auto& member : members) {
+      if (member.inner_callee->func_type_ != FunctionType::Group) continue;
+      const auto& args = member.inner_call->args_;
+      auto& bindings = group_bindings[member.inner_callee->name_];
+      bindings.resize(std::max(bindings.size(), args.size()));
+      for (std::size_t i = 0; i < args.size(); ++i) {
+        auto value = As<ConstBool>(args[i]);
+        bindings[i] |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
       }
     }
+  }
+  // A Group without an IR caller can still be launched with either value.
+  std::map<KernelPair, std::vector<int>> peer_bindings;
+  for (const auto& [name, peers] : groups) {
+    auto& bindings = group_bindings[name];
+    bindings.resize(program->GetFunction(name)->params_.size(), kEitherGuard);
+    auto& allowed = peer_bindings[peers];
+    allowed.resize(std::max(allowed.size(), bindings.size()));
+    for (std::size_t i = 0; i < bindings.size(); ++i) allowed[i] |= bindings[i];
   }
   std::map<std::tuple<std::string, std::string, int>, int> incoming;
   for (const auto& [name, local] : info) {
@@ -736,14 +765,24 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         if (push_count != local.counts.end() && pop_count != peer->second.counts.end()) {
           const auto& push = push_count->second;
           const auto& pop = pop_count->second;
-          const auto p = std::minmax(push.when_true, push.when_false);
-          const auto q = std::minmax(pop.when_true, pop.when_false);
-          const bool same_guard = push.guard_index && push.guard_index == pop.guard_index &&
-                                  group_peers.count(std::minmax(func->name_, peer_name));
-          if (push.seen == pushes->second.size() && pop.seen == pops->second.size() &&
-              (p != q || (same_guard && push.when_true != pop.when_true))) {
+          const auto pair = peer_bindings.find(std::minmax(func->name_, peer_name));
+          auto counts = [&](const FixpipeEndpointCounts& flow) {
+            const auto mask =
+                pair != peer_bindings.end() && flow.guard_index && *flow.guard_index < pair->second.size()
+                    ? pair->second[*flow.guard_index]
+                    : kEitherGuard;
+            return std::make_pair(mask == kGuardFalse ? flow.when_false : flow.when_true,
+                                  mask == kGuardTrue ? flow.when_true : flow.when_false);
+          };
+          const auto p = counts(push), q = counts(pop);
+          const bool comparable = p.first == p.second || q.first == q.second ||
+                                  (pair != peer_bindings.end() && push.guard_index == pop.guard_index);
+          const auto p_range = std::minmax(p.first, p.second), q_range = std::minmax(q.first, q.second);
+          const bool mismatch =
+              comparable ? p != q : p_range.second < q_range.first || q_range.second < p_range.first;
+          if (push.seen == pushes->second.size() && pop.seen == pops->second.size() && mismatch) {
             const bool excess_pop =
-                p.first < q.first || p.second < q.second || (same_guard && push.when_true < pop.when_true);
+                comparable ? p.first < q.first || p.second < q.second : p_range.second < q_range.first;
             error(excess_pop ? pops->second.front() : pushes->second.front(),
                   "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
           }
@@ -782,145 +821,157 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       // PTOAS quant state must precede TPUSH in the same block, with the same id.
       std::set<int> scalar_state;
       std::map<int, int64_t> vector_state;
+      std::map<int, std::deque<const Var*>> retained;
       for (const auto& stmt : stmts) {
-        auto assign = As<AssignStmt>(stmt);
-        auto eval = As<EvalStmt>(stmt);
-        auto call = assign ? As<Call>(assign->value_) : (eval ? As<Call>(eval->expr_) : nullptr);
-        if (call) {
-          if ((IsOp(call, "tile.store") || IsOp(call, "tile.assemble")) && call->HasKwarg("pre_quant")) {
-            scalar_state.clear();
-            vector_state.clear();
-          }
-          if (auto result = As<TileType>(call->GetType());
-              result && result->memory_space_ == MemorySpace::Scaling) {
-            vector_state.clear();
-          }
-          const int id = call->GetKwarg<int>("id", 0);
-          if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
-            auto previous = visible.find(id);
-            saved_inits.emplace_back(
-                id, previous == visible.end() ? std::nullopt : std::optional<CallPtr>(previous->second));
-            visible[id] = call;
-            scalar_state.erase(id);
-            vector_state.erase(id);
+        auto call = transform_utils::GetCallFromStmt(stmt);
+        if (!call) {
+          if (auto loop = As<ForStmt>(stmt)) {
+            verify_block(FlattenBody(loop->body_), visible);
+          } else if (auto loop = As<WhileStmt>(stmt)) {
+            verify_block(FlattenBody(loop->body_), visible);
+          } else if (auto branch = As<IfStmt>(stmt)) {
+            verify_block(FlattenBody(branch->then_body_), visible);
+            if (branch->else_body_) verify_block(FlattenBody(*branch->else_body_), visible);
           } else {
-            const bool scalar = IsOp(call, "system.set_quant_scalar");
-            const bool vector = IsOp(call, "system.set_quant_vector");
-            const bool push = IsOp(call, "tile.tpush_to_aiv");
-            const bool pop = IsOp(call, "tile.tpop_from_aic");
-            if (scalar || vector || push || pop) {
-              auto it = visible.find(id);
-              if (it == visible.end()) {
-                if (scalar || vector ||
-                    (local.inits.count(id) && local.inits.at(id)->HasKwarg("acc_push_epilogue"))) {
-                  error(call, "Fixpipe operation requires a dominating initialize_pipe for its pipe id");
-                }
-              } else if (!it->second->HasKwarg("acc_push_epilogue")) {
-                if (scalar || vector) {
-                  error(call, "set_quant requires an acc_push_epilogue on the matching pipe id");
-                }
-              } else {
-                const auto init = it->second;
-                const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
-                if (!ValidateAccPushEpilogue(e).empty()) continue;
-                const auto quant = e.at("quant");
-                if (scalar || vector) {
-                  scalar_state.clear();
-                  vector_state.clear();
-                  if ((scalar && !IsScalarAccPushQuant(quant)) || (vector && !IsVectorAccPushQuant(quant))) {
-                    error(call, "set_quant kind does not match acc_push_epilogue.quant");
-                  } else {
-                    try {
-                      // Raw calls can bypass the operator builder's operand validation.
-                      OpRegistry::GetInstance()
-                          .GetEntry(call->op_->name_)
-                          .GetDeduceType()(call->args_, call->kwargs_);
-                      if (scalar) {
-                        scalar_state.insert(id);
-                      } else {
-                        auto payload = As<TileType>(call->args_[0]->GetType());
-                        vector_state[id] = As<ConstInt>(payload->shape_[1])->value_;
-                      }
-                    } catch (const Error& exception) {
-                      error(call, exception.what());
-                    }
-                  }
-                } else {
-                  if (call->GetKwarg<int>("split", 0) != 0) error(call, "Fixpipe transfers require split=0");
-                  if (push && ((IsScalarAccPushQuant(quant) && !scalar_state.count(id)) ||
-                               (IsVectorAccPushQuant(quant) && !vector_state.count(id)))) {
-                    error(
-                        call,
-                        "Fixpipe TPUSH requires preceding set_quant with the same pipe id in the same block");
-                  }
-                  auto tile = push ? (call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType()))
-                                   : (pop ? As<TileType>(call->GetType()) : nullptr);
-                  if (tile && (push || pop)) {
-                    if (push && IsVectorAccPushQuant(quant) && vector_state.count(id)) {
-                      auto columns = tile->shape_.size() == 2
-                                         ? cross_core_pipe::TryGetNonNegativeConstInt(tile->shape_[1])
-                                         : std::nullopt;
-                      if (!columns || vector_state.at(id) < *columns) {
-                        error(call, "Fixpipe vector controls do not cover the producer columns");
-                      }
-                    }
-                    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-                    if (push) {
-                      if (tile->memory_space_ != MemorySpace::Acc) {
-                        error(call, "Fixpipe TPUSH requires an Acc source");
-                      }
-                      if (e.at("layout") == "nz2nz" && tile->dtype_ != DataType::FP32) {
-                        error(call, "NZ2NZ no_convert currently requires an FP32 source");
-                      }
-                      if ((quant == "no_convert" && tile->dtype_ != DataType::FP32 &&
-                           tile->dtype_ != DataType::INT32) ||
-                          (quant != "no_convert" && tile->dtype_ != AccPushSourceDtype(quant))) {
-                        error(call, "Fixpipe producer dtype does not match quant mode");
-                      }
-                      if (view.blayout != TileLayout::col_major || view.slayout != TileLayout::row_major ||
-                          view.fractal != tile_view_semantics::kAccFractal) {
-                        error(call, "Fixpipe producer requires NZ layout with fractal=1024");
-                      }
-                    } else {
-                      const auto layout = e.at("layout");
-                      const auto block = layout == "nz2nd" ? TileLayout::row_major : TileLayout::col_major;
-                      const auto scatter = layout == "nz2nz" ? TileLayout::row_major : TileLayout::none_box;
-                      if (view.blayout != block || view.slayout != scatter) {
-                        error(call, "Fixpipe consumer layout does not match acc_push_epilogue.layout");
-                      }
-                      if (quant != "no_convert" &&
-                          tile->dtype_ != AccPushResultDtype(quant, DataType::FP32)) {
-                        error(call, "Fixpipe consumer dtype does not match quant mode");
-                      }
-                    }
-                    auto bytes = cross_core_pipe::TryGetTileSlotSizeBytes(tile);
-                    if (bytes && push && tile->dtype_.GetBit() == 32) {
-                      const auto result_bytes =
-                          static_cast<int64_t>(AccPushResultDtype(quant, tile->dtype_).GetBit() / 8);
-                      *bytes = (*bytes / 4) * result_bytes;
-                    }
-                    if (!bytes || *bytes > init->GetKwarg<int>("slot_size", 0)) {
-                      error(call, "Fixpipe converted tile exceeds slot_size or has a non-static footprint");
-                    }
-                  }
-                }
-              }
-            }
+            continue;
           }
-        }
-        if (auto loop = As<ForStmt>(stmt)) {
-          verify_block(FlattenBody(loop->body_), visible);
-        } else if (auto loop = As<WhileStmt>(stmt)) {
-          verify_block(FlattenBody(loop->body_), visible);
-        } else if (auto branch = As<IfStmt>(stmt)) {
-          verify_block(FlattenBody(branch->then_body_), visible);
-          if (branch->else_body_) verify_block(FlattenBody(*branch->else_body_), visible);
-        }
-        // A nested block may change the hardware quant registers on either path.
-        // Require an explicit reconfiguration before a subsequent enclosing push.
-        if (IsA<ForStmt>(stmt) || IsA<WhileStmt>(stmt) || IsA<IfStmt>(stmt)) {
+          // A nested block may write its own quant registers on either path.
           scalar_state.clear();
           vector_state.clear();
+          continue;
+        }
+        if ((IsOp(call, "tile.store") || IsOp(call, "tile.assemble")) && call->HasKwarg("pre_quant")) {
+          scalar_state.clear();
+          vector_state.clear();
+        }
+        if (auto result = As<TileType>(call->GetType());
+            result && result->memory_space_ == MemorySpace::Scaling) {
+          vector_state.clear();
+        }
+        const int id = call->GetKwarg<int>("id", 0);
+        if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
+          auto previous = visible.find(id);
+          saved_inits.emplace_back(
+              id, previous == visible.end() ? std::nullopt : std::optional<CallPtr>(previous->second));
+          visible[id] = call;
+          scalar_state.erase(id);
+          vector_state.erase(id);
+          continue;
+        }
+        if (IsOp(call, "system.tfree_to_aic") && !call->args_.empty()) {
+          const auto tile = AsVarLike(call->args_[0]);
+          const auto origin = local.definitions.find(tile.get());
+          if (origin == local.definitions.end() || !IsOp(origin->second, "tile.tpop_from_aic")) continue;
+          auto& fifo = retained[origin->second->GetKwarg<int>("id", 0)];
+          if (fifo.empty()) continue;
+          if (fifo.front() != tile.get()) {
+            error(call, "Fixpipe TFREE must release the oldest outstanding TPOP of its pipe");
+          } else {
+            fifo.pop_front();
+          }
+          continue;
+        }
+        const bool scalar = IsOp(call, "system.set_quant_scalar"),
+                   vector = IsOp(call, "system.set_quant_vector");
+        const bool push = IsOp(call, "tile.tpush_to_aiv"), pop = IsOp(call, "tile.tpop_from_aic");
+        if (!scalar && !vector && !push && !pop) continue;
+        const auto found = visible.find(id);
+        if (found == visible.end()) {
+          if (scalar || vector ||
+              (local.inits.count(id) && local.inits.at(id)->HasKwarg("acc_push_epilogue"))) {
+            error(call, "Fixpipe operation requires a dominating initialize_pipe for its pipe id");
+          }
+          continue;
+        }
+        const auto init = found->second;
+        if (!init->HasKwarg("acc_push_epilogue")) {
+          if (scalar || vector)
+            error(call, "set_quant requires an acc_push_epilogue on the matching pipe id");
+          continue;
+        }
+        const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
+        if (!ValidateAccPushEpilogue(e).empty()) continue;
+        const auto quant = e.at("quant");
+        if (scalar || vector) {
+          scalar_state.clear();
+          vector_state.clear();
+          if ((scalar && !IsScalarAccPushQuant(quant)) || (vector && !IsVectorAccPushQuant(quant))) {
+            error(call, "set_quant kind does not match acc_push_epilogue.quant");
+            continue;
+          }
+          try {
+            // Raw calls can bypass the operator builder's operand validation.
+            OpRegistry::GetInstance().GetEntry(call->op_->name_).GetDeduceType()(call->args_, call->kwargs_);
+            if (scalar) {
+              scalar_state.insert(id);
+            } else {
+              auto payload = As<TileType>(call->args_[0]->GetType());
+              vector_state[id] = As<ConstInt>(payload->shape_[1])->value_;
+            }
+          } catch (const Error& exception) {
+            error(call, exception.what());
+          }
+          continue;
+        }
+        if (call->GetKwarg<int>("split", 0) != 0) error(call, "Fixpipe transfers require split=0");
+        if (auto assign = As<AssignStmt>(stmt); pop && assign) {
+          auto& fifo = retained[id];
+          fifo.push_back(assign->var_.get());
+          const int slots = init->GetKwarg<int>("slot_num", cross_core_pipe::GetPtoasImplicitSlotNum(1));
+          if (fifo.size() > static_cast<std::size_t>(std::max(0, slots))) {
+            error(call, "Fixpipe outstanding TPOP count exceeds slot_num");
+          }
+        }
+        if (push && ((IsScalarAccPushQuant(quant) && !scalar_state.count(id)) ||
+                     (IsVectorAccPushQuant(quant) && !vector_state.count(id)))) {
+          error(call, "Fixpipe TPUSH requires preceding set_quant with the same pipe id in the same block");
+        }
+        auto tile = push ? (call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType()))
+                         : As<TileType>(call->GetType());
+        if (!tile) continue;
+        if (push && IsVectorAccPushQuant(quant) && vector_state.count(id)) {
+          auto columns = tile->shape_.size() == 2
+                             ? cross_core_pipe::TryGetNonNegativeConstInt(tile->shape_[1])
+                             : std::nullopt;
+          if (!columns || vector_state.at(id) < *columns) {
+            error(call, "Fixpipe vector controls do not cover the producer columns");
+          }
+        }
+        const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+        if (push) {
+          if (tile->memory_space_ != MemorySpace::Acc) {
+            error(call, "Fixpipe TPUSH requires an Acc source");
+          }
+          if (e.at("layout") == "nz2nz" && tile->dtype_ != DataType::FP32) {
+            error(call, "NZ2NZ no_convert currently requires an FP32 source");
+          }
+          if ((quant == "no_convert" && tile->dtype_ != DataType::FP32 && tile->dtype_ != DataType::INT32) ||
+              (quant != "no_convert" && tile->dtype_ != AccPushSourceDtype(quant))) {
+            error(call, "Fixpipe producer dtype does not match quant mode");
+          }
+          if (view.blayout != TileLayout::col_major || view.slayout != TileLayout::row_major ||
+              view.fractal != tile_view_semantics::kAccFractal) {
+            error(call, "Fixpipe producer requires NZ layout with fractal=1024");
+          }
+        } else {
+          const auto layout = e.at("layout");
+          const auto block = layout == "nz2nd" ? TileLayout::row_major : TileLayout::col_major;
+          const auto scatter = layout == "nz2nz" ? TileLayout::row_major : TileLayout::none_box;
+          if (view.blayout != block || view.slayout != scatter) {
+            error(call, "Fixpipe consumer layout does not match acc_push_epilogue.layout");
+          }
+          if (quant != "no_convert" && tile->dtype_ != AccPushResultDtype(quant, DataType::FP32)) {
+            error(call, "Fixpipe consumer dtype does not match quant mode");
+          }
+        }
+        auto bytes = cross_core_pipe::TryGetTileSlotSizeBytes(tile);
+        if (bytes && push && tile->dtype_.GetBit() == 32) {
+          const auto result_bytes =
+              static_cast<int64_t>(AccPushResultDtype(quant, tile->dtype_).GetBit() / 8);
+          *bytes = (*bytes / 4) * result_bytes;
+        }
+        if (!bytes || *bytes > init->GetKwarg<int>("slot_size", 0)) {
+          error(call, "Fixpipe converted tile exceeds slot_size or has a non-static footprint");
         }
       }
       for (auto saved = saved_inits.rbegin(); saved != saved_inits.rend(); ++saved) {

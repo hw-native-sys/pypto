@@ -223,6 +223,7 @@ void RecordTileSlotSize(PipeDirectionMetadata& metadata, const TypePtr& type) {
 void MergeDirectionMetadata(PipeDirectionMetadata& dst, const PipeDirectionMetadata& src) {
   dst.acc_push_layouts.insert(src.acc_push_layouts.begin(), src.acc_push_layouts.end());
   dst.has_acc_push |= src.has_acc_push;
+  if (!dst.non_fp32_acc_push) dst.non_fp32_acc_push = src.non_fp32_acc_push;
   dst.has_non_acc_push |= src.has_non_acc_push;
   dst.has_nonzero_split |= src.has_nonzero_split;
   dst.has_ops = dst.has_ops || src.has_ops;
@@ -352,6 +353,7 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
         auto tile = As<TileType>(call->args_[0]->GetType());
         const bool acc = tile && tile->memory_space_ == MemorySpace::Acc;
         metadata.c2v.has_acc_push |= acc;
+        if (acc && tile->dtype_ != DataType::FP32) metadata.c2v.non_fp32_acc_push = tile->dtype_;
         metadata.c2v.has_non_acc_push |= !acc;
         metadata.c2v.has_nonzero_split |= call->GetKwarg<int>("split", 0) != 0;
       } else if (IsOp(op, "tile.tpush_to_aic") && call->args_.size() == 1) {
@@ -448,6 +450,11 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
     CHECK_SPAN(dir_mask == 1 && !combined.c2v.has_non_acc_push && !combined.c2v.has_nonzero_split, span)
         << "Explicit C2V column-major/fractal layout requires an Acc-only C2V pipe with split=0; "
            "use explicit separate pipes or row-major move plus a real transpose";
+    if (layouts.count("nz2nz") && combined.c2v.non_fp32_acc_push) {
+      CHECK_SPAN(false, span) << "Automatic C2V NZ2NZ requires an FP32 accumulator, got "
+                              << combined.c2v.non_fp32_acc_push->ToString()
+                              << ". Use an unboxed ND or DN move";
+    }
     epilogue = AccPushEpilogue{{"layout", *layouts.begin()}, {"quant", "no_convert"}, {"relu", "no_relu"}};
   }
   auto common_slot_size = GetCommonSlotSizeBytes(combined);
