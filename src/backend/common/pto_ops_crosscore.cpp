@@ -303,29 +303,13 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-  const bool split_valid_rows = op->GetKwarg<bool>("split_valid_rows", false);
-  if (split_valid_rows) {
-    CHECK_SPAN(std::string_view(target) == "aiv" && split == ir::kSplitUpDown &&
-                   codegen.GetBackendHandler()->SplitsCubeToVectorTransportInHardware() &&
-                   !codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0)).has_value() &&
-                   !op->HasKwarg("lane_stride"),
-               op->span_)
-        << "split_valid_rows requires an untyped UP_DOWN hardware C2V split";
-    const auto source = GetTpushTileType(op->args_[0]);
-    CHECK_SPAN(source && source->shape_.size() == 2 && source->GetMemorySpace() == ir::MemorySpace::Acc &&
-                   source->dtype_ == DataType::FP32,
-               op->span_)
-        << "split_valid_rows requires an FP32 Acc tile";
-    const auto view = ir::tile_view_semantics::GetEffectiveTileView(*source);
-    CHECK_SPAN(IsSameDimExpr(view.valid_shape[1], source->shape_[1]), op->span_)
-        << "split_valid_rows requires full valid columns";
-    if (auto rows = As<ir::ConstInt>(view.valid_shape[0])) {
-      CHECK_SPAN(rows->value_ > 0 && rows->value_ % 2 == 0, op->span_)
-          << "split_valid_rows requires a positive even row count";
-    }
-  }
-  // Valid-row splitting keeps the pitch MAD used for compact L0C (see
-  // EmitTpushTransportValidShape). Each AIV consumes its half-slot's valid prefix.
+  // FixPipe divides the extent it reads. Keeping the compact Acc's valid rows
+  // both preserves MAD's pitch and places each half at the start of its lane's slot.
+  const bool split_valid_rows =
+      std::string_view(target) == "aiv" && split == ir::kSplitUpDown &&
+      codegen.GetBackendHandler()->SplitsCubeToVectorTransportInHardware() &&
+      !codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0)).has_value() && !op->HasKwarg("lane_stride") &&
+      ir::cross_core_pipe::GetA5C2VRowTailBoxStride(op->args_[0]->GetType()).has_value();
   const bool restore_valid_shape =
       !split_valid_rows && EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
 

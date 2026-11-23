@@ -948,7 +948,9 @@ class CompiledProgram(_RuntimeFacade):
                 f"No passes_dump/ under {self._output_dir}. "
                 "Compile with dump_passes=True to enable IR validation."
             )
-        validate_pass_ir_codegen_results(str(passes_dump), tensors, expected, rtol=rtol, atol=atol)
+        validate_pass_ir_codegen_results(
+            str(passes_dump), tensors, expected, rtol=rtol, atol=atol, backend_type=self.backend_type
+        )
 
     # --- Runtime artefacts (lazy) — see _RuntimeFacade -----------------------
     #

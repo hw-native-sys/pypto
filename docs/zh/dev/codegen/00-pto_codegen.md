@@ -402,12 +402,13 @@ PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位�
   （deferred）时是 box 的一半——因此从来不需要 box 的其余行，而把行扩成 box 会像上面一样
   使 compact 的 L0C 读取错位（64 行 box 只有 16 行有效、跨 `pl.split(UP_DOWN)` 时，2048 个
   有效元素中有 1792 个是错的）。非 compact 的 tile 无论 `validRow` 为何都按 `Rows` 读取
-  L0C，因此其切分传输仍保持完整 box。在由硬件把行拆给两个 lane 的后端上
-  （`BackendHandler::SplitsCubeToVectorTransportInHardware`，即 A5 的 dual-mode TMOV），
-  传输的行数*就是* lane 划分，因此切分 push 保持完整 box，两种 pitch 不同的 compact tile
-  在该后端上会被**拒绝**。*运行期*行 extent 也按同样方式传输：`pl.split` 和
-  `pl.split_aiv` 两种形式随后都会 pop 完整 box（见上文 popped tile 规则）；lane 1 载入它的整个
-  一半，超出有效 extent 的行是旧数据，但从不被当作数据使用。
+  L0C，因此其切分传输仍保持完整 box。对运行期 extent，A2/A3 消费者可以 pop 完整 box，
+  再限制有效范围。
+- A5 上，手写 `split=1` 的 C2V push 在整列有效、管道无 dtype 转换且未指定 lane stride 时，
+  按 compact FP32 Acc 尾块的有效行切分。每条 lane 的槽位按物理行数的一半预留，消费开头的
+  `validRow // 2` 行。有效行数要求正偶数，包括运行期值。物理和 compact 行距始终一致的运行期
+  尾块沿用物理分区，可以兼容奇数行。shard 和独立 split pass 生成的
+  lane stride 用于保留 lowering 选定的物理分区。物理分区与 compact 行距冲突时仍会在编译时报错。
 - 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
 - 对于手写 pop 的 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局

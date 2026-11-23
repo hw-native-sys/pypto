@@ -54,6 +54,7 @@
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -401,6 +402,9 @@ std::vector<ExprPtr> NormalizeShapeSequence(const nb::sequence& shape) {
 
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
+
+  ir.def("_get_a5_c2v_row_tail_box_stride", &cross_core_pipe::GetA5C2VRowTailBoxStride, nb::arg("type"),
+         "Return the box lane stride for an A5 compact FP32 C2V row tail, or None.");
 
   nb::enum_<HardwareLoopState>(ir, "HardwareLoopState")
       .value("Eligible", HardwareLoopState::Eligible)

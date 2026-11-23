@@ -15,7 +15,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from pypto import DataType, ir
+from pypto import DataType, backend, ir
 from pypto.debug import torch_codegen
 from pypto.debug.torch_codegen import TorchCodegen
 
@@ -1317,25 +1317,7 @@ def test_cross_core_split_merge_preserves_region_attrs():
     assert getattr(merged, "_pypto_full_shape", None) == (2, 4)
 
 
-def test_cross_core_split_valid_rows_partitions_a_short_tile():
-    ns: dict[str, Any] = {}
-    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
-
-    runtime = ns["_cross_core_rt"]
-    set_lane = ns["_set_subblock_idx"]
-    tile = torch.arange(16 * 2, dtype=torch.float32).reshape(16, 2)
-    setattr(tile, "_pypto_valid_shape", (8, 2))
-
-    runtime.push_to_aiv(tile, 1, split_valid_rows=True)
-    for lane in (0, 1):
-        set_lane(lane)
-        result = runtime.pop_from_aic(1)
-        assert result.shape == (8, 2)
-        assert getattr(result, "_pypto_valid_shape", None) == (4, 2)
-        torch.testing.assert_close(result[:4], tile[lane * 4 : (lane + 1) * 4])
-
-
-@pytest.mark.parametrize("rows", [8, 12])
+@pytest.mark.parametrize("rows", [96, 160, 192])
 def test_cross_core_split_valid_rows_uses_matmul_result_type(rows):
     """Matmul carries runtime row validity in IR even when its Torch result has no tile attribute."""
 
@@ -1344,27 +1326,27 @@ def test_cross_core_split_valid_rows_uses_matmul_result_type(rows):
         @pl.function(type=pl.FunctionType.AIC)
         def produce(
             self,
-            lhs: pl.Tensor[[16, 16], pl.FP32],
+            lhs: pl.Tensor[[192, 16], pl.FP32],
             rhs: pl.Tensor[[16, 16], pl.FP32],
             valid_rows: pl.Scalar[pl.INDEX],
         ):
             left = pl.move(
-                pl.load(lhs, [0, 0], [16, 16], valid_shape=[valid_rows, 16]), target_memory=pl.Mem.Left
+                pl.load(lhs, [0, 0], [192, 16], valid_shape=[valid_rows, 16]), target_memory=pl.Mem.Left
             )
             right = pl.move(pl.load(rhs, [0, 0], [16, 16]), target_memory=pl.Mem.Right)
             acc = pl.matmul(left, right)
-            pl.tpush_to_aiv(acc, split=1, split_valid_rows=True)
+            pl.tpush_to_aiv(acc, split=1)
 
     namespace: dict[str, Any] = {}
-    exec(torch_codegen(Producer), namespace)  # noqa: S102
-    lhs = torch.arange(16 * 16, dtype=torch.float32).reshape(16, 16)
+    exec(torch_codegen(Producer, backend_type=backend.BackendType.Ascend950), namespace)  # noqa: S102
+    lhs = torch.arange(192 * 16, dtype=torch.float32).reshape(192, 16)
     rhs = torch.eye(16)
     namespace["produce"](lhs, rhs, rows)
     half = rows // 2
     for lane in (0, 1):
         namespace["_set_subblock_idx"](lane)
         payload = namespace["_cross_core_rt"].pop_from_aic(1)
-        assert payload.shape == (8, 16)
+        assert payload.shape == (96, 16)
         assert getattr(payload, "_pypto_valid_shape", None) == (half, 16)
         torch.testing.assert_close(payload[:half], lhs[lane * half : (lane + 1) * half])
 

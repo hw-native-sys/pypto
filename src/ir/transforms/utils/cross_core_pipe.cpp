@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -30,6 +31,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
@@ -37,6 +39,7 @@
 #include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -141,6 +144,34 @@ std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr) {
   auto value = transform_utils::EvalConstInt(expr);
   if (!value.has_value() || *value < 0) return std::nullopt;
   return value;
+}
+
+std::optional<int> GetA5C2VRowTailBoxStride(const TypePtr& type) {
+  const auto tile = As<TileType>(type);
+  if (!tile || tile->shape_.size() != 2 || tile->dtype_ != DataType::FP32 ||
+      tile->GetMemorySpace() != MemorySpace::Acc) {
+    return std::nullopt;
+  }
+  const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+  if (view.compact != CompactMode::normal || view.valid_shape.size() != 2 ||
+      ProveValidExtentEqual(view.valid_shape[1], tile->shape_[1]) != ProofResult::kTrue ||
+      ProveValidExtentEqual(view.valid_shape[0], tile->shape_[0]) == ProofResult::kTrue) {
+    return std::nullopt;
+  }
+  const auto box_rows = TryGetNonNegativeConstInt(tile->shape_[0]);
+  if (!box_rows || *box_rows == 0 || *box_rows % 2 != 0 || *box_rows / 2 > std::numeric_limits<int>::max()) {
+    return std::nullopt;
+  }
+  const auto rows = transform_utils::EvalConstInt(view.valid_shape[0]);
+  if (rows && (*rows <= 0 || *rows % 2 != 0 || *rows > *box_rows)) {
+    return std::nullopt;
+  }
+  // A runtime tail in a single fractal can already use the box pitch, even
+  // when its runtime extent is odd. Keep that working partition.
+  if (!rows && AccPitchesCoincide(view.valid_shape[0], tile->shape_[0])) {
+    return std::nullopt;
+  }
+  return static_cast<int>(*box_rows / 2);
 }
 
 std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type) {

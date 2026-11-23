@@ -743,10 +743,8 @@ void CheckOpDrivenBoundaryOperands(const std::vector<StmtPtr>& stmts,
 
 std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0, int lane_stride = 0) {
   std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split)}};
-  // The partition stride only rides along when a ragged boundary was rebalanced
-  // (when supplied explicitly). PTO codegen ignores it — it prints only
-  // id and split — but the torch reference runtime needs it to cut the two lanes
-  // where the compiler did.
+  // Carry an explicit stride when balancing a ragged boundary or preserving
+  // the box partition during A5 codegen. Torch uses it to split the same bands.
   if (lane_stride > 0) {
     kwargs.emplace_back("lane_stride", std::any(lane_stride));
   }
@@ -778,6 +776,11 @@ int BoundaryTransportSplitCode(const CVBoundaryMove& bm, const Span& span) {
 
 CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0,
                     int lane_stride = 0) {
+  // The generated TPOP and AIV offsets already use the authored shard's bands.
+  if (op_name == "tile.tpush_to_aiv" && split == kSplitUpDown && lane_stride == 0 &&
+      PassContext::Current()->GetBackendHandler()->SplitsCubeToVectorTransportInHardware()) {
+    lane_stride = cross_core_pipe::GetA5C2VRowTailBoxStride(tile->GetType()).value_or(0);
+  }
   return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split, lane_stride), span);
 }
 

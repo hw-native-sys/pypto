@@ -432,12 +432,17 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
   deferred one — so the box rows were never needed, and widening them skews the compact L0C read
   exactly as above (1792 of 2048 valid elements wrong for a 64-row box valid to 16 across
   `pl.split(UP_DOWN)`). A non-compact tile reads L0C at `Rows` whatever its `validRow`, so its split
-  transport keeps the full box. Where the push splits the rows between the lanes in hardware
-  (`BackendHandler::SplitsCubeToVectorTransportInHardware`, A5's dual-mode TMOV), the transported
-  rows *are* the lane partition, so a split push keeps the box and a compact tile whose two pitches
-  differ is **rejected** there. A *runtime* row extent is transported the same way: both the
-  `pl.split` and the `pl.split_aiv` forms then pop the full box (see the popped-tile rule above);
-  lane 1 loads its whole half, and the rows past the valid extent are stale but never treated as data.
+  transport keeps the full box. With a runtime extent, the A2/A3 consumer may pop the full box
+  and apply the valid extent after the pop.
+- On A5, a hand-written `split=1` C2V push of a compact FP32 Acc tail uses its valid rows when the
+  columns are full and the pipe has no dtype conversion or explicit lane stride. The consumer
+  reserves half the physical rows and uses the first `validRow // 2` rows in each slot. The
+  valid row count must be positive and even, including at runtime. A runtime tail whose box and
+  compact pitches always match keeps its box partition, which also supports odd row counts.
+  The lane stride recorded by
+  generated shard and standalone split passes preserves the physical partition chosen by their
+  lowering. For a physical partition, incompatible compact and box pitches still produce a
+  compile-time diagnostic.
 - When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store. The full-box Cube-to-Vector transport above overrides this for a statically-shaped, non-empty partial pop, because `pto.treshape` carries no valid-row/valid-col operands and so can only restore *static* logical extents.
 - For split consumers of a hand-written pop, `SplitVectorKernel` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes

@@ -21,6 +21,8 @@ import pypto.language as pl
 from pypto import DataType
 from pypto import ir as _ir
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
+from pypto.pypto_core import backend as _backend
+from pypto.pypto_core import ir as _ir_core
 
 # ---------------------------------------------------------------------------
 # DataType -> torch dtype string
@@ -303,20 +305,20 @@ class _CrossCoreRuntime:
 
         return merged
 
-    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0, *, split_valid_rows=False, valid_shape=None):
+    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0, *, valid_shape=None):
         split = int(split)
         lane_stride = int(lane_stride)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
-            if split_valid_rows:
-                if split != 1 or lane_stride or queues.c2v_dtype is not None or tile.dtype != torch.float32:
-                    raise ValueError("split_valid_rows requires an untyped UP_DOWN split of an FP32 tile")
-                if valid_shape is None:
-                    valid_shape = getattr(tile, "_pypto_valid_shape", tile.shape)
+            if queues.c2v_dtype is not None:
+                valid_shape = None
+            if valid_shape is not None:
+                if split != 1 or lane_stride or tile.dtype != torch.float32:
+                    raise ValueError("A5 valid-row partition requires an UP_DOWN split of an FP32 tile")
                 rows, cols = _coerce_shape(valid_shape)
                 if not 0 < rows <= tile.shape[0] or rows % 2 or cols != tile.shape[1]:
                     raise ValueError(
-                        "split_valid_rows requires a positive even row count within the tile and full columns"
+                        "A5 valid-row partition requires positive even rows within the tile and full columns"
                     )
                 valid_shape = (rows, cols)
                 lane_stride = rows // 2
@@ -1077,15 +1079,13 @@ def _pipe_id_kwarg(kw: dict[str, Any]) -> str:
 
 
 def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any], *, valid_shape: str | None = None) -> str:
-    # The stride is emitted only when a ragged boundary was rebalanced, so every
-    # other kernel keeps the two-argument form.
+    # Generated boundaries can explicitly carry the stride used by their TPOP.
     stride = _lane_stride_kwarg(kw)
     stride_arg = f", {stride}" if stride else ""
-    valid_rows_arg = ", split_valid_rows=True" if kw.get("split_valid_rows", False) else ""
     valid_shape_arg = f", valid_shape={valid_shape}" if valid_shape is not None else ""
     return (
         f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}"
-        f"{_pipe_id_kwarg(kw)}{valid_rows_arg}{valid_shape_arg})"
+        f"{_pipe_id_kwarg(kw)}{valid_shape_arg})"
     )
 
 
@@ -1656,7 +1656,11 @@ class TorchCodegen(_ir.IRVisitor):
     """Emit executable PyTorch code from PyPTO IR."""
 
     def __init__(
-        self, *, check_shapes: bool = False, group_meta: dict[str, dict[str, Any]] | None = None
+        self,
+        *,
+        check_shapes: bool = False,
+        group_meta: dict[str, dict[str, Any]] | None = None,
+        backend_type: _backend.BackendType | None = None,
     ) -> None:
         super().__init__()
         self._lines: list[str] = []
@@ -1674,6 +1678,12 @@ class TorchCodegen(_ir.IRVisitor):
         self._yield_targets: list[str] = []  # names to assign on yield
         self._check_shapes: bool = check_shapes
         self._group_meta: dict[str, dict[str, Any]] = group_meta or {}
+        if backend_type is None and _backend.is_backend_configured():
+            backend_type = _backend.get_backend_type()
+        self._hardware_c2v_split = False
+        if backend_type is not None:
+            handler = _backend.get_backend_instance(backend_type).get_handler()
+            self._hardware_c2v_split = handler.splits_cube_to_vector_transport_in_hardware()
 
     # -- helpers --
 
@@ -1986,8 +1996,13 @@ class TorchCodegen(_ir.IRVisitor):
             return False
         return True
 
-    def _tpush_valid_shape(self, tile_type: _ir.Type) -> str | None:
-        if not isinstance(tile_type, _ir.TileType) or len(tile_type.shape) != 2:
+    def _tpush_valid_shape(self, tile_type: _ir.Type, kw: dict[str, Any]) -> str | None:
+        if not self._hardware_c2v_split or kw.get("split") != 1 or "lane_stride" in kw:
+            return None
+        if (
+            not isinstance(tile_type, _ir.TileType)
+            or _ir_core._get_a5_c2v_row_tail_box_stride(tile_type) is None
+        ):
             return None
         view = tile_type.get_effective_tile_view()
         rows, cols = (self._visit_expr_str(dim) for dim in view.valid_shape)
@@ -2020,8 +2035,8 @@ class TorchCodegen(_ir.IRVisitor):
                     self._expr_result = f"{arg_strs[0]}.mT"
                 else:
                     self._expr_result = arg_strs[0]
-        elif op_name == _ir.get_op("tile.tpush_to_aiv").name and kw.get("split_valid_rows", False):
-            valid_shape = self._tpush_valid_shape(op.args[0].type)
+        elif op_name == _ir.get_op("tile.tpush_to_aiv").name:
+            valid_shape = self._tpush_valid_shape(op.args[0].type, kw)
             self._expr_result = _handle_tpush_to_aiv(arg_strs, kw, valid_shape=valid_shape)
         elif handler is not None:
             self._expr_result = handler(arg_strs, kw)
@@ -2292,6 +2307,7 @@ def _collect_pass_ir_files(ir_dir: str) -> list[Path]:
 
 def _build_codegen_entry(
     ir_file: Path,
+    backend_type: _backend.BackendType | None,
 ) -> tuple[_ir.Function, Callable[..., Any]]:
     binary_path = ir_file.with_suffix(".msgpack")
     parsed = _ir.deserialize(binary_path.read_bytes()) if binary_path.is_file() else pl.loads(str(ir_file))
@@ -2301,7 +2317,7 @@ def _build_codegen_entry(
         )
 
     entry_func = _select_entry_function(parsed)
-    code = torch_codegen(parsed, check_shapes=True)
+    code = torch_codegen(parsed, check_shapes=True, backend_type=backend_type)
     namespace: dict[str, Any] = {}
     exec(code, namespace)  # noqa: S102
 
@@ -2349,7 +2365,12 @@ def _compare_expected_tensors(
 # ---------------------------------------------------------------------------
 
 
-def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = False) -> str:
+def torch_codegen(
+    node: _ir.Program | _ir.Function,
+    *,
+    check_shapes: bool = False,
+    backend_type: _backend.BackendType | None = None,
+) -> str:
     """Emit executable PyTorch code from a PyPTO IR Program or Function.
 
     The generated code can be exec()'d with torch available to numerically
@@ -2359,6 +2380,7 @@ def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = Fals
         node: A Program or Function IR node
         check_shapes: If True, emit runtime assertions to verify that every
             tensor/tile variable's shape and dtype match the IR type annotations.
+        backend_type: Backend whose cross-core transport is replayed. Defaults to the configured backend.
 
     Returns:
         String of executable Python/PyTorch code
@@ -2367,7 +2389,7 @@ def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = Fals
     if isinstance(node, _ir.Program):
         group_meta = _build_group_meta(node)
 
-    cg = TorchCodegen(check_shapes=check_shapes, group_meta=group_meta)
+    cg = TorchCodegen(check_shapes=check_shapes, group_meta=group_meta, backend_type=backend_type)
     lines = [_PREAMBLE]
     if group_meta:
         lines.append(f"_GROUP_META.update({group_meta!r})")
@@ -2393,6 +2415,7 @@ def validate_pass_ir_codegen_results(
     *,
     rtol: float = 5e-2,
     atol: float = 5e-2,
+    backend_type: _backend.BackendType | None = None,
 ) -> None:
     """Validate torch_codegen correctness on each pass IR file in a directory.
 
@@ -2405,6 +2428,7 @@ def validate_pass_ir_codegen_results(
         expected: Expected tensors keyed by tensor name.
         rtol: Relative tolerance for ``torch.allclose``.
         atol: Absolute tolerance for ``torch.allclose``.
+        backend_type: Backend whose cross-core transport is replayed.
 
     Prints:
         Per-pass validation summary with max absolute differences.
@@ -2425,7 +2449,7 @@ def validate_pass_ir_codegen_results(
     ir_files = _collect_pass_ir_files(ir_dir)
 
     for ir_file in ir_files:
-        entry_func, entry = _build_codegen_entry(ir_file)
+        entry_func, entry = _build_codegen_entry(ir_file, backend_type)
         run_tensors = {k: v.clone() for k, v in validated_tensors.items()}
         args = [_resolve_tensor_from_dict(param.name_hint, run_tensors) for param in entry_func.params]
         entry(*args)

@@ -88,6 +88,9 @@ constexpr int kDefaultAutoPipeSlotNum = 2;
 /// negative is nonsense rather than a value to propagate. For the plain
 /// signed reading, use ``transform_utils::EvalConstInt``, which this wraps.
 std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr);
+// Return the box half for a compact FP32 Acc row tail that A5 can divide at
+// half its effective valid rows. Runtime valid row counts must be positive and even.
+std::optional<int> GetA5C2VRowTailBoxStride(const TypePtr& type);
 std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type);
 void RecordObservedSlotSize(PipeDirectionMetadata& metadata, int64_t slot_size);
 void RecordTileSlotSize(PipeDirectionMetadata& metadata, const TypePtr& type);

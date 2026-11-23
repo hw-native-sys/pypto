@@ -379,7 +379,6 @@ def tpush_to_aiv(
     tile: Tile,
     *,
     split: int,
-    split_valid_rows: bool = False,
     lane_stride: int | None = None,
     id: int | None = None,
     span: Span | None = None,
@@ -390,23 +389,23 @@ def tpush_to_aiv(
     slot with [`tfree_to_aic`][pypto.language.system.tfree_to_aic]; ``split`` and ``id`` must match across all
     three.
 
+    For a hand-written A5 C2V pipe without dtype conversion, ``split=1`` divides a compact FP32 Acc row
+    tail with full columns at half its valid rows. The valid row count must be positive and even.
+    Each AIV reads ``valid_rows // 2`` rows from the start of its physical half-slot.
+
     Args:
         tile: Tile to send. Its Cube-side buffer stays live until the consumer frees the slot.
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
             axes over an odd extent). Selects the axis along which the two AIV
             lanes divide the tile, and how their extents relate; 0 sends it whole.
-        split_valid_rows: On A5, divide an FP32 Acc tile at half its actual valid
-            rows. Use split=1 with a positive even valid row count and full columns.
-            Each AIV lane receives valid_rows // 2 rows at the start of its tile.
         lane_stride: Partition stride carried when a ragged boundary was balanced
-            across the two AIV lanes; omit for the default box partition.
+            across the two AIV lanes, or to preserve an existing box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     return _ir_ops.tpush_to_aiv(
         tile.unwrap(),
         split=split,
-        split_valid_rows=split_valid_rows,
         lane_stride=lane_stride,
         id=id,
         span=span,
