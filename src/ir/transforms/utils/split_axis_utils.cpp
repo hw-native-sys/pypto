@@ -38,6 +38,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/printer.h"
@@ -856,15 +857,32 @@ void RejectDeferredPadFill(bool deferred, const CallPtr& call, const char* cross
          "itself";
 }
 
-ExprPtr PopLaneIndex(const CallPtr& call, const ExprPtr& physical_lane) {
+ExprPtr PopLaneIndex(const CallPtr& call, const ExprPtr& physical_lane,
+                     const std::unordered_map<const Var*, VarPtr>& var_replacements) {
   if (call->args_.empty()) return physical_lane;
   const auto& lane = call->args_.front();
   if (auto constant = As<ConstInt>(lane)) return MakeIndexConst(constant->value_, lane->span_);
-  return MakeCast(lane, DataType::INDEX, lane->span_);
+  // Loop initializers are substituted before the backedge is processed. Use
+  // the replacement scalar bindings now so both edges see the same lane.
+  class RemapLane : public IRMutator {
+   public:
+    explicit RemapLane(const std::unordered_map<const Var*, VarPtr>& replacements)
+        : replacements_(replacements) {}
+
+   private:
+    ExprPtr VisitExpr_(const VarPtr& var) override {
+      auto it = replacements_.find(var.get());
+      return it == replacements_.end() ? var : it->second;
+    }
+    ExprPtr VisitExpr_(const IterArgPtr& arg) override { return VisitExpr_(VarPtr(arg)); }
+
+    const std::unordered_map<const Var*, VarPtr>& replacements_;
+  };
+  return MakeCast(RemapLane(var_replacements).VisitExpr(lane), DataType::INDEX, lane->span_);
 }
 
 CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int split_dim,
-                                   const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
+                                   const ExprPtr& pop_lane, const ExprPtr& lane_stride) {
   // NOT widened for a runtime extent, unlike the boundary ops in
   // LocalizeExplicitBoundaryValid. A hand-written tpop declares its own
   // valid_shape and its consumers inherit that declaration, so widening the pop
@@ -877,7 +895,6 @@ CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int spli
   // The transport's lane operand selects the GM band. Its valid extent must
   // describe that same logical band, even when it differs from the physical
   // AIV executing the pop. Shape metadata uses INDEX while PTOAS takes i64.
-  const auto pop_lane = PopLaneIndex(call, subblock_idx);
   auto new_result_type = HalveTileShape(call->GetType(), split_dim, pop_lane, lane_stride);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
@@ -1156,24 +1173,17 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     }
     if (IsOp(call, "tile.tpop_from_aic")) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
+      const auto pop_lane = PopLaneIndex(call, subblock_idx, var_replacements);
       auto new_call = RebuildTpopWithHalvedShape(
           call, ShardSplitCode(mode, call->GetType(), split_dim, lane_stride, op_name, call->span_),
-          split_dim, subblock_idx, lane_stride);
+          split_dim, pop_lane, lane_stride);
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
         TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim]), split_dim};
-        if (!call->args_.empty()) {
-          const auto physical_type =
-              As<TileType>(HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride));
-          const auto logical_type = As<TileType>(new_call->GetType());
-          // Equal, fully populated halves need no provenance override. Keeping
-          // their ordinary facts lets existing loop carries remain compatible.
-          if (!tile_view_semantics::ShapeExprListsEquivalent(GetValidShape(physical_type),
-                                                             GetValidShape(logical_type))) {
-            info.validity_lane = PopLaneIndex(call, subblock_idx);
-          }
-        }
+        // A currently full half can be narrowed by a later consumer. Retain
+        // its selected lane even when today's extents do not depend on it.
+        if (!call->args_.empty()) info.validity_lane = pop_lane;
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
       }

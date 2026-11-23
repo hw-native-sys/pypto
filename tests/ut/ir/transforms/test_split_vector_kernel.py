@@ -1246,15 +1246,20 @@ def _assert_extent_after_substitution(expr, values, expected):
 
 
 @pytest.mark.parametrize(
-    ("mode", "shape", "view", "axis"),
+    ("mode", "shape", "view", "axis", "narrow_after_pop"),
     [
-        ("UP_DOWN", [31, 16], "", 0),
-        ("LEFT_RIGHT", [16, 31], "", 1),
-        ("UP_DOWN", [32, 16], ", pl.TileView(valid_shape=[31, 16])", 0),
+        ("UP_DOWN", [31, 16], "", 0, False),
+        ("LEFT_RIGHT", [16, 31], "", 1, False),
+        ("UP_DOWN", [32, 16], ", pl.TileView(valid_shape=[31, 16])", 0, False),
+        pytest.param("UP_DOWN", [32, 16], "", 0, True, id="even_then_narrow_rows"),
+        pytest.param("LEFT_RIGHT", [16, 32], "", 1, True, id="even_then_narrow_cols"),
     ],
 )
 @pytest.mark.parametrize("lane_kind", ["omit", "zero", "one", "swapped"])
-def test_explicit_pop_lane_localizes_odd_validity(mode, shape, view, axis, lane_kind):
+@pytest.mark.parametrize("carry", [False, True])
+def test_explicit_pop_lane_localizes_odd_validity(
+    mode, shape, view, axis, narrow_after_pop, lane_kind, carry
+):
     """The 31-cell band is 16/15 by LOGICAL lane, including its consumers.
 
     Output placement still follows the executing physical AIV. A swapped pop
@@ -1263,7 +1268,11 @@ def test_explicit_pop_lane_localizes_odd_validity(mode, shape, view, axis, lane_
     """
     operand = {"omit": "", "zero": "0", "one": "1", "swapped": "lane"}[lane_kind]
     lane_kw = f", aiv_subblockid={operand}" if operand else ""
-    split = 3 if axis == 0 else 4
+    split = (1 if axis == 0 else 2) if narrow_after_pop else (3 if axis == 0 else 4)
+    loop = "for step in pl.range(2):\n            value = pl.tile.add(value, 1.0)" if carry else ""
+    valid = [31, 16] if axis == 0 else [16, 31]
+    narrow = f"narrowed = pl.tile.set_validshape(value, {valid[0]}, {valid[1]})" if narrow_after_pop else ""
+    consumer_input = "narrowed" if narrow_after_pop else "value"
     before = pl.parse_program(f"""
 @pl.program
 class Before:
@@ -1275,7 +1284,10 @@ class Before:
         received: pl.Tile[{shape}, pl.FP32, pl.Mem.Vec{view}] = pl.system.tpop_from_aic(
             split={split}{lane_kw}
         )
-        incremented = pl.tile.add(received, 1.0)
+        value = pl.tile.add(received, 1.0)
+        {loop}
+        {narrow}
+        incremented = pl.tile.add({consumer_input}, 1.0)
         pl.system.tfree_to_aic(received)
         saved = pl.tile.store(incremented, [0, 0], out)
         return saved
@@ -1284,31 +1296,40 @@ class Before:
     tiles = {}
     physical_vars = []
     stores = []
+    physical_name = ir.get_op("tile.get_subblock_idx").name
+    pop_name = ir.get_op("tile.tpop_from_aic").name
+    add_name = ir.get_op("tile.adds").name
+    store_name = ir.get_op("tile.store").name
 
     class Collect(ir.IRVisitor):
         def visit_assign_stmt(self, op):
             if isinstance(op.value, ir.Call):
                 name = op.value.op.name
-                if name == "tile.get_subblock_idx":
+                if name == physical_name:
                     physical_vars.append(op.var)
-                elif name in ("tile.tpop_from_aic", "tile.adds"):
+                elif name in (pop_name, add_name):
                     tiles[name] = op
-                elif name == "tile.store":
+                elif name == store_name:
                     stores.append(op.value)
             super().visit_assign_stmt(op)
 
     Collect().visit_program(after)
     assert len(tiles) == 2 and physical_vars and len(stores) == 1
-    pop = tiles["tile.tpop_from_aic"].value
+    pop = tiles[pop_name].value
     assert len(pop.args) == (0 if lane_kind == "omit" else 1)
     for physical in (0, 1):
         logical = {"omit": physical, "zero": 0, "one": 1, "swapped": 1 - physical}[lane_kind]
         values = {var.name_hint: physical for var in physical_vars}
         if lane_kind == "swapped":
             values[pop.args[0].name_hint] = logical
-        for assignment in tiles.values():
-            extent = assignment.var.type.tile_view.valid_shape[axis]
-            _assert_extent_after_substitution(extent, values, 16 if logical == 0 else 15)
+        for name, assignment in tiles.items():
+            tile_type = assignment.var.type
+            assert isinstance(tile_type, ir.TileType)
+            extent = tile_type.get_effective_tile_view().valid_shape[axis]
+            expected = 16 if logical == 0 else 15
+            if narrow_after_pop and name == pop_name:
+                expected = 16
+            _assert_extent_after_substitution(extent, values, expected)
         # Selecting another input band must not relocate the physical output.
         _assert_extent_after_substitution(stores[0].args[1].elements[axis], values, physical * 16)
 
