@@ -640,3 +640,7 @@ def test_fixpipe_rejects_unvalidated_a2a3_target():
     backend.set_backend_type(backend.BackendType.Ascend910)
     with pytest.raises(Error, match="currently require Ascend950"):
         _generate(_program())
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -10,6 +10,7 @@
 """Non-square C2V layout regression: physical DN bytes must match the view."""
 
 import pypto.language as pl
+import pytest
 import torch
 from harness import st
 
@@ -95,3 +96,7 @@ def _case(kernel, signed, buffer_ir):
 )
 def test_non_square_c2v(case_run):
     case_run.assert_passed()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

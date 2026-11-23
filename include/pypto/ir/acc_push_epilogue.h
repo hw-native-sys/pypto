@@ -20,8 +20,7 @@
 
 namespace pypto::ir {
 
-/// Structured, value-semantic pipe contract. Exactly layout/quant/relu are required.
-/// The map representation survives generic Call kwargs, serialization and printing.
+/// Value-semantic pipe record with required layout, quant and relu fields.
 using AccPushEpilogue = std::map<std::string, std::string>;
 
 inline std::string ValidateAccPushEpilogue(const AccPushEpilogue& e) {

@@ -698,6 +698,4 @@ A5 两端 init 接受 `nosplit` 和 `acc_push_epilogue={layout, quant, relu}`。
 
 `MixedKernelExpanded` 校验类型、物理布局、转换后槽位字节数、本地环容量及两端 id。当前 PTOAS 要求同 id 使用同一消费者 tile 类型。验证器检查直线代码和简单布尔分支的端点计数，包括共享 Group 参数和字面量实参。跟踪嵌套块内尚未释放的槽位，验证环深度及 FIFO 释放顺序。其他手写控制流由作者保证两端消息配对。
 
-A5 显式非 ND Acc→Vec move 将同一布局传给两端 init，Buffer IR 同样适用。省略布局时保持原管道。transpose scratch 使用自身 SSA 类型。
-
-序列化、结构比较/哈希和打印保留 `ir::AccPushEpilogue`。`PipeDirectionMetadata` 记录 `acc_push_layouts`、`has_acc_push`、`has_non_acc_push` 、`has_nonzero_split` 和 `non_fp32_acc_push`。`CreateInitializePipe` 在两端写入契约。GlobalTensor FIFO 有独立契约。`test_c2v_fixpipe.py` 覆盖两端校验、往返和两种 Buffer IR 模式的真实 PTOAS 编译。JIT 系统用例以精确整数 golden 和行优先真实转置为对照，核对非方形 DN 转置视图。显式 AIC/AIV JIT 核由 `jit.incore` 声明，由 `CORE_GROUP` 调度。
+A5 显式非 ND Acc→Vec move 将同一布局传给两端 init，Buffer IR 同样适用。省略布局时保持原管道。transpose scratch 使用自身 SSA 类型。序列化、结构比较/哈希和打印保留 `ir::AccPushEpilogue`。`PipeDirectionMetadata` 记录 `acc_push_layouts`、`has_acc_push`、`has_non_acc_push` 、`has_nonzero_split` 和 `non_fp32_acc_push`。`CreateInitializePipe` 在两端写入契约。GlobalTensor FIFO 有独立契约。`test_c2v_fixpipe.py` 覆盖两端校验、往返和两种 Buffer IR 模式的真实 PTOAS 编译。JIT 系统用例以精确整数 golden 和行优先真实转置为对照，核对非方形 DN 转置视图。显式 AIC/AIV JIT 核由 `jit.incore` 声明，由 `CORE_GROUP` 调度。
