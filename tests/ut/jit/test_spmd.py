@@ -75,15 +75,17 @@ def test_inline_while_carries_counter_and_store_result(tmp_path, ascend_backend)
     assert main is not None
     Collect().visit_function(main)
     (loop,) = loops
-    cache_arg, row_arg = sorted(loop.iter_args, key=lambda arg: isinstance(arg.type, ir.ScalarType))
+    cache_arg = next(arg for arg in loop.iter_args if isinstance(arg.type, ir.TensorType))
+    row_arg = next(arg for arg in loop.iter_args if isinstance(arg.type, ir.ScalarType))
     assert cache_arg.initValue.same_as(main.params[0])
     assert loop.condition.left.same_as(row_arg)
+    store_name = ir.get_op("tile.store").name
     first, second = [
         stmt
         for stmt in loop.body.stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "tile.store"
+        and stmt.value.op.name == store_name
     ]
     assert isinstance(first.value, ir.Call) and isinstance(second.value, ir.Call)
     assert first.value.args[-1].same_as(cache_arg)
