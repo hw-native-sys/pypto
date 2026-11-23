@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <map>
@@ -24,6 +25,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core_affinity_kind.h"
@@ -593,17 +595,20 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const bool has_epilogue = init->HasKwarg("acc_push_epilogue");
       const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
       if (has_epilogue) {
-        if (handler && !handler->SupportsC2VFixpipeEpilogue())
+        if (handler && !handler->SupportsC2VFixpipeEpilogue()) {
           error(init, "Cross-core Fixpipe epilogues currently require Ascend950 (A5); A2/A3 is not enabled");
+        }
         const auto schema_error = ValidateAccPushEpilogue(e);
         if (!schema_error.empty()) {
           error(init, schema_error);
           continue;
         }
-        if (local.duplicate_ids.count(id))
+        if (local.duplicate_ids.count(id)) {
           error(init, "Fixpipe pipe id requires exactly one initialize_pipe");
-        if (e.at("layout") == "nz2nz" && e.at("quant") != "no_convert")
+        }
+        if (e.at("layout") == "nz2nz" && e.at("quant") != "no_convert") {
           error(init, "NZ2NZ currently supports no_convert only; use NZ2ND/NZ2DN for quantization");
+        }
       }
       if (has_epilogue &&
           (init->GetKwarg<int>("dir_mask", 0) != 1 || !init->GetKwarg<bool>("nosplit", false))) {
@@ -614,29 +619,33 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       auto def = buffer ? local.definitions.find(buffer.get()) : local.definitions.end();
       if (def == local.definitions.end() ||
           (!IsOp(def->second, "system.reserve_buffer") && !IsOp(def->second, "system.import_peer_buffer"))) {
-        if (has_epilogue)
+        if (has_epilogue) {
           error(init, "Fixpipe c2v_consumer_buf must trace to reserve_buffer/import_peer_buffer");
+        }
         continue;
       }
       if (has_epilogue && IsOp(def->second, "system.reserve_buffer")) {
         const auto name = def->second->GetKwarg<std::string>("name", "");
-        if (incoming[{func->name_, name, id}] != 1)
+        if (incoming[{func->name_, name, id}] != 1) {
           error(init, "Fixpipe consumer requires exactly one peer producer importing its buffer and pipe id");
+        }
         const int slots = init->GetKwarg<int>("slot_num", cross_core_pipe::GetPtoasImplicitSlotNum(1));
         const int requested_local_slots = init->GetKwarg<int>("local_slot_num", slots);
         const int local_slots = handler ? handler->GetC2VConsumerRingSlotCount(slots, requested_local_slots)
                                         : requested_local_slots;
         const int64_t required = static_cast<int64_t>(init->GetKwarg<int>("slot_size", 0)) * local_slots;
-        if (required > def->second->GetKwarg<int>("size", 0))
+        if (required > def->second->GetKwarg<int>("size", 0)) {
           error(init, "Fixpipe reserve_buffer requires at least " + std::to_string(required) +
                           " bytes for its local ring");
+        }
       }
       if (!IsOp(def->second, "system.import_peer_buffer")) continue;
       const auto peer_name = def->second->GetKwarg<std::string>("peer_func", "");
       auto peer = info.find(peer_name);
       if (peer == info.end() || !peer->second.inits.count(id)) {
-        if (has_epilogue)
+        if (has_epilogue) {
           error(init, "Fixpipe requires a matching peer initialize_pipe with the same pipe id");
+        }
         continue;
       }
       const auto peer_init = peer->second.inits.at(id);
@@ -674,14 +683,17 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           auto src = push->args_.empty() ? nullptr : As<TileType>(push->args_[0]->GetType());
           if (src) source_signatures.insert(signature(src, AccPushResultDtype(e.at("quant"), src->dtype_)));
         }
-        if (source_signatures.size() > 1)
+        if (source_signatures.size() > 1) {
           error(init,
                 "Current PTOAS requires one physical payload shape/converted dtype per Fixpipe pipe id; "
                 "use separate explicit pipe ids for different payloads");
+        }
         for (const auto& pop : pops->second) {
           auto dst = As<TileType>(pop->GetType());
-          if (dst && (source_signatures.size() != 1 || !source_signatures.count(signature(dst, dst->dtype_))))
+          if (dst &&
+              (source_signatures.size() != 1 || !source_signatures.count(signature(dst, dst->dtype_)))) {
             error(pop, "Fixpipe producer/consumer shape or converted dtype mismatch");
+          }
         }
       }
     }
@@ -723,11 +735,13 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
               auto it = visible.find(id);
               if (it == visible.end()) {
                 if (scalar || vector ||
-                    (local.inits.count(id) && local.inits.at(id)->HasKwarg("acc_push_epilogue")))
+                    (local.inits.count(id) && local.inits.at(id)->HasKwarg("acc_push_epilogue"))) {
                   error(call, "Fixpipe operation requires a dominating initialize_pipe for its pipe id");
+                }
               } else if (!it->second->HasKwarg("acc_push_epilogue")) {
-                if (scalar || vector)
+                if (scalar || vector) {
                   error(call, "set_quant requires an acc_push_epilogue on the matching pipe id");
+                }
               } else {
                 const auto init = it->second;
                 const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
@@ -746,18 +760,20 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
                                        ? cross_core_pipe::TryGetNonNegativeConstInt(payload->shape_[1])
                                        : std::nullopt;
                     if (!columns || payload->memory_space_ != MemorySpace::Scaling ||
-                        (payload->dtype_ != DataType::INT64 && payload->dtype_ != DataType::UINT64))
+                        (payload->dtype_ != DataType::INT64 && payload->dtype_ != DataType::UINT64)) {
                       error(call, "set_quant_vector requires static packed 64-bit loc=scaling controls");
-                    else
+                    } else {
                       vector_state[id] = *columns;
+                    }
                   }
                 } else {
                   if (call->GetKwarg<int>("split", 0) != 0) error(call, "Fixpipe transfers require split=0");
                   if (push && ((IsScalarAccPushQuant(quant) && !scalar_state.count(id)) ||
-                               (IsVectorAccPushQuant(quant) && !vector_state.count(id))))
+                               (IsVectorAccPushQuant(quant) && !vector_state.count(id)))) {
                     error(
                         call,
                         "Fixpipe TPUSH requires preceding set_quant with the same pipe id in the same block");
+                  }
                   auto tile = push ? (call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType()))
                                    : (pop ? As<TileType>(call->GetType()) : nullptr);
                   if (tile && (push || pop)) {
@@ -765,37 +781,48 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
                       auto columns = tile->shape_.size() == 2
                                          ? cross_core_pipe::TryGetNonNegativeConstInt(tile->shape_[1])
                                          : std::nullopt;
-                      if (!columns || vector_state.at(id) < *columns)
+                      if (!columns || vector_state.at(id) < *columns) {
                         error(call, "Fixpipe vector controls do not cover the producer columns");
+                      }
                     }
                     const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
                     if (push) {
-                      if (tile->memory_space_ != MemorySpace::Acc)
+                      if (tile->memory_space_ != MemorySpace::Acc) {
                         error(call, "Fixpipe TPUSH requires an Acc source");
-                      if (e.at("layout") == "nz2nz" && tile->dtype_ != DataType::FP32)
+                      }
+                      if (e.at("layout") == "nz2nz" && tile->dtype_ != DataType::FP32) {
                         error(call, "NZ2NZ no_convert currently requires an FP32 source");
+                      }
                       if ((quant == "no_convert" && tile->dtype_ != DataType::FP32 &&
                            tile->dtype_ != DataType::INT32) ||
-                          (quant != "no_convert" && tile->dtype_ != AccPushSourceDtype(quant)))
+                          (quant != "no_convert" && tile->dtype_ != AccPushSourceDtype(quant))) {
                         error(call, "Fixpipe producer dtype does not match quant mode");
+                      }
                       if (view.blayout != TileLayout::col_major || view.slayout != TileLayout::row_major ||
-                          view.fractal != tile_view_semantics::kAccFractal)
+                          view.fractal != tile_view_semantics::kAccFractal) {
                         error(call, "Fixpipe producer requires NZ layout with fractal=1024");
+                      }
                     } else {
                       const auto layout = e.at("layout");
                       const auto block = layout == "nz2nd" ? TileLayout::row_major : TileLayout::col_major;
                       const auto scatter = layout == "nz2nz" ? TileLayout::row_major : TileLayout::none_box;
-                      if (view.blayout != block || view.slayout != scatter)
+                      if (view.blayout != block || view.slayout != scatter) {
                         error(call, "Fixpipe consumer layout does not match acc_push_epilogue.layout");
-                      if (quant != "no_convert" && tile->dtype_ != AccPushResultDtype(quant, DataType::FP32))
+                      }
+                      if (quant != "no_convert" &&
+                          tile->dtype_ != AccPushResultDtype(quant, DataType::FP32)) {
                         error(call, "Fixpipe consumer dtype does not match quant mode");
+                      }
                     }
                     auto bytes = cross_core_pipe::TryGetTileSlotSizeBytes(tile);
-                    if (bytes && push && tile->dtype_.GetBit() == 32)
-                      *bytes = *bytes / (tile->dtype_.GetBit() / 8) *
-                               (AccPushResultDtype(quant, tile->dtype_).GetBit() / 8);
-                    if (!bytes || *bytes > init->GetKwarg<int>("slot_size", 0))
+                    if (bytes && push && tile->dtype_.GetBit() == 32) {
+                      const auto result_bytes =
+                          static_cast<int64_t>(AccPushResultDtype(quant, tile->dtype_).GetBit() / 8);
+                      *bytes = (*bytes / 4) * result_bytes;
+                    }
+                    if (!bytes || *bytes > init->GetKwarg<int>("slot_size", 0)) {
                       error(call, "Fixpipe converted tile exceeds slot_size or has a non-static footprint");
+                    }
                   }
                 }
               }
@@ -818,10 +845,11 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         }
       }
       for (auto saved = saved_inits.rbegin(); saved != saved_inits.rend(); ++saved) {
-        if (saved->second)
+        if (saved->second) {
           visible[saved->first] = *saved->second;
-        else
+        } else {
           visible.erase(saved->first);
+        }
       }
     };
     InitMap visible;

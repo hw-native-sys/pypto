@@ -25,6 +25,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -365,8 +366,9 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
           std::string layout = "unsupported";
           if (view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box) layout = "nz2nd";
           if (view.blayout == TileLayout::col_major && view.slayout == TileLayout::none_box) layout = "nz2dn";
-          if (view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major)
+          if (view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major) {
             layout = "nz2nz";
+          }
           metadata.c2v.acc_push_layouts.insert(layout);
         }
         metadata.c2v.has_nonzero_split |= call->GetKwarg<int>("split", 0) != 0;

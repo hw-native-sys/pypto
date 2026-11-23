@@ -65,10 +65,7 @@ TypePtr DeduceInitializePipeType(const std::vector<ExprPtr>& args,
     const auto error = ValidateAccPushEpilogue(e);
     CHECK(error.empty()) << error;
     CHECK(GetIntKwarg(kwargs, "dir_mask", -1) == 1) << "acc_push_epilogue requires dir_mask=1 (C2V only)";
-    bool nosplit = false;
-    for (const auto& [k, v] : kwargs)
-      if (k == "nosplit") nosplit = AnyCast<bool>(v);
-    CHECK(nosplit) << "acc_push_epilogue requires nosplit=true";
+    CHECK(nosplit.value_or(false)) << "acc_push_epilogue requires nosplit=true";
   }
   return GetUnknownType();
 }
