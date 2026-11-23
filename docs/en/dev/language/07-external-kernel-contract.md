@@ -178,7 +178,6 @@ This direct provider path does not claim immutable input capture or enable cache
 
 Existing explicit declarations remain supported:
 
-
 ```python
 from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
 
