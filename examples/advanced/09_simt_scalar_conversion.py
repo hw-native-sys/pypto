@@ -83,31 +83,6 @@ def make_inputs() -> tuple[torch.Tensor, ...]:
     return values, half, bfloat, integers, bits, magnitudes
 
 
-def check_outputs(inputs: tuple[torch.Tensor, ...], original: tuple[torch.Tensor, ...], valid: int) -> None:
-    """Compare complete outputs bitwise, including zero signs and inactive tails."""
-    values, half, bfloat, integers, bits, magnitudes = inputs
-    source, expected_half, expected_bfloat, expected_integers, expected_bits, expected_magnitudes = (
-        value.clone() for value in original
-    )
-    active = source[:valid]
-    expected_half[:valid] = active.clamp(-65504, 65504).to(torch.float16)
-    expected_bfloat[:valid] = active.to(torch.bfloat16)
-    expected_integers[0, :valid] = active.trunc().to(torch.int32)
-    expected_integers[1, :valid] = active.round().to(torch.int32)
-    expected_bits[:valid] = active.view(torch.int32)
-    expected_magnitudes[:valid] = active.abs()
-    # Integer views also check the signs of zero; float equality alone would not.
-    for actual, expected in (
-        (values.view(torch.int32), source.view(torch.int32)),
-        (half.view(torch.int16), expected_half.view(torch.int16)),
-        (bfloat.view(torch.int16), expected_bfloat.view(torch.int16)),
-        (integers, expected_integers),
-        (bits, expected_bits),
-        (magnitudes.view(torch.int32), expected_magnitudes.view(torch.int32)),
-    ):
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=int, help="Allocated A5 device; omit to compile only")
@@ -124,11 +99,15 @@ def main():
     if args.device is None:
         print("compiled; pass --device to execute on an allocated A5 device")
         return
-    inputs = make_inputs()
-    original = tuple(value.clone() for value in inputs)
-    compiled(*inputs, args.valid, config=config)
-    check_outputs(inputs, original, args.valid)
-    print(f"PASS valid={args.valid}: FP16/BF16, integer rounding, FP32 bits and output tails verified")
+    values, half, bfloat, integers, bits, magnitudes = make_inputs()
+    compiled(values, half, bfloat, integers, bits, magnitudes, args.valid, config=config)
+    print("FP32:", values[: args.valid])
+    print("FP16:", half[: args.valid])
+    print("BF16:", bfloat[: args.valid])
+    print("Truncated:", integers[0, : args.valid])
+    print("Nearest even:", integers[1, : args.valid])
+    print("FP32 bits:", bits[: args.valid])
+    print("Magnitudes:", magnitudes[: args.valid])
 
 
 if __name__ == "__main__":

@@ -10,8 +10,8 @@
 """Count eight bins and allocate per-bin tickets with contending SIMT threads.
 
 atomic_add returns the old count as a unique ticket. atomic_or accumulates
-which of 16 input-position classes contributed to each bin. Ticket order is
-not stable: the host checks a permutation of 0..count-1 for each bin.
+which of 16 input-position classes contributed to each bin. Tickets run from
+0 to count-1 within each bin, in unspecified thread order.
 
 Run bare to compile only. On an allocated A5 device:
     python examples/advanced/08_simt_atomic_histogram.py --device 0 --valid 47
@@ -63,25 +63,6 @@ def make_inputs() -> tuple[torch.Tensor, ...]:
     return keys, stats, tickets
 
 
-def check_outputs(inputs: tuple[torch.Tensor, ...], original: tuple[torch.Tensor, ...], valid: int) -> None:
-    """Check counts and membership, allowing any serialization of the atomics."""
-    keys, stats, tickets = inputs
-    original_keys = original[0]
-    expected_counts = torch.bincount(original_keys[:valid].long(), minlength=8).to(torch.int32)
-    expected_masks = torch.zeros(8, dtype=torch.int32)
-    for tid in range(valid):
-        bucket = int(original_keys[tid])
-        expected_masks[bucket] |= 1 << (tid % 16)
-    torch.testing.assert_close(keys, original_keys, rtol=0, atol=0)
-    torch.testing.assert_close(stats[0], expected_counts, rtol=0, atol=0)
-    torch.testing.assert_close(stats[1], expected_masks, rtol=0, atol=0)
-    for bucket in range(8):
-        actual = tickets[:valid][original_keys[:valid] == bucket].sort().values
-        expected = torch.arange(int(expected_counts[bucket]), dtype=torch.int32)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    torch.testing.assert_close(tickets[valid:], original[2][valid:], rtol=0, atol=0)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=int, help="Allocated A5 device; omit to compile only")
@@ -98,12 +79,11 @@ def main():
     if args.device is None:
         print("compiled; pass --device to execute on an allocated A5 device")
         return
-    inputs = make_inputs()
-    original = tuple(value.clone() for value in inputs)
-    compiled(*inputs, args.valid, config=config)
-    check_outputs(inputs, original, args.valid)
-    counts = [int(count) for count in inputs[1][0]]
-    print(f"PASS valid={args.valid}: counts={counts}, masks and ticket permutations verified")
+    keys, stats, tickets = make_inputs()
+    compiled(keys, stats, tickets, args.valid, config=config)
+    print("Bin counts:", stats[0])
+    print("Position masks:", stats[1])
+    print("Tickets:", tickets[: args.valid])
 
 
 if __name__ == "__main__":

@@ -607,15 +607,13 @@ synchronization operations, and [native acceptance](../../dev/codegen/05-simt-lo
 for compilation versus hardware evidence.
 
 The histogram initializes its counters and masks on the host. `atomic_add`
-returns a unique per-bin ticket, but thread order is unspecified: validation
-checks the ticket permutation, not a stable ordering. `atomic_or` accumulates
+returns a unique per-bin ticket in unspecified thread order. `atomic_or` accumulates
 16 input-position classes per bin, even though its return value is unused.
 The conversion example uses finite inputs with rounding ties, signed zero and
 FP16 overflow. It explicitly clips to the FP16 finite range before `ftof`;
 `ftoi` contrasts truncation with nearest-even rounding, while `bitcast` preserves
-the FP32 representation. Both examples accept `--valid` from 0 to 64 and verify
-untouched output tails when run with `--device`. Their numerical checks require
-A5 execution; compile-only success does not establish numerical correctness.
+the FP32 representation. Both examples accept `--valid` from 0 to 64 and print
+the results when run with `--device`.
 
 Use `pl.simt.lanemask_lt()` to select physical lanes below the caller, as in the
 compaction example. `bitcast` preserves FP32/INT32 bits; `atomic_sub` and INT32

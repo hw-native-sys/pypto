@@ -538,13 +538,12 @@ task-submit --device auto --max-time 600 --run \
 [原生验收](../../dev/codegen/05-simt-lowering.md)。
 
 直方图在宿主侧初始化计数器和掩码。`atomic_add` 返回唯一的桶内序号，但线程顺序
-不确定，因此验证检查序号排列，不要求稳定顺序。`atomic_or` 将每桶的输入位置按
+不确定。`atomic_or` 将每桶的输入位置按
 16 类累计为位掩码，即使没有使用其返回值也会保留更新。
 转换示例使用包含舍入中点、有符号零和 FP16 溢出的有限输入。
 示例在 `ftof` 前显式裁剪到 FP16 的有限值范围；`ftoi` 对比向零截断
 与最近偶数舍入，`bitcast` 则保留 FP32 位表示。两个示例的 `--valid` 均支持
-0 到 64，带 `--device` 执行时还会检查输出尾部保持不变。数值检查需要 A5 执行；
-仅编译成功不代表数值正确性已经验证。
+0 到 64，带 `--device` 执行时会打印结果。
 
 使用 `pl.simt.lanemask_lt()` 选择低于当前 lane 的物理 lane，如压缩示例所示。
 `bitcast` 保留 FP32/INT32 位模式；`atomic_sub` 和 INT32 `atomic_and/or/xor`
