@@ -172,7 +172,6 @@ const SoC& Create950SoC() {
                                        Mem(ir::MemorySpace::Bias, 4ULL * 1024, 64),        // 4KB Bias
                                        Mem(ir::MemorySpace::LeftScale, 4ULL * 1024, 32),   // 4KB L0A scale
                                        Mem(ir::MemorySpace::RightScale, 4ULL * 1024, 32),  // 4KB L0B scale
-                                       // Conservative allocation budget for packed Fixpipe controls.
                                        Mem(ir::MemorySpace::Scaling, 4ULL * 1024, 128)});
 
     // AIV (VECTOR) core configuration.

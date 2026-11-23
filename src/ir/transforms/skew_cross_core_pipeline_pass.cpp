@@ -309,7 +309,6 @@ class SkewCrossCoreMutator : public IRMutator {
   }
 
  private:
-  // Submit launches functions; the mutator still visits its argument expressions.
   size_t ordered_effect_count_ = 0;
 
   /// Monotonic pipeline-group id for the membership tags this pass stamps. Started

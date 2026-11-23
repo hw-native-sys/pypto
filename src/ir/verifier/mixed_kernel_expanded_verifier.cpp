@@ -574,7 +574,6 @@ struct FixpipeFunctionInfo : IRVisitor {
   }
 };
 
-// Count all pipe ids together and leave unsupported control flow uncounted.
 void CountFixpipeEndpoints(const FunctionPtr& func, FixpipeFunctionInfo& local) {
   const std::string op = func->func_type_ == FunctionType::AIC ? "tile.tpush_to_aiv" : "tile.tpop_from_aic";
   std::map<const Var*, std::size_t> bool_params;
@@ -630,7 +629,10 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
   struct GuardArgument {
     int mask = 0;
     const Var* origin = nullptr;
+    std::size_t pattern = 0, inverse = 0;
   };
+  std::map<std::string, std::string> launch_peers;
+  std::map<const Var*, std::string> literal_columns;
   std::map<const Var*, GuardArgument> group_bindings;
   std::map<const Var*, std::vector<const Var*>> forwarded;
   for (const auto& [gv, func] : program->functions_) {
@@ -640,6 +642,13 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
     if (!local.pushes.empty() || !local.pops.empty()) CountFixpipeEndpoints(func, local);
     if (!IsWrapperType(func->func_type_) && !IsOrchestrationLike(func->func_type_)) continue;
     const auto members = CollectInnerCalls(func, program);
+    if (func->func_type_ == FunctionType::Group) {
+      const auto pair = FindGroupCallees(func, program);
+      if (!pair.aic_name.empty()) {
+        auto [entry, first] = launch_peers.emplace(pair.aic_name, pair.aiv_name);
+        if (!first && entry->second != pair.aiv_name) entry->second.clear();
+      }
+    }
     if (func->func_type_ == FunctionType::Group && members.size() == 2 &&
         SameGroupArguments(members[0].inner_call->args_, members[1].inner_call->args_)) {
       groups.emplace_back(std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_),
@@ -653,13 +662,14 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       for (std::size_t i = 0; i < std::min(args.size(), params.size()); ++i) {
         const auto* target = params[i].get();
         const auto source = AsVarLike(args[i]);
+        const auto value = As<ConstBool>(args[i]);
+        literal_columns[target] += value ? (value->value_ ? '1' : '0') : '?';
         auto [it, inserted] = group_bindings.try_emplace(target, GuardArgument{0, source.get()});
         auto& binding = it->second;
         if (!inserted && binding.origin != source.get()) binding.origin = nullptr;
         if (IsWrapperType(func->func_type_) && parameters.count(source)) {
           forwarded[source.get()].push_back(target);
         } else {
-          const auto value = As<ConstBool>(args[i]);
           binding.mask |= value ? (value->value_ ? kGuardTrue : kGuardFalse) : kEitherGuard;
         }
       }
@@ -681,9 +691,19 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       pending.push_back(target);
     }
   }
+  // Intern literal columns and their complements once for constant-time pair checks.
+  std::map<std::string, std::size_t> patterns;
+  for (const auto& [param, column] : literal_columns) {
+    if (column.find('?') != std::string::npos) continue;
+    auto inverse = column;
+    for (char& bit : inverse) bit = bit == '0' ? '1' : '0';
+    auto& binding = group_bindings[param];
+    binding.pattern = patterns.try_emplace(column, patterns.size() + 1).first->second;
+    binding.inverse = patterns.try_emplace(inverse, patterns.size() + 1).first->second;
+  }
   struct PeerArgument {
     int mask = 0;
-    std::size_t representative = 0;
+    std::size_t representative = 0, pattern = 0, inverse = 0;
   };
   // Intersect equal argument positions across Groups, each of which may use a different SSA value.
   std::map<KernelPair, std::vector<PeerArgument>> peer_bindings;
@@ -699,6 +719,8 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const auto known = found != group_bindings.end() ? found->second : GuardArgument{};
       const auto* identity = known.origin ? known.origin : var;
       auto& argument = allowed[i];
+      argument.pattern = argument.mask ? 0 : known.pattern;
+      argument.inverse = argument.mask ? 0 : known.inverse;
       argument.representative =
           identity ? classes[argument.representative].try_emplace(identity, i).first->second : i;
       argument.mask |=
@@ -785,6 +807,10 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       }
       if (!IsOp(def, "system.import_peer_buffer")) continue;
       const auto peer_name = def->GetKwarg<std::string>("peer_func", "");
+      const auto launch = launch_peers.find(func->name_);
+      if (has_epilogue && launch != launch_peers.end() && launch->second != peer_name) {
+        error(def, "Fixpipe import_peer_buffer must name the consumer in the producer's Group");
+      }
       auto peer = info.find(peer_name);
       if (peer == info.end() || !peer->second.inits.count(id)) {
         if (has_epilogue) {
@@ -832,12 +858,19 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
             return std::make_pair(mask == kGuardFalse ? flow.when_false : flow.when_true,
                                   mask == kGuardTrue ? flow.when_true : flow.when_false);
           };
-          const auto p = counts(push, push_arg), q = counts(pop, pop_arg);
+          const auto p = counts(push, push_arg);
+          auto q = counts(pop, pop_arg);
+          const bool literal = push_arg && pop_arg && push_arg->pattern && pop_arg->pattern;
+          if (literal && push_arg->pattern == pop_arg->inverse) std::swap(q.first, q.second);
+          const bool unrelated = literal && p.first != p.second && q.first != q.second &&
+                                 push_arg->pattern != pop_arg->pattern &&
+                                 push_arg->pattern != pop_arg->inverse;
           const bool shared = push_arg && pop_arg && push_arg->representative == pop_arg->representative;
-          const bool comparable = p.first == p.second || q.first == q.second || shared;
+          const bool comparable = literal || p.first == p.second || q.first == q.second || shared;
           const auto p_range = std::minmax(p.first, p.second), q_range = std::minmax(q.first, q.second);
           const bool mismatch =
-              comparable ? p != q : p_range.second < q_range.first || q_range.second < p_range.first;
+              unrelated ||
+              (comparable ? p != q : p_range.second < q_range.first || q_range.second < p_range.first);
           if (push.seen == pushes->second.size() && pop.seen == pops->second.size() && mismatch) {
             const bool excess_pop =
                 comparable ? p.first < q.first || p.second < q.second : p_range.second < q_range.first;

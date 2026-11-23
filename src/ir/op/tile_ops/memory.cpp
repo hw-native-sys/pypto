@@ -227,6 +227,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       break;
     }
   }
+  CHECK_SPAN(target_memory_opt != MemorySpace::Scaling, args[0]->span_)
+      << "tile.load cannot target Scaling. Load into Mat, then use tile.move to Scaling.";
   const bool is_mx_load =
       tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout);
   if (is_mx_load) {

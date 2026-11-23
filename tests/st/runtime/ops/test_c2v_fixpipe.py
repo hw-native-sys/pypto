@@ -85,4 +85,4 @@ def test_non_square_c2v(case_run):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    raise SystemExit(pytest.main([__file__, "-v"]))

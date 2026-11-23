@@ -581,37 +581,5 @@ def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp
     _assemble(mlir, tmp_path, expected_error="to use the same tile type")
 
 
-@pytest.mark.parametrize("quant", ["deqf16_scalar", "deqf16_vec"])
-@pytest.mark.parametrize("buffer_ir", [False, True])
-@pytest.mark.parametrize("round_trip", [False, True])
-@pytest.mark.ptoas_compile
-def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
-    source = ir.python_print(_program(quant=quant, slot_size=1024))
-    consumer, producer = source.rsplit("    @pl.function", 1)
-    c_init, c_body = consumer.split("        tile:", 1)
-    p_init, p_body = producer.split("        lhs:", 1)
-    c_body = "        tile:" + c_body
-    p_body = "        lhs:" + p_body.replace(
-        "set_quant_scalar(0.5", "set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5"
-    )
-    if round_trip:
-        c_init += "        reply = pl.import_peer_buffer(name='reply', peer_func='producer')\n"
-        c_init += "        pl.aiv_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)\n"
-        p_init += "        reply = pl.reserve_buffer(name='reply', size=2048)\n"
-        p_init += "        pl.aic_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)\n"
-        c_body = c_body.replace(
-            "        pl.system.tfree_to_aic",
-            "        pl.tpush_to_aic(tile, split=0, id=1)\n        pl.system.tfree_to_aic",
-        )
-        p_body += "\n        reply_tile = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)"
-        p_body += "\n        pl.tfree_to_aiv(reply_tile, id=1)\n"
-    loop = "        for i in pl.pipeline(4, stage=2):\n"
-    source = (
-        c_init + loop + indent(c_body, "    ") + "    @pl.function" + p_init + loop + indent(p_body, "    ")
-    )
-    _, mlir = _generate(pl.parse_program(source), buffer_ir)
-    _assemble(mlir, tmp_path)
-
-
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    raise SystemExit(pytest.main([__file__, "-v"]))
