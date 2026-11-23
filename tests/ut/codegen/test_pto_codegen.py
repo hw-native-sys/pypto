@@ -2736,12 +2736,17 @@ class TestGenerateKernelWrapper:
         assert "int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);" in wrapper
         assert "split_vec(__pypto_spmd_subblock_idx);" in wrapper
 
-    @pytest.mark.parametrize("explicit_push,explicit_pop", [(True, True), (True, False), (False, True)])
+    @pytest.mark.parametrize(
+        "explicit_push,explicit_pop", [(True, True), (True, False), (False, True), (False, False)]
+    )
     @pytest.mark.parametrize("runtime_lane_param", [False, True])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_split_fifo_bridge_preserves_authored_lanes(
-        self, explicit_push, explicit_pop, runtime_lane_param
+        self, explicit_push, explicit_pop, runtime_lane_param, backend_type, tmp_path
     ):
         """Mixed calls bridge only omitted lanes; authored third operands survive."""
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
         lane_op = "pl.tile.get_subblock_idx()" if runtime_lane_param else ""
         push_kw = ", aiv_subblockid=1" if explicit_push else ""
         pop_kw = ", aiv_subblockid=1" if explicit_pop else ""
@@ -2769,11 +2774,32 @@ class Before:
             if explicit:
                 source = source.replace(f">({pipe}, {tile_name});", f">({pipe}, {tile_name}, {lane});")
         wrapper = _generate_kernel_wrapper(func, source)
+        diagnostic = "Explicit aiv_subblockid requires NPU execution; CPU simulation is unsupported."
+        if explicit_push or explicit_pop:
+            assert wrapper.startswith(f'#if defined(__CPU_SIM)\n#error "{diagnostic}"\n#endif\n')
+        else:
+            assert diagnostic not in wrapper
+
+        # Compile the emitted pre-header diagnostic only; no simulator or kernel runs.
+        compiler = shutil.which("g++") or shutil.which("c++")
+        assert compiler is not None, "A C++ compiler is required to verify the CPU-mode diagnostic"
+        guard_source = tmp_path / "lane_guard.cpp"
+        guard_source.write_text(wrapper.partition("#include")[0])
+        for cpu_sim in (False, True):
+            command = [compiler, "-E", "-x", "c++", str(guard_source)]
+            if cpu_sim:
+                command.append("-D__CPU_SIM")
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            rejected = cpu_sim and (explicit_push or explicit_pop)
+            assert (result.returncode != 0) == rejected, result.stderr
+            if rejected:
+                assert diagnostic in result.stderr
+
         for tile_name, explicit in ((popped, explicit_pop), (produced, explicit_push)):
             if explicit:
                 assert f">({pipe}, {tile_name}, {lane});" in wrapper
                 assert f"{tile_name} PYPTO_SPLIT_RUNTIME_LANE_ARG" not in wrapper
-            else:
+            elif backend_type == BackendType.Ascend910:
                 assert f">({pipe}, {tile_name} PYPTO_SPLIT_RUNTIME_LANE_ARG(" in wrapper
         if explicit_push and explicit_pop:
             assert "PYPTO_SPLIT_RUNTIME_LANE_ARG" not in wrapper

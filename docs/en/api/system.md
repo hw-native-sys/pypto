@@ -58,6 +58,11 @@ slot to the other physical AIV. Use the matching physical lane on this path.
 The pinned GM-backed C2V implementation uses the lane for its GM band offset;
 that route needs separate device validation.
 
+PTO-ISA CPU simulation does not implement the explicit-lane overloads. Such
+endpoints report a compile-time diagnostic under `__CPU_SIM`; the lane is
+never removed to select a different overload. NPU execution and the PyTorch
+reference FIFO are separate paths.
+
 `tests/st/runtime/cross_core/test_explicit_aiv_lane.py` checks omitted,
 static and dynamic lanes with exact goldens and twelve transfers through a
 four-slot ring. Its A5 V2C cases swap the logical lanes to distinguish explicit

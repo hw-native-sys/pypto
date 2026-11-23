@@ -54,6 +54,10 @@ AIV 的本地 UB 槽；显式 pop lane 不会把该槽重定位到另一个物�
 该路径应使用匹配的物理 lane。当前固定版本的 GM-backed C2V 实现将
 lane 用于 GM 数据分带偏移；该路径仍需单独进行真机验证。
 
+PTO-ISA CPU 模拟器尚未实现显式 lane 重载。这些端点在 `__CPU_SIM`
+下报告编译期诊断；不会删除 lane 来选择其他重载。NPU 执行与
+PyTorch 参考 FIFO 属于独立路径。
+
 `tests/st/runtime/cross_core/test_explicit_aiv_lane.py` 使用精确 golden
 检查省略、静态和动态 lane，并通过四槽环形缓冲完成十二次传输。
 A5 V2C 用例交换逻辑 lane，区分显式选择与忽略操作数的行为；本地
