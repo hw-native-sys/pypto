@@ -29,7 +29,11 @@ def test_function_type_enum():
         ir.FunctionType.Graph,
         ir.FunctionType.SIMT,
         ir.FunctionType.VF,
+        ir.FunctionType.CCU,
     ]
+    # Mainline artifacts serialize the VF discriminator as 10.
+    assert ir.FunctionType.VF.value == 10
+    assert ir.FunctionType.CCU.value == 11
     assert len(all_types) == len(set(all_types))
     # Distinctness alone cannot notice a member missing from the list above, so
     # pin the count against the enum itself.

@@ -12,6 +12,7 @@
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 
 #include <cctype>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -20,6 +21,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -40,6 +42,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/ccu_collective_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "src/codegen/orchestration/orchestration_stmt_codegen.h"
@@ -72,6 +75,99 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
 }
 
 namespace {
+
+// Reuse the registrations produced while emitting Call/Submit dispatches. This
+// keeps native missions scoped to the actual callable and avoids a second IR
+// scan that could register kernels reachable only from unused functions.
+std::vector<CcuModule> CollectCcuModules(const ProgramPtr& program,
+                                         const std::vector<KernelRegistration>& registrations) {
+  // As with AIV registrations, allocate a callable-local ID on first use.
+  // Preserve dispatch order; the same table drives native packaging, wrapper
+  // constants and HOST registrations. Shapes may share a native specialization.
+  using Identity = std::pair<std::string, std::map<std::string, std::string>>;
+  std::map<Identity, int> ids;
+  std::vector<CcuModule> modules;
+  std::set<std::string> seen;
+  for (const auto& registration : registrations) {
+    if (!seen.insert(registration.code_name).second) continue;
+    auto func = program->GetFunction(registration.code_name);
+    auto call = CcuWrapperCall(func, program);
+    if (!call) continue;
+    auto definition = program->GetFunction(call->op_->name_);
+    auto variables = GetBuiltinTemplateVariables(definition);
+    const auto template_dir = definition->GetAttr<std::string>(kAttrBuiltinTemplateDir);
+    auto [it, inserted] =
+        ids.try_emplace(Identity{template_dir, variables}, static_cast<int>(modules.size()));
+    if (!inserted) {
+      modules[it->second].wrappers.push_back(func->name_);
+      continue;
+    }
+    const auto ranks = variables.find("nranks_cpp");
+    INTERNAL_CHECK(ranks != variables.end()) << "Missing CCU allgather rank specialization";
+    int nranks = 0;
+    const auto& value = ranks->second;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), nranks);
+    INTERNAL_CHECK(parsed.ec == std::errc() && parsed.ptr == value.data() + value.size() && nranks >= 2 &&
+                   nranks <= 64)
+        << "Invalid lowered CCU allgather rank specialization: " << value;
+    const int id = it->second;
+    // Address/token expansion: nine fixed uint64 words, then one output
+    // address, token and logical rank per domain slot. Match the native ABI.
+    modules.push_back(CcuModule{id,
+                                template_dir,
+                                std::move(variables),
+                                {func->name_},
+                                "ccu/module_" + std::to_string(id) + ".cpp",
+                                "pypto_ccu_allgather_" + std::to_string(id),
+                                8 * (9 + 3 * nranks),
+                                64});
+  }
+  return modules;
+}
+
+std::vector<BuiltinSourceSpec> CollectBuiltinSources(const ProgramPtr& program,
+                                                     const std::vector<KernelRegistration>& registrations,
+                                                     const std::vector<CcuModule>& modules) {
+  std::vector<BuiltinSourceSpec> sources;
+  std::map<std::string, int> wrapper_ids;
+  std::set<std::string> shared_templates;
+  for (const auto& module : modules) {
+    // The supported HBM implementation shares its scheduling header across
+    // rank specializations; each native module still has its own entry symbol.
+    if (shared_templates.insert(module.template_dir).second) {
+      sources.push_back({module.template_dir, "templates/schedule.hpp.in", "ccu/allgather_schedule.hpp", {}});
+    }
+    auto variables = module.variables;
+    variables["entry_symbol"] = module.entry_symbol;
+    sources.push_back({module.template_dir, "templates/module.cpp.in", module.source, std::move(variables)});
+    for (const auto& name : module.wrappers) wrapper_ids.emplace(name, module.ccu_id);
+  }
+  // Kernel registrations already cover Call/Submit and nested dispatch. Emit
+  // each code unit once, even when multiple runtime signatures reference it.
+  std::set<std::string> names;
+  for (const auto& registration : registrations) names.insert(registration.code_name);
+  for (const auto& name : names) {
+    auto func = program->GetFunction(name);
+    if (!func || !func->HasAttr(kAttrBuiltinTemplateDir)) continue;
+    auto template_dir = func->GetAttr<std::string>(kAttrBuiltinTemplateDir);
+    INTERNAL_CHECK_SPAN(!template_dir.empty(), func->span_) << "Empty builtin template directory";
+    auto ccu_call = CcuWrapperCall(func, program);
+    auto variables =
+        GetBuiltinTemplateVariables(ccu_call ? program->GetFunction(ccu_call->op_->name_) : func);
+    variables["template_package"] = template_dir.front() == ':' ? template_dir.substr(1) : template_dir;
+    if (const auto id = wrapper_ids.find(name); id != wrapper_ids.end()) {
+      // IDs come from the packaged native definition table, never call sites.
+      variables["ccu_id"] = std::to_string(id->second);
+      INTERNAL_CHECK_SPAN(func->params_.size() == 7, func->span_)
+          << "CCU wrapper requires four tensors and three explicit contexts";
+      variables["ctx_index"] = "4";
+    }
+    const auto core = func->func_type_ == FunctionType::AIC ? "aic" : "aiv";
+    sources.push_back({template_dir, "templates/kernel.cpp.in",
+                       "kernels/" + std::string(core) + "/" + name + ".cpp", std::move(variables)});
+  }
+  return sources;
+}
 
 const char* ParamDirectionToRuntimeName(ParamDirection dir) {
   switch (dir) {
@@ -656,7 +752,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";
 
-  return OrchestrationResult{oss.str(), std::move(registrations.entries), std::move(orchestration_signature)};
+  auto ccu_modules = CollectCcuModules(program, registrations.entries);
+  auto builtin_sources = CollectBuiltinSources(program, registrations.entries, ccu_modules);
+  return OrchestrationResult{oss.str(), std::move(registrations.entries), std::move(builtin_sources),
+                             std::move(ccu_modules), std::move(orchestration_signature)};
 }
 
 }  // namespace codegen

@@ -121,6 +121,18 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       throw pypto::TypeError("external return parameters must be a list of parameter Vars");
     }
 
+    if (key == kAttrCcuBindings) {
+      if (!nb::isinstance<nb::list>(item.second) && !nb::isinstance<nb::tuple>(item.second)) {
+        throw pypto::TypeError("ccu_bindings must be a list of registration Vars");
+      }
+      auto values = nb::cast<std::vector<VarPtr>>(item.second);
+      for (const auto& value : values) {
+        CHECK(value && IsA<CcuRegistrationType>(value->GetType()))
+            << "ccu_bindings expects CcuRegistration Vars";
+      }
+      kwargs.emplace_back(key, std::move(values));
+      continue;
+    }
     // Try to cast to common types
     // NOTE: Check DataType/MemorySpace/PipeType/CoreType/PadValue BEFORE int, and bool BEFORE int
     if (nb::isinstance<DataType>(item.second)) {
@@ -765,6 +777,11 @@ void BindIR(nb::module_& m) {
   comm_ctx_type_class.def(nb::init<>(), "Create the singleton CommCtxType instance.");
   comm_ctx_type_class.def_static("get", &GetCommCtxType, "Get the shared singleton CommCtxType instance.");
   BindFields<CommCtxType>(comm_ctx_type_class);
+  auto ccu_registration_type = nb::class_<CcuRegistrationType, Type>(
+      ir, "CcuRegistrationType", "HOST-only domain CCU registration handle.");
+  ccu_registration_type.def(nb::init<>());
+  ccu_registration_type.def_static("get", &GetCcuRegistrationType);
+  BindFields<CcuRegistrationType>(ccu_registration_type);
 
   // Async-prefetch handle types - singleton markers for the prefetch.* op family.
   // All three are opaque: the workspace backing a context, the in-flight event and
@@ -2172,6 +2189,7 @@ void BindIR(nb::module_& m) {
       .value("Inline", FunctionType::Inline, "Whole-body substitution at every call site")
       .value("Graph", FunctionType::Graph, "Recordable/replayable orchestration fragment")
       .value("VF", FunctionType::VF, "Synchronous register device helper")
+      .value("CCU", FunctionType::CCU, "Domain-registered native communication builtin")
       .value("SIMT", FunctionType::SIMT, "Per-thread device helper launched inside an AIV task")
       .export_values();
 

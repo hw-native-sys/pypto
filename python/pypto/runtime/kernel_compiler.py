@@ -72,6 +72,9 @@ class KernelCompiler:
         self._sanitizers = self._sanitizers or getattr(self.sdk, "_sanitizers", "")
         if self._sanitizers:
             self.sdk.host_gxx = GxxToolchain(prefer_g15=True)
+            self.sdk._sanitizers = self._sanitizers
+            if self.sdk.ccu is not None:
+                self.sdk.ccu.host_toolchain = self.sdk.host_gxx
         self.project_root = self.sdk.project_root
 
     def get_incore_include_dirs(self) -> list[str]:
@@ -283,6 +286,30 @@ class KernelCompiler:
                 functions = _device_image.validate_device_image(binary, entry_symbol="kernel_entry")
                 _stack_usage.validate_stack_usage(output.with_suffix(".su"), functions)
             return binary
+
+    def compile_ccu(self, source_path: str) -> bytes:
+        """Build a native Host ELF using Simpler's complete CCU build metadata."""
+        if self.platform != "a5":
+            raise ValueError(f"Native CCU modules require a5, got {self.platform!r}")
+        source = self._source_path(source_path)
+        inputs = self.sdk.ccu_compile_cache_token()
+        with tempfile.TemporaryDirectory(prefix="pypto-ccu-") as directory:
+            root = Path(directory)
+            (root / "ccu_manifest_identity.h").write_text(
+                inputs["manifest_identity_header"], encoding="ascii"
+            )
+            output = root / "module.so"
+            cmd = [
+                inputs["cxx_path"],
+                *inputs["compile_flags"],
+                *self._include_flags([str(root), *inputs["include_dirs"]]),
+                str(compiler_visible_path(source)),
+                *inputs["link_flags"],
+                *inputs["library_paths"],
+                "-o",
+                str(output),
+            ]
+            return self._run(cmd, output, "CCU")
 
     def _vpto_toolchain(self) -> tuple[str, str]:
         """Use the assembler selected by PyPTO and the SDK's matching Bisheng."""

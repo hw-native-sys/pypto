@@ -76,6 +76,7 @@ FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
     "Graph": ir.FunctionType.Graph,
     "SIMT": ir.FunctionType.SIMT,
     "VF": ir.FunctionType.VF,
+    "CCU": ir.FunctionType.CCU,
 }
 
 

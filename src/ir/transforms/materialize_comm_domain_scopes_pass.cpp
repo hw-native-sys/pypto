@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/ccu_collective_utils.h"
 #include "pypto/ir/transforms/utils/collective_operand_utils.h"
 #include "pypto/ir/transforms/utils/dist_tensor_alias_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -864,15 +865,20 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
           groups[urma ? 1 : 0].push_back(slot);
         }
         auto engines = updated->engines_;
-        engines.erase(std::remove(engines.begin(), engines.end(), "urma"), engines.end());
         const bool split = !groups[0].empty() && !groups[1].empty();
         if (!split) {
-          if (!groups[1].empty()) engines.emplace_back("urma");
-          if (engines == updated->engines_) return updated;
+          const auto urma = std::find(engines.begin(), engines.end(), "urma");
+          if ((urma != engines.end()) == !groups[1].empty()) return updated;
+          if (groups[1].empty()) {
+            engines.erase(urma);
+          } else {
+            engines.emplace_back("urma");
+          }
           auto result = MutableCopy(updated);
           result->engines_ = std::move(engines);
           return result;
         }
+        engines.erase(std::remove(engines.begin(), engines.end(), "urma"), engines.end());
         // Keep the original name on the outer scope. New names are allocated
         // from one monotonic sequence, avoiding collisions with existing IR.
         std::string name;
@@ -1147,8 +1153,10 @@ Pass MaterializeCommDomainScopes() {
       if (new_func.get() != func.get()) modified = true;
     }
 
-    if (!modified) return program;
-    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+    auto domains = modified
+                       ? std::make_shared<Program>(std::move(new_functions), program->name_, program->span_)
+                       : program;
+    return MaterializeCcuBindings(domains);
   };
 
   return CreateProgramPass(pass_func, "MaterializeCommDomainScopes", kMaterializeCommDomainScopesProperties);
@@ -1181,6 +1189,12 @@ class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    try {
+      VerifyCcuBindings(program);
+    } catch (const pypto::Error& error) {
+      diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0, error.what(),
+                               program->span_);
+    }
     CommDomainScopeCollector collector;
     for (const auto& [gvar, func] : program->functions_) {
       if (func && func->body_) collector.VisitStmt(func->body_);

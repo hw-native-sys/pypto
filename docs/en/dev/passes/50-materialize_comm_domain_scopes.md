@@ -342,3 +342,22 @@ zeroing before reuse (enabled by default). Initialization is not repeated after
 zeroing. Set `reset_persistent_windows=False` to retain the loaded Engram table;
 this also disables reset for Device scratch/signal buffers, whose state the caller
 must then manage. Domain release remains owned by Simpler.
+
+### CCU engine requirements
+
+After URMA/MTE grouping, the pass traces each dispatched CHIP allgather's
+input, target and signal to a single domain. It adds `ccu` to that domain's
+workspace engines during binding materialization. Uncalled CHIP functions and
+unrelated domains do not request a CCU workspace. Repeated requests retain a
+single engine entry. See [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather).
+
+### Explicit CCU bindings
+
+After domain construction, CCU uses are resolved against the existing allocation
+slots. Each CHIP call receives independent registrations; the op names that callable.
+The pass inserts `pld.system.register_ccu(allocation, callee=..., chip_callee=...)` and
+HOST dispatch `ccu_bindings` SSA references. Each registration carries the
+dispatch device and returns a local handle. All registrations precede the first
+task submission; rank loops retain their bodies and select handles at dispatch.
+Bindings must match the consumer device. It does not merge overlapping member sets. See [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather) for
+provenance, participant checks and the codegen-only runtime boundary.

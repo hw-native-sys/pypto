@@ -672,6 +672,7 @@ Consequences:
 | `Graph` | Callable orchestration fragment, recorded once and replayed by the `host_build_graph` runtime |
 | `SIMT` | Void device helper invoked only by `SimtLaunchStmt`; no runtime task metadata |
 | `VF` | Synchronous register device helper; Tile/Scalar parameters and Tile alias returns; no runtime task metadata |
+| `CCU` | Domain-registered native communication builtin declaration; referenced by AIV requests, not an AIC/AIV task |
 
 `IsInCoreType(type)` / `ir.is_incore_type(type)` returns `True` for `InCore`, `AIC`, and `AIV`.
 

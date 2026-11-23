@@ -36,14 +36,25 @@ own destabilised the run and cost device force-resets.)
 """
 
 import re
+import shutil
+import subprocess
+from pathlib import Path
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import codegen, ir
+from pypto._artifact_contract import ArtifactExecutionMode
 from pypto.backend import pto_backend
+from pypto.backend.pto_backend import (
+    _render_builtin_kernel_sources,
+    _render_builtin_template,
+    _resolve_builtin_template_dir,
+)
 from pypto.ir import DistributedConfig
+from pypto.ir.compile import _compile_to_files
 from pypto.pypto_core import passes
+from pypto.pypto_core.backend import BackendType
 
 
 @pytest.fixture(autouse=True)
@@ -1055,6 +1066,341 @@ def test_indexed_remote_operands_get_distinct_engine_contexts(tmp_path):
     assert "counts_ctx = reinterpret_cast<__gm__ CommContext*>(args[8])" in text
     assert "ExchangeBarrier(signal_ctx, signal_base" in text
     assert "CommRemotePtr(counts_ctx, send_counts_base" in text
+
+
+def _ccu_allgather_source_program(*, host=False, ranks: int = 2, dispatch_ranks: int | None = None):
+    device_count = ranks if dispatch_ranks is None else dispatch_ranks
+
+    @pl.program
+    class Chip:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, 64], pl.BF16],
+            target: pl.InOut[pld.DistributedTensor[[ranks, 64], pl.BF16]],
+            signal: pl.InOut[pld.DistributedTensor[[ranks, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[ranks, 64], pl.BF16]:
+            target = pld.tensor.allgather(data, target, signal, engine="ccu")
+            target = pld.tensor.allgather(data, target, signal, engine="ccu")
+            return target
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(128)
+            target_buf = pld.alloc_window_buffer(ranks * 128)
+            signal_buf = pld.alloc_window_buffer(ranks * 4)
+            for r in pl.range(device_count):
+                data = pld.window(input_buf, [1, 64], dtype=pl.BF16)
+                target = pld.window(target_buf, [ranks, 64], dtype=pl.BF16)
+                signal = pld.window(signal_buf, [ranks, 1], dtype=pl.INT32)
+                self.chip_pipeline(data, target, signal, device=r)
+
+    if host:
+        return Chip
+    return ir.Program(
+        [f for f in Chip.functions.values() if f.name == "chip_pipeline"], "Chip", ir.Span.unknown()
+    )
+
+
+@pytest.mark.parametrize("ranks", [2, 4, 8, 64])
+@pytest.mark.parametrize("host", [False, True])
+@pytest.mark.parametrize(
+    "runtime", [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH]
+)
+def test_ccu_allgather_full_codegen(tmp_path, host, runtime, ranks):
+    output = tmp_path / "allgather"
+    program = _ccu_allgather_source_program(host=host, ranks=ranks)
+    with passes.PassContext(
+        [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)], runtime=runtime
+    ):
+        ir.compile(
+            program,
+            output_dir=str(output),
+            backend_type=BackendType.Ascend950,
+            skip_ptoas=True,
+            dump_passes=False,
+            distributed_config=DistributedConfig(device_ids=list(range(ranks)), num_sub_workers=0)
+            if host
+            else None,
+        )
+    config_paths = list(output.rglob("kernel_config.py"))
+    assert len(config_paths) == 1
+    config = config_paths[0].read_text()
+    assert "CCU_MODULES =" in config
+    assert "'ccu_id': 0" in config
+    assert f"'parameter_size': {8 * (9 + 3 * ranks)}" in config
+    assert "'parameter_alignment': 64" in config
+    assert "request_count" not in config
+    assert "CCU_RUNTIME_SUPPORTED = False" in config
+    root = config_paths[0].parent
+    wrapper = _sole_file(root / "kernels" / "aiv", "*allgather*.cpp").read_text()
+    assert "get_async_ctx(args)" in wrapper
+    assert "CommContext *>(args[4])" in wrapper
+    assert "submit_ccu_mission(ctx, comm, ccu_id, call_args)" in wrapper
+    assert "{Arg::Kind::Window, rank, input_offset, bytes}" in wrapper
+    assert "{Arg::Kind::Window, peer, target_offset, nranks * bytes}" in wrapper
+    assert "{Arg::Kind::Scalar, 0, peer, 0}" in wrapper
+    module = (root / "ccu/module_0.cpp").read_text()
+    assert "CCU_WHILE(service != 0)" in module
+    assert "SIMPLER_CCU_TASK_ARGUMENT_COUNT" in module
+    assert "stable_input.addr = words[0]" in module and "stable_input.token = words[1]" in module
+    assert "ccu::LoopGroup main_group" in module
+    assert "ccu::LoopGroup remainder_group" in module
+    assert (root / "ccu/allgather_schedule.hpp").is_file()
+    assert f"constexpr uint32_t kRanks = {ranks}" in module
+    assert "stable_output[rank].addr += words[3]" in module
+    assert "ccu::LocalCopy(local_[slot][peer], source_[slot], length_[slot], event, bit)" in module
+    assert "ccu::Write(binding_->channels[peer], remote_[slot][peer], source_[slot]," in module
+    assert "CCU_IF(words[11 + 3 * slot] == peer)" in module
+    assert "{{" not in wrapper + module
+    orch = _sole_file(root / "orchestration", "*.cpp").read_text()
+    assert orch.count("rt_submit_aiv_task") == 2
+    if host:
+        host_source = (output / "orchestration/host_orch.py").read_text()
+        assert 'workspace_engines=("ccu",)' in host_source
+        assert host_source.count(".add_scalar(") == 3, host_source
+        assert host_source.count(".get_or_register_ccu(") == ranks
+        assert host_source.rindex(".get_or_register_ccu(") < host_source.index("_submit_chip(")
+        for rank in range(ranks):
+            assert f"ccu_id=0, worker={rank})" in host_source
+        assert host_source.count("ccu_bindings=[") == 1
+        assert host_source.rindex(".get_or_register_ccu(") < host_source.index("for r")
+
+
+@pytest.mark.parametrize("dispatch_ranks", [3, 5])
+def test_ccu_allgather_host_rank_count_mismatch(tmp_path, dispatch_ranks):
+    # Both undersized and enlarged domains would otherwise write wrong rows or
+    # leave a native mission waiting for a rank that never participates.
+    program = _ccu_allgather_source_program(host=True, ranks=4, dispatch_ranks=dispatch_ranks)
+    with pytest.raises(ValueError, match="Host domain size must match target rank count 4"):
+        ir.compile(
+            program,
+            output_dir=str(tmp_path),
+            backend_type=BackendType.Ascend950,
+            skip_ptoas=True,
+        )
+
+
+@pytest.mark.parametrize("ranks", [2, 3, 4, 8, 17, 64])
+@pytest.mark.parametrize("native", [False, True], ids=["aiv-metadata", "native-hbm"])
+def test_ccu_allgather_generated_abi_and_data_path(tmp_path, native, ranks):
+    compiler = shutil.which("c++")
+    if compiler is None:
+        pytest.skip("C++ compiler is required for the generated CCU contract test")
+    templates = _resolve_builtin_template_dir(":pypto.runtime.builtins.ccu.allgather") / "templates"
+    if native:
+        template = "module.cpp.in"
+        output = "ccu/generated_module.inc"
+        variables = {"entry_symbol": "pypto_ccu_allgather_test"}
+        headers = (
+            "ccu_manifest_identity.h",
+            "hcomm/ccu/ccu_primitives.hpp",
+            "hcomm/ccu/ccu_res.h",
+        )
+        fixture = "ccu_allgather_native_test.cpp"
+    else:
+        template = "kernel.cpp.in"
+        output = "kernels/aiv/generated_kernel.inc"
+        variables = {"template_package": "ccu.allgather", "ccu_id": "7", "ctx_index": "4"}
+        headers = ("pto/pto-inst.hpp", "async_kernel_api.h", "tensor.h")
+        fixture = "ccu_allgather_wrapper_test.cpp"
+    variables["nranks_cpp"] = str(ranks)
+    (tmp_path / output).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ccu").mkdir(exist_ok=True)
+    (tmp_path / "ccu/allgather_schedule.hpp").write_text(
+        _render_builtin_template(templates / "schedule.hpp.in", {})
+    )
+    (tmp_path / output).write_text(_render_builtin_template(templates / template, variables))
+    # CPU primitives execute the actual emitted source. They do not emulate
+    # HCOMM instruction synthesis, device scheduling or cross-rank progress.
+    for name in headers:
+        header = tmp_path / name
+        header.parent.mkdir(parents=True, exist_ok=True)
+        header.write_text("")
+    source = Path(__file__).with_name(fixture)
+    binary = tmp_path / "contract_test"
+    built = subprocess.run(
+        [
+            compiler,
+            "-std=c++17",
+            "-Wno-attributes",
+            f"-DTEST_RANKS={ranks}",
+            *([] if native else ["-DSIMPLER_CCU_ABI_VERSION=2"]),
+            "-I",
+            str(Path(__file__).resolve().parents[4] / "runtime/src/common"),
+            "-I",
+            str(tmp_path),
+            "-I",
+            str(tmp_path / "ccu"),
+            "-I",
+            str(tmp_path / "kernels/aiv"),
+            str(source),
+            "-o",
+            str(binary),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert built.returncode == 0, built.stdout + built.stderr
+    run = subprocess.run([str(binary)], check=False, capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_ccu_entry_ids_follow_first_use_and_are_submit_aware():
+    # Synthetic specialization tags exercise two entries without claiming a
+    # second hardware algorithm. Identity, not a function-name substring, selects CCU.
+    span = ir.Span.unknown()
+    kernels = []
+    for name, variant in (("first", "b"), ("second", "a"), ("unused", "c")):
+        definition = ir.Function(
+            name + "_ccu",
+            [],
+            [],
+            ir.ReturnStmt([], span),
+            span,
+            type=ir.FunctionType.CCU,
+            attrs={
+                "builtin_template_dir": ":pypto.runtime.builtins.ccu.allgather",
+                "builtin_template_vars": f"fixture_variant={variant},nranks_cpp=2",
+            },
+        )
+        params = [ir.Var(f"p{i}", ir.ScalarType(pl.UINT32), span) for i in range(4)]
+        params += [ir.Var(f"ctx{i}", ir.CommCtxType.get(), span) for i in range(3)]
+        request = ir.Call(ir.GlobalVar(definition.name), [], {}, {}, ir.TupleType([]), span)
+        wrapper = ir.Function(
+            name,
+            params,
+            [],
+            ir.EvalStmt(request, span),
+            span,
+            type=ir.FunctionType.AIV,
+            attrs={"builtin_template_dir": ":pypto.runtime.builtins.ccu.allgather"},
+        )
+        kernels.extend([definition, wrapper])
+    # Ordinary AIV builtins and CCU wrappers use the same artifact contract.
+    # An unreferenced ordinary definition must not produce an artifact either.
+    kernels.extend(
+        ir.Function(
+            name,
+            [],
+            [],
+            ir.ReturnStmt([], span),
+            span,
+            type=ir.FunctionType.AIV,
+            attrs={
+                "builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v",
+                "builtin_template_vars": "dtype_cpp=float",
+            },
+        )
+        for name in ("ordinary", "unused_ordinary")
+    )
+    calls: list[ir.Stmt] = [
+        ir.EvalStmt(ir.Call(ir.GlobalVar("ordinary"), [], ir.TupleType([]), span), span),
+        ir.EvalStmt(
+            ir.Call(ir.GlobalVar("first"), [ir.ConstInt(0, pl.UINT32, span)] * 7, ir.TupleType([]), span),
+            span,
+        ),
+        ir.EvalStmt(
+            ir.Submit(
+                ir.GlobalVar("second"), [ir.ConstInt(0, pl.UINT32, span)] * 7, [], ir.TupleType([]), span
+            ),
+            span,
+        ),
+    ]
+    chip = ir.Function("chip", [], [], ir.SeqStmts(calls, span), span, type=ir.FunctionType.Orchestration)
+    # Another entry calls the otherwise-unused implementation. Its mission
+    # must not leak into chip's descriptors, even in an unsplit Program.
+    other = ir.Function(
+        "other",
+        [],
+        [],
+        ir.EvalStmt(
+            ir.Call(ir.GlobalVar("unused"), [ir.ConstInt(0, pl.UINT32, span)] * 7, ir.TupleType([]), span),
+            span,
+        ),
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    program = ir.Program([chip, other, *kernels], "ids", span)
+    program = passes.derive_call_directions()(program)
+    program = passes.materialize_runtime_scopes()(program)
+    chip = next(f for f in program.functions.values() if f.name == "chip")
+    result = codegen.generate_orchestration(program, chip)
+    entries = result.ccu_modules
+    assert [(e.ccu_id, e.wrappers) for e in entries] == [(0, ["first"]), (1, ["second"])]
+    assert all(e.parameter_size == 8 * (9 + 3 * 2) and e.parameter_alignment == 64 for e in entries)
+    specs = result.builtin_sources
+    assert len({spec.output_path for spec in specs}) == len(specs) == 6
+    sources = _render_builtin_kernel_sources(specs)
+    assert "kernels/aiv/ordinary.cpp" in sources
+    assert "kernels/aiv/unused_ordinary.cpp" not in sources
+    assert "submit_ccu_mission(ctx, comm, ccu_id, call_args)" in sources["kernels/aiv/first.cpp"]
+    assert "submit_ccu_mission(ctx, comm, ccu_id, call_args)" in sources["kernels/aiv/second.cpp"]
+    assert "constexpr uint32_t ccu_id = 0;" in sources["kernels/aiv/first.cpp"]
+    assert "constexpr uint32_t ccu_id = 1;" in sources["kernels/aiv/second.cpp"]
+    assert "kernels/aiv/unused.cpp" not in sources
+    assert set(p for p in sources if p.startswith("ccu/")) == {
+        "ccu/module_0.cpp",
+        "ccu/module_1.cpp",
+        "ccu/allgather_schedule.hpp",
+    }
+    reordered = ir.Program([*reversed(kernels), chip], "ids", span)
+    reordered_result = codegen.generate_orchestration(reordered, chip)
+    assert sources == _render_builtin_kernel_sources(reordered_result.builtin_sources)
+
+
+def test_ccu_multi_callable_entries_and_shape_deduplication(tmp_path):
+    @pl.program
+    class Multi:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def first(
+            self,
+            data: pld.DistributedTensor[[1, 64], pl.BF16],
+            target: pl.InOut[pld.DistributedTensor[[2, 64], pl.BF16]],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        ):
+            target = pld.tensor.allgather(data, target, signal, engine="ccu")
+            return target
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def second(
+            self,
+            data: pld.DistributedTensor[[1, 64], pl.BF16],
+            target: pl.InOut[pld.DistributedTensor[[2, 64], pl.BF16]],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            data2: pld.DistributedTensor[[1, 32], pl.BF16],
+            target2: pl.InOut[pld.DistributedTensor[[2, 32], pl.BF16]],
+            signal2: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        ):
+            target = pld.tensor.allgather(data, target, signal, engine="ccu")
+            target2 = pld.tensor.allgather(data2, target2, signal2, engine="ccu")
+            return target, target2
+
+    _compile_to_files(
+        Multi,
+        contract=ArtifactExecutionMode.PROGRAM,
+        output_dir=str(tmp_path),
+        backend_type=BackendType.Ascend950,
+        skip_ptoas=True,
+    )
+    # Native lifetime must not change with the number of static call sites.
+    assert (tmp_path / "next_levels/first/ccu/module_0.cpp").read_text() == (
+        tmp_path / "next_levels/second/ccu/module_0.cpp"
+    ).read_text()
+    for name, count in (("first", 1), ("second", 2)):
+        root = tmp_path / "next_levels" / name
+        config = (root / "kernel_config.py").read_text()
+        assert "'ccu_id': 0" in config and "'ccu_id': 1" not in config
+        assert "request_count" not in config
+        assert len(list((root / "ccu").glob("*.cpp"))) == 1
+        assert "CCU_WHILE(service != 0)" in (root / "ccu/module_0.cpp").read_text()
+        wrappers = list((root / "kernels/aiv").glob("*.cpp"))
+        assert len(wrappers) == count
+        assert all("submit_ccu_mission(ctx, comm, ccu_id, call_args)" in p.read_text() for p in wrappers)
+        source = _sole_file(root / "orchestration", "*.cpp").read_text()
+        tokens = re.findall(r"\.add_inout\((_ccu_order_\w*)\)", source)
+        assert len(tokens) == count and len(set(tokens)) == 1
 
 
 if __name__ == "__main__":

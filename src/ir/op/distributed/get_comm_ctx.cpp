@@ -86,6 +86,32 @@ TypePtr DeduceCommCtxScalarType(const std::string& op_name, const std::vector<Ex
 
 }  // namespace
 
+// Registration has resource/failure effects even though it does not read Ptr data.
+// DCE explicitly preserves it; no generic purity declaration is made.
+REGISTER_OP("pld.system.register_ccu")
+    .set_internal_only()
+    .set_description("Register a CCU definition in the live domain owning an allocation token")
+    .set_op_category("DistributedOp")
+    .add_argument("allocation", "alloc_window_buffer Ptr selecting a live communication domain")
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) -> TypePtr {
+      CHECK(args.size() == 1 && args[0] && IsA<PtrType>(args[0]->GetType()))
+          << "register_ccu expects one allocation Ptr";
+      CHECK(kwargs.size() == 2) << "register_ccu requires callee and chip_callee symbols";
+      bool has_callee = false;
+      bool has_chip = false;
+      for (const auto& [name, value] : kwargs) {
+        CHECK((name == "callee" || name == "chip_callee") && value.type() == typeid(std::string) &&
+              !std::any_cast<std::string>(value).empty())
+            << "register_ccu requires nonempty callee and chip_callee symbols";
+        has_callee |= name == "callee";
+        has_chip |= name == "chip_callee";
+      }
+      CHECK(has_callee && has_chip) << "register_ccu requires callee and chip_callee symbols";
+      return GetCcuRegistrationType();
+    });
+
 // ============================================================================
 // pld.system.get_comm_ctx — lift a DistributedTensor to its CommContext handle
 // ============================================================================

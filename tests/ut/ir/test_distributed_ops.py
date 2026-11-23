@@ -3289,5 +3289,30 @@ def test_async_transfer_rejects_unknown_atomic_kwarg(op_name):
         )
 
 
+@pytest.mark.parametrize("engine", ["default", "ccu"])
+def test_allgather_engine_builder_and_effects(engine):
+    span = ir.Span.unknown()
+    data = ir.Var("data", ir.DistributedTensorType([1, 256], DataType.BF16), span)
+    target = ir.Var("target", ir.DistributedTensorType([2, 256], DataType.BF16), span)
+    signal = ir.Var("signal", ir.DistributedTensorType([2, 1], DataType.INT32), span)
+    call = dist_tensor_ops.allgather(data, target, signal, engine=engine)
+    assert call.kwargs.get("engine", "default") == engine
+    assert call.type is target.type
+    assert ir.get_op_arg_effect("pld.tensor.allgather", 0) == ir.ArgEffect.Read
+    assert ir.get_op_arg_effect("pld.tensor.allgather", 1) == ir.ArgEffect.Write
+    assert ir.get_op_arg_effect("pld.tensor.allgather", 2) == ir.ArgEffect.ReadWrite
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("engine", ["CCU", "urma", "", 1])
+def test_allgather_engine_rejects_invalid_values(engine):
+    span = ir.Span.unknown()
+    data = ir.Var("data", ir.DistributedTensorType([1, 256], DataType.BF16), span)
+    target = ir.Var("target", ir.DistributedTensorType([2, 256], DataType.BF16), span)
+    signal = ir.Var("signal", ir.DistributedTensorType([2, 1], DataType.INT32), span)
+    with pytest.raises((ValueError, TypeError), match="engine|type"):
+        dist_tensor_ops.allgather(data, target, signal, engine=engine)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

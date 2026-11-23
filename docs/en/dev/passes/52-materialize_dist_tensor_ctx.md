@@ -8,6 +8,11 @@ Engine requirements, per-buffer conflict checks and domain grouping belong to
 This pass only materializes contexts for those domains. Both passes share the
 distributed-tensor alias tracing utility.
 
+CCU CHIP callables, wrappers and builtin declarations follow this same rule.
+A CHIP may use several domains; repeated contexts are valid. HOST registration handles remain only in
+`ccu_bindings` dispatch configuration. Native CCU algorithm packing excludes
+compiler-added contexts. The definition ID is a codegen constant, not a wrapper parameter.
+
 ## Overview
 
 Distributed tensors need a communication context at every dispatch boundary:

@@ -7,6 +7,11 @@
 [MaterializeCommDomainScopes](50-materialize_comm_domain_scopes.md#异步工作区引擎) 完成。
 本 Pass 只为这些通信域物化上下文；两个 Pass 共用分布式 tensor 的别名追踪工具。
 
+CCU CHIP callable、wrapper 和 builtin 声明均遵循同一规则。
+一个 CHIP 可以使用多个通信域，重复 ctx 也合法。
+HOST 注册 handle 只出现在 dispatch 的 `ccu_bindings` 配置中。
+编译器追加的 ctx 不打包为 native 算法参数。定义编号是 codegen 常量，不是 wrapper 形参。
+
 ## 概览
 
 DistributedTensor 的通信上下文需要沿完整调用链传递：host orchestration

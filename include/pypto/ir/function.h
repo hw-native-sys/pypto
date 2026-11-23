@@ -65,7 +65,8 @@ enum class FunctionType : uint8_t {
   Inline = 7,         ///< Whole-body substitution at every call site
   Graph = 8,          ///< Recordable/replayable orchestration fragment
   SIMT = 9,           ///< Per-thread device helper launched inside an AIV task
-  VF = 10             ///< Synchronous register helper called inside an AIV task
+  VF = 10,            ///< Synchronous register helper called inside an AIV task
+  CCU = 11            ///< Domain-registered native communication builtin
 };
 
 /** @brief Function body representation, independent of its execution context. */
@@ -289,6 +290,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "SIMT";
     case FunctionType::VF:
       return "VF";
+    case FunctionType::CCU:
+      return "CCU";
   }
   throw pypto::TypeError("Unknown FunctionType");
 }
@@ -385,6 +388,8 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::Graph;
   } else if (str == "VF") {
     return FunctionType::VF;
+  } else if (str == "CCU") {
+    return FunctionType::CCU;
   } else if (str == "SIMT") {
     return FunctionType::SIMT;
   } else {

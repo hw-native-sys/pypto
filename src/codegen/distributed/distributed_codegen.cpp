@@ -19,7 +19,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -30,6 +29,7 @@
 #include "pypto/codegen/codegen_preconditions.h"
 #include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/distributed/distributed_op_registry.h"
+#include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -41,6 +41,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/ccu_collective_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/window_view_utils.h"
@@ -78,7 +79,8 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
 // Public API
 // ========================================================================
 
-std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
+std::string DistributedCodegen::Generate(const ir::ProgramPtr& program,
+                                         const std::map<std::string, OrchestrationResult>& chip_results) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
   VerifyDistributedCodegenPreconditions(program);
   // Share recursive HOST return maps across all CHIP entries in this immutable
@@ -104,6 +106,19 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
 
   comm_domain_stack_.clear();
 
+  ccu_definitions_.clear();
+  allocation_domains_.clear();
+  // Consume the actual CHIP codegen table. Reconstructing IDs from another IR
+  // scan can disagree with dispatch order or include kernels not packaged.
+  for (const auto& [callable, result] : chip_results) {
+    for (const auto& module : result.ccu_modules) {
+      for (const auto& wrapper : module.wrappers) {
+        auto call = ir::CcuWrapperCall(program->GetFunction(wrapper), program);
+        INTERNAL_CHECK(call) << "CCU module must name an AIV submission wrapper";
+        ccu_definitions_.emplace(std::make_pair(callable, call->op_->name_), module.ccu_id);
+      }
+    }
+  }
   ClassifyFunctions();
   CHECK(!workers_.empty() || !orchestrators_.empty())
       << "Program has no distributed functions (no functions with level/role metadata)";
@@ -671,11 +686,13 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   // Push this scope so EmitCallToWorker can resolve DistributedTensor args
   // inside the body to the correct handle var. Pop on exit so a sibling
   // scope's body never sees this one.
+  for (const auto& slot : op->slots_) allocation_domains_[ir::AsVarLike(slot->base_).get()] = op;
   comm_domain_stack_.push_back(op);
   if (op->body_) {
     VisitStmt(op->body_);
   }
   comm_domain_stack_.pop_back();
+  for (const auto& slot : op->slots_) allocation_domains_.erase(ir::AsVarLike(slot->base_).get());
 
   emitter_.DecreaseIndent();
 }
@@ -978,6 +995,22 @@ void DistributedCodegen::VisitStmt_(const ir::SeqStmtsPtr& op) {
 
 void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Call";
+
+  if (ir::IsOp(op, "pld.system.register_ccu")) {
+    auto allocation = ir::AsVarLike(op->args_.at(0));
+    const auto domain = allocation_domains_.find(allocation.get());
+    CHECK_SPAN(domain != allocation_domains_.end(), op->span_)
+        << "register_ccu requires an allocation token in a live domain";
+    const auto callable = op->GetKwarg<std::string>("chip_callee");
+    auto def = ccu_definitions_.find({callable, op->GetKwarg<std::string>("callee")});
+    CHECK_SPAN(def != ccu_definitions_.end(), op->span_)
+        << "register_ccu requires the consuming CHIP callable's generated CCU table";
+    const auto device = ResolveRankExpr(op);
+    INTERNAL_CHECK_SPAN(!device.empty(), op->span_) << "CCU registration requires an explicit device";
+    current_expr_value_ = HandleVarForScope(domain->second) + ".get_or_register_ccu(callables[\"" + callable +
+                          "\"], ccu_id=" + std::to_string(def->second) + ", worker=" + device + ")";
+    return;
+  }
 
   // Check if callee is a GlobalVar (program function reference)
   if (auto gv = std::dynamic_pointer_cast<const ir::GlobalVar>(op->op_)) {
@@ -1401,8 +1434,22 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     }
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
     const std::string worker_arg = rank_expr.empty() ? "None" : rank_expr;
+    std::string ccu_config;
+    const auto regs = submit ? submit->GetAttr<std::vector<ir::VarPtr>>(ir::kAttrCcuBindings)
+                             : call->GetAttr<std::vector<ir::VarPtr>>(ir::kAttrCcuBindings);
+    if (!regs.empty()) {
+      ccu_config = ", ccu_bindings=[";
+      for (size_t index = 0; index < regs.size(); ++index) {
+        // MaterializeCcuBindings verifies dominance and device ownership;
+        INTERNAL_CHECK_SPAN(ir::IsA<ir::CcuRegistrationType>(regs[index]->GetType()), call->span_)
+            << "CCU binding must reference a HOST registration";
+        if (index) ccu_config += ", ";
+        ccu_config += GetVarName(regs[index]);
+      }
+      ccu_config += "]";
+    }
     const std::string submit_expr = "_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var +
-                                    ", config, " + worker_arg + ")";
+                                    ", config, " + worker_arg + ccu_config + ")";
     if (submit) {
       // The producer TaskId is the LAST element of the Submit's own return
       // tuple (the parser builds ``TupleType([*callee returns, Scalar[TASK_ID]])``).

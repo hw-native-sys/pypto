@@ -221,8 +221,10 @@ set(PYPTO_SOURCES
     src/ir/transforms/tensor_to_tile/output_propagation.cpp
     src/ir/transforms/tensor_to_tile/type_propagation.cpp
     src/ir/transforms/synthesize_allreduce_signals_pass.cpp
+    src/ir/transforms/materialize_ccu_bindings.cpp
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp
+    src/ir/transforms/lower_l2/ccu_collectives.cpp
     src/ir/transforms/lower_l2_tensor_collectives_pass.cpp
     src/ir/transforms/legalize_spmd_launches_pass.cpp
     src/ir/transforms/materialize_dist_tensor_ctx_pass.cpp

@@ -446,6 +446,8 @@ def _local_builds(
     metadata_path = root / "build/lib/pto_isa_build.json"
     runtime_build = metadata_path.read_bytes() if metadata_path.is_file() else None
     device: list[Any] = [_compiler_identity(compiler._orchestration_toolchain(runtime_name).cxx_path, root)]
+    if compiler.platform == "a5":
+        device.append(_compiler_identity(compiler.sdk.host_gxx.cxx_path, root))
     if compiler.platform.endswith("sim"):
         device.append(_compiler_identity(compiler.sdk.gxx15.cxx_path, root))
     else:

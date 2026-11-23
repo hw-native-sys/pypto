@@ -48,6 +48,7 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 
 | 方法 | 用途 | Ascend910 | Ascend950 |
 | ---- | ---- | --------- | --------- |
+| `SupportCcu()` | CCU 编译器能力（源码及运行支持另行交付） | `false` | `true` |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
 | `GetSyncResourceCatalog()` | 该后端持有的不可变[同步资源信息](01-sync_resources.md) | A2/A3 资源池 | A5 资源池 |
 | `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置逻辑 block 数量的运行时 API 名 | `"set_block_num"` | `"set_block_num"` |

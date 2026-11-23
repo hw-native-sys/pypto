@@ -906,6 +906,11 @@ inline std::vector<std::pair<std::string, std::any>> WithDumpVarsAttr(
   return attrs;
 }
 
+/// HOST Call/Submit launch requirements: vector<VarPtr> of CcuRegistration
+/// handles, including ordinary SSA phi results. Order has no routing identity;
+/// device requests use the native definition ID together with their CommCtx.
+inline constexpr const char* kAttrCcuBindings = "ccu_bindings";
+
 /**
  * @brief Reserved attr key for the physical device selector on a
  * host-orchestrator dispatch to a chip-level Orchestration function.

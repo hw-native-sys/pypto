@@ -54,6 +54,7 @@ class TestBackendHandlerValues:
     def test_ascend910b_handler_values(self):
         handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend910).get_handler()
 
+        assert handler.support_ccu() is False
         assert handler.get_pto_target_arch() == "a2a3"
         assert handler.get_launch_spec_core_count_method() == "set_block_num"
         assert handler.get_default_sim_platform() == "a2a3sim"
@@ -74,6 +75,7 @@ class TestBackendHandlerValues:
     def test_ascend950_handler_values(self):
         handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
 
+        assert handler.support_ccu() is True
         assert handler.get_pto_target_arch() == "a5"
         assert handler.get_launch_spec_core_count_method() == "set_block_num"
         assert handler.get_default_sim_platform() == "a5sim"

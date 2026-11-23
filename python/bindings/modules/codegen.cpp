@@ -16,6 +16,9 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <map>
+#include <string>
+
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
@@ -80,12 +83,32 @@ void BindCodegen(nb::module_& m) {
       .def_ro("core_type", &KernelRegistration::core_type)
       .def_ro("signature", &KernelRegistration::signature);
 
+  nb::class_<BuiltinSourceSpec>(codegen_module, "BuiltinSourceSpec", "Template artifact selected by codegen")
+      .def_ro("template_dir", &BuiltinSourceSpec::template_dir)
+      .def_ro("template_file", &BuiltinSourceSpec::template_file)
+      .def_ro("output_path", &BuiltinSourceSpec::output_path)
+      .def_ro("variables", &BuiltinSourceSpec::variables);
+
+  nb::class_<CcuModule>(codegen_module, "CcuModule", "Callable-local native CCU module descriptor")
+      .def_ro("ccu_id", &CcuModule::ccu_id)
+      .def_ro("template_dir", &CcuModule::template_dir)
+      .def_ro("variables", &CcuModule::variables)
+      .def_ro("wrappers", &CcuModule::wrappers)
+      .def_ro("source", &CcuModule::source)
+      .def_ro("entry_symbol", &CcuModule::entry_symbol)
+      .def_ro("parameter_size", &CcuModule::parameter_size)
+      .def_ro("parameter_alignment", &CcuModule::parameter_alignment);
+
   // OrchestrationResult - result of orchestration code generation
   nb::class_<OrchestrationResult>(codegen_module, "OrchestrationResult",
                                   "Result of orchestration code generation")
       .def_ro("code", &OrchestrationResult::code, "Generated C++ orchestration code")
       .def_ro("kernel_registrations", &OrchestrationResult::kernel_registrations,
               "Runtime registrations keyed by code, core type and final tensor signature")
+      .def_ro("builtin_sources", &OrchestrationResult::builtin_sources,
+              "Template source artifacts with complete paths and substitutions")
+      .def_ro("ccu_modules", &OrchestrationResult::ccu_modules,
+              "Native CCU modules in callable-local ID order, shared by wrappers and config")
       .def_ro("orchestration_signature", &OrchestrationResult::orchestration_signature,
               "Orchestration entry per-tensor ArgDirection name list (scalars excluded), in "
               "orch_args tensor order; sets the ChipCallable signature");
@@ -110,16 +133,18 @@ void BindCodegen(nb::module_& m) {
       .def_ro("template_vars", &BuiltinNextLevelSpec::template_vars,
               "Template variables supplied by the builtin op codegen handler");
 
-  // DistributedCodegen - Distributed C++ code generator for Linqu runtime
+  // DistributedCodegen - Distributed Python code generator for Linqu runtime
   nb::class_<DistributedCodegen>(codegen_module, "DistributedCodegen",
-                                 "Distributed codegen for Linqu hierarchy runtime C++ code")
+                                 "Distributed codegen for Linqu hierarchy runtime Python code")
       .def(nb::init<>(), "Create a distributed code generator")
       .def("generate", &DistributedCodegen::Generate, nb::arg("program"),
-           "Generate distributed C++ code from IR Program.\n\n"
+           nb::arg("chip_results") = std::map<std::string, OrchestrationResult>{},
+           "Generate distributed Python code from IR Program.\n\n"
            "Args:\n"
-           "    program: The IR Program (after OutlineHierarchyScopes)\n\n"
+           "    program: The IR Program (after OutlineHierarchyScopes)\n"
+           "    chip_results: Generated CHIP artifacts; required for CCU registrations\n\n"
            "Returns:\n"
-           "    Complete C++ source code as a string")
+           "    Complete Python source code as a string")
       .def("get_builtin_next_level_specs", &DistributedCodegen::GetBuiltinNextLevelSpecs,
            "Return builtin chip-callable variants requested during the last generate() call.");
 
