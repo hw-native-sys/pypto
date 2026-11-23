@@ -673,7 +673,7 @@ must also provide the tile memory space as a separate `pl.Mem.*` argument.
 
 `Scaling` holds packed INT64/UINT64 Fixpipe control words (`loc=scaling`),
 separately from the MX `LeftScale` / `RightScale` spaces. See the
-[C2V Fixpipe contract](../passes/24-expand_mixed_kernel.md#c2v-fixpipe-contract).
+[C2V Fixpipe contract](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-contract).
 
 | Value | Description |
 | ----- | ----------- |
