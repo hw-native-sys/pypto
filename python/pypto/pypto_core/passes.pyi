@@ -13,7 +13,7 @@ from enum import Enum
 from types import TracebackType
 from typing import Any, overload
 
-from pypto.pypto_core.backend import Backend
+from pypto.pypto_core.backend import Backend, BackendType
 from pypto.pypto_core.ir import Function, HardwareLoopProfile, HardwareLoopQualification, Program, Span, Stmt
 
 class IRProperty(Enum):
@@ -310,6 +310,7 @@ class PassContext:
         enable_buffer_ir: bool = True,
         enable_software_pipeline: bool = False,
         report_hardware_loops: bool = False,
+        backend_type: BackendType | None = None,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -317,6 +318,10 @@ class PassContext:
         flag. Automatic dbC is disabled for PYPTO and DSA_RP; PTOAS retains
         its existing selection independently of this flag. Explicit buffering
         declarations are preserved.
+
+        ``backend_type`` binds a target for this context and nested contexts.
+        An omitted target inherits the enclosing target or process configuration.
+        PTO targets must agree with the process-wide runtime backend.
 
         ``runtime`` selects the target Simpler runtime ABI; its wire name is
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
@@ -351,6 +356,7 @@ class PassContext:
         """Get the diagnostic checks suppressed by this context."""
         ...
 
+    def get_scoped_backend_type(self) -> BackendType | None: ...
     def get_backend(self) -> Backend:
         """Return the configured backend; raise ValueError when none is configured."""
         ...

@@ -231,7 +231,7 @@ class SoftwarePipelineMutator : public IRMutator {
     plan.step = *step;
     plan.dynamic_trips = !stop.has_value();
     if (plan.dynamic_trips &&
-        !PassContext::Current()->GetBackendHandler()->SupportsRuntimeBoundLocalSoftwarePipeline()) {
+        !PassContext::GetCurrentBackendHandler()->SupportsRuntimeBoundLocalSoftwarePipeline()) {
       return Decline(reason, "backend has not enabled runtime-bound local software pipelines");
     }
     const auto max_stop = std::max(plan.start, scalar_bounds_.const_int_bound(op->stop_).max_value);
@@ -367,7 +367,7 @@ class SoftwarePipelineMutator : public IRMutator {
     }
     // Fixed-address multi_tile buffers require their physical slot stride to
     // satisfy target alignment. This is an encoding check, not a UB budget.
-    const auto* handler = PassContext::Current()->GetBackendHandler();
+    const auto* handler = PassContext::GetCurrentBackendHandler();
     for (const auto& [owner, base] : plan.bases) {
       auto bytes =
           utils::StaticPhysicalAllocationBytes(As<TileType>(owner->GetType()), MemorySpace::Vec, handler);

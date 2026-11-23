@@ -19,6 +19,7 @@ class BackendType:
 
     Ascend910: BackendType
     Ascend910B: BackendType  # Compatibility alias of Ascend910.
+    Linx: BackendType
     Ascend950: BackendType
     __members__: ClassVar[dict[str, BackendType]]
     """Every member, keyed by name — the canonical way to enumerate the enum."""
@@ -42,10 +43,25 @@ class Mem:
     @property
     def alignment(self) -> int: ...
 
+class PE:
+    """Processing element with private CELL storage."""
+
+    def __init__(self, cell_capacity_bytes: int, execution_units: list[str]) -> None: ...
+    @property
+    def cell_capacity_bytes(self) -> int: ...
+    @property
+    def execution_units(self) -> list[str]: ...
+
 class Core:
     """Processing core."""
 
-    def __init__(self, core_type: ir.CoreType, mems: list[Mem]) -> None: ...
+    def __init__(
+        self, core_type: ir.CoreType, mems: list[Mem], pes: list[PE] = ..., shared_capacity_bytes: int = 0
+    ) -> None: ...
+    @property
+    def pes(self) -> list[PE]: ...
+    @property
+    def shared_capacity_bytes(self) -> int: ...
     @property
     def core_type(self) -> ir.CoreType: ...
     @property
@@ -67,7 +83,7 @@ class Cluster:
     def total_core_count(self) -> int: ...
 
 class Die:
-    """Die containing clusters."""
+    """Die containing clusters or directly attached cores."""
 
     @overload
     def __init__(self, cluster_counts: dict[Cluster, int], /) -> None:
@@ -77,6 +93,12 @@ class Die:
     def __init__(self, cluster: Cluster, count: int, /) -> None:
         """Create a die with a single cluster type repeated ``count`` times."""
 
+    @overload
+    def __init__(self, core: Core, count: int) -> None: ...
+    @property
+    def direct_core_counts(self) -> dict[Core, int]: ...
+    @property
+    def core_counts(self) -> dict[Core, int]: ...
     @property
     def cluster_counts(self) -> dict[Cluster, int]: ...
     def total_cluster_count(self) -> int: ...
@@ -95,6 +117,7 @@ class SoC:
 
     @property
     def die_counts(self) -> dict[Die, int]: ...
+    def total_pe_count(self) -> int: ...
     def total_die_count(self) -> int: ...
     def total_cluster_count(self) -> int: ...
     def total_core_count(self) -> int: ...
@@ -197,6 +220,8 @@ class OpScratchPlan:
 class Backend:
     """Abstract backend base class."""
 
+    @property
+    def has_pto_codegen(self) -> bool: ...
     def get_type_name(self) -> str: ...
     def find_isa_macro_resources(self, name: str) -> IsaMacroResources | None:
         """Return symbolic signal claims, or None for an unregistered macro.
@@ -251,6 +276,12 @@ class Backend910B(Backend):
     def instance() -> Backend910B:
         """Get singleton instance of 910B backend."""
         ...
+
+class BackendLinx(Backend):
+    """Linx backend for IR lowering."""
+
+    @staticmethod
+    def instance() -> BackendLinx: ...
 
 class Backend950(Backend):
     """950 PTO backend implementation (singleton)."""

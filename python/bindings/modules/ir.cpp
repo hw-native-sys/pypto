@@ -831,6 +831,7 @@ void BindIR(nb::module_& m) {
   nb::enum_<CoreType>(ir, "CoreType", nb::is_arithmetic(), "Core type enumeration")
       .value("VECTOR", CoreType::VECTOR, "Vector Core")
       .value("CUBE", CoreType::CUBE, "Cube Core")
+      .value("SuperScalar", CoreType::SuperScalar, "Linx superscalar core")
       .export_values();
 
   // TileLayout enum - must be before TileView

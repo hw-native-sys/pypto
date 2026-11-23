@@ -66,8 +66,9 @@ inline std::string PipeTypeToString(PipeType pipe) {
  * @brief Core type enumeration (numeric values must match runtime add_task expectation)
  */
 enum CoreType : int {
-  CUBE = 0,   ///< Cube Core (Alias for AIC)
-  VECTOR = 1  ///< Vector Core (Alias for AIV)
+  CUBE = 0,        ///< Cube Core (Alias for AIC)
+  VECTOR = 1,      ///< Vector Core (Alias for AIV)
+  SuperScalar = 2  ///< Linx physical core containing processing elements
 };
 
 /**

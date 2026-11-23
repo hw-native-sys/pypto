@@ -11,9 +11,11 @@
 
 from pypto.pypto_core.backend import (
     # Backend type and implementations
+    PE,
     Backend,
     Backend910B,
     Backend950,
+    BackendLinx,
     BackendType,
     Cluster,
     Core,
@@ -36,6 +38,7 @@ from pypto.pypto_core.backend import (
 )
 
 __all__ = [
+    "PE",
     "Mem",
     "Core",
     "Cluster",
@@ -47,6 +50,7 @@ __all__ = [
     "Backend",
     "Backend910B",
     "Backend950",
+    "BackendLinx",
     "BackendType",
     "set_backend_type",
     "get_backend_type",

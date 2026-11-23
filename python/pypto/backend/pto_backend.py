@@ -1553,7 +1553,7 @@ def _generate_config_file(
     for registration in sorted(kernel_registrations, key=lambda r: r.func_id):
         name, func_id = registration.code_name, registration.func_id
         core_type = registration.core_type
-        ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
+        ct_str = _pto_core_name(core_type)
         # External kernels are referenced in place at their original path so the
         # entry .cpp keeps its sibling files (relative #include "../..." resolve);
         # DSL kernels are generated at kernels/<ct>/<name>.cpp under the artifact.
@@ -1719,13 +1719,21 @@ def _get_ptoas_flags(
     return flags
 
 
+def _pto_core_name(core_type: _ir_core.CoreType) -> str:
+    if core_type == _ir_core.CoreType.VECTOR:
+        return "aiv"
+    if core_type == _ir_core.CoreType.CUBE:
+        return "aic"
+    raise ValueError(f"PTO code generation does not support core type {core_type.name}")
+
+
 def _get_kernel_output_path(
     func: _ir_core.Function,
     suffix: str,
 ) -> str:
     """Return the per-core kernel output path for a function."""
     core_type = _codegen_core.infer_function_core_type(func)
-    ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
+    ct_str = _pto_core_name(core_type)
     return os.path.join("kernels", ct_str, f"{func.name}.{suffix}")
 
 

@@ -59,7 +59,7 @@ using split_axis::TileInfo;
 bool RequiresNoSplitDualAivSync(const FunctionPtr& func) {
   return func != nullptr && func->func_type_ == FunctionType::AIV &&
          pypto::backend::BackendConfig::IsConfigured() &&
-         pypto::ir::PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() &&
+         pypto::ir::PassContext::GetCurrentBackendHandler()->RequiresNoSplitDualAivDispatch() &&
          func->HasAttr(kAttrDualAivDispatch) && func->GetAttr<bool>(kAttrDualAivDispatch, false);
 }
 

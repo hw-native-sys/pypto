@@ -438,8 +438,14 @@ def _classify_overlaps(boxes: list[Box]) -> None:
 
 
 def backend_names() -> list[str]:
-    """Canonical backend names, with compatibility aliases omitted from the UI."""
-    return list(dict.fromkeys(member.name for member in _backend.BackendType.__members__.values()))
+    """Canonical backend names supported by the PTO memory-map viewer."""
+    return list(
+        dict.fromkeys(
+            member.name
+            for member in _backend.BackendType.__members__.values()
+            if _backend.get_backend_instance(member).has_pto_codegen
+        )
+    )
 
 
 def _backend_type(backend_name: str) -> _backend.BackendType:

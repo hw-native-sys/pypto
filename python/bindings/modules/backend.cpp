@@ -34,6 +34,7 @@
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/op_rules.h"
 #include "pypto/backend/common/soc.h"
+#include "pypto/backend/linx/backend_linx.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
@@ -49,11 +50,13 @@ using pypto::backend::Backend;
 using pypto::backend::Backend910B;
 using pypto::backend::Backend950;
 using pypto::backend::BackendHandler;
+using pypto::backend::BackendLinx;
 using pypto::backend::BackendType;
 using pypto::backend::Cluster;
 using pypto::backend::Core;
 using pypto::backend::Die;
 using pypto::backend::Mem;
+using pypto::backend::PE;
 using pypto::backend::SoC;
 using pypto::ir::CoreType;
 using pypto::ir::MemorySpace;
@@ -70,7 +73,8 @@ void BindBackend(nb::module_& m) {
       nb::enum_<BackendType>(backend_mod, "BackendType",
                              "Backend type for passes and codegen (use Instance internally)")
           .value("Ascend910", BackendType::Ascend910, "910 backend (A2/A3 PTO assembly codegen)")
-          .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
+          .value("Ascend950", BackendType::Ascend950, "950 PTO backend")
+          .value("Linx", BackendType::Linx, "Linx superscalar backend");
 
   // Register the old spelling as the same Python object. A second .value()
   // creates a distinct nanobind enum member and breaks Python identity/equality.
@@ -90,11 +94,20 @@ void BindBackend(nb::module_& m) {
                ", alignment=" + std::to_string(mem.GetAlignment()) + ")";
       });
 
+  nb::class_<PE>(backend_mod, "PE", "Processing element")
+      .def(nb::init<uint64_t, std::vector<std::string>>(), nb::arg("cell_capacity_bytes"),
+           nb::arg("execution_units"))
+      .def_prop_ro("cell_capacity_bytes", &PE::GetCellCapacityBytes)
+      .def_prop_ro("execution_units", &PE::GetExecutionUnits);
+
   // ========== Core class ==========
   nb::class_<Core>(backend_mod, "Core", "Processing core")
-      .def(nb::init<CoreType, std::vector<Mem>>(), nb::arg("core_type"), nb::arg("mems"),
+      .def(nb::init<CoreType, std::vector<Mem>, std::vector<PE>, uint64_t>(), nb::arg("core_type"),
+           nb::arg("mems"), nb::arg("pes") = std::vector<PE>{}, nb::arg("shared_capacity_bytes") = 0,
            "Create a processing core")
-      .def_prop_ro("core_type", &Core::GetCoreType, "Core type (CUBE or VECTOR)")
+      .def_prop_ro("pes", &Core::GetPEs)
+      .def_prop_ro("shared_capacity_bytes", &Core::GetSharedCapacityBytes)
+      .def_prop_ro("core_type", &Core::GetCoreType, "Physical core type")
       .def_prop_ro("mems", &Core::GetMems, "List of memory components")
       .def("__repr__", [](const Core& core) {
         return "Core(type=" + std::to_string(static_cast<int>(core.GetCoreType())) +
@@ -113,11 +126,14 @@ void BindBackend(nb::module_& m) {
       });
 
   // ========== Die class ==========
-  nb::class_<Die>(backend_mod, "Die", "Die containing clusters")
+  nb::class_<Die>(backend_mod, "Die", "Die containing clusters or directly attached cores")
       .def(nb::init<std::map<Cluster, int>>(), nb::arg("cluster_counts"),
            "Create die from cluster counts map")
       .def(nb::init<const Cluster&, int>(), nb::arg("cluster"), nb::arg("count"),
            "Create die with single cluster type")
+      .def(nb::init<const Core&, int>(), nb::arg("core"), nb::arg("count"))
+      .def_prop_ro("direct_core_counts", &Die::GetDirectCoreCounts)
+      .def_prop_ro("core_counts", &Die::GetCoreCounts)
       .def_prop_ro("cluster_counts", &Die::GetClusterCounts, "Map of cluster configurations to counts")
       .def("total_cluster_count", &Die::TotalClusterCount, "Get total number of clusters in die")
       .def("total_core_count", &Die::TotalCoreCount, "Get total number of cores in die")
@@ -131,6 +147,7 @@ void BindBackend(nb::module_& m) {
       .def(nb::init<std::map<Die, int>>(), nb::arg("die_counts"), "Create SoC from die counts map")
       .def(nb::init<const Die&, int>(), nb::arg("die"), nb::arg("count"), "Create SoC with single die type")
       .def_prop_ro("die_counts", &SoC::GetDieCounts, "Map of die configurations to counts")
+      .def("total_pe_count", &SoC::TotalPECount)
       .def("total_die_count", &SoC::TotalDieCount, "Get total number of dies in SoC")
       .def("total_cluster_count", &SoC::TotalClusterCount, "Get total number of clusters in SoC")
       .def("total_core_count", &SoC::TotalCoreCount, "Get total number of cores in SoC")
@@ -221,6 +238,7 @@ void BindBackend(nb::module_& m) {
 
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
+      .def_prop_ro("has_pto_codegen", &Backend::HasPtoCodegen)
       .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
       .def("get_registered_op_names", &Backend::GetRegisteredOpNames,
            "Get a sorted snapshot of this backend's registered operator names")
@@ -268,6 +286,9 @@ void BindBackend(nb::module_& m) {
   nb::class_<Backend950, Backend>(backend_mod, "Backend950", "950 PTO backend implementation")
       .def_static("instance", &Backend950::Instance, nb::rv_policy::reference,
                   "Get singleton instance of 950 backend");
+
+  nb::class_<BackendLinx, Backend>(backend_mod, "BackendLinx", "Linx IR backend")
+      .def_static("instance", &BackendLinx::Instance, nb::rv_policy::reference);
 
   // ========== Backend configuration functions ==========
   backend_mod.def("set_backend_type", &backend::BackendConfig::SetBackendType, nb::arg("backend_type"),

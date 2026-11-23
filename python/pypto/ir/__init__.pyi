@@ -40,7 +40,7 @@ from pypto.pypto_core.passes import (
 from . import directions as directions
 from . import op as op
 from .builder import IRBuilder
-from .compile import compile
+from .compile import compile, lower
 from .compiled_program import CompiledProgram
 from .directions import make_call
 from .distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
@@ -92,6 +92,7 @@ __all__ = [
     "TileView",
     "python_print",
     "compile",
+    "lower",
     "CompiledProgram",
     "DistributedCompiledProgram",
     "DistributedConfig",

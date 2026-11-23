@@ -16,6 +16,7 @@
 #include <fstream>
 #include <ios>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -310,8 +311,9 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
                          MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
                          RuntimeKind runtime, bool enable_buffer_ir, bool enable_software_pipeline,
-                         bool report_hardware_loops)
-    : report_hardware_loops_(report_hardware_loops),
+                         bool report_hardware_loops, std::optional<backend::BackendType> backend_type)
+    : backend_type_(backend_type),
+      report_hardware_loops_(report_hardware_loops),
       instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
@@ -347,6 +349,14 @@ const DiagnosticCheckSet& PassContext::GetDisabledDiagnostics() const { return d
 const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { return instruments_; }
 
 void PassContext::EnterContext() {
+  for (const auto* enclosing = current_; enclosing; enclosing = enclosing->previous_) {
+    CHECK(enclosing != this) << "Cannot re-enter an active PassContext";
+  }
+  // PTO passes still share the runtime target. Bind it before pushing this
+  // context so a conflicting target cannot leave a partially entered scope.
+  if (backend_type_ && backend::GetBackendInstance(*backend_type_)->HasPtoCodegen()) {
+    backend::BackendConfig::SetBackendType(*backend_type_);
+  }
   previous_ = current_;
   current_ = this;
 }
@@ -381,17 +391,35 @@ void PassContext::RunAfterPipeline(const ProgramPtr& program) {
 
 PassContext* PassContext::Current() { return current_; }
 
-const backend::Backend* PassContext::GetBackend() const { return backend::BackendConfig::GetBackend(); }
+std::optional<backend::BackendType> PassContext::GetScopedBackendType() const {
+  if (backend_type_ || !previous_) return backend_type_;
+  return previous_->GetScopedBackendType();
+}
 
-const backend::BackendHandler* PassContext::GetBackendHandler() const {
-  // Handler ownership lives with the Backend itself; PassContext is just a
-  // convenient access path that satisfies the "pass-context-config" rule.
-  return GetBackend()->GetHandler();
+const backend::Backend* PassContext::GetBackend() const {
+  auto type = GetScopedBackendType();
+  return type ? backend::GetBackendInstance(*type) : backend::BackendConfig::GetBackend();
+}
+
+const backend::BackendHandler* PassContext::GetBackendHandler() const { return GetBackend()->GetHandler(); }
+
+const backend::BackendHandler* PassContext::GetCurrentBackendHandler() {
+  const auto* ctx = Current();
+  return (ctx ? ctx->GetBackend() : backend::BackendConfig::GetBackend())->GetHandler();
+}
+
+const backend::BackendHandler* PassContext::CurrentPtoHandler() {
+  const auto* ctx = Current();
+  if (!(ctx && ctx->GetScopedBackendType()) && !backend::BackendConfig::IsConfigured()) return nullptr;
+  const auto* target = ctx ? ctx->GetBackend() : backend::BackendConfig::GetBackend();
+  return target->HasPtoCodegen() ? target->GetHandler() : nullptr;
 }
 
 HardwareLoopProfile PassContext::GetHardwareLoopProfile() const {
-  if (!backend::BackendConfig::IsConfigured()) return {};
-  return GetBackendHandler()->GetHardwareLoopProfile();
+  auto type = GetScopedBackendType();
+  if (!type && !backend::BackendConfig::IsConfigured()) return {};
+  const auto* target = GetBackend();
+  return target->HasPtoCodegen() ? target->GetHandler()->GetHardwareLoopProfile() : HardwareLoopProfile{};
 }
 
 }  // namespace ir

@@ -31,6 +31,7 @@
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_registry.h"
 #include "pypto/backend/common/op_rules.h"
+#include "pypto/backend/linx/backend_linx.h"
 #include "pypto/ir/memory_allocator_policy.h"
 
 // clang-format off
@@ -54,8 +55,10 @@ const Backend* GetBackendInstance(BackendType type) {
       return &Backend910B::Instance();
     case BackendType::Ascend950:
       return &Backend950::Instance();
+    case BackendType::Linx:
+      return &BackendLinx::Instance();
     default:
-      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be Ascend910 or Ascend950)";
+      CHECK(false) << "GetBackendInstance: unexpected BackendType";
       return nullptr;  // unreachable
   }
 }
@@ -66,6 +69,8 @@ std::string BackendTypeToString(BackendType type) {
       return "Ascend910";
     case BackendType::Ascend950:
       return "Ascend950";
+    case BackendType::Linx:
+      return "Linx";
   }
   return "Unknown";
 }
@@ -98,22 +103,37 @@ msgpack::object SerializeCore(const Core& core, msgpack::zone& zone) {
   }
   core_map["mems"] = msgpack::object(mems_vec, zone);
 
+  if (!core.GetPEs().empty()) {
+    std::vector<msgpack::object> pes;
+    for (const auto& pe : core.GetPEs()) {
+      std::map<std::string, msgpack::object> entry;
+      entry["cell_capacity_bytes"] = msgpack::object(pe.GetCellCapacityBytes(), zone);
+      entry["execution_units"] = msgpack::object(pe.GetExecutionUnits(), zone);
+      pes.emplace_back(entry, zone);
+    }
+    core_map["pes"] = msgpack::object(pes, zone);
+  }
+  if (core.GetSharedCapacityBytes()) {
+    core_map["shared_capacity_bytes"] = msgpack::object(core.GetSharedCapacityBytes(), zone);
+  }
   return msgpack::object(core_map, zone);
 }
 
-// Serialize Cluster to msgpack object
-msgpack::object SerializeCluster(const Cluster& cluster, msgpack::zone& zone) {
-  std::map<std::string, msgpack::object> cluster_map;
-
+msgpack::object SerializeCoreCounts(const std::map<Core, int>& counts, msgpack::zone& zone) {
   // Serialize core_counts map as array of [core, count] pairs
   std::vector<msgpack::object> cores_vec;
-  for (const auto& [core, count] : cluster.GetCoreCounts()) {
+  for (const auto& [core, count] : counts) {
     std::map<std::string, msgpack::object> entry;
     entry["core"] = SerializeCore(core, zone);
     entry["count"] = msgpack::object(count, zone);
     cores_vec.emplace_back(entry, zone);
   }
-  cluster_map["cores"] = msgpack::object(cores_vec, zone);
+  return msgpack::object(cores_vec, zone);
+}
+
+msgpack::object SerializeCluster(const Cluster& cluster, msgpack::zone& zone) {
+  std::map<std::string, msgpack::object> cluster_map;
+  cluster_map["cores"] = SerializeCoreCounts(cluster.GetCoreCounts(), zone);
 
   return msgpack::object(cluster_map, zone);
 }
@@ -132,6 +152,9 @@ msgpack::object SerializeDie(const Die& die, msgpack::zone& zone) {
   }
   die_map["clusters"] = msgpack::object(clusters_vec, zone);
 
+  if (!die.GetDirectCoreCounts().empty()) {
+    die_map["cores"] = SerializeCoreCounts(die.GetDirectCoreCounts(), zone);
+  }
   return msgpack::object(die_map, zone);
 }
 
@@ -210,15 +233,23 @@ Core DeserializeCore(const msgpack::object& obj) {
     mems.push_back(DeserializeMem(mem_obj));
   }
 
-  return Core(core_type, std::move(mems));
+  std::vector<PE> pes;
+  if (auto it = core_map.find("pes"); it != core_map.end()) {
+    for (const auto& pe : it->second.as<std::vector<msgpack::object>>()) {
+      auto entry = pe.as<std::map<std::string, msgpack::object>>();
+      pes.emplace_back(entry.at("cell_capacity_bytes").as<uint64_t>(),
+                       entry.at("execution_units").as<std::vector<std::string>>());
+    }
+  }
+  auto shared = core_map.find("shared_capacity_bytes");
+  return Core(core_type, std::move(mems), std::move(pes),
+              shared == core_map.end() ? 0 : shared->second.as<uint64_t>());
 }
 
 // Deserialize Cluster from msgpack object
-std::shared_ptr<const Cluster> DeserializeCluster(const msgpack::object& obj) {
-  auto cluster_map = obj.as<std::map<std::string, msgpack::object>>();
-
+std::map<Core, int> DeserializeCoreCounts(const msgpack::object& obj) {
   std::map<Core, int> core_counts;
-  auto cores_vec = cluster_map.at("cores").as<std::vector<msgpack::object>>();
+  auto cores_vec = obj.as<std::vector<msgpack::object>>();
   for (const auto& entry_obj : cores_vec) {
     auto entry = entry_obj.as<std::map<std::string, msgpack::object>>();
     auto core = DeserializeCore(entry.at("core"));
@@ -226,7 +257,12 @@ std::shared_ptr<const Cluster> DeserializeCluster(const msgpack::object& obj) {
     core_counts[core] = count;
   }
 
-  return std::make_shared<Cluster>(std::move(core_counts));
+  return core_counts;
+}
+
+std::shared_ptr<const Cluster> DeserializeCluster(const msgpack::object& obj) {
+  auto cluster_map = obj.as<std::map<std::string, msgpack::object>>();
+  return std::make_shared<Cluster>(DeserializeCoreCounts(cluster_map.at("cores")));
 }
 
 // Deserialize Die from msgpack object
@@ -242,7 +278,9 @@ std::shared_ptr<const Die> DeserializeDie(const msgpack::object& obj) {
     cluster_counts[*cluster] = count;
   }
 
-  return std::make_shared<Die>(std::move(cluster_counts));
+  std::map<Core, int> direct_cores;
+  if (auto it = die_map.find("cores"); it != die_map.end()) direct_cores = DeserializeCoreCounts(it->second);
+  return std::make_shared<Die>(std::move(cluster_counts), std::move(direct_cores));
 }
 
 // Deserialize SoC from msgpack object
@@ -366,12 +404,10 @@ std::vector<ir::MemorySpace> Backend::FindMemPath(ir::MemorySpace from, ir::Memo
 uint64_t Backend::GetMemSize(ir::MemorySpace mem_type) const {
   // Find the first memory of the requested type and return its size
   for (const auto& [die, die_count] : soc_->GetDieCounts()) {
-    for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
-      for (const auto& [core, core_count] : cluster.GetCoreCounts()) {
-        for (const auto& mem : core.GetMems()) {
-          if (mem.GetMemType() == mem_type) {
-            return mem.GetMemSize();
-          }
+    for (const auto& [core, core_count] : die.GetCoreCounts()) {
+      for (const auto& mem : core.GetMems()) {
+        if (mem.GetMemType() == mem_type) {
+          return mem.GetMemSize();
         }
       }
     }
@@ -384,11 +420,9 @@ uint64_t Backend::GetMemSize(ir::MemorySpace mem_type) const {
 int Backend::GetCoreCount(ir::CoreType core_type) const {
   int total = 0;
   for (const auto& [die, die_count] : soc_->GetDieCounts()) {
-    for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
-      for (const auto& [core, core_count] : cluster.GetCoreCounts()) {
-        if (core.GetCoreType() == core_type) {
-          total += core_count * cluster_count * die_count;
-        }
+    for (const auto& [core, core_count] : die.GetCoreCounts()) {
+      if (core.GetCoreType() == core_type) {
+        total += core_count * die_count;
       }
     }
   }
@@ -397,12 +431,10 @@ int Backend::GetCoreCount(ir::CoreType core_type) const {
 
 uint64_t Backend::GetMemAlignment(ir::MemorySpace mem_type) const {
   for (const auto& [die, die_count] : soc_->GetDieCounts()) {
-    for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
-      for (const auto& [core, core_count] : cluster.GetCoreCounts()) {
-        for (const auto& mem : core.GetMems()) {
-          if (mem.GetMemType() == mem_type) {
-            return mem.GetAlignment();
-          }
+    for (const auto& [core, core_count] : die.GetCoreCounts()) {
+      for (const auto& mem : core.GetMems()) {
+        if (mem.GetMemType() == mem_type) {
+          return mem.GetAlignment();
         }
       }
     }
@@ -603,6 +635,7 @@ ir::PipeType Backend::InferPipe(const ir::CallPtr& call) const {
   CHECK(call->op_ != nullptr) << "InferPipe received call with null op";
   if (const auto exact = TryInferPipe(call)) return *exact;
 
+  CHECK(HasPtoCodegen()) << "No pipe mapping is available for " << GetTypeName();
   // Legacy fallback for callers that do not require an exact hardware premise.
   bool has_tile = false;
   for (const auto& arg : call->args_) {
@@ -628,7 +661,7 @@ std::optional<ir::PipeType> Backend::TryInferPipe(const ir::CallPtr& call) const
   }
   const auto* info = GetOpInfo(call->op_->name_);
   if (info && info->infer_pipe_func) return (*info->infer_pipe_func)(call);
-  return InferCommonPtoPipe(*this, call);
+  return HasPtoCodegen() ? InferCommonPtoPipe(*this, call) : std::nullopt;
 }
 
 // ========== BackendOpRegistryEntry Implementation ==========

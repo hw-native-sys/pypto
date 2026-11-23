@@ -428,6 +428,7 @@ set(PYPTO_SOURCES
     src/backend/910B/backend_910b.cpp
     src/backend/910B/backend_910b_handler.cpp
     src/backend/910B/backend_910b_ops.cpp
+    src/backend/linx/backend_linx.cpp
     src/backend/950/backend_950.cpp
     src/backend/950/backend_950_handler.cpp
     src/backend/950/backend_950_ops.cpp

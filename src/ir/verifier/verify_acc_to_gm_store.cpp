@@ -16,8 +16,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/backend.h"
-#include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -215,14 +213,7 @@ class AccToGmStoreValidPropertyVerifierImpl : public PropertyVerifier {
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
-    // The destination whitelist is a backend fact. Several codegen tests drive
-    // passes with no backend configured; there is nothing to verify against
-    // then, and guessing a profile would reject programs the real target
-    // accepts. Both lookups below CHECK-fail when unconfigured, so probe first.
-    if (!backend::BackendConfig::IsConfigured()) return;
-    const auto* ctx = PassContext::Current();
-    const backend::BackendHandler* handler =
-        ctx != nullptr ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+    const auto* handler = PassContext::CurrentPtoHandler();
     if (handler == nullptr) return;
 
     for (const auto& [global_var, func] : program->functions_) {

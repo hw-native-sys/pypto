@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <map>
 #include <numeric>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -40,17 +41,32 @@ bool Mem::operator==(const Mem& other) const {
 
 // ========== Core Implementation ==========
 
-Core::Core(ir::CoreType core_type, std::vector<Mem> mems) : core_type_(core_type), mems_(std::move(mems)) {}
+PE::PE(uint64_t cell_capacity_bytes, std::vector<std::string> execution_units)
+    : cell_capacity_bytes_(cell_capacity_bytes), execution_units_(std::move(execution_units)) {}
+
+bool PE::operator<(const PE& other) const {
+  return std::tie(cell_capacity_bytes_, execution_units_) <
+         std::tie(other.cell_capacity_bytes_, other.execution_units_);
+}
+
+bool PE::operator==(const PE& other) const {
+  return cell_capacity_bytes_ == other.cell_capacity_bytes_ && execution_units_ == other.execution_units_;
+}
+
+Core::Core(ir::CoreType core_type, std::vector<Mem> mems, std::vector<PE> pes, uint64_t shared_capacity_bytes)
+    : core_type_(core_type),
+      pes_(std::move(pes)),
+      shared_capacity_bytes_(shared_capacity_bytes),
+      mems_(std::move(mems)) {}
 
 bool Core::operator<(const Core& other) const {
-  if (core_type_ != other.core_type_) {
-    return core_type_ < other.core_type_;
-  }
-  return mems_ < other.mems_;
+  return std::tie(core_type_, mems_, pes_, shared_capacity_bytes_) <
+         std::tie(other.core_type_, other.mems_, other.pes_, other.shared_capacity_bytes_);
 }
 
 bool Core::operator==(const Core& other) const {
-  return core_type_ == other.core_type_ && mems_ == other.mems_;
+  return core_type_ == other.core_type_ && mems_ == other.mems_ && pes_ == other.pes_ &&
+         shared_capacity_bytes_ == other.shared_capacity_bytes_;
 }
 
 // ========== Cluster Implementation ==========
@@ -70,9 +86,20 @@ bool Cluster::operator==(const Cluster& other) const { return core_counts_ == ot
 
 // ========== Die Implementation ==========
 
-Die::Die(std::map<Cluster, int> cluster_counts) : cluster_counts_(std::move(cluster_counts)) {}
+Die::Die(std::map<Cluster, int> cluster_counts, std::map<Core, int> direct_core_counts)
+    : cluster_counts_(std::move(cluster_counts)),
+      direct_core_counts_(std::move(direct_core_counts)),
+      core_counts_(direct_core_counts_) {
+  for (const auto& [cluster, count] : cluster_counts_) {
+    for (const auto& [core, cores_per_cluster] : cluster.GetCoreCounts()) {
+      core_counts_[core] += count * cores_per_cluster;
+    }
+  }
+}
 
-Die::Die(const Cluster& cluster, int count) : cluster_counts_({{cluster, count}}) {}
+Die::Die(const Core& core, int count) : Die({}, {{core, count}}) {}
+
+Die::Die(const Cluster& cluster, int count) : Die({{cluster, count}}) {}
 
 int Die::TotalClusterCount() const {
   return std::accumulate(cluster_counts_.begin(), cluster_counts_.end(), 0,
@@ -80,14 +107,19 @@ int Die::TotalClusterCount() const {
 }
 
 int Die::TotalCoreCount() const {
-  return std::accumulate(cluster_counts_.begin(), cluster_counts_.end(), 0, [](int sum, const auto& pair) {
-    return sum + pair.first.TotalCoreCount() * pair.second;
-  });
+  return std::accumulate(core_counts_.begin(), core_counts_.end(), 0,
+                         [](int sum, const auto& pair) { return sum + pair.second; });
 }
 
-bool Die::operator<(const Die& other) const { return cluster_counts_ < other.cluster_counts_; }
+bool Die::operator<(const Die& other) const {
+  return std::tie(cluster_counts_, direct_core_counts_) <
+         std::tie(other.cluster_counts_, other.direct_core_counts_);
+}
 
-bool Die::operator==(const Die& other) const { return cluster_counts_ == other.cluster_counts_; }
+bool Die::operator==(const Die& other) const {
+  return std::tie(cluster_counts_, direct_core_counts_) ==
+         std::tie(other.cluster_counts_, other.direct_core_counts_);
+}
 
 // ========== SoC Implementation ==========
 
@@ -112,6 +144,16 @@ int SoC::TotalCoreCount() const {
   return std::accumulate(die_counts_.begin(), die_counts_.end(), 0, [](int sum, const auto& pair) {
     return sum + pair.first.TotalCoreCount() * pair.second;
   });
+}
+
+int SoC::TotalPECount() const {
+  int total = 0;
+  for (const auto& [die, die_count] : die_counts_) {
+    for (const auto& [core, core_count] : die.GetCoreCounts()) {
+      total += die_count * core_count * static_cast<int>(core.GetPEs().size());
+    }
+  }
+  return total;
 }
 
 // ========== 910B SoC Factory ==========

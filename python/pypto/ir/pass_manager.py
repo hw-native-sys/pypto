@@ -18,6 +18,7 @@ from pathlib import Path
 from pypto.compile_profiling import CompileProfiler
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
+from pypto.pypto_core.backend import BackendType
 
 from .printer import python_print
 
@@ -99,6 +100,14 @@ def _write_ir_dump(program: core_ir.Program, path: str, prefix: str, explicit_la
 
 PassFactory = Callable[[], passes.Pass]
 
+# Simplify uses SSA definitions before statement and call normalization.
+_SCALAR_NORMALIZATION: tuple[PassFactory, ...] = (
+    passes.convert_to_ssa,
+    passes.simplify,
+    passes.normalize_stmt_structure,
+    passes.flatten_call_expr,
+)
+
 
 @unique
 class OptimizationStrategy(Enum):
@@ -162,10 +171,13 @@ class PassManager:
         strategy: OptimizationStrategy,
         *,
         analyze_auto_scopes_for_deps: bool,
+        linx: bool = False,
     ) -> tuple[PassFactory, ...]:
         """Build the immutable pass-factory recipe for an optimization strategy."""
         if strategy != OptimizationStrategy.Default:
             raise ValueError(f"Unsupported optimization strategy: {strategy!r}")
+        if linx:
+            return _SCALAR_NORMALIZATION
         tensor_prefix_passes: tuple[PassFactory, ...] = (
             passes.outline_simt_scopes,
             passes.outline_reg_scopes,
@@ -175,13 +187,7 @@ class PassManager:
             passes.inline_functions,
             passes.unroll_loops,
             passes.ctrl_flow_transform,
-            passes.convert_to_ssa,
-            # Propagate scalar constants (e.g. `CHUNK_K: Scalar[INDEX] = 512`)
-            # into downstream expression and type-annotation uses before tile
-            # lowering inspects them. Runs post-SSA to exploit single-definition.
-            passes.simplify,
-            passes.normalize_stmt_structure,
-            passes.flatten_call_expr,
+            *_SCALAR_NORMALIZATION,
         )
         tensor_only_passes: tuple[PassFactory, ...] = (
             passes.outline_hierarchy_scopes,
@@ -380,6 +386,16 @@ class PassManager:
         # the active planner to retain automatic dbC only for PTOAS.
         self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         self._construction_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
+        self._linx = ctx is not None and ctx.get_scoped_backend_type() == BackendType.Linx
+        self._pipeline = passes.PassPipeline()
+        pass_factories = self._get_pass_factories(
+            strategy, analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps, linx=self._linx
+        )
+        if self._linx:
+            for factory in pass_factories:
+                self._pipeline.add_pass(factory())
+            return
+
         skipped_mem_planning_passes: tuple[str, ...]
         if self._construction_planner == passes.MemoryPlanner.PTOAS:
             skipped_mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
@@ -391,11 +407,6 @@ class PassManager:
         # The C++ pipeline is the single source of truth for both pass objects
         # and names. Strategy recipes contain factories only; names always come
         # from the constructed Pass instances.
-        self._pipeline = passes.PassPipeline()
-        pass_factories = self._get_pass_factories(
-            strategy,
-            analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
-        )
         phase_properties = passes.IRPropertySet()
         phase_properties.insert(passes.IRProperty.AccStorePhaseValid)
         for pass_factory in pass_factories:
@@ -443,6 +454,8 @@ class PassManager:
         IR mode also fixes which storage verifiers are present and must match.
         """
         ctx = passes.PassContext.current()
+        if self._linx != (ctx is not None and ctx.get_scoped_backend_type() == BackendType.Linx):
+            raise RuntimeError("PassManager must run with the target used at construction")
         run_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         run_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         if run_buffer_ir != self._construction_buffer_ir:

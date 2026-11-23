@@ -20,18 +20,18 @@ change.
 
 `BackendHandler` (`include/pypto/backend/common/backend_handler.h`) is an
 abstract interface that names every behavioural difference between backends.
-Each `Backend` subclass owns a singleton `BackendHandler` subclass and exposes
-it through the new pure-virtual `Backend::GetHandler()`.
+Each PTO codegen backend exposes its singleton handler through `Backend::GetHandler()`.
+IR-only targets such as Linx expose their topology through `Backend::GetSoC()`.
 
 ```text
                        ┌────────────────────────────┐
-        Pass / Codegen │  PassContext::Current()    │
-                       │     ->GetBackendHandler()  │
+        Pass / Codegen │  PassContext::             │
+                       │  GetCurrentBackendHandler()│
                        └─────────────┬──────────────┘
                                      │
                                      ▼
                        ┌────────────────────────────┐
-                       │  BackendConfig::GetBackend │
+                       │  Scoped or global backend  │
                        │     ->GetHandler()         │
                        └─────────────┬──────────────┘
                                      │

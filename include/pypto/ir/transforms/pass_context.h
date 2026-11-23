@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,6 +31,7 @@ namespace pypto {
 namespace backend {
 class Backend;
 class BackendHandler;
+enum class BackendType;
 }  // namespace backend
 
 namespace ir {
@@ -319,7 +321,8 @@ class PassContext {
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
                        bool enable_buffer_ir = true, bool enable_software_pipeline = false,
-                       bool report_hardware_loops = false);
+                       bool report_hardware_loops = false,
+                       std::optional<backend::BackendType> backend_type = std::nullopt);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -401,14 +404,16 @@ class PassContext {
    */
   static PassContext* Current();
 
-  /// Access registered operator rules through the same target resolution as
-  /// GetBackendHandler; this does not introduce per-context target ownership.
+  /// Explicit target of this context or its enclosing scope, if any.
+  [[nodiscard]] std::optional<backend::BackendType> GetScopedBackendType() const;
+
+  /// Resolve the scoped backend, falling back to the process configuration.
   [[nodiscard]] const backend::Backend* GetBackend() const;
 
   /**
    * @brief Convenience accessor for the currently configured BackendHandler.
    *
-   * Equivalent to `BackendConfig::GetBackend()->GetHandler()`. Provided so
+   * Equivalent to `GetBackend()->GetHandler()`. Provided so
    * that passes can dispatch backend-specific behaviour through the
    * PassContext (per the `pass-context-config` rule) without taking a
    * direct dependency on the global BackendConfig from every call site.
@@ -417,6 +422,12 @@ class PassContext {
    * @throws pypto::ValueError if backend type has not been configured.
    */
   [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
+
+  /// Require the handler of the active context or the process backend for standalone passes.
+  static const backend::BackendHandler* GetCurrentBackendHandler();
+
+  /// PTO-specific checks are optional for IR-only targets and unconfigured host code.
+  static const backend::BackendHandler* CurrentPtoHandler();
 
   /// Host-only codegen may run without a device backend; its profile is unsupported.
   [[nodiscard]] HardwareLoopProfile GetHardwareLoopProfile() const;
@@ -431,6 +442,7 @@ class PassContext {
   }
 
  private:
+  std::optional<backend::BackendType> backend_type_;
   bool report_hardware_loops_ = false;
   std::vector<HardwareLoopQualification> hardware_loop_reports_;
   std::vector<PassInstrumentPtr> instruments_;

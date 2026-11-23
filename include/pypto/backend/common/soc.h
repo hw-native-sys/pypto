@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "pypto/ir/memory_space.h"
@@ -73,6 +74,20 @@ class Mem {
   uint64_t alignment_;
 };
 
+/// A processing element with private CELL storage and its execution units.
+class PE {
+ public:
+  PE(uint64_t cell_capacity_bytes, std::vector<std::string> execution_units);
+  [[nodiscard]] uint64_t GetCellCapacityBytes() const { return cell_capacity_bytes_; }
+  [[nodiscard]] const std::vector<std::string>& GetExecutionUnits() const { return execution_units_; }
+  bool operator<(const PE& other) const;
+  bool operator==(const PE& other) const;
+
+ private:
+  uint64_t cell_capacity_bytes_;
+  std::vector<std::string> execution_units_;
+};
+
 /**
  * @brief Processing core with associated memories
  *
@@ -84,10 +99,11 @@ class Core {
   /**
    * @brief Construct a processing core
    *
-   * @param core_type Type of core (CUBE or VECTOR)
+   * @param core_type Physical core type
    * @param mems Vector of memory components
    */
-  Core(ir::CoreType core_type, std::vector<Mem> mems);
+  Core(ir::CoreType core_type, std::vector<Mem> mems, std::vector<PE> pes = {},
+       uint64_t shared_capacity_bytes = 0);
 
   // Allow copy and move for container storage
   Core(const Core&) = default;
@@ -98,12 +114,17 @@ class Core {
   [[nodiscard]] ir::CoreType GetCoreType() const { return core_type_; }
   [[nodiscard]] const std::vector<Mem>& GetMems() const { return mems_; }
 
+  [[nodiscard]] const std::vector<PE>& GetPEs() const { return pes_; }
+  [[nodiscard]] uint64_t GetSharedCapacityBytes() const { return shared_capacity_bytes_; }
+
   // Comparison operators for map key support
   bool operator<(const Core& other) const;
   bool operator==(const Core& other) const;
 
  private:
   ir::CoreType core_type_;
+  std::vector<PE> pes_;
+  uint64_t shared_capacity_bytes_;
   std::vector<Mem> mems_;
 };
 
@@ -149,7 +170,7 @@ class Cluster {
 };
 
 /**
- * @brief Die containing clusters
+ * @brief Die containing clusters or directly attached cores
  *
  * Contains a map of cluster configurations to their counts.
  * map<Cluster, int> stores different cluster types and how many of each.
@@ -161,8 +182,10 @@ class Die {
    * @brief Construct a die
    *
    * @param cluster_counts Map from cluster configuration to count
+   * @param direct_core_counts Cores attached to the die outside a cluster
    */
-  explicit Die(std::map<Cluster, int> cluster_counts);
+  explicit Die(std::map<Cluster, int> cluster_counts, std::map<Core, int> direct_core_counts = {});
+  Die(const Core& core, int count);
 
   /**
    * @brief Convenience constructor for single cluster type
@@ -178,6 +201,8 @@ class Die {
   Die(Die&&) = default;
   Die& operator=(Die&&) = default;
 
+  [[nodiscard]] const std::map<Core, int>& GetCoreCounts() const { return core_counts_; }
+  [[nodiscard]] const std::map<Core, int>& GetDirectCoreCounts() const { return direct_core_counts_; }
   [[nodiscard]] const std::map<Cluster, int>& GetClusterCounts() const { return cluster_counts_; }
   [[nodiscard]] int TotalClusterCount() const;
   [[nodiscard]] int TotalCoreCount() const;
@@ -188,6 +213,8 @@ class Die {
 
  private:
   std::map<Cluster, int> cluster_counts_;
+  std::map<Core, int> direct_core_counts_;
+  std::map<Core, int> core_counts_;  // Includes cores in clusters.
 };
 
 /**
@@ -227,6 +254,7 @@ class SoC {
   [[nodiscard]] const std::map<ir::MemorySpace, std::vector<ir::MemorySpace>>& GetMemoryGraph() const {
     return mem_graph_;
   }
+  [[nodiscard]] int TotalPECount() const;
   [[nodiscard]] int TotalDieCount() const;
   [[nodiscard]] int TotalClusterCount() const;
   [[nodiscard]] int TotalCoreCount() const;
@@ -257,6 +285,8 @@ const SoC& Create910BSoC();
  * @return Const reference to 950 SoC
  */
 const SoC& Create950SoC();
+
+const SoC& CreateLinxSoC();
 
 }  // namespace backend
 }  // namespace pypto

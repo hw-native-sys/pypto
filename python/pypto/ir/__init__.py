@@ -44,7 +44,7 @@ from . import operators as operators
 from .builder import IRBuilder
 
 # Import high-level API functions
-from .compile import compile
+from .compile import compile, lower
 from .compiled_program import CompiledProgram
 from .directions import make_call
 from .distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
@@ -106,6 +106,7 @@ __all__ = [
     "TileView",
     "python_print",
     "compile",
+    "lower",
     "CompiledProgram",
     "DistributedCompiledProgram",
     "DistributedConfig",

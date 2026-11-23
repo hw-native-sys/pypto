@@ -17,19 +17,19 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 ## 设计
 
 `BackendHandler`（`include/pypto/backend/common/backend_handler.h`）是一个抽象
-接口，它把后端之间所有"行为差异"显式命名出来。每个 `Backend` 子类各自持有一个
-`BackendHandler` 子类的单例，并通过新引入的纯虚函数 `Backend::GetHandler()`
-对外暴露。
+接口，它把后端之间所有"行为差异"显式命名出来。每个支持 PTO 代码生成的后端都通过
+`Backend::GetHandler()` 提供自己的 handler 单例。Linx 等仅支持 IR 的目标通过
+`Backend::GetSoC()` 提供硬件拓扑。
 
 ```text
                        ┌────────────────────────────┐
-        Pass / Codegen │  PassContext::Current()    │
-                       │     ->GetBackendHandler()  │
+        Pass / Codegen │  PassContext::             │
+                       │  GetCurrentBackendHandler()│
                        └─────────────┬──────────────┘
                                      │
                                      ▼
                        ┌────────────────────────────┐
-                       │  BackendConfig::GetBackend │
+                       │  Scoped or global backend  │
                        │     ->GetHandler()         │
                        └─────────────┬──────────────┘
                                      │

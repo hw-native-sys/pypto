@@ -31,7 +31,12 @@ else:
         MigrationStatus,
     )
 
-_TARGETS = tuple(backend.BackendType.__members__.values())
+# This inventory covers backends with PTO operator callbacks.
+_TARGETS = tuple(
+    target
+    for target in backend.BackendType.__members__.values()
+    if backend.get_backend_instance(target).has_pto_codegen
+)
 
 
 def _audit_issues(

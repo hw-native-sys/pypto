@@ -150,6 +150,12 @@ class TestCompileReturnsCompiledProgram:
 class TestLowerReturnsProgram:
     """Verify ``lower()`` specializes and runs passes without compiling."""
 
+    def test_linx_lower_uses_architecture_without_a_runtime_platform(self):
+        torch = pytest.importorskip("torch")
+        x = torch.zeros(16, 16)
+        program = add_kernel.lower(x, x, torch.empty_like(x), config=RunConfig(backend_type=BackendType.Linx))
+        assert isinstance(program, ir.Program)
+
     def test_lower_runs_the_pipeline_for_a_valueless_entry(self):
         """A kernel that writes its Out parameter and returns nothing lowers.
 

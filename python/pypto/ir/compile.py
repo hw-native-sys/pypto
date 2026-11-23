@@ -200,7 +200,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     *,
     operation: str,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
-    backend_type: BackendType = BackendType.Ascend910,
+    backend_type: BackendType | None = None,
     platform: str | None = None,
     verification_level: _passes.VerificationLevel | None = None,
     diagnostic_phase: _passes.DiagnosticPhase | None = None,
@@ -216,7 +216,10 @@ def _run_pass_pipeline(  # noqa: PLR0913
     passes_dump_dir: str | None = None,
 ) -> _PassPipelineResult:
     """Resolve pass settings and run the configured pass pipeline."""
-    effective_backend_type = _select_backend(backend_type=backend_type, platform=platform)
+    if backend_type is None:
+        current = _passes.PassContext.current()
+        backend_type = current.get_scoped_backend_type() if current is not None else None
+    effective_backend_type = _backend_type_for_platform(platform, backend_type or BackendType.Ascend910)
     outer = _validate_pass_context_conflicts(
         operation=operation,
         verification_level=verification_level,
@@ -266,7 +269,16 @@ def _run_pass_pipeline(  # noqa: PLR0913
         # IR selection enabled for compilations that do not request this opt-in.
         buffer_ir = not software_pipeline
     ctx = _passes.PassContext(
-        instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir, software_pipeline
+        instruments,
+        vlevel,
+        dphase,
+        disabled,
+        mplan,
+        dbc_flag,
+        rt,
+        buffer_ir,
+        software_pipeline,
+        backend_type=effective_backend_type,
     )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
@@ -294,6 +306,11 @@ def _run_pass_pipeline(  # noqa: PLR0913
             )
 
     return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt)
+
+
+def lower(program: _ir_core.Program, *, backend_type: BackendType | None = None) -> _ir_core.Program:
+    """Run the target pass pipeline and return IR. Linx currently performs scalar normalization."""
+    return _run_pass_pipeline(program, operation="lower", backend_type=backend_type).transformed_program
 
 
 def make_default_output_dir(name: str) -> str:
@@ -683,8 +700,7 @@ def _compile_to_files(  # noqa: PLR0913
             if _passes.is_host_build_graph(effective_runtime):
                 validate_kernel_host_access(transformed_program)
 
-        # Codegen target selection is owned by the per-backend BackendHandler;
-        # any value of the ``BackendType`` enum is a valid PTO codegen target.
+        # Codegen target selection is owned by the PTO backend handler.
         try:
             with _stage("codegen"):
                 files = generate(
