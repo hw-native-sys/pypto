@@ -694,13 +694,13 @@ A5 两端 init 接受 `nosplit` 和 `acc_push_epilogue={layout, quant, relu}`。
 
 `no_convert` 保持 FP32/INT32。`f32_f16` 和 `f32_bf16` 转换 FP32。`deqf16_scalar` 和 `deqf16_vec` 将 INT32 转为 FP16。`qf322f16_pre_scalar` 将 FP32 转为 FP16。量化前的 ReLU 可选 `no_relu` 或 `normal_relu`。
 
-使用 Acc 输入、`dir_mask=1`、`nosplit=true`，push/pop/free 均用 `split=0`。提供 epilogue 时 Python 默认 `nosplit=true`，其余情况保留省略。`c2v_dtype` 和 `pre_relu` 是 ND FP32 简写，与结构化 epilogue 互斥。
+使用 Acc 输入、`dir_mask=1`、`nosplit=true`，push/pop 用 `split=0`。Free 从 pop 继承 split 和 id。提供 epilogue 时 Python 默认 `nosplit=true`，其余情况保留省略。`c2v_dtype` 和 `pre_relu` 是 ND FP32 简写，与结构化 epilogue 互斥。
 
-标量控制值为 FP32。向量控制字为 packed i64/u64，从无分形行优先 Mat 移至 Scaling，与 MX 控制区独立。`[1, N]` 必须完全有效，`N > 0` 且为 16 的倍数。Scaling 的规划预算为 4 KiB，控制字在 TPUSH 完成前不可改写，分配保持到函数结束。
+标量控制值为 FP32。向量控制字为 packed i64/u64，从无分形行优先 Mat 移至同布局的 Scaling，与 MX 控制区独立。`[1, N]` 必须完全有效，`N > 0`、为 16 的倍数且覆盖生产者列数。Scaling 的规划预算为 4 KiB，控制字在 TPUSH 完成前不可改写，分配保持到函数结束。
 
-setter 在同块内先于 TPUSH，匹配 id 和量化模式。控制流、另一 id 的 setter 或 `pre_quant` 写回会使旧状态失效。含 setter 的 pipeline 及祖先（含 stage=1）降为顺序循环。
+`deqf16_scalar` 和 `qf322f16_pre_scalar` 用标量 setter，`deqf16_vec` 用向量 setter，其余模式禁止 setter。配置与同 id 的 TPUSH 在同块且先于 TPUSH。控制流、另一 id 的 setter 或 `pre_quant` 写回会使旧状态失效。含 setter 的 pipeline 及祖先（含 stage=1）降为顺序循环。
 
-`MixedKernelExpanded` 校验类型、物理布局、转换后槽位字节数、本地环容量及两端 id。当前 PTOAS 要求同 id 使用同一消费者 tile 类型。验证器诊断直线代码和简单布尔分支的已知端点计数不匹配，其他手写控制流由作者保证两端消息配对。
+`MixedKernelExpanded` 校验类型、物理布局、转换后槽位字节数、本地环容量及两端 id。当前 PTOAS 要求同 id 使用同一消费者 tile 类型。验证器检查直线代码和简单布尔分支的端点计数，包括两端使用同一 Group 参数的情况。其他手写控制流由作者保证两端消息配对。
 
 A5 显式非 ND Acc→Vec move 将同一布局传给两端 init，Buffer IR 同样适用。省略布局时保持原管道。transpose scratch 使用自身 SSA 类型。
 

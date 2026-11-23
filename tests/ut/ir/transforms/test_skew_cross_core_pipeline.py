@@ -60,92 +60,51 @@ class TestSkewCrossCorePipeline:
     def test_quant_configuration_preserves_sequential_order(self, vector, round_trip, stages):
         """Quant registers are side effects outside TPUSH's SSA backward slice."""
 
-        @pl.program
-        class Before:
-            @pl.function(strict_ssa=True)
-            def main(
-                self,
-                q: pl.Tensor[[64, 64], pl.FP32],
-                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
-            ):
-                for i in pl.pipeline(0, 4, 1, stage=stages):
-                    tile = pl.tile.load(q, [i * 16, 0], [16, 64])
-                    if vector:
-                        pl.system.set_quant_vector(controls)
-                    else:
-                        pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
-                    pl.tile.tpush_to_aiv(tile, split=0)
-                    if round_trip:
-                        reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
-                        pl.tfree_to_aiv(reply, id=1)
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(
-                self,
-                q: pl.Tensor[[64, 64], pl.FP32],
-                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
-            ):
-                for i in pl.range(0, 4, 1):
-                    tile = pl.tile.load(q, [i * 16, 0], [16, 64])
-                    if vector:
-                        pl.system.set_quant_vector(controls)
-                    else:
-                        pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
-                    pl.tile.tpush_to_aiv(tile, split=0)
-                    if round_trip:
-                        reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
-                        pl.tfree_to_aiv(reply, id=1)
-
-        # The default pipeline folds compile-time mode branches before skewing.
-        ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(strict_ssa=True)
+    def main(q: pl.Tensor[[64, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
+        for i in {{loop}}:
+            tile = pl.tile.load(q, [i * 16, 0], [16, 64])
+            if {vector}:
+                pl.system.set_quant_vector(controls)
+            else:
+                pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
+            pl.tile.tpush_to_aiv(tile, split=0)
+            if {round_trip}:
+                reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
+                pl.tfree_to_aiv(reply, id=1)
+"""
+        before = pl.parse_program(source.format(loop=f"pl.pipeline(0, 4, 1, stage={stages})"))
+        expected = pl.parse_program(source.format(loop="pl.range(0, 4, 1)"))
+        ir.assert_structural_equal(_skew(passes.simplify()(before)), passes.simplify()(expected))
 
     @pytest.mark.parametrize("vector", [False, True])
     def test_nested_quant_configuration_protects_ancestors_only(self, vector):
-        @pl.program
-        class Before:
-            @pl.function(strict_ssa=True)
-            def main(
-                self,
-                q: pl.Tensor[[64, 64], pl.FP32],
-                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
-            ):
-                for i in pl.pipeline(2, stage=2):
-                    for j in pl.pipeline(2, stage=3):
-                        for k in pl.range(2):
-                            tile = pl.tile.load(q, [i * 16, 0], [16, 64])
-                            if vector:
-                                pl.system.set_quant_vector(controls)
-                            else:
-                                pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
-                            pl.tile.tpush_to_aiv(tile, split=0)
-                for i in pl.pipeline(2, stage=2):
-                    sibling = pl.tile.load(q, [i * 16, 0], [16, 64])
-                    pl.tile.store(sibling, [i * 16, 0], q)
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(
-                self,
-                q: pl.Tensor[[64, 64], pl.FP32],
-                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
-            ):
-                for i in pl.range(2):
-                    for j in pl.range(2):
-                        for k in pl.range(2):
-                            tile = pl.tile.load(q, [i * 16, 0], [16, 64])
-                            if vector:
-                                pl.system.set_quant_vector(controls)
-                            else:
-                                pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
-                            pl.tile.tpush_to_aiv(tile, split=0)
-                for i in pl.pipeline(2, stage=2):
-                    sibling = pl.tile.load(q, [i * 16, 0], [16, 64])
-                    pl.tile.store(sibling, [i * 16, 0], q)
-
-        ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(strict_ssa=True)
+    def main(q: pl.Tensor[[64, 64], pl.FP32], controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling]):
+        for i in {{outer}}:
+            for j in {{middle}}:
+                for k in pl.range(2):
+                    tile = pl.tile.load(q, [i * 16, 0], [16, 64])
+                    if {vector}:
+                        pl.system.set_quant_vector(controls)
+                    else:
+                        pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                    pl.tile.tpush_to_aiv(tile, split=0)
+        for i in pl.pipeline(2, stage=2):
+            sibling = pl.tile.load(q, [i * 16, 0], [16, 64])
+            pl.tile.store(sibling, [i * 16, 0], q)
+"""
+        before = pl.parse_program(
+            source.format(outer="pl.pipeline(2, stage=2)", middle="pl.pipeline(2, stage=3)")
+        )
+        expected = pl.parse_program(source.format(outer="pl.range(2)", middle="pl.range(2)"))
+        ir.assert_structural_equal(_skew(passes.simplify()(before)), passes.simplify()(expected))
 
     def test_single_roundtrip_producer_skews(self):
         """AIC-style (cube) produce-first body — one ``tpush_to_aiv`` then one

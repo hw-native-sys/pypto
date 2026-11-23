@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <list>
@@ -46,6 +47,7 @@
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -527,7 +529,13 @@ void VerifyTpopTfreeMatching(const FunctionPtr& func, std::vector<Diagnostic>& d
 
 // Fixpipe contracts are checked before Buffer IR lowering, while both peers and
 // lexical quantization-state dominance are still explicit in the tile IR.
+struct FixpipeEndpointCounts {
+  std::size_t seen = 0, when_true = 0, when_false = 0;
+  std::optional<std::size_t> guard_index;
+};
+
 struct FixpipeFunctionInfo : IRVisitor {
+  std::map<int, FixpipeEndpointCounts> counts;
   std::map<int, CallPtr> inits;
   std::set<int> duplicate_ids;
   std::map<const Var*, CallPtr> definitions;
@@ -563,41 +571,38 @@ struct FixpipeFunctionInfo : IRVisitor {
   }
 };
 
-// Prove count mismatches for straight-line peers and top-level branches on one
-// boolean input. Loops and other guards can have correlated execution counts.
-std::optional<std::pair<size_t, size_t>> FixpipeEndpointCountRange(const FunctionPtr& func,
-                                                                   const std::vector<CallPtr>& sites) {
-  const std::set<CallPtr> endpoints(sites.begin(), sites.end());
-  auto count = [&](const StmtPtr& body) {
-    const auto stmts = FlattenBody(body);
-    return std::count_if(stmts.begin(), stmts.end(), [&](const auto& stmt) {
-      return endpoints.count(transform_utils::GetCallFromStmt(stmt));
-    });
-  };
-  size_t seen = static_cast<size_t>(count(func->body_));
-  size_t on_true = seen;
-  size_t on_false = seen;
-  VarPtr guard;
-  for (const auto& stmt : FlattenBody(func->body_)) {
-    auto branch = As<IfStmt>(stmt);
-    if (!branch) continue;
-    const auto then_count = static_cast<size_t>(count(branch->then_body_));
-    const auto else_count = branch->else_body_ ? static_cast<size_t>(count(*branch->else_body_)) : 0;
-    seen += then_count + else_count;
-    if (then_count != else_count) {
-      auto param = AsVarLike(branch->condition_);
-      auto type = param ? As<ScalarType>(param->GetType()) : nullptr;
-      if (!type || type->dtype_ != DataType::BOOL || (guard && param != guard) ||
-          std::find(func->params_.begin(), func->params_.end(), param) == func->params_.end()) {
-        return std::nullopt;
-      }
-      guard = param;
-    }
-    on_true += then_count;
-    on_false += else_count;
+// Summarize all pipe IDs together. A count is exact only when every endpoint
+// is counted, which excludes loops and unsupported control flow.
+void CountFixpipeEndpoints(const FunctionPtr& func, FixpipeFunctionInfo& local) {
+  const std::string op = func->func_type_ == FunctionType::AIC ? "tile.tpush_to_aiv" : "tile.tpop_from_aic";
+  std::map<const Var*, std::size_t> bool_params;
+  for (std::size_t i = 0; i < func->params_.size(); ++i) {
+    const auto param = func->params_[i];
+    auto type = As<ScalarType>(param->GetType());
+    if (type && type->dtype_ == DataType::BOOL) bool_params.emplace(param.get(), i);
   }
-  if (seen != sites.size()) return std::nullopt;
-  return std::minmax(on_true, on_false);
+  auto count = [&](const StmtPtr& stmt, std::optional<std::size_t> guard, bool then_taken) {
+    auto call = transform_utils::GetCallFromStmt(stmt);
+    if (!IsOp(call, op)) return;
+    auto& flow = local.counts[call->GetKwarg<int>("id", 0)];
+    if (guard && flow.guard_index && guard != flow.guard_index) return;
+    if (guard) flow.guard_index = guard;
+    ++flow.seen;
+    if (!guard || then_taken) ++flow.when_true;
+    if (!guard || !then_taken) ++flow.when_false;
+  };
+  for (const auto& stmt : FlattenBody(func->body_)) {
+    if (auto branch = As<IfStmt>(stmt)) {
+      auto guard = bool_params.find(AsVarLike(branch->condition_).get());
+      if (guard == bool_params.end()) continue;
+      for (const auto& child : FlattenBody(branch->then_body_)) count(child, guard->second, true);
+      if (branch->else_body_) {
+        for (const auto& child : FlattenBody(*branch->else_body_)) count(child, guard->second, false);
+      }
+    } else {
+      count(stmt, std::nullopt, false);
+    }
+  }
 }
 
 void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) {
@@ -607,8 +612,18 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           ? (context ? context->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler())
           : nullptr;
   std::map<std::string, FixpipeFunctionInfo> info;
+  std::set<std::pair<std::string, std::string>> group_peers;
   for (const auto& [gv, func] : program->functions_) {
-    if (func && func->body_) info[func->name_].VisitStmt(func->body_);
+    if (!func || !func->body_) continue;
+    auto& local = info[func->name_];
+    local.VisitStmt(func->body_);
+    if (!local.pushes.empty() || !local.pops.empty()) CountFixpipeEndpoints(func, local);
+    if (func->func_type_ == FunctionType::Group) {
+      const auto members = CollectInnerCalls(func, program);
+      if (members.size() == 2 && members[0].inner_call->args_ == members[1].inner_call->args_) {
+        group_peers.insert(std::minmax(members[0].inner_callee->name_, members[1].inner_callee->name_));
+      }
+    }
   }
   std::map<std::tuple<std::string, std::string, int>, int> incoming;
   for (const auto& [name, local] : info) {
@@ -716,13 +731,22 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         error(init, "Fixpipe requires matching TPUSH and TPOP endpoints for the same pipe id");
       }
       if (pushes != local.pushes.end() && pops != peer->second.pops.end()) {
-        auto push_range = FixpipeEndpointCountRange(func, pushes->second);
-        auto pop_range = FixpipeEndpointCountRange(program->GetFunction(peer_name), pops->second);
-        if (push_range && pop_range && *push_range != *pop_range) {
-          const bool excess_pop =
-              push_range->first < pop_range->first || push_range->second < pop_range->second;
-          error(excess_pop ? pops->second.front() : pushes->second.front(),
-                "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
+        const auto push_count = local.counts.find(id);
+        const auto pop_count = peer->second.counts.find(id);
+        if (push_count != local.counts.end() && pop_count != peer->second.counts.end()) {
+          const auto& push = push_count->second;
+          const auto& pop = pop_count->second;
+          const auto p = std::minmax(push.when_true, push.when_false);
+          const auto q = std::minmax(pop.when_true, pop.when_false);
+          const bool same_guard = push.guard_index && push.guard_index == pop.guard_index &&
+                                  group_peers.count(std::minmax(func->name_, peer_name));
+          if (push.seen == pushes->second.size() && pop.seen == pops->second.size() &&
+              (p != q || (same_guard && push.when_true != pop.when_true))) {
+            const bool excess_pop =
+                p.first < q.first || p.second < q.second || (same_guard && push.when_true < pop.when_true);
+            error(excess_pop ? pops->second.front() : pushes->second.front(),
+                  "Fixpipe TPUSH and TPOP endpoint counts differ across control-flow paths");
+          }
         }
         std::set<std::vector<int64_t>> source_signatures;
         auto signature = [](const TileTypePtr& tile, DataType dtype) {
@@ -784,8 +808,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
             const bool vector = IsOp(call, "system.set_quant_vector");
             const bool push = IsOp(call, "tile.tpush_to_aiv");
             const bool pop = IsOp(call, "tile.tpop_from_aic");
-            const bool free = IsOp(call, "system.tfree_to_aic");
-            if (scalar || vector || push || pop || free) {
+            if (scalar || vector || push || pop) {
               auto it = visible.find(id);
               if (it == visible.end()) {
                 if (scalar || vector ||

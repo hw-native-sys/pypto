@@ -10,6 +10,8 @@
 """Fixpipe schemas, cross-peer verification, and real PTOAS compilation."""
 
 import subprocess
+from textwrap import indent
+from types import SimpleNamespace
 
 import pypto.language as pl
 import pytest
@@ -49,6 +51,8 @@ def _program(
     peer_epilogue = _epilogue(layout=layout, quant=peer_quant or quant, relu=relu)
     input_dtype = input_dtype_override or (pl.INT8 if quant.startswith("deq") else pl.BF16)
     scalar_state = state and quant in ("deqf16_scalar", "qf322f16_pre_scalar")
+    closure_scale = quant == "qf322f16_pre_scalar"
+    scalar_config = SimpleNamespace(scale=0.5)
     vector_state = state and quant == "deqf16_vec"
     output_dtype = consumer_dtype or (
         pl.FP32 if quant == "no_convert" else (pl.BF16 if quant == "f32_bf16" else pl.FP16)
@@ -81,7 +85,10 @@ def _program(
                 controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
                 pl.system.set_quant_vector(controls, id=state_id)
             if scalar_state:
-                pl.system.set_quant_scalar(scale=0.5, id=state_id)
+                if closure_scale:
+                    pl.set_quant_scalar(scalar_config.scale, id=state_id)
+                else:
+                    pl.system.set_quant_scalar(scale=0.5, id=state_id)
             pl.tpush_to_aiv(acc, split=split)
 
         @pl.function(type=pl.FunctionType.AIV)
@@ -98,7 +105,7 @@ def _program(
             )
             tile = pl.tpop_from_aic(shape=[32, 16], dtype=output_dtype, split=split)
             pl.store(tile, [0, 0], out)
-            pl.tfree_to_aic(tile)
+            pl.tfree_to_aic(tile, split=1)  # StampTfreeSplit copies the actual split from TPOP.
 
     return Program
 
@@ -191,15 +198,12 @@ def test_explicit_fixpipe_compiles(quant, relu, tmp_path):
 @pytest.mark.parametrize("depth", [1, 4])
 @pytest.mark.ptoas_compile
 def test_pipe_buffer_aliases_compile(buffer_ir, side, depth, tmp_path):
-    # Both imported and reserved addresses may have shared, transitive aliases.
-    # Compile all the way to PTOAS so SSA alias emission is checked as well.
     aliases = _PipeBufferAliases(depth if side != "consumer" else 0, depth if side != "producer" else 0)
     _, mlir = _generate(aliases.visit_program(_program()), buffer_ir)
     _assemble(mlir, tmp_path)
 
 
 def test_buffer_arithmetic_is_not_an_identity_alias():
-    # Offsetting a reserved address does not name the same FIFO allocation.
     program = _PipeBufferAliases(4, 4, offset=16).visit_program(_program())
     with pytest.raises(Error, match="must trace to reserve_buffer/import_peer_buffer"):
         _generate(program)
@@ -249,11 +253,23 @@ def test_fixpipe_pop_requires_a_matching_push():
         _generate(pl.parse_program(without_push))
 
 
-def test_fixpipe_detects_a_one_sided_guard():
+@pytest.mark.parametrize("guarded_pop", [False, True])
+def test_fixpipe_rejects_mismatched_endpoint_counts(guarded_pop):
     source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
     source = source.replace(
         "        pl.tile.tpush_to_aiv(", "        if enabled:\n            pl.tile.tpush_to_aiv("
     )
+    if guarded_pop:
+        before, body = source.split("        tile: ", 1)
+        consumer, producer = ("        tile: " + body).split("    @pl.function", 1)
+        source = before + "        if enabled:\n            pass\n        else:\n" + indent(consumer, "    ")
+        source += "    @pl.function" + producer
+        signature = next(line for line in source.splitlines() if line.startswith("    def producer("))
+        source += "\n    @pl.function(type=pl.FunctionType.Group)\n" + signature.replace(
+            "producer(", "group(self, "
+        )
+        source += "\n        self.producer(a, b, out, control_words, enabled)\n"
+        source += "        self.consumer(a, b, out, control_words, enabled)\n"
     with pytest.raises(Error, match="endpoint counts differ across control-flow paths"):
         _generate(pl.parse_program(source))
 
@@ -394,24 +410,36 @@ def test_vector_quant_packed_controls():
     assert call.kwargs["id"] == 3
 
 
-@pytest.mark.parametrize("valid_shape", [[1, 16], [0, 32]])
-@pytest.mark.parametrize("setter", [False, True])
-def test_packed_controls_require_full_valid_extent(valid_shape, setter):
+@pytest.mark.parametrize(
+    ("valid_shape", "setter", "layout", "message"),
+    [
+        *(
+            (shape, setter, {}, "valid_shape to cover the full")
+            for shape in ([1, 16], [0, 32])
+            for setter in (False, True)
+        ),
+        ([1, 32], False, {"blayout": ir.TileLayout.col_major}, "row-major unboxed destination"),
+        ([1, 32], False, {"slayout": ir.TileLayout.row_major}, "row-major unboxed destination"),
+    ],
+)
+def test_packed_control_extent_and_layout(valid_shape, setter, layout, message):
     controls = ir.Var(
         "controls",
         ir.TileType(
             [1, 32],
             DataType.UINT64,
             memory_space=ir.MemorySpace.Scaling if setter else ir.MemorySpace.Mat,
-            tile_view=ir.TileView(valid_shape=valid_shape),
+            tile_view=ir.TileView(
+                valid_shape=valid_shape, blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box
+            ),
         ),
         ir.Span.unknown(),
     )
-    with pytest.raises(ValueError, match="valid_shape to cover the full"):
+    with pytest.raises(ValueError, match=message):
         if setter:
             system_ops.set_quant_vector(controls)
         else:
-            tile_ops.move(controls, target_memory=ir.MemorySpace.Scaling)
+            tile_ops.move(controls, target_memory=ir.MemorySpace.Scaling, **layout)
 
 
 @pytest.mark.parametrize(

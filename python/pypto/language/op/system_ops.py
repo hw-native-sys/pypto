@@ -35,7 +35,7 @@ from pypto.ir.op.system_ops import (
 )
 from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PipeType, Span
 
 from ..typing import Array, IntLike, Scalar, Tensor, Tile
 
@@ -120,8 +120,12 @@ def wait_flag(
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
 
 
-def set_quant_scalar(scale: Scalar | Expr, *, id: int = 0, span: Span | None = None) -> Call:
+def set_quant_scalar(scale: Scalar | Expr | float, *, id: int = 0, span: Span | None = None) -> Call:
     """Set the pipe's FP32 quant scale in the same block before TPUSH."""
+    if isinstance(scale, float):
+        scale = ConstFloat(scale, DataType.FP32, _get_span_or_capture(span, frame_offset=1))
+    elif isinstance(scale, int):
+        raise TypeError("set_quant_scalar requires an FP32 scalar or floating-point literal")
     return _ir_ops.set_quant_scalar(scale.unwrap() if isinstance(scale, Scalar) else scale, id=id, span=span)
 
 

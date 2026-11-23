@@ -736,6 +736,8 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
         << "Fixpipe Scaling controls require valid_shape to cover the full [1, N] shape";
     CHECK(source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::none_box)
         << "Fixpipe Scaling controls require a row-major unboxed Mat source";
+    CHECK(requested_blayout == TileLayout::row_major && requested_slayout == TileLayout::none_box)
+        << "Fixpipe Scaling controls require a row-major unboxed destination";
   }
 
   // MX LeftScale/RightScale must be !pto.f8E8M0 so EmitC maps loc=scaling → ScaleLeft

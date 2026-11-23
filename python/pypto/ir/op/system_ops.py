@@ -839,12 +839,9 @@ def aic_initialize_pipe(  # noqa: PLR0913
             mixed kernel to PTOAS. Both initializers must agree.
         ptoas_buffer_id_sync: Use PTOAS buffer ID synchronization for the
             outlined A5 mixed kernel. Both initializers must agree.
-        nosplit: Optional transport policy. Defaults to true with an epilogue;
-            otherwise omitted, preserving the PTOAS default.
-        acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
-            ``relu``. Requires C2V only and split=0 on every transfer.
-            Cannot be combined with the c2v_dtype/pre_relu shorthand.
-            Cannot be combined with the c2v_dtype/pre_relu shorthand.
+        nosplit: Defaults to true with an epilogue and is omitted otherwise.
+        acc_push_epilogue: C2V Fixpipe ``layout``, ``quant`` and ``relu`` record, with split=0.
+            Mutually exclusive with c2v_dtype/pre_relu.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -904,12 +901,9 @@ def aiv_initialize_pipe(  # noqa: PLR0913
             mixed kernel to PTOAS. Both initializers must agree.
         ptoas_buffer_id_sync: Use PTOAS buffer ID synchronization for the
             outlined A5 mixed kernel. Both initializers must agree.
-        nosplit: Optional transport policy. Defaults to true with an epilogue;
-            otherwise omitted, preserving the PTOAS default.
-        acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
-            ``relu``. Requires C2V only and split=0 on every transfer.
-            Cannot be combined with the c2v_dtype/pre_relu shorthand.
-            Cannot be combined with the c2v_dtype/pre_relu shorthand.
+        nosplit: Defaults to true with an epilogue and is omitted otherwise.
+        acc_push_epilogue: C2V Fixpipe ``layout``, ``quant`` and ``relu`` record, with split=0.
+            Mutually exclusive with c2v_dtype/pre_relu.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)

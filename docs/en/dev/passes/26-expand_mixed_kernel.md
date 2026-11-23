@@ -804,13 +804,13 @@ A5 pipe initializers accept `nosplit` and `acc_push_epilogue={layout, quant, rel
 
 `no_convert` preserves FP32/INT32. `f32_f16` and `f32_bf16` convert FP32. `deqf16_scalar` and `deqf16_vec` convert INT32 to FP16. `qf322f16_pre_scalar` converts FP32 to FP16. ReLU is `no_relu` or `normal_relu` before quantization.
 
-Use an Acc input, `dir_mask=1`, `nosplit=true` and `split=0` for push/pop/free. Python defaults `nosplit` to true with an epilogue and leaves it omitted otherwise. `c2v_dtype` and `pre_relu` are the ND FP32 shorthand and exclude a structured epilogue.
+Use an Acc input, `dir_mask=1`, `nosplit=true` and `split=0` for push/pop. Free inherits split and id from pop. Python defaults `nosplit` to true with an epilogue and leaves it omitted otherwise. `c2v_dtype` and `pre_relu` are the ND FP32 shorthand and exclude a structured epilogue.
 
-Scalar controls are FP32. Vector controls are packed i64/u64 moved from unboxed row-major Mat to Scaling (separate from MX sidecars). They require full-valid `[1, N]` with positive `N` divisible by 16. The planner budgets 4 KiB for Scaling. Keep controls immutable through TPUSH and their allocations live to function end.
+Scalar controls are FP32. Move packed i64/u64 vector controls from unboxed row-major Mat to Scaling with the same layout. Use a full-valid `[1, N]` with positive `N` divisible by 16 and at least as large as the producer column count. The planner budgets 4 KiB for Scaling, separately from MX sidecars. Keep controls immutable through TPUSH and their allocations live to function end.
 
-Set quant state in the same block before TPUSH with the same id and quant mode. Control flow, another id's setter, and `pre_quant` writeback invalidate state. Pipelines containing setters and their ancestors run sequentially, including stage=1.
+Use a scalar setter for `deqf16_scalar` and `qf322f16_pre_scalar`, a vector setter for `deqf16_vec`, and no setter for other modes. Configure before TPUSH in the same block and for the same id. Control flow, another id's setter, and `pre_quant` writeback invalidate state. Pipelines containing setters and their ancestors run sequentially, including stage=1.
 
-`MixedKernelExpanded` checks payload type, physical layout, converted slot bytes, local ring capacity and peer ids. Current PTOAS needs one consumer tile type per id. The verifier diagnoses known endpoint count mismatches in straight-line code and simple Boolean branches. For other manual control flow, the author must balance messages on both peers.
+`MixedKernelExpanded` checks payload type, physical layout, converted slot bytes, local ring capacity and peer ids. Current PTOAS needs one consumer tile type per id. The verifier checks endpoint counts for straight-line code and simple Boolean branches, including peers with the same Group argument. For other manual control flow, the author must balance messages on both peers.
 
 Explicit non-ND A5 Acc→Vec moves carry the layout to both inits with or without Buffer IR. Use one layout for the pipe. Omitted layouts retain legacy transport. Transpose scratch uses its own SSA type.
 
