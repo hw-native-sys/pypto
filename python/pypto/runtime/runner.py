@@ -183,16 +183,17 @@ class RunConfig:
     :meth:`~pypto.ir.CompiledProgram.__call__` / :meth:`Worker.run`.
 
     When passed to :meth:`pypto.jit.decorator.JITFunction.lower`, only
-    ``platform``, ``strategy``, diagnostics, dependency analysis, and
-    ``memory_planner`` affect pass execution. Runtime and artifact fields such
-    as ``device_id``, ``dump_passes``, ``dump_ptoas_passes``,
+    ``backend_type``, ``strategy``, diagnostics, dependency analysis,
+    ``memory_planner``, and ``enable_software_pipeline`` affect pass execution. Runtime and artifact
+    fields such as ``device_id``, ``dump_passes``, ``dump_ptoas_passes``,
     ``save_kernels_dir``, and ``compile_profiling`` are ignored; ``lower()``
     does not execute or write compilation artifacts.
 
     Attributes:
         cache_config: Complete per-call persistent-cache policy. None uses process or environment defaults.
         arch: Target architecture, as the codegen backend that names it —
-            ``BackendType.Ascend910`` (a2a3) or ``BackendType.Ascend950`` (a5).
+            ``BackendType.Ascend910`` (a2a3), ``BackendType.Ascend950`` (a5),
+            or ``BackendType.Linx`` for IR lowering.
         execution_mode: :class:`ExecutionMode.SIM` or ``ONBOARD``.
         platform: **Not a field** — the wire spelling of the two axes above
             (``"a2a3sim"`` / ``"a2a3"`` / ``"a5sim"`` / ``"a5"``), derived on

@@ -472,6 +472,38 @@ Three accessors describe the signature without specializing anything: `param_nam
 declaration order), `output_param_names` (the `pl.Out[...]` and `pl.InOut[...]` params,
 also in declaration order), and `__name__`.
 
+### Lowering a Linx kernel to IR
+
+Select Linx with `RunConfig(backend_type=BackendType.Linx)`. A PE loads its inputs into
+`Local` storage. To share the sum, publish the Local tile and pass the returned Shared
+value to `broadcast_shared`. The consumer gets a Local tile with the same valid region,
+here 7 rows and 23 columns of an 8 × 32 tile.
+
+```python
+import pypto.language as pl
+from pypto.backend import BackendType
+from pypto.runtime import RunConfig
+
+
+@pl.jit
+def add_and_publish(
+    a: pl.Tensor[[8, 32], pl.FP32],
+    b: pl.Tensor[[8, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        lhs = pl.load(a, [0, 0], [8, 32], valid_shape=[7, 23], target_memory=pl.MemorySpace.Local)
+        rhs = pl.load(b, [0, 0], [8, 32], valid_shape=[7, 23], target_memory=pl.MemorySpace.Local)
+        total = pl.add(lhs, rhs)
+        published = pl.tile.publish_shared(total)
+        local = pl.tile.broadcast_shared(published)
+        pl.store(local, [0, 0], out)
+
+
+program = add_and_publish.lower(config=RunConfig(backend_type=BackendType.Linx))
+print(program.as_python())
+```
+
 ### External C++ kernels
 
 A hand-written C++ kernel can be called like any other function. See

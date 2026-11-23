@@ -375,6 +375,37 @@ ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910)
 
 另有三个访问器可以在不做任何特化的情况下读取签名：`param_names`（按声明顺序）、`output_param_names`（`pl.Out[...]` 与 `pl.InOut[...]` 参数，同样按声明顺序）、以及 `__name__`。
 
+### 将 Linx kernel 降级为 IR
+
+通过 `RunConfig(backend_type=BackendType.Linx)` 选择 Linx。PE 将两个输入加载到
+`Local` 后相加。要共享结果，先发布求和得到的 Local tile，再将返回的 Shared 值传给
+`broadcast_shared`。消费端得到的 Local tile 保留原有效区，本例为 8 × 32 的 tile 中的 7 行、23 列。
+
+```python
+import pypto.language as pl
+from pypto.backend import BackendType
+from pypto.runtime import RunConfig
+
+
+@pl.jit
+def add_and_publish(
+    a: pl.Tensor[[8, 32], pl.FP32],
+    b: pl.Tensor[[8, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        lhs = pl.load(a, [0, 0], [8, 32], valid_shape=[7, 23], target_memory=pl.MemorySpace.Local)
+        rhs = pl.load(b, [0, 0], [8, 32], valid_shape=[7, 23], target_memory=pl.MemorySpace.Local)
+        total = pl.add(lhs, rhs)
+        published = pl.tile.publish_shared(total)
+        local = pl.tile.broadcast_shared(published)
+        pl.store(local, [0, 0], out)
+
+
+program = add_and_publish.lower(config=RunConfig(backend_type=BackendType.Linx))
+print(program.as_python())
+```
+
 ### 外部 C++ kernel
 
 手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md)。
