@@ -50,8 +50,16 @@ class CallVisitor : public IRVisitor {
         bind_guards_(bind_guards) {}
 
  protected:
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    // A direct SSA copy retains the origin that dominates its uses.
+    if (const auto origin = bind_guards_ ? AliasOrigin(stmt->value_) : nullptr) {
+      copies_.emplace(stmt->var_.get(), origin);
+    }
+    IRVisitor::VisitStmt_(stmt);
+  }
+
   void VisitStmt_(const IfStmtPtr& stmt) override {
-    const auto condition = bind_guards_ ? AsVarLike(stmt->condition_) : nullptr;
+    const auto condition = bind_guards_ ? AliasOrigin(stmt->condition_) : nullptr;
     if (!condition) return IRVisitor::VisitStmt_(stmt);
     auto [it, inserted] = guards_.try_emplace(condition.get(), true);
     if (it->second) VisitStmt(stmt->then_body_);
@@ -64,7 +72,7 @@ class CallVisitor : public IRVisitor {
     if (stop_) return;
     if (auto gv = As<GlobalVar>(call->op_)) {
       if (auto callee = program_->GetFunction(gv->name_)) {
-        if (on_match_(guards_.empty() ? call : BindGuards(call), callee)) {
+        if (on_match_(guards_.empty() && copies_.empty() ? call : BindGuards(call), callee)) {
           stop_ = true;
           return;
         }
@@ -86,9 +94,16 @@ class CallVisitor : public IRVisitor {
   }
 
  private:
+  [[nodiscard]] VarPtr AliasOrigin(const ExprPtr& expression) const {
+    const auto var = AsVarLike(expression);
+    const auto copy = copies_.find(var.get());
+    return copy == copies_.end() ? var : copy->second;
+  }
+
   [[nodiscard]] CallPtr BindGuards(const CallPtr& call) const {
     auto args = call->args_;
     for (auto& arg : args) {
+      if (const auto origin = AliasOrigin(arg)) arg = origin;
       const auto guard = guards_.find(AsVarLike(arg).get());
       if (guard != guards_.end()) arg = std::make_shared<ConstBool>(guard->second, arg->span_);
     }
@@ -102,6 +117,7 @@ class CallVisitor : public IRVisitor {
   bool bind_guards_;
   bool stop_ = false;
   std::map<const Var*, bool> guards_;
+  std::map<const Var*, VarPtr> copies_;
 };
 
 }  // namespace

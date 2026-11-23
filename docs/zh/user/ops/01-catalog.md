@@ -186,7 +186,6 @@ Matmul 的 `acc_phase` 仅接受关键字传参；`matmul_acc` 保留现有 `ini
 | [`tpop_from_aic`][pypto.language.system.tpop_from_aic] [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] | `pl.` | 弹出对端推来的 tile |
 | [`tfree_to_aic`][pypto.language.system.tfree_to_aic] [`tfree_to_aiv`][pypto.language.system.tfree_to_aiv] | `pl.` | 把弹出的 slot 释放回生产者 |
 | [`aic_initialize_pipe`][pypto.language.system.aic_initialize_pipe] [`aiv_initialize_pipe`][pypto.language.system.aiv_initialize_pipe] | `pl.` | 建立跨核管道 |
-| `set_quant_scalar` `set_quant_vector` | `pl.` / `pl.system.` | 设置 FP32 标量或 packed 64-bit 向量 Fixpipe 控制字 |
 | [`aiv_shard`][pypto.language.tile.aiv_shard] [`aic_gather`][pypto.language.tile.aic_gather] | `pl.` | 在 AIV lane 间分片 / 在 AIC 上聚回 |
 | `AUTO` | `pl.` | 由编译器选择管道参数的哨兵值 |
 

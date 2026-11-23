@@ -198,7 +198,6 @@ The mixed-kernel surface — AIC and AIV cooperating inside one InCore function.
 | [`tpop_from_aic`][pypto.language.system.tpop_from_aic] [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] | `pl.` | Pop a tile pushed by the peer |
 | [`tfree_to_aic`][pypto.language.system.tfree_to_aic] [`tfree_to_aiv`][pypto.language.system.tfree_to_aiv] | `pl.` | Release a popped slot back to the producer |
 | [`aic_initialize_pipe`][pypto.language.system.aic_initialize_pipe] [`aiv_initialize_pipe`][pypto.language.system.aiv_initialize_pipe] | `pl.` | Set up the cross-core pipe |
-| `set_quant_scalar` `set_quant_vector` | `pl.` / `pl.system.` | Set FP32 scalar / packed 64-bit vector Fixpipe controls |
 | [`aiv_shard`][pypto.language.tile.aiv_shard] [`aic_gather`][pypto.language.tile.aic_gather] | `pl.` | Shard across AIV lanes / gather back on AIC |
 | `AUTO` | `pl.` | Sentinel for compiler-chosen pipe parameters |
 

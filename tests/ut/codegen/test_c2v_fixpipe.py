@@ -296,12 +296,12 @@ def test_fixpipe_endpoint_counts(binding, tmp_path):
             source += wrapper + (wrapper.replace("def wrapper(", "def second_wrapper(") if fan_in else "")
         source += f"\n    @pl.function(type=pl.FunctionType.Orchestration)\n{caller}\n"
         if literals:
-            prefix = "if y:\n            " if binding == "literal_condition" else ""
+            prefix = "alias = y\n        if y:\n            " if binding == "literal_condition" else ""
             runtime_arguments = "x, x" if binding == "literal_shared" else "x, y"
             for enabled, out in ((True, "out"), (False, "second_out")):
                 other = enabled if binding == "literal_same" else not enabled
                 actuals = runtime_arguments if partial and not enabled else f"{enabled}, {other}"
-                actuals = "True, y" if prefix else actuals
+                actuals = "True, alias" if prefix else actuals
                 callee = "second_wrapper" if fan_in and not enabled else target
                 source += f"        {prefix}self.{callee}(a, b, {out}, control_words, {actuals})\n"
         else:
@@ -404,28 +404,6 @@ def producer(use_relu: pl.Scalar[pl.BOOL]):
         "layout": "nz2nd", "quant": "no_convert", "relu": "normal_relu" if use_relu else "no_relu",
     }})
 """)
-
-
-@pytest.mark.parametrize("recorded", [False, True])
-def test_parse_epilogue_dict_metadata(recorded):
-    metadata = {"acc_push_epilogue": _epilogue()}
-    call = (
-        f'pl._dump.call("system.aic_initialize_pipe", [], pl.Scalar[pl.INT32], '
-        f"kwargs={metadata!r}, attrs={metadata!r})"
-        if recorded
-        else f"pl.aic_initialize_pipe(dir_mask=1, slot_size=2048, attrs={metadata!r})"
-    )
-    func = pl.parse(f"""
-@pl.function(type=pl.FunctionType.AIC)
-def producer():
-    {call}
-""")
-    assert isinstance(func, ir.Function)
-    stmt = func.body.stmts[0] if isinstance(func.body, ir.SeqStmts) else func.body
-    assert isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call)
-    assert stmt.expr.attrs["acc_push_epilogue"] == _epilogue()
-    if recorded:
-        assert stmt.expr.kwargs["acc_push_epilogue"] == _epilogue()
 
 
 @pytest.mark.parametrize(

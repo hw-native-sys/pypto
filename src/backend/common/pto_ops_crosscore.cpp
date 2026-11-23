@@ -35,6 +35,7 @@
 #include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
@@ -272,7 +273,8 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
     }
     if (op->HasKwarg("acc_push_epilogue")) {
       const auto e = op->GetKwarg<ir::AccPushEpilogue>("acc_push_epilogue");
-      INTERNAL_CHECK_SPAN(ir::ValidateAccPushEpilogue(e).empty(), op->span_) << "Invalid Fixpipe epilogue";
+      const auto schema_error = ir::ValidateAccPushEpilogue(e);
+      INTERNAL_CHECK_SPAN(schema_error.empty(), op->span_) << "Internal error: " << schema_error;
       oss << ", acc_push_epilogue = #pto.acc_push_epilogue<layout = " << e.at("layout")
           << ", quant = " << e.at("quant") << ", relu = " << e.at("relu") << ">";
     }

@@ -756,6 +756,10 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const bool has_epilogue = init->HasKwarg("acc_push_epilogue");
       const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
       if (has_epilogue) {
+        const bool correct_lane =
+            (func->func_type_ == FunctionType::AIC && IsOp(init, "system.aic_initialize_pipe")) ||
+            (func->func_type_ == FunctionType::AIV && IsOp(init, "system.aiv_initialize_pipe"));
+        if (!correct_lane) error(init, "Fixpipe initialize_pipe must match the kernel lane");
         if (init->HasKwarg("c2v_dtype") || init->GetKwarg<bool>("pre_relu", false)) {
           error(init, "acc_push_epilogue cannot be combined with c2v_dtype/pre_relu");
         }
