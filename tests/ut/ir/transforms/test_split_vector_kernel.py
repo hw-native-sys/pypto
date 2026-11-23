@@ -1223,6 +1223,11 @@ def _assert_extent_after_substitution(expr, values, expected):
                 return ir.ConstInt(values[op.name_hint], op.type.dtype, op.span)
             return super().visit_var(op)
 
+        def visit_iter_arg(self, op):
+            if op.name_hint in values:
+                return self.visit_var(op)
+            return super().visit_iter_arg(op)
+
     value = Substitute().visit_expr(expr)
     before = ir.Program(
         [ir.Function("extent", [], [ir.ScalarType(pl.INDEX)], ir.ReturnStmt([value], span), span)],
@@ -1332,6 +1337,66 @@ class Before:
             _assert_extent_after_substitution(extent, values, expected)
         # Selecting another input band must not relocate the physical output.
         _assert_extent_after_substitution(stores[0].args[1].elements[axis], values, physical * 16)
+
+
+def test_full_pop_carry_tracks_the_lane_that_produced_the_value():
+    """The init uses the physical lane, while the backedge selects logical lane zero."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector(self, steps: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+            buf = pl.system.reserve_buffer(name="c2v", size=65536)
+            pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
+            value = pl.tile.full([32, 16], dtype=pl.FP32, value=0.0)
+            for step in pl.range(steps):
+                inner = pl.tile.set_validshape(value, 31, 16)
+                out = pl.tile.store(inner, [0, 0], out)
+                received: pl.Tile[[32, 16], pl.FP32, pl.Mem.Vec] = pl.system.tpop_from_aic(
+                    split=1, aiv_subblockid=0
+                )
+                value = pl.tile.add(received, 1.0)
+                pl.system.tfree_to_aic(received)
+            outer = pl.tile.set_validshape(value, 31, 16)
+            return pl.tile.store(outer, [0, 0], out)
+
+    program = _run_split_vector_kernel(Before)
+    loops = []
+    narrowed = []
+    yields = []
+    physical = []
+
+    class Collect(ir.IRVisitor):
+        def visit_for_stmt(self, op):
+            loops.append(op)
+            super().visit_for_stmt(op)
+
+        def visit_yield_stmt(self, op):
+            yields.append(op)
+            super().visit_yield_stmt(op)
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call):
+                if op.value.op.name == ir.get_op("tile.set_validshape").name:
+                    narrowed.append(op.var)
+                elif op.value.op.name == ir.get_op("tile.get_subblock_idx").name:
+                    physical.append(op.var)
+            super().visit_assign_stmt(op)
+
+    Collect().visit_program(program)
+    assert len(loops) == len(yields) == len(physical) == 1
+    assert len(narrowed) == 2
+    lane = loops[0].iter_args[-1]
+    exit_lane = loops[0].return_vars[-1]
+    assert isinstance(lane.type, ir.ScalarType) and lane.type.dtype == pl.INDEX
+    ir.assert_structural_equal(lane.initValue, physical[0])
+    _assert_extent_after_substitution(yields[0].value[-1], {}, 0)
+    for tile, selector in zip(narrowed, (lane, exit_lane), strict=True):
+        assert isinstance(tile.type, ir.TileType)
+        extent = tile.type.get_effective_tile_view().valid_shape[0]
+        _assert_extent_after_substitution(extent, {selector.name_hint: 0}, 16)
+        _assert_extent_after_substitution(extent, {selector.name_hint: 1}, 15)
 
 
 if __name__ == "__main__":
