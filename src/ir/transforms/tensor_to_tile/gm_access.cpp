@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -383,6 +384,20 @@ class ConstantScalarFillLoopCanonicalizer : public IRMutator {
         }
       }
 
+      // An aligned fill can still step across holes in a sampled GM window.
+      // Prove that successive scalar stores advance by one physical element
+      // before replacing them with a single transfer. Bare tensors are ND
+      // packed; the singleton trailing extents above already prove that case.
+      if (const auto& view = target_type->tensor_view_) {
+        if (view->layout != TensorLayout::ND && view->layout != TensorLayout::DN) return nullptr;
+        const auto strides = view->stride.empty() ? tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                        target_type->shape_, view->layout)
+                                                  : view->stride;
+        if (strides.size() != target_type->shape_.size()) return nullptr;
+        auto pitch = As<ConstInt>(strides[*varying_axis]);
+        if (!pitch || pitch->value_ != 1) return nullptr;
+      }
+
       std::vector<ExprPtr> logical_shape;
       logical_shape.reserve(target_type->shape_.size());
       for (size_t i = 0; i < target_type->shape_.size(); ++i) {
@@ -571,6 +586,18 @@ ParamOrigins CollectReferencedOrigins(const ExprPtr& expr, const AliasOriginMap&
   return origins;
 }
 
+// Descriptor construction has no payload effect, but evaluating its operands
+// can still access GM (for example, a tensor.read in a dynamic offset).
+class OperandCallCollector : public IRVisitor {
+ public:
+  std::vector<CallPtr> calls;
+
+ protected:
+  void VisitExpr_(const CallPtr& call) override { calls.push_back(call); }
+  void VisitExpr_(const VarPtr&) override {}
+  void VisitExpr_(const IterArgPtr&) override {}
+};
+
 /// Mark the parameter origins each argument of @p call reads and writes.
 ///
 /// Which argument a call writes is a property of the operator, declared once on
@@ -594,6 +621,16 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   // registry entry. Its writes are propagated separately, from the callee's
   // declared param directions; every operand counts as a read here.
   const auto* entry = LookupOpEntry(call->op_);
+
+  if (entry && entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess) {
+    OperandCallCollector operands;
+    for (const auto& arg : call->args_) operands.VisitExpr(arg);
+    for (const auto& nested : operands.calls) {
+      AnalyzeCallAccess(nested, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
+    }
+    return;
+  }
 
   for (size_t i = 0; i < call->args_.size(); ++i) {
     const auto effect = entry ? entry->GetArgEffect(i, call->kwargs_) : ArgEffect::Read;

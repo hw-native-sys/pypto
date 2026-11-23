@@ -290,6 +290,11 @@ void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                             const std::string& op_name);
 
+/// Native DMA requires a unit physical inner stride. With transpose=True,
+/// gather_row presents the source's last axis as the inner axis of a DN view.
+void ValidateDmaInnerStride(const TensorTypePtr& tensor, const Span& span, const std::string& op_name,
+                            bool transpose = false);
+
 /**
  * @brief Validate the optional ``init_cond`` operand of an accumulating matmul
  *
@@ -419,6 +424,10 @@ const char* DescribeCubeWritebackScaledConversion(DataType accumulator, DataType
  * @return One expression per tuple element
  */
 std::vector<ExprPtr> ExtractTupleElements(const ExprPtr& tuple_expr, size_t rank);
+
+/// A rectangular slice preserves the parent's physical stride on every retained
+/// axis. Rank-changing reinterprets and blocked layouts have other addressing rules.
+bool HasRectangularSliceStrides(const TensorTypePtr& parent, size_t window_rank, size_t offset_rank);
 
 /**
  * @brief Whether the substrate under a window read trims an over-extent window

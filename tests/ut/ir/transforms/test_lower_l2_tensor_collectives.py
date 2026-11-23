@@ -24,6 +24,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto._function_attrs import REQUIRE_CONTIGUOUS_OPERANDS_ATTR
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir, passes
 
 SIZE = 64
@@ -401,7 +402,7 @@ _REJECTED = {
         "",
         "tensor.slice",
     ),
-    # A slice's type carries no strides, so the type deducer cannot see this one.
+    # An implicit-stride parent requires tracing the slice back to its allocation.
     "static_strided_slice": (_STRIDED + "        x = s\n", "", "", "tensor.slice"),
     # A direct transpose has a non-ND type the deducer rejects; a reshape hides it.
     "transpose_behind_reshape": (
@@ -434,14 +435,6 @@ _REJECTED = {
         "",
         "",
         "a DN-layout tensor.slice",
-    ),
-    # A slice drops its parent's stride, so a padded parent must be caught at the parent.
-    "slice_of_padded_stride_parameter": (
-        f"        x = pl.slice(w, [{TOTAL}, {SIZE}], [0, 0])\n",
-        f"\n        w: pl.Tensor[[{2 * TOTAL}, {SIZE}], pl.FP32,"
-        f" pl.TensorView(stride=[{2 * SIZE}, 1], layout=pl.TensorLayout.ND)],",
-        "",
-        "a non-packed-stride parameter 'w'",
     ),
     # An ND view of a DN parameter lowers to a runtime transpose, which is not contiguous.
     "dn_parameter_behind_nd_view": (
@@ -511,6 +504,18 @@ def test_operand_not_provably_row_major_is_rejected(case):
     body, params, kernels, op = _REJECTED[case]
     with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(role="input", op=op)):
         passes.lower_l2_tensor_collectives()(_input_program(body, params, kernels))
+
+
+def test_slice_of_padded_stride_parameter_is_rejected_at_type_deduction():
+    # The slice retains the physical pitch, so the collective can validate its
+    # packing as soon as the call is constructed.
+    body = f"        x = pl.slice(w, [{TOTAL}, {SIZE}], [0, 0])\n"
+    params = (
+        f"\n        w: pl.Tensor[[{2 * TOTAL}, {SIZE}], pl.FP32,"
+        f" pl.TensorView(stride=[{2 * SIZE}, 1], layout=pl.TensorLayout.ND)],"
+    )
+    with pytest.raises(InvalidOperationError, match=rf"dim 0 has stride {2 * SIZE}, expected {SIZE}"):
+        _input_program(body, params)
 
 
 _ACCEPTED = {

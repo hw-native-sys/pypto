@@ -180,6 +180,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
                      << " requires first argument to be a TensorType or DistributedTensorType, but got "
                      << args[0]->GetType()->TypeName();
 
+  ValidateDmaInnerStride(tensor_type, args[0]->span_, op_name);
+
   // Second argument must be TupleType (offsets)
   auto offsets_tuple = As<MakeTuple>(args[1]);
   CHECK(offsets_tuple) << "The operator " << op_name
@@ -454,6 +456,7 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name
       << " requires third argument to be a TensorType or DistributedTensorType, but got "
       << args[2]->GetType()->TypeName();
+  ValidateDmaInnerStride(output_tensor_type, args[2]->span_, op_name);
   // MX scale tensors are written in their logical 2-D coordinates here. The
   // LegalizeMxScaleTensorViews validates alignment while preserving these
   // coordinates; PTOAS v0.74 constructs the packed physical SFractal descriptor.

@@ -2132,7 +2132,7 @@ class TestRemainderFamilyCodegen:
 
 
 class TestTileReadWriteOffsetCodegen:
-    """Tests verifying tile.read/write multi-dimensional indices generate correct flat offsets."""
+    """Scalar element offsets for tiles and GM tensor descriptors."""
 
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
@@ -2146,6 +2146,87 @@ class TestTileReadWriteOffsetCodegen:
         assert funcs, "Program has no functions"
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
+
+    @pytest.mark.parametrize(
+        ("layout", "steps", "expected_offset"),
+        [("ND", [2, 2], 18), ("ND", [1, 1], 9), ("DN", [2, 1], 10)],
+    )
+    def test_tensor_window_scalar_read_write_and_alias(self, tmp_path, layout, steps, expected_offset):
+        program = pl.parse_program(f"""
+@pl.program
+class Window:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[8, 8], pl.FP32, pl.TensorView(layout=pl.TensorLayout.{layout})],
+               condition: pl.Scalar[pl.INDEX]):
+        v = pl.tensor.view(x, [2, 3], offsets=[1, 1], steps={steps})
+        value = pl.tensor.read(v, [1, 1])
+        if condition == 1:
+            updated = pl.tensor.write(v, [1, 1], value)
+        else:
+            updated = v
+        after = pl.tensor.read(updated, [1, 1])
+        pl.tensor.write(updated, [0, 0], after)
+""")
+        mlir = self._generate_mlir(program)
+        base = re.search(r"(%\w+) = pto.addptr %arg0, %c9_index", mlir)
+        assert base is not None, mlir
+        # Both branches return the same descriptor. Scalar consumers use its
+        # adjusted GM pointer, and add only the coordinate displacement to it.
+        address = f"{base[1]}[%c{expected_offset}_index]"
+        assert mlir.count(f"pto.load {address}") == 2, mlir
+        assert re.search(r"pto.store %\w+, " + re.escape(address), mlir), mlir
+        assert f"{base[1]}[%c0_index]" in mlir
+        if find_ptoas_binary() is not None:
+            pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+
+    def test_tensor_window_dim_step_preserves_loaded_value(self, tmp_path):
+        @pl.program
+        class Window:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[8, 8], pl.FP32]):
+                v = pl.tensor.view(x, [2, 2], steps=[pl.tensor.dim(x, 0) // 4, 1])
+                value = pl.tensor.read(v, [1, 1])
+                pl.tensor.write(x, [0, 0], value)
+
+        mlir = self._generate_mlir(Window)
+        load = re.search(r"(%\w+) = pto.load .* -> f32", mlir)
+        assert load is not None, mlir
+        assert f"pto.store {load[1]}, " in mlir, mlir
+        if find_ptoas_binary() is not None:
+            pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+
+    def test_tensor_window_scalar_read_with_runtime_step_and_index(self):
+        @pl.program
+        class Window:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[8, 8], pl.FP32], step: pl.Scalar[pl.INDEX], col: pl.Scalar[pl.INDEX]
+            ):
+                v = pl.tensor.view(x, [2, 3], offsets=[1, 1], steps=[1, step])
+                value = pl.tensor.read(v, [1, col])
+                pl.tensor.write(x, [0, 0], value)
+
+        mlir = self._generate_mlir(Window)
+        product = re.search(r"(%\w+) = arith.muli %arg2, %arg1 : index", mlir)
+        assert product is not None, mlir
+        offset = re.search(rf"(%\w+) = arith.addi %c8_index, {product[1]} : index", mlir)
+        assert offset is not None, mlir
+        assert re.search(rf"pto.load %\w+\[{offset[1]}\]", mlir), mlir
+
+    def test_tensor_window_rank_one_bare_scalar_index(self):
+        @pl.program
+        class Window:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[8], pl.FP32]):
+                v = pl.tensor.view(x, [3], offsets=[1], steps=[2])
+                value = pl.tensor.read(v, 1)
+                pl.tensor.write(x, 3, value)
+
+        mlir = self._generate_mlir(Window)
+        base = re.search(r"(%\w+) = pto.addptr %arg0, %c1_index", mlir)
+        assert base is not None, mlir
+        assert f"pto.load {base[1]}[%c2_index]" in mlir
+        assert re.search(r"pto.store %\w+, %arg0\[%c3_index\]", mlir), mlir
 
     def test_tile_read_constant_1d(self):
         """1D-like slice of 2D tile [1, 16], tile.read(t, [0, 3]) -> flat offset 3 -> pto.tgetval."""
