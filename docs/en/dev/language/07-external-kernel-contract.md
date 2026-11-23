@@ -176,23 +176,7 @@ including unhashable objects, and hold the kernel and internal signature declara
 until preparation finishes. Rebinding a kernel between requests is rediscovered.
 This direct provider path does not claim immutable input capture or enable caches.
 
-Existing explicit declarations remain supported:
-
-```python
-from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
-
-@pl.jit.extern(binding=CANNBotDSLProvider().bind(native_kernel))
-def native(x: pl.Tensor, out: pl.Tensor):
-    ...
-
-@pl.jit
-def pipeline(x: pl.Tensor, out: pl.Out[pl.Tensor]):
-    native(x, out)
-    return out
-```
-
-Parameter names/order must match the native kernel. The declaration is void;
-use bare tensor annotations. Read/write directions and hidden SSA writebacks
+Read/write directions and hidden SSA writebacks
 come from the validated native export. AIC/AIV/MIX topology is also inferred
 from that export; MIX produces one Group containing an AIC and a dual-lane AIV
 member. Ordinary PyPTO producers and consumers can surround the call.
@@ -488,7 +472,7 @@ calls need separate ordering or isolation. It does not prove intra-group safety,
 resource ownership, stack limits, binary loading or completion visibility by
 itself. The direct runtime path described above composes this helper with
 `TMRBridge.lower`, checked compilation and actual TMR submission for the supported
-subset. Both automatic discovery and explicit JIT binding use the restricted
+subset. Automatic JIT discovery uses the restricted
 view policy above.
 
 ## Requests and prepared kernels
@@ -728,7 +712,7 @@ includes, contract and checker to an existing extern specialization. Keep that l
 alive until the existing runtime has compiled/published its sources. AIC/AIV members,
 mixed Groups and vector lane count come from the execution contract.
 Persistent reuse remains task 34.6.
-CANNBotDSL supports the direct runtime, automatic JIT discovery, and explicit binding paths above.
+CANNBotDSL supports direct runtime execution and automatic JIT discovery.
 
 Orchestration invokes the checker after building actual task arguments and before
 submission, including direct calls, explicit submits and reordered SPMD/Group wrappers.

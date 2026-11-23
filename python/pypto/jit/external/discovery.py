@@ -89,7 +89,7 @@ def _discover(identity: _Identity) -> "JITFunction | None":
     if not declarations:
         return None
     if len(declarations) != 1:
-        raise ContractError("JIT discovery: ambiguous providers; use an explicit extern binding")
+        raise ContractError("JIT discovery: ambiguous providers matched the same native kernel")
     declaration = declarations[0]
     parameters = tuple(declaration.signature.parameters.values())
     if any(

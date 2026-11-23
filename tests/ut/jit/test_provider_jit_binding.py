@@ -15,7 +15,6 @@ import sys
 import weakref
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, cast
 
 import pypto.language as pl
 import pytest
@@ -91,7 +90,7 @@ def native_api(monkeypatch):
         else None
     )
     monkeypatch.setitem(sys.modules, "cannbotdsl", cb)
-    monkeypatch.setattr(CANNBotDSLProvider, "bind", lambda self, kernel: kernel.binding)
+    monkeypatch.setattr(CANNBotDSLBinding, "prepare", lambda self, *args: self.kernel.binding.prepare(*args))
 
 
 def _automatic_entry(native):
@@ -108,38 +107,12 @@ def _automatic_entry(native):
     return entry
 
 
-def _native_call(binding, automatic):
-    if automatic:
-        return _Native(binding)
-
-    @pl.jit.extern(binding=binding)
-    def native(x: pl.Tensor, out: pl.Tensor): ...
-
-    return native
-
-
-def _entry(binding):
-    @pl.jit.extern(binding=binding)
-    def native(x: pl.Tensor, out: pl.Tensor): ...
-
-    @pl.jit
-    def entry(
-        x: pl.Tensor[[32], pl.FP32], tmp: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]
-    ):
-        native(x, tmp)
-        native(tmp, out)
-        return out
-
-    return entry
-
-
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
-@pytest.mark.parametrize("automatic", [False, True])
-def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, native_api, core, automatic):
+def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, native_api, core):
     backend.reset_for_testing()
     monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
     binding = _Binding(core)
-    entry = _automatic_entry(_Native(binding)) if automatic else _entry(binding)
+    entry = _automatic_entry(_Native(binding))
     config = RunConfig(backend_type=backend.BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
     first = entry.compile(config=config)
     second = entry.compile(config=config)
@@ -165,14 +138,11 @@ def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, native_a
 
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
 @pytest.mark.parametrize("core_num,sync_start", [(2, False), (1, True)])
-@pytest.mark.parametrize("automatic", [False, True])
-def test_binding_preflight_observes_explicit_launch(
-    monkeypatch, native_api, core, core_num, sync_start, automatic
-):
+def test_binding_preflight_observes_explicit_launch(monkeypatch, native_api, core, core_num, sync_start):
     backend.reset_for_testing()
     monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
 
-    native = _native_call(_Binding(core), automatic)
+    native = _Native(_Binding(core))
 
     @pl.jit
     def entry(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]):
@@ -194,14 +164,13 @@ def test_binding_preflight_observes_explicit_launch(
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
 @pytest.mark.parametrize("producer_style", ["submit", "at"])
 @pytest.mark.parametrize("require_completion", [False, True])
-@pytest.mark.parametrize("automatic", [False, True])
 def test_binding_completion_overrides_explicit_hints(
-    monkeypatch, native_api, core, producer_style, require_completion, automatic
+    monkeypatch, native_api, core, producer_style, require_completion
 ):
     backend.reset_for_testing()
     monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
 
-    native = _native_call(_Binding(core, require_completion=require_completion), automatic)
+    native = _Native(_Binding(core, require_completion=require_completion))
 
     @pl.jit.incore
     def producer(x: pl.Tensor, out: pl.Out[pl.Tensor]):
@@ -227,15 +196,9 @@ def test_binding_completion_overrides_explicit_hints(
     assert source.count(".set_allow_early_resolve(false)") == (2 if require_completion else 0)
 
 
-def test_binding_rejects_source_options_and_targetless_specialization():
-    with pytest.raises(ValueError, match="cannot be combined"):
-        pl.jit.extern(binding=_Binding("aiv"), source="ignored.cpp")(lambda: None)
-    with pytest.raises(ValueError, match="determines core_type"):
-        pl.jit.extern(binding=_Binding("aiv"), core_type="aic")
-    with pytest.raises(TypeError, match="implement prepare"):
-        pl.jit.extern(binding=cast(Any, object()))
+def test_discovered_kernel_requires_target(native_api):
     with pytest.raises(ValueError, match="explicit target"):
-        _entry(_Binding("aiv")).specialize()
+        _automatic_entry(_Native(_Binding("aiv"))).specialize()
 
 
 def _context(shape):

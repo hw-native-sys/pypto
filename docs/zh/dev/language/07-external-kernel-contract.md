@@ -115,7 +115,7 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 每次准备都重新导出；由于尚未建立完整的 Python 闭包/输入快照，身份明确标记为不完整。
 因此该 provider 尚未注册到仅支持 capture 的 registry，也不声明 preparation 缓存复用。
 
-A5 TMR bridge 支持下述单 block AIC/AIV/MIX 子集的直接执行、普通 JIT 自动发现和显式绑定。
+A5 TMR bridge 支持下述单 block AIC/AIV/MIX 子集的直接执行、普通 JIT 自动发现。
 完整输入捕获、持久复用及性能验收仍单独跟踪。准备和原生二进制编译不使用缓存。
 
 ### 普通 JIT 自动发现
@@ -143,22 +143,7 @@ PyPTO 不遍历原生函数体，导入 PyPTO 也不会导入 CANNBotDSL。
 适配器按对象身份在一次编译请求内去重，支持不可哈希对象，并持有 kernel 和内部签名声明。
 不同请求间重新绑定的 kernel 会重新发现；这不代表完整输入捕获，也不会启用缓存。
 
-原有显式声明仍可使用：
-
-```python
-from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
-
-@pl.jit.extern(binding=CANNBotDSLProvider().bind(native_kernel))
-def native(x: pl.Tensor, out: pl.Tensor):
-    ...
-
-@pl.jit
-def pipeline(x: pl.Tensor, out: pl.Out[pl.Tensor]):
-    native(x, out)
-    return out
-```
-
-参数名与顺序必须与原生 kernel 一致。声明无返回值，使用普通 tensor 注解；读写方向与
+读写方向与
 隐藏 SSA 回写由经过校验的原生导出决定。AIC/AIV/MIX 拓扑也从导出推导，MIX 生成为
 包含一个 AIC 和双 lane AIV 成员的 Group。调用前后可以使用普通 PyPTO 生产者与消费者。
 
@@ -377,7 +362,7 @@ ID。辅助层不负责加载 kernel 或授权执行；回调所接入的 runtim
 结果。辅助层只约束本批次，其他可能并发的调用仍需独立的依赖或隔离策略。它不证明
 组内安全、资源所有权、栈限制、二进制加载或完成可见性。上述直接 runtime 路径将
 该辅助层与 `TMRBridge.lower`、受检查的编译以及真实 TMR 提交组合，用于支持的子集。
-显式 JIT 绑定和原生对象自动发现使用相同的受限视图策略。
+原生对象自动发现使用相同的受限视图策略。
 
 ## 请求与编译结果
 
@@ -613,7 +598,7 @@ C++ 类型须匹配声明。维度、stride 和 offset 使用 1/2/4/8 字节无�
 `native.configure_context(context)` 校验请求，并给既有 extern 特化附加源码、include、
 契约及检查器。保持租约直到既有 runtime 完成源码编译/发布。AIC/AIV、mixed Group
 和向量 lane 数来自执行契约。注册对象接入仍属任务 34.5，持久化
-复用属任务 34.6。CANNBotDSL 支持上文的直接 runtime、自动 JIT 发现及显式绑定路径。
+复用属任务 34.6。CANNBotDSL 支持上文的直接 runtime 和自动 JIT 发现路径。
 
 每次调用都在实际参数打包后、提交前检查 rank/dtype、固定及共享维度、正 stride、
 offset、对齐、存储/地址边界和原生元数据位宽，支持普通调用、显式 submit 及参数重排的

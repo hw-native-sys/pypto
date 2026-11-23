@@ -24,8 +24,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding
-
     from ..discovery import JITDeclaration
 
 from pypto.pypto_core import DataType
@@ -451,7 +449,7 @@ class CANNBotDSLProvider:
     """Direct, uncached preparation and automatic ordinary JIT discovery.
 
     TMRBridge.lower supports the checked single-block A5 AIC/AIV/MIX subset.
-    Use bind() for an ordinary JIT extern declaration, or
+    Call the native kernel directly in ordinary JIT, or use
     cannbotdsl_runtime.compile_task and build_submitter for direct execution.
     Both consume the manifest and require binary admission and completion-based
     ordering. Other resource or launch requirements are rejected.
@@ -467,15 +465,11 @@ class CANNBotDSLProvider:
         if info is None:
             return None
         _require(not info.configured, "expected an unconfigured kernel without host launch dimensions")
-        from ..discovery import JITDeclaration  # noqa: PLC0415
-
-        return JITDeclaration(info.signature, self.bind(kernel))
-
-    def bind(self, kernel: object) -> "CANNBotDSLBinding":
-        """Bind a native kernel for an ``@pl.jit.extern(binding=...)`` declaration."""
         from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding  # noqa: PLC0415
 
-        return CANNBotDSLBinding(self, kernel)
+        from ..discovery import JITDeclaration  # noqa: PLC0415
+
+        return JITDeclaration(info.signature, CANNBotDSLBinding(self, kernel))
 
     def prepare(self, kernel: object, request: KernelRequest) -> PreparedKernel:
         _validate_inputs(request)
