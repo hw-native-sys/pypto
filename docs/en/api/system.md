@@ -24,12 +24,16 @@ physical lane selection and existing pipe emission.
 
 ```python
 lane = pl.cast(pl.tile.get_subblock_idx(), pl.INT64)
+pl.system.tpush_to_aic(outgoing, split=1, aiv_subblockid=lane)
 received = pl.system.tpop_from_aic(
     shape=[16, 16], dtype=pl.FP32, split=1, aiv_subblockid=lane
 )
-pl.system.tpush_to_aic(received, split=1, aiv_subblockid=lane)
+# Consume received before releasing its C2V slot.
 pl.system.tfree_to_aic(received)
 ```
+
+Keep `outgoing` live until the AIC consumer releases its V2C slot with
+`tfree_to_aiv`. The C2V release shown here only releases `received`.
 
 Only AIV-side Vec Tile entries and split codes 1/2/3/4 accept the operand.
 No-split (`split=0`), GlobalTensor entries, and AIC-side `tpush_to_aiv` /

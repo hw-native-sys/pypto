@@ -23,12 +23,16 @@ outlining（函数提取）和拆核后仍保留。省略参数时维持后端�
 
 ```python
 lane = pl.cast(pl.tile.get_subblock_idx(), pl.INT64)
+pl.system.tpush_to_aic(outgoing, split=1, aiv_subblockid=lane)
 received = pl.system.tpop_from_aic(
     shape=[16, 16], dtype=pl.FP32, split=1, aiv_subblockid=lane
 )
-pl.system.tpush_to_aic(received, split=1, aiv_subblockid=lane)
+# Consume received before releasing its C2V slot.
 pl.system.tfree_to_aic(received)
 ```
+
+保持 `outgoing` 的存储有效，直到 AIC 消费方用 `tfree_to_aiv` 释放对应的 V2C slot。
+示例中的 C2V 释放只针对 `received`。
 
 该操作数仅适用于 AIV 侧 Vec Tile entry 和 split=1/2/3/4。
 no-split（`split=0`）、GlobalTensor entry 以及 AIC 侧的
