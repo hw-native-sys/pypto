@@ -379,8 +379,9 @@ void TypeChecker::CheckAsyncOperands(const CallPtr& op) {
     return;
   }
   if (!IsOp(op, "pld.system.wait_event") && !IsOp(op, "pld.system.defer_wait_event") &&
-      !IsOp(op, "prefetch.wait"))
+      !IsOp(op, "prefetch.wait")) {
     return;
+  }
   if (op->args_.empty()) return;
   auto event = ResolveAsyncDefinition(op->args_[0]).value;
   auto get_event = As<TupleGetItemExpr>(event);
