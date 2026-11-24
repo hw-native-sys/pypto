@@ -102,6 +102,8 @@ def test_dequant_assembles_a5(src_dtype, width, tmp_path):
         # A5 repeats the full first predicate when storing the 32-column tail.
         result_type = "dtype=f32, rows=16, cols=128"
         assert result_type in dequant.split(" outs(", 1)[1]
-        allocation = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line and result_type in line)
+        allocation = next(
+            line for line in mlir.splitlines() if "pto.alloc_tile" in line and result_type in line
+        )
         assert "valid_col = %c96_index" in allocation
         assert "!pto.partition_tensor_view<16x96xf32>" in mlir
