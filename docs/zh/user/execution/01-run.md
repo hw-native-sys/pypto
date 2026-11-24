@@ -140,6 +140,16 @@ handle 受 CANN 自身约束。
 `torch.float8_e5m2`，主机端可直接使用它。编排代码将 `pl.HF8` 和
 `pl.FP4E1M2X2` 的分配描述为 `UINT8` 字节缓冲区，核内代码保留声明的元素类型。
 
+### Owner-local 服务注册
+
+准备后的 `DistributedWorker` 可选接受 `chip_service_factories={rank: factory}`。
+factory 在 chip 初始化后、真正持有分配的子进程内执行，返回带 `close()` 的服务。
+对完整的常驻张量调用 `token, descriptor = rt.retain_service_tensor(t, rank)`
+可保留底层分配；descriptor 交给 owner-local 服务，只有原生 unregister
+完成后才能调用 `rt.release_service_tensor(token)`。仍有注册时，主动 free/close
+会在自动释放之前拒绝执行。retain 不同步计算，调用方仍须完成数据就绪等待和
+读写保护。该窄接口仅支持 L3 device malloc；普通 worker 不启动任何服务。
+
 ### 影响派发的 `RunConfig` 字段
 
 `RunConfig` 同时携带编译侧与运行时侧设置；编译侧那些见[上一页](00-compile.md)。派发时要紧的是：

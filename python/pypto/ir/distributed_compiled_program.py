@@ -540,6 +540,7 @@ class DistributedCompiledProgram:
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
         startup_timeout_s: float | None = None,
+        chip_service_factories: dict[int, Callable[..., Any]] | None = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
@@ -615,6 +616,11 @@ class DistributedCompiledProgram:
             startup_timeout_s: Optional positive finite bound, in seconds, for
                 the forked worker hierarchy to report startup readiness. ``None``
                 keeps Simpler's default timeout.
+            chip_service_factories: Optional startup factories indexed by local
+                chip rank. Each runs after device initialization in that chip's
+                allocation-owner process and returns a service with close().
+                Register resident tensors with retain_service_tensor(); unregister
+                and release them before closing the worker. No services run by default.
 
         Returns:
             A :class:`DistributedWorker`; use it as a context manager or call
@@ -632,6 +638,7 @@ class DistributedCompiledProgram:
             sub_worker_overrides=sub_worker_overrides,
             inherited_host_tensors=inherited_host_tensors,
             startup_timeout_s=startup_timeout_s,
+            **({"chip_service_factories": chip_service_factories} if chip_service_factories else {}),
         )
 
     @staticmethod

@@ -27,6 +27,7 @@ import warnings
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -4895,6 +4896,47 @@ def test_persistent_domain_identity_includes_source_and_workspace():
     host = DistributedWorker._persistent_domain_spec({**base, "memory_source": "host"})
     urma = DistributedWorker._persistent_domain_spec({**base, "workspace_engines": ("urma",)})
     assert len({device, host, urma}) == 3
+
+
+def test_chip_service_factory_is_optional_and_forwarded(patched_setup):
+    compiled = _fake_compiled([], [])
+    with DistributedWorker(compiled):
+        assert "chip_service_factories" not in patched_setup["construct"].call_args.kwargs
+    factories = {0: lambda context: context}
+    with DistributedWorker(compiled, chip_service_factories=factories):
+        assert patched_setup["construct"].call_args.kwargs["chip_service_factories"] is factories
+
+
+def test_service_retain_guards_auto_free_before_any_teardown(patched_setup):
+    rt = DistributedWorker(_fake_compiled([], []))
+    tensor = _resident(rt, (16,))
+    descriptor = object()
+    native = patched_setup["worker"]
+    native.retain_service_buffer.return_value = ("registration", descriptor)
+    assert rt.retain_service_tensor(tensor) == ("registration", descriptor)
+    native.retain_service_buffer.assert_called_once_with(tensor.buffer)
+    with pytest.raises(RuntimeError, match="service"):
+        rt.close()
+    native.free.assert_not_called()
+    native.close.assert_not_called()
+    assert rt._owned_tensors[(0, tensor.data_ptr)] is tensor
+    assert not rt._closed and not rt._closing
+    rt.release_service_tensor("registration")
+    native.release_service_buffer.assert_called_once_with("registration")
+    rt.close()
+    native.free.assert_called_once_with(tensor.buffer)
+    native.close.assert_called_once()
+
+
+def test_service_retain_rejects_foreign_worker_and_tensor_view(patched_setup):
+    with DistributedWorker(_fake_compiled([], [])) as rt:
+        tensor = _resident(rt, (16,))
+        with pytest.raises(ValueError, match="owned"):
+            rt.retain_service_tensor(tensor, 1)
+        view = replace(tensor)
+        with pytest.raises(ValueError, match="owned"):
+            rt.retain_service_tensor(view)
+        patched_setup["worker"].retain_service_buffer.assert_not_called()
 
 
 if __name__ == "__main__":
