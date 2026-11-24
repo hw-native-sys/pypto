@@ -322,6 +322,44 @@ class P:
         _verify_through_ssa(program)
 
 
+@pytest.mark.parametrize("condition", ["cond", "pl.const(1, pl.INDEX) == pl.const(1, pl.INDEX)"])
+def test_prefetch_wait_accepts_prefetch_events_from_either_branch(
+    ascend_backend, default_pass_manager, condition
+):
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32], pl.FP32], y: pl.Tensor[[32], pl.FP32], cond: pl.Scalar[pl.BOOL]):
+        ctx = pl.prefetch.make_context()
+        session = pl.prefetch.session(ctx)
+        if {condition}:
+            event = pl.prefetch.async_prefetch(x, ctx)
+        else:
+            event = pl.prefetch.async_prefetch(y, ctx)
+        pl.prefetch.wait(event, session)
+""")
+    assert "pl.prefetch.wait(" in str(default_pass_manager.run_passes(program))
+
+
+def test_prefetch_wait_accepts_loop_carried_prefetch_event(ascend_backend):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32], pl.FP32], count: pl.Scalar[pl.INDEX], refresh: pl.Scalar[pl.BOOL]
+        ):
+            ctx = pl.prefetch.make_context()
+            session = pl.prefetch.session(ctx)
+            event = pl.prefetch.async_prefetch(x, ctx)
+            for _ in pl.range(count):
+                if refresh:
+                    event = pl.prefetch.async_prefetch(x, ctx)
+            pl.prefetch.wait(event, session)
+
+    _verify_through_ssa(P)
+
+
 def test_prefetch_wait_rejects_unknown_event_after_branch(ascend_backend):
     @pl.program
     class P:

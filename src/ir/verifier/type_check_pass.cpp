@@ -300,6 +300,48 @@ class VarValueCollector : public IRVisitor {
   }
 };
 
+// Classify event families without requiring a unique submission. Each loop carry
+// includes its initial value and backedge, so propagation also covers cycles.
+using EventVars = std::unordered_set<const Var*>;
+
+EventVars FindPrefetchEvents(const VarValueCollector& definitions) {
+  std::unordered_map<const Var*, std::vector<const Var*>> users;
+  std::vector<const Var*> sources, prefetch, unknown;
+  for (const auto& [var, values] : definitions.values) {
+    if (!IsA<AsyncEventType>(var->GetType())) continue;
+    for (const auto& value : values) {
+      if (auto source = AsVarLike(value)) {
+        sources.push_back(source.get());
+        users[source.get()].push_back(var);
+      } else if (IsOp(As<Call>(value), "prefetch.async_prefetch")) {
+        prefetch.push_back(var);
+      } else {
+        unknown.push_back(var);
+      }
+    }
+  }
+  const auto reachable = [&](std::vector<const Var*> work) {
+    EventVars visited;
+    while (!work.empty()) {
+      const auto* var = work.back();
+      work.pop_back();
+      if (!visited.insert(var).second) continue;
+      if (auto it = users.find(var); it != users.end()) {
+        work.insert(work.end(), it->second.begin(), it->second.end());
+      }
+    }
+    return visited;
+  };
+  auto known = reachable(std::move(prefetch));
+  // An opaque parameter or a carry without a prefetch seed is unknown. One
+  // unknown incoming path disqualifies a join, even if another path prefetches.
+  for (const auto* source : sources) {
+    if (!known.count(source)) unknown.push_back(source);
+  }
+  for (const auto* var : reachable(std::move(unknown))) known.erase(var);
+  return known;
+}
+
 /// Whether a ``tensor.slice`` takes the last two axes of its source whole: full
 /// extent at offset 0, and neither one dropped. Only such a slice selects whole
 /// matrices, whose bytes are the same run under ND and NZ order.
@@ -354,6 +396,7 @@ class AsyncHandleChecker : public IRVisitor {
   StmtPtr body_;
   std::vector<Diagnostic>& diagnostics_;
   std::optional<VarValueCollector> var_values_;
+  std::optional<EventVars> prefetch_events_;
   // Keep the SSA definition as well as its RHS: two executions of an identical
   // make_session call still produce distinct mutable session objects.
   struct Definition {
@@ -409,7 +452,12 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   auto submit = As<Call>(event);
   const bool explicit_session = IsOp(submit, "pld.tile.get_async") || IsOp(submit, "pld.tile.put_async");
   if (IsOp(op, "prefetch.wait")) {
-    if (!IsOp(submit, "prefetch.async_prefetch")) {
+    bool is_prefetch = IsOp(submit, "prefetch.async_prefetch");
+    if (!event && var_values_) {
+      if (!prefetch_events_) prefetch_events_ = FindPrefetchEvents(*var_values_);
+      is_prefetch = prefetch_events_->count(AsVarLike(op->args_[0]).get()) != 0;
+    }
+    if (!is_prefetch) {
       mismatch("requires an event traceable to prefetch.async_prefetch");
     }
     if (op->args_.size() == 2 &&
