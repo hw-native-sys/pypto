@@ -664,7 +664,10 @@ class JITFunction:
             (dep._func, names) for dep in deps_topo if (names := _layout_dependency_names(dep._func))
         )
         state = _CachedDepGraph(graph, bindings, source_hash, layout_dependencies)
-        self._dep_graph_state = state
+        # Discovered wrappers own live provider inputs and declaration files.
+        # cache_in_snapshot already pins their graph for this compilation.
+        if not any(dep._external_binding is not None for dep in deps_topo):
+            self._dep_graph_state = state
         return state
 
     def _get_deps(self) -> list["JITFunction"]:
@@ -1987,8 +1990,14 @@ def _discover_dep_bindings(
 
     deps: list[_call_binding.DepBinding] = []
     seen: set[str] = set()
+    local_names = _ast_analysis.body_local_names(func)
     for name in called_names:
-        obj = _resolve_jit_hook(all_vars.get(name))
+        value = all_vars.get(name)
+        obj = _resolve_jit_hook(value)
+        if obj is None and name not in local_names:
+            from .external.discovery import discover_jit  # noqa: PLC0415
+
+            obj = discover_jit(value)
         if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(_call_binding.DepBinding(call_name=name, dep=obj))
             seen.add(name)
@@ -2334,10 +2343,6 @@ class _ExternKernelDecorator:
         @pl.jit.extern(source="k.cpp", core_type="aiv",        # extra headers
                        include_dirs=["include", "third_party/include"])
 
-    ``binding=provider.bind(kernel)`` supplies an owned export during specialization.
-    It determines topology, writebacks and binary admission; source/core/include
-    options cannot accompany a binding. Direct bindings bypass JIT caches.
-
     A ``mixed`` kernel is dispatched as one ``MixedKernels`` submit: the
     specializer emits an AIC member, an AIV member, and a Group wrapper.
     Set ``dual_aiv_dispatch=True`` only when the external implementation is
@@ -2356,30 +2361,15 @@ class _ExternKernelDecorator:
         aiv_source: str | Any = None,
         dual_aiv_dispatch: bool = False,
         include_dirs: Sequence[str | os.PathLike[str]] | None = None,
-        binding: "ExternalJITBinding | None" = None,
     ) -> Any:
-        if binding is not None and core_type is not None:
-            raise ValueError("@pl.jit.extern binding determines core_type from its export")
         if core_type is None:
             core_type = "aiv"
-        if binding is not None and not callable(getattr(binding, "prepare", None)):
-            raise TypeError("@pl.jit.extern binding must implement prepare()")
         if core_type not in ("aic", "aiv", "mixed"):
             raise ValueError(f"@pl.jit.extern core_type must be 'aic', 'aiv', or 'mixed', got {core_type!r}")
         if dual_aiv_dispatch and core_type != "mixed":
             raise ValueError("@pl.jit.extern dual_aiv_dispatch=True requires core_type='mixed'")
 
         def _make(f: Any) -> JITFunction:
-            if binding is not None:
-                if (
-                    any(value is not None for value in (source, aic_source, aiv_source, include_dirs))
-                    or dual_aiv_dispatch
-                ):
-                    raise ValueError("@pl.jit.extern binding cannot be combined with native source options")
-                # Reserve member names before provider preparation determines topology.
-                return JITFunction(
-                    f, func_type="extern", external_core_type="mixed", external_binding=binding
-                )
             if core_type == "mixed":
                 if aic_source is None or aiv_source is None:
                     raise ValueError(

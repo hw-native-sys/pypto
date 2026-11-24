@@ -15,15 +15,17 @@ again. The named descriptor ABI deliberately requires a dedicated runtime bridge
 it must never be relabeled as c_pointer or executed without manifest checks.
 """
 
+import ast
 import hashlib
 import importlib
 import inspect
 import json
+import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_origin
 
 if TYPE_CHECKING:
-    from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding
+    from ..discovery import JITDeclaration
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
@@ -76,6 +78,25 @@ _DTYPES = {
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ContractError(f"CANNBotDSL: {message}")
+
+
+def _is_constexpr(annotation: Any, marker: object) -> bool:
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    if isinstance(annotation, str):
+        # inspect_kernel may expose a postponed annotation without its defining
+        # namespace. Read the marker spelling without evaluating DSL source.
+        try:
+            node = ast.parse(annotation, mode="eval").body
+        except SyntaxError:
+            return False
+        return isinstance(node, ast.Subscript) and (
+            isinstance(node.value, ast.Name)
+            and node.value.id == "Constexpr"
+            or isinstance(node.value, ast.Attribute)
+            and node.value.attr == "Constexpr"
+        )
+    return get_origin(annotation) is marker
 
 
 def _arguments(cb: Any, kernel: object, request: KernelRequest) -> list[Any]:
@@ -445,20 +466,35 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
 
 
 class CANNBotDSLProvider:
-    """Direct, uncached preparation; automatic JIT discovery remains unsupported.
+    """Direct, uncached preparation and automatic ordinary JIT discovery.
 
     TMRBridge.lower supports the checked single-block A5 AIC/AIV/MIX subset.
-    Use bind() for an ordinary JIT extern declaration, or
+    Call the native kernel directly in ordinary JIT, or use
     cannbotdsl_runtime.compile_task and build_submitter for direct execution.
     Both consume the manifest and require binary admission and completion-based
     ordering. Other resource or launch requirements are rejected.
     """
 
-    def bind(self, kernel: object) -> "CANNBotDSLBinding":
-        """Bind a native kernel for an ``@pl.jit.extern(binding=...)`` declaration."""
+    def discover(self, kernel: object) -> "JITDeclaration | None":
+        """Recognize native objects through the already-loaded public DSL API."""
+        cb: Any = sys.modules.get("cannbotdsl")
+        inspect_kernel = getattr(cb, "inspect_kernel", None)
+        if not callable(inspect_kernel):
+            return None
+        info = cast(Any, inspect_kernel(kernel))
+        if info is None:
+            return None
+        _require(not info.configured, "expected an unconfigured kernel without host launch dimensions")
         from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding  # noqa: PLC0415
 
-        return CANNBotDSLBinding(self, kernel)
+        from ..discovery import JITDeclaration  # noqa: PLC0415
+
+        signature: inspect.Signature = info.signature
+        marker = getattr(cb, "Constexpr", inspect.Parameter.empty)
+        constexpr_params = frozenset(
+            p.name for p in signature.parameters.values() if _is_constexpr(p.annotation, marker)
+        )
+        return JITDeclaration(signature, CANNBotDSLBinding(self, kernel), constexpr_params)
 
     def prepare(self, kernel: object, request: KernelRequest) -> PreparedKernel:
         _validate_inputs(request)
