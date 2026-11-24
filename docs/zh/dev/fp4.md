@@ -59,7 +59,7 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | `fillpad`、`fillpad_expand`、`fillpad_inplace` | 两种格式的 ND Vec；零值、最小值和最大值填充均保留有效载体矩形 |
 | DN 数值转换 | 完整静态连续的二维 BF16↔打包或打包↔打包转换；使用 PYPTO/DSA_RP 静态地址；部分有效、带填充及分块布局均被拒绝 |
 | 直接对打包类型执行 `reshape` 或 `transpose` | 不支持；在现有别名契约允许时，先对字节别名执行 reshape |
-| 原生打包 FP4 `matmul_mx` | Tile API 支持两种格式及 E2M1/E1M2 混合组合，使用 FP32 累加器；需要 PTOAS 的 Cube 逻辑维度约定 |
+| 原生打包 FP4 `matmul_mx` | Tensor 和 Tile API 支持两种格式及 E2M1/E1M2 混合组合，使用 FP32 累加器；需要 PTOAS v0.77 或兼容的更新版本 |
 | MXFP4 `quant_mx` | 仅 E2M1，输入为 FP16/BF16，支持 OCP 和 axis0 上受支持的 NV 路径；使用 PYPTO/DSA_RP 静态分配 |
 | `pl.tile.quant_mx_raw` | 显式提供工作区，返回原生 E2M1 数据（MXFP8 返回 INT8）及原始 UINT8 指数；支持静态部分有效区域和 axis0 交错 |
 | Ascend910/A2A3 上执行打包 FP4 | 不支持 |
@@ -75,11 +75,9 @@ Mat→Left/Right 搬运随布局切换打包轴，不进行数值转换。直接
 可避开尚不支持的混合核 Vec 搬运。编排层 FP4/字节别名保留 buffer 标识、偏移、
 步长及依赖关系；其他编排层 dtype 重新解释仍会被拒绝。
 
-PTOAS v0.72 已包含 [Cube 逻辑维度修复](https://gitcode.com/cann/pto-as/pull/381)。
 PyPTO 保留上述载体 ABI，在输出 PTO 时扩展 Mat/Left/Right 的打包轴物理和有效维度。
 GM 和 Vec 描述符仍使用载体维度，分配字节数不变。生成可执行代码前会探测所选汇编器的
-操作数、累加器和 scale 逻辑维度。可通过 `PTOAS_ROOT` 选择正式 v0.77 或兼容的新版本/补丁构建；
-旧的 Cube 载体维度开发构建不兼容。仅生成 IR（`skip_ptoas=True`）仍可用于检查。
+操作数、累加器和 scale 逻辑维度。通过 `PTOAS_ROOT` 选择 PTOAS v0.77 或兼容的更新版本。仅生成 IR（`skip_ptoas=True`）仍可用于检查。
 
 ## 数值转换限制
 
@@ -193,7 +191,10 @@ FP16/BF16 OCP 缩放工作区容量将组数向上取整到 128 个元素。
 支持静态部分有效区域；axis1 要求物理列数等于有效列数，且 FP4 物理列数为 64 的倍数。
 axis0 每 32 个有效行分组；`interleave=True` 要求 FP16/BF16 的物理行数和有效行数
 均为 64 的倍数。量化入口见[算子目录](../user/ops/01-catalog.md)。
-原生 FP4 矩阵乘通过 tile API 提供；`tensor.matmul_mx` 仍仅支持 FP8。
+原生 FP4 矩阵乘通过 Tensor 和 Tile API 提供。`tensor.matmul_mx` 接受静态二维
+ND/DN 数据：ND 载体形状为 `[M,K/2]` / `[K,N/2]`，DN 为 `[M/2,K]` / `[K/2,N]`。
+缩放形状按逻辑值计，为 `[M,K/32]` / `[K/32,N]`；输出为 FP32 `[M,N]`。
+逻辑 M/K/N 分别要求是 32/64/64 的倍数（M 须填满现有载体行分块）。累加和 bias 仍仅通过 Tile API 提供。
 量化结果仍受通用混合核 FP4 Vec→Mat 搬运限制。
 
 ## 另见

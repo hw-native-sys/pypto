@@ -375,21 +375,20 @@ def _native_fp4_specs():
     ]
 
 
-def _native_fp4_golden(lhs_dtype, rhs_dtype):
-    def decode(data, dtype):
-        raw = data.view(torch.uint8)
-        codes = torch.stack((raw & 15, raw >> 4), dim=-1).flatten(-2).long()
-        levels = (
-            [0, 0.5, 1, 1.5, 2, 3, 4, 6]
-            if dtype == pl.fp4e2m1x2
-            else [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75]
-        )
-        values = torch.tensor(levels + [-v for v in levels], dtype=torch.float64)
-        return values[codes]
+def _decode_native_fp4(data, dtype):
+    raw = data.view(torch.uint8)
+    codes = torch.stack((raw & 15, raw >> 4), dim=-1).flatten(-2).long()
+    levels = (
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6] if dtype == pl.fp4e2m1x2 else [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75]
+    )
+    values = torch.tensor(levels + [-v for v in levels], dtype=torch.float64)
+    return values[codes]
 
+
+def _native_fp4_golden(lhs_dtype, rhs_dtype):
     def golden(tensors):
-        a = decode(tensors["a"], lhs_dtype)
-        b = decode(tensors["b"], rhs_dtype).T
+        a = _decode_native_fp4(tensors["a"], lhs_dtype)
+        b = _decode_native_fp4(tensors["b"], rhs_dtype).T
         sa = _unpack_a_scale(tensors["a_scale"].view(torch.uint8))
         sb = _unpack_b_scale(tensors["b_scale"].view(torch.uint8))
         base = _matmul_mx_golden(a, sa, b, sb)
@@ -414,6 +413,75 @@ def _native_fp4_golden(lhs_dtype, rhs_dtype):
     ]
 )
 def test_native_fp4_matmul_mx(case_run):
+    case_run.assert_passed()
+
+
+def _tensor_native_fp4_entry(lhs_dtype, rhs_dtype):
+    @pl.jit.incore
+    def compute(
+        a: pl.Tensor[[M, K // 2], lhs_dtype],
+        a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+        b: pl.Tensor[[K, N // 2], rhs_dtype],
+        b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        result = pl.tensor.matmul_mx(a, a_scale, b, b_scale)
+        return pl.tensor.assemble(out, result, [0, 0])
+
+    @pl.jit(auto_scope=False)
+    def entry(
+        a: pl.Tensor[[M, K // 2], lhs_dtype],
+        a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+        b: pl.Tensor[[K, N // 2], rhs_dtype],
+        b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ):
+        with pl.spmd(1):
+            out = compute(a, a_scale, b, b_scale, out)
+        return out
+
+    return entry
+
+
+def _tensor_native_fp4_specs():
+    specs = _native_fp4_specs()[:-1]
+    # Transpose logical nibble values, then repack along N for an ND RHS.
+    rhs = specs[2]
+    assert isinstance(rhs.init_value, torch.Tensor)
+    raw = rhs.init_value
+    codes = torch.stack((raw & 15, raw >> 4), dim=-1).flatten(-2).T.contiguous()
+    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
+    specs[2] = TensorSpec("b", [K, N // 2], DataType.UINT8, init_value=packed)
+    return specs
+
+
+def _tensor_native_fp4_golden(lhs_dtype, rhs_dtype):
+    def golden(tensors):
+        a = _decode_native_fp4(tensors["a"], lhs_dtype)
+        b = _decode_native_fp4(tensors["b"], rhs_dtype)
+        sa = _unpack_a_scale(tensors["a_scale"].view(torch.uint8))
+        sb = _unpack_b_scale(tensors["b_scale"].view(torch.uint8))
+        return {"out": _matmul_mx_golden(a, sa, b, sb)}
+
+    return golden
+
+
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            _tensor_native_fp4_entry(lhs, rhs),
+            tensors=_tensor_native_fp4_specs(),
+            name=f"tensor_native_mx_{lhs}_{rhs}",
+            golden=_tensor_native_fp4_golden(lhs, rhs),
+            rtol=0.0,
+            atol=0.0,
+        )
+        for lhs in (pl.fp4e2m1x2, pl.fp4e1m2x2)
+        for rhs in (pl.fp4e2m1x2, pl.fp4e1m2x2)
+    ]
+)
+def test_tensor_native_fp4_matmul_mx(case_run):
     case_run.assert_passed()
 
 
