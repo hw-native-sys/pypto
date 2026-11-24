@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -140,7 +141,7 @@ std::vector<std::string> InlineExpansionOrder(
 // Preserve auto-name role/version suffixes for downstream renamers. Ordinary
 // names use an underscore-safe join so `_` stays valid and `a__b` stays invalid.
 std::string FreshName(const std::string& orig) {
-  static std::atomic<unsigned long long> counter{0};
+  static std::atomic<uint64_t> counter{0};
   const auto suffix = "inline" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
   const auto parsed = auto_name::Parse(orig);
   if (parsed.role.has_value() || parsed.version.has_value()) {

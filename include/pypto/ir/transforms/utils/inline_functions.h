@@ -14,6 +14,7 @@
 
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 

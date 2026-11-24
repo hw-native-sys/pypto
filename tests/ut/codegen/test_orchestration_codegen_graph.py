@@ -42,6 +42,7 @@ from _orchestration_codegen_common import (
 from pypto import backend
 from pypto.backend import BackendType, pto_backend
 from pypto.ir.compile import compile as ir_compile
+from pypto.ir.compiled_program import CompiledProgram
 from pypto.pypto_core import codegen, passes
 
 # ``kernel_config.py`` is only written when ptoas is not skipped, but these tests
@@ -1552,6 +1553,7 @@ def test_same_program_compiles_for_both_graph_paths(tmp_path, monkeypatch, hbg_f
             compiled = ir_compile(Pipeline, output_dir=str(output_dir), dump_passes=False)
 
         assert Pipeline.as_python() == original
+        assert isinstance(compiled, CompiledProgram)
         metadata = compiled._artifact.metadata
         assert metadata is not None
         assert metadata.return_aliases == (1, 2)

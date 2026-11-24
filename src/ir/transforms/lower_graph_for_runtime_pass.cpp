@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <cstddef>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -17,9 +17,10 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -50,8 +51,9 @@ class GraphLowerer : public IRMutator {
     if (manual_inline_calls_.empty()) return;
     // Existing Inline helpers can contain a Graph marker. Propagate that fact
     // backwards through Inline calls so we see the final caller's scope mode.
-    for (size_t i = 0; i < pending_graph_helpers_.size(); ++i) {
-      auto callers = inline_callers_.find(pending_graph_helpers_[i]);
+    while (!pending_graph_helpers_.empty()) {
+      auto callers = inline_callers_.find(pending_graph_helpers_.front());
+      pending_graph_helpers_.pop_front();
       if (callers == inline_callers_.end()) continue;
       for (const auto& caller : callers->second) MarkGraphHelper(&caller);
     }
@@ -143,7 +145,7 @@ class GraphLowerer : public IRMutator {
   std::unordered_set<std::string> inline_names_;
   std::unordered_map<std::string, std::vector<std::string>> inline_callers_;
   std::unordered_set<std::string> inline_graph_helpers_;
-  std::vector<std::string> pending_graph_helpers_;
+  std::deque<std::string> pending_graph_helpers_;
   std::vector<CallPtr> manual_inline_calls_;
   const std::string* inline_caller_ = nullptr;
   bool in_manual_scope_ = false;
