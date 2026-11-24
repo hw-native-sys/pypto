@@ -1015,6 +1015,25 @@ def test_submitted_dynamic_reshape_preserves_body_shape_expression(computed_alia
     assert isinstance(result_dim.right, ir.ConstInt) and result_dim.right.value == 32
 
 
+def test_host_submit_keeps_worker_tensor_separate_from_placement():
+    @pl.jit
+    def chip(worker: pl.Tensor):
+        return worker
+
+    @pl.jit.host
+    def host(x: pl.Tensor):
+        value, done = pl.submit(chip, x, worker=0)
+        return value
+
+    program = host.specialize(torch.empty(16, 32))
+    (submit,) = _submissions(program)
+    (tensor,) = submit.args
+    assert isinstance(tensor, ir.Var) and tensor.name_hint == "x"
+    assert isinstance(submit.attrs["worker"], ir.ConstInt) and submit.attrs["worker"].value == 0
+    callee = program.get_function("chip")
+    assert callee is not None and isinstance(callee.params[0].type, ir.TensorType)
+
+
 def test_submitted_chip_keeps_its_implicit_output():
     @pl.jit
     def chip(x: pl.Tensor, out: pl.Out[pl.Tensor]):

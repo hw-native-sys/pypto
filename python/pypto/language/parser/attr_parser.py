@@ -266,10 +266,10 @@ class AttrParser:
             key = key_node.value
             if key in bespoke:
                 continue
-            result[key] = self.parse_attr_value(method_name, key, value_node)
+            result[key] = self.parse_dispatch_attr_value(method_name, key, value_node)
         return result
 
-    def parse_op_attrs(self, call: ast.Call) -> dict[str, object] | None:
+    def parse_op_attrs(self, call: ast.Call, *, dispatch_placement: bool = False) -> dict[str, object] | None:
         """Extract a generic ``attrs={...}`` kwarg from an op call, if present.
 
         The python printer surfaces compiler-internal op-call attrs (e.g.
@@ -292,10 +292,14 @@ class AttrParser:
                     "op attrs must be a dict literal",
                     span=self.services.span_tracker.get_span(keyword.value),
                 )
-            return self.parse_generic_attrs_dict(ast.unparse(call.func), keyword.value)
+            return self.parse_generic_attrs_dict(
+                ast.unparse(call.func), keyword.value, dispatch_placement=dispatch_placement
+            )
         return None
 
-    def parse_generic_attrs_dict(self, method_name: str, node: ast.Dict) -> dict[str, object]:
+    def parse_generic_attrs_dict(
+        self, method_name: str, node: ast.Dict, *, dispatch_placement: bool = False
+    ) -> dict[str, object]:
         """Read an open-world ``attrs={...}`` dict literal via ``_parse_attr_value``.
 
         Only the string-literal-key invariant is enforced; each value's type is
@@ -322,7 +326,11 @@ class AttrParser:
                     "pl.system.task_dummy or pl.submit",
                     span=self.services.span_tracker.get_span(value_node),
                 )
-            result[key] = self.parse_attr_value(method_name, key, value_node)
+            result[key] = (
+                self.parse_dispatch_attr_value(method_name, key, value_node)
+                if dispatch_placement
+                else self.parse_attr_value(method_name, key, value_node)
+            )
         return result
 
     @staticmethod
@@ -331,3 +339,12 @@ class AttrParser:
         if attrs and isinstance(result, ir.Call):
             return ir.set_call_attrs(result, attrs)
         return result
+
+    def parse_dispatch_attr_value(self, method_name: str, key: str, value_node: ast.expr) -> Any:
+        """Read placement as an Expr only in a dispatch-specific attrs context."""
+        if key in {"worker", "device"}:
+            # A dispatch selector is an SSA edge even when written as a literal.
+            # Function, loop and communication-scope metadata use the generic
+            # syntax-inferred reader and must not inherit this reserved meaning.
+            return self.callbacks.expression(value_node)
+        return self.parse_attr_value(method_name, key, value_node)

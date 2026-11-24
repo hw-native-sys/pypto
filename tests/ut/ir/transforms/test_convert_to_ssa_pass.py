@@ -1915,7 +1915,7 @@ class TestMidBodyYieldGuard:
 class TestCallAttrSubstitution:
     """SSA renaming must reach into Call attrs that hold IR expressions.
 
-    Regression: ``Call.attrs["device"]`` (an ``ExprPtr`` written by the N3
+    Regression: ``Call.attrs["worker"]`` (an ``ExprPtr`` written by the N3
     parser on host_orch → chip_orch dispatches) used to be left untouched by
     ConvertToSSA, leaving a dead reference to the pre-SSA loop induction var.
     MaterializeCommDomainScopes then failed identity-matching the dead Var against any
@@ -1947,11 +1947,11 @@ class TestCallAttrSubstitution:
                     walk_stmt(s)
                 return
             if isinstance(stmt, ir.EvalStmt):
-                if isinstance(stmt.expr, ir.Call) and "device" in dict(stmt.expr.attrs):
+                if isinstance(stmt.expr, ir.Call) and "worker" in dict(stmt.expr.attrs):
                     call = stmt.expr
                 return
             if isinstance(stmt, ir.AssignStmt):
-                if isinstance(stmt.value, ir.Call) and "device" in dict(stmt.value.attrs):
+                if isinstance(stmt.value, ir.Call) and "worker" in dict(stmt.value.attrs):
                     call = stmt.value
                 return
 
@@ -1963,7 +1963,7 @@ class TestCallAttrSubstitution:
     def test_device_var_attr_versioned_with_loop_var(self):
         """``device=r`` must rebind to the versioned induction Var, not the dead
         pre-SSA Var. Verified by object-identity between the ForStmt's
-        ``loop_var`` and the Call's ``attrs['device']`` after SSA."""
+        ``loop_var`` and the Call's ``attrs['worker']`` after SSA."""
         SIZE = 8
 
         @pl.program
@@ -1983,7 +1983,7 @@ class TestCallAttrSubstitution:
 
         After = passes.convert_to_ssa()(Before)
         for_stmt, call = self._find_host_orch_dispatch(After)
-        device_expr = dict(call.attrs)["device"]
+        device_expr = dict(call.attrs)["worker"]
         assert isinstance(device_expr, ir.Var), (
             f"device= attr should remain an ir.Var after SSA, got {type(device_expr).__name__}"
         )
@@ -2066,14 +2066,14 @@ class TestCallAttrSubstitution:
                     walk(s)
             elif isinstance(stmt, ir.EvalStmt):
                 v = stmt.expr
-                if isinstance(v, ir.Call) and "device" in dict(v.attrs):
-                    dev = dict(v.attrs)["device"]
+                if isinstance(v, ir.Call) and "worker" in dict(v.attrs):
+                    dev = dict(v.attrs)["worker"]
                     assert isinstance(dev, ir.ConstInt)
                     seen.append(dev.value)
             elif isinstance(stmt, ir.AssignStmt):
                 v = stmt.value
-                if isinstance(v, ir.Call) and "device" in dict(v.attrs):
-                    dev = dict(v.attrs)["device"]
+                if isinstance(v, ir.Call) and "worker" in dict(v.attrs):
+                    dev = dict(v.attrs)["worker"]
                     assert isinstance(dev, ir.ConstInt)
                     seen.append(dev.value)
 

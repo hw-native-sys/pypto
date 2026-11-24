@@ -1422,7 +1422,8 @@ void BindIR(nb::module_& m) {
       nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("attrs").none(), nb::arg("type"),
       nb::arg("span"),
       "Create a function call expression with kwargs and explicit attrs map and type. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Call>(call_class);
 
@@ -1454,7 +1455,8 @@ void BindIR(nb::module_& m) {
       "allow_early_resolve opts this task in as a speculative early-dispatch producer. "
       "predicate is an optional comparison Expr (e.g. Gt(tensor.read(t, [i]), 0)) the scheduler "
       "evaluates at the dispatch point; omit it for an unconditional dispatch. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Submit>(submit_class);
 
@@ -1537,7 +1539,7 @@ void BindIR(nb::module_& m) {
         // Used by ScopeStmt attrs["task_id_var"] (single producer TaskId Var).
         result[key.c_str()] = nb::cast(AnyCast<VarPtr>(value, "converting to Python: " + key));
       } else if (value.type() == typeid(ExprPtr)) {
-        // IR expressions stored in attrs (e.g. attrs["device"] and
+        // IR expressions stored in attrs (e.g. attrs["worker"] and
         // attrs["core_num"] on Orchestration dispatch calls).
         result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
       }

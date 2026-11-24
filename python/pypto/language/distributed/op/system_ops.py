@@ -9,10 +9,10 @@
 
 """``pld.system.*`` — distributed system-level op DSL wrappers.
 
-System-level ops cover host-only queries, CommContext scalar accessors, and
+System-level ops cover topology queries, CommContext scalar accessors, and
 cross-rank synchronisation primitives:
 
-* :func:`world_size` — host-only scalar returning the number of devices in the
+* :func:`world_size` — scalar returning the number of devices in the
   current distributed execution. Returns a :class:`Scalar` wrapping an
   :class:`ir.Expr` of type ``ScalarType(INT64)``. Codegen lowers each call
   site to the ``world_size`` kwarg bound in the host_orch signature.
@@ -45,20 +45,29 @@ from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap
 
 
+def num_workers() -> Scalar:
+    """Return the immediate-child count as an INT64 Scalar.
+
+    HOST orchestrators count local devices; CLUSTER_0 orchestrators count
+    nodes. This is independent of a global communication domain's rank count.
+    Callable only in an orchestration context, outside InCore/SPMD scopes.
+    CLUSTER_0 parsing is supported; executable cluster lowering is not yet
+    available. In HOST codegen the value uses the existing world_size binding.
+    """
+    return Scalar(expr=_ir_system.num_workers())
+
+
 def world_size() -> Scalar:
     """Return the distributed world size as an ``INT64`` :class:`Scalar`.
 
-    Parser context (host-only, not inside a nested device-side scope) is
-    validated by the parser before this wrapper is invoked. The DSL-side
-    return wrapping lets call sites compose naturally with Python operators
+    The DSL-side return wrapping lets call sites compose naturally with Python operators
     (``pld.world_size() * 4``, ``pl.range(pld.world_size())``), which the
     parser's ``invoke_dsl`` unwraps back to the underlying Call.
 
     .. warning::
 
-       This function is callable **only** inside HOST-level orchestration
-       (``level=pl.Level.HOST, role=pl.Role.Orchestrator``). Calling it
-       inside InCore (``type=pl.FunctionType.InCore``) raises a parser error.
+       The parser accepts this call in HOST and CLUSTER_0 orchestration,
+       outside nested InCore and SPMD scopes.
 
     .. seealso::
 
@@ -207,4 +216,4 @@ def defer_wait(
     return _ir_system.defer_wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "num_workers", "rank", "wait", "world_size"]
