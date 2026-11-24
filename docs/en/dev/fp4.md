@@ -55,7 +55,7 @@ below. Native MXFP4 quantization supports E2M1 only.
 | Operation | Support |
 | --------- | ------- |
 | Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
-| Either packed format ↔ UINT8/INT8 alias | Same-shape orchestration GM aliases; dense addressed 2D row-major Vec aliases with PYPTO or DSA_RP planning |
+| Either packed format ↔ UINT8/INT8 alias | Same-shape orchestration GM aliases and dense 2D row-major Vec aliases with all three planners |
 | Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
 | E2M1 → FP8E4M3FN cast | Direct A5 TCVT, ND or fused NZ output; no BF16/FP32 intermediate |
 | Other packed FP4 → FP8 casts | Legalized through BF16 and FP32, with a warning |
@@ -180,7 +180,7 @@ Only the numerical cast creates a fresh BF16 `[32,512]` tile. Use
 `pl.fp4e1m2x2` instead when the source bytes encode E1M2.
 
 The alias requires `slayout=none_box`, dense storage, zero tile `start_offset`,
-and an address-backed MemRef with a static UB byte offset. Its source byte span
+and a local allocation. Its source byte span
 must equal the carrier element count. Noncontiguous UB slices, including
 intermediate aliases or reshapes of them, and addressless inputs are rejected.
 GM load offsets may be nonzero or dynamic; they are distinct from UB offsets.
@@ -188,8 +188,8 @@ An explicit alias shape must match the source. Reshape a byte view separately
 before aliasing back. InCore tensor aliases lower to the same tile path;
 orchestration tensor aliases support only same-shape packed FP4 ↔ UINT8/INT8 aliases.
 
-PYPTO and DSA_RP planning emit addressed aliases. PTOAS planning remains
-unsupported for this path because its `treshape` rejects the packed FP4 type.
+PYPTO and DSA_RP planning emit addressed aliases. PTOAS 0.77 uses
+`pto.treshape` to give the same storage its packed or byte element type.
 Aliasing preserves bits; it does not numerically convert one FP4 format into
 the other.
 

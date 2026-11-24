@@ -47,7 +47,7 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | 操作 | 支持范围 |
 | ---- | -------- |
 | 打包 GM 视图与 load/store | 两种格式均支持 ND/DN 载体维度、步长和偏移；宽度为一个载体时仍保持 ND；PTOAS v0.67 负责 DMA 描述符转换 |
-| 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同的编排层 GM 别名；连续且带地址的二维行主序 Vec 别名使用 PYPTO 或 DSA_RP 内存规划器 |
+| 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同的编排层 GM 别名，以及三种内存规划器均支持的连续二维行主序 Vec 别名 |
 | 任一打包格式 ↔ BF16 转换 | 无分块 Vec 上的原生 TCVT；ND 列或完整静态连续 DN 行按 2:1 展开或收缩 |
 | E2M1 → FP8E4M3FN 转换 | 原生 A5 TCVT，可直接输出 ND 或 NZ，无 BF16/FP32 中间结果 |
 | 其他打包 FP4 → FP8 转换 | 经 BF16 和 FP32 合法化，并发出警告 |
@@ -155,15 +155,14 @@ def decode_bytes(
 只有数值转换会创建新的 BF16 `[32,512]` tile。若源字节编码为 E1M2，
 应改用 `pl.fp4e1m2x2`。
 
-别名要求 `slayout=none_box`、连续存储、零 tile `start_offset`，以及具有静态 UB
-字节偏移的带地址内存引用（MemRef）。源字节跨度必须等于载体元素数量。
+别名要求 `slayout=none_box`、连续存储、零 tile `start_offset` 和本地分配的内存。源字节跨度必须等于载体元素数量。
 非连续 UB 切片（包括其间接别名和 reshape）以及无地址输入会被拒绝。
 GM 加载偏移可为非零或动态值，它不同于 UB 偏移。显式别名 shape 必须与源相同；
 需要 reshape 时，应先单独变形字节视图，再重新创建别名。
 InCore tensor 别名降低为相同的 tile 路径；编排层 tensor 别名仅支持 shape 相同的打包 FP4 ↔ UINT8/INT8 别名。
 
-PYPTO 和 DSA_RP 内存规划器生成带地址别名。PTOAS 内存规划器的 `treshape`
-拒绝打包 FP4 类型，因此不支持此路径。别名保留比特，不会将一种 FP4 格式数值转换为另一种。
+PYPTO 和 DSA_RP 内存规划器生成带地址别名。PTOAS 0.77 使用 `pto.treshape` 为同一块存储赋予
+打包 FP4 或字节类型。别名保留原始比特。
 
 静态空的打包 FP4 tile 切片复用已初始化的带地址结果描述符，避免使用 `treshape`。
 它要求 PYPTO 或 DSA_RP 内存规划、静态偏移，以及直接基于本地分配的连续行主序 Vec 窗口。

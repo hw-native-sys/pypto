@@ -700,7 +700,7 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
                args[0]->span_)
         << "tile.assemble: native packed FP4 insertion requires matching NZ layouts from Vec to Vec/Mat; "
            "the native ND insert uses incorrect packed-byte strides. For ND data, alias to UINT8, "
-           "assemble the byte carriers, then alias back using PYPTO or DSA_RP memory planning";
+           "assemble the byte carriers, then alias back";
     const auto offset_tuple = As<MakeTuple>(args[2]);
     CHECK_SPAN(offset_tuple->elements_.size() == 2, args[2]->span_)
         << "tile.assemble: packed FP4 insertion requires two offsets";
@@ -879,7 +879,7 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
         !src_type->memory_space_.has_value() || src_type->memory_space_ == MemorySpace::Vec;
     CHECK_SPAN(!source_vec || target != MemorySpace::Vec, args[0]->span_)
         << "tile.extract: native packed FP4 Vec-to-Vec extraction uses incorrect packed-byte strides; "
-           "alias to INT8, extract byte carriers, then alias back using PYPTO or DSA_RP memory planning";
+           "alias to INT8, extract byte carriers, then alias back";
     CHECK_SPAN(
         src_view.blayout == tile_view.blayout && (!source_vec || src_view.slayout == tile_view.slayout),
         args[0]->span_)

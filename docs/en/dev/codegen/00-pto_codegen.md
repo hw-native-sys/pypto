@@ -600,23 +600,24 @@ Two properties matter:
 
 Under the PTOAS planner, `PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
 cannot describe (slots holding differently shaped tiles, slots declaring
-different valid shapes, two slots live at once inside a loop, a space other than
+different valid shapes, a loop-carried slot prefetch, a space other than
 Vec / Mat / Acc, a runtime valid shape, a slot carried out of an `if` or loop as
 a phi, a count outside ptoas's `[2, 16]`) is a `ValueError` naming the shape,
 because falling back to per-slot `alloc_tile` would let ptoas plan the slots on
 top of each other.
 
-**One slot per iteration.** The co-live rejection is not a shape ptoas fails to
-*type* — it is one it fails to *synchronize*. Two forms of it have gone wrong:
+**Two slots in one iteration.** Synchronization depends on when each slot is
+written and read.
 
 | Form | ptoas behaviour | Upstream |
 | ---- | --------------- | -------- |
 | Two slots filled and read in the same iteration | ≤ 0.55 guards only the first `multi_tile_get`; the second load races the next iteration's write (measured wrong on device with 0.54). 0.56+ guards the body with one static event for the whole region — correct, but none of the per-slot overlap the region form exists for | [PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118), fixed in 0.56 |
 | Prefetch: slot 0 filled before the loop, then each iteration fills slot `(i+1) % 2` while reading slot `i % 2` | ≤ 0.62 primes and drains both slots' events as for a one-slot rotation, off by one here: wrong data for an even trip count, a device hang for an odd one. 0.63 primes only the slot the loop writes first; 0.64 and 0.65 prime both again | [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519), fixed in 0.63, regressed in 0.64 |
 
-`CoLiveSlotCollector` retains the conservative rejection on the legacy PTOAS
-planner path. The prefetch regression recorded above remains a toolchain
-constraint; enabling software pipelining is not a toolchain correctness guarantee.
+The PTOAS planner accepts two complementary slots in a counted loop when each
+slot is written once by an unconditional load or fresh matmul and the iteration
+consumes both results. Sibling loops may reuse the same allocation when each loop
+satisfies these conditions. Read-only bindings and cross-iteration prefetch remain guarded.
 With the PyPTO planner, codegen recognizes slots marked by software-pipeline
 lowering in the IR; generating an already lowered program requires no additional
 option. It accepts canonical co-live Vec slots after validating static, uniform
