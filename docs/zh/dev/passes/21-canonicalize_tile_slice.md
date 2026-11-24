@@ -362,10 +362,11 @@ stride，应放宽或删除该拒绝，而不是把它保留为长期规则。
 | 被上述某条 Vec 规则实例化、且其存储在 function 中从未被写入的 Vec `tile.slice` | **定义**被替换为 `tile.extract`；所有消费者读取它（一次拷贝，位于作者的区域中） |
 | 被上述某条 Vec 规则实例化、且其存储在 function 中可能被写入的 Vec `tile.slice` | 在**每个消费者**之前插入 extract；删除 slice |
 | 链式 Mat `tile.slice`（slice 的 slice） | 剥离；累加偏移 |
-| 带 `valid_shape` / `drop_dims` 的 `tile.slice` | 跳过（不是普通窗口）。若这样的 slice 同时不满足上述任一恒等拷贝条件——动态偏移（例如降秩的 `t[i]`）或非连续窗口——并喂给 col-expand op，codegen 会以 `INTERNAL_CHECK` 直接报错，而不是生成会破坏源 tile 的代码。上面的 Acc 累加器检查对这类 slice 仍然生效：它只需要物理基址和偏移，而这些信息对每个窗口都会记录，与是否可规范化无关 |
+| 由 BF16 cast 消费的满秩打包 FP4 ND `tile.slice`，含显式指定 `valid_shape` 的窗口 | 源地址无法证明为 32 字节对齐时，按父 tile 的行跨度提取载体字节，并在解码时保留有效区域 |
+| 其他带 `valid_shape` 或 `drop_dims` 的 `tile.slice` | 普通改写会跳过这类 slice。若消费者为 col-expand，动态偏移或非连续窗口会触发 codegen 的 `INTERNAL_CHECK`。Acc 累加器检查使用每个窗口记录的物理基址和偏移 |
 | 用作 matmul **累加器**、且窗口既不覆盖父 tile 全部行范围、也不落在单个 16 列 block 内的 `Acc` `tile.slice` | **拒绝**并抛出 `ValueError`，错误信息给出切列的写法——MAD 没有目的地 stride，该写入会静默落到错误的行 tile 上（pto-isa#253）。操作数不必**就是**该 slice：循环 `IterArg` 携带、普通 SSA 别名，或保持形状的视图 / 原地算子都会被解析回同一窗口（见"把累加器操作数解析回它所指的窗口"） |
 | 其他位于 Left/Right/Acc 的 `tile.slice`，含**连续**的 Acc 累加器窗口 | 不处理（无匹配的消费者） |
-| 不含规范 `tile.slice` 的 function | 原样返回 |
+| 既无规范 slice 也无已跟踪的打包 FP4 ND 窗口的函数 | 完成 Acc 累加器检查后原样返回 |
 
 ## 参见
 

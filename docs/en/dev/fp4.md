@@ -119,7 +119,7 @@ addressed direct path. The result keeps logical
 `[M, 2*K]` dimensions while its NZ descriptor controls physical storage.
 NZ physical rows must be divisible by 16; use `valid_shape` for row tails.
 The layout option is Tile-only. E1M2 and FP8E5M2 do not have this direct path.
-PTOAS v0.77 or newer and the matching pinned A5 ISA are required.
+This path requires PTOAS v0.78 or newer and the matching pinned A5 ISA.
 
 For a direct NZ cast, the source `tile.slice` retains its parent row pitch and runtime row offset.
 Its UB address must be provably 32-byte aligned: use static packed column

@@ -388,10 +388,11 @@ deleted rather than kept.
 | Vec `tile.slice` that one of the Vec rows above materializes, storage never written in the function | The **definition** is replaced by the `tile.extract`; every consumer reads it (one copy, in the author's region) |
 | Vec `tile.slice` that one of the Vec rows above materializes, storage possibly written in the function | The extract is inserted before **each consumer**; slice dropped |
 | Chained Mat `tile.slice` (slice of a slice) | Peeled; offsets accumulated |
-| `tile.slice` with `valid_shape` / `drop_dims` | Skipped (not a plain window). If such a slice *also* fails either identity-copy condition above — a dynamic offset (e.g. a rank-reducing `t[i]`) or a non-contiguous window — while feeding a col-expand op, codegen rejects it with an `INTERNAL_CHECK` rather than emitting the source-corrupting materialization. The Acc accumulator check above still applies to such a slice: it needs only the physical base and offset, which are recorded for every window regardless of canonicalization eligibility |
+| Full-rank packed FP4 ND `tile.slice` feeding a BF16 cast, including a slice with explicit `valid_shape` | When the source address cannot be proven 32-byte aligned, extracts the carrier bytes using the parent row pitch and preserves the valid rectangle for decoding |
+| Other `tile.slice` with `valid_shape` or `drop_dims` | The ordinary rewrites skip these slices. For a col-expand consumer, a dynamic offset or non-contiguous window triggers an `INTERNAL_CHECK` in codegen. The Acc accumulator check uses the physical base and offset recorded for every window |
 | `Acc`-resident `tile.slice` used as a matmul **accumulator**, window neither spanning the parent's full row extent nor inside one 16-column block | **Rejected** with a `ValueError` naming the column-slice spelling — the MAD has no destination stride, so the write would silently land in the wrong row tile (pto-isa#253). The operand does not have to *be* the slice: a loop `IterArg` carrying it, a plain SSA alias, or a shape-preserving view / in-place op over it resolves back to the same window (see "Resolving the accumulator operand back to its window") |
 | Other Left/Right/Acc-resident `tile.slice`, including a *contiguous* Acc accumulator window | Untouched (no matching consumer) |
-| Functions with no canonical `tile.slice` | Returned unchanged |
+| Functions containing neither a canonical slice nor a tracked packed FP4 ND window | Returned unchanged after the Acc accumulator checks |
 
 ## See also
 
