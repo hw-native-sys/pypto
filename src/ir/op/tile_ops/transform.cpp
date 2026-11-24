@@ -782,8 +782,9 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   // tile.extract(src, index_row, index_col, shape) — ISA TEXTRACT Variant 1.
   // shape carries the static destination shape (2D MakeTuple of ConstInt).
   // target_memory kwarg drives the destination memory space.
-  CHECK(args.size() == 4) << "tile.extract requires exactly 4 arguments "
-                          << "(src, index_row, index_col, shape), but got " << args.size();
+  CHECK(args.size() == 4 || args.size() == 5)
+      << "tile.extract requires (src, index_row, index_col, shape[, scale_for]), but got " << args.size()
+      << " arguments";
 
   auto src_type = As<TileType>(args[0]->GetType());
   CHECK(src_type) << "tile.extract requires src to be a TileType, but got " << args[0]->GetType()->TypeName();
@@ -908,6 +909,18 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
     tile_view.compact = CompactMode::normal;
   }
 
+  if (args.size() == 5) {
+    auto data = As<TileType>(args[4]->GetType());
+    CHECK(src_type->dtype_ == DataType::FP8E8M0 && src_type->GetMemorySpace() == MemorySpace::Mat)
+        << "tile.extract scale_for requires an FP8E8M0 source in Mat memory";
+    CHECK(data && ((target == MemorySpace::LeftScale && data->GetMemorySpace() == MemorySpace::Left) ||
+                   (target == MemorySpace::RightScale && data->GetMemorySpace() == MemorySpace::Right)))
+        << "tile.extract scale_for requires matching LeftScale/Left or RightScale/Right memory spaces";
+    CHECK(data->dtype_ == DataType::FP8E4M3FN || data->dtype_ == DataType::FP8E5M2 ||
+          data->dtype_.IsPackedFp4())
+        << "tile.extract scale_for requires an MX payload tile";
+  }
+
   // Canonicalize the view once, against the space it is actually a view of --
   // not against nullopt, which would let OpRegistry::Create re-interpret a
   // collapsed view under a different space's implicit layout.
@@ -921,6 +934,7 @@ REGISTER_OP("tile.extract")
     .add_argument("index_row", "Starting row offset (ScalarType INT64/UINT64/INDEX)")
     .add_argument("index_col", "Starting col offset (ScalarType INT64/UINT64/INDEX)")
     .add_argument("shape", "Static destination shape (TupleType, 2D MakeTuple of ConstInt)")
+    .add_argument("scale_for", "Optional L0 MX payload tile used to bind the scale destination address")
     .set_attr<MemorySpace>("target_memory")
     .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
     // pto.textract repacks a strided window of src (row pitch = src cols) into a
