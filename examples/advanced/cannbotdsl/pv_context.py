@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Apply attention probabilities to values using the public Mega-MLA Cube kernel.
+"""Cast FP32 probabilities in PyPTO, then apply them to values with the public Mega-MLA Cube kernel.
 
 Requires CANNBotDSL 0.8.4, PyPTO, and the public CANNBotDSL operator sources:
     git clone https://github.com/hicann/cannbot-dsl.git
@@ -15,7 +15,7 @@ Requires CANNBotDSL 0.8.4, PyPTO, and the public CANNBotDSL operator sources:
     export PYTHONPATH="$PWD/cannbot-dsl/samples/attention/mega_mla:${PYTHONPATH}"
     python examples/advanced/cannbotdsl/pv_context.py --compile-only
 
-The compile-only path builds the device kernel and orchestration without a device.
+The compile-only path builds both device kernels and the orchestration without a device.
 Omit --compile-only on A5 to compare the FP32 context against PyTorch.
 """
 
@@ -31,13 +31,25 @@ from pypto.runtime import ExecutionMode, RunConfig
 pv = ProbabilityValueMatmulKernel(m=16, n=64, k=128, base_n=64).probability_value_matmul_kernel
 
 
+@pl.jit.incore
+def cast_probabilities(
+    probabilities: pl.Tensor[[16, 128], pl.FP32],
+    rounded: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+) -> pl.Tensor[[16, 128], pl.BF16]:
+    tile = pl.load(probabilities, [0, 0], [16, 128])
+    pl.store(pl.cast(tile, pl.BF16, mode="rint"), [0, 0], rounded)
+    return rounded
+
+
 @pl.jit
 def attention_context(
-    probabilities: pl.Tensor[[16, 128], pl.BF16],
+    probabilities: pl.Tensor[[16, 128], pl.FP32],
     values: pl.Tensor[[128, 64], pl.BF16],
     context: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
 ):
-    pv(context, probabilities, values)
+    rounded = pl.create_tensor([16, 128], dtype=pl.BF16)
+    rounded = cast_probabilities(probabilities, rounded)
+    pv(context, rounded, values)
     return context
 
 
@@ -54,15 +66,15 @@ def main() -> None:
         program.load()
         print(f"Built attention context program from {program.output_dir}")
         return
-    # Each row is an exactly representable distribution over two distinct values.
+    # These probabilities exercise FP32-to-BF16 rounding before the Cube matmul.
     rows = torch.arange(16)
-    probabilities = torch.zeros((16, 128), dtype=torch.bfloat16)
-    probabilities[rows, rows] = 0.25
-    probabilities[rows, 127 - rows] = 0.75
+    probabilities = torch.zeros((16, 128), dtype=torch.float32)
+    probabilities[rows, rows] = 0.251
+    probabilities[rows, 127 - rows] = 0.749
     values = torch.randint(-8, 9, (128, 64), generator=torch.Generator().manual_seed(13)).bfloat16()
     context = torch.full((16, 64), float("nan"))
     program(probabilities, values, context, config=config)
-    torch.testing.assert_close(context, probabilities.float() @ values.float(), rtol=0, atol=0)
+    torch.testing.assert_close(context, probabilities.bfloat16().float() @ values.float(), rtol=0, atol=0)
     print("Attention context matches the FP32 reference")
 
 

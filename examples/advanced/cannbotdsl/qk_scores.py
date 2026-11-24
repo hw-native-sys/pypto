@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Compute BF16 query/key attention scores with the public Mega-MLA Cube kernel.
+"""Compute Q @ K.T with the public Mega-MLA Cube kernel, then scale the scores in PyPTO.
 
 Requires CANNBotDSL 0.8.4, PyPTO, and the public CANNBotDSL operator sources:
     git clone https://github.com/hicann/cannbot-dsl.git
@@ -15,7 +15,7 @@ Requires CANNBotDSL 0.8.4, PyPTO, and the public CANNBotDSL operator sources:
     export PYTHONPATH="$PWD/cannbot-dsl/samples/attention/mega_mla:${PYTHONPATH}"
     python examples/advanced/cannbotdsl/qk_scores.py --compile-only
 
-The compile-only path builds the device kernel and orchestration without a device.
+The compile-only path builds both device kernels and the orchestration without a device.
 Omit --compile-only on A5 to compare the FP32 score matrix against PyTorch.
 """
 
@@ -28,6 +28,7 @@ from attention_matmul import QueryKeyMatmulKernel
 from pypto.backend import BackendType
 from pypto.runtime import ExecutionMode, RunConfig
 
+SCORE_SCALE = 128**-0.5  # Inverse square root of the query/key head dimension.
 qk = QueryKeyMatmulKernel(m=16, n=64, k=128, base_n=64, base_k=128)
 
 
@@ -38,14 +39,25 @@ def qk_one_block(q: cb.Tensor, k: cb.Tensor, scores: cb.Tensor):
     qk.compute_flat_tiles(scores, q, k, 0, 1, 1)
 
 
+@pl.jit.incore
+def scale_scores(
+    raw_scores: pl.Tensor[[16, 64], pl.FP32],
+    scores: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+) -> pl.Tensor[[16, 64], pl.FP32]:
+    tile = pl.load(raw_scores, [0, 0], [16, 64])
+    pl.store(pl.mul(tile, SCORE_SCALE), [0, 0], scores)
+    return scores
+
+
 @pl.jit
 def attention_scores(
     q: pl.Tensor[[16, 128], pl.BF16],
     k: pl.Tensor[[64, 128], pl.BF16],
     scores: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
 ):
-    qk_one_block(q, k, scores)
-    return scores
+    raw_scores = pl.create_tensor([16, 64], dtype=pl.FP32)
+    qk_one_block(q, k, raw_scores)
+    return scale_scores(raw_scores, scores)
 
 
 def main() -> None:
@@ -67,8 +79,8 @@ def main() -> None:
     k = torch.randint(-3, 4, (64, 128), generator=rng).bfloat16()
     scores = torch.full((16, 64), float("nan"))
     program(q, k, scores, config=config)
-    torch.testing.assert_close(scores, q.float() @ k.float().T, rtol=0, atol=0)
-    print("QK scores match the FP32 reference")
+    torch.testing.assert_close(scores, (q.float() @ k.float().T) * SCORE_SCALE, rtol=0, atol=0)
+    print("Scaled QK scores match the FP32 reference")
 
 
 if __name__ == "__main__":
