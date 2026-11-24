@@ -29,7 +29,12 @@ def _dequant_program(src_dtype, width):
         return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)
 
     @pl.jit
-    def program(src, scale, offset, out):
+    def program(
+        src: pl.Tensor[[16, width], src_dtype],
+        scale: pl.Tensor[[16, 1], pl.FP32],
+        offset: pl.Tensor[[16, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, width], pl.FP32]],
+    ) -> pl.Tensor[[16, width], pl.FP32]:
         return kernel(src, scale, offset, out)
 
     return program
