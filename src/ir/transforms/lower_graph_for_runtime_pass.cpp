@@ -108,7 +108,7 @@ class GraphLowerer : public IRMutator {
   }
 
   ExprPtr VisitExpr_(const SubmitPtr& op) override {
-    if (graph_names_.empty()) return op;
+    if (graph_names_.empty() && inline_names_.empty()) return op;
     // A Submit has one completion TaskId, even if the caller ignores it.
     // Submitting the constituent tasks separately cannot retain that identity,
     // or apply a launch predicate/explicit dependencies to the region as a unit.

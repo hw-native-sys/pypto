@@ -1063,5 +1063,30 @@ class Pipeline:
             ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
 
 
+def test_tmr_reports_inline_graph_scope_in_manual_submit_argument():
+    program = pl.parse_program("""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.InCore)
+    def increment(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.load(c, [0, 0], [16, 16])
+        return pl.store(pl.add(tile, 1.0), [0, 0], c)
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.graph("layer"):
+            self.increment(c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        with pl.manual_scope():
+            result, done = pl.submit(self.increment, self.helper(c))
+        return result
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower Graph inside an enclosing manual scope"):
+            passes.lower_graph_for_runtime()(program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
