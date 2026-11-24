@@ -44,6 +44,18 @@ def _make_view(
     return ir.TileView(valid_shape, stride, start_offset, blayout, slayout, fractal, pad, compact)
 
 
+def test_tile_view_accepts_unset_start_offset():
+    """An unset offset must reach both TileView constructors as an empty expression."""
+    shape = [16, 32]
+    stride = [32, 1]
+    shape_exprs = [_make_const(size) for size in shape]
+    stride_exprs = [_make_const(step) for step in stride]
+
+    assert ir.TileView().start_offset is None
+    assert ir.TileView(shape_exprs, stride_exprs, start_offset=None).start_offset is None
+    assert ir.TileView(shape, stride, start_offset=None).start_offset is None
+
+
 class TestTileViewEquality:
     """Tests for TileView.__eq__ and __ne__."""
 

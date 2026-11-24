@@ -874,6 +874,7 @@ void BindIR(nb::module_& m) {
   // Fields are read-only from Python so that hash and equality remain stable
   // across an instance's lifetime (Python's hash contract). Construct via the
   // constructor, not by mutating fields.
+  // An empty ExprPtr becomes None in Python, which nanobind must accept in both overloads.
   nb::class_<TileView>(
       ir, "TileView",
       "Tile view representation with valid shape, stride, start offset, layouts, fractal, pad, and "
@@ -882,14 +883,14 @@ void BindIR(nb::module_& m) {
       .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue, CompactMode>(),
            nb::arg("valid_shape") = std::vector<ExprPtr>{}, nb::arg("stride") = std::vector<ExprPtr>{},
-           nb::arg("start_offset") = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
+           nb::arg("start_offset").none() = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
            nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
            nb::arg("pad") = PadValue::null, nb::arg("compact") = CompactMode::null,
            "Create a tile view; fields default to empty/null/row_major/none_box/512/null/null. "
            "fractal is a size in bytes, not elements.")
       .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue, CompactMode>(),
-           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
+           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset").none(),
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
            nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
            nb::arg("compact") = CompactMode::null,
