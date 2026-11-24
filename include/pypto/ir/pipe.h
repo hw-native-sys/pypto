@@ -79,6 +79,7 @@ enum CoreType : int {
  * - Acc (L0C): accumulator/output buffer
  * - Mat (L1): staging buffer
  * - LeftScale / RightScale: L0A/L0B MX block-scale sidecars (A5)
+ * - Scaling: FIXPIPE channel-parameter buffer (A5)
  *
  * @param space Memory space to check
  * @return true if the memory space is used by the CUBE core

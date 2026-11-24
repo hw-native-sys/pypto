@@ -23,13 +23,11 @@ def test_backend_inventory_is_a_snapshot_including_legacy_entries(target):
     # unreachable legacy emitters from operations that need conversion recipes.
     assert {name for name in names if not ir.is_op_registered(name)} == {
         "tile.assign",
-        "tile.move_fp",
         "tile.partadd",
         "tile.partmax",
         "tile.partmin",
         "tile.print",
         "tile.selc",
-        "tile.store_fp",
     }
     assert {"tile.load", "tile.store", "tile.matmul", "prefetch.wait", "pld.tile.remote_load"} <= set(names)
 
@@ -52,6 +50,8 @@ def test_backend_inventory_preserves_architecture_exclusions():
             "tile.tquant_mx_raw",
             "tile.tmov_x2zz",
             "tile.dequant",
+            "tile.move_fp",
+            "tile.store_fp",
         )
     }
     assert a5_only_ops <= a5

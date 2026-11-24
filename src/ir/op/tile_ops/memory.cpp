@@ -623,6 +623,66 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
                                       std::make_optional(result_view));
 }
 
+namespace {
+
+// A5 TMovToFb copies one row of packed 64-bit channel parameters. FPC
+// addresses the buffer in 128-byte units.
+void ValidateFixpipeScaleTile(const TileTypePtr& scale, const Span& span, const std::string& op_name) {
+  CHECK_SPAN(scale && scale->shape_.size() == 2 &&
+                 (scale->dtype_ == DataType::UINT64 || scale->dtype_ == DataType::INT64),
+             span)
+      << op_name << " requires a 2D UINT64 or INT64 FIXPIPE scale tile";
+  const auto rows = As<ConstInt>(scale->shape_[0]);
+  const auto cols = As<ConstInt>(scale->shape_[1]);
+  CHECK_SPAN(rows && rows->value_ == 1 && cols && cols->value_ >= 16 && cols->value_ <= 512 &&
+                 cols->value_ % 16 == 0,
+             span)
+      << op_name << " requires FIXPIPE scale shape [1, N] with N a multiple of 16 in [16, 512]";
+  const auto view = tile_view_semantics::GetEffectiveTileView(*scale);
+  const auto valid_rows = As<ConstInt>(view.valid_shape[0]);
+  CHECK_SPAN(view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box && valid_rows &&
+                 valid_rows->value_ == 1,
+             span)
+      << op_name << " requires a row-major FIXPIPE scale tile with one valid row";
+}
+
+void ValidateFixpipeVectorWriteback(const TileTypePtr& acc, const TileTypePtr& scale, DataType dtype,
+                                    bool to_gm, const Span& span, const std::string& op_name) {
+  CHECK_SPAN(acc && acc->shape_.size() == 2 && acc->GetMemorySpace() == MemorySpace::Acc, span)
+      << op_name << " requires a 2D Acc source tile";
+  CHECK_SPAN(scale && scale->GetMemorySpace() == MemorySpace::Scaling, span)
+      << op_name << " requires a FIXPIPE scale tile in Mem.Scaling. Move the Mat scale to Mem.Scaling first.";
+  ValidateFixpipeScaleTile(scale, span, op_name);
+  const auto acc_view = tile_view_semantics::GetEffectiveTileView(*acc);
+  CHECK_SPAN(acc_view.blayout == TileLayout::col_major && acc_view.slayout == TileLayout::row_major &&
+                 acc_view.fractal == tile_view_semantics::kAccFractal,
+             span)
+      << op_name << " requires the NZ Acc layout";
+  const auto scale_view = tile_view_semantics::GetEffectiveTileView(*scale);
+  const auto acc_cols = As<ConstInt>(acc->shape_[1]);
+  const auto valid_cols = As<ConstInt>(acc_view.valid_shape[1]);
+  const auto scale_cols = As<ConstInt>(scale_view.valid_shape[1]);
+  CHECK_SPAN(AreExprsEqual(acc_view.valid_shape[1], scale_view.valid_shape[1]) ||
+                 (scale_cols && ((valid_cols && valid_cols->value_ <= scale_cols->value_) ||
+                                 (acc_cols && acc_cols->value_ <= scale_cols->value_))),
+             span)
+      << op_name << " requires at least one valid scale word per valid Acc column";
+
+  // PTO-ISA GetVectorPreQuantMode[Gm]. FP32 with a scale is a quantizing
+  // conversion only for the GM overload.
+  const bool byte_output = dtype == DataType::INT8 || dtype == DataType::UINT8;
+  const bool narrow_float = dtype == DataType::FP16 || dtype == DataType::BF16;
+  const bool int32_pair = acc->dtype_ == DataType::INT32 && (byte_output || narrow_float);
+  const bool fp32_pair =
+      acc->dtype_ == DataType::FP32 && (byte_output || narrow_float || dtype == DataType::HF8 ||
+                                        dtype == DataType::FP8E4M3FN || (to_gm && dtype == DataType::FP32));
+  CHECK_SPAN(int32_pair || fp32_pair, span)
+      << op_name << " does not support FIXPIPE vector pre-quantization from " << acc->dtype_.ToString()
+      << " to " << dtype.ToString();
+}
+
+}  // namespace
+
 TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -1440,6 +1500,83 @@ REGISTER_OP("tile.store")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileStoreType(args, kwargs, "tile.store");
+    });
+
+REGISTER_OP("tile.store_fp")
+    .set_op_category("TileOp")
+    .set_description("Store an Acc tile to GM with FIXPIPE per-column quantization")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .functional_execution_memory_access()
+    .add_argument("tile", "Source Acc tile")
+    .add_argument("offsets", "2D offsets in the GM tensor")
+    .add_argument("output_tensor", "Destination ND tensor")
+    .add_argument("scale", "Packed per-column parameters in Mem.Scaling")
+    .set_attr<bool>("pre_relu")
+    .set_input_memory(0, MemorySpace::Acc)
+    .set_input_memory(3, MemorySpace::Scaling)
+    .set_output_reuses_input(2)
+    .set_arg_effect(2, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Dma)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      constexpr auto name = "tile.store_fp";
+      CHECK(args.size() == 4) << name << " requires tile, offsets, output_tensor and scale";
+      const auto offsets = As<MakeTuple>(args[1]);
+      const auto out = As<TensorType>(args[2]->GetType());
+      CHECK_SPAN(out && out->shape_.size() == 2 && offsets && offsets->elements_.size() == 2 &&
+                     (!out->tensor_view_ || out->tensor_view_->layout == TensorLayout::ND),
+                 args[2]->span_)
+          << name << " requires a rank-2 ND tensor and two offsets";
+      ValidateFixpipeVectorWriteback(As<TileType>(args[0]->GetType()), As<TileType>(args[3]->GetType()),
+                                     out->dtype_, /*to_gm=*/true, args[0]->span_, name);
+      return DeduceTileStoreType(std::vector<ExprPtr>(args.begin(), args.begin() + 3), kwargs, name);
+    });
+
+REGISTER_OP("tile.move_fp")
+    .set_op_category("TileOp")
+    .set_description("Move an Acc tile to Mat with FIXPIPE per-column quantization")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .functional_execution_memory_access()
+    .add_argument("tile", "Source Acc tile")
+    .add_argument("scale", "Packed per-column parameters in Mem.Scaling")
+    .set_attr<DataType>("dtype")
+    .set_attr<bool>("pre_relu")
+    .set_input_memory(0, MemorySpace::Acc)
+    .set_input_memory(1, MemorySpace::Scaling)
+    .set_output_memory(MemorySpace::Mat)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      constexpr auto name = "tile.move_fp";
+      CHECK(args.size() == 2) << name << " requires an Acc tile and a FIXPIPE scale";
+      const auto acc = As<TileType>(args[0]->GetType());
+      const auto dtype = GetKwarg<DataType>(kwargs, "dtype");
+      const auto scale = As<TileType>(args[1]->GetType());
+      ValidateFixpipeVectorWriteback(acc, scale, dtype, /*to_gm=*/false, args[0]->span_, name);
+      const auto rows = As<ConstInt>(acc->shape_[0]);
+      const auto cols = As<ConstInt>(acc->shape_[1]);
+      const int64_t col_align = dtype.GetBit() == 8 ? 32 : 16;
+      CHECK_SPAN(rows && rows->value_ > 0 && rows->value_ % 16 == 0 && cols && cols->value_ > 0 &&
+                     cols->value_ % col_align == 0,
+                 args[0]->span_)
+          << name << " requires an NZ Mat result with rows aligned to 16 and columns aligned to "
+          << col_align;
+      const auto acc_view = tile_view_semantics::GetEffectiveTileView(*acc);
+      const auto valid_cols = As<ConstInt>(acc_view.valid_shape[1]);
+      const auto scale_cols = As<ConstInt>(scale->shape_[1]);
+      const int64_t read_cols =
+          valid_cols ? ((valid_cols->value_ + col_align - 1) / col_align) * col_align : cols->value_;
+      // NZ writes round the column extent up to a destination fractal and
+      // use the physical row pitch when reading the accumulator.
+      CHECK_SPAN(scale_cols->value_ >= read_cols, args[1]->span_)
+          << name << " requires physical scale capacity for the entire NZ column fractal";
+      CHECK_SPAN(
+          acc_view.compact == CompactMode::null || AreExprsEqual(acc_view.valid_shape[0], acc->shape_[0]),
+          args[0]->span_)
+          << name << " requires a noncompact Acc or fully valid Acc rows for an NZ Mat result";
+      auto view = tile_view_semantics::GetImplicitTileView(acc->shape_, MemorySpace::Mat);
+      view.valid_shape = GetValidShape(acc);
+      return std::make_shared<TileType>(acc->shape_, dtype, std::nullopt, view, MemorySpace::Mat);
     });
 
 // ============================================================================

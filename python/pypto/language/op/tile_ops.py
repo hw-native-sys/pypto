@@ -159,6 +159,7 @@ from ._tile_memory import gather_row as gather_row
 from ._tile_memory import load as load
 from ._tile_memory import mark_remote_written as mark_remote_written
 from ._tile_memory import move as move
+from ._tile_memory import move_fp as move_fp
 from ._tile_memory import random as random
 from ._tile_memory import read as read
 from ._tile_memory import reinterpret_view as reinterpret_view
@@ -166,6 +167,7 @@ from ._tile_memory import reshape as reshape
 from ._tile_memory import set_validshape as set_validshape
 from ._tile_memory import slice as slice
 from ._tile_memory import store as store
+from ._tile_memory import store_fp as store_fp
 from ._tile_memory import transpose as transpose
 from ._tile_memory import transpose_view as transpose_view
 from ._tile_memory import tri as tri
@@ -213,6 +215,7 @@ __all__ = [
     "write",
     "load",
     "store",
+    "store_fp",
     "assemble",
     "gather_row",
     "mark_remote_written",
@@ -220,6 +223,7 @@ __all__ = [
     "scatter_update",
     "concat",
     "move",
+    "move_fp",
     "aiv_shard",
     "aic_gather",
     "full",

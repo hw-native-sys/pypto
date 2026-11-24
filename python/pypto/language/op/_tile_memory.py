@@ -318,6 +318,66 @@ def store(
     return output_tensor.__class__(expr=call_expr)
 
 
+def store_fp(
+    tile: Tile,
+    offsets: Sequence[IntLike],
+    output_tensor: _TensorT,
+    scale: Tile,
+    *,
+    pre_relu: bool = False,
+) -> _TensorT:
+    """Store an A5 Acc tile to a rank-2 ND tensor using FIXPIPE channel parameters.
+
+    Args:
+        tile: FP32 or INT32 accumulator tile.
+        offsets: Two offsets in the destination tensor.
+        output_tensor: Destination ND tensor. FP32 Acc supports FP32, FP16,
+            BF16, FP8E4M3FN, HF8, INT8 and UINT8 destinations. INT32 Acc
+            supports FP16, BF16, INT8 and UINT8 destinations.
+        scale: Contiguous ``[1, N]`` tile of packed UINT64 or INT64 FIXPIPE
+            words in ``Mem.Scaling``. Each valid Acc column needs one word.
+            Load the words into Mat, then use ``pl.tile.move`` into
+            ``Mem.Scaling``. The physical width is a multiple of 16 and no
+            greater than 512.
+        pre_relu: Apply ReLU to the accumulator before conversion.
+
+    Returns:
+        The updated destination tensor.
+    """
+    call_expr = _ir_ops.store_fp(
+        tile.unwrap(),
+        _normalize_intlike(offsets),
+        output_tensor.unwrap(),
+        scale.unwrap(),
+        pre_relu=pre_relu,
+    )
+    return output_tensor.__class__(expr=call_expr)
+
+
+def move_fp(
+    tile: Tile,
+    scale: Tile,
+    *,
+    dtype: DataType,
+    pre_relu: bool = False,
+) -> Tile:
+    """Move an A5 Acc tile to NZ Mat using FIXPIPE channel parameters.
+
+    Args:
+        tile: FP32 or INT32 accumulator tile.
+        scale: Packed FIXPIPE channel parameters in ``Mem.Scaling``, as for
+            ``pl.tile.store_fp``.
+        dtype: Destination element type. FP32 Acc supports FP16, BF16,
+            FP8E4M3FN, HF8, INT8 and UINT8. INT32 Acc supports FP16, BF16,
+            INT8 and UINT8.
+        pre_relu: Apply ReLU to the accumulator before conversion.
+
+    Returns:
+        The converted NZ Mat tile with the same physical and valid shapes.
+    """
+    return Tile(expr=_ir_ops.move_fp(tile.unwrap(), scale.unwrap(), dtype=dtype, pre_relu=pre_relu))
+
+
 def assemble(
     target: Tile,
     source: Tile,

@@ -135,7 +135,7 @@ class StoreTargetCollector : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& op) override {
     auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
-    if (opnode && IsOp(opnode, "tile.store") && op->args_.size() >= 3) {
+    if (opnode && (IsOp(opnode, "tile.store") || IsOp(opnode, "tile.store_fp")) && op->args_.size() >= 3) {
       // A loop-carried destination is an IterArg, with its own ObjectKind.
       // It needs the same post-store return binding as an ordinary Var.
       if (auto var = AsVarLike(op->args_[2])) {
@@ -480,7 +480,7 @@ class PostStoreAliasCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     auto call = std::dynamic_pointer_cast<const Call>(op->value_);
     auto opnode = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
-    if (opnode && IsOp(opnode, "tile.store") && call->args_.size() >= 3) {
+    if (opnode && (IsOp(opnode, "tile.store") || IsOp(opnode, "tile.store_fp")) && call->args_.size() >= 3) {
       if (auto target = AsVarLike(call->args_[2])) {
         alias_to_target.emplace(op->var_.get(), target.get());
       }
@@ -601,7 +601,9 @@ class StoreEvalToAssignMutator : public IRMutator {
   /// here so they cannot drift apart on what counts as a store.
   [[nodiscard]] std::optional<TrackedStore> MatchTrackedStore(const ExprPtr& value) const {
     auto call = std::dynamic_pointer_cast<const Call>(value);
-    if (!IsOp(call, "tile.store") || call->args_.size() < 3) return std::nullopt;
+    if ((!IsOp(call, "tile.store") && !IsOp(call, "tile.store_fp")) || call->args_.size() < 3) {
+      return std::nullopt;
+    }
     auto target = AsVarLike(call->args_[2]);
     if (!target) return std::nullopt;
     auto it = target_vars_.find(target.get());

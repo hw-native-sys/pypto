@@ -62,7 +62,6 @@ using ir::Var;
 
 using pto_ops_detail::AsPto;
 using pto_ops_detail::BeginNonEmptyRegion;
-using pto_ops_detail::CheckArity;
 using pto_ops_detail::EmitFlatOffsetSSAFromValues;
 using pto_ops_detail::EmitIndexOperand;
 using pto_ops_detail::EmitPartitionViewPTO;
@@ -71,18 +70,6 @@ using pto_ops_detail::GetDimStrings;
 using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
 using pto_ops_detail::MakePartitionTensorViewType;
-
-// Helper function for StoreFP
-static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                         codegen::CodegenBase& codegen_base) {
-  auto& codegen = AsPto(codegen_base);
-  CheckArity(op, pto_op_name, 3);
-  std::string src = codegen.GetExprAsCode(op->args_[0]);
-  std::string fp = codegen.GetExprAsCode(op->args_[1]);
-  std::string mem = codegen.GetExprAsCode(op->args_[2]);
-  codegen.Emit(pto_op_name + " ins(" + src + ", " + fp + ") outs(" + mem + ")");
-  return "";
-}
 
 // Select native PTO enum spellings from the semantic frontend policy after
 // choosing the target. PTOAS owns encodings, target/path checks and ISA emission.
@@ -260,6 +247,11 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 // tile.store: emit pto.partition_view + pto.tstore
 static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
+  const bool has_vector_scale = op->op_->name_ == "tile.store_fp";
+  if (has_vector_scale) {
+    CHECK_SPAN(codegen.EmitTileAddr(), op->span_)
+        << "tile.store_fp requires a PyPTO memory planner to enforce the 4 KiB FIXPIPE limit";
+  }
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK_SPAN(tile, op->span_) << "tile.store first argument must be a Var or IterArg";
 
@@ -463,6 +455,10 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   if (pre_quant.has_value()) {
     const int64_t word = codegen::EncodeFixpipePreQuant(*pre_quant, tensor_type->dtype_);
     tstore_line << ", " << codegen.GetOrEmitConstant(word, DataType::INT64) << " : i64";
+  }
+  if (has_vector_scale) {
+    const auto& fp = op->args_[3];
+    tstore_line << " fp " << codegen.GetExprAsCode(fp) << " : " << codegen.GetExprTypeAnnotation(fp);
   }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
 
@@ -1267,9 +1263,11 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     return std::string("");  // No MLIR emission - tile allocation handled by pto.alloc_tile
   });
 
-  reg("tile.store_fp", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeStoreFPCodegenPTO("pto.tstore.fp", op, codegen);
-  });
+  if (ShouldRegister(exclude_ops, "tile.store_fp")) {
+    backend.RegisterOp("tile.store_fp")
+        .f_codegen(MakeTileStoreCodegenPTO)
+        .f_infer_pipe([](const ir::CallPtr&) { return ir::PipeType::FIX; });
+  }
 
   reg("tensor.dim", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTensorDimCodegenPTO(op, codegen);

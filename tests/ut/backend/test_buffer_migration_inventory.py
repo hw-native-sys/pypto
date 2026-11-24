@@ -139,8 +139,8 @@ def test_every_backend_entry_has_one_current_migration_classification(registry_s
 
     # These are audited baseline sizes, not a count of implemented recipes.
     assert len(MIGRATION_FAMILIES) == 22
-    assert sum(len(family.operations) for family in MIGRATION_FAMILIES) == 189
-    assert len(HISTORICAL_CALLBACKS) == 8
+    assert sum(len(family.operations) for family in MIGRATION_FAMILIES) == 191
+    assert len(HISTORICAL_CALLBACKS) == 6
 
 
 def test_new_backend_entry_cannot_inherit_a_prefix_classification(registry_snapshots):

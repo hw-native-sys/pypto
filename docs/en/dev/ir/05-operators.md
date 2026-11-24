@@ -419,6 +419,18 @@ INT32 for integer inputs (mirroring `tile.matmul_acc`). At conversion time
 this batched path whenever any operand has rank > 2; `FlattenTileNdTo2D`
 later unrolls the batched form into per-batch 2D ops.
 
+### Per-column FIXPIPE writeback (Ascend950)
+
+`pl.tile.store_fp(acc, offsets, output_tensor, scale)` fuses an Acc-to-GM ND
+store with per-column quantization. `pl.tile.move_fp(acc, scale, dtype=...)`
+writes a converted NZ Mat tile for reuse by Cube. Both accept
+`pre_relu=True` to apply ReLU to the accumulator before conversion.
+
+Load a row of packed INT64 or UINT64 channel parameter words into Mat and move
+it to `pl.Mem.Scaling`. The physical width must be a multiple of 16 and each
+valid Acc column needs one valid parameter word. The 4 KiB FIXPIPE buffer is
+separate from the MX scale buffers and uses the PyPTO memory planner.
+
 ### MX block-scale matmul (Ascend950)
 
 Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` supports FP8E4M3FN on both sides. Both APIs also accept native packed FP4 (E2M1x2 or E1M2x2 on each side). For mixed FP4/FP8, cast the FP4 operand to FP8 explicitly. A5 can cast E2M1 directly to E4M3 for supported descriptors. Other packed-FP4-to-FP8 casts use a BF16/FP32 bridge. The conversion leaves scale values unchanged.

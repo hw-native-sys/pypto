@@ -41,6 +41,7 @@ _SPACES = [
     MS.Bias,
     MS.LeftScale,
     MS.RightScale,
+    MS.Scaling,
 ]
 
 _TARGETS = [backend.BackendType.Ascend910, backend.BackendType.Ascend950]
@@ -103,6 +104,8 @@ def test_targets_disagree_on_some_edges():
     assert "Vec->Mat" not in a2a3
     assert "Acc->Vec" in a5
     assert "Acc->Vec" not in a2a3
+    assert "Mat->Scaling" in a5
+    assert "Mat->Scaling" not in a2a3
 
 
 if __name__ == "__main__":

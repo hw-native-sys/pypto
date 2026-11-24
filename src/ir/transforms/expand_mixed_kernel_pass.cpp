@@ -1465,8 +1465,8 @@ std::vector<StmtPtr> PromoteDirectC2VData(const std::vector<StmtPtr>& stmts,
           roots[assign->var_.get()] = root(source.get());
         }
       }
-      if (call && (IsOp(call, "tile.store") || IsOp(call, "tile.load"))) {
-        const bool store = IsOp(call, "tile.store");
+      const bool store = IsOp(call, "tile.store") || IsOp(call, "tile.store_fp");
+      if (store || IsOp(call, "tile.load")) {
         const auto tensor = AsVarLike(call->args_[store ? 2 : 0]);
         if (tensor) {
           const Var* origin = root(tensor.get());
@@ -1801,7 +1801,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     for (const auto& stmt : ss) {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-        if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
+        if ((IsOp(call, "tile.store") || IsOp(call, "tile.store_fp")) && call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             store_result_to_dest[assign->var_.get()] = dest.get();
           }
@@ -1845,7 +1845,8 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
         const bool single_lane = (aff == CoreAffinity::CUBE || aff == CoreAffinity::VECTOR);
-        if (single_lane && IsOp(call, "tile.store") && call->args_.size() >= 3) {
+        if (single_lane && (IsOp(call, "tile.store") || IsOp(call, "tile.store_fp")) &&
+            call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
             stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), store_result_to_dest), side, call,
@@ -2344,7 +2345,7 @@ std::unordered_map<const Var*, const Var*> BuildGmOriginMap(
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         const Var* lhs = assign->var_.get();
         if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
-          if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
+          if ((IsOp(call, "tile.store") || IsOp(call, "tile.store_fp")) && call->args_.size() >= 3) {
             propagate_from_expr(lhs, call->args_[2]);
             continue;
           }
@@ -2856,7 +2857,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
       if (!call || !call->op_) continue;
       auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-      if (!opnode || !IsOp(opnode, "tile.store")) continue;
+      if (!opnode || (!IsOp(opnode, "tile.store") && !IsOp(opnode, "tile.store_fp"))) continue;
       if (call->args_.size() < 3) continue;
 
       // Check if the result var is NOT defined in the AIV body

@@ -294,10 +294,10 @@ output elements outside the valid rectangle.
 | pto.tsetval | .SetValue | tile | ✅ | ✅ | ❌ | ✅ | — | emitted by `tile.write` |
 | **MX Quantization (6)** |  |  |  |  |  |  |  |  |
 | pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen; Mat→scale `tmov` emitted in source order, PTOAS `PTOA5NormalizeTMovPass` reorders bind-before-fill; see [operators MX constraints](ir/05-operators.md#mx--ascend950-ptoas-constraints) |
-| pto.tmov.fp | TMOV_FP | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
+| pto.tmov.fp | TMOV_FP | tile | ✅ | ✅ | ✅ | ✅ | — | A5 `pl.tile.move_fp` uses packed per-column parameters. Hardware ST covers INT32 to FP16. |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 standalone quantization frontend+codegen+hardware ST (`group_axis` A/B), MXFP8 from FP16/BF16/FP32 and MXFP4_E2M1 from FP16/BF16; `pl.tile.quant_mx_raw` also covers the raw TQUANT form |
-| pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | the current backend emits `pto.tstore.fp` |
+| pto.tstore_fp | TSTORE_FP | tile | ✅ | ✅ | ✅ | ✅ | — | A5 `pl.tile.store_fp` uses packed per-column parameters. Hardware ST covers INT32 to FP16. |
 | pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ❌ | ✅ | — | A5 numerical ST covers signed INT8 and INT16 with per-row scale and offset. |
 | **Synchronization (8)** |  |  |  |  |  |  |  |  |
 | pto.barrier | pipe_barrier / dsb | internal | ✅ | — | — | ✅ | — | emitted automatically by compiler/system lowering |

@@ -284,7 +284,7 @@ MIGRATION_FAMILIES = (
         ),
     ),
     MigrationFamily(
-        "G15: A5 quantization, MX and scale binding",
+        "G15: A5 quantization, MX, scale binding and FIXPIPE scales",
         (
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
@@ -295,6 +295,8 @@ MIGRATION_FAMILIES = (
             "tile.tquant_mx_raw",
             "tile.tmov_x2zz",
             "tile.dequant",
+            "tile.move_fp",
+            "tile.store_fp",
         ),
         targets=frozenset({backend.BackendType.Ascend950}),
     ),
@@ -413,11 +415,9 @@ MIGRATION_FAMILIES = (
 # from live recipes; a restored IR definition must be reclassified as live.
 HISTORICAL_CALLBACKS = (
     "tile.assign",
-    "tile.move_fp",
     "tile.partadd",
     "tile.partmax",
     "tile.partmin",
     "tile.print",
     "tile.selc",
-    "tile.store_fp",
 )
