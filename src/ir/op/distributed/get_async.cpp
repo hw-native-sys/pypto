@@ -184,7 +184,8 @@ REGISTER_OP("pld.tensor.get_async_event")
     });
 
 REGISTER_OP("pld.tile.get_async")
-    .set_description("Submit a single-peer GET using an existing URMA session and return its event.")
+    .set_description(
+        "Submit a single-peer GET using an existing URMA session and return (destination, completion event).")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Local GM destination tensor")
     .add_argument("peer", "Remote rank")
@@ -192,9 +193,12 @@ REGISTER_OP("pld.tile.get_async")
     .add_argument("session", "URMA session for the source communication domain")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
+    .set_output_arity(2)
+    .set_tuple_result_alias(0, 0)
     .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_arg_effect(1, ArgEffect::Read)
     .set_arg_effect(2, ArgEffect::Read)
-    .set_arg_effect(3, ArgEffect::ReadWrite)
+    .set_mutable_session_arg(3)
     .set_write_channel(WriteChannel::Dma)
     .f_deduce_type([](const std::vector<ExprPtr>& args, const comm_op::Kwargs& kwargs) -> TypePtr {
       const std::string name = "pld.tile.get_async";
@@ -202,7 +206,7 @@ REGISTER_OP("pld.tile.get_async")
       CHECK(kwargs.empty()) << name << " takes no kwargs";
       ValidateGetEndpoints(args, name, true);
       CHECK(IsA<AsyncSessionType>(args[3]->GetType())) << name << " expects an AsyncSession";
-      return GetAsyncEventType();
+      return std::make_shared<TupleType>(std::vector<TypePtr>{args[0]->GetType(), GetAsyncEventType()});
     });
 
 }  // namespace ir

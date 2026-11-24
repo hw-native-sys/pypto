@@ -104,7 +104,7 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
 
   // One submission yields exactly one event covering the whole logical
   // transfer; PyPTO never splits or aggregates.
-  return GetAsyncEventType();
+  return std::make_shared<TupleType>(std::vector<TypePtr>{args[0]->GetType(), GetAsyncEventType()});
 }
 
 // --------------------------------------------------------------------------
@@ -148,19 +148,11 @@ REGISTER_OP("pld.system.make_session")
     .f_deduce_type(DeduceMakeSessionType);
 
 // ============================================================================
-// pld.tile.put_async — submit one URMA write, return its completion event
+// pld.tile.put_async — submit one URMA write, return the destination alias and event
 // ============================================================================
-//
-// VECTOR, as for the V1 async put.
-//
-// This is a separate op rather than an overload of `pld.tensor.put_async`
-// because it returns an event instead of `dst`: an overload would make one call
-// change its return type by context. `dst` stays ReadWrite so the write is
-// visible to dependence analysis, but there is no `set_output_reuses_input` —
-// the result is a handle, not a buffer.
 
 REGISTER_OP("pld.tile.put_async")
-    .set_description("Submit one URMA write to the given peer and return its completion event.")
+    .set_description("Submit one URMA write to the given peer and return (destination, completion event).")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote window-bound GM destination")
     .add_argument("peer", "Remote rank for this submission")
@@ -171,9 +163,12 @@ REGISTER_OP("pld.tile.put_async")
     // The destination is written in place; the source is only read. The IR keeps
     // the real payload operands and their effects - descriptors are a backend
     // detail and never appear here.
+    .set_output_arity(2)
+    .set_tuple_result_alias(0, 0)
     .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_arg_effect(1, ArgEffect::Read)
     .set_arg_effect(2, ArgEffect::Read)
-    .set_arg_effect(3, ArgEffect::ReadWrite)
+    .set_mutable_session_arg(3)
     .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeducePutAsyncType);
 

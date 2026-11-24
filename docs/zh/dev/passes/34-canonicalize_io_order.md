@@ -17,6 +17,8 @@
 
 上拉标量计算正是 load 聚集的关键：若不区分类别，每个克隆的地址运算 assign 会被归为普通 compute、按原始位置排序，从而在兄弟 load 之间穿插，把 load 钉在原始克隆里。把标量计算作为最高优先级类别后，所有兄弟克隆的地址运算先发射，所有依赖的 load 同时就绪，load 自然聚集。
 
+包含 `pld.system.wait_event` 的语句划分重排范围。即使等待返回的布尔值未被使用，读取 GET 目标或覆盖 PUT 源的操作也会在等待完成后执行。
+
 ### 跨核（AIC↔AIV）—— 由上游处理
 
 跨核（cube/vector）pipeline 循环由 [`SkewCrossCorePipeline`](31-skew_cross_core_pipeline.md) 软流水：它在 `LowerPipelineLoops` *之前*运行，把每个跨核循环改写为 `ForKind::Sequential`。因此它们永远不会以 `ForKind::Pipeline` body 进入本 pass，`CanonicalizeIOOrder` 也**不含任何跨核处理** —— 这里 `tpush`/`tpop` 只是普通 tile 计算，不会被重排进任何跨核阶段。本 pass 只对剩余的同核 pipeline 循环（GM→L1、L1→L0、嵌套 matmul）聚集**同核**阶段（标量 → load → compute → store）以实现 ping-pong。

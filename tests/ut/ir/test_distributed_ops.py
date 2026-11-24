@@ -3220,12 +3220,16 @@ def test_async_transfer_engine_rejection_names_sdma_rdma(op_name):
         ir.create_op_call(f"pld.tensor.{op_name}", [dst, peer, src], {"engine": 0}, span)
 
 
-def test_explicit_get_result_alias_and_effects():
-    assert _ir.get_op_tuple_result_aliases("pld.tensor.get_async_event") == {0: 0}
-    for name in ("pld.tensor.get_async_event", "pld.tile.get_async"):
-        assert ir.get_op_arg_effect(name, 0) == ir.ArgEffect.ReadWrite
-        assert ir.get_op_arg_effect(name, 2) == ir.ArgEffect.Read
-    assert ir.get_op_arg_effect("pld.tile.get_async", 3) == ir.ArgEffect.ReadWrite
+@pytest.mark.parametrize("name", ["pld.tensor.get_async_event", "pld.tile.get_async", "pld.tile.put_async"])
+def test_async_transfer_result_alias_and_effects(name):
+    assert _ir.get_op_output_arity(name) == 2
+    assert _ir.get_op_tuple_result_aliases(name) == {0: 0}
+    assert ir.get_op_arg_effect(name, 0) == ir.ArgEffect.ReadWrite
+    assert ir.get_op_arg_effect(name, 1) == ir.ArgEffect.Read
+    assert ir.get_op_arg_effect(name, 2) == ir.ArgEffect.Read
+    if name.startswith("pld.tile."):
+        assert _ir.get_op_mutable_session_arg(name) == 3
+        assert ir.get_op_arg_effect(name, 3) == ir.ArgEffect.ReadWrite
 
 
 def test_explicit_get_ir_operand_contracts():
@@ -3251,7 +3255,9 @@ def test_explicit_get_ir_operand_contracts():
             submit(_make_tensor_var("short", [16], DataType.FP16, span), 0, src)
     with pytest.raises(ValueError, match="AsyncSession"):
         dist_tile_ops.get_async(dst, 0, src, ctx)
-    event = dist_tile_ops.get_async(dst, 0, src, session)
+    result = dist_tile_ops.get_async(dst, 0, src, session)
+    ir.assert_structural_equal(ir.TupleGetItemExpr(result, 0, span).type, dst.type)
+    event = ir.TupleGetItemExpr(result, 1, span)
     assert isinstance(event.type, ir.AsyncEventType)
     assert isinstance(dist_system_ops.defer_wait_event(event, session).type, ir.UnknownType)
     with pytest.raises(ValueError, match="AsyncEvent"):
@@ -3400,16 +3406,16 @@ def test_make_session_rejects_non_enum_engine_in_builder():
         dist_system_ops.make_session(ctx, engine=cast(Any, 1), span=span)
 
 
-def test_tile_put_async_returns_event_not_dst():
-    """V2's explicit form returns an event; only V1 returns dst."""
+def test_tile_put_async_returns_dst_alias_and_event():
     span = ir.Span.unknown()
     session = _make_session(span)
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
     src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
 
     call = dist_tile_ops.put_async(dst, 1, src, session, span=span)
-    assert isinstance(call.type, ir.AsyncEventType)
-    assert not isinstance(call.type, ir.DistributedTensorType)
+    assert isinstance(call.type, ir.TupleType)
+    assert call.type.types[0] is dst.type
+    assert isinstance(call.type.types[1], ir.AsyncEventType)
 
 
 def test_tile_put_async_requires_session_handle():
@@ -3474,7 +3480,8 @@ def test_wait_event_returns_bool():
     session = _make_session(span)
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
     src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
-    event = dist_tile_ops.put_async(dst, 1, src, session, span=span)
+    result = dist_tile_ops.put_async(dst, 1, src, session, span=span)
+    event = ir.TupleGetItemExpr(result, 1, span)
 
     call = dist_system_ops.wait_event(event, session, span=span)
     assert isinstance(call.type, ir.ScalarType)
@@ -3487,7 +3494,8 @@ def test_wait_event_rejects_swapped_operands():
     session = _make_session(span)
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
     src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
-    event = dist_tile_ops.put_async(dst, 1, src, session, span=span)
+    result = dist_tile_ops.put_async(dst, 1, src, session, span=span)
+    event = ir.TupleGetItemExpr(result, 1, span)
 
     with pytest.raises(ValueError, match="AsyncEvent"):
         ir.create_op_call("pld.system.wait_event", [session, event], {}, span)
@@ -3511,7 +3519,7 @@ def test_v2_session_surface_roundtrips_through_printer():
         ):
             ctx = pld.system.get_comm_ctx(dst)
             session = pld.system.make_session(ctx)
-            evt = pld.tile.put_async(dst, 1, src, session)
+            _out, evt = pld.tile.put_async(dst, 1, src, session)
             pld.system.wait_event(evt, session)
 
     printed = str(Program)
@@ -3539,8 +3547,14 @@ def test_v2_dsl_wrappers_return_handle_types():
 
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
     src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
-    event = dsl_dist_tile.put_async(DistributedTensor(expr=dst), 1, Tensor(expr=src), session)
+    out, event = dsl_dist_tile.put_async(DistributedTensor(expr=dst), 1, Tensor(expr=src), session)
     assert isinstance(event, AsyncEvent)
+
+    assert isinstance(out, DistributedTensor)
+    out_field, event_field = out.unwrap(), event.unwrap()
+    assert isinstance(out_field, ir.TupleGetItemExpr) and isinstance(event_field, ir.TupleGetItemExpr)
+    assert (out_field.index, event_field.index) == (0, 1)
+    assert out_field.tuple is event_field.tuple
 
     done = dsl_dist_system.wait_event(event, session)
     assert isinstance(done.unwrap().type, ir.ScalarType)

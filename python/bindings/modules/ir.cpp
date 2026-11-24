@@ -1093,6 +1093,13 @@ void BindIR(nb::module_& m) {
       nb::arg("op_name"), "Number of SSA results (0 means VoidType, >1 means TupleType)");
 
   ir.def(
+      "get_op_mutable_session_arg",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetMutableSessionArg();
+      },
+      nb::arg("op_name"), "Index of the mutable AsyncSession argument, if present.");
+
+  ir.def(
       "op_arg_is_workspace",
       [](const std::string& op_name, size_t arg_index) {
         return OpRegistry::GetInstance().GetEntry(op_name).IsWorkspaceArg(arg_index);

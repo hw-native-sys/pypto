@@ -17,6 +17,8 @@ The result is `[scalars…, loads…, per-stage (compute, store)…]` whenever t
 
 Lifting scalar compute is what unlocks the load cluster: without it, each clone's address-arithmetic assign would be classified as ordinary compute and rank by original position — interleaving between sibling loads and pinning them in their original groups. With scalar compute as the highest-priority category, all sibling clones' address arithmetic emits first, all dependent loads become ready together, and the loads naturally cluster.
 
+A statement containing `pld.system.wait_event` preserves source order across the wait. This keeps a GET destination read or a PUT source overwrite after DMA completion, even when the boolean result is unused.
+
 ### Cross-core (AIC↔AIV) — handled upstream
 
 Cross-core (cube/vector) pipeline loops are software-pipelined by [`SkewCrossCorePipeline`](31-skew_cross_core_pipeline.md), which runs *before* `LowerPipelineLoops` and rewrites every cross-core loop to `ForKind::Sequential`. They therefore never reach this pass as a `ForKind::Pipeline` body, and `CanonicalizeIOOrder` has **no cross-core handling** — `tpush`/`tpop` are ordinary tile compute here, not reordered into any cross-core tier. This pass only clusters the **same-core** stages (scalar → load → compute → store) of the remaining same-core pipeline loops (GM→L1, L1→L0, nested matmul) for ping-pong.

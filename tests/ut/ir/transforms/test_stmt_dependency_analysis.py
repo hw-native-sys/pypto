@@ -18,6 +18,7 @@ Covers:
 
 import pypto
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import ir, passes
 from pypto.ir.builder import IRBuilder
@@ -166,6 +167,34 @@ class TestStmtDependencyGraph:
         # Neither assign has a predecessor in the region — both only read external x.
         assert graph.get_predecessors(stmts[0]) == []
         assert graph.get_predecessors(stmts[1]) == []
+
+    def test_nested_wait_bounds_independent_accesses(self):
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Tensor[[16], pl.FP32],
+                src: pld.DistributedTensor[[16], pl.FP32],
+                cond: pl.Scalar[pl.BOOL],
+            ):
+                out, event = pld.tensor.get_async_event(dst, 1, src)
+                _first = pl.tile.load(src, [0], [16])
+                _second = pl.tile.load(src, [0], [16])
+                if cond:
+                    pld.system.wait_event(event)
+                _third = pl.tile.load(out, [0], [16])
+                _fourth = pl.tile.load(out, [0], [16])
+
+        body = _seq_body(P, "kernel")
+        first, second, wait, third, fourth = body.stmts[-5:]
+        assert isinstance(wait, ir.IfStmt)
+        graph = dep_analysis.build_stmt_dependency_graph(body)
+        assert first not in graph.get_predecessors(second)
+        assert {first, second} <= set(graph.get_predecessors(wait))
+        assert wait in graph.get_predecessors(third)
+        assert wait in graph.get_predecessors(fourth)
+        assert third not in graph.get_predecessors(fourth)
 
     @pytest.mark.parametrize("block_stride", [None, 2])
     def test_reg_stores_keep_program_order_when_value_ssa_is_independent(self, block_stride):

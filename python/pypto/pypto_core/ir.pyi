@@ -3645,6 +3645,9 @@ def get_op_output_arity(op_name: str) -> int:
         Exception: If operator is not registered
     """
 
+def get_op_mutable_session_arg(op_name: str) -> int | None:
+    """Index of the mutable AsyncSession argument, if present."""
+
 def op_arg_is_workspace(op_name: str, arg_index: int) -> bool:
     """Whether an argument is compiler-supplied scratch rather than a result.
 

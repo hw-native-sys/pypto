@@ -885,8 +885,8 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 | -------- | ------ |
 | `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | An AIV-local session reusable across peers and transfer directions |
 | `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | A pair containing an alias of the local destination and a completion event |
-| `pld.tile.get_async(dst, peer, src, session)` | An event for the read from the peer's source window |
-| `pld.tile.put_async(dst, peer, src, session)` | An event for the write to the peer's destination window |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the local destination |
+| `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the remote destination window |
 | `pld.system.wait_event(event[, session])` | A BOOL success flag after waiting in the issuing kernel |
 | `pld.system.defer_wait_event(event[, session])` | A statement registering the event for completion by the issuing task |
 

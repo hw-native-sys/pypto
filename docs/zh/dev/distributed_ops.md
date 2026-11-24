@@ -53,8 +53,8 @@ SSA 值而存在。
 | ---- | ---- |
 | `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | 当前 AIV 与 workspace 的 `pl.AsyncSession`，可跨 peer 复用 |
 | `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | `(dst, event)`，元组第 0 项与本地目标别名相同 |
-| `pld.tile.get_async(dst, peer, src, session)` | 本次提交在指定 session 上产生的 `pl.AsyncEvent` |
-| `pld.tile.put_async(dst, peer, src, session)` | 写入远端目标窗口的 `pl.AsyncEvent` |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与本地目标张量共享存储 |
+| `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与远端目标窗口共享存储 |
 | `pld.system.wait_event(event[, session])` | 在当前核等待，返回 `BOOL` 成功标志 |
 | `pld.system.defer_wait_event(event[, session])` | 将完成责任移交给发起传输的 task |
 
@@ -63,6 +63,16 @@ PUT 的目标与 GET 的源分别位于远端窗口。两种方向可以在同�
 Tensor GET 的事件使用 `wait_event(event)` 或 `defer_wait_event(event)`。对于 Tile PUT 和 GET，
 等待和移交也可传入发起该次提交的 session。核内等待返回成功标志；
 移交将完成责任交给 task，依赖方在发起 task 逻辑完成后可以使用目标。这六个操作目前支持 DSL 构造、IR 验证和打印。
+
+后续操作使用返回的目标别名。下面的 PUT 读取 GET 的结果，因此先在核内等待 GET 完成。
+
+```python
+session = pld.system.make_session(pld.system.get_comm_ctx(window))
+local, fetched = pld.tile.get_async(local, first_peer, window, session)
+pld.system.wait_event(fetched, session)
+window, sent = pld.tile.put_async(window, second_peer, local, session)
+pld.system.defer_wait_event(sent, session)
+```
 
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
 

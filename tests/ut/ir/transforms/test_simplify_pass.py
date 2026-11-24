@@ -2391,8 +2391,8 @@ class TestScalarDCE:
             def kernel(self, dst: pl.Tensor[[32], pl.FP16], src: pld.DistributedTensor[[32], pl.FP16]):
                 ctx = pld.system.get_comm_ctx(src)
                 session = pld.system.make_session(ctx)
-                _event = pld.tile.get_async(dst, 1, src, session)
-                _out, _another_event = pld.tensor.get_async_event(dst, 2, src)
+                next_dst, _event = pld.tile.get_async(dst, 1, src, session)
+                _out, _another_event = pld.tensor.get_async_event(next_dst, 2, src)
 
         # Both requests write dst even if the author drops their completion handles.
         after = str(passes.simplify()(Before))
@@ -2406,7 +2406,7 @@ class TestScalarDCE:
             def kernel(self, dst: pld.DistributedTensor[[32], pl.FP16], src: pl.Tensor[[32], pl.FP16]):
                 ctx = pld.system.get_comm_ctx(dst)
                 session = pld.system.make_session(ctx)
-                sent = pld.tile.put_async(dst, 1, src, session)
+                _out, sent = pld.tile.put_async(dst, 1, src, session)
                 _done = pld.system.wait_event(sent, session)
 
         # Observing completion is an effect even if the BOOL result has no SSA uses.

@@ -33,7 +33,7 @@ def put_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Sp
         span: Source location for the call. Captured from the caller when omitted.
 
     Returns:
-        A call returning an AsyncEventType handle for this PUT.
+        A tuple-valued call returning the destination alias and completion event.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
@@ -51,7 +51,7 @@ def get_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Sp
         span: Source location for the call. Captured from the caller when omitted.
 
     Returns:
-        A call returning an AsyncEventType handle for this GET.
+        A tuple-valued call returning the destination alias and completion event.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)

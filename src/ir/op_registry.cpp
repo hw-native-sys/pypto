@@ -250,6 +250,11 @@ void OpRegistryEntry::ValidateIRStage() const {
 void OpRegistryEntry::ValidateCall(const std::vector<ExprPtr>& args, const TypePtr& result_type,
                                    const Span& span) const {
   INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" << name_ << "'";
+  if (mutable_session_arg_) {
+    const size_t i = *mutable_session_arg_;
+    INTERNAL_CHECK_SPAN(i < args.size() && args[i] && IsA<AsyncSessionType>(args[i]->GetType()), span)
+        << "Operator '" << name_ << "' argument " << i << " must be an AsyncSession";
+  }
   auto tuple = As<TupleType>(result_type);
   if (output_arity_ == 0) {
     INTERNAL_CHECK_SPAN(
@@ -692,13 +697,13 @@ void OpRegistry::ValidateMultiOutputOps() const {
         unclassified.push_back(name + " (argument " + std::to_string(i) + ")");
         continue;
       }
-      // A written argument is either scratch the hardware needs or a result the
-      // caller reads. An existing destination tensor must appear explicitly
-      // as an aliased tuple element; an ordinary result needs no destination argument.
+      // Tensor writes require a returned alias or a workspace declaration.
+      // Submissions can also update an opaque session whose identity stays the same.
       const auto& aliases = entry.GetTupleResultAliases();
       const bool returned =
           std::any_of(aliases.begin(), aliases.end(), [i](const auto& alias) { return alias.second == i; });
-      if (entry.MayWriteArg(i) && !entry.IsWorkspaceArg(i) && !returned) {
+      if (entry.MayWriteArg(i) && !entry.IsWorkspaceArg(i) && entry.GetMutableSessionArg() != i &&
+          !returned) {
         leaked_destinations.push_back(name + " (argument " + std::to_string(i) + ")");
       }
     }
@@ -737,7 +742,8 @@ void OpRegistry::ValidateMultiOutputOps() const {
   if (!leaked_destinations.empty()) {
     fail(
         "The following multi-output ops write an argument without declaring its role. Use "
-        "set_workspace_arg for scratch, or set_tuple_result_alias for an existing destination tensor "
+        "set_workspace_arg for scratch, set_mutable_session_arg for queue state, or set_tuple_result_alias "
+        "for a tensor "
         "returned as a tuple element. Fresh tile outputs belong in the TupleType:",
         std::move(leaked_destinations));
   }

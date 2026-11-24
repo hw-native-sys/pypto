@@ -427,13 +427,17 @@ AsyncHandleChecker::Definition AsyncHandleChecker::ResolveAsyncDefinition(const 
   return definition;
 }
 
+bool IsTileAsyncTransfer(const CallPtr& op) {
+  return IsOp(op, "pld.tile.get_async") || IsOp(op, "pld.tile.put_async");
+}
+
 void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   const auto mismatch = [&](const std::string& message) {
     diagnostics_.emplace_back(DiagnosticSeverity::Error, "AsyncHandleProvenance",
                               static_cast<int>(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH),
                               op->op_->name_ + " " + message, op->span_);
   };
-  if ((IsOp(op, "pld.tile.get_async") || IsOp(op, "pld.tile.put_async")) && op->args_.size() == 4) {
+  if (IsTileAsyncTransfer(op) && op->args_.size() == 4) {
     if (!IsOp(As<Call>(ResolveAsyncDefinition(op->args_[3]).value), "pld.system.make_session")) {
       mismatch("requires a session from pld.system.make_session in this function");
     }
@@ -445,14 +449,12 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   }
   if (op->args_.empty()) return;
   auto event = ResolveAsyncDefinition(op->args_[0]).value;
-  auto get_event = As<TupleGetItemExpr>(event);
-  const bool implicit_session =
-      get_event && get_event->index_ == 1 &&
-      IsOp(As<Call>(ResolveAsyncDefinition(get_event->tuple_).value), "pld.tensor.get_async_event");
-  auto submit = As<Call>(event);
-  const bool explicit_session = IsOp(submit, "pld.tile.get_async") || IsOp(submit, "pld.tile.put_async");
+  auto field = As<TupleGetItemExpr>(event);
+  auto submit = field && field->index_ == 1 ? As<Call>(ResolveAsyncDefinition(field->tuple_).value) : nullptr;
+  const bool implicit_session = IsOp(submit, "pld.tensor.get_async_event");
+  const bool explicit_session = IsTileAsyncTransfer(submit);
   if (IsOp(op, "prefetch.wait")) {
-    bool is_prefetch = IsOp(submit, "prefetch.async_prefetch");
+    bool is_prefetch = IsOp(As<Call>(event), "prefetch.async_prefetch");
     if (!event && var_values_) {
       if (!prefetch_events_) prefetch_events_ = FindPrefetchEvents(*var_values_);
       is_prefetch = prefetch_events_->count(AsVarLike(op->args_[0]).get()) != 0;
@@ -480,7 +482,7 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
 }
 
 void AsyncHandleChecker::VisitExpr_(const CallPtr& op) {
-  if (As<AsyncEventType>(op->GetType()) ||
+  if (IsTileAsyncTransfer(op) ||
       (!op->args_.empty() && op->args_.front() && As<AsyncEventType>(op->args_.front()->GetType()))) {
     CheckAsyncOperands(op);
   }

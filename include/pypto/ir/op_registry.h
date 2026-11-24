@@ -1036,6 +1036,16 @@ class OpRegistryEntry {
   void ValidateIRStage() const;
   void ValidateCall(const std::vector<ExprPtr>& args, const TypePtr& result_type, const Span& span) const;
 
+  /// Opaque queue state shared by submissions on the issuing core.
+  OpRegistryEntry& set_mutable_session_arg(size_t arg_index) {
+    CHECK(arg_index < GetArgumentCount() && !mutable_session_arg_)
+        << "Operator '" << name_ << "' must name one existing AsyncSession argument";
+    mutable_session_arg_ = arg_index;
+    return set_arg_effect(arg_index, ArgEffect::ReadWrite);
+  }
+
+  [[nodiscard]] std::optional<size_t> GetMutableSessionArg() const { return mutable_session_arg_; }
+
   /// Declare argument `arg_index` to be scratch: the hardware writes it, but it
   /// carries no result the caller reads. Its storage may be supplied by the
   /// caller or compiler; shape and dtype requirements still apply. This
@@ -1240,6 +1250,7 @@ class OpRegistryEntry {
   std::map<size_t, BufferArgEffect> buffer_arg_effects_;
   std::map<size_t, BufferResultSpec> buffer_results_;
   std::map<size_t, size_t> tuple_result_aliases_;  ///< Tuple result index to aliased tensor operand
+  std::optional<size_t> mutable_session_arg_;      ///< Opaque state updated by an async submission
   std::set<size_t> workspace_args_;                ///< Args written as scratch rather than as results
   std::set<size_t> pointwise_validity_args_;       ///< Data args sharing element-indexed validity
   std::optional<std::string> template_dir_;        ///< Package resource for builtin templates.

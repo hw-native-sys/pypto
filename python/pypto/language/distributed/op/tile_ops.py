@@ -18,12 +18,12 @@ from typing import TypeGuard
 
 from pypto.ir.op.distributed import tile_ops as _ir_tile
 from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Tile
-from pypto.language.typing.tensor import Tensor
+from pypto.language.typing.tensor import Tensor, TensorT
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr
 
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
+from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors, _wrap_async_transfer_result
 
 
 def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
@@ -41,7 +41,9 @@ def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
     return isinstance(x, (list, tuple))
 
 
-def put_async(dst: DistributedTensor, peer: IntLike, src: Tensor, session: AsyncSession) -> AsyncEvent:
+def put_async(
+    dst: DistributedTensor, peer: IntLike, src: Tensor, session: AsyncSession
+) -> tuple[DistributedTensor, AsyncEvent]:
     """Submit a single-peer PUT from a dense local GM view to a remote window.
 
     Args:
@@ -51,13 +53,16 @@ def put_async(dst: DistributedTensor, peer: IntLike, src: Tensor, session: Async
         session: AIV-local URMA session created by pld.system.make_session.
 
     Returns:
-        An AsyncEvent for this PUT. Pass it to wait_event or defer_wait_event.
+        The destination alias and its completion event. Pass the event to wait_event or defer_wait_event.
     """
     (dst_expr,) = _unwrap_distributed_tensors("pld.tile.put_async", dst=dst)
-    return AsyncEvent(expr=_ir_tile.put_async(dst_expr, _unwrap(peer), _unwrap(src), _unwrap(session)))
+    call = _ir_tile.put_async(dst_expr, _unwrap(peer), _unwrap(src), _unwrap(session))
+    return _wrap_async_transfer_result(dst, call)
 
 
-def get_async(dst: Tensor, peer: IntLike, src: DistributedTensor, session: AsyncSession) -> AsyncEvent:
+def get_async(
+    dst: TensorT, peer: IntLike, src: DistributedTensor, session: AsyncSession
+) -> tuple[TensorT, AsyncEvent]:
     """Submit a single-peer GET from a remote window into a dense local GM view.
 
     Args:
@@ -67,10 +72,11 @@ def get_async(dst: Tensor, peer: IntLike, src: DistributedTensor, session: Async
         session: AIV-local URMA session created by pld.system.make_session.
 
     Returns:
-        An AsyncEvent for this GET. Pass it to wait_event or defer_wait_event.
+        The destination alias and its completion event. Pass the event to wait_event or defer_wait_event.
     """
     (src_expr,) = _unwrap_distributed_tensors("pld.tile.get_async", src=src)
-    return AsyncEvent(expr=_ir_tile.get_async(_unwrap(dst), _unwrap(peer), src_expr, _unwrap(session)))
+    call = _ir_tile.get_async(_unwrap(dst), _unwrap(peer), src_expr, _unwrap(session))
+    return _wrap_async_transfer_result(dst, call)
 
 
 def remote_load(

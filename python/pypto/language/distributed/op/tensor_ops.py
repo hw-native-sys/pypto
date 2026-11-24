@@ -51,7 +51,7 @@ from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, CommEngine, Expr, ReduceOp
 
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
+from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors, _wrap_async_transfer_result
 
 _ALLREDUCE_SIGNAL_MISSING = object()
 
@@ -682,10 +682,7 @@ def get_async_event(
     """
     (src_expr,) = _unwrap_distributed_tensors("pld.tensor.get_async_event", src=src)
     call = _ir_tensor.get_async_event(_unwrap(dst), _unwrap(peer), src_expr, engine=engine)
-    return (
-        dst.__class__(expr=_ir.TupleGetItemExpr(call, 0, call.span)),
-        AsyncEvent(expr=_ir.TupleGetItemExpr(call, 1, call.span)),
-    )
+    return _wrap_async_transfer_result(dst, call)
 
 
 def get_async(
