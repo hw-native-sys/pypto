@@ -113,6 +113,7 @@ struct PassProperties {
 
 | Pass | Required | Produced | Invalidated |
 | ---- | -------- | -------- | ----------- |
+| LowerGraphForRuntime | — | — | InlineFunctionsEliminated |
 | OutlineSimtScopes | — | — | SSAForm |
 | OutlineRegScopes | — | — | SSAForm |
 | InlineFunctions | — | InlineFunctionsEliminated | — |
@@ -493,6 +494,12 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 ```
 
 ### Strategy Notes
+
+The `Default` pipeline starts with
+[LowerGraphForRuntime](01-lower_graph_for_runtime.md). It prepares Graph bodies
+for `InlineFunctions` on TMR and preserves them for outlining and boundary
+legalization on HBG. The scope outliners for SIMT and registers run before
+`InlineFunctions`.
 
 The PTO-oriented tile stage of `Default` is:
 

@@ -111,6 +111,7 @@ struct PassProperties {
 
 | Pass | 所需 | 产生 | 失效 |
 | ---- | ---- | ---- | ---- |
+| LowerGraphForRuntime | — | — | InlineFunctionsEliminated |
 | OutlineSimtScopes | — | — | SSAForm |
 | OutlineRegScopes | — | — | SSAForm |
 | InlineFunctions | — | InlineFunctionsEliminated | — |
@@ -488,6 +489,10 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 ```
 
 ### 策略补充说明
+
+`Default` 流水线先运行 [LowerGraphForRuntime](01-lower_graph_for_runtime.md)。
+TMR 的 Graph 函数体随后交给 `InlineFunctions`，HBG 的 Graph 保留给作用域提取和
+边界合法化。SIMT 和寄存器作用域的提取均在 `InlineFunctions` 前运行。
 
 `Default` 的 PTO tile 阶段顺序为：
 

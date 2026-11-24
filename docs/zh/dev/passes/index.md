@@ -9,7 +9,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 
 - `00` 用于 pass manager 概述。
 - `01`–`89` 预留给流水线 pass 页面，按默认流水线的顺序排列。
-  可选 pass 在对应表项和独立页面中说明。
+  可选 pass 在对应表项和独立页面中说明。初始降级阶段的 pass 共用编号 `01`。
 - `90` 及以上预留给工具 pass（utility passes）和基础设施。在多个位置运行的工具 pass
   集中记录，不为每次调用分配独立的页面编号。
 - 文档编号表示阅读顺序，不是绝对执行位置；重复调用的工具 pass 和条件执行的 pass
@@ -29,6 +29,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 
 | 序号 | Pass | 作用 |
 | ---- | ---- | ---- |
+| 01 | [LowerGraphForRuntime](01-lower_graph_for_runtime.md) | 在内联前为 `tensormap_and_ringbuffer` 降级 Graph 函数和作用域 |
 | 01 | [OutlineSimtScopes / OutlineRegScopes](01-outline_simt_scopes.md) | 在调用方 SSA 转换前将 SIMT 和寄存器作用域提取为设备 helper |
 | 02 | [InlineFunctions](02-inline_functions.md) | 把 `FunctionType.Inline` 函数体展开到每个调用点 |
 | 03 | [UnrollLoops](03-unroll_loops.md) | 在编译期展开 `ForKind::Unroll` 循环 |

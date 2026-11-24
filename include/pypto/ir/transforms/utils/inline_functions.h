@@ -12,9 +12,16 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_INLINE_FUNCTIONS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_INLINE_FUNCTIONS_H_
 
+#include <vector>
+
 #include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 
 namespace pypto::ir::transform_utils {
+// Propagate dump tags from an eliminated boundary to the dispatches that
+// receive the tagged arguments. Run before inlining or outlining those dispatches.
+StmtPtr TransferDispatchDumpVars(const StmtPtr& body, std::vector<VarPtr> dump_vars);
+
 // Complete ordinary Inline expansion in programs containing source register
 // scopes before captures become a VF ABI. This exposes scalar producers and
 // Out writes too. Programs without source register scopes remain unchanged.

@@ -691,9 +691,11 @@ void BindPass(nb::module_& m) {
              "allreduce is skipped for LowerHostTensorCollectives. FP32-only for trig. Idempotent.");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
+  passes.def("lower_graph_for_runtime", &pass::LowerGraphForRuntime,
+             "Lower Graph functions and scopes for TMR before outlining and inlining. No-op on HBG.");
   passes.def("inline_functions", &pass::InlineFunctions,
              "Create a pass that eliminates FunctionType::Inline functions by splicing\n"
-             "their bodies at every call site. Runs as the first pipeline pass.\n"
+             "their bodies at every call site.\n"
              "Detects cycles in the Inline → Inline call graph and raises ValueError.\n"
              "Supports multi-return inline (emits MakeTuple at call site) and nested\n"
              "Inline-calls-Inline (iterates to fixpoint).");

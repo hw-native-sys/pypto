@@ -438,10 +438,11 @@ def compile(  # noqa: PLR0913
             NoDep/OutputExisting direction rewrites.
         runtime: Simpler runtime ABI to target.
             ``RuntimeKind.TENSORMAP_AND_RINGBUFFER`` (default) builds the task
-            graph on the AICPU and derives dependencies through the TensorMap;
+            graph on the AICPU, derives dependencies through the TensorMap, and
+            lowers Graph regions to ordinary task orchestration.
             ``RuntimeKind.HOST_BUILD_GRAPH`` builds the whole graph on the host
-            up front, which is what Graph Execution (record once, replay)
-            requires. ``None`` inherits the setting from an active outer
+            up front and preserves Graph regions for recording and replay.
+            ``None`` inherits the setting from an active outer
             ``PassContext``. Its wire name is written to
             ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``
             and is what a ``ChipWorker`` must match to bind the program.

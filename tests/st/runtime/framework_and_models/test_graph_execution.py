@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end coverage for ``@pl.jit.graph`` under the host_build_graph runtime.
+"""End-to-end Graph coverage for HBG replay and TMR task submission.
 
 The unit tests around ``LegalizeGraphBoundary`` and orchestration codegen cover
 the compile side, including one that compiles the emitted
@@ -29,14 +29,13 @@ feature fails quietly:
   carries a ``FunctionType.Graph`` function.
 
 The runtime ABI comes from the enclosing ``PassContext``, which is what
-``@pl.jit`` reads when it lowers; ``graph_runtime`` supplies one.
+``@pl.jit`` reads when it lowers. Cases that use ``graph_runtime`` exercise
+HBG-specific behavior, and ``graph_execution_runtime`` runs the same Graph
+source and numerical checks under both runtimes.
 
 **Run this file with ``--forked``.** A ``ChipWorker`` binds one
-``(platform, device_id, runtime)``, and this file deliberately mixes the two: the
-Graph cases need ``host_build_graph`` while the A/B twin runs on the default
-runtime. Sharing one process poisons the lane — the first Graph test fails 507018
-and every later test in that process goes with it, including unrelated ones. CI
-gives the file its own ``--forked`` step for that reason.
+``(platform, device_id, runtime)``. Each runtime needs an isolated process, so
+CI gives the file its own ``--forked`` step.
 """
 
 import pypto.language as pl
@@ -54,8 +53,18 @@ LAYERS = 4
 
 @pytest.fixture
 def graph_runtime():
-    """Compile under host_build_graph — a Graph is rejected under any other."""
+    """Compile cases that exercise HBG recording and replay."""
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        yield
+
+
+@pytest.fixture(
+    params=[passes.RuntimeKind.HOST_BUILD_GRAPH, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER],
+    ids=["hbg", "tmr"],
+)
+def graph_execution_runtime(request):
+    """Run the same Graph program and golden under either runtime ABI."""
+    with passes.PassContext([], runtime=request.param):
         yield
 
 
@@ -159,28 +168,30 @@ def boundary_view_accumulate(w: pl.Tensor, acc: pl.InOut[pl.Tensor]):
 
 
 @pl.jit.graph
-def double_via_scratch(a: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+def update_via_scratch(a: pl.Tensor, acc: pl.InOut[pl.Tensor], balance: pl.InOut[pl.Tensor]):
     """Step C: a constant-shaped allocation inside the region.
 
     Recorded as a kernel-less node, so the region's topology is more than one
     task per call.
     """
     tmp = pl.create_tensor([ROWS, COLS], pl.FP32)
-    with pl.at(level=pl.Level.CORE_GROUP):
+    with pl.at(level=pl.Level.CORE_GROUP) as scratch_ready:
         t = pl.load(a, [0, 0], [ROWS, COLS])
         pl.store(pl.add(t, t), [0, 0], tmp)
-    with pl.at(level=pl.Level.CORE_GROUP):
+    with pl.at(level=pl.Level.CORE_GROUP, deps=[scratch_ready]):
         u = pl.load(tmp, [0, 0], [ROWS, COLS])
         v = pl.load(acc, [0, 0], [ROWS, COLS])
         pl.store(pl.add(u, v), [0, 0], acc)
-    return acc
+        b = pl.load(balance, [0, 0], [ROWS, COLS])
+        pl.store(pl.sub(b, u), [0, 0], balance)
+    return acc, balance
 
 
 @pl.jit
-def region_alloc_accumulate(a: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+def region_alloc_accumulate(a: pl.Tensor, acc: pl.InOut[pl.Tensor], balance: pl.InOut[pl.Tensor]):
     for _ in pl.range(LAYERS):
-        acc = double_via_scratch(a, acc)
-    return acc
+        acc, balance = update_via_scratch(a, acc, balance)
+    return acc, balance
 
 
 @pl.jit.graph
@@ -252,7 +263,7 @@ def single_launch(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
 
 
 class TestGraphExecution:
-    """Numerical results after record-and-replay."""
+    """Numerical results across ordinary task submission and Graph replay."""
 
     def test_single_launch(self, test_config, graph_runtime):
         single_launch._cache.clear()
@@ -267,7 +278,7 @@ class TestGraphExecution:
             f"max diff = {(out - expected).abs().max().item()}"
         )
 
-    def test_per_layer_accumulate(self, test_config, graph_runtime):
+    def test_per_layer_accumulate(self, test_config, graph_execution_runtime):
         """The one that catches a frozen boundary scalar.
 
         Every band must be added exactly once. A frozen offset adds band 0 four
@@ -304,7 +315,7 @@ class TestGraphExecution:
             f"max diff = {(acc - expected).abs().max().item()}"
         )
 
-    def test_scope_form_accumulate(self, test_config, graph_runtime):
+    def test_scope_form_accumulate(self, test_config, graph_execution_runtime):
         """The scope form must hit the same golden as the decorator form.
 
         Shares ``test_per_layer_accumulate``'s shape on purpose: a frozen
@@ -324,7 +335,7 @@ class TestGraphExecution:
             f"offset would give {float(LAYERS)} everywhere"
         )
 
-    def test_boundary_view(self, test_config, graph_runtime):
+    def test_boundary_view(self, test_config, graph_execution_runtime):
         boundary_view_accumulate._cache.clear()
         w = _banded_weights()
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
@@ -337,18 +348,20 @@ class TestGraphExecution:
             f"max diff = {(acc - expected).abs().max().item()}"
         )
 
-    def test_region_alloc(self, test_config, graph_runtime):
+    def test_region_alloc(self, test_config, graph_execution_runtime):
         region_alloc_accumulate._cache.clear()
         a = torch.full((ROWS, COLS), 1.5, dtype=torch.float32)
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
+        balance = torch.full_like(acc, 100.0)
 
-        compiled = region_alloc_accumulate.compile(a, acc, config=test_config)
-        compiled(a, acc, config=test_config)
+        compiled = region_alloc_accumulate.compile(a, acc, balance, config=test_config)
+        compiled(a, acc, balance, config=test_config)
 
-        expected = a * 2 * LAYERS
-        assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
-            f"max diff = {(acc - expected).abs().max().item()}"
-        )
+        # Each Graph call produces a scratch tensor and then uses it to update
+        # two caller-owned buffers. Distinct values expose a swapped alias.
+        delta = a * 2 * LAYERS
+        torch.testing.assert_close(acc, delta)
+        torch.testing.assert_close(balance, 100.0 - delta)
 
     def test_two_distinct_graphs(self, test_config, graph_runtime):
         two_distinct_graphs._cache.clear()
@@ -481,18 +494,17 @@ class TestGraphIsNotSilentlyDroppedAtCompile:
         )
         assert src.count("type=pl.FunctionType.Graph") == 2, src
 
-    def test_a_graph_under_the_default_runtime_is_rejected(self, test_config):
-        """The default runtime has neither `rt_submit_graph` nor `GraphTaskArgs`.
-
-        Compiling a Graph against it used to emit orchestration C++ naming
-        undeclared symbols; it is a compile-time error now.
-        """
-        with pytest.raises(ValueError, match="requires the host_build_graph runtime"):
+    def test_default_runtime_lowers_graph_to_ordinary_tasks(self, test_config):
+        """TMR lowers the Graph helper into the caller and retains its kernel."""
+        src = python_print(
             per_layer_accumulate.lower(
                 torch.zeros(LAYERS * ROWS, COLS),
                 torch.zeros(ROWS, COLS),
                 config=test_config,
             )
+        )
+        assert "type=pl.FunctionType.Graph" not in src, src
+        assert "type=pl.FunctionType.AIV" in src, src
 
 
 # --- MoE routing: a Graph plus per-expert dispatch predicates ---

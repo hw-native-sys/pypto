@@ -6,7 +6,9 @@
 ## 概述
 
 该 Pass 将 `GraphScopeStmt` 节点（由 `with pl.graph("name"):` 生成）变换为
-`Function(Graph)` 定义，并将原作用域替换为对提取函数的 Call 或 Submit。
+`Function(Graph)` 定义，并将原作用域替换为对提取函数的 Call 或 Submit。默认流水线中，
+TMR 在本 Pass 之前通过 [LowerGraphForRuntime](01-lower_graph_for_runtime.md) 展开 Graph
+作用域。HBG 通过本 Pass 提取 Graph 作用域以供录制。
 
 它存在的全部意义就是**汇聚 (convergence)**。该 Pass 之后，用户就地标记的区域与用户用
 `@pl.jit.graph` 装饰的函数具有相同的形态 —— 一个带编排元数据的 `Function(Graph)` 加一个

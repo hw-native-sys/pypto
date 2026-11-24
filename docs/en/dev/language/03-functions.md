@@ -357,7 +357,7 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 | `pl.FunctionType.AIC` | Cube core | Cube core kernel (specialized InCore) |
 | `pl.FunctionType.AIV` | Vector core | Vector core kernel (specialized InCore) |
 | `pl.FunctionType.Group` | Multi-core | Co-scheduled group of AIC + AIV kernels |
-| `pl.FunctionType.Graph` | Host/AICPU | Recordable orchestration fragment, replayed by the `host_build_graph` runtime (see below) |
+| `pl.FunctionType.Graph` | Host/AICPU | Orchestration fragment recorded by HBG or inlined for TMR |
 
 When no type is specified, functions default to `Opaque`.
 
@@ -381,9 +381,11 @@ class Decoder:
             self.layer(cur, normed, next_hidden, wq, i * 5120)
 ```
 
-One Graph function is one recorded topology: the runtime identifies the recording
-by the address of the emitted C++ function, so there is no cache key to name or
-keep unique.
+For `tensormap_and_ringbuffer`, the compiler inlines the same Graph body at
+ordinary calls before SSA conversion and task dependency analysis. A
+`with pl.graph(...)` scope inlines its body at the same position in the enclosing
+function. See [LowerGraphForRuntime](../passes/01-lower_graph_for_runtime.md)
+for the supported Graph boundary metadata.
 
 ### Parameter Directions
 

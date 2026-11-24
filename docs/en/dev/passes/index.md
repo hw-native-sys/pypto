@@ -11,7 +11,8 @@ the conditions under which optional or backend-dependent passes run.
 
 - `00` is the pass manager overview.
 - `01`–`89` are reserved for pipeline pass pages, ordered by the default pipeline.
-  Optional passes are identified in their entries and individual pages.
+  Optional passes are identified in their entries and individual pages. The
+  passes in the initial lowering group share label `01`.
 - `90` and above are reserved for utility passes and infrastructure. Utility
   passes that run at multiple positions are documented together rather than
   receiving a page number for every invocation.
@@ -34,6 +35,7 @@ Keep the English and Chinese documentation synchronized.
 
 | Order | Pass | What it does |
 | ----- | ---- | ------------ |
+| 01 | [LowerGraphForRuntime](01-lower_graph_for_runtime.md) | Lowers Graph functions and scopes for `tensormap_and_ringbuffer` before inlining |
 | 01 | [OutlineSimtScopes / OutlineRegScopes](01-outline_simt_scopes.md) | Outlines SIMT and register scopes into device helpers before caller SSA |
 | 02 | [InlineFunctions](02-inline_functions.md) | Splices `FunctionType.Inline` bodies into every call site |
 | 03 | [UnrollLoops](03-unroll_loops.md) | Expands `ForKind::Unroll` loops at compile time |

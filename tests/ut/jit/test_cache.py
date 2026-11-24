@@ -16,6 +16,7 @@ import math
 import re
 import types
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Event, current_thread
 from typing import Any
 
@@ -561,6 +562,59 @@ class TestResolveRuntime:
         # context is the sole source the cache key can consult.
         with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
             assert _resolve_runtime() == passes.RuntimeKind.HOST_BUILD_GRAPH
+
+
+@pytest.mark.parametrize("hbg_first", [False, True], ids=["tmr-first", "hbg-first"])
+def test_graph_jit_caches_runtime_specific_artifacts(tmp_path, monkeypatch, hbg_first):
+    """Both compile orders cache the Graph implementation for their own ABI."""
+    from pypto.backend import pto_backend  # noqa: PLC0415
+    from pypto.jit import decorator  # noqa: PLC0415
+
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    monkeypatch.setattr(decorator, "_ptoas_available", lambda: True)
+    monkeypatch.setattr(
+        pto_backend,
+        "_run_ptoas",
+        lambda source, target, **kwargs: Path(target).write_text("// fake external PTOAS output\n"),
+    )
+
+    @pl.jit.incore
+    def copy(
+        x: pl.Tensor[[16, 16], pl.FP32], out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        return pl.store(pl.load(x, [0, 0], [16, 16]), [0, 0], out)
+
+    @pl.jit.graph
+    def layer(
+        x: pl.Tensor[[16, 16], pl.FP32], out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        return copy(x, out)
+
+    @pl.jit
+    def model(
+        x: pl.Tensor[[16, 16], pl.FP32], out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        pl.dump_tag(x)
+        return layer(x, out)
+
+    tmr, hbg = passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH
+    order = (hbg, tmr) if hbg_first else (tmr, hbg)
+    artifacts = {}
+    for runtime in order:
+        with passes.PassContext([], runtime=runtime):
+            artifacts[runtime] = model.compile()
+    assert artifacts[tmr] is not artifacts[hbg]
+    assert artifacts[tmr].output_dir != artifacts[hbg].output_dir
+    for runtime in order:
+        with passes.PassContext([], runtime=runtime):
+            assert model.compile() is artifacts[runtime]
+        output_dir = Path(artifacts[runtime].output_dir)
+        runtime_name = passes.runtime_kind_to_name(runtime)
+        assert f'"runtime": "{runtime_name}"' in (output_dir / "kernel_config.py").read_text()
+        code = (output_dir / "orchestration" / "model.cpp").read_text()
+        assert ("rt_submit_graph(" in code) is (runtime == hbg)
+        assert "rt_submit_aiv_task(" in code
+        assert ".dump(" in code
 
 
 class TestResolveMemoryPlanner:

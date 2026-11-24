@@ -71,7 +71,7 @@ assert compiled.param_names == ["a", "b", "out"]
 | `enable_pypto_l0c_double_buffer` | `None` | 旧版开关；PYPTO/DSA_RP 禁用自动 dbC，PTOAS 保留自动 dbC 且不受此开关影响 |
 | `emit_source_loc` | `None` | 把 DSL 源位置带进发出的 `.pto` |
 | `dump_ptoas_passes` | `False` | 同时 dump ptoas 自己的 pass IR |
-| `runtime` | `None` | 面向哪个 Simpler 运行时 ABI —— `TENSORMAP_AND_RINGBUFFER` 或 `HOST_BUILD_GRAPH`（`@pl.jit.graph` 需要它 —— [函数](../language/01-functions.md)）；`None` 继承当前 `PassContext`。派发它的 worker 必须与之匹配 |
+| `runtime` | `None` | 面向哪个 Simpler 运行时 ABI —— `TENSORMAP_AND_RINGBUFFER` 或 `HOST_BUILD_GRAPH`。该目标决定 [Graph 片段](../language/01-functions.md)的执行路径。`None` 继承当前 `PassContext`。派发它的 worker 必须与之匹配 |
 
 ### Pass dump
 

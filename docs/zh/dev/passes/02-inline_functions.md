@@ -6,7 +6,9 @@
 
 被装饰为 `@pl.function(type=pl.FunctionType.Inline)`(或通过 JIT 端的 `@pl.jit.inline`)的函数是*源级实用工具*:每个调用点展开为一份新的、经过 alpha 重命名的函数体副本,其中形参由实际参数表达式替换。该 pass 运行后,程序中不会再有 `FunctionType.Inline` 函数,也不会有指向它的 `Call` — 后续 pass 把已展开的代码视为如同直接写在调用点处。
 
-在 `OptimizationStrategy.Default` 中紧接 `OutlineSimtScopes` 运行,以确保下游 pass(`UnrollLoops`、`OutlineIncoreScopes` 等)永远不会观察到 Inline 函数。
+在 `OptimizationStrategy.Default` 中，本 Pass 位于 SIMT 和寄存器作用域提取之后、
+`UnrollLoops` 之前。TMR 上由 [LowerGraphForRuntime](01-lower_graph_for_runtime.md)
+转为 Inline 的 Graph 函数也在这里展开。
 
 **产生**: `IRProperty.InlineFunctionsEliminated`。
 

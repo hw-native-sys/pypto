@@ -290,7 +290,7 @@ runtime 中都能直接按类型解码数值。
 
 | 检查 | 原因 |
 | ---- | ---- |
-| 编译目标必须是 `host_build_graph` | `GraphTaskArgs` 与 `rt_submit_graph` 只存在于该 runtime 的 orchestration API，而 codegen 无条件发射它们；因此在默认的 `tensormap_and_ringbuffer` 下编译 Graph，产物会引用未声明的符号。在这里报错、指向用户自己写的函数，而不是让它变成生成代码里的 C++ 编译错误 |
+| 编译目标必须是 `host_build_graph` | `GraphTaskArgs` 和 `rt_submit_graph` 属于 HBG 编排接口。TMR 的 [LowerGraphForRuntime](01-lower_graph_for_runtime.md) 和 `InlineFunctions` 在此检查前消除 Graph 边界。本检查会报告自定义 TMR 流水线中残留的 Graph 边界 |
 | 至少 1 个张量形参 | 空边界的 graph 回放时无处可 patch，runtime 拒绝缓存 |
 | 至多 128 个张量形参 | `GRAPH_MAX_TENSOR_ARGS` —— 边界是定长的 `GraphTaskArgs` |
 | 至多 64 个标量形参 | `GRAPH_MAX_SCALAR_ARGS`。在 Step A 之后检查：Step A 会**新增**标量形参，所以上提前放得下的签名，上提后可能放不下 |
