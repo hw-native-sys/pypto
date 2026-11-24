@@ -751,8 +751,7 @@ def _build_pipe_init_kwargs(
     pre_relu: bool,
     ptoas_plan_memory: bool,
     ptoas_buffer_id_sync: bool,
-    nosplit: bool | None,
-    acc_push_epilogue: dict[str, str] | None,
+    fixpipe_options: tuple[bool | None, dict[str, str] | None],
 ) -> dict[str, Any]:
     """Build the attribute kwargs shared by aic/aiv_initialize_pipe.
 
@@ -761,6 +760,7 @@ def _build_pipe_init_kwargs(
     dir_mask / slot_size are handled, so they are not re-checked here.
     """
     kwargs: dict[str, Any] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    nosplit, acc_push_epilogue = fixpipe_options
     if acc_push_epilogue is not None:
         kwargs["acc_push_epilogue"] = acc_push_epilogue
         kwargs["nosplit"] = True if nosplit is None else nosplit
@@ -855,8 +855,7 @@ def aic_initialize_pipe(  # noqa: PLR0913
         pre_relu,
         ptoas_plan_memory,
         ptoas_buffer_id_sync,
-        nosplit,
-        acc_push_epilogue,
+        (nosplit, acc_push_epilogue),
     )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
@@ -917,8 +916,7 @@ def aiv_initialize_pipe(  # noqa: PLR0913
         pre_relu,
         ptoas_plan_memory,
         ptoas_buffer_id_sync,
-        nosplit,
-        acc_push_epilogue,
+        (nosplit, acc_push_epilogue),
     )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
