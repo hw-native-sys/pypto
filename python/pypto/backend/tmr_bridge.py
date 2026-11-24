@@ -426,7 +426,7 @@ class MaterializedTask:
         if self.task.binary_policy != "ordinary":
             raise ContractError(
                 "TMR bridge: descriptor JIT integration requires an owned provider binding; "
-                "use pl.jit.extern(binding=...) or compile_task and build_submitter"
+                "call the native kernel directly in @pl.jit or use compile_task and build_submitter"
             )
         if ctx.func_type != "extern":
             raise ContractError("TMR bridge: configure_context requires an extern declaration")

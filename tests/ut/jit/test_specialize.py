@@ -222,6 +222,56 @@ class TestFreeNameResolution:
         assert cast_call.kwargs["target_type"] == expected_dtype
 
 
+def test_host_dispatch_worker_does_not_bind_callee_constexpr():
+    @jit
+    def chip(worker: pl.constexpr):
+        return worker
+
+    @jit.host
+    def host():
+        for rank in pl.range(pld.world_size()):
+            chip(7, worker=rank)
+
+    program = host.specialize()
+    chip_func = program.get_function("chip")
+    host_func = program.get_function("host")
+    assert chip_func is not None and "return 7" in chip_func.as_python()
+    assert host_func is not None
+    loop = host_func.body
+    assert isinstance(loop, ir.ForStmt)
+    assert isinstance(loop.body, ir.EvalStmt)
+    call = loop.body.expr
+    assert isinstance(call, ir.Call)
+    assert len(call.args) == 0
+    assert call.attrs["worker"] is loop.loop_var
+
+
+def test_host_dispatch_worker_cannot_supply_missing_callee_argument():
+    @jit
+    def chip(worker: pl.Scalar[pl.INT32]):
+        return worker
+
+    @jit.host
+    def host():
+        chip(worker=0)
+
+    with pytest.raises(ParserTypeError, match=r"expects 1 argument\(s\), got 0"):
+        host.specialize()
+
+
+def test_worker_keyword_binds_to_an_ordinary_jit_helper():
+    @jit.inline
+    def helper(worker: pl.constexpr):
+        return worker
+
+    @jit
+    def entry():
+        return helper(worker=7)
+
+    helper_func = entry.specialize().get_function("helper")
+    assert helper_func is not None and "return 7" in helper_func.as_python()
+
+
 _GLOBAL_REDUCE_OP = pld.ReduceOp.Sum
 
 

@@ -80,7 +80,7 @@ move. All are keyword-only — only `program` is positional.
 | `enable_pypto_l0c_double_buffer` | `None` | Legacy flag; automatic dbC is disabled for PYPTO/DSA_RP, retained for PTOAS independently of this flag |
 | `emit_source_loc` | `None` | Carry DSL source locations into the emitted `.pto` |
 | `dump_ptoas_passes` | `False` | Also dump ptoas's own pass IR |
-| `runtime` | `None` | Simpler runtime ABI to target — `TENSORMAP_AND_RINGBUFFER` or `HOST_BUILD_GRAPH` (what `@pl.jit.graph` needs — [Functions](../language/01-functions.md)); `None` inherits the active `PassContext`. The worker must match it |
+| `runtime` | `None` | Simpler runtime ABI to target — `TENSORMAP_AND_RINGBUFFER` or `HOST_BUILD_GRAPH`. This selects the execution path for [Graph fragments](../language/01-functions.md). `None` inherits the active `PassContext`. The worker must match it |
 
 ### Pass dumps
 

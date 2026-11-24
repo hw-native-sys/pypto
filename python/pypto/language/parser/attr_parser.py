@@ -25,7 +25,7 @@ from .parser_state import (
     ParseCallbacks,
     ParserServices,
 )
-from .syntax_helpers import ENUM_VALUE_TYPES
+from .syntax_helpers import ENUM_VALUE_TYPES, references_ir_binding
 
 # Call attrs that never appear inside a printed ``attrs={...}`` dict. On
 # ``system.task_dummy`` they ride bespoke surfaces (``manual_dep_edges`` prints
@@ -108,6 +108,15 @@ class AttrParser:
                 )
         return attrs_kw.value
 
+    def parse_acc_push_epilogue(self, node: ast.Dict) -> Any:
+        """Evaluate the Fixpipe record without substituting shadowed runtime bindings."""
+        if references_ir_binding(node, self.services.scope_manager.lookup_var):
+            raise ParserSyntaxError(
+                "acc_push_epilogue must be a compile-time record",
+                span=self.services.span_tracker.get_span(node),
+            )
+        return self.services.expr_evaluator.eval_expr(node)
+
     def parse_attr_value(self, method_name: str, key: str, value_node: ast.expr) -> Any:
         """Reconstruct one generic ``attrs={...}`` value from its Python AST node.
 
@@ -124,6 +133,8 @@ class AttrParser:
         from pypto.language.typing.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
         node_span = self.services.span_tracker.get_span(value_node)
+        if key == "acc_push_epilogue" and isinstance(value_node, ast.Dict):
+            return self.parse_acc_push_epilogue(value_node)
         if (
             isinstance(value_node, ast.UnaryOp)
             and isinstance(value_node.op, (ast.USub, ast.UAdd))
@@ -266,10 +277,10 @@ class AttrParser:
             key = key_node.value
             if key in bespoke:
                 continue
-            result[key] = self.parse_attr_value(method_name, key, value_node)
+            result[key] = self.parse_dispatch_attr_value(method_name, key, value_node)
         return result
 
-    def parse_op_attrs(self, call: ast.Call) -> dict[str, object] | None:
+    def parse_op_attrs(self, call: ast.Call, *, dispatch_placement: bool = False) -> dict[str, object] | None:
         """Extract a generic ``attrs={...}`` kwarg from an op call, if present.
 
         The python printer surfaces compiler-internal op-call attrs (e.g.
@@ -292,10 +303,14 @@ class AttrParser:
                     "op attrs must be a dict literal",
                     span=self.services.span_tracker.get_span(keyword.value),
                 )
-            return self.parse_generic_attrs_dict(ast.unparse(call.func), keyword.value)
+            return self.parse_generic_attrs_dict(
+                ast.unparse(call.func), keyword.value, dispatch_placement=dispatch_placement
+            )
         return None
 
-    def parse_generic_attrs_dict(self, method_name: str, node: ast.Dict) -> dict[str, object]:
+    def parse_generic_attrs_dict(
+        self, method_name: str, node: ast.Dict, *, dispatch_placement: bool = False
+    ) -> dict[str, object]:
         """Read an open-world ``attrs={...}`` dict literal via ``_parse_attr_value``.
 
         Only the string-literal-key invariant is enforced; each value's type is
@@ -322,7 +337,11 @@ class AttrParser:
                     "pl.system.task_dummy or pl.submit",
                     span=self.services.span_tracker.get_span(value_node),
                 )
-            result[key] = self.parse_attr_value(method_name, key, value_node)
+            result[key] = (
+                self.parse_dispatch_attr_value(method_name, key, value_node)
+                if dispatch_placement
+                else self.parse_attr_value(method_name, key, value_node)
+            )
         return result
 
     @staticmethod
@@ -331,3 +350,12 @@ class AttrParser:
         if attrs and isinstance(result, ir.Call):
             return ir.set_call_attrs(result, attrs)
         return result
+
+    def parse_dispatch_attr_value(self, method_name: str, key: str, value_node: ast.expr) -> Any:
+        """Read placement as an Expr only in a dispatch-specific attrs context."""
+        if key in {"worker", "device"}:
+            # A dispatch selector is an SSA edge even when written as a literal.
+            # Function, loop and communication-scope metadata use the generic
+            # syntax-inferred reader and must not inherit this reserved meaning.
+            return self.callbacks.expression(value_node)
+        return self.parse_attr_value(method_name, key, value_node)

@@ -248,9 +248,8 @@ def alloc_window_buffer(  # type: ignore[no-redef]
 
     .. note::
 
-       This function is callable only inside HOST-level orchestration
-       (``level=pl.Level.HOST, role=pl.Role.Orchestrator``). Calling it
-       inside InCore (``type=pl.FunctionType.InCore``) raises a parser error.
+       The parser accepts this call in HOST and CLUSTER_0 orchestration,
+       outside nested InCore and SPMD scopes.
 
     .. seealso::
 

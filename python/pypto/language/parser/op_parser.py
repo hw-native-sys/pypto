@@ -597,8 +597,9 @@ class OpParser:
             if key == "attrs":
                 continue
 
-            # Handle dtype specially
-            if key in expression_keywords:
+            if key == "acc_push_epilogue" and isinstance(value, ast.Dict):
+                kwargs[key] = self.attrs.parse_acc_push_epilogue(value)
+            elif key in expression_keywords:
                 # Operand literals need the same dtype as positional operands;
                 # compile-time attributes still use the value parsing below.
                 kwargs[key] = self.callbacks.expression(value)
@@ -1078,7 +1079,7 @@ class OpParser:
 
         - ``alloc_window_buffer``: must be intercepted at assignment-LHS.
           Reaching here means it was used outside that context.
-        - ``world_size``: host-only.
+        - ``world_size`` and ``num_workers``: orchestration-level topology queries.
         """
         span = self.services.span_tracker.get_span(call)
 
@@ -1091,19 +1092,25 @@ class OpParser:
                 "(or the short form 'buf = pld.alloc_window_buffer(N)')",
             )
 
-        if op_name == "world_size":
-            in_device_scope = any(
-                self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+        if op_name in ("world_size", "num_workers"):
+            self.validate_host_or_cluster_scope(f"pld.system.{op_name}", span)
+
+    def validate_host_or_cluster_scope(self, op_name: str, span: ir.Span) -> None:
+        level = self.regions.effective_level
+        in_device_scope = any(
+            self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+        )
+        if (
+            level is None
+            or level.value not in (ir.Level.HOST.value, ir.Level.CLUSTER_0.value)
+            or in_device_scope
+        ):
+            raise ParserSyntaxError(
+                f"{op_name}() can only be called in HOST or CLUSTER_0 orchestration context "
+                f"(not inside InCore / SPMD scopes); current hierarchy level: {level}",
+                span=span,
+                hint="Call from a HOST or CLUSTER_0 orchestrator outside any nested device-side scope",
             )
-            if self.function.func_level != ir.Level.HOST or in_device_scope:
-                raise ParserSyntaxError(
-                    "pld.system.world_size() can only be called in HOST orchestration context "
-                    "(not inside InCore / SPMD scopes); "
-                    f"current function level: {self.function.func_level}",
-                    span=span,
-                    hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                    "on the enclosing function and call outside any nested device-side scope",
-                )
 
     def parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse ``pld.<op>(...)`` — 2-segment unified short form.
@@ -1204,7 +1211,7 @@ class OpParser:
 
         args = [self.callbacks.expression(arg) for arg in call.args]
         kwargs = self.parse_op_kwargs(call)
-        attrs = self.attrs.parse_op_attrs(call) or {}
+        attrs = self.attrs.parse_op_attrs(call, dispatch_placement=True) or {}
         self.check_builtin_op_printer_invariants(full_name, args, attrs, span)
         try:
             built = ir._create_internal_op_call(full_name, args, kwargs, span)
@@ -1227,7 +1234,7 @@ class OpParser:
         Keeps the accepted grammar equal to the printer's output, so this
         machine-only surface cannot be used to hand-build a dispatch that
         orchestration codegen would reject with an ``INTERNAL_CHECK`` (see
-        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``device`` attr
+        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``worker`` attr
         to resolve the rank expression, and one ``arg_directions`` entry per
         positional arg).
         """
@@ -1236,10 +1243,20 @@ class OpParser:
             f"{full_name} is reached by writing the public pld.{full_name.split('.', 1)[1]} "
             f"collective and letting LowerHostTensorCollectives lower it"
         )
-        if "device" not in attrs:
+        if "worker" in attrs and "device" in attrs:
             raise InvalidOperationError(
-                f"'pl.{full_name}' requires a device attr naming the dispatching rank "
-                f'(attrs={{"device": <rank>}})',
+                f"'pl.{full_name}' must use only one worker or device placement attr",
+                span=span,
+                hint=hint,
+            )
+        if "device" in attrs:
+            # Read older printer dumps; constructors perform the same wire/direct
+            # IR normalization while preserving the referenced expression object.
+            attrs["worker"] = attrs.pop("device")
+        if "worker" not in attrs:
+            raise InvalidOperationError(
+                f"'pl.{full_name}' requires a worker attr naming the dispatching child "
+                f'(attrs={{"worker": <rank>}})',
                 span=span,
                 hint=hint,
             )

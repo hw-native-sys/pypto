@@ -154,6 +154,7 @@ set(PYPTO_SOURCES
     src/ir/op/sync_ops/launch.cpp
     src/ir/op/distributed/memory.cpp
     src/ir/op/distributed/world_size.cpp
+    src/ir/op/distributed/num_workers.cpp
     src/ir/op/distributed/remote_load.cpp
     src/ir/op/distributed/remote_store.cpp
     src/ir/op/distributed/collective.cpp
@@ -242,6 +243,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/insert_mx_scale_addr_pass.cpp
     src/ir/transforms/loop_invariant_mat_residency.cpp
     src/ir/transforms/inline_functions_pass.cpp
+    src/ir/transforms/lower_graph_for_runtime_pass.cpp
     src/ir/transforms/materialize_simt_outputs_pass.cpp
     src/ir/transforms/outline_simt_scopes_pass.cpp
     src/ir/transforms/outline_reg_scopes_pass.cpp

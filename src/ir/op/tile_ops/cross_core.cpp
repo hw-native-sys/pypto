@@ -445,8 +445,8 @@ REGISTER_OP("tile.tpush_to_aiv")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
-    // Optional partition stride (see tile.aiv_shard); consumed by the torch
-    // reference runtime, ignored by PTO codegen.
+    // Explicit partition stride used by Torch. On A5 it also preserves the
+    // box transport chosen by the split passes.
     .set_attr<int>("lane_stride")
     .set_attr<int>("id")
     .no_memory_spec()

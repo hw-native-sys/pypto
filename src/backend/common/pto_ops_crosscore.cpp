@@ -32,8 +32,11 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -264,6 +267,17 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
                                                   : "no_convert";
     oss << ", nosplit = true, acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = " << quant
         << ", relu = " << (relu ? "normal_relu" : "no_relu") << ">";
+  } else {
+    if (op->HasKwarg("nosplit")) {
+      oss << ", nosplit = " << (op->GetKwarg<bool>("nosplit", false) ? "true" : "false");
+    }
+    if (op->HasKwarg("acc_push_epilogue")) {
+      const auto e = op->GetKwarg<ir::AccPushEpilogue>("acc_push_epilogue");
+      const auto schema_error = ir::ValidateAccPushEpilogue(e);
+      INTERNAL_CHECK_SPAN(schema_error.empty(), op->span_) << "Internal error: " << schema_error;
+      oss << ", acc_push_epilogue = #pto.acc_push_epilogue<layout = " << e.at("layout")
+          << ", quant = " << e.at("quant") << ", relu = " << e.at("relu") << ">";
+    }
   }
   oss << "}";
   return oss.str();
@@ -303,8 +317,15 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  // FixPipe divides the extent it reads. Keeping the compact Acc's valid rows
+  // both preserves MAD's pitch and places each half at the start of its lane's slot.
+  const bool split_valid_rows =
+      std::string_view(target) == "aiv" && split == ir::kSplitUpDown &&
+      codegen.GetBackendHandler()->SplitsCubeToVectorTransportInHardware() &&
+      !codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0)).has_value() && !op->HasKwarg("lane_stride") &&
+      ir::cross_core_pipe::GetA5C2VRowTailBoxStride(op->args_[0]->GetType()).has_value();
   const bool restore_valid_shape =
-      EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
+      !split_valid_rows && EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
 
   std::ostringstream oss;
   oss << "pto.tpush_to_" << target << "(" << tile_buf;
@@ -726,6 +747,18 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
   reg("system.aiv_initialize_pipe", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeInitializePipeCodegenPTO("aiv", op, codegen);
   });
+  for (const auto* name : {"system.set_quant_scalar", "system.set_quant_vector"}) {
+    reg(name, [](const ir::CallPtr& op, codegen::CodegenBase& base) {
+      auto& codegen = AsPto(base);
+      INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_) << "set_quant requires one operand";
+      const bool vector = ir::IsOp(op, "system.set_quant_vector");
+      const auto operand = codegen.GetExprAsCode(op->args_[0]);
+      const auto type = vector ? codegen.GetExprTypeAnnotation(op->args_[0]) : "f32";
+      codegen.Emit(std::string("pto.set_quant_") + (vector ? "vector(" : "scalar(") + operand + " : " + type +
+                   ") {id = " + std::to_string(op->GetKwarg<int>("id", 0)) + "}");
+      return std::string("");
+    });
+  }
   reg("system.sync_set", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCrossCoreSyncCodegenPTO("set", op, codegen);
   });

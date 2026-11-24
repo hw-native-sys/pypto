@@ -190,7 +190,9 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
         calls.append(str(args[0]))
         return binary
 
-    def recorded_run(self: "KernelCompiler", cmd: list[str], output: Path, label: str) -> bytes:
+    def recorded_run(
+        self: "KernelCompiler", cmd: list[str], output: Path, label: str, *, env: dict[str, str] | None = None
+    ) -> bytes:
         evidence = root / f"compilation-{len(calls) + 1}"
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / f"{output.name}.command.txt").write_text(
@@ -200,7 +202,7 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
             if arg.startswith("--symbol-ordering-file="):
                 order = Path(arg.split("=", 1)[1])
                 (evidence / order.name).write_bytes(order.read_bytes())
-        binary = original_run(self, cmd, output, label)
+        binary = original_run(self, cmd, output, label, env=env)
         (evidence / output.name).write_bytes(binary)
         return binary
 
@@ -246,10 +248,7 @@ def _check_values(worker: ChipWorker, compiled: CompiledProgram, stage: str) -> 
 
 def _check_internal_sync(output: Path) -> list[str]:
     directory = output / "compilation-1"
-    llvm = (directory / "vpto_0.ll").read_text()
-    expected = ["vld.vst", "vst.vld", "vld.vst", "vst.vst", "vst.vld"]
-    barriers = re.findall(r"call void @llvm.hivm.mem.bar.([a-z.]+)\(\)", llvm)
-    assert barriers == expected, barriers
+    expected = ["VLD_VST", "VST_VLD", "VLD_VST", "VST_VST", "VST_VLD"]
     objdump = Path(os.environ["ASCEND_HOME_PATH"]) / "bin/llvm-objdump"
     observed = {}
     for name in ("vpto_0.o", "kernel.elf"):
@@ -257,13 +256,13 @@ def _check_internal_sync(output: Path) -> list[str]:
         result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
         (directory / f"{name}-disassembly.log").write_text(result.stdout)
         (directory / f"{name}-disassembly.command.txt").write_text(shlex.join(command) + "\n")
-        machine = re.findall(r"\bSMEM_BAR.([A-Z_]+)", result.stdout)
-        assert machine == [item.upper().replace(".", "_") for item in expected], machine
+        machine = re.findall(r"\bSMEM_BAR\.([A-Z_]+)", result.stdout)
+        assert machine == expected, machine
         observed[name] = machine
     (output / "internal-sync.json").write_text(
-        json.dumps({"llvm": barriers, "machine": observed, "ptoas_inserted": True}, indent=2) + "\n"
+        json.dumps({"machine": observed, "ptoas_inserted": True}, indent=2) + "\n"
     )
-    return barriers
+    return [kind.lower().replace("_", ".") for kind in observed["kernel.elf"]]
 
 
 def _run(output: Path, device: int) -> None:

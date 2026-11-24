@@ -356,8 +356,9 @@ def _emitted_dumps(program: ir.Program) -> list[str]:
         (_cluster_with_dumps, [(64, 64)] * 4, None),
         (_cluster_nested_spmd_with_dumps, [(64, 64)] * 4, None),
         (_graph_with_dumps, [(64, 64)] * 2, passes.RuntimeKind.HOST_BUILD_GRAPH),
+        (_graph_with_dumps, [(64, 64)] * 2, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER),
     ],
-    ids=["spmd", "cluster", "cluster_nested_spmd", "graph"],
+    ids=["spmd", "cluster", "cluster_nested_spmd", "graph-hbg", "graph-tmr"],
 )
 def test_container_scope_dumps_reach_codegen(entry, shapes, runtime):
     """An explicit ``dumps=[a]`` on ``pl.spmd`` / ``pl.cluster`` / a

@@ -35,6 +35,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -55,6 +56,7 @@
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -178,6 +180,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<std::string>(item.second));
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else if (key == "acc_push_epilogue" && nb::isinstance<nb::dict>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<AccPushEpilogue>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
       // Lists/tuples carry exactly one element type, dispatched by attr key:
       //   - kAttrArgDirections             -> vector<ArgDirection>
@@ -402,6 +406,9 @@ std::vector<ExprPtr> NormalizeShapeSequence(const nb::sequence& shape) {
 
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
+
+  ir.def("_get_a5_c2v_row_tail_box_stride", &cross_core_pipe::GetA5C2VRowTailBoxStride, nb::arg("type"),
+         "Return the box lane stride for an A5 compact FP32 C2V row tail, or None.");
 
   nb::enum_<HardwareLoopState>(ir, "HardwareLoopState")
       .value("Eligible", HardwareLoopState::Eligible)
@@ -809,6 +816,7 @@ void BindIR(nb::module_& m) {
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
       .value("LeftScale", MemorySpace::LeftScale, "L0A-side MX block-scale buffer (A5)")
+      .value("Scaling", MemorySpace::Scaling, "Packed 64-bit Fixpipe control buffer")
       .value("RightScale", MemorySpace::RightScale, "L0B-side MX block-scale buffer (A5)")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
@@ -1425,7 +1433,8 @@ void BindIR(nb::module_& m) {
       nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("attrs").none(), nb::arg("type"),
       nb::arg("span"),
       "Create a function call expression with kwargs and explicit attrs map and type. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Call>(call_class);
 
@@ -1457,7 +1466,8 @@ void BindIR(nb::module_& m) {
       "allow_early_resolve opts this task in as a speculative early-dispatch producer. "
       "predicate is an optional comparison Expr (e.g. Gt(tensor.read(t, [i]), 0)) the scheduler "
       "evaluates at the dispatch point; omit it for an unconditional dispatch. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Submit>(submit_class);
 
@@ -1471,6 +1481,8 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(std::string)) {
         result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(AccPushEpilogue)) {
+        result[key.c_str()] = nb::cast(AnyCast<AccPushEpilogue>(value));
       } else if (value.type() == typeid(double)) {
         result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(float)) {
@@ -1540,7 +1552,7 @@ void BindIR(nb::module_& m) {
         // Used by ScopeStmt attrs["task_id_var"] (single producer TaskId Var).
         result[key.c_str()] = nb::cast(AnyCast<VarPtr>(value, "converting to Python: " + key));
       } else if (value.type() == typeid(ExprPtr)) {
-        // IR expressions stored in attrs (e.g. attrs["device"] and
+        // IR expressions stored in attrs (e.g. attrs["worker"] and
         // attrs["core_num"] on Orchestration dispatch calls).
         result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
       }

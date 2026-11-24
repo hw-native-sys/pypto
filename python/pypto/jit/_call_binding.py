@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 from . import _arguments, _ast_analysis
-from ._call_syntax import dependency_call
+from ._call_syntax import PLACEMENT_KEYWORDS, dependency_call
 from .specializer import (
     DynDim,
     free_name_source,
@@ -144,7 +144,7 @@ def arg_ref(arg: ast.expr) -> str | SlicedArg | None:
 
 
 def extract_call_args_for_dep(
-    entry_func: Any, dep_name: str
+    entry_func: Any, dep_name: str, *, orchestrator: bool = False
 ) -> list[tuple[str | None, str | SlicedArg | None]] | None:
     """Find the arguments passed to ``dep_name`` in ``entry_func``'s body.
 
@@ -164,7 +164,7 @@ def extract_call_args_for_dep(
     calls = _dep_call_nodes(entry_func, dep_name)
     if not calls:
         return None
-    return call_arg_refs(min(calls, key=lambda call: (call.lineno, call.col_offset)))
+    return call_arg_refs(calls[0], orchestrator=orchestrator)
 
 
 def _dep_call_nodes(caller_func: Any, dep_call_name: str) -> list[ast.Call]:
@@ -243,6 +243,8 @@ def resolve_call_site_constexpr(
     caller_binding: Mapping[str, str],
     caller_globals: Mapping[str, Any],
     caller_locals: frozenset[str],
+    *,
+    orchestrator: bool = False,
 ) -> dict[str, str]:
     """Resolve one call site's ``pl.constexpr`` arguments into folded source text.
 
@@ -267,15 +269,8 @@ def resolve_call_site_constexpr(
         TypeError: if a constexpr parameter is unbound at this call site or is
             bound to something with no compile-time value.
     """
-    call = dependency_call(call) or call
     constexpr_names, dep_param_names = signature
-    bound: dict[str, ast.expr] = {}
-    for index, arg in enumerate(call.args):
-        if index < len(dep_param_names):
-            bound[dep_param_names[index]] = arg
-    for keyword in call.keywords:
-        if keyword.arg is not None:
-            bound[keyword.arg] = keyword.value
+    bound = build_param_mapping(dep_param_names, call_arg_nodes(call, orchestrator=orchestrator))
 
     resolved: dict[str, str] = {}
     for name in constexpr_names:
@@ -438,6 +433,7 @@ def expand_constexpr_variants(
                             caller_binding,
                             caller_globals,
                             caller_locals,
+                            orchestrator=dep._func_type == "orchestration",
                         )
                         if splits
                         else {}
@@ -474,22 +470,30 @@ def expand_constexpr_variants(
 _ArgT = TypeVar("_ArgT")
 
 
-def _call_arg_pairs(node: ast.Call, transform: Callable[[ast.expr], _ArgT]) -> list[tuple[str | None, _ArgT]]:
+def _call_arg_pairs(
+    node: ast.Call, transform: Callable[[ast.expr], _ArgT], *, orchestrator: bool
+) -> list[tuple[str | None, _ArgT]]:
     node = dependency_call(node) or node
     return [
         *((None, transform(arg)) for arg in node.args),
-        *((kw.arg, transform(kw.value)) for kw in node.keywords if kw.arg is not None),
+        *(
+            (kw.arg, transform(kw.value))
+            for kw in node.keywords
+            if kw.arg is not None and not (orchestrator and kw.arg in PLACEMENT_KEYWORDS)
+        ),
     ]
 
 
-def call_arg_refs(node: ast.Call) -> list[tuple[str | None, str | SlicedArg | None]]:
+def call_arg_refs(
+    node: ast.Call, *, orchestrator: bool = False
+) -> list[tuple[str | None, str | SlicedArg | None]]:
     """Bind actual callee arguments, excluding Submit dispatch metadata."""
-    return _call_arg_pairs(node, arg_ref)
+    return _call_arg_pairs(node, arg_ref, orchestrator=orchestrator)
 
 
-def call_arg_nodes(node: ast.Call) -> list[tuple[str | None, ast.expr]]:
+def call_arg_nodes(node: ast.Call, *, orchestrator: bool = False) -> list[tuple[str | None, ast.expr]]:
     """Keep exact operands for tuple projections that cannot be tensor slices."""
-    return _call_arg_pairs(node, lambda arg: arg)
+    return _call_arg_pairs(node, lambda arg: arg, orchestrator=orchestrator)
 
 
 def build_param_mapping(

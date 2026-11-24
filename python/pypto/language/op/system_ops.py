@@ -35,7 +35,7 @@ from pypto.ir.op.system_ops import (
 )
 from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PipeType, Span
 
 from ..typing import Array, IntLike, Scalar, Tensor, Tile
 
@@ -53,6 +53,8 @@ __all__ = [
     "wait_intra_block",
     "set_ffts",
     "barrier",
+    "set_quant_scalar",
+    "set_quant_vector",
     "fence",
     "cacheinvalid",
     "syncall",
@@ -116,6 +118,22 @@ def wait_flag(
     """Block ``dst_pipe`` until the matching source event is signalled."""
     event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
+
+
+def set_quant_scalar(scale: Scalar | Expr | float, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set the pipe's FP32 quant scale in the same block before TPUSH."""
+    if isinstance(scale, float):
+        scale = ConstFloat(scale, DataType.FP32, _get_span_or_capture(span, frame_offset=1))
+    elif isinstance(scale, int):
+        raise TypeError("set_quant_scalar requires an FP32 scalar or floating-point literal")
+    return _ir_ops.set_quant_scalar(scale.unwrap() if isinstance(scale, Scalar) else scale, id=id, span=span)
+
+
+def set_quant_vector(controls: Tile | Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set packed INT64/UINT64 Scaling controls for a ``deqf16_vec`` pipe before TPUSH."""
+    return _ir_ops.set_quant_vector(
+        controls.unwrap() if isinstance(controls, Tile) else controls, id=id, span=span
+    )
 
 
 def sync_set(
@@ -389,17 +407,27 @@ def tpush_to_aiv(
     slot with [`tfree_to_aic`][pypto.language.system.tfree_to_aic]; ``split`` and ``id`` must match across all
     three.
 
+    For a hand-written A5 C2V pipe without dtype conversion, ``split=1`` divides a compact FP32 Acc row
+    tail with full columns at half its valid rows. The valid row count must be positive and even.
+    Each AIV reads ``valid_rows // 2`` rows from the start of its physical half-slot.
+
     Args:
         tile: Tile to send. Its Cube-side buffer stays live until the consumer frees the slot.
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
             axes over an odd extent). Selects the axis along which the two AIV
             lanes divide the tile, and how their extents relate; 0 sends it whole.
         lane_stride: Partition stride carried when a ragged boundary was balanced
-            across the two AIV lanes; omit for the default box partition.
+            across the two AIV lanes, or to preserve an existing box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
-    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, lane_stride=lane_stride, id=id, span=span)
+    return _ir_ops.tpush_to_aiv(
+        tile.unwrap(),
+        split=split,
+        lane_stride=lane_stride,
+        id=id,
+        span=span,
+    )
 
 
 def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
@@ -523,12 +551,13 @@ def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None 
     return Scalar(DataType.INT32, call)
 
 
-def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Scalar:
+def import_peer_buffer(*, name: str, peer_func: str = "", span: Span | None = None) -> Scalar:
     """Import a buffer from a peer function in the same group.
 
     Args:
         name: Buffer name to import (must match peer's reserve_buffer name).
-        peer_func: Name of the peer function that owns the buffer.
+        peer_func: Name of the peer function that owns the buffer. Omit it in
+            an automatically outlined mixed kernel to select the other member.
         span: Optional source span.
 
     Returns:

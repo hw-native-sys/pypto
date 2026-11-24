@@ -189,7 +189,9 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
         calls.append(str(args[0]))
         return binary
 
-    def recorded_run(self: "KernelCompiler", cmd: list[str], output: Path, label: str) -> bytes:
+    def recorded_run(
+        self: "KernelCompiler", cmd: list[str], output: Path, label: str, *, env: dict[str, str] | None = None
+    ) -> bytes:
         evidence = root / f"compilation-{len(calls) + 1}"
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / f"{output.name}.command.txt").write_text(
@@ -199,7 +201,7 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
             if arg.startswith("--symbol-ordering-file="):
                 order = Path(arg.split("=", 1)[1])
                 (evidence / order.name).write_bytes(order.read_bytes())
-        binary = original_run(self, cmd, output, label)
+        binary = original_run(self, cmd, output, label, env=env)
         (evidence / output.name).write_bytes(binary)
         return binary
 

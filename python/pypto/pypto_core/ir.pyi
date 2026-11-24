@@ -1052,6 +1052,8 @@ class MemorySpace(enum.Enum):
     """Bias buffer."""
     LeftScale = ...
     """L0A-side MX block-scale buffer (A5)."""
+    Scaling = ...
+    """Packed 64-bit Fixpipe control buffer (PTO loc=scaling)."""
     RightScale = ...
     """L0B-side MX block-scale buffer (A5)."""
 
@@ -1403,10 +1405,15 @@ class Call(Expr):
 
         - ``"arg_directions"`` -> ``list[ArgDirection]`` (use the
           :attr:`arg_directions` shortcut for typed access).
+        - ``"worker"`` -> ``Expr``: logical immediate-child selector.
+          Legacy ``"device"`` attrs normalize to ``"worker"`` with the same
+          expression identity; supplying both raises ValueError.
         """
 
     kwargs: Final[Mapping[str, Any]]
-    """Keyword arguments (metadata)."""
+    """Keyword arguments (metadata). Pipe init accepts a structured
+    ``acc_push_epilogue`` dict with ``layout``, ``quant`` and ``relu`` fields.
+    """
 
     @overload
     def __init__(self, op: Op, args: Sequence[Expr], span: Span) -> None:
@@ -1493,7 +1500,10 @@ class Call(Expr):
             args: List of argument expressions
             kwargs: Keyword arguments (metadata)
             attrs: Compiler-internal node metadata. Reserved keys:
-                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``;
+                ``"worker"`` -> ``Expr`` (logical child selector).
+                Legacy ``"device"`` attrs normalize to ``"worker"``;
+                competing placement attrs raise ValueError.
             type: Explicit result type
             span: Source location
         """
@@ -1611,7 +1621,10 @@ class Submit(Expr):
             deps: TaskId dependency expressions
             kwargs: Keyword arguments (metadata)
             attrs: Compiler-internal node metadata. Reserved keys:
-                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``;
+                ``"worker"`` -> ``Expr`` (logical child selector).
+                Legacy ``"device"`` attrs normalize to ``"worker"``;
+                competing placement attrs raise ValueError.
             type: Explicit result type
             span: Source location
             core_num: SPMD block count Expr (``pl.spmd_submit``); ``None`` for a
@@ -3228,7 +3241,17 @@ def create_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3253,7 +3276,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3288,7 +3321,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     type: Type,
     span: Span,
@@ -3366,6 +3409,10 @@ def is_op_registered(op_name: str) -> bool:
     Returns:
         True if the operator is registered, False otherwise
     """
+
+def _get_a5_c2v_row_tail_box_stride(type: Type) -> int | None:
+    """Return the box lane stride for an A5 compact FP32 C2V row tail, or None."""
+    ...
 
 def get_op(op_name: str) -> Op:
     """Get an operator instance by name.

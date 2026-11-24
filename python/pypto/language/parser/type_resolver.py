@@ -221,6 +221,7 @@ class TypeResolver:
         "Bias": ir.MemorySpace.Bias,
         "LeftScale": ir.MemorySpace.LeftScale,
         "RightScale": ir.MemorySpace.RightScale,
+        "Scaling": ir.MemorySpace.Scaling,
         # Must mirror MemorySpaceToString (src/ir/memref.cpp) exactly: any name the
         # printer can emit has to parse back, or the round trip loses the space.
         "ScalarLocal": ir.MemorySpace.ScalarLocal,

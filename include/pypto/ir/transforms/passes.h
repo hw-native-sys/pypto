@@ -193,10 +193,17 @@ Pass MemoryReuse();
 Pass AllocateMemoryAddr();
 
 /**
+ * @brief Flatten Graph scope markers and convert Graph functions to Inline for TMR.
+ *
+ * Run before source scope outlining and InlineFunctions. HBG keeps Graph IR.
+ */
+Pass LowerGraphForRuntime();
+
+/**
  * @brief Eliminate FunctionType::Inline functions by splicing their bodies
  *        into every call site.
  *
- * Runs as the first pipeline pass. After this pass, no Function with
+ * After this pass, no Function with
  * func_type == Inline remains, and no Call expression resolves to one.
  * Subsequent passes do not need to handle Inline functions.
  *

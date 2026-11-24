@@ -34,6 +34,7 @@ from .diagnostics import (
     ParserTypeError,
     concise_error_message,
 )
+from .dispatch_semantics import validate_placement_callee
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 from .parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
 from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
@@ -1266,6 +1267,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # can use return type information from earlier functions
             functions: list[ir.Function] = []
             gvar_to_func: dict[ir.GlobalVar, ir.Function] = {}
+            pending_placements: list[tuple[ir.Level | None, ir.GlobalVar, ir.Span]] = []
             external_functions: dict[str, ir.Function] = {}
 
             # Pre-scan: collect reserve_buffer metadata from all functions so that
@@ -1400,9 +1402,9 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
 
                 ir_func = _bind_jit_submit_returns(ir_func, submit_return_arities.get(ir_func.name))
                 functions.append(ir_func)
+                pending_placements.extend(parser.bindings.pending_placements)
                 # Update gvar_to_func map so subsequent functions can use this function's return type
-                gvar = global_vars[ir_func.name]
-                gvar_to_func[gvar] = ir_func
+                gvar_to_func[global_vars[ir_func.name]] = ir_func
 
                 # Merge external functions discovered by the parser.
                 # The parser already validates against global_vars within each method,
@@ -1416,6 +1418,9 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         )
                     external_functions[ext_name] = ext_func
 
+            for caller_level, target, span in pending_placements:
+                validate_placement_callee(caller_level, gvar_to_func[target], span)
+
             # Combine internal and external functions
             all_functions = functions + list(external_functions.values())
 
@@ -1423,9 +1428,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # class's indentation as a character count; Span columns are
             # 1-indexed, so a class at the left margin starts at column 1.
             program_span = ir.Span(source_file, starting_line, col_offset + 1)
-            prog = ir.Program(all_functions, c.__name__, program_span)
-
-            return prog
+            return ir.Program(all_functions, c.__name__, program_span)
 
         except ParserError as e:
             # Attach source lines if not already present

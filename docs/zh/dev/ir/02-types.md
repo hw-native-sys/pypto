@@ -604,6 +604,7 @@ class MyProgram:
 | 值 | 说明 |
 | -- | ---- |
 | `DDR` | 主存储器（片外） |
+| `Scaling` | Packed 64 位 Fixpipe 控制字。参见 [C2V Fixpipe 契约](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-契约)。 |
 | `Vec` | 向量/统一缓冲区（片上） |
 | `Mat` | 矩阵/L1 缓冲区 |
 | `Left` | 左矩阵操作数缓冲区 |

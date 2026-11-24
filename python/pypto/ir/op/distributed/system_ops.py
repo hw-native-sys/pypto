@@ -79,11 +79,20 @@ def defer_wait_event(event: Expr, session: Expr | None = None, *, span: Span | N
     return _ir_core.create_op_call("pld.system.defer_wait_event", args, {}, actual_span)
 
 
+def num_workers(*, span: Span | None = None) -> Call:
+    """Build the orchestration immediate-child count query, returning INT64.
+
+    Context legality is checked by the parser and the IR verifier. HOST counts
+    local devices; CLUSTER_0 counts nodes, independently of communication ranks.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.system.num_workers", [], {}, actual_span)
+
+
 def world_size(*, span: Span | None = None) -> Call:
     """Build a ``pld.system.world_size()`` Call returning ``ScalarType(INT64)``.
 
-    Host-only — the parser already validates the call site, so this builder
-    is unconditional.
+    The DSL parser checks the HOST or CLUSTER_0 call site.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("pld.system.world_size", [], {}, actual_span)
@@ -201,6 +210,7 @@ __all__ = [
     "make_session",
     "notify",
     "nranks",
+    "num_workers",
     "rank",
     "wait",
     "wait_event",

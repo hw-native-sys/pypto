@@ -22,7 +22,8 @@
 
 | 名称 | 签名 | 描述 |
 | ---- | ---- | ---- |
-| `world_size` | `() -> Scalar` | **仅限 host。** 分布式执行中的 rank 数量。 |
+| `world_size` | `() -> Scalar` | 分布式执行中的 rank 数量，返回 `INT64`。可在 HOST 或 CLUSTER_0 编排中调用。 |
+| `num_workers` | `() -> Scalar` | 直属 worker 数量，返回 `INT64`。可在 HOST 或 CLUSTER_0 编排中调用。 |
 | `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | 提升为 `CommCtx` 句柄。host 编排器和 InCore 代码均可用。 |
 | `rank` | `(ctx: Ctx) -> Scalar` | **仅限 InCore。** 本地 rank 索引。 |
 | `nranks` | `(ctx: Ctx) -> Scalar` | **仅限 InCore。** 通信组中 rank 数量。 |
@@ -38,7 +39,7 @@
 | 名称 | 签名 | 描述 |
 | ---- | ---- | ---- |
 | `window` | `(buf: Ptr, shape, *, dtype) -> DT` | 物化为 `DistributedTensor` 视图，`buf` 来自 `alloc_window_buffer`。 |
-| `alloc_window_buffer` | `(size, *, name="") -> Ptr` | 分配每 rank 一份的 HCCL window buffer。**size 以字节为单位。** `name` 由解析器从赋值左侧注入——不要手动传入。 |
+| `alloc_window_buffer` | `(size, *, name="") -> Ptr` | 在 HOST 或 CLUSTER_0 编排中声明每个 rank 的 HCCL window buffer。**size 以字节为单位。** `name` 由解析器从赋值左侧注入——不要手动传入。 |
 | `alloc_window_buffer` | `(shape, *, dtype, name="") -> Ptr` | 便捷重载：自动计算 `size = prod(shape) x dtype.get_byte()`。 |
 
 ## Notify & Wait：信号握手

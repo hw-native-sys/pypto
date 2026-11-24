@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -38,9 +39,11 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -618,6 +621,13 @@ CallPtr RebuildCallWithSplit(const CallPtr& call, int split_code) {
   }
   if (!has_split) {
     new_kwargs.emplace_back("split", std::any(split_code));
+  }
+  // Standalone split lowering has already assigned the matching AIV's box bands.
+  if (split_code == kSplitUpDown && IsOp(call, "tile.tpush_to_aiv") && !call->HasKwarg("lane_stride") &&
+      PassContext::Current()->GetBackendHandler()->SplitsCubeToVectorTransportInHardware()) {
+    if (auto stride = cross_core_pipe::GetA5C2VRowTailBoxStride(call->args_[0]->GetType())) {
+      new_kwargs.emplace_back("lane_stride", *stride);
+    }
   }
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->GetType(), call->span_);
 }

@@ -15,7 +15,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from pypto import DataType, ir
+from pypto import DataType, backend, ir
 from pypto.debug import torch_codegen
 from pypto.debug.torch_codegen import TorchCodegen
 
@@ -1315,6 +1315,40 @@ def test_cross_core_split_merge_preserves_region_attrs():
     assert tuple(merged.shape) == (2, 4)
     assert getattr(merged, "_pypto_valid_shape", None) == (2, 3)
     assert getattr(merged, "_pypto_full_shape", None) == (2, 4)
+
+
+@pytest.mark.parametrize("rows", [96, 160, 192])
+def test_cross_core_split_valid_rows_uses_matmul_result_type(rows):
+    """Matmul carries runtime row validity in IR even when its Torch result has no tile attribute."""
+
+    @pl.program
+    class Producer:
+        @pl.function(type=pl.FunctionType.AIC)
+        def produce(
+            self,
+            lhs: pl.Tensor[[192, 16], pl.FP32],
+            rhs: pl.Tensor[[16, 16], pl.FP32],
+            valid_rows: pl.Scalar[pl.INDEX],
+        ):
+            left = pl.move(
+                pl.load(lhs, [0, 0], [192, 16], valid_shape=[valid_rows, 16]), target_memory=pl.Mem.Left
+            )
+            right = pl.move(pl.load(rhs, [0, 0], [16, 16]), target_memory=pl.Mem.Right)
+            acc = pl.matmul(left, right)
+            pl.tpush_to_aiv(acc, split=1)
+
+    namespace: dict[str, Any] = {}
+    exec(torch_codegen(Producer, backend_type=backend.BackendType.Ascend950), namespace)  # noqa: S102
+    lhs = torch.arange(192 * 16, dtype=torch.float32).reshape(192, 16)
+    rhs = torch.eye(16)
+    namespace["produce"](lhs, rhs, rows)
+    half = rows // 2
+    for lane in (0, 1):
+        namespace["_set_subblock_idx"](lane)
+        payload = namespace["_cross_core_rt"].pop_from_aic(1)
+        assert payload.shape == (96, 16)
+        assert getattr(payload, "_pypto_valid_shape", None) == (half, 16)
+        torch.testing.assert_close(payload[:half], lhs[lane * half : (lane + 1) * half])
 
 
 def test_cross_core_rebalanced_split_slices_at_the_box_but_starts_at_the_stride():

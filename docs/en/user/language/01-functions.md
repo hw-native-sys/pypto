@@ -73,7 +73,7 @@ core levels:
 | `@pl.jit.incore` | `InCore`, `AIC`, `AIV`, or `Group` | A device kernel; explicit `level=AIC` / `AIV` selects that core kind, and `level=CORE_GROUP` co-schedules explicit peers |
 | `@pl.jit.inline` | `Inline` | Helper spliced into every call site by `InlineFunctions` |
 | `@pl.jit.opaque` | `Opaque` | A separate IR function that may hold orchestration loops and `pl.at` scopes |
-| `@pl.jit.graph` | `Graph` | A recordable orchestration fragment — the `host_build_graph` runtime records its task topology on the first call and replays it after, so N calls cost one graph build rather than N. Requires compiling under `RuntimeKind.HOST_BUILD_GRAPH` |
+| `@pl.jit.graph` | `Graph` | A recordable orchestration fragment. `host_build_graph` records and replays its task topology. `tensormap_and_ringbuffer` inlines the fragment and submits its tasks each time |
 
 `@pl.jit.incore` without a level (or with `level=pl.Level.CHIP_DIE`) keeps the
 ordinary `InCore` kind. For a manual cross-core protocol, use
@@ -85,22 +85,25 @@ the normal JIT specialization and compilation path.
 When factories produce same-named peers, JIT resolves `peer_func` within each
 Group and rewrites it to that peer's generated name, including aliased calls.
 
-`@pl.jit.graph` has a scope form: `with pl.graph("name"):` marks a region *in place*
-instead of splitting it into a function. The two compile to the same thing — the region is
-outlined into a Graph function named after `name` — so the choice is ergonomic. Use the
-decorator when the layer is already its own function; use the scope when the region is a
-slice of a larger orchestration body you would rather not split up:
+Use `@pl.jit.graph` for an orchestration helper or `with pl.graph("name"):` to
+mark a region inside a larger orchestration body. Both forms select their
+execution path from the [compile target](../execution/00-compile.md).
+`host_build_graph` outlines the scope into a Graph function and records each
+fragment's task topology for replay. `tensormap_and_ringbuffer` expands Graph
+calls and scope bodies into the surrounding orchestration, which submits the
+original tasks on each execution. Loops and branches inside the fragment remain
+part of that orchestration.
 
 ```python
 @pl.jit
 def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
     for layer in pl.range(40):
-        with pl.graph("decoder_layer"):        # recorded once, replayed 39 times
+        with pl.graph("decoder_layer"):
             ...
     return hidden
 ```
 
-The name is required and becomes the recorded graph's identity, so keep it stable. A Graph
+The name is required and identifies the function outlined for HBG. A Graph
 region cannot nest inside another Graph region, nor inside `pl.at` / `pl.cluster` /
 `pl.spmd` — those become a single device task, whereas a Graph region records a topology of
 them. All three are compile errors.
@@ -109,7 +112,7 @@ Orchestration codegen currently supports bounded `for ... in pl.range(...)`
 loops, but rejects `while` loops, including Graph dispatches inside them.
 Dynamic loops can be placed inside an InCore kernel.
 
-Inside an `@pl.program` class, launch a Graph method with
+For `host_build_graph`, inside an `@pl.program` class, launch a Graph method with
 `pl.submit(self.layer, ..., deps=[producer])` under a manual scope. This Submit
 form requires a `self.<kernel>` method reference. A JIT entry may submit a
 `@pl.jit.graph` dependency by name. JIT specializes it and supplies the method
@@ -122,7 +125,19 @@ the entire invocation completes, including on the first recording. Explicit
 predecessors order that outer task; they are not stored as internal edges of the
 recorded Definition. Graph functions still write into caller-supplied tensors;
 computed values and recorded-internal TaskIds cannot be returned to the caller.
-Definition reuse is within one orchestration run, not across separate L2 calls.
+The runtime reuses the Definition within an orchestration run.
+
+For `tensormap_and_ringbuffer`, call the Graph as an ordinary function or use a
+Graph scope without an outer dependency or completion capture. The compiler
+rejects `pl.submit` targeting a Graph and a Graph scope with `deps=` or `as done`
+that would require a separate outer task. Dependencies and synchronization
+written on tasks inside the fragment retain their ordinary semantics. With
+`dumps=`, the dump marks follow the consuming dispatches inside the fragment.
+
+On TMR, a Graph call or `with pl.graph(...)` region inside `pl.manual_scope()`
+raises a compile error, including when reached through an Inline helper. Graph
+bodies can still contain their own manual scopes under the ordinary runtime
+scope rules.
 
 Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are auto-discovered from
 the entry's body — call them by name. Functions passed to `pl.submit` or
@@ -180,7 +195,7 @@ silently folding into one program.
 
 ### Explicit dependencies on a Graph scope
 
-Use `with pl.graph("layer", deps=[ready]) as done:` to wait for preceding tasks
+On HBG, use `with pl.graph("layer", deps=[ready]) as done:` to wait for preceding tasks
 and capture completion of the whole Graph. The scope uses the same existing
 Submit metadata as `pl.at`/`pl.spmd`; the completion is valid for the first
 recording as well as cached invocations in that orchestration run.

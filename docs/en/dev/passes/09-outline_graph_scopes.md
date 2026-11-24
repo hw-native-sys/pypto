@@ -7,7 +7,9 @@ scope form and `@pl.jit.graph` converge into one representation.
 
 This pass transforms `GraphScopeStmt` nodes — produced by
 `with pl.graph("name"):` — into `Function(Graph)` definitions and replaces each
-scope with a Call or Submit to the outlined function.
+scope with a Call or Submit to the outlined function. In the default TMR
+pipeline, [LowerGraphForRuntime](01-lower_graph_for_runtime.md) lowers Graph
+scopes before this pass. HBG uses the outliner to prepare them for recording.
 
 Its entire purpose is convergence. After this pass, a region the user marked in
 place has the same shape as a function the user decorated with `@pl.jit.graph` —

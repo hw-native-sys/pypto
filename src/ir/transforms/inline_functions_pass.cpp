@@ -9,7 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -133,14 +135,14 @@ std::vector<std::string> InlineExpansionOrder(
 // =============================================================================
 
 // Process-wide counter ensuring distinct fresh names across multiple call
-// sites of the same inline function. Pass execution is sequential, so a
-// plain static int suffices.
+// sites of the same inline function, including separate compilations running
+// on different threads.
 //
 // Preserve auto-name role/version suffixes for downstream renamers. Ordinary
 // names use an underscore-safe join so `_` stays valid and `a__b` stays invalid.
 std::string FreshName(const std::string& orig) {
-  static int counter = 0;
-  const auto suffix = "inline" + std::to_string(counter++);
+  static std::atomic<uint64_t> counter{0};
+  const auto suffix = "inline" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
   const auto parsed = auto_name::Parse(orig);
   if (parsed.role.has_value() || parsed.version.has_value()) {
     return auto_name::AddQualifier(orig, suffix);
@@ -1190,10 +1192,7 @@ class InlineCallsMutator : public IRMutator {
     auto renamed_body = DeepClone(callee->body_, seed, /*clone_def_vars=*/true, FreshName).cloned_body;
     // Transfer before nested inlining: a nested helper may introduce another
     // local handle and needs the tag on its call to map that handle in turn.
-    if (!dump_vars.empty()) {
-      InlineDumpVarTransfer attacher(std::move(dump_vars));
-      renamed_body = attacher.VisitStmt(renamed_body);
-    }
+    renamed_body = transform_utils::TransferDispatchDumpVars(renamed_body, std::move(dump_vars));
     // Preserve seeded caller bindings even when a writeback refines
     // the RHS view; subsequent caller uses must still observe the rebinding.
     for (const auto& param : callee->params_) {
@@ -1496,7 +1495,7 @@ namespace pass {
  * @brief Pass that eliminates FunctionType::Inline functions by splicing their
  *        bodies at every call site.
  *
- * Runs as the first pipeline pass. Subsequent passes never observe Inline
+ * Subsequent passes never observe Inline
  * functions or Calls to them.
  *
  * Algorithm:
@@ -1610,6 +1609,12 @@ Pass InlineFunctions() {
 }  // namespace pass
 
 namespace transform_utils {
+StmtPtr TransferDispatchDumpVars(const StmtPtr& body, std::vector<VarPtr> dump_vars) {
+  if (dump_vars.empty()) return body;
+  InlineDumpVarTransfer transfer(std::move(dump_vars));
+  return transfer.VisitStmt(body);
+}
+
 ProgramPtr InlineRegScopeCalls(const ProgramPtr& program) {
   class RegScopeFinder : public IRVisitor {
    public:

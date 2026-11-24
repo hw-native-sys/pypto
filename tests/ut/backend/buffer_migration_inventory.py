@@ -364,6 +364,8 @@ MIGRATION_FAMILIES = (
             "system.tfree_to_aiv",
             "system.aic_initialize_pipe",
             "system.aiv_initialize_pipe",
+            "system.set_quant_scalar",
+            "system.set_quant_vector",
             "system.reserve_buffer",
             "system.import_peer_buffer",
         ),

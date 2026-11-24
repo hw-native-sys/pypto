@@ -17,6 +17,7 @@ PYPTO_VPTO_DEVICE_ID and a bounded PYPTO_VPTO_TIMEOUT.
 import json
 import os
 import runpy
+import shlex
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from pypto import CacheConfig
 from pypto.backend import BackendType
 from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
 from pypto.runtime._artifact_sources import read_kernel_config
+from pypto.runtime._device_image import device_object_exports
 from pypto.runtime.runtime_pin import check_runtime_pin
 from test_vpto_vf_onboard import FIXTURE, ROOT
 
@@ -53,9 +55,13 @@ def _environment() -> tuple[int, int, Path]:
     return device, timeout, output.resolve()
 
 
-def test_tile_adapter_persistent_onboard():
+# Cold, warm, mutated and relocated runs each check three inputs at 9 add or 16 overlap lengths.
+@pytest.mark.parametrize(
+    "example_name,checks", [("vf_emitc_vpto.py", 108), ("vf_adapter_ub_overlap.py", 192)]
+)
+def test_tile_adapter_persistent_onboard(example_name, checks):
     device, timeout, output = _environment()
-    example = ROOT / "examples/runtime/vf_emitc_vpto.py"
+    example = ROOT / "examples/runtime" / example_name
     runpy.run_path(str(FIXTURE / "test_validation.py"))["run"](
         output,
         "production-example",
@@ -63,9 +69,16 @@ def test_tile_adapter_persistent_onboard():
         timeout=timeout + 30,
     )
     result = json.loads((output / "example/result.json").read_text())
-    assert result["numerical_checks"] == 108
+    assert result["numerical_checks"] == checks
     assert result["production_tile_adapter"]
     assert result["compile_calls"] == 2
+    # Verify which compiler path produced the cold and helper-mutated images.
+    for index in (1, 2):
+        compilation = output / f"example/compilation-{index}"
+        command = shlex.split((compilation / "vpto_0.native.o.command.txt").read_text())
+        assert "--emit-vpto-device-object" in command
+        assert not (compilation / "vpto_0.ll.command.txt").exists()
+        assert device_object_exports((compilation / "vpto_0.native.o").read_bytes())
 
 
 def _prepare_multiple(directory: Path):

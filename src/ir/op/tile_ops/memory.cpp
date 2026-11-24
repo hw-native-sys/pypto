@@ -227,6 +227,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       break;
     }
   }
+  CHECK_SPAN(target_memory_opt != MemorySpace::Scaling, args[0]->span_)
+      << "tile.load cannot target Scaling. Load into Mat, then use tile.move to Scaling.";
   const bool is_mx_load =
       tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout);
   if (is_mx_load) {
@@ -717,6 +719,21 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   // Preserve pad value from input tile
   if (source_view.pad != PadValue::null) {
     tile_view.pad = source_view.pad;
+  }
+
+  if (space == MemorySpace::Scaling) {
+    // Fixpipe indexes packed controls as a flat channel row in 128-byte units.
+    // A partial valid extent would leave some of the control words uninitialized.
+    CHECK(tile_type->memory_space_ == MemorySpace::Mat && input_shape.size() == 2)
+        << "Fixpipe Scaling controls require a 2D Mat source";
+    CHECK(tile_type->dtype_ == DataType::INT64 || tile_type->dtype_ == DataType::UINT64)
+        << "Fixpipe Scaling controls require packed INT64/UINT64 payloads";
+    const auto error = tile_view_semantics::ValidateFixpipeControlRow(input_shape, source_view);
+    CHECK(!error) << "Fixpipe Scaling control row " << error;
+    CHECK(source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::none_box)
+        << "Fixpipe Scaling controls require a row-major unboxed Mat source";
+    CHECK(requested_blayout == TileLayout::row_major && requested_slayout == TileLayout::none_box)
+        << "Fixpipe Scaling controls require a row-major unboxed destination";
   }
 
   // MX LeftScale/RightScale must be !pto.f8E8M0 so EmitC maps loc=scaling → ScaleLeft

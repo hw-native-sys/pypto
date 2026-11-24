@@ -2242,18 +2242,7 @@ class Specializer:
         self._rename_map: dict[str, str] = {}
         self._graph_rebinds: dict[str, dict[str, str | int] | None] = {}
         self._submit_return_arities: dict[str, int] = {}
-        # Param order per function — lets the body transformer rewrite
-        # ``self.<dep>(a, out=out)`` keyword args into all-positional form
-        # (the parser rejects keyword args on inter-function calls).
-        self._dep_param_names: dict[str, list[str]] = {
-            ctx.func_name: list(ctx.param_names) for ctx in contexts
-        }
-        # Constexpr params per function. ``visit_Call`` drops their arguments
-        # when rewriting a call: the callee resolved them at compile time and no
-        # longer declares them, so passing one would be an arity mismatch.
-        self._dep_constexpr_params: dict[str, set[str]] = {
-            ctx.func_name: set(ctx.constexpr_values) for ctx in contexts
-        }
+        self._callee_contexts = {ctx.func_name: ctx for ctx in contexts}
         # generated-program absolute line → (orig_file, orig_line, orig_col),
         # built by specialize() so diagnostics map back to the user's .py (#1612).
         self._source_map: dict[int, tuple[str, int, int]] = {}
@@ -2583,8 +2572,7 @@ class Specializer:
             param_names=all_param_names,
             initial_used_names=all_defined,
             py_globals=ctx.py_globals,
-            dep_param_names=self._dep_param_names,
-            dep_constexpr_params=self._dep_constexpr_params,
+            callee_contexts=self._callee_contexts,
             dep_func_names=ctx.dep_func_names,
             dep_call_targets=(
                 _resolve_dep_call_targets(func_def, dep_names, ctx.dep_call_variants)

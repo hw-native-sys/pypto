@@ -282,17 +282,76 @@ is PyPTO's copy of PTOAS `verifyMatmulTypeTriple` and pto-isa `npu/a5/TMatmul.hp
 | FP16 x FP16 | FP32 | yes | yes | matmul, gemv |
 | BF16 x BF16 | FP32 | yes | yes | matmul, gemv |
 | FP32 x FP32 | FP32 | yes | yes | matmul, gemv |
-| FP8E4M3FN x FP8E4M3FN | FP32 | no | yes | matmul, mx |
-| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul |
-| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul |
-| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul |
-| HF8 x HF8 | FP32 | no | yes | matmul |
+| FP8E4M3FN x FP8E4M3FN | FP32 | no | yes | matmul, gemv, mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul, gemv |
+| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul, gemv |
+| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul, gemv |
+| HF8 x HF8 | FP32 | no | yes | matmul, gemv |
 
 So on Ascend950 `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`,
 `tile.batch_matmul*`, `tensor.matmul`, and `tensor.matmul_acc` accept **mixed FP8
 operands in either order**; the accumulator, the `matmul_acc` input, and the
 `matmul_bias` bias stay FP32. `tf32_mode` remains FP32-only, so an FP8 operand
 pair rejects it.
+
+The ordinary GEMV family — `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias` — is the
+`M == 1` specialization of that matmul and shares the table: `pto.tgemv`,
+`pto.tgemv.acc` and `pto.tgemv.bias` all verify their element types through the
+same `verifyMatmulTypeTriple`, and their a5 TileLib templates carry the matmul
+`MATMUL_*_DTYPES` signature lists. So the FP8 and HF8 pairs are available there
+too, with the same FP32 result, FP32 `gemv_acc` accumulator and FP32 `gemv_bias`
+bias. The **MX** GEMV ops are a different instruction with a different table and
+are not covered by these rows.
+
+GEMV's dtype check (`ValidateGemvInputDtypes`, `src/ir/op/tile_ops/matmul.cpp`)
+is a *closed* allow-list, unlike matmul's: GEMV never had the historical
+same-dtype escape hatch, so an unlisted pair is rejected in type deduction rather
+than passed down to PTOAS. It writes its pairs out longhand instead of querying
+`FindCubeOperandPair`, and a `static_assert` in the same file
+(`HandWrittenGemvListMatchesCubeTable`) holds the two descriptions to each other
+in both directions, with the accumulator dtype.
+
+That assertion is load-bearing, not tidiness. The `gemv` family bits on the five
+FP8 / HF8 rows have one remaining reader — codegen's `CheckMatmulOperandArch`,
+which looks the operand pair up in the `kGemv` rows and **returns without
+checking when it finds none**. A pair the longhand list accepted but the table
+did not carry would therefore lose its "FP8 needs the a5 backend" rejection
+silently and reach PTOAS on hardware that cannot multiply it, so that drift
+direction is pinned at compile time rather than left to review.
+
+##### A5 GEMV: the static-valid accumulator bridge
+
+An ordinary GEMV on Ascend950 also needs its accumulator **re-typed at the
+instruction**, independently of the operand dtype. PTOAS v0.72's
+`verifyGemvTileOperandsA5` chains into the *matmul* operand verifier to pick up
+the A5 layout rules, and inherits its shape rule — "static matmul tile shapes
+lhs[M,K], rhs[K,N], and dst[M,N]". That rule compares `getMatmulLogicalShapeVec`,
+which falls back to the *physical* extent whenever the type's valid is dynamic.
+PyPTO's generic `pto.alloc_tile` emits `v_row=?, v_col=?` and carries the live
+extent in separate `valid_row` / `valid_col` operands, and a GEMV result is the
+mandatory 16-row FP32 Acc box holding one logical row — so the rule compared lhs
+rows 1 against dst rows 16 and rejected every `pto.tgemv*` for a5, at every
+dtype. A2/A3 never reaches that rule: `verifyGemvTileOperandsA2A3` uses
+`verifyGemvValidShapes`, which compares *valid* rows only.
+
+`EmitStaticValidGemvAccView` (`src/backend/common/pto_ops_elementwise.cpp`)
+therefore emits, on a5 only, a zero-copy `pto.treshape` whose *result type*
+carries the accumulator's static valid extents — the same bridge `pto.tquant.mx`
+uses — and points the GEMV's `outs()` (and, for `.acc`, its `ins()` accumulator)
+at that view. The accumulator's own allocation and the downstream `pto.tstore`
+are untouched, and the emitted A2/A3 instruction is byte-for-byte unchanged.
+
+Two cases decline the bridge, both deliberately:
+
+| Case | Why |
+| ---- | --- |
+| Accumulator valid extents not compile-time constants | There is no static type to offer; PTOAS reports it rather than codegen inventing a constant |
+| Accumulator valid N narrower than its physical N | A static dst N turns on the rule's `rhs logical N == dst logical N` clause, and the rhs type's valid stays dynamic, so that clause would read the rhs's *physical* N — a fresh mismatch. A partially-valid N needs every GEMV operand re-typed, not just the accumulator |
+
+Physical K for a GEMV lhs is a function of the operand dtype: the Mat-to-Left
+extract (`TExtractToAVector`, pto-isa `npu/a5/TExtractCommon.hpp`) requires
+`Cols % (512 / sizeof(dtype)) == 0`, i.e. a whole 512-byte K block — K = 512 for a
+1-byte operand, 256 for 2-byte, 128 for 4-byte.
 
 The contract is split across two layers, because the legal set depends on the
 compilation target while type deduction does not see one. Type deduction
@@ -452,70 +511,27 @@ later unrolls the batched form into per-batch 2D ops.
 
 ### MX block-scale matmul (Ascend950)
 
-MX uses dedicated `LeftScale` / `RightScale` memory spaces and the `FP8E8M0`
-scale dtype. PyPTO supports host-prequant MXFP8 and an explicit FP4×FP8 conversion path on Ascend950 through
-the `matmul_mx` family. `InsertMxScaleAddr` (after `InferTileMemorySpace`)
-inserts the internal `tile.tget_scale_addr` bindings once operand memory
-spaces are resolved.
+Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` supports FP8E4M3FN on both sides. Both APIs also accept native packed FP4 (E2M1x2 or E1M2x2 on each side). For mixed FP4/FP8, cast the FP4 operand to FP8 explicitly. A5 can cast E2M1 directly to E4M3 for supported descriptors. Other packed-FP4-to-FP8 casts use a BF16/FP32 bridge. The conversion leaves scale values unchanged.
 
-| IR / DSL | Notes |
-| -------- | ----- |
-| `tile.load` of `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | The source TensorLayout carries the MX scale GM layout. Dtype is FP8E8M0, and strided sources are rejected. Public `pl.load` defaults an omitted target to `Mat`; raw IR must carry `target_memory=Mat`. |
-| `tile.move(..., target_memory=LeftScale/RightScale)` | Mat-to-Scale move with hardware-fixed row/row/32 (left) or col/col/32 (right) layout; the source Mat tile and layout overrides must match exactly. |
-| `tile.create(..., target_memory=LeftScale/RightScale)` | Not supported; load MX scale data into Mat and then move it into scale memory. |
-| `tile.matmul_mx` / `pl.tile.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; each FP8 operand independently accepts FP8E4M3FN or FP8E5M2. Packed FP4 accepts either format on each side. Mixed FP4/FP8 requires an explicit cast. FP4 shapes count carriers; inference expands the contiguous axis to logical M/K/N. FP8E8M0 scales use `[M, ceil(K/32)]` / `[ceil(K/32), N]`, and FP32 Acc uses `[M, N]`; scales must be distinct tiles. Physical logical `M % 16 == 0`, `K % 64 == 0`, `N % 32 == 0` (FP4 N % 64), with boxed-tile alignment also required. Valid K must preserve the physical scale-group count. Numeric checks apply to constant extents; PTOAS verifies symbolic geometry later. Native FP4 requires PTOAS #1700; see [FP4](../fp4.md). |
-| `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`; in-place through `set_output_reuses_input(0)`; accumulator physical and valid M/N must match the matmul output. |
-| `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`; bias is `[1, N]` FP32. |
-| `tile.tget_scale_addr` | Compiler-generated A5 binding from `LeftScale↔Left` or `RightScale↔Right`; DPS in-place on `dst_scale`. Users write only the `matmul_mx` family. |
+| IR / DSL | Contract |
+| -------- | -------- |
+| `tile.load`, `tile.move` | Load non-strided FP8E8M0 scales with TensorLayout `MX_A_ZZ` or `MX_B_NN` into Mat. `pl.load` defaults to Mat. Raw IR must specify `target_memory=Mat`. Move to `LeftScale` or `RightScale` instead of creating a tile there. The source and layout overrides must match row/row/32 (left) or col/col/32 (right). |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`. Use distinct FP8E8M0 scales of logical shape `[M, ceil(K/32)]` / `[ceil(K/32), N]` and FP32 Acc `[M,N]`. Logical physical M/K/N must align to 16/64/32 (FP4: 16/64/64), with additional boxed tile alignment. Valid K must preserve the physical scale-group count. PyPTO checks constant extents. PTOAS verifies symbolic geometry. |
+| `tensor.matmul_mx` | Static oriented 2D data, loaded to Mat before Left/Right staging. M/K/N align to 16/64/32 (FP4: 32/64/64). For FP4, the contiguous axis counts packed bytes: ND shapes `[M,K/2]` / `[K,N/2]`, DN `[M/2,K]` / `[K/2,N]`. Scales and FP32 output retain their logical shapes. The canonical M/K/N of 128/64/64 uses `[128,2]` / `[2,64]` scales in ZZ/NN for both FP8 and FP4. |
+| `tile.matmul_mx_acc` / `pl.matmul_mx_acc`, `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | Acc prepends an accumulator and updates it in place via `set_output_reuses_input(0)`. Its physical and valid M/N must match the result. Bias appends an FP32 `[1,N]` operand. |
+| `tile.tget_scale_addr` | Internal DPS binding that updates `dst_scale` in place (`LeftScale↔Left`, `RightScale↔Right`). `InsertMxScaleAddr` inserts it after `InferTileMemorySpace`. |
 
-The canonical shape is `M=128, K=64, N=64`, with FP8E4M3FN data,
-FP8E8M0 scales shaped `[128,2]` and `[2,64]`, and `mx_a_zz` / `mx_b_nn`
-host layouts. The left input may use either packed FP4 format when explicitly cast to FP8 first.
-Align M↑16, K↑64, and N↑32.
-
-MX tensor subviews are a legacy limitation. `tensor.slice`, `tensor.reshape`,
-`tensor.transpose`, `tensor.reinterpret_view`, and ordinary MX `tensor.view`
-reject MX-layout sources because the hardware path cannot represent a subview
-base offset. The one exception is a product-preserving FP8E8M0 shaped alias
-between packed ND backing and `MX_A_ZZ` / `MX_B_NN` (used for GM staging).
-`pld.tile.remote_load` also rejects MX layouts until its complete scale layout
-contract is implemented. `tensor.gather_row` / `tile.gather_row` likewise reject
-MX sources.
-
-Packed FP4 Tensor/Tile shapes, `valid_shape`, strides, and offsets count byte
-carriers. Torch E2M1 x2 tensors and explicitly annotated UINT8 carriers retain
-these dimensions through JIT and compiled calls without unit conversion.
-
-Explicit casts from either packed FP4 format to FP8 are legalized on A5 through
-BF16 and FP32. Scale values are unchanged because this numerically converts
-only the data operand. Native packed-FP4 tile matmul retains both packed operands.
-`pl.quant_mx` quantizes to MXFP8 from FP16, BF16 or FP32, and to E2M1 MXFP4 from FP16 or BF16;
-FP4 results require supported placement into Mat and Left/Right before tile matmul.
-See [FP4](../fp4.md) for
-quantization alignment and memory-planner requirements.
+- MX-layout sources reject `tensor.slice`, `tensor.reshape`, `tensor.transpose`, `tensor.reinterpret_view`, ordinary `tensor.view`, `pld.tile.remote_load`, and tensor/tile `gather_row`. The subview path cannot represent a base offset. GM staging supports product-preserving FP8E8M0 shaped aliases between ND backing and `MX_A_ZZ` / `MX_B_NN`.
+- FP4 Tensor/Tile shapes, `valid_shape`, strides, and offsets count byte carriers. Torch E2M1 x2 and explicitly annotated UINT8 retain these units in JIT and compiled calls. Native tile matmul expands the contiguous axis for logical M/K/N inference, and both native paths retain packed operands.
+- `pl.quant_mx` accepts FP16/BF16/FP32 for MXFP8 and FP16/BF16 for E2M1 MXFP4. FP4 results need supported Mat and Left/Right placement for tile matmul. See [FP4](../fp4.md) for alignment, memory planners, and the native FP4 geometry introduced in PTOAS #1700.
 
 #### MX / Ascend950: pto-isa constraints
 
-| Constraint | Detail |
-| ---------- | ------ |
-| Distinct scale buffers | Cube does not fold scales into Left/Right data. `TileType::ScaleLeft` / `ScaleRight` sidecars map to PyPTO `LeftScale` / `RightScale`. |
-| Payload | Scale is FP8E8M0; operands are FP8E4M3FN pairs or packed FP4 pairs (E2M1/E1M2). FP8E5M2 and mixed FP4/FP8 are rejected. K and scale-group counts use logical values; scale fractal is 32. |
-| Layouts | `mx_a_zz` is row-major ZZ; `mx_b_nn` is col-major NN; loads use `TLoadMxCube*` (AZZ2ZZ). |
-| `TMov` `CommonCheckMX` | Allows UINT8 Mat → FP8E8M0 ScaleLeft/Right; canonical path: ui8 Mat reshape then ui8→f8 Scale. |
-| Bind then fill | Fill **after** `GetScaleAddr(Left/Right)`; writing the provisional alloc address is orphaned once rebound. |
-| Alignment | Logical physical `M%16==0`, `K%64==0`, and `N%32==0` (FP4: `N%64==0`), plus boxed carrier-tile alignment. Numeric checks apply only to constant extents. |
+Cube uses separate `TileType::ScaleLeft` and `TileType::ScaleRight` buffers. The logical scale fractal is 32. Loads use `TLoadMxCube*` (AZZ2ZZ) for row-major `mx_a_zz` or col-major `mx_b_nn`. `TMov` `CommonCheckMX` allows UINT8 Mat to FP8E8M0 scale moves. Fill scales only after `GetScaleAddr(Left/Right)` binds their destination. The provisional allocation is no longer used after binding.
 
 #### MX / Ascend950: PTOAS constraints
 
-| Constraint | Detail |
-| ---------- | ------ |
-| Single `loc=scaling` | PTOAS has no distinct left/right scale locations; EmitC recovers ScaleLeft/Right. |
-| FP8E8M0 scaling dtype | UINT8 with `loc=scaling` is treated as Fixpipe scaling, so promote before entering LeftScale/RightScale. |
-| No Mat↔Scaling `treshape` | Different locs; reshape stays in Mat (ui8), then `tmov` into scaling. |
-| Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first. |
-| Order | PyPTO emits Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` reorders `tget_scale_addr` before it (ISA bind-then-fill). |
-| `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
-| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md). |
+PTOAS uses one `loc=scaling`. EmitC recovers the side. UINT8 in that location selects Fixpipe scaling, so promote during the shape-matched Mat-to-scale `tmov`. Reshape flat `[1,G]` scales to the logical A or B shape while they are still UINT8 in Mat. `PTOA5NormalizeTMovPass` moves `tget_scale_addr` before the scale fill. Codegen emits logical rank-2 `make_tensor_view` with `#pto.layout` (PTOAS InferPTOLayout and EmitC map it to physical packing). PTOAS supports `pto.tmatmul.mx`, `.acc`, `.bias`, `pto.tget_scale_addr`, and `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md).
 
 ### Tile-only GEMV family (A2/A3)
 
@@ -793,8 +809,10 @@ Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu` |
-| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu` |
+| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu`, `nosplit`, `acc_push_epilogue` |
+| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu`, `nosplit`, `acc_push_epilogue` |
+| `system.set_quant_scalar` | 1 (FP32 scalar) | Fixpipe scalar quant state | optional `id` matching a [Fixpipe epilogue](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-contract) |
+| `system.set_quant_vector` | 1 (Scaling INT64/UINT64 tile) | Fixpipe packed vector controls | optional `id` matching a [Fixpipe epilogue](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-contract) |
 
 - `slot_num` (when set, must be > 0) pins the GM ring-buffer slot count; omit it to let PTOAS pick its default (8 unidirectional, 4 per direction bidirectional).
 - `local_slot_num` (a2/a3 only, must be > 0 and `<= slot_num`) pins the local slot count.

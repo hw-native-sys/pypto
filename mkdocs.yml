@@ -311,6 +311,7 @@ nav:
       - Passes:
           - en/dev/passes/index.md
           - en/dev/passes/00-pass_manager.md
+          - en/dev/passes/01-lower_graph_for_runtime.md
           - en/dev/passes/01-outline_simt_scopes.md
           - en/dev/passes/02-inline_functions.md
           - en/dev/passes/03-unroll_loops.md

@@ -59,7 +59,7 @@ def entry(
 | `@pl.jit.incore` | `InCore`、`AIC`、`AIV` 或 `Group` | 设备 kernel；显式 `level=AIC` / `AIV` 选择相应核类型，`level=CORE_GROUP` 协同派发显式对端 |
 | `@pl.jit.inline` | `Inline` | 由 `InlineFunctions` 在每个调用点展开的辅助函数 |
 | `@pl.jit.opaque` | `Opaque` | 独立 IR 函数，可包含编排循环与 `pl.at` 作用域 |
-| `@pl.jit.graph` | `Graph` | 可录制的编排片段 —— `host_build_graph` runtime 在首次调用时录制其 task 拓扑、之后回放，因此 N 次调用只付一次建图代价。需要在 `RuntimeKind.HOST_BUILD_GRAPH` 下编译 |
+| `@pl.jit.graph` | `Graph` | 可录制的编排片段。`host_build_graph` 录制和回放任务拓扑。`tensormap_and_ringbuffer` 内联片段，每次调用时提交其中的任务 |
 
 不提供层级（或指定 `level=pl.Level.CHIP_DIE`）时，`@pl.jit.incore` 保持普通 `InCore` 类型。
 手写跨核协议时，可分别用 `@pl.jit.incore(level=pl.Level.AIC)` 和 `level=pl.Level.AIV` 定义
@@ -69,28 +69,29 @@ def entry(
 工厂函数生成同名对端时，JIT 在各自 Group 内解析 `peer_func`，并将其改写为对应的生成函数名，
 也支持组内通过别名调用对端。
 
-`@pl.jit.graph` 有一种作用域形式：`with pl.graph("name"):` 就地标记一个区域，而不必把它
-拆成独立函数。两者编译结果相同 —— 区域会被外提为一个以 `name` 命名的 Graph 函数 ——
-因此这只是书写习惯的选择。layer 本身已是独立函数时用装饰器；区域只是某个较大编排函数体
-中不愿拆出去的一段时用作用域：
+用 `@pl.jit.graph` 标记编排辅助函数，或用 `with pl.graph("name"):` 就地标记较大编排体中的一段。
+两种写法都根据[编译目标](../execution/00-compile.md)选择执行路径。`host_build_graph` 将
+作用域提取为 Graph 函数，录制片段的任务拓扑并供后续回放。`tensormap_and_ringbuffer` 将
+Graph 调用和作用域体展开到所属编排中，每次执行都提交原有任务。片段内部的循环和分支继续
+由编排处理。
 
 ```python
 @pl.jit
 def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
     for layer in pl.range(40):
-        with pl.graph("decoder_layer"):        # 录制一次，回放 39 次
+        with pl.graph("decoder_layer"):
             ...
     return hidden
 ```
 
-名字是必填的，并且成为所录制图的身份，因此请保持稳定。Graph 区域不能嵌套在另一个 Graph
+名字是必填的，用于标识 HBG 提取的函数。Graph 区域不能嵌套在另一个 Graph
 区域内，也不能嵌套在 `pl.at` / `pl.cluster` / `pl.spmd` 内 —— 后者会变成单个设备 task，
 而 Graph 区域录制的是 task 的拓扑。三种情况都是编译期错误。
 
 编排代码生成目前支持有界的 `for ... in pl.range(...)` 循环，
 但不支持 `while`，包括在其中提交 Graph。动态循环可放在 InCore kernel 内。
 
-在 `@pl.program` 类的手动作用域中，可以通过
+以 `host_build_graph` 为目标时，在 `@pl.program` 类的手动作用域中可以通过
 `pl.submit(self.layer, ..., deps=[producer])` 提交 Graph 方法。这种 Submit
 写法要求 `self.<kernel>` 方法引用。在 JIT 入口里，`pl.submit(layer, ..., deps=[producer])`
 可直接使用由 `@pl.jit.graph` 修饰的依赖，JIT 会将其转为方法引用。
@@ -99,7 +100,16 @@ def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
 `pl.submit` 的末尾 `TASK_ID` 结果与作用域的 `done` 均表示外层 Graph 任务；首次录制时也有效，只有整个调用完成后才完成。
 显式前驱约束的是这次调用的外层任务，不会进入已录制 Definition 的内部边。
 Graph 函数仍然写入调用方提供的张量，不能向调用方返回新计算的值或图内任务号。
-Definition 只在一次 orchestration run 内复用，不跨独立 L2 调用持久保存。
+运行时在一次编排执行中复用 Definition。
+
+以 `tensormap_and_ringbuffer` 为目标时，直接调用 Graph 函数，或使用无需外层依赖和完成号
+的 Graph 作用域。编译器会拒绝以 Graph 为目标的 `pl.submit`，以及通过 `deps=` 或
+`as done` 请求独立外层任务的 Graph 作用域。片段内部任务的依赖和显式同步沿用普通编排语义。
+`dumps=` 的标记会随片段内使用相应张量的派发传递。
+
+在 TMR 上，`pl.manual_scope()` 内的 Graph 调用和 `with pl.graph(...)` 区域会触发
+编译错误，经由 Inline 辅助函数进入的 Graph 也受此限制。Graph 体内可以声明符合普通
+运行时作用域规则的手动作用域。
 
 传给 `pl.submit` 或 `pl.spmd_submit` 的 JIT 依赖也会被发现；callee 的 constexpr
 参数参与特化，`deps` 等提交元数据仍保留在提交操作上。
@@ -143,7 +153,7 @@ def host_orch(
 
 ### Graph 范围的显式依赖
 
-使用 `with pl.graph("layer", deps=[ready]) as done:` 等待前驱任务，并捕获整个
+在 HBG 上，使用 `with pl.graph("layer", deps=[ready]) as done:` 等待前驱任务，并捕获整个
 Graph 的完成任务号。它复用 `pl.at`/`pl.spmd` 已有的 Submit 元数据；首次录制和
 同一次 orchestration run 内的缓存调用都能得到有效的外层完成号。
 

@@ -18,9 +18,8 @@ flowchart TD
   Caller --> EmitC[PTOAS EmitC 与 caller 同步]
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
-  Helper --> LLVM[PTOAS VPTO LLVM 与 VF 同步]
-  LLVM --> Symbols[检查 helper 外部符号]
-  Symbols --> HelperObj[Bisheng 设备 helper 对象]
+  Helper --> Native[PTOAS 插入 VF 同步并生成 AIV 对象]
+  Native --> HelperObj[通过 ld.lld -r 添加逻辑导出名]
   CallerObj --> Link[ld.lld: kernel_entry 位于首部]
   HelperObj --> Link
   Link --> ELF[验证链接后的设备 ELF]
@@ -79,9 +78,7 @@ PyPTO 不在调用前后添加固定的 `pipe_barrier(PIPE_ALL)`，正常的 ker
 helper 保持自动同步。合并诊断输出 `generate()`（含 `skip_ptoas=True`）
 拒绝手动作用域，须用 `generate_bundle()` 编译。调用方 effects、DMA 与 kernel
 尾部同步继续生效。
-PyPTO 将生成的 LLVM 交给 Bisheng，不再重新推导访存依赖或施加 LLVM 指令白名单。
-PTOAS/Bisheng 的错误会传递给调用者。下述独立的外部符号与设备镜像检查负责
-保证 helper 的打包契约。
+PTOAS 负责依赖分析，并按该 helper 的同步策略生成设备代码。编译器诊断会传递给调用者。
 
 自动模式下，索引 gather/scatter 依赖PTOAS v0.77 或更新版本，对同一 vecscope 内
 未知访存范围的 RAW/WAR/WAW 依赖进行保守同步。该版本包含
@@ -92,10 +89,15 @@ PyPTO 不再为每次索引访问添加 `VV_ALL` 屏障。Caller/helper 边界�
 ## 设备代码与 ABI
 
 LLVM 的 `ptr addrspace(6)`、PTO 的 `!pto.ptr<f32, ub>` 与 caller 的
-`__ubuf__ float*` 必须描述相同的 UB 地址空间和传参 ABI。Helper 编译保留
-`--cce-generic-addrspace=off`，使用 A5 vector 设备目标，生成设备对象而非 host fat
-object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helper 外部符号；相关编译选项
-全部参与二进制缓存标识。
+`__ubuf__ float*` 必须描述相同的 UB 地址空间和传参 ABI。PyPTO 对每个普通 VF helper 调用一次 PTOAS，
+传入 `--emit-vpto-device-object` 和该 helper 的同步策略。PTOAS 使用 SDK 选择的
+CANN 工具链生成可重定位的 AIV ELF。EmitC 调用方单独编译。
+
+若 PTOAS 生成的可见设备函数带有 CANN ABI 后缀（`.vector` 或 `_mix_aiv`），
+PyPTO 会通过可重定位链接补上逻辑名。例如，调用方可用 `helper` 引用对象中的
+`helper.vector`。最终设备链接会在调用方和所有 helper 对象中解析引用。
+缺少定义时，链接器会在报错中给出未解析的符号名。
+源码快照、编译器版本、选项和原生对象 ABI 版本均参与二进制缓存标识。
 
 运行时接收原始代码字节。本路径只提取 `.text`，因此链接后的镜像必须满足：
 
@@ -104,8 +106,8 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helpe
 - 没有未解析符号或剩余重定位。
 - 没有其他非空的已分配 section，包括 `.rodata`、`.data` 和 `.bss`。
 
-符号表和调试表可以留在 ELF 中，但不会装载。需要其他数据存储或 Bridge/外部函数
-的 helper 会被拒绝。结构检查不能证明任意手写机器码都与装载位置无关；helper
+符号表和调试表仅供构建时使用。运行所需的代码和数据都必须能随通过校验的
+`.text` 一起装载。结构检查不能证明任意手写机器码都与装载位置无关；helper
 仍必须遵守设备调用 ABI。
 
 ## 当前可执行子集
@@ -126,7 +128,7 @@ VF 调用和后续 Tile 消费者保持有效。在 `tfree` 前，调用方通�
 PTOAS 据此插入 MTE3 → V 事件对。显式使用流水线 flag 的调用方不支持这条路径，
 因为 PTOAS 可能跳过自动同步。参数支持的 Tile、跨行不连续或动态起点的 FIFO 窗口、
 未分组 peer、更广泛的 Group 组合、grouped SIMT、设备对象的 CPU 模拟执行、
-Bridge 调用及一般 helper 控制流仍不受支持。
+依赖额外运行时服务的 Bridge 操作及一般 helper 控制流仍不受支持。
 访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
 具体 dtype、mask 与索引访存契约见[寄存器操作参考](../language/06-register-operations.md)。
 

@@ -6,7 +6,10 @@ Eliminates `FunctionType.Inline` functions by splicing their bodies at every cal
 
 Functions decorated as `@pl.function(type=pl.FunctionType.Inline)` (or via the JIT-side `@pl.jit.inline`) are *source-level utilities*: each call site expands into a fresh, alpha-renamed copy of the body, with formal parameters substituted by actual-argument expressions. After this pass, no `FunctionType.Inline` function and no `Call` to one survives in the program — subsequent passes treat the spliced code as if it had been written inline at the call site.
 
-Runs immediately after `OutlineSimtScopes` in `OptimizationStrategy.Default` so downstream passes (`UnrollLoops`, `OutlineIncoreScopes`, …) never observe Inline functions.
+In `OptimizationStrategy.Default`, this pass runs after SIMT and register
+scope outlining and before `UnrollLoops`. It also expands Graph functions
+converted to Inline by [LowerGraphForRuntime](01-lower_graph_for_runtime.md)
+on TMR.
 
 **Produces**: `IRProperty.InlineFunctionsEliminated`.
 

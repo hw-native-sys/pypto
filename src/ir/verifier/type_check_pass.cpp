@@ -82,7 +82,7 @@ std::string ErrorTypeToString(ErrorType type) {
 
 namespace {
 
-/// What an ND argument of a ``device=`` dispatch hands an NZ parameter, from
+/// What an ND argument of a ``worker=`` dispatch hands an NZ parameter, from
 /// best to worst so the worst of several possible values wins.
 enum class NzDispatchArg {
   kWholeMatrices,  ///< A host parameter, or slices of one keeping its last two axes whole
@@ -135,7 +135,7 @@ class TypeChecker : public IRVisitor {
                                  bool is_submit);
 
   /**
-   * @brief Trace an ND argument of a ``device=`` dispatch back to what it hands
+   * @brief Trace an ND argument of a ``worker=`` dispatch back to what it hands
    * an NZ parameter
    */
   NzDispatchArg ClassifyNzDispatchArg(const ExprPtr& arg);
@@ -522,7 +522,7 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
     // ``OptimizeOrchTensors`` also rewrites such a parameter's view with
     // explicit strides, which is what makes the pattern lower correctly.
     if (*want == TensorLayout::DN || *got == TensorLayout::DN) continue;
-    // A ``device=`` dispatch crosses from a host driver into a device program,
+    // A ``worker=`` dispatch crosses from a host driver into a device program,
     // and what crosses it is a buffer: the driver never reads these bytes, it
     // only says which card they are on. The callee's parameter is therefore the
     // only claim about their order, and an ND argument is the absence of a
@@ -616,7 +616,7 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
 
 void TypeChecker::VisitExpr_(const CallPtr& op) {
   if (op) {
-    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrWorker));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, false);
   }
   IRVisitor::VisitExpr_(op);
@@ -624,7 +624,7 @@ void TypeChecker::VisitExpr_(const CallPtr& op) {
 
 void TypeChecker::VisitExpr_(const SubmitPtr& op) {
   if (op) {
-    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrWorker));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, true);
   }
   IRVisitor::VisitExpr_(op);

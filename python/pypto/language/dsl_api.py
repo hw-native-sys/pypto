@@ -834,48 +834,33 @@ class GraphContext:
 
 
 def graph(name: str, *, deps: list[Any] | None = None, dumps: list[Any] | None = None) -> GraphContext:
-    """Mark a repeated region of orchestration as one recordable graph.
+    """Mark an orchestration region for runtime-specific Graph lowering.
 
-    Under ``runtime="host_build_graph"`` the runtime records the region's task
-    topology on its first execution and reuses the Definition for matching
-    configurations and boundary metadata within the same orchestration run.
-    Repeated layers can then share one build and use N outer task slots instead
-    of N x (tasks per layer). A later program invocation records its own
-    Definitions; reusing a compiled program does not persist this runtime cache.
+    Under ``RuntimeKind.HOST_BUILD_GRAPH``, ``OutlineGraphScopes`` extracts the
+    region into a Graph function. The runtime records its task topology on first
+    use and replays the Definition for matching configurations and boundary
+    metadata within the same orchestration run. Replay updates tensor addresses
+    and boundary scalars.
 
-    ``pl.graph`` is the in-place form of ``@pl.jit.graph``: ``OutlineGraphScopes``
-    extracts the region into a Graph function named after ``name``, so the two
-    surfaces compile to the same thing. Reach for the scope form when the region
-    is a slice of a larger orchestration body that you would rather not split into
-    a separate function; reach for the decorator when the layer is already its own
-    function.
-
-    The recorded topology is fixed after the first execution: only tensor
-    addresses and boundary scalars are refreshed per replay. ``LegalizeGraphBoundary``
-    proves that statically and rejects at compile time whatever it cannot prove —
-    it never silently degrades to a wrong answer.
+    Under ``RuntimeKind.TENSORMAP_AND_RINGBUFFER``, the compiler expands the
+    region in place. The surrounding orchestration submits the individual tasks
+    each time. The same runtime choice applies to ``@pl.jit.graph`` functions.
 
     Args:
-        name: Region name. Must be a valid Python identifier; it becomes the
-            outlined function's name and hence the runtime's graph key, so keep
-            it stable across edits.
-        deps: Optional explicit predecessor TaskIds or TaskId arrays from this
-            orchestration run. They order this invocation's outer Graph task;
-            they do not become recorded-internal edges or cache-key fields.
-        dumps: Optional list literal of outer-scope tensor names to mark for
-            selective tensor dump on the Graph task itself (distinct from the
-            kernel dispatches recorded inside it) — the same surface as
-            ``pl.at(..., dumps=[...])``. This marks only this Graph launch.
-            A preceding ``pl.dump_tag(t)`` may also mark recorded kernel
-            dispatches and later consumers. The printer emits ``dumps=`` for
-            a scope carrying dump marks.
+        name: Required region name. Identifies the outlined function on HBG.
+        deps: Optional predecessor TaskIds or TaskId arrays that order the outer
+            Graph task on HBG. Specifying outer dependencies on TMR raises a
+            compile error.
+        dumps: Optional list literal of outer-scope tensor names for selective
+            tensor dumps. The marks apply to the outer Graph task on HBG and
+            follow the consuming dispatches inside the region on TMR.
 
-    ``with pl.graph(..., deps=[ready]) as done:`` binds ``done`` to completion
-    of the entire Graph, including its first recording. Keep internal TaskId
-    arrays local to the region; use this outer completion for later tasks.
+    On HBG, ``with pl.graph(..., deps=[ready]) as done:`` binds ``done`` to
+    completion of the entire Graph, including its first recording. TMR rejects
+    an outer completion capture at compile time.
 
     Returns:
-        Context manager with an optional outer completion TaskId capture.
+        Context manager for the Graph region.
 
     Raises:
         ParserSyntaxError: if written in a device-kernel body (InCore / AIC /

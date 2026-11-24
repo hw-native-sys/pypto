@@ -108,12 +108,16 @@ def tpush_to_aiv(
 ) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe.
 
+    On A5, a hand-written untyped UP_DOWN push of a compact FP32 Acc uses
+    half the valid rows as the partition stride when the columns are full
+    and the valid row count is positive and even.
+
     Args:
         tile: Tile data to push
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
             axes over an odd extent)
         lane_stride: Partition stride carried when a ragged boundary was
-            balanced across the two AIV lanes; omit for the box partition
+            balanced across the two AIV lanes, or to preserve an existing box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """

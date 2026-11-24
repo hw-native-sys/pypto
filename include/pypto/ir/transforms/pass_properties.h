@@ -24,7 +24,11 @@ namespace pass {
 /// for one pass.  Using `inline const` (not `constexpr`) because
 /// IRPropertySet's initializer_list constructor is not constexpr in C++17.
 
-// -- Inline-function elimination pass (runs first, before everything) ---------
+// LowerGraphForRuntime may introduce Inline functions when targeting TMR.
+inline const PassProperties kLowerGraphForRuntimeProperties{
+    .invalidated = {IRProperty::InlineFunctionsEliminated}};
+
+// -- Inline-function elimination pass -----------------------------------------
 
 // AccStorePhaseValid is first decidable after Inline helpers have been spliced
 // into their call sites. A helper may return a final phased accumulator value

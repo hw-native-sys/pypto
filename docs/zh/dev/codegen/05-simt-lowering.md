@@ -51,7 +51,7 @@ InsertSync 负责，PyPTO 不在 launch 周围添加固定屏障。Launch 结果
 
 LLVM 导出绕过 PTOAS 对象级 SIMT 大小修复。仅使用内建指令（intrinsics）的 helper
 继续通过 LLVM 导出和 Bisheng 编译；
-包含内联汇编的 SIMT 模块在完成相同的外部符号检查后，改走 PTOAS 原生设备对象输出，
+包含内联汇编的 SIMT 模块使用 PTOAS 原生设备对象输出，
 由 PTOAS 验证或修复 `VF_SIMT` 长度。PyPTO 通过可重定位链接，为产物中的 `.vector`
 或 `_mix_aiv` ABI 符号添加逻辑名称别名，并显式向 PTOAS 传递所选 SDK 的 CANN 安装目录。
 原生对象选项参与缓存标识；编译或别名链接失败时，不会回退到未经长度校验的 LLVM 编译。

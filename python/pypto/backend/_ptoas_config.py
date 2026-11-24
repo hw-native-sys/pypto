@@ -12,6 +12,7 @@
 import os
 
 PTOAS_TIMEOUT_ENV = "PYPTO_PTOAS_TIMEOUT_SECONDS"
+PTOAS_BUFFER_ID_SYNC_MARKER = "// pypto.ptoas_buffer_id_sync"
 
 
 def get_ptoas_timeout() -> int:

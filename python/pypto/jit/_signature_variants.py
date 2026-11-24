@@ -233,6 +233,7 @@ def build_contexts(
                         constexpr,
                         namespace,
                         local_names,
+                        orchestrator=dep._func_type == "orchestration",
                     )
                     if signatures[dep_id][0]
                     else {}

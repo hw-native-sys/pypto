@@ -441,19 +441,7 @@ def _jit_consume(x: pl.Tensor, y: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 
 def _jit_compute_chain(cb, kind):
-    cube, vector, mixed = _compute_kernels(cb)
-    provider = CANNBotDSLProvider()
-
-    @pl.jit.extern(binding=provider.bind(cube))
-    def native_cube(a: pl.Tensor, b: pl.Tensor, out: pl.Tensor): ...
-
-    @pl.jit.extern(binding=provider.bind(vector))
-    def native_vector(x: pl.Tensor, y: pl.Tensor, out: pl.Tensor): ...
-
-    @pl.jit.extern(binding=provider.bind(mixed))
-    def native_mixed(
-        a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, product: pl.Tensor, vector: pl.Tensor
-    ): ...
+    native_cube, native_vector, native_mixed = _compute_kernels(cb)
 
     @pl.jit
     def cube_chain(a: pl.Tensor, b: pl.Tensor, x: pl.Tensor, y: pl.Tensor, out: pl.InOut[pl.Tensor]):
@@ -532,6 +520,35 @@ def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
         vector = (x + y + 2) * (x + 1)
         lhs, rhs = {"aic": (product, product), "aiv": (vector, vector), "mixed": (product, vector)}[kind]
         torch.testing.assert_close(out, (lhs + rhs) * lhs, rtol=0, atol=0)
+
+
+@pytest.mark.platforms("a5", reason="CANNBotDSL JIT requires A5 text-only callbacks")
+@pytest.mark.parametrize("postponed", [False, True])
+def test_cannbotdsl_jit_constexpr_layout(tmp_path, test_config, postponed, monkeypatch):
+    from dataclasses import replace  # noqa: PLC0415
+
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    def copy_tile(x, out, width):
+        tile = cb.Buffer(cb.MemLoc.UB, cb.dtypes.float32, cb.make_layout((width,)))
+        cb.mem_copy(tile, x)
+        cb.vec_sync_all()
+        cb.mem_copy(out, tile)
+
+    # CANNBotDSL resolves postponed annotations in the kernel module namespace.
+    monkeypatch.setitem(globals(), "cb", cb)
+    copy_tile.__annotations__["width"] = "cb.Constexpr[int]" if postponed else cb.Constexpr[int]
+    native = cb.kernel(copy_tile)
+
+    @pl.jit
+    def entry(x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]):
+        native(x, out, 64)
+        return out
+
+    compiled = entry.compile(config=replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path)))
+    compiled.load()
 
 
 if __name__ == "__main__":

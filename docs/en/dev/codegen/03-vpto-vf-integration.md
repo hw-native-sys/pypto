@@ -20,9 +20,8 @@ flowchart TD
   Caller --> EmitC[PTOAS EmitC and caller synchronization]
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
-  Helper --> LLVM[PTOAS VPTO LLVM and VF synchronization]
-  LLVM --> Symbols[Check helper external symbols]
-  Symbols --> HelperObj[Bisheng device helper objects]
+  Helper --> Native[PTOAS inserts VF synchronization and emits an AIV object]
+  Native --> HelperObj[Add logical export names with ld.lld -r]
   CallerObj --> Link[ld.lld: kernel_entry first]
   HelperObj --> Link
   Link --> ELF[Validate linked device ELF]
@@ -90,10 +89,9 @@ so mixed policies work across separate helpers and artifact relocation. Old
 unmarked helpers retain automatic synchronization. Combined diagnostic
 `generate()` output, including `skip_ptoas=True`, rejects manual scopes; use
 `generate_bundle()` for their compilation. Caller effects, DMA and kernel-tail
-synchronization remain in force. PyPTO passes its LLVM output to Bisheng without
-reconstructing memory dependencies or imposing an LLVM instruction whitelist.
-PTOAS/Bisheng diagnostics propagate to the caller. The separate external-symbol
-and device-image checks below enforce the helper packaging contract.
+synchronization remain in force. PTOAS owns dependency analysis and emits the
+device code using the helper's synchronization policy. Compiler diagnostics
+propagate to the caller.
 
 In automatic mode, indexed gather/scatter rely on PTOAS v0.77 or newer for conservative
 RAW/WAR/WAW synchronization of unknown footprints within a vecscope. This
@@ -105,10 +103,18 @@ synchronization continue to use their existing mechanisms.
 
 The LLVM pointer `ptr addrspace(6)`, PTO `!pto.ptr<f32, ub>` and the caller's
 `__ubuf__ float*` must describe the same UB address space and parameter ABI.
-Helper compilation retains `--cce-generic-addrspace=off` and uses the A5 vector
-device target. It emits a device object, not a host fat object. LLVM export
-and Bisheng compilation are separate to check external helper symbols before linking;
-all relevant flags participate in the binary cache identity.
+PyPTO invokes PTOAS once per ordinary VF helper with
+`--emit-vpto-device-object` and the helper's synchronization policy. PTOAS uses
+the SDK's CANN installation and writes a relocatable AIV ELF. The EmitC caller
+is compiled separately.
+
+A relocatable link exposes the logical name of a visible device function when
+PTOAS emits it with a CANN ABI suffix (`.vector` or `_mix_aiv`). For example,
+the caller can reference `helper` when the object defines `helper.vector`.
+The final device link resolves references across the caller and all helpers.
+A missing definition produces a linker diagnostic naming the unresolved symbol.
+The source snapshot, compiler versions, options and native-object ABI version
+participate in the binary cache identity.
 
 The runtime consumes raw code bytes. This path extracts only `.text`, so the
 linked image must satisfy all of the following:
@@ -118,8 +124,8 @@ linked image must satisfy all of the following:
 - No unresolved symbols or remaining relocations.
 - No other nonempty allocated sections, including `.rodata`, `.data` or `.bss`.
 
-Symbol and debug tables may remain in the ELF but are not loaded. Helpers
-requiring separate data storage or Bridge/external functions are rejected.
+Symbol and debug tables are used only at build time. The loader requires all
+code and data needed at execution to fit the validated text-only image.
 Structural validation does not prove that arbitrary handwritten machine code
 is position independent; helpers still have to obey the device-call ABI.
 
@@ -143,7 +149,8 @@ an MTE3 → V event pair when a GM store still reads that slot. Caller code
 containing explicit pipe flags cannot use this path because PTOAS may skip
 automatic synchronization. Parameter-backed Tiles, strided or dynamic FIFO
 windows, ungrouped peers, broader Group layouts, grouped SIMT, CPU simulation
-of device objects, Bridge calls and general helper control flow remain unsupported.
+of device objects, Bridge operations requiring additional runtime services, and
+general helper control flow remain unsupported.
 Memory-mode and alignment constraints are checked by the
 frontend and toolchain; supported combinations require compiler and hardware
 coverage. See the [register operation reference](../language/06-register-operations.md)

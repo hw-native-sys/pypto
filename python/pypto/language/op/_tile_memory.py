@@ -485,7 +485,9 @@ def move(
     Args:
         tile: Input tile
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right,
-            .LeftScale, .RightScale)
+            .LeftScale, .RightScale, .Scaling)
+            Scaling takes a full-valid packed INT64/UINT64 Mat row of shape [1, N].
+            N is a positive multiple of 16. Both layouts are unboxed row-major with packed strides.
         blayout: Optional block layout for the destination tile
         slayout: Optional scatter layout for the destination tile
 
