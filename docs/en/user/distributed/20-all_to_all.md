@@ -212,8 +212,10 @@ For `B > P`, only AIVs `0..P-1` submit URMA work, one writer per remote rank.
 All B AIVs divide local receive rows evenly. Each AIV submits its remote
 transfers, copies its local rows, then waits for the final remote completions. A hidden row is never split
 between AIVs. All B AIVs participate in the barriers, including empty local
-workers; signal is INT32 `[P,S]` with `S >= B`, initially zero. L2 requires a
-compile-time core count. All ranks must agree
+workers; signal is INT32 `[P,S]` with `S >= B`, initially zero. L2 accepts a
+compile-time or runtime core count; a dynamic value's validity is the caller's
+responsibility (a non-positive value yields no launch, and the runtime still
+enforces admission). All ranks must agree
 on geometry, launch width and collective order.
 
 Counts must be in `[0,C]`, and each valid index must be in `[0,Nmax)`.

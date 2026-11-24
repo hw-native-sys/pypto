@@ -20,12 +20,14 @@ signature and directions, the argument order, and the absence of any residual
 public collective.
 """
 
+from typing import TypeGuard
+
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto._function_attrs import REQUIRE_CONTIGUOUS_OPERANDS_ATTR
 from pypto.language.parser.diagnostics import InvalidOperationError
-from pypto.pypto_core import ir, passes
+from pypto.pypto_core import DataType, ir, passes
 
 SIZE = 64
 NR = 2
@@ -34,6 +36,7 @@ TOTAL = NR * MAX_RECV
 
 _KERNEL_NAME = "__builtin_all_to_all_v__fp32"
 _ALL_TO_ALL_V = ir.get_op("pld.tensor.all_to_all_v").name
+_AVAILABLE_AIV_COUNT = ir.get_op("system.available_aiv_count").name
 
 
 def _build_program(core_num: int = 1):
@@ -99,6 +102,41 @@ def _collect_calls(stmt: ir.Stmt) -> list[ir.Call]:
 
 def _callee_names(func: ir.Function) -> list[str]:
     return [c.op.name for c in _collect_calls(func.body)]
+
+
+def _assert_no_nested_call_like(stmt: ir.Stmt) -> None:
+    """Fail if any Call/Submit argument or operand is itself a Call/Submit.
+
+    ``LegalizeSpmdLaunches``'s ``NoNestedCalls`` prerequisite requires every
+    Call/Submit to be a top-level statement value (an AssignStmt/EvalStmt RHS,
+    or a ReturnStmt value bound to one first); this walks binary/unary operands
+    and call-like arguments looking for a violation anywhere in ``stmt``.
+    """
+    nested: list[ir.Call | ir.Submit] = []
+
+    def _is_call_like(value: object) -> TypeGuard[ir.Call | ir.Submit]:
+        return isinstance(value, (ir.Call, ir.Submit))
+
+    class _Walker(ir.IRVisitor):
+        def visit_binary_expr(self, op: ir.BinaryExpr) -> None:
+            nested.extend(o for o in (op.left, op.right) if _is_call_like(o))
+            super().visit_binary_expr(op)
+
+        def visit_unary_expr(self, op: ir.UnaryExpr) -> None:
+            if _is_call_like(op.operand):
+                nested.append(op.operand)
+            super().visit_unary_expr(op)
+
+        def visit_call(self, op: ir.Call) -> None:
+            nested.extend(a for a in op.args if _is_call_like(a))
+            super().visit_call(op)
+
+        def visit_submit(self, op: ir.Submit) -> None:
+            nested.extend(a for a in op.args if _is_call_like(a))
+            super().visit_submit(op)
+
+    _Walker().visit_stmt(stmt)
+    assert not nested, [getattr(c, "op", c) for c in nested]
 
 
 def test_collective_becomes_a_local_builtin_kernel_call():
@@ -780,11 +818,111 @@ def test_core_num_above_int32_is_rejected(requested):
         passes.lower_l2_tensor_collectives()(_build_exchange(NR, 1, requested))
 
 
-def test_dynamic_core_num_is_rejected_with_guidance():
-    """A runtime ``core_num`` is out of scope for this cut and must say so."""
+def _build_dynamic_request(signal_stride: int = 4):
+    """A CHIP pipeline whose ``core_num`` is a runtime scalar, not a literal."""
 
     @pl.program
     class DynamicRequest:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, signal_stride], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            return pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n)
+
+    return DynamicRequest
+
+
+def test_dynamic_core_num_lowers_to_an_emitted_launch_width():
+    """A runtime ``core_num`` is admitted and its width becomes IR, not a fold.
+
+    This rail rejected a runtime ``core_num`` until RFC #2521 O2: the width has
+    to be computed somewhere, and the compiler cannot do it when ``L`` is only
+    known at run time. The replacement is orchestration arithmetic over the
+    signal's static ``NR``, so the attr carries an expression rather than a
+    ``ConstInt``.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_dynamic_request())
+    call = _kernel_call(after)
+    width = call.attrs["core_num"]
+    assert not isinstance(width, ir.ConstInt), width
+    # The width is the ``a2av_blocks_`` prelude Var, attached as computed. No
+    # positivity clamp: LegalizeSpmdLaunches owns the non-positive case.
+    assert isinstance(width, ir.Var), width
+    assert call.attrs["sync_start"] is True
+
+
+def test_dynamic_core_num_uses_the_static_rank_count():
+    """``P`` is the signal's static ``NR``, never a host CommCtx dereference.
+
+    Route B (RFC #2521 O2): the width arithmetic still emits a prelude, but it
+    is over the static ``NR`` the signal shape already carries. A CHIP
+    orchestration receives the per-rank *device* CommCtx pointer, so a
+    ``pld.system.nranks`` read here would fault on real hardware.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_dynamic_request())
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    assert "pld.system.get_comm_ctx" not in names, names
+    assert "pld.system.nranks" not in names, names
+    # The prelude is still emitted: the launch width is a bound arithmetic Var.
+    call = _kernel_call(after)
+    width = call.attrs["core_num"]
+    assert isinstance(width, ir.Var), width
+    assert width.name_hint.startswith("a2av_blocks_"), width.name_hint
+
+
+def _build_call_valued_width():
+    """A CHIP pipeline whose ``core_num`` is a scalar *call*, not a Var."""
+
+    @pl.program
+    class CallWidth:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            return pld.tensor.all_to_all_v(
+                stage, data, signal, counts, recv, core_num=pl.system.available_aiv_count()
+            )
+
+    return CallWidth
+
+
+def test_call_valued_core_num_is_bound_once():
+    """A call-valued request is bound before it is expanded into ``B``.
+
+    Splicing the call into the remainder, comparison and subtraction would
+    nest a Call under arithmetic (rejected by ``LegalizeSpmdLaunches``'s
+    ``NoNestedCalls`` prerequisite) and ``FlattenCallExpr`` would evaluate the
+    call three times instead.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_call_valued_width())
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    calls = [c.op.name for c in _collect_calls(pipeline.body)]
+    assert calls.count(_AVAILABLE_AIV_COUNT) == 1, calls
+    width = _kernel_call(after).attrs["core_num"]
+    assert isinstance(width, ir.Var), width
+    # The bound prelude leaves no Call nested under the width arithmetic.
+    passes.legalize_spmd_launches()(after)
+
+
+def _build_compound_call_valued_width():
+    """A CHIP pipeline whose ``core_num`` is arithmetic over a scalar call."""
+
+    @pl.program
+    class CompoundCallWidth:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_pipeline(
             self,
@@ -795,10 +933,657 @@ def test_dynamic_core_num_is_rejected_with_guidance():
             recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             n: pl.Scalar[pl.INDEX],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
-            return pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n)
+            return pld.tensor.all_to_all_v(
+                stage,
+                data,
+                signal,
+                counts,
+                recv,
+                core_num=n + pl.system.available_aiv_count(),
+            )
 
-    with pytest.raises(ValueError, match="a runtime core_num is not supported on this rail yet"):
-        passes.lower_l2_tensor_collectives()(DynamicRequest)
+    return CompoundCallWidth
+
+
+def test_compound_call_valued_core_num_hoists_the_call():
+    """``core_num = n + call()`` must bind the call out of the arithmetic.
+
+    Binding the whole ``Add`` would leave the Call nested in the assignment RHS:
+    ``LegalizeSpmdLaunches``'s ``NoNestedCalls`` prerequisite rejects it and
+    expression codegen cannot render it. Every Call subexpression is hoisted
+    first, in source order, and evaluated exactly once.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_compound_call_valued_width())
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    calls = [c.op.name for c in _collect_calls(pipeline.body)]
+    assert calls.count(_AVAILABLE_AIV_COUNT) == 1, calls
+    width = _kernel_call(after).attrs["core_num"]
+    assert isinstance(width, ir.Var), width
+    assert width.name_hint.startswith("a2av_blocks_"), width.name_hint
+
+    _assert_no_nested_call_like(pipeline.body)
+    # End-to-end gate: the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
+
+
+def test_dynamic_shape_param_keeps_its_identity_when_lifted():
+    """Hoisting must not rewrite a Var type that carries a ``tensor.dim`` call.
+
+    The lifted ``y`` param's type shape contains ``tensor.dim(x, 0)``. A naive
+    mutator rewrites that type and returns a fresh Var, so the lifted assignment
+    reads an undefined ``y_N`` instead of the param.
+    """
+    base = _build_dynamic_request()
+    pipeline = _get_func(base, "chip_pipeline")
+    assert pipeline is not None
+    span = ir.Span.unknown()
+    x = ir.Var("x", ir.TensorType([TOTAL, SIZE], DataType.FP32), span)
+    dim = ir.create_op_call("tensor.dim", [x, ir.ConstInt(0, DataType.INDEX, span)], {}, span)
+    flat_type = ir.TensorType([dim, ir.ConstInt(SIZE, DataType.INDEX, span)], DataType.FP32)
+    y = ir.Var("y", flat_type, span)
+    ret = pipeline.body
+    assert isinstance(ret, ir.ReturnStmt)
+    collective = ret.value[0]
+    body = ir.ReturnStmt([y, collective], span)
+    rewritten = ir.Function(
+        pipeline.name,
+        list(
+            zip(
+                [*pipeline.params, x, y],
+                [*pipeline.param_directions, ir.ParamDirection.In, ir.ParamDirection.In],
+            )
+        ),
+        [flat_type, collective.type],
+        body,
+        pipeline.span,
+        type=ir.FunctionType.Orchestration,
+    )
+    before = ir.Program([rewritten], base.name, base.span)
+
+    after = passes.lower_l2_tensor_collectives()(before)
+    result = _get_func(after, "chip_pipeline")
+    assert result is not None
+
+    assigned = []
+
+    class _Assigns(ir.IRVisitor):
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+            assigned.append(op)
+            super().visit_assign_stmt(op)
+
+    _Assigns().visit_stmt(result.body)
+    # The lifted copy must use the original `y` param, not a fresh `y_N` whose
+    # defining assignment does not exist.
+    assert any(isinstance(op.value, ir.Var) and op.value.name_hint == "y" for op in assigned), [
+        (op.var.name_hint, type(op.value).__name__) for op in assigned
+    ]
+    assert not any(op.var.name_hint.startswith("y_") for op in assigned), assigned
+
+
+def test_literal_core_num_needs_no_runtime_prelude():
+    """A literal request folds ``B`` at compile time and emits no rank read.
+
+    Keeping the static path free of the prelude is what keeps its generated
+    orchestration byte-identical to the pre-O2 output.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_exchange(NR, 8, 8))
+    call = _kernel_call(after)
+    assert isinstance(call.attrs["core_num"], ir.ConstInt), call.attrs
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    assert "pld.system.get_comm_ctx" not in names, names
+    assert "pld.system.nranks" not in names, names
+
+
+def test_two_returned_collectives_keep_their_source_order():
+    """A runtime width must not hoist its dispatch ahead of an earlier one.
+
+    One runtime ``core_num`` forces its dispatch into the prelude. If a literal
+    dispatch returned alongside it were left inline, the runtime one would be
+    submitted first — reversing the order the author wrote and the task edges
+    derived from it. Both are lifted, in source order.
+    """
+
+    @pl.program
+    class TwoCollectives:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        # Two dispatches x the collective's five-operand ABI. The windows cannot
+        # be shared: InOutUseDiscipline rejects a second call reading the
+        # pre-call variable, so the count is fixed by the op, not by the test.
+        def chip_pipeline(  # noqa: PLR0913
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            stage2: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data2: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal2: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts2: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv2: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[
+            pld.DistributedTensor[[TOTAL, SIZE], pl.FP32],
+            pld.DistributedTensor[[TOTAL, SIZE], pl.FP32],
+        ]:
+            # Returned inline, not bound first: binding them would route through
+            # the AssignStmt visitor and leave this branch untested.
+            # Literal first, runtime second — the order under test.
+            return (
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=2),
+                pld.tensor.all_to_all_v(stage2, data2, signal2, counts2, recv2, core_num=n),
+            )
+
+    after = passes.lower_l2_tensor_collectives()(TwoCollectives)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    calls = [c for c in _collect_calls(pipeline.body) if c.op.name == _KERNEL_NAME]
+    assert len(calls) == 2, [c.op.name for c in _collect_calls(pipeline.body)]
+    # The literal dispatch was written first and must submit first; the runtime
+    # one follows it, with its width prelude attached immediately before it.
+    assert isinstance(calls[0].attrs["core_num"], ir.ConstInt), calls[0].attrs
+    assert isinstance(calls[1].attrs["core_num"], ir.Var), calls[1].attrs
+    assert calls[1].attrs["core_num"].name_hint.startswith("a2av_blocks_")
+
+
+@pytest.mark.parametrize("runtime_width", [False, True])
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_ordinary_return_call_keeps_its_order_before_a_collective(runtime_width, use_submit):
+    """A read written before an exchange must still read the original data.
+
+    Return the calls inline so the pass sees the unflattened ReturnStmt that
+    used to hoist only the collective. The literal case pins the path that
+    needs no prelude and must keep both calls inline.
+    """
+
+    @pl.program
+    class ReadThenExchange:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            data: pld.DistributedTensor[[TOTAL, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[TOTAL, SIZE], pl.FP32]:
+            chunk = pl.load(data, [0, 0], [TOTAL, SIZE])
+            out = pl.store(chunk, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[TOTAL, SIZE], pl.FP32], pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]]:
+            return (
+                self.consume_step(data, out),
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n),
+            )
+
+    before = ReadThenExchange
+    if not runtime_width:
+
+        class LiteralWidth(ir.IRMutator):
+            def visit_call(self, op):
+                if op.op.name != _ALL_TO_ALL_V:
+                    return super().visit_call(op)
+                return ir.Call(
+                    op.op,
+                    [*list(op.args)[:5], ir.ConstInt(2, pl.INDEX, op.span)],
+                    kwargs=op.kwargs,
+                    attrs=op.attrs,
+                    type=op.type,
+                    span=op.span,
+                )
+
+        before = LiteralWidth().visit_program(before)
+    if use_submit:
+        # Submit has a distinct IR kind and a trailing TaskId in its result.
+        # Build that unflattened return directly: the DSL normally binds the
+        # submit's tuple before returning its elements, hiding this edge case.
+        pipeline = _get_func(before, "chip_pipeline")
+        assert pipeline is not None
+        returned = pipeline.body
+        assert isinstance(returned, ir.ReturnStmt)
+        call, collective = returned.value
+        assert isinstance(call, ir.Call)
+        submit_type = ir.TupleType([call.type, ir.ScalarType(pl.TASK_ID)])
+        submit = ir.Submit(call.op, list(call.args), [], submit_type, call.span)
+        body = ir.RuntimeScopeStmt(
+            manual=True, body=ir.ReturnStmt([submit, collective], returned.span), span=returned.span
+        )
+        rewritten = ir.Function(
+            pipeline.name,
+            list(zip(pipeline.params, pipeline.param_directions)),
+            [submit_type, collective.type],
+            body,
+            pipeline.span,
+            type=ir.FunctionType.Orchestration,
+        )
+        consumer = _get_func(before, "consume_step")
+        assert consumer is not None
+        before = ir.Program([consumer, rewritten], before.name, before.span)
+
+    if use_submit:
+        # An inline returned Submit is valid IR, but the text parser requires
+        # submit tuple unpacking. Keep property verification and use the binary
+        # roundtrip for this direct-IR case, including the unchanged literal path.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.lower_l2_tensor_collectives()(before)
+        ir.assert_structural_equal(after, ir.deserialize(ir.serialize(after)))
+    else:
+        after = passes.lower_l2_tensor_collectives()(before)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = []
+
+    class CallLikeCollector(ir.IRVisitor):
+        def visit_call(self, op):
+            names.append(op.op.name)
+
+        def visit_submit(self, op):
+            names.append(op.op.name)
+
+    CallLikeCollector().visit_stmt(pipeline.body)
+    assert names.index("consume_step") < names.index(_KERNEL_NAME), names
+    if runtime_width:
+        assert names.count(_KERNEL_NAME) == 1, names
+    else:
+        assert names == ["consume_step", _KERNEL_NAME], names
+
+
+def test_tuple_projected_call_is_lifted_before_a_runtime_collective():
+    """A call nested in a returned expression is lifted too.
+
+    ``return self.consume_pair(...)[0], all_to_all_v(..., core_num=n)`` has a
+    ``TupleGetItemExpr`` on the first value, not a direct ``Call``. If that
+    value stayed inline while the collective was lifted, the consumer would run
+    after the exchange it was written before.
+    """
+
+    @pl.program
+    class ProjectedCall:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_pair(
+            self,
+            data: pld.DistributedTensor[[TOTAL, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> tuple[pl.Tensor[[TOTAL, SIZE], pl.FP32], pl.Tensor[[TOTAL, SIZE], pl.FP32]]:
+            chunk = pl.load(data, [0, 0], [TOTAL, SIZE])
+            out = pl.store(chunk, [0, 0], out)
+            return out, out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[TOTAL, SIZE], pl.FP32], pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]]:
+            return (
+                self.consume_pair(data, out)[0],
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n),
+            )
+
+    after = passes.lower_l2_tensor_collectives()(ProjectedCall)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    assert names.index("consume_pair") < names.index(_KERNEL_NAME), names
+    body = pipeline.body
+    assert isinstance(body, ir.SeqStmts), body
+    returned = body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt), returned
+    assert all(isinstance(value, ir.Var) for value in returned.value), returned.value
+    # The lifted projection must not leave a Call under the TupleGetItemExpr;
+    # the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
+
+
+def test_nested_call_under_a_lifted_direct_call_is_hoisted_too():
+    """A direct-Call return value's OWN argument may itself be a call.
+
+    ``return self.outer(self.inner(...)), all_to_all_v(..., core_num=n)`` has a
+    direct ``Call`` as its first returned value, so the lift logic must not
+    skip it outright (that would double-bind it) -- but ``inner`` is nested
+    inside ``outer``'s own argument and still needs hoisting on its own.
+    Leaving it inline would carry a Call under the generated AssignStmt's RHS,
+    which ``LegalizeSpmdLaunches``'s ``NoNestedCalls`` prerequisite rejects.
+    """
+
+    @pl.program
+    class NestedDirectCall:
+        @pl.function(type=pl.FunctionType.InCore)
+        def inner_step(
+            self,
+            data: pld.DistributedTensor[[TOTAL, SIZE], pl.FP32],
+            tmp: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[TOTAL, SIZE], pl.FP32]:
+            chunk = pl.load(data, [0, 0], [TOTAL, SIZE])
+            tmp = pl.store(chunk, [0, 0], tmp)
+            return tmp
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def outer_step(
+            self,
+            x: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[TOTAL, SIZE], pl.FP32]:
+            chunk = pl.load(x, [0, 0], [TOTAL, SIZE])
+            out = pl.store(chunk, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+            tmp: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[TOTAL, SIZE], pl.FP32], pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]]:
+            # Written inline, not pre-bound: the first value is a direct Call
+            # (outer_step) whose own argument is another direct Call
+            # (inner_step) -- the unflattened shape the lift logic must handle.
+            return (
+                self.outer_step(self.inner_step(data, tmp), out),
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n),
+            )
+
+    after = passes.lower_l2_tensor_collectives()(NestedDirectCall)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    # Source order preserved: both ordinary calls run before the exchange.
+    assert names.index("inner_step") < names.index("outer_step") < names.index(_KERNEL_NAME), names
+    _assert_no_nested_call_like(pipeline.body)
+    # End-to-end gate: the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
+
+
+def test_call_like_collective_operand_is_hoisted_before_the_width_prelude():
+    """A collective operand that is itself a call must be hoisted too.
+
+    ``all_to_all_v(self.make_input(...), ..., core_num=n)`` with a runtime
+    width emits an arithmetic prelude for ``core_num`` -- but the ``input``
+    operand is ALSO, independently, a direct call that was left untouched by
+    that prelude logic. Leaving it inline carries a Call under the kernel
+    call's own argument list, which ``LegalizeSpmdLaunches``'s
+    ``NoNestedCalls`` prerequisite rejects.
+    """
+
+    @pl.program
+    class CallLikeOperand:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            for row in pl.range(TOTAL):
+                chunk = pl.load(inp, [row, 0], [1, SIZE])
+                stage = pl.store(chunk, [row, 0], stage)
+            return stage
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            # The ``input`` operand is written inline as a direct call, not
+            # pre-bound to a Var -- the unflattened shape the operand-hoist
+            # logic in LowerCollective must handle, alongside the runtime
+            # ``core_num`` width prelude.
+            return pld.tensor.all_to_all_v(
+                self.stage_step(inp, stage), data, signal, counts, recv, core_num=n
+            )
+
+    after = passes.lower_l2_tensor_collectives()(CallLikeOperand)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    # The operand's own producer must run before the kernel it feeds.
+    assert names.index("stage_step") < names.index(_KERNEL_NAME), names
+    _assert_no_nested_call_like(pipeline.body)
+    kernel_args = list(_kernel_call(after).args)
+    assert isinstance(kernel_args[0], ir.Var), kernel_args[0]
+    # End-to-end gate: the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
+
+
+def test_submit_predicate_is_preserved_when_hoisting_a_collective_operand():
+    """A Submit's dispatch predicate must not be hoisted like an operand.
+
+    ``predicate_`` is a declarative field the scheduler reads at dispatch
+    time, not an SSA operand to extract eagerly. The inherited Submit mutator
+    also remaps it, so hoisting a Submit nested in a collective operand would
+    otherwise extract its own ``tensor.read`` guard into a prefix assignment,
+    turning a deferred read into an eager one and changing the predicate's
+    structure -- ``EmitPredicateHint`` requires the original expression shape.
+
+    The DSL always destructures a submit's result into vars (``out, tid =
+    pl.spmd_submit(...)``), so it cannot write the unflattened shape directly.
+    Parse a normal, flattened program and manually inline the submit's 0th
+    projection back into the collective operand -- the shape a caller
+    invoking this pass directly on hand-built IR could still produce.
+    """
+
+    @pl.program
+    class PredicatedSubmitOperand:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            for row in pl.range(TOTAL):
+                chunk = pl.load(inp, [row, 0], [1, SIZE])
+                stage = pl.store(chunk, [row, 0], stage)
+            return stage
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            rc: pl.Tensor[[1, 1], pl.INT32],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            with pl.manual_scope():
+                staged, tid = pl.spmd_submit(
+                    self.stage_step, inp, stage, core_num=1, predicate=(rc[0, 0] > 0)
+                )
+            return pld.tensor.all_to_all_v(staged, data, signal, counts, recv, core_num=n)
+
+    before = PredicatedSubmitOperand
+    pipeline = _get_func(before, "chip_pipeline")
+    assert pipeline is not None
+
+    submits: list[ir.Submit] = []
+
+    class _SubmitCollector(ir.IRVisitor):
+        def visit_submit(self, op: ir.Submit) -> None:
+            submits.append(op)
+            super().visit_submit(op)
+
+    _SubmitCollector().visit_stmt(pipeline.body)
+    assert len(submits) == 1, submits
+    submit = submits[0]
+    assert submit.predicate is not None, submit
+    original_predicate = submit.predicate
+
+    returns: list[ir.ReturnStmt] = []
+
+    class _ReturnCollector(ir.IRVisitor):
+        def visit_return_stmt(self, op: ir.ReturnStmt) -> None:
+            returns.append(op)
+
+    _ReturnCollector().visit_stmt(pipeline.body)
+    assert len(returns) == 1, returns
+    collective = returns[0].value[0]
+    assert isinstance(collective, ir.Call), collective
+
+    # Inline the submit's 0th projection directly as the collective's first
+    # operand, dropping the manual-scope assignment -- an unflattened return
+    # with the Submit itself (predicate intact) nested in a collective operand.
+    projected = ir.TupleGetItemExpr(submit, 0, submit.span)
+    new_args = [projected, *list(collective.args)[1:]]
+    new_collective = ir.Call(
+        collective.op,
+        new_args,
+        kwargs=collective.kwargs,
+        attrs=collective.attrs,
+        type=collective.type,
+        span=collective.span,
+    )
+    new_body = ir.ReturnStmt([new_collective], returns[0].span)
+    rewritten = ir.Function(
+        pipeline.name,
+        list(zip(pipeline.params, pipeline.param_directions)),
+        pipeline.return_types,
+        new_body,
+        pipeline.span,
+        type=ir.FunctionType.Orchestration,
+    )
+    stage_fn = _get_func(before, "stage_step")
+    assert stage_fn is not None
+    before = ir.Program([stage_fn, rewritten], before.name, before.span)
+
+    after = passes.lower_l2_tensor_collectives()(before)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    submits_after: list[ir.Submit] = []
+
+    class _SubmitCollectorAfter(ir.IRVisitor):
+        def visit_submit(self, op: ir.Submit) -> None:
+            submits_after.append(op)
+            super().visit_submit(op)
+
+    _SubmitCollectorAfter().visit_stmt(pipeline.body)
+    assert len(submits_after) == 1, submits_after
+    assert submits_after[0].predicate is not None, submits_after[0]
+    # Structurally unchanged -- hoisting must not have replaced any Call
+    # inside the predicate (e.g. its tensor.read) with a bound Var.
+    ir.assert_structural_equal(submits_after[0].predicate, original_predicate)
+    # End-to-end gate: the launch legalizer's NoNestedCalls check deliberately
+    # does not consult predicate_ (it is declarative, not an operand), so this
+    # must still succeed with the predicate's own Call intact.
+    passes.legalize_spmd_launches()(after)
+
+
+def _build_indexed_runtime_return():
+    @pl.program
+    class IndexedRuntime:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[13, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pld.DistributedTensor[[NR, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            index: pl.Tensor[[NR, MAX_RECV], pl.INT32],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            return pld.tensor.indexed_all_to_all_v(inp, data, signal, counts, recv, index, core_num=n)
+
+    return IndexedRuntime
+
+
+def test_runtime_indexed_return_is_lifted_for_the_launch_legalizer():
+    """An indexed runtime width needs an assignment, not just a prelude.
+
+    The indexed variant's width is the request itself, so no arithmetic prelude
+    is emitted. It still has to leave the ``ReturnStmt``: ``LegalizeSpmdLaunches``
+    can only wrap an assignment in ``if (B > 0)``.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_indexed_runtime_return())
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    body = pipeline.body
+    assert isinstance(body, ir.SeqStmts), body
+    returned = body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt), returned
+    assert isinstance(returned.value[0], ir.Var), returned.value[0]
+
+    legalized = passes.legalize_spmd_launches()(after)
+    pipeline = _get_func(legalized, "chip_pipeline")
+    assert pipeline is not None
+    assert isinstance(pipeline.body, ir.SeqStmts), pipeline.body
+    guarded = [stmt for stmt in pipeline.body.stmts if isinstance(stmt, ir.IfStmt)]
+    assert guarded, pipeline.body
+
+
+def test_collective_in_a_manual_scope_still_lowers():
+    """A ``pl.manual_scope`` body is not a blind spot for this pass.
+
+    ``pass-submit-awareness.md``: a pass that matches only ``Call`` silently
+    skips manual-scope bodies, where ``Submit`` appears. That does not apply
+    here — ``Submit`` carries a *function* callee while a managed collective is
+    an op, so the collective stays a ``Call`` inside the scope — but the rule
+    is easy to violate later, so pin the behaviour rather than the reasoning.
+    """
+
+    @pl.program
+    class InManualScope:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            with pl.manual_scope():
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n)
+            # Return the writeback param directly (ReturnParamsExplicit); the
+            # collective still writes it inside the manual scope.
+            return data
+
+    after = passes.lower_l2_tensor_collectives()(InManualScope)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    assert _KERNEL_NAME in names, names
+    assert _ALL_TO_ALL_V not in names, names
+
+
+def test_dynamic_core_num_keeps_the_kernel_abi():
+    """A runtime width changes the launch spec, never the operand list.
+
+    RFC #2521 frozen item #11: the kernel consumes ``block_num`` and must not
+    recompute it, so the five-operand + CommCtx-suffix ABI is what the width
+    must not disturb.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_dynamic_request())
+    call = _kernel_call(after)
+    assert len(call.args) == 5, [str(a) for a in call.args]
 
 
 def test_int8_synthesizes_int8_variant():
