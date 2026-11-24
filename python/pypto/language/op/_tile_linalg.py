@@ -18,6 +18,7 @@ from pypto.pypto_core.ir import (
 
 from ..typing import BoolLike, Tile, predicate_to_expr
 
+
 def quant(src: Tile, scale: Tile, offset: Tile | None = None) -> Tile:
     """Quantize an FP32 tile to INT8 or UINT8 on Ascend950.
 

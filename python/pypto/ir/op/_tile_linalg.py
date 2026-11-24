@@ -24,6 +24,7 @@ from ..utils import (
     _get_span_or_capture,
 )
 
+
 def quant(src: Expr, scale: Expr, offset: Expr | None = None, *, span: Span | None = None) -> Call:
     """Build an A5 row-wise 8-bit quantization call."""
     operands = [src, scale] if offset is None else [src, scale, offset]
