@@ -46,8 +46,10 @@ def quant_mx(
             ``group_axis=1``: ``[M, K]`` with ``M%16==0``, ``K%64==0``.
             ``group_axis=0``: ``[N, K]`` with ``N%32==0``, ``K%64==0``.
         group_axis: PTOAS grouping axis — ``1`` (A-side) or ``0`` (B-side).
-        dtype: ``FP8E4M3FN`` (default) or ``FP4E2M1X2``.
+        dtype: ``FP8E4M3FN`` (default), ``FP8E5M2``, or ``FP4E2M1X2``.
+            FP8E5M2 uses OCP scaling and a native A5 FP8 cast.
         quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
+            FP8E5M2 requires ``"ocp"``.
 
     Returns:
         ``group_axis=1``: ``(quant[M,K], scale[M,K/32])`` row/row ZZ scale.
@@ -80,12 +82,14 @@ def quant_mx_raw(
     dtype: DataType = DataType.FP8E4M3FN,
     quant_scale_alg: str = "ocp",
     interleave: bool = False,
+    canonical_axis1: bool = False,
 ) -> tuple[Tile, Tile]:
     """Quantize in source orientation and return unpacked UINT8 exponent codes.
 
     This tile primitive exposes PTOAS TQUANT without MX scale-layout conversion.
     Axis1 accepts any positive row count and a valid column count divisible by
-    32 (64 for native FP4); physical columns must equal valid columns. Axis0 groups 32 valid rows.
+    32 (64 for native FP4). The default flat axis1 mode requires physical
+    columns to equal valid columns. Axis0 groups 32 valid rows.
     FP4 output halves physical and valid columns; native FP4 additionally
     requires physical columns divisible by 64 (32 carrier bytes). Partial valid rows are allowed.
 
@@ -94,7 +98,13 @@ def quant_mx_raw(
     Axis1 may use flat valid shape ``[1, valid_rows*valid_cols/32]``; FP16/BF16
     OCP scaling capacity must round this group count up to 128 elements.
     Workspaces are write-only. FP4E2M1X2 returns native carriers; MXFP8 returns
-    INT8 carrier bytes. Exponents are flat on axis1 and grouped on axis0.
+    INT8 carrier bytes. Exponents are flat by default on axis1 and grouped on axis0.
+    Set ``canonical_axis1=True`` for FP32 axis1 inputs with at least two valid
+    rows. This mode permits padded input columns and returns a UINT8
+    exponent tile with valid shape ``[valid_rows, valid_cols/32]`` and a
+    32-byte aligned row stride. Both workspaces must hold a compact prefix
+    of ``valid_rows*valid_cols/32`` values with 32-byte aligned physical rows.
+    Use one flat workspace row when a grouped row is too narrow.
     ``interleave=True`` interleaves adjacent axis0 exponent groups along columns;
     FP16/BF16 physical and valid source rows must then be divisible by 64.
     """
@@ -106,6 +116,7 @@ def quant_mx_raw(
         group_axis=group_axis,
         quant_scale_alg=quant_scale_alg,
         interleave=interleave,
+        canonical_axis1=canonical_axis1,
     )
     span = call_expr.span
     return (

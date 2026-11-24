@@ -521,7 +521,15 @@ Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` s
 
 - MX-layout sources reject `tensor.slice`, `tensor.reshape`, `tensor.transpose`, `tensor.reinterpret_view`, ordinary `tensor.view`, `pld.tile.remote_load`, and tensor/tile `gather_row`. The subview path cannot represent a base offset. GM staging supports product-preserving FP8E8M0 shaped aliases between ND backing and `MX_A_ZZ` / `MX_B_NN`.
 - FP4 Tensor/Tile shapes, `valid_shape`, strides, and offsets count byte carriers. Torch E2M1 x2 and explicitly annotated UINT8 retain these units in JIT and compiled calls. Native tile matmul expands the contiguous axis for logical M/K/N inference, and both native paths retain packed operands.
-- `pl.quant_mx` accepts FP16/BF16/FP32 for MXFP8 and FP16/BF16 for E2M1 MXFP4. FP4 results need supported Mat and Left/Right placement for tile matmul. See [FP4](../fp4.md) for alignment, memory planners, and the native FP4 geometry introduced in PTOAS #1700.
+- `pl.quant_mx` accepts FP16/BF16/FP32 for MXFP8 and FP16/BF16 for E2M1 MXFP4.
+  `dtype=pl.FP8E5M2` uses OCP scaling on A5 for both A- and B-oriented inputs.
+  To store a packed scale tile in GM, reshape it to a single-row view before `pl.store`.
+  FP4 results need supported Mat and Left/Right placement for tile matmul. See [FP4](../fp4.md) for alignment, memory planners, and the native FP4 geometry introduced in PTOAS #1700.
+- `pl.tile.quant_mx_raw(..., group_axis=1, canonical_axis1=True)` supports FP32 source tiles with
+  padded columns. The source must have at least two valid rows and a valid column count divisible by 32.
+  The UINT8 exponent tile has valid shape `[valid_rows, valid_cols/32]` and 32-byte row alignment.
+  Both FP32 workspaces hold a compact prefix, using either a grouped descriptor with
+  full, aligned rows or a single aligned row. Omitting the flag preserves the flat exponent shape `[1, valid_rows*valid_cols/32]`.
 
 #### MX / Ascend950: pto-isa constraints
 

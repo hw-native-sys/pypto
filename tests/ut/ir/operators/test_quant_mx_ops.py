@@ -40,6 +40,8 @@ class TestQuantMxTypes:
         [
             (1, pl.FP8E4M3FN, (16, 64), (16, 64), (16, 2)),
             (0, pl.FP8E4M3FN, (32, 64), (64, 32), (2, 32)),
+            (1, pl.FP8E5M2, (16, 64), (16, 64), (16, 2)),
+            (0, pl.FP8E5M2, (32, 64), (64, 32), (2, 32)),
             (1, pl.FP4E2M1X2, (16, 64), (16, 32), (16, 2)),
             (0, pl.FP4E2M1X2, (64, 64), (64, 32), (2, 64)),
         ],
@@ -102,11 +104,15 @@ class TestQuantMxTypes:
         with pytest.raises(ValueError, match="group_axis must be 0 or 1"):
             pl.quant_mx(src, group_axis=2)
 
-    @pytest.mark.parametrize("dtype", [pl.FP8E5M2, pl.FP4E1M2X2])
-    def test_public_rejects_unsupported_dtype(self, dtype):
+    def test_public_rejects_unsupported_dtype(self):
         src = pl.Tile(expr=_tile("src", (16, 64), pl.FP16))
         with pytest.raises(ValueError, match="requires dtype FP8E4M3FN or FP4E2M1X2"):
-            pl.quant_mx(src, group_axis=1, dtype=dtype)
+            pl.quant_mx(src, group_axis=1, dtype=pl.FP4E1M2X2)
+
+    def test_e5m2_requires_ocp(self):
+        src = pl.Tile(expr=_tile("src", (16, 64), pl.FP32))
+        with pytest.raises(ValueError, match="requires OCP for FP8E5M2"):
+            pl.quant_mx(src, group_axis=1, dtype=pl.FP8E5M2, quant_scale_alg="nv")
 
     @pytest.mark.parametrize(
         ("source_dtype", "shape", "axis", "algorithm", "message"),
@@ -160,6 +166,58 @@ class TestQuantMxTypes:
         assert isinstance(exp_type, ir.TileType) and exp_type.tile_view is not None
         assert _shape_values(exp_type) == (1, 32)
         assert tuple(_const_int(dim) for dim in exp_type.tile_view.valid_shape) == (1, rows * 2)
+
+    def test_canonical_axis1_keeps_the_padded_payload_stride(self):
+        quant, exp = pl.tile.quant_mx_raw(
+            pl.Tile(expr=_tile("src", (16, 128), pl.FP32, valid_shape=[8, 64])),
+            pl.Tile(expr=_tile("amax", (1, 16), pl.FP32)),
+            pl.Tile(expr=_tile("scaling", (1, 24), pl.FP32, valid_shape=[1, 16])),
+            group_axis=1,
+            canonical_axis1=True,
+        )
+        quant_type = quant.unwrap().type
+        exp_type = exp.unwrap().type
+        assert isinstance(quant_type, ir.TileType) and quant_type.tile_view is not None
+        assert isinstance(exp_type, ir.TileType) and exp_type.tile_view is not None
+        assert _shape_values(quant_type) == (16, 128)
+        assert tuple(_const_int(dim) for dim in quant_type.tile_view.valid_shape) == (8, 64)
+        assert exp_type.dtype == pl.UINT8
+        assert _shape_values(exp_type) == (16, 32)
+        assert tuple(_const_int(dim) for dim in exp_type.tile_view.valid_shape) == (8, 2)
+
+    def test_canonical_axis1_accepts_aligned_grouped_scratch(self):
+        call = ir.op.tile.tquant_mx_raw(
+            _tile("src", (16, 512), pl.FP32, valid_shape=[16, 256]),
+            _tile("amax", (16, 8), pl.FP32),
+            _tile("scaling", (16, 8), pl.FP32),
+            canonical_axis1=True,
+        )
+        exp_type = call.type.types[1]
+        assert exp_type.tile_view is not None
+        assert tuple(_const_int(dim) for dim in exp_type.tile_view.valid_shape) == (16, 8)
+
+    @pytest.mark.parametrize(
+        ("axis", "dtype", "valid_rows", "scratch_shape", "scratch_valid", "message"),
+        [
+            (0, pl.FP32, 16, (16, 2), None, "requires axis1 FP32"),
+            (1, pl.FP16, 16, (16, 2), None, "requires axis1 FP32"),
+            (1, pl.FP32, 1, (1, 2), None, "at least two valid source rows"),
+            (1, pl.FP32, 16, (2, 16), None, "max scratch to have valid shape"),
+            (1, pl.FP32, 16, (16, 2), None, "32-byte aligned row"),
+            (1, pl.FP32, 16, (16, 8), [16, 2], "compact physical prefix"),
+        ],
+    )
+    def test_canonical_axis1_checks_source_and_scratch(
+        self, axis, dtype, valid_rows, scratch_shape, scratch_valid, message
+    ):
+        with pytest.raises(ValueError, match=message):
+            ir.op.tile.tquant_mx_raw(
+                _tile("src", (16, 128), dtype, valid_shape=[valid_rows, 64]),
+                _tile("amax", scratch_shape, dtype, valid_shape=scratch_valid),
+                _tile("scaling", (valid_rows, 2), dtype),
+                group_axis=axis,
+                canonical_axis1=True,
+            )
 
     def test_fp4_raw_axis0_preserves_padded_row_stride(self):
         call = ir.op.tile.tquant_mx_raw(

@@ -1168,7 +1168,7 @@ def quant_mx(
     Tensor calls materialize data and correctly laid-out scale tensors in GM;
     tile calls retain the existing on-chip behavior. Both forms use
     ``group_axis=1`` for A-oriented input and ``group_axis=0`` for B-oriented
-    input.
+    input. ``dtype=FP8E5M2`` requires OCP scaling on A5.
     """
     if isinstance(src, Tensor):
         return _tensor.quant_mx(src, group_axis=group_axis, dtype=dtype, quant_scale_alg=quant_scale_alg)
