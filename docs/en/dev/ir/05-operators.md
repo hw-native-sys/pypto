@@ -429,6 +429,7 @@ Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` s
 | `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`. Use distinct FP8E8M0 scales of logical shape `[M, ceil(K/32)]` / `[ceil(K/32), N]` and FP32 Acc `[M,N]`. Logical physical M/K/N must align to 16/64/32 (FP4: 16/64/64), with additional boxed tile alignment. Valid K must preserve the physical scale-group count. PyPTO checks constant extents. PTOAS verifies symbolic geometry. |
 | `tensor.matmul_mx` | Static oriented 2D data, loaded to Mat before Left/Right staging. M/K/N align to 16/64/32 (FP4: 32/64/64). For FP4, the contiguous axis counts packed bytes: ND shapes `[M,K/2]` / `[K,N/2]`, DN `[M/2,K]` / `[K/2,N]`. Scales and FP32 output retain their logical shapes. The canonical M/K/N of 128/64/64 uses `[128,2]` / `[2,64]` scales in ZZ/NN for both FP8 and FP4. |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc`, `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | Acc prepends an accumulator and updates it in place via `set_output_reuses_input(0)`. Its physical and valid M/N must match the result. Bias appends an FP32 `[1,N]` operand. |
+| `tile.gemv_mx`, `tile.gemv_mx_acc`, `tile.gemv_mx_bias` | A5 MX GEMV. The left operand has one physical and valid row. FP8E4M3FN / FP8E5M2 pairs and packed FP4 pairs are supported. The Mat-to-Left row vector moves in 512-byte blocks. Packed FP4 packs along K and requires full valid K/N. The distinct FP8E8M0 scales have shapes `[1, ceil(valid_K/32)]` and `[ceil(valid_K/32), physical_N]`. Load a row-major GM left scale with `MX_A_ND`. The FP32 result uses a 16-row Acc buffer with one valid row. Acc shares input storage and Bias takes FP32 `[1,N]`. |
 | `tile.bind_scale_addr` | Creates an empty scale handle at the address derived from an MX payload. |
 | `tile.extract_into` | Writes a Mat scale window into the bound destination and returns its SSA alias. |
 | `tile.tget_scale_addr` | Internal DPS binding that updates `dst_scale` in place (`LeftScale↔Left`, `RightScale↔Right`). `InsertMxScaleAddr` inserts it after `InferTileMemorySpace`. |
@@ -491,8 +492,8 @@ mints a correctly typed accumulator, at the cost of a phi between the branches.
 
 ### Accumulator phases (A2/A3 and A5)
 
-`tile.matmul`, `tile.matmul_acc`, `tile.gemv`, `tile.gemv_acc`, and
-`tile.gemv_bias` accept `acc_phase` as `pl.AccPhase.Unspecified` (the default),
+The `tile.matmul`, `tile.matmul_acc`, GEMV, and MX GEMM/GEMV tile operations
+accept `acc_phase` as `pl.AccPhase.Unspecified` (the default),
 `pl.AccPhase.Partial`, or `pl.AccPhase.Final`. `Unspecified` preserves the
 existing behavior. Use `Partial` while more K chunks remain and `Final` for
 the last chunk. The Matmul DSL entry points make `acc_phase` keyword-only,
@@ -501,7 +502,7 @@ existing fourth positional `init_cond`; the IR wrapper likewise preserves
 its positional `span`. Both initialization and accumulation codegen arms
 carry the selected phase.
 
-With `AccPhase.Final`, `matmul_acc` requires the product's valid M/N rectangle
+With `AccPhase.Final`, `matmul_acc` and `matmul_mx_acc` require the product's valid M/N rectangle
 to provably equal the accumulator's valid rectangle. A smaller update of a
 wider accumulator is rejected: its Final store would check untouched blocks
 whose unit flags the MAD did not set. Use a matching accumulator window, or

@@ -136,15 +136,15 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A5 还接受 FP8 混合配对（E4M3FN x E5M2，两种顺序）、E5M2 x E5M2 与 HF8 x HF8；见 [Cube 操作数类型配对](ir/05-operators.md#cube-操作数类型配对operand-dtype-pairs) |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | 操作数配对同 `pto.tmatmul`；acc_in 仍为 FP32 |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | 操作数配对同 `pto.tmatmul`；bias 仍为 FP32 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 预量化 E4M3FN/E5M2 四种配对的 frontend+codegen+ST；原生 FP4×FP4 tile 使用 PTOAS v0.72 的 Cube 逻辑维度；混合 FP4/FP8 需显式 cast；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束) |
-| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 E4M3FN/E5M2 四种配对的 frontend+codegen+ST（`tile.matmul_mx_acc`） |
-| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 E4M3FN/E5M2 四种配对的 frontend+codegen+ST（`tile.matmul_mx_bias`） |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 预量化 E4M3FN/E5M2 四种配对的 frontend+codegen+ST；原生 FP4×FP4 tile 使用 PTOAS v0.72 的 Cube 逻辑维度；混合 FP4/FP8 需显式 cast；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束) A5 task-submit ST 覆盖 E4M3FN × E5M2 的 `AccPhase.Partial`。 |
+| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 E4M3FN/E5M2 四种配对的 frontend+codegen+ST（`tile.matmul_mx_acc`） A5 task-submit ST 覆盖 E4M3FN × E5M2 的 `AccPhase.Final`。 |
+| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 E4M3FN/E5M2 四种配对的 frontend+codegen+ST（`tile.matmul_mx_bias`） A5 task-submit ST 覆盖 E4M3FN × E5M2 的 `AccPhase.Final`。 |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。与 `pto.tmatmul` 共用操作数配对表，因此 A5 同样接受四种 FP8 配对（E4M3FN / E5M2，两种顺序）与 HF8 x HF8；见 [Cube 操作数类型配对](ir/05-operators.md#cube-操作数类型配对operand-dtype-pairs)。A5 ST 已覆盖全部 dtype（静态 valid 累加器桥接才使 a5 GEMV 可汇编）|
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。操作数配对同 `pto.tgemv`；acc_in 仍为 FP32。A5 ST 已覆盖全部 dtype、split-K 与 `init_cond` |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。操作数配对同 `pto.tgemv`；bias 仍为 FP32。A5 ST 已覆盖全部 dtype |
-| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ✅ | ❌ | ✅ | — | A5 task-submit ST 覆盖 E4M3FN × E5M2 `AccPhase.Partial`。支持显式 `acc_phase` 和打包 MXFP4。 |
+| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 task-submit ST 覆盖 E4M3FN × E5M2 `AccPhase.Final`。支持显式 `acc_phase` 和打包 MXFP4。 |
+| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 task-submit ST 覆盖 E4M3FN × E5M2 加 bias。支持显式 `acc_phase` 和打包 MXFP4。 |
 | **向量算术与数学（42）** |  |  |  |  |  |  |  |  |
 | pto.tadd | TADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

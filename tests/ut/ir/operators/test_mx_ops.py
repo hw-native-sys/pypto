@@ -703,5 +703,33 @@ class TestTGetScaleAddr:
             ir.op.tile.tget_scale_addr(dst, src, span)
 
 
+def test_gemv_mx_uses_valid_k_for_scale_geometry():
+    lhs = _tile("lhs", [1, 512], pl.FP8E4M3FN, valid_shape=[1, 128], memory=pl.Mem.Left)
+    lhs_scale = _tile("lhs_scale", [1, 4], pl.FP8E8M0, memory=pl.Mem.LeftScale)
+    rhs = _tile("rhs", [128, 32], pl.FP8E5M2, valid_shape=[128, 24], memory=pl.Mem.Right)
+    rhs_scale = _tile("rhs_scale", [4, 32], pl.FP8E8M0, valid_shape=[4, 24], memory=pl.Mem.RightScale)
+
+    call = ir.op.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.dtype == pl.FP32
+    assert [d.value for d in call.type.shape] == [16, 32]
+    assert [d.value for d in call.type.tile_view.valid_shape] == [1, 24]
+    bound_scale = ir.op.tile.tget_scale_addr(lhs_scale, lhs)
+    assert [d.value for d in bound_scale.type.shape] == [1, 4]
+
+    extra_groups = _tile("extra_groups", [1, 8], pl.FP8E8M0)
+    with pytest.raises(ValueError, match="requires lhs_scale physical cols=4"):
+        ir.op.tile.gemv_mx(lhs, extra_groups, rhs, rhs_scale)
+
+
+def test_gemv_mx_rejects_matrix_lhs():
+    lhs = _tile("lhs", [16, 128], pl.FP8E4M3FN)
+    lhs_scale = _tile("lhs_scale", [16, 4], pl.FP8E8M0)
+    rhs = _tile("rhs", [128, 32], pl.FP8E5M2)
+    rhs_scale = _tile("rhs_scale", [4, 32], pl.FP8E8M0)
+    with pytest.raises(ValueError, match="requires lhs physical and valid M to be 1"):
+        ir.op.tile.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

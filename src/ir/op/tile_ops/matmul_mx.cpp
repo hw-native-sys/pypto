@@ -28,6 +28,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -86,7 +87,12 @@ static ExprPtr MxScaleKCeil(const ExprPtr& k_dim) {
 
 TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
-                               const std::string& op_name) {
+                               const std::string& op_name, bool is_gemv = false) {
+  const int acc_phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
+  CHECK(IsValidAccPhase(acc_phase))
+      << "The operator " << op_name
+      << " requires acc_phase to be AccPhase.Unspecified, AccPhase.Partial, or AccPhase.Final, but got "
+      << acc_phase;
   CHECK(args.size() == 4) << "The operator " << op_name
                           << " requires exactly 4 arguments (lhs, lhs_scale, rhs, rhs_scale), but got "
                           << args.size();
@@ -127,39 +133,65 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   const ExprPtr& k_valid_rhs = rhs_valid[0];
   ExprPtr n_valid = rhs_valid[1];
 
-  auto m_phys_c = As<ConstInt>(m_phys);
-  auto n_phys_c = As<ConstInt>(n_phys);
   auto k_phys_lhs_c = As<ConstInt>(k_phys_lhs);
   auto k_phys_rhs_c = As<ConstInt>(k_phys_rhs);
-  if (m_phys_c) {
-    CHECK(m_phys_c->value_ > 0 && m_phys_c->value_ % 16 == 0)
-        << "The operator " << op_name
-        << " requires physical M divisible by 16 (ISA/PTOAS tmatmul_mx), but got M=" << m_phys_c->value_;
-  }
-  if (n_phys_c) {
-    const int64_t n_align = rhs_type->dtype_.IsPackedFp4() ? 64 : 32;
-    CHECK(n_phys_c->value_ > 0 && n_phys_c->value_ % n_align == 0)
-        << "The operator " << op_name << " requires physical N divisible by " << n_align << " for "
-        << rhs_type->dtype_.ToString()
-        << " (ISA/PTOAS tmatmul_mx 32-byte row), but got N=" << n_phys_c->value_;
-  }
-  if (k_phys_lhs_c && k_phys_rhs_c) {
-    CHECK(k_phys_lhs_c->value_ == k_phys_rhs_c->value_)
-        << "The operator " << op_name
-        << " requires matching physical K, but got lhs K=" << k_phys_lhs_c->value_
-        << " and rhs K=" << k_phys_rhs_c->value_;
-  }
-  if (k_phys_lhs_c) {
-    CHECK(k_phys_lhs_c->value_ > 0 && k_phys_lhs_c->value_ % 64 == 0)
-        << "The operator " << op_name
-        << " requires physical K divisible by 64 (ISA/PTOAS tmatmul_mx), but got lhs K="
-        << k_phys_lhs_c->value_;
-  }
-  if (k_phys_rhs_c) {
-    CHECK(k_phys_rhs_c->value_ > 0 && k_phys_rhs_c->value_ % 64 == 0)
-        << "The operator " << op_name
-        << " requires physical K divisible by 64 (ISA/PTOAS tmatmul_mx), but got rhs K="
-        << k_phys_rhs_c->value_;
+  if (is_gemv) {
+    const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, m_phys->span_);
+    CHECK(ProveValidExtentEqual(m_phys, one) == ProofResult::kTrue &&
+          ProveValidExtentEqual(m_valid, one) == ProofResult::kTrue)
+        << "The operator " << op_name << " requires lhs physical and valid M to be 1";
+    // PTOAS cannot give a packed FP4 descriptor an instruction-local static
+    // valid view with TRESHAPE. The assembler compares the physical extents
+    // of these descriptors, so packed inputs need matching full valid extents.
+    CHECK(!lhs_type->dtype_.IsPackedFp4() ||
+          (ProveValidExtentEqual(k_valid_lhs, k_phys_lhs) == ProofResult::kTrue &&
+           ProveValidExtentEqual(k_valid_rhs, k_phys_rhs) == ProofResult::kTrue &&
+           ProveValidExtentEqual(n_valid, n_phys) == ProofResult::kTrue))
+        << "The operator " << op_name << " requires full valid K and N for packed FP4";
+    constexpr int64_t kMaxValidExtent = 4095;
+    for (const auto& dim : {k_valid_lhs, k_valid_rhs, n_valid}) {
+      const auto extent = As<ConstInt>(dim);
+      CHECK(!extent || (extent->value_ > 0 && extent->value_ <= kMaxValidExtent))
+          << "The operator " << op_name << " requires valid K and N between 1 and " << kMaxValidExtent;
+    }
+    // The standard one-row Mat-to-Left path loads a complete 512-byte block.
+    const int64_t k_align = lhs_type->dtype_.IsPackedFp4() ? 1024 : 512;
+    CHECK(!k_phys_lhs_c || (k_phys_lhs_c->value_ > 0 && k_phys_lhs_c->value_ % k_align == 0))
+        << "The operator " << op_name << " requires lhs physical K divisible by " << k_align
+        << " for a 512-byte L0A vector block";
+  } else {
+    auto m_phys_c = As<ConstInt>(m_phys);
+    auto n_phys_c = As<ConstInt>(n_phys);
+    if (m_phys_c) {
+      CHECK(m_phys_c->value_ > 0 && m_phys_c->value_ % 16 == 0)
+          << "The operator " << op_name
+          << " requires physical M divisible by 16 (ISA/PTOAS tmatmul_mx), but got M=" << m_phys_c->value_;
+    }
+    if (n_phys_c) {
+      const int64_t n_align = rhs_type->dtype_.IsPackedFp4() ? 64 : 32;
+      CHECK(n_phys_c->value_ > 0 && n_phys_c->value_ % n_align == 0)
+          << "The operator " << op_name << " requires physical N divisible by " << n_align << " for "
+          << rhs_type->dtype_.ToString()
+          << " (ISA/PTOAS tmatmul_mx 32-byte row), but got N=" << n_phys_c->value_;
+    }
+    if (k_phys_lhs_c && k_phys_rhs_c) {
+      CHECK(k_phys_lhs_c->value_ == k_phys_rhs_c->value_)
+          << "The operator " << op_name
+          << " requires matching physical K, but got lhs K=" << k_phys_lhs_c->value_
+          << " and rhs K=" << k_phys_rhs_c->value_;
+    }
+    if (k_phys_lhs_c) {
+      CHECK(k_phys_lhs_c->value_ > 0 && k_phys_lhs_c->value_ % 64 == 0)
+          << "The operator " << op_name
+          << " requires physical K divisible by 64 (ISA/PTOAS tmatmul_mx), but got lhs K="
+          << k_phys_lhs_c->value_;
+    }
+    if (k_phys_rhs_c) {
+      CHECK(k_phys_rhs_c->value_ > 0 && k_phys_rhs_c->value_ % 64 == 0)
+          << "The operator " << op_name
+          << " requires physical K divisible by 64 (ISA/PTOAS tmatmul_mx), but got rhs K="
+          << k_phys_rhs_c->value_;
+    }
   }
 
   auto k_valid_lhs_c = As<ConstInt>(k_valid_lhs);
@@ -196,10 +228,14 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
            "verifiers conflict. Got physical K="
         << phys_c->value_ << ", valid K=" << valid_c->value_;
   };
-  check_scale_group_agreement(k_phys_lhs_c, k_valid_lhs_c, "lhs");
-  check_scale_group_agreement(k_phys_rhs_c, k_valid_rhs_c, "rhs");
+  if (!is_gemv) {
+    check_scale_group_agreement(k_phys_lhs_c, k_valid_lhs_c, "lhs");
+    check_scale_group_agreement(k_phys_rhs_c, k_valid_rhs_c, "rhs");
+  }
 
-  ExprPtr lhs_scale_k_phys = MxScaleKCeil(k_phys_lhs);
+  // GEMV scales cover the active K groups even if a staged operand has a
+  // wider physical pitch (for example a one-row L0A load with padding).
+  ExprPtr lhs_scale_k_phys = MxScaleKCeil(is_gemv ? k_valid_lhs : k_phys_lhs);
   ExprPtr lhs_scale_k_valid = MxScaleKCeil(k_valid_lhs);
   if (!lhs_scale_k_phys) {
     // Symbolic lhs K: ceil(K/32) is not computable, so the scale-group count is read off
@@ -215,7 +251,7 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   if (!lhs_scale_k_valid) {
     lhs_scale_k_valid = lhs_scale_k_phys;
   }
-  ExprPtr rhs_scale_k_phys = MxScaleKCeil(k_phys_rhs);
+  ExprPtr rhs_scale_k_phys = MxScaleKCeil(is_gemv ? k_valid_rhs : k_phys_rhs);
   ExprPtr rhs_scale_k_valid = MxScaleKCeil(k_valid_rhs);
   if (!rhs_scale_k_phys) {
     // Symbolic rhs K -- see the lhs_scale note above.
@@ -234,19 +270,22 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   CheckMxScaleTile(rhs_scale_type, rhs_scale_k_phys, n_phys, rhs_scale_k_valid, n_valid, op_name,
                    "rhs_scale");
 
-  std::vector<ExprPtr> output_shape = {m_phys, n_phys};
+  // MAD writes a full 16-row L0C pitch even in its one-row GEMV mode.
+  auto acc_rows =
+      is_gemv ? std::make_shared<ConstInt>(kAccFractalRows, DataType::INDEX, m_phys->span_) : m_phys;
+  std::vector<ExprPtr> output_shape = {acc_rows, n_phys};
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
   tile_view.valid_shape = {m_valid, n_valid};
-  StampCompactForNarrowedAccRows(tile_view, output_shape);
+  if (!is_gemv) StampCompactForNarrowedAccRows(tile_view, output_shape);
   return std::make_shared<TileType>(output_shape, DataType::FP32, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const std::string& op_name) {
+                                  const std::string& op_name, bool is_gemv = false) {
   CHECK(args.size() == 5) << "The operator " << op_name
                           << " requires exactly 5 arguments (acc, lhs, lhs_scale, rhs, rhs_scale), but got "
                           << args.size();
@@ -260,7 +299,7 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
   const auto acc_valid = GetValidShape(acc_type);
 
   std::vector<ExprPtr> mx_args = {args[1], args[2], args[3], args[4]};
-  auto out_type = DeduceTileMatMulMxType(mx_args, kwargs, op_name);
+  auto out_type = DeduceTileMatMulMxType(mx_args, kwargs, op_name, is_gemv);
   auto out_tile = As<TileType>(out_type);
   auto m_acc = As<ConstInt>(acc_type->shape_[0]);
   auto n_acc = As<ConstInt>(acc_type->shape_[1]);
@@ -276,6 +315,14 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
   }
 
   const auto out_valid = GetValidShape(out_tile);
+  if (GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified)) ==
+      static_cast<int>(AccPhase::kFinal)) {
+    // Every block the matching final store checks must have been set by MAD.
+    CHECK(ProveValidExtentEqual(out_valid[0], acc_valid[0]) == ProofResult::kTrue &&
+          ProveValidExtentEqual(out_valid[1], acc_valid[1]) == ProofResult::kTrue)
+        << "The operator " << op_name
+        << " with AccPhase.Final requires the product valid shape to match the accumulator valid shape";
+  }
   CheckDimMatch(out_valid[0], acc_valid[0], op_name, "acc", "valid", "rows");
   CheckDimMatch(out_valid[1], acc_valid[1], op_name, "acc", "valid", "cols");
   return out_type;
@@ -283,7 +330,7 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                   const std::string& op_name) {
+                                   const std::string& op_name, bool is_gemv = false) {
   CHECK(args.size() == 5) << "The operator " << op_name
                           << " requires exactly 5 arguments (lhs, lhs_scale, rhs, rhs_scale, bias), but got "
                           << args.size();
@@ -297,7 +344,7 @@ TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
   const auto bias_valid = GetValidShape(bias_type);
 
   std::vector<ExprPtr> mx_args = {args[0], args[1], args[2], args[3]};
-  auto out_type = DeduceTileMatMulMxType(mx_args, kwargs, op_name);
+  auto out_type = DeduceTileMatMulMxType(mx_args, kwargs, op_name, is_gemv);
   auto out_tile = As<TileType>(out_type);
   auto n_out = As<ConstInt>(out_tile->shape_[1]);
   auto bias_rows = As<ConstInt>(bias_type->shape_[0]);
@@ -333,6 +380,7 @@ REGISTER_OP("tile.matmul_mx")
         "Right-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4); physical K % 64 == 0, N % 32 "
         "== 0 (64 for FP4)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0); physical/valid [ceil(K/32), N]")
+    .set_attr<int>("acc_phase")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::LeftScale)
     .set_input_memory(2, MemorySpace::Right)
@@ -351,6 +399,7 @@ REGISTER_OP("tile.matmul_mx_acc")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
+    .set_attr<int>("acc_phase")
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)
     .set_input_memory(2, MemorySpace::LeftScale)
@@ -373,6 +422,7 @@ REGISTER_OP("tile.matmul_mx_bias")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
     .add_argument("bias", "Bias tile (TileType, [1, N], FP32)")
+    .set_attr<int>("acc_phase")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::LeftScale)
     .set_input_memory(2, MemorySpace::Right)
@@ -382,6 +432,70 @@ REGISTER_OP("tile.matmul_mx_bias")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulMxBiasType(args, kwargs, "tile.matmul_mx_bias");
+    });
+
+REGISTER_OP("tile.gemv_mx")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description("MX block-scale matrix-vector multiplication: C = gemv_mx(A, A_scale, B, B_scale)")
+    .add_argument("lhs", "Left row vector (TileType, [1, K], FP8 E4M3/E5M2 or packed FP4)")
+    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0); physical/valid [M, ceil(K/32)]")
+    .add_argument("rhs", "Right-hand side tile (TileType, [K, N], FP8 E4M3/E5M2 or packed FP4)")
+    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0); physical/valid [ceil(K/32), N]")
+    .set_attr<int>("acc_phase")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::LeftScale)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_input_memory(3, MemorySpace::RightScale)
+    .set_output_memory(MemorySpace::Acc)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMatMulMxType(args, kwargs, "tile.gemv_mx", /*is_gemv=*/true);
+    });
+
+REGISTER_OP("tile.gemv_mx_acc")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description("MX block-scale GEMV with accumulation: acc += gemv_mx(...)")
+    .add_argument("acc", "Accumulator tile (TileType, 2D, FP32)")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4)")
+    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4)")
+    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
+    .set_attr<int>("acc_phase")
+    .set_input_memory(0, MemorySpace::Acc)
+    .set_input_memory(1, MemorySpace::Left)
+    .set_input_memory(2, MemorySpace::LeftScale)
+    .set_input_memory(3, MemorySpace::Right)
+    .set_input_memory(4, MemorySpace::RightScale)
+    .set_output_memory(MemorySpace::Acc)
+    .set_output_reuses_input(0)
+    // Accumulates into `acc`, same as tile.matmul_acc.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMatMulMxAccType(args, kwargs, "tile.gemv_mx_acc", /*is_gemv=*/true);
+    });
+
+REGISTER_OP("tile.gemv_mx_bias")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description("MX block-scale GEMV with bias: C = gemv_mx(...) + bias")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4)")
+    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8 E4M3/E5M2 or packed FP4)")
+    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("bias", "Bias tile (TileType, [1, N], FP32)")
+    .set_attr<int>("acc_phase")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::LeftScale)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_input_memory(3, MemorySpace::RightScale)
+    .set_input_memory(4, MemorySpace::Bias)
+    .set_output_memory(MemorySpace::Acc)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMatMulMxBiasType(args, kwargs, "tile.gemv_mx_bias", /*is_gemv=*/true);
     });
 
 static void CheckScaleAddressTypes(const TileTypePtr& dst_type, const TileTypePtr& src_type,
@@ -398,7 +512,6 @@ static void CheckScaleAddressTypes(const TileTypePtr& dst_type, const TileTypePt
       << src_type->dtype_.ToString();
   CHECK(dst_type->shape_.size() == 2 && src_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D dst_scale and src tiles";
-  const auto dst_valid = GetValidShape(dst_type);
   const auto src_shape = GetMatmulLogicalShape(src_type);
   const auto src_valid = GetMatmulLogicalShape(src_type, true);
 
@@ -412,45 +525,14 @@ static void CheckScaleAddressTypes(const TileTypePtr& dst_type, const TileTypePt
                              << " requires LeftScale↔Left or RightScale↔Right pairing, but got dst="
                              << MemorySpaceToString(*dst_space) << " src=" << MemorySpaceToString(*src_space);
 
-  // Scale geometry relative to src: Left [M, ceil(K/32)], Right [ceil(K/32), N].
-  // Also check valid_shape when present (PTOAS uses valid K for tget group count).
-  auto apply_left_scale_shape = [&]() {
-    const ExprPtr& m_phys = src_shape[0];
-    const ExprPtr& k_phys = src_shape[1];
-    const ExprPtr& m_valid = src_valid[0];
-    const ExprPtr& k_valid = src_valid[1];
-    ExprPtr sk_phys = MxScaleKCeil(k_phys);
-    ExprPtr sk_valid = MxScaleKCeil(k_valid);
-    if (!sk_phys) {
-      // Symbolic K: still validate the M axis that does not need ceil(K/32).
-      CheckDimMatch(m_phys, dst_type->shape_[0], op_name, "dst_scale", "physical", "rows");
-      CheckDimMatch(m_valid, dst_valid[0], op_name, "dst_scale", "valid", "rows");
-      return;
-    }
-    if (!sk_valid) sk_valid = sk_phys;
-    CheckMxScaleTile(dst_type, m_phys, sk_phys, m_valid, sk_valid, op_name, "dst_scale");
-  };
-  auto apply_right_scale_shape = [&]() {
-    const ExprPtr& k_phys = src_shape[0];
-    const ExprPtr& n_phys = src_shape[1];
-    const ExprPtr& k_valid = src_valid[0];
-    const ExprPtr& n_valid = src_valid[1];
-    ExprPtr sk_phys = MxScaleKCeil(k_phys);
-    ExprPtr sk_valid = MxScaleKCeil(k_valid);
-    if (!sk_phys) {
-      // Symbolic K: still validate the N axis that does not need ceil(K/32).
-      CheckDimMatch(n_phys, dst_type->shape_[1], op_name, "dst_scale", "physical", "cols");
-      CheckDimMatch(n_valid, dst_valid[1], op_name, "dst_scale", "valid", "cols");
-      return;
-    }
-    if (!sk_valid) sk_valid = sk_phys;
-    CheckMxScaleTile(dst_type, sk_phys, n_phys, sk_valid, n_valid, op_name, "dst_scale");
-  };
-
+  // Both the physical and valid scale K axes cover the source's valid K.
+  // A symbolic valid K remains unchecked here and is verified by PTOAS.
   if (is_left) {
-    apply_left_scale_shape();
+    const ExprPtr scale_k = MxScaleKCeil(src_valid[1]);
+    CheckMxScaleTile(dst_type, src_shape[0], scale_k, src_valid[0], scale_k, op_name, "dst_scale");
   } else {
-    apply_right_scale_shape();
+    const ExprPtr scale_k = MxScaleKCeil(src_valid[0]);
+    CheckMxScaleTile(dst_type, scale_k, src_shape[1], scale_k, src_valid[1], op_name, "dst_scale");
   }
 }
 

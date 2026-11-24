@@ -43,6 +43,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -193,8 +194,6 @@ static const std::unordered_set<std::string_view>& LayoutAwareOps() {
       "tile.fillpad",
       // Fractal / window / index addressed.
       "tile.matmul",
-      "tile.matmul_mx",
-      "tile.matmul_mx_bias",
       "tile.matmul_bias",
       "tile.concat",
       "tile.move_fp",
@@ -1114,11 +1113,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
-    {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
-    {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
-    // tile.matmul has phase-aware custom codegen.
-    // tile.matmul_acc / tile.gemv_acc / tile.matmul_mx_acc have custom codegen
-    // (in-place accumulation: ptoas requires ins(acc) == outs).
+    // Phase-aware matrix operations use custom codegen below.
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
     // tile.gemv_acc has custom codegen (in-place accumulation)
     // Data movement/layout operations
@@ -1571,6 +1566,15 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     };
   };
 
+  auto make_mx_codegen = [](const std::string& pto_op, size_t arity) {
+    return [pto_op, arity](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+      auto& codegen = AsPto(codegen_base);
+      CheckArity(op, pto_op, arity);
+      codegen.Emit(pto_op + " " + GenerateInsOutsClause(op, codegen) + AccPhaseAttr(op));
+      return "";
+    };
+  };
+
   // MX in-place acc (5 operands): same c_in==dst contract as make_acc_codegen,
   // kept separate so the non-MX 3-arg helper stays untouched.
   auto make_mx_acc_codegen = [](const std::string& pto_op) {
@@ -1610,8 +1614,47 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
       acc_inst << ") outs(" << dst;
       if (!dst_type.empty()) acc_inst << " : " << dst_type;
-      acc_inst << ")";
+      acc_inst << ")" << AccPhaseAttr(op);
       codegen.Emit(acc_inst.str());
+      return "";
+    };
+  };
+
+  auto make_mx_gemv_codegen = [](const std::string& pto_op, size_t arity, bool accumulates = false) {
+    return [pto_op, arity, accumulates](const ir::CallPtr& op,
+                                        codegen::CodegenBase& codegen_base) -> std::string {
+      auto& codegen = AsPto(codegen_base);
+      CheckArity(op, pto_op, arity);
+
+      // PTOAS compares the logical operand extents from the type and otherwise
+      // falls back to physical shapes. Expose the valid row of the physically
+      // 16-row Acc tile, and the valid K/N of any padded inputs, at the op site.
+      // TRESHAPE keeps each storage address, and the Acc retains its pitch for
+      // the subsequent store. In-place accumulation must use one Acc SSA for
+      // both the input and the destination.
+      const auto result_type = codegen.GetCurrentResultTileType();
+      const std::string result = codegen.EnsureTileView(codegen.GetCurrentResultTarget(),
+                                                        codegen.GetCurrentResultTileBufTypeString(),
+                                                        result_type, "gemv_mx_acc_view");
+      std::vector<std::pair<std::string, std::string>> ins;
+      ins.reserve(arity);
+      if (accumulates) ins.emplace_back(result, codegen.GetSSATileBufType(result));
+      for (size_t i = accumulates ? 1 : 0; i < arity; ++i) {
+        const auto& arg = op->args_[i];
+        const auto tile = As<ir::TileType>(arg->GetType());
+        INTERNAL_CHECK_SPAN(tile, arg->span_) << "Internal error: " << pto_op << " requires tile operands";
+        // Full-valid operands can use their original types. This also keeps
+        // packed FP4 operands on their original handles, which cannot reshape.
+        if (ir::tile_view_semantics::ShapeExprListsEquivalent(ir::GetValidShape(tile), tile->shape_)) {
+          ins.emplace_back(codegen.GetExprAsCode(arg), codegen.GetExprTypeAnnotation(arg));
+        } else {
+          const std::string operand = EnsureStaticViewTileSsa(arg, codegen, "gemv_mx_operand_view");
+          ins.emplace_back(operand, codegen.GetSSATileBufType(operand));
+        }
+      }
+      codegen.Emit(pto_op + " " +
+                   pto_ops_detail::FormatInsOutsClause(ins, {{result, codegen.GetSSATileBufType(result)}}) +
+                   AccPhaseAttr(op));
       return "";
     };
   };
@@ -1624,7 +1667,12 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return MakePhasedMatmulCodegenPTO("pto.tgemv", 2, op, codegen);
   });
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv"));
+  reg("tile.matmul_mx", make_mx_codegen("pto.tmatmul.mx", 4));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
+  reg("tile.matmul_mx_bias", make_mx_codegen("pto.tmatmul.mx.bias", 5));
+  reg("tile.gemv_mx", make_mx_gemv_codegen("pto.tgemv.mx", 4));
+  reg("tile.gemv_mx_acc", make_mx_gemv_codegen("pto.tgemv.mx.acc", 5, /*accumulates=*/true));
+  reg("tile.gemv_mx_bias", make_mx_gemv_codegen("pto.tgemv.mx.bias", 5));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakePhasedMatmulCodegenPTO("pto.tgemv.bias", 3, op, codegen);
   });

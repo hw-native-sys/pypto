@@ -91,7 +91,9 @@ struct FinalProducer {
 
 bool IsPhasedAccumulatorProducer(const CallPtr& call) {
   return IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.gemv") ||
-         IsOp(call, "tile.gemv_acc") || IsOp(call, "tile.gemv_bias");
+         IsOp(call, "tile.gemv_acc") || IsOp(call, "tile.gemv_bias") || IsOp(call, "tile.matmul_mx") ||
+         IsOp(call, "tile.matmul_mx_acc") || IsOp(call, "tile.matmul_mx_bias") ||
+         IsOp(call, "tile.gemv_mx") || IsOp(call, "tile.gemv_mx_acc") || IsOp(call, "tile.gemv_mx_bias");
 }
 
 bool IsFinalAccumulatorProducer(const CallPtr& call) {
@@ -382,8 +384,8 @@ class AccStorePhaseVisitor : public IRVisitor {
         diagnostics_.emplace_back(
             DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/1,
             store_name + "(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
-                "' must consume the exact SSA value produced by tile.matmul, tile.matmul_acc, "
-                "tile.gemv, tile.gemv_acc, or tile.gemv_bias with acc_phase=pl.AccPhase.Final in the "
+                "' must consume the exact SSA value produced by a tile matmul or gemv operation with "
+                "acc_phase=pl.AccPhase.Final in the "
                 "same straight-line region. A final "
                 "store "
                 "without a matching producer waits on a unit flag that was never set and can stall device "

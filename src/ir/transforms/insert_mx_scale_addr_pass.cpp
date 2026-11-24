@@ -231,10 +231,11 @@ class MxScaleAddrInserter : public IRMutator {
   }
 
   static std::vector<std::pair<size_t, size_t>> GetDataScalePairs(const CallPtr& call) {
-    if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias")) {
+    if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias") || IsOp(call, "tile.gemv_mx") ||
+        IsOp(call, "tile.gemv_mx_bias")) {
       return {{0, 1}, {2, 3}};
     }
-    if (IsOp(call, "tile.matmul_mx_acc")) {
+    if (IsOp(call, "tile.matmul_mx_acc") || IsOp(call, "tile.gemv_mx_acc")) {
       return {{1, 2}, {3, 4}};
     }
     return {};

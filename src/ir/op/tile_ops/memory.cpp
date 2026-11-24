@@ -791,8 +791,27 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
                  space == MemorySpace::Right,
              args[0]->span_)
       << op_name << ": packed FP4 Mat layout conversion requires a Left or Right destination";
-  RetargetPackedFp4Geometry(out_dtype, source_view.blayout, tile_view.blayout, output_shape, tile_view,
-                            args[0]->span_, op_name);
+  // TMovToLeft's one-row Mat vector path copies packed K bytes directly.
+  // Its L0A descriptor still uses ColMajor/RowMajor, as required by TGEMV_MX.
+  const auto phys_rows = input_shape.size() == 2 ? As<ConstInt>(input_shape[0]) : nullptr;
+  const bool to_left_vector = tile_type->GetMemorySpace() == MemorySpace::Mat && space == MemorySpace::Left &&
+                              source_view.blayout == TileLayout::row_major && phys_rows &&
+                              phys_rows->value_ == 1;
+  const bool packed_left_vector = to_left_vector && out_dtype.IsPackedFp4();
+  if (packed_left_vector) {
+    const auto cols = As<ConstInt>(input_shape[1]);
+    constexpr int64_t kCubeFractalBytes = 512;
+    // A5 copies a whole 512-byte L0A vector block even when fewer K values are
+    // active. Packed FP4 IR columns already count bytes.
+    CHECK_SPAN(!cols || (cols->value_ > 0 && cols->value_ % kCubeFractalBytes == 0), args[0]->span_)
+        << op_name
+        << " requires an A5 packed FP4 Mat-to-Left row vector to be physically "
+           "padded to a multiple of 512 bytes; keep K in valid_shape";
+  }
+  if (!packed_left_vector) {
+    RetargetPackedFp4Geometry(out_dtype, source_view.blayout, tile_view.blayout, output_shape, tile_view,
+                              args[0]->span_, op_name);
+  }
 
   // Stamp memory_space_ for every destination so the view is canonicalized once,
   // against the space it is actually a view of (same contract as tile.load).

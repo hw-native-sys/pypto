@@ -200,8 +200,8 @@ PropertyVerifierPtr CreateInParamWrittenWarningVerifier();
 /**
  * @brief Factory for the final accumulator/store phase-pairing verifier
  *
- * Checks the bidirectional unit-flag contract between ``tile.gemv``,
- * ``tile.gemv_acc`` and ``tile.gemv_bias`` calls carrying
+ * Checks the bidirectional unit-flag contract between supported matrix
+ * multiplication calls (including MX GEMM and GEMV) carrying
  * ``acc_phase=pl.AccPhase.Final`` and
  * ``tile.store(..., st_phase=pl.STPhase.Final)``. A final producer must be
  * consumed exactly once, using that exact SSA value (or a plain SSA alias), in
