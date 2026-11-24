@@ -1021,7 +1021,7 @@ class ASTParser:
     def _annotated_call_kwargs(call: ir.Call, annotation: ir.Type) -> Mapping[str, Any]:
         """Keep the annotated cast layout when compiler passes re-deduce its result type."""
         if (
-            call.op.name == "tile.cast"
+            call.op.name == ir.get_op("tile.cast").name
             and isinstance(annotation, ir.TileType)
             and annotation.tile_view is not None
             and annotation.tile_view.compact == ir.CompactMode.row_plus_one

@@ -1112,21 +1112,31 @@ def test_row_plus_one_cast_preserves_layout_and_padded_slot_size():
     set_backend_type(BackendType.Ascend950)
     flattened = passes.flatten_tile_nd_to_2d()(PaddedDecode)
     initialized = passes.init_mem_ref()(flattened)
-    body = initialized.get_function("main").body
-    decoded = next(
-        stmt.var
+    main = initialized.get_function("main")
+    assert main is not None
+    body = main.body
+    assert isinstance(body, ir.SeqStmts)
+    decoded_type = next(
+        stmt.var.type
         for stmt in body.stmts
         if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "_decoded"
     )
-    assert decoded.type.tile_view.compact == pl.CompactMode.row_plus_one
-    assert decoded.type.memref.size_ == (128 + 1) * 256
-    assert decoded.type.memref.byte_offset_.value == (128 + 1) * 256
+    assert isinstance(decoded_type, ir.TileType)
+    assert decoded_type.get_effective_tile_view().compact == pl.CompactMode.row_plus_one
+    memref = decoded_type.memref
+    assert memref is not None
+    assert memref.size_ == (128 + 1) * 256
+    offset = memref.byte_offset_
+    assert isinstance(offset, ir.ConstInt)
+    assert offset.value == (128 + 1) * 256
 
 
 def test_direct_fp4_to_fp8_cast_can_request_row_plus_one():
     packed = ir.Var("packed", ir.TileType([128, 128], pl.FP4E2M1X2), ir.Span.unknown())
     decoded = ir.op.tile.cast(packed, pl.FP8E4M3FN, layout=pl.NZ, compact=pl.CompactMode.row_plus_one)
-    assert decoded.type.tile_view.compact == pl.CompactMode.row_plus_one
+    decoded_type = decoded.type
+    assert isinstance(decoded_type, ir.TileType)
+    assert decoded_type.get_effective_tile_view().compact == pl.CompactMode.row_plus_one
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
