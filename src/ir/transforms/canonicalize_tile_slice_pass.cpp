@@ -1172,6 +1172,11 @@ class CanonicalizeMutator : public IRMutator {
     const auto valid = GetValidShape(tile);
     if (tile_view_semantics::HasZeroValidExtent(valid)) return assign;
     const auto& span = cast->span_;
+    const auto columns = As<ConstInt>(tile->shape_[1]);
+    CHECK_SPAN(!columns || columns->value_ % kVecOperandAlignmentBytes == 0, span)
+        << "Decoding an unaligned FP4 slice requires a physical row width divisible by "
+        << kVecOperandAlignmentBytes
+        << " carrier bytes. Pad the slice's physical width and use valid_shape for the valid carriers.";
     auto& registry = OpRegistry::GetInstance();
     std::vector<StmtPtr> stmts;
     auto bind = [&](const std::string& suffix, const CallPtr& value) {

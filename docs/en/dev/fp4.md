@@ -129,6 +129,9 @@ rejected; load that packed window into its own aligned tile instead.
 A plain ND cast through BF16 and FP32 accepts unaligned carrier offsets, including
 a runtime column. PyPTO extracts the byte window using the parent's row pitch
 and decodes both nibbles from an aligned temporary of the window's size.
+For one valid carrier per row, keep the physical width a multiple of 32 bytes.
+For example, `pl.tile.slice(packed, [3, 32], [1, 1], valid_shape=[3, 1])`
+decodes to three rows of two valid BF16 values.
 
 Use `tpush_to_aic` to transfer the NZ result to the Cube without another
 ND-to-NZ move. On A5, a plain Vec store can also copy it to a matching `pl.NZ`

@@ -501,12 +501,13 @@ static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::Ti
   const int64_t data_areas = src->dtype_ == DataType::INT32 ? (is_trem ? 3 : 2) : 1;
   int64_t required = data_areas * row_stride + ((row_stride + 255) / 256) * 8 + 8;
   if (high_precision) {
+    constexpr int64_t kFp32LanesPerVector = 64;
     const auto valid_columns = As<ir::ConstInt>(ir::GetValidShape(src)[1]);
     const int64_t width = valid_columns ? valid_columns->value_ : columns->value_;
-    const int64_t vectors = std::max<int64_t>(width / 64, 1);
-    const int64_t compensation = 10 * 64 * std::min<int64_t>(vectors, 8);
+    const int64_t vectors = std::max<int64_t>(width / kFp32LanesPerVector, 1);
+    const int64_t compensation = 10 * kFp32LanesPerVector * std::min<int64_t>(vectors, 8);
     const int64_t staged =
-        192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? 64 : 0) + compensation;
+        192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? kFp32LanesPerVector : 0) + compensation;
     required = std::max(required, staged);
   }
   return required;

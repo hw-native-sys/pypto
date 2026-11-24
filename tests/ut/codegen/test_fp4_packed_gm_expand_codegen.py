@@ -1510,7 +1510,24 @@ def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path
 
 
 @pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
-def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner):
+def test_unaligned_fp4_slice_reports_physical_row_pitch(planner):
+    @pl.program
+    class Narrow:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self, src: pl.Tensor[[8, 128], pl.FP4E2M1X2], out: pl.Out[pl.Tensor[[3, 2], pl.BF16]]
+        ) -> pl.Tensor[[3, 2], pl.BF16]:
+            packed = pl.tile.load(src, [0, 0], [8, 128])
+            window = pl.tile.slice(packed, [3, 1], [1, 1], valid_shape=[3, 1])
+            return pl.tile.store(pl.cast(window, pl.BF16), [0, 0], out)
+
+    with pytest.raises(ValueError, match="physical row width divisible by 32 carrier bytes"):
+        _emit_incore_mlir(Narrow, planner)
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+@pytest.mark.parametrize("valid_cols", [1, 23])
+def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner, valid_cols):
     @pl.program
     class Partial:
         @pl.function(type=pl.FunctionType.AIV)
@@ -1519,14 +1536,14 @@ def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner):
         ) -> pl.Tensor[[3, 64], pl.BF16]:
             packed = pl.load(src, [0, 0], [8, 128])
             outer = pl.tile.slice(packed, [6, 96], [1, 1])
-            inner = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[2, 23])
+            inner = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[2, valid_cols])
             return pl.store(pl.cast(inner, pl.BF16), [0, 0], out)
 
     mlir = _emit_incore_mlir(Partial, planner)
     extract = next(line for line in mlir.splitlines() if "pto.textract ins(" in line)
     assert ", %c2_index, %c3_index :" in extract and "dtype=i8, rows=8, cols=128" in extract
     store = next(line for line in mlir.splitlines() if "pto.tstore ins(" in line)
-    assert "2x46xbf16" in store, store
+    assert f"2x{2 * valid_cols}xbf16" in store, store
     if find_ptoas_binary() is not None:
         pto, cpp = tmp_path / "partial.pto", tmp_path / "partial.cpp"
         pto.write_text(mlir)
