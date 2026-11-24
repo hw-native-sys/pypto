@@ -780,13 +780,19 @@ def expand_manual_phase_fence() -> Pass:
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
+def lower_graph_for_runtime() -> Pass:
+    """Convert Graph functions to Inline and remove Graph scope wrappers for TMR.
+
+    Uses the current PassContext runtime. Leaves HBG Graphs available for recording.
+    """
+
 def inline_functions() -> Pass:
     """Create a pass that eliminates ``FunctionType.Inline`` functions.
 
     Splices the body of every ``Inline``-typed function into each call site,
     alpha-renaming locals and substituting formal params with actual args. The
-    inline functions are then removed from the program. Runs as the first
-    pipeline pass so subsequent passes never observe Inline functions.
+    inline functions are then removed from the program so subsequent passes
+    never observe Inline functions.
 
     Detects cycles in the Inline → Inline call graph and raises
     :class:`pypto.ValueError`. Multi-return inline functions emit
@@ -1190,6 +1196,7 @@ __all__ = [
     "lower_tile_to_buffer",
     "select_buffer_ir_functions",
     "flatten_call_expr",
+    "lower_graph_for_runtime",
     "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",

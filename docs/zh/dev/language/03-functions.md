@@ -288,7 +288,7 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 | `pl.FunctionType.AIC` | Cube 核心 | Cube 核心内核（特化的 InCore） |
 | `pl.FunctionType.AIV` | Vector 核心 | Vector 核心内核（特化的 InCore） |
 | `pl.FunctionType.Group` | 多核 | AIC + AIV 内核的协调调度组 |
-| `pl.FunctionType.Graph` | 主机/AICPU | 可录制的编排片段，由 `host_build_graph` runtime 回放（详见下文） |
+| `pl.FunctionType.Graph` | 主机/AICPU | 编排片段，在 HBG 上录制与回放，在 TMR 上内联 |
 
 未指定类型时, 函数默认为 `Opaque`。
 
@@ -311,8 +311,9 @@ class Decoder:
             self.layer(cur, normed, next_hidden, wq, i * 5120)
 ```
 
-一个 Graph 函数就是一份被录制的拓扑：runtime 用生成的 C++ 函数地址来标识这份录制，
-因此不存在需要命名、也不需要保证唯一的 cache key。
+以 `tensormap_and_ringbuffer` 为目标时，编译器在 SSA 转换和任务依赖分析之前，将同一份
+Graph 函数体内联到普通调用点。`with pl.graph(...)` 作用域体在所属函数中就地展开。
+支持的 Graph 边界元数据见 [LowerGraphForRuntime](../passes/01-lower_graph_for_runtime.md)。
 
 ### 参数方向
 

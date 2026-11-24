@@ -353,7 +353,7 @@ which decodes values directly in both supported runtimes.
 
 | Check | Why |
 | ----- | --- |
-| The compilation targets `host_build_graph` | `GraphTaskArgs` and `rt_submit_graph` exist only in that runtime's orchestration API, and codegen emits them unconditionally, so a Graph built against the default `tensormap_and_ringbuffer` yields orchestration C++ that names undeclared symbols. Reported here, against the function the user wrote, rather than as a C++ error in generated code |
+| The compilation targets `host_build_graph` | `GraphTaskArgs` and `rt_submit_graph` belong to the HBG orchestration API. On TMR, [LowerGraphForRuntime](01-lower_graph_for_runtime.md) and `InlineFunctions` remove Graph boundaries before this check. This check diagnoses a surviving boundary in a custom pipeline targeting TMR |
 | At least one tensor parameter | A graph with an empty boundary has nothing to patch on replay; the runtime refuses to cache it |
 | At most 128 tensor parameters | `GRAPH_MAX_TENSOR_ARGS` — the boundary is a fixed-size `GraphTaskArgs` |
 | At most 64 scalar parameters | `GRAPH_MAX_SCALAR_ARGS`. Checked after Step A, which *adds* scalar parameters, so a signature that fit before hoisting can stop fitting after |

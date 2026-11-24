@@ -35,8 +35,8 @@ Public API
 
     @pl.jit.graph
     def layer(a: pl.Tensor, c: pl.InOut[pl.Tensor]):        # FunctionType.Graph
-        with pl.at(level=pl.Level.CORE_GROUP):              # recorded once,
-            ...                                             # replayed after
+        with pl.at(level=pl.Level.CORE_GROUP):              # recorded on HBG,
+            ...                                             # submitted directly on TMR
 
     @pl.jit
     def entry(a: pl.Tensor, c: pl.Out[pl.Tensor]):
@@ -2226,7 +2226,7 @@ _AUTO_SCOPE_UNSET: Any = object()
 
 
 class _SubFunctionDecorator:
-    """Sub-decorator factory for ``@jit.<kind>`` (host / incore / inline / opaque).
+    """Sub-decorator factory for ``@jit.<kind>`` (host / incore / inline / opaque / graph).
 
     Every kind supports both ``@jit.kind`` (bare) and ``@jit.kind()`` (parens).
     Only ``incore`` honors a ``level=`` kwarg; passing it to other kinds raises.
@@ -2243,11 +2243,11 @@ class _SubFunctionDecorator:
         ``InlineFunctions`` IR pass).
       - ``opaque``  → ``FunctionType.Opaque`` (separate IR function; may wrap
         orchestration loops and ``pl.at`` scopes).
-      - ``graph``   → ``FunctionType.Graph`` (a recordable orchestration
-        fragment; the host_build_graph runtime records its task topology on the
-        first call and replays it after, so N calls cost one graph build rather
-        than N). Requires ``RuntimeKind.HOST_BUILD_GRAPH`` — compile under a
-        ``PassContext(runtime=...)``, or ``LegalizeGraphBoundary`` rejects it.
+      - ``graph``   → ``FunctionType.Graph`` (an orchestration fragment that
+        ``host_build_graph`` records and replays). With
+        ``tensormap_and_ringbuffer``, ordinary Graph calls inline the body and
+        submit its tasks on every execution. An explicit ``pl.submit`` of the
+        fragment requires ``host_build_graph``.
     """
 
     def __init__(self, func_type: str, *, allow_level: bool, allow_auto_scope: bool = False) -> None:

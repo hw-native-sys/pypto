@@ -20,6 +20,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.backend import BackendType
 from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics import ParserSyntaxError, UndefinedVariableError
 
@@ -973,6 +974,119 @@ class P:
         source = _graph_dispatch_scope_source(False, True).replace(" as done:", " as (left, right):")
         with pytest.raises(ParserSyntaxError, match="plain variable name"):
             pl.parse_program(source)
+
+
+@pytest.mark.parametrize(
+    ("submit_kwarg", "after"),
+    [
+        (", deps=[seed]", ""),
+        (", predicate=(gate[0, 0] > 0)", ""),
+        ("", "            pl.system.task_dummy(deps=[done])\n"),
+    ],
+    ids=["incoming-dependency", "predicate", "completion-consumer"],
+)
+def test_tmr_reports_unsupported_graph_submit(submit_kwarg, after):
+    program = pl.parse_program(f"""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(c, [0, 0], [16, 16])
+            pl.store(pl.add(tile, 1.0), [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], gate: pl.Tensor[[1, 1], pl.INT32]):
+        with pl.manual_scope():
+            seed = pl.system.task_dummy(deps=[])
+            c, done = pl.submit(self.layer, c{submit_kwarg})
+{after}        return c
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower Graph submit.*layer"):
+            passes.lower_graph_for_runtime()(program)
+
+
+@pytest.mark.parametrize(
+    ("scope_args", "after"),
+    [(", deps=[seed]):", ""), (") as done:", "        pl.system.task_dummy(deps=[done])\n")],
+    ids=["incoming-dependency", "completion-consumer"],
+)
+def test_tmr_reports_unsupported_graph_scope_boundary(scope_args, after):
+    program = pl.parse_program(f"""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        seed = pl.system.task_dummy(deps=[])
+        with pl.graph("layer"{scope_args}
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(c, [0, 0], [16, 16])
+                pl.store(pl.add(tile, 1.0), [0, 0], c)
+{after}        return c
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower Graph scope.*layer"):
+            passes.lower_graph_for_runtime()(program)
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        "self.layer(c)",
+        'with pl.graph("direct"):\n                self.increment(c)',
+        "self.helper(c)",
+    ],
+    ids=["graph-call", "graph-scope", "inline-helper"],
+)
+def test_tmr_reports_graph_inside_manual_scope(tmp_path, region):
+    program = pl.parse_program(f"""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.InCore)
+    def increment(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.load(c, [0, 0], [16, 16])
+        return pl.store(pl.add(tile, 1.0), [0, 0], c)
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        self.increment(c)
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        self.layer(c)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        with pl.manual_scope():
+            {region}
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower.*manual scope"):
+            ir.compile(program, output_dir=str(tmp_path), backend_type=BackendType.Ascend950, skip_ptoas=True)
+
+
+def test_tmr_reports_inline_graph_scope_in_manual_submit_argument():
+    program = pl.parse_program("""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.InCore)
+    def increment(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.load(c, [0, 0], [16, 16])
+        return pl.store(pl.add(tile, 1.0), [0, 0], c)
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.graph("layer"):
+            self.increment(c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        with pl.manual_scope():
+            result, done = pl.submit(self.increment, self.helper(c))
+        return result
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower Graph inside an enclosing manual scope"):
+            passes.lower_graph_for_runtime()(program)
 
 
 if __name__ == "__main__":

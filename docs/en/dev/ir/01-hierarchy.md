@@ -668,8 +668,8 @@ Consequences:
 | `AIV` | Vector core kernel (specialized InCore) |
 | `Group` | Co-scheduled group of AIC + AIV kernels |
 | `Spmd` | SPMD data-parallel dispatch wrapper |
-| `Inline` | Whole-body substitution at every call site; eliminated by `InlineFunctions` before any other pass |
-| `Graph` | Callable orchestration fragment, recorded once and replayed by the `host_build_graph` runtime |
+| `Inline` | Whole-body substitution at every call site; eliminated by `InlineFunctions` before SSA conversion |
+| `Graph` | Callable orchestration fragment, recorded and replayed by `host_build_graph` or inlined for `tensormap_and_ringbuffer` |
 | `SIMT` | Void device helper invoked only by `SimtLaunchStmt`; no runtime task metadata |
 | `VF` | Synchronous register device helper; Tile/Scalar parameters and Tile alias returns; no runtime task metadata |
 
