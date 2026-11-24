@@ -91,7 +91,7 @@ def _wrap_arg(arg: Any) -> Any:
         return Tile(expr=arg)
     if isinstance(t, ir.ArrayType):
         return Array(expr=arg)
-    if isinstance(t, ir.RegType):
+    if isinstance(t, ir.RegType) and t.kind != ir.RegKind.UReg:
         return Reg(arg)
     if isinstance(t, ir.ScalarType):
         return Scalar(expr=arg)

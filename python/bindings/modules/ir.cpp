@@ -501,13 +501,21 @@ void BindIR(nb::module_& m) {
 
   nb::enum_<RegKind>(ir, "RegKind", "Register descriptor kind")
       .value("VecReg", RegKind::VecReg, "Vector register holding non-BOOL lanes")
-      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes");
-  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Static logical register descriptor");
+      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes")
+      .value("UReg", RegKind::UReg, "Linear squeeze-store alignment state");
+  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Logical register descriptor");
   // The lane count must be an integer, not text coerced by older nanobind releases.
   reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape").noconvert(), nb::arg("dtype"),
                      nb::arg("kind"), "Create a register descriptor with a positive logical lane count");
+  reg_type_class.def_static("ureg", &RegType::GetUReg, "Get the type of the linear squeeze-store state.");
   BindFields<RegType>(reg_type_class);
-  reg_type_class.def_prop_ro("lanes", &RegType::GetLanes, "Logical lane count (alias of shape)");
+  reg_type_class.def_prop_ro(
+      "lanes",
+      [](const RegType& type) -> std::optional<int64_t> {
+        if (type.GetRegKind() == RegKind::UReg) return std::nullopt;
+        return type.GetLanes();
+      },
+      "Logical lane count (alias of shape), or None for UReg");
 
   // ScalarType - const shared_ptr
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");

@@ -360,7 +360,7 @@ void RejectRawNoOpConvert(const std::string& op_name, const std::vector<ExprPtr>
   }
   if (has_rounding || has_saturate || target == nullptr || !args[0]) return;
   auto source = std::dynamic_pointer_cast<const RegType>(args[0]->GetType());
-  if (source && source->dtype_ == *target) {
+  if (source && source->GetRegKind() == RegKind::VecReg && source->GetDType() == *target) {
     CHECK_SPAN(false, span) << "Raw reg.convert same-dtype no-op is non-canonical; use the operand directly";
   }
 }

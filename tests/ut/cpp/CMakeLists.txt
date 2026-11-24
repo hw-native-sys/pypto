@@ -45,7 +45,7 @@ target_link_libraries(pypto_vf_ir_contract_test PRIVATE libbacktrace)
 # Keep assert-based contract checks enabled in release builds as well.
 target_compile_options(pypto_vf_ir_contract_test PRIVATE -UNDEBUG)
 # Invalid RegKind, wide RegKind, and HardwareLoopPolicy values, respectively.
-add_test(NAME pypto_vf_ir_contract_test COMMAND pypto_vf_ir_contract_test 2 255 2)
+add_test(NAME pypto_vf_ir_contract_test COMMAND pypto_vf_ir_contract_test 3 255 2)
 
 # Test native construction and query contracts without Python or a device runtime.
 add_executable(pypto_sync_resource_catalog_test

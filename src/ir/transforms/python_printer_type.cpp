@@ -77,9 +77,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
            std::to_string(multi_buffer->slot_count_) + ")";
   }
   if (auto reg = As<RegType>(type)) {
-    return prefix_ + ".Reg[" + std::to_string(reg->shape_) + ", " + prefix_ + "." +
-           DataTypeToString(reg->dtype_) + ", " + prefix_ + ".RegKind." +
-           (reg->kind_ == RegKind::VecReg ? "VecReg" : "MaskReg") + "]";
+    if (reg->GetRegKind() == RegKind::UReg) return prefix_ + "._dump.UReg";
+    return prefix_ + ".Reg[" + std::to_string(reg->GetShape()) + ", " + prefix_ + "." +
+           DataTypeToString(reg->GetDType()) + ", " + prefix_ + ".RegKind." +
+           (reg->GetRegKind() == RegKind::VecReg ? "VecReg" : "MaskReg") + "]";
   }
   if (auto scalar_type = As<ScalarType>(type)) {
     // Print as pl.Scalar[pl.INT64] for proper round-trip support

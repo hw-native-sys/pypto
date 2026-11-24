@@ -28,6 +28,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
@@ -43,6 +44,7 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   std::map<const Var*, VarPtr> aliases;
   std::map<const Var*, VarPtr> references;
   bool has_control_flow = false;
+  bool micro = false;
   std::vector<ForStmtPtr> loops;
 
   void VisitStmt(const StmtPtr& stmt) override {
@@ -64,17 +66,22 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     if (auto call = As<Call>(stmt->value_); call && (IsOp(call, "reg.store") || IsOp(call, "reg.scatter"))) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
     }
+    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.squeeze_store_flush")) {
+      aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[1]));
+    }
     references.emplace(stmt->var_.get(), stmt->var_);
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
+    micro |= IsOp(call, "reg.squeeze_store_init");
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       memory.push_back(call);
       // VMI adds the view origin when materializing an address. Its scalar
       // dependencies live in the Tile type, so ordinary operand traversal
       // would otherwise omit them from the helper's scalar captures.
-      const auto tile = As<TileType>(call->args_[0]->GetType());
+      const auto tile = As<TileType>(GetRegMemoryEffect(call).target->GetType());
       if (tile && tile->tile_view_ && tile->tile_view_->start_offset) {
         VisitExpr(tile->tile_view_->start_offset);
       }
@@ -132,8 +139,9 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   if (!operands.loops.empty()) {
     for (const auto& loop : operands.loops) {
       const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
-      CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && stop_type &&
-                     (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
+      CHECK_SPAN((loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require ||
+                  (operands.micro && ir::HasCanonicalHardwareLoopBounds(loop))) &&
+                     stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
                  loop->span_)
           << "VF hardware loop lowering requires canonical integer loops";
       // Register/mask carries remain inside the VF. Tile carries would need
@@ -168,6 +176,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   PTOCodegen helper(backend_);
   helper.emit_source_loc_ = emit_source_loc_;
   helper.inside_reg_scope_ = true;
+  helper.micro_reg_scope_ = operands.micro;
   helper.fs_.current_function = fs_.current_function;
   helper.fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(scope->body_);
   helper.fs_.constants_indent = "    ";
@@ -193,7 +202,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   // effects to surrounding transfers and aliases. Only the adapter extracts UB
   // pointers, after sync analysis has modeled its annotated Tile call.
   for (const auto& call : operands.memory) {
-    auto target = ir::AsVarLike(call->args_[0]);
+    auto target = ir::AsVarLike(ir::GetRegMemoryEffect(call).target);
     CHECK_SPAN(target, call->span_) << "VF memory capture requires an external Tile variable";
     auto root = resolve(target);
     auto tile = ir::As<ir::TileType>(root->GetType());
@@ -211,9 +220,11 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     CHECK_SPAN(borrowed || allocation, call->span_)
         << "VF capture requires planned local UB or a contiguous view of a known AIV C2V receive";
     auto effect = ir::GetRegMemoryEffect(call);
-    CHECK_SPAN((borrowed || effect.root) && (effect.begin || !operands.loops.empty() ||
-                                             IsOp(call, "reg.gather") || IsOp(call, "reg.scatter")),
-               call->span_)
+    CHECK_SPAN(
+        (borrowed || effect.root) && (effect.begin || !operands.loops.empty() || IsOp(call, "reg.gather") ||
+                                      IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+                                      IsOp(call, "reg.squeeze_store_flush")),
+        call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     if (borrowed) {
       const auto& view = fifo->second;
@@ -269,7 +280,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     // Tile. Readwrite preserves dependencies on the untouched contents without
     // claiming that masked-off lanes physically read memory. Store-version
     // aliases share this capture and accumulate its conservative effect.
-    if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter")) {
+    if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       artifact.parameter_effects[it->second] = "readwrite";
     }
   }
@@ -335,7 +347,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     addresses.push_back(address);
   }
   for (const auto& call : operands.memory) {
-    const auto target = ir::AsVarLike(call->args_[0]);
+    const auto target = ir::AsVarLike(ir::GetRegMemoryEffect(call).target);
     const auto& address = addresses[captures.at(resolve(target).get())];
     helper.reg_addresses_[target.get()] = address;
     helper.BindVarToMlir(target, address);

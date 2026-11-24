@@ -132,6 +132,8 @@ _MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,
     "AsyncEventType": ir.AsyncEventType.get,
     "AsyncEvent": ir.AsyncEventType.get,
+    "SqueezeStore": ir.RegType.ureg,
+    "SqueezeStoreType": ir.RegType.ureg,
     "AsyncSessionType": ir.AsyncSessionType.get,
     "AsyncSession": ir.AsyncSessionType.get,
     "CommCtxType": ir.CommCtxType.get,
@@ -579,7 +581,12 @@ class TypeResolver:
             and node.value.attr == "_dump"
             and isinstance(node.value.value, ast.Name)
         ):
-            getters = {"WindowBuffer": ir.WindowBufferType.get, "Unknown": ir.UnknownType}
+            getters = {
+                "WindowBuffer": ir.WindowBufferType.get,
+                "Unknown": ir.UnknownType,
+                "UReg": ir.RegType.ureg,
+                "SqueezeStore": ir.RegType.ureg,
+            }
             getter = getters.get(node.attr)
             return getter() if getter is not None else None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
@@ -653,14 +660,16 @@ class TypeResolver:
                 if (
                     isinstance(kind_node, ast.Attribute)
                     and is_reg_kind
-                    and kind_node.attr in ("VecReg", "MaskReg")
+                    and kind_node.attr in ("VecReg", "MaskReg", "UReg")
                 ):
-                    kind = ir.RegKind.VecReg if kind_node.attr == "VecReg" else ir.RegKind.MaskReg
+                    kind = getattr(ir.RegKind, kind_node.attr)
                 else:
                     success, resolved_kind = self.expr_evaluator.try_eval_expr(kind_node)
                     if not success or not isinstance(resolved_kind, ir.RegKind):
                         raise ParserTypeError("Reg kind must be a RegKind", span=self._get_span(kind_node))
                     kind = resolved_kind
+            if kind == ir.RegKind.UReg:
+                raise ParserTypeError("UReg has no lanes or dtype", span=self._get_span(value))
             return ir.RegType(shape, self.resolve_dtype(dtype_node), kind)
 
         if type_name == "Array":

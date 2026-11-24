@@ -54,6 +54,16 @@ def test_reg_type_rejects_dtype_kind_mismatch():
         ir.RegType(64, DataType.BOOL, ir.RegKind.VecReg)
 
 
+def test_ureg_type_has_no_lanes_or_dtype():
+    state = ir.RegType.ureg()
+    assert state.kind == ir.RegKind.UReg
+    assert state.shape is None and state.lanes is None and state.dtype is None
+    assert not ir.structural_equal(state, ir.RegType(64, DataType.FP32, ir.RegKind.VecReg))
+    assert python_print(state, format=False) == "pl._dump.UReg"
+    with pytest.raises(ValueError, match="UReg"):
+        ir.RegType(64, DataType.FP32, ir.RegKind.UReg)
+
+
 @pytest.mark.parametrize("mask", [False, True])
 def test_reg_type_serialization(mask):
     dtype = DataType.BOOL if mask else DataType.FP32
@@ -72,10 +82,25 @@ def _type_map(fields):
     )
 
 
+def test_ureg_serialization_and_legacy_descriptor():
+    var = ir.Var("state", ir.RegType.ureg(), ir.Span.unknown())
+    payload = ir.serialize(var)
+    descriptor = _type_map({"type_kind": b"\xa7RegType", "kind": b"\x02"})
+    assert payload.count(descriptor) == 1
+    legacy_descriptor = _type_map({"type_kind": b"\xb0SqueezeStoreType"})
+    for encoded in (payload, payload.replace(descriptor, legacy_descriptor)):
+        restored = ir.deserialize(encoded)
+        assert isinstance(restored, ir.Var)
+        ir.assert_structural_equal(var, restored, enable_auto_mapping=True)
+        assert ir.structural_hash(restored.type) == ir.structural_hash(var.type)
+        assert ir.serialize(restored) == payload
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
         ("kind", b"\x02"),
+        ("kind", b"\x03"),
         ("kind", b"\xcd\x01\x00"),
         ("kind", b"\xff"),
         ("kind", b"\xc3"),

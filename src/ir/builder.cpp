@@ -393,7 +393,8 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
     for (const auto& [key, value] : kwargs) {
       if (key == "dtype") dtype = std::any_cast<DataType>(&value);
     }
-    no_op_convert = source != nullptr && dtype != nullptr && source->dtype_ == *dtype;
+    no_op_convert =
+        source && source->GetRegKind() == RegKind::VecReg && dtype && source->GetDType() == *dtype;
   }
   Emit(std::make_shared<AssignStmt>(var, no_op_convert ? args[0] : ExprPtr(call), span));
   return var;

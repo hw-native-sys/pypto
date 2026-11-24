@@ -23,18 +23,24 @@ float_type = ir.ScalarType(DataType.FP32)
 
 ### 寄存器 IR 描述符
 
-`RegType(shape, dtype, kind)` 直接继承 `Type`。shape 是表示逻辑 lane 数的单个
-正整数，与物理向量宽度无关；`lanes` 直接返回该整数。`RegKind.VecReg` 禁止
+`RegType` 直接继承 `Type`，有 `VecReg`、`MaskReg` 和 `UReg` 三种。
+构造 VecReg 和 MaskReg 时使用 `RegType(shape, dtype, kind)`，其中 `shape` 是逻辑 lane 数的
+单个正整数，与物理向量宽度无关。`lanes` 直接返回该整数。`RegKind.VecReg` 禁止
 `BOOL`，`RegKind.MaskReg` 必须使用 `BOOL`。非法 shape、未知 dtype 和未知 kind 在构造或
 反序列化时立即失败。
+
+`ir.RegType.ureg()` 返回 squeeze-store 使用的不透明 SSA 状态类型。它的种类是
+`RegKind.UReg`，`shape`、`lanes` 和 `dtype` 在 Python 中均为 `None`。
+IR dump 中写作 `pl._dump.UReg`。
 
 ```python
 vector = ir.RegType(64, DataType.FP32, ir.RegKind.VecReg)
 mask = ir.RegType(64, DataType.BOOL, ir.RegKind.MaskReg)
+ureg_type = ir.RegType.ureg()
 ```
 
-标注形式为 `pl.Reg[64, pl.FP32]`（默认 VecReg）和
-`pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]`。这些描述符、无专属字段的
+DSL 使用 `pl.Reg[64, pl.FP32]` 标注默认的 `VecReg`，使用
+`pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]` 标注 `MaskReg`。这些描述符、无专属字段的
 `ir.RegScopeStmt(name_hint, body, span, leading_comments=[], attrs=None)` 和
 `ir.ForStmt.hardware_loop_policy` 属于 IR 基础设施，支持直接构造、visitor/mutator
 遍历、结构比较和二进制序列化。P0 寄存器操作和 `pl.reg_scope()` 支持经过验证的
@@ -46,6 +52,18 @@ VF 代码生成仍由 PR3 实现。
 必须失败。本次基础设施改动不实现 hardware loop 分析或生成。
 
 `Simplify` 可消除已证明零次执行的 Sequential Require 循环，并返回初始携带值；非空 Require（包括单次循环）必须保留。
+
+#### Squeeze-store 状态
+
+公开的 `squeeze_store_init/step/flush` 操作表达 UReg 状态链。`init` 接收目标 Tile
+和元素 offset，并初始化 UReg 状态。Tile 存储最早在 `step` 或 `flush` 时写入。
+每个操作都显式关联目标 Tile，以便内存效果与别名分析识别写入；前端不暴露指针。
+step 消费当前循环携带的 UReg
+值并返回后继值；`pl.range(..., init_values=...)` 在顺序循环中携带它。该类型下沉为
+`!pto.align`，不能跨 RegScope 或函数边界、不能重复消费，必须恰好收尾一次，即使没有执行
+step 或循环为空。当前基于 AR 的 lowering 同时支持一条活动链，关闭后可在同一区域开启
+下一条；这个实现限制与硬件非对齐寄存器数量不同。编译器
+消除零次循环等场景产生的线性 SSA 转发会消费旧名称，后续复用旧名称仍会报错。
 
 ### 内部 Buffer 类型
 

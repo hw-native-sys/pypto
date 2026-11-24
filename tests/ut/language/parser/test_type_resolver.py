@@ -2425,6 +2425,20 @@ def test_canonical_reg_annotation_resolves_without_captured_module():
     assert result.kind == ir.RegKind.MaskReg
 
 
+@pytest.mark.parametrize("text", ["pl._dump.UReg", "pl._dump.SqueezeStore", "pl.SqueezeStoreType"])
+def test_ureg_annotation_resolves_from_current_and_legacy_dumps(text):
+    annotation = ast.parse(text, mode="eval").body
+    resolved = _make_resolver().resolve_type(annotation)
+    assert isinstance(resolved, ir.RegType)
+    ir.assert_structural_equal(resolved, ir.RegType.ureg())
+
+
+def test_ureg_annotation_rejects_lanes_and_dtype():
+    annotation = ast.parse("pl.Reg[64, pl.FP32, pl.RegKind.UReg]", mode="eval").body
+    with pytest.raises(ParserTypeError, match="no lanes or dtype"):
+        _make_resolver().resolve_type(annotation)
+
+
 @pytest.mark.parametrize("shape_expr", ["SHAPE", "[SHAPE[0], 16]"])
 @pytest.mark.parametrize("initialized", [False, True])
 def test_shape_alias_uses_local_dynamic_binding(shape_expr, initialized):

@@ -261,10 +261,16 @@ class MemRefUpdateMutator : public IRMutator {
     }
 
     if (args_changed || kwargs_changed) {
-      // Reg stores/scatters alias their destination, including its resolved
-      // MemRef. Keeping the old result type loses the newly assigned address.
-      auto result_type =
-          (IsOp(op, "reg.store") || IsOp(op, "reg.scatter")) ? new_args[0]->GetType() : op->GetType();
+      // Register writebacks alias their declared destination, including its
+      // resolved MemRef. The destination is not necessarily argument zero.
+      auto result_type = op->GetType();
+      auto& registry = OpRegistry::GetInstance();
+      if (registry.IsRegistered(op->op_->name_)) {
+        const auto& entry = registry.GetEntry(op->op_->name_);
+        if (const auto reuse = entry.GetOutputReusesInputArg(); entry.GetRegSpec() && reuse) {
+          result_type = new_args[*reuse]->GetType();
+        }
+      }
       return std::make_shared<Call>(op->op_, std::move(new_args), std::move(new_kwargs), result_type,
                                     op->span_);
     }
