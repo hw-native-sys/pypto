@@ -17,10 +17,12 @@ import inspect
 import json
 import logging
 import math
+import shutil
 import sys
 import threading
 import time
 import types
+import uuid
 import warnings
 import weakref
 from collections.abc import Callable, Mapping, Sequence
@@ -132,12 +134,15 @@ class DistributedRunHandle:
         frame: _DispatchFrame,
         dispatch_id: int,
         postprocess: Callable[[], None] | None = None,
+        *,
+        capture_directory: Path | None = None,
     ) -> None:
         self._worker: DistributedWorker | None = worker
         self._native_handle = native_handle
         self._frame: _DispatchFrame | None = frame
         self._dispatch_id = dispatch_id
         self._postprocess = postprocess
+        self._capture_directory = capture_directory
         self._cv = threading.Condition()
         self._wait_in_progress = False
         self._terminal = False
@@ -157,6 +162,8 @@ class DistributedRunHandle:
         cls,
         worker: DistributedWorker,
         error: BaseException | None = None,
+        *,
+        capture_directory: Path,
     ) -> DistributedRunHandle:
         handle = cls.__new__(cls)
         handle._worker = worker
@@ -164,11 +171,21 @@ class DistributedRunHandle:
         handle._frame = None
         handle._dispatch_id = 0
         handle._postprocess = None
+        handle._capture_directory = capture_directory
         handle._cv = threading.Condition()
         handle._wait_in_progress = False
         handle._terminal = True
         handle._error = error
         return handle
+
+    @property
+    def capture_directory(self) -> Path | None:
+        """Root of this submission's chip-swimlane capture, or None when disabled.
+
+        Read the artifacts after ``result()``. They survive worker close until a
+        new worker starts a profiling session in the same output root.
+        """
+        return self._capture_directory
 
     @property
     def done(self) -> bool:
@@ -379,15 +396,16 @@ def _run_directory(compiled: Any) -> Path:
     return runtime_output_directory(compiled)
 
 
-def _collect_program_swimlane(compiled: Any) -> None:
+def _collect_program_swimlane(compiled: Any, dfx_base: Path) -> None:
     artifact_fields = cast("dict[str, Any]", vars(compiled))
     if artifact_fields.get("_artifact_runtime") is None:
-        _collect_l3_swimlane(compiled.output_dir, compiled.platform)
+        _collect_l3_swimlane(compiled.output_dir, compiled.platform, dfx_base=dfx_base)
     else:
         _collect_l3_swimlane(
             artifact_fields["_artifact_runtime"].directory,
             compiled.platform,
             run_directory=_run_directory(compiled),
+            dfx_base=dfx_base,
         )
 
 
@@ -924,6 +942,7 @@ _DISPATCH_DIR_GLOB = "d[0-9]*"
 # ``next_levels/<program>`` — so naming a dispatch's tasks needs this marker
 # (issue #2169).
 _DISPATCH_PROGRAM_FILE = "dispatch_program.json"
+_CLOSED_SWIMLANE_SESSION = ".pypto-swimlane-closed"
 
 # Written by the ChipWorker child into every capture directory it creates. The
 # child numbers captures per *process* (``local_capture_index``), not per run, so
@@ -1087,21 +1106,9 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
 
 
 def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
-    """Remove stale ``rank*/d{k}`` dispatch dirs before a fresh DFX run.
-
-    A prepared :class:`DistributedWorker` reusing one ``output_dir`` across runs
-    would otherwise leave ``d{k}`` dirs from an earlier, larger run on disk,
-    whether the child restarted its capture numbering or carried it forward.
-    ``_collect_l3_swimlane`` globs ``d[0-9]*``, so
-    those stale dirs would be re-converted as if they belonged to the current
-    run. Clearing them once, before the first dispatch of a DFX run, scopes the
-    artifacts (and their post-processing) to exactly this run. Called only when
-    DFX is enabled; best-effort (a removal failure must not abort the dispatch).
-    """
+    """Remove stale dispatch directories for DFX calls that reuse a flat output prefix."""
     if not dfx_base.is_dir():
         return
-    import shutil  # noqa: PLC0415
-
     for rank_dir in dfx_base.glob(_RANK_DIR_GLOB):
         if not rank_dir.is_dir():
             continue
@@ -1271,7 +1278,6 @@ def _consolidate_two_pass_captures(rank_dir: Path, pairs: dict[Path, Path]) -> N
     left exactly as it was, and its records are still converted where they lie.
     """
     import collections  # noqa: PLC0415
-    import shutil  # noqa: PLC0415
 
     # Several timed captures can share one graph pass — a benchmark loop repeats
     # the timing run against the graph it captured once. Folding them all into
@@ -1386,7 +1392,9 @@ def _write_dispatch_name_map(
     return name_map_path
 
 
-def _collect_l3_swimlane(output_dir: Path, platform: str, *, run_directory: Path | None = None) -> None:
+def _collect_l3_swimlane(
+    output_dir: Path, platform: str, *, dfx_base: Path | None = None, run_directory: Path | None = None
+) -> None:
     """Convert each dispatch's swimlane records into a ``merged_swimlane_*.json``.
 
     The runtime writes ``rank{r}/d{k}/deps.json`` in the graph pass and
@@ -1440,7 +1448,8 @@ def _collect_l3_swimlane(output_dir: Path, platform: str, *, run_directory: Path
     # ``_write_dispatch_name_map`` so each config is loaded once per run.
     name_map_cache: dict[str, dict[str, str]] = {}
 
-    dfx_base = (output_dir if run_directory is None else run_directory) / "dfx_outputs"
+    if dfx_base is None:
+        dfx_base = (output_dir if run_directory is None else run_directory) / "dfx_outputs"
     # See the docstring for why we glob rather than iterate a rank count.
     # 3.10-safe dir filter (``glob`` directory filtering is only reliable on 3.11+).
     rank_dirs = sorted(d for d in dfx_base.glob(_RANK_DIR_GLOB) if d.is_dir())
@@ -1773,7 +1782,7 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
 
     # Offline post-pass (reads the per-dispatch deps.json + records on disk).
     if swimlane:
-        _collect_program_swimlane(compiled)
+        _collect_program_swimlane(compiled, dfx_base)
 
 
 _EXECUTE_DISTRIBUTED_COMPILED_DEPRECATION = (
@@ -2020,6 +2029,9 @@ class DistributedWorker(Worker):
         # the child's ``local_capture_index``; a new Worker (new child) starts
         # fresh. See ``_reset_dfx_dispatch_state`` / ``_submit_chip``.
         self._dfx_dispatch_idx: dict[str, int] = {}
+        # Dispatch IDs restart on a new worker, even if it shares an output directory.
+        self._swimlane_session = f"session-{uuid.uuid4().hex}"
+        self._swimlane_session_dirs: set[Path] = set()
         self._reset_persistent_windows = reset_persistent_windows
         self._persistent_error: BaseException | None = None
         self._persistent_error_reported = False
@@ -3262,9 +3274,8 @@ class DistributedWorker(Worker):
 
         frame, dispatch_id = self._acquire_dispatch_frame()
         try:
-            call_config, dfx_base, two_pass_swimlane = self._prepare_dispatch_config(
-                compiled,
-                config,
+            call_config, capture_directory, two_pass_swimlane = self._prepare_dispatch_config(
+                compiled, config, dispatch_id
             )
 
             tensors = frame.tensors
@@ -3282,11 +3293,11 @@ class DistributedWorker(Worker):
 
             if two_pass_swimlane:
                 assert config is not None
-                assert dfx_base is not None
+                assert capture_directory is not None
                 _run_l3_swimlane_two_pass(
                     compiled._distributed_config,
                     config,
-                    dfx_base,
+                    capture_directory,
                     lambda pass_config: self._dispatch_prepared(
                         state,
                         tensors,
@@ -3294,18 +3305,20 @@ class DistributedWorker(Worker):
                         frame.keepalive,
                     ),
                 )
-                _collect_program_swimlane(compiled)
+                _collect_program_swimlane(compiled, capture_directory)
                 self._release_unpublished_dispatch_frame(frame)
-                return DistributedRunHandle._completed(self)
+                return DistributedRunHandle._completed(self, capture_directory=capture_directory)
 
             postprocess: Callable[[], None] | None = None
-            if config is not None and config.enable_chip_swimlane > 0:
+            if capture_directory is not None:
 
                 def collect_swimlane() -> None:
-                    _collect_program_swimlane(compiled)
+                    _collect_program_swimlane(compiled, capture_directory)
 
                 postprocess = collect_swimlane
-            handle = DistributedRunHandle(self, None, frame, dispatch_id, postprocess)
+            handle = DistributedRunHandle(
+                self, None, frame, dispatch_id, postprocess, capture_directory=capture_directory
+            )
             try:
                 frame.handle = handle
                 with self._dispatch_cv:
@@ -3321,32 +3334,52 @@ class DistributedWorker(Worker):
                 self._release_unpublished_dispatch_frame(frame)
             raise
 
+    def _swimlane_capture_directory(self, dfx_base: Path, dispatch_id: int) -> Path:
+        """Start a session per output root and allocate one prefix for both passes."""
+        session_dir = dfx_base.resolve() / self._swimlane_session
+        if session_dir not in self._swimlane_session_dirs:
+            session_dir.mkdir(parents=True)
+            self._swimlane_session_dirs.add(session_dir)
+            # Other workers can profile into the same root. Only a worker that
+            # finished closing has released its captures for cleanup.
+            for marker in session_dir.parent.glob(f"session-*/{_CLOSED_SWIMLANE_SESSION}"):
+                if marker.is_file():
+                    shutil.rmtree(marker.parent, ignore_errors=True)
+        return session_dir / f"run-{dispatch_id:06d}"
+
+    def _close_swimlane_session(self) -> None:
+        for session_dir in self._swimlane_session_dirs:
+            try:
+                (session_dir / _CLOSED_SWIMLANE_SESSION).touch()
+            except OSError as exc:
+                logger.warning("Could not mark swimlane session %s for cleanup: %s", session_dir, exc)
+
     def _prepare_dispatch_config(
         self,
         compiled: DistributedCompiledProgram,
         config: RunConfig | None,
+        dispatch_id: int,
     ) -> tuple[Any, Path | None, bool]:
         """Snapshot one dispatch's runtime config after capacity admission."""
         if config is None:
             return _make_call_config(compiled._distributed_config), None, False
 
         dfx_base = _run_directory(compiled) / "dfx_outputs"
-        two_pass_swimlane = config.enable_chip_swimlane > 0 and not compiled.platform.endswith("sim")
+        capture_directory = None
+        if config.enable_chip_swimlane > 0:
+            capture_directory = self._swimlane_capture_directory(dfx_base, dispatch_id)
+        two_pass_swimlane = capture_directory is not None and not compiled.platform.endswith("sim")
         call_config = None
         if not two_pass_swimlane:
-            call_config = _make_call_config(compiled._distributed_config, config, dfx_base=dfx_base)
+            call_config = _make_call_config(
+                compiled._distributed_config, config, dfx_base=capture_directory or dfx_base
+            )
 
-        # This worker reuses one output_dir across dispatches, so stale
-        # ``rank*/d{k}`` dirs from an earlier, larger run must be cleared before
-        # this run writes new ones. The numbering does not restart with the run
-        # on a prepared worker — the child's capture counter spans the process —
-        # so the new dirs may start above zero.
         if config.dfx_options().any():
-            # Every dispatch writes below the same output directory. Finish
-            # earlier work before clearing or repopulating those paths.
             self._drain_dispatch_handles()
-            _clear_dfx_dispatch_dirs(dfx_base)
-        return call_config, dfx_base, two_pass_swimlane
+            if capture_directory is None:
+                _clear_dfx_dispatch_dirs(dfx_base)
+        return call_config, capture_directory, two_pass_swimlane
 
     def _run_compiled(
         self, compiled: DistributedCompiledProgram, *args: Any, config: RunConfig | None = None
@@ -3427,6 +3460,7 @@ class DistributedWorker(Worker):
                 first_error = self._remember_close_error(first_error, exc)
             else:
                 self._close_complete = True
+                self._close_swimlane_session()
             finally:
                 self._inherited_host_tensors = ()
                 self._inherited_host_spans = ()
