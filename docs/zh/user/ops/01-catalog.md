@@ -134,7 +134,7 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | [`matmul_acc`][pypto.language.matmul_acc] | `pl.` | 乘累加进已有的 `Acc` tile。操作数配对同 `matmul`；累加器使用 FP32 / INT32 结果类型 |
 | [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | 带 bias 操作数的乘法。操作数配对同 `matmul`；bias 与累加器类型一致 |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
-| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式 |
+| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式，`M == 1`。操作数配对与 `matmul` 相同（含 Ascend950 上的 FP8 / HF8 配对）；结果、累加器与 bias 为 FP32 / INT32 |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor，返回 FP32。Tensor 支持两侧均为 FP8E4M3FN 或两侧均为打包 FP4（E2M1/E1M2，可混合）。打包 ND/DN Tensor 的形状按字节载体计，scale 和输出按逻辑维度计。Tile API 及其专有的 `_acc` 和 `_bias` 形式支持 FP8E4M3FN/FP8E5M2 的四种组合和两侧均为打包 FP4 的组合 |
 
 `pl.tile.matmul`、`pl.tile.matmul_acc` 和 GEMV 家族通过
