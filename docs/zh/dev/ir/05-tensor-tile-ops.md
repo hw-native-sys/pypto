@@ -150,13 +150,16 @@ Carrier 单位约定与可用路径见 [FP4](../fp4.md)。
 
 | 算子 | 输入 | 结果 |
 | ---- | ---- | ---- |
-| `tile.dequant` | 行主序有符号 INT8 或 INT16 tile，以及 FP32 scale 和 offset 列 tile | 有效形状相同的 FP32 tile |
+| `tile.dequant` | 行主序有符号 INT8 或 INT16 tile，以及 FP32 scale 和 offset 列 tile | 物理形状和有效形状均与源 tile 相同的 FP32 tile |
 
 `pl.tile.dequant(src, scale, offset)` 生成 `pto.tdequant`，对每个有效元素计算
 `(float(src[i,j]) - offset[i,0]) * scale[i,0]`。scale 和 offset 均只有一列有效数据，
-有效行数与源 tile 相同。源 tile 的物理行须按 32 字节对齐。两者必须使用相同的物理形状和布局，因为 PTO ISA 指令使用同一个模板类型。
-超过首个 64 列向量后的尾部可能需要扩宽结果的物理行，以容纳 A5 指令的最后一次写入。
-结果的有效列数保持不变。
+有效行数与源 tile 相同。由于 PTO ISA 指令使用同一个模板类型，scale 和 offset 必须使用相同的物理形状和布局。
+
+A5 指令始终读取完整的 64 元素源向量，包括最后不足 64 列的部分。源 tile 的物理行须按 32 字节对齐，
+物理列数至少达到有效列数向上取整到 64 的倍数后的值。有效列数在运行时确定时，物理列数须为 64 的倍数。
+例如，对于形状为 `[16, 96]` 的张量，`pl.tile.load(src, [0, 0], [16, 128], valid_shape=[16, 96])`
+会分配所需的物理列数，并读取 96 列有效数据。
 
 ### tile.move 的结果 view
 

@@ -19,20 +19,27 @@ from pypto.runtime import ExecutionMode, RunConfig
 
 
 @pytest.mark.parametrize(
-    ("src_dtype", "src_cols", "valid_cols", "out_cols"),
-    [(pl.INT8, 32, 23, 32), (pl.INT16, 96, 95, 128)],
+    ("src_dtype", "src_cols", "valid_cols"),
+    [(pl.INT8, 64, 23), (pl.INT8, 96, 64), (pl.INT16, 128, 95), (pl.INT16, 128, None)],
 )
-def test_dequant_result_preserves_valid_shape(src_dtype, src_cols, valid_cols, out_cols):
+def test_dequant_result_preserves_tile_shape(src_dtype, src_cols, valid_cols):
     span = ir.Span.unknown()
+    if valid_cols is None:
+        valid_cols = ir.Var("valid_cols", ir.ScalarType(pl.INDEX), span)
     src = ir.Var("src", ir.TileType([16, src_cols], src_dtype, tile_view=ir.TileView([10, valid_cols])), span)
     params = ir.TileType([16, 1], pl.FP32, tile_view=ir.TileView([10, 1], blayout=ir.TileLayout.col_major))
     result_type = ir.op.tile.dequant(src, ir.Var("scale", params, span), ir.Var("offset", params, span)).type
 
     assert isinstance(result_type, ir.TileType)
     assert result_type.dtype == pl.FP32
-    assert [dim.value for dim in result_type.shape] == [16, out_cols]
+    assert [dim.value for dim in result_type.shape] == [16, src_cols]
     assert result_type.tile_view is not None
-    assert [dim.value for dim in result_type.tile_view.valid_shape] == [10, valid_cols]
+    rows, cols = result_type.tile_view.valid_shape
+    assert rows.value == 10
+    if isinstance(valid_cols, int):
+        assert cols.value == valid_cols
+    else:
+        assert isinstance(cols, ir.Var) and cols.name_hint == valid_cols.name_hint
 
 
 @pytest.mark.parametrize(
@@ -46,7 +53,7 @@ def test_dequant_result_preserves_valid_shape(src_dtype, src_cols, valid_cols, o
 )
 def test_dequant_rejects_invalid_operands(src_dtype, offset_shape, offset_dtype, message):
     span = ir.Span.unknown()
-    src = ir.Var("src", ir.TileType([16, 32], src_dtype), span)
+    src = ir.Var("src", ir.TileType([16, 64], src_dtype), span)
     scale = ir.Var("scale", ir.TileType([16, 1], pl.FP32), span)
     offset = ir.Var("offset", ir.TileType(offset_shape, offset_dtype), span)
 
@@ -56,7 +63,7 @@ def test_dequant_rejects_invalid_operands(src_dtype, offset_shape, offset_dtype,
 
 def test_dequant_rejects_mismatched_parameter_descriptors():
     span = ir.Span.unknown()
-    src = ir.Var("src", ir.TileType([16, 32], pl.INT8), span)
+    src = ir.Var("src", ir.TileType([16, 64], pl.INT8), span)
     scale = ir.Var("scale", ir.TileType([16, 1], pl.FP32), span)
     offset_type = ir.TileType([16, 8], pl.FP32, tile_view=ir.TileView(valid_shape=[16, 1]))
     offset = ir.Var("offset", offset_type, span)
@@ -65,9 +72,26 @@ def test_dequant_rejects_mismatched_parameter_descriptors():
         ir.op.tile.dequant(src, scale, offset)
 
 
+@pytest.mark.parametrize(
+    ("src_dtype", "src_cols", "valid_cols"),
+    [(pl.INT8, 32, 32), (pl.INT16, 96, 96), (pl.INT16, 96, None)],
+)
+def test_dequant_rejects_incomplete_source_vectors(src_dtype, src_cols, valid_cols):
+    span = ir.Span.unknown()
+    if valid_cols is None:
+        valid_cols = ir.Var("valid_cols", ir.ScalarType(pl.INDEX), span)
+    src = ir.Var("src", ir.TileType([16, src_cols], src_dtype, tile_view=ir.TileView([16, valid_cols])), span)
+    params = ir.TileType([16, 1], pl.FP32)
+
+    with pytest.raises(ValueError, match="physical source columns to cover every 64-element vector"):
+        ir.op.tile.dequant(src, ir.Var("scale", params, span), ir.Var("offset", params, span))
+
+
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize(("src_dtype", "width"), [(pl.INT8, 32), (pl.INT16, 96)])
-def test_dequant_assembles_a5(src_dtype, width, tmp_path):
+@pytest.mark.parametrize(("src_dtype", "pto_dtype", "width"), [(pl.INT8, "i8", 32), (pl.INT16, "i16", 96)])
+def test_dequant_assembles_a5(src_dtype, pto_dtype, width, tmp_path):
+    physical_width = (width + 63) // 64 * 64
+
     @pl.jit.incore
     def dequant_kernel(
         src: pl.Tensor[[16, width], src_dtype],
@@ -75,7 +99,7 @@ def test_dequant_assembles_a5(src_dtype, width, tmp_path):
         offset: pl.Tensor[[16, 1], pl.FP32],
         out: pl.Out[pl.Tensor[[16, width], pl.FP32]],
     ) -> pl.Tensor[[16, width], pl.FP32]:
-        values = pl.tile.load(src, [0, 0], [16, width])
+        values = pl.tile.load(src, [0, 0], [16, physical_width], valid_shape=[16, width])
         scales = pl.tile.load(scale, [0, 0], [16, 1])
         offsets = pl.tile.load(offset, [0, 0], [16, 1])
         return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)
@@ -98,12 +122,15 @@ def test_dequant_assembles_a5(src_dtype, width, tmp_path):
     )
     mlir = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.pto"))
     dequant = next(line for line in mlir.splitlines() if "pto.tdequant ins(" in line)
-    if width == 96:
-        # A5 repeats the full first predicate when storing the 32-column tail.
-        result_type = "dtype=f32, rows=16, cols=128"
-        assert result_type in dequant.split(" outs(", 1)[1]
+    inputs, output = dequant.split(" outs(", 1)
+    src_type = f"dtype={pto_dtype}, rows=16, cols={physical_width}"
+    result_type = f"dtype=f32, rows=16, cols={physical_width}"
+    assert src_type in inputs
+    assert result_type in output
+    for tile_type in (src_type, result_type):
         allocation = next(
-            line for line in mlir.splitlines() if "pto.alloc_tile" in line and result_type in line
+            line for line in mlir.splitlines() if "pto.alloc_tile" in line and tile_type in line
         )
-        assert "valid_col = %c96_index" in allocation
-        assert "!pto.partition_tensor_view<16x96xf32>" in mlir
+        assert f"valid_col = %c{width}_index" in allocation
+    assert f"!pto.partition_tensor_view<16x{width}x{pto_dtype}>" in mlir
+    assert f"!pto.partition_tensor_view<16x{width}xf32>" in mlir

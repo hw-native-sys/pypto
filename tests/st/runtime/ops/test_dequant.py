@@ -16,6 +16,8 @@ from harness import st
 
 
 def _dequant_program(src_dtype, width):
+    physical_width = (width + 63) // 64 * 64
+
     @pl.jit.incore
     def kernel(
         src: pl.Tensor[[16, width], src_dtype],
@@ -23,7 +25,7 @@ def _dequant_program(src_dtype, width):
         offset: pl.Tensor[[16, 1], pl.FP32],
         out: pl.Out[pl.Tensor[[16, width], pl.FP32]],
     ) -> pl.Tensor[[16, width], pl.FP32]:
-        values = pl.tile.load(src, [0, 0], [16, width])
+        values = pl.tile.load(src, [0, 0], [16, physical_width], valid_shape=[16, width])
         scales = pl.tile.load(scale, [0, 0], [16, 1])
         offsets = pl.tile.load(offset, [0, 0], [16, 1])
         return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)

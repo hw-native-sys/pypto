@@ -72,30 +72,26 @@ TypePtr DeduceDequantType(const std::vector<ExprPtr>& args) {
              args[2]->span_)
       << "tile.dequant requires scale and offset to have matching physical shapes and layouts";
 
-  auto result_shape = src->shape_;
-  const auto cols = As<ConstInt>(result_shape[1]);
+  const auto cols = As<ConstInt>(src->shape_[1]);
   constexpr int64_t kFp32VectorLanes = 64;
   constexpr int64_t kVectorBlockBytes = 32;
-  CHECK_SPAN(cols && cols->value_ > 0 &&
-                 cols->value_ <= std::numeric_limits<int32_t>::max() - (kFp32VectorLanes - 1) &&
+  CHECK_SPAN(cols && cols->value_ > 0 && cols->value_ <= std::numeric_limits<int32_t>::max() &&
                  cols->value_ % (kVectorBlockBytes / src->dtype_.GetByte()) == 0,
              source_span)
       << "tile.dequant requires a static positive source width with 32-byte row alignment";
 
   const auto valid_cols = As<ConstInt>(src_view.valid_shape[1]);
   const auto max_valid_cols = valid_cols ? valid_cols->value_ : cols->value_;
-  // The pinned A5 TDEQUANT uses the first vector predicate for every repeat.
-  // A short last repeat after a full vector therefore needs enough output
-  // row storage for a full-width store.
-  if (max_valid_cols > kFp32VectorLanes) {
-    const auto store_cols = (max_valid_cols + kFp32VectorLanes - 1) / kFp32VectorLanes * kFp32VectorLanes;
-    if (store_cols > cols->value_) {
-      result_shape[1] = std::make_shared<ConstInt>(store_cols, DataType::INDEX, source_span);
-    }
-  }
+  // A5 TDEQUANT loads all source lanes before applying a predicate. It also
+  // reuses the first output predicate on later repeats. Both rows must have
+  // space for every full 64-element vector touched by the valid columns.
+  const auto full_vector_cols = cols->value_ / kFp32VectorLanes * kFp32VectorLanes;
+  CHECK_SPAN(max_valid_cols <= full_vector_cols, source_span)
+      << "tile.dequant requires physical source columns to cover every 64-element vector of the valid "
+         "columns. Pad the physical tile width and preserve its valid_shape";
   TileView result_view;
   result_view.valid_shape = src_view.valid_shape;
-  return std::make_shared<TileType>(result_shape, DataType::FP32, std::nullopt, result_view);
+  return std::make_shared<TileType>(src->shape_, DataType::FP32, std::nullopt, result_view);
 }
 
 }  // namespace

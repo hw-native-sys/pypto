@@ -164,16 +164,20 @@ See [FP4](../fp4.md) for the carrier-unit contract and supported alias paths.
 
 | Operation | Inputs | Result |
 | --------- | ------ | ------ |
-| `tile.dequant` | Row-major signed INT8 or INT16 tile and FP32 scale and offset column tiles | FP32 tile with the same valid shape |
+| `tile.dequant` | Row-major signed INT8 or INT16 tile and FP32 scale and offset column tiles | FP32 tile with the same physical and valid shapes as the source |
 
 `pl.tile.dequant(src, scale, offset)` emits `pto.tdequant`. Each valid
 element is `(float(src[i,j]) - offset[i,0]) * scale[i,0]`. Scale and
 offset each have one valid column and as many valid rows as the source.
-Physical source rows must be 32-byte aligned.
 They must share their physical shape and layout because the PTO ISA
-intrinsic uses one template type for both. A partial vector after the
-first 64 columns may require a wider physical result row to contain the
-A5 intrinsic's final store. The result's valid width stays unchanged.
+intrinsic uses one template type for both.
+
+The A5 instruction reads full 64-element source vectors, including the
+last partial vector. The physical source row must be 32-byte aligned and
+wide enough to cover the valid columns rounded up to 64 elements. With a
+runtime valid width, the physical width must be a multiple of 64 elements.
+For a `[16, 96]` tensor, `pl.tile.load(src, [0, 0], [16, 128], valid_shape=[16, 96])`
+allocates the required tile width and reads the 96 valid columns.
 
 ### Result view of `tile.move`
 

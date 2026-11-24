@@ -52,7 +52,8 @@ def dequant(src: Tile, scale: Tile, offset: Tile) -> Tile:
     """Dequantize an A5 integer tile to FP32 with per-row parameters.
 
     Computes `(float(src[i,j]) - offset[i,0]) * scale[i,0]` on the valid region.
-    The output may pad its physical width to contain the final vector store.
+    Physical source rows must be 32-byte aligned and have room for each full
+    64-element vector touched by the valid columns.
 
     Args:
         src: Row-major rank-2 signed INT8 or INT16 tile.
@@ -60,7 +61,7 @@ def dequant(src: Tile, scale: Tile, offset: Tile) -> Tile:
         offset: FP32 column tile with the same shape and layout as scale.
 
     Returns:
-        FP32 tile with the same valid shape as src.
+        FP32 tile with the same physical and valid shapes as src.
     """
     return Tile(expr=_ir_ops.dequant(src.unwrap(), scale.unwrap(), offset.unwrap()))
 
