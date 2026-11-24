@@ -157,9 +157,9 @@ def rem(
             ``k * S + 8 * ceil(S / 256) + 8`` columns, where S is the source
             row stride rounded to 8 elements and k is 3 for INT32, else 1.
             High-precision rem requires
-            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8))``,
-            with ``C = max(valid_cols // 64, 1)``; use physical columns to
-            bound dynamic valid columns. A5 does not consume scratch.
+            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 640*min(C, 8))``,
+            with ``C = max(valid_cols // 64, 1)``. Use physical columns to bound
+            dynamic valid columns. A5 does not consume scratch.
         span: Optional source span for debugging (auto-captured if not provided)
         high_precision: Select the FP32 high-precision TREM algorithm on A2/A3 and A5.
 

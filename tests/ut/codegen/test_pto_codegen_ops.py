@@ -1551,8 +1551,8 @@ class TestRemainderFamilyCodegen:
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[2, 784], pl.FP32] = pl.tile.create(
-                        [2, 784], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 912], pl.FP32] = pl.tile.create(
+                        [2, 912], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     return pl.store(result, [0, 0], out)
@@ -2060,9 +2060,10 @@ class TestRemainderFamilyCodegen:
             # INT32 keeps three (TREM) or two (TREMS) data areas in tmp.
             ("rem", pl.INT32, 64, False, 208),
             ("rems", pl.INT32, 64, False, 144),
-            ("rem", pl.FP32, 64, True, 784),
-            ("rem", pl.FP32, 128, True, 1424),
-            ("rem", pl.FP32, 256, True, 2832),
+            ("rem", pl.FP32, 64, True, 912),
+            ("rem", pl.FP32, 128, True, 1680),
+            ("rem", pl.FP32, 256, True, 3344),
+            ("rem", pl.FP32, 576, True, 6880),  # Nine vectors share an eight-vector compensation batch.
         ],
     )
     @pytest.mark.parametrize("shortfall", [0, 1])
@@ -2948,7 +2949,8 @@ class TestTileSliceCodegen:
             f"subview sizes attribute must be [1, 32], got:\n{subview_lines}"
         )
 
-    def test_tile_slice_codegen_with_valid_shape(self):
+    @pytest.mark.parametrize("valid_dtype", [pl.INDEX, pl.INT64])
+    def test_tile_slice_codegen_with_valid_shape(self, valid_dtype):
         """tile.slice(..., valid_shape=...) emits a single pto.subview with a `valid [...]` clause.
 
         tile.slice is a pure view; the explicit valid_shape is encoded directly
@@ -2965,7 +2967,7 @@ class TestTileSliceCodegen:
             def kernel(
                 self,
                 src: pl.Tensor[[32, 32], pl.FP32],
-                valid_cols: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[valid_dtype],
                 dst: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
@@ -2979,10 +2981,10 @@ class TestTileSliceCodegen:
         assert len(subview_lines) == 1, (
             f"tile.slice with valid_shape should emit exactly one pto.subview, got:\n{mlir}"
         )
-        assert "valid [" in subview_lines[0], (
-            f"pto.subview should carry a `valid [...]` clause when valid_shape is explicit, got:\n"
-            f"{subview_lines[0]}"
-        )
+        valid = re.search(r"valid \[[^,]+, (%[\w.$-]+)\]", subview_lines[0])
+        assert valid, subview_lines[0]
+        if valid_dtype == pl.INT64:
+            assert re.search(rf"{re.escape(valid[1])} = arith.index_cast %\S+ : i64 to index", mlir)
         tmov_lines = [line for line in mlir.splitlines() if "pto.tmov" in line]
         assert not tmov_lines, "tile.slice must not emit pto.tmov (pure view), got:\n" + "\n".join(tmov_lines)
         set_vs_lines = [line for line in mlir.splitlines() if "pto.set_validshape" in line]

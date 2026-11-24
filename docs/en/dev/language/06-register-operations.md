@@ -140,7 +140,8 @@ Inactive lanes and gaps retain their prior contents. Static bounds include the
 last strided block; initialization checks credit only active written blocks.
 Dynamic offsets remain caller-managed. The memory-effect query returns the
 conservative bounding interval, including gaps, for dependency/lifetime analysis.
-PTOAS receives an i16 stride operand and lowers BF16 stores to `vsstb`.
+PyPTO emits the stride as an `i16` operand and a predicate with the vector's lane count.
+If the mask is omitted, PyPTO emits `PAT_ALL`. PTOAS lowers BF16 block-stride stores to `vsstb`.
 For example, `pl.reg.store(dst, 16, values, mask, block_stride=16)` writes
 128 BF16 lanes into eight NZ panels at element offsets `16, 272, ..., 1808`.
 Dynamic stride scalars are not exposed in this initial API.

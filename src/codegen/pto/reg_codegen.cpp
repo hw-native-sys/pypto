@@ -240,6 +240,13 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     if (auto reg = ir::As<ir::RegType>(expr->GetType())) return GetRegTypeString(reg);
     return GetTypeString(ir::As<ir::ScalarType>(expr->GetType())->dtype_);
   };
+  auto emit_full_mask = [this](const ir::ExprPtr& vector, const std::string& name_hint) {
+    auto lanes = ir::As<ir::RegType>(vector->GetType())->shape_;
+    auto type = GetRegTypeString(std::make_shared<ir::RegType>(lanes, DataType::BOOL, ir::RegKind::MaskReg));
+    auto mask = NewNamedTemp(name_hint);
+    Emit(mask + " = pto.vmi.pset \"PAT_ALL\" : " + type);
+    return std::pair{mask, type};
+  };
   const bool indexed_read = ir::IsOp(call, "reg.gather");
   if (indexed_read || ir::IsOp(call, "reg.scatter")) {
     auto target = ir::AsVarLike(args[0]);
@@ -319,15 +326,17 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
         Emit(scalar + " = arith.constant " + std::to_string(stride) + " : i16");
         line += ", " + scalar;
       }
-      if (args.size() == 4) line += ", " + GetExprAsCode(args[3]);
-      // Preserve the existing contiguous-store spelling. Block-stride stores
-      // intrinsically preserve inactive lanes and do not accept a pmode flag.
-      if (args.size() == 4 && !stride) line += " {pmode = \"merge\"}";
-      line += " : " + operand_type(args[2]) + ", " + ptr_type;
-      // The custom VMI parser infers the stride's i16 type. Its type list
-      // contains only the vector, destination and optional predicate types.
-      if (args.size() == 4) line += ", " + operand_type(args[3]);
-      Emit(line);
+      // VMI prints the offset type after the pointer. A block stride is an
+      // implicit i16 and its predicate is explicit, even for an all-lane store.
+      auto types = operand_type(args[2]) + ", " + ptr_type + ", index";
+      if (args.size() == 4 || stride) {
+        auto [mask, mask_type] = args.size() == 4 ? std::pair{GetExprAsCode(args[3]), operand_type(args[3])}
+                                                  : emit_full_mask(args[2], "store_all");
+        line += ", " + mask;
+        if (!stride) line += " {pmode = \"merge\"}";
+        types += ", " + mask_type;
+      }
+      Emit(line + " : " + types);
       // VMI stores have no SSA result. The IR's updated Tile version denotes
       // the same mutable handle, so bind it to the destination's existing SSA.
       BindVarToMlir(result, GetExprAsCode(args[0]));
@@ -336,8 +345,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
       return true;
     }
     auto name = NewNamedTemp(result->name_hint_);
-    Emit(name + " = " + spec->emitter + " " + addr->second + "[" + offset + "] : " + ptr_type + " -> " +
-         GetRegTypeString(ir::As<ir::RegType>(validated->GetType())));
+    Emit(name + " = " + spec->emitter + " " + addr->second + "[" + offset + "] : " + ptr_type +
+         ", index -> " + GetRegTypeString(ir::As<ir::RegType>(validated->GetType())));
     BindVarToMlir(result, name);
     return true;
   }
@@ -386,11 +395,7 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     // VMI requires a predicate even for an all-active public call. Generate it
     // locally so PTOAS can recognize the all-active load/rearrangement chain
     // and preserve its fusion opportunities.
-    auto source = ir::As<ir::RegType>(args[0]->GetType());
-    auto mask_type =
-        GetRegTypeString(std::make_shared<ir::RegType>(source->shape_, DataType::BOOL, ir::RegKind::MaskReg));
-    auto mask = NewNamedTemp("interleave_all");
-    Emit(mask + " = pto.vmi.pset \"PAT_ALL\" : " + mask_type);
+    auto [mask, mask_type] = emit_full_mask(args[0], "interleave_all");
     operands += ", " + mask;
     types += ", " + mask_type;
   }

@@ -110,10 +110,11 @@ def test_typed_load_store_and_external_tile_alias():
     body, after = region.split("\n  }", 1)
     assert before.count("pto.tile_buf_addr") == 2
     assert "pto.tile_buf_addr" not in body
-    assert "!pto.vmi.vreg<64xf32>" in body
-    assert "!pto.ptr<f32, ub>" in body
+    load = next(line for line in body.splitlines() if "pto.vmi.vload " in line)
+    assert load.endswith(" : !pto.ptr<f32, ub>, index -> !pto.vmi.vreg<64xf32>")
     store = next(line.strip() for line in body.splitlines() if "pto.vmi.vstore" in line)
-    assert store.startswith("pto.vmi.vstore ") and "->" not in store
+    assert store.startswith("pto.vmi.vstore ")
+    assert store.endswith(" : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, index")
     assert "pto.tadd" in after
     assert "pto.alloc_tile" not in body
     assert "scf.yield" not in body
@@ -720,6 +721,7 @@ def test_review_masked_store_preserves_inactive_lanes(tmp_path):
     source = generate(build_kernel(masked=True))
     store = next(line for line in source.splitlines() if "pto.vmi.vstore" in line)
     assert 'pmode = "merge"' in store
+    assert store.endswith(" : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, index, !pto.vmi.mask<64xpred>")
     compile_review_pto(source, tmp_path)
 
 
@@ -1380,10 +1382,15 @@ def test_bf16_block_stride_lowers_to_vsstb(lanes, active, tmp_path):
     # level3 assembler invocation below; generate() selects PTOAS planning.
     source = codegen.PTOCodegen().generate(program, emit_tile_addr=True, emit_source_loc=False)
     store = next(line for line in source.splitlines() if "pto.vmi.vstore " in line)
-    # VMI infers the stride's type from its operand position; spelling i16
-    # again in the custom type list makes PTOAS reject the generated store.
-    assert "reg_block_stride" in store.split(" : ")[0]
-    assert ", i16" not in store
+    operands, types = store.split(" : ")
+    assert "reg_block_stride" in operands
+    assert types == f"!pto.vmi.vreg<{lanes}xbf16>, !pto.ptr<bf16, ub>, index, !pto.vmi.mask<{lanes}xpred>"
+    mask_ssa = operands.rsplit(", ", 1)[1]
+    if active is None or active == "full":
+        # Omitting the DSL mask writes every logical lane, including in later blocks.
+        assert f'{mask_ssa} = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<{lanes}xpred>' in source
+    else:
+        assert f"{mask_ssa} = pto.vmi.create_mask " in source
     assert "arith.constant 16 : i16" in source
     compiler = find_ptoas_binary()
     if compiler is None:

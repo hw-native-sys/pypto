@@ -35,7 +35,7 @@ base + (off_row * base_cols + off_col) * storage_bits
 
 **失效属性 (Invalidated)**：无。
 
-**何时使用**：一律在默认 tile 阶段流水线中运行。如果不存在规范 `tile.slice`，本 pass 是 no-op。
+**何时使用**：一律在默认 tile 阶段流水线中运行。也处理带有显式有效范围、保留完整秩的打包 FP4 ND 切片。
 
 ## API
 
@@ -53,7 +53,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 对每个 InCore 类型的 function，分四步：
 
-1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。分析前会解析直接的 `ConstInt` SSA 定义及其普通别名，避免字面量偏移在 `ConvertToSSA` 后被误判为动态值；同时保留标量 SSA 定义用于模对齐证明，例如 `block_idx * 32` 虽是动态值，但可静态确定其为 32 个元素的倍数。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
+1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。分析前会解析直接的 `ConstInt` SSA 定义及其普通别名，避免字面量偏移在 `ConvertToSSA` 后被误判为动态值；同时保留标量 SSA 定义用于模对齐证明，例如 `block_idx * 32` 虽是动态值，但可静态确定其为 32 个元素的倍数。普通改写处理三参数形式。FP4 解码还处理带显式有效范围、保留完整秩的打包 ND 窗口。
 
 2. **规划定义处 extract (Plan definition-site extracts)**（仅 Vec slice） —— 同时满足以下两点时，slice 通过把其自身定义替换为 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)` 来实例化：
    - 按下面的消费者规则，某个消费者会实例化它（一个惰性 textract 不是恒等拷贝的 `tile.col_expand_*` 操作数，或地址无法证明对齐的普通 call 操作数、别名、循环初始值或 yield）；并且
@@ -70,9 +70,12 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
    Vec 消费者规则只作用于第 2 步未规划的 slice——即其存储可能在定义与消费者之间被写入的 slice。此时只有放在消费者处的拷贝才能读到视图本应读到的内容。
 
-4. **删除死 slice (Drop dead slices)** —— 结果不再被任何使用者引用的 `tile.slice` 被删除。链式 slice（slice 的 slice）只有在消费它的那个 slice 被删除后才会变死，因此该步骤迭代至不动点（迭代次数以 slice 数量为上界）。结束时仍被使用的 slice，说明其消费者不被本 pass 规范化——保持原样，相对 pass 前的 IR 无回退。
+   BF16 转换消费未对齐的打包 FP4 ND 切片时，pass 在转换处按有符号字节读取父 tile，
+   提取所需窗口，恢复窗口的有效范围和打包类型后再转换。
 
-本 pass 是 `FunctionPass`；当不存在规范 `tile.slice` 时 function 原样返回。
+4. **删除死 slice (Drop dead slices)** —— 收集剩余消费者后，逆序遍历切片定义。每个活跃切片将其父切片标记为活跃，随后删除未使用的窗口，包括带显式 FP4 有效范围的链式切片。
+
+本 pass 按函数运行。
 
 ## 示例
 

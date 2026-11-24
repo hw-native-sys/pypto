@@ -179,7 +179,7 @@ LLVM 计数器、不插入内存屏障，也不增加链接后指令校验。后
 
 ## 运行完整示例
 
-在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.77 或更新版本，
+在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.78 或更新版本，
 配置匹配的 CANN/Bisheng 工具链，保持 runtime pin 检查开启。先预约空闲 A5 设备，
 再运行以下命令：
 

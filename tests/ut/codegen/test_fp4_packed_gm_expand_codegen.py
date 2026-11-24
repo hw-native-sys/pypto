@@ -146,9 +146,14 @@ def test_fp4_decode_fp8_byte_alias_is_consumed(planner, transpose):
     assert len(addresses) == 2 and addresses[0] == addresses[1], (fp8_alloc, byte_alloc)
 
 
-def test_uint8_ub_fp4_alias_rejects_ptoas_memory_planner():
-    with pytest.raises(ValueError, match="FP4E2M1X2 tile aliases require PYPTO or DSA_RP"):
-        _emit_incore_mlir(_uint8_ub_fp4_decode_program(), passes.MemoryPlanner.PTOAS)
+@pytest.mark.parametrize("dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+def test_uint8_ub_fp4_alias_with_ptoas_memory_planner(tmp_path, dtype):
+    mlir = _emit_incore_mlir(_uint8_ub_fp4_decode_program(dtype), passes.MemoryPlanner.PTOAS)
+    assert "pto.treshape " in mlir
+    if find_ptoas_binary() is not None:
+        pto, cpp = tmp_path / "packed_alias.pto", tmp_path / "packed_alias.cpp"
+        pto.write_text(mlir)
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level2", "--pto-arch=a5"])
 
 
 def _uint8_slice_fp4_decode_program(
@@ -301,7 +306,7 @@ def test_uint8_ub_fp4_alias_rejects_memref_less_tpop(planner, source_dtype, targ
             pl.tfree_to_aic(payload)
             return pl.tile.store(decoded, [0, 0], output)
 
-    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires an address-backed tile"):
+    with pytest.raises(ValueError, match="MemRef-less inputs"):
         _emit_incore_mlir(DecodePop, planner)
 
 
@@ -554,10 +559,6 @@ def test_fp4e2m1x2_byte_reshape_round_trip_consumed(planner, byte_dtype, tensor_
                 result = pl.store(pl.cast(tile, pl.BF16), [0, 0], out)
             return result
 
-    if planner == passes.MemoryPlanner.PTOAS:
-        with pytest.raises(ValueError, match="FP4E2M1X2 tile aliases require PYPTO or DSA_RP"):
-            _emit_incore_mlir(Program, planner)
-        return
     mlir = _emit_incore_mlir(Program, planner)
     assert "pto.tload" in mlir and "pto.tcvt" in mlir and "pto.tstore" in mlir, mlir
     assert "8x128x!pto.f4E2M1x2" in mlir or "rows=8, cols=128" in mlir, mlir
@@ -1475,7 +1476,8 @@ def test_standalone_left_right_fp4_nd_cast_keeps_bridge_after_split(tmp_path):
 
 
 @pytest.mark.parametrize("dynamic_column", [False, True])
-def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path, dynamic_column):
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path, dynamic_column, planner):
     column_scale, column_base = (1, 0) if dynamic_column else (0, 1)
 
     @pl.program
@@ -1492,14 +1494,44 @@ def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path
             window = pl.tile.slice(packed, [16, 256], [0, start], valid_shape=[16, 256])
             return pl.store(pl.cast(window, pl.FP8E4M3FN), [0, 0], out)
 
-    mlir = _emit_incore_mlir(SliceNdDecode)
+    mlir = _emit_incore_mlir(SliceNdDecode, planner)
+    extract = next(line for line in mlir.splitlines() if "pto.textract ins(" in line)
+    assert "dtype=i8, rows=32, cols=512" in extract and "dtype=i8, rows=16, cols=256" in extract
+    if not dynamic_column:
+        assert ", %c0_index, %c1_index :" in extract
     assert mlir.count("pto.tcvt ") == 3, mlir
     assert "dtype=bf16" in mlir and "dtype=f32" in mlir, mlir
     if find_ptoas_binary() is not None:
         pto, cpp = tmp_path / "slice_nd_bridge.pto", tmp_path / "slice_nd_bridge.cpp"
         pto.write_text(mlir)
-        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"])
         assert cpp.read_text().count("TCVT(") == 3
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner):
+    @pl.program
+    class Partial:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self, src: pl.Tensor[[8, 128], pl.FP4E1M2X2], out: pl.Out[pl.Tensor[[3, 64], pl.BF16]]
+        ) -> pl.Tensor[[3, 64], pl.BF16]:
+            packed = pl.load(src, [0, 0], [8, 128])
+            outer = pl.tile.slice(packed, [6, 96], [1, 1])
+            inner = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[2, 23])
+            return pl.store(pl.cast(inner, pl.BF16), [0, 0], out)
+
+    mlir = _emit_incore_mlir(Partial, planner)
+    extract = next(line for line in mlir.splitlines() if "pto.textract ins(" in line)
+    assert ", %c2_index, %c3_index :" in extract and "dtype=i8, rows=8, cols=128" in extract
+    store = next(line for line in mlir.splitlines() if "pto.tstore ins(" in line)
+    assert "2x46xbf16" in store, store
+    if find_ptoas_binary() is not None:
+        pto, cpp = tmp_path / "partial.pto", tmp_path / "partial.cpp"
+        pto.write_text(mlir)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"])
 
 
 if __name__ == "__main__":
