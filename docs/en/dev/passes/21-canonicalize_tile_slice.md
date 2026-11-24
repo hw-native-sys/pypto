@@ -72,7 +72,8 @@ For each InCore-typed function, in four steps:
 
    For an unaligned packed FP4 ND slice consumed by a BF16 cast, the pass reads
    the parent as signed bytes and extracts the requested window at the cast site.
-   It restores the window's valid extents and packed dtype before conversion.
+   SSA renames and `tile.set_validshape` preserve the parent and byte offsets.
+   The cast uses the valid extents of its operand and decodes the original packed dtype.
 
 4. **Drop dead slices** — after collecting the remaining consumers, visit slice definitions in reverse order. Each live slice keeps its parent live. Remove unused windows, including chains with explicit FP4 valid extents.
 

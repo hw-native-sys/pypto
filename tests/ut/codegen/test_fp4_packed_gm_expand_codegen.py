@@ -1527,7 +1527,8 @@ def test_unaligned_fp4_slice_reports_physical_row_pitch(planner):
 
 @pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
 @pytest.mark.parametrize("valid_cols", [1, 23])
-def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner, valid_cols):
+@pytest.mark.parametrize("metadata_alias", [False, True])
+def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner, valid_cols, metadata_alias):
     @pl.program
     class Partial:
         @pl.function(type=pl.FunctionType.AIV)
@@ -1536,7 +1537,11 @@ def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner, valid_c
         ) -> pl.Tensor[[3, 64], pl.BF16]:
             packed = pl.load(src, [0, 0], [8, 128])
             outer = pl.tile.slice(packed, [6, 96], [1, 1])
-            inner = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[2, valid_cols])
+            if metadata_alias:
+                window = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[3, 32])
+                inner = pl.tile.set_validshape(window, 2, valid_cols)
+            else:
+                inner = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[2, valid_cols])
             return pl.store(pl.cast(inner, pl.BF16), [0, 0], out)
 
     mlir = _emit_incore_mlir(Partial, planner)

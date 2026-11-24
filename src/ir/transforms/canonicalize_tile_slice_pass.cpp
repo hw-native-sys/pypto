@@ -517,7 +517,7 @@ void CheckAccumulatorSliceContiguous(const ExprPtr& value,
 class SliceCollector : public IRVisitor {
  public:
   std::unordered_map<const Var*, SliceInfo> slices;
-  // Full-rank packed ND slices, including those with explicit valid extents.
+  // Full-rank packed ND slices and their SSA or valid-shape aliases.
   std::unordered_map<const Var*, SliceInfo> packed_windows;
   std::unordered_map<const Var*, ExprPtr> scalar_defs;
   /// Which window each Var *names*, whether or not that Var is itself a
@@ -547,8 +547,7 @@ class SliceCollector : public IRVisitor {
       const auto tile = As<TileType>(op->var_->GetType());
       if (tile && tile->dtype_.IsPackedFp4() && tile->shape_.size() == 2) {
         const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-        // Peel actual slice definitions only. A loop-carried window can
-        // change its base on the back edge.
+        // A loop-carried window can change its base on the back edge.
         if (view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box &&
             (!windows.count(window->source.get()) || packed_windows.count(window->source.get()))) {
           packed_windows.emplace(op->var_.get(), *window);
@@ -728,7 +727,7 @@ class SliceCollector : public IRVisitor {
 
   /// Record `target` as naming the same window as `source`, when both provably
   /// describe the same window extent.  Unproven edges are simply not recorded.
-  void BindWindowAlias(const VarPtr& target, const ExprPtr& source) {
+  void BindWindowAlias(const VarPtr& target, const ExprPtr& source, bool preserves_packed_view = false) {
     if (!target) return;
     auto source_var = AsVarLike(source);  // matches Var AND IterArg
     if (!source_var) return;
@@ -741,6 +740,9 @@ class SliceCollector : public IRVisitor {
     // value by copy keeps this independent of that.
     const SliceInfo source_window = it->second;
     windows.emplace(target.get(), source_window);
+    if (preserves_packed_view && packed_windows.count(source_var.get())) {
+      packed_windows.emplace(target.get(), source_window);
+    }
   }
 
   /// A definition that is not itself a `tile.slice` but still binds a fresh SSA
@@ -763,7 +765,7 @@ class SliceCollector : public IRVisitor {
   void RecordAliasedWindow(const AssignStmtPtr& op) {
     if (!op || !op->var_) return;
     if (AsVarLike(op->value_)) {
-      BindWindowAlias(op->var_, op->value_);
+      BindWindowAlias(op->var_, op->value_, /*preserves_packed_view=*/true);
       return;
     }
     auto call = As<Call>(op->value_);
@@ -776,7 +778,7 @@ class SliceCollector : public IRVisitor {
     if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) return;
     size_t source_index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()).value_or(0);
     if (source_index >= call->args_.size()) return;
-    BindWindowAlias(op->var_, call->args_[source_index]);
+    BindWindowAlias(op->var_, call->args_[source_index], IsOp(call, "tile.set_validshape"));
   }
 
   // Convert direct ConstInt SSA definitions (and their plain aliases) back to
@@ -1042,6 +1044,8 @@ class CanonicalizeMutator : public IRMutator {
     auto base = IRMutator::VisitStmt_(op);
     auto assign = As<AssignStmt>(base);
     if (!assign) return base;
+    // Packed views are metadata only. The cast reads their carriers at its use site.
+    if (packed_windows_.count(assign->var_.get())) return base;
     auto call = As<Call>(assign->value_);
     if (call && IsOp(call, "tile.cast") && !call->args_.empty()) {
       const auto source = AsVarLike(call->args_[0]);
@@ -1534,8 +1538,12 @@ class VarUseCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     const auto var = op->var_.get();
     if (collector_.slices.count(var) || collector_.packed_windows.count(var)) {
+      if (const auto source = AsVarLike(op->value_)) {
+        slice_sources.emplace(var, source.get());
+        return;
+      }
       const auto call = As<Call>(op->value_);
-      if (call && IsOp(call, "tile.slice")) {
+      if (call && (IsOp(call, "tile.slice") || IsOp(call, "tile.set_validshape"))) {
         slice_sources.emplace(var, AsVarLike(call->args_[0]).get());
         for (size_t i = 1; i < call->args_.size(); ++i) VisitExpr(call->args_[i]);
         return;

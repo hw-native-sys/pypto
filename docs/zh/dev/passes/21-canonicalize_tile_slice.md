@@ -71,7 +71,8 @@ program_canon = passes.canonicalize_tile_slice()(program)
    Vec 消费者规则只作用于第 2 步未规划的 slice——即其存储可能在定义与消费者之间被写入的 slice。此时只有放在消费者处的拷贝才能读到视图本应读到的内容。
 
    BF16 转换消费未对齐的打包 FP4 ND 切片时，pass 在转换处按有符号字节读取父 tile，
-   提取所需窗口，恢复窗口的有效范围和打包类型后再转换。
+   提取所需窗口。SSA 重命名和 `tile.set_validshape` 会保留父 tile 和字节偏移。
+   转换按操作数的有效范围解码原始打包类型。
 
 4. **删除死 slice (Drop dead slices)** —— 收集剩余消费者后，逆序遍历切片定义。每个活跃切片将其父切片标记为活跃，随后删除未使用的窗口，包括带显式 FP4 有效范围的链式切片。
 

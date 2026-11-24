@@ -697,8 +697,9 @@ def _decode_unaligned_fp4_window(
     with pl.spmd(2):
         block = pl.tile.get_block_idx()
         packed = pl.tile.load(src, [0, 0], [8, 128])
-        window = pl.tile.slice(packed, [3, 32], [1, block * 16 + 1], valid_shape=[3, 32])
-        pl.tile.store(pl.cast(window, pl.FP8E4M3FN), [block * 3, 0], out)
+        window = pl.tile.slice(packed, [3, 32], [1, block * 16 + 1])
+        valid_window = pl.tile.set_validshape(window, 3, 32)
+        pl.tile.store(pl.cast(valid_window, pl.FP8E4M3FN), [block * 3, 0], out)
     return out
 
 
