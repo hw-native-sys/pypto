@@ -41,7 +41,7 @@ def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
     return isinstance(x, (list, tuple))
 
 
-def put_async(dst: DistributedTensor, peer: IntLike, src: Tensor | Expr, session: AsyncSession) -> AsyncEvent:
+def put_async(dst: DistributedTensor, peer: IntLike, src: Tensor, session: AsyncSession) -> AsyncEvent:
     """Submit a single-peer PUT from a dense local GM view to a remote window.
 
     Args:
