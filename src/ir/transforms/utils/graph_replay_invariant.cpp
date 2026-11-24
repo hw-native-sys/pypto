@@ -89,6 +89,39 @@ bool IsTaskIdScalar(const TypePtr& type) {
   return scalar != nullptr && scalar->dtype_ == DataType::TASK_ID;
 }
 
+bool IsResourceCountQuery(const CallPtr& call) {
+  return call && call->args_.empty() &&
+         (IsOp(call, "system.available_cluster_count") || IsOp(call, "system.available_aiv_count"));
+}
+
+ExprPtr ResourceCountResolver::Resolve(const ExprPtr& expr, const FunctionPtr& func) const {
+  if (IsResourceCountQuery(As<Call>(expr))) return expr;
+  auto var = AsVarLike(expr);
+  if (!var || !func || !func->body_) return nullptr;
+  auto found = queries_.find(func.get());
+  if (found == queries_.end()) {
+    class Collector : public IRVisitor {
+     public:
+      std::unordered_map<const Var*, ExprPtr> queries;
+
+     protected:
+      void VisitStmt_(const AssignStmtPtr& op) override {
+        if (auto query = As<Call>(op->value_); IsResourceCountQuery(query)) {
+          queries.emplace(op->var_.get(), query);
+        } else if (auto source = AsVarLike(op->value_)) {
+          auto it = queries.find(source.get());
+          if (it != queries.end()) queries.emplace(op->var_.get(), it->second);
+        }
+        IRVisitor::VisitStmt_(op);
+      }
+    } collector;
+    collector.VisitStmt(func->body_);
+    found = queries_.emplace(func.get(), std::move(collector.queries)).first;
+  }
+  auto query = found->second.find(var.get());
+  return query != found->second.end() ? query->second : nullptr;
+}
+
 ReplayInvariantSet::ReplayInvariantSet(const FunctionPtr& graph_func,
                                        const std::unordered_set<const Var*>& proven_fixed_scalar_params) {
   if (!graph_func) return;
@@ -259,6 +292,7 @@ void ReplayInvariantSet::Collect(const StmtPtr& body, bool include_constant_trip
       owner_->TrackTensorAlias(op);
       auto var = AsVarLike(op->var_);
       if (!var || As<ScalarType>(var->GetType()) == nullptr) return;
+      if (owner_->IsResourceCount(op->value_)) owner_->resource_counts_.insert(var.get());
       if (auto proof = owner_->ProveExpr(op->value_)) {
         owner_->invariant_.try_emplace(var.get(), std::move(*proof));
       }
@@ -402,6 +436,11 @@ ReplayInvariantSet::Proof ReplayInvariantSet::ProveDimRead(const CallPtr& call) 
 
 bool ReplayInvariantSet::IsInvariant(const ExprPtr& expr) const { return ProveExpr(expr).has_value(); }
 
+bool ReplayInvariantSet::IsResourceCount(const ExprPtr& expr) const {
+  if (auto var = AsVarLike(expr)) return resource_counts_.count(var.get()) != 0;
+  return IsResourceCountQuery(As<Call>(expr));
+}
+
 ReplayInvariantSet::Proof ReplayInvariantSet::ProveExpr(const ExprPtr& expr) const {
   if (!expr) return std::nullopt;
 
@@ -413,7 +452,10 @@ ReplayInvariantSet::Proof ReplayInvariantSet::ProveExpr(const ExprPtr& expr) con
     Proof proof = Roots{};
 
    protected:
-    void VisitExpr_(const CallPtr& op) override { MergeProof(proof, owner_.ProveDimRead(op)); }
+    void VisitExpr_(const CallPtr& op) override {
+      if (IsResourceCountQuery(op)) return;
+      MergeProof(proof, owner_.ProveDimRead(op));
+    }
     void VisitExpr_(const SubmitPtr& op) override { proof.reset(); }
     void VisitVarLike_(const VarPtr& op) override {
       auto fact = owner_.invariant_.find(op.get());

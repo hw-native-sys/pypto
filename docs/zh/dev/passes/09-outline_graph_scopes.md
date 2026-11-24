@@ -20,6 +20,12 @@ layer；作用域适合用户不愿拆分出去的、较大编排函数体中的
 声明的签名。两者的边界互为排列，而下游不依赖这一点 —— 所有消费方都通过
 `param_directions_` 而非位置来读取形参。
 
+边界方向推断会追踪局部缓冲区别名，包括 reshape、slice 链和原地写回结果。
+内置算子的写入，以及普通调用或提交任务声明的参数方向，均作用于捕获的底层张量。
+调用返回值和 Submit 的 tuple 投影会沿返回形参关系追踪存储；callee 的新分配结果保持独立。
+直接张量别名和 view 构造不读取数据；消费者决定边界是 `In`、`Out` 还是 `InOut`。
+算术运算的新结果拥有独立存储，其写入不会传播到输入张量。
+
 `with pl.graph("layer", deps=[ready]) as done:` 复用通用 scope 的
 `manual_dep_edges` 和 `task_id_var` 属性。outliner 将它们转为外层
 `Submit.deps_` 及末尾的完成号；它们不成为录制函数的形参或计算返回值。

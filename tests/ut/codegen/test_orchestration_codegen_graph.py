@@ -1077,9 +1077,17 @@ class P:
     _assert_orchestration_compiles(main_cpp, arch=platform)
 
 
-@pytest.mark.parametrize("record_graph", [False, True], ids=["eager", "graph"])
+@pytest.mark.parametrize(
+    ("record_graph", "width_kind"),
+    [
+        (False, "literal"),
+        *[(True, kind) for kind in ("literal", "cluster", "cluster-alias", "aiv", "aiv-alias")],
+    ],
+)
 @pytest.mark.parametrize("manual", [False, True], ids=["spmd-scope", "manual-submit"])
-def test_gm_pipe_capacity_follows_each_launch_through_graph_boundary(tmp_path, record_graph, manual):
+def test_gm_pipe_capacity_follows_each_launch_through_graph_boundary(
+    tmp_path, record_graph, manual, width_kind
+):
     """Hoisted pipe storage keeps its own layout and SPMD block count.
 
     These are deliberately different groups: sizing both caller allocations from
@@ -1099,6 +1107,19 @@ def test_gm_pipe_capacity_follows_each_launch_through_graph_boundary(tmp_path, r
             out = self.large_group(out)
 """
     )
+    resource = ""
+    runtime_query = ""
+    if width_kind != "literal":
+        query = "available_cluster_count" if width_kind.startswith("cluster") else "available_aiv_count"
+        width = f"pl.system.{query}()"
+        runtime_query = f"rt_{query}()"
+        if width_kind.endswith("-alias"):
+            resource = f"        width = {width}\n        alias = width\n"
+            width = "alias"
+        launches = launches.replace("core_num=8", f"core_num={width}")
+        launches = launches.replace("core_num=2", f"core_num={width}")
+        launches = launches.replace("pl.spmd(8)", f"pl.spmd({width})")
+        launches = launches.replace("pl.spmd(2)", f"pl.spmd({width})")
     program = pl.parse_program(f"""@pl.program
 class PipeCapacities:
     @pl.function(type=pl.FunctionType.AIC)
@@ -1145,7 +1166,7 @@ class PipeCapacities:
 
     @pl.function(type=pl.FunctionType.{scope_type})
     def layer(self, out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
-{launches}
+{resource}{launches}
         return out
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
@@ -1179,7 +1200,10 @@ class PipeCapacities:
         launch = re.search(rf"// Group {group}: MixedKernels(.*?)rt_submit_task\(\w+, (\w+)\);", body, re.S)
         assert launch is not None, body
         params = launch.group(2)
-        assert f"{params}.launch_spec.set_block_num({core_num});" in launch.group(1), body
+        if width_kind == "literal":
+            assert f"{params}.launch_spec.set_block_num({core_num});" in launch.group(1), body
+        else:
+            assert runtime_query in body, body
         pipe = re.search(rf"{params}\.add_output\((gm_pipe_buffer_\w+)\);", launch.group(1))
         assert pipe is not None, launch.group(1)
         caller_pipe = pipe.group(1)
@@ -1191,6 +1215,11 @@ class PipeCapacities:
         shape = re.search(rf"{caller_pipe}_ci_shapes\[1\]\s*=\s*\{{([^}}]+)\}};", entry)
         assert shape is not None, entry
         expression = re.sub(r"\s+", "", shape.group(1)).replace("static_cast<uint32_t>", "")
+        if width_kind != "literal":
+            # Hoisting must emit a query, never the Graph-local alias. The C++
+            # integration check below independently catches leaked identifiers.
+            assert runtime_query in expression, expression
+            expression = expression.replace(runtime_query, str(core_num))
         factors = expression.replace("(", "").replace(")", "").split("*")
         assert all(factor.isdigit() for factor in factors), expression
         capacity = 1

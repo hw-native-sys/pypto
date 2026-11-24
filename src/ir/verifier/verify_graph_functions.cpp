@@ -348,7 +348,8 @@ class GraphBodyChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
     CheckAllocation(op);
-    CheckLaunchSpec(alloc_batching::EffectiveCoreNum(op, Callee(op->op_)), op->span_);
+    auto callee = Callee(op->op_);
+    CheckLaunchSpec(alloc_batching::EffectiveCoreNum(op, callee), callee, op->span_);
     CheckBoundaryView(op);
     if (!IsTaskLaunch(op)) return;
     AddNodes(1, 1);
@@ -363,7 +364,7 @@ class GraphBodyChecker : public IRVisitor {
       auto callee = Callee(op->op_);
       if (callee) submit_core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
     }
-    CheckLaunchSpec(submit_core_num, op->span_);
+    CheckLaunchSpec(submit_core_num, Callee(op->op_), op->span_);
     AddNodes(1, 1);
     CheckArity(op->op_, op->args_.size(), /*is_submit=*/true, op->span_);
     CheckScalarArgs(op->args_, op->span_);
@@ -554,8 +555,13 @@ class GraphBodyChecker : public IRVisitor {
   /// Definition and refreshes only boundary tensors and scalar slots, so a
   /// `core_num` reading a boundary scalar replays the first call's block count
   /// and silently leaves the rest of the work unscheduled.
-  void CheckLaunchSpec(const ExprPtr& core_num, const Span& span) {
-    if (!core_num || IsLiteralScalarExpr(core_num)) return;
+  [[nodiscard]] bool IsResourceCountWidth(const ExprPtr& core_num, const FunctionPtr& callee) {
+    return topology_invariant_.IsResourceCount(core_num) ||
+           resource_counts_.Resolve(core_num, callee) != nullptr;
+  }
+
+  void CheckLaunchSpec(const ExprPtr& core_num, const FunctionPtr& callee, const Span& span) {
+    if (!core_num || IsLiteralScalarExpr(core_num) || IsResourceCountWidth(core_num, callee)) return;
     Report(
         "launches a task whose core_num is not a compile-time constant; recording freezes the launch "
         "spec into the node and replay restores it unchanged.",
@@ -684,6 +690,7 @@ class GraphBodyChecker : public IRVisitor {
   std::vector<Diagnostic>& diagnostics_;
   graph_replay::ReplayInvariantSet invariant_;
   graph_replay::ReplayInvariantSet topology_invariant_;
+  graph_replay::ResourceCountResolver resource_counts_;
   std::unordered_set<const Var*> scalar_params_;
   std::unordered_set<const Var*> tensor_params_;
   /// Tensor vars that derive from a boundary parameter, directly or by alias.

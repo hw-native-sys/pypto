@@ -437,6 +437,45 @@ class TestLaunchSpec:
     call — the rest of the blocks are never scheduled, with no diagnostic.
     """
 
+    @pytest.mark.parametrize("query", ["available_cluster_count", "available_aiv_count"])
+    @pytest.mark.parametrize("bind_width", [False, True])
+    def test_run_local_resource_query_width_is_accepted(self, query, bind_width):
+        """A run's resource cohort remains fixed while its Graph Definition lives."""
+        width = f"pl.system.{query}()"
+        binding = f"blocks = {width}\n                alias = blocks" if bind_width else ""
+        launch = "alias" if bind_width else width
+        before = pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self, a: pl.Tensor[[16, 128], pl.FP32], c: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        value = pl.load(a, [0, 0], [16, 128])
+        c = pl.store(value, [0, 0], c)
+        return c
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, a: pl.Tensor[[16, 128], pl.FP32], c: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        with pl.manual_scope():
+                {binding}
+                c, done = pl.spmd_submit(self.kernel, a, c, core_num={launch})
+        return c
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, a: pl.Tensor[[16, 128], pl.FP32], c: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        return self.layer(a, c)
+""")
+        assert isinstance(before, ir.Program)
+        after = _legalize_outlined(before)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.GraphBoundaryLegalized)
+        diagnostics = passes.PropertyVerifierRegistry.verify(props, after)
+        assert not [d for d in diagnostics if d.rule_name == "GraphBoundaryLegalized"]
+
     def test_core_num_from_a_boundary_scalar_is_rejected(self):
         @pl.program
         class Before:
