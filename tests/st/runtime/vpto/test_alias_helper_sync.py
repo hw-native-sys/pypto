@@ -25,7 +25,7 @@ import pytest
 import torch
 from pypto import CacheConfig
 from pypto.backend import BackendType
-from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
+from pypto.runtime import ChipWorker, ExecutionMode, RunConfig, _vpto
 from pypto.runtime.runtime_pin import check_runtime_pin
 from test_tile_helper_sync import _environment, _record_compilation
 from test_vpto_vf_onboard import FIXTURE, ROOT
@@ -33,23 +33,42 @@ from test_vpto_vf_onboard import FIXTURE, ROOT
 pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
 
 
+def _diagnostic_llvm(evidence: Path) -> str:
+    """Export IR for barrier assertions from the retained production helper source."""
+    support = runpy.run_path(str(FIXTURE / "test_validation.py"))
+    source = evidence / "helper-0.pto"
+    llvm = evidence / "diagnostic.ll"
+    flags = _vpto.ptoas_flags_for_source(source.read_text(), emit_llvm=True)
+    support["run"](evidence, "diagnostic-llvm", [support["require_ptoas"](), source, *flags, "-o", llvm])
+    return llvm.read_text()
+
+
 def _audit_machine_code(evidence: Path, kind: str, offset: int) -> dict[str, list[str]]:
     """Check the helper object and linked image, allowing observed dead-code elimination."""
     support = runpy.run_path(str(FIXTURE / "test_validation.py"))
     objdump = Path(os.environ["ASCEND_HOME_PATH"]) / "bin/llvm-objdump"
     expected_kind = {"wr": "VST_VLD", "rw": "VLD_VST", "ww": "VST_VST"}[kind]
-    # For exact-address WR, Bisheng forwards the stored register to the result.
-    # For exact-address WW, the overwritten first store is eliminated.
-    eliminated = offset == 0 and kind in ("wr", "ww")
-    expected = [expected_kind] if offset < 64 and not eliminated else []
+    expected = [expected_kind] if offset < 64 else []
     results = {}
     for filename in ("vpto_0.o", "kernel.elf"):
         disassembly = support["run"](
-            evidence, f"{filename}-disassembly", [objdump, "-d", "-r", evidence / filename]
+            evidence,
+            f"{filename}-disassembly",
+            [objdump, "-d", "-r", "--no-show-raw-insn", evidence / filename],
         )
         barriers = re.findall(r"\bSMEM_BAR\.([A-Z_]+)", disassembly)
-        assert barriers == expected, (kind, offset, filename, barriers)
+        if offset == 0 and kind in ("wr", "ww") and not barriers:
+            # A missing barrier is valid if the same-address load was forwarded (WR)
+            # or the overwritten store was removed (WW). Padding after SEND can decode as VST.
+            thread = re.search(r"<[^<>\n]+\.thread>:\n([^<]*?)\bSEND\b", disassembly)
+            assert thread is not None, (kind, offset, filename)
+            accesses = re.findall(r"(?m)^\s*[0-9a-f]+:[ \t]+(VLD|VST)", thread[1])
+            expected_stores = 2 if kind == "wr" else 1
+            assert accesses == ["VST"] * expected_stores, (kind, offset, filename, accesses)
+        else:
+            assert barriers == expected, (kind, offset, filename, barriers)
         results[filename] = barriers
+    assert results["vpto_0.o"] == results["kernel.elf"], (kind, offset, results)
     return results
 
 
@@ -151,7 +170,7 @@ def _run(output: Path, device: int) -> None:
                 compiled.load()
                 assert len(calls) == 1
             evidence = case / "objects/compilation-1"
-            llvm = (evidence / "vpto_0.ll").read_text()
+            llvm = _diagnostic_llvm(evidence)
             barriers = [line.strip() for line in llvm.splitlines() if "call " in line and "mem.bar" in line]
             assert len(barriers) == (1 if offset < 64 else 0), barriers
             machine_barriers = _audit_machine_code(evidence, kind, offset)
@@ -478,7 +497,7 @@ def _run_complex(output: Path, device: int, *, extended: bool = False) -> None:
             compiled.load()
             assert len(calls) == 1
         evidence = case / "objects/compilation-1"
-        llvm = (evidence / "vpto_0.ll").read_text()
+        llvm = _diagnostic_llvm(evidence)
         barriers = re.findall(r"call void @llvm.hivm.mem.bar.([a-z.]+)\(\)", llvm)
         if kind not in ("chain", "triangle"):
             assert len(barriers) == (1 if offset < 64 else 0), (name, barriers)

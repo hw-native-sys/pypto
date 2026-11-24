@@ -20,11 +20,11 @@ exactly once. A private generated source artifact substitutes the native copy
 for a scheduled copy kernel and attaches it as `vpto_sources`. This is an ABI
 fixture, not evidence that PyPTO SIMT IR already lowers to executable code.
 
-The unchanged production path performs:
+This intrinsic-only fixture follows the production SIMT path.
 
-1. PTOAS VPTO LLVM export and external-symbol checking.
+1. PTOAS exports VPTO LLVM for Bisheng.
 2. Bisheng compilation of the helper and the C++ wrapper to device objects.
-3. Device linking with `kernel_entry` first, followed by ELF validation.
+3. The device linker resolves external references and places `kernel_entry` first. PyPTO validates the ELF.
 4. `.text` extraction, `CoreCallable` registration and persistent A5 execution.
 
 The probe checks GM address spaces, thread/register annotations, direct

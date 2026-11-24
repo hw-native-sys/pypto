@@ -706,47 +706,23 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
         compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
 
 
-@pytest.mark.parametrize(
-    "helper_kind", ["empty", "ssa_writeback", "memory_attrs", "bridge", "simt_asm", "bridge_simt_asm"]
-)
-def test_vpto_compilation_links_helpers_and_rejects_bridge(
-    compiler_module, monkeypatch, tmp_path, device_elf, helper_kind
-):
+@pytest.mark.parametrize("helper_kind", ["vf", "simt_intrinsics", "simt_asm"])
+def test_vpto_compilation_links_helpers(compiler_module, monkeypatch, tmp_path, device_elf, helper_kind):
     monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
     monkeypatch.setenv("LD_DEBUG", "libs")
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
-    # A load-dependent writeback needs no additional frontend synchronization
-    # proof. Forward the LLVM produced by PTOAS unchanged to Bisheng.
-    writeback = """declare <64 x float> @llvm.hivm.vldsx1.v64f32(ptr addrspace(6), i32, i32, i32)
-declare void @llvm.hivm.vstsx1.v64f32(<64 x float>, ptr addrspace(6), i32, i32, i32, <256 x i1>)
-define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
-  %acc = call <64 x float> @llvm.hivm.vldsx1.v64f32(ptr addrspace(6) %base, i32 0, i32 0, i32 0)
-  %result = fadd <64 x float> %acc, %acc
-  call void @llvm.hivm.vstsx1.v64f32(<64 x float> %result, ptr addrspace(6) %base,
-    i32 0, i32 2, i32 0, <256 x i1> %mask)
-  ret void
-}
-"""
-    llvm = {
-        "empty": "define void @helper() {\n  ret void\n}\n",
-        "ssa_writeback": writeback,
-        "memory_attrs": (
-            "declare float @llvm.fabs.f32(float) #0\n"
-            'attributes #0 = { nounwind memory(none) "comment"="memory(none)" }\n'
-        ),
-        "bridge": "declare void @bridge()",
-        "simt_asm": (
-            "define void @entry() { ret void }\n"
-            'define simt_entry void @helper() {\n call void asm sideeffect "nop", ""()\n ret void\n}'
-        ),
-        "bridge_simt_asm": (
-            'declare void @bridge()\ndefine simt_entry void @helper() { asm sideeffect "nop", ""() }'
-        ),
-    }[helper_kind]
+    llvm = (
+        "define simt_entry void @body() { ret void }\n"
+        "declare float @llvm.fabs.f32(float) #0\n"
+        'attributes #0 = { nounwind memory(none) "comment"="memory(none)" }\n'
+        if helper_kind == "simt_intrinsics"
+        else 'define simt_entry void @body() { call void asm sideeffect "nop", ""() }'
+    )
+    attribute = "pto.aiv" if helper_kind == "vf" else "pto.simt_entry"
     helpers = [tmp_path / "first.pto", tmp_path / "second.pto"]
     for helper in helpers:
-        helper.write_text("module {}")
+        helper.write_text(f"module {{ func.func @body() attributes {{{attribute}}} {{ return }} }}")
     commands = []
 
     def run(command, **kwargs):
@@ -760,8 +736,9 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
         if command[0] == "ptoas":
             if "--emit-vpto-device-object" in command:
                 assert "--emit-vpto-llvm-ir" not in command
-                assert "--vpto-fix-vfsimt-size=auto" in command
-                output.write_bytes(_native_simt_object(("entry.vector",)))
+                assert ("--vpto-fix-vfsimt-size=auto" in command) == (helper_kind == "simt_asm")
+                assert ("--bisheng-vec-misched=on" in command) == (helper_kind == "simt_asm")
+                output.write_bytes(_native_vpto_object(("entry.vector",)))
             else:
                 output.write_text(llvm)
         else:
@@ -780,28 +757,21 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     kwargs = dict(pto_isa_root=str(tmp_path), build_dir=str(tmp_path), vpto_sources=list(map(str, helpers)))
-    if helper_kind.startswith("bridge"):
-        with pytest.raises(ValueError, match="not self-contained: bridge"):
-            compiler.compile_incore(_source(tmp_path), **kwargs)
-        assert not any(command[0] == "linker" for command in commands)
-        assert not any("--emit-vpto-device-object" in command for command in commands)
-    else:
-        assert compiler.compile_incore(_source(tmp_path), **kwargs) == device_elf()
-        helper_commands = ["ptoas", "ptoas", "linker"] if helper_kind == "simt_asm" else ["ptoas", "bisheng"]
-        assert [command[0] for command in commands] == [
-            "compiler",
-            *helper_commands,
-            *helper_commands,
-            "linker",
-        ]
-        assert [Path(p).name for p in commands[-1][-3:]] == ["kernel.o", "vpto_0.o", "vpto_1.o"]
-        if helper_kind != "simt_asm":
-            assert "--cce-generic-addrspace=off" in commands[2]
-        assert "-ffunction-sections" in commands[0]
+    assert compiler.compile_incore(_source(tmp_path), **kwargs) == device_elf()
+    helper_commands = {
+        "vf": ["ptoas", "linker"],
+        "simt_intrinsics": ["ptoas", "bisheng"],
+        "simt_asm": ["ptoas", "ptoas", "linker"],
+    }[helper_kind]
+    assert [command[0] for command in commands] == ["compiler", *helper_commands, *helper_commands, "linker"]
+    assert [Path(p).name for p in commands[-1][-3:]] == ["kernel.o", "vpto_0.o", "vpto_1.o"]
+    if helper_kind == "simt_intrinsics":
+        assert "--cce-generic-addrspace=off" in commands[2]
+    assert "-ffunction-sections" in commands[0]
     assert not list(tmp_path.glob("pypto-incore-*"))
 
 
-def _native_simt_object(exports):
+def _native_vpto_object(exports):
     data = _text_only_elf()
     struct.pack_into("<H", data, 16, 1)
     strings = b"\0" + b"".join(name.encode() + b"\0" for name in exports)
@@ -816,30 +786,37 @@ def _native_simt_object(exports):
 
 
 @pytest.mark.parametrize("native", ["entry.vector", "entry_mix_aiv", "entry"])
-def test_simt_object_aliases_follow_emitted_abi(native):
-    from pypto.runtime._vpto import simt_object_aliases  # noqa: PLC0415
+def test_vpto_object_aliases_follow_emitted_abi(native):
+    from pypto.runtime._vpto import device_object_aliases  # noqa: PLC0415
 
-    llvm = "define void @entry() { ret void }\ndefine simt_entry void @body() { ret void }"
-    aliases = simt_object_aliases(llvm, _native_simt_object((native,)))
+    aliases = device_object_aliases(_native_vpto_object((native,)))
     assert aliases == (() if native == "entry" else (f"--defsym=entry={native}",))
 
 
-@pytest.mark.parametrize("exports", [("unrelated.vector",), ("entry.vector", "entry_mix_aiv")])
-def test_simt_object_aliases_reject_missing_or_ambiguous_definitions(exports):
-    from pypto.runtime._vpto import simt_object_aliases  # noqa: PLC0415
+def test_vpto_object_aliases_preserve_multiple_vf_exports():
+    from pypto.runtime._vpto import device_object_aliases  # noqa: PLC0415
 
-    with pytest.raises(ValueError, match="needs one native definition"):
-        simt_object_aliases("define void @entry() { ret void }", _native_simt_object(exports))
+    native = _native_vpto_object(("first.vector", "second.vector"))
+    assert device_object_aliases(native) == (
+        "--defsym=first=first.vector",
+        "--defsym=second=second.vector",
+    )
+
+
+@pytest.mark.parametrize("exports", [(), ("entry", "entry.vector"), ("entry.vector", "entry_mix_aiv")])
+def test_vpto_object_aliases_require_a_unique_suffix(exports):
+    from pypto.runtime._vpto import device_object_aliases  # noqa: PLC0415
+
+    assert device_object_aliases(_native_vpto_object(exports)) == ()
 
 
 @pytest.mark.parametrize("info,visibility,section", [(0x02, 0, 2), (0x12, 2, 2), (0x12, 0, 0), (0x11, 0, 2)])
-def test_simt_object_aliases_require_visible_defined_functions(info, visibility, section):
-    from pypto.runtime._vpto import simt_object_aliases  # noqa: PLC0415
+def test_vpto_object_aliases_require_visible_defined_functions(info, visibility, section):
+    from pypto.runtime._vpto import device_object_aliases  # noqa: PLC0415
 
-    data = bytearray(_native_simt_object(("entry.vector",)))
+    data = bytearray(_native_vpto_object(("entry.vector",)))
     struct.pack_into("<BBH", data, 252, info, visibility, section)
-    with pytest.raises(ValueError, match="needs one native definition"):
-        simt_object_aliases("define void @entry() { ret void }", bytes(data))
+    assert device_object_aliases(bytes(data)) == ()
 
 
 @pytest.mark.parametrize(
@@ -853,21 +830,23 @@ def test_simt_object_aliases_require_visible_defined_functions(info, visibility,
         (254, "H", 99, "function outside its sections"),
     ],
 )
-def test_simt_object_rejects_invalid_exports(offset, fmt, value, error):
+def test_vpto_object_rejects_invalid_exports(offset, fmt, value, error):
     from pypto.runtime._device_image import device_object_exports  # noqa: PLC0415
 
-    data = bytearray(_native_simt_object(("entry.vector",)))
+    data = bytearray(_native_vpto_object(("entry.vector",)))
     struct.pack_into(f"<{fmt}", data, offset, value)
     with pytest.raises(ValueError, match=error):
         device_object_exports(bytes(data))
 
 
-@pytest.mark.parametrize("stage", ["SIMT native object compilation", "SIMT logical export linking"])
-def test_simt_object_failure_does_not_fall_back(compiler_module, monkeypatch, tmp_path, stage):
+@pytest.mark.parametrize("simt_asm", [False, True])
+@pytest.mark.parametrize("stage", ["VPTO native object compilation", "VPTO logical export linking"])
+def test_vpto_object_failure_does_not_fall_back(compiler_module, monkeypatch, tmp_path, stage, simt_asm):
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "/selected/cann/bin/bisheng"))
     source = tmp_path / "helper.pto"
-    source.write_text("module {}")
+    attr = "pto.simt_entry" if simt_asm else "pto.aiv"
+    source.write_text(f"module {{ func.func @body() attributes {{{attr}}} {{ return }} }}")
     labels = []
 
     def run(command, output, label, **kwargs):
@@ -875,11 +854,14 @@ def test_simt_object_failure_does_not_fall_back(compiler_module, monkeypatch, tm
         if label == stage:
             raise RuntimeError("native compilation failed")
         if label == "VPTO lowering":
-            output.write_text('define void @entry() { ret void }\ndefine simt_entry void @body() { asm "" }')
+            llvm = "define void @entry() { ret void }"
+            if simt_asm:
+                llvm += '\ndefine simt_entry void @body() { asm "" }'
+            output.write_text(llvm)
             return output.read_bytes()
-        assert label == "SIMT native object compilation"
+        assert label == "VPTO native object compilation"
         assert kwargs["env"]["ASCEND_HOME_PATH"] == "/selected/cann"
-        return _native_simt_object(("entry.vector",))
+        return _native_vpto_object(("entry.vector",))
 
     monkeypatch.setattr(compiler, "_run", run)
     with pytest.raises(RuntimeError, match="native compilation failed"):
@@ -986,6 +968,54 @@ def test_real_native_entry_layout(tmp_path, with_decoy):
         )
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("provide_definition", [False, True])
+def test_real_vf_external_reference_is_resolved_at_final_link(tmp_path, provide_definition):
+    pytest.importorskip("simpler_setup")
+    from pypto.backend._ptoas_locate import find_ptoas_binary  # noqa: PLC0415
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+    if shutil.which("ccec") is None or find_ptoas_binary() is None:
+        pytest.skip("PTOAS and CCEC are required for native VF compilation")
+    caller = tmp_path / "caller.cpp"
+    caller.write_text(
+        'extern "C" __aicore__ void helper(int);\n'
+        'extern "C" __aicore__ void kernel_entry(__gm__ int *args) { helper(args[0]); }\n'
+    )
+    module = (
+        'module attributes {pto.target_arch = "a5", pto.backend = "vpto", '
+        "pto.kernel_kind = #pto.kernel_kind<vector>}"
+    )
+    helper = tmp_path / "helper.pto"
+    helper.write_text(
+        module
+        + """ {
+  func.func private @external_device_fn(i32)
+  func.func @helper(%v: i32) attributes {pto.aiv} {
+    func.call @external_device_fn(%v) : (i32) -> ()
+    return
+  }
+}
+"""
+    )
+    sources = [str(helper)]
+    if provide_definition:
+        provider = tmp_path / "provider.pto"
+        provider.write_text(
+            module + " { func.func @external_device_fn(%v: i32) attributes {pto.aiv} { return } }"
+        )
+        sources.append(str(provider))
+
+    compiler = KernelCompiler("a5")
+    if provide_definition:
+        validate_device_image(
+            compiler.compile_incore(str(caller), pto_isa_root=str(tmp_path), vpto_sources=sources)
+        )
+    else:
+        with pytest.raises(RuntimeError, match=r"(?s)Incore-link.*undefined symbol: external_device_fn"):
+            compiler.compile_incore(str(caller), pto_isa_root=str(tmp_path), vpto_sources=sources)
+
+
 def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkeypatch, tmp_path):
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
@@ -1011,9 +1041,11 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     identities.append(key())
     monkeypatch.setattr(compiler_module._vpto, "PTOAS_FLAGS", ("--enable-vecscope-mem-bar=true",))
     identities.append(key())
-    monkeypatch.setattr(compiler_module._vpto, "SIMT_OBJECT_FLAGS", ("--emit-vpto-device-object",))
+    monkeypatch.setattr(compiler_module._vpto, "DEVICE_OBJECT_FLAG", "--other-object-mode")
     identities.append(key())
-    assert len(set(identities)) == 8
+    monkeypatch.setattr(compiler_module._vpto, "SIMT_OBJECT_FLAGS", ())
+    identities.append(key())
+    assert len(set(identities)) == 9
 
 
 def test_vpto_identity_excludes_loader_diagnostics(compiler_module, monkeypatch, tmp_path):
@@ -1131,6 +1163,12 @@ def test_bisheng_removes_empty_attribute_groups_and_references():
     assert prepare_llvm_for_bisheng(expected) == expected
 
 
+def _write_vf_helper_output(command, output):
+    assert "--emit-vpto-llvm-ir" not in command
+    output.write_bytes(_native_vpto_object(("helper.vector",)))
+    return output.read_bytes()
+
+
 @pytest.mark.parametrize("policy", [None, "true", "false"])
 def test_reg_auto_sync_flags(compiler_module, monkeypatch, tmp_path, policy):
     compiler = compiler_module.KernelCompiler("a5")
@@ -1139,16 +1177,17 @@ def test_reg_auto_sync_flags(compiler_module, monkeypatch, tmp_path, policy):
     helper.write_text((f"// pypto.reg_auto_sync: {policy}\n" if policy else "") + "module {}")
     commands = []
 
-    def run(command, output, label):
+    def run(command, output, label, **kwargs):
         commands.append(command)
-        output.write_text("define void @helper() { ret void }")
-        return b"object"
+        return _write_vf_helper_output(command, output)
 
     monkeypatch.setattr(compiler, "_run", run)
     compiler._compile_vpto_helpers((str(helper),), tmp_path)
-    flags = [flag for flag in commands[0] if flag.startswith("--enable-vecscope-mem-bar=")]
+    (command,) = [cmd for cmd in commands if cmd[0] == "ptoas"]
+    assert "--emit-vpto-device-object" in command
+    flags = [flag for flag in command if flag.startswith("--enable-vecscope-mem-bar=")]
     assert flags == [f"--enable-vecscope-mem-bar={'false' if policy == 'false' else 'true'}"]
-    assert not any("mem-bar-all" in flag for flag in commands[0])
+    assert not any("mem-bar-all" in flag for flag in command)
 
 
 @pytest.mark.parametrize(
@@ -1184,12 +1223,11 @@ def test_reg_auto_sync_identity_and_compilation_share_snapshot(compiler_module, 
     commands = []
     compiled_sources = []
 
-    def run(command, output, label):
+    def run(command, output, label, **kwargs):
         commands.append(command)
         if command[0] == "ptoas":
             compiled_sources.append(Path(command[1]).read_text())
-        output.write_text("define void @helper() { ret void }")
-        return b"object"
+        return _write_vf_helper_output(command, output)
 
     monkeypatch.setattr(compiler, "_run", run)
     compiler._compile_vpto_helpers((str(helper),), tmp_path, snapshot)
@@ -1197,7 +1235,7 @@ def test_reg_auto_sync_identity_and_compilation_share_snapshot(compiler_module, 
     assert "--enable-vecscope-mem-bar=false" in commands[0]
     # Identity snapshots are consumed once: a direct second compile sees edits.
     compiler._compile_vpto_helpers((str(helper),), tmp_path)
-    assert compiled_sources[-1] == "module {}"
+    assert compiled_sources == [manual, "module {}"]
     assert "--enable-vecscope-mem-bar=true" in commands[2]
     assert compiler.vpto_cache_identity((str(helper),), "aiv") != key
     helper.write_text("// pypto.reg_auto_sync: invalid\nmodule {}")
@@ -1219,11 +1257,10 @@ def test_reg_auto_sync_snapshots_are_operation_local(compiler_module, monkeypatc
     second_identity_done = threading.Event()
     compiled = {}
 
-    def run(command, output, label):
+    def run(command, output, label, **kwargs):
         if command[0] == "ptoas":
-            compiled[output.parent.name] = (Path(command[1]).read_text(), command)
-        output.write_text("define void @helper() { ret void }")
-        return b"object"
+            compiled.setdefault(output.parent.name, []).append((Path(command[1]).read_text(), command))
+        return _write_vf_helper_output(command, output)
 
     monkeypatch.setattr(compiler, "_run", run)
 
@@ -1252,14 +1289,17 @@ def test_reg_auto_sync_snapshots_are_operation_local(compiler_module, monkeypatc
         for future in futures:
             future.result(timeout=20)
     # Both requests use the same path and compiler, but retain their own identity snapshot.
-    assert compiled["first"][0] == first
-    assert "--enable-vecscope-mem-bar=false" in compiled["first"][1]
-    assert compiled["second"][0] == second
-    assert "--enable-vecscope-mem-bar=true" in compiled["second"][1]
+    for name, source, policy in (("first", first, "false"), ("second", second, "true")):
+        ((text, command),) = compiled[name]
+        assert text == source
+        assert f"--enable-vecscope-mem-bar={policy}" in command
 
 
-def test_reg_auto_sync_rejects_actual_simt_entry(compiler_module):
-    source = "// pypto.reg_auto_sync: false\nmodule { func.func @helper() attributes {pto.simt_entry} {} }"
+@pytest.mark.parametrize("attribute", ["pto.simt_entry", '"pto.simt_entry"'])
+def test_reg_auto_sync_rejects_actual_simt_entry(compiler_module, attribute):
+    source = f"module {{ func.func @helper() attributes {{{attribute}}} {{ return }} }}"
+    assert "--emit-vpto-llvm-ir" in compiler_module._vpto.ptoas_flags_for_source(source)
+    source = "// pypto.reg_auto_sync: false\n" + source
     with pytest.raises(ValueError, match="SIMT helpers"):
         compiler_module._vpto.ptoas_flags_for_source(source)
 
