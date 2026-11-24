@@ -229,7 +229,8 @@ StmtPtr TagPipelineStage(const StmtPtr& body, int32_t group, int32_t stage) {
  *
  * NON-cross-core pipeline loops (same-core GM->L1 / L1->L0 / nested matmul stage
  * loops) are left intact as `ForKind::Pipeline` for `LowerPipelineLoops` to
- * replicate.
+ * replicate, except loops with explicit quant configuration: their implicit
+ * register dependencies require sequential ordering even without a push/pop pair.
  *
  * Idempotency: the steady loop and the demoted loop are both `Sequential` with no
  * `pipeline_stages` attr, so re-running this pass finds no trigger.
@@ -237,8 +238,9 @@ StmtPtr TagPipelineStage(const StmtPtr& body, int32_t group, int32_t stage) {
 class SkewCrossCoreMutator : public IRMutator {
  public:
   ExprPtr VisitExpr_(const CallPtr& op) override {
-    if (IsOp(op, "system.set_intra_block") || IsOp(op, "system.wait_intra_block")) {
-      ++named_event_count_;
+    if (IsOp(op, "system.set_intra_block") || IsOp(op, "system.wait_intra_block") ||
+        IsOp(op, "system.set_quant_scalar") || IsOp(op, "system.set_quant_vector")) {
+      ++ordered_effect_count_;
     }
     return IRMutator::VisitExpr_(op);
   }
@@ -256,18 +258,14 @@ class SkewCrossCoreMutator : public IRMutator {
     // Recurse into the loop bounds and body first so nested cross-core pipelines
     // are skewed and any expr-level mutations are preserved before this pass
     // rewrites the loop kind.
-    const auto named_events_before = named_event_count_;
+    const auto ordered_effects_before = ordered_effect_count_;
     auto inner_start = VisitExpr(op->start_);
     auto inner_stop = VisitExpr(op->stop_);
     auto inner_step = VisitExpr(op->step_);
     auto inner_body = VisitStmt(op->body_);
 
-    // Named events order payload accesses without SSA edges. Neither same-core
-    // IO clustering nor tpush/tpop skew models their peer protocol or event
-    // reuse, so keep the entire enclosing loop sequential, even for stage=1.
-    // The traversal counter also detects events in nested loops/branches: an
-    // inner demotion alone would leave outer replication free to cross them.
-    if (named_event_count_ != named_events_before) {
+    // Preserve named-event and quant-register order in enclosing pipelines, including stage=1.
+    if (ordered_effect_count_ != ordered_effects_before) {
       return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
     }
 
@@ -311,10 +309,7 @@ class SkewCrossCoreMutator : public IRMutator {
   }
 
  private:
-  // Snapshot/difference per loop avoids rescanning each nested body (O(N)
-  // over the function). Submit launches functions, not these builtin events;
-  // normal mutator traversal still visits expressions in Submit arguments.
-  size_t named_event_count_ = 0;
+  size_t ordered_effect_count_ = 0;
 
   /// Monotonic pipeline-group id for the membership tags this pass stamps. Started
   /// at a high base so it never collides with LowerPipelineLoops' own 0-based group

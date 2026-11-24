@@ -251,6 +251,11 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
 
+  /// Number of slots physically reserved by the C2V consumer's local ring.
+  [[nodiscard]] virtual int GetC2VConsumerRingSlotCount(int /*slot_num*/, int local_slot_num) const {
+    return local_slot_num;
+  }
+
   /**
    * @brief Whether this backend enables local Vec software-pipeline lowering
    *        for loops with runtime trip counts.

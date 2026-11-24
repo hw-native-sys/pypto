@@ -674,6 +674,7 @@ must also provide the tile memory space as a separate `pl.Mem.*` argument.
 | Value | Description |
 | ----- | ----------- |
 | `DDR` | Main memory (off-chip) |
+| `Scaling` | Packed 64-bit Fixpipe controls. See [C2V Fixpipe](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-contract). |
 | `Vec` | Vector/unified buffer (on-chip) |
 | `Mat` | Matrix/L1 buffer |
 | `Left` | Left matrix operand buffer |

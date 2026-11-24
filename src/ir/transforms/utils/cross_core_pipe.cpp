@@ -25,6 +25,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -220,6 +221,11 @@ void RecordTileSlotSize(PipeDirectionMetadata& metadata, const TypePtr& type) {
 }
 
 void MergeDirectionMetadata(PipeDirectionMetadata& dst, const PipeDirectionMetadata& src) {
+  dst.acc_push_layouts.insert(src.acc_push_layouts.begin(), src.acc_push_layouts.end());
+  dst.has_acc_push |= src.has_acc_push;
+  if (!dst.non_fp32_acc_push) dst.non_fp32_acc_push = src.non_fp32_acc_push;
+  dst.has_non_acc_push |= src.has_non_acc_push;
+  dst.has_nonzero_split |= src.has_nonzero_split;
   dst.has_ops = dst.has_ops || src.has_ops;
   dst.has_inconsistent_slot_size = dst.has_inconsistent_slot_size || src.has_inconsistent_slot_size;
   for (int64_t slot_size : src.observed_slot_sizes) {
@@ -301,7 +307,8 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf, int slot_num,
-                             std::optional<int> local_slot_num, const Span& span) {
+                             std::optional<int> local_slot_num, const Span& span,
+                             const std::optional<AccPushEpilogue>& epilogue) {
   INTERNAL_CHECK_SPAN(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max(), span)
       << "Cross-core slot_size out of range: " << slot_size_bytes;
   INTERNAL_CHECK_SPAN(slot_num > 0, span) << "Cross-core slot_num must be positive: " << slot_num;
@@ -312,6 +319,10 @@ CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slo
                                                           {"slot_num", std::any(slot_num)}};
   if (local_slot_num.has_value()) {
     kwargs.emplace_back("local_slot_num", local_slot_num.value());
+  }
+  if (epilogue) {
+    kwargs.emplace_back("nosplit", true);
+    kwargs.emplace_back("acc_push_epilogue", *epilogue);
   }
   const std::string op_name = core_side_ops::InitializePipeOp(side);
   return CreateSystemOpCall(op_name, {c2v_consumer_buf, v2c_consumer_buf}, kwargs, span);
@@ -339,12 +350,30 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
         metadata.has_aiv_initialize_pipe = true;
       } else if (IsOp(op, "tile.tpush_to_aiv") && call->args_.size() == 1) {
         RecordTileSlotSize(metadata.c2v, call->args_[0]->GetType());
+        auto tile = As<TileType>(call->args_[0]->GetType());
+        const bool acc = tile && tile->memory_space_ == MemorySpace::Acc;
+        metadata.c2v.has_acc_push |= acc;
+        if (acc && tile->dtype_ != DataType::FP32) metadata.c2v.non_fp32_acc_push = tile->dtype_;
+        metadata.c2v.has_non_acc_push |= !acc;
+        metadata.c2v.has_nonzero_split |= call->GetKwarg<int>("split", 0) != 0;
       } else if (IsOp(op, "tile.tpush_to_aic") && call->args_.size() == 1) {
         RecordTileSlotSize(metadata.v2c, call->args_[0]->GetType());
       } else if (IsOp(op, "tile.tpop_from_aiv") && assign) {
         RecordTileSlotSize(metadata.v2c, assign->var_->GetType());
       } else if (IsOp(op, "tile.tpop_from_aic") && assign) {
         RecordTileSlotSize(metadata.c2v, assign->var_->GetType());
+        auto tile = As<TileType>(assign->var_->GetType());
+        if (tile) {
+          const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+          std::string layout = "unsupported";
+          if (view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box) layout = "nz2nd";
+          if (view.blayout == TileLayout::col_major && view.slayout == TileLayout::none_box) layout = "nz2dn";
+          if (view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major) {
+            layout = "nz2nz";
+          }
+          metadata.c2v.acc_push_layouts.insert(layout);
+        }
+        metadata.c2v.has_nonzero_split |= call->GetKwarg<int>("split", 0) != 0;
       }
     }
 
@@ -398,7 +427,8 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
                                            const std::vector<StmtPtr>& aiv_stmts,
                                            std::optional<int> slot_num_override,
-                                           std::optional<int> local_slot_num_override, const Span& span) {
+                                           std::optional<int> local_slot_num_override,
+                                           bool explicit_c2v_layout, const Span& span) {
   CrossCorePipeMetadata aic_metadata;
   CollectCrossCorePipeMetadata(aic_stmts, aic_metadata);
   CrossCorePipeMetadata aiv_metadata;
@@ -410,6 +440,23 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   }
 
   const int dir_mask = BuildDirMask(combined);
+  std::optional<AccPushEpilogue> epilogue;
+  const auto& layouts = combined.c2v.acc_push_layouts;
+  if (explicit_c2v_layout && combined.c2v.has_acc_push &&
+      PassContext::Current()->GetBackendHandler()->SupportsC2VFixpipeEpilogue()) {
+    CHECK_SPAN(layouts.size() == 1 && !layouts.count("unsupported"), span)
+        << "Automatic C2V pipe requires one consistent supported physical consumer layout; "
+           "use separate explicit pipe ids for different layouts";
+    CHECK_SPAN(dir_mask == 1 && !combined.c2v.has_non_acc_push && !combined.c2v.has_nonzero_split, span)
+        << "Explicit C2V column-major/fractal layout requires an Acc-only C2V pipe with split=0; "
+           "use explicit separate pipes or row-major move plus a real transpose";
+    if (layouts.count("nz2nz") && combined.c2v.non_fp32_acc_push) {
+      CHECK_SPAN(false, span) << "Automatic C2V NZ2NZ requires an FP32 accumulator, got "
+                              << combined.c2v.non_fp32_acc_push->ToString()
+                              << ". Use an unboxed ND or DN move";
+    }
+    epilogue = AccPushEpilogue{{"layout", *layouts.begin()}, {"quant", "no_convert"}, {"relu", "no_relu"}};
+  }
   auto common_slot_size = GetCommonSlotSizeBytes(combined);
   if (dir_mask == 0 || !common_slot_size.has_value()) {
     return {};
@@ -497,11 +544,11 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
 
   setup.aic_stmts.push_back(std::make_shared<EvalStmt>(
       CreateInitializePipe(core_affinity::CoreSide::AIC, dir_mask, slot_size_bytes, aic_c2v_arg, aic_v2c_arg,
-                           effective_slot_num, local_slot_num_override, span),
+                           effective_slot_num, local_slot_num_override, span, epilogue),
       span));
   setup.aiv_stmts.push_back(std::make_shared<EvalStmt>(
       CreateInitializePipe(core_affinity::CoreSide::AIV, dir_mask, slot_size_bytes, aiv_c2v_arg, aiv_v2c_arg,
-                           effective_slot_num, local_slot_num_override, span),
+                           effective_slot_num, local_slot_num_override, span, epilogue),
       span));
 
   return setup;

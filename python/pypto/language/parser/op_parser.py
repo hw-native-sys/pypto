@@ -597,8 +597,9 @@ class OpParser:
             if key == "attrs":
                 continue
 
-            # Handle dtype specially
-            if key in expression_keywords:
+            if key == "acc_push_epilogue" and isinstance(value, ast.Dict):
+                kwargs[key] = self.attrs.parse_acc_push_epilogue(value)
+            elif key in expression_keywords:
                 # Operand literals need the same dtype as positional operands;
                 # compile-time attributes still use the value parsing below.
                 kwargs[key] = self.callbacks.expression(value)

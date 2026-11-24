@@ -43,6 +43,7 @@ enum class MemorySpace {
   Bias = 6,         ///< Bias buffer
   ScalarLocal = 7,  ///< On-core scalar register file / C stack (for ArrayType)
   LeftScale = 8,    ///< L0A-side MX block-scale buffer (A5)
+  Scaling = 10,     ///< Packed 64-bit Fixpipe controls (__fbuf__), distinct from MX scales
   RightScale = 9,   ///< L0B-side MX block-scale buffer (A5)
 };
 

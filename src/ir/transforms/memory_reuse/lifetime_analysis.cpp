@@ -103,6 +103,12 @@ class LifetimeAnalyzer : public IRVisitor {
       VisitStmt(func_body);
     }
 
+    // Keep Scaling live through function completion for asynchronous TPUSH control reads.
+    for (const auto& var : ordered_defs_) {
+      auto tile = As<TileType>(var->GetType());
+      if (tile && tile->memory_space_ == MemorySpace::Scaling) RecordRawUse(var, current_order_);
+    }
+
     // Phase 2: Apply loop-aware lifetime extension
     auto effective_last_use = ComputeEffectiveLastUse();
 

@@ -25,7 +25,7 @@ from .parser_state import (
     ParseCallbacks,
     ParserServices,
 )
-from .syntax_helpers import ENUM_VALUE_TYPES
+from .syntax_helpers import ENUM_VALUE_TYPES, references_ir_binding
 
 # Call attrs that never appear inside a printed ``attrs={...}`` dict. On
 # ``system.task_dummy`` they ride bespoke surfaces (``manual_dep_edges`` prints
@@ -108,6 +108,15 @@ class AttrParser:
                 )
         return attrs_kw.value
 
+    def parse_acc_push_epilogue(self, node: ast.Dict) -> Any:
+        """Evaluate the Fixpipe record without substituting shadowed runtime bindings."""
+        if references_ir_binding(node, self.services.scope_manager.lookup_var):
+            raise ParserSyntaxError(
+                "acc_push_epilogue must be a compile-time record",
+                span=self.services.span_tracker.get_span(node),
+            )
+        return self.services.expr_evaluator.eval_expr(node)
+
     def parse_attr_value(self, method_name: str, key: str, value_node: ast.expr) -> Any:
         """Reconstruct one generic ``attrs={...}`` value from its Python AST node.
 
@@ -124,6 +133,8 @@ class AttrParser:
         from pypto.language.typing.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
         node_span = self.services.span_tracker.get_span(value_node)
+        if key == "acc_push_epilogue" and isinstance(value_node, ast.Dict):
+            return self.parse_acc_push_epilogue(value_node)
         if (
             isinstance(value_node, ast.UnaryOp)
             and isinstance(value_node.op, (ast.USub, ast.UAdd))

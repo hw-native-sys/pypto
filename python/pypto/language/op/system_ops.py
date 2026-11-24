@@ -35,7 +35,7 @@ from pypto.ir.op.system_ops import (
 )
 from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PipeType, Span
 
 from ..typing import Array, IntLike, Scalar, Tensor, Tile
 
@@ -53,6 +53,8 @@ __all__ = [
     "wait_intra_block",
     "set_ffts",
     "barrier",
+    "set_quant_scalar",
+    "set_quant_vector",
     "fence",
     "cacheinvalid",
     "syncall",
@@ -116,6 +118,22 @@ def wait_flag(
     """Block ``dst_pipe`` until the matching source event is signalled."""
     event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
+
+
+def set_quant_scalar(scale: Scalar | Expr | float, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set the pipe's FP32 quant scale in the same block before TPUSH."""
+    if isinstance(scale, float):
+        scale = ConstFloat(scale, DataType.FP32, _get_span_or_capture(span, frame_offset=1))
+    elif isinstance(scale, int):
+        raise TypeError("set_quant_scalar requires an FP32 scalar or floating-point literal")
+    return _ir_ops.set_quant_scalar(scale.unwrap() if isinstance(scale, Scalar) else scale, id=id, span=span)
+
+
+def set_quant_vector(controls: Tile | Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set packed INT64/UINT64 Scaling controls for a ``deqf16_vec`` pipe before TPUSH."""
+    return _ir_ops.set_quant_vector(
+        controls.unwrap() if isinstance(controls, Tile) else controls, id=id, span=span
+    )
 
 
 def sync_set(

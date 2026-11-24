@@ -1,0 +1,488 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Fixpipe schemas, cross-peer verification, and real PTOAS compilation."""
+
+import subprocess
+from textwrap import indent
+
+import pypto.language as pl
+import pytest
+from pypto import DataType, Error, backend, codegen, ir, passes
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.ir.op import system_ops, tile_ops
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+
+
+@pytest.fixture(autouse=True)
+def _backend():
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    yield
+    backend.reset_for_testing()
+
+
+def _epilogue(layout="nz2nd", quant="no_convert", relu="no_relu"):
+    return {"layout": layout, "quant": quant, "relu": relu}
+
+
+def _program(
+    quant="no_convert",
+    relu="no_relu",
+    slot_size=2048,
+    state=True,
+    state_id=0,
+    peer_quant=None,
+    split=0,
+    layout="nz2nd",
+    consumer_dtype=None,
+    input_dtype_override=None,
+):
+    epilogue = _epilogue(layout=layout, quant=quant, relu=relu)
+    peer_epilogue = _epilogue(layout=layout, quant=peer_quant or quant, relu=relu)
+    input_dtype = input_dtype_override or (pl.INT8 if quant.startswith("deq") else pl.BF16)
+    setter = (
+        "pl.set_quant_scalar(scalar_config.scale"
+        if quant == "qf322f16_pre_scalar"
+        else "pl.system.set_quant_scalar(scale=0.5"
+    )
+    output_dtype = consumer_dtype or (
+        pl.FP32 if quant == "no_convert" else (pl.BF16 if quant == "f32_bf16" else pl.FP16)
+    )
+
+    src = "BF16" if input_dtype == pl.BF16 else str(input_dtype).upper()
+    dst = "BF16" if output_dtype == pl.BF16 else str(output_dtype).upper()
+    signature = (
+        f"a: pl.Tensor[[32, 32], pl.{src}], b: pl.Tensor[[16, 32], pl.{src}], "
+        f"out: pl.Out[pl.Tensor[[32, 16], pl.{dst}]], control_words: pl.Tensor[[1, 32], pl.UINT64]"
+    )
+    return pl.parse_program(f"""
+from types import SimpleNamespace
+scalar_config = SimpleNamespace(scale=0.5)
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def producer(self, {signature}):
+        peer = pl.import_peer_buffer(name="c2v", peer_func="consumer")
+        pl.aic_initialize_pipe(peer, dir_mask=1, slot_size={slot_size}, slot_num=2,
+                               acc_push_epilogue={epilogue!r})
+        lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
+        if {state and quant == "deqf16_vec"}:
+            packed: pl.Tile[[1, 32], pl.UINT64, pl.Mem.Mat,
+                            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)
+                            ] = pl.load(control_words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+            controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(controls, id={state_id})
+        if {state and quant in ("deqf16_scalar", "qf322f16_pre_scalar")}:
+            {setter}, id={state_id})
+        pl.tpush_to_aiv(acc, split={split})
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def consumer(self, {signature}):
+        buf = pl.reserve_buffer(name="c2v", size={slot_size * 2})
+        pl.aiv_initialize_pipe(buf, dir_mask=1, slot_size={slot_size}, slot_num=2,
+                               acc_push_epilogue={peer_epilogue!r})
+        tile = pl.tpop_from_aic(shape=[32, 16], dtype=pl.{dst}, split={split})
+        pl.store(tile, [0, 0], out)
+        pl.tfree_to_aic(tile, split=1)
+""")
+
+
+class _PipeBufferAliases(ir.IRMutator):
+    def __init__(self, producer_depth: int, consumer_depth: int, offset: int = 0):
+        super().__init__()
+        self._offset = offset
+        self._depths = {
+            ir.get_op("system.aic_initialize_pipe").name: producer_depth,
+            ir.get_op("system.aiv_initialize_pipe").name: consumer_depth,
+        }
+
+    def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:
+        call = op.expr
+        if not isinstance(call, ir.Call) or not (depth := self._depths.get(call.op.name, 0)):
+            return super().visit_eval_stmt(op)
+        value = call.args[0]
+        if self._offset:
+            value = ir.Add(value, ir.ConstInt(self._offset, DataType.INT32, op.span), DataType.INT32, op.span)
+        statements: list[ir.Stmt] = []
+        for index in range(depth):
+            alias = ir.Var(f"c2v_buffer_alias_{index}", value.type, op.span)
+            statements.append(ir.AssignStmt(alias, value, op.span))
+            value = alias
+        aliased = ir.Call(call.op, [value, *call.args[1:]], dict(call.kwargs), call.type, call.span)
+        statements.append(ir.EvalStmt(aliased, op.span))
+        return ir.SeqStmts(statements, op.span)
+
+
+def _generate(program, buffer_ir=False, verification_level=passes.VerificationLevel.BASIC):
+    with passes.PassContext([], enable_buffer_ir=buffer_ir, verification_level=verification_level):
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        core_functions = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
+        modules = codegen.PTOCodegen().generate(ir.Program(core_functions, "Fixpipe", lowered.span))
+    return lowered, modules if isinstance(modules, str) else "".join(modules.values())
+
+
+def _verify_expanded(program):
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.MixedKernelExpanded)
+    passes.verify_properties(props, program, "test")
+
+
+def _assemble(mlir, tmp_path, expected_error=None):
+    compiler = find_ptoas_binary()
+    if not compiler:
+        pytest.skip("real PTOAS compiler is not installed")
+    source = tmp_path / "kernel.pto"
+    source.write_text(mlir)
+    output = tmp_path / "kernel.cpp"
+    result = subprocess.run(
+        [compiler, "--pto-arch=a5", "--pto-level=level3", str(source), "-o", str(output)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if expected_error is not None:
+        assert result.returncode != 0, "PTOAS unexpectedly accepted an unsupported contract"
+        assert expected_error in result.stderr, result.stderr
+        return result.stderr
+    assert result.returncode == 0, result.stderr
+    assert output.stat().st_size > 0
+    return output.read_text()
+
+
+@pytest.mark.parametrize(
+    "quant", ["no_convert", "f32_f16", "f32_bf16", "deqf16_scalar", "deqf16_vec", "qf322f16_pre_scalar"]
+)
+@pytest.mark.parametrize("relu", ["no_relu", "normal_relu"])
+@pytest.mark.ptoas_compile
+def test_explicit_fixpipe_compiles(quant, relu, tmp_path):
+    slot_size = 2048 if quant == "no_convert" else 1024
+    _, mlir = _generate(_program(quant, relu, slot_size=slot_size))
+    cpp = _assemble(mlir, tmp_path)
+    assert mlir.count("#pto.acc_push_epilogue<") == 2
+    assert "FixpipeParams<" in cpp
+    if quant.endswith("scalar"):
+        assert "SET_QUANT_SCALAR" in cpp
+    if quant.endswith("vec"):
+        assert "SET_QUANT_VECTOR" in cpp
+        assert "TileType::Scaling, uint64_t" in cpp
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"quant": "deqf16_scalar", "state": False}, "preceding set_quant"),
+        ({"quant": "deqf16_vec", "state": False}, "preceding set_quant"),
+        ({"quant": "deqf16_scalar", "state_id": 1}, "dominating initialize_pipe"),
+        ({"split": 1}, "split=0"),
+        ({"peer_quant": "f32_f16", "_alias_offset": 0}, "contract mismatch"),
+        ({"slot_size": 128, "_alias_offset": 0}, "exceeds slot_size"),
+        ({"_alias_offset": 16}, "must trace to reserve_buffer/import_peer_buffer"),
+        ({"consumer_dtype": pl.FP16}, "converted dtype mismatch"),
+        ({"_a2a3": True}, "currently require Ascend950"),
+        ({"layout": "nz2dn"}, "consumer layout"),
+        ({"layout": "nz2nz", "quant": "f32_f16"}, "NZ2NZ currently supports no_convert"),
+        ({"layout": "nz2nz", "consumer_dtype": pl.INT32, "input_dtype_override": pl.INT8}, "FP32 source"),
+    ],
+)
+def test_invalid_fixpipe_contract(kwargs, message):
+    options = kwargs.copy()
+    offset = options.pop("_alias_offset", None)
+    if options.pop("_a2a3", False):
+        backend.reset_for_testing()
+        backend.set_backend_type(backend.BackendType.Ascend910)
+    program = _program(**options)
+    with pytest.raises(Error, match=message):
+        _generate(
+            _PipeBufferAliases(4, 4, offset=offset).visit_program(program) if offset is not None else program
+        )
+
+
+@pytest.mark.parametrize("bare_pop", [False, True])
+def test_fixpipe_requires_matching_pop_endpoints_and_result(bare_pop):
+    lines = ir.python_print(_program()).splitlines()
+    pop = next(line for line in lines if ".tpop_from_aic(" in line)
+    skip = (".tfree_to_aic(", ".store(") if bare_pop else (".tpush_to_aiv(",)
+    source = "\n".join(line for line in lines if not any(op in line for op in skip))
+    if bare_pop:
+        source = source.replace(pop, "        " + pop.split(" = ", 1)[1])
+    message = "TPOP requires a result target" if bare_pop else "matching TPUSH and TPOP endpoints"
+    with pytest.raises(Error, match=message):
+        _verify_expanded(passes.simplify()(pl.parse_program(source)))
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [None, True, False, "opposite", "member", "wrong_group"]
+    + ["shared", "shared_twice"]
+    + ["literal_same", "literal_crossed", "literal_spmd", "literal_spmd_fan_in", "literal_partial"]
+    + ["literal_shared", "literal_condition"],
+)
+@pytest.mark.ptoas_compile
+def test_fixpipe_endpoint_counts(binding, tmp_path):
+    """Compile balanced literal and conditioned launches; reject proven endpoint mismatches."""
+    source = ir.python_print(_program()).replace("pl.UINT64]):", "pl.UINT64], enabled: pl.Scalar[pl.BOOL]):")
+    literals = isinstance(binding, str) and binding.startswith("literal_")
+    partial = binding in {"literal_same", "literal_partial", "literal_shared", "literal_condition"}
+    extra = ", other: pl.Scalar[pl.BOOL]" if literals or binding in {"shared", "shared_twice"} else ""
+    source = source.replace("enabled: pl.Scalar[pl.BOOL]):", f"enabled: pl.Scalar[pl.BOOL]{extra}):")
+    if binding != "wrong_group":
+        source = source.replace(
+            "        pl.tile.tpush_to_aiv(", "        if enabled:\n            pl.tile.tpush_to_aiv("
+        )
+    if extra or binding == "opposite":
+        before, body = source.split("        tile: ", 1)
+        consumer, producer = ("        tile: " + body).split("    @pl.function", 1)
+        guard = "other" if extra else "enabled"
+        branch = "" if literals and binding != "literal_shared" else "            pass\n        else:\n"
+        source = before + f"        if {guard}:\n{branch}" + indent(consumer, "    ")
+        source += "    @pl.function" + producer
+    literal_member = binding == "member"
+    if binding is not None:
+        signature = next(line for line in source.splitlines() if line.startswith("    def producer("))
+        group = signature.replace("producer(", "group(self, ")
+        if extra and not literals:
+            group = group.replace(extra, "")
+        elif binding is not None and not literals:
+            group = group.replace(", enabled: pl.Scalar[pl.BOOL]", "")
+            if not literal_member:
+                group = group.replace("group(self, ", "group(self, enabled: pl.Scalar[pl.BOOL], ")
+        arg = "True" if literal_member else "enabled"
+        arg += (", other" if literals else ", enabled") if extra else ""
+        group_source = f"\n    @pl.function(type=pl.FunctionType.Group)\n{group}\n"
+        for callee in ("producer",) if binding == "wrong_group" else ("producer", "consumer"):
+            group_source += f"        self.{callee}(a, b, out, control_words, {arg})\n"
+        source += group_source
+        if binding == "shared_twice":
+            source += group_source.replace("def group(", "def other_group(")
+    if isinstance(binding, bool) or literals:
+        extra_output = ", second_out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]" if literals else ""
+        extra_output += ", x: pl.Scalar[pl.BOOL], y: pl.Scalar[pl.BOOL]" if partial else ""
+        caller = signature.replace("producer(", "main(self, ").replace(
+            f", enabled: pl.Scalar[pl.BOOL]{extra}", extra_output
+        )
+        fan_in = binding == "literal_spmd_fan_in"
+        target = "group" if binding in {"literal_same", "literal_crossed"} else "wrapper"
+        if target == "wrapper":
+            args = (
+                "a, b, out, control_words, enabled, other"
+                if literals
+                else "enabled, a, b, out, control_words"
+            )
+            wrapper = f"\n    @pl.function(type=pl.FunctionType.Spmd)\n{group.replace('group(', 'wrapper(')}"
+            wrapper += f"\n        self.group({args})\n"
+            source += wrapper + (wrapper.replace("def wrapper(", "def second_wrapper(") if fan_in else "")
+        source += f"\n    @pl.function(type=pl.FunctionType.Orchestration)\n{caller}\n"
+        if literals:
+            prefix = "alias = y\n        if y:\n            " if binding == "literal_condition" else ""
+            runtime_arguments = "x, x" if binding == "literal_shared" else "x, y"
+            for enabled, out in ((True, "out"), (False, "second_out")):
+                other = enabled if binding == "literal_same" else not enabled
+                actuals = runtime_arguments if partial and not enabled else f"{enabled}, {other}"
+                actuals = "True, alias" if prefix else actuals
+                callee = "second_wrapper" if fan_in and not enabled else target
+                source += f"        {prefix}self.{callee}(a, b, {out}, control_words, {actuals})\n"
+        else:
+            source += f"        self.wrapper({binding}, a, b, out, control_words)\n"
+    program = pl.parse_program(source)
+    if binding is True or literal_member or binding in {"literal_same", "literal_condition"}:
+        _assemble(_generate(program)[1], tmp_path)
+    else:
+        group_only = bool(extra) or binding == "wrong_group"  # Preserve authored Group arguments.
+        verify = _verify_expanded if group_only else _generate
+        message = "peer_func must belong" if binding == "wrong_group" else "endpoint counts differ"
+        with pytest.raises(Error, match=message):
+            verify(passes.simplify()(program) if group_only else program)
+
+
+@pytest.mark.parametrize("schedule", ["overflow", "reverse", "sequential", "nested"])
+@pytest.mark.ptoas_compile
+def test_fixpipe_retained_slots_and_fifo_order(schedule, tmp_path):
+    slots = 1 if schedule in {"overflow", "sequential"} else 2
+    source = ir.python_print(_program()).replace("slot_num=2", f"slot_num={slots}")
+    push = next(line for line in source.splitlines() if ".tpush_to_aiv(" in line)
+    pop = next(line for line in source.splitlines() if ".tpop_from_aic(" in line)
+    free = next(line for line in source.splitlines() if ".tfree_to_aic(" in line)
+    second, release = pop.replace("tile:", "second:", 1), free.replace("(tile,", "(second,")
+    sequence = {"reverse": [second, release, free], "sequential": [free, second, release]}
+    sequence["nested"] = [
+        "        for j in pl.range(2):",
+        indent(second, "    "),
+        indent(release, "    "),
+        free,
+    ]
+    source = source.replace(push, "\n".join([push] * (3 if schedule == "nested" else 2)))
+    source = source.replace(free, "\n".join(sequence.get(schedule, [second, free, release])))
+    if schedule == "sequential":
+        _assemble(_generate(pl.parse_program(source))[1], tmp_path)
+    else:
+        with pytest.raises(
+            Error, match="outstanding TPOP count" if schedule == "overflow" else "oldest outstanding"
+        ):
+            _generate(pl.parse_program(source))
+
+
+@pytest.mark.parametrize("initialize", [system_ops.aic_initialize_pipe, system_ops.aiv_initialize_pipe])
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"acc_push_epilogue": {"layout": "nz2dn"}}, "acc_push_epilogue"),
+        ({"acc_push_epilogue": _epilogue(layout="dn2nz")}, "acc_push_epilogue"),
+        ({"acc_push_epilogue": _epilogue(quant="unknown")}, "acc_push_epilogue"),
+        ({"acc_push_epilogue": _epilogue(relu="relu")}, "acc_push_epilogue"),
+        ({"dir_mask": 3}, "C2V only"),
+        ({"nosplit": False}, "nosplit=true"),
+        ({"c2v_dtype": DataType.FP32}, "cannot be combined"),
+        ({"pre_relu": True}, "cannot be combined"),
+        ({"acc_push_epilogue": None, "c2v_dtype": DataType.FP32, "nosplit": False}, "requires nosplit=true"),
+    ],
+)
+def test_init_rejects_invalid_contract(initialize, options, message):
+    defaults = {"dir_mask": 1, "slot_size": 2048, "acc_push_epilogue": _epilogue()}
+    with pytest.raises(ValueError, match=message):
+        initialize(**(defaults | options))
+
+
+@pytest.mark.parametrize(
+    ("valid_shape", "space", "dtype", "layout", "message"),
+    [
+        *(
+            (shape, space, DataType.UINT64, {}, "valid_shape to cover the full")
+            for shape in ([1, 16], [0, 32])
+            for space in (ir.MemorySpace.Mat, ir.MemorySpace.Scaling)
+        ),
+        *(
+            [[1, 32], ir.MemorySpace.Mat, DataType.UINT64, layout, "row-major unboxed destination"]
+            for layout in ({"blayout": ir.TileLayout.col_major}, {"slayout": ir.TileLayout.row_major})
+        ),
+        ([1, 32], ir.MemorySpace.Scaling, DataType.FP32, {}, "packed 64-bit controls in loc=scaling"),
+        ([1, 32], ir.MemorySpace.Vec, DataType.UINT64, {}, "packed 64-bit controls in loc=scaling"),
+        ([1, 32], ir.MemorySpace.Scaling, DataType.UINT64, {}, None),
+    ],
+)
+def test_packed_control_contract(valid_shape, space, dtype, layout, message):
+    view = ir.TileView(
+        valid_shape=valid_shape, blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box
+    )
+    controls = ir.Var(
+        "controls", ir.TileType([1, 32], dtype, memory_space=space, tile_view=view), ir.Span.unknown()
+    )
+    if message is None:
+        assert system_ops.set_quant_vector(controls, id=3).kwargs["id"] == 3
+    else:
+        with pytest.raises(ValueError, match=message):
+            if space == ir.MemorySpace.Mat:
+                tile_ops.move(controls, target_memory=ir.MemorySpace.Scaling, **layout)
+            else:
+                system_ops.set_quant_vector(controls)
+
+
+@pytest.mark.parametrize("buffer_ir", [False, True])
+def test_scaling_allocations_remain_distinct_after_setter(buffer_ir):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel():
+            src = pl.tile.create([1, 32], pl.UINT64, target_memory=pl.Mem.Mat, flat_layout=True)
+            first = pl.tile.move(src, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(first)
+            second = pl.tile.move(src, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(second)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel():
+            mat = pl.tile.alloc(pl.Mem.Mat, 256)
+            first_buf = pl.tile.alloc(pl.Mem.Scaling, 256)
+            second_buf = pl.tile.alloc(pl.Mem.Scaling, 256)
+            src: pl.Tile[[1, 32], pl.UINT64, pl.MemRef(mat, 0, 256), pl.Mem.Mat] = pl.tile.create(
+                [1, 32], pl.UINT64, target_memory=pl.Mem.Mat, flat_layout=True
+            )
+            first: pl.Tile[[1, 32], pl.UINT64, pl.MemRef(first_buf, 0, 256), pl.Mem.Scaling] = pl.tile.move(
+                src, target_memory=pl.Mem.Scaling
+            )
+            pl.system.set_quant_vector(first)
+            second: pl.Tile[[1, 32], pl.UINT64, pl.MemRef(second_buf, 0, 256), pl.Mem.Scaling] = pl.tile.move(
+                src, target_memory=pl.Mem.Scaling
+            )
+            pl.system.set_quant_vector(second)
+
+    with passes.PassContext([], enable_buffer_ir=buffer_ir):
+        initialized = passes.init_mem_ref()(Before)
+        After = passes.memory_reuse()(passes.materialize_semantic_aliases()(initialized))
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    body = next(iter(After.functions.values())).body
+    assert isinstance(body, ir.SeqStmts)
+    tiles = [stmt.var.type for stmt in body.stmts if isinstance(stmt, ir.AssignStmt)]
+    first, second = [
+        tile.memref
+        for tile in tiles
+        if isinstance(tile, ir.TileType) and tile.memory_space == ir.MemorySpace.Scaling
+    ]
+    assert first is not None and second is not None
+    # Asynchronous TPUSH reads controls after the setter in either IR path.
+    assert not ir.MemRef.same_allocation(first, second)
+
+
+def _automatic_move(rows=(32,), *, loop=False, nz_int32=False):
+    dtype, out_dtype = ("INT8", "INT32") if nz_int32 else ("BF16", "FP32")
+    out_shape = [32, 16] if loop or nz_int32 else [16, sum(rows)]
+    scatter = "row_major" if nz_int32 else "none_box"
+    blocks = []
+    for i, n in enumerate(rows):
+        stored = f"tile{i}" if nz_int32 else f"pl.tile.transpose_view(tile{i})"
+        if loop:
+            stored = f"pl.tile.transpose({stored}, 0, 1)"
+        blocks.append(f"""
+lhs{i} = pl.load(a, [0, 0], [{n}, 32], target_memory=pl.Mem.Mat)
+rhs = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+acc{i} = pl.matmul(lhs{i}, rhs)
+tile{i} = pl.tile.move(acc{i}, target_memory=pl.Mem.Vec,
+                       blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.{scatter})
+pl.store({stored}, [0, {sum(rows[:i])}], out)
+""")
+    body = "".join(blocks)
+    if loop:
+        body = "for iteration in pl.range(2):\n" + indent(body, "    ")
+    return pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(a: pl.Tensor[[{max(rows)}, 32], pl.{dtype}], b: pl.Tensor[[32, 16], pl.{dtype}],
+               out: pl.Out[pl.Tensor[{out_shape}, pl.{out_dtype}]]):
+{indent(body, "        ")}
+""")
+
+
+@pytest.mark.parametrize(("loop", "buffer_ir"), [(False, False), (False, True), (True, False)])
+@pytest.mark.ptoas_compile
+def test_automatic_column_major_producer_and_consumer_compile(loop, buffer_ir, tmp_path):
+    _, mlir = _generate(_automatic_move(loop=loop), buffer_ir)
+    cpp = _assemble(mlir, tmp_path)
+    if not loop:
+        assert mlir.count("layout = nz2dn, quant = no_convert, relu = no_relu") == 2
+        assert "LayoutMode_t::NZ2DN" in cpp
+
+
+@pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.ptoas_compile
+def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp_path):
+    program = _automatic_move((32, 64))
+    with pytest.raises(Error, match="one physical payload shape/converted dtype"):
+        _generate(program, buffer_ir)
+    _, mlir = _generate(program, buffer_ir, passes.VerificationLevel.NONE)
+    _assemble(mlir, tmp_path, expected_error="to use the same tile type")
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

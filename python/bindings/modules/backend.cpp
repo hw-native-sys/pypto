@@ -171,6 +171,9 @@ void BindBackend(nb::module_& m) {
            "Whether non-split C2V pipes support explicit FP32 output conversion and ReLU")
       .def("supports_local_pipe_depth", &BackendHandler::SupportsLocalPipeDepth,
            "Whether cross-core pipes support a local consumer depth independent of the transport ring")
+      .def("get_c2v_consumer_ring_slot_count", &BackendHandler::GetC2VConsumerRingSlotCount,
+           nb::arg("slot_num"), nb::arg("local_slot_num"),
+           "Number of slots physically reserved by the C2V consumer's local ring")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,
            "Whether MemoryReuse must apply the load + tpop_from_aic in-place hazard guard")
       .def("requires_level3_tmp_scratch", &BackendHandler::RequiresLevel3TmpScratch,

@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/acc_push_epilogue.h"
+
 // clang-format off
 #include <msgpack.hpp>
 // clang-format on
@@ -809,6 +811,11 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
     } else if (value.type() == typeid(std::string)) {
       kwargs_msgs.push_back(
           make_pair(key, VisitLeafField(AnyCast<std::string>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(AccPushEpilogue)) {
+      std::map<std::string, msgpack::object> contract;
+      contract["type"] = msgpack::object("AccPushEpilogue", zone_);
+      contract["value"] = msgpack::object(AnyCast<AccPushEpilogue>(value), zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(contract, zone_)));
     } else if (value.type() == typeid(double)) {
       kwargs_msgs.push_back(
           make_pair(key, VisitLeafField(AnyCast<double>(value, "serializing kwarg: " + key))));
