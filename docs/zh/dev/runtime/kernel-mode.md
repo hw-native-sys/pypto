@@ -110,8 +110,7 @@ session 是生命周期适配层，不是独立执行引擎。Simpler 负责 cal
 要求输出目录，本阶段只保留配置，公开 DFX 窗口后续实现。workspace budget 遵循公开
 Worker 的最小 1024 字节要求，不包含借用的 Tensor 存储。
 
-runtime submodule 跟随 upstream 的 Simpler revision
-`27fe21756a5230cc4cfe7e44fa360d07d782a111`。实际 native binding 的身份仍由既有
+`runtime/` 子模块记录当前 checkout 使用的 Simpler 版本。实际 native binding 的身份由
 `check_runtime_pin` 检查，包括身份缺失和显式跳过规则。能力检查要求公开 borrowed init、
 caller-stream prepare、Buffer/TaskArgs、PreparedSubmission 和 `flush_diagnostics` 接口；
 不查询旧 kernel supported bit 或私有 slot。接口检查和 UT 不构成设备执行正确性验证。
@@ -220,6 +219,10 @@ UT 使用真实初始化状态转换、JIT passes/codegen、公共产物发布/�
 `warmup()` 使用 PROGRAM contract，不能代替 Kernel 注册。capture 只查找已有 KERNEL
 specialization 和 callable，不编译、不加载新 binary、不初始化 Worker。初始化时须关闭诊断。
 
+如果 `CacheConfig.extra_source_paths` 中的路径缺失，eager 预热可能通过私有构建成功，
+但 capture 无法按指纹找到该产物。恢复缺失的输入，或在使用进程默认配置时调用
+`pypto.configure_cache(pypto.CacheConfig(enabled=False))`，然后重新执行 eager 预热和同步。
+
 ```python
 import torch
 import torch_npu
@@ -244,6 +247,8 @@ PyPTO 在每次调用时，通过不排空队列的 stream 查询获取当前 AC
 每次调用仍独立持有 preparation、参数快照和资源。收到旧 model 的销毁通知后，其地址可被
 新 model 复用。PyPTO 不持有 Python graph 对象，也不修改或包装任何 `NPUGraph` 方法；
 capture begin/end、replay 和 reset 全由原生 torch_npu graph 上下文管理。
+同一个 graph 的所有 PyPTO 节点须在同一条 stream 上录制。如果第二条 stream 加入同一个
+graph 并调用 PyPTO，运行时会在提交前拒绝该调用，Worker 仍可继续使用。录制后可在其他 stream 上 replay。
 
 capture 与 eager 使用相同的无 GIL native submit 回调，入队后返回输出别名，不等待回调。
 原生框架的 capture-end 边界负责在 RTS 结束录制前排空 host queue。replay 不进入 Python
@@ -255,15 +260,17 @@ Tensor/storage、stream 和 callable，直到收到 native model 销毁通知并
 后续普通 `op()` 在自身回调入队前自动回收已销毁 graph 的资源。由于 replay 可使用不同于
 录制的 stream，这一步可能同步整个设备上的历史工作。尚存活的 graph 保持资源并可继续回放。
 
-录制另一个 graph 时推迟回收，包括新 model 复用已销毁 model 地址的情形；在 capture 外的
-下一次普通调用时恢复清理。capture 内可以轮询已完成的 eager 预热并将其移出 native
+调用所在的 stream 正在录图时会推迟回收，包括新 model 复用已销毁 model 地址的情形。
+eager 提交也会检查 PyPTO 仍持有的录制 stream，因此排队等待加入录图的 stream 不会触发 eager 清理。
+若另一条 stream 上的录图没有 PyPTO 持有的资源，回收仍可能触发整卡同步，导致 Worker 进入失败状态。
+请在此类录图结束后再发起会回收旧图的普通调用。capture 内可以轮询已完成的 eager 预热并将其移出 native
 执行队列，但 finalization 推迟到录制结束后。最终仍以 Simpler 的 `safe_to_release` 为
 释放 owner 的条件。
 清理失败时保留 owner 并拒绝新提交。若之后没有 op 调用，则在 shutdown 时尝试清理。
 不提供公开 `drain()` API，没有后台回收线程，用户无需额外调用清理接口。
 
-已有 shutdown hook 不会 reset 或禁止用户 graph。Worker close 时若 graph 仍存活，立即
-拒绝清理并保留资源。进程退出前应 reset 或销毁 graph。销毁失败、部分录制、同步失败、
+已有 shutdown hook 不会 reset 或禁止用户 graph。Worker close 时若 graph 仍存活，会保留其资源，
+处理完其他待清理的 ticket 后报告错误，期间可能等待 eager 调用完成。进程退出前应 reset 或销毁 graph。销毁失败、部分录制、同步失败、
 native release 失败均保留 owner，以便重试清理。
 
 `tests/st/runtime/kernel/test_torch_capture.py` 覆盖 HBG/TMR、task queue 0/1：冷调用拒绝、

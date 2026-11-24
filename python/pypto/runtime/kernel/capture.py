@@ -29,7 +29,8 @@ class CaptureResources:
         self,
         submission: Any,
         model: int,
-        anchors: dict[int, Any],
+        stream: int,
+        anchors: dict[int, "CaptureResources"],
         synchronize_device: Callable[[], None],
     ) -> None:
         native = getattr(submission, "_native_submission", None)
@@ -40,23 +41,29 @@ class CaptureResources:
                 raise NotImplementedError(f"Kernel capture requires Simpler native submission.{method}")
         self.native = native
         self.model = model
+        self.stream = stream
         self.anchors = anchors
         self.synchronize_device = synchronize_device
         self.retained = False
+        # Native cancellation is a one-shot result. Python owner release can
+        # fail independently and retry after the native token has retired.
+        self._cancelled: bool | None = None
 
     def retain(self) -> None:
         anchor = self.anchors.get(self.model)
-        if anchor is not None and anchor._model_destroyed():
+        if anchor is not None and anchor.native._model_destroyed():
             del self.anchors[self.model]
             anchor = None
         # The ticket already owns this object when preparation starts, including
         # failures after native allocation or destroy-notice registration.
-        self.native._retain_model_resources(anchor)
+        self.native._retain_model_resources(anchor.native if anchor is not None else None)
         self.retained = True
         if anchor is None:
-            self.anchors[self.model] = self.native
+            self.anchors[self.model] = self
 
     def release(self) -> bool:
+        if self._cancelled is not None:
+            return self._cancelled
         if self.retained:
             if not self.native._model_destroyed():
                 raise CaptureInUseError(
@@ -68,8 +75,10 @@ class CaptureResources:
             self.synchronize_device()
         # Also cleans partial retention that never reached enqueue. Simpler
         # refuses release if a registered model notice has not arrived yet.
-        return self.native._release_model_resources()
+        cancelled: bool = self.native._release_model_resources()
+        self._cancelled = cancelled
+        return cancelled
 
     def forget(self) -> None:
-        if self.anchors.get(self.model) is self.native:
+        if self.anchors.get(self.model) is self:
             del self.anchors[self.model]

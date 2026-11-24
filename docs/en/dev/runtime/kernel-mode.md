@@ -141,8 +141,7 @@ Diagnostics require an output directory; this step reserves the configuration,
 while public DFX windows are a later step. The workspace budget follows the
 public Worker's minimum of 1024 bytes and excludes borrowed tensor storage.
 
-The runtime submodule follows upstream's Simpler pin
-`27fe21756a5230cc4cfe7e44fa360d07d782a111`. The existing `check_runtime_pin`
+The `runtime/` submodule records the Simpler revision for this checkout. The `check_runtime_pin`
 policy remains authoritative for the installed native binding, including its
 missing-identity and explicit-skip rules. A separate availability check requires
 public borrowed init, caller-stream preparation, Buffer/TaskArgs, PreparedSubmission and
@@ -282,6 +281,11 @@ Call each specialization eagerly and synchronize before capture. `compile()` and
 Capture uses the existing KERNEL specialization and callable; it never compiles,
 loads a new binary or initializes a Worker. Initialize with diagnostics disabled.
 
+If a configured `CacheConfig.extra_source_paths` entry is missing, eager warmup
+can succeed with a private build whose fingerprint capture cannot look up.
+Restore the missing input or call `pypto.configure_cache(pypto.CacheConfig(enabled=False))`
+when using process defaults, then repeat eager warmup and synchronization.
+
 ```python
 import torch
 import torch_npu
@@ -307,6 +311,9 @@ call. The session groups submissions by model and uses Simpler's same-build
 Each invocation still owns its own preparation, argument snapshot and retained
 resources. Model addresses can be reused only after the previous destroy notice.
 No Python graph object is retained and no `NPUGraph` method is patched or wrapped.
+Record all PyPTO nodes of a graph on one stream. An attempted PyPTO call on a
+second stream joined to the same graph is refused before submission and leaves
+the Worker available. The graph can subsequently replay on a different stream.
 The original torch_npu graph context owns capture begin/end, replay and reset.
 
 Capture admission enqueues the same GIL-free native submit callback as eager
@@ -323,16 +330,21 @@ native model destroy notice and checked cleanup. Each subsequent ordinary
 This cleanup may synchronize all device streams because replay can use a stream
 different from recording. Live graphs remain retained and replayable.
 
-Reclamation is deferred while recording another graph, including when a new
-model reuses a destroyed model's address. It resumes at the next ordinary call
-outside capture. Completed eager warmup may still be polled out of the native
+Reclamation is deferred when the calling stream is recording, including when
+a new model reuses a destroyed model's address. Eager admission also checks
+streams retained from PyPTO recordings, so a queued stream join cannot trigger
+eager cleanup. A recording on an unrelated stream with no PyPTO owner can
+still coincide with device synchronization and leave the Worker failed.
+Schedule ordinary calls that reclaim graphs after such recordings end.
+Completed eager warmup may still be polled out of the native
 execution lane during capture, while its finalization is deferred until outside
 recording. Simpler's `safe_to_release` remains the final owner-release condition. Failed cleanup retains owners and refuses the new submission.
 If there are no subsequent calls, shutdown attempts reclamation. There is no
 public `drain()` API, no background reclaimer and no need for an extra user call.
 
 The existing shutdown hook never resets or disables user graphs. A graph still
-alive at Worker close causes a bounded refusal and retains its resources. Reset
+alive at Worker close retains its resources. Close reports an error after
+processing other pending tickets, which can include waiting for eager work. Reset
 or destroy graphs before process teardown. Failed destruction, partial recording,
 failed synchronization and failed native release retain owners for cleanup retry.
 

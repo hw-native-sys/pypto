@@ -340,6 +340,9 @@ def kernel_env(monkeypatch, tmp_path):
         def check_context(self):
             pass
 
+        def check_eager_admission(self):
+            pass
+
         def on_owner_thread(self):
             return False
 
@@ -527,6 +530,7 @@ def eager_env(monkeypatch):
             assert model
             env.events.append(("capture.retain", model, anchor))
             if anchor is not None:
+                assert anchor.caller_stream == self.caller_stream
                 assert anchor.model_notice is env.models[model]
                 assert not anchor._model_destroyed()
                 self.model_notice = anchor.model_notice
@@ -547,6 +551,7 @@ def eager_env(monkeypatch):
             cancelled = not self.consumed and not self.cancelled
             if cancelled:
                 self.cancelled = True
+                self.cancel_error = RunPreparationRefused("model release cancelled the prepared submission")
             self.model_released = True
             return cancelled
 
@@ -718,6 +723,7 @@ def eager_env(monkeypatch):
         caller_stream=lambda stream, device: env.rts_stream,
         check_call=lambda stream, device: bool(env.capture),
         capture_model=lambda stream, device: int(env.capture),
+        recording_on_stream=lambda stream: bool(env.capture),
         borrow_context=lambda device: env.context,
         bind_context=lambda context: None,
         framework_alive=lambda: True,

@@ -60,6 +60,9 @@ class _ProcessKernelState:
         self._preparing: dict[Hashable, Future[KernelRegistration]] = {}
         self._prepare_threads: dict[Hashable, threading.Thread] = {}
         self._submissions: list[Any] = []
+        # Capture must advance outstanding eager work without walking the
+        # growing list of recorded nodes or changing their retirement order.
+        self._warmup_submissions: list[Any] = []
         self._submission_lock = threading.Lock()
 
     def _check_pid(self) -> None:
@@ -247,6 +250,10 @@ class _ProcessKernelState:
             if self.state is not KernelState.CLOSING:
                 self.state = KernelState.FAILED
 
+    def check_eager_admission(self, config: KernelConfig) -> None:
+        with self._submission_lock:
+            self.bound_worker(config).check_eager_admission()
+
     def submit(
         self, registration: KernelRegistration, prepare: Callable[[Any], Any], *, capturing: bool = False
     ) -> None:
@@ -255,17 +262,18 @@ class _ProcessKernelState:
         with self._submission_lock:
             self.require_registration(registration)
             self._worker.check_context()
+            if not capturing:
+                self._worker.check_eager_admission()
             try:
-                pending: list[Any] = []
-                for ticket in self._submissions:
-                    if capturing:
-                        # Advance completed warmup out of the native execution
-                        # lane, but defer all finalization until outside capture.
-                        ticket.poll_capture()
-                        pending.append(ticket)
-                    elif not ticket.done():
-                        pending.append(ticket)
-                self._submissions = pending
+                if capturing:
+                    self._warmup_submissions = [
+                        ticket for ticket in self._warmup_submissions if not ticket.poll_capture()
+                    ]
+                else:
+                    self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
+                    self._warmup_submissions = [
+                        ticket for ticket in self._submissions if getattr(ticket, "capture", None) is None
+                    ]
             except BaseException as exc:
                 self._submissions = [
                     ticket for ticket in self._submissions if not getattr(ticket, "retired", False)
@@ -276,6 +284,8 @@ class _ProcessKernelState:
             self._submissions.append(ticket)
             try:
                 ticket.enqueue()
+                if not capturing:
+                    self._warmup_submissions.append(ticket)
             except BaseException as exc:
                 if getattr(ticket, "retired", False):
                     self._submissions.remove(ticket)
@@ -294,6 +304,7 @@ class _ProcessKernelState:
                 if error is None and not (allow_live_captures and isinstance(exc, CaptureInUseError)):
                     error = exc
         self._submissions = pending
+        self._warmup_submissions = [ticket for ticket in pending if getattr(ticket, "capture", None) is None]
         if error is not None:
             raise error
 

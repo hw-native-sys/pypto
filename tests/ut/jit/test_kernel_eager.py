@@ -183,13 +183,21 @@ def test_capture_admission_polls_warmup_but_defers_its_finalization(
     assert not warmup.retired and len(env.state._submissions) == 2 and len(env.queue) == 1
     assert "warmup.poll" in env.events and "wait" not in env.events
     assert "synchronize" not in env.events and "device.synchronize" not in env.events
+    # Subsequent recording must not scan captured tickets, or poll a warmup
+    # again once its native execution has completed.
+    captured = env.state._submissions[-1]
+    monkeypatch.setattr(captured, "poll_capture", lambda: pytest.fail("polled captured ticket"))
+    monkeypatch.setattr(warmup, "poll_capture", lambda: pytest.fail("repolled completed warmup"))
+    copy_kernel(x, 3, out)
     env.run_queue()
     env.capture = False
     env.models[42].destroyed = True
     env.state.close()
 
 
-def test_capture_returns_before_callbacks_and_shares_model_notice(eager_env, copy_kernel, stub_device_runner):
+def test_capture_returns_before_callbacks_and_shares_model_notice(
+    eager_env, copy_kernel, stub_device_runner, monkeypatch
+):
     env = eager_env
     env.init()
     x, out = env.tensor(), env.tensor()
@@ -219,7 +227,7 @@ def test_capture_returns_before_callbacks_and_shares_model_notice(eager_env, cop
     assert len(env.queue) == 2 and len(env.runs) == baseline
     assert "synchronize" not in env.events and "device.synchronize" not in env.events
     assert not first.done() and not second.done()
-    assert first.capture.native is second.capture.anchors[42]
+    assert first.capture is second.capture.anchors[42]
     assert first.submission.model_notice is second.submission.model_notice
     graph = Graph()
     graph.capture_end()
@@ -229,6 +237,13 @@ def test_capture_returns_before_callbacks_and_shares_model_notice(eager_env, cop
     assert "capture.release" not in env.events and "device.synchronize" not in env.events
     graph.replay()
     graph.reset()
+    original_enqueue = env.native.enqueue
+
+    def enqueue(*args):
+        assert first.retired and second.retired
+        return original_enqueue(*args)
+
+    monkeypatch.setattr(env.native, "enqueue", enqueue)
     env.events.clear()
     copy_kernel(x, 5, out)  # Reclaim the destroyed graph before enqueueing this call.
     assert first.retired and second.retired
@@ -239,6 +254,57 @@ def test_capture_returns_before_callbacks_and_shares_model_notice(eager_env, cop
     assert env.events.index("capture.release") < env.events.index("prepare")
     assert methods == (Graph.capture_end, Graph.replay, Graph.reset)
     env.state.close()
+
+
+@pytest.mark.parametrize("join_pending", [False, True])
+def test_joined_recording_stream_refused_without_failing_worker(
+    eager_env, copy_kernel, stub_device_runner, monkeypatch, join_pending
+):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    env.capture = 42
+    copy_kernel(x, 2, out)
+    env.rts_stream += 1  # A second stream has joined the same native capture model.
+    if join_pending:
+        # A queued Torch wait_event has not yet made the second RTS stream
+        # report the model. The original recording stream is already active.
+        monkeypatch.setattr(env.native, "check_call", lambda stream, device: False)
+    env.events.clear()
+    with pytest.raises(ValueError, match="single NPU stream"):
+        copy_kernel(x, 3, out)
+    assert env.state.state is KernelState.READY
+    assert "prepare" not in env.events and len(env.queue) == 1
+    env.run_queue()
+    env.capture = False
+    env.models[42].destroyed = True
+    copy_kernel(x, 4, out)
+    env.state.close()
+
+
+def test_discarded_capture_retries_only_owner_release(eager_env, copy_kernel, stub_device_runner):
+    env = eager_env
+    env.init()
+    x, out = env.tensor(), env.tensor()
+    copy_kernel(x, 1, out)
+    env.state.drain()
+    env.capture = 42
+    copy_kernel(x, 2, out)
+    ticket = env.state._submissions[0]
+    env.queue.clear()  # Torch discarded the callback before it consumed the token.
+    env.capture = False
+    env.models[42].destroyed = True
+    buffer = next(buffer for buffer in env.buffers if not buffer.closed)
+    buffer.close_error = RuntimeError("lease release failed")
+    with pytest.raises(env.api.RunPreparationRefused) as caught:
+        env.state.close()
+    assert caught.value.__cause__ is buffer.close_error
+    assert not ticket.retired and ticket.submission.safe_to_release
+    buffer.close_error = None
+    env.state.close()
+    assert ticket.retired and env.events.count("capture.release") == 1
 
 
 def test_capture_close_refuses_live_graph_and_retries_after_destroy(
@@ -310,7 +376,7 @@ def test_capture_model_address_reuse_does_not_reuse_destroyed_anchor(
     env.capture = False
     env.state.drain()
     assert old.retired and not new.retired
-    assert env.state._worker.capture_anchors[42] is new.capture.native
+    assert env.state._worker.capture_anchors[42] is new.capture
     env.models[42].destroyed = True
     env.state.close()
 

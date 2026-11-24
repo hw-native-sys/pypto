@@ -64,10 +64,10 @@ c10_npu::NPUStream CallStream(int64_t stream_id, int32_t device_id) {
 }
 
 // Query without draining Torch's host queue. Graph entry/exit belongs to Torch.
-aclmdlRI CaptureModel(c10_npu::NPUStream stream) {
+aclmdlRI CaptureModel(aclrtStream stream) {
   aclmdlRICaptureStatus status{};
   aclmdlRI model = nullptr;
-  CheckAcl(aclmdlRICaptureGetInfo(stream.stream(false), &status, &model), "aclmdlRICaptureGetInfo");
+  CheckAcl(aclmdlRICaptureGetInfo(stream, &status, &model), "aclmdlRICaptureGetInfo");
   Require(status == ACL_MODEL_RI_CAPTURE_STATUS_NONE || status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE,
           "Kernel call encountered an invalidated graph capture");
   Require(status != ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE || model != nullptr,
@@ -123,10 +123,13 @@ NB_MODULE(_torch_npu, m) {
   // Intentionally survive interpreter finalization if safe cleanup failed.
   m.def("retain_until_exit", [](nb::object owner) { Py_INCREF(owner.ptr()); });
   m.def("check_call", [](int64_t stream_id, int32_t device_id) {
-    return CaptureModel(CallStream(stream_id, device_id)) != nullptr;
+    return CaptureModel(CallStream(stream_id, device_id).stream(false)) != nullptr;
   });
   m.def("capture_model", [](int64_t stream_id, int32_t device_id) {
-    return reinterpret_cast<uintptr_t>(CaptureModel(CallStream(stream_id, device_id)));
+    return reinterpret_cast<uintptr_t>(CaptureModel(CallStream(stream_id, device_id).stream(false)));
+  });
+  m.def("recording_on_stream", [](uintptr_t retained_stream) {
+    return CaptureModel(reinterpret_cast<aclrtStream>(retained_stream)) != nullptr;
   });
   m.def("storage_shape", [](nb::handle object) {
     Require(THPVariable_Check(object.ptr()), "Storage shape requires a torch tensor");

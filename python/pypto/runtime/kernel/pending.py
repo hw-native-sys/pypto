@@ -105,15 +105,14 @@ class PendingTicket:
                 raise
             self._release_if_safe()
 
-    def poll_capture(self) -> None:
+    def poll_capture(self) -> bool:
         """Advance completed eager execution without finalizing it during capture.
 
         Simpler must remove completed warmup from its execution lane before
         capture preparation. Its full wait/finalize can synchronize streams,
         so retain the Python ticket and defer that observation until later.
         """
-        if not self.retired and self.capture is None and self.submission is not None:
-            _ = self.submission.done
+        return self.retired or self.submission is None or self.submission.done
 
     def done(self) -> bool:
         if self.retired:

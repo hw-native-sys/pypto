@@ -24,7 +24,11 @@ from pypto.torch import init
 from tests.st.runtime.kernel.test_torch_eager import eager_add_bias
 
 
-def _run_capture_case(case: str, device: int, runtime: str) -> None:
+def _reference_input() -> torch.Tensor:
+    return torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64) / 64
+
+
+def _run_capture_case(case: str, device: int, runtime: str, reference: torch.Tensor) -> None:
     torch_npu = importlib.import_module("torch_npu")
     if not torch_npu.npu.is_available():
         sys.exit(77)
@@ -40,7 +44,6 @@ def _run_capture_case(case: str, device: int, runtime: str) -> None:
     graphs = []
     frames = []
     with npu.stream(stream):
-        reference = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64) / 64
         x = reference.to(device=f"npu:{device}")
         warm = torch.empty_like(x)
         if case == "cold":
@@ -56,6 +59,22 @@ def _run_capture_case(case: str, device: int, runtime: str) -> None:
             return
         eager_add_bias(x, 1.5, warm)
         stream.synchronize()
+        if case == "joined":
+            graph = graph_type()
+            with npu.graph(graph, stream=stream):
+                eager_add_bias(x, 1.5, warm)
+                replay_stream.wait_stream(stream)
+                with npu.stream(replay_stream), pytest.raises(ValueError, match="single NPU stream"):
+                    eager_add_bias(x, 2.0, warm)
+                stream.wait_stream(replay_stream)
+            graph.replay()
+            stream.synchronize()
+            torch.testing.assert_close(warm.cpu(), reference + 1.5, rtol=0, atol=0)
+            graph.reset()
+            eager_add_bias(x, 2.0, warm)
+            stream.synchronize()
+            torch.testing.assert_close(warm.cpu(), reference + 2.0, rtol=0, atol=0)
+            return
         for _ in range(3):
             pre, mid, out, result = [torch.full_like(x, float("nan")) for _ in range(4)]
             graph = graph_type()
@@ -112,7 +131,7 @@ def _run_capture_case(case: str, device: int, runtime: str) -> None:
 
 @pytest.mark.parametrize("task_queue", ["0", "1"])
 @pytest.mark.parametrize("runtime", ["tensormap_and_ringbuffer", "host_build_graph"])
-@pytest.mark.parametrize("case", ["cold", "multi"])
+@pytest.mark.parametrize("case", ["cold", "multi", "joined"])
 def test_torch_capture_execution(test_config, runtime, case, task_queue):
     if test_config.codegen_only or test_config.platform != "a2a3":
         pytest.skip("Torch capture execution requires an onboard a2a3 NPU")
@@ -124,7 +143,7 @@ def test_torch_capture_execution(test_config, runtime, case, task_queue):
             sys.executable,
             "-c",
             "import runpy, sys; ns = runpy.run_path(sys.argv[1]); "
-            "ns['_run_capture_case'](sys.argv[2], int(sys.argv[3]), sys.argv[4])",
+            "ns['_run_capture_case'](sys.argv[2], int(sys.argv[3]), sys.argv[4], ns['_reference_input']())",
             str(Path(__file__).resolve()),
             case,
             str(test_config.device_id),
@@ -148,4 +167,4 @@ def test_torch_capture_execution(test_config, runtime, case, task_queue):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    raise SystemExit(pytest.main([__file__, "-v"]))
