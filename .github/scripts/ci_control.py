@@ -52,7 +52,11 @@ REQUIRED = {
     "system-tests-a5sim",
 }
 OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-tidy"}
-CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
+CONDITIONAL = {
+    "docs-examples": "docs_changed",
+    "serving-guard-a2a3": "ptoas_version_changed",
+    "serving-guard-a5": "ptoas_version_changed",
+}
 MERGE_WAIT_SECONDS = 60
 MERGE_POLL_SECONDS = 5
 REBASE_BEHIND_LIMIT = 10

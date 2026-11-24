@@ -111,9 +111,18 @@ def test_warmup_failure_does_not_hide_successful_tests(control, needs, job):
 
 
 @pytest.mark.parametrize(
-    "job,flag", [("docs-examples", "docs_changed"), ("serving-guard", "ptoas_version_changed")]
+    "job,flag",
+    [
+        ("docs-examples", "docs_changed"),
+        ("serving-guard-a2a3", "ptoas_version_changed"),
+        ("serving-guard-a5", "ptoas_version_changed"),
+    ],
 )
-def test_applicable_conditional_job_must_run(control, needs, job, flag):
+@pytest.mark.parametrize("result", ["skipped", "failure", "cancelled"])
+def test_applicable_conditional_job_must_run(control, needs, job, flag, result):
+    for name in control.CONDITIONAL:
+        needs[name]["result"] = "success"
+    needs[job]["result"] = result
     needs["changes"]["outputs"][flag] = "true"
     with pytest.raises(ValueError, match=job):
         control.aggregate(needs)
@@ -861,6 +870,14 @@ def test_workflow_wiring_covers_every_full_job(control):
                 assert options["persist-credentials"] is False
             if step.get("uses") == "./.github/actions/setup-ci-job":
                 assert step["with"]["checkout-ref"] == "${{ needs.changes.outputs.checkout_sha }}"
+    for platform in ("a2a3", "a5"):
+        guard = jobs[f"serving-guard-{platform}"]
+        assert (
+            guard["uses"]
+            == f"hw-native-sys/pypto-serving/.github/workflows/serving-guard-{platform}.yml@main"
+        )
+        assert guard["with"]["pypto-revision"] == "${{ needs.changes.outputs.checkout_sha }}"
+        assert "needs.changes.outputs.ptoas_version_changed == 'true'" in guard["if"]
     # The full aggregate itself is not the required context: it is attached to
     # main in dispatch runs. Only trusted control jobs write the PR status.
     assert workflow["permissions"] == {"contents": "read"}

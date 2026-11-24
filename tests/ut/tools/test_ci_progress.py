@@ -613,6 +613,11 @@ def test_progress_reconciles_legacy_full_run(progress, monkeypatch, event, harne
     assert writes[-1][1]["state"] == "success"
 
 
+@pytest.mark.parametrize("job", ["serving-guard-a2a3", "serving-guard-a5"])
+def test_serving_guard_call_and_skipped_job_share_one_status(progress, job):
+    assert progress.job_context(f"{job} / guard") == progress.job_context(job) == f"full / {job}"
+
+
 def test_long_matrix_names_do_not_collide(progress):
     prefix = "unit-tests (" + "a" * 120
     first = progress.job_context(prefix + ", python3.10)")

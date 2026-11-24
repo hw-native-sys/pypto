@@ -49,6 +49,10 @@ def latest_statuses(existing: list[dict[str, Any]]) -> dict[str, Any]:
 
 def job_context(name: str) -> str:
     """Keep matrix legs distinct even when a long name must be shortened."""
+    # Actions adds the called workflow's job name when the guard runs, while
+    # a skipped call can have just the caller name. Publish one context for both.
+    if name in {"serving-guard-a2a3 / guard", "serving-guard-a5 / guard"}:
+        name = name.partition(" / ")[0]
     context = f"full / {name}"
     if len(context) <= 100:
         return context
