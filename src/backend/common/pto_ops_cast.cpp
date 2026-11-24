@@ -322,6 +322,10 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
         << "Direct FP4E2M1X2 to FP8E4M3FN conversion supports ND or standard 512-byte NZ output";
     CHECK_SPAN(dst_nz || dst_view.compact == ir::CompactMode::null, op->span_)
         << "Direct FP4E2M1X2 to FP8E4M3FN ND output requires compact=null";
+    CHECK_SPAN(dst_view.compact != ir::CompactMode::row_plus_one ||
+                   ir::tile_view_semantics::ShapeExprListsEquivalent(src_view.valid_shape, src_type->shape_),
+               op->span_)
+        << "RowPlusOne FP4 to FP8 conversion requires the full source tile to be valid";
     if (dst_nz) {
       const auto rows = As<ir::ConstInt>(dst_type->shape_[0]);
       CHECK_SPAN(rows && rows->value_ % 16 == 0, op->span_)

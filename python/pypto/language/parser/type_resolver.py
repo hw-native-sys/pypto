@@ -2332,13 +2332,18 @@ class TypeResolver:
         compact_modes = {
             "null": ir.CompactMode.null,
             "normal": ir.CompactMode.normal,
+            "row_plus_one": ir.CompactMode.row_plus_one,
         }
         if isinstance(node, ast.Attribute) and node.attr in compact_modes:
             return compact_modes[node.attr]
+        if isinstance(node, ast.Name):
+            success, value = self.expr_evaluator.try_eval_expr(node)
+            if success and isinstance(value, ir.CompactMode):
+                return value
         raise ParserTypeError(
             f"Unknown CompactMode value: {ast.unparse(node)}",
             span=self._get_span(node),
-            hint="Use pl.CompactMode.null or pl.CompactMode.normal",
+            hint="Use pl.CompactMode.null, pl.CompactMode.normal, or pl.CompactMode.row_plus_one",
         )
 
     @staticmethod

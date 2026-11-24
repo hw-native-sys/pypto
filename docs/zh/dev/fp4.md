@@ -117,10 +117,18 @@ A5 上还可通过 Vec plain store 写入匹配的 `pl.NZ` FP8E4M3FN GM 张量�
 写入保持 NZ box 顺序，不会将 NZ 转回 ND。固定版本的 CPU 模拟器会丢失符号零，
 物理字节验收使用 A5 硬件。
 
-RowPlusOne padding 暂缓实现，相关汇编器工作由
-[PTOAS #1684](https://github.com/hw-native-sys/PTOAS/issues/1684) 与
-[PTOAS #1685](https://github.com/hw-native-sys/PTOAS/pull/1685) 跟踪；
-当前公开的 cast 仅生成普通 NZ 存储。
+要通过 `tpush_to_aic` 传输带 padding 的 NZ tile，可在 cast 或其结果的
+`TileView` 中设置 `compact=pl.CompactMode.row_plus_one`。
+
+```python
+fp8_nz = pl.cast(
+    packed, pl.FP8E4M3FN, layout=pl.NZ, compact=pl.CompactMode.row_plus_one
+)
+```
+
+RowPlusOne 要求源和目标 tile 的形状为静态且全量有效。这里结果的逻辑形状仍为
+`[128, 256]`。PyPTO 在 UB 为额外一行预留空间，共 `129 * 256 = 33024` 字节。
+跨核传输的 slot 保存去掉 padding 的 NZ 数据。
 
 经 BF16 解码可精确保留每个 FP4 值。隐式编码链同样要求经 BF16 后保留原始源值：
 FP16/FP32 及较宽整数源会被拒绝，因为该中间步骤可能导致两次舍入。

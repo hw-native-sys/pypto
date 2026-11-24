@@ -446,15 +446,7 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
   // compact — omit if null (default)
   if (tile_view.compact != CompactMode::null) {
     maybe_comma();
-    oss << "compact=" << prefix_ << ".CompactMode.";
-    switch (tile_view.compact) {
-      case CompactMode::null:
-        oss << "null";
-        break;
-      case CompactMode::normal:
-        oss << "normal";
-        break;
-    }
+    oss << "compact=" << prefix_ << ".CompactMode." << CompactModeToString(tile_view.compact);
   }
 
   // If all fields were at defaults, return empty string to skip tile_view entirely

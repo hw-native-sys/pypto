@@ -140,10 +140,19 @@ atomic, FIXPIPE epilogue, and explicit `st_phase` options. It preserves NZ box
 order and does not convert NZ back to ND. The pinned CPU simulator loses
 signed zero, so physical-byte acceptance uses A5 hardware.
 
-RowPlusOne padding remains deferred to the assembler work tracked in
-[PTOAS #1684](https://github.com/hw-native-sys/PTOAS/issues/1684) and
-[PTOAS #1685](https://github.com/hw-native-sys/PTOAS/pull/1685); the public cast
-currently emits ordinary NZ storage.
+For a padded NZ tile to send with `tpush_to_aic`, set
+`compact=pl.CompactMode.row_plus_one` on the cast or its result's `TileView`.
+
+```python
+fp8_nz = pl.cast(
+    packed, pl.FP8E4M3FN, layout=pl.NZ, compact=pl.CompactMode.row_plus_one
+)
+```
+
+RowPlusOne requires fully valid static source and destination tiles. The
+logical result above remains `[128, 256]`. PyPTO reserves `129 * 256 = 33024`
+bytes in UB, including the extra row, and the cross-core slot holds the
+unpadded NZ payload.
 
 Decoding through BF16 preserves every FP4 value exactly. Implicit encoding chains must also preserve
 the original source through BF16: FP16/FP32 and larger integer sources are

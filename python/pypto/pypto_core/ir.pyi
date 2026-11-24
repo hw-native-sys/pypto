@@ -460,6 +460,9 @@ class CompactMode(enum.Enum):
     normal = ...
     """Compact valid-region layout."""
 
+    row_plus_one = ...
+    """Vec NZ with one padded row per panel."""
+
 class TensorView:
     """Tensor view representation with stride, layout, valid shape, and pad mode."""
 

@@ -18,6 +18,7 @@ from pypto.ir.utils import (
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
+    CompactMode,
     Expr,
     TensorLayout,
 )
@@ -339,6 +340,7 @@ def cast(
     tmp: Tile | None = None,
     saturation_mode: str | int | None = None,
     layout: TensorLayout | None = None,
+    compact: CompactMode | None = None,
 ) -> Tile:
     """Cast tile to target data type (element-wise).
 
@@ -366,6 +368,8 @@ def cast(
 
         layout: Optional output layout. ``pl.NZ`` selects the fused A5
             FP4E2M1X2-to-FP8E4M3FN NZ decoder.
+        compact: Set ``pl.CompactMode.row_plus_one`` to pad each destination
+            NZ panel by one row.
 
     Returns:
         Tile wrapping the cast operation
@@ -381,6 +385,7 @@ def cast(
         tmp=tmp_expr,
         saturation_mode=saturation_mode,
         layout=layout,
+        compact=compact,
     )
     return Tile(expr=call_expr)
 

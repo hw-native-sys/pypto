@@ -1075,6 +1075,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         // same way `mode` is restored, so a printed cast reparses as the call
         // the author would have written.
         stream_ << "'" << SaturationModeToName(int_val) << "'";
+      } else if (key == "compact" && IsOp(op, "tile.cast")) {
+        stream_ << prefix_ << ".CompactMode." << CompactModeToString(static_cast<CompactMode>(int_val));
       } else if (key == "atomic") {
         // Stored as int (the DSL casts AtomicType -> int before stashing on
         // kwargs_; nb::isinstance<AtomicType> in bindings does the same). The
