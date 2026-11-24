@@ -146,6 +146,7 @@ from ._tile_linalg import matmul_bias as matmul_bias
 from ._tile_linalg import matmul_mx as matmul_mx
 from ._tile_linalg import matmul_mx_acc as matmul_mx_acc
 from ._tile_linalg import matmul_mx_bias as matmul_mx_bias
+from ._tile_linalg import quant as quant
 from ._tile_linalg import tget_scale_addr as tget_scale_addr
 from ._tile_linalg import tmov_x2zz as tmov_x2zz
 from ._tile_linalg import tquant_mx as tquant_mx

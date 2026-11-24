@@ -18,6 +18,27 @@ from pypto.pypto_core.ir import (
 
 from ..typing import BoolLike, Tile, predicate_to_expr
 
+def quant(src: Tile, scale: Tile, offset: Tile | None = None) -> Tile:
+    """Quantize an FP32 tile to INT8 or UINT8 on Ascend950.
+
+    Each row uses one FP32 scale and, when supplied, one FP32 offset. The
+    operation rounds to nearest with ties to even and saturates to the result
+    type. With no offset it computes ``round(src * scale)`` for INT8. With
+    offset it computes ``round(src * scale + offset)`` for UINT8.
+
+    Args:
+        src: Row-major unboxed FP32 tile with physical columns divisible by 32.
+        scale: Unboxed FP32 column tile with one coefficient per valid source row.
+        offset: Optional FP32 column tile with the same shape and layout as scale.
+
+    Returns:
+        INT8 for symmetric quantization or UINT8 for asymmetric quantization,
+        with the same physical and valid shape as src.
+    """
+    result = _ir_ops.quant(src.unwrap(), scale.unwrap(), offset.unwrap() if offset is not None else None)
+    return Tile(expr=result)
+
+
 # ============================================================================
 # MX Quantization Operations
 # ============================================================================

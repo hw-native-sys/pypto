@@ -140,6 +140,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/matmul.cpp
     src/ir/op/tile_ops/matmul_mx.cpp
     src/ir/op/tile_ops/memory.cpp
+    src/ir/op/tile_ops/quant.cpp
     src/ir/op/tile_ops/quant_mx.cpp
     src/ir/op/tile_ops/reduction.cpp
     src/ir/op/tile_ops/transform.cpp

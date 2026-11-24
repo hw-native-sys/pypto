@@ -1314,6 +1314,16 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return std::string("");
   });
 
+  reg("tile.quant", [](const CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    INTERNAL_CHECK_SPAN(op->args_.size() == 2 || op->args_.size() == 3, op->span_)
+        << "Internal error: tile.quant requires src, scale, and an optional offset";
+    const char* quant_type = op->args_.size() == 2 ? "INT8_SYM" : "INT8_ASYM";
+    codegen.Emit("pto.tquant " + GenerateInsOutsClause(op, codegen) +
+                 " {quant_type = #pto<quant_type " + quant_type + ">}");
+    return std::string("");
+  });
+
   reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileTransposeCodegenPTO(op, codegen);
   });

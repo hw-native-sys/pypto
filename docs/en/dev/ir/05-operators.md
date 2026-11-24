@@ -647,6 +647,18 @@ UINT32 + INT32 → INT32 (signed precedence)
 See [Tensor and Tile Operators](05-tensor-tile-ops.md) for data-operator APIs,
 flat gather, valid-region semantics, tile layouts, and mask patterns.
 
+### A5 row-wise quantization
+
+`tile.quant(src, scale[, offset])` returns an 8-bit Vec tile with the source
+physical and valid shape. The source is FP32, unboxed and row-major, with a
+physical column count divisible by 32. Scale and optional offset are unboxed
+FP32 column tiles with one value per valid source row, and the two parameter
+tiles share the same physical type.
+
+The symmetric form uses `pto.tquant` with `INT8_SYM` and rounds and saturates
+`src * scale` to INT8. The asymmetric form uses `INT8_ASYM` and rounds and
+saturates `src * scale + offset` to UINT8. Both use round-to-nearest-even.
+
 ## SyncOp: Synchronization Operations
 
 **Purpose**: Hardware synchronization and barriers, plus the TaskId and SPMD launch-shape queries sharing the `system.` namespace
