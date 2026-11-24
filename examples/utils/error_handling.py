@@ -7,38 +7,29 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Demonstrates that the @pl.jit pipeline rejects an invalid kernel at compile time.
+"""Diagnose rebinding an Out parameter in a JIT kernel.
 
-The body rebinds ``result`` to ``pl.add(x, 1.0)``, discarding the prior write
-of ``pl.mul(x, 2.0)``. The JIT specializer alpha-renames the rebinding to keep
-the parser happy, but downstream codegen still surfaces a structural error
-because the renamed local never reaches the ``pl.store`` (out parameter).
+The last assignment gives ``result`` a new tensor value. The compiler emits
+``OutParamWriteDropped`` because the caller's output buffer is never written.
+Use ``result[:] = ...`` for a write to that buffer.
 """
 
 import pypto.language as pl
 
 
 @pl.jit
-def test_ssa_violation(x: pl.Tensor, result: pl.Out[pl.Tensor]):
+def rebind_out_parameter(x: pl.Tensor, result: pl.Out[pl.Tensor]):
     with pl.at(level=pl.Level.CORE_GROUP):
         result = pl.mul(x, 2.0)
-        result = pl.add(x, 1.0)  # rebinding -- discards the prior write to result
+        result = pl.add(x, 1.0)
     return result
 
 
 if __name__ == "__main__":
-    import sys
-
     import torch
-    from pypto.backend.pto_backend import PartialCodegenError
     from pypto.runtime import RunConfig
 
-    x = torch.randn(64, dtype=torch.float32)
+    x = torch.arange(64, dtype=torch.float32)
     result = torch.zeros_like(x)
-    try:
-        compiled = test_ssa_violation.compile(x, result, config=RunConfig())
-        compiled(x, result, config=RunConfig())
-        print("ERROR: expected the invalid kernel to be rejected")
-        sys.exit(1)
-    except PartialCodegenError as e:
-        print(f"OK -- caught expected error: {type(e).__name__}")
+    rebind_out_parameter.compile(x, result, config=RunConfig(codegen_only=True))
+    print("Check for OutParamWriteDropped in the compiler diagnostics.")

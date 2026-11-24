@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/utils/tile_cast_legalization.h"
 
 namespace pypto {
 namespace ir {
@@ -86,16 +87,6 @@ AdjList BuildAdj(const backend::TcvtAdjacency& table) {
     AddEdge(adj, from, to);
   }
   return adj;
-}
-
-bool IsNativeCast(const AdjList& adj, DataType from, DataType to) {
-  if (from == to) return false;
-  auto it = adj.find(from.Code());
-  if (it == adj.end()) return false;
-  for (const DataType& d : it->second) {
-    if (d == to) return true;
-  }
-  return false;
 }
 
 // Preferred same-width float bridge used when preferring "convert kind without
@@ -182,16 +173,10 @@ bool IsFp4FloatBridge(DataType dtype) {
   return dtype == DataType::BF16 || dtype == DataType::FP16 || dtype == DataType::FP32;
 }
 
-// BFS shortest path; returns the sequence of intermediate/final target types
-// (excluding `from`). Empty vector means already native? No — caller checks
-// native first. Empty here means unreachable.
-std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType to,
-                                    bool allow_direct_fp4_to_fp8) {
-  if (from == to) return {};
-  if (IsNativeCast(adj, from, to) &&
-      (allow_direct_fp4_to_fp8 || from != DataType::FP4E2M1X2 || to != DataType::FP8E4M3FN)) {
-    return {to};
-  }
+// BFS shortest path when a single native conversion is unavailable. The path
+// excludes the source dtype and includes the destination dtype.
+std::vector<DataType> FindChainedCast(const AdjList& adj, DataType from, DataType to,
+                                      bool allow_direct_fp4_to_fp8) {
   if (to.IsPackedFp4() && !HasLosslessFp4EncodingBridge(from)) return {};
 
   // State: dtype code → (parent code, edge-to dtype, path_len, path_pref_cost)
@@ -265,11 +250,6 @@ std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType 
   return rev;
 }
 
-ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
-  std::vector<std::pair<std::string, std::any>> kw = {{"target_type", to}, {"mode", mode}};
-  return OpRegistry::GetInstance().Create("tile.cast", {x}, kw, span);
-}
-
 bool IsFp8DataCastTarget(DataType dst) { return dst == DataType::FP8E4M3FN || dst == DataType::FP8E5M2; }
 
 /// Packed FP4 → FP8* is allowed but discouraged (prefer LUT gather or host precast).
@@ -323,7 +303,7 @@ class LegalizeTileCastMutator : public IRMutator {
   LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name, bool addressed_fp4_cast,
                           bool future_aiv_split, std::vector<Diagnostic>* diags)
       : arch_name_(std::move(arch_name)),
-        adj_(BuildAdj(table)),
+        table_(table),
         addressed_fp4_cast_(addressed_fp4_cast),
         future_aiv_split_(future_aiv_split),
         diags_(diags) {}
@@ -364,14 +344,12 @@ class LegalizeTileCastMutator : public IRMutator {
                op->span_)
         << "Direct FP4E2M1X2 to FP8E4M3FN NZ conversion requires contiguous ND source "
            "physical carrier columns divisible by 32 and static positive valid columns";
-    if (IsNativeCast(adj_, src, dst) && (!direct_pair || allow_direct_fp4_to_fp8)) {
-      return IRMutator::VisitStmt_(op);
-    }
+    const auto chain = utils::PlanTileCastChain(table_, src, dst, allow_direct_fp4_to_fp8);
+    if (chain.size() == 1) return IRMutator::VisitStmt_(op);
 
     // Native exact E2M1 widening has no wide intermediates to warn about.
     MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
 
-    std::vector<DataType> chain = FindCastChain(adj_, src, dst, allow_direct_fp4_to_fp8);
     CHECK_SPAN(!chain.empty() || !dst.IsPackedFp4() || HasLosslessFp4EncodingBridge(src), op->span_)
         << "LegalizeTileCast: no lossless cast path from " << src.ToString() << " to " << dst.ToString()
         << "; the required BF16 intermediate can double-round. Cast to BF16 explicitly before FP4 "
@@ -399,7 +377,7 @@ class LegalizeTileCastMutator : public IRMutator {
     stmts.reserve(chain.size());
 
     for (size_t i = 0; i + 1 < chain.size(); ++i) {
-      ExprPtr cast_expr = MakeCast(cur, chain[i], mode, op->span_);
+      auto cast_expr = utils::MakeIntermediateTileCast(cur, chain[i], mode, op->span_);
       const std::string name =
           auto_name::BuildName(auto_name::GetBaseName(op->var_->name_hint_), "cast_" + chain[i].ToString(),
                                "tmp", static_cast<int>(temp_counter_++));
@@ -462,7 +440,7 @@ class LegalizeTileCastMutator : public IRMutator {
   }
 
   std::string arch_name_;
-  AdjList adj_;
+  const backend::TcvtAdjacency& table_;
   bool addressed_fp4_cast_;
   bool future_aiv_split_;
   std::unordered_map<const Var*, ExprPtr> definitions_;
@@ -506,6 +484,26 @@ FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+namespace utils {
+
+std::vector<DataType> PlanTileCastChain(const backend::TcvtAdjacency& table, DataType from, DataType to,
+                                        bool allow_direct_fp4_to_fp8) {
+  if (from == to) return {};
+  const bool allow_native =
+      allow_direct_fp4_to_fp8 || from != DataType::FP4E2M1X2 || to != DataType::FP8E4M3FN;
+  if (allow_native &&
+      std::find(table.edges.begin(), table.edges.end(), std::make_pair(from, to)) != table.edges.end()) {
+    return {to};
+  }
+  return FindChainedCast(BuildAdj(table), from, to, allow_direct_fp4_to_fp8);
+}
+
+CallPtr MakeIntermediateTileCast(const ExprPtr& source, DataType to, int mode, const Span& span) {
+  return OpRegistry::GetInstance().Create("tile.cast", {source}, {{"target_type", to}, {"mode", mode}}, span);
+}
+
+}  // namespace utils
 
 namespace pass {
 

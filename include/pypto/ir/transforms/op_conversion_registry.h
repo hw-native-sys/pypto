@@ -195,12 +195,18 @@ struct InputSpaceReq {
   bool cube_n_axis = false;
 };
 
+/// Axes on which a dense tensor operation can be partitioned independently.
+/// Reductions require a full window on the reduced axis unless a separate
+/// partial-combine schedule is available.
+enum class TensorPartition { None, Pointwise, ReduceRows, ReduceColumns };
+
 /**
- * @brief Full conversion entry: converter function + per-input space requirements.
+ * @brief A tensor-to-tile conversion and its operand and partition contracts.
  */
 struct ConversionEntry {
   ContextualConversionFunc func;
   std::unordered_map<size_t, InputSpaceReq> input_reqs;  ///< Per-input space requirements (key = arg index)
+  TensorPartition partition = TensorPartition::None;
 };
 
 /**
@@ -231,9 +237,11 @@ class OpConversionRegistry {
    * @param from_op Source op name (e.g., "tensor.add")
    * @param to_op Target op name (e.g., "tile.add")
    * @param input_reqs Per-input memory space requirements (default: none)
+   * @param partition Independent windowing supported by the conversion (default: none)
    */
   void RegisterSimple(const std::string& from_op, const std::string& to_op,
-                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {},
+                      TensorPartition partition = TensorPartition::None);
 
   /**
    * @brief Register a custom conversion function
@@ -243,12 +251,15 @@ class OpConversionRegistry {
    * @param from_op Source op name (e.g., "tensor.matmul")
    * @param func Custom conversion function
    * @param input_reqs Per-input memory space requirements (default: none)
+   * @param partition Independent windowing supported by the conversion (default: none)
    */
   void RegisterCustom(const std::string& from_op, ConversionFunc func,
-                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {},
+                      TensorPartition partition = TensorPartition::None);
 
   void RegisterCustom(const std::string& from_op, ContextualConversionFunc func,
-                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {},
+                      TensorPartition partition = TensorPartition::None);
 
   /**
    * @brief Look up a conversion entry for an op

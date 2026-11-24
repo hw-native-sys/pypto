@@ -289,24 +289,25 @@ OpConversionRegistry::OpConversionRegistry() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterScalarAndUnaryOps() {
-  RegisterSimple("tensor.adds", "tile.adds");
-  RegisterSimple("tensor.subs", "tile.subs");
-  RegisterSimple("tensor.muls", "tile.muls");
-  RegisterSimple("tensor.divs", "tile.divs");
+  constexpr auto kPointwise = TensorPartition::Pointwise;
+  RegisterSimple("tensor.adds", "tile.adds", {}, kPointwise);
+  RegisterSimple("tensor.subs", "tile.subs", {}, kPointwise);
+  RegisterSimple("tensor.muls", "tile.muls", {}, kPointwise);
+  RegisterSimple("tensor.divs", "tile.divs", {}, kPointwise);
   // fmod has no broadcast (row-expand) form, so both the tensor-tensor and
   // tensor-scalar variants are simple 1:1 lowerings.
   RegisterSimple("tensor.fmod", "tile.fmod");
   RegisterSimple("tensor.fmods", "tile.fmods");
 
-  RegisterSimple("tensor.neg", "tile.neg");
-  RegisterSimple("tensor.abs", "tile.abs");
+  RegisterSimple("tensor.neg", "tile.neg", {}, kPointwise);
+  RegisterSimple("tensor.abs", "tile.abs", {}, kPointwise);
   RegisterSimple("tensor.recip", "tile.recip");
-  RegisterSimple("tensor.exp", "tile.exp");
+  RegisterSimple("tensor.exp", "tile.exp", {}, kPointwise);
   RegisterSimple("tensor.log", "tile.log");
   RegisterSimple("tensor.sin", "tile.sin");
   RegisterSimple("tensor.cos", "tile.cos");
-  RegisterSimple("tensor.sqrt", "tile.sqrt");
-  RegisterSimple("tensor.cast", "tile.cast");
+  RegisterSimple("tensor.sqrt", "tile.sqrt", {}, kPointwise);
+  RegisterSimple("tensor.cast", "tile.cast", {}, kPointwise);
 
   // tensor.rsqrt preserves high_precision when lowering to tile.rsqrt.
   // The tmp scratch tile is allocated via tile.create when high_precision=True.
@@ -334,19 +335,20 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
 
         auto rsqrt_call = op_reg.Create("tile.rsqrt", {input, tmp_var}, {{"high_precision", true}}, span);
         return ConversionResult{std::move(prologue), rsqrt_call};
-      });
+      },
+      {}, kPointwise);
 
   // Bitwise / shift ops. Type deduction already rejects broadcasting operands
   // (there is no tile.row_expand_and), so every shape that reaches here maps 1:1.
-  RegisterSimple("tensor.and", "tile.and");
-  RegisterSimple("tensor.ands", "tile.ands");
-  RegisterSimple("tensor.or", "tile.or");
-  RegisterSimple("tensor.ors", "tile.ors");
-  RegisterSimple("tensor.not", "tile.not");
-  RegisterSimple("tensor.shl", "tile.shl");
-  RegisterSimple("tensor.shls", "tile.shls");
-  RegisterSimple("tensor.shr", "tile.shr");
-  RegisterSimple("tensor.shrs", "tile.shrs");
+  RegisterSimple("tensor.and", "tile.and", {}, kPointwise);
+  RegisterSimple("tensor.ands", "tile.ands", {}, kPointwise);
+  RegisterSimple("tensor.or", "tile.or", {}, kPointwise);
+  RegisterSimple("tensor.ors", "tile.ors", {}, kPointwise);
+  RegisterSimple("tensor.not", "tile.not", {}, kPointwise);
+  RegisterSimple("tensor.shl", "tile.shl", {}, kPointwise);
+  RegisterSimple("tensor.shls", "tile.shls", {}, kPointwise);
+  RegisterSimple("tensor.shr", "tile.shr", {}, kPointwise);
+  RegisterSimple("tensor.shrs", "tile.shrs", {}, kPointwise);
 
   // tensor.xor/xors -> tile.xor/xors(lhs, rhs, tmp). pto.txor/txors need a third
   // scratch operand, which the tile frontend makes the caller supply. Allocate it
@@ -372,8 +374,8 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
       return ConversionResult{std::move(prologue), xor_call};
     };
   };
-  RegisterCustom("tensor.xor", MakeXorConv("tensor.xor", "tile.xor"));
-  RegisterCustom("tensor.xors", MakeXorConv("tensor.xors", "tile.xors"));
+  RegisterCustom("tensor.xor", MakeXorConv("tensor.xor", "tile.xor"), {}, kPointwise);
+  RegisterCustom("tensor.xors", MakeXorConv("tensor.xors", "tile.xors"), {}, kPointwise);
 }
 
 // ============================================================================
@@ -445,6 +447,7 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterElementwiseBinaryOps() {
+  constexpr auto kPointwise = TensorPartition::Pointwise;
   auto MakeBroadcastBinaryConv = [](const std::string& tile_op, const std::string& row_expand_op,
                                     bool enforce_tdiv_contract = false) -> ConversionFunc {
     return [tile_op, row_expand_op, enforce_tdiv_contract](
@@ -536,10 +539,11 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
     };
   };
 
-  RegisterCustom("tensor.add", MakeBroadcastBinaryConv("tile.add", "tile.row_expand_add"));
-  RegisterCustom("tensor.sub", MakeBroadcastBinaryConv("tile.sub", "tile.row_expand_sub"));
-  RegisterCustom("tensor.mul", MakeBroadcastBinaryConv("tile.mul", "tile.row_expand_mul"));
-  RegisterCustom("tensor.div", MakeBroadcastBinaryConv("tile.div", "tile.row_expand_div", true));
+  RegisterCustom("tensor.add", MakeBroadcastBinaryConv("tile.add", "tile.row_expand_add"), {}, kPointwise);
+  RegisterCustom("tensor.sub", MakeBroadcastBinaryConv("tile.sub", "tile.row_expand_sub"), {}, kPointwise);
+  RegisterCustom("tensor.mul", MakeBroadcastBinaryConv("tile.mul", "tile.row_expand_mul"), {}, kPointwise);
+  RegisterCustom("tensor.div", MakeBroadcastBinaryConv("tile.div", "tile.row_expand_div", true), {},
+                 kPointwise);
   // tensor.maximum/minimum dispatch by rhs type:
   //   tensor rhs → tile.maximum/minimum
   //   scalar rhs → tile.maximums/minimums
@@ -559,8 +563,8 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
       return ConversionResult{op_reg.Create(chosen, args, kwargs, span)};
     };
   };
-  RegisterCustom("tensor.maximum", MakeMinMaxConv("tile.maximum", "tile.maximums"));
-  RegisterCustom("tensor.minimum", MakeMinMaxConv("tile.minimum", "tile.minimums"));
+  RegisterCustom("tensor.maximum", MakeMinMaxConv("tile.maximum", "tile.maximums"), {}, kPointwise);
+  RegisterCustom("tensor.minimum", MakeMinMaxConv("tile.minimum", "tile.minimums"), {}, kPointwise);
 
   // Partial-combine ops have no broadcast (row-expand) or scalar form, so each
   // is a simple 1:1 lowering.
@@ -1460,10 +1464,10 @@ void OpConversionRegistry::RegisterReductionOps() {
     };
   };
 
-  RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
-  RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
-  RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
-  RegisterCustom("tensor.row_prod", MakeReductionConv("tile.row_prod"));
+  RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"), {}, TensorPartition::ReduceColumns);
+  RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"), {}, TensorPartition::ReduceColumns);
+  RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"), {}, TensorPartition::ReduceColumns);
+  RegisterCustom("tensor.row_prod", MakeReductionConv("tile.row_prod"), {}, TensorPartition::ReduceColumns);
 
   // Binary col_sum uses ceil(M/2) scratch rows for a static 2D input.
   RegisterCustom(
@@ -1475,17 +1479,22 @@ void OpConversionRegistry::RegisterReductionOps() {
           return binary_conv(args, {}, span);
         }
         return ConversionResult{OpRegistry::GetInstance().Create("tile.col_sum", args, span)};
-      });
-  RegisterSimple("tensor.col_max", "tile.col_max");
-  RegisterSimple("tensor.col_min", "tile.col_min");
-  RegisterSimple("tensor.col_prod", "tile.col_prod");
+      },
+      {}, TensorPartition::ReduceRows);
+  RegisterSimple("tensor.col_max", "tile.col_max", {}, TensorPartition::ReduceRows);
+  RegisterSimple("tensor.col_min", "tile.col_min", {}, TensorPartition::ReduceRows);
+  RegisterSimple("tensor.col_prod", "tile.col_prod", {}, TensorPartition::ReduceRows);
 
   // Argmax/argmin all require a tmp scratch tile (including the column variants,
   // unlike col_max/col_min), sized exactly like the source (no 128 padding).
-  RegisterCustom("tensor.row_argmax", MakeScratchReductionConv("tile.row_argmax"));
-  RegisterCustom("tensor.row_argmin", MakeScratchReductionConv("tile.row_argmin"));
-  RegisterCustom("tensor.col_argmax", MakeScratchReductionConv("tile.col_argmax"));
-  RegisterCustom("tensor.col_argmin", MakeScratchReductionConv("tile.col_argmin"));
+  RegisterCustom("tensor.row_argmax", MakeScratchReductionConv("tile.row_argmax"), {},
+                 TensorPartition::ReduceColumns);
+  RegisterCustom("tensor.row_argmin", MakeScratchReductionConv("tile.row_argmin"), {},
+                 TensorPartition::ReduceColumns);
+  RegisterCustom("tensor.col_argmax", MakeScratchReductionConv("tile.col_argmax"), {},
+                 TensorPartition::ReduceRows);
+  RegisterCustom("tensor.col_argmin", MakeScratchReductionConv("tile.col_argmin"), {},
+                 TensorPartition::ReduceRows);
 }
 
 // ============================================================================
@@ -3054,7 +3063,8 @@ void OpConversionRegistry::RegisterCrossCoreOps() {
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,
-                                          std::unordered_map<size_t, InputSpaceReq> input_reqs) {
+                                          std::unordered_map<size_t, InputSpaceReq> input_reqs,
+                                          TensorPartition partition) {
   // Capture to_op by value for the lambda
   ConversionFunc func = [to_op](const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -3068,22 +3078,24 @@ void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std:
     }
     return ConversionResult{call};
   };
-  RegisterCustom(from_op, std::move(func), std::move(input_reqs));
+  RegisterCustom(from_op, std::move(func), std::move(input_reqs), partition);
 }
 
 void OpConversionRegistry::RegisterCustom(const std::string& from_op, ConversionFunc func,
-                                          std::unordered_map<size_t, InputSpaceReq> input_reqs) {
+                                          std::unordered_map<size_t, InputSpaceReq> input_reqs,
+                                          TensorPartition partition) {
   RegisterCustom(
       from_op,
       [func = std::move(func)](const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span,
                                const ConversionContext&) { return func(args, kwargs, span); },
-      std::move(input_reqs));
+      std::move(input_reqs), partition);
 }
 
 void OpConversionRegistry::RegisterCustom(const std::string& from_op, ContextualConversionFunc func,
-                                          std::unordered_map<size_t, InputSpaceReq> input_reqs) {
-  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs)};
+                                          std::unordered_map<size_t, InputSpaceReq> input_reqs,
+                                          TensorPartition partition) {
+  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs), partition};
 }
 
 const ConversionEntry* OpConversionRegistry::Lookup(const std::string& op_name) const {

@@ -108,7 +108,7 @@ A plain 0/1 value tile is deliberately **not** a second accepted form. A mask's 
 
 The tile/scalar path queries `Backend::PlanOpScratch("tile.sels", request)` with the source dtype and physical column count. It uses TSELS only when the plan is `Required`, the source is rank 2 with static columns, and the scalar dtype can be paired with the source. Otherwise it tries TSEL after materializing the scalar. Both targets reject BF16 for TSELS but accept it for TSEL; A2/A3 rejects 8-bit integers for both forms, so the pass reports an unsupported select instead of emitting an invalid fallback. The registered scratch planner and TSELS validator share the dtype predicate in `pto_ops_select.cpp`.
 
-`tile.full` is the only scalar broadcast the tile pipeline can lower: `tile.expands` has no PTO emitter, so `pl.expands` itself fails codegen. That constrains a scalar branch to a **literal** and the result to **static** extents, and `DeduceTileSelectType` enforces both so the diagnostic lands on the user's call rather than surfacing as a `tile.full` error from inside this pass.
+This lowering uses `tile.full` to materialize scalar branches. `DeduceTileSelectType` validates the scalar **literal** and **static** extents at the user's call site.
 
 `tile.full` also stamps its result fully valid, and `tile.sel` reads the result's valid extents from its `lhs`, so a materialized branch would widen a tail-narrowed select. The rule re-types the created call with the other branch's view — overriding the view only, so the rewritten call still round-trips through print → parse.
 

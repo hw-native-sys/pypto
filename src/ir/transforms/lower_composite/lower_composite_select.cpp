@@ -71,11 +71,8 @@ ExprPtr RetypeSelectScalar(const ExprPtr& scalar, DataType dtype, const Span& sp
 
 /// Materialize `scalar` as a tile shaped like `model`, the other (shaped) branch.
 ///
-/// `tile.full` is the only broadcast the tile pipeline can actually lower today:
-/// `tile.expands` has no PTO emitter (`pl.expands` fails codegen on main), so it
-/// is not an option here. That constrains the operand to a literal and the shape
-/// to static extents; `DeduceTileSelectType` enforces both at the user's call
-/// site, so reaching this function with anything else is a compiler bug.
+/// This lowering uses `tile.full` for scalar branches. `DeduceTileSelectType`
+/// validates the literal and static extents at the user's call site.
 ///
 /// `tile.full` stamps its result fully valid, which would widen a tail-narrowed
 /// select — `tile.sel` takes the result's valid extents from its `lhs`. Re-type

@@ -62,6 +62,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
+#include "src/ir/transforms/tensor_to_tile/internal.h"
 
 namespace pypto {
 namespace ir {
@@ -387,7 +388,7 @@ RelativeMemRefOffsets FoldRelativeMemRefOffsets(const std::vector<MemRefWithSpac
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReserveBufferResolution& reserve_resolution,
     const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& reserved_alloc_sizes,
-    const RelativeMemRefOffsets& relative_offsets, const std::string& func_name) {
+    const RelativeMemRefOffsets& relative_offsets, const FunctionPtr& func) {
   const ReservedEndBySpace& reserved_end_by_space = reserve_resolution.reserved_end_by_space;
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
@@ -482,9 +483,10 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     if (backend::BackendConfig::IsConfigured()) {
       const uint64_t limit = backend::GetBackend()->GetMemSize(space);
       const uint64_t used = footprint.HighWater();
-      CHECK(limit == 0 || used <= limit)
-          << MemorySpaceToString(space) << " buffer usage (" << used << " bytes) exceeds platform limit ("
-          << limit << " bytes)" << ReservedBytesNote(reserve_resolution, space, func_name);
+      if (limit != 0 && used > limit) {
+        throw tensor_to_tile::TensorAllocationFailure(
+            func, space, used, limit, ReservedBytesNote(reserve_resolution, space, func->name_));
+      }
     }
   }
 
@@ -629,8 +631,8 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
       const auto capacity = allocation_sizes.find(memory->base_.get());
       if (capacity != allocation_sizes.end()) reserved_sizes[memory->base_.get()] = capacity->second;
     }
-    memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, reserved_sizes,
-                                           relative_offsets, func->name_);
+    memref_pairs =
+        AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, reserved_sizes, relative_offsets, func);
   }
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {

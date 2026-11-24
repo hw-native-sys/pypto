@@ -511,9 +511,8 @@ class PassManager:
         _write_ir_dump(input_ir, frontend_path, prefix, explicit_layout)
 
         # Use instrument for IR dumping -- verification handled by C++ pipeline.
-        # Snapshot the pipeline-derived names for stable callback indexing during
-        # this run. Pass names have no independent Python-side storage.
-        pass_names = self.pass_names
+        # Count completed pass invocations, including allocation retries.
+        # Names come from each invocation rather than indexing the fixed recipe.
         pass_index = 0
 
         # Resolve diagnostic checks once for post-pass dump.
@@ -533,12 +532,14 @@ class PassManager:
         def before_pass_profiling(_pass_obj: passes.Pass, _program: core_ir.Program) -> None:
             nonlocal stage_open
             if prof is not None:
-                prof._begin_stage(pass_names[pass_index])
+                if stage_open:
+                    prof._end_stage()
+                prof._begin_stage(_pass_obj.get_name())
                 stage_open = True
 
         def after_pass(_pass_obj: passes.Pass, program: core_ir.Program) -> None:
             nonlocal pass_index, stage_open
-            pass_name = pass_names[pass_index]
+            pass_name = _pass_obj.get_name()
             stem = f"{pass_index + 1:02d}_after_{pass_name}"
 
             # Dump IR
@@ -615,21 +616,22 @@ class PassManager:
 
     def _run_with_profiling(self, input_ir: core_ir.Program, prof: CompileProfiler) -> core_ir.Program:
         """Run the pipeline with per-pass timing recorded into *prof*."""
-        pass_names = self.pass_names
-        pass_index = 0
         stage_open = False
 
         def before_pass(_pass_obj: passes.Pass, _program: core_ir.Program) -> None:
-            nonlocal pass_index, stage_open
-            prof._begin_stage(pass_names[pass_index])
+            nonlocal stage_open
+            # A failed allocation has no after-pass callback. Close its timing
+            # stage before the pipeline returns to the pre-outline checkpoint.
+            if stage_open:
+                prof._end_stage()
+            prof._begin_stage(_pass_obj.get_name())
             stage_open = True
 
         def after_pass(_pass_obj: passes.Pass, _program: core_ir.Program) -> None:
-            nonlocal pass_index, stage_open
+            nonlocal stage_open
             if stage_open:
                 prof._end_stage()
                 stage_open = False
-            pass_index += 1
 
         timing_instrument = passes.CallbackInstrument(
             before_pass=before_pass, after_pass=after_pass, name="PipelineProfiling"

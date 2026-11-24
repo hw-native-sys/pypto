@@ -75,6 +75,9 @@ extern const std::vector<std::string> mask_patterns;
 codegen::PTOCodegen& AsPto(codegen::CodegenBase& codegen_base);
 void CheckArity(const ir::CallPtr& op, std::string_view pto_op_name, size_t arity);
 void CheckSafeIdentifier(const std::string& value, const std::string& attr_name);
+/// Match the GM descriptor to a native Vec transfer without copying storage.
+/// row_major_vec describes the actual physical Tile/Buffer selected by lowering.
+std::string GetTensorTransferView(const ir::VarPtr& tensor, bool row_major_vec, codegen::PTOCodegen& codegen);
 std::string MakePartitionTensorViewType(const std::vector<std::string>& dims, const std::string& dtype_str);
 std::vector<std::string> GetIndexOffsetCodes(const std::vector<ir::ExprPtr>& exprs,
                                              codegen::PTOCodegen& codegen);

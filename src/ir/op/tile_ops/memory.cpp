@@ -569,11 +569,23 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   // the tile's own extent, and an ND partition covers a window the 2D tile only
   // describes after the flatten mapping. So the ND form still keeps the
   // destination type it had.
+  std::vector<ExprPtr> transfer_physical = tile_type->shape_;
+  std::vector<ExprPtr> transfer_valid = GetValidShape(tile_type);
+
+  // An explicit partition shape must not bypass the rank-one transfer contract.
+  if (dest_rank == 1 && transfer_valid.size() == 2) {
+    // A rank-one partition transfers the tile width. It cannot encode a second
+    // valid row unless the author first reshapes the tile into a flat window.
+    const auto one = MakeIndexConst(1, args[0]->span_);
+    const bool single_row = ProveValidExtentLessEqual(transfer_valid.front(), one) == ProofResult::kTrue ||
+                            ProveValidExtentLessEqual(transfer_physical.front(), one) == ProofResult::kTrue;
+    CHECK_SPAN(single_row, args[0]->span_)
+        << "The operator " << op_name << " into a rank-one tensor requires a tile with at most one valid row";
+  }
+
   if (shapes_tuple) {
     return output_tensor_type;
   }
-  std::vector<ExprPtr> transfer_physical = tile_type->shape_;
-  std::vector<ExprPtr> transfer_valid = GetValidShape(tile_type);
 
   // As for assemble, the union is derivable only when the transfer, the offsets,
   // and the destination share one rank. A store whose tile addresses the

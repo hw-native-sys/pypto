@@ -541,13 +541,10 @@ class TestTileSelect:
             tile.select(cond, full, narrowed)
 
     def test_select_rejects_a_runtime_scalar_branch_at_the_call_site(self):
-        """A non-literal scalar branch is refused here, not deep inside the pass.
+        """Validate the literal scalar branch at the select call site.
 
-        The lowering materializes a scalar branch with ``tile.full``, the only
-        scalar broadcast the tile pipeline can emit — ``tile.expands`` has no PTO
-        codegen. ``tile.full`` demands a literal, so accepting a runtime scalar
-        would surface as a confusing ``tile.full`` error from LowerCompositeOps
-        rather than a diagnostic on the user's own call.
+        The lowering materializes scalar branches with ``tile.full``, which
+        requires a literal.
         """
         src = self._tile([16, 128], name="src")
         mask = tile.cmps(src, 0.0, cmp_type=4)

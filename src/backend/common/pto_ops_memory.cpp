@@ -123,6 +123,93 @@ static std::optional<std::string> GetPtoL2Hint(const CallPtr& op, codegen::PTOCo
   INTERNAL_UNREACHABLE_SPAN(op->span_) << "Internal error: invalid cache policy";
 }
 
+// Render explicit GM metadata without changing IR aliases or storage ownership.
+static std::string MakeTensorViewCodegenPTO(const std::string& result_buf, const std::string& input_base_ptr,
+                                            const ir::TensorTypePtr& lhs_type, const ir::TensorView& view,
+                                            codegen::PTOCodegen& codegen) {
+  const size_t rank = lhs_type->shape_.size();
+  // Materialize shape and stride SSA names.
+  auto emit_dim = [&](const ir::ExprPtr& dim) -> std::string {
+    if (auto c = As<ir::ConstInt>(dim)) {
+      return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+    }
+    return codegen.EmitCastToIndex(dim, codegen.GetExprAsCode(dim));
+  };
+  std::vector<std::string> shape_dim_names(rank);
+  for (size_t j = 0; j < rank; ++j) shape_dim_names[j] = emit_dim(lhs_type->shape_[j]);
+  std::vector<std::string> stride_names(rank);
+  for (size_t j = 0; j < rank; ++j) stride_names[j] = emit_dim(view.stride[j]);
+
+  std::string layout_str = "nd";
+  switch (view.layout) {
+    case ir::TensorLayout::DN:
+      layout_str = "dn";
+      break;
+    case ir::TensorLayout::NZ:
+      layout_str = "nz";
+      break;
+    case ir::TensorLayout::MX_A_ZZ:
+      layout_str = "mx_a_zz";
+      break;
+    case ir::TensorLayout::MX_B_NN:
+      layout_str = "mx_b_nn";
+      break;
+    case ir::TensorLayout::MX_A_ND:
+      layout_str = "mx_a_nd";
+      break;
+    case ir::TensorLayout::ND:
+      break;
+  }
+
+  std::ostringstream oss;
+  oss << result_buf << " = pto.make_tensor_view " << input_base_ptr << ", shape = [";
+  for (size_t j = 0; j < rank; ++j) {
+    if (j > 0) oss << ", ";
+    oss << shape_dim_names[j];
+  }
+  oss << "], strides = [";
+  for (size_t j = 0; j < rank; ++j) {
+    if (j > 0) oss << ", ";
+    oss << stride_names[j];
+  }
+  oss << "] {layout = #pto.layout<" << layout_str << ">} : ";
+  oss << "!pto.tensor_view<";
+  for (size_t j = 0; j < rank; ++j) {
+    if (j > 0) oss << "x";
+    oss << "?";
+  }
+  oss << "x" << codegen.GetTypeString(lhs_type->dtype_) << ">";
+  return oss.str();
+}
+
+std::string pto_ops_detail::GetTensorTransferView(const ir::VarPtr& tensor, bool row_major_vec,
+                                                  codegen::PTOCodegen& codegen) {
+  auto original = codegen.GetOrCreateTensorView(tensor);
+  const auto type = AsTensorTypeLike(tensor->GetType());
+  if (!row_major_vec || type->shape_.size() < 2 || type->dtype_.IsPackedFp4()) return original;
+  const auto columns = As<ir::ConstInt>(type->shape_.back());
+  if (!columns || columns->value_ != 1 ||
+      (type->tensor_view_ && type->tensor_view_->layout != ir::TensorLayout::ND)) {
+    return original;
+  }
+
+  // Legacy parameter views infer DN from a trailing unit axis. A padded ND
+  // tile must use ND on both sides of DMA. Emit a per-transfer descriptor of
+  // the same pointer and strides, leaving authored DN transfers and defaults
+  // intact. This metadata introduces no allocation or data copy.
+  auto view = type->tensor_view_.value_or(ir::TensorView{});
+  if (view.stride.empty()) view.stride = ir::tensor_view_semantics::BuildRowMajorStrides(type->shape_);
+  const auto name = codegen.NewTemp();
+  codegen.Emit(MakeTensorViewCodegenPTO(name, codegen.GetTensorBasePtr(tensor), type, view, codegen));
+  return name;
+}
+
+static bool IsRowMajorVecTransfer(const ir::TileTypePtr& tile) {
+  if (tile->GetMemorySpace() != ir::MemorySpace::Vec) return false;
+  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
+  return view.blayout == ir::TileLayout::row_major && view.slayout == ir::TileLayout::none_box;
+}
+
 // tile.load: emit pto.subview + pto.tload
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -202,7 +289,9 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
   std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
   std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
-  std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+  const auto result_tile = As<ir::TileType>(codegen.GetCurrentResultVar()->GetType());
+  std::string tensor_view =
+      pto_ops_detail::GetTensorTransferView(tensor, IsRowMajorVecTransfer(result_tile), codegen);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
 
   if (ir::tile_view_semantics::HasZeroValidExtent(valid_shape_tuple->elements_)) return "";
@@ -270,16 +359,16 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.store first argument must have TileType";
   const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid_shape = tile_view.valid_shape;
-  INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
-
-  auto height_code = codegen.GetExprAsCode(valid_shape[0]);
-  auto width_code = codegen.GetExprAsCode(valid_shape[1]);
-
   auto output_tensor = AsVarLike(op->args_[2]);
   INTERNAL_CHECK_SPAN(output_tensor, op->span_) << "tile.store output_tensor must be a Var or IterArg";
 
   auto tensor_type = AsTensorTypeLike(output_tensor->GetType());
   INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "tile.store output_tensor must have TensorType";
+  const size_t tensor_rank = tensor_type->shape_.size();
+  INTERNAL_CHECK_SPAN(valid_shape.size() == 2 || (tensor_rank == 1 && valid_shape.size() == 1), op->span_)
+      << "tile.store requires a 2D tile or a 1D tile for a rank-one destination";
+  auto height = valid_shape.size() == 2 ? valid_shape.front() : ir::MakeIndexConst(1, op->span_);
+  const auto& width = valid_shape.back();
 
   const bool nz_destination =
       tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::NZ;
@@ -379,7 +468,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   }
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
-  std::string tensor_view = codegen.GetOrCreateTensorView(output_tensor);
+  std::string tensor_view =
+      pto_ops_detail::GetTensorTransferView(output_tensor, IsRowMajorVecTransfer(tile_type), codegen);
   std::string tile_buf = codegen.GetVarName(tile);
 
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
@@ -412,7 +502,6 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   std::string partition_view;
   std::string partition_type;
-  const size_t tensor_rank = tensor_type->shape_.size();
 
   // RFC #1300 P7: the IR's offsets / shapes are already in canonical
   // coordinates (matching the source TensorType's shape). No implicit
@@ -436,13 +525,13 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
   } else {
-    // Logical 1D/2D path, including MX views whose packing PTOAS owns.
-    std::string height_dim = "?", width_dim = "?";
-    if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
-    if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
-    std::vector<std::string> partition_dims = {height_dim, width_dim};
+    // Keep the partition in the destination's logical rank. A rank-one
+    // transfer covers the width of its tile, regardless of tile boxing.
+    std::vector<ir::ExprPtr> dims =
+        tensor_rank == 1 ? std::vector<ir::ExprPtr>{width} : std::vector<ir::ExprPtr>{height, width};
+    auto partition_dims = GetDimStrings(dims);
     auto offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
-    std::vector<std::string> size_codes = {height_code, width_code};
+    auto size_codes = GetSizeCodes(dims, codegen);
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
@@ -1180,58 +1269,7 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     codegen.RegisterTensorView(lhs_var, result_buf);
     codegen.RegisterVarToMlir(lhs_var, result_buf);
 
-    // Materialize shape and stride SSA names.
-    auto emit_dim = [&](const ir::ExprPtr& dim) -> std::string {
-      if (auto c = As<ir::ConstInt>(dim)) {
-        return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
-      }
-      return codegen.EmitCastToIndex(dim, codegen.GetExprAsCode(dim));
-    };
-    std::vector<std::string> shape_dim_names(rank);
-    for (size_t j = 0; j < rank; ++j) shape_dim_names[j] = emit_dim(lhs_type->shape_[j]);
-    std::vector<std::string> stride_names(rank);
-    for (size_t j = 0; j < rank; ++j) stride_names[j] = emit_dim(view.stride[j]);
-
-    std::string layout_str = "nd";
-    switch (view.layout) {
-      case ir::TensorLayout::DN:
-        layout_str = "dn";
-        break;
-      case ir::TensorLayout::NZ:
-        layout_str = "nz";
-        break;
-      case ir::TensorLayout::MX_A_ZZ:
-        layout_str = "mx_a_zz";
-        break;
-      case ir::TensorLayout::MX_B_NN:
-        layout_str = "mx_b_nn";
-        break;
-      case ir::TensorLayout::MX_A_ND:
-        layout_str = "mx_a_nd";
-        break;
-      case ir::TensorLayout::ND:
-        break;
-    }
-
-    std::ostringstream oss;
-    oss << result_buf << " = pto.make_tensor_view " << input_base_ptr << ", shape = [";
-    for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) oss << ", ";
-      oss << shape_dim_names[j];
-    }
-    oss << "], strides = [";
-    for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) oss << ", ";
-      oss << stride_names[j];
-    }
-    oss << "] {layout = #pto.layout<" << layout_str << ">} : ";
-    oss << "!pto.tensor_view<";
-    for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) oss << "x";
-      oss << "?";
-    }
-    oss << "x" << codegen.GetTypeString(lhs_type->dtype_) << ">";
-    return oss.str();
+    return MakeTensorViewCodegenPTO(result_buf, input_base_ptr, lhs_type, view, codegen);
   });
 
   reg("tile.load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

@@ -692,9 +692,13 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const auto type = As<ir::TensorType>(tensor->GetType());
     const std::string partition_type = backend::pto_ops_detail::MakePartitionTensorViewType(
         backend::pto_ops_detail::GetDimStrings(extents->elements_), GetTypeString(type->dtype_));
-    // Cache the shared tensor view outside the guard so later accesses can
-    // reuse it without referring to a value defined only in this branch.
-    const auto tensor_view = GetOrCreateTensorView(tensor);
+    // Bind the base and any matching DMA descriptor outside the guard;
+    // descriptor metadata must not escape a conditional definition.
+    const auto physical = As<ir::BufferType>(buffer->GetType());
+    const bool row_major_vec = physical->memory_space_ == ir::MemorySpace::Vec &&
+                               physical->blayout_ == ir::TileLayout::row_major &&
+                               physical->slayout_ == ir::TileLayout::none_box;
+    const auto tensor_view = backend::pto_ops_detail::GetTensorTransferView(tensor, row_major_vec, *this);
     const bool guarded =
         backend::pto_ops_detail::BeginNonEmptyRegion(extents->elements_, *this, extent_values);
     const std::string partition = backend::pto_ops_detail::EmitPartitionViewPTO(

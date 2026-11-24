@@ -1381,6 +1381,20 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
         .set_output_layout(ir::TileLayout::row_major);
   }
 
+  // A runtime scalar uses the same native fill as a constant tile.full.
+  if (ShouldRegister(exclude_ops, "tile.expands")) {
+    backend.RegisterOp("tile.expands")
+        .f_codegen([](const CallPtr& op, codegen::CodegenBase& codegen) {
+          CheckArity(op, "tile.expands", 2);
+          auto scalar = As<ScalarType>(op->args_[1]->GetType());
+          auto result = As<ir::TileType>(op->GetType());
+          CHECK_SPAN(scalar && result && scalar->dtype_ == result->dtype_, op->span_)
+              << "tile.expands requires the scalar to have the result tile's element type";
+          return MakeFullCodegenPTO(GetPtoNativeOpSpec("tile.full").native_op, op, codegen);
+        })
+        .set_output_layout(ir::TileLayout::row_major);
+  }
+
   // tile.cmps (TCMPS): tile input and output must be row_major per ISA
   if (ShouldRegister(exclude_ops, "tile.cmps")) {
     backend.RegisterOp("tile.cmps")

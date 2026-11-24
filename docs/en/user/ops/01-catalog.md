@@ -99,6 +99,20 @@ tile depend on the pad value; see
 
 Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compiler-managed scratch of shape `[ceil(M/2), N]` for static 2D inputs (full input shape otherwise). The default `False` preserves sequential reduction. This changes floating-point summation order and can increase UB usage. Tile callers continue to select the tree by passing `tmp_tile`.
 
+For supported static FP32 Tensor scopes, automatic streaming preserves
+`col_sum`'s default sequential row order by carrying the running sum into
+the next window. Automatic windowing reports output-window sizes, the
+reduction input extent, chunk length and count per output window, capacity
+budget, extra GM output and writeback through `PH-TENSOR-001` in the compilation's
+`report/perf_hints.log`. Chunked row sums and binary column sums can regroup
+floating-point additions.
+
+With the default PyPTO memory planner, supported static ND Tensor regions
+use ordinary lowering and buffer reuse until capacity feedback requests tiling.
+Only the affected scopes are replanned. Layout, type and other compilation
+errors propagate without a tiling retry. See
+[capacity-feedback recovery](../../dev/passes/10-outline_incore_scopes.md).
+
 ## Broadcast and expand
 
 | Operator | Reach | What it does |

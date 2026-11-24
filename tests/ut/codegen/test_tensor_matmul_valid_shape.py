@@ -188,5 +188,45 @@ def test_transposed_matmul_l0b_capacity(tmp_path, ascend_backend, planner, buffe
         assert list((tmp_path / "kernels").rglob("*.cpp"))
 
 
+@pytest.mark.parametrize(
+    "m,n,k,dtype",
+    [(8192, 8192, 8192, pl.BF16), (640, 928, 512, pl.FP16)],
+    ids=["8k-bf16", "rectangular-fp16"],
+)
+def test_oversized_whole_tensor_matmul_streams_mat_panels(tmp_path, ascend_backend, m, n, k, dtype):
+    """Check that backend lowering bounds the Mat working set and preserves writeback."""
+
+    @pl.jit
+    def matmul(
+        a: pl.Tensor[[m, k], dtype],
+        b: pl.Tensor[[k, n], dtype],
+        out: pl.Out[pl.Tensor[[m, n], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="whole"):
+            out[:] = pl.matmul(a, b, out_dtype=pl.FP32)
+        return out
+
+    matmul.compile(config=RunConfig(codegen_only=True, save_kernels=True, save_kernels_dir=str(tmp_path)))
+
+    pto = {file.stem: file.read_text() for file in tmp_path.rglob("*.pto")}
+    compute = pto["whole"]
+    copy = pto["whole_writeback"]
+    assert "pto.tmatmul.acc" in compute
+    assert "pto.tload" in copy
+    assert "pto.tstore" in copy
+    mat_shapes = re.findall(r"pto\.alloc_tile [^\n]*loc=mat, dtype=\w+, rows=(\d+), cols=(\d+)", compute)
+    assert len(mat_shapes) == 2, compute
+    assert sum(int(rows) * int(cols) * 2 for rows, cols in mat_shapes) <= 512 * 1024, mat_shapes
+
+    orchestration = (tmp_path / "orchestration" / "matmul.cpp").read_text()
+    write = re.search(r"params_t0\.add_output\((\w+)\);", orchestration)
+    read = re.search(r"params_t1\.add_input\((\w+)\);", orchestration)
+    assert write and read and write.start() < read.start(), orchestration
+    assert f" {read[1]} = {write[1]};" in orchestration
+    assert "params_t1.add_output(ext_out);" in orchestration
+    if find_ptoas_binary() is not None:
+        assert len(list((tmp_path / "kernels").rglob("*.cpp"))) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

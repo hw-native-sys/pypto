@@ -73,8 +73,9 @@ def head(x: pl.Tensor[[128, 64], pl.FP32],
 
 ## 配套示例
 
-`examples/utils/error_handling.py` —— 裸重绑定的代价：函数体重绑定了 `result` 而不是写穿它，
-先前的值被丢弃，codegen 把它报成结构性错误，因为改名后的局部变量根本没到达 `Out` 参数。
+`examples/utils/error_handling.py` 展示了把 `Out` 参数重绑定为新 Tensor 的情况，
+这不会写入调用方的输出缓冲。编译器会发出 `OutParamWriteDropped` 诊断；
+应使用 `result[:] = ...` 将结果写入该缓冲。
 
 ## See Also
 

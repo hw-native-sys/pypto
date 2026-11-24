@@ -1665,12 +1665,9 @@ TypePtr DeduceTileSelectType(const std::vector<ExprPtr>& args,
         << "; the lowered TSEL has a single element type for both sources and the result, so cast one "
            "branch first";
   } else {
-    // A scalar branch is materialized by the lowering with `tile.full`, the only
-    // scalar broadcast the tile pipeline can emit (`tile.expands` has no PTO
-    // codegen). That constrains the operand to a literal and the shape to static
-    // extents. Both are checked here rather than in the pass, so the diagnostic
-    // lands on the user's call site instead of surfacing as a `tile.full` error
-    // from inside LowerCompositeOps.
+    // LowerCompositeOps materializes a scalar branch with `tile.full`, which
+    // requires a literal and static extents. Check both at the user's call site
+    // so an invalid branch is diagnosed here instead of inside the lowering.
     const ExprPtr& scalar_arg = true_tile ? args[2] : args[1];
     const char* scalar_name = true_tile ? "on_false" : "on_true";
     CHECK_SPAN(As<ConstInt>(scalar_arg) || As<ConstFloat>(scalar_arg), scalar_arg->span_)

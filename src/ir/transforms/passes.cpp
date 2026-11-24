@@ -12,6 +12,7 @@
 #include "pypto/ir/transforms/passes.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
@@ -26,6 +27,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
+#include "src/ir/transforms/tensor_to_tile/internal.h"
 
 namespace pypto {
 namespace ir {
@@ -137,10 +139,18 @@ class FunctionPassImpl : public PassImpl {
     std::vector<FunctionPtr> transformed_functions;
     transformed_functions.reserve(program->functions_.size());
 
+    std::vector<tensor_to_tile::TensorAllocationFailure::Request> failures;
     for (const auto& [global_var, func] : program->functions_) {
-      FunctionPtr transformed_func = transform_(func);
-      transformed_functions.push_back(transformed_func);
+      try {
+        FunctionPtr transformed_func = transform_(func);
+        transformed_functions.push_back(transformed_func);
+      } catch (const tensor_to_tile::TensorAllocationFailure& failure) {
+        // Allocation is independent per function. Collect every failure in this
+        // pass, so K oversized scopes do not cause K whole-program replays.
+        failures.insert(failures.end(), failure.requests.begin(), failure.requests.end());
+      }
     }
+    if (!failures.empty()) throw tensor_to_tile::TensorAllocationFailure(std::move(failures));
 
     return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
   }
@@ -266,8 +276,33 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
     }
   }
 
-  for (const auto& p : passes_) {
-    current = p(current);
+  std::unique_ptr<tensor_to_tile::TensorAllocationRetry> allocation_retry;
+  size_t retry_index = 0;
+  IRPropertySet retry_verified;
+  for (size_t index = 0; index < passes_.size();) {
+    const auto& p = passes_[index];
+    // Keep the real source program before outlining changes the dispatch
+    // structure. Successful compilations execute exactly the original passes.
+    if (!allocation_retry && p.GetName() == "OutlineIncoreScopes") {
+      allocation_retry = std::make_unique<tensor_to_tile::TensorAllocationRetry>(current);
+      retry_index = index;
+      retry_verified = verified;
+    }
+    try {
+      if (allocation_retry &&
+          (p.GetName() == "ConvertTensorToTileOps" || p.GetName() == "AutoTileMatmulL0")) {
+        allocation_retry->CheckMatLoadCapacity(current);
+      }
+      current = p(current);
+    } catch (const tensor_to_tile::TensorAllocationFailure& failure) {
+      if (!allocation_retry) throw;
+      auto replanned = allocation_retry->Retry(failure, current);
+      if (!replanned) throw;
+      current = std::move(replanned);
+      verified = retry_verified;
+      index = retry_index;
+      continue;
+    }
 
     if (should_verify) {
       // Remove invalidated properties so they get re-verified if re-produced
@@ -287,7 +322,10 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
                                                                     DiagnosticPhase::PostPass, current);
       EmitDiagnostics(diags, p.GetName());
     }
+    ++index;
   }
+
+  if (allocation_retry) allocation_retry->EmitSelectedDiagnostics();
 
   // End-of-pipeline diagnostics — performance hints typically run here, after
   // all tile shapes / memory layouts are finalised (issue #1180).

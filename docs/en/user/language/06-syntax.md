@@ -87,10 +87,9 @@ variable defined in the caller and cannot be re-parsed.
 
 ## Worked example
 
-`examples/utils/error_handling.py` — what a bare rebinding costs: the body rebinds
-`result` instead of writing through it, the earlier value is discarded, and codegen
-surfaces it as a structural error because the renamed local never reaches the `Out`
-parameter.
+`examples/utils/error_handling.py` shows an `Out` parameter rebound to a new
+Tensor instead of writing to the caller's buffer. Compilation emits
+`OutParamWriteDropped`; use `result[:] = ...` to write to that buffer.
 
 ## See Also
 

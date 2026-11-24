@@ -164,6 +164,7 @@ MIGRATION_FAMILIES = (
         "G08: Vector generators",
         (
             "tile.full",
+            "tile.expands",
             "tile.ci",
             "tile.tri",
             "tile.random",

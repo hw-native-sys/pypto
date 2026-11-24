@@ -326,6 +326,86 @@ coherency bug). The translation lives in the shared outlining utility, so the
 sibling `OutlineHierarchyScopes` path stamps the attr the same way. See
 [GM Cache-Access Policy](../language/05-cache-policy.md).
 
+### Capacity-aware tiling of Tensor regions
+
+`PassPipeline` saves an immutable checkpoint immediately before this pass and
+first uses ordinary lowering, memory reuse and address allocation. An allocation
+overflow reports the failed kernel, memory space, required bytes and capacity,
+then requests a retry. Running `OutlineIncoreScopes` alone performs outlining only.
+
+For a whole-operand matrix product, the conversion registry declares its operand's
+Mat load. If that rank-2 operand's logical bytes already exceed the entire Mat
+capacity, the same failure is reported before Tensor conversion. This also
+covers products in mixed regions, where later consumers could otherwise fail
+shape deduction before allocation. Concrete oversized Mat loads are checked
+again before L0 expansion. Both checks prove a single buffer cannot fit; they
+do not estimate aggregate liveness or alter reuse.
+
+A retry traces failed kernels backward through Call and Submit edges to their
+original source-scope call sites. Deduplication preserves these caller spans,
+so a shared kernel feeds back to every affected source scope. One reverse walk
+covers the whole failure batch, including wrappers and split kernels, without
+copying origin sets through each graph level. Ambiguous or unsupported scopes
+retain the allocation error. Supported scopes
+contain straight-line computations over static ND tensors with unit inner stride.
+They can return a result or write it through a full non-atomic assemble.
+Only failed scopes receive window plans; other scopes retain ordinary lowering.
+Each capacity stage collects all failed kernels before requesting one replay.
+Retry builds one source-scope index, adjusts each failed original scope once
+(including when several split kernels fail), and rebuilds the checkpoint once.
+Independent oversized scopes share a feedback round instead of causing one
+whole-program replay each.
+
+- **Vector.** Pointwise operators and reductions use rectangular windows.
+  The fallback budgets registered tile conversions, loads, results, scratch and
+  remainder templates against Vec (UB) capacity. It does not simulate a second
+  ordinary allocation pipeline or replace the existing memory reuse algorithm.
+  Native Tile and Buffer transfers emit a matching ND descriptor when padded
+  row-major windows address scalar or batched column storage, retaining the
+  pointer and strides without a data copy.
+  Row and column reductions first split the independent axis. When the
+  reduction axis still exceeds capacity, a terminal FP32 sum or row maximum
+  can stream it. Default sequential column sums carry the accumulated value
+  as the first row of the next chunk, preserving row order. Column reductions
+  pad physical columns even for a one-column input so the row result has a
+  valid native width. Other chunked sums can change floating-point rounding order.
+  If the combined working set exceeds capacity for every window, supported
+  operations can use independent windows and pass their results through GM.
+- **Matrix.** When the inputs exceed Mat (L1) capacity, the planner uses the
+  backend's L0 tile chooser to bound the operand panels and accumulator. It
+  handles transposed inputs, leading batch broadcasts, and output remainders.
+  An incomplete K fractal is staged with explicit zeros in both operands
+  before the Cube reads it. Horizontal padding of multi-byte operands uses
+  row windows bounded by the A2/A3 vector repeat count. A supported vector
+  epilogue can consume the materialized matrix product in its own kernel.
+- **Mixed regions.** A chain of matrix products and supported vector
+  operations can use separate stages connected by GM tensors. Each stage
+  chooses windows for its own on-chip working set. Vector operations can
+  use independent windows when a reduction and its neighbors cannot share
+  one. An unpredicated `matmul_acc` in this path adds its incoming tensor
+  to a separately reduced product, which can change floating-point rounding
+  order.
+
+If allocation still fails, the failed scope's capacity budget is halved. Identical
+plans are skipped without recompilation. Halving a 64-bit budget has a finite
+bound; recovery stops when no smaller legal plan exists and preserves the actual
+allocation error. Other compiler errors propagate immediately. Retry plans are
+owned by one pipeline invocation and cannot affect a later compilation. Pass
+instruments and dumps observe the actual repeated passes.
+
+The loops reuse their tile allocations across windows, so the generated IR
+does not grow with the number of windows. When the destination is a captured
+tensor, the compute task writes a compiler-owned GM tensor. A later task
+copies the result to the captured destination, preserving read-before-write
+ordering when the caller's tensor views overlap.
+
+Selected window plans emit `PH-TENSOR-001` through the existing diagnostic
+channel. The hint records output-window dimensions, reduction input extent,
+chunk length and count per output window, the relevant capacity budget, temporary GM output bytes,
+separate writeback, and any partial-sum regrouping.
+Only the selected replacement publishes hints. With a report instrument they
+appear in `report/perf_hints.log`, and `DiagnosticPhase.NONE` suppresses them.
+
 ## Example
 
 ### Basic Outlining

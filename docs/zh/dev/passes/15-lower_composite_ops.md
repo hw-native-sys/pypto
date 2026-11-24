@@ -101,7 +101,7 @@ mutator 把本 Pass 产出的 `MakeTuple`（及其 SSA alias）记入私有 `com
 
 tile/标量路径通过 `Backend::PlanOpScratch("tile.sels", request)` 查询源 dtype 和物理列数对应的规则。只有计划为 `Required`、源为列数静态的二维 tile、且标量 dtype 能与源配对时，才使用 TSELS；否则物化标量并尝试 TSEL。两个目标的 TSELS 都不支持 BF16，但 TSEL 支持；A2/A3 的两种形式都不支持 8 位整数，因此 Pass 会报告不支持该 select，而不是生成非法的回退。注册的 scratch planner 与 TSELS validator 共用 `pto_ops_select.cpp` 中的 dtype 谓词。
 
-`tile.full` 是 tile 流水线唯一能降级的标量广播：`tile.expands` 没有 PTO 发射器，`pl.expands` 自身就过不了 codegen。这就把标量分支限制为**字面量**、把结果限制为**静态** extent；两者都由 `DeduceTileSelectType` 校验，因此诊断落在用户的调用点上，而不是以 `tile.full` 报错的形式从本 Pass 内部冒出来。
+本 Pass 用 `tile.full` 将标量分支扩展为 Tile。`DeduceTileSelectType` 在用户的调用点校验标量**字面量**和结果的**静态** extent。
 
 `tile.full` 还会把结果标成全部有效，而 `tile.sel` 从它的 `lhs` 读取结果的 valid 范围，所以被物化的分支会把尾部收窄的 select 重新放宽。规则会用另一分支的 view 给新建的调用重新定型 —— 只覆盖 view，这样改写后的调用仍能通过 print → parse 往返。
 
