@@ -160,6 +160,21 @@ rejects FP4 `treshape`. InCore tensor reinterpret operations lower to tile
 aliases and require the same planners; same-shape orchestration FP4/byte aliases are also supported.
 See [FP4](../fp4.md) for the carrier-unit contract and supported alias paths.
 
+### Row-wise integer dequantization (Ascend950)
+
+| Operation | Inputs | Result |
+| --------- | ------ | ------ |
+| `tile.dequant` | Row-major signed INT8 or INT16 tile and FP32 scale and offset column tiles | FP32 tile with the same valid shape |
+
+`pl.tile.dequant(src, scale, offset)` emits `pto.tdequant`. Each valid
+element is `(float(src[i,j]) - offset[i,0]) * scale[i,0]`. Scale and
+offset each have one valid column and as many valid rows as the source.
+Physical source rows must be 32-byte aligned.
+They must share their physical shape and layout because the PTO ISA
+intrinsic uses one template type for both. A partial vector after the
+first 64 columns may require a wider physical result row to contain the
+A5 intrinsic's final store. The result's valid width stays unchanged.
+
 ### Result view of `tile.move`
 
 The deduced result `TileView` splits by field:

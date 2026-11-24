@@ -73,6 +73,7 @@ from ._tile_elementwise import cast as cast
 from ._tile_elementwise import cmp as cmp
 from ._tile_elementwise import cmps as cmps
 from ._tile_elementwise import cos as cos
+from ._tile_elementwise import dequant as dequant
 from ._tile_elementwise import div as div
 from ._tile_elementwise import divs as divs
 from ._tile_elementwise import exp as exp

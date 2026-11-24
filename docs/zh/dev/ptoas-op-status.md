@@ -269,7 +269,7 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 独立量化前端+codegen+真机 ST（`group_axis` A/B）：MXFP8 支持 FP16/BF16/FP32 源，MXFP4_E2M1 支持 FP16/BF16 源；`pl.tile.quant_mx_raw` 另外覆盖原始 TQUANT 形式 |
 | pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | 当前 backend 发 `pto.tstore.fp` |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ❌ | ❌ | — | A5 有符号 INT8/INT16 转 FP32，逐行应用 scale 和 offset。已添加 A5 数值 ST，待真机验证。 |
 | **同步（8）** |  |  |  |  |  |  |  |  |
 | pto.barrier | pipe_barrier / dsb | internal | ✅ | — | — | ✅ | — | compiler/system lowering 自动发射 |
 | pto.barrier_sync | barrier lowering | internal | ✅ | — | — | — | — | 同步/调度内部原语，不独立建 ST |

@@ -298,7 +298,7 @@ output elements outside the valid rectangle.
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 standalone quantization frontend+codegen+hardware ST (`group_axis` A/B), MXFP8 from FP16/BF16/FP32 and MXFP4_E2M1 from FP16/BF16; `pl.tile.quant_mx_raw` also covers the raw TQUANT form |
 | pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | the current backend emits `pto.tstore.fp` |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ❌ | ❌ | — | A5 signed INT8/INT16 to FP32 with per-row scale and offset. A5 numerical ST added, hardware verification pending. |
 | **Synchronization (8)** |  |  |  |  |  |  |  |  |
 | pto.barrier | pipe_barrier / dsb | internal | ✅ | — | — | ✅ | — | emitted automatically by compiler/system lowering |
 | pto.barrier_sync | barrier lowering | internal | ✅ | — | — | — | — | internal synchronization/scheduling primitive; no standalone ST |

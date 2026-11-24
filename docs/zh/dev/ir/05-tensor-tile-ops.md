@@ -146,6 +146,18 @@ Packed `FP4E2M1X2` 的 tile 字节别名需要 PYPTO 或 DSA_RP；PTOAS 0.65
 planner 要求；编排层另支持 shape 相同的 FP4/字节别名。
 Carrier 单位约定与可用路径见 [FP4](../fp4.md)。
 
+### 逐行整数反量化（Ascend950）
+
+| 算子 | 输入 | 结果 |
+| ---- | ---- | ---- |
+| `tile.dequant` | 行主序有符号 INT8 或 INT16 tile，以及 FP32 scale 和 offset 列 tile | 有效形状相同的 FP32 tile |
+
+`pl.tile.dequant(src, scale, offset)` 生成 `pto.tdequant`，对每个有效元素计算
+`(float(src[i,j]) - offset[i,0]) * scale[i,0]`。scale 和 offset 均只有一列有效数据，
+有效行数与源 tile 相同。源 tile 的物理行须按 32 字节对齐。两者必须使用相同的物理形状和布局，因为 PTO ISA 指令使用同一个模板类型。
+超过首个 64 列向量后的尾部可能需要扩宽结果的物理行，以容纳 A5 指令的最后一次写入。
+结果的有效列数保持不变。
+
 ### tile.move 的结果 view
 
 推导出的结果 `TileView` 按字段分别取值：

@@ -48,6 +48,23 @@ def _scalar_operand_to_expr(value: int | Scalar | Expr) -> Expr:
     return _ir_core.ConstInt(value, DataType.INDEX, _get_span_or_capture())
 
 
+def dequant(src: Tile, scale: Tile, offset: Tile) -> Tile:
+    """Dequantize an A5 integer tile to FP32 with per-row parameters.
+
+    Computes `(float(src[i,j]) - offset[i,0]) * scale[i,0]` on the valid region.
+    The output may pad its physical width to contain the final vector store.
+
+    Args:
+        src: Row-major rank-2 signed INT8 or INT16 tile.
+        scale: FP32 column tile with one value per valid source row.
+        offset: FP32 column tile with the same shape and layout as scale.
+
+    Returns:
+        FP32 tile with the same valid shape as src.
+    """
+    return Tile(expr=_ir_ops.dequant(src.unwrap(), scale.unwrap(), offset.unwrap()))
+
+
 def add(lhs: Tile, rhs: Tile | int | float | Scalar | Expr) -> Tile:
     """Element-wise addition of tile and tile or scalar.
 

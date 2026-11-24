@@ -135,6 +135,7 @@ set(PYPTO_SOURCES
     src/ir/op/reg_ops/reg_ops.cpp
     src/ir/op/tile_ops/batch_matmul.cpp
     src/ir/op/tile_ops/broadcast.cpp
+    src/ir/op/tile_ops/dequant.cpp
     src/ir/op/tile_ops/elementwise.cpp
     src/ir/op/tile_ops/matmul.cpp
     src/ir/op/tile_ops/matmul_mx.cpp
