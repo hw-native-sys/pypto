@@ -20,6 +20,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.backend import BackendType
 from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics import ParserSyntaxError, UndefinedVariableError
 
@@ -1060,7 +1061,7 @@ class Pipeline:
 """)
     with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
         with pytest.raises(ValueError, match=r"TMR cannot lower.*manual scope"):
-            ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+            ir.compile(program, output_dir=str(tmp_path), backend_type=BackendType.Ascend950, skip_ptoas=True)
 
 
 def test_tmr_reports_inline_graph_scope_in_manual_submit_argument():
