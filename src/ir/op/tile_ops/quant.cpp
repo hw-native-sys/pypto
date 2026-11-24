@@ -63,6 +63,17 @@ TypePtr DeduceQuantType(const std::vector<ExprPtr>& args) {
       args[0]->span_)
       << "tile.quant requires a positive physical column count divisible by 32 for the 8-bit result";
 
+  // The source load reads all 64 FP32 lanes on each repeat. Only the
+  // subsequent arithmetic and destination store are masked. Use the
+  // largest covered width to avoid overflow when rounding valid columns up.
+  constexpr int kSourceVectorWidth = 64;
+  const auto valid_cols = As<ConstInt>(src_view.valid_shape[1]);
+  const auto max_valid_cols = valid_cols ? valid_cols->value_ : physical_cols->value_;
+  const auto covered_cols = physical_cols->value_ / kSourceVectorWidth * kSourceVectorWidth;
+  CHECK_SPAN(max_valid_cols <= covered_cols, args[0]->span_)
+      << "tile.quant requires the physical column count to cover the valid columns rounded up to 64. "
+      << "Pad the tile width in pl.tile.load while keeping its original valid_shape";
+
   auto scale = CheckQuantInput(args[1], "scale");
   const auto scale_view = tile_view_semantics::GetEffectiveTileView(*scale);
   CheckQuantParameter(scale, scale_view, src_view.valid_shape[0], "scale", args[1]->span_);

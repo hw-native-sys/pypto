@@ -48,6 +48,39 @@ def test_quant_preserves_valid_shape():
     assert [dim.value for dim in result_type.tile_view.valid_shape] == [10, 47]
 
 
+@pytest.mark.parametrize(
+    ("physical_cols", "valid_cols", "safe"),
+    [
+        (32, 32, False),
+        (64, 47, True),
+        (96, 64, True),
+        (96, 65, False),
+        (96, None, False),
+        (128, None, True),
+    ],
+)
+def test_quant_requires_source_pitch_for_full_vector_reads(physical_cols, valid_cols, safe):
+    span = ir.Span.unknown()
+    rows = ir.ConstInt(16, pl.INDEX, span)
+    cols = (
+        ir.Var("valid_cols", ir.ScalarType(pl.INDEX), span)
+        if valid_cols is None
+        else ir.ConstInt(valid_cols, pl.INDEX, span)
+    )
+    source_view = ir.TileView(valid_shape=[rows, cols])
+    src = ir.Var("src", ir.TileType([16, physical_cols], pl.FP32, tile_view=source_view), span)
+    scale = ir.Var("scale", ir.TileType([16, 1], pl.FP32), span)
+
+    if not safe:
+        with pytest.raises(ValueError, match="cover the valid columns rounded up to 64"):
+            ir.op.tile.quant(src, scale)
+        return
+
+    result_type = ir.op.tile.quant(src, scale).type
+    assert isinstance(result_type, ir.TileType)
+    assert result_type.shape[1].value == physical_cols
+
+
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize(
     ("asymmetric", "dst_dtype", "mode"), [(False, pl.INT8, "INT8_SYM"), (True, pl.UINT8, "INT8_ASYM")]

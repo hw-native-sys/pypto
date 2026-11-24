@@ -58,6 +58,31 @@ def _quant_asym(
     return _quant_asym_kernel(src, scale, offset, out)
 
 
+_TAIL_COLUMNS = 47
+_TAIL_SENTINEL = 77
+
+
+@pl.jit
+def _quant_sym_padded_tail(
+    src: pl.Tensor[[16, 64], pl.FP32],
+    scale: pl.Tensor[[16, 1], pl.FP32],
+    out: pl.InOut[pl.Tensor[[16, 64], pl.INT8]],
+) -> pl.Tensor[[16, 64], pl.INT8]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        values = pl.tile.load(src, [0, 0], [16, 64], valid_shape=[16, _TAIL_COLUMNS])
+        scales = pl.tile.load(scale, [0, 0], [16, 1])
+        quantized = pl.tile.quant(values, scales)
+        out = pl.tile.store(quantized, [0, 0], out)
+    return out
+
+
+def _padded_tail_golden(tensors):
+    result = torch.full_like(tensors["out"], _TAIL_SENTINEL)
+    valid = tensors["src"][:, :_TAIL_COLUMNS] * tensors["scale"]
+    result[:, :_TAIL_COLUMNS] = valid.round().clamp(-128, 127).to(torch.int8)
+    return result
+
+
 def _quant_cases():
     # Exact half-integers exercise ties-to-even. Large magnitudes cover both
     # clamps, and varying the row coefficients checks the broadcast direction.
@@ -83,6 +108,17 @@ def _quant_cases():
         torch.empty_like(src, dtype=torch.uint8),
         name="uint8_asymmetric",
         golden=lambda t: (t["src"] * t["scale"] + t["offset"]).round().clamp(0, 255).to(torch.uint8),
+        rtol=0,
+        atol=0,
+    )
+
+    yield st.case(
+        _quant_sym_padded_tail,
+        src,
+        scale,
+        torch.full_like(src, _TAIL_SENTINEL, dtype=torch.int8),
+        name="int8_symmetric_padded_tail",
+        golden=_padded_tail_golden,
         rtol=0,
         atol=0,
     )

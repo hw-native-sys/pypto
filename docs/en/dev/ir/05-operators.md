@@ -651,9 +651,12 @@ flat gather, valid-region semantics, tile layouts, and mask patterns.
 
 `tile.quant(src, scale[, offset])` returns an 8-bit Vec tile with the source
 physical and valid shape. The source is FP32, unboxed and row-major, with a
-physical column count divisible by 32. Scale and optional offset are unboxed
-FP32 column tiles with one value per valid source row, and the two parameter
-tiles share the same physical type.
+physical column count divisible by 32. The native load reads 64 FP32
+elements per repeat, so the physical width must cover the valid width rounded
+up to 64. When the valid width is dynamic, the physical width must be a multiple
+of 64. A padded tile load can preserve a smaller logical width via `valid_shape`.
+Scale and optional offset are unboxed FP32 column tiles with one value per valid
+source row. Both parameter tiles must share the same physical type.
 
 The symmetric form uses `pto.tquant` with `INT8_SYM` and rounds and saturates
 `src * scale` to INT8. The asymmetric form uses `INT8_ASYM` and rounds and
