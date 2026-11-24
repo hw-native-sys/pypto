@@ -1,6 +1,6 @@
 # SIMT interface coverage
 
-This matrix tracks task 11.7 against pinned PTOAS v0.77. General unsigned
+This matrix records task 11.7 validation with PTOAS v0.77. General unsigned
 types are distinct from INT32 values interpreted as unsigned by one operation.
 
 ## First batch: 32-bit interfaces

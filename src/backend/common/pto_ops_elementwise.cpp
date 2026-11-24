@@ -586,9 +586,8 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
 // PTO-ISA 83b1b2b52 uses one scratch row: candidate values, a 32-byte-aligned
 // comparison mask, and a 32-byte address buffer. INT32 keeps the FP32 dividend,
 // divisor and quotient chain in tmp so the sources stay read-only: three data
-// areas for TREM, two for TREMS. High-precision TREM adds staged vector state
-// plus a fused buffer of up to 8 vectors (TREM_HP_FUSED_CHUNK_A2A3); using the
-// physical width bounds dynamic valid columns.
+// areas for TREM, two for TREMS. HpScratchRequiredColsV in PTO-ISA reserves
+// ten 64-float compensation vectors for each of up to eight batched vectors.
 static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::TileType>& src, bool is_trem,
                                               bool high_precision, const ir::Span& span) {
   const auto columns = As<ir::ConstInt>(src->shape_[1]);
@@ -599,11 +598,13 @@ static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::Ti
   const int64_t data_areas = src->dtype_ == DataType::INT32 ? (is_trem ? 3 : 2) : 1;
   int64_t required = data_areas * row_stride + ((row_stride + 255) / 256) * 8 + 8;
   if (high_precision) {
+    constexpr int64_t kFp32LanesPerVector = 64;
     const auto valid_columns = As<ir::ConstInt>(ir::GetValidShape(src)[1]);
     const int64_t width = valid_columns ? valid_columns->value_ : columns->value_;
-    const int64_t vectors = std::max<int64_t>(width / 64, 1);
-    const int64_t staged = 192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? 64 : 0) +
-                           512 * std::min<int64_t>(vectors, 8);
+    const int64_t vectors = std::max<int64_t>(width / kFp32LanesPerVector, 1);
+    const int64_t compensation = 10 * kFp32LanesPerVector * std::min<int64_t>(vectors, 8);
+    const int64_t staged =
+        192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? kFp32LanesPerVector : 0) + compensation;
     required = std::max(required, staged);
   }
   return required;

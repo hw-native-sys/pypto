@@ -55,7 +55,7 @@ below. Native MXFP4 quantization supports E2M1 only.
 | Operation | Support |
 | --------- | ------- |
 | Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
-| Either packed format ↔ UINT8/INT8 alias | Same-shape orchestration GM aliases; dense addressed 2D row-major Vec aliases with PYPTO or DSA_RP planning |
+| Either packed format ↔ UINT8/INT8 alias | Same-shape orchestration GM aliases and dense 2D row-major Vec aliases with all three planners |
 | Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
 | E2M1 → FP8E4M3FN cast | Direct A5 TCVT, ND or fused NZ output; no BF16/FP32 intermediate |
 | Other packed FP4 → FP8 casts | Legalized through BF16 and FP32, with a warning |
@@ -67,7 +67,7 @@ below. Native MXFP4 quantization supports E2M1 only.
 | `fillpad`, `fillpad_expand`, `fillpad_inplace` | Both formats, ND Vec; zero/min/max padding preserves the valid carrier rectangle |
 | DN numerical casts | Full static dense 2D BF16↔packed or packed↔packed; PYPTO/DSA_RP static addresses; partial, padded, and boxed cases are rejected |
 | Direct packed `reshape` or `transpose` | Unsupported; reshape a byte alias where the existing alias contract permits it |
-| Native packed FP4 `matmul_mx` | Tensor and Tile APIs: both formats and mixed E2M1/E1M2 pairs, FP32 accumulator; requires PTOAS v0.77 or a compatible newer build |
+| Native packed FP4 `matmul_mx` | Tensor and Tile APIs: both formats and mixed E2M1/E1M2 pairs, FP32 accumulator; requires PTOAS v0.78 or a compatible newer build |
 | MXFP4 `quant_mx` | E2M1 only, FP16/BF16 source, OCP or supported axis0 NV; PYPTO/DSA_RP static allocation |
 | `pl.tile.quant_mx_raw` | Native E2M1 payload (INT8 for MXFP8) and raw UINT8 exponents with explicit workspaces; static partial validity and axis0 interleaving |
 | Ascend910/A2A3 packed FP4 execution | Unsupported |
@@ -90,7 +90,7 @@ PyPTO keeps the carrier ABI above and expands the packed axis of Mat/Left/Right
 physical and valid dimensions when emitting PTO. GM and Vec descriptors retain
 carrier dimensions; allocation byte sizes are unchanged. Executable generation
 probes the selected assembler's logical operand, accumulator, and scale geometry
-before enabling native FP4 MX. Select PTOAS v0.77 or a compatible newer build
+before enabling native FP4 MX. Select PTOAS v0.78 or a compatible newer build
 via `PTOAS_ROOT`. IR-only generation (`skip_ptoas=True`) remains available.
 
 ## Numerical cast constraints
@@ -119,13 +119,19 @@ addressed direct path. The result keeps logical
 `[M, 2*K]` dimensions while its NZ descriptor controls physical storage.
 NZ physical rows must be divisible by 16; use `valid_shape` for row tails.
 The layout option is Tile-only. E1M2 and FP8E5M2 do not have this direct path.
-PTOAS v0.77 or newer and the matching pinned A5 ISA are required.
+This path requires PTOAS v0.78 or newer and the matching pinned A5 ISA.
 
-A source `tile.slice` retains its parent row pitch and runtime row offset.
+For a direct NZ cast, the source `tile.slice` retains its parent row pitch and runtime row offset.
 Its UB address must be provably 32-byte aligned: use static packed column
 offsets divisible by 32. Runtime row offsets remain aligned when the parent
 row pitch is a multiple of 32 bytes. Unknown runtime column offsets are
 rejected; load that packed window into its own aligned tile instead.
+A plain ND cast through BF16 and FP32 accepts unaligned carrier offsets, including
+a runtime column. PyPTO extracts the byte window using the parent's row pitch
+and decodes both nibbles from an aligned temporary of the window's size.
+For one valid carrier per row, keep the physical width a multiple of 32 bytes.
+For example, `pl.tile.slice(packed, [3, 32], [1, 1], valid_shape=[3, 1])`
+decodes to three rows of two valid BF16 values.
 
 Use `tpush_to_aic` to transfer the NZ result to the Cube without another
 ND-to-NZ move. On A5, a plain Vec store can also copy it to a matching `pl.NZ`
@@ -180,16 +186,16 @@ Only the numerical cast creates a fresh BF16 `[32,512]` tile. Use
 `pl.fp4e1m2x2` instead when the source bytes encode E1M2.
 
 The alias requires `slayout=none_box`, dense storage, zero tile `start_offset`,
-and an address-backed MemRef with a static UB byte offset. Its source byte span
-must equal the carrier element count. Noncontiguous UB slices, including
-intermediate aliases or reshapes of them, and addressless inputs are rejected.
+and a locally planned Vec allocation. Its source byte span must equal the
+carrier element count. Noncontiguous UB slices, including intermediate aliases
+or reshapes of them, and inputs without a MemRef are rejected.
 GM load offsets may be nonzero or dynamic; they are distinct from UB offsets.
 An explicit alias shape must match the source. Reshape a byte view separately
 before aliasing back. InCore tensor aliases lower to the same tile path;
 orchestration tensor aliases support only same-shape packed FP4 ↔ UINT8/INT8 aliases.
 
-PYPTO and DSA_RP planning emit addressed aliases. PTOAS planning remains
-unsupported for this path because its `treshape` rejects the packed FP4 type.
+PYPTO and DSA_RP bind both types to the same UB address. With the PTOAS
+planner, PTOAS v0.78 lowers the same-shape byte alias through `pto.treshape`.
 Aliasing preserves bits; it does not numerically convert one FP4 format into
 the other.
 

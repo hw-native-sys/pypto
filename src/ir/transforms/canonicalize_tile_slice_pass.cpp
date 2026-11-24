@@ -184,6 +184,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -516,6 +517,8 @@ void CheckAccumulatorSliceContiguous(const ExprPtr& value,
 class SliceCollector : public IRVisitor {
  public:
   std::unordered_map<const Var*, SliceInfo> slices;
+  // Full-rank packed ND slices and their SSA or valid-shape aliases.
+  std::unordered_map<const Var*, SliceInfo> packed_windows;
   std::unordered_map<const Var*, ExprPtr> scalar_defs;
   /// Which window each Var *names*, whether or not that Var is itself a
   /// `tile.slice` result.  Seeded from every `tile.slice`, canonical or not —
@@ -525,7 +528,7 @@ class SliceCollector : public IRVisitor {
   /// the MAD with exactly the same broken stride — and then extended along
   /// identity-preserving edges by `BindWindowAlias`.
   std::unordered_map<const Var*, SliceInfo> windows;
-  /// The keys of `slices`, in program order: a chained slice follows its source.
+  /// Slice definitions considered for rewriting, in source-before-use order.
   std::vector<VarPtr> slice_order;
 
  protected:
@@ -541,6 +544,20 @@ class SliceCollector : public IRVisitor {
     }
     if (auto window = ParseSliceWindow(op, windows, known_consts_, /*require_canonical=*/false)) {
       windows.emplace(op->var_.get(), *window);
+      const auto tile = As<TileType>(op->var_->GetType());
+      if (tile && tile->dtype_.IsPackedFp4() && tile->shape_.size() == 2) {
+        // Type deduction pads a rank-reduced result back to 2D. Its shape can
+        // no longer describe the rows and columns addressed in the parent.
+        const auto& args = As<Call>(op->value_)->args_;
+        const auto drop_dims = args.size() == 5 ? As<MakeTuple>(args[4]) : nullptr;
+        const bool full_rank = args.size() < 5 || (drop_dims && drop_dims->elements_.empty());
+        const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+        // A loop-carried window can change its base on the back edge.
+        if (full_rank && view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box &&
+            (!windows.count(window->source.get()) || packed_windows.count(window->source.get()))) {
+          packed_windows.emplace(op->var_.get(), *window);
+        }
+      }
     } else {
       RecordAliasedWindow(op);
     }
@@ -549,6 +566,7 @@ class SliceCollector : public IRVisitor {
       slice_order.push_back(op->var_);
       return;
     }
+    if (packed_windows.count(op->var_.get())) slice_order.push_back(op->var_);
     RecordCarriedAccumulatorUse(op->value_);
     CheckAccumulatorSliceContiguous(op->value_, windows);
   }
@@ -714,7 +732,7 @@ class SliceCollector : public IRVisitor {
 
   /// Record `target` as naming the same window as `source`, when both provably
   /// describe the same window extent.  Unproven edges are simply not recorded.
-  void BindWindowAlias(const VarPtr& target, const ExprPtr& source) {
+  void BindWindowAlias(const VarPtr& target, const ExprPtr& source, bool preserves_packed_view = false) {
     if (!target) return;
     auto source_var = AsVarLike(source);  // matches Var AND IterArg
     if (!source_var) return;
@@ -727,6 +745,9 @@ class SliceCollector : public IRVisitor {
     // value by copy keeps this independent of that.
     const SliceInfo source_window = it->second;
     windows.emplace(target.get(), source_window);
+    if (preserves_packed_view && packed_windows.count(source_var.get())) {
+      packed_windows.emplace(target.get(), source_window);
+    }
   }
 
   /// A definition that is not itself a `tile.slice` but still binds a fresh SSA
@@ -749,7 +770,7 @@ class SliceCollector : public IRVisitor {
   void RecordAliasedWindow(const AssignStmtPtr& op) {
     if (!op || !op->var_) return;
     if (AsVarLike(op->value_)) {
-      BindWindowAlias(op->var_, op->value_);
+      BindWindowAlias(op->var_, op->value_, /*preserves_packed_view=*/true);
       return;
     }
     auto call = As<Call>(op->value_);
@@ -762,7 +783,7 @@ class SliceCollector : public IRVisitor {
     if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) return;
     size_t source_index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()).value_or(0);
     if (source_index >= call->args_.size()) return;
-    BindWindowAlias(op->var_, call->args_[source_index]);
+    BindWindowAlias(op->var_, call->args_[source_index], IsOp(call, "tile.set_validshape"));
   }
 
   // Convert direct ConstInt SSA definitions (and their plain aliases) back to
@@ -975,9 +996,10 @@ class SliceStorageAnalysis : public IRVisitor {
 /// storage, and unaligned Vec operands are materialized before ordinary ops.
 class CanonicalizeMutator : public IRMutator {
  public:
-  CanonicalizeMutator(const std::unordered_map<const Var*, SliceInfo>& slices,
-                      const std::unordered_map<const Var*, ExprPtr>& scalar_defs)
-      : slices_(slices), scalar_defs_(scalar_defs) {}
+  explicit CanonicalizeMutator(const SliceCollector& collector)
+      : slices_(collector.slices),
+        packed_windows_(collector.packed_windows),
+        scalar_defs_(collector.scalar_defs) {}
 
   /// Phase 2a — choose the Vec slices to materialize at their DEFINITION.
   ///
@@ -998,6 +1020,9 @@ class CanonicalizeMutator : public IRMutator {
   /// source and is rebased onto the source's extract when that was planned.
   void PlanDefinitionSiteExtracts(const std::vector<VarPtr>& slice_order, SliceStorageAnalysis& storage) {
     for (const auto& slice_var : slice_order) {
+      // Packed decoders read byte carriers at the consumer. Direct NZ casts
+      // need the original descriptor for their native alignment check.
+      if (packed_windows_.count(slice_var.get())) continue;
       auto& info = slices_.at(slice_var.get());
       RebaseOnPlannedSource(info, slice_var->span_);
       const auto* uses = storage.FindUses(slice_var.get());
@@ -1024,7 +1049,20 @@ class CanonicalizeMutator : public IRMutator {
     auto base = IRMutator::VisitStmt_(op);
     auto assign = As<AssignStmt>(base);
     if (!assign) return base;
+    // Packed views are metadata only. The cast reads their carriers at its use site.
+    if (packed_windows_.count(assign->var_.get())) return base;
     auto call = As<Call>(assign->value_);
+    if (call && IsOp(call, "tile.cast") && !call->args_.empty()) {
+      const auto source = AsVarLike(call->args_[0]);
+      const auto it = packed_windows_.find(source.get());
+      if (it != packed_windows_.end()) {
+        if (call->GetKwarg<TensorLayout>("layout", TensorLayout::ND) == TensorLayout::NZ) return base;
+        if (call->GetKwarg<DataType>("target_type") == DataType::BF16 &&
+            NeedsAlignedVecMaterialization(it->second)) {
+          return MaterializePackedCast(assign, call, source, it->second);
+        }
+      }
+    }
     if (call && call->op_ && IsOp(call, "tile.extract") && call->args_.size() == 4) {
       auto src = AsVarLike(call->args_[0]);
       auto it = src ? slices_.find(src.get()) : slices_.end();
@@ -1133,6 +1171,42 @@ class CanonicalizeMutator : public IRMutator {
     auto call = reg.Create("tile.extract", args, kwargs, span);
     auto var = std::make_shared<Var>(slice_var->name_hint_ + "_textract", call->GetType(), span);
     return std::make_shared<AssignStmt>(var, call, span);
+  }
+
+  // A5 can extract signed byte carriers at any column. Use the full parent's
+  // pitch for each row and decode from a fresh, aligned window-sized tile.
+  StmtPtr MaterializePackedCast(const AssignStmtPtr& assign, const CallPtr& cast, const VarPtr& window,
+                                const SliceInfo& info) {
+    const auto tile = As<TileType>(window->GetType());
+    const auto valid = GetValidShape(tile);
+    if (tile_view_semantics::HasZeroValidExtent(valid)) return assign;
+    const auto& span = cast->span_;
+    const auto columns = As<ConstInt>(tile->shape_[1]);
+    CHECK_SPAN(!columns || columns->value_ % kVecOperandAlignmentBytes == 0, span)
+        << "Decoding an unaligned FP4 slice requires a physical row width divisible by "
+        << kVecOperandAlignmentBytes
+        << " carrier bytes. Pad the slice's physical width and use valid_shape for the valid carriers.";
+    auto& registry = OpRegistry::GetInstance();
+    std::vector<StmtPtr> stmts;
+    auto bind = [&](const std::string& suffix, const CallPtr& value) {
+      auto var = std::make_shared<Var>(assign->var_->name_hint_ + suffix, value->GetType(), span);
+      stmts.push_back(std::make_shared<AssignStmt>(var, value, span));
+      return var;
+    };
+    const auto bytes = bind("_carriers", registry.Create("tile.reinterpret_view", {info.base},
+                                                         {{"dtype", DataType::INT8}}, span));
+    const auto shape = std::make_shared<MakeTuple>(tile->shape_, span);
+    auto copy = bind("_window", registry.Create("tile.extract", {bytes, info.off_row, info.off_col, shape},
+                                                {{"target_memory", MemorySpace::Vec}}, span));
+    if (!tile_view_semantics::ShapeExprListsEquivalent(valid, GetValidShape(As<TileType>(copy->GetType())))) {
+      copy = bind("_valid", registry.Create("tile.set_validshape", {copy, valid[0], valid[1]}, {}, span));
+    }
+    auto args = cast->args_;
+    args[0] =
+        bind("_packed", registry.Create("tile.reinterpret_view", {copy}, {{"dtype", tile->dtype_}}, span));
+    stmts.push_back(std::make_shared<AssignStmt>(
+        assign->var_, registry.Create("tile.cast", args, cast->kwargs_, span), span));
+    return SeqStmts::Flatten(std::move(stmts), span);
   }
 
   /// If `assign` is a matmul-family op with a Mat-slice lhs/rhs operand, return
@@ -1451,23 +1525,44 @@ class CanonicalizeMutator : public IRMutator {
 
   /// Own copy: planning rebases chained windows in place.
   std::unordered_map<const Var*, SliceInfo> slices_;
+  const std::unordered_map<const Var*, SliceInfo>& packed_windows_;
   const std::unordered_map<const Var*, ExprPtr>& scalar_defs_;
   /// Slice Var -> the `tile.extract` assignment that replaces its definition.
   std::unordered_map<const Var*, AssignStmtPtr> definition_site_extracts_;
 };
 
-/// Phase 3a — collect every Var *used* (referenced on a statement's RHS).  An
-/// AssignStmt's LHS is a definition, not a use, so it is deliberately skipped.
+/// Phase 3a — collect uses outside removable slices. A slice keeps its
+/// source live only if the slice itself is live.
 class VarUseCollector : public IRVisitor {
  public:
+  explicit VarUseCollector(const SliceCollector& collector) : collector_(collector) {}
   std::unordered_set<const Var*> used;
+  std::unordered_map<const Var*, const Var*> slice_sources;
 
  protected:
-  void VisitStmt_(const AssignStmtPtr& op) override { VisitExpr(op->value_); }
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    const auto var = op->var_.get();
+    if (collector_.slices.count(var) || collector_.packed_windows.count(var)) {
+      if (const auto source = AsVarLike(op->value_)) {
+        slice_sources.emplace(var, source.get());
+        return;
+      }
+      const auto call = As<Call>(op->value_);
+      if (call && (IsOp(call, "tile.slice") || IsOp(call, "tile.set_validshape"))) {
+        slice_sources.emplace(var, AsVarLike(call->args_[0]).get());
+        for (size_t i = 1; i < call->args_.size(); ++i) VisitExpr(call->args_[i]);
+        return;
+      }
+    }
+    VisitExpr(op->value_);
+  }
   void VisitVarLike_(const VarPtr& op) override {
     used.insert(op.get());
     IRVisitor::VisitVarLike_(op);
   }
+
+ private:
+  const SliceCollector& collector_;
 };
 
 /// Phase 3b — drop the AssignStmts whose result Var is in the `dead` set.
@@ -1508,35 +1603,32 @@ Pass CanonicalizeTileSlice() {
     // Phase 1 — index every canonical tile.slice.
     SliceCollector collector;
     collector.VisitStmt(func->body_);
-    if (collector.slices.empty()) return func;
+    if (collector.slice_order.empty()) return func;
 
     // Phase 2 — materialize Vec slices at their definition where that is
     // provably equivalent, then fold or materialize the remaining consumers.
     SliceStorageAnalysis storage;
     storage.VisitStmt(func->body_);
-    CanonicalizeMutator mutator(collector.slices, collector.scalar_defs);
+    CanonicalizeMutator mutator(collector);
     mutator.PlanDefinitionSiteExtracts(collector.slice_order, storage);
     auto new_body = mutator.VisitStmt(func->body_);
 
-    // Phase 3 — drop the slice defs that no longer have any use.  A chained
-    // slice (a slice of a slice) only becomes dead once the slice that consumes
-    // it is dropped, so iterate to a fixpoint — bounded by the slice count,
-    // since every non-terminating iteration drops at least one statement.  A
-    // slice still used at the end had a consumer this pass does not
-    // canonicalize; it is left intact (no regression versus the pre-pass IR).
-    for (size_t round = 0; round <= collector.slices.size(); ++round) {
-      VarUseCollector uses;
-      uses.VisitStmt(new_body);
-      std::unordered_set<const Var*> dead;
-      for (const auto& [slice_var, info] : collector.slices) {
-        if (uses.used.find(slice_var) == uses.used.end()) dead.insert(slice_var);
+    // Propagate liveness from each remaining slice to its parent in reverse
+    // definition order, including chains of windows with explicit validity.
+    VarUseCollector uses(collector);
+    uses.VisitStmt(new_body);
+    std::unordered_set<const Var*> dead;
+    for (auto it = collector.slice_order.rbegin(); it != collector.slice_order.rend(); ++it) {
+      const auto* var = it->get();
+      const auto source = uses.slice_sources.find(var);
+      if (source == uses.slice_sources.end()) continue;
+      if (uses.used.count(var)) {
+        uses.used.insert(source->second);
+      } else {
+        dead.insert(var);
       }
-      if (dead.empty()) break;
-      DropDeadSliceMutator dropper(dead);
-      auto dropped = dropper.VisitStmt(new_body);
-      if (dropped.get() == new_body.get()) break;  // nothing left to remove
-      new_body = dropped;
     }
+    if (!dead.empty()) new_body = DropDeadSliceMutator(dead).VisitStmt(new_body);
 
     if (new_body.get() == func->body_.get()) return func;
     auto new_func = MutableCopy(func);

@@ -38,8 +38,9 @@ def test_indexed_barrier(
         first, second, barrier = "vscatter", "vscatter", "vst.vst"
     elif hazard == "control":
         replacement = (
-            "      pto.vmi.vstore %x, %dst[%c0_index] : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>\n"
-            "      %reread = pto.vmi.vload %dst[%c0_index] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>"
+            "      pto.vmi.vstore %x, %dst[%c0_index] : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, index\n"
+            "      %reread = pto.vmi.vload %dst[%c0_index] : !pto.ptr<f32, ub>, index"
+            " -> !pto.vmi.vreg<64xf32>"
         )
         first, second, barrier = "vstsx1", "vldsx1", "vst.vld"
     else:
