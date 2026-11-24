@@ -38,6 +38,7 @@
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
+#include "src/ir/transforms/utils/var_value_collector.h"
 
 namespace pypto {
 namespace ir {
@@ -231,117 +232,6 @@ std::optional<TensorLayout> TensorLayoutOf(const TypePtr& type) {
   return tensor_type->tensor_view_->layout;
 }
 
-/// Every value each Var can hold in a function body: what an ``AssignStmt``
-/// binds it to (several before SSA), an ``IterArg``'s initial value and each
-/// value yielded back into it, and each value a loop or ``if`` result variable
-/// receives. A Var absent from the map is bound some other way.
-class VarValueCollector : public IRVisitor {
- public:
-  std::unordered_map<const Var*, std::vector<ExprPtr>> values;
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (op && op->var_) values[op->var_.get()].push_back(op->value_);
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    if (!op) return;
-    yield_targets_.push_back(RecordLoopCarried(op->iter_args_, op->return_vars_));
-    IRVisitor::VisitStmt_(op);
-    yield_targets_.pop_back();
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    if (!op) return;
-    yield_targets_.push_back(RecordLoopCarried(op->iter_args_, op->return_vars_));
-    IRVisitor::VisitStmt_(op);
-    yield_targets_.pop_back();
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    if (!op) return;
-    std::vector<const Var*> targets;
-    targets.reserve(op->return_vars_.size());
-    for (const auto& return_var : op->return_vars_) targets.push_back(return_var.get());
-    yield_targets_.push_back(std::move(targets));
-    IRVisitor::VisitStmt_(op);
-    yield_targets_.pop_back();
-  }
-
-  void VisitStmt_(const YieldStmtPtr& op) override {
-    if (op && !yield_targets_.empty()) {
-      const auto& targets = yield_targets_.back();
-      for (size_t i = 0; i < op->value_.size() && i < targets.size(); ++i) {
-        if (targets[i]) values[targets[i]].push_back(op->value_[i]);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  /// Per enclosing For / While / If, innermost last: the Vars its yields bind.
-  std::vector<std::vector<const Var*>> yield_targets_;
-
-  /// Record a loop's carried values; return the Vars its body's yields bind.
-  std::vector<const Var*> RecordLoopCarried(const std::vector<IterArgPtr>& iter_args,
-                                            const std::vector<VarPtr>& return_vars) {
-    std::vector<const Var*> targets;
-    targets.reserve(iter_args.size());
-    for (size_t i = 0; i < iter_args.size(); ++i) {
-      const auto& iter_arg = iter_args[i];
-      targets.push_back(iter_arg.get());
-      if (!iter_arg) continue;
-      values[iter_arg.get()].push_back(iter_arg->initValue_);
-      // The result holds the carried value after the last trip (or the initial
-      // value after none), which is exactly what the IterArg can hold.
-      if (i < return_vars.size() && return_vars[i]) values[return_vars[i].get()].push_back(iter_arg);
-    }
-    return targets;
-  }
-};
-
-// Classify event families without requiring a unique submission. Each loop carry
-// includes its initial value and backedge, so propagation also covers cycles.
-using EventVars = std::unordered_set<const Var*>;
-
-EventVars FindPrefetchEvents(const VarValueCollector& definitions) {
-  std::unordered_map<const Var*, std::vector<const Var*>> users;
-  std::vector<const Var*> sources, prefetch, unknown;
-  for (const auto& [var, values] : definitions.values) {
-    if (!IsA<AsyncEventType>(var->GetType())) continue;
-    for (const auto& value : values) {
-      if (auto source = AsVarLike(value)) {
-        sources.push_back(source.get());
-        users[source.get()].push_back(var);
-      } else if (IsOp(As<Call>(value), "prefetch.async_prefetch")) {
-        prefetch.push_back(var);
-      } else {
-        unknown.push_back(var);
-      }
-    }
-  }
-  const auto reachable = [&](std::vector<const Var*> work) {
-    EventVars visited;
-    while (!work.empty()) {
-      const auto* var = work.back();
-      work.pop_back();
-      if (!visited.insert(var).second) continue;
-      if (auto it = users.find(var); it != users.end()) {
-        work.insert(work.end(), it->second.begin(), it->second.end());
-      }
-    }
-    return visited;
-  };
-  auto known = reachable(std::move(prefetch));
-  // An opaque parameter or a carry without a prefetch seed is unknown. One
-  // unknown incoming path disqualifies a join, even if another path prefetches.
-  for (const auto* source : sources) {
-    if (!known.count(source)) unknown.push_back(source);
-  }
-  for (const auto* var : reachable(std::move(unknown))) known.erase(var);
-  return known;
-}
-
 /// Whether a ``tensor.slice`` takes the last two axes of its source whole: full
 /// extent at offset 0, and neither one dropped. Only such a slice selects whole
 /// matrices, whose bytes are the same run under ND and NZ order.
@@ -396,7 +286,7 @@ class AsyncHandleChecker : public IRVisitor {
   StmtPtr body_;
   std::vector<Diagnostic>& diagnostics_;
   std::optional<VarValueCollector> var_values_;
-  std::optional<EventVars> prefetch_events_;
+  std::optional<std::unordered_map<const Var*, bool>> prefetch_handles_;
   // Keep the SSA definition as well as its RHS: two executions of an identical
   // make_session call still produce distinct mutable session objects.
   struct Definition {
@@ -406,6 +296,7 @@ class AsyncHandleChecker : public IRVisitor {
   std::unordered_map<const Var*, Definition> async_definitions_;
   Definition ResolveAsyncDefinition(const ExprPtr& expr);
 
+  bool IsPrefetchHandle(const ExprPtr& expr);
   void CheckAsyncOperands(const CallPtr& op);
 };
 
@@ -431,6 +322,23 @@ bool IsTileAsyncTransfer(const CallPtr& op) {
   return IsOp(op, "pld.tile.get_async") || IsOp(op, "pld.tile.put_async");
 }
 
+bool AsyncHandleChecker::IsPrefetchHandle(const ExprPtr& expr) {
+  auto is_prefetch = [](const ExprPtr& value) {
+    auto call = As<Call>(value);
+    return IsOp(call, "prefetch.async_prefetch") || IsOp(call, "prefetch.session");
+  };
+  auto var = AsVarLike(expr);
+  if (!var) return is_prefetch(expr);
+  if (!prefetch_handles_) {
+    if (!var_values_) var_values_.emplace().VisitStmt(body_);
+    prefetch_handles_ = var_values_->CommonOrigins<bool>(
+        [](const TypePtr& type) { return IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type); },
+        [&](const ExprPtr& value) { return std::make_pair(AsVarLike(value).get(), is_prefetch(value)); });
+  }
+  auto it = prefetch_handles_->find(var.get());
+  return it != prefetch_handles_->end() && it->second;
+}
+
 void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   const auto mismatch = [&](const std::string& message) {
     diagnostics_.emplace_back(DiagnosticSeverity::Error, "AsyncHandleProvenance",
@@ -448,25 +356,21 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
     return;
   }
   if (op->args_.empty()) return;
+  if (IsOp(op, "prefetch.wait")) {
+    if (!IsPrefetchHandle(op->args_[0])) {
+      mismatch("requires an event traceable to prefetch.async_prefetch");
+    }
+    if (op->args_.size() == 2 && !IsPrefetchHandle(op->args_[1])) {
+      mismatch("requires a prefetch session traceable to prefetch.session on every path");
+    }
+    return;
+  }
   auto event = ResolveAsyncDefinition(op->args_[0]).value;
   auto field = As<TupleGetItemExpr>(event);
   auto submit = field && field->index_ == 1 ? As<Call>(ResolveAsyncDefinition(field->tuple_).value) : nullptr;
   const bool implicit_session = IsOp(submit, "pld.tensor.get_async_event");
   const bool explicit_session = IsTileAsyncTransfer(submit);
-  if (IsOp(op, "prefetch.wait")) {
-    bool is_prefetch = IsOp(As<Call>(event), "prefetch.async_prefetch");
-    if (!event && var_values_) {
-      if (!prefetch_events_) prefetch_events_ = FindPrefetchEvents(*var_values_);
-      is_prefetch = prefetch_events_->count(AsVarLike(op->args_[0]).get()) != 0;
-    }
-    if (!is_prefetch) {
-      mismatch("requires an event traceable to prefetch.async_prefetch");
-    }
-    if (op->args_.size() == 2 &&
-        IsOp(As<Call>(ResolveAsyncDefinition(op->args_[1]).value), "pld.system.make_session")) {
-      mismatch("requires a prefetch session");
-    }
-  } else if (!implicit_session && !explicit_session) {
+  if (!implicit_session && !explicit_session) {
     mismatch("requires a statically traceable distributed transfer event from this function");
   } else if (implicit_session && op->args_.size() == 2) {
     mismatch("requires the event-only form for tensor GET; omit the session argument");

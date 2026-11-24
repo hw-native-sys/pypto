@@ -66,7 +66,7 @@
 | **SimtOutputsMaterialized** | SimtOutputsMaterialized | 每个可写 Tile 使用独立的已初始化 SIMT 输出副本。 |
 | **SimtSpecialized** | SimtSpecialized | 每个 launch 的辅助函数资源与块维度及目标匹配。 |
 | **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性；调用边界 layout 一致性 |
-| **AsyncHandleProvenance** | AsyncHandleProvenance | 在 `ConvertToSSA` 后追溯分布式事件的提交来源，按 SSA 身份匹配 tile 提交和等待使用的显式 session。Tensor GET 的等待与移交只接收 event；prefetch 等待要求 event 可追溯到 prefetch 提交。 |
+| **AsyncHandleProvenance** | AsyncHandleProvenance | 在 `ConvertToSSA` 后追溯分布式事件的提交来源，按 SSA 身份匹配 tile 提交和等待使用的显式 session。Tensor GET 的等待与移交只接收 event；prefetch 等待要求所有到达路径上的 event 和 session 均来自 prefetch。 |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
 | **UseAfterDefCheck** | UseAfterDef | 每个 Var 使用均由定义支配（参数、AssignStmt、循环变量、iter_arg、return_var） |

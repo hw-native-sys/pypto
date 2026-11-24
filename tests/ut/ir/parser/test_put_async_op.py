@@ -285,6 +285,74 @@ def test_put_and_get_share_session_across_peers_and_completion_paths(ascend_back
     ir.assert_structural_equal(P, ir.deserialize(ir.serialize(P)))
 
 
+@pytest.mark.parametrize("direction", ["get", "put"])
+@pytest.mark.parametrize("session_window", ["a", "b"])
+def test_tile_session_matches_remote_window_parameter(
+    ascend_backend, default_pass_manager, direction, session_window
+):
+    # Both endpoints are windows. Only the remote one (a, through its GM view)
+    # determines the session, regardless of the local endpoint b.
+    dst, src = ("b", "view") if direction == "get" else ("view", "b")
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pld.DistributedTensor[[4, 8], pl.FP32], b: pld.DistributedTensor[[32], pl.FP32]):
+        view = pl.tensor.view(a, [32])
+        session = pld.system.make_session(pld.system.get_comm_ctx({session_window}))
+        out, event = pld.tile.{direction}_async({dst}, 1, {src}, session)
+        pld.system.wait_event(event, session)
+""")
+    if session_window == "a":
+        default_pass_manager.run_passes(program)
+    else:
+        with pytest.raises(ValueError, match="session from the same DistributedTensor parameter"):
+            default_pass_manager.run_passes(program)
+
+
+def test_get_then_put_on_distinct_remote_parameters(ascend_backend, default_pass_manager):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pld.DistributedTensor[[32], pl.FP32],
+            b: pld.DistributedTensor[[32], pl.FP32],
+            local: pl.Tensor[[32], pl.FP32],
+        ):
+            read_session = pld.system.make_session(pld.system.get_comm_ctx(a))
+            write_session = pld.system.make_session(pld.system.get_comm_ctx(b))
+            data, incoming = pld.tile.get_async(local, 1, a, read_session)
+            pld.system.wait_event(incoming, read_session)
+            _dst, outgoing = pld.tile.put_async(b, 1, data, write_session)
+            pld.system.defer_wait_event(outgoing, write_session)
+
+    assert str(default_pass_manager.run_passes(P)).count("pld.system.make_session(") == 2
+
+
+@pytest.mark.parametrize("backedge_window", ["a", "b"])
+def test_session_context_through_loop_and_branch(ascend_backend, default_pass_manager, backedge_window):
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pld.DistributedTensor[[32], pl.FP32], b: pld.DistributedTensor[[32], pl.FP32],
+               x: pl.Tensor[[32], pl.FP32], count: pl.Scalar[pl.INDEX], cond: pl.Scalar[pl.BOOL]):
+        ctx = pld.system.get_comm_ctx(a)
+        for _ in pl.range(count):
+            if cond:
+                ctx = pld.system.get_comm_ctx({backedge_window})
+        session = pld.system.make_session(ctx)
+        out, event = pld.tile.get_async(x, 1, a, session)
+        pld.system.wait_event(event, session)
+""")
+    if backedge_window == "a":
+        default_pass_manager.run_passes(program)
+    else:
+        with pytest.raises(ValueError, match="session from the same DistributedTensor parameter"):
+            default_pass_manager.run_passes(program)
+
+
 def test_reassigned_event_and_session_use_the_reaching_submission(ascend_backend):
     @pl.program
     class P:
@@ -414,6 +482,78 @@ def test_prefetch_wait_accepts_loop_carried_prefetch_event(ascend_backend):
             pl.prefetch.wait(event, session)
 
     _verify_through_ssa(P)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"), [("prefetch", "prefetch"), ("prefetch", "urma"), ("urma", "urma")]
+)
+def test_prefetch_wait_checks_session_on_every_branch(ascend_backend, default_pass_manager, first, second):
+    sessions = {"prefetch": "pl.prefetch.session(ctx)", "urma": "pld.system.make_session(comm)"}
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32], pl.FP32], window: pld.DistributedTensor[[32], pl.FP32],
+               cond: pl.Scalar[pl.BOOL]):
+        ctx = pl.prefetch.make_context()
+        comm = pld.system.get_comm_ctx(window)
+        event = pl.prefetch.async_prefetch(x, ctx)
+        if cond:
+            session = {sessions[first]}
+        else:
+            session = {sessions[second]}
+        pl.prefetch.wait(event, session)
+""")
+    if first == second == "prefetch":
+        default_pass_manager.run_passes(program)
+    else:
+        with pytest.raises(Error, match="prefetch.wait requires a prefetch session"):
+            default_pass_manager.run_passes(program)
+
+
+@pytest.mark.parametrize("completion", ["wait_event", "defer_wait_event"])
+def test_distributed_completion_rejects_mixed_session(ascend_backend, default_pass_manager, completion):
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32], pl.FP32], window: pld.DistributedTensor[[32], pl.FP32],
+               cond: pl.Scalar[pl.BOOL]):
+        submit_session = pld.system.make_session(pld.system.get_comm_ctx(window))
+        out, event = pld.tile.get_async(x, 1, window, submit_session)
+        if cond:
+            session = submit_session
+        else:
+            session = pl.prefetch.session(pl.prefetch.make_context())
+        pld.system.{completion}(event, session)
+""")
+    with pytest.raises(Error, match="requires an explicit session from pld.system.make_session"):
+        default_pass_manager.run_passes(program)
+
+
+@pytest.mark.parametrize("use_prefetch", [True, False])
+def test_prefetch_wait_checks_loop_carried_session(ascend_backend, default_pass_manager, use_prefetch):
+    replacement = "pl.prefetch.session(ctx)" if use_prefetch else "pld.system.make_session(comm)"
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32], pl.FP32], window: pld.DistributedTensor[[32], pl.FP32],
+               count: pl.Scalar[pl.INDEX], cond: pl.Scalar[pl.BOOL]):
+        ctx = pl.prefetch.make_context()
+        comm = pld.system.get_comm_ctx(window)
+        event = pl.prefetch.async_prefetch(x, ctx)
+        session = pl.prefetch.session(ctx)
+        for _ in pl.range(count):
+            if cond:
+                session = {replacement}
+        pl.prefetch.wait(event, session)
+""")
+    if use_prefetch:
+        default_pass_manager.run_passes(program)
+    else:
+        with pytest.raises(Error, match="prefetch.wait requires a prefetch session"):
+            default_pass_manager.run_passes(program)
 
 
 def test_prefetch_wait_rejects_unknown_event_after_branch(ascend_backend):
