@@ -48,6 +48,15 @@ mixed InCore 函数中旧的 `optimizations=[pl.split(pl.SplitMode.UP_DOWN)]`
 valid extent；这属于边界元数据，不是隐式改写计算或地址。现有传输可表示性约束
 仍适用；已删除的 AUTO 路径不再替用户重新平衡 ragged body 的分片。
 
+A2/A3 的 `UP_DOWN` shard 在整列有效、有效行数为静态偶数且物理分区无法由 C2V pipe
+表示时，按有效行数平分。64 行容量、40 行有效的 tile 切成两段各 20 行。生成的 TPOP
+从 GM 槽位的第 0、20 行起读，每条 lane 的 tile 容量为 32 行。region 中依赖此分区的
+load 和 store 使用 `lane * 20` 作为行偏移，每次 store 只写其有效的 20 行。
+可表示的物理分区沿用模型原有的分段方式。
+
+该 fallback 依赖 A2/A3 真机的 GM FIFO。CPU 模拟器按物理半幅打包偶数行切分，因此生成的
+wrapper 在模拟编译时会对需要更小有效行步长的 kernel 报错。
+
 非 region scope 应已完成 outlining。隐藏在未展开 scope 后的区域，或区域中仍存活
 的 scope，会收到明确诊断。
 

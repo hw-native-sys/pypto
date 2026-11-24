@@ -547,13 +547,15 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
         INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
             << "Internal error: " << *reshape_name << " must carry exactly one tile argument, got "
             << call->args_.size();
-        boundary_moves[stmt.get()] = CVBoundaryMove{SplitReshapeDirection(*reshape_name),
-                                                    assign->var_,
-                                                    call->args_[0],
-                                                    call->GetType(),
-                                                    /*op_driven=*/true,
-                                                    call->GetKwarg<int>("split", 0),
-                                                    call->GetKwarg<int>("lane_stride", 0)};
+        const auto direction = SplitReshapeDirection(*reshape_name);
+        const int split = call->GetKwarg<int>("split", 0);
+        int lane_stride = call->GetKwarg<int>("lane_stride", 0);
+        if (direction == CVDirection::CUBE_TO_VECTOR && split == kSplitUpDown && lane_stride == 0) {
+          lane_stride = split_axis::InferA2A3RowShardStride(call->args_[0]->GetType(), /*split_dim=*/0);
+        }
+        boundary_moves[stmt.get()] =
+            CVBoundaryMove{direction,          assign->var_, call->args_[0], call->GetType(),
+                           /*op_driven=*/true, split,        lane_stride};
       } else if (call) {
         auto dir = ClassifyMoveDirection(call);
         if (dir != CVDirection::NONE) {

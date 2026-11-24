@@ -297,10 +297,13 @@ class TestNarrowedAccEpilogue:
         assert result.passed, f"carried accumulator failed: {result.error}"
 
 
-def _explicit_split_epilogue(mode: pl.SplitMode, valid_rows: int):
+def _explicit_split_epilogue(mode: pl.SplitMode, valid_rows: int, *, balanced_rows: bool = False):
     """An explicit split region over an accumulator narrowed through its left operand."""
 
     row_step = M_TILE // 2 if mode == pl.SplitMode.UP_DOWN else 0
+    lane_rows = M_TILE - row_step
+    if balanced_rows:
+        row_step = valid_rows // 2
     col_step = N_TILE // 2 if mode == pl.SplitMode.LEFT_RIGHT else 0
 
     @pl.jit
@@ -316,7 +319,7 @@ def _explicit_split_epilogue(mode: pl.SplitMode, valid_rows: int):
                 shard = pl.aiv_shard(acc)
                 row = lane * row_step
                 col = lane * col_step
-                out[row : row + (M_TILE - row_step), col : col + (N_TILE - col_step)] = pl.cast(
+                out[row : row + lane_rows, col : col + (N_TILE - col_step)] = pl.cast(
                     shard, target_type=pl.FP32, mode="none"
                 )
         return out
@@ -475,6 +478,11 @@ def _split_case(kernel, valid_rows: int, name: str, *, runtime_extent: bool = Fa
         _explicit_split_epilogue(pl.SplitMode.LEFT_RIGHT, 40), 40, "narrowed_acc_explicit_split_lr_v40"
     ),
     _split_case(narrowed_acc_explicit_split, VALID_ROWS, "narrowed_acc_explicit_split_ud_v16"),
+    _split_case(
+        _explicit_split_epilogue(pl.SplitMode.UP_DOWN, 40, balanced_rows=True),
+        40,
+        "narrowed_acc_explicit_split_ud_v40_balanced",
+    ),
 )
 def test_vector_epilogue_across_a_split_boundary(case_run):
     """A compact accumulator crosses a split C2V boundary at its own row extent."""
@@ -507,10 +515,9 @@ def test_explicit_runtime_split_reports_unsupported_consumers(kernel, message):
         kernel.lower(config=RunConfig(platform="a2a3"))
 
 
-@pytest.mark.parametrize("valid_rows", [33, 40])
-def test_explicit_static_split_does_not_rebalance_ragged_rows(valid_rows):
-    """The authored box partition is preserved instead of rebalancing its valid rows."""
-    kernel = _explicit_split_epilogue(pl.SplitMode.UP_DOWN, valid_rows)
+def test_explicit_static_split_reports_unrepresentable_odd_rows():
+    """The valid-row fallback handles even extents."""
+    kernel = _explicit_split_epilogue(pl.SplitMode.UP_DOWN, 33)
     with pytest.raises(ValueError, match="leaves the two AIV lanes"):
         kernel.lower(config=RunConfig(platform="a2a3"))
 

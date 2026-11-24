@@ -58,6 +58,18 @@ metadata, not implicit rewriting of the author's compute or addresses. The
 existing transport representability restrictions still apply. The removed AUTO
 path no longer rebalances a ragged body's partition on the author's behalf.
 
+An A2/A3 `UP_DOWN` shard with full columns can balance a static, even valid
+row count when the box partition cannot be represented by the C2V pipe. A
+64-row tile with 40 valid rows splits into two 20-row bands. The generated
+TPOP uses row offsets 0 and 20 in the GM slot and reserves a 32-row tile per
+lane. Use `lane * 20` for the region's loads and stores that follow this
+partition. The 20 valid rows limit each store to its own band. Representable
+box partitions retain their authored geometry.
+
+This fallback requires the A2/A3 device GM FIFO. The CPU simulator packs even
+row splits using physical halves, so the generated wrapper reports a compile
+error if a kernel needs a smaller valid-row stride.
+
 Non-region scopes must already have been outlined. A region hidden behind such
 a scope, or a surviving scope inside a region, produces a diagnostic.
 
