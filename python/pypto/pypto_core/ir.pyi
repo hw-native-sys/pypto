@@ -1119,7 +1119,7 @@ class PrefetchAsyncContextType(Type):
         ...
 
 class AsyncEventType(Type):
-    """Singleton marker type for ``prefetch.async_prefetch`` outputs.
+    """Opaque event type shared by asynchronous prefetch and distributed PUT/GET.
 
     Opaque handle to an in-flight asynchronous DMA completion event. Paired
     with an :class:`AsyncSessionType` in ``prefetch.wait``; lowers to PTOAS
@@ -1133,7 +1133,7 @@ class AsyncEventType(Type):
         ...
 
 class AsyncSessionType(Type):
-    """Singleton marker type for ``prefetch.session`` outputs.
+    """Opaque session type shared by asynchronous prefetch and distributed PUT/GET.
 
     Opaque handle to the asynchronous DMA session an event belongs to. Paired
     with an :class:`AsyncEventType` in ``prefetch.wait``; lowers to PTOAS
@@ -3624,6 +3624,9 @@ def get_op_lane_invariant_arg(op_name: str, arg_index: int) -> LaneInvariantArg 
         Exception: If operator is not registered
     """
 
+def get_op_tuple_result_aliases(op_name: str) -> dict[int, int]:
+    """Map tuple result indices to the input tensor arguments they alias."""
+
 def get_op_output_arity(op_name: str) -> int:
     """Number of values an operator produces.
 
@@ -3642,12 +3645,14 @@ def get_op_output_arity(op_name: str) -> int:
         Exception: If operator is not registered
     """
 
+def get_op_mutable_session_arg(op_name: str) -> int | None:
+    """Index of the mutable AsyncSession argument, if present."""
+
 def op_arg_is_workspace(op_name: str, arg_index: int) -> bool:
     """Whether an argument is compiler-supplied scratch rather than a result.
 
-    A Functional-stage multi-output operator may write through an argument only when that
-    argument is declared a workspace; an undeclared written argument is a
-    destination tile leaked into the argument list.
+    A Functional-stage multi-output operator declares its written arguments as
+    workspace or as tensor operands returned through a specified tuple element.
 
     Args:
         op_name: Name of the operator

@@ -11,7 +11,7 @@
 
 /**
  * @file get_async.cpp
- * @brief Asynchronous cross-rank tensor read - ``pld.tensor.get_async``.
+ * @brief Cross-rank URMA GET with either task-owned or explicit event completion.
  *
  * V1 of task 25.3 exposes an asynchronous URMA read. The op is the async
  * sibling of ``pld.tensor.get`` with the following contract:
@@ -50,6 +50,7 @@
 
 #include <any>
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,33 +70,40 @@ namespace {
 
 constexpr const char* kOpName = "pld.tensor.get_async";
 
+// All async GET forms have the same local and remote GM endpoint contract.
+void ValidateGetEndpoints(const std::vector<ExprPtr>& args, const std::string& op_name,
+                          bool require_same_shape) {
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << op_name << " positional argument #" << i << " must not be null";
+  }
+  auto dst_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(dst_type) << op_name << " dst must be a Tensor, got " << args[0]->GetType()->TypeName();
+  comm_op::ValidateAsyncPeer(args[1], op_name);
+  auto src_type = As<DistributedTensorType>(args[2]->GetType());
+  CHECK(src_type) << op_name << " src must be a DistributedTensor (window-bound), got "
+                  << args[2]->GetType()->TypeName();
+  CHECK(dst_type->dtype_ == src_type->dtype_)
+      << op_name << " dst and src must have the same element type, got dst " << args[0]->GetType()->TypeName()
+      << " vs src " << args[2]->GetType()->TypeName();
+
+  // No packing or staging is provided, so both physical views must be dense row-major.
+  comm_op::ValidateAsyncEndpointView(dst_type, op_name, "dst");
+  comm_op::ValidateAsyncEndpointView(src_type, op_name, "src");
+
+  comm_op::ValidateTransferShapeContract(dst_type->shape_, src_type->shape_, op_name, require_same_shape);
+}
+
 TypePtr DeduceGetAsyncType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 3 || args.size() == 6) << kOpName
                                               << " requires 3 positional arguments (dst, peer, src) or 6 "
                                                  "(dst, peer, src, dst_offsets, src_offsets, shape), but got "
                                               << args.size();
-  for (size_t i = 0; i < args.size(); ++i) {
-    CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
-  }
 
-  auto dst_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(dst_type) << kOpName << " dst must be a Tensor, got " << args[0]->GetType()->TypeName();
-  comm_op::ValidateAsyncPeer(args[1], kOpName);
-  auto src_type = As<DistributedTensorType>(args[2]->GetType());
-  CHECK(src_type) << kOpName << " src must be a DistributedTensor (window-bound), got "
-                  << args[2]->GetType()->TypeName();
-  CHECK(dst_type->dtype_ == src_type->dtype_)
-      << kOpName << " dst and src must have the same element type, got dst " << args[0]->GetType()->TypeName()
-      << " vs src " << args[2]->GetType()->TypeName();
-
-  // No packing or staging is provided, so both physical views must be dense row-major.
-  comm_op::ValidateAsyncEndpointView(dst_type, kOpName, "dst");
-  comm_op::ValidateAsyncEndpointView(src_type, kOpName, "src");
-
-  comm_op::ValidateTransferShapeContract(dst_type->shape_, src_type->shape_, kOpName,
-                                         /*require_same_shape=*/args.size() == 3);
+  ValidateGetEndpoints(args, kOpName, args.size() == 3);
   if (args.size() == 6) {
+    auto dst_type = AsTensorTypeLike(args[0]->GetType());
+    auto src_type = As<DistributedTensorType>(args[2]->GetType());
     comm_op::ValidateAsyncIntegerRegionArgs(args, 3, kOpName);
     const auto transfer_shape =
         comm_op::ValidateRegionArgs(args, 3, dst_type->shape_, src_type->shape_, kOpName);
@@ -151,6 +159,55 @@ REGISTER_OP("pld.tensor.get_async")
     .set_output_reuses_input(0)
     .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeduceGetAsyncType);
+
+REGISTER_OP("pld.tensor.get_async_event")
+    .set_description("Submit a single-peer URMA GET and return (destination, completion event).")
+    .set_op_category("DistributedOp")
+    .add_argument("dst", "Local GM destination tensor")
+    .add_argument("peer", "Remote rank")
+    .add_argument("src", "Remote window-bound source tensor")
+    .set_attr<int>("engine")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .no_memory_spec()
+    .set_output_arity(2)
+    .set_tuple_result_alias(0, 0)
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_arg_effect(1, ArgEffect::Read)
+    .set_arg_effect(2, ArgEffect::Read)
+    .set_write_channel(WriteChannel::Dma)
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const comm_op::Kwargs& kwargs) -> TypePtr {
+      const std::string name = "pld.tensor.get_async_event";
+      CHECK(args.size() == 3) << name << " requires (dst, peer, src)";
+      ValidateGetEndpoints(args, name, true);
+      comm_op::ValidateAsyncEngine(kwargs, name);
+      return std::make_shared<TupleType>(std::vector<TypePtr>{args[0]->GetType(), GetAsyncEventType()});
+    });
+
+REGISTER_OP("pld.tile.get_async")
+    .set_description(
+        "Submit a single-peer GET using an existing URMA session and return (destination, completion event).")
+    .set_op_category("DistributedOp")
+    .add_argument("dst", "Local GM destination tensor")
+    .add_argument("peer", "Remote rank")
+    .add_argument("src", "Remote window-bound source tensor")
+    .add_argument("session", "URMA session for the source communication domain")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .no_memory_spec()
+    .set_output_arity(2)
+    .set_tuple_result_alias(0, 0)
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_arg_effect(1, ArgEffect::Read)
+    .set_arg_effect(2, ArgEffect::Read)
+    .set_mutable_session_arg(3)
+    .set_write_channel(WriteChannel::Dma)
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const comm_op::Kwargs& kwargs) -> TypePtr {
+      const std::string name = "pld.tile.get_async";
+      CHECK(args.size() == 4) << name << " requires (dst, peer, src, session)";
+      CHECK(kwargs.empty()) << name << " takes no kwargs";
+      ValidateGetEndpoints(args, name, true);
+      CHECK(IsA<AsyncSessionType>(args[3]->GetType())) << name << " expects an AsyncSession";
+      return std::make_shared<TupleType>(std::vector<TypePtr>{args[0]->GetType(), GetAsyncEventType()});
+    });
 
 }  // namespace ir
 }  // namespace pypto

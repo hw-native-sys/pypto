@@ -16,6 +16,7 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 | **SyncOp** | UnknownType (barriers); ScalarType (task / launch queries) | Pipeline barriers, synchronization, TaskId and SPMD launch-shape queries | `src/ir/op/sync_ops/` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV cross-core communication | `src/ir/op/sync_ops/cross_core.cpp` |
 | **PrefetchOp** | Opaque handles | Asynchronous GM→L2 cache prefetch | `src/ir/op/prefetch/prefetch_async.cpp` |
+| **DistributedOp** | GM tensors and opaque handles | [Explicit PUT and GET completion](../distributed_ops.md) | `src/ir/op/distributed/` |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
 
@@ -175,6 +176,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `no_arg_writes()` | Classified: writes through no argument | `.no_arg_writes()` |
 | `set_write_channel(c)` | Hardware path the op's writes take | `.set_write_channel(WriteChannel::Dma)` |
 | `set_output_arity(N)` | Values produced; `N > 1` means a `TupleType` result — see [Multi-Output Operators](09-multi_output_ops.md) | `.set_output_arity(2)` |
+| `set_tuple_result_alias(result, arg)` | Tuple element returning an existing destination tensor | `.set_tuple_result_alias(0, 0)` |
 | `set_workspace_arg(i)` | Argument `i` is compiler-supplied scratch, not a result | `.set_workspace_arg(2)` |
 
 ### Argument effects
@@ -876,6 +878,17 @@ class CrossCoreExample:
 ```
 
 See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Buffer Management](../../reference/pto-isa/02-buffer_management.md) for hardware details.
+
+## Distributed PUT and GET completion
+
+| Operator | Result |
+| -------- | ------ |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | An AIV-local session reusable across peers and transfer directions |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | A pair containing an alias of the local destination and a completion event |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the local destination |
+| `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the remote destination window |
+| `pld.system.wait_event(event[, session])` | A BOOL success flag after waiting in the issuing kernel |
+| `pld.system.defer_wait_event(event[, session])` | A statement registering the event for completion by the issuing task |
 
 ## PrefetchOp: Asynchronous GM→L2 Prefetch
 

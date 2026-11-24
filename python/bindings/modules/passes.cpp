@@ -179,7 +179,9 @@ void BindPass(nb::module_& m) {
       .value("SimtValid", IRProperty::SimtValid, "Canonical SIMT helper and launch contracts")
       .value("SimtOutputsMaterialized", IRProperty::SimtOutputsMaterialized,
              "Writable SIMT Tiles have dedicated initialized output storage")
-      .value("SimtSpecialized", IRProperty::SimtSpecialized, "SIMT helper resources match their launches");
+      .value("SimtSpecialized", IRProperty::SimtSpecialized, "SIMT helper resources match their launches")
+      .value("AsyncHandleProvenance", IRProperty::AsyncHandleProvenance,
+             "Distributed async events and sessions trace to matching SSA definitions");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -515,7 +517,9 @@ void BindPass(nb::module_& m) {
       .value("BUFFER_DESCRIPTOR_MISMATCH", typecheck::ErrorType::BUFFER_DESCRIPTOR_MISMATCH,
              "Buffer descriptor or multi-buffer slot count mismatch")
       .value("TENSOR_LAYOUT_MISMATCH", typecheck::ErrorType::TENSOR_LAYOUT_MISMATCH,
-             "Call argument layout differs from the callee parameter's");
+             "Call argument layout differs from the callee parameter's")
+      .value("ASYNC_HANDLE_MISMATCH", typecheck::ErrorType::ASYNC_HANDLE_MISMATCH,
+             "A communication event or session has the wrong producer");
 
   // Bind NestedCallErrorType enum
   nb::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")

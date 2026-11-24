@@ -41,6 +41,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // Register all built-in property verifiers
   Register(IRProperty::SSAForm, CreateSSAPropertyVerifier);
   Register(IRProperty::TypeChecked, CreateTypeCheckPropertyVerifier);
+  Register(IRProperty::AsyncHandleProvenance, CreateAsyncHandleProvenanceVerifier);
   Register(IRProperty::NoNestedCalls, CreateNoNestedCallPropertyVerifier);
   Register(IRProperty::NormalizedStmtStructure, CreateNormalizedStmtPropertyVerifier);
   Register(IRProperty::NoRedundantBlocks, CreateNoRedundantBlocksPropertyVerifier);

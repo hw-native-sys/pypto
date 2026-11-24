@@ -2,9 +2,9 @@
 
 ## 概述
 
-有些硬件指令会产生多个结果。PTOAS `TGATHER` 的 compare 形式同时写出收集到的索引和每行的匹配计数，`pto.tgather` 把它们写作两个 `outs(...)` 操作数。包装这类指令的算子就是**多输出算子 (multi-output operator)**，PyPTO 用 `TupleType` 表达它的结果，绝不用目的参数 (destination argument)。
+有些硬件指令会产生多个结果。PTOAS `TGATHER` 的 compare 形式同时写出收集到的索引和每行的匹配计数，`pto.tgather` 把它们写作两个 `outs(...)` 操作数。包装这类指令的算子就是**多输出算子 (multi-output operator)**，PyPTO 用 `TupleType` 表达它的结果。
 
-**规则**：注册时只写*输入*。每个输出都是 `f_deduce_type` 返回的 `TupleType` 中的一个元素。
+每个输出都是 `f_deduce_type` 返回的 `TupleType` 中的一个元素。编译器为新 tile 结果分配存储。原地更新已有 GM 张量时，用 `set_tuple_result_alias(result, arg)` 声明元组元素与输入的别名关系。例如 `pld.tensor.get_async_event` 的第 0 项与目标张量共享存储，第 1 项是新 event。
 
 参见 [算子系统](05-operators.md) 了解通用注册 API，[类型与示例](02-types.md#tupletype) 了解 `TupleType` 本身。
 
@@ -64,12 +64,14 @@ REGISTER_OP("tile.gather_compare")
 
 ### 暂存空间与目的地
 
-被写入的参数只可能是两者之一，注册必须说清是哪一个：
+注册时须说明每个被写入参数的用途。
 
 | 种类 | 示例 | 声明方式 |
 | ---- | ---- | -------- |
 | **暂存空间 (workspace)**——硬件 scratch，不承载任何人读取的结果 | `tile.gather_compare` 的 `tmp`，由 `ConvertTensorToTileOps` 合成 | `set_arg_effect(i, ArgEffect::Write)` + `set_workspace_arg(i)` |
-| **目的地 (destination)**——调用方要读取的结果 | `dst`、`cdst` | 根本不是参数——它是 `TupleType` 的元素 |
+| **新分配的目标** | 收集的索引和每行的计数 | 每个结果作为元组元素返回 |
+| **已有目标** | GET 的本地目标或 PUT 的远端窗口 | 声明写入效果，并用 `set_tuple_result_alias(result, arg)` 指定别名 |
+| **可变 session** | Tile PUT 与 GET 共用的提交队列 | `set_mutable_session_arg(i)` 将 `AsyncSession` 参数声明为可读写 |
 
 这个区分不是修辞。暂存空间由合成它的 pass 分配且从不被读取，因此不需要 SSA 结果；目的地则是程序后续要使用的值。
 
@@ -77,12 +79,12 @@ REGISTER_OP("tile.gather_compare")
 
 两道检查，都会大声失败，而不是让泄漏溜到设备上。
 
-**import 期**——`OpRegistry::ValidateMultiOutputOps()` 遍历所有 arity > 1 的算子，拒绝三种形状：
+**import 期**——`OpRegistry::ValidateMultiOutputOps()` 遍历所有 arity > 1 的算子，会拒绝下表中的注册方式。
 
 | 被拒绝的情况 | 原因 |
 | ------------ | ---- |
 | 存在未声明效应的参数 | 默认的 `Read` 与藏起来的目的地无法区分 |
-| 被写入却未声明为 workspace 的参数 | 它要么是必须自报家门的 scratch，要么是本该放进 `TupleType` 的目的地 |
+| 写入的参数未声明用途 | 应标明暂存区、返回的目标张量别名或可变 session |
 | `set_workspace_arg(i)` 指向不存在的参数 | 越界的下标是一个笔误，它什么也保护不了 |
 | 声明为 workspace 却从不被写入的参数 | scratch 按定义就是硬件会写的。把它声明成 `Read`——或者经由 `no_arg_writes()` 落到 `Read`——依然是那条被丢掉的依赖边，只是外面套了一个说法相反的标记 |
 | `set_output_reuses_input(N)` | 有多个结果时，"输出复用输入 N"说不清是哪一个输出 |
@@ -156,7 +158,7 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
 
 1. 只注册输入；加上 `set_output_arity(N)`。
 2. 用 `set_arg_effect` 对**每一个**参数分类；若该算子不通过任何参数写入，则用 `no_arg_writes()`。import 期检查要求每个参数都有明确结论。
-3. 给任何被写入的参数标记 `set_workspace_arg(i)`——如果它不是 scratch，那它就是目的地，不该出现在参数列表里。
+3. 用 `set_workspace_arg(i)` 标记暂存区。若结果原地更新已有 GM 张量，用 `set_tuple_result_alias(result, i)` 声明对应的结果元素并标明参数的读写效果。
 4. 从 `f_deduce_type` 返回 N 元 `TupleType`。
 5. DSL 包装器返回一组指向同一个 call 的 `TupleGetItemExpr(call, i)`——解析器的解包路径认这个形状。
 6. codegen emitter 使用 `PrepareTupleOutputs(op)` 编写。

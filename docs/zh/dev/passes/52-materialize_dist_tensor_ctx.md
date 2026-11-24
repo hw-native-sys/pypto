@@ -71,6 +71,8 @@ property verifier 再独立校验一遍——这也覆盖了「程序里没有�
 host window buffer 已由 `MaterializeCommDomainScopes` 填好，host tensor
 collective 也已降低完成，同时后续仍有一次 simplify 可清理转发别名。
 
+对于 InCore 中的 tile PUT 和 GET，本 pass 检查 session 的上下文与远端窗口是否源自同一个分布式张量形参。PUT 检查目标，GET 检查源，视图沿用其输入形参的上下文。若 session 可能来自另一个形参，编译时报错。
+
 ## 与 dynamic dim 的区别
 
 dynamic dim 可以在 wrapper 边界从 tensor descriptor 本地恢复；CommCtx 不行。

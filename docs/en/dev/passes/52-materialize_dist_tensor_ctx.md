@@ -87,6 +87,8 @@ The pass runs after `LowerHostTensorCollectives` and before the final
 there is still time for the final simplify pass to clean up any forwarding
 aliases.
 
+For InCore tile PUT and GET, the pass resolves the session context and the remote window to the same distributed-tensor parameter. PUT uses the destination, GET uses the source, and views inherit their input parameter’s context. A session that may come from a different parameter is rejected.
+
 ## Why CommCtx Is Different From Dynamic Dims
 
 Dynamic tensor dimensions can be recovered locally from tensor descriptors at

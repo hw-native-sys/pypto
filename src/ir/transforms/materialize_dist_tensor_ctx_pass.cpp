@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
+#include "src/ir/transforms/utils/var_value_collector.h"
 
 namespace pypto {
 namespace ir {
@@ -156,6 +157,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
 
   FunctionPtr VisitFunction(const FunctionPtr& func) override {
     current_func_ = func;
+    handle_contexts_.reset();
     current_plan_ = nullptr;
     current_alias_to_ctx_.clear();
     current_tuple_to_ctx_.clear();
@@ -274,6 +276,18 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
       return ctx;
     }
 
+    const bool is_put = IsOp(call, "pld.tile.put_async");
+    if (IsInCoreType(current_func_->func_type_) && (is_put || IsOp(call, "pld.tile.get_async"))) {
+      const auto& window = call->args_[is_put ? 0 : 2];
+      auto remote_ctx = LookupExistingCtx(window);
+      auto session_ctx = LookupSessionCtx(op->args_[3]);
+      CHECK_SPAN(remote_ctx && session_ctx == remote_ctx, call->span_)
+          << call->op_->name_
+          << " requires a session from the same DistributedTensor parameter as its remote "
+          << (is_put ? "destination " : "source ") << DescribeDistValue(window);
+      return call;
+    }
+
     auto callee = ResolveCallee(call->op_);
     if (!callee) return call;
     auto plan_it = plans_.find(callee->name_);
@@ -379,6 +393,28 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     return returned_ctxs.size() == 1 ? returned_ctxs[0] : nullptr;
   }
 
+  // Trace the original get_comm_ctx queries to the same parameter identities
+  // used to lower them. A session inherits the window identity of its context.
+  VarPtr LookupSessionCtx(const ExprPtr& session) {
+    auto source = [&](const ExprPtr& expr) -> std::pair<const Var*, VarPtr> {
+      auto call = As<Call>(expr);
+      const auto& ctx = IsOp(call, "pld.system.make_session") ? call->args_.front() : expr;
+      auto query = As<Call>(ctx);
+      if (IsOp(query, "pld.system.get_comm_ctx")) return {nullptr, LookupExistingCtx(query->args_.front())};
+      return {AsVarLike(ctx).get(), nullptr};
+    };
+    const auto [var, ctx] = source(session);
+    if (!var) return ctx;
+    if (!handle_contexts_) {
+      VarValueCollector definitions;
+      definitions.VisitStmt(current_func_->body_);
+      handle_contexts_ = definitions.CommonOrigins<VarPtr>(
+          [](const TypePtr& t) { return IsA<AsyncSessionType>(t) || IsA<CommCtxType>(t); }, source);
+    }
+    auto it = handle_contexts_->find(var);
+    return it == handle_contexts_->end() ? nullptr : it->second;
+  }
+
   ExprPtr GetCtxForArg(const ExprPtr& arg, const Span& span) {
     if (!IsDistTensor(arg)) return nullptr;
     if (auto ctx = LookupExistingCtx(arg)) return ctx;
@@ -426,6 +462,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
   const FunctionCtxPlan* current_plan_ = nullptr;
   std::unordered_map<const Var*, VarPtr> current_alias_to_ctx_;
   std::unordered_map<const Var*, std::vector<VarPtr>> current_tuple_to_ctx_;
+  std::optional<std::unordered_map<const Var*, VarPtr>> handle_contexts_;
   std::vector<StmtPtr> pending_prefix_;
   std::unordered_set<std::string> local_ctx_names_;
   bool can_emit_prefix_ = false;
