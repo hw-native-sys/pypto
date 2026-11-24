@@ -214,7 +214,7 @@ def _build_aic_gather_program():
 # ---------------------------------------------------------------------------
 
 
-def _build_shard_program(box_rows, valid_rows, lane_stride=None):
+def _build_shard_program(box_rows, valid_rows, lane_stride=None, *, compact_acc=False):
     """The same C->V shard over a [box_rows, 128] cube tile valid to `valid_rows`.
 
     Only the split code is under test here, so the body stops at the shard: its
@@ -227,9 +227,10 @@ def _build_shard_program(box_rows, valid_rows, lane_stride=None):
         valid_shape=[
             ir.ConstInt(valid_rows, DataType.INDEX, span),
             ir.ConstInt(128, DataType.INDEX, span),
-        ]
+        ],
+        compact=ir.CompactMode.normal if compact_acc else ir.CompactMode.null,
     )
-    qk = ir.Var("qk", _tile([box_rows, 128], view, MS.Vec), span)
+    qk = ir.Var("qk", _tile([box_rows, 128], view, MS.Acc if compact_acc else MS.Vec), span)
     half_rows = (box_rows + 1) // 2
     out_0 = ir.Var("out_0", ir.TensorType([half_rows, 128], FP32), span)
 
@@ -288,6 +289,12 @@ def test_folded_transport_carries_the_pto_isa_split_code(
     stride_attr = "" if lane_stride is None else f", lane_stride={lane_stride}"
     assert f"pl.tile.tpush_to_aiv(qk, split={expected_code}{stride_attr})" in printed, why
     assert f"pl.tile.tpop_from_aic(split={expected_code}{stride_attr})" in printed, why
+
+
+def test_folded_a5_compact_shard_preserves_the_box_partition():
+    printed = ir.python_print(_expand(_build_shard_program(16, 8, compact_acc=True)))
+    assert "pl.tile.tpush_to_aiv(qk, split=1, lane_stride=8)" in printed
+    assert "pl.tile.tpop_from_aic(split=1)" in printed
 
 
 def test_folded_transport_carries_the_left_right_odd_code():

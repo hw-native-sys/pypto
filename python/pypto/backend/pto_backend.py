@@ -54,6 +54,7 @@ from pypto._function_attrs import (
 )
 from pypto._target import runtime_implementation_name
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
+from pypto.backend._ptoas_config import PTOAS_BUFFER_ID_SYNC_MARKER
 from pypto.backend._ptoas_config import PTOAS_TIMEOUT_ENV as _PTOAS_TIMEOUT_ENV
 from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
 from pypto.backend._ptoas_fp4 import check_native_fp4_mx_support, uses_native_fp4_mx
@@ -1737,6 +1738,8 @@ def _build_group_mapping(
 def _get_ptoas_flags(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     passes_dump_dir: str | None = None,
+    *,
+    buffer_id_sync: bool = False,
 ) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
 
@@ -1748,7 +1751,7 @@ def _get_ptoas_flags(
     """
     level = "level2" if memory_planner == _passes.MemoryPlanner.PTOAS else "level3"
     flags = [
-        "--enable-insert-sync",
+        "--enable-bufid_sync" if buffer_id_sync else "--enable-insert-sync",
         f"--pto-level={level}",
     ]
     if passes_dump_dir is not None:
@@ -1870,10 +1873,11 @@ def _compile_pto_module(
     is_vpto = 'pto.backend = "vpto"' in pto_code.partition("\n")[0]
     suffix = "o" if is_vpto else "cpp"
     compiled_path = os.path.join(ptoas_dir, f"{unit_name}.{suffix}")
+    buffer_id_sync = PTOAS_BUFFER_ID_SYNC_MARKER in pto_code.splitlines()
     _run_ptoas(
         pto_path,
         compiled_path,
-        ptoas_flags=_get_ptoas_flags(memory_planner, passes_dump_dir),
+        ptoas_flags=_get_ptoas_flags(memory_planner, passes_dump_dir, buffer_id_sync=buffer_id_sync),
     )
 
     if is_vpto:
@@ -1935,6 +1939,24 @@ def _emit_single_function_output(
         result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
 
 
+def _requests_buffer_id_sync(func: _ir_core.Function) -> bool:
+    enabled = dict(func.attrs).get("ptoas_buffer_id_sync", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("ptoas_buffer_id_sync must be a Boolean function attribute")
+    return enabled
+
+
+def _group_memory_planner(
+    members: list[_ir_core.Function], default: _passes.MemoryPlanner
+) -> _passes.MemoryPlanner:
+    overrides = [func.attrs.get("ptoas_plan_memory", False) for func in members]
+    if any(overrides):
+        if not all(overrides):
+            raise ValueError("Grouped kernels must agree on ptoas_plan_memory")
+        return _passes.MemoryPlanner.PTOAS
+    return default
+
+
 def _emit_group_output(
     result_files: dict[str, str],
     group_name: str,
@@ -1946,6 +1968,16 @@ def _emit_group_output(
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
+    memory_planner = _group_memory_planner(members, memory_planner)
+    member_buffer_id_sync = [_requests_buffer_id_sync(func) for func in members]
+    buffer_id_sync = any(member_buffer_id_sync)
+    if buffer_id_sync and not all(member_buffer_id_sync):
+        raise ValueError("Grouped kernels must agree on ptoas_buffer_id_sync")
+    if buffer_id_sync:
+        header, newline, body = pto_code.partition("\n")
+        if 'pto.target_arch = "a5"' not in header or 'pto.backend = "vpto"' in header:
+            raise ValueError("ptoas_buffer_id_sync requires A5 PTO code generation")
+        pto_code = f"{header}{newline}{PTOAS_BUFFER_ID_SYNC_MARKER}\n{body}"
     if skip_ptoas:
         result_files[os.path.join("kernels", f"{group_name}.pto")] = pto_code
         return
@@ -2755,7 +2787,7 @@ def _generate_single_chip(
             pto_code, helpers, entry_helpers = _generate_pto_bundle(
                 grouped_program,
                 skip_ptoas=skip_ptoas,
-                memory_planner=memory_planner,
+                memory_planner=_group_memory_planner(members, memory_planner),
                 emit_source_loc=emit_source_loc,
                 is_group=True,
             )

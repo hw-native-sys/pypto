@@ -55,6 +55,23 @@ struct AutomaticPipeSetup {
   std::vector<StmtPtr> aiv_stmts;
 };
 
+inline constexpr auto kAttrPtoasBufferIdSync = "ptoas_buffer_id_sync";
+
+struct PtoasPipeOptions {
+  bool plan_memory = false;
+  bool buffer_id_sync = false;
+};
+
+struct MixedPipePtoasOptions {
+  PtoasPipeOptions aic;
+  PtoasPipeOptions aiv;
+};
+
+std::vector<CallPtr> CollectPipeInitializers(const std::vector<StmtPtr>& stmts);
+
+// Collect the module-wide requests for each core side before or after outlining.
+MixedPipePtoasOptions CollectMixedPipePtoasOptions(const StmtPtr& body);
+
 constexpr int kAutoBufferBase = -1;
 
 /// Ring depth an automatically built cross-core pipe gets when the enclosing scope carries no
@@ -71,6 +88,9 @@ constexpr int kDefaultAutoPipeSlotNum = 2;
 /// negative is nonsense rather than a value to propagate. For the plain
 /// signed reading, use ``transform_utils::EvalConstInt``, which this wraps.
 std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr);
+// Return the box half for a compact FP32 Acc row tail that A5 can divide at
+// half its effective valid rows. Runtime valid row counts must be positive and even.
+std::optional<int> GetA5C2VRowTailBoxStride(const TypePtr& type);
 std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type);
 void RecordObservedSlotSize(PipeDirectionMetadata& metadata, int64_t slot_size);
 void RecordTileSlotSize(PipeDirectionMetadata& metadata, const TypePtr& type);

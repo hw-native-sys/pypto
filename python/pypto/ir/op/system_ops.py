@@ -749,6 +749,8 @@ def _build_pipe_init_kwargs(
     id: int | None,
     c2v_dtype: object,
     pre_relu: bool,
+    ptoas_plan_memory: bool,
+    ptoas_buffer_id_sync: bool,
 ) -> dict[str, Any]:
     """Build the attribute kwargs shared by aic/aiv_initialize_pipe.
 
@@ -774,10 +776,18 @@ def _build_pipe_init_kwargs(
         kwargs["c2v_dtype"] = c2v_dtype
     if relu:
         kwargs["pre_relu"] = True
+    for key, enabled in (
+        ("ptoas_plan_memory", ptoas_plan_memory),
+        ("ptoas_buffer_id_sync", ptoas_buffer_id_sync),
+    ):
+        if type(enabled) is not bool:
+            raise TypeError(f"initialize_pipe: {key} must be a bool")
+        if enabled:
+            kwargs[key] = True
     return kwargs
 
 
-def aic_initialize_pipe(
+def aic_initialize_pipe(  # noqa: PLR0913
     c2v_consumer_buf: PipeBufOperand = 0,
     v2c_consumer_buf: PipeBufOperand = 0,
     *,
@@ -788,6 +798,8 @@ def aic_initialize_pipe(
     id: int | None = None,
     c2v_dtype: DataType | None = None,
     pre_relu: bool = False,
+    ptoas_plan_memory: bool = False,
+    ptoas_buffer_id_sync: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIC side.
@@ -810,15 +822,29 @@ def aic_initialize_pipe(
         pre_relu: Apply ReLU before conversion on every push in this pipe.
             Requires c2v_dtype. Like store's pre_relu, this is a compile-time
             setting. No scalar pre_quant scale is applied.
+        ptoas_plan_memory: Delegate on-chip memory planning for the outlined
+            mixed kernel to PTOAS. Both initializers must agree.
+        ptoas_buffer_id_sync: Use PTOAS buffer ID synchronization for the
+            outlined A5 mixed kernel. Both initializers must agree.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu)
+    kwargs = _build_pipe_init_kwargs(
+        dir_mask,
+        slot_size,
+        slot_num,
+        local_slot_num,
+        id,
+        c2v_dtype,
+        pre_relu,
+        ptoas_plan_memory,
+        ptoas_buffer_id_sync,
+    )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
 
 
-def aiv_initialize_pipe(
+def aiv_initialize_pipe(  # noqa: PLR0913
     c2v_consumer_buf: PipeBufOperand = 0,
     v2c_consumer_buf: PipeBufOperand = 0,
     *,
@@ -829,6 +855,8 @@ def aiv_initialize_pipe(
     id: int | None = None,
     c2v_dtype: DataType | None = None,
     pre_relu: bool = False,
+    ptoas_plan_memory: bool = False,
+    ptoas_buffer_id_sync: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIV side.
@@ -849,10 +877,24 @@ def aiv_initialize_pipe(
             Narrowing uses RNE; slot bytes describe the payload dtype.
         pre_relu: Apply ReLU before conversion on every push in this pipe.
             Must match the producer's initializer and requires c2v_dtype.
+        ptoas_plan_memory: Delegate on-chip memory planning for the outlined
+            mixed kernel to PTOAS. Both initializers must agree.
+        ptoas_buffer_id_sync: Use PTOAS buffer ID synchronization for the
+            outlined A5 mixed kernel. Both initializers must agree.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu)
+    kwargs = _build_pipe_init_kwargs(
+        dir_mask,
+        slot_size,
+        slot_num,
+        local_slot_num,
+        id,
+        c2v_dtype,
+        pre_relu,
+        ptoas_plan_memory,
+        ptoas_buffer_id_sync,
+    )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
 
@@ -876,14 +918,15 @@ def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None 
     )
 
 
-def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Call:
+def import_peer_buffer(*, name: str, peer_func: str = "", span: Span | None = None) -> Call:
     """Import a buffer from a peer function in the same group.
 
     Result type is ``ScalarType(INT32)`` (PTO ``pto.import_reserved_buffer ... -> i32``).
 
     Args:
         name: Buffer name to import
-        peer_func: Name of the peer function that owns the buffer
+        peer_func: Name of the peer function that owns the buffer. Omit it in
+            an automatically outlined mixed kernel to select the other member.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)

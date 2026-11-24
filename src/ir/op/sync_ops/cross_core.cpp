@@ -247,6 +247,8 @@ REGISTER_OP("system.aic_initialize_pipe")
     .set_attr<int>("id")
     .set_attr<DataType>("c2v_dtype")
     .set_attr<bool>("pre_relu")
+    .set_attr<bool>("ptoas_plan_memory")
+    .set_attr<bool>("ptoas_buffer_id_sync")
     .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIV side
@@ -264,6 +266,8 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .set_attr<int>("id")
     .set_attr<DataType>("c2v_dtype")
     .set_attr<bool>("pre_relu")
+    .set_attr<bool>("ptoas_plan_memory")
+    .set_attr<bool>("ptoas_buffer_id_sync")
     .f_deduce_type(DeduceUnknownType);
 
 // Reserve a named buffer in a kernel

@@ -67,6 +67,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -1326,7 +1327,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func, const ProgramPtr& progr
   // PTOAS level2 owns implicit-tmp materialization as part of PlanMemory. PyPTO
   // and DSA-RP instead emit fixed addresses and invoke level3. CI/TCVT scratch
   // requirements come from the backend, while TSORT32 scratch is level-driven.
-  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  const auto planner = GetFunctionMemoryPlanner(func);
   if (handler != nullptr && (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
     MaterializePtoScratchMutator materializer(target);
     normalized_func = materializer.VisitFunction(normalized_func);
@@ -1355,7 +1356,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func, const ProgramPtr& progr
   // the author asked for — slot k is not slot j — is therefore carried into ptoas
   // rather than lost, which is the whole reason the multi-buffer form exists. A
   // single-slot declaration has no such counterpart and stays rejected.
-  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+  if (planner == MemoryPlanner::PtoAS) {
     for (const auto& [base, alloc] : declared_allocs) {
       CHECK(alloc.slot_count > 1)
           << "A single-slot declared allocation (pl.MemRef(\"" << base->name_hint_

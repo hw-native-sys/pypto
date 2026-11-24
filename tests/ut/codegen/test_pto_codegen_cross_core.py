@@ -790,7 +790,16 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
     def _row_narrowed_acc_push_program(
-        self, valid_rows, valid_cols, compact, split=0, rows=64, backend_type=BackendType.Ascend910
+        self,
+        valid_rows,
+        valid_cols,
+        compact,
+        split=0,
+        rows=64,
+        backend_type=BackendType.Ascend910,
+        *,
+        dtype=pl.INT32,
+        lane_stride=None,
     ):
         """One AIC function that pushes a row-narrowed Acc tile into the C2V FIFO.
 
@@ -808,11 +817,11 @@ class TestCrossCoreTpushTpopCodegen:
         shape = ir.MakeTuple([rows, cols], span)
         valid_shape = ir.MakeTuple([v_rows, v_cols], span)
 
-        src = ir.Var("src", ir.TensorType([box_rows, 128], pl.INT32), span)
+        src = ir.Var("src", ir.TensorType([box_rows, 128], dtype), span)
         acc_memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, pl.INT64, span), box_rows * 128 * 4, 0)
         acc_type = ir.TileType(
             [rows, cols],
-            pl.INT32,
+            dtype,
             acc_memref,
             ir.TileView(valid_shape=[v_rows, v_cols], compact=compact),
             ir.MemorySpace.Acc,
@@ -825,7 +834,10 @@ class TestCrossCoreTpushTpopCodegen:
             acc_type,
             span,
         )
-        push_call = ir.Call(ir.Op("tile.tpush_to_aiv"), [acc_tile], {"split": split}, ir.UnknownType(), span)
+        kwargs = {"split": split}
+        if lane_stride is not None:
+            kwargs["lane_stride"] = lane_stride
+        push_call = ir.Call(ir.Op("tile.tpush_to_aiv"), [acc_tile], kwargs, ir.UnknownType(), span)
         producer = ir.Function(
             "narrow_acc_producer",
             [(src, ir.ParamDirection.In)]
@@ -937,6 +949,59 @@ class TestCrossCoreTpushTpopCodegen:
             self._row_narrowed_acc_push_program(
                 16, 128, ir.CompactMode.normal, split=1, backend_type=BackendType.Ascend950
             )
+
+    @pytest.mark.parametrize("valid_rows", [96, None])
+    def test_hardware_split_at_valid_rows_preserves_accumulator_pitch(self, valid_rows):
+        code = self._row_narrowed_acc_push_program(
+            valid_rows,
+            128,
+            ir.CompactMode.normal,
+            split=1,
+            rows=192,
+            backend_type=BackendType.Ascend950,
+            dtype=pl.FP32,
+        )
+        assert "pto.tpush_to_aiv" in code
+        assert "pto.set_validshape" not in code
+
+    @pytest.mark.parametrize("rows, cols", [(17, 128), (16, 64)])
+    def test_hardware_split_at_valid_rows_rejects_unsupported_extents(self, rows, cols):
+        with pytest.raises(
+            ValueError, match="split push hands each vector lane half of the transported rows"
+        ):
+            self._row_narrowed_acc_push_program(
+                rows,
+                cols,
+                ir.CompactMode.normal,
+                split=1,
+                backend_type=BackendType.Ascend950,
+                dtype=pl.FP32,
+            )
+
+    def test_hardware_split_preserves_an_explicit_box_partition(self):
+        code = self._row_narrowed_acc_push_program(
+            8,
+            128,
+            ir.CompactMode.normal,
+            split=1,
+            rows=16,
+            backend_type=BackendType.Ascend950,
+            dtype=pl.FP32,
+            lane_stride=8,
+        )
+        assert "pto.set_validshape" in code
+
+    def test_hardware_split_keeps_the_box_for_runtime_rows_in_one_fractal(self):
+        code = self._row_narrowed_acc_push_program(
+            None,
+            128,
+            ir.CompactMode.normal,
+            split=1,
+            rows=16,
+            backend_type=BackendType.Ascend950,
+            dtype=pl.FP32,
+        )
+        assert "pto.set_validshape" in code
 
     def test_hardware_split_acc_to_vec_non_compact_transport_keeps_the_full_box(self):
         """A non-compact Acc reads at ``Rows`` either way, so the hardware split keeps the box."""

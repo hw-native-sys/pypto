@@ -303,8 +303,15 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  // FixPipe divides the extent it reads. Keeping the compact Acc's valid rows
+  // both preserves MAD's pitch and places each half at the start of its lane's slot.
+  const bool split_valid_rows =
+      std::string_view(target) == "aiv" && split == ir::kSplitUpDown &&
+      codegen.GetBackendHandler()->SplitsCubeToVectorTransportInHardware() &&
+      !codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0)).has_value() && !op->HasKwarg("lane_stride") &&
+      ir::cross_core_pipe::GetA5C2VRowTailBoxStride(op->args_[0]->GetType()).has_value();
   const bool restore_valid_shape =
-      EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
+      !split_valid_rows && EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
 
   std::ostringstream oss;
   oss << "pto.tpush_to_" << target << "(" << tile_buf;

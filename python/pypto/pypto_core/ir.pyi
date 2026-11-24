@@ -3367,6 +3367,10 @@ def is_op_registered(op_name: str) -> bool:
         True if the operator is registered, False otherwise
     """
 
+def _get_a5_c2v_row_tail_box_stride(type: Type) -> int | None:
+    """Return the box lane stride for an A5 compact FP32 C2V row tail, or None."""
+    ...
+
 def get_op(op_name: str) -> Op:
     """Get an operator instance by name.
 
