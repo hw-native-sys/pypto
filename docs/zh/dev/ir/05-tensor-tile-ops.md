@@ -139,6 +139,10 @@ DSL 的 `_tile_common.py` 保存 `store` 和 `mscatter` 共用的张量类型参
 中。编译器会把量化数据与 FP8E8M0 scale 直接经 V2C 传递，同时保留 scale
 的逻辑 fractal-32 布局。
 
+`pl.tile.view(src, shape, offsets=..., valid_shape=...)` 构造已有的 `tile.slice`
+IR 操作。它描述静态大小、单位步长的窗口，偏移可动态指定，并继承源 tile 的物理
+stride。Tile codegen 生成 `pto.subview`。Buffer IR 路径先将窗口降低为 `buffer.subview`。
+
 `tile.reshape` 保持 dtype、元素总数以及源的有效区域（见下）；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语；packed FP4E2M1X2↔UINT8/INT8 alias 是例外：PTOAS 0.65 的 `treshape` 拒绝此 dtype，因此这些类型对仅支持 PYPTO 或 DSA_RP。
 
 Packed `FP4E2M1X2` 的 tile 字节别名需要 PYPTO 或 DSA_RP；PTOAS 0.65

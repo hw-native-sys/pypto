@@ -789,6 +789,32 @@ def slice(
     return Tile(expr=call_expr)
 
 
+def view(
+    src: Tile,
+    shape: Sequence[IntLike],
+    *,
+    offsets: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
+) -> Tile:
+    """Create a zero-copy window into an on-chip tile.
+
+    The window uses unit steps and keeps the source's physical strides. Its
+    offsets and shape are expressed in source tile coordinates. The window
+    must fit within the source tile, including at runtime for dynamic offsets.
+
+    Args:
+        src: Source tile.
+        shape: Compile-time window extents, one per source axis.
+        offsets: Starting coordinate per axis, constant or runtime.
+        valid_shape: Optional extents that narrow the source's valid region
+            within the window. Defaults to that region.
+
+    Returns:
+        A tile that shares storage with the source.
+    """
+    return slice(src, shape, offsets, valid_shape=valid_shape)
+
+
 def reshape(tile: Tile, shape: Sequence[IntLike]) -> Tile:
     """Reshape tile to new shape.
 
