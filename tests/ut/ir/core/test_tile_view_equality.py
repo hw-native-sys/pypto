@@ -11,6 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
+from pypto.pypto_core.ir import TileView as NativeTileView
 
 
 def _make_span():
@@ -54,6 +55,10 @@ def test_tile_view_accepts_unset_start_offset():
     assert ir.TileView().start_offset is None
     assert ir.TileView(shape_exprs, stride_exprs, start_offset=None).start_offset is None
     assert ir.TileView(shape, stride, start_offset=None).start_offset is None
+
+    # The public wrapper converts integer lists to expressions before dispatch.
+    assert NativeTileView(shape, stride, start_offset=None).start_offset is None
+    assert NativeTileView().start_offset is None
 
 
 class TestTileViewEquality:
