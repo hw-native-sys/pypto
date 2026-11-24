@@ -1626,6 +1626,19 @@ class TestVecExtractPlacement:
 class TestNoOp:
     """Cases the pass must leave untouched."""
 
+    def test_rank_reduced_packed_column_keeps_its_original_window(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self, src: pl.Tensor[[32, 128], pl.FP4E2M1X2], out: pl.Out[pl.Tensor[[1, 64], pl.BF16]]
+            ) -> pl.Tensor[[1, 64], pl.BF16]:
+                packed = pl.tile.load(src, [0, 0], [32, 128])
+                column = pl.tile.slice(packed, [32, 1], [0, 1], drop_dims=[1])
+                return pl.tile.store(pl.cast(column, pl.BF16), [0, 0], out)
+
+        ir.assert_structural_equal(_run_pass(Before), Before)
+
     def test_program_without_mat_slice_unchanged(self):
         """A matmul kernel with no ``tile.slice`` at all is returned as-is."""
 

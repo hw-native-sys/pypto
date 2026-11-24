@@ -546,9 +546,14 @@ class SliceCollector : public IRVisitor {
       windows.emplace(op->var_.get(), *window);
       const auto tile = As<TileType>(op->var_->GetType());
       if (tile && tile->dtype_.IsPackedFp4() && tile->shape_.size() == 2) {
+        // Type deduction pads a rank-reduced result back to 2D. Its shape can
+        // no longer describe the rows and columns addressed in the parent.
+        const auto& args = As<Call>(op->value_)->args_;
+        const auto drop_dims = args.size() == 5 ? As<MakeTuple>(args[4]) : nullptr;
+        const bool full_rank = args.size() < 5 || (drop_dims && drop_dims->elements_.empty());
         const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
         // A loop-carried window can change its base on the back edge.
-        if (view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box &&
+        if (full_rank && view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box &&
             (!windows.count(window->source.get()) || packed_windows.count(window->source.get()))) {
           packed_windows.emplace(op->var_.get(), *window);
         }
