@@ -109,10 +109,9 @@ class BorrowedTileRoots {
   std::map<const Var*, const Var*> roots_;
 };
 
-// Call results are flat tuples of captured Tiles. Preserve their actual views
-// across copies and control flow until a projection selects one. A null field
-// has no common caller operand and uses the ordinary projection lowering.
-class VFReturnTuples {
+// Track declared tensor aliases and VF tile returns across tuple copies and control flow.
+// A null field has no common operand and uses ordinary projection lowering.
+class TupleResultStorage {
  public:
   struct Storage {
     TypePtr type;
@@ -123,7 +122,9 @@ class VFReturnTuples {
     auto& fields = fields_[result.get()];
     fields.clear();
     fields.reserve(args.size());
-    for (const auto& arg : args) fields.push_back({arg->GetType(), borrowed.Find(arg)});
+    for (const auto& arg : args) {
+      fields.push_back(arg ? Storage{arg->GetType(), borrowed.Find(arg)} : Storage{});
+    }
   }
 
   [[nodiscard]] const std::vector<Storage>* Find(const ExprPtr& value) const {
@@ -142,7 +143,7 @@ class VFReturnTuples {
     const auto* fields = Find(item->tuple_);
     if (!fields) return nullptr;
     INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < fields->size(), item->span_)
-        << "Internal error: VF return projection out of bounds";
+        << "Internal error: tuple result projection out of bounds";
     const auto& field = (*fields)[item->index_];
     return field.type ? &field : nullptr;
   }
@@ -154,7 +155,7 @@ class VFReturnTuples {
     auto fields = *left;
     auto tuple = As<TupleType>(result->GetType());
     INTERNAL_CHECK_SPAN(tuple && tuple->types_.size() == fields.size(), result->span_)
-        << "Internal error: VF tuple arity changed at control-flow join";
+        << "Internal error: tuple result arity changed at control-flow join";
     for (size_t i = 0; i < fields.size(); ++i) {
       auto& field = fields[i];
       const auto& other = (*right)[i];
@@ -762,7 +763,7 @@ class InitMemRefMutator : public IRMutator {
 
     auto result = std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
     borrowed_.BindAlias(result, new_init);
-    vf_returns_.Copy(result, new_init);
+    tuple_results_.Copy(result, new_init);
     return result;
   }
 
@@ -978,10 +979,9 @@ class InitMemRefMutator : public IRMutator {
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
   }
 
-  // A VF result denotes exactly the argument's view, including MemRef-less
-  // cross-core pipe views. It never owns a new allocation.
-  StmtPtr BindVFResult(const VFReturnTuples::Storage& storage, const AssignStmtPtr& op,
-                       const ExprPtr& value) {
+  // A projected alias keeps the operand's complete view, including borrowed FIFO storage.
+  StmtPtr BindAliasedResult(const TupleResultStorage::Storage& storage, const AssignStmtPtr& op,
+                            const ExprPtr& value) {
     CheckAliasBinding(op, GetTypeMemRef(storage.type).value_or(nullptr));
     auto var = std::make_shared<Var>(op->var_->name_hint_, storage.type, op->var_->span_);
     borrowed_.Bind(var, storage.root);
@@ -994,30 +994,34 @@ class InitMemRefMutator : public IRMutator {
     auto new_value = VisitExpr(op->value_);
 
     if (auto call = As<Call>(new_value)) {
-      if (auto helper = ResolveVFCall(call, program_)) {
-        auto aliases = VFReturnedArguments(helper, call);
-        // Call result caches must use the actual borrowed views too. A formal
-        // may retain an explicit layout that caller canonicalization removed.
+      auto helper = ResolveVFCall(call, program_);
+      auto aliases = helper ? VFReturnedArguments(helper, call) : TupleResultAliasOperands(call);
+      if (helper || !aliases.empty()) {
+        // Replace aliased result types with the actual operand views. Fresh fields
+        // such as a transfer event retain the result type deduced by the operator.
+        auto tuple = As<TupleType>(call->GetType());
         std::vector<TypePtr> types;
         types.reserve(aliases.size());
-        for (const auto& alias : aliases) types.push_back(alias->GetType());
+        for (size_t i = 0; i < aliases.size(); ++i) {
+          types.push_back(aliases[i] ? aliases[i]->GetType() : tuple->types_[i]);
+        }
         TypePtr type = types.size() == 1 ? types[0] : std::make_shared<TupleType>(types);
         auto value =
             std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, type, call->span_);
-        if (aliases.size() == 1) return BindVFResult({type, borrowed_.Find(aliases[0])}, op, value);
+        if (aliases.size() == 1) return BindAliasedResult({type, borrowed_.Find(aliases[0])}, op, value);
         auto var = std::make_shared<Var>(op->var_->name_hint_, type, op->var_->span_);
         var_map_[op->var_] = var;
-        vf_returns_.Record(var, aliases, borrowed_);
+        tuple_results_.Record(var, aliases, borrowed_);
         return std::make_shared<AssignStmt>(var, value, op->span_, op->leading_comments_);
       }
     }
-    if (vf_returns_.Find(new_value)) {
+    if (tuple_results_.Find(new_value)) {
       auto var = std::make_shared<Var>(op->var_->name_hint_, new_value->GetType(), op->var_->span_);
       var_map_[op->var_] = var;
-      vf_returns_.Copy(var, new_value);
+      tuple_results_.Copy(var, new_value);
       return std::make_shared<AssignStmt>(var, new_value, op->span_, op->leading_comments_);
     }
-    if (auto storage = vf_returns_.Project(new_value)) return BindVFResult(*storage, op, new_value);
+    if (auto storage = tuple_results_.Project(new_value)) return BindAliasedResult(*storage, op, new_value);
 
     // FIFO storage is provided by the pipe. Follow physical aliases before
     // allocating a Tile, including writebacks with a fresh SSA result.
@@ -1167,7 +1171,7 @@ class InitMemRefMutator : public IRMutator {
     new_for->iter_args_ = new_iter_args;
     new_for->body_ = new_body;
     new_for->return_vars_ = new_return_vars;
-    vf_returns_.JoinLoop(new_return_vars, new_iter_args, new_body);
+    tuple_results_.JoinLoop(new_return_vars, new_iter_args, new_body);
 
     // Patch return_vars so each shares its iter_arg's MemRef (inherited from initValue).
     // This establishes the invariant that initValue/iter_arg/return_var all share the
@@ -1194,7 +1198,7 @@ class InitMemRefMutator : public IRMutator {
     auto result = IRMutator::VisitStmt_(op);
     auto loop = As<WhileStmt>(result);
     if (!loop || loop->return_vars_.empty()) return result;
-    vf_returns_.JoinLoop(loop->return_vars_, loop->iter_args_, loop->body_);
+    tuple_results_.JoinLoop(loop->return_vars_, loop->iter_args_, loop->body_);
     // Match the ForStmt invariant: the result is the carried storage even if
     // the loop executes zero times. A fresh return MemRef would lose both
     // alias identity and initialization established before the loop.
@@ -1216,7 +1220,7 @@ class InitMemRefMutator : public IRMutator {
 
     auto then_yield = FindYieldStmt(new_if->then_body_);
     auto else_yield = new_if->else_body_.has_value() ? FindYieldStmt(new_if->else_body_.value()) : nullptr;
-    vf_returns_.JoinBranches(new_if, then_yield, else_yield);
+    tuple_results_.JoinBranches(new_if, then_yield, else_yield);
     if (!then_yield && !else_yield) return result;
 
     auto get_yield_var = [&](size_t i) -> VarPtr {
@@ -1290,7 +1294,7 @@ class InitMemRefMutator : public IRMutator {
   const backend::BackendHandler* handler_ = nullptr;
   FunctionType func_type_ = FunctionType::InCore;
   ProgramPtr program_;
-  VFReturnTuples vf_returns_;
+  TupleResultStorage tuple_results_;
   uint64_t next_id_ = 0;
 };
 
@@ -1458,19 +1462,19 @@ class HasMemRefsVerifier : public IRVisitor {
   void VisitExpr_(const IterArgPtr& op) override {
     IRVisitor::VisitExpr_(op);
     TrackBufferLessAlias(op, op->initValue_);
-    vf_returns_.Copy(op, op->initValue_);
+    tuple_results_.Copy(op, op->initValue_);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
     TrackLoopResults(op->return_vars_, op->iter_args_);
-    vf_returns_.JoinLoop(op->return_vars_, op->iter_args_, op->body_);
+    tuple_results_.JoinLoop(op->return_vars_, op->iter_args_, op->body_);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
     TrackLoopResults(op->return_vars_, op->iter_args_);
-    vf_returns_.JoinLoop(op->return_vars_, op->iter_args_, op->body_);
+    tuple_results_.JoinLoop(op->return_vars_, op->iter_args_, op->body_);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -1478,7 +1482,7 @@ class HasMemRefsVerifier : public IRVisitor {
     auto then_yield = FindYieldStmt(op->then_body_);
     auto else_yield = op->else_body_ ? FindYieldStmt(*op->else_body_) : nullptr;
     if (!then_yield || !else_yield) return;
-    vf_returns_.JoinBranches(op, then_yield, else_yield);
+    tuple_results_.JoinBranches(op, then_yield, else_yield);
     for (size_t i = 0;
          i < op->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size(); ++i) {
       if (borrowed_.Find(then_yield->value_[i]) == borrowed_.Find(else_yield->value_[i])) {
@@ -1505,12 +1509,12 @@ class HasMemRefsVerifier : public IRVisitor {
         if (aliases.size() == 1) {
           TrackBufferLessAlias(op->var_, aliases[0]);
         } else {
-          vf_returns_.Record(op->var_, aliases, borrowed_);
+          tuple_results_.Record(op->var_, aliases, borrowed_);
         }
       }
     }
-    vf_returns_.Copy(op->var_, op->value_);
-    if (auto storage = vf_returns_.Project(op->value_)) borrowed_.Bind(op->var_, storage->root);
+    tuple_results_.Copy(op->var_, op->value_);
+    if (auto storage = tuple_results_.Project(op->value_)) borrowed_.Bind(op->var_, storage->root);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
     if (tile_type && !tile_type->memref_.has_value()) {
       borrowed_.Bind(op->var_, borrowed_.Definition(op->var_, op->value_));
@@ -1538,7 +1542,7 @@ class HasMemRefsVerifier : public IRVisitor {
   BorrowedTileRoots borrowed_;
   std::vector<Diagnostic>& diagnostics_;
   ProgramPtr program_;
-  VFReturnTuples vf_returns_;
+  TupleResultStorage tuple_results_;
 };
 
 }  // namespace

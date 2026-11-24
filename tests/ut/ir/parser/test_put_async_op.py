@@ -118,7 +118,7 @@ def _verify_through_ssa(program: ir.Program) -> None:
         pipeline.run(program)
 
 
-def test_tensor_get_event_unpacks_one_submission_and_defers(ascend_backend):
+def test_tensor_get_event_unpacks_one_submission_and_defers(ascend_backend, default_pass_manager):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
@@ -138,6 +138,41 @@ def test_tensor_get_event_unpacks_one_submission_and_defers(ascend_backend):
     _verify_through_ssa(P)
     ir.assert_structural_equal(P, pl.parse_program(str(P)))
     ir.assert_structural_equal(P, ir.deserialize(ir.serialize(P)))
+
+    kernel = _get_func(default_pass_manager.run_passes(P), "kernel")
+    (out,) = [
+        stmt.var
+        for stmt in _iter_stmts(kernel.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.TupleGetItemExpr)
+        and stmt.value.index == 0
+    ]
+    dst_type = kernel.params[0].type
+    assert isinstance(dst_type, ir.TensorType) and dst_type.memref is not None
+    assert isinstance(out.type, ir.TensorType) and out.type.memref is dst_type.memref
+
+
+def test_tensor_get_event_window_result_keeps_destination_context(ascend_backend, default_pass_manager):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, dst: pld.DistributedTensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]
+        ):
+            out, event = pld.tensor.get_async_event(dst, 1, src)
+            pld.system.wait_event(event)
+            ctx = pld.system.get_comm_ctx(out)
+            session = pld.system.make_session(ctx)
+            sent = pld.tile.put_async(out, 2, src, session)
+            pld.system.defer_wait_event(sent)
+
+    kernel = _get_func(default_pass_manager.run_passes(P), "kernel")
+    ctx = next(
+        stmt
+        for stmt in _iter_stmts(kernel.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.CommCtxType)
+    )
+    assert ctx.value is kernel.params[-2]  # dst_ctx, followed by src_ctx
 
 
 def test_tile_get_event_reuses_session_for_dynamic_peers(ascend_backend):
@@ -269,6 +304,46 @@ def test_prefetch_handles_cannot_be_used_for_urma_get_or_defer(ascend_backend):
         _verify_through_ssa(P)
     assert "session from pld.system.make_session" in str(exc.value)
     assert "distributed transfer event" in str(exc.value)
+
+
+@pytest.mark.parametrize("completion", ["wait_event", "defer_wait_event"])
+def test_tensor_get_event_rejects_explicit_session(ascend_backend, completion):
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]):
+        ctx = pld.system.get_comm_ctx(src)
+        session = pld.system.make_session(ctx)
+        out, event = pld.tensor.get_async_event(dst, 1, src)
+        pld.system.{completion}(event, session)
+""")
+    with pytest.raises(Error, match=rf"{completion}.*omit the session"):
+        _verify_through_ssa(program)
+
+
+def test_prefetch_wait_rejects_unknown_event_after_branch(ascend_backend):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pl.Tensor[[32], pl.FP32],
+            src: pld.DistributedTensor[[32], pl.FP32],
+            cond: pl.Scalar[pl.BOOL],
+        ):
+            pc = pl.prefetch.make_context()
+            ps = pl.prefetch.session(pc)
+            if cond:
+                event = pl.prefetch.async_prefetch(dst, pc)
+            else:
+                ctx = pld.system.get_comm_ctx(src)
+                session = pld.system.make_session(ctx)
+                event = pld.tile.get_async(dst, 1, src, session)
+            pl.prefetch.wait(event, ps)
+
+    with pytest.raises(Error, match="prefetch.wait requires an event traceable to prefetch.async_prefetch"):
+        _verify_through_ssa(P)
 
 
 def _subregion_program(op_name: str):

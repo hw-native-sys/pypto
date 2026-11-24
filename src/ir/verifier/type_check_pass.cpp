@@ -409,15 +409,17 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   auto submit = As<Call>(event);
   const bool explicit_session = IsOp(submit, "pld.tile.get_async") || IsOp(submit, "pld.tile.put_async");
   if (IsOp(op, "prefetch.wait")) {
-    // Preserve existing prefetch handles, but reject mixing a known URMA
-    // producer into a wait whose result and completion contract are SDMA-specific.
-    if (implicit_session || explicit_session ||
-        (op->args_.size() == 2 &&
-         IsOp(As<Call>(ResolveAsyncDefinition(op->args_[1]).value), "pld.system.make_session"))) {
-      mismatch("requires prefetch event and session handles");
+    if (!IsOp(submit, "prefetch.async_prefetch")) {
+      mismatch("requires an event traceable to prefetch.async_prefetch");
+    }
+    if (op->args_.size() == 2 &&
+        IsOp(As<Call>(ResolveAsyncDefinition(op->args_[1]).value), "pld.system.make_session")) {
+      mismatch("requires a prefetch session");
     }
   } else if (!implicit_session && !explicit_session) {
     mismatch("requires a statically traceable distributed transfer event from this function");
+  } else if (implicit_session && op->args_.size() == 2) {
+    mismatch("requires the event-only form for tensor GET; omit the session argument");
   } else if (op->args_.size() == 2) {
     const auto session = ResolveAsyncDefinition(op->args_[1]);
     if (!IsOp(As<Call>(session.value), "pld.system.make_session")) {
@@ -426,8 +428,6 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
                ResolveAsyncDefinition(submit->args_[3]).identity != session.identity) {
       mismatch("requires the same session that submitted the transfer");
     }
-    // Tensor GET has no session SSA operand until materialization. Its optional
-    // explicit operand constrains that binding; a tile submission already has an owner.
   }
 }
 

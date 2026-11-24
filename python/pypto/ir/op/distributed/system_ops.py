@@ -51,7 +51,7 @@ def wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = 
 
     Args:
         event: Completion event returned by the transfer.
-        session: Originating session. Omit it to use the session associated with the event.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
         span: Source location for the call. Captured from the caller when omitted.
 
     Returns:
@@ -68,7 +68,7 @@ def defer_wait_event(event: Expr, session: Expr | None = None, *, span: Span | N
 
     Args:
         event: Completion event returned by the transfer.
-        session: Originating session. Omit it to use the session associated with the event.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
         span: Source location for the call. Captured from the caller when omitted.
 
     Returns:

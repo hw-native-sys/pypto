@@ -65,8 +65,8 @@ See [Async transfer validation](distributed_async.md) for the supported transfer
 PUT and GET submit dense GM views of matching shape and dtype. Each submission selects
 one peer. PUT takes a remote destination window and GET takes a remote source window.
 Both directions can reuse one session bound to the same workspace on the issuing AIV.
-The event identifies its submission. An explicit session supplied to wait or defer must
-match it. An in-kernel wait returns success to the caller. Deferring hands completion
+For tensor GET, call `wait_event(event)` or `defer_wait_event(event)`. For tile PUT and GET,
+wait and defer also accept the session that submitted the transfer. An in-kernel wait returns success to the caller. Deferring hands completion
 to the task so its consumers can use the destination after logical completion. These six
 operations currently support DSL construction, IR verification, and printing.
 

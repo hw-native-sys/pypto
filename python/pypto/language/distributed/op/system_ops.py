@@ -63,7 +63,7 @@ def wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Scalar
 
     Args:
         event: Completion event returned by the transfer.
-        session: Originating session. Omit it to use the session associated with the event.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
 
     Returns:
         A BOOL scalar indicating success. After success the kernel can read the GET destination or
@@ -77,7 +77,7 @@ def defer_wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> 
 
     Args:
         event: Completion event returned by the transfer.
-        session: Originating session. Omit it to use the session associated with the event.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
 
     Returns:
         A statement call that registers the event. Dependent tasks can use the data after task

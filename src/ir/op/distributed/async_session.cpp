@@ -111,8 +111,7 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
 // pld.system.wait_event
 // --------------------------------------------------------------------------
 
-// The tensor frontend can leave the originating session implicit. An explicit
-// handle is checked against the submission after ConvertToSSA resolves reassignments.
+// The verifier distinguishes tensor events from tile events after SSA conversion.
 void CheckCompletionOperands(const char* name, const std::vector<ExprPtr>& args,
                              const comm_op::Kwargs& kwargs) {
   CHECK(args.size() == 1 || args.size() == 2) << name << " requires (event[, session])";
@@ -190,7 +189,7 @@ REGISTER_OP("pld.system.wait_event")
         "session.")
     .set_op_category("DistributedOp")
     .add_argument("event", "Distributed PUT or GET completion event")
-    .add_argument("session", "Optional originating async session")
+    .add_argument("session", "Optional originating session for tile events only")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     // Observes completion of an already-submitted request; writes no operand.
@@ -204,7 +203,7 @@ REGISTER_OP("pld.system.defer_wait_event")
     .set_description("Hand completion of a distributed transfer to the issuing task.")
     .set_op_category("DistributedOp")
     .add_argument("event", "Distributed PUT or GET completion event")
-    .add_argument("session", "Optional originating async session")
+    .add_argument("session", "Optional originating session for tile events only")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     .no_arg_writes()

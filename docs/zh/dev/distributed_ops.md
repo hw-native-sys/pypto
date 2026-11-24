@@ -60,7 +60,8 @@ SSA 值而存在。
 
 PUT 和 GET 均接受形状及数据类型匹配的连续 GM 视图，每次提交指定一个 peer。
 PUT 的目标与 GET 的源分别位于远端窗口。两种方向可以在同一 AIV 上复用绑定同一 workspace 的 session。
-event 标识本次提交。等待或移交时显式提供的 session 必须与提交时一致。核内等待返回成功标志；
+Tensor GET 的事件使用 `wait_event(event)` 或 `defer_wait_event(event)`。对于 Tile PUT 和 GET，
+等待和移交也可传入发起该次提交的 session。核内等待返回成功标志；
 移交将完成责任交给 task，依赖方在发起 task 逻辑完成后可以使用目标。这六个操作目前支持 DSL 构造、IR 验证和打印。
 
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
