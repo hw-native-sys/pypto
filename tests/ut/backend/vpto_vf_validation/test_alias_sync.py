@@ -47,10 +47,10 @@ def helper_source(kind: str, offset: int, relation: str = "static") -> str:
         second_base, second_offset = "%other", "%zero"
 
     def store(value: str, base: str, index: str) -> str:
-        return f"pto.vmi.vstore {value}, {base}[{index}], %mask : {reg}, {ptr}, {mask}"
+        return f"pto.vmi.vstore {value}, {base}[{index}], %mask : {reg}, {ptr}, index, {mask}"
 
     def load(base: str, index: str) -> str:
-        return f"%loaded = pto.vmi.vload {base}[{index}] : {ptr} -> {reg}"
+        return f"%loaded = pto.vmi.vload {base}[{index}] : {ptr}, index -> {reg}"
 
     operations = {
         "wr": [
@@ -246,10 +246,10 @@ def interleaved_helper_source(offset: int) -> str:
     ptr, reg, mask = "!pto.ptr<f32, ub>", "!pto.vmi.vreg<64xf32>", "!pto.vmi.mask<64xpred>"
 
     def load(name, base):
-        return f"%{name} = pto.vmi.vload %{base}[%zero] : {ptr} -> {reg}"
+        return f"%{name} = pto.vmi.vload %{base}[%zero] : {ptr}, index -> {reg}"
 
     def store(value, base, index, predicate):
-        return f"pto.vmi.vstore %{value}, %{base}[%{index}], %{predicate} : {reg}, {ptr}, {mask}"
+        return f"pto.vmi.vstore %{value}, %{base}[%{index}], %{predicate} : {reg}, {ptr}, index, {mask}"
 
     original = "\n      ".join(
         (

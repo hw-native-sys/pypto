@@ -17,12 +17,12 @@ module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
     %zero = arith.constant 0 : index
     %active = arith.constant 8 : index
     pto.vecscope {
-      %a = pto.vmi.vload %lhs[%zero] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<8xf32>
-      %b = pto.vmi.vload %rhs[%zero] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<8xf32>
+      %a = pto.vmi.vload %lhs[%zero] : !pto.ptr<f32, ub>, index -> !pto.vmi.vreg<8xf32>
+      %b = pto.vmi.vload %rhs[%zero] : !pto.ptr<f32, ub>, index -> !pto.vmi.vreg<8xf32>
       %mask = pto.vmi.create_mask %active : index -> !pto.vmi.mask<8xpred>
       %low, %high = pto.vmi.vintlv %a, %b, %mask {pmode = "zero"} : !pto.vmi.vreg<8xf32>, !pto.vmi.vreg<8xf32>, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xf32>, !pto.vmi.vreg<8xf32>
-      pto.vmi.vstore %low, %out0[%zero] : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>
-      pto.vmi.vstore %high, %out1[%zero] : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>
+      pto.vmi.vstore %low, %out0[%zero] : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>, index
+      pto.vmi.vstore %high, %out1[%zero] : !pto.vmi.vreg<8xf32>, !pto.ptr<f32, ub>, index
     }
     return
   }

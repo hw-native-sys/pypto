@@ -210,7 +210,7 @@ synchronization and optimization.
 
 ## Run the complete examples
 
-Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.77
+Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.78
 or newer, and configure the matching CANN/Bisheng toolchain. Keep runtime pin
 checking enabled. Reserve an idle A5 device before running either command:
 

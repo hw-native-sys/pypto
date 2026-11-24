@@ -14,6 +14,7 @@ import pytest
 import torch
 from harness import st
 from harness.core.harness import DataType, TensorSpec
+from pypto.pypto_core.passes import MemoryPlanner
 
 _HAS_TORCH_FP4 = hasattr(torch, "float4_e2m1fn_x2")
 
@@ -685,6 +686,57 @@ def _direct_fp4_to_fp8_golden(layout):
     ),
 )
 def test_direct_fp4_to_fp8_all_patterns(case_run):
+    case_run.assert_passed()
+
+
+@pl.jit(auto_scope=False)
+def _decode_unaligned_fp4_window(
+    src: pl.Tensor[[8, 128], pl.FP4E2M1X2],
+    out: pl.Out[pl.Tensor[[6, 64], pl.FP8E4M3FN]],
+):
+    with pl.spmd(2):
+        block = pl.tile.get_block_idx()
+        packed = pl.tile.load(src, [0, 0], [8, 128])
+        window = pl.tile.slice(packed, [3, 32], [1, block * 16 + 1])
+        valid_window = pl.tile.set_validshape(window, 3, 32)
+        pl.tile.store(pl.cast(valid_window, pl.FP8E4M3FN), [block * 3, 0], out)
+    return out
+
+
+def _unaligned_fp4_input():
+    # Distinguish rows, columns and nibble order. Nonzero encodings also run
+    # on the CPU simulator, which canonicalizes negative zero.
+    row = torch.arange(8)[:, None]
+    col = torch.arange(128)[None, :]
+    low = (row + col) % 7 + 1
+    high = (3 * row + 2 * col) % 7 + 9
+    return (low | (high << 4)).to(torch.uint8)
+
+
+def _unaligned_fp4_golden(tensors):
+    packed = tensors["src"]
+    windows = torch.cat([packed[1:4, start : start + 32] for start in (1, 17)])
+    return {"out": _packed_fp4_values(windows, pl.FP4E2M1X2).to(torch.float8_e4m3fn)}
+
+
+@pytest.mark.platforms("a5", "a5sim")
+@st.cases(
+    *[
+        st.case(
+            _decode_unaligned_fp4_window,
+            tensors=[
+                TensorSpec("src", [8, 128], DataType.UINT8, init_value=_unaligned_fp4_input),
+                TensorSpec("out", [6, 64], DataType.FP8E4M3FN, is_output=True, init_value=0),
+            ],
+            name=f"fp4_unaligned_nd_windows_{planner.name}",
+            memory_planner=planner,
+            golden=_unaligned_fp4_golden,
+            compare=_compare_packed_bytes,
+        )
+        for planner in MemoryPlanner
+    ]
+)
+def test_unaligned_fp4_window_decode(case_run):
     case_run.assert_passed()
 
 

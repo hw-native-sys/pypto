@@ -40,8 +40,8 @@ It checks both linked launch sizes; it does not execute on an NPU.
 
 ## Focused acceptance
 
-Build PyPTO and the pinned runtime in the current checkout. Configure the pinned
-PTOAS v0.77 and an A5 CANN/Bisheng toolchain. Keep runtime pin checking enabled.
+Build PyPTO and the pinned runtime in the current checkout. Configure the PTOAS version in
+`toolchain/versions.env` and an A5 CANN/Bisheng toolchain. Keep runtime pin checking enabled.
 The test uses the same opt-in gates as the [VF tests](03-vpto-vf-integration.md).
 
 The initial hardware acceptance passed on Ascend950DT with PTOAS v0.72,
