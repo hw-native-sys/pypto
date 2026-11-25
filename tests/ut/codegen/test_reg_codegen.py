@@ -1661,6 +1661,14 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
+def generate_native_test(function):
+    assert isinstance(function, ir.Function)
+    with passes.PassContext([]):
+        program = passes.convert_to_ssa()(ir.Program([function], "NativeRegisterKernel", SPAN))
+        program = passes.init_mem_ref()(program)
+    return generate(program)
+
+
 @pytest.mark.parametrize("dtype", ["FP4E2M1X2", "FP8E4M3FN"])
 def test_native_quantized_load_convert(dtype):
     # UNPK4 reads only 64 bytes, not the full 256-byte result register. The
@@ -1671,7 +1679,7 @@ def test_native_quantized_load_convert(dtype):
 def native_decode():
     raw = pl.tile.full([64], pl.UINT8, 0)
     out = pl.tile.create([{lanes}], pl.{target}, target_memory=pl.Mem.Vec)
-    with pl.reg_scope(auto_sync=False):
+    with pl.reg_scope():
         raw_reg = pl.reg.load_native(raw, dtype=pl.{dtype}, lanes=256, mode="UNPK4")
         mask8 = pl.reg.full_mask(lanes=256)
         value = pl.reg.convert_native(raw_reg, mask8, dtype=pl.{target}, lanes={lanes}, part="PART_P0")
@@ -1680,7 +1688,7 @@ def native_decode():
     result = pl.tile.add(written, written)
 """
     function = pl.parse(source)
-    mlir = generate(function)
+    mlir = generate_native_test(function)
     assert "pto.vlds" in mlir and 'dist = "UNPK4"' in mlir
     assert "pto.vcvt" in mlir and 'part = "PART_P0"' in mlir
     assert "pto.vmi.vload" not in mlir
@@ -1697,7 +1705,7 @@ def native_pack():
     raw = pl.tile.full([128], pl.UINT8, 0)
     out = pl.tile.create([17*128], pl.BF16, target_memory=pl.Mem.Vec)
     packed_out = pl.tile.create([64], pl.BF16, target_memory=pl.Mem.Vec)
-    with pl.reg_scope(auto_sync=False):
+    with pl.reg_scope():
         m8 = pl.reg.full_mask(lanes=256)
         m32 = pl.reg.full_mask(lanes=64)
         m16 = pl.reg.full_mask(lanes=128)
@@ -1715,7 +1723,7 @@ def native_pack():
         written = pl.reg.store(out, 0, packed, m16, block_stride=17, post_update=True)
         pk_written = pl.reg.store_native(packed_out, 0, b0, m32, mode="PK_B32")
 """)
-    source = generate(program)
+    source = generate_native_test(program)
     assert source.count('part = "PART_P0"') == 2
     assert source.count('part = "PART_EVEN"') == 2
     assert source.count("pto.vdintlv") == 1
@@ -1730,15 +1738,15 @@ def test_native_scalar_load_and_store_compiles_with_ptoas(tmp_path):
     program = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def native_scalar():
-    src = pl.tile.full([1], pl.FP32, 1.0)
-    dst = pl.tile.create([1], pl.FP32, target_memory=pl.Mem.Vec)
-    with pl.reg_scope(auto_sync=False):
+    src = pl.tile.full([8], pl.FP32, 1.0)
+    dst = pl.tile.full([8], pl.FP32, 0.0)
+    with pl.reg_scope():
         one = pl.reg.active_mask(1, lanes=64)
         x = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="BRC_B32")
         written = pl.reg.store_native(dst, 0, x, one, mode="ONEPT_B32")
     y = pl.tile.add(written, written)
 """)
-    source = generate(program)
+    source = generate_native_test(program)
     assert 'dist = "BRC_B32"' in source
     assert 'dist = "1PT_B32"' in source
     compile_review_pto(source, tmp_path)
@@ -1760,7 +1768,7 @@ def test_native_load_checks_physical_footprint(size, dtype, lanes, match):
 @pl.function(type=pl.FunctionType.AIV)
 def invalid_native():
     raw = pl.tile.full([{size}], pl.UINT8, 0)
-    with pl.reg_scope(auto_sync=False):
+    with pl.reg_scope():
         x = pl.reg.load_native(raw, dtype=pl.{dtype}, lanes={lanes}, mode="UNPK4")
 """)
 
@@ -1773,18 +1781,20 @@ def test_native_scale_gather_and_reduction_compile_with_ptoas(tmp_path):
     program = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def native_scale_reduction():
-    scale = pl.tile.full([8], pl.UINT16, 0x3f80)
+    scale = pl.tile.full([16], pl.UINT16, 0x3f80)
     scale_out = pl.tile.create([128], pl.BF16, target_memory=pl.Mem.Vec)
     src = pl.tile.full([64], pl.FP32, 1.0)
-    dst = pl.tile.create([1], pl.FP32, target_memory=pl.Mem.Vec)
-    with pl.reg_scope(auto_sync=False):
+    dst = pl.tile.create([8], pl.FP32, target_memory=pl.Mem.Vec)
+    with pl.reg_scope():
         m16 = pl.reg.full_mask(lanes=128)
-        group = pl.reg.shift_rights(pl.reg.index_gen(0, lanes=128, dtype=pl.UINT16), 5, m16)
+        indices = pl.reg.index_gen(0, lanes=128, dtype=pl.UINT16)
+        group = pl.reg.shift_rights(indices, 5, m16)
         scale_bits = pl.reg.gather(scale, group, m16)
         e2b = pl.reg.load_native(scale, dtype=pl.BF16, lanes=128, mode="E2B_B16")
-        val = pl.reg.mul(pl.reg.interpret_cast(scale_bits, dtype=pl.BF16), e2b, m16)
+        scale_bf = pl.reg.interpret_cast(scale_bits, dtype=pl.BF16)
+        val = pl.reg.mul(scale_bf, e2b, m16)
         scale_written = pl.reg.store(scale_out, 0, val, m16)
-    with pl.reg_scope(auto_sync=False):
+    with pl.reg_scope():
         all32 = pl.reg.full_mask(lanes=64)
         one = pl.reg.active_mask(1, lanes=64)
         x = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="NORM")
@@ -1794,8 +1804,39 @@ def native_scale_reduction():
         total = pl.reg.reduce_sum_native(rep, all32, reassoc=True)
         written = pl.reg.store_native(dst, 0, total, one, mode="ONEPT_B32")
 """)
-    source = generate(program)
+    source = generate_native_test(program)
     for op in ("pto.vgather2", "pto.vmul", "pto.vcmax", "pto.vselr", "pto.vcadd"):
         assert op in source
     assert 'dist = "E2B_B16"' in source
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+def test_native_masked_fp32_math_compiles_with_ptoas(tmp_path):
+    # Native online-state arithmetic uses a physical vector and a prefix
+    # predicate, not a compact 32-lane logical VMI vector.
+    program = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def native_math():
+    src = pl.tile.full([64], pl.FP32, 1.0)
+    other = pl.tile.full([64], pl.FP32, 2.0)
+    out = pl.tile.create([64], pl.FP32, target_memory=pl.Mem.Vec)
+    with pl.reg_scope():
+        heads = pl.reg.active_mask(32, lanes=64)
+        a = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="NORM")
+        b = pl.reg.load(other, lanes=64)
+        scaled = pl.reg.muls(a, 0.0441941731, heads)
+        mx = pl.reg.maximum(scaled, b, heads)
+        sub = pl.reg.sub(scaled, mx, heads)
+        exp = pl.reg.exp(sub, heads)
+        mul = pl.reg.mul(exp, b, heads)
+        added = pl.reg.add(mul, exp, heads)
+        value = pl.reg.div(exp, added, heads)
+        written = pl.reg.store_native(out, 0, value, heads, mode="NORM")
+        pl.reg.mem_bar("VST_VLD")
+""")
+    source = generate_native_test(program)
+    for op in ("pto.vmuls", "pto.vmax", "pto.vsub", "pto.vexp", "pto.vmul", "pto.vadd", "pto.vdiv"):
+        assert op in source
+    assert 'pto.mem_bar "VST_VLD"' in source
     compile_review_pto(source, tmp_path)
