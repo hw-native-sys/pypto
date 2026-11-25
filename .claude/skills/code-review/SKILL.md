@@ -49,18 +49,18 @@ the pinned diff and its callers. Describe the previous limitation, the practical
 affected, what the PR changes for that workflow, and the scope of the new behavior. For internal
 changes, name the caller and the observable effect or invariant that motivates the change.
 
-- Use a complete representative before/after DSL or API case for the main behavior change.
-  Include the relevant input declarations, values, call, and result or error. Explain why these
-  inputs expose the difference and what the reader should look for in the output. For IR-only
-  changes, show the relevant before/after IR with enough surrounding context to follow the value.
+- Put a complete, runnable before/after DSL or public API case for the main change in the final
+  reply as fenced code. Include imports, setup, input declarations and values, and the invocation.
+  Show the exact edit or setting for each side and explain why the inputs expose the difference.
+  For IR-only changes, show before/after IR directly in the reply with enough context to follow it.
 - Cover materially different entry points, modes, or boundaries with a focused case or a table
   derived from the main case. Keep comparable inputs and settings fixed where practical. Name the
   affected variants and the conditions under which the behavior applies.
-- Give the exact runnable command or existing test selector, including relevant parameters,
-  target, and toolchain version. Show the observed output for each executed side and label any
-  source-derived side as inferred. A call fragment by itself leaves input and output unspecified.
-- For each verified finding, cite its own runnable case or the specific walkthrough case that
-  demonstrates it. Show the decisive output and cite the contract used to judge it.
+- Give the exact command or test selector with relevant parameters, target, and toolchain version.
+  Show the observed output or error for each executed side and label source-derived behavior as
+  inferred. Use links, attachments, and earlier messages as supporting evidence for the inline case.
+- For each verified behavior finding, show its runnable case in the reply or reuse one shown there.
+  Show the decisive output and cite the contract used to judge it.
 
 ## Review Checklist
 
@@ -159,9 +159,9 @@ Use these four sections in order. Follow
 
 1. **PR overview**. Explain the motivation and the previous workflow, what changes for users or
    callers, and the supported scope. Name affected entry points and material constraints.
-2. **Concrete cases**. Walk through the before/after behavior using the cases above. Explain what
-   each case demonstrates and show the evidence, including a relevant boundary when it clarifies
-   the contract. Include these cases even when there are no review findings.
+2. **Concrete cases**. Show the code, inputs, invocation, and results directly in the reply, even
+   when there are no findings. Include a relevant boundary when it clarifies the contract. Before
+   sending, check that each case can be reproduced from the reply alone.
 3. **Implementation path**. Explicitly list the passes, IR, and interfaces the PR adds or
    modifies. Name the affected passes, IR nodes, operators, types, attributes, or contracts, and
    frontend or internal interfaces as applicable. Give the concrete change and location for each
