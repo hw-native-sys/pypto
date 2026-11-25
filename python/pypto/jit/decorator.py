@@ -1581,10 +1581,11 @@ class JITFunction:
         """Specialize this JIT function and return its post-pass IR.
 
         A ``config=RunConfig(...)`` keyword controls pass execution through its
-        strategy, diagnostics, dependency-analysis, memory-planner, and platform
-        fields. Runtime and artifact fields are ignored. This method does not
-        run code generation, invoke ``ptoas``, execute on a device, write
-        artifacts, or access the compiled-program cache.
+        backend type, strategy, diagnostics, dependency analysis, memory planner,
+        and software pipeline settings. Use ``backend_type=BackendType.Linx``
+        to lower a Linx kernel. Runtime and artifact fields are ignored. This method
+        does not run code generation, invoke ``ptoas``, execute on a device,
+        write artifacts, or access the compiled-program cache.
 
         Args:
             *args: Positional sample arguments matching the decorated function.
