@@ -202,3 +202,7 @@ class Program:
         channel = pl.tile.create([64,256],pl.FP32,target_memory=pl.Mem.Vec)
         pl.tile.writeback_to_vec(channel,acc,[0,0],split=2)
 """)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

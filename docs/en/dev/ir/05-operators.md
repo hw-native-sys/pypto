@@ -523,24 +523,9 @@ pending final result across a branch, loop, or scope boundary is rejected.
 intermediate K blocks use `Partial`, and the last block alone uses `Final`.
 Explicit phases do not remove other automatically inserted synchronization.
 
-#### Direct split-M FIXPIPE on A5
-
-`pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` writes a full FP32 Acc
-tile into the manually addressed row-major FP32 Vec storage of both AIV lanes,
-each receiving half the accumulator rows. The destination row and column
-offsets address each lane's local view; the full destination pitch is
-preserved by `TINSERT`. For example, a 64×64 accumulator can write into a
-64×256 destination at row 0 or 32 and column 64. For a final accumulator
-producer use `st_phase=pl.STPhase.Final` with a complete 32×64 destination at
-offset [0, 0]; `TMOV` performs the required unit-flag check-and-clear.
-No TPipe slot or extra synchronization is introduced.
-
-The AIC and AIV authors must agree on the physical UB addresses and manage
-the event handshake. After the AIV waits for the producer, call
-`pl.tile.mark_remote_written(view)` on the contiguous received Vec view before
-reading it from a register scope. This explicit memory-effect annotation
-introduces no instructions and credits only the view's valid region, not
-the backing allocation. It is not a synchronization operation.
+On A5, `pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` directly writes a full FP32 Acc into manually addressed ND UB; each AIV receives half the rows. `TINSERT` preserves the destination pitch, and the caller guarantees valid local offsets.
+A Final producer requires `st_phase=pl.STPhase.Final`, a complete [M/2, N] destination and zero offset; `TMOV` checks and clears the unit flag. No TPipe slots or extra synchronization are introduced.
+After waiting for the peer, AIV code calls `pl.tile.mark_remote_written(view)` before reading its contiguous received view in a register scope. This annotation records only the valid region as initialized, not the backing allocation, and emits no instruction. The author owns address agreement and event handshakes.
 
 Storage checks follow registered in-place operations and views, including
 aliases made before a Final update and straight-line tuple forwarding or

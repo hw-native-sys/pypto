@@ -507,19 +507,9 @@ final 配对：应绑定 final 生产者的结果，并在同一个直线控制�
 [`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) 保留该契约：中间 K 分块
 使用 `Partial`，只有最后一个分块使用 `Final`。显式阶段不会删除其他自动插入的同步。
 
-#### A5 split-M FIXPIPE 直接写回
-
-`pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` 将完整 FP32 Acc Tile
-直接写入两侧 AIV 手工指定地址的行主序 FP32 Vec 存储，各接收一半行。
-行列坐标均为每侧本地目标坐标，`TINSERT` 保留完整目标行跨度。例如 64×64
-累加器可写入 64×256 目标的第 0 或 32 行、第 64 列。Final 累加器必须
-使用 `st_phase=pl.STPhase.Final`，且目标为零偏移的完整 32×64 Tile；
-此时 `TMOV` 执行 unit flag check-and-clear。不引入 TPipe 槽位或额外同步。
-
-AIC 与 AIV 需约定物理 UB 地址并手工管理事件握手。AIV 等待生产者后，
-在寄存器作用域读取前对连续接收视图调用 `pl.tile.mark_remote_written(view)`。
-该显式内存效果标注不生成指令，仅记入目标视图的有效范围，不标记整个
-底层分配。它不是同步操作。
+A5 上，`pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` 将完整 FP32 Acc 直接写入手工指定地址的 ND UB，各 AIV 接收一半行。`TINSERT` 保留目标行跨度，由调用者保证本地行列偏移有效。
+Final 生产者要求 `st_phase=pl.STPhase.Final`、完整 [M/2, N] 目标和零偏移；`TMOV` 执行 unit flag 检查与清位。不引入 TPipe 槽位或额外同步。
+AIV 等待对端后，在寄存器作用域读取连续接收视图之前调用 `pl.tile.mark_remote_written(view)`；仅将该视图的有效区间标记为已初始化，不标记整个底层分配，也不生成指令。由作者负责地址一致性与事件握手。
 
 存储检查遵循注册的原地操作与视图关系，包括 Final 更新之前创建的别名，以及
 直线代码中的 tuple 转发和嵌套 tuple 投影。分支选择保留可能来源，同时保留
