@@ -10,7 +10,7 @@ import subprocess
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen, ir
+from pypto import backend, codegen
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -29,26 +29,25 @@ def lower(program):
 
 def generated_mlir(program):
     lowered = lower(program)
-    functions = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
-    generated = codegen.PTOCodegen().generate(ir.Program(functions, "Probe", lowered.span))
+    generated = codegen.PTOCodegen().generate(lowered)
     return generated if isinstance(generated, str) else "\n".join(generated.values())
 
 
-def compile_native(tmp_path, mlir):
+def compile_native(tmp_path, mlir, *, output_name="writeback.cpp"):
     ptoas = find_ptoas_binary()
     if ptoas is None:
         pytest.skip("PTOAS is unavailable")
     pto = tmp_path / "writeback.pto"
-    cpp = tmp_path / "writeback.cpp"
+    output = tmp_path / output_name
     pto.write_text(mlir)
     subprocess.run(
-        [str(ptoas), "--pto-arch=a5", "--pto-level=level3", str(pto), "-o", str(cpp)],
+        [str(ptoas), "--pto-arch=a5", "--pto-level=level3", str(pto), "-o", str(output)],
         check=True,
         timeout=60,
         capture_output=True,
         text=True,
     )
-    return cpp.read_text()
+    return output
 
 
 def test_direct_pv_writeback(tmp_path):
@@ -80,7 +79,7 @@ def test_direct_pv_writeback(tmp_path):
     assert "rows=64, cols=64" in insert and "rows=64, cols=256" in insert
     assert "#pto.acc_to_vec_mode<dual_mode_split_m>" in insert
     assert "pto.tpush" not in mlir
-    cpp = compile_native(tmp_path, mlir)
+    cpp = compile_native(tmp_path, mlir).read_text()
     assert "TINSERT<" in cpp and "AccToVecMode::DualModeSplitM" in cpp
 
 
@@ -112,7 +111,7 @@ def test_direct_final_qk_writeback(tmp_path):
     assert "rows=64, cols=128" in move and "rows=32, cols=128" in move
     assert "#pto.acc_to_vec_mode<dual_mode_split_m>" in move
     assert "pto.tinsert " not in mlir and "pto.tpush" not in mlir
-    cpp = compile_native(tmp_path, mlir)
+    cpp = compile_native(tmp_path, mlir).read_text()
     assert "TMOV<STPhase::Final" in cpp and "AccToVecMode::DualModeSplitM" in cpp
 
 
@@ -156,7 +155,8 @@ def test_remote_initialized_by_peer(tmp_path):
     assert "mark_remote_written" not in mlir
     assert "pto.tload " not in mlir
     assert "pto.tfill " not in mlir
-    compile_native(tmp_path, mlir)
+    # PTOAS's VF path emits an object rather than C++ source.
+    assert compile_native(tmp_path, mlir, output_name="writeback.o").stat().st_size > 0
 
 
 def test_unmarked_remote_load_still_rejected():
