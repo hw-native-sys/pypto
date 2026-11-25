@@ -30,6 +30,136 @@ def _graph_funcs(prog):
     return [f for f in prog.functions.values() if f.func_type == ir.FunctionType.Graph]
 
 
+@pytest.mark.parametrize(
+    "view_statements",
+    [
+        "view = buffer",
+        "view = pl.reshape(buffer, [32, 64])",
+        "view = pl.slice(buffer, [16, 64], [0, 0])",
+        "flat = pl.reshape(buffer, [32, 64])\n            view = pl.slice(flat, [16, 64], [0, 0])",
+    ],
+)
+@pytest.mark.parametrize("read_before_write", [False, True])
+def test_graph_view_write_tracks_captured_storage(view_statements, read_before_write):
+    """A local view's writer determines the backing parameter's direction."""
+    value = "pl.load(view, [0, 0], [8, 64])" if read_before_write else "pl.tile.full([8, 64], pl.FP32, 1.0)"
+    before = pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function
+    def main(self, buffer: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+        with pl.graph("layer"):
+            {view_statements}
+            with pl.at(level=pl.Level.CORE_GROUP):
+                value = {value}
+                view = pl.store(value, [0, 0], view)
+        return buffer
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(before))
+    graph = _graph_funcs(after)[0]
+    expected = ir.ParamDirection.InOut if read_before_write else ir.ParamDirection.Out
+    assert list(graph.param_directions) == [expected]
+
+
+@pytest.mark.parametrize("submit", [False, True])
+@pytest.mark.parametrize("direction", ["Out", "InOut"])
+def test_graph_callee_view_write_tracks_captured_storage(submit, direction):
+    """Both call kinds attribute a view argument's effects to its backing tensor."""
+    launch = "_, done = pl.submit(self.update, view)" if submit else "view = self.update(view)"
+    before = pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def update(self, view: pl.{direction}[pl.Tensor[[32, 64], pl.FP32]]) -> pl.Tensor[[32, 64], pl.FP32]:
+        value = pl.tile.full([8, 64], pl.FP32, 1.0)
+        view = pl.store(value, [0, 0], view)
+        return view
+    @pl.function
+    def main(self, buffer: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+        with pl.graph("layer"):
+            view = pl.reshape(buffer, [32, 64])
+            with pl.manual_scope():
+                {launch}
+        return buffer
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(before))
+    expected = ir.ParamDirection.Out if direction == "Out" else ir.ParamDirection.InOut
+    assert list(_graph_funcs(after)[0].param_directions) == [expected]
+
+
+def test_graph_fresh_result_does_not_alias_input_view():
+    """Writing a fresh arithmetic result must leave the captured input read-only."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, buffer: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+            with pl.graph("layer"):
+                view = pl.reshape(buffer, [32, 64])
+                fresh = pl.add(view, view)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    value = pl.load(fresh, [0, 0], [8, 64])
+                    fresh = pl.store(value, [0, 0], fresh)
+            return buffer
+
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(Before))
+    assert list(_graph_funcs(after)[0].param_directions) == [ir.ParamDirection.In]
+
+
+@pytest.mark.parametrize("submit", [False, True])
+@pytest.mark.parametrize("fresh_result", [False, True])
+def test_graph_reads_returned_call_storage(submit, fresh_result):
+    """A read after a partial Out write needs the backing input, through either call kind.
+
+    A callee returning a fresh allocation is the negative control: its read
+    must not turn the unrelated write-only input into InOut.
+    """
+    launch = "view, done = pl.submit(self.update, view)" if submit else "view = self.update(view)"
+    result = "pl.create_tensor([32, 64], pl.FP32)" if fresh_result else "view"
+    before = pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def update(self, view: pl.Out[pl.Tensor[[32, 64], pl.FP32]]) -> pl.Tensor[[32, 64], pl.FP32]:
+        value = pl.tile.full([8, 64], pl.FP32, 1.0)
+        view = pl.store(value, [0, 0], view)
+        result = {result}
+        return result
+    @pl.function(type=pl.FunctionType.InCore)
+    def consume(
+        self, view: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+    ) -> pl.Tensor[[8, 64], pl.FP32]:
+        value = pl.load(view, [16, 0], [8, 64])
+        dst = pl.store(value, [0, 0], dst)
+        return dst
+    @pl.function
+    def main(
+        self, buffer: pl.InOut[pl.Tensor[[16, 128], pl.FP32]], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+    ) -> pl.Tensor[[8, 64], pl.FP32]:
+        with pl.graph("layer"):
+            view = pl.reshape(buffer, [32, 64])
+            with pl.manual_scope():
+                {launch}
+                dst = self.consume(view, dst)
+        return dst
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(before))
+    graph = _graph_funcs(after)[0]
+    expected = ir.ParamDirection.Out if fresh_result else ir.ParamDirection.InOut
+    directions = [
+        direction
+        for param, direction in zip(graph.params, graph.param_directions)
+        if param.name_hint.startswith("buffer")
+    ]
+    assert directions == [expected]
+
+
 class TestOutlineGraphScopes:
     """Outlining ``pl.graph`` regions into Graph functions."""
 
