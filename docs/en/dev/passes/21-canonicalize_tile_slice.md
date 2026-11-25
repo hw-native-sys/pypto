@@ -35,6 +35,10 @@ valid shapes and unaligned windows. Transpose views, vector reshapes that swap a
 preserve the corresponding parent coordinate mapping, including offsets introduced by later chained slices.
 This normalization runs before generic slice materialization, and removes only the original pure coefficient-view
 ancestors whose values have no remaining consumers.
+A coefficient loop carry is read from its current storage on every iteration.
+For view-backed column coefficients, a scalar copy of the initializer into the original physical shape
+provides an aligned carry without changing independent uses of the initializer; an unaligned column-major
+initializer cannot be materialized using the A5 ND-only Vec-to-Vec extract.
 
 **Pipeline position**: After [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](22-infer_tile_memory_space.md).
 

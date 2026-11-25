@@ -261,5 +261,49 @@ def test_dequant_preserves_shared_coefficient_view(tmp_path):
     assert "pto.tdequant ins(" in mlir
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("origin", [0, 1])
+def test_dequant_loop_carried_coefficients(origin, tmp_path):
+    @pl.jit.incore
+    def kernel(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[32, 1], pl.FP32],
+        offset: pl.Tensor[[16, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+    ) -> pl.Tensor[[32, 64], pl.FP32]:
+        values = pl.tile.load(src, [0, 0], [16, 64])
+        initial = pl.tile.slice(pl.tile.load(scale, [0, 0], [32, 1]), [16, 1], [origin, 0])
+        offsets = pl.tile.load(offset, [0, 0], [16, 1])
+        for step, (carried, out_iter) in pl.range(2, init_values=(initial, out)):
+            result = pl.tile.dequant(values, carried, offsets)
+            if origin == 0:
+                # The original, aligned view remains independent of the loop carry.
+                pl.tile.write(result, [0, 0], pl.tile.read(initial, [0, 0]))
+            out_next = pl.tile.store(result, [step * 16, 0], out_iter)
+            updated = pl.tile.adds(carried, 1.0)
+            _, out_final = pl.yield_(updated, out_next)
+        return out_final
+
+    @pl.jit
+    def program(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[32, 1], pl.FP32],
+        offset: pl.Tensor[[16, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+    ) -> pl.Tensor[[32, 64], pl.FP32]:
+        return kernel(src, scale, offset, out)
+
+    compiled = program.compile(
+        config=RunConfig(
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            save_kernels_dir=str(tmp_path),
+        )
+    )
+    mlir = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.pto"))
+    assert "pto.tdequant ins(" in mlir
+    assert "pto.textract" not in mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

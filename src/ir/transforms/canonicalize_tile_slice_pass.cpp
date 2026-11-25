@@ -654,7 +654,7 @@ class SliceCollector : public IRVisitor {
   /// out of the K loop).
   void VisitExpr_(const IterArgPtr& op) override {
     if (!op) return;
-    BindWindowAlias(op, op->initValue_);
+    BindControlFlowWindow(op, op->initValue_);
     IRVisitor::VisitExpr_(op);
   }
 
@@ -689,7 +689,7 @@ class SliceCollector : public IRVisitor {
       const SliceInfo* then_window = LookupWindow(then_yield->value_[i]);
       const SliceInfo* else_window = LookupWindow(else_yield->value_[i]);
       if (!then_window || !else_window || !SameWindow(*then_window, *else_window)) continue;
-      BindWindowAlias(op->return_vars_[i], then_yield->value_[i]);
+      BindControlFlowWindow(op->return_vars_[i], then_yield->value_[i]);
     }
   }
 
@@ -747,7 +747,7 @@ class SliceCollector : public IRVisitor {
       }
       const SliceInfo* initial = LookupWindow(iter_arg);
       if (i < return_vars.size() && carried && initial && SameWindow(*carried, *initial)) {
-        BindWindowAlias(return_vars[i], yield->value_[i]);
+        BindControlFlowWindow(return_vars[i], yield->value_[i]);
       }
     }
   }
@@ -794,6 +794,29 @@ class SliceCollector : public IRVisitor {
     auto acc = AccumulatorOperand(call);
     if (!acc || !As<IterArg>(acc)) return;
     carried_acc_uses_.emplace(acc.get(), call);
+  }
+
+  /// A Vec FP32 control-flow value names its current carried/merged storage,
+  /// not necessarily the initializer's parent on later iterations. Keep the
+  /// original window relation for the Acc guard, but anchor coefficient
+  /// coordinates at the control-flow value itself.
+  void BindControlFlowWindow(const VarPtr& target, const ExprPtr& source) {
+    const auto type = As<TileType>(target->GetType());
+    const auto source_var = AsVarLike(source);
+    if (type && source_var && type->dtype_ == DataType::FP32 && type->shape_.size() == 2 &&
+        type->memory_space_.value_or(MemorySpace::Vec) == MemorySpace::Vec &&
+        tile_view_semantics::GetEffectiveTileView(*type).slayout == TileLayout::none_box &&
+        (windows.count(source_var.get()) || coefficient_views.count(source_var.get())) &&
+        (!windows.count(source_var.get()) ||
+         windows.at(source_var.get()).memory_space.value_or(MemorySpace::Vec) == MemorySpace::Vec)) {
+      const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, target->span_);
+      windows.emplace(target.get(),
+                      SliceInfo{target, zero, zero, MemorySpace::Vec, false, target, zero, zero, false});
+      coefficient_views.insert(target.get());
+      coefficient_view_sources_.emplace(target.get(), source_var.get());
+      return;
+    }
+    BindWindowAlias(target, source);
   }
 
   /// Record `target` as naming the same window as `source`, when both provably
@@ -1089,7 +1112,9 @@ class SliceStorageAnalysis : public IRVisitor {
 class DequantCoefficientMutator : public IRMutator {
  public:
   explicit DequantCoefficientMutator(const SliceCollector& collector)
-      : windows_(collector.windows), coefficient_views_(collector.coefficient_views) {}
+      : windows_(collector.windows),
+        coefficient_views_(collector.coefficient_views),
+        coefficient_chain_(collector.DequantViewChain()) {}
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -1099,12 +1124,15 @@ class DequantCoefficientMutator : public IRMutator {
     if (!IsOp(call, "tile.dequant")) return base;
     std::vector<StmtPtr> copies;
     std::vector<ExprPtr> args = call->args_;
-    if (!NormalizeDequantCoefficients(call, copies, args)) return base;
+    if (!NormalizeDequantCoefficients(As<Call>(op->value_), copies, args)) return base;
     auto result = MutableCopy(assign);
     result->value_ = OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_);
     copies.push_back(result);
     return SeqStmts::Flatten(std::move(copies), assign->span_);
   }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return MaterializeCoefficientLoopInits(op); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return MaterializeCoefficientLoopInits(op); }
 
  private:
   /// A coefficient subview can have a parent's row pitch or a different native
@@ -1123,73 +1151,118 @@ class DequantCoefficientMutator : public IRMutator {
     }
 
     const auto& span = call->span_;
-    auto& registry = OpRegistry::GetInstance();
     const auto coeff = As<TileType>(scale->GetType());
     const auto rows = As<ConstInt>(coeff->shape_[0]);
     INTERNAL_CHECK_SPAN(rows, span) << "dequantization coefficient rows must be static";
     constexpr int64_t kFp32Block = 8;
     const auto padded_rows = (rows->value_ + kFp32Block - 1) / kFp32Block * kFp32Block;
-    const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
     const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
     const auto padded = std::make_shared<ConstInt>(padded_rows, DataType::INDEX, span);
     const auto shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{padded, one}, span);
 
     for (size_t i = 1; i < args.size(); ++i) {
-      auto operand = AsVarLike(args[i]);
-      const auto type = As<TileType>(operand->GetType());
-      const auto valid = GetValidShape(type);
-      const auto window = windows_.find(operand.get());
-      ExprPtr base = operand;
-      ExprPtr row_offset = zero;
-      ExprPtr col_offset = zero;
-      bool transposed = false;
-      if (window != windows_.end()) {
-        base = VisitExpr(window->second.base);
-        row_offset = window->second.off_row;
-        col_offset = window->second.off_col;
-        transposed = window->second.transposed;
-      }
-      const auto base_type = As<TileType>(base->GetType());
-      const auto base_view = tile_view_semantics::GetEffectiveTileView(*base_type);
-      auto allocate = registry.Create("tile.create", {shape},
-                                      {{"dtype", DataType::FP32}, {"target_memory", MemorySpace::Vec}}, span);
-      auto dest = std::make_shared<Var>(operand->name_hint_ + "_dequant_coeff", allocate->GetType(), span);
-      stmts.push_back(std::make_shared<AssignStmt>(dest, allocate, span));
-
-      auto row = std::make_shared<Var>(operand->name_hint_ + "_coeff_row",
-                                       std::make_shared<ScalarType>(DataType::INDEX), span);
-      const ExprPtr row_index = row;
-      const ExprPtr column_index = zero;
-      auto input_row = MakeCanonicalIndexAdd(transposed ? column_index : row_index, row_offset, span);
-      auto input_col = MakeCanonicalIndexAdd(transposed ? row_index : column_index, col_offset, span);
-      std::vector<ExprPtr> indices{input_row, input_col};
-      if (base_view.blayout == TileLayout::col_major) {
-        auto flat = MakeAdd(MakeMul(input_col, base_type->shape_[0], span), input_row, span);
-        // tile.read takes rank-matched indices and codegen linearizes them
-        // in row-major order; convert the physical column-major offset.
-        indices = {MakeFloorDiv(flat, base_type->shape_[1], span),
-                   MakeFloorMod(flat, base_type->shape_[1], span)};
-      }
-      auto read_index = std::make_shared<MakeTuple>(indices, span);
-      auto read = registry.Create("tile.read", {base, read_index}, span);
-      auto value = std::make_shared<Var>(operand->name_hint_ + "_coeff_value", read->GetType(), span);
-      auto write_index = std::make_shared<MakeTuple>(std::vector<ExprPtr>{row, zero}, span);
-      auto write = registry.Create("tile.write", {dest, write_index, value}, span);
-      auto body = SeqStmts::Flatten(
-          {std::make_shared<AssignStmt>(value, read, span), std::make_shared<EvalStmt>(write, span)}, span);
-      stmts.push_back(std::make_shared<ForStmt>(row, zero, valid[0], one, std::vector<IterArgPtr>{}, body,
-                                                std::vector<VarPtr>{}, span));
-      auto set_valid = registry.Create("tile.set_validshape", {dest, valid[0], one}, span);
-      auto normalized =
-          std::make_shared<Var>(operand->name_hint_ + "_coeff_valid", set_valid->GetType(), span);
-      stmts.push_back(std::make_shared<AssignStmt>(normalized, set_valid, span));
-      args[i] = normalized;
+      args[i] = CopyCoefficient(AsVarLike(call->args_[i]), AsVarLike(args[i]), shape, stmts, span);
     }
     return true;
   }
 
+  /// Preserve loop initializer shape and valid extent so loop/yield types
+  /// remain unchanged. An unaligned column-vector slice cannot use the A5
+  /// Vec TEXTRACT instruction (which requires ND); a scalar copy is legal.
+  /// Remap the IterArg, not the initializer, because the original initializer
+  /// may still be independently used by the body.
+  template <typename LoopStmtPtr>
+  StmtPtr MaterializeCoefficientLoopInits(const LoopStmtPtr& op) {
+    std::vector<StmtPtr> copies;
+    for (const auto& carry : op->iter_args_) {
+      if (!coefficient_chain_.count(carry.get())) continue;
+      const auto initial = AsVarLike(carry->initValue_);
+      if (!initial || (!windows_.count(initial.get()) && !coefficient_views_.count(initial.get()))) {
+        continue;
+      }
+      const auto type = As<TileType>(initial->GetType());
+      const auto valid = GetValidShape(type);
+      const auto valid_cols = As<ConstInt>(valid[1]);
+      const auto rows = As<ConstInt>(type->shape_[0]);
+      const auto cols = As<ConstInt>(type->shape_[1]);
+      const auto view = tile_view_semantics::GetEffectiveTileView(*type);
+      // This copy preserves the original physical descriptor. Larger
+      // multi-column carries are handled by ordinary slice materialization.
+      if (!valid_cols || valid_cols->value_ != 1 || !rows || !cols ||
+          (cols->value_ == 1 ? rows->value_ % 8 != 0 || view.blayout != TileLayout::col_major
+                             : cols->value_ % 8 != 0 || view.blayout != TileLayout::row_major)) {
+        continue;
+      }
+      auto shape = std::make_shared<MakeTuple>(type->shape_, op->span_);
+      auto materialized = CopyCoefficient(initial, AsVarLike(VisitExpr(initial)), shape, copies, op->span_,
+                                          type->memory_space_.has_value());
+      var_remap_[carry.get()] =
+          std::make_shared<IterArg>(carry->name_hint_, materialized->GetType(), materialized, carry->span_);
+    }
+    auto loop = IRMutator::VisitStmt_(op);
+    if (copies.empty()) return loop;
+    copies.push_back(loop);
+    return SeqStmts::Flatten(std::move(copies), op->span_);
+  }
+
+  VarPtr CopyCoefficient(const VarPtr& original, const VarPtr& operand, const ExprPtr& shape,
+                         std::vector<StmtPtr>& stmts, const Span& span, bool force_vec = true) {
+    auto& registry = OpRegistry::GetInstance();
+    const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+    const auto type = As<TileType>(operand->GetType());
+    const auto valid = GetValidShape(type);
+    const auto window = windows_.find(original.get());
+    ExprPtr base = operand;
+    ExprPtr row_offset = zero;
+    ExprPtr col_offset = zero;
+    bool transposed = false;
+    if (window != windows_.end()) {
+      base = VisitExpr(window->second.base);
+      row_offset = VisitExpr(window->second.off_row);
+      col_offset = VisitExpr(window->second.off_col);
+      transposed = window->second.transposed;
+    }
+    const auto base_type = As<TileType>(base->GetType());
+    const auto base_view = tile_view_semantics::GetEffectiveTileView(*base_type);
+    std::vector<std::pair<std::string, std::any>> kwargs{{"dtype", DataType::FP32}};
+    if (force_vec) kwargs.emplace_back("target_memory", MemorySpace::Vec);
+    auto allocate = registry.Create("tile.create", {shape}, kwargs, span);
+    auto dest = std::make_shared<Var>(operand->name_hint_ + "_dequant_coeff", allocate->GetType(), span);
+    stmts.push_back(std::make_shared<AssignStmt>(dest, allocate, span));
+
+    auto row = std::make_shared<Var>(operand->name_hint_ + "_coeff_row",
+                                     std::make_shared<ScalarType>(DataType::INDEX), span);
+    const ExprPtr row_index = row;
+    const ExprPtr column_index = zero;
+    auto input_row = MakeCanonicalIndexAdd(transposed ? column_index : row_index, row_offset, span);
+    auto input_col = MakeCanonicalIndexAdd(transposed ? row_index : column_index, col_offset, span);
+    std::vector<ExprPtr> indices{input_row, input_col};
+    if (base_view.blayout == TileLayout::col_major) {
+      auto flat = MakeAdd(MakeMul(input_col, base_type->shape_[0], span), input_row, span);
+      // tile.read takes rank-matched indices and codegen linearizes them
+      // in row-major order; convert the physical column-major offset.
+      indices = {MakeFloorDiv(flat, base_type->shape_[1], span),
+                 MakeFloorMod(flat, base_type->shape_[1], span)};
+    }
+    auto read_index = std::make_shared<MakeTuple>(indices, span);
+    auto read = registry.Create("tile.read", {base, read_index}, span);
+    auto value = std::make_shared<Var>(operand->name_hint_ + "_coeff_value", read->GetType(), span);
+    auto write_index = std::make_shared<MakeTuple>(std::vector<ExprPtr>{row, zero}, span);
+    auto write = registry.Create("tile.write", {dest, write_index, value}, span);
+    auto body = SeqStmts::Flatten(
+        {std::make_shared<AssignStmt>(value, read, span), std::make_shared<EvalStmt>(write, span)}, span);
+    stmts.push_back(std::make_shared<ForStmt>(row, zero, valid[0], one, std::vector<IterArgPtr>{}, body,
+                                              std::vector<VarPtr>{}, span));
+    auto set_valid = registry.Create("tile.set_validshape", {dest, valid[0], one}, span);
+    auto normalized = std::make_shared<Var>(operand->name_hint_ + "_coeff_valid", set_valid->GetType(), span);
+    stmts.push_back(std::make_shared<AssignStmt>(normalized, set_valid, span));
+    return normalized;
+  }
+
   const std::unordered_map<const Var*, SliceInfo>& windows_;
   const std::unordered_set<const Var*>& coefficient_views_;
+  const std::unordered_set<const Var*> coefficient_chain_;
 };
 
 /// Phase 2 — rewrite canonicalizable `tile.slice` consumers: Mat slices are

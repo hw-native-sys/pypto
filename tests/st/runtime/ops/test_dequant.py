@@ -222,8 +222,50 @@ def _dequant_vector_view_cases():
         )
 
 
+@pl.jit.incore
+def _dequant_loop_kernel(
+    src: pl.Tensor[[16, 64], pl.INT8],
+    scale: pl.Tensor[[32, 1], pl.FP32],
+    offset: pl.Tensor[[16, 1], pl.FP32],
+    out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+) -> pl.Tensor[[32, 64], pl.FP32]:
+    values = pl.tile.load(src, [0, 0], [16, 64])
+    initial = pl.tile.slice(pl.tile.load(scale, [0, 0], [32, 1]), [16, 1], [1, 0])
+    offsets = pl.tile.load(offset, [0, 0], [16, 1])
+    for step, (carried, out_iter) in pl.range(2, init_values=(initial, out)):
+        result = pl.tile.dequant(values, carried, offsets)
+        out_next = pl.tile.store(result, [step * 16, 0], out_iter)
+        updated = pl.tile.adds(carried, 1.0)
+        _, out_final = pl.yield_(updated, out_next)
+    return out_final
+
+
+@pl.jit
+def _dequant_loop_program(
+    src: pl.Tensor[[16, 64], pl.INT8],
+    scale: pl.Tensor[[32, 1], pl.FP32],
+    offset: pl.Tensor[[16, 1], pl.FP32],
+    out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+) -> pl.Tensor[[32, 64], pl.FP32]:
+    return _dequant_loop_kernel(src, scale, offset, out)
+
+
+def _dequant_loop_case():
+    return st.case(
+        _dequant_loop_program,
+        torch.ones((16, 64), dtype=torch.int8),
+        torch.ones((32, 1), dtype=torch.float32),
+        torch.zeros((16, 1), dtype=torch.float32),
+        torch.empty((32, 64), dtype=torch.float32),
+        name="int8_loop_carried_coefficient",
+        golden=lambda t: torch.cat((t["src"].float(), t["src"].float() * 2), dim=0),
+        rtol=0,
+        atol=0,
+    )
+
+
 @pytest.mark.platforms("a5")
-@st.cases(*_dequant_cases(), *_dequant_transpose_cases(), *_dequant_vector_view_cases())
+@st.cases(*_dequant_cases(), *_dequant_transpose_cases(), *_dequant_vector_view_cases(), _dequant_loop_case())
 def test_dequantization(case_run):
     case_run.assert_passed()
 
