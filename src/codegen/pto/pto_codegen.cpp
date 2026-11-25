@@ -834,13 +834,12 @@ class TupleConsumerCollector : public ir::IRVisitor {
   void VisitStmt_(const ir::AssignStmtPtr& op) override {
     auto call = As<ir::Call>(op->value_);
     auto source = ir::AsVarLike(op->value_);
-    if (ir::IsOp(call, "pld.tile.get_async") || ir::ResolveVFCall(call, program_) ||
-        (source && aliases_.count(source.get()))) {
+    if (ir::ResolveVFCall(call, program_) || (source && aliases_.count(source.get()))) {
       aliases_.insert(op->var_.get());
     }
     if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
       if (auto base = As<ir::Var>(tge->tuple_); base && tge->index_ >= 0) {
-        // VF returns and Scatter GET projections borrow existing storage.
+        // VF tuple elements are borrowed aliases, not hardware DPS destinations.
         if (aliases_.count(base.get())) return;
         auto& elements = index_[base.get()];
         const auto index = static_cast<size_t>(tge->index_);
