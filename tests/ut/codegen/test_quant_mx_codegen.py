@@ -10,12 +10,14 @@
 """PTO codegen tests for MX quantization operators."""
 
 import re
+import subprocess
 from pathlib import Path
 
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.runtime import RunConfig
@@ -36,6 +38,22 @@ def _generate_mlir(program):
         function for function in optimized.functions.values() if ir.is_incore_type(function.func_type)
     )
     return codegen.PTOCodegen().generate(ir.Program([target], target.name, optimized.span))
+
+
+def _assemble_a5(mlir, tmp_path):
+    ptoas = find_ptoas_binary()
+    if ptoas is None:
+        pytest.skip("PTOAS is not installed")
+    path = tmp_path / "kernel.pto"
+    path.write_text(mlir)
+    result = subprocess.run(
+        [str(ptoas), "--pto-arch=a5", "--pto-level=level3", str(path), "-o", "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
 
 
 def _allocation_range(mlir, name_fragment):
@@ -69,6 +87,63 @@ class TestQuantMxCodegen:
         assert "quant_type MXFP4_E2M1" in mlir
         assert "dtype=!pto.f4E2M1x2, rows=3, cols=32, v_row=3, v_col=32" in mlir
         assert "dtype=ui8, rows=1, cols=32, v_row=1, v_col=6" in mlir
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("algorithm", ["ocp", "nv"])
+    def test_canonical_axis1_compiles_with_padded_source(self, algorithm, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 128], pl.FP32],
+                out_quant: pl.Tensor[[16, 128], pl.INT8],
+                out_exp: pl.Tensor[[16, 32], pl.UINT8],
+            ):
+                values = pl.tile.set_validshape(pl.load(src, [0, 0], [16, 128]), 16, 64)
+                amax = pl.tile.create([1, 32], pl.FP32)
+                scaling = pl.tile.create([1, 32], pl.FP32)
+                quant, exp = pl.tile.quant_mx_raw(
+                    values, amax, scaling, group_axis=1, quant_scale_alg=algorithm, canonical_axis1=True
+                )
+                pl.store(quant, [0, 0], out_quant)
+                pl.store(exp, [0, 0], out_exp)
+
+        mlir = _generate_mlir(Program)
+        operation = next(line for line in mlir.splitlines() if "pto.tquant.mx" in line)
+        assert "dtype=f32, rows=16, cols=128, v_row=16, v_col=64" in operation
+        assert "dtype=i8, rows=16, cols=128, v_row=16, v_col=64" in operation
+        assert "dtype=ui8, rows=16, cols=32, v_row=16, v_col=2" in operation
+
+        cpp = _assemble_a5(mlir, tmp_path)
+        enum = {"ocp": "OcpMxFp8E4M3", "nv": "NvMxFp8E4M3"}[algorithm]
+        assert f"TQUANT<1, pto::MxQuantAlg::{enum}>" in cpp
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("axis", [0, 1])
+    def test_e5m2_quantization_compiles_a_native_cast(self, axis, tmp_path):
+        quant_shape = (32, 64) if axis == 1 else (64, 32)
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[32, 64], pl.BF16],
+                out_quant: pl.Tensor[quant_shape, pl.FP8E5M2],
+                out_scale: pl.Tensor[[1, 64], pl.FP8E8M0],
+            ):
+                values = pl.load(src, [0, 0], [32, 64])
+                quant, scale = pl.quant_mx(values, group_axis=axis, dtype=pl.FP8E5M2)
+                pl.store(quant, [0, 0], out_quant)
+                pl.store(pl.reshape(scale, [1, 64]), [0, 0], out_scale)
+
+        mlir = _generate_mlir(Program)
+        assert "pto.tquant.mx" not in mlir
+        assert "pto.trowmax" in mlir
+        assert any("pto.tcvt" in line and "f8E5M2" in line for line in mlir.splitlines())
+
+        assert "float8_e5m2_t" in _assemble_a5(mlir, tmp_path)
 
     @pytest.mark.parametrize("axis", [0, 1])
     def test_fp4_tensor_quant_materializes_carrier_output(self, axis):

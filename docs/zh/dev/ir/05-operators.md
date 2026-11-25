@@ -411,8 +411,17 @@ Torch E2M1 x2 张量与显式标注的 UINT8 载体在 JIT 和编译后调用中
 A5 对满足描述符条件的 E2M1→E4M3 使用直接转换；其他打包 FP4→FP8 转换经
 BF16/FP32 桥接。它仅对数据操作数进行数值转换，因此缩放因子不变。
 原生 FP4 Tensor 和 Tile 矩阵乘保持两侧打包格式。
-`pl.quant_mx` 可将 FP16/BF16/FP32 源量化为 MXFP8，将 FP16/BF16 源量化为 E2M1 MXFP4；
+`pl.quant_mx` 可将 FP16/BF16/FP32 源量化为 MXFP8，将 FP16/BF16 源量化为 E2M1 MXFP4。
+在 A5 上，`dtype=pl.FP8E5M2` 对 A/B 两种输入方向均使用 OCP 缩放。
+tensor `pl.quant_mx` 的完整有效 scale 返回值保留 GM 中的 `MX_A_ZZ` 或 `MX_B_NN` 布局。
+完整 buffer 的 packed scale store 会自动合法化为不改变字节的单行 ND backing view。
+暂不支持部分 packed scale store，也可显式将完整 scale tile reshape 为单行 backing view 后写回。
 FP4 结果需通过受支持的 Mat 和 Left/Right 放置路径供 tile 矩阵乘使用。量化对齐与内存规划器要求见 [FP4](../fp4.md)。
+
+`pl.tile.quant_mx_raw(..., group_axis=1, canonical_axis1=True)` 支持物理列数大于有效列数的
+FP32 源 tile。有效行数至少为 2，有效列数须为 32 的倍数。UINT8 指数 tile 的有效形状为
+`[valid_rows, valid_cols/32]`，行步长按 32 字节对齐。两个 FP32 工作区均需连续存储有效元素，
+可使用无列填充的对齐多行，或对齐的单行。省略该参数时，指数仍采用 `[1, valid_rows*valid_cols/32]` 扁平形状。
 
 #### MX / Ascend950：pto-isa 约束
 

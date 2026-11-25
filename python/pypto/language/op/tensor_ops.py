@@ -782,9 +782,10 @@ def quant_mx(
         src: Source tensor. Must be a static-rank 2D FP16, BF16, or FP32 tensor.
         group_axis: Quantization group axis. Use ``1`` for A/LHS data and ``0``
             for B/RHS data.
-        dtype: Quantized MX data dtype. Defaults to ``FP8E4M3FN``.
+        dtype: Quantized MX data dtype. Defaults to ``FP8E4M3FN``. ``FP8E5M2`` uses OCP scaling.
             ``FP4E2M1X2`` requires FP16/BF16 input and halves the output's last dimension.
         quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
+            FP8E5M2 requires ``"ocp"``.
 
     Returns:
         A pair ``(data, scale)``. ``data`` is the quantized MX tensor and

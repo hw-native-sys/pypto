@@ -37,7 +37,10 @@ def tquant_mx(
     quant_scale_alg: str = "ocp",
     span: Span | None = None,
 ) -> Call:
-    """MX block-32 dynamic quantization returning quantized data and scale."""
+    """MX block-32 dynamic quantization returning quantized data and scale.
+
+    FP8E5M2 uses OCP scaling and a native A5 FP8 cast.
+    """
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
     if quant_scale_alg != "ocp":
@@ -54,12 +57,15 @@ def tquant_mx_raw(
     group_axis: int = 1,
     quant_scale_alg: str = "ocp",
     interleave: bool = False,
+    canonical_axis1: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build the compiler-internal value-returning raw MX quantization Call.
 
     Returns ``TupleType{INT8 dst, UINT8 exp}``. ``max_scratch`` / ``scaling_scratch``
     are write-only per-group workspaces (same role as ``gather_compare``'s tmp).
+    With ``canonical_axis1=True``, a FP32 axis1 input produces one exponent
+    row per source row, with ``valid_cols/32`` valid exponents in each row.
     """
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
@@ -67,6 +73,8 @@ def tquant_mx_raw(
         kwargs["quant_scale_alg"] = quant_scale_alg
     if interleave:
         kwargs["interleave"] = True
+    if canonical_axis1:
+        kwargs["canonical_axis1"] = True
     return _ir_core.create_op_call(
         "tile.tquant_mx_raw",
         [src, max_scratch, scaling_scratch],

@@ -474,9 +474,10 @@ def quant_mx(
         group_axis: Quantization group axis. ``1`` produces A-oriented data
             and an ``MX_A_ZZ`` scale tensor; ``0`` produces B-oriented data
             and an ``MX_B_NN`` scale tensor.
-        dtype: Quantized data dtype. Defaults to ``FP8E4M3FN``.
+        dtype: Quantized data dtype. Defaults to ``FP8E4M3FN``. ``FP8E5M2`` uses OCP scaling.
             ``FP4E2M1X2`` packs two values per output byte.
         quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
+            FP8E5M2 requires ``"ocp"``.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:

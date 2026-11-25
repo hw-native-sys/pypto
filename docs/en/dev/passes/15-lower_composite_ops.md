@@ -4,7 +4,7 @@ Decomposes composite tile / distributed ops into primitive operations so codegen
 
 ## Overview
 
-`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee appears in the pass's lowering dispatch table. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive tile-op recipe using `tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, and `tile.cast`: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. `tile.tquant_mx` becomes value-returning `tile.tquant_mx_raw` + `tile.tmov_x2zz` (gather_compare-style SSA) plus explicit workspace tiles; public FP8 aliases are added via `reinterpret_view` / `transpose_view`. For `pld.tensor.*` distributed collectives, the rules emit the cross-rank recipes documented below; `pld.tensor.allreduce` remains explicit-signal in InCore/composite lowering. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
+`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee appears in the pass's lowering dispatch table. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive tile-op recipe using `tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, and `tile.cast`: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. For E4M3FN and FP4 payloads, `tile.tquant_mx` becomes value-returning `tile.tquant_mx_raw` + `tile.tmov_x2zz` (gather_compare-style SSA) plus explicit workspace tiles; public FP8 aliases are added via `reinterpret_view` / `transpose_view`. For `pld.tensor.*` distributed collectives, the rules emit the cross-rank recipes documented below; `pld.tensor.allreduce` remains explicit-signal in InCore/composite lowering. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
 
 Host-orchestrator `pld.tensor.allreduce` calls are skipped by this pass: `SynthesizeAllReduceSignals` first normalizes optional-signal host calls to the explicit-signal form, `MaterializeCommDomainScopes` places the data and signal windows into comm domains, and then `LowerHostTensorCollectives` lowers them to internal builtin dispatches.
 
@@ -81,6 +81,12 @@ outside the table, preserving idempotency. `AssignStmt`, `EvalStmt`, and direct
 neither its backend queries nor the pass order and properties.
 
 ## Algorithm (`tile.tquant_mx` rule)
+
+For FP8E5M2, the rule reduces each group of 32 source values by magnitude, derives the OCP
+shared exponent using E5M2's maximum normal exponent of 15, and applies its reciprocal
+scale and clamps it to the finite E5M2 range before a native FP8E5M2 cast. Zero and tiny groups use the minimum E8M0
+scale. Groups containing a NaN use E8M0 code 255 and NaN payloads. The exponent bytes
+reuse the X-to-ZZ packing, with a transposed scale view for B-oriented input.
 
 The lowering creates source-dtype `max` / `scaling` write-only workspace tiles, then binds a value-returning `tile.tquant_mx_raw(src, max, scaling)` whose `TupleType{INT8 dst, UINT8 exp}` elements are projected with `TupleGetItem` (same SSA pattern as `tile.gather_compare`). Codegen resolves those projections via `ResolveTupleResultElements` and emits `pto.tquant.mx` with four outs (dst, exp, max, scaling). Public `group_axis` matches PTOAS `grpAxis`: axis1 keeps `[M,K]` and returns scale `[M,K/32]`; axis0 first transposes `[N,K]` to `[K,N]` and returns scale `[K/32,N]`. Both forms then bind value-returning `tile.tmov_x2zz(exp, tmp)`. Axis1 tmp capacity is `64 + ceil(rows/16)*cols` bytes (33-byte-aligned); axis0 uses a minimal 32-byte Vec pad required by `TMovDnTo2Zz`. Axis0 follows pto-isa `TMovDnTo2Zz` (pin `be5ccb76`): DN `[M̂,N]` → ZZ `[N,M̂]` row/row, then a zero-copy `tile.transpose_view` yields the public `[M̂,N]` col/col scale. A zero-copy FP8 data alias and FP8E8M0 scale alias complete the public tuple. Write effects on the workspace args keep the Calls alive under DCE when a public result is unused.
 
