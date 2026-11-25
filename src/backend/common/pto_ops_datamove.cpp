@@ -882,8 +882,6 @@ static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::Codeg
   INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
       << op->op_->name_ << " requires 2 arguments (dst_scale, src), but got " << op->args_.size();
 
-  std::string src = codegen.GetExprAsCode(op->args_[1]);
-  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_ty = codegen.GetCurrentResultTileBufTypeString();
 
@@ -896,17 +894,7 @@ static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::Codeg
       << ". This usually means IsInPlaceInput0DpsOp is out of sync with the op registry's "
          "set_output_reuses_input flag.";
 
-  std::ostringstream oss;
-  oss << "pto.tget_scale_addr ins(" << src;
-  if (!src_ty.empty()) {
-    oss << " : " << src_ty;
-  }
-  oss << ") outs(" << dst;
-  if (!dst_ty.empty()) {
-    oss << " : " << dst_ty;
-  }
-  oss << ")";
-  codegen.Emit(oss.str());
+  codegen.EmitMxScaleAddress(op->args_[1], dst, dst_ty);
   return "";
 }
 
@@ -1755,6 +1743,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       codegen.RegisterTileBufType(result_target, result_type, codegen.GetCurrentResultTileType());
     }
 
+    codegen.EmitMxExtractScaleAddress(result_target, result_type);
     std::ostringstream oss;
     oss << "pto.textract ins(" << src << ", " << offsets[0] << ", " << offsets[1];
     if (!src_type.empty()) {

@@ -51,6 +51,8 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 
 已有的显式 `tget_scale_addr` 也会使状态失效。因此重复执行 pass 会保守地再增加一层绑定；标准 lowering pipeline 只运行该 pass 一次。
 
+当 PTO 代码生成在同一直线区域找到匹配的 Mat→Scale `tile.extract` 时，会在 scale 目标 tile 分配后、`pto.textract` 写入前发射地址绑定。对应的 data tile 届时必须已经定义。extract 与 IR 绑定之间可以有流水线 flag 或另一侧的 scale 分级操作。
+
 ## 相关
 
 - 算子注册与类型检查：`src/ir/op/tile_ops/matmul_mx.cpp`

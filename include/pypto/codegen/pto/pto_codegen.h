@@ -193,6 +193,8 @@ class PTOCodegen : public CodegenBase {
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override;
   void Emit(const std::string& line) override;
+  void EmitMxScaleAddress(const ir::ExprPtr& data, const std::string& scale, const std::string& scale_type);
+  void EmitMxExtractScaleAddress(const std::string& scale, const std::string& scale_type);
   std::string GetExprAsCode(const ir::ExprPtr& expr) override;
   [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override;
   int64_t GetConstIntValue(const ir::ExprPtr& expr) const override;
@@ -901,6 +903,7 @@ class PTOCodegen : public CodegenBase {
 
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
+  void VisitStmt_(const ir::SeqStmtsPtr& op) override;
   void VisitStmt_(const ir::RegScopeStmtPtr& op) override;
   void VisitStmt_(const ir::ForStmtPtr& op) override;
   void VisitStmt_(const ir::IfStmtPtr& op) override;
@@ -1217,6 +1220,8 @@ class PTOCodegen : public CodegenBase {
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
 
     std::map<const ir::Var*, std::string> var_to_mlir;
+    std::map<const ir::Var*, ir::ExprPtr> mx_extract_scale_data;
+    std::set<const ir::AssignStmt*> early_mx_scale_bindings;
     /// Symbols that appear ONLY in a tensor parameter's valid_shape, mapped to
     /// that parameter's name. Such a symbol is bound at the call site, so a
     /// precompiled kernel never receives it — read on the GetVarName failure
@@ -1394,6 +1399,8 @@ class PTOCodegen : public CodegenBase {
       constants_indent.clear();
 
       var_to_mlir.clear();
+      mx_extract_scale_data.clear();
+      early_mx_scale_bindings.clear();
       valid_shape_symbol_origin.clear();
       tensor_to_view.clear();
       window_origins.clear();

@@ -407,6 +407,12 @@ class LoopResidencyInventory : public IRVisitor {
     if (IsOp(call, "tile.matmul_acc")) {
       return call->args_.size() >= 3 ? std::optional<std::pair<size_t, size_t>>({1, 2}) : std::nullopt;
     }
+    if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias")) {
+      return call->args_.size() >= 4 ? std::optional<std::pair<size_t, size_t>>({0, 2}) : std::nullopt;
+    }
+    if (IsOp(call, "tile.matmul_mx_acc")) {
+      return call->args_.size() >= 5 ? std::optional<std::pair<size_t, size_t>>({1, 3}) : std::nullopt;
+    }
     return std::nullopt;
   }
 
@@ -415,6 +421,11 @@ class LoopResidencyInventory : public IRVisitor {
     if (!operand_indices.has_value()) return false;
     if (space == MemorySpace::Left) return use.arg_index == operand_indices->first;
     if (space == MemorySpace::Right) return use.arg_index == operand_indices->second;
+    // MX operands interleave each payload with its scale.
+    if (operand_indices->second - operand_indices->first == 2) {
+      if (space == MemorySpace::LeftScale) return use.arg_index == operand_indices->first + 1;
+      if (space == MemorySpace::RightScale) return use.arg_index == operand_indices->second + 1;
+    }
     return false;
   }
 

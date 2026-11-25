@@ -51,6 +51,8 @@ SSA identity alone is insufficient because aliases may share a mutable buffer. A
 
 An explicit earlier `tget_scale_addr` also invalidates the state. Consequently, repeated pass execution conservatively adds another binding layer; the standard lowering pipeline runs the pass once.
 
+When PTO emission finds a matching Mat→Scale `tile.extract` in the same straight-line region, it emits the derived address binding as soon as the destination tile is allocated, before `pto.textract` writes it. The paired data tile must already be defined at that point. Pipeline flags and staging on the opposite scale side can appear between the extract and the IR binding.
+
 ## Related
 
 - Op registration / type checks: `src/ir/op/tile_ops/matmul_mx.cpp`

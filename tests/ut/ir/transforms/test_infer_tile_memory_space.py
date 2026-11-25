@@ -4329,6 +4329,44 @@ for n in pl.range(0, 2, 1):
         assert self._line_index(printed, "tile.load(rhs") > loop
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
+    def test_marked_mx_scale_panel_hoists_load_but_keeps_extracts(self):
+        params = """
+lhs: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+rhs: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+lhs_scale: pl.Tensor[[16, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+rhs_scale: pl.Tensor[[2, 128], pl.FP8E8M0, pl.MX_B_NN],
+out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+"""
+        body = """
+for n in pl.range(2):
+    panel = pl.tile.load(lhs_scale, [0, 0], [16, 4], target_memory=pl.Mem.Mat)
+    lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+    rhs_mat = pl.tile.load(rhs, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+    rhs_panel = pl.tile.load(rhs_scale, [0, 0], [2, 128], target_memory=pl.Mem.Mat)
+    sa0 = pl.tile.extract(panel, 0, n * 2, [16, 2], target_memory=pl.Mem.LeftScale)
+    sa1 = pl.tile.extract(panel, 0, 0, [16, 2], target_memory=pl.Mem.LeftScale)
+    sb = pl.tile.extract(rhs_panel, 0, 0, [2, 128], target_memory=pl.Mem.RightScale)
+    a = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+    b = pl.tile.extract(rhs_mat, 0, 0, [64, 128], target_memory=pl.Mem.Right)
+    acc = pl.tile.matmul_mx(a, sa0, b, sb)
+    result = pl.tile.matmul_mx_acc(acc, a, sa1, b, sb)
+"""
+        before = self._parse_marked_program(
+            params,
+            "lhs, rhs, lhs_scale, rhs_scale, out",
+            body,
+            fresh_param="lhs_scale",
+            fresh_expr="pl.create_tensor([16, 4], dtype=pl.FP8E8M0, layout=pl.MX_A_ZZ)",
+        )
+        backend.set_backend_type(BackendType.Ascend950)
+        after = passes.infer_tile_memory_space()(passes.convert_to_ssa()(before))
+        printed = ir.python_print(after)
+        loop = self._line_index(printed, "for n")
+        assert self._line_index(printed, "tile.load(lhs_scale") < loop
+        assert self._line_index(printed, "sa0", "tile.extract") > loop
+        assert self._line_index(printed, "sa1", "tile.extract") > loop
+        assert self._line_index(printed, "tile.load(rhs_scale") > loop
+
     def test_marked_transposed_mat_panel_fanout_hoists_only_load(self):
         """A transposed Mat view may fan out while its staging stays local."""
         params = """

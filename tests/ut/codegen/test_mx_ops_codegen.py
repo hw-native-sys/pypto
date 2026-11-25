@@ -603,6 +603,42 @@ class TestMxMatmulCodegen:
         first_tget = next(i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line)
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
 
+    def test_mx_scale_extract_binds_write_destination(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[16, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[128, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[4, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                am = pl.load(a, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+                asm = pl.load(a_s, [0, 0], [16, 4], target_memory=pl.Mem.Mat)
+                bm = pl.load(b, [0, 0], [128, 32], target_memory=pl.Mem.Mat)
+                bsm = pl.load(b_s, [0, 0], [4, 32], target_memory=pl.Mem.Mat)
+                al = pl.tile.extract(am, 0, 64, [16, 64], target_memory=pl.Mem.Left)
+                br = pl.tile.extract(bm, 64, 0, [64, 32], target_memory=pl.Mem.Right)
+                asl = pl.tile.extract(asm, 0, 2, [16, 2], target_memory=pl.Mem.LeftScale)
+                bsr = pl.tile.extract(bsm, 2, 0, [2, 32], target_memory=pl.Mem.RightScale)
+                result = pl.matmul_mx(al, asl, br, bsr)
+                pl.store(result, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        lines = mlir.splitlines()
+        scale_extracts = [
+            i for i, line in enumerate(lines) if "pto.textract" in line and "loc=scaling" in line
+        ]
+        bindings = [i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line]
+        assert len(scale_extracts) == len(bindings) == 2
+        for extract, bind in zip(scale_extracts, bindings, strict=True):
+            assert bind < extract
+            bind_destination = lines[bind].split(" outs(", 1)[1].split(" : ", 1)[0]
+            extract_destination = lines[extract].split(" outs(", 1)[1].split(" : ", 1)[0]
+            assert bind_destination == extract_destination
+
     @pytest.mark.ptoas_compile
     def test_nd_backing_alias_emits_logical_mx_views(self, tmp_path):
         @pl.program
