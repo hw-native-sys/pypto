@@ -560,8 +560,6 @@ op_instance = ir.get_op("tensor.add")
 
 Call 表达式 (Expression) 将 Expr 参数与元数据参数通过 kwargs 分离。
 
-
-
 ### Kwargs vs Args vs 属性 (Property)
 
 | - | **Args** | **Kwargs** | **Op 属性** |

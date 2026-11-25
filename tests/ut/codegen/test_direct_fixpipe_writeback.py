@@ -8,11 +8,13 @@
 # -----------------------------------------------------------------------------------------------------------
 import subprocess
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.diagnostics import InvalidOperationError
 
 
 @pytest.fixture(autouse=True)
@@ -123,7 +125,7 @@ def test_direct_final_qk_writeback(tmp_path):
     ],
 )
 def test_writeback_preserves_unit_flag_check(store_phase, producer_phase):
-    with pytest.raises(Exception, match="AccStorePhaseValid"):
+    with pytest.raises(pypto.Error, match="AccStorePhaseValid"):
         lower(qk_program(store_phase, producer_phase))
 
 
@@ -160,17 +162,19 @@ def test_remote_initialized_by_peer(tmp_path):
 
 
 def test_unmarked_remote_load_still_rejected():
-    with pytest.raises(Exception, match="reg.load reads an uninitialized interval"):
+    with pytest.raises(ValueError, match="reg.load reads an uninitialized interval"):
         lower(remote_program(False))
 
 
 def test_remote_annotation_does_not_initialize_neighbor():
-    with pytest.raises(Exception, match="reg.load reads an uninitialized interval"):
+    with pytest.raises(ValueError, match="reg.load reads an uninitialized interval"):
         lower(remote_program(True, "neighbor"))
 
 
 def test_final_partial_writeback_rejected_at_type_deduction():
-    with pytest.raises(Exception, match="Final writeback requires the complete split-M destination"):
+    with pytest.raises(
+        InvalidOperationError, match="Final writeback requires the complete split-M destination"
+    ):
         pl.parse_program("""
 import pypto.language as pl
 @pl.program
@@ -184,7 +188,7 @@ class Program:
 
 
 def test_unsupported_writeback_split_rejected():
-    with pytest.raises(Exception, match="supports only split=1"):
+    with pytest.raises(InvalidOperationError, match="supports only split=1"):
         pl.parse_program("""
 import pypto.language as pl
 @pl.program
