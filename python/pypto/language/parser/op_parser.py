@@ -205,7 +205,7 @@ class OpParser:
         return self.attrs.attach_op_attrs(result, self.attrs.parse_op_attrs(call))
 
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
-        """Parse operation call like pl.tensor.create_tensor() or pl.add().
+        """Parse operation call like pl.tensor.create() or pl.add().
 
         Args:
             call: Call AST node
@@ -216,7 +216,7 @@ class OpParser:
         func = call.func
 
         # Navigate through attribute chain to find operation
-        # e.g., pl.tensor.create_tensor -> ["pl", "tensor", "create_tensor"]
+        # e.g., pl.tensor.create -> ["pl", "tensor", "create"]
         # e.g., pl.add -> ["pl", "add"]
         attrs: list[str] = []
         node = func
@@ -950,6 +950,13 @@ class OpParser:
         ``tile.mrgsort_format1``). IR builders take ``span=`` explicitly and
         accept raw ``ir.Expr`` arguments — no DSL wrap/unwrap round-trip.
         """
+        # The raw IR builders retain constructor aliases removed from the DSL.
+        if (module_name, op_name) in (("pl.tensor", "create_tensor"), ("pl.tile", "create_tile")):
+            raise InvalidOperationError(
+                f"{module_name}.{op_name} was removed",
+                span=self.services.span_tracker.get_span(call),
+                hint=f"Use pl.{op_name}(...) or {module_name}.create(...).",
+            )
         if not hasattr(module, op_name):
             raise InvalidOperationError(
                 f"Unknown {module_name} operation: {op_name}",

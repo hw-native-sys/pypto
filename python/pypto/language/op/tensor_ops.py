@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from typing import Any, TypeVar, overload
 
 __all__ = [
-    "create_tensor",
     "create",
     "no_dep",
     "dump_tag",
@@ -211,9 +210,6 @@ def create(
         _normalize_intlike(shape), dtype, layout, manual_dep=manual_dep, init_value=init_value
     )
     return Tensor(expr=call_expr)
-
-
-create_tensor = create
 
 
 def no_dep(tensor: Tensor) -> Tensor:

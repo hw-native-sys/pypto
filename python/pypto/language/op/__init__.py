@@ -75,7 +75,6 @@ from .tile_ops import (
     aic_gather,
     aiv_shard,
     cmps,
-    create_tile,
     gatherb,
     gemv,
     gemv_acc,
@@ -102,6 +101,9 @@ from .tile_ops import (
     subc,
     subsc,
     tri,
+)
+from .tile_ops import (
+    create as create_tile,
 )
 from .tile_ops import (
     tmov_x2zz as tmov_x2zz,
