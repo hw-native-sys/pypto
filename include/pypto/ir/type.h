@@ -160,23 +160,25 @@ class ScalarType : public Type {
 
 using ScalarTypePtr = std::shared_ptr<const ScalarType>;
 
-/// Logical vector values and boolean predicate values share one descriptor.
-enum class RegKind : uint8_t { VecReg = 0, MaskReg = 1 };
+enum class RegKind : uint8_t { VecReg = 0, MaskReg = 1, UReg = 2 };
 
 /**
  * @brief Register value descriptor, independent of addressable tile storage.
  *
- * shape_ counts logical lanes, not physical vector registers. There is exactly
- * one static dimension; lanes is an alias rather than duplicated state.
+ * VecReg and MaskReg have one static logical lane dimension and an element
+ * dtype. UReg carries linear, region-local squeeze-store alignment state
+ * without a lane dimension or element dtype.
  */
 class RegType : public Type {
  public:
   RegType(int64_t shape, DataType dtype, RegKind kind);
+  [[nodiscard]] static std::shared_ptr<const RegType> GetUReg();
+
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::RegType; }
   [[nodiscard]] std::string TypeName() const override { return "RegType"; }
-  [[nodiscard]] int64_t GetShape() const { return shape_; }
-  [[nodiscard]] int64_t GetLanes() const { return shape_; }
-  [[nodiscard]] DataType GetDType() const { return dtype_; }
+  [[nodiscard]] int64_t GetShape() const;
+  [[nodiscard]] int64_t GetLanes() const { return GetShape(); }
+  [[nodiscard]] DataType GetDType() const;
   [[nodiscard]] RegKind GetRegKind() const { return kind_; }
 
   static constexpr auto GetFieldDescriptors() {
@@ -186,8 +188,11 @@ class RegType : public Type {
                                           reflection::UsualField(&RegType::kind_, "kind")));
   }
 
-  int64_t shape_;  ///< Positive logical lane count.
-  DataType dtype_;
+ private:
+  RegType() : kind_(RegKind::UReg) {}
+
+  std::optional<int64_t> shape_;
+  std::optional<DataType> dtype_;
   RegKind kind_;
 };
 
@@ -195,11 +200,16 @@ using RegTypePtr = std::shared_ptr<const RegType>;
 
 inline bool IsVecRegType(const TypePtr& type) {
   return type && type->GetKind() == ObjectKind::RegType &&
-         std::static_pointer_cast<const RegType>(type)->kind_ == RegKind::VecReg;
+         std::static_pointer_cast<const RegType>(type)->GetRegKind() == RegKind::VecReg;
 }
 inline bool IsMaskRegType(const TypePtr& type) {
   return type && type->GetKind() == ObjectKind::RegType &&
-         std::static_pointer_cast<const RegType>(type)->kind_ == RegKind::MaskReg;
+         std::static_pointer_cast<const RegType>(type)->GetRegKind() == RegKind::MaskReg;
+}
+
+inline bool IsURegType(const TypePtr& type) {
+  return type && type->GetKind() == ObjectKind::RegType &&
+         std::static_pointer_cast<const RegType>(type)->GetRegKind() == RegKind::UReg;
 }
 
 /**

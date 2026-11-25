@@ -1083,6 +1083,10 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   reg_addresses_.clear();
   reg_tuple_values_.clear();
   inside_reg_scope_ = false;
+  micro_reg_scope_ = false;
+  squeeze_destination_.reset();
+  squeeze_cursor_.clear();
+  squeeze_pointer_type_.clear();
   size_t incore_count = 0, aic_count = 0, aiv_count = 0;
   for (const auto& [_, function] : program->functions_) {
     incore_count += ir::IsInCoreType(function->func_type_);
@@ -2973,7 +2977,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         return;
       }
     }
-    if (As<ir::RegType>(op->var_->GetType()) && As<ir::TupleGetItemExpr>(op->value_)) {
+    if ((ir::IsVecRegType(op->var_->GetType()) || ir::IsMaskRegType(op->var_->GetType())) &&
+        As<ir::TupleGetItemExpr>(op->value_)) {
       BindVarToMlir(op->var_, GetExprAsCode(op->value_));
       return;
     }
@@ -3319,7 +3324,8 @@ std::string PTOCodegen::LocSuffix() const {
 }
 
 std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
-  if (auto item = As<ir::TupleGetItemExpr>(expr); item && As<ir::RegType>(item->GetType())) {
+  if (auto item = As<ir::TupleGetItemExpr>(expr);
+      item && (ir::IsVecRegType(item->GetType()) || ir::IsMaskRegType(item->GetType()))) {
     auto tuple = AsVarLike(item->tuple_);
     auto it = reg_tuple_values_.find(tuple.get());
     CHECK_SPAN(inside_reg_scope_ && it != reg_tuple_values_.end() && item->index_ >= 0 &&

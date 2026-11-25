@@ -327,17 +327,20 @@ class RegKind(enum.Enum):
     MaskReg = 1
     """Predicate register holding BOOL lanes."""
 
+    UReg = 2
+    """Linear squeeze-store alignment state."""
+
 class RegType(Type):
-    """Static logical register descriptor, independent of ShapedType storage."""
+    """Logical register descriptor, independent of ShapedType storage."""
 
-    shape: Final[int]
-    """Logical register lane count as declared by the shape argument."""
+    shape: Final[int | None]
+    """Logical register lane count, or None for UReg."""
 
-    lanes: Final[int]
+    lanes: Final[int | None]
     """Logical lane count (alias of shape)."""
 
-    dtype: Final[DataType]
-    """Register element data type."""
+    dtype: Final[DataType | None]
+    """Register element data type, or None for UReg."""
 
     kind: Final[RegKind]
     """Register descriptor kind."""
@@ -348,8 +351,13 @@ class RegType(Type):
         Args:
             shape: Logical lane count.
             dtype: Register element data type.
-            kind: Register descriptor kind.
+            kind: VecReg or MaskReg.
         """
+
+    @staticmethod
+    def ureg() -> RegType:
+        """Get the type of the linear squeeze-store state."""
+        ...
 
 class ShapedType(Type):
     """Base class for shaped types (tensors and tiles)."""

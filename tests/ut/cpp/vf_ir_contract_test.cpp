@@ -54,6 +54,11 @@ void CheckRegisterContracts(uint8_t invalid_kind, uint8_t invalid_wide_kind) {
   assert(IsMaskRegType(mask) && !IsVecRegType(mask));
   TypePtr type = vec;
   assert(IsA<Type>(type) && !IsA<ShapedType>(type));
+  const auto ureg = RegType::GetUReg();
+  assert(ureg->GetRegKind() == RegKind::UReg && IsURegType(ureg));
+  ExpectValueError([&] { (void)ureg->GetLanes(); });
+  ExpectValueError([&] { (void)ureg->GetDType(); });
+  ExpectValueError([] { RegType(64, DataType::FP32, RegKind::UReg); });
   ExpectValueError([] { RegType(0, DataType::FP32, RegKind::VecReg); });
   ExpectValueError([] { RegType(-1, DataType::FP32, RegKind::VecReg); });
   ExpectValueError([] { RegType(64, DataType::BOOL, RegKind::VecReg); });

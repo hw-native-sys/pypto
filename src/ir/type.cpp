@@ -37,11 +37,27 @@ namespace pypto {
 namespace ir {
 
 RegType::RegType(int64_t shape, DataType dtype, RegKind kind) : shape_(shape), dtype_(dtype), kind_(kind) {
+  CHECK(kind != RegKind::UReg) << "Create UReg with the factory; it has no shape or dtype";
   CHECK(shape > 0) << "RegType shape must be a positive integer";
   CHECK(DataTypeToString(dtype) != "UnknownType") << "RegType requires a known dtype";
   CHECK(kind == RegKind::VecReg || kind == RegKind::MaskReg) << "Unknown RegKind";
   CHECK(kind != RegKind::MaskReg || dtype == DataType::BOOL) << "MaskReg requires BOOL dtype";
   CHECK(kind != RegKind::VecReg || dtype != DataType::BOOL) << "VecReg forbids BOOL dtype";
+}
+
+RegTypePtr RegType::GetUReg() {
+  static const auto type = std::make_shared<const RegType>(RegType{});
+  return type;
+}
+
+int64_t RegType::GetShape() const {
+  CHECK(shape_.has_value()) << "UReg has no logical lanes";
+  return *shape_;
+}
+
+DataType RegType::GetDType() const {
+  CHECK(dtype_.has_value()) << "UReg has no element dtype";
+  return *dtype_;
 }
 
 void detail::CheckValueType(const TypePtr& type, const Span& span, const char* context) {

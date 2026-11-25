@@ -438,9 +438,12 @@ class IRSerializer::Impl {
     type_map["type_kind"] = msgpack::object(type->TypeName(), zone);
 
     if (auto reg = As<RegType>(type)) {
-      type_map["shape"] = msgpack::object(reg->shape_, zone);
-      type_map["dtype"] = msgpack::object(reg->dtype_.Code(), zone);
-      type_map["kind"] = msgpack::object(static_cast<uint8_t>(reg->kind_), zone);
+      const auto kind = reg->GetRegKind();
+      type_map["kind"] = msgpack::object(static_cast<uint8_t>(kind), zone);
+      if (kind != RegKind::UReg) {
+        type_map["shape"] = msgpack::object(reg->GetShape(), zone);
+        type_map["dtype"] = msgpack::object(reg->GetDType().Code(), zone);
+      }
     } else if (auto scalar_type = As<ScalarType>(type)) {
       type_map["dtype"] = msgpack::object(scalar_type->dtype_.Code(), zone);
     } else if (type->GetKind() == ObjectKind::TensorType ||

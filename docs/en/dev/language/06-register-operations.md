@@ -84,8 +84,10 @@ Scalars cannot escape their defining region through later uses, function returns
 loop results, tuples or assignments to outer variables. Nested tuple types are
 checked at function boundaries too. Tile operands must
 originate outside the region; `store` and `scatter` return aliases usable after the region.
-Assign every operation result to a variable, including `store` and `scatter`; a bare store is
-rejected. For loop APIs and hardware-loop policy, see [statements](01-statements.md).
+Assign register operation results to variables, including `store` and
+`scatter`. Assign the state returned by `squeeze_store_step` and carry it
+through `pl.yield_` inside a loop. See [statements](01-statements.md) for loop
+APIs and hardware-loop policy.
 `pl.hardware_loop()` (`HardwareLoopPolicy.Require`) is restricted to this lexical
 scope, including when the loop has zero trips.
 The A5 codegen boundary and backend execution limitations are
@@ -163,6 +165,133 @@ Dynamic offsets and valid extents pass through when static checks cannot prove a
 violation. The caller owns their runtime bounds and initialization. A store does
 not enlarge `valid_shape`, allocate storage or create a snapshot: its result
 aliases the destination and has exactly the destination Tile type.
+
+## Stable compaction and dense stores
+
+`squeeze(value, mask)` packs selected lanes into the beginning of one register,
+preserving their order. It accepts one full 256-byte UINT16 or UINT32 register
+(128 or 64 lanes) and a matching mask. Only the selected prefix is defined; use
+a prefix mask of the selected count when storing it. Integer bits are preserved,
+including UINT32 values above `2**24`.
+
+```python
+with pl.reg_scope():
+    value = pl.reg.load(src, lanes=64)  # UINT32 Tile
+    keep = pl.reg.active_mask(9, lanes=64)
+    packed = pl.reg.squeeze(value, keep)
+    out = pl.reg.store(dst, value=packed, mask=keep)
+```
+
+Use the explicit `squeeze_store_init/step/flush` operations when successive
+chunks must append into one dense UB sequence. Carry the opaque state through
+the loop with `pl.range(..., init_values=...)` and yield each updated state:
+
+```python
+with pl.reg_scope():
+    init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
+        value = pl.reg.load(src, offset=i * 64, lanes=64)
+        keep = pl.reg.active_mask(9, lanes=64)
+        next_ureg = pl.reg.squeeze_store_step(curr_ureg, dst, value, keep)
+        final_ureg = pl.yield_(next_ureg)
+    written = pl.reg.squeeze_store_flush(final_ureg, dst)
+    # dst[7:43] contains four selected prefixes, without gaps.
+```
+
+The destination is a Tile, not a pointer. Only `init` accepts `offset`: it is
+evaluated once and counts elements from the Tile's contiguous view origin,
+including any existing View `start_offset`. For example, a view origin of 32
+and `offset=7` start at element 39 of the backing allocation. `step` and `flush`
+have no offset argument; they continue the existing chain. Each `step` must use the same
+destination as `init`, and its mask must match the VecReg lane count. Use a
+full or prefix mask when appending all lanes or a known prefix. A squeezed
+register has an undefined tail, so use a mask that selects only its defined
+prefix.
+
+`init` initializes the UReg append state and returns an opaque
+`RegKind.UReg` value; it does not initialize the destination Tile. Each
+`step` must consume the current loop-carried UReg value and returns its
+successor; the loop carries that value through `init_values` and `pl.yield_`.
+Outside the loop, consume the result bound by `pl.yield_` (`final_ureg` above).
+Call `flush` exactly once after the loop. The
+backend lowers the chain to one alignment initialization, loop-carried
+`!pto.align` passed through `vstur "POST_UPDATE"`, and one final `vstar`.
+`flush` returns an alias of the destination Tile; it does not zero unwritten
+capacity. The caller guarantees total output capacity and reads only the
+written prefix.
+
+An input can contain zero chunks, for example when a batch has no candidates.
+Zero iterations forward the initial state unchanged. A chain that has been
+initialized still requires exactly one flush, even when no step ran; it appends
+zero elements and preserves the destination. The same rule covers an empty
+straight-line sequence:
+
+```python
+with pl.reg_scope():
+    ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    written = pl.reg.squeeze_store_flush(ureg, dst)
+```
+
+This keeps one init/step/flush contract for zero and nonzero runtime counts,
+without a separate user-side conditional. Proven empty loops can be removed
+while forwarding their initial state.
+
+PTOAS 0.77 treats the stored form of VSQZ as pure, although it pushes a
+SQZN count consumed by VSTUR. Until that effect is modeled in PTOAS, the verifier
+rejects loop-invariant value/mask pairs: load or derive at least one input inside
+the current loop. The input may come from a loop carry updated by such a value
+through `pl.yield_`. Reusing equivalent value/mask producers for multiple steps in
+one RegScope is also rejected to prevent commoning away a required SQZN producer.
+This includes repeated writes of one value with equivalent full or prefix masks,
+even when those masks were constructed separately.
+These are conservative backend restrictions, not a change to append semantics.
+
+With PTOAS 0.77 on A5, avoid using two loads from the same unchanged address
+with the same mask in one RegScope. PTOAS can merge their stored VSQZ producers,
+leaving a VSTUR without its SQZN count. Also avoid reopening a stream in the
+same RegScope. PTOAS can schedule the second AR reset before the first VSTAR
+flush. See [PTOAS #1779](https://github.com/hw-native-sys/PTOAS/issues/1779) for
+the affected cases and follow-up validation.
+
+The destination must be a static one-dimensional Vec Tile or a two-dimensional
+Vec Tile that can be flattened in row-major order without copying. UINT16/UINT32
+dtype must match the input. Both implicit dense layout and explicit dense strides
+are accepted: `[2, 64]` with stride `[64, 1]` is valid; stride `[96, 1]` has row
+gaps and is rejected. Singleton axes contribute no gap, including single-row or
+single-column views. Boxed, padded, compact and nondegenerate column-major views
+are unsupported. Changing shape alone does not make a strided view contiguous.
+Offsets include the Tile View origin and are checked against static capacity at
+entry. As with dynamic register stores, the caller
+must ensure `offset + sum(selected_lanes) <= dst_capacity` at runtime.
+There is no truncation or allocation growth. Bytes before and after the written
+sequence retain their contents; initialize any tail that will later be read.
+
+The state is linear and local to its RegScope: consume only the current state,
+replace it with the step result, and flush once before leaving the region. It
+cannot escape through a function return or container. Do not read, write or rebind
+the destination or its aliases while the chain is active. Every for loop
+enclosing a stream opening must be sequential. Carry state with `init_values` and
+`pl.yield_`, with at most four nested loop levels. Use lane masks for filtering
+while a chain is active. The active chain requires straight-line or sequential
+for-loop control flow.
+
+The current AR-based lowering supports one **active** append chain at a time.
+The IR supports sequential chains after flushing, subject to the PTOAS 0.77
+scheduling limitation above. Ascend C documents separate limits of four load
+and four store unalign registers. Squeeze-store also uses shared AR state.
+Supporting multiple live squeeze chains requires independent
+cursor/count management and backend validation; increasing a resource limit alone
+does not provide that support. See the [register limits](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/ascendcopapi/docs/en/api/SIMD-API/basic_api/reg_vector_compute/register_data_types/UnalignRegForLoad-UnalignRegForStore.md)
+and [squeeze-store AR semantics](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/ascendcopapi/atlasascendc_api_07_0324.html).
+
+Squeeze-store uses physical micro instructions for its alignment state. A
+register scope containing a stream uses physical register codegen throughout.
+It currently supports full 256-byte loads/stores,
+scalar broadcast, index generation, reinterpretation, comparisons, selection,
+mask generation/logic, and squeeze. Other operations or partial register shapes
+are diagnosed. The verifier rejects `reg.add` anywhere in a scope containing a
+stream. Scopes without streams retain ordinary VMI lowering, including
+pure `squeeze`. Future PTOAS stream-aware VMI can preserve this public API.
 
 ## Vector and mask generators
 
