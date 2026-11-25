@@ -21,6 +21,8 @@ if not all(hasattr(torch, name) for name in _REQUIRED_TORCH_DTYPES):
 
 M, K, N = 16, 128, 128
 MX_GROUP_SIZE = 32
+# A5 packs each E8M0 scale fractal as 16 outer M/N lanes by two
+# consecutive K groups (32 data values per scale group).
 SCALE_BLOCK_ROWS = 2
 SCALE_BLOCK_COLS = 16
 
@@ -102,6 +104,9 @@ def _mx_specs(m):
     a = (torch.arange(m * K).reshape(m, K) % 13 - 6).to(torch.float8_e4m3fn)
     b = (torch.arange(K * N).reshape(K, N) % 11 - 5).to(torch.float8_e5m2)
     a_scale = (torch.arange(m * groups).reshape(m, groups) % groups + 125).to(torch.uint8)
+    # MX_A_ZZ maps logical [M, groups] to [M/16, groups/2, 16, 2].
+    # With GEMV's single M row there is no 16-row scale fractal: the A5
+    # scale-vector TLOAD consumes the dense row-major MX_A_ND scale bytes.
     if m != 1:
         a_scale = (
             a_scale.reshape(
@@ -112,6 +117,8 @@ def _mx_specs(m):
             .reshape(m, groups)
         )
     b_codes = (torch.arange(groups * N).reshape(groups, N) % 5 + 125).to(torch.uint8)
+    # MX_B_NN maps logical [groups, N] to [N/16, groups/2, 16, 2],
+    # placing N blocks and lanes in the outer positions of the same fractal.
     b_scale = (
         b_codes.reshape(groups // SCALE_BLOCK_ROWS, SCALE_BLOCK_ROWS, N // SCALE_BLOCK_COLS, SCALE_BLOCK_COLS)
         .permute(2, 0, 3, 1)
@@ -132,6 +139,8 @@ def _mx_specs(m):
 
 def _mx_golden(tensors):
     groups = K // MX_GROUP_SIZE
+    # Invert the MX_B_NN permutation to recover [groups, N], then recover
+    # [M, groups] from MX_A_ZZ below. The GEMV A row already uses ND order.
     b_codes = (
         tensors["b_scale"]
         .view(torch.uint8)
