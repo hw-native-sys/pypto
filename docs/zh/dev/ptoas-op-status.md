@@ -265,10 +265,10 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.tsetval | .SetValue | tile | ✅ | ✅ | ❌ | ✅ | — | 由 `tile.write` 发射 |
 | **MX 量化（6）** |  |  |  |  |  |  |  |  |
 | pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen；Mat→scale `tmov` 按源序发射，PTOAS `PTOA5NormalizeTMovPass` 重排为 bind-before-fill；见 [operators MX 约束](ir/05-operators.md#mx--ascend950ptoas-约束) |
-| pto.tmov.fp | TMOV_FP | tile | ✅ | ✅ | ✅ | ✅ | — | A5 `pl.tile.move_fp` 使用打包的按列量化参数。硬件 ST 覆盖 INT32 到 FP16。 |
+| pto.tmov.fp | TMOV_FP | tile | ✅ | ✅ | ❌ | ✅ | — | A5 `pl.tile.move_fp` 使用打包的按列量化参数。硬件 ST 覆盖 INT32 到 FP16。 |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 独立量化前端+codegen+真机 ST（`group_axis` A/B）：MXFP8 支持 FP16/BF16/FP32 源，MXFP4_E2M1 支持 FP16/BF16 源；`pl.tile.quant_mx_raw` 另外覆盖原始 TQUANT 形式 |
-| pto.tstore_fp | TSTORE_FP | tile | ✅ | ✅ | ✅ | ✅ | — | A5 `pl.tile.store_fp` 使用打包的按列量化参数。硬件 ST 覆盖 INT32 到 FP16。 |
+| pto.tstore_fp | TSTORE_FP | tile | ✅ | ✅ | ❌ | ✅ | — | A5 `pl.tile.store_fp` 使用打包的按列量化参数。硬件 ST 覆盖 INT32 到 FP16。 |
 | pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ❌ | ✅ | — | A5 数值 ST 覆盖有符号 INT8 和 INT16，逐行应用 scale 和 offset。 |
 | **同步（8）** |  |  |  |  |  |  |  |  |
 | pto.barrier | pipe_barrier / dsb | internal | ✅ | — | — | ✅ | — | compiler/system lowering 自动发射 |
