@@ -467,39 +467,30 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   BufferEmissionPreflight preflight(func, GetBackendHandler()->GetPtoTargetArch() == "a2a3");
   preflight.VisitFunction(func);
   preflight.CheckReturns();
-  const auto tensor_views = PrepareTensorParameterViews(*func, /*buffer_ir=*/true, {});
+  const auto parameters = PrepareEntryParameters(*func, /*buffer_ir=*/true, {});
 
   fs_.Reset();
   fs_.buffer_ir = true;
   fs_.current_function = func;
   fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(func->body_, func->params_);
-  // Match PTOParam's existing GM ABI: tensor pointers precede scalar values,
-  // regardless of IR parameter order. The first GM recipe has static shapes,
-  // so it needs no implicit trailing dynamic-shape parameters.
-  std::vector<ir::VarPtr> parameters;
-  for (const auto& param : func->params_) {
-    if (As<ir::TensorType>(param->GetType())) parameters.push_back(param);
-  }
-  for (const auto& param : func->params_) {
-    if (As<ir::ScalarType>(param->GetType())) parameters.push_back(param);
-  }
   stream_ << "  func.func @" << func->name_ << "(";
-  for (size_t i = 0; i < parameters.size(); ++i) {
+  for (size_t i = 0; i < parameters.abi_order.size(); ++i) {
+    const auto& param = parameters.abi_order[i];
     const std::string name = "%arg" + std::to_string(i);
     fs_.used_ssa_names.insert(name.substr(1));
-    BindVarToMlir(parameters[i], name);
+    BindVarToMlir(param, name);
     if (i != 0) stream_ << ", ";
     stream_ << name << ": ";
-    if (auto tensor = As<ir::TensorType>(parameters[i]->GetType())) {
+    if (auto tensor = As<ir::TensorType>(param->GetType())) {
       stream_ << "!pto.ptr<" << GetTypeString(tensor->dtype_) << ">";
-      RegisterBasePtr(parameters[i], name);
+      RegisterBasePtr(param, name);
     } else {
-      stream_ << GetTypeString(As<ir::ScalarType>(parameters[i]->GetType())->dtype_);
+      stream_ << GetTypeString(As<ir::ScalarType>(param->GetType())->dtype_);
     }
   }
   // The wrapper supplies SPMD identities after all user parameters. Detect
   // these scalar queries during preflight, without legacy storage discovery.
-  bool has_parameters = !parameters.empty();
+  bool has_parameters = !parameters.abi_order.empty();
   const auto append_identity = [&](std::string& binding, const char* name) {
     binding = std::string("%") + name;
     fs_.used_ssa_names.insert(name);
@@ -515,10 +506,8 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
     append_identity(fs_.spmd_subblock_idx_arg, "__pypto_spmd_subblock_idx");
   }
   // Reserve every ABI name before assigning view names.
-  for (const auto& param : parameters) {
-    if (As<ir::TensorType>(param->GetType())) {
-      BindTensorView(param, NewNamedTemp(param->name_hint_ + "_view"));
-    }
+  for (const auto& view : parameters.views) {
+    BindTensorView(view.parameter, NewNamedTemp(view.parameter->name_hint_ + "_view"));
   }
   stream_ << ")";
   if (func->func_type_ == ir::FunctionType::AIC) {
@@ -531,7 +520,7 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   fs_.constants_indent = GetIndent();
   auto saved_stream = std::move(stream_);
   stream_ = std::move(fs_.body_section);
-  EmitMakeTensorViews(tensor_views);
+  EmitMakeTensorViews(parameters.views);
   if (func->body_) VisitStmt(func->body_);
   const std::string body = stream_.str();
   stream_ = std::move(saved_stream);

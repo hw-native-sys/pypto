@@ -75,24 +75,33 @@ TensorParameterView PrepareTensorParameterView(const ir::VarPtr& parameter, cons
 
 }  // namespace
 
-std::vector<TensorParameterView> PrepareTensorParameterViews(
-    const ir::Function& func, bool buffer_ir, const std::set<const ir::Var*>& ffts_workspaces) {
+EntryParameterPlan PrepareEntryParameters(const ir::Function& func, bool buffer_ir,
+                                          const std::set<const ir::Var*>& ffts_workspaces) {
   ir::var_collectors::VarDefUseCollector body_vars;
   if (func.body_) body_vars.VisitStmt(func.body_);
 
-  std::vector<TensorParameterView> views;
+  EntryParameterPlan plan;
+  plan.abi_order.reserve(func.params_.size());
+  std::vector<ir::VarPtr> trailing_params;
   for (const auto& parameter : func.params_) {
     const auto type = ir::AsTensorTypeLike(parameter->GetType());
-    if (!type || body_vars.var_uses.count(parameter.get()) == 0) continue;
+    if (!type) {
+      trailing_params.push_back(parameter);
+      continue;
+    }
+    plan.abi_order.push_back(parameter);
+    if (body_vars.var_uses.count(parameter.get()) == 0) continue;
     // Outlining shares a public signature across cores. Unused parameters need
     // no view, and PTOAS cannot infer some unused layouts (e.g. MX).
     if ((!buffer_ir && parameter->name_hint_ == "__gm_pipe_buffer") ||
         ffts_workspaces.count(parameter.get())) {
       continue;
     }
-    views.push_back(PrepareTensorParameterView(parameter, type));
+    plan.views.push_back(PrepareTensorParameterView(parameter, type));
   }
-  return views;
+  // PTOParam dispatches tensor pointers first, preserving IR order within each group.
+  plan.abi_order.insert(plan.abi_order.end(), trailing_params.begin(), trailing_params.end());
+  return plan;
 }
 
 }  // namespace pypto::codegen

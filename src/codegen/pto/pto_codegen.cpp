@@ -1481,7 +1481,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   const bool uses_l2_cache_offset =
       collector.UsesL2BypassLoad() && backend_->GetHandler()->GetPtoTargetArch() == "a2a3";
   const auto& ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
-  const auto tensor_views = PrepareTensorParameterViews(*func, /*buffer_ir=*/false, ffts_workspace_vars);
+  const auto parameters = PrepareEntryParameters(*func, /*buffer_ir=*/false, ffts_workspace_vars);
   if (uses_sdma_workspace) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
   }
@@ -1568,55 +1568,22 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   stream_ << "  func.func @" << func->name_ << "(";
 
-  // Separate params into tensors and scalars for tensors-first dispatch order.
-  // PTOParam dispatches args as [tensors..., scalars...] regardless of function
-  // signature order, so the MLIR function signature must match that layout.
-  // DistributedTensorType inherits TensorType and uses the same `!pto.ptr<T>`
-  // signature slot — fold it into the tensor partition via ir::AsTensorTypeLike.
-  std::vector<size_t> tensor_param_indices;
-  std::vector<size_t> scalar_param_indices;
-  for (size_t i = 0; i < func->params_.size(); i++) {
-    if (ir::AsTensorTypeLike(func->params_[i]->GetType())) {
-      tensor_param_indices.push_back(i);
-    } else {
-      scalar_param_indices.push_back(i);
-    }
-  }
-
-  // Assign %argN names: tensors get indices 0..N_tensors-1, scalars get N_tensors..
-  size_t scalar_start_idx = tensor_param_indices.size();
-  std::set<const ir::Var*> param_keys;
-  for (size_t j = 0; j < tensor_param_indices.size(); j++) {
-    const auto& param = func->params_[tensor_param_indices[j]];
-    BindVarToMlir(param, "%arg" + std::to_string(j));
-    param_keys.insert(GetVarKey(param));
-  }
-  for (size_t j = 0; j < scalar_param_indices.size(); j++) {
-    const auto& param = func->params_[scalar_param_indices[j]];
-    BindVarToMlir(param, "%arg" + std::to_string(scalar_start_idx + j));
-    param_keys.insert(GetVarKey(param));
-  }
-
-  // Emit signature: tensors first, then scalars
   bool first_param = true;
-  for (size_t j = 0; j < tensor_param_indices.size(); j++) {
+  for (size_t i = 0; i < parameters.abi_order.size(); ++i) {
+    const auto& param = parameters.abi_order[i];
+    const auto name = "%arg" + std::to_string(i);
+    BindVarToMlir(param, name);
     if (!first_param) stream_ << ", ";
     first_param = false;
-    const auto& param = func->params_[tensor_param_indices[j]];
-    auto tensor_type = ir::AsTensorTypeLike(param->GetType());
-    if (ffts_workspace_vars.count(param.get()) > 0) {
-      auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
-      INTERNAL_CHECK_SPAN(extent && tensor_type->dtype_ == DataType::INT64, param->span_)
-          << "FFTS workspace must be a statically sized INT64 tensor";
-    }
-    stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
-  }
-  for (size_t j = 0; j < scalar_param_indices.size(); j++) {
-    if (!first_param) stream_ << ", ";
-    first_param = false;
-    const auto& param = func->params_[scalar_param_indices[j]];
-    stream_ << "%arg" << (scalar_start_idx + j) << ": ";
-    if (auto scalar_type = As<ScalarType>(param->GetType())) {
+    stream_ << name << ": ";
+    if (auto tensor_type = ir::AsTensorTypeLike(param->GetType())) {
+      if (ffts_workspace_vars.count(param.get()) > 0) {
+        auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
+        INTERNAL_CHECK_SPAN(extent && tensor_type->dtype_ == DataType::INT64, param->span_)
+            << "FFTS workspace must be a statically sized INT64 tensor";
+      }
+      stream_ << "!pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
+    } else if (auto scalar_type = As<ScalarType>(param->GetType())) {
       stream_ << GetTypeString(scalar_type->dtype_);
     } else if (ir::IsA<ir::CommCtxType>(param->GetType())) {
       stream_ << "!pto.ptr<i64>";
@@ -1827,7 +1794,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // shape/stride expression (e.g. the 2 in M * 2) are declared before use.
   stream_.str("");
   stream_.clear();
-  EmitMakeTensorViews(tensor_views);
+  EmitMakeTensorViews(parameters.views);
   SpanScope prologue_loc(this, &func->span_);
   EmitExtraAllocTiles();
   std::string prologue_content = stream_.str();

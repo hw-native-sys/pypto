@@ -124,8 +124,9 @@ scalar packing are unchanged.
 
 `GenerateBufferFunction` validates explicitly constructed Buffer IR before
 emission. Its GM path supports static, packed ND rank-2 FP16/BF16/FP32/INT32/INT8 Tensor parameters
-and normalized Tensor parameter returns. It shares the existing GM tensor-view
-prologue and native tensors-first/scalars-last ABI. Tensor returns remain in IR
+and normalized Tensor parameter returns. Tile and Buffer entry preparation maps declared
+parameters to native argument slots in stable tensors-first order and selects
+the GM views needed by the body. An unused tensor keeps its argument slot. Tensor returns remain in IR
 for orchestration aliasing; they do not create native return values.
 
 `buffer.load` and `buffer.store` each render an explicit window as
@@ -647,75 +648,22 @@ preload/main/drain transformation and its whole-loop fallback rules.
 
 ### Load Operation Transformation
 
-**PyPTO IR**:
-
-```python
-tile_a = pl.load(tensor_a, [0, 0], [32, 32])
-```
-
-**Generated MLIR** (two operations):
-
-```mlir
-# 1. Create partition view
-%3 = pto.partition_view %tensor_view, offsets = [%c0_index, %c0_index],
-                 sizes = [%c32_index, %c32_index]
-                 : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
-
-# 2. Load into tile buffer
-pto.tload ins(%3 : !pto.partition_tensor_view<32x32xf32>)
-          outs(%tile_buf : !pto.tile_buf<loc=vec, ...>)
-```
-
-**Key transformations**:
-
-- Tensor parameter → tensor_view lookup
-- Offsets/sizes from `tile.load` arguments
-- Output tile_buf from variable's MemRef with type derived from TileType
+`tile.load` selects a window of the tensor parameter's GM view with `pto.partition_view`,
+using the offsets and sizes from the IR. `pto.tload` reads that window into the result
+tile buffer identified by its MemRef and typed by its TileType.
 
 ### Store Operation Transformation
 
-**PyPTO IR**:
-
-```python
-pl.store(tile_c, [0, 0], tensor_out)
-```
-
-**Generated MLIR**:
-
-```mlir
-# 1. Create partition view for output
-%5 = pto.partition_view %output_view, offsets = [%c0_index, %c0_index],
-                 sizes = [%c32_index, %c32_index]
-                 : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
-
-# 2. Store from tile buffer
-pto.tstore ins(%tile_buf : !pto.tile_buf<loc=vec, ...>)
-           outs(%5 : !pto.partition_tensor_view<32x32xf32>)
-```
+`tile.store` selects the destination window with `pto.partition_view`.
+`pto.tstore` reads the source tile buffer and writes that window.
 
 ### Compute Operations
 
 #### Example: Tile Multiplication
 
-PyPTO:
-
-```python
-tile_c = pl.mul(tile_a, tile_b)
-```
-
-MLIR:
-
-```mlir
-pto.tmul ins(%tile_a_buf : !pto.tile_buf<...>,
-             %tile_b_buf : !pto.tile_buf<...>)
-         outs(%tile_c_buf : !pto.tile_buf<...>)
-```
-
-**Result handling**:
-
-- Result variable's MemRef determines output tile_buf
-- Input operands resolved through variable name lookup
-- All `ins`/`outs` clauses include type annotations
+`tile.mul` resolves both input variables to tile buffers for the typed `ins` clause of
+`pto.tmul`. The result's MemRef supplies the buffer for its typed `outs` clause.
+The [complete example](#complete-example) shows both loads, the multiply and the store in one kernel.
 
 ### Source Locations (`loc`)
 
