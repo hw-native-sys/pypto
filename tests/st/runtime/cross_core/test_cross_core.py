@@ -1242,5 +1242,89 @@ def test_acc_store_cache_policy_preserves_results(case_run, policy):
     case_run.assert_passed()
 
 
+def _direct_push(final: bool):
+    @pl.jit.incore(level=pl.Level.AIC)
+    def produce(
+        a: pl.Tensor[[64, 64], pl.BF16],
+        b: pl.Tensor[[64, 128], pl.BF16],
+    ):
+        mailbox: pl.Tile[[32, 128], pl.FP32, pl.MemRef("ub"), pl.Mem.Vec] = pl.tile.create(
+            [32, 128], pl.FP32, target_memory=pl.Mem.Vec
+        )
+        left = pl.tile.load(a, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        if final:
+            right = pl.tile.load(b, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(left, right, acc_phase=pl.AccPhase.Partial)
+            acc = pl.tile.matmul_acc(acc, left, right, acc_phase=pl.AccPhase.Final)
+            pl.tpush_to_aiv(acc, split=1, dst=mailbox, st_phase=pl.STPhase.Final)
+        else:
+            for part in pl.range(2):
+                right = pl.tile.load(b, [0, part * 64], [64, 64], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(left, right)
+                pl.tpush_to_aiv(acc, split=1, dst=mailbox, offset=[0, part * 64])
+
+        # Signal each lane after FIX has written its full 32 x 128 mailbox.
+        pl.system.set_intra_block(4, pipe=pl.PipeType.FIX)
+        pl.system.set_intra_block(20, pipe=pl.PipeType.FIX)
+
+    @pl.jit.incore(level=pl.Level.AIV)
+    def consume(out: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        pl.func_attr({"split_aiv": True, "split": pl.SplitMode.NONE})
+        mailbox: pl.Tile[[32, 128], pl.FP32, pl.MemRef("ub"), pl.Mem.Vec] = pl.tile.create(
+            [32, 128], pl.FP32, target_memory=pl.Mem.Vec
+        )
+        pl.system.wait_intra_block(4, pipe=pl.PipeType.MTE3)
+        pl.tile.mark_remote_written(mailbox)
+        return pl.tile.store(mailbox, [pl.tile.get_subblock_idx() * 32, 0], out)
+
+    @pl.jit.incore(level=pl.Level.CORE_GROUP)
+    def group(
+        a: pl.Tensor[[64, 64], pl.BF16],
+        b: pl.Tensor[[64, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+    ):
+        produce(a, b)
+        return consume(out)
+
+    @pl.jit(auto_scope=False)
+    def main(
+        a: pl.Tensor[[64, 64], pl.BF16],
+        b: pl.Tensor[[64, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+    ):
+        with pl.spmd(1):
+            out = group(a, b, out)
+        return out
+
+    return main
+
+
+def _direct_push_case(final: bool):
+    a = torch.arange(1, 65, dtype=torch.bfloat16).reshape(64, 1).expand(64, 64).contiguous()
+    b = torch.arange(1, 129, dtype=torch.bfloat16).expand(64, 128).contiguous()
+    out = torch.zeros(64, 128)
+
+    def golden(tensors):
+        product = tensors["a"].float() @ tensors["b"].float()
+        return product * 2 if final else product
+
+    return st.case(
+        _direct_push(final),
+        a,
+        b,
+        out,
+        name="direct_final" if final else "direct_column_fragments",
+        golden=golden,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.platforms("a5")
+@st.cases(_direct_push_case(False), _direct_push_case(True))
+def test_direct_tpush_to_aiv(case_run):
+    case_run.assert_passed()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v", *sys.argv[1:]]))
