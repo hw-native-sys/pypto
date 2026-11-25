@@ -201,9 +201,48 @@ void VerifyInitializePipeOperands(const FunctionPtr& func, std::vector<Diagnosti
   WalkStmtsVerifyInitializePipe(FlattenBody(func->body_), func->name_, diagnostics);
 }
 
-void TryCountReserveImportFromStmt(const StmtPtr& stmt, int& reserve_count, int& import_count) {
+// A named buffer used by direct DMA has its own capacity and pairing checks.
+// It is separate from the reservations counted for FIFO pipe initialization.
+class DirectDmaBufferUses : public IRVisitor {
+ public:
+  std::set<const Var*> dma_buffers;
+  std::set<const Var*> other_uses;
+
+  void Analyze(const StmtPtr& body) {
+    VisitStmt(body);
+    if (dma_buffers.empty()) return;
+    check_other_uses_ = true;
+    VisitStmt(body);
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& stmt) override { VisitExpr(stmt->value_); }
+
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "tile.l1_dma_send")) {
+      if (auto buffer = AsVarLike(call->args_[1])) dma_buffers.insert(buffer.get());
+      VisitExpr(call->args_[0]);
+    } else if (IsOp(call, "tile.l1_dma_receive")) {
+      if (auto buffer = AsVarLike(call->args_[0])) dma_buffers.insert(buffer.get());
+      VisitExpr(call->args_[1]);
+    } else {
+      IRVisitor::VisitExpr_(call);
+    }
+  }
+
+  void VisitVarLike_(const VarPtr& var) override {
+    if (check_other_uses_ && dma_buffers.count(var.get()) != 0) other_uses.insert(var.get());
+  }
+
+ private:
+  bool check_other_uses_ = false;
+};
+
+void TryCountReserveImportFromStmt(const StmtPtr& stmt, const std::set<const Var*>& dma_buffers,
+                                   int& reserve_count, int& import_count) {
   CallPtr call;
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+    if (dma_buffers.count(assign->var_.get()) != 0) return;
     call = std::dynamic_pointer_cast<const Call>(assign->value_);
   } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     call = std::dynamic_pointer_cast<const Call>(eval->expr_);
@@ -238,25 +277,25 @@ void AccumulateRequiredReserveImportFromInitializePipe(const CallPtr& call, Func
   }
 }
 
-void WalkStmtsCountReserveImport(const std::vector<StmtPtr>& stmts, int& reserve_count, int& import_count,
-                                 int& required_reserve_count, int& required_import_count,
-                                 FunctionType func_type) {
+void WalkStmtsCountReserveImport(const std::vector<StmtPtr>& stmts, const std::set<const Var*>& dma_buffers,
+                                 int& reserve_count, int& import_count, int& required_reserve_count,
+                                 int& required_import_count, FunctionType func_type) {
   for (const auto& stmt : stmts) {
-    TryCountReserveImportFromStmt(stmt, reserve_count, import_count);
+    TryCountReserveImportFromStmt(stmt, dma_buffers, reserve_count, import_count);
     AccumulateRequiredReserveImportFromInitializePipe(transform_utils::GetCallFromStmt(stmt), func_type,
                                                       required_reserve_count, required_import_count);
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      WalkStmtsCountReserveImport(FlattenBody(for_stmt->body_), reserve_count, import_count,
+      WalkStmtsCountReserveImport(FlattenBody(for_stmt->body_), dma_buffers, reserve_count, import_count,
                                   required_reserve_count, required_import_count, func_type);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      WalkStmtsCountReserveImport(FlattenBody(if_stmt->then_body_), reserve_count, import_count,
+      WalkStmtsCountReserveImport(FlattenBody(if_stmt->then_body_), dma_buffers, reserve_count, import_count,
                                   required_reserve_count, required_import_count, func_type);
       if (const auto& else_body = if_stmt->else_body_) {
-        WalkStmtsCountReserveImport(FlattenBody(*else_body), reserve_count, import_count,
+        WalkStmtsCountReserveImport(FlattenBody(*else_body), dma_buffers, reserve_count, import_count,
                                     required_reserve_count, required_import_count, func_type);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      WalkStmtsCountReserveImport(FlattenBody(while_stmt->body_), reserve_count, import_count,
+      WalkStmtsCountReserveImport(FlattenBody(while_stmt->body_), dma_buffers, reserve_count, import_count,
                                   required_reserve_count, required_import_count, func_type);
     }
   }
@@ -264,12 +303,20 @@ void WalkStmtsCountReserveImport(const std::vector<StmtPtr>& stmts, int& reserve
 
 void VerifyReserveAndImportPeerBufferCoverage(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) {
   if (!func->body_) return;
+  DirectDmaBufferUses uses;
+  uses.Analyze(func->body_);
+  for (const auto* buffer : uses.other_uses) {
+    diagnostics.emplace_back(
+        DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+        "Direct L1-to-UB DMA buffer '" + buffer->name_hint_ + "' must be reserved exclusively for DMA",
+        buffer->span_);
+  }
   int reserve_count = 0;
   int import_count = 0;
   int required_reserve_count = 0;
   int required_import_count = 0;
-  WalkStmtsCountReserveImport(FlattenBody(func->body_), reserve_count, import_count, required_reserve_count,
-                              required_import_count, func->func_type_);
+  WalkStmtsCountReserveImport(FlattenBody(func->body_), uses.dma_buffers, reserve_count, import_count,
+                              required_reserve_count, required_import_count, func->func_type_);
   if (reserve_count < required_reserve_count) {
     diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                              "Function '" + func->name_ +

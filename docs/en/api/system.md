@@ -76,32 +76,35 @@ four-slot ring. Its A5 V2C cases swap the logical lanes to distinguish explicit
 selection from an ignored operand. Local C2V cases use matching physical
 lanes. A3 and A5 execution results must be recorded separately.
 
-## L1 to UB boundary
+## A5 direct L1-to-UB Tile transfers
 
-Explicit lane selection does not establish a Mat (L1) to Vec (UB) transfer.
-The current PTOAS `verifyTMovGenericPairing` has no Mat→Vec pair, and the 950
-memory graph in `src/backend/common/soc.cpp` has no such edge. Keep this
-restriction until a legal backend mechanism is demonstrated.
+In a mixed core group, moving a Mat tile to Vec with
+`pl.tile.move(tile, pl.Mem.Vec)` uses the A5 L1-to-UB DMA. The existing
+`blayout` and `slayout` options select the destination layout. Request
+`row_major` / `none_box` to unpack a standard NZ Mat tile into ND. In
+`pl.split_aiv` regions, `pl.aiv_shard(mat_tile)` sends the corresponding
+partition to each physical AIV. An ordinary Mat-to-Vec `tile.move` in a
+dual-AIV mixed kernel is rejected because its physical lane is ambiguous.
 
-The alternatives require separate contracts:
+The compiler reserves one shared receive buffer per AIV and selects two
+intra-block event IDs alongside FIFO pipe reservations. Peer initializers can
+specify the same even `flag_base` to reserve two event IDs for a unidirectional
+pipe or four for a bidirectional pipe. PTOAS lowers
+`pto.tdma_l1_to_ub` and `pto.tdma_ub_copy` with local synchronization for both
+the event and buffer-ID modes. Use a PTOAS build that includes those ops.
 
-- Direct TMOV needs a legal Mat→Vec instruction, layouts, dtypes, valid extents
-  and producer/consumer ordering. The minimal assembler rejection is covered
-  by `tests/ut/codegen/test_pto_codegen_aiv_lane.py`.
-- A tile TPipe needs evidence that its C2V producer accepts Mat storage and
-  that its AIV consumer receives Vec storage; the existing Acc→Vec pipe is
-  not that evidence. A Mat producer probe currently fails on both A3 and A5
-  with `tile type must map to a supported producer pipe`.
-- A GM route needs a legal L1→GM store, AIV GM→UB load, lifetime, cache
-  visibility and synchronization. A3's store verifier permits Mat, but A5's
-  permits only Vec or Acc. Reloading the original GM input on AIV can be a
-  separately authored algorithm when that input is still available; it does
-  not copy an arbitrary existing L1 tile.
+Each transfer waits for both the remote DMA and the local copy to finish
+before reusing the shared buffer. The local copy costs an extra UB read and
+write and leaves an owned Tile that can outlive the next transfer. Both memory
+planners can allocate the buffers. The default layout can preserve NZ, so
+subsequent ND-only vector operations may insert layout conversions. Request
+ND on the transfer for a consumer that expects ND.
 
-No new memory-graph edge or implicit staging is introduced. These compiler
-limits do not establish a hardware capability limit. Backend instruction and
-protocol evidence, including the intended meaning of the external L1→UB
-request, remains necessary before extending this path.
+This path accepts full, statically shaped, byte-addressable 2-D Tiles with
+32-byte-aligned extents. It supports same-layout whole transfers and evenly
+aligned ND/NZ partitions. The 12-bit burst count is split across commands
+when necessary. Burst length and gaps must fit 16 bits, in 32-byte units.
+PTOAS emits a counted loop over NZ column stripes.
 
 ::: pypto.language.system
     options:

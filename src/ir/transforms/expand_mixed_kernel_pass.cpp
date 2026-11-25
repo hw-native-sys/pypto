@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -50,6 +51,7 @@
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/deferred_wait_contract.h"
+#include "pypto/ir/transforms/utils/direct_l1_dma.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -1985,6 +1987,205 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   }
 }
 
+struct L1DmaBoundary {
+  TileTypePtr result_type;
+  int split;
+};
+
+struct L1DmaPlan {
+  std::map<const Stmt*, L1DmaBoundary> boundaries;
+  VarPtr producer_buffer;
+  VarPtr consumer_buffer;
+  bool dual = false;
+  int capacity = 0;
+};
+
+class L1DmaSignalUsage : public IRVisitor {
+ public:
+  explicit L1DmaSignalUsage(const Span& span) : span_(span) {}
+
+  std::pair<int, int> Allocate() const {
+    std::bitset<16> fixed;
+    fixed.set(14).set(15);  // Hard SYNCALL.
+    std::vector<int> automatic;
+    for (const auto& [id, pipe] : pipes_) {
+      if (!pipe.base) {
+        automatic.push_back(pipe.width);
+        continue;
+      }
+      CHECK_SPAN(*pipe.base >= 0 && *pipe.base % 2 == 0 && *pipe.base <= 14 - pipe.width, span_)
+          << "Pipe " << id << " flag_base must start an even interval below hard SYNCALL events 14/15";
+      const auto interval = Interval(*pipe.base, pipe.width);
+      CHECK_SPAN((fixed & interval).none(), span_) << "Explicit pipe flag_base intervals overlap";
+      fixed |= interval;
+    }
+    for (int ready = 13; ready >= 1; --ready) {
+      if (fixed.test(ready) || named_.test(ready)) continue;
+      for (int released = ready - 1; released >= 0; --released) {
+        if (fixed.test(released) || named_.test(released)) continue;
+        auto used = fixed;
+        used.set(ready).set(released);
+        // Match PTOAS: explicit ranges first, then auto pipes in ID order at
+        // the lowest even base that can hold their whole range.
+        bool fits = true;
+        for (int width : automatic) {
+          int base = 0;
+          while (base + width <= 14 && (used & Interval(base, width)).any()) base += 2;
+          if (base + width > 14) {
+            fits = false;
+            break;
+          }
+          used |= Interval(base, width);
+        }
+        if (fits) return {ready, released};
+      }
+    }
+    CHECK_SPAN(false, span_) << "Automatic L1-to-UB DMA needs two unused intra-block event IDs alongside the FIFO pipes";
+    return {-1, -1};
+  }
+
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
+      const int id = call->GetKwarg<int>("id", 0);
+      const int width = call->GetKwarg<int>("dir_mask", 0) == 3 ? 4 : 2;
+      auto [entry, inserted] = pipes_.try_emplace(id, Pipe{width, std::nullopt});
+      CHECK_SPAN(inserted || entry->second.width == width, call->span_)
+          << "Peer initializers for pipe " << id << " must agree on flag interval width";
+      if (call->HasKwarg("flag_base")) {
+        const auto base = call->GetKwarg<int>("flag_base");
+        CHECK_SPAN(!entry->second.base || *entry->second.base == base, call->span_)
+            << "Peer initializers for pipe " << id << " must agree on flag_base";
+        entry->second.base = base;
+      }
+    } else if (IsOp(call, "system.set_intra_block") || IsOp(call, "system.wait_intra_block") ||
+               IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait")) {
+      CHECK_SPAN(call->HasKwarg("event_id"), call->span_)
+          << "Automatic L1-to-UB DMA cannot share a mixed group with a dynamic cross-core event ID";
+      const int id = call->GetKwarg<int>("event_id");
+      CHECK_SPAN(id >= 0, call->span_) << "Cross-core event ID must be nonnegative";
+      named_.set(id % direct_l1_dma::kLaneOffset);
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+
+ private:
+  struct Pipe {
+    int width;
+    std::optional<int> base;
+  };
+  static std::bitset<16> Interval(int base, int width) {
+    return std::bitset<16>(((1u << width) - 1) << base);
+  }
+  const Span& span_;
+  std::map<int, Pipe> pipes_;
+  std::bitset<16> named_;
+};
+
+class AssignL1DmaSignals : public IRMutator {
+ public:
+  AssignL1DmaSignals(int ready, int released) : ready_(ready), released_(released) {}
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& call) override {
+    if (!IsOp(call, "tile.l1_dma_send") && !IsOp(call, "tile.l1_dma_receive"))
+      return IRMutator::VisitExpr_(call);
+    auto updated = MutableCopy(call);
+    updated->kwargs_.emplace_back("ready", ready_);
+    updated->kwargs_.emplace_back("released", released_);
+    return updated;
+  }
+
+ private:
+  int ready_;
+  int released_;
+};
+
+L1DmaPlan PlanL1Dma(const FunctionPtr& func, const std::map<const Stmt*, CVBoundaryMove>& boundaries,
+                    bool dual) {
+  L1DmaPlan plan;
+  if (PassContext::Current()->GetBackendHandler()->GetPtoTargetArch() != "a5") return plan;
+  plan.dual = dual;
+  for (const auto& [stmt, boundary] : boundaries) {
+    auto src = As<TileType>(boundary.source_tile->GetType());
+    if (boundary.direction != CVDirection::CUBE_TO_VECTOR || !src ||
+        src->GetMemorySpace() != MemorySpace::Mat)
+      continue;
+    CHECK_SPAN(!dual || boundary.op_driven, stmt->span_)
+        << "A5 L1-to-UB tile.move has no defined lane in a dual-AIV mixed kernel. "
+           "Use pl.aiv_shard for the transfer or outline the move in a single-AIV mixed kernel.";
+    auto dst = As<TileType>(boundary.dest_var->GetType());
+    CHECK_SPAN(dst && dst->GetMemorySpace() == MemorySpace::Vec, stmt->span_)
+        << "A5 L1-to-UB DMA requires a Vec destination";
+    if (boundary.op_driven) {
+      auto view = tile_view_semantics::GetImplicitTileView(dst->shape_, MemorySpace::Vec);
+      view.valid_shape = tile_view_semantics::GetEffectiveTileView(*dst).valid_shape;
+      dst = std::make_shared<TileType>(dst->shape_, dst->dtype_, std::nullopt, view, MemorySpace::Vec);
+    }
+    const auto src_geometry = direct_l1_dma::Describe(src, stmt->span_);
+    const auto dst_geometry = direct_l1_dma::Describe(dst, stmt->span_);
+    const int split = boundary.op_driven ? BoundaryTransportSplitCode(boundary, stmt->span_) : kSplitNone;
+    CHECK_SPAN(src->dtype_ == dst->dtype_ &&
+                   (split == kSplitNone || (dual && (split == kSplitUpDown || split == kSplitLeftRight))),
+               stmt->span_)
+        << "A5 L1-to-UB DMA requires matching dtypes and an aligned, even AIV partition";
+    CHECK_SPAN(src_geometry.rows == dst_geometry.rows * (split == kSplitUpDown ? 2 : 1) &&
+                   src_geometry.cols == dst_geometry.cols * (split == kSplitLeftRight ? 2 : 1) &&
+                   (boundary.lane_stride == 0 ||
+                    boundary.lane_stride == (split == kSplitUpDown ? dst_geometry.rows : dst_geometry.cols)),
+               stmt->span_)
+        << "A5 L1-to-UB DMA requires matching Tile extents or two equal lane partitions";
+    using direct_l1_dma::Layout;
+    const auto is_nd_or_nz = [](Layout layout) { return layout == Layout::ND || layout == Layout::NZ; };
+    CHECK_SPAN((split == kSplitNone && src_geometry.layout == dst_geometry.layout) ||
+                   (is_nd_or_nz(src_geometry.layout) && is_nd_or_nz(dst_geometry.layout)),
+               stmt->span_)
+        << "A5 L1-to-UB DMA supports same-layout whole Tiles and aligned ND/NZ partitions";
+    plan.capacity = std::max(plan.capacity, dst_geometry.Bytes());
+    plan.boundaries.emplace(stmt, L1DmaBoundary{dst, split});
+  }
+  if (plan.boundaries.empty()) return plan;
+
+  const auto type = std::make_shared<ScalarType>(DataType::INT32);
+  plan.producer_buffer = std::make_shared<Var>("l1_dma_peer", type, func->span_);
+  plan.consumer_buffer = std::make_shared<Var>("l1_dma_scratch", type, func->span_);
+  return plan;
+}
+
+void EmitL1DmaBoundary(const L1DmaPlan& plan, const L1DmaBoundary& transfer, const CVBoundaryMove& boundary,
+                       CoreSide side, const Span& span, std::vector<StmtPtr>& result,
+                       std::unordered_map<const Var*, VarPtr>& result_remap) {
+  const auto dst = direct_l1_dma::Describe(transfer.result_type, span);
+  std::vector<std::pair<std::string, std::any>> args;
+  if (side == CoreSide::AIC) {
+    args.emplace_back("rows", dst.rows);
+    args.emplace_back("cols", dst.cols);
+    args.emplace_back("layout", static_cast<int>(dst.layout));
+    args.emplace_back("split", transfer.split);
+    args.emplace_back("lanes", plan.dual ? 2 : 1);
+    auto op = OpRegistry::GetInstance().Create("tile.l1_dma_send",
+                                               {boundary.source_tile, plan.producer_buffer}, args, span);
+    result.push_back(std::make_shared<EvalStmt>(op, span));
+    return;
+  }
+  // Receive into an owned result Tile. The shared scratch can be reused once
+  // the local UB copy completes, even when the result escapes a loop or branch.
+  auto output = std::make_shared<Var>(boundary.dest_var->name_hint_, transfer.result_type, span);
+  const auto view = tile_view_semantics::GetEffectiveTileView(*transfer.result_type);
+  args.emplace_back("dtype", transfer.result_type->dtype_);
+  args.emplace_back("blayout", view.blayout);
+  args.emplace_back("slayout", view.slayout);
+  auto shape = std::make_shared<MakeTuple>(transfer.result_type->shape_, span);
+  auto op =
+      OpRegistry::GetInstance().Create("tile.l1_dma_receive", {plan.consumer_buffer, shape}, args, span);
+  result.push_back(std::make_shared<AssignStmt>(output, op, span));
+  result_remap[boundary.dest_var.get()] = output;
+  if (!boundary.op_driven) {
+    if (auto source = AsVarLike(boundary.source_tile)) result_remap[source.get()] = output;
+  }
+  result_remap[output.get()] = output;
+}
+
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
 /// and replacing CV boundary moves with TPUSH/TPOP ops.
 /// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
@@ -1998,7 +2199,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
+                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops,
+                                   const L1DmaPlan& l1_dma) {
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
@@ -2029,6 +2231,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     // MIXED here, but we handle it specially before the generic MIXED arm below.
     auto bm_it = boundary_moves.find(stmt.get());
     if (bm_it != boundary_moves.end()) {
+      if (auto dma = l1_dma.boundaries.find(stmt.get()); dma != l1_dma.boundaries.end()) {
+        EmitL1DmaBoundary(l1_dma, dma->second, bm_it->second, side, stmt->span_, result, tpop_var_remap);
+        continue;
+      }
       const size_t first_emitted = result.size();
       {
         const auto& bm = bm_it->second;
@@ -2234,20 +2440,22 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, l1_dma);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_then =
+            BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, l1_dma);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
           auto new_else_stmts =
               BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
-                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, l1_dma);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -2255,8 +2463,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         new_if->else_body_ = new_else;
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, l1_dma);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -2623,6 +2832,13 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, tpop_defs);
+  const auto l1_dma =
+      PlanL1Dma(func, boundary_moves,
+                needs_dual_aiv_dispatch || had_regions || func->GetAttr<bool>(kAttrSplitAiv, false) ||
+                    func->GetAttr<bool>(kAttrDualAivDispatch, false));
+  const std::string aic_name = func->name_ + "_aic";
+  const std::string aiv_name = func->name_ + "_aiv";
+  const std::string dma_buffer_name = func->name_ + "_l1_dma_slots";
 
   // Detect GM-mediated cross-lane store/load dependencies (issue #1433) that
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
@@ -2652,7 +2868,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
   auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, l1_dma);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -2690,7 +2906,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, l1_dma);
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap, program);
@@ -2719,8 +2935,6 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   AssertNoSplitReshapeSurvives(aic_final, func->name_ + "_aic");
   AssertNoSplitReshapeSurvives(aiv_final, func->name_ + "_aiv");
 
-  const std::string aic_name = func->name_ + "_aic";
-  const std::string aiv_name = func->name_ + "_aiv";
   RewriteOutlinedPipeBuffers(aic_final, aiv_final, CoreSide::AIV, aiv_name);
   RewriteOutlinedPipeBuffers(aiv_final, aic_final, CoreSide::AIC, aic_name);
   // Pipe depths from pl.cross_core_slot, propagated as function attrs by the
@@ -2731,9 +2945,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
       func->HasAttr("local_slot_num") ? std::optional<int>(func->GetAttr<int>("local_slot_num", 0))
                                       : std::nullopt;
   const bool explicit_c2v_layout =
-      std::any_of(boundary_moves.begin(), boundary_moves.end(), [](const auto& entry) {
+      std::any_of(boundary_moves.begin(), boundary_moves.end(), [&](const auto& entry) {
         const auto& [stmt, move] = entry;
         if (move.op_driven || move.direction != CVDirection::CUBE_TO_VECTOR) return false;
+        if (l1_dma.boundaries.count(stmt) != 0) return false;
         const auto* assign = dynamic_cast<const AssignStmt*>(stmt);
         const auto call = assign ? As<Call>(assign->value_) : nullptr;
         if (!call || (!call->HasKwarg("blayout") && !call->HasKwarg("slayout"))) return false;
@@ -2750,6 +2965,23 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // LowerAutoVectorSplit path) above the pipe setup, matching the standalone
   // split_aiv SplitVectorKernel placement for byte-identical output.
   aiv_final = PrependPipeSetupKeepingSubblockIdx(automatic_pipe_setup.aiv_stmts, aiv_final);
+  if (l1_dma.producer_buffer) {
+    L1DmaSignalUsage usage(func->span_);
+    for (const auto& stmt : aic_final) usage.VisitStmt(stmt);
+    for (const auto& stmt : aiv_final) usage.VisitStmt(stmt);
+    const auto [ready, released] = usage.Allocate();
+    AssignL1DmaSignals assign(ready, released);
+    for (auto& stmt : aic_final) stmt = assign.VisitStmt(stmt);
+    for (auto& stmt : aiv_final) stmt = assign.VisitStmt(stmt);
+    // Bind the scratch after automatic FIFO setup is planned. It is dedicated
+    // to DMA and must not be mistaken for a user-supplied FIFO buffer.
+    auto imported = cross_core_pipe::CreateImportPeerBuffer(dma_buffer_name, aiv_name, func->span_);
+    auto reserved = cross_core_pipe::CreateReserveBuffer(dma_buffer_name, l1_dma.capacity, func->span_);
+    aic_final = PrependPipeSetup(
+        {std::make_shared<AssignStmt>(l1_dma.producer_buffer, imported, func->span_)}, aic_final);
+    aiv_final = PrependPipeSetupKeepingSubblockIdx(
+        {std::make_shared<AssignStmt>(l1_dma.consumer_buffer, reserved, func->span_)}, aiv_final);
+  }
 
   // Seed every parameter first, then publish the final type-remapped identities.
   // Both the signature and DeepClone must use these exact final Var objects.
@@ -2888,7 +3120,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(aiv_body_stmt, aiv_map);
   (void)aiv_clone_map_unused;
   auto aiv_attrs = std::move(core_attrs);
-  if (needs_dual_aiv_dispatch) {
+  if (needs_dual_aiv_dispatch || (!l1_dma.boundaries.empty() && l1_dma.dual)) {
     aiv_attrs.erase(std::remove_if(aiv_attrs.begin(), aiv_attrs.end(),
                                    [](const auto& kv) { return kv.first == kAttrDualAivDispatch; }),
                     aiv_attrs.end());

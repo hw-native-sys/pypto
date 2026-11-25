@@ -70,28 +70,29 @@ PyTorch 参考 FIFO 属于独立路径。
 A5 V2C 用例交换逻辑 lane，区分显式选择与忽略操作数的行为；本地
 C2V 用例使用匹配的物理 lane。A3、A5 的运行结果必须分别记录。
 
-## L1 到 UB 的支持边界
+## A5 的 L1 到 UB 直接 Tile 搬运
 
-显式 lane 不建立 Mat（L1）到 Vec（UB）的传输能力。当前 PTOAS 的
-`verifyTMovGenericPairing` 不包含 Mat→Vec，950 的内存图
-`src/backend/common/soc.cpp` 也没有该边。在出现合法后端机制的证据前
-继续维持限制。
+在 mixed core group 中，用 `pl.tile.move(tile, pl.Mem.Vec)` 将 Mat Tile
+搬到 Vec 时，A5 编译器使用 L1→UB DMA。用已有的 `blayout` 和 `slayout`
+参数选择目标布局。目标为 `row_major` / `none_box` 时，可以把标准 NZ Mat
+Tile 按逻辑顺序搬到 ND Vec Tile。在 `pl.split_aiv` 区域中，
+`pl.aiv_shard(mat_tile)` 将对应分片送到每个物理 AIV。双 AIV 混合核中的
+普通 Mat→Vec `tile.move` 无法确定目标 lane，编译器会给出诊断。
 
-各候选机制需要独立契约：
+编译器为每个 AIV 预留一个共享接收缓冲区，并依据 FIFO 已占用的区间分配两个块内事件
+ID。同一 pipe 的两侧初始化可以指定相同的偶数 `flag_base`，单向 pipe 占用两个事件，
+双向 pipe 占用四个。使用包含 `pto.tdma_l1_to_ub` 和 `pto.tdma_ub_copy` 的
+PTOAS 版本。事件同步和 buffer ID 同步都会对本地 Tile 写入安排同步。
 
-- 直接 TMOV 需要合法的 Mat→Vec 指令、布局、dtype、有效范围及
-  生产者/消费者次序。最小汇编拒绝用例位于
-  `tests/ut/codegen/test_pto_codegen_aiv_lane.py`。
-- Tile TPipe 需要证明 C2V 生产端接受 Mat、AIV 消费端得到 Vec；
-  已有 Acc→Vec 管道不能证明这一点。当前 Mat 生产端的最小用例在
-  A3、A5 均报错 `tile type must map to a supported producer pipe`。
-- 经 GM 路径需要合法的 L1→GM store、AIV GM→UB load、生命周期、cache
-  可见性和同步。A3 store verifier 允许 Mat，A5 仅允许 Vec 或 Acc。
-  当原始 GM 输入仍可用时，可以单独编写在 AIV 重新读取的算法，
-  但这不等于复制已有的任意 L1 tile。
+每次搬运等待远端 DMA 和本地复制完成后再复用共享缓冲区。本地复制多一次 UB 读写，
+使接收结果在下一次搬运后仍然有效。PyPTO 和 PTOAS 内存规划器均可分配这些缓冲区。
+默认目标布局可能保留 NZ，后续只支持 ND 的向量算子可能插入布局转换。
+如果消费方使用 ND，可在搬运时明确请求 ND。
 
-本次不添加内存图边或隐式 staging。这些编译器限制不能证明硬件没有相关
-能力。扩展该路径仍需后端指令和协议证据，并明确外部 L1→UB 需求所指机制。
+该路径支持有效范围覆盖整个 Tile、静态二维、按字节寻址且物理范围 32 字节对齐的
+Tile。支持同布局整块搬运，以及满足对齐的 ND/NZ 等分分片。单条指令的 burst
+计数为 12 位，超出时拆成多条指令。长度和间隔以 32 字节为单位，必须适配 16 位字段。
+PTOAS 用循环生成 NZ 列条带的搬运指令。
 
 ::: pypto.language.system
     options:

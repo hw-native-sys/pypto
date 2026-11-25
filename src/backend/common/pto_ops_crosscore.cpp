@@ -43,6 +43,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
+#include "pypto/ir/transforms/utils/direct_l1_dma.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -248,6 +249,7 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
     oss << "id = " << id << ", ";
   }
   oss << "dir_mask = " << dir_mask << ", slot_size = " << slot_size;
+  if (op->HasKwarg("flag_base")) oss << ", flag_base = " << op->GetKwarg<int>("flag_base");
   if (op->HasKwarg("slot_num")) {
     const int slot_num = op->GetKwarg<int>("slot_num", 0);
     CHECK(slot_num > 0) << "Frontend initialize_pipe 'slot_num' attribute must be positive, got " << slot_num;
@@ -712,12 +714,116 @@ static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase
   return "";
 }
 
+static void EmitL1DmaPartition(codegen::PTOCodegen& codegen, const std::string& tile,
+                               const std::string& tile_type, const std::string& peer,
+                               const ir::direct_l1_dma::TileGeometry& src,
+                               const ir::direct_l1_dma::TileGeometry& dst, int lane, int split,
+                               int ready, int released, const ir::Span& span) {
+  using namespace ir::direct_l1_dma;  // NOLINT(build/namespaces)
+  const auto emit = [&](int source, int dest, int count, int length, int src_gap, int dst_gap,
+                        int groups, int src_stride, int dst_stride) {
+    CHECK_SPAN(count >= 1 && count <= kMaxBursts && length >= 1 && length <= kMaxBurstLength &&
+                   src_gap >= 0 && src_gap <= kMaxBurstLength && dst_gap >= 0 &&
+                   dst_gap <= kMaxBurstLength,
+               span)
+        << "A5 L1-to-UB DMA burst geometry exceeds the hardware fields";
+    std::ostringstream op;
+    op << "pto.tdma_l1_to_ub ins(" << tile << " : " << tile_type << ") outs(" << peer << " : i32)"
+       << " {lane = " << lane << " : i32, ready = " << ready << " : i32, released = " << released
+       << " : i32, src_offset = " << source << " : i32, dst_offset = " << dest
+       << " : i32, burst_count = " << count << " : i32, burst_length = " << length
+       << " : i32, src_gap = " << src_gap << " : i32, dst_gap = " << dst_gap
+       << " : i32, groups = " << groups << " : i32, src_group_stride = " << src_stride
+       << " : i32, dst_group_stride = " << dst_stride << " : i32}";
+    codegen.Emit(op.str());
+  };
+  if (split == ir::kSplitNone && src.layout == dst.layout) {
+    emit(0, 0, 1, dst.Bytes() / kBurstBytes, 0, 0, 1, 0, 0);
+    return;
+  }
+  const int row = split == ir::kSplitUpDown ? lane * dst.rows : 0;
+  const int col = split == ir::kSplitLeftRight ? lane * dst.RowBytes() : 0;
+  const bool boxed = src.layout == Layout::NZ || dst.layout == Layout::NZ;
+  const int src_pitch = src.layout == Layout::NZ ? kBurstBytes : src.RowBytes();
+  const int dst_pitch = dst.layout == Layout::NZ ? kBurstBytes : dst.RowBytes();
+  const int len = boxed ? kBurstBytes : dst.RowBytes();
+  const int src_base = src.layout == Layout::NZ ? col * src.rows + row * kBurstBytes
+                                                : row * src.RowBytes() + col;
+  const int groups = boxed ? dst.RowBytes() / kBurstBytes : 1;
+  const int src_stride = src.layout == Layout::NZ ? src.rows * kBurstBytes : kBurstBytes;
+  const int dst_stride = dst.layout == Layout::NZ ? dst.rows * kBurstBytes : kBurstBytes;
+  // The row count takes 12 bits. Keep stripes in a counted loop in PTOAS
+  // instead of emitting an instruction for every column group.
+  for (int r = 0; r < dst.rows; r += kMaxBursts) {
+    emit(src_base + r * src_pitch, r * dst_pitch, std::min(kMaxBursts, dst.rows - r),
+         len / kBurstBytes, (src_pitch - len) / kBurstBytes, (dst_pitch - len) / kBurstBytes,
+         groups, src_stride, dst_stride);
+  }
+}
+
+static std::string EmitAutomaticL1DmaSend(const CallPtr& op, codegen::CodegenBase& base) {
+  auto& codegen = AsPto(base);
+  const auto& input = op->args_[0];
+  const auto src_type = As<ir::TileType>(input->GetType());
+  const auto src = ir::direct_l1_dma::Describe(src_type, op->span_);
+  if (codegen.EmitTileAddr() && src_type->memref_.has_value()) {
+    const auto memref = ir::GetDefinedMemRef(src_type);
+    const auto offset = ir::transform_utils::EvalConstInt(memref->byte_offset_);
+    CHECK_SPAN(offset && *offset % ir::direct_l1_dma::kBurstBytes == 0 &&
+                   memref->size_ >= static_cast<uint64_t>(src.Bytes()),
+               op->span_)
+        << "A5 L1-to-UB DMA needs a 32-byte-aligned source allocation covering the Tile";
+  }
+  const ir::direct_l1_dma::TileGeometry dst{
+      op->GetKwarg<int>("rows"), op->GetKwarg<int>("cols"), src.element_bytes,
+      static_cast<ir::direct_l1_dma::Layout>(op->GetKwarg<int>("layout"))};
+  const auto source = codegen.GetExprAsCode(input);
+  const auto source_type = codegen.GetExprTypeAnnotation(input);
+  const auto peer = codegen.GetExprAsCode(op->args_[1]);
+  const int ready = op->GetKwarg<int>("ready");
+  const int released = op->GetKwarg<int>("released");
+  const int lanes = op->GetKwarg<int>("lanes");
+  for (int lane = 0; lane < lanes; ++lane) {
+    EmitL1DmaPartition(codegen, source, source_type, peer, src, dst, lane, op->GetKwarg<int>("split"),
+                       ready, released, op->span_);
+    codegen.Emit("pto.set_intra_block <PIPE_MTE1>, " +
+                 std::to_string(ready + lane * ir::direct_l1_dma::kLaneOffset));
+  }
+  for (int lane = 0; lane < lanes; ++lane) {
+    codegen.Emit("pto.wait_intra_block <PIPE_MTE1>, " +
+                 std::to_string(released + lane * ir::direct_l1_dma::kLaneOffset));
+  }
+  return "";
+}
+
+static std::string EmitAutomaticL1DmaReceive(const CallPtr& op, codegen::CodegenBase& base) {
+  auto& codegen = AsPto(base);
+  const auto ready = std::to_string(op->GetKwarg<int>("ready"));
+  const auto released = std::to_string(op->GetKwarg<int>("released"));
+  codegen.Emit("pto.wait_intra_block <PIPE_V>, " + ready);
+  codegen.Emit("pto.tdma_ub_copy ins(" + codegen.GetExprAsCode(op->args_[0]) + " : i32) outs(" +
+               codegen.GetCurrentResultTarget() + " : " + codegen.GetCurrentResultTileBufTypeString() +
+               ") {ready = " + ready + " : i32, released = " + released + " : i32}");
+  codegen.Emit("pto.set_intra_block <PIPE_V>, " + released);
+  return "";
+}
+
 void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
     if (!ShouldRegister(exclude_ops, op_name)) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
+  if (ShouldRegister(exclude_ops, "tile.l1_dma_send")) {
+    backend.RegisterOp("tile.l1_dma_send").f_codegen(EmitAutomaticL1DmaSend).f_infer_pipe([](const CallPtr&) {
+      return ir::PipeType::MTE1;
+    });
+  }
+  if (ShouldRegister(exclude_ops, "tile.l1_dma_receive")) {
+    backend.RegisterOp("tile.l1_dma_receive")
+        .f_codegen(EmitAutomaticL1DmaReceive)
+        .f_infer_pipe([](const CallPtr&) { return ir::PipeType::V; });
+  }
 
   auto emit_flag = [](const ir::CallPtr& op, codegen::CodegenBase& base, const char* instruction) {
     auto& codegen = AsPto(base);

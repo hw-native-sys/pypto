@@ -746,7 +746,7 @@ def _build_pipe_init_kwargs(
     slot_size: int,
     slot_num: int | None,
     local_slot_num: int | None,
-    id: int | None,
+    event_options: tuple[int | None, int | None],
     c2v_dtype: object,
     pre_relu: bool,
     ptoas_plan_memory: bool,
@@ -760,6 +760,7 @@ def _build_pipe_init_kwargs(
     dir_mask / slot_size are handled, so they are not re-checked here.
     """
     kwargs: dict[str, Any] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    id, flag_base = event_options
     nosplit, acc_push_epilogue = fixpipe_options
     if acc_push_epilogue is not None:
         kwargs["acc_push_epilogue"] = acc_push_epilogue
@@ -772,6 +773,8 @@ def _build_pipe_init_kwargs(
         kwargs["local_slot_num"] = local_slot_num
     if id is not None:
         kwargs["id"] = id
+    if flag_base is not None:
+        kwargs["flag_base"] = flag_base
     # Match store's compile-time ReLU semantics, without introducing a scale:
     # the pipe's payload dtype selects an unscaled FP32 conversion instead.
     _, relu = resolve_fixpipe_epilogue("initialize_pipe", None, pre_relu)
@@ -807,6 +810,7 @@ def aic_initialize_pipe(  # noqa: PLR0913
     slot_num: int | None = None,
     local_slot_num: int | None = None,
     id: int | None = None,
+    flag_base: int | None = None,
     c2v_dtype: DataType | None = None,
     pre_relu: bool = False,
     ptoas_plan_memory: bool = False,
@@ -828,6 +832,7 @@ def aic_initialize_pipe(  # noqa: PLR0913
             ``<= slot_num``). On a3 the reserved/imported buffer is sized
             ``slot_size * local_slot_num``; on a5 it is ``slot_size * slot_num``.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        flag_base: Optional even intra-block event base. Peer initializers must agree.
         c2v_dtype: Explicit A5 non-split C2V payload type: FP32, FP16, or BF16.
             The producer must push FP32 Acc tiles. Both peer initializers must
             agree, and the consumer must pop this dtype. Narrowing uses RNE.
@@ -850,7 +855,7 @@ def aic_initialize_pipe(  # noqa: PLR0913
         slot_size,
         slot_num,
         local_slot_num,
-        id,
+        (id, flag_base),
         c2v_dtype,
         pre_relu,
         ptoas_plan_memory,
@@ -870,6 +875,7 @@ def aiv_initialize_pipe(  # noqa: PLR0913
     slot_num: int | None = None,
     local_slot_num: int | None = None,
     id: int | None = None,
+    flag_base: int | None = None,
     c2v_dtype: DataType | None = None,
     pre_relu: bool = False,
     ptoas_plan_memory: bool = False,
@@ -891,6 +897,7 @@ def aiv_initialize_pipe(  # noqa: PLR0913
             ``<= slot_num``). On a3 the reserved/imported buffer is sized
             ``slot_size * local_slot_num``; on a5 it is ``slot_size * slot_num``.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        flag_base: Optional even intra-block event base. Peer initializers must agree.
         c2v_dtype: Explicit A5 non-split C2V payload type: FP32, FP16, or BF16.
             Must match the producer's initializer and every consumer pop.
             Narrowing uses RNE; slot bytes describe the payload dtype.
@@ -911,7 +918,7 @@ def aiv_initialize_pipe(  # noqa: PLR0913
         slot_size,
         slot_num,
         local_slot_num,
-        id,
+        (id, flag_base),
         c2v_dtype,
         pre_relu,
         ptoas_plan_memory,
