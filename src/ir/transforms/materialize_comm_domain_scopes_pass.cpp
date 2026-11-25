@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/collective_operand_utils.h"
 #include "pypto/ir/transforms/utils/dist_tensor_alias_utils.h"
+#include "pypto/ir/transforms/utils/external_window.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -511,6 +512,9 @@ class DispatchAnalyzer : public IRVisitor {
     --repeating_scope_depth_;
   }
 
+  const std::unordered_map<const Var*, size_t>* external_params = nullptr;
+  std::map<size_t, DeviceDescriptor> external_devices;
+
   void AnalyzeDispatch(const CallPtr& op) {
     if (!IsChipOrchDispatch(op, chip_orchs_)) return;
     ExprPtr device;
@@ -526,6 +530,12 @@ class DispatchAnalyzer : public IRVisitor {
     for (const auto& arg : op->args_) {
       auto arg_var = AsVarLike(arg);
       if (!arg_var) continue;
+      if (external_params) {
+        if (IsA<CommCtxType>(arg->GetType())) arg_var = AsVarLike(UnwrapStopExpr(arg_var, var_defs_));
+        auto it = external_params->find(arg_var.get());
+        if (it != external_params->end()) external_devices[it->second].Merge(desc);
+        continue;
+      }
       auto window = ResolveWindowRecord(arg_var);
       if (window) {
         window->alloc->seen.push_back(desc);
@@ -541,8 +551,9 @@ class DispatchAnalyzer : public IRVisitor {
     INTERNAL_CHECK_SPAN(view_var, expr->span_)
         << "MaterializeCommDomainScopes: " << op_name << " " << role << " must be a window view Var";
     auto window = ResolveWindowRecord(view_var);
-    INTERNAL_CHECK_SPAN(window, expr->span_) << "MaterializeCommDomainScopes: " << op_name << " " << role
-                                             << " must be produced by pld.tensor.window";
+    CHECK_SPAN(window, expr->span_) << "HOST builtin collectives require locally allocated windows; external "
+                                       "DistributedTensor is unsupported: "
+                                    << op_name << " " << role << " must be produced by pld.tensor.window";
     return window->alloc;
   }
 
@@ -655,7 +666,7 @@ class DispatchAnalyzer : public IRVisitor {
 
   void VisitExpr_(const CallPtr& op) override {
     AnalyzeDispatch(op);
-    AnalyzeCollective(op);
+    if (!external_params) AnalyzeCollective(op);
     IRVisitor::VisitExpr_(op);
   }
 
@@ -1155,6 +1166,58 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
 }
 
 }  // namespace
+
+ExternalWindowAnalysis AnalyzeExternalWindows(const ProgramPtr& program, const FunctionPtr& host) {
+  ExternalWindowAnalysis result;
+  std::unordered_map<std::string, dist_tensor_alias::FunctionCtxPlan> plans;
+  std::map<std::string, FunctionPtr> chips;
+  for (const auto& [gv, function] : program->functions_) {
+    if (IsChipOrch(function)) chips[function->name_] = function;
+    plans[function->name_].returned_param_indices = return_lineage::ReturnedParamIndices(function, program);
+  }
+  auto& host_plan = plans.at(host->name_);
+  for (size_t i = 0; i < host->params_.size(); ++i) {
+    const auto& param = host->params_[i];
+    if (As<DistributedTensorType>(param->GetType())) {
+      host_plan.param_to_ctx[param.get()] = param;
+      host_plan.dist_param_indices.push_back(i);
+      result.parameter_indices.emplace(param.get(), i);
+    }
+  }
+  dist_tensor_alias::DistParamAliasCollector aliases(program, &plans, &host_plan);
+  aliases.VisitStmt(host->body_);
+  for (const auto& [var, root] : aliases.alias_to_ctx) {
+    result.parameter_indices.emplace(var, result.parameter_indices.at(root.get()));
+  }
+  AllocAndWindowCollector collector;
+  collector.VisitStmt(host->body_);
+  DispatchAnalyzer analyzer(collector.view_to_window, chips, collector.var_defs);
+  const size_t first_ctx = host->params_.size() - host_plan.dist_param_indices.size();
+  for (size_t i = 0; i < first_ctx; ++i) {
+    CHECK_SPAN(!IsA<CommCtxType>(host->params_[i]->GetType()), host->span_)
+        << "CommCtx must form the entry suffix";
+  }
+  for (size_t j = 0; j < host_plan.dist_param_indices.size(); ++j) {
+    const auto& ctx = host->params_[first_ctx + j];
+    CHECK_SPAN(
+        IsA<CommCtxType>(ctx->GetType()) && host->param_directions_[first_ctx + j] == ParamDirection::In,
+        host->span_)
+        << "Expected one input CommCtx suffix per DistributedTensor parameter";
+    result.parameter_indices.emplace(ctx.get(), host_plan.dist_param_indices[j]);
+  }
+  analyzer.external_params = &result.parameter_indices;
+  analyzer.VisitStmt(host->body_);
+  auto engines = BufferEngineCollector(program).Collect();
+  for (const auto& [param, root] : host_plan.param_to_ctx) {
+    size_t i = result.parameter_indices.at(param);
+    const auto& devices = analyzer.external_devices[i];
+    auto engine = EnginesFor(engines, param);
+    CHECK_SPAN(!(engine[0] && engine[1]), param->span_)
+        << "External window requires incompatible URMA and mapped peer access";
+    result.uses.emplace(i, ExternalWindowUse{devices.is_all, devices.ToDevices(), engine[0], engine[1]});
+  }
+  return result;
+}
 
 namespace pass {
 

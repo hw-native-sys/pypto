@@ -102,10 +102,10 @@ class DistributedCodegen : public CodegenBase {
   [[nodiscard]] std::string ResolveRankExpr(const ir::CallPtr& call) const;
 
   /// Lower a ``CommCtxType`` call argument. get_comm_ctx-derived locals map to
-  /// the runtime device_ctx expression for the current dispatch rank; explicit
-  /// CommCtx params are forwarded as scalar names.
+  /// the runtime device_ctx expression for the current dispatch rank.
+  /// External HOST contexts contribute their domain to the ordering-token list.
   [[nodiscard]] std::string ResolveCommCtxArg(const ir::ExprPtr& arg, const std::string& rank_expr,
-                                              const ir::Span& span) const;
+                                              const ir::Span& span, std::vector<size_t>& external_args) const;
 
   /// Return the emitted Python handle variable for the comm domain that owns
   /// ``wb``.
@@ -187,6 +187,8 @@ class DistributedCodegen : public CodegenBase {
  private:
   // Code structure emission
   void EmitImports();
+  void EmitExternalWindowArgs(const ir::FunctionPtr& func);
+  void EmitExternalWindowCapacityCheck(size_t index, const ir::DistributedTensorTypePtr& type);
   void EmitFunction(const ir::FunctionPtr& func);
   void EmitEntryFunction();
   // Tag the emitted orchestrator/entry with a sentinel attribute so the runtime
@@ -332,6 +334,9 @@ class DistributedCodegen : public CodegenBase {
   // tuple element. Keep it separate from tensor aliases so a later
   // ``deps=[tid]`` can lower to ``TaskArgs.add_dep_wait(tid)``.
   std::map<std::pair<std::string, int>, std::string> tuple_element_task_handles_;
+
+  // External window values and their contexts map to the originating HOST parameter.
+  std::unordered_map<const ir::Var*, size_t> external_windows_;
 
   // HOST orchestrator AssignStmt defs, populated before comm-domain emission.
   std::unordered_map<const ir::Var*, ir::ExprPtr> host_orch_var_defs_;

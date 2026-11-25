@@ -19,6 +19,8 @@ the IR types so downstream codegen has O(1) access.
 | Threaded back onto | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
 | IR-level registry | `Program.functions_` (alloc stmts) | `CommDomainScopeStmt` wrapping each host_orch body (one per inferred comm domain) |
 
+External HOST parameters receive their buffer slot and domain from the entry ABI. Only local allocations create an owning scope.
+
 ## Async workspace engines
 
 `CommDomainScopeStmt.engines` records the async workspace engines required by a

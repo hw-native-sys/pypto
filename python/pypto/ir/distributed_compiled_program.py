@@ -16,6 +16,8 @@ through simpler's distributed runtime (Worker level=3)::
     compiled(a, b, c)   # executes via simpler Worker(level=3)
 """
 
+import hashlib
+import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
@@ -63,11 +65,19 @@ from .param_info import bind_complete_args, collect_output_values
 # re-exported here, where the rest of the L3 metadata contract lives. Bump
 # ``_META_SCHEMA`` on any incompatible format change.
 _META_SCHEMA = 3
+_EXTERNAL_META_SCHEMA = 4
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
     from pypto.runtime.distributed_runner import DistributedWorker, ReadOnlyHostTensor
     from pypto.runtime.runner import RunConfig
+
+
+def _host_entry_digest(entry: Path, params: list[_ParamInfo]) -> str:
+    """Bind the generated HOST entry to the ordered public signature used at submission."""
+    digest = hashlib.sha256(entry.read_bytes())
+    digest.update(json.dumps([_param_info_to_dict(p) for p in params], sort_keys=True).encode())
+    return digest.hexdigest()
 
 
 @dataclass
@@ -262,7 +272,10 @@ class DistributedCompiledProgram:
                 self._output_dir, keep=(_DISTRIBUTED_META_FILENAME, "orchestration/host_orch.py")
             )
             self._persist_metadata()
-            _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+            if not any(p.is_distributed for p in self._param_infos or ()):
+                _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+            else:
+                (self._output_dir / "debug" / "run.py").unlink(missing_ok=True)
 
     def _persist_metadata(self) -> None:
         """Write ``<output_dir>/distributed_meta.json`` for :meth:`from_dir`.
@@ -303,6 +316,11 @@ class DistributedCompiledProgram:
                 "aicpu_thread_num": dc.aicpu_thread_num,
             },
         }
+        if any(p.is_distributed for p in param_infos):
+            meta["schema"] = _EXTERNAL_META_SCHEMA
+            meta["entry_digest"] = _host_entry_digest(
+                self._output_dir / "orchestration" / "host_orch.py", param_infos
+            )
         _write_meta_atomically(self._output_dir / _DISTRIBUTED_META_FILENAME, meta)
 
     @classmethod
@@ -363,7 +381,9 @@ class DistributedCompiledProgram:
         # JSON, bad params, a ``backend_type`` naming a class attribute instead
         # of an enum member -- surfaces as one ValueError naming the file and
         # the recompile fix, rather than whichever internal exception it raised.
-        meta = _load_meta(meta_path, filename=_DISTRIBUTED_META_FILENAME, schema=_META_SCHEMA)
+        meta = _load_meta(
+            meta_path, filename=_DISTRIBUTED_META_FILENAME, schema=(_META_SCHEMA, _EXTERNAL_META_SCHEMA)
+        )
         platform = _reload_platform(
             meta["backend_type"],
             meta["platform"],
@@ -372,6 +392,22 @@ class DistributedCompiledProgram:
             platform=platform,
         )
         param_infos = meta["param_infos"]
+        raw = meta["raw"]
+        entry = meta_path.parent / "orchestration" / "host_orch.py"
+        external = any(p.is_distributed for p in param_infos)
+        if raw["schema"] == _EXTERNAL_META_SCHEMA:
+            if (
+                not external
+                or not entry.is_file()
+                or raw.get("entry_digest") != _host_entry_digest(entry, param_infos)
+            ):
+                raise ValueError("External window parameter metadata disagrees with the generated HOST entry")
+        elif (
+            external
+            or "entry_digest" in raw
+            or (entry.is_file() and "\n_PYPTO_WINDOW_REQUIREMENTS = " in entry.read_text())
+        ):
+            raise ValueError(f"External windows require distributed schema {_EXTERNAL_META_SCHEMA}")
         output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
         # ``return_types`` contents are never inspected at runtime — only the
         # count matters (has_return = len(...) > 0), so placeholders suffice.
@@ -450,7 +486,7 @@ class DistributedCompiledProgram:
 
             if host_orch is not None:
                 self._param_infos, self._output_indices, self._return_types = _extract_func_param_infos(
-                    host_orch
+                    host_orch, host_entry=True
                 )
             else:
                 self._param_infos, self._output_indices, self._return_types = _extract_param_infos(
@@ -487,6 +523,8 @@ class DistributedCompiledProgram:
         from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
         param_infos, output_indices, return_types = self._get_metadata()
+        if any(p.is_distributed for p in param_infos):
+            raise TypeError("This HOST entry requires external communication-window bindings")
         n_params = len(param_infos)
         n_inputs = n_params - len(output_indices)
         has_return = len(return_types) > 0

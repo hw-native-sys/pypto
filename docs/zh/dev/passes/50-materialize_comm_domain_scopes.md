@@ -18,6 +18,8 @@
 | 回填到 | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
 | Program 级注册表 | `Program.functions_`（alloc 语句） | `CommDomainScopeStmt wrappers in each host_orch body` |
 
+HOST 的外部形参通过入口 ABI 取得 buffer 槽位和域。仅在本地分配处创建拥有该 buffer 的 scope。
+
 ## 异步工作区引擎
 
 `CommDomainScopeStmt.engines` 记录通信域需要的异步工作区引擎 (async workspace engines)。

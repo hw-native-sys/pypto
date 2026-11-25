@@ -156,8 +156,8 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   for (size_t index : roles->context_args) {
     auto type = ir::As<ir::DistributedTensorType>(call->args_[index]->GetType());
     INTERNAL_CHECK_SPAN(type, call->span_) << "Builtin collective remote operand must be distributed";
-    INTERNAL_CHECK_SPAN(type->window_buffer_.has_value(), call->span_)
-        << "Builtin collective remote operand must be window-bound";
+    CHECK_SPAN(type->window_buffer_.has_value(), call->span_)
+        << "HOST builtin collectives do not support external windows";
     const auto& buffer = type->window_buffer_.value();
     const auto handle = codegen.GetCommDomainHandleVar(buffer);
     context_handles.push_back(handle);
@@ -183,8 +183,8 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   for (size_t i = 0; i < call->args_.size(); ++i) {
     const std::string tag = ArgDirectionToTensorArgType(arg_directions[i]);
     if (auto dist_type = ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) {
-      INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
-          << "Internal error: builtin tensor collective window arg must have a WindowBuffer";
+      CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
+          << "HOST builtin collectives do not support external windows";
       const auto& window_buffer = dist_type->window_buffer_.value();
       const std::string arg_handle = codegen.GetCommDomainHandleVar(window_buffer);
       if (seen_handles.insert(arg_handle).second) ordering_handles.push_back(arg_handle);

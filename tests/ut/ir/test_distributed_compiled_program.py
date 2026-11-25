@@ -154,6 +154,7 @@ def test_compile_persists_distributed_meta(compiled, tmp_path):
     meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
     assert meta_path.exists()
     meta = json.loads(meta_path.read_text())
+    assert meta["schema"] == 3
 
     # Param metadata mirrors the HOST orchestrator (post-SSA names that match
     # the generated host_orch.py): a, b are In; f is Out; all 128x128 fp32.
@@ -235,7 +236,7 @@ def test_from_dir_incompatible_schema_raises(compiled, tmp_path):
     """A distributed_meta.json written under a different schema version is rejected."""
     meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
     meta = json.loads(meta_path.read_text())
-    meta["schema"] = meta["schema"] + 1  # simulate an incompatible future format
+    meta["schema"] = 999  # simulate an incompatible future format
     meta_path.write_text(json.dumps(meta))
     with pytest.raises(ValueError, match="schema"):
         DistributedCompiledProgram.from_dir(tmp_path)

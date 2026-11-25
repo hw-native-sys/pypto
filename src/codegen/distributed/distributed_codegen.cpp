@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -41,10 +42,12 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/external_window.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/window_view_utils.h"
 #include "pypto/ir/type.h"
+#include "task_interface/data_type.h"
 
 namespace pypto {
 namespace codegen {
@@ -70,6 +73,43 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
     }
   }
   return result;
+}
+
+void ValidateWindowParam(const ir::DistributedTensorType& type, const ir::VarPtr& param) {
+  auto offset = type.memref_ ? ir::As<ir::ConstInt>(type.memref_.value()->byte_offset_) : nullptr;
+  const auto& view = type.tensor_view_;
+  const auto rank = type.shape_.size();
+  CHECK_SPAN(rank > 0 && rank <= MAX_TENSOR_DIMS && type.dtype_.GetBit() >= 8 &&
+                 (!type.memref_ || (offset && offset->value_ == 0)) &&
+                 (!view || (view->layout == ir::TensorLayout::ND && view->pad == ir::PadValue::null &&
+                            (view->stride.empty() || view->stride.size() == rank) &&
+                            (view->valid_shape.empty() || view->valid_shape.size() == rank))),
+             param->span_)
+      << "External DistributedTensor requires a contiguous ND view from the buffer start";
+  (void)DistributedCodegen::DataTypeToSimplerEnum(type.dtype_);
+  int64_t stride = 1;
+  for (size_t i = rank; i-- > 0;) {
+    const auto dim = ir::As<ir::ConstInt>(type.shape_[i]);
+    CHECK_SPAN(dim && dim->value_ > 0, param->span_)
+        << "External DistributedTensor requires a positive static shape";
+    CHECK_SPAN(
+        dim->value_ <= std::numeric_limits<uint32_t>::max() && stride <= std::numeric_limits<uint32_t>::max(),
+        param->span_)
+        << "External window shape and strides must fit uint32";
+    if (view && !view->stride.empty()) {
+      auto actual = ir::As<ir::ConstInt>(view->stride[i]);
+      CHECK_SPAN(actual && actual->value_ == stride, param->span_)
+          << "External DistributedTensor must be contiguous";
+    }
+    if (view && !view->valid_shape.empty()) {
+      auto valid = ir::As<ir::ConstInt>(view->valid_shape[i]);
+      CHECK_SPAN(valid && valid->value_ == dim->value_, param->span_)
+          << "External window requires the full valid shape";
+    }
+    CHECK_SPAN(dim->value_ <= std::numeric_limits<int64_t>::max() / stride, param->span_)
+        << "External window shape exceeds the descriptor size limit";
+    stride *= dim->value_;
+  }
 }
 
 }  // namespace
@@ -275,6 +315,56 @@ void DistributedCodegen::EmitImports() {
   emitter_.EmitLine("from pypto.runtime.distributed_runner import add_chip_tensor_arg, _submit_chip");
 }
 
+void DistributedCodegen::EmitExternalWindowArgs(const ir::FunctionPtr& func) {
+  emitter_.EmitLine("from pypto.runtime.distributed_args import decode_domain_ref");
+  emitter_.EmitLine("__run_domains = {}");
+  size_t scalar_offset = 0;
+  std::vector<size_t> windows;
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    const auto& param = func->params_[i];
+    const auto type = param->GetType();
+    if (ir::IsA<ir::CommCtxType>(type)) break;
+    const auto name = SanitizeName(param->name_hint_);
+    if (ir::IsA<ir::DistributedTensorType>(type)) {
+      windows.push_back(i);
+      emitter_.EmitLine("__index_" + std::to_string(i) + " = _args.scalar(" +
+                        std::to_string(scalar_offset++) + ")");
+    } else if (ir::IsA<ir::ScalarType>(type)) {
+      // Preserve the typed host value for Python control flow. TaskArgs.scalar() exposes raw uint64 bits.
+      ++scalar_offset;
+      emitter_.EmitLine(name + " = tensors[" + QuotePythonString(param->name_hint_) + "]");
+    } else {
+      CHECK_SPAN(ir::IsA<ir::TensorType>(type), param->span_) << "Unsupported HOST entry parameter";
+      if (name != param->name_hint_) {
+        emitter_.EmitLine("tensors[" + QuotePythonString(name) + "] = tensors[" +
+                          QuotePythonString(param->name_hint_) + "]");
+      }
+    }
+  }
+
+  // The CommCtx suffix has one three-scalar domain reference for each window, in declaration order.
+  for (const auto i : windows) {
+    const auto id = std::to_string(i);
+    const auto ref = "__ref_" + id;
+    const auto domain = "__domain_" + id;
+    const auto index = "__index_" + id;
+    const auto slot = "__slot_" + id;
+    emitter_.EmitLine(ref + " = decode_domain_ref(_args, " + std::to_string(scalar_offset) + ")");
+    scalar_offset += 3;
+    emitter_.EmitLine("if " + ref + " not in __run_domains:");
+    emitter_.EmitLine("    __run_domains[" + ref + "] = orch.get_domain(" + ref + ")");
+    emitter_.EmitLine(domain + " = __run_domains[" + ref + "]");
+    emitter_.EmitLine(slot + " = " + domain + ".buffers[" + index + "].name");
+  }
+}
+
+void DistributedCodegen::EmitExternalWindowCapacityCheck(size_t i, const ir::DistributedTensorTypePtr& type) {
+  const auto id = std::to_string(i);
+  emitter_.EmitLine("check_window_capacity(name=__slot_" + id + ", shapes=" + FormatShapeTuple(type->shape_) +
+                    ", element_bytes=" + std::to_string(type->dtype_.GetByte()) + ", slot_nbytes=__domain_" +
+                    id + ".buffers[__index_" + id + "].count)");
+}
+
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   window_source_keys_.clear();
   requires_host_domain_ = false;
@@ -283,6 +373,29 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
 
   bool is_sub_worker = func->role_.has_value() && *func->role_ == ir::Role::SubWorker;
   is_worker_context_ = is_sub_worker;
+
+  external_windows_.clear();
+  const bool external =
+      std::any_of(func->params_.begin(), func->params_.end(),
+                  [](const auto& param) { return ir::IsA<ir::DistributedTensorType>(param->GetType()); }) &&
+      func->level_ == ir::Level::HOST;
+  if (external) {
+    auto analysis = ir::AnalyzeExternalWindows(program_, func);
+    external_windows_ = std::move(analysis.parameter_indices);
+    std::ostringstream requirements;
+    requirements << "{";
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      const auto& param = func->params_[i];
+      auto dist = ir::As<ir::DistributedTensorType>(param->GetType());
+      if (!dist) continue;
+      ValidateWindowParam(*dist, param);
+      const auto& use = analysis.uses.at(i);
+      requirements << i << ":(" << (use.all_workers ? "True" : "False") << ",(";
+      for (auto worker : use.workers) requirements << worker << ",";
+      requirements << ")," << (use.uses_urma ? "'urma'" : use.uses_mapped_peer ? "'mapped'" : "None") << "),";
+    }
+    emitter_.EmitLine("_PYPTO_WINDOW_REQUIREMENTS = " + requirements.str() + "}");
+  }
 
   // Build function signature
   // Orchestrators: def func(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size):
@@ -314,7 +427,11 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   // pl.Scalar[pl.BOOL]) may appear in bare-name contexts such as ``if``
   // conditions.  Emitting ``name = tensors["name"]`` at the top of the
   // function body ensures the bare name resolves correctly.
-  RegisterParamsAndEmitScalarBindings(func);
+  if (external) {
+    EmitExternalWindowArgs(func);
+  } else {
+    RegisterParamsAndEmitScalarBindings(func);
+  }
 
   // For HOST orchestrators, pre-collect AssignStmt defs so the upcoming
   // ``VisitStmt_(CommDomainScopeStmtPtr)`` can unwrap CSE / SSA-hoisted
@@ -345,6 +462,9 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   }
 
   emitter_.DecreaseIndent();
+  if (external) {
+    emitter_.EmitLine(func->name_ + "._window_requirements = _PYPTO_WINDOW_REQUIREMENTS");
+  }
   if (requires_host_domain_) emitter_.EmitLine(func->name_ + "._requires_host_domain = True");
   // Validate runtime bindings before Worker initialization without opening files
   // during compilation or serializing process-local handles into the artifact.
@@ -823,7 +943,8 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
     current_expr_value_ = "";
     return;
   }
-  if (value_call && ir::IsOp(value_call, "pld.system.get_comm_ctx")) {
+  if ((value_call && ir::IsOp(value_call, "pld.system.get_comm_ctx")) ||
+      (ir::IsA<ir::CommCtxType>(op->var_->GetType()) && ir::AsVarLike(op->value_))) {
     current_target_var_ = "";
     current_expr_value_ = "";
     return;
@@ -938,6 +1059,7 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
     const auto yld = ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(body));
     if (!yld) return;
     for (size_t i = 0; i < op->return_vars_.size() && i < yld->value_.size(); ++i) {
+      if (external_windows_.count(op->return_vars_[i].get())) continue;
       VisitExpr(yld->value_[i]);
       const std::string val = current_expr_value_;
       current_expr_value_ = "";
@@ -1164,6 +1286,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // Attaching the WAW edge to the lexically-innermost scope would chain the dispatch into a domain it
   // does not actually touch while leaving the domain it *does* touch unordered.
   std::vector<ir::CommDomainScopeStmtPtr> comm_arg_scopes;
+  std::vector<size_t> external_args;
 
   // Build TaskArgs from callee's parameter directions
   emitter_.EmitLine(ta_var + " = TaskArgs()");
@@ -1179,7 +1302,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   for (size_t i = 0; i < call->args_.size(); ++i) {
     if (ir::IsA<ir::CommCtxType>(call->args_[i]->GetType())) {
       scalar_lines.push_back(ta_var + ".add_scalar(" +
-                             ResolveCommCtxArg(call->args_[i], rank_expr, call->span_) + ")");
+                             ResolveCommCtxArg(call->args_[i], rank_expr, call->span_, external_args) + ")");
       continue;
     }
 
@@ -1196,25 +1319,34 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       INTERNAL_CHECK_SPAN(!rank_expr.empty(), call->span_)
           << "Call passing DistributedTensor args must carry device= attr "
              "(N3 parser writes attrs[\"device\"] on chip-orch dispatch sites)";
-      INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
-          << "DistributedTensorType arg must have window_buffer_ populated by N4 pass";
-      const auto& window_buffer = dist_type->window_buffer_.value();
       std::string tag = "TensorArgType.INOUT";
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
-      const auto owning_scope = ScopeForWindowBuffer(window_buffer);
-      if (std::none_of(
-              comm_arg_scopes.begin(), comm_arg_scopes.end(),
-              [&](const ir::CommDomainScopeStmtPtr& seen) { return seen.get() == owning_scope.get(); })) {
-        comm_arg_scopes.push_back(owning_scope);
+      const auto arg = ir::AsVarLike(call->args_[i]);
+      const auto external = external_windows_.find(arg.get());
+      std::string domain, slot;
+      if (external != external_windows_.end()) {
+        CHECK_SPAN(!is_sub, call->span_) << "External windows require a CHIP dispatch";
+        const auto index = external->second;
+        external_args.push_back(index);
+        domain = "__domain_" + std::to_string(index);
+        slot = "__slot_" + std::to_string(index);
+        if (arg != current_func_->params_[index]) EmitExternalWindowCapacityCheck(index, dist_type);
+      } else {
+        CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
+            << "DistributedTensor must originate from an external parameter or a local window";
+        const auto& window = dist_type->window_buffer_.value();
+        const auto scope = ScopeForWindowBuffer(window);
+        if (std::find(comm_arg_scopes.begin(), comm_arg_scopes.end(), scope) == comm_arg_scopes.end()) {
+          comm_arg_scopes.push_back(scope);
+        }
+        domain = HandleVarForScope(scope);
+        slot = "\"" + SanitizeName(window->name_hint_) + "\"";
       }
-      const std::string handle_var = HandleVarForScope(owning_scope);
-      const std::string name = SanitizeName(window_buffer->name_hint_);
-      const std::string shape = FormatShapeTuple(dist_type->shape_);
-      const std::string dtype_enum = "DataType." + DataTypeToSimplerEnum(dist_type->dtype_);
-      emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
-                        "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
+      emitter_.EmitLine(ta_var + ".add_tensor(" + domain + "[" + rank_expr + "].buffers[" + slot +
+                        "].tensor(shapes=" + FormatShapeTuple(dist_type->shape_) + ", dtype=DataType." +
+                        DataTypeToSimplerEnum(dist_type->dtype_) + "), " + tag + ")");
       continue;
     }
 
@@ -1360,6 +1492,17 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // orchestration entry simply does not index it. That is what keeps this fix
   // host-side only — no chip .cpp regeneration, no `expected_arg_count` change.
   if (!is_sub && !rank_expr.empty()) {
+    if (!external_args.empty()) {
+      std::string refs;
+      std::set<size_t> seen;
+      for (auto index : external_args) {
+        if (seen.insert(index).second) refs += "__ref_" + std::to_string(index) + ",";
+      }
+      emitter_.EmitLine("for __ref in dict.fromkeys((" + refs + ")):");
+      emitter_.EmitLine("    __token = tensors['.domain_tokens'][__ref][" + rank_expr +
+                        "].tensor((1,), DataType.INT32)");
+      emitter_.EmitLine("    " + ta_var + ".add_tensor(__token, TensorArgType.INOUT)");
+    }
     for (const auto& scope : comm_arg_scopes) {
       const std::string ord_key = HandleVarForScope(scope) + "_ord";
       emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + ord_key + "\"][" +
@@ -1817,7 +1960,8 @@ std::string DistributedCodegen::ResolveRankExpr(const ir::CallPtr& call) const {
 }
 
 std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const std::string& rank_expr,
-                                                  const ir::Span& span) const {
+                                                  const ir::Span& span,
+                                                  std::vector<size_t>& external_args) const {
   ir::ExprPtr cur = arg;
   std::unordered_set<const ir::Var*> visited;
   while (auto var = ir::As<ir::Var>(cur)) {
@@ -1830,6 +1974,13 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
   auto get_ctx = ir::As<ir::Call>(cur);
   if (!get_ctx && ir::IsA<ir::CommCtxType>(cur->GetType())) {
     if (auto var = ir::As<ir::Var>(cur)) {
+      auto it = external_windows_.find(var.get());
+      if (it != external_windows_.end()) {
+        CHECK_SPAN(!rank_expr.empty(), span)
+            << "Dispatching an external communication context requires device=";
+        external_args.push_back(it->second);
+        return "__domain_" + std::to_string(it->second) + ".device_context(" + rank_expr + ")";
+      }
       return SanitizeName(var->name_hint_);
     }
   }

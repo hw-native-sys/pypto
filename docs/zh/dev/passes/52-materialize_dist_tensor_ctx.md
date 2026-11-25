@@ -41,7 +41,7 @@ SIMT helper 仅借用当前 rank 的本地 GM 指针，不能执行通信操作�
    device-side 查询。
 3. 在 chip orchestration 和 device 函数中，本 pass 会把所有
    `pld.system.get_comm_ctx(dist)` 替换为已经解析出的显式 `CommCtxType` SSA
-   值。host orchestration 保留该 op，由 host codegen 从每个 rank 的运行时
+   值。HOST 外部形参及其别名也使用配对 ctx。本地窗口由 host codegen 从每个 rank 的运行时
    window context 中解析。
 4. 若调用点已有 `arg_directions`，同步追加 `ArgDirection::Scalar`，让后续
    codegen 把 ctx 当作普通 scalar task payload 处理。
@@ -118,4 +118,4 @@ def host_orch(self):
 
 kernel body 不需要修改。device 函数 body 中已有的
 `pld.system.get_comm_ctx(data)` 会在本 pass 中改写为显式 ctx 参数；host
-orchestration 中的用法仍保留为运行时查询。
+orchestration 中对本地分配窗口的查询在运行时解析。

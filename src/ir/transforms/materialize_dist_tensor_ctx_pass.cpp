@@ -124,6 +124,8 @@ class LocalNameCollector : public IRVisitor {
   used_names.insert(collector.names.begin(), collector.names.end());
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
+    CHECK_SPAN(!IsHostOrch(func) || !IsA<CommCtxType>(param->GetType()), param->span_)
+        << "HOST entry CommCtx parameters are supplied by MaterializeDistTensorCtx";
     if (!As<DistributedTensorType>(param->GetType())) continue;
     auto ctx = std::make_shared<Var>(MakeUniqueName(MakeCtxParamBaseName(param), &used_names),
                                      GetCommCtxType(), param->span_);
@@ -260,9 +262,8 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     if (IsOp(call, "pld.system.get_comm_ctx")) {
       INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
           << "MaterializeDistTensorCtx: pld.system.get_comm_ctx expects exactly one argument";
-      if (IsHostOrch(current_func_)) return call;
-
       auto ctx = LookupExistingCtx(call->args_[0]);
+      if (!ctx && IsHostOrch(current_func_)) return call;
       CHECK_SPAN(ctx, call->span_)
           << "Cannot resolve pld.system.get_comm_ctx(" << DescribeDistValue(call->args_[0]) << ") in '"
           << (current_func_ ? current_func_->name_ : std::string("<unknown>"))
@@ -522,13 +523,26 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
 /// code.
 class GetCommCtxCallChecker : public IRVisitor {
  public:
-  GetCommCtxCallChecker(std::vector<Diagnostic>& diagnostics, std::string func_name)
-      : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
+  GetCommCtxCallChecker(std::vector<Diagnostic>& diagnostics, const FunctionPtr& func)
+      : diagnostics_(diagnostics), func_name_(func->name_), host_(IsHostOrch(func)) {}
 
  protected:
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    if (host_) {
+      auto value = As<Call>(stmt->value_);
+      if (value && IsOp(value, "pld.tensor.window")) local_views_.insert(stmt->var_.get());
+    }
+    IRVisitor::VisitStmt_(stmt);
+  }
+
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
     if (!op || !op->op_ || !IsOp(op, "pld.system.get_comm_ctx")) return;
+    if (host_ && op->args_.size() == 1) {
+      const auto& arg = op->args_.front();
+      auto type = As<DistributedTensorType>(arg->GetType());
+      if (type && (type->window_buffer_ || local_views_.count(AsVarLike(arg).get()))) return;
+    }
     diagnostics_.emplace_back(
         DiagnosticSeverity::Error, "DistTensorCtxMaterialized", 0,
         "Function '" + func_name_ +
@@ -541,6 +555,8 @@ class GetCommCtxCallChecker : public IRVisitor {
  private:
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
+  bool host_;
+  std::unordered_set<const Var*> local_views_;
 };
 
 class DistTensorCtxMaterializedPropertyVerifierImpl : public PropertyVerifier {
@@ -550,8 +566,8 @@ class DistTensorCtxMaterializedPropertyVerifierImpl : public PropertyVerifier {
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
-      if (!func || !func->body_ || IsHostOrch(func)) continue;
-      GetCommCtxCallChecker checker(diagnostics, func->name_);
+      if (!func || !func->body_) continue;
+      GetCommCtxCallChecker checker(diagnostics, func);
       checker.VisitStmt(func->body_);
     }
   }

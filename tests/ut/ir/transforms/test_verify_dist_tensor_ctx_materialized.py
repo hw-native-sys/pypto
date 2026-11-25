@@ -75,12 +75,14 @@ def test_chip_orchestration_get_comm_ctx_is_flagged():
     assert "chip_orch" in errors[0].message
 
 
-def test_host_orchestration_get_comm_ctx_is_allowed():
-    """Host codegen resolves the query from the window's per-rank context."""
+def test_host_parameter_query_requires_materialization():
+    """Incoming windows already have a paired context in materialized IR."""
     # `func_type=Orchestration` implies level=CHIP, so host orchestration is
     # spelled with the HOST level plus the Orchestrator role.
     host = _get_ctx_function("host_orch", level=ir.Level.HOST, role=ir.Role.Orchestrator)
-    assert _errors(ir.Program([host], "host_get_ctx", _span())) == []
+    assert any(
+        "pld.system.get_comm_ctx" in d.message for d in _errors(ir.Program([host], "host_get_ctx", _span()))
+    )
 
 
 def test_program_without_get_comm_ctx_passes():

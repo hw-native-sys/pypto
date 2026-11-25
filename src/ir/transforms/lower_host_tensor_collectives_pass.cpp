@@ -78,8 +78,9 @@ static constexpr size_t kMaxSupportedRanks = 16;
   auto dist_type = As<DistributedTensorType>(expr->GetType());
   INTERNAL_CHECK_SPAN(dist_type, expr->span_)
       << "LowerHostTensorCollectives: " << context << " must be DistributedTensorType";
-  INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), expr->span_)
-      << "LowerHostTensorCollectives: " << context << " must have materialized WindowBuffer back-references";
+  CHECK_SPAN(dist_type->window_buffer_.has_value(), expr->span_)
+      << "LowerHostTensorCollectives: " << context
+      << " requires a locally allocated window; external windows are unsupported";
   return *dist_type->window_buffer_;
 }
 

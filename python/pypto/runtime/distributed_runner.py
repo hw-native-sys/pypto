@@ -3264,6 +3264,8 @@ class DistributedWorker(Worker):
                 "registered when this worker was constructed."
             )
 
+        if any(p.is_distributed for p in state["param_infos"]):
+            raise TypeError("This HOST entry requires external communication-window bindings")
         param_infos = state["param_infos"]
         n_params = len(param_infos)
         if len(args) != n_params:

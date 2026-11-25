@@ -31,7 +31,9 @@ import torch
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    CommCtxType,
     ConstInt,
+    DistributedTensorType,
     Function,
     FunctionType,
     ParamDirection,
@@ -130,6 +132,7 @@ class _ParamInfo:
     # Layout describes either logical or lowered metadata; NZ/MX need not
     # already have their blocked rank-5 shape here.
     layout: str | None = None
+    is_distributed: bool = False
 
     def __post_init__(self) -> None:
         # IR construction and passes own parameter legality. Metadata only
@@ -290,6 +293,7 @@ def _param_info_to_dict(info: _ParamInfo) -> dict[str, Any]:
         "shape": list(info.shape) if info.shape is not None else None,
         "dtype": str(info.dtype),
         "layout": info.layout,
+        **({"is_distributed": True} if info.is_distributed else {}),
     }
 
 
@@ -347,7 +351,13 @@ def _param_info_from_dict(d: dict[str, object]) -> _ParamInfo:
     ):
         raise ValueError(f"'layout' must be null or a TensorLayout name, got {raw_layout!r}")
 
+    is_distributed = d.get("is_distributed", False)
+    if not isinstance(is_distributed, bool):
+        raise ValueError("'is_distributed' must be a boolean")
+    if is_distributed and (not shape or any(d <= 0 for d in shape) or raw_layout != "ND"):
+        raise ValueError("External windows require a positive static ND shape")
     return _ParamInfo(
+        is_distributed=is_distributed,
         name=name,
         direction=direction,
         shape=shape,
@@ -383,7 +393,9 @@ def validate_l2_capacity(parameters: Sequence[ParamInfo]) -> None:
         raise ValueError("Signature exceeds L2 argument capacity")
 
 
-def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[int], list[Any]]:
+def _extract_func_param_infos(
+    func: Function, *, host_entry: bool = False
+) -> tuple[list[_ParamInfo], list[int], list[Any]]:
     """Extract parameter metadata from a specific IR function.
 
     Returns:
@@ -394,6 +406,8 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
 
     for i, (param, direction) in enumerate(zip(func.params, func.param_directions, strict=True)):
         param_type = param.type
+        if host_entry and isinstance(param_type, CommCtxType) and any(p.is_distributed for p in param_infos):
+            break
         shape: list[int] | None = None
 
         layout: str | None = None
@@ -412,7 +426,14 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
             )
 
         param_infos.append(
-            _ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype, layout=layout)
+            _ParamInfo(
+                name=param.name_hint,
+                direction=direction,
+                shape=shape,
+                dtype=dtype,
+                layout=layout,
+                is_distributed=host_entry and isinstance(param_type, DistributedTensorType),
+            )
         )
 
         # Only pure Out params can be auto-allocated in return-style calls.

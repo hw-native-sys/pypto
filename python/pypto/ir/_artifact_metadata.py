@@ -168,7 +168,7 @@ def _read_capabilities(
 
 
 def _load_meta(
-    meta_path: Path, *, filename: str, schema: int, require_program: bool = True
+    meta_path: Path, *, filename: str, schema: int | tuple[int, ...], require_program: bool = True
 ) -> dict[str, Any]:
     """Read and fully validate the fields the L2 and L3 sidecars share.
 
@@ -213,9 +213,10 @@ def _load_meta(
     meta = raw_meta
 
     found_schema = meta.get("schema")
-    if type(found_schema) is not int or found_schema not in (
-        (1, 2, 3) if filename == _COMPILED_META_FILENAME else (schema,)
-    ):
+    supported = schema if isinstance(schema, tuple) else (schema,)
+    if filename == _COMPILED_META_FILENAME:
+        supported = (1, 2, 3)
+    if type(found_schema) is not int or found_schema not in supported:
         raise ValueError(
             f"Incompatible {filename} schema {found_schema!r} (expected "
             f"{schema}) in {meta_path}. The metadata was written by a "

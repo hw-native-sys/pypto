@@ -49,8 +49,7 @@ device kernels still receive the explicit communication context.
    device-side query.
 3. In chip orchestration and device functions, replace every
    `pld.system.get_comm_ctx(dist)` with the resolved explicit `CommCtxType` SSA
-   value. Host orchestration keeps the op because host codegen resolves it from
-   the window's per-rank runtime context.
+   value. HOST parameters and their aliases also resolve to the paired context. A window allocated in the HOST body keeps the runtime query.
 4. If call-site `arg_directions` are already resolved, append matching
    `ArgDirection::Scalar` entries so downstream codegen can keep treating ctx as
    ordinary scalar task payload.
@@ -135,5 +134,4 @@ def host_orch(self):
 
 The kernel body does not need to change. Existing
 `pld.system.get_comm_ctx(data)` uses in a device function are rewritten to the
-explicit ctx parameter by this pass; host-orchestration uses remain runtime
-queries.
+explicit ctx parameter by this pass. In this HOST example the local allocation supplies the runtime context.
