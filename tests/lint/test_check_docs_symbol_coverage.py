@@ -100,11 +100,19 @@ def test_qualified_pld_includes_short_form_aliases(tmp_path: Path) -> None:
 
 
 def test_deferred_symbols_are_namespace_qualified() -> None:
-    """A deferred pld symbol must not exempt a same-named API in another namespace."""
+    """A deferred pld symbol must not exempt a same-named API in another namespace.
+
+    ``is_deferred`` matches the fully qualified name only, so an entry never
+    exempts the same bare name elsewhere. ``pld.tile.put_async`` was the original
+    negative case; it is now deferred in its own right, so the check uses
+    ``pld.tensor.put``, which shares a prefix with a deferred entry but is a
+    different, documented operator.
+    """
     assert coverage.is_deferred("pld.put_async")
     assert coverage.is_deferred("pld.tensor.put_async")
     assert not coverage.is_deferred("pl.put_async")
-    assert not coverage.is_deferred("pld.tile.put_async")
+    assert not coverage.is_deferred("pld.tensor.put")
+    assert not coverage.is_deferred("put_async")
 
 
 if __name__ == "__main__":

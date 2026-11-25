@@ -70,15 +70,36 @@ NOT_SYMBOLS = {
     "tile",
 }
 
-# put_async/get_async: intentionally deferred while their runtime support is
-# still being completed. Documenting them as user-facing now risks being
-# rewritten under us. Move them out of DEFERRED (and into the chapter and
-# catalog) once that support is stable and documented.
+# The async transfer family is intentionally deferred while its runtime support
+# is still being completed. Documenting these as user-facing now risks being
+# rewritten under us. Move each one out of DEFERRED (and into the chapter and
+# catalog) once its support is stable and documented.
+#
+# put_async/get_async: V1 ops, lowered, but their V2 successors are in flight.
+#
+# The session/event surface below landed with the V2 IR and DSL ops but is not
+# yet usable end to end: PUT has no backend lowering, GET's is in review, and
+# in-kernel wait_event is rejected by URMA codegen. Documenting an op a user
+# cannot compile would be worse than deferring it. These leave DEFERRED with the
+# V2 backend batch, as each direction gains a lowering.
+_ASYNC_V1 = "pld async ops -- not documented while runtime support is being completed"
+_ASYNC_V2 = "pld V2 session/event surface -- deferred until the V2 backend batch lands its lowering"
 DEFERRED: dict[str, str] = {
-    "pld.put_async": "pld async ops -- not documented while runtime support is being completed",
-    "pld.get_async": "pld async ops -- not documented while runtime support is being completed",
-    "pld.tensor.put_async": "pld async ops -- not documented while runtime support is being completed",
-    "pld.tensor.get_async": "pld async ops -- not documented while runtime support is being completed",
+    "pld.put_async": _ASYNC_V1,
+    "pld.get_async": _ASYNC_V1,
+    "pld.tensor.put_async": _ASYNC_V1,
+    "pld.tensor.get_async": _ASYNC_V1,
+    # V2 session/event surface (merged in #3540).
+    "pld.make_session": _ASYNC_V2,
+    "pld.system.make_session": _ASYNC_V2,
+    "pld.wait_event": _ASYNC_V2,
+    "pld.system.wait_event": _ASYNC_V2,
+    "pld.defer_wait_event": _ASYNC_V2,
+    "pld.system.defer_wait_event": _ASYNC_V2,
+    "pld.get_async_event": _ASYNC_V2,
+    "pld.tensor.get_async_event": _ASYNC_V2,
+    "pld.tile.put_async": _ASYNC_V2,
+    "pld.tile.get_async": _ASYNC_V2,
 }
 
 # pld.tensor names that are permanent language abstractions, not catalog
