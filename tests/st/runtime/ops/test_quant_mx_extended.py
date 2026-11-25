@@ -133,6 +133,75 @@ def test_e5m2_quantization(case_run):
     case_run.assert_passed()
 
 
+def _make_tensor_e5m2_quant(axis: int):
+    rows = 16 if axis == 1 else 32
+    q_shape = (rows, 64) if axis == 1 else (64, rows)
+    scale_shape = (rows, 2) if axis == 1 else (2, rows)
+    scale_layout = pl.MX_A_ZZ if axis == 1 else pl.MX_B_NN
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def quantize(
+            self, src: pl.Tensor[[rows, 64], pl.FP32]
+        ) -> tuple[pl.Tensor[q_shape, pl.FP8E5M2], pl.Tensor[scale_shape, pl.FP8E8M0, scale_layout]]:
+            quant, scale = pl.quant_mx(src, group_axis=axis, dtype=pl.FP8E5M2)
+            return quant, scale
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def copy_scale(
+            self, src: pl.Tensor[[1, rows * 2], pl.FP8E8M0], dst: pl.Out[pl.Tensor[[1, rows * 2], pl.UINT8]]
+        ) -> pl.Tensor[[1, rows * 2], pl.UINT8]:
+            values = pl.load(src, [0, 0], [1, rows * 2])
+            return pl.store(pl.reinterpret_view(values, pl.UINT8), [0, 0], dst)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            src: pl.Tensor[[rows, 64], pl.FP32],
+            out_quant: pl.Out[pl.Tensor[q_shape, pl.FP8E5M2]],
+            out_scale: pl.Out[pl.Tensor[[1, rows * 2], pl.UINT8]],
+        ) -> tuple[pl.Tensor[q_shape, pl.FP8E5M2], pl.Tensor[[1, rows * 2], pl.UINT8]]:
+            quant, scale = self.quantize(src)
+            out_quant = pl.assemble(out_quant, quant, [0, 0])
+            # Read back the returned MX tensor's exact physical bytes without
+            # requiring a host-side torch FP8E8M0 dtype.
+            scale_bytes = pl.tensor.view(scale, shape=[1, rows * 2], layout=pl.ND)
+            out_scale = self.copy_scale(scale_bytes, out_scale)
+            return out_quant, out_scale
+
+    return Program
+
+
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            _make_tensor_e5m2_quant(axis),
+            tensors=[
+                TensorSpec("src", [rows, 64], DataType.FP32, init_value=lambda rows=rows: _e5m2_source(rows)),
+                TensorSpec(
+                    "out_quant", [rows, 64] if axis == 1 else [64, rows], DataType.FP8E5M2, is_output=True
+                ),
+                TensorSpec(
+                    "out_scale",
+                    [1, rows * 2],
+                    DataType.UINT8,
+                    init_value=lambda rows=rows: torch.zeros((1, rows * 2), dtype=torch.uint8),
+                    is_output=True,
+                ),
+            ],
+            name=f"tensor_e5m2_quant_axis{axis}",
+            golden=_e5m2_golden(axis),
+            compare=_compare_e5m2_quant,
+        )
+        for axis, rows in ((1, 16), (0, 32))
+    ]
+)
+def test_tensor_e5m2_quantization(case_run):
+    case_run.assert_passed()
+
+
 @pl.jit(auto_scope=False)
 def _canonical_axis1_quant(
     src: pl.Tensor[[16, 128], pl.FP32],

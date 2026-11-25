@@ -17,8 +17,13 @@ static positive extents aligned to 16 rows / 2 groups and provably non-negative
 aligned offsets. Distributed MX tensors remain unsupported; partial tensor
 valid shapes remain unsupported for ZZ/NN. A narrowed ZZ/NN load valid shape does not shrink the DMA box: the pass uses the full
 aligned logical load window while preserving the tile result's active extents.
-Direct stores from fractal-32 Vec scale tiles remain unsupported by PTOAS; a
-logical destination view does not make that source layout legal.
+PTOAS does not accept a direct store from a fractal-32 Vec scale tile. For a
+fully valid, complete ZZ/NN destination buffer at zero offset, the pass instead
+flattens the packed source to a one-row tile and aliases the destination as a
+one-row ND tensor. The resulting `pto.tstore` writes the identical packed
+scale bytes; its SSA result is a shaped MX view again. This allows tensor
+`quant_mx` to return its payload and public MX scale tensor together. Partial
+packed stores remain unsupported: their physical boxes need not be contiguous.
 
 `MX_A_ND` preserves row-major GM storage and converts directly to ZZ Mat during
 TLOAD. Rows and row offsets may be dynamic and need not be multiples of 16;

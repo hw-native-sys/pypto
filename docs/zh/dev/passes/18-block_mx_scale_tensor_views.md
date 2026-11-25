@@ -13,8 +13,11 @@ load/store 坐标及带形状的 ND/MX 别名。`MaterializeTensorStrides` 生�
 形状和偏移检查与下述旧版 pass 共用。ZZ/NN 要求静态正数维度按 16 行 / 2 组对齐，
 偏移须可证明非负且对齐。仍不支持分布式 MX；ZZ/NN 仍不支持部分 tensor valid shape。
 缩小 ZZ/NN load 的 valid shape 不会缩小 DMA 窗口：pass 使用完整对齐的逻辑加载范围，
-同时保留结果 tile 的有效范围。PTOAS 仍不支持从 fractal-32 Vec scale tile
-直接 store；逻辑目标视图不会使这种源布局变为合法。
+同时保留结果 tile 的有效范围。PTOAS 不支持从 fractal-32 Vec scale tile 直接 store。对于零偏移、完整有效且覆盖整个
+ZZ/NN 目标 buffer 的写回，该 pass 将 packed 源 tile 展平为单行，并将同一目标 buffer
+别名为单行 ND tensor。生成的 `pto.tstore` 以原 byte 顺序写入 packed scale；返回值
+再恢复为 MX 形状及布局。因此 tensor `quant_mx` 可同时返回量化 payload 和公开 MX scale。
+部分 packed store 仍不支持，因为其物理 box 可能不连续。
 
 `MX_A_ND` 保持行主序 GM 存储，在 TLOAD 中直接转换为 ZZ Mat。行数和行偏移可以动态，
 也不必为 16 的倍数；静态正数 group 维度和 group 偏移必须覆盖对齐的完整二元素组。

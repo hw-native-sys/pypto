@@ -54,7 +54,7 @@ def _emit_incore_mlir(program, backend_type=BackendType.Ascend950, planner=passe
     return "\n".join(parts)
 
 
-def _assemble_mx(mlir, tmp_path, planner=passes.MemoryPlanner.PYPTO):
+def _assemble_mx(mlir, tmp_path, planner=passes.MemoryPlanner.PYPTO, *, require_native_views=True):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
     source = tmp_path / "mx.pto"
@@ -66,7 +66,7 @@ def _assemble_mx(mlir, tmp_path, planner=passes.MemoryPlanner.PYPTO):
     # Acceptance alone is insufficient: MX must retain its packed ISA layout,
     # rather than silently falling back to an ordinary ND GlobalTensor.
     for layout in ("mx_a_zz", "mx_b_nn"):
-        if f"#pto.layout<{layout}>" in mlir:
+        if require_native_views and f"#pto.layout<{layout}>" in mlir:
             assert f"pto::Layout::{layout.upper()}" in cpp
     return cpp
 
@@ -645,22 +645,84 @@ class TestMxMatmulCodegen:
         assert any("#pto.layout<mx_b_nn>" in line for line in mx_views)
 
     @pytest.mark.ptoas_compile
-    def test_quant_mx_scale_store_preserves_native_layout_diagnostic(self, tmp_path):
+    @pytest.mark.parametrize("axis", [0, 1])
+    @pytest.mark.parametrize("dtype", [pl.FP8E4M3FN, pl.FP8E5M2, pl.FP4E2M1X2])
+    def test_tensor_quant_mx_returns_payload_and_packed_scale(self, axis, dtype, tmp_path):
+        rows = 16 if axis == 1 else (64 if dtype == pl.FP4E2M1X2 else 32)
+        src_dtype = pl.BF16 if dtype == pl.FP4E2M1X2 else pl.FP32
+        payload_rows, payload_cols = (rows, 64) if axis == 1 else (64, rows)
+        if dtype == pl.FP4E2M1X2:
+            payload_cols //= 2
+        scale_shape = (rows, 2) if axis == 1 else (2, rows)
+        scale_layout = pl.MX_A_ZZ if axis == 1 else pl.MX_B_NN
+
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
-            def main(self, src: pl.Tensor[[16, 64], pl.FP16]) -> pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ]:
-                _data, scale = pl.quant_mx(src, group_axis=1)
-                return scale
+            def main(
+                self, src: pl.Tensor[[rows, 64], src_dtype]
+            ) -> tuple[
+                pl.Tensor[[payload_rows, payload_cols], dtype],
+                pl.Tensor[scale_shape, pl.FP8E8M0, scale_layout],
+            ]:
+                data, scale = pl.quant_mx(src, group_axis=axis, dtype=dtype)
+                return data, scale
 
+        optimized = _run_default_pipeline(Program)
+        kernel = next(func for func in optimized.functions.values() if ir.is_incore_type(func.func_type))
+        scale_params = [
+            param.type
+            for param in kernel.params
+            if isinstance(param.type, ir.TensorType) and param.type.dtype == pl.FP8E8M0
+        ]
+        (scale_type,) = scale_params
+        assert isinstance(scale_type, ir.TensorType) and scale_type.tensor_view is not None
+        assert scale_type.tensor_view.layout == scale_layout
+        assert tuple(dim.value for dim in scale_type.shape if isinstance(dim, ir.ConstInt)) == scale_shape
         mlir = _emit_incore_mlir(Program)
-        # Direct Vec fractal-32 stores are rejected by both PTOAS v0.67 and v0.74.
-        # Changing the destination view must not hide the unsupported source layout.
-        with pytest.raises(RuntimeError, match="expects A5 vec tstore src layout"):
-            _assemble_mx(mlir, tmp_path)
+        cpp = _assemble_mx(mlir, tmp_path, require_native_views=False)
+        # The packed public GM view is metadata-only in this kernel; TSTORE
+        # uses the flat backing bytes, not an MX-layout GlobalTensor.
+        assert "TSTORE" in cpp and "pto::Layout::ND" in cpp
         stores = [line for line in mlir.splitlines() if "pto.tstore" in line and "!pto.f8E8M0" in line]
         assert len(stores) == 1
-        assert "!pto.partition_tensor_view<16x2x!pto.f8E8M0>" in stores[0]
+        assert "slayout=none_box" in stores[0]
+        assert f"!pto.partition_tensor_view<1x{rows * 2}x!pto.f8E8M0>" in stores[0]
+        assert f"#pto.layout<{'mx_a_zz' if axis == 1 else 'mx_b_nn'}>" in mlir
+
+    @pytest.mark.ptoas_compile
+    def test_full_quant_mx_scale_store_to_explicit_output(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[32, 128], pl.BF16], out: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ]
+            ):
+                _data, scale = pl.quant_mx(pl.load(src, [0, 0], [32, 128]), group_axis=1)
+                pl.store(scale, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        _assemble_mx(mlir, tmp_path, require_native_views=False)
+        stores = [line for line in mlir.splitlines() if "pto.tstore" in line and "!pto.f8E8M0" in line]
+        assert len(stores) == 1
+        assert "!pto.partition_tensor_view<1x128x!pto.f8E8M0>" in stores[0]
+
+    @pytest.mark.ptoas_compile
+    def test_partial_quant_mx_scale_store_preserves_native_layout_diagnostic(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[16, 64], pl.FP16], out: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]
+            ):
+                _data, scale = pl.quant_mx(pl.load(src, [0, 0], [16, 64]), group_axis=1)
+                pl.store(scale, [16, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        # A subset of a packed tensor need not be contiguous. Do not silently
+        # treat a partial window as a full ND byte-buffer write.
+        with pytest.raises(RuntimeError, match="expects A5 vec tstore src layout"):
+            _assemble_mx(mlir, tmp_path)
 
     @pytest.mark.parametrize("cast_layout", [None, pl.NZ], ids=["nd", "fused-nz"])
     def test_mxfp4_times_mxfp8_uses_explicit_lhs_cast(self, cast_layout):

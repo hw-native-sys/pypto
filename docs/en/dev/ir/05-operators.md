@@ -523,7 +523,9 @@ Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` s
 - FP4 Tensor/Tile shapes, `valid_shape`, strides, and offsets count byte carriers. Torch E2M1 x2 and explicitly annotated UINT8 retain these units in JIT and compiled calls. Native tile matmul expands the contiguous axis for logical M/K/N inference, and both native paths retain packed operands.
 - `pl.quant_mx` accepts FP16/BF16/FP32 for MXFP8 and FP16/BF16 for E2M1 MXFP4.
   `dtype=pl.FP8E5M2` uses OCP scaling on A5 for both A- and B-oriented inputs.
-  To store a packed scale tile in GM, reshape it to a single-row view before `pl.store`.
+  Fully valid packed scale returns from tensor `pl.quant_mx` preserve the `MX_A_ZZ` or `MX_B_NN` GM layout.
+  Whole-buffer packed scale stores are legalized to a single-row ND backing view without changing bytes.
+  Partial packed scale stores are not supported; an explicit single-row backing view can also be used for a whole scale tile.
   FP4 results need supported Mat and Left/Right placement for tile matmul. See [FP4](../fp4.md) for alignment, memory planners, and the native FP4 geometry introduced in PTOAS #1700.
 - `pl.tile.quant_mx_raw(..., group_axis=1, canonical_axis1=True)` supports FP32 source tiles with
   padded columns. The source must have at least two valid rows and a valid column count divisible by 32.
