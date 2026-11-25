@@ -579,6 +579,14 @@ unknown = ir.UnknownType()
 
 ### DSL 中的 MemRef 类型注解
 
+生产者存储也可通过 `ir.bind_result_storage(call, destinations)` 绑定。
+它验证创建存储的 Functional 阶段生产者，返回新的不可变 Call：保留原有操作、
+参数、关键字参数、属性、形状、数据类型和视图，仅在 Tile 结果类型中加入指定的
+MemRef。元组必须为每个结果提供一个目标，`None` 保留该结果的自动放置。
+继承存储的操作、未确定的输出内存空间和重复绑定均会报错。此操作不修改已有
+Call，也不重新放置 SSA 变量。引用只保存在结果类型中；类型替换和无损调用打印
+会保留引用及槽位表达式。
+
 MemRef 可以在 `@pl.program` / `@pl.function` DSL 代码中作为位置参数指定在类型注解中：
 
 ```python

@@ -101,6 +101,14 @@ struct OpMemorySpaceSpec {
   /// InferTileMemorySpace uses this for forward inheritance and backward-demand
   /// propagation through view-like ops; memory reuse uses it to skip retargeting.
   bool output_inherits_input = false;
+
+  /// True when the operator opted out of the memory system via
+  /// `no_memory_spec()`. The spec is then engaged-but-empty on purpose: it
+  /// marks "intentionally no contract", not a contract to interpret.
+  /// Consumers gating on the presence of an output-memory contract must
+  /// treat these entries as contract-less, not as satisfied by the engaged
+  /// optional.
+  bool opted_out = false;
 };
 
 /**
@@ -731,9 +739,11 @@ class OpRegistryEntry {
   }
 
   /// Mark this op as not needing a memory spec (e.g., returns MemRefType, not TileType).
-  /// Creates an empty spec so ValidateTileOps() treats it as intentionally opted out.
+  /// Creates an empty spec so ValidateTileOps() treats it as intentionally opted
+  /// out; `opted_out` distinguishes it from a real contract.
   inline OpRegistryEntry& no_memory_spec() {
     EnsureMemorySpec();
+    memory_spec_->opted_out = true;  // NOLINT(bugprone-unchecked-optional-access)
     return *this;
   }
 
@@ -1280,6 +1290,12 @@ class OpRegistry {
    * @return Reference to the global operator registry
    */
   static OpRegistry& GetInstance();
+
+  /// Bind each flat Tile result of a detached producer to explicit storage.
+  /// Storage lives in the produced type, where embedded slot expressions already
+  /// participate in SSA substitution. No second copy is kept in opaque kwargs.
+  [[nodiscard]] CallPtr BindResultStorage(const CallPtr& call,
+                                          const std::vector<std::optional<MemRefPtr>>& destinations) const;
 
   /**
    * @brief Register an operator by name
