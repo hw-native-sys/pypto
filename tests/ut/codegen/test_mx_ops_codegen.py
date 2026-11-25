@@ -1104,6 +1104,28 @@ class TestMxANDScaleCodegen:
         assert "pto.tload" in mlir
         assert "pto.tmov" not in mlir
 
+    @pytest.mark.ptoas_compile
+    def test_one_row_scale_load_preserves_parent_descriptor_and_offset(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, scales: pl.Tensor[[4, 4], pl.FP8E8M0, pl.MX_A_ND]):
+                _ = pl.load(scales, [1, 0], [1, 4])
+
+        mlir = _emit_incore_mlir(Program)
+        original = next(line for line in mlir.splitlines() if "= pto.make_tensor_view" in line)
+        dense = next(line for line in mlir.splitlines() if "_scale_vector = pto.make_tensor_view" in line)
+        # Both descriptors have the same address and parent row pitch. The
+        # one-row load keeps its nonzero row offset in the dense ND partition.
+        assert (
+            original.split("pto.make_tensor_view ")[1].split(" {layout")[0]
+            == dense.split("pto.make_tensor_view ")[1].split(" {layout")[0]
+        )
+        partition = next(line for line in mlir.splitlines() if "pto.partition_view" in line)
+        assert "_scale_vector, offsets = [%c1_index, %c0_index]" in partition
+        cpp = _assemble_mx(mlir, tmp_path)
+        assert "TLOAD(" in cpp
+
 
 def _mx_scale_writeback_program(source_type="pl.Tensor", *, move_to_right=False):
     consume = (

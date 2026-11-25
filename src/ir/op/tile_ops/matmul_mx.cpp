@@ -121,7 +121,7 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
 
   const auto lhs_shape = GetMatmulLogicalShape(lhs_type);
   const auto rhs_shape = GetMatmulLogicalShape(rhs_type);
-  ExprPtr m_phys = lhs_shape[0];
+  const ExprPtr& m_phys = lhs_shape[0];
   const ExprPtr& k_phys_lhs = lhs_shape[1];
   const ExprPtr& k_phys_rhs = rhs_shape[0];
   ExprPtr n_phys = rhs_shape[1];
@@ -137,8 +137,11 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   auto k_phys_rhs_c = As<ConstInt>(k_phys_rhs);
   if (is_gemv) {
     const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, m_phys->span_);
-    CHECK(ProveValidExtentEqual(m_phys, one) == ProofResult::kTrue &&
-          ProveValidExtentEqual(m_valid, one) == ProofResult::kTrue)
+    auto is_one_row = [&one](const ExprPtr& extent) {
+      if (auto c = As<ConstInt>(extent)) return c->value_ == 1;
+      return ProveValidExtentEqual(extent, one) == ProofResult::kTrue;
+    };
+    CHECK(is_one_row(m_phys) && is_one_row(m_valid))
         << "The operator " << op_name << " requires lhs physical and valid M to be 1";
     // PTOAS cannot give a packed FP4 descriptor an instruction-local static
     // valid view with TRESHAPE. The assembler compares the physical extents

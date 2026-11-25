@@ -137,6 +137,7 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式，`M == 1`。操作数配对与 `matmul` 相同（含 Ascend950 上的 FP8 / HF8 配对）；结果、累加器与 bias 为 FP32 / INT32 |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor，返回 FP32。Tensor 支持两侧均为 FP8E4M3FN 或两侧均为打包 FP4（E2M1/E1M2，可混合）。打包 ND/DN Tensor 的形状按字节载体计，scale 和输出按逻辑维度计。Tile API 及其专有的 `_acc` 和 `_bias` 形式支持 FP8E4M3FN/FP8E5M2 的四种组合和两侧均为打包 FP4 的组合 |
+| [`gemv_mx`][pypto.language.tile.gemv_mx] [`gemv_mx_acc`][pypto.language.tile.gemv_mx_acc] [`gemv_mx_bias`][pypto.language.tile.gemv_mx_bias] | `pl.` (t) | A5 单行 MX 块缩放矩阵乘，支持 FP8 配对或打包 FP4 配对。左侧向量 scale 使用 `MX_A_ND`，物理向量宽度按 512 字节对齐，原生 FP4 的 K/N 必须全有效。FP32 累加器有 16 个物理行和 1 个有效行。MX GEMV 与 GEMM tile 形式支持 `acc_phase=pl.AccPhase.Partial` 或 `Final`；Final 结果使用 `pl.store(..., st_phase=pl.STPhase.Final)` 消费 |
 
 `pl.tile.matmul`、`pl.tile.matmul_acc` 和 GEMV 家族通过
 `acc_phase=pl.AccPhase` 选择生产者阶段。默认 `Unspecified` 保持现有行为；

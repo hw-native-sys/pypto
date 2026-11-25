@@ -212,10 +212,15 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     // the ISA uses only for the multi-row GM-to-ZZ path. The GM bytes are
     // already row-major, so keep the source origin, extents and row stride.
     auto shape = GetSizeCodes(tensor_type->shape_, codegen);
-    auto one = codegen.GetOrEmitConstant(int64_t{1}, DataType::INDEX);
+    const auto& source_view = *tensor_type->tensor_view_;
+    auto strides =
+        GetSizeCodes(source_view.stride.empty() ? ir::tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                      tensor_type->shape_, source_view.layout)
+                                                : source_view.stride,
+                     codegen);
     tensor_view = codegen.NewNamedTemp(tensor->name_hint_ + "_scale_vector");
     codegen.Emit(tensor_view + " = pto.make_tensor_view " + codegen.GetTensorBasePtr(tensor) + ", shape = [" +
-                 shape[0] + ", " + shape[1] + "], strides = [" + shape[1] + ", " + one +
+                 shape[0] + ", " + shape[1] + "], strides = [" + strides[0] + ", " + strides[1] +
                  "] {layout = #pto.layout<nd>} : " + tensor_view_type);
     pto_layout = "nd";
   }

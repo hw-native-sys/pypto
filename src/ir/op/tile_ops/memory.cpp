@@ -811,6 +811,17 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   if (!packed_left_vector) {
     RetargetPackedFp4Geometry(out_dtype, source_view.blayout, tile_view.blayout, output_shape, tile_view,
                               args[0]->span_, op_name);
+    if (out_dtype.IsPackedFp4() && space == MemorySpace::Left && output_shape.size() == 2) {
+      // Reserve one carrier row for the K-packed L0A vector path. A regular
+      // matrix conversion must not produce a descriptor with that geometry.
+      auto rows = As<ConstInt>(output_shape[0]);
+      CHECK_SPAN(
+          !rows || rows->value_ != 1 ||
+              (tile_type->GetMemorySpace() == MemorySpace::Left && phys_rows && phys_rows->value_ == 1),
+          args[0]->span_)
+          << op_name << " cannot produce a one-row packed FP4 Left tile from a matrix; "
+          << "use a row-major one-row Mat vector or a larger aligned matrix";
+    }
   }
 
   // Stamp memory_space_ for every destination so the view is canonicalized once,
