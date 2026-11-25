@@ -568,6 +568,7 @@ class BlockMxMutator : public IRMutator {
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
     auto result = IRMutator::VisitStmt_(op);
     auto eval = As<EvalStmt>(result);
+    INTERNAL_CHECK_SPAN(eval, op->span_) << "Internal error: MX view legalization must preserve EvalStmt";
     if (auto call = As<Call>(eval->expr_); call && IsOp(call, "tile.store")) {
       if (auto lowered = LegalizeFullScaleStore(call, nullptr)) return lowered;
     }
@@ -581,33 +582,42 @@ class BlockMxMutator : public IRMutator {
   StmtPtr LegalizeFullScaleStore(const CallPtr& store, const VarPtr& result) {
     if (!logical_views_) return nullptr;
     const auto src = As<TileType>(store->args_[0]->GetType());
-    const auto dst = As<TensorType>(store->args_[2]->GetType());
-    if (!src || !dst || !dst->tensor_view_.has_value() ||
-        (dst->tensor_view_->layout != TensorLayout::MX_A_ZZ &&
-         dst->tensor_view_->layout != TensorLayout::MX_B_NN) ||
-        (src->GetMemorySpace().has_value() && src->GetMemorySpace() != MemorySpace::Vec)) {
+    // Distributed MX types are rejected by BlockMxType before rewriting uses.
+    const auto dst = AsTensorTypeLike(store->args_[2]->GetType());
+    if (!src || !dst) return nullptr;
+    const auto& dst_view = dst->tensor_view_;
+    if (!dst_view.has_value()) return nullptr;
+    const auto layout = dst_view->layout;
+    const auto memory = src->GetMemorySpace();
+    if ((layout != TensorLayout::MX_A_ZZ && layout != TensorLayout::MX_B_NN) ||
+        (memory.has_value() && memory != MemorySpace::Vec)) {
       return nullptr;
     }
     const auto& shape = dst->shape_;
     const auto src_view = tile_view_semantics::GetEffectiveTileView(*src);
     if (shape.size() != 2 || !src_view.stride.empty() || src_view.start_offset ||
         !tile_view_semantics::ShapeExprListsEquivalent(src->shape_, shape) ||
-        !tile_view_semantics::ShapeExprListsEquivalent(src_view.valid_shape, shape))
+        !tile_view_semantics::ShapeExprListsEquivalent(src_view.valid_shape, shape)) {
       return nullptr;
+    }
     const auto offsets = As<MakeTuple>(store->args_[1]);
+    INTERNAL_CHECK_SPAN(offsets, store->span_) << "Internal error: MX tile.store offsets must be a tuple";
     for (const auto& offset : offsets->elements_) {
       const auto constant = As<ConstInt>(offset);
       if (!constant || constant->value_ != 0) return nullptr;
     }
-    if (store->args_.size() == 4 &&
-        !tile_view_semantics::ShapeExprListsEquivalent(As<MakeTuple>(store->args_[3])->elements_, shape)) {
-      return nullptr;
+    if (store->args_.size() == 4) {
+      const auto partition_shape = As<MakeTuple>(store->args_[3]);
+      INTERNAL_CHECK_SPAN(partition_shape, store->span_)
+          << "Internal error: MX tile.store partition shape must be a tuple";
+      if (!tile_view_semantics::ShapeExprListsEquivalent(partition_shape->elements_, shape)) return nullptr;
     }
     const auto rows = As<ConstInt>(shape[0]);
     const auto cols = As<ConstInt>(shape[1]);
     if (!rows || !cols || rows->value_ <= 0 || cols->value_ <= 0 ||
-        rows->value_ > std::numeric_limits<int64_t>::max() / cols->value_)
+        rows->value_ > std::numeric_limits<int64_t>::max() / cols->value_) {
       return nullptr;
+    }
 
     const auto& span = store->span_;
     auto index = [&](int64_t value) { return std::make_shared<ConstInt>(value, DataType::INDEX, span); };
@@ -637,7 +647,7 @@ class BlockMxMutator : public IRMutator {
       // The SSA result keeps the original consumer layout and the dependency
       // on the write, so public tensor returns and downstream cube loads agree.
       auto restored = registry.Create("tensor.view", {stored, std::make_shared<MakeTuple>(shape, span)},
-                                      {{"layout", dst->tensor_view_->layout}}, span);
+                                      {{"layout", layout}}, span);
       auto restored_var = std::make_shared<Var>(result->name_hint_, restored->GetType(), span);
       stmts.push_back(std::make_shared<AssignStmt>(restored_var, restored, span));
       var_cache_[result] = restored_var;
