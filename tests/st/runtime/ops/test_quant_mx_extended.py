@@ -136,41 +136,31 @@ def test_e5m2_quantization(case_run):
 def _make_tensor_e5m2_quant(axis: int):
     rows = 16 if axis == 1 else 32
     q_shape = (rows, 64) if axis == 1 else (64, rows)
-    scale_shape = (rows, 2) if axis == 1 else (2, rows)
-    scale_layout = pl.MX_A_ZZ if axis == 1 else pl.MX_B_NN
 
-    @pl.program
-    class Program:
-        @pl.function(type=pl.FunctionType.InCore)
-        def quantize(
-            self, src: pl.Tensor[[rows, 64], pl.FP32]
-        ) -> tuple[pl.Tensor[q_shape, pl.FP8E5M2], pl.Tensor[scale_shape, pl.FP8E8M0, scale_layout]]:
-            quant, scale = pl.quant_mx(src, group_axis=axis, dtype=pl.FP8E5M2)
-            return quant, scale
+    @pl.jit.incore
+    def quantize(src: pl.Tensor[[rows, 64], pl.FP32]):
+        quant, scale = pl.quant_mx(src, group_axis=axis, dtype=pl.FP8E5M2)
+        return quant, scale
 
-        @pl.function(type=pl.FunctionType.InCore)
-        def copy_scale(
-            self, src: pl.Tensor[[1, rows * 2], pl.FP8E8M0], dst: pl.Out[pl.Tensor[[1, rows * 2], pl.UINT8]]
-        ) -> pl.Tensor[[1, rows * 2], pl.UINT8]:
-            values = pl.load(src, [0, 0], [1, rows * 2])
-            return pl.store(pl.reinterpret_view(values, pl.UINT8), [0, 0], dst)
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            src: pl.Tensor[[rows, 64], pl.FP32],
-            out_quant: pl.Out[pl.Tensor[q_shape, pl.FP8E5M2]],
-            out_scale: pl.Out[pl.Tensor[[1, rows * 2], pl.UINT8]],
-        ) -> tuple[pl.Tensor[q_shape, pl.FP8E5M2], pl.Tensor[[1, rows * 2], pl.UINT8]]:
-            quant, scale = self.quantize(src)
-            out_quant = pl.assemble(out_quant, quant, [0, 0])
-            # Read back the returned MX tensor's exact physical bytes without
-            # requiring a host-side torch FP8E8M0 dtype.
+    @pl.jit(auto_scope=False)
+    def main(
+        src: pl.Tensor[[rows, 64], pl.FP32],
+        out_quant: pl.Out[pl.Tensor[q_shape, pl.FP8E5M2]],
+        out_scale: pl.Out[pl.Tensor[[1, rows * 2], pl.UINT8]],
+    ):
+        quant, scale = quantize(src)
+        out_quant = pl.assemble(out_quant, quant, [0, 0])
+        # Read the true tensor return in a second outlined kernel. Explicit
+        # SPMD avoids requiring specialization of a dependent function's
+        # argument from quant_mx's tuple-valued builtin.
+        with pl.spmd(1):
+            block = pl.tile.get_block_idx()
             scale_bytes = pl.tensor.view(scale, shape=[1, rows * 2], layout=pl.ND)
-            out_scale = self.copy_scale(scale_bytes, out_scale)
-            return out_quant, out_scale
+            values = pl.tile.load(scale_bytes, [block, 0], [1, rows * 2])
+            out_scale = pl.tile.store(pl.reinterpret_view(values, pl.UINT8), [block, 0], out_scale)
+        return out_quant, out_scale
 
-    return Program
+    return main
 
 
 @pytest.mark.platforms("a5")
