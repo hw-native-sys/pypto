@@ -11,6 +11,7 @@
 
 #include "pypto/backend/950/backend_950_handler.h"
 
+#include <cstdint>
 #include <initializer_list>
 
 #include "pypto/backend/950/backend_950.h"
@@ -28,7 +29,7 @@ namespace backend {
 
 int64_t Ascend950Handler::GetUrmaScatterScratchBytes() const {
   // Each physical AIV writes one private descriptor cache line.
-  return PLATFORM_MAX_AIV_PER_THREAD * 64;
+  return PLATFORM_MAX_AIV_PER_THREAD * int64_t{64};
 }
 
 Ascend950Handler::Ascend950Handler() : BackendHandler(Backend950::Instance()) {}

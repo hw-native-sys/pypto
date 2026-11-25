@@ -10,13 +10,16 @@
  */
 
 #include <algorithm>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/scalar_expr.h"
 
 namespace pypto::codegen {
 namespace {
@@ -30,7 +33,7 @@ void PTOCodegen::EmitUrmaMakeSession(const ir::CallPtr& op) {
   CHECK_SPAN(GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_)
       << "pld.system.make_session requires the A5 backend";
   const auto storage = NewTemp();
-  Emit(storage + " = \"emitc.variable\"() {value = #emitc.opaque<\"\">} : () -> " + kSession);
+  Emit(storage + R"( = "emitc.variable"() {value = #emitc.opaque<"">} : () -> )" + kSession);
   auto session = GetCurrentResultVar() ? GetCurrentResultTarget() : NewTemp();
   Emit(session + " = emitc.apply \"&\"(" + storage + ") : (" + kSession + ") -> " + kSessionPtr);
   const std::string signature = std::string("(!pto.ptr<i64>, !pto.ptr<i64>, ") + kSessionPtr + ")";
@@ -49,8 +52,8 @@ void PTOCodegen::EmitUrmaScatterGet(const ir::CallPtr& op) {
   const auto type = ir::AsTensorTypeLike(dst->GetType());
   const auto bits = type->dtype_.GetBit();
   CHECK_SPAN(bits >= 8 && bits % 8 == 0, op->span_) << "pld.tile.get_async requires byte-sized elements";
-  constexpr int64_t kMaxBytes = 256 * 1024 * 1024;
-  int64_t fixed_bytes = bits / 8;
+  constexpr int64_t kMaxBytes = int64_t{256} << 20;
+  int64_t fixed_bytes = static_cast<int64_t>(bits / 8);
   std::vector<ir::ExprPtr> dynamic_dims;
   for (const auto& dim : type->shape_) {
     if (auto extent = ir::As<ir::ConstInt>(dim)) {
