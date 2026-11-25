@@ -1653,8 +1653,10 @@ class TopDownRetargeter {
   std::map<const Var*, const Var*> branch_storage_handle_bases_;
   std::set<const Var*> pinned_branch_bases_;
   uint64_t branch_storage_counter_ = 0;
+  std::optional<BufferViewAnalysis> views_;
 
   void BuildAnalysis(const StmtPtr& func_body, bool index_branch_storage = false) {
+    if (index_branch_storage) views_.emplace(func_body);
     storage_handle_counts_.clear();
     branch_storage_handle_bases_.clear();
     DefMapVisitor def_v;
@@ -1736,8 +1738,9 @@ class TopDownRetargeter {
     if (!output || !input) return;
     auto target = GetDefinedMemRef(input);
     if (call && !op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-      target = MakeAliasingMemRef(target, ComputeViewByteOffset(call, input), GetDefinedMemRef(output)->size_,
-                                  result->span_);
+      target =
+          MakeAliasingMemRef(target, ComputeViewByteOffset(call, input, views_->GetWindowRowStride(source)),
+                             GetDefinedMemRef(output)->size_, result->span_);
     }
     if (!SamePhysicalWindow(GetDefinedMemRef(output), target) ||
         output->GetMemorySpace() != input->GetMemorySpace()) {
@@ -2842,6 +2845,11 @@ class RetypeApplier : public IRMutator {
         initializers_(std::move(initializers)),
         entries_(std::move(entries)) {}
 
+  StmtPtr Run(const StmtPtr& body) {
+    views_.emplace(body);
+    return VisitStmt(body);
+  }
+
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = var_substitution_.find(op);
     if (it != var_substitution_.end()) return it->second;
@@ -2938,7 +2946,8 @@ class RetypeApplier : public IRMutator {
     const auto& in_new = *in_new_opt;
     // The registered alias contract also holds when only the source's offset,
     // extent or slot changed, or the output already carried a stale descriptor.
-    auto additional = ComputeViewByteOffset(orig_call, sub->second->GetType());
+    auto additional =
+        ComputeViewByteOffset(orig_call, sub->second->GetType(), views_->GetWindowRowStride(in_var));
     auto new_mr = MakeAliasingMemRef(in_new, additional, out_mr->size_, out_mr->span_);
     // OutputMemoryInheritsInput also requires the view's memory space to follow its
     // input: if the retarget moved across memory spaces, carry the new space too.
@@ -3060,18 +3069,19 @@ class RetypeApplier : public IRMutator {
   std::map<VarPtr, VarPtr> var_substitution_;
   std::map<const IterArg*, VarPtr> initializers_;
   std::map<const Stmt*, std::vector<StmtPtr>> entries_;
+  std::optional<BufferViewAnalysis> views_;
 };
 
 }  // namespace
 
 // Retyping also propagates a retargeted input through its aliasing views.
-StmtPtr RefreshStorageTypes(const StmtPtr& body) { return RetypeApplier({}).VisitStmt(body); }
+StmtPtr RefreshStorageTypes(const StmtPtr& body) { return RetypeApplier({}).Run(body); }
 
 StmtPtr CoalesceAccumulatorIfPhis(const StmtPtr& body) {
   TopDownRetargeter coalescer;
   auto rewrites = coalescer.CoalesceAccumulatorIfPhis(body);
   if (rewrites.empty()) return body;
-  return RetypeApplier(std::move(rewrites)).VisitStmt(body);
+  return RetypeApplier(std::move(rewrites)).Run(body);
 }
 
 // Semantic must-alias materialization — the "Step 0" formerly at the head of
@@ -3110,7 +3120,7 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     // Branch storage is still provisional here: every dependent alias must
     // remain unsettled until CanonicalizeBranchStorage/YieldFixup selects it.
     new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
-    new_body = RetypeApplier({}).VisitStmt(new_body);
+    new_body = RetypeApplier({}).Run(new_body);
   }
   {
     const bool buffer_ir = ctx != nullptr && ctx->GetEnableBufferIR();
@@ -3123,17 +3133,17 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     if (!isolation.initializers.empty()) {
       RetypeApplier applier(std::move(isolation.rewrites), std::move(isolation.initializers),
                             std::move(isolation.entries));
-      new_body = applier.VisitStmt(new_body);
+      new_body = applier.Run(new_body);
       new_body = InsertAllocsIntoBody(new_body, isolation.allocations);
       new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
     }
-    if (buffer_ir) new_body = RetypeApplier({}).VisitStmt(new_body);
+    if (buffer_ir) new_body = RetypeApplier({}).Run(new_body);
   }
   TopDownRetargeter retargeter;
   auto rewrites = retargeter.Compute(new_body);
   if (!rewrites.empty()) {
     RetypeApplier applier(std::move(rewrites));
-    new_body = applier.VisitStmt(new_body);
+    new_body = applier.Run(new_body);
   }
 
   // Peeled accumulator phis are semantic must-alias boundaries. Coalesce them
@@ -3190,10 +3200,10 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     auto branch_rewrites = branch_storage.CanonicalizeBranchStorage(new_body, &allocations);
     if (!branch_rewrites.empty()) {
       RetypeApplier applier(std::move(branch_rewrites));
-      new_body = applier.VisitStmt(new_body);
+      new_body = applier.Run(new_body);
     }
     new_body = InsertAllocsIntoBody(new_body, allocations);
-    new_body = RetypeApplier({}).VisitStmt(new_body);
+    new_body = RetypeApplier({}).Run(new_body);
     new_body =
         FixupYields(new_body, func->params_, /*fixup_if_stmts=*/true, /*canonical_branch_storage=*/true);
     new_body = NormalizeIdentityCopyBuffers(new_body);

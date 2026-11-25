@@ -24,6 +24,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
 
@@ -40,6 +41,7 @@ class BufferViewAnalysis : public IRVisitor {
     CallPtr slice;
     VarPtr root;
     std::optional<std::array<int64_t, 2>> offsets = std::array<int64_t, 2>{0, 0};
+    bool preserves_axes = true;
   };
 
   explicit BufferViewAnalysis(const StmtPtr& body) { VisitStmt(body); }
@@ -55,6 +57,32 @@ class BufferViewAnalysis : public IRVisitor {
   }
 
   bool IsWindow(const ExprPtr& value) const { return Get(value).window; }
+
+  /// The physical row stride (in elements) inherited by a rank-2 flat Vec
+  /// slice. Do not infer it from the logical width of the immediate window.
+  std::optional<int64_t> GetWindowRowStride(const ExprPtr& value) const {
+    const auto tile = As<TileType>(value->GetType());
+    if (!tile || tile->shape_.size() != 2 || tile->GetMemorySpace() != MemorySpace::Vec) {
+      return std::nullopt;
+    }
+    const auto view = Get(value);
+    if (!view.window || !view.root || !view.preserves_axes) return std::nullopt;
+    const auto root = As<TileType>(view.root->GetType());
+    if (!root || root->shape_.size() != 2 || root->dtype_ != tile->dtype_ ||
+        root->GetMemorySpace() != MemorySpace::Vec) {
+      return std::nullopt;
+    }
+    const auto layout = tile_view_semantics::GetEffectiveTileView(*root);
+    const auto cols = As<ConstInt>(root->shape_[1]);
+    if (!cols || cols->value_ <= 0 || layout.blayout != TileLayout::row_major ||
+        layout.slayout != TileLayout::none_box ||
+        (!layout.stride.empty() &&
+         (layout.stride.size() != 2 || !IsConstValue(layout.stride[0], cols->value_) ||
+          !IsConstValue(layout.stride[1], 1)))) {
+      return std::nullopt;
+    }
+    return cols->value_;
+  }
 
   bool HasDenseRowPitch(const ExprPtr& value) const {
     const auto tile = As<TileType>(value->GetType());
@@ -78,6 +106,10 @@ class BufferViewAnalysis : public IRVisitor {
         view = Get(call->args_[0]);
         view.window = true;
         view.slice = call;
+        if (call->args_.size() == 5) {
+          const auto dropped = As<MakeTuple>(call->args_[4]);
+          view.preserves_axes = view.preserves_axes && dropped && dropped->elements_.empty();
+        }
         const auto offsets = As<MakeTuple>(call->args_[2]);
         if (!offsets || offsets->elements_.size() != 2) view.offsets = std::nullopt;
         if (view.offsets) {

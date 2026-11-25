@@ -743,6 +743,69 @@ class TestSliceView:
     """tile.slice is a view op: output shares the input's base Ptr with an
     accumulated byte offset and a smaller view size."""
 
+    @pytest.mark.parametrize("reanchor", [False, True])
+    def test_nested_tile_views_inherit_physical_row_stride(self, reanchor):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                tail: pl.Out[pl.Tensor[[2, 8], pl.FP32]],
+            ):
+                root = pl.tile.load(x, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec)
+                outer = pl.tile.view(root, [32, 32], offsets=[8, 16])
+                alias = outer
+                inner = pl.tile.slice(alias, [16, 16], [4, 8])
+                row = pl.tile.view(outer, [1, 16], offsets=[4, 8])
+                relabeled = pl.tile.reshape(row, [2, 8])
+                dynamic = pl.tile.view(outer, [16, 16], offsets=[row_offset, 8])
+                pl.tile.store(inner, [0, 0], out)
+                pl.tile.store(relabeled, [0, 0], tail)
+                pl.tile.store(dynamic, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        if reanchor:
+            after = passes.memory_reuse()(passes.materialize_semantic_aliases()(after))
+
+        refs = {}
+
+        class Views(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                if isinstance(op.var.type, ir.TileType):
+                    refs[op.var.name_hint] = op.var.type.memref
+                super().visit_assign_stmt(op)
+
+        Views().visit_program(after)
+        for name, offset, size in [
+            ("outer", 2112, 8064),
+            ("inner", 3168, 3904),
+            ("row", 3168, 64),
+            ("relabeled", 3168, 64),
+        ]:
+            ref = refs[name]
+            assert ref.base_.same_as(refs["root"].base_)
+            assert isinstance(ref.byte_offset_, ir.ConstInt)
+            assert (ref.byte_offset_.value, ref.size_) == (offset, size)
+
+        def evaluate(expr, row_offset):
+            if isinstance(expr, ir.ConstInt):
+                return expr.value
+            if isinstance(expr, ir.Var):
+                assert expr.name_hint == "row_offset"
+                return row_offset
+            if isinstance(expr, ir.Add):
+                return evaluate(expr.left, row_offset) + evaluate(expr.right, row_offset)
+            assert isinstance(expr, ir.Mul)
+            return evaluate(expr.left, row_offset) * evaluate(expr.right, row_offset)
+
+        dynamic = refs["dynamic"]
+        assert dynamic.base_.same_as(refs["root"].base_)
+        assert dynamic.size_ == 3904
+        assert [evaluate(dynamic.byte_offset_, row) for row in (0, 4, 8)] == [2144, 3168, 4192]
+
     @pytest.mark.parametrize("row_step", [1, 2])
     def test_tensor_slices_preserve_gm_window_strides(self, row_step):
         @pl.program
