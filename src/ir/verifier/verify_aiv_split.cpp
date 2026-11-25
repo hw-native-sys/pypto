@@ -18,6 +18,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
@@ -30,6 +33,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -93,6 +97,15 @@ std::optional<MemorySpace> ResolvedTileMemory(const ExprPtr& expr) {
   auto tile_type = As<TileType>(expr->GetType());
   if (!tile_type) return std::nullopt;
   return tile_type->memory_space_;
+}
+
+bool MatShardUsesDirectDma(const CallPtr& op, MemorySpace operand) {
+  if (operand != MemorySpace::Mat || !IsOp(op, "tile.aiv_shard") || !backend::BackendConfig::IsConfigured())
+    return false;
+  const auto* context = PassContext::Current();
+  const auto* handler =
+      context ? context->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+  return handler->GetPtoTargetArch() == "a5";
 }
 
 /// True for the two ops ConvertTensorToTileOps materializes OUTSIDE a region
@@ -989,8 +1002,9 @@ class SplitAivStructuralVerifier : public IRVisitor {
     auto operand_var = op->args_.empty() ? nullptr : AsVarLike(op->args_[0]);
     const bool shared_external = lowered_ && operand_var && !facts_.local_defs.count(operand_var.get());
     if (!shared_external && !op->args_.empty()) {
-      if (auto operand_ms = ResolvedTileMemory(op->args_[0]);
-          operand_ms.has_value() && *operand_ms != contract->operand) {
+      if (auto operand_ms = ResolvedTileMemory(op->args_[0]); operand_ms.has_value() &&
+                                                              *operand_ms != contract->operand &&
+                                                              !MatShardUsesDirectDma(op, *operand_ms)) {
         Err(op->span_, "'" + op->op_->name_ + "' operand is in " + MemorySpaceToString(*operand_ms) +
                            ", but it transfers a " + contract->producer +
                            "-produced value across the cross-core boundary and requires " +

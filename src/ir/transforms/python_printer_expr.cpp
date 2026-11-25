@@ -474,7 +474,8 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // recorded Call. Type expressions use a separate printer and keep their DSL
   // spelling, as do Inline/InCore functions whose parser does not fold reads.
   const bool dimension_call = orchestration_function_ && IsOp(op, "tensor.dim");
-  if (!storage_call && !folded_flag && !dimension_call &&
+  const bool internal_dma = IsOp(op, "tile.l1_dma_send") || IsOp(op, "tile.l1_dma_receive");
+  if (!storage_call && !folded_flag && !dimension_call && !internal_dma &&
       (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value()))) {
     PrintCall(op);
     return;
