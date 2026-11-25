@@ -192,8 +192,9 @@ class TestQuantMxTypes:
             _tile("scaling", (16, 8), pl.FP32),
             canonical_axis1=True,
         )
+        assert isinstance(call.type, ir.TupleType)
         exp_type = call.type.types[1]
-        assert exp_type.tile_view is not None
+        assert isinstance(exp_type, ir.TileType) and exp_type.tile_view is not None
         assert tuple(_const_int(dim) for dim in exp_type.tile_view.valid_shape) == (16, 8)
 
     @pytest.mark.parametrize(

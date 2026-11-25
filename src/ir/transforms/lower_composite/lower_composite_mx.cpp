@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstdint>
 #include <limits>
@@ -18,7 +19,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/cast_saturation.h"
@@ -28,6 +31,8 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/lower_composite/lower_composite_builder.h"
 #include "src/ir/transforms/lower_composite/lower_composite_rules.h"
@@ -89,8 +94,21 @@ ExprPtr PackMxExponent(const ExprPtr& exponent, int64_t group_rows, int64_t grou
 }
 
 ExprPtr LowerE5M2Quantization(const ExprPtr& src, int group_axis, LoweringBuilder& b, const Span& span) {
-  CHECK_SPAN(backend::GetBackendType() == backend::BackendType::Ascend950, span)
-      << "tile.tquant_mx with FP8E5M2 requires Ascend950";
+  // This recipe needs the native E5M2 narrowing, signed ordering
+  // comparisons and the MX exponent-packing operator. Query backend policy
+  // through the active pass context, independent of its architecture name.
+  const auto* handler = tile_conversion_utils::ActiveBackendHandler();
+  const auto* context = PassContext::Current();
+  if (handler != nullptr) {
+    const auto* target = context != nullptr ? context->GetBackend() : backend::BackendConfig::GetBackend();
+    const auto& edges = handler->GetTcvtAdjacency().edges;
+    const auto narrowing = std::make_pair(DataType::FP32, DataType::FP8E5M2);
+    CHECK_SPAN(std::find(edges.begin(), edges.end(), narrowing) != edges.end() &&
+                   handler->SupportsOrderingCompareDataType(DataType::INT32) &&
+                   target->GetOpInfo("tile.tmov_x2zz") != nullptr,
+               span)
+        << "tile.tquant_mx with FP8E5M2 requires native E5M2 narrowing and MX exponent packing";
+  }
   const auto src_type = As<TileType>(src->GetType());
   const auto rows = As<ConstInt>(src_type->shape_[0])->value_;
   const auto cols = As<ConstInt>(src_type->shape_[1])->value_;
