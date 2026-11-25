@@ -1,0 +1,67 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+module {
+  func.func @cube_up_down(%gm_slot_buffer: !pto.ptr<f32>,
+                          %full_rows: index)
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c1 = arith.constant 1 : index
+    %c16 = arith.constant 16 : index
+    %gm_slots = pto.make_tensor_view %gm_slot_buffer,
+      shape = [%c16, %c16], strides = [%c16, %c1]
+      : !pto.tensor_view<16x16xf32>
+
+    %consumer_import = pto.import_reserved_buffer {
+      name = "up_down_fifo",
+      peer_func = @vector_up_down
+    } -> i32
+
+    pto.aic_initialize_pipe {id = 3, dir_mask = 1, slot_size = 1024}
+      (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>,
+       c2v_consumer_buf = %consumer_import : i32)
+
+    %tile = pto.alloc_tile valid_row = %full_rows valid_col = %c16
+      : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=?, v_col=?, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tpush_to_aiv(%tile : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=?, v_col=?, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 3, split = 3}
+    return
+  }
+
+  func.func @vector_up_down(%gm_slot_buffer: !pto.ptr<f32>,
+                            %full_rows: index)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i64 = arith.constant 0 : i64
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c16 = arith.constant 16 : index
+    %gm_slots = pto.make_tensor_view %gm_slot_buffer,
+      shape = [%c16, %c16], strides = [%c16, %c1]
+      : !pto.tensor_view<16x16xf32>
+
+    %consumer_local = pto.reserve_buffer {
+      name = "up_down_fifo",
+      size = 8192,
+      location = #pto.address_space<vec>,
+      auto = true
+    } -> i32
+
+    pto.aiv_initialize_pipe {id = 3, dir_mask = 1, slot_size = 1024}
+      (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>,
+       c2v_consumer_buf = %consumer_local : i32)
+
+    %subblock_idx = pto.get_subblock_idx
+    %is_aiv0 = arith.cmpi eq, %subblock_idx, %c0_i64 : i64
+    %rounded_rows = arith.addi %full_rows, %c1 : index
+    %ceil_rows = arith.divui %rounded_rows, %c2 : index
+    %floor_rows = arith.divui %full_rows, %c2 : index
+    %half_rows = arith.select %is_aiv0, %ceil_rows, %floor_rows : index
+    %tile = pto.tpop_from_aic(%half_rows, %c16) {id = 3, split = 3} aiv_subblockid(%subblock_idx)
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=16, v_row=?, v_col=?, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 3, split = 3}
+    return
+  }
+}

@@ -138,6 +138,8 @@ class _PipeQueues:
         self.c2v_dtype = None
         self.pre_relu = False
         self.to_aiv = deque()
+        # Split queue keys are physical AIVs. Logical band selection must not
+        # change which producer/consumer FIFO frame advances.
         self.to_aiv_split = {c: {0: deque(), 1: deque()} for c in _SPLIT_CODES}
         self.to_aiv_dual_nosplit = {0: deque(), 1: deque()}
         self.to_aic = deque()
@@ -336,16 +338,17 @@ class _CrossCoreRuntime:
                 else:
                     queues.to_aiv.append(_copy_region_attrs(tile, tile.clone()))
             elif split in _SPLIT_CODES:
-                lane0, lane1 = self._split_tile(tile, split, lane_stride, valid_shape=valid_shape)
-                queues.to_aiv_split[split][0].append(lane0)
-                queues.to_aiv_split[split][1].append(lane1)
+                frame = self._split_tile(tile, split, lane_stride, valid_shape=valid_shape)
+                queues.to_aiv_split[split][0].append(frame)
+                queues.to_aiv_split[split][1].append(frame)
             else:
                 raise ValueError(f"Unsupported split mode for push_to_aiv: {split}")
             self._cv.notify_all()
 
-    def pop_from_aic(self, split, pipe_id=0):
+    def pop_from_aic(self, split, pipe_id=0, aiv_subblockid=None):
         split = int(split)
-        lane = _get_subblock_idx()
+        physical_lane = _get_subblock_idx()
+        lane = physical_lane if aiv_subblockid is None else int(aiv_subblockid)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
             if split == 0:
@@ -362,19 +365,23 @@ class _CrossCoreRuntime:
             if split in _SPLIT_CODES:
                 if lane not in (0, 1):
                     raise ValueError(f"Split tpop_from_aic requires lane in {{0,1}}, got {lane}")
-                queue = queues.to_aiv_split[split][lane]
-                self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane, pipe_id)
-                return queue.popleft()
+                queue = queues.to_aiv_split[split][physical_lane]
+                self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, physical_lane, pipe_id)
+                part = queue.popleft()[lane]
+                # Each physical AIV has independent local storage, even when
+                # both readers choose the same logical band of a GM frame.
+                return _copy_region_attrs(part, part.clone())
             raise ValueError(f"Unsupported split mode for pop_from_aic: {split}")
 
-    def push_to_aic(self, tile, split, pipe_id=0):
+    def push_to_aic(self, tile, split, pipe_id=0, aiv_subblockid=None):
         split = int(split)
         if _is_odd_split(split):
             # pto-isa places lane 1's Vector -> Cube band at lane 1's own extent,
             # so the two only abut when the lanes are equal: there is no odd V2C
             # transport, and PTO codegen rejects these codes too.
             raise ValueError(f"Unsupported odd split mode for push_to_aic: {split}")
-        lane = _get_subblock_idx()
+        physical_lane = _get_subblock_idx()
+        lane = physical_lane if aiv_subblockid is None else int(aiv_subblockid)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
             if split == 0:
@@ -389,7 +396,8 @@ class _CrossCoreRuntime:
             elif split in _SPLIT_CODES:
                 if lane not in (0, 1):
                     raise ValueError(f"Split tpush_to_aic requires lane in {{0,1}}, got {lane}")
-                queues.to_aic_split[split][lane].append(_copy_region_attrs(tile, tile.clone()))
+                payload = _copy_region_attrs(tile, tile.clone())
+                queues.to_aic_split[split][physical_lane].append((lane, payload))
             else:
                 raise ValueError(f"Unsupported split mode for push_to_aic: {split}")
             self._cv.notify_all()
@@ -427,8 +435,15 @@ class _CrossCoreRuntime:
                     lane,
                     pipe_id,
                 )
-                part0 = lane0_q.popleft()
-                part1 = lane1_q.popleft()
+                selection0, part0 = lane0_q.popleft()
+                selection1, part1 = lane1_q.popleft()
+                if selection0 == selection1:
+                    raise ValueError(
+                        f"Split tpop_from_aiv requires complementary logical lanes for each frame, "
+                        f"got {selection0} and {selection1}"
+                    )
+                if selection0 == 1:
+                    part0, part1 = part1, part0
                 return self._merge_tile(part0, part1, split)
             raise ValueError(f"Unsupported split mode for pop_from_aiv: {split}")
 
@@ -1102,11 +1117,14 @@ def _handle_aic_initialize_pipe(_a: list[str], kw: dict[str, Any]) -> str:
 
 
 def _handle_tpush_to_aic(a: list[str], kw: dict[str, Any]) -> str:
-    return f"_cross_core_rt.push_to_aic({a[0]}, {_split_kwarg(kw)}{_pipe_id_kwarg(kw)})"
+    # Keep pipe_id's established positional slot when selecting a logical lane.
+    lane_arg = f", aiv_subblockid={a[1]}" if len(a) == 2 else ""
+    return f"_cross_core_rt.push_to_aic({a[0]}, {_split_kwarg(kw)}{_pipe_id_kwarg(kw)}{lane_arg})"
 
 
-def _handle_tpop_from_aic(_a: list[str], kw: dict[str, Any]) -> str:
-    return f"_cross_core_rt.pop_from_aic({_split_kwarg(kw)}{_pipe_id_kwarg(kw)})"
+def _handle_tpop_from_aic(a: list[str], kw: dict[str, Any]) -> str:
+    lane_arg = f", aiv_subblockid={a[0]}" if a else ""
+    return f"_cross_core_rt.pop_from_aic({_split_kwarg(kw)}{_pipe_id_kwarg(kw)}{lane_arg})"
 
 
 def _handle_tpop_from_aiv(_a: list[str], kw: dict[str, Any]) -> str:

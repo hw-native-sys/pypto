@@ -1212,5 +1212,256 @@ def test_native_c2v_preserves_authored_dual_dispatch():
     ir.assert_structural_equal(_run_split_vector_kernel(Before), passes.convert_to_ssa()(Before))
 
 
+def _assert_extent_after_substitution(expr, values, expected):
+    """Use the compiler's scalar simplifier to check the selected lane's extent."""
+    span = ir.Span.unknown()
+
+    class Substitute(ir.IRMutator):
+        def visit_var(self, op):
+            if op.name_hint in values:
+                assert isinstance(op.type, ir.ScalarType)
+                return ir.ConstInt(values[op.name_hint], op.type.dtype, op.span)
+            return super().visit_var(op)
+
+        def visit_iter_arg(self, op):
+            if op.name_hint in values:
+                return self.visit_var(op)
+            return super().visit_iter_arg(op)
+
+    value = Substitute().visit_expr(expr)
+    before = ir.Program(
+        [ir.Function("extent", [], [ir.ScalarType(pl.INDEX)], ir.ReturnStmt([value], span), span)],
+        "Extent",
+        span,
+    )
+    wanted = ir.Program(
+        [
+            ir.Function(
+                "extent",
+                [],
+                [ir.ScalarType(pl.INDEX)],
+                ir.ReturnStmt([ir.ConstInt(expected, pl.INDEX, span)], span),
+                span,
+            )
+        ],
+        "Extent",
+        span,
+    )
+    ir.assert_structural_equal(passes.simplify()(before), wanted)
+
+
+@pytest.mark.parametrize(
+    ("mode", "shape", "view", "axis", "narrow_after_pop"),
+    [
+        ("UP_DOWN", [31, 16], "", 0, False),
+        ("LEFT_RIGHT", [16, 31], "", 1, False),
+        ("UP_DOWN", [32, 16], ", pl.TileView(valid_shape=[31, 16])", 0, False),
+        pytest.param("UP_DOWN", [32, 16], "", 0, True, id="even_then_narrow_rows"),
+        pytest.param("LEFT_RIGHT", [16, 32], "", 1, True, id="even_then_narrow_cols"),
+    ],
+)
+@pytest.mark.parametrize("lane_kind", ["omit", "zero", "one", "swapped"])
+@pytest.mark.parametrize("carry", [False, True])
+def test_explicit_pop_lane_localizes_odd_validity(
+    mode, shape, view, axis, narrow_after_pop, lane_kind, carry
+):
+    """The 31-cell band is 16/15 by LOGICAL lane, including its consumers.
+
+    Output placement still follows the executing physical AIV. A swapped pop
+    on physical lane zero must read 15 cells, rather than pairing logical lane
+    one's band offset with physical lane zero's 16-cell valid extent.
+    """
+    operand = {"omit": "", "zero": "0", "one": "1", "swapped": "lane"}[lane_kind]
+    lane_kw = f", aiv_subblockid={operand}" if operand else ""
+    split = (1 if axis == 0 else 2) if narrow_after_pop else (3 if axis == 0 else 4)
+    loop = "for step in pl.range(2):\n            value = pl.tile.add(value, 1.0)" if carry else ""
+    valid = [31, 16] if axis == 0 else [16, 31]
+    narrow = f"narrowed = pl.tile.set_validshape(value, {valid[0]}, {valid[1]})" if narrow_after_pop else ""
+    consumer_input = "narrowed" if narrow_after_pop else "value"
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector(self, lane: pl.Scalar[pl.INT64], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+        pl.func_attr({{"split": pl.SplitMode.{mode}}})
+        buf = pl.system.reserve_buffer(name="c2v", size=65536)
+        pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
+        received: pl.Tile[{shape}, pl.FP32, pl.Mem.Vec{view}] = pl.system.tpop_from_aic(
+            split={split}{lane_kw}
+        )
+        value = pl.tile.add(received, 1.0)
+        {loop}
+        {narrow}
+        incremented = pl.tile.add({consumer_input}, 1.0)
+        pl.system.tfree_to_aic(received)
+        saved = pl.tile.store(incremented, [0, 0], out)
+        return saved
+""")
+    after = _run_split_vector_kernel(before)
+    tiles = {}
+    physical_vars = []
+    stores = []
+    physical_name = ir.get_op("tile.get_subblock_idx").name
+    pop_name = ir.get_op("tile.tpop_from_aic").name
+    add_name = ir.get_op("tile.adds").name
+    store_name = ir.get_op("tile.store").name
+
+    class Collect(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call):
+                name = op.value.op.name
+                if name == physical_name:
+                    physical_vars.append(op.var)
+                elif name in (pop_name, add_name):
+                    tiles[name] = op
+                elif name == store_name:
+                    stores.append(op.value)
+            super().visit_assign_stmt(op)
+
+    Collect().visit_program(after)
+    assert len(tiles) == 2 and physical_vars and len(stores) == 1
+    pop = tiles[pop_name].value
+    assert len(pop.args) == (0 if lane_kind == "omit" else 1)
+    for physical in (0, 1):
+        logical = {"omit": physical, "zero": 0, "one": 1, "swapped": 1 - physical}[lane_kind]
+        values = {var.name_hint: physical for var in physical_vars}
+        if lane_kind == "swapped":
+            values[pop.args[0].name_hint] = logical
+        for name, assignment in tiles.items():
+            tile_type = assignment.var.type
+            assert isinstance(tile_type, ir.TileType)
+            extent = tile_type.get_effective_tile_view().valid_shape[axis]
+            expected = 16 if logical == 0 else 15
+            if narrow_after_pop and name == pop_name:
+                expected = 16
+            _assert_extent_after_substitution(extent, values, expected)
+        # Selecting another input band must not relocate the physical output.
+        _assert_extent_after_substitution(stores[0].args[1].elements[axis], values, physical * 16)
+
+
+@pytest.mark.parametrize("pop_site", ["backedge", "initializer", "conditional_backedge"])
+def test_full_pop_carry_tracks_the_lane_that_produced_the_value(pop_site):
+    """The init and backedge supply different origins without changing the tile type."""
+    physical_value = "value = pl.tile.full([32, 16], dtype=pl.FP32, value=0.0)"
+    explicit_value = (
+        "received: pl.Tile[[32, 16], pl.FP32, pl.Mem.Vec] = "
+        "pl.system.tpop_from_aic(split=1, aiv_subblockid=0)\n"
+        "value = pl.tile.add(received, 1.0)\n"
+        "pl.system.tfree_to_aic(received)"
+    )
+    if pop_site == "initializer":
+        init, backedge = explicit_value, physical_value
+    elif pop_site == "conditional_backedge":
+        init = physical_value
+        backedge = "if step == 0:\n    value = pl.tile.add(value, 1.0)\nelse:\n    "
+        backedge += explicit_value.replace("\n", "\n    ")
+    else:
+        init, backedge = physical_value, explicit_value
+    init = init.replace("\n", "\n        ")
+    backedge = backedge.replace("\n", "\n            ")
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector(self, steps: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]):
+        pl.func_attr({{"split": pl.SplitMode.UP_DOWN}})
+        buf = pl.system.reserve_buffer(name="c2v", size=65536)
+        pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
+        {init}
+        for step in pl.range(steps):
+            inner = pl.tile.set_validshape(value, 31, 16)
+            out = pl.tile.store(inner, [0, 0], out)
+            {backedge}
+        outer = pl.tile.set_validshape(value, 31, 16)
+        return pl.tile.store(outer, [0, 0], out)
+""")
+    program = _run_split_vector_kernel(before)
+    loops = []
+    branches = []
+    narrowed = []
+    yields = []
+    physical = []
+
+    class Collect(ir.IRVisitor):
+        def visit_for_stmt(self, op):
+            loops.append(op)
+            super().visit_for_stmt(op)
+
+        def visit_yield_stmt(self, op):
+            yields.append(op)
+            super().visit_yield_stmt(op)
+
+        def visit_if_stmt(self, op):
+            branches.append(op)
+            super().visit_if_stmt(op)
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call):
+                if op.value.op.name == ir.get_op("tile.set_validshape").name:
+                    narrowed.append(op.var)
+                elif op.value.op.name == ir.get_op("tile.get_subblock_idx").name:
+                    physical.append(op.var)
+            super().visit_assign_stmt(op)
+
+    Collect().visit_program(program)
+    assert len(loops) == len(physical) == 1
+    assert len(narrowed) == 2
+    lane = loops[0].iter_args[-1]
+    exit_lane = loops[0].return_vars[-1]
+    assert isinstance(lane.type, ir.ScalarType) and lane.type.dtype == pl.INDEX
+    backedge_lane = yields[-1].value[-1]
+    if pop_site == "conditional_backedge":
+        assert len(branches) == 1 and len(yields) == 3
+        ir.assert_structural_equal(lane.initValue, physical[0])
+        ir.assert_structural_equal(yields[0].value[-1], lane)
+        _assert_extent_after_substitution(yields[1].value[-1], {}, 0)
+        ir.assert_structural_equal(backedge_lane, branches[0].return_vars[-1])
+    elif pop_site == "backedge":
+        assert len(yields) == 1
+        ir.assert_structural_equal(lane.initValue, physical[0])
+        _assert_extent_after_substitution(backedge_lane, {}, 0)
+    else:
+        assert len(yields) == 1
+        _assert_extent_after_substitution(lane.initValue, {}, 0)
+        ir.assert_structural_equal(backedge_lane, physical[0])
+    for tile, selector in zip(narrowed, (lane, exit_lane), strict=True):
+        assert isinstance(tile.type, ir.TileType)
+        extent = tile.type.get_effective_tile_view().valid_shape[0]
+        _assert_extent_after_substitution(extent, {selector.name_hint: 0}, 16)
+        _assert_extent_after_substitution(extent, {selector.name_hint: 1}, 15)
+
+
+def test_explicit_pop_leaves_unrelated_loop_carry_without_a_lane_companion():
+    """A pop stored directly to the output has no effect on a separate tile carry."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector(self, steps: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[32, 16], pl.FP32]]):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+            buf = pl.system.reserve_buffer(name="c2v", size=65536)
+            pl.system.aiv_initialize_pipe(dir_mask=1, slot_size=4096, slot_num=16, c2v_consumer_buf=buf)
+            value = pl.tile.full([32, 16], dtype=pl.FP32, value=0.0)
+            for step in pl.range(steps):
+                received: pl.Tile[[32, 16], pl.FP32, pl.Mem.Vec] = pl.system.tpop_from_aic(
+                    split=1, aiv_subblockid=0
+                )
+                out = pl.tile.store(received, [0, 0], out)
+                pl.system.tfree_to_aic(received)
+                if step == 0:
+                    value = pl.tile.add(value, 1.0)
+                else:
+                    value = pl.tile.full([32, 16], dtype=pl.FP32, value=2.0)
+            return pl.tile.store(value, [0, 0], out)
+
+    program = _run_split_vector_kernel(Before)
+    vector = program.get_function("vector")
+    assert vector is not None
+    assert isinstance(vector.body, ir.SeqStmts)
+    loop = next(stmt for stmt in vector.body.stmts if isinstance(stmt, ir.ForStmt))
+    assert len(loop.iter_args) == 2
+    assert all(not isinstance(arg.type, ir.ScalarType) for arg in loop.iter_args)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
