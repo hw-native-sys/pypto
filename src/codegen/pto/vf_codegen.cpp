@@ -73,7 +73,7 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    micro |= IsOp(call, "reg.squeeze_store_init");
+    micro |= IsOp(call, "reg.squeeze_store_init") || GetKwargOr<bool>(call->kwargs_, "native", false);
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
         IsOp(call, "reg.squeeze_store_flush")) {

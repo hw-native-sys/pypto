@@ -18,6 +18,7 @@ from pypto.backend import pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
+from pypto.language.diagnostics import InvalidOperationError
 
 SPAN = ir.Span("register_kernel.py", 10, 1, 10, 60)
 
@@ -1658,3 +1659,135 @@ def empty_squeeze():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("dtype", ["FP4E2M1X2", "FP8E4M3FN"])
+def test_native_quantized_load_convert(dtype):
+    # UNPK4 reads only 64 bytes, not the full 256-byte result register. The
+    # native conversion must preserve the hardware source mask and PART_P0.
+    target, lanes = ("BF16", 128) if dtype == "FP4E2M1X2" else ("FP32", 64)
+    source = f"""
+@pl.function(type=pl.FunctionType.AIV)
+def native_decode():
+    raw = pl.tile.full([64], pl.UINT8, 0)
+    out = pl.tile.create([{lanes}], pl.{target}, target_memory=pl.Mem.Vec)
+    with pl.reg_scope(auto_sync=False):
+        raw_reg = pl.reg.load_native(raw, dtype=pl.{dtype}, lanes=256, mode="UNPK4")
+        mask8 = pl.reg.full_mask(lanes=256)
+        value = pl.reg.convert_native(raw_reg, mask8, dtype=pl.{target}, lanes={lanes}, part="PART_P0")
+        out_mask = pl.reg.full_mask(lanes={lanes})
+        written = pl.reg.store(out, 0, value, out_mask)
+    result = pl.tile.add(written, written)
+"""
+    function = pl.parse(source)
+    mlir = generate(function)
+    assert "pto.vlds" in mlir and 'dist = "UNPK4"' in mlir
+    assert "pto.vcvt" in mlir and 'part = "PART_P0"' in mlir
+    assert "pto.vmi.vload" not in mlir
+    # The canonical printed DSL must retain the explicit hardware mode attrs.
+    roundtrip = pl.parse(ir.python_print(function, format=False))
+    ir.assert_structural_equal(function, roundtrip, enable_auto_mapping=True)
+
+
+@pytest.mark.ptoas_compile
+def test_native_fp8_pack_store_compiles_with_ptoas(tmp_path):
+    program = pl.parse('''
+@pl.function(type=pl.FunctionType.AIV)
+def native_pack():
+    raw = pl.tile.full([128], pl.UINT8, 0)
+    out = pl.tile.create([17*128], pl.BF16, target_memory=pl.Mem.Vec)
+    packed_out = pl.tile.create([64], pl.BF16, target_memory=pl.Mem.Vec)
+    with pl.reg_scope(auto_sync=False):
+        m8 = pl.reg.full_mask(lanes=256)
+        m32 = pl.reg.full_mask(lanes=64)
+        m16 = pl.reg.full_mask(lanes=128)
+        raw0 = pl.reg.load_native(raw, 0, dtype=pl.FP8E4M3FN, lanes=256, mode="UNPK4")
+        raw1 = pl.reg.load_native(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, mode="UNPK4")
+        x0 = pl.reg.convert_native(raw0, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
+        x1 = pl.reg.convert_native(raw1, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
+        b0 = pl.reg.convert_native(x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False)
+        b1 = pl.reg.convert_native(x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False)
+        packed, unused = pl.reg.dintlv(b0, b1)
+        written = pl.reg.store(out, 0, packed, m16, block_stride=17)
+        pk_written = pl.reg.store_native(packed_out, 0, b0, m32, mode="PK_B32")
+''')
+    source = generate(program)
+    assert source.count('part = "PART_P0"') == 2
+    assert source.count('part = "PART_EVEN"') == 2
+    assert source.count("pto.vdintlv") == 1
+    assert source.count("pto.vsstb") == 1
+    assert 'dist = "PK_B32"' in source
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+def test_native_scalar_load_and_store_compiles_with_ptoas(tmp_path):
+    program = pl.parse('''
+@pl.function(type=pl.FunctionType.AIV)
+def native_scalar():
+    src = pl.tile.full([1], pl.FP32, 1.0)
+    dst = pl.tile.create([1], pl.FP32, target_memory=pl.Mem.Vec)
+    with pl.reg_scope(auto_sync=False):
+        one = pl.reg.active_mask(1, lanes=64)
+        x = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="BRC_B32")
+        written = pl.reg.store_native(dst, 0, x, one, mode="ONEPT_B32")
+    y = pl.tile.add(written, written)
+''')
+    source = generate(program)
+    assert 'dist = "BRC_B32"' in source
+    assert 'dist = "1PT_B32"' in source
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.parametrize("size,dtype,lanes,match", [
+    (63, "FP4E2M1X2", 256, "capacity bounds"),
+    (64, "FP4E2M1X2", 128, "full 256-byte register"),
+    (64, "BF16", 128, "UNPK4 native load requires"),
+])
+def test_native_load_checks_physical_footprint(size, dtype, lanes, match):
+    # Reject an undersized payload and register geometry at the IR schema
+    # boundary, before either codegen or a device access is possible.
+    with pytest.raises(InvalidOperationError, match=match):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def invalid_native():
+    raw = pl.tile.full([{size}], pl.UINT8, 0)
+    with pl.reg_scope(auto_sync=False):
+        x = pl.reg.load_native(raw, dtype=pl.{dtype}, lanes={lanes}, mode="UNPK4")
+""")
+
+
+@pytest.mark.ptoas_compile
+def test_native_scale_gather_and_reduction_compile_with_ptoas(tmp_path):
+    # Decode's E2B and gather2 scale broadcasts remain in the same micro
+    # scope as BF16 arithmetic. A separate full FP32 scope uses the exact
+    # reduction, register permutation and one-point store operations.
+    program = pl.parse('''
+@pl.function(type=pl.FunctionType.AIV)
+def native_scale_reduction():
+    scale = pl.tile.full([8], pl.UINT16, 0x3f80)
+    scale_out = pl.tile.create([128], pl.BF16, target_memory=pl.Mem.Vec)
+    src = pl.tile.full([64], pl.FP32, 1.0)
+    dst = pl.tile.create([1], pl.FP32, target_memory=pl.Mem.Vec)
+    with pl.reg_scope(auto_sync=False):
+        m16 = pl.reg.full_mask(lanes=128)
+        group = pl.reg.shift_rights(pl.reg.index_gen(0, lanes=128, dtype=pl.UINT16), 5, m16)
+        scale_bits = pl.reg.gather(scale, group, m16)
+        e2b = pl.reg.load_native(scale, dtype=pl.BF16, lanes=128, mode="E2B_B16")
+        val = pl.reg.mul(pl.reg.interpret_cast(scale_bits, dtype=pl.BF16), e2b, m16)
+        scale_written = pl.reg.store(scale_out, 0, val, m16)
+    with pl.reg_scope(auto_sync=False):
+        all32 = pl.reg.full_mask(lanes=64)
+        one = pl.reg.active_mask(1, lanes=64)
+        x = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="NORM")
+        mx = pl.reg.reduce_max_native(x, all32)
+        first = pl.reg.broadcast(0, lanes=64, dtype=pl.UINT32)
+        rep = pl.reg.gather_lanes(mx, first)
+        total = pl.reg.reduce_sum_native(rep, all32, reassoc=True)
+        written = pl.reg.store_native(dst, 0, total, one, mode="ONEPT_B32")
+''')
+    source = generate(program)
+    for op in ("pto.vgather2", "pto.vmul", "pto.vcmax", "pto.vselr", "pto.vcadd"):
+        assert op in source
+    assert 'dist = "E2B_B16"' in source
+    compile_review_pto(source, tmp_path)

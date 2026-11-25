@@ -651,3 +651,31 @@ Explicit masks retain zero-inactive-result semantics; omitted masks do not need
 result-clearing selects. Two adjacent BF16 loads followed by unmasked `dintlv`
 can therefore lower to A5 `DINTLV_B16`, with `convert` selecting the required
 EVEN/ODD parts automatically. Physical conversion parts remain a backend choice.
+
+### Explicit physical register mode (A5)
+
+For instruction-for-instruction ports of native VF kernels, use
+`pl.reg.load_native`, `pl.reg.convert_native` and `pl.reg.store_native`. These
+operations retain a full 256-byte physical register and select the PTO micro
+lowering for the containing `reg_scope`. The ordinary logical register APIs
+and default VMI lowering are unchanged. All register operands in a native
+scope must describe full hardware vectors or masks.
+
+- `load_native(..., dtype, lanes, mode="UNPK4")` reads 64 packed FP4/FP8 bytes
+  into a 256-lane register. `BRC_B32` reads one 32-bit element and `E2B_B16`
+  reads eight 16-bit group scales. `NORM` reads a complete register.
+- `convert_native(..., mask, dtype, lanes, part="PART_P0")` converts native
+  FP4 to BF16 or FP8 to FP32. FP32-to-BF16 uses `PART_EVEN` or `PART_ODD`,
+  rounding `R` and disabled saturation, returning 128 physical lanes.
+- Use `dintlv` on two physical BF16 registers to collect their populated even
+  lanes into one full register, or `store_native(..., mode="PK_B32")` to
+  write a single register's packed even lanes. `ONEPT_B32` writes lane zero.
+  The mask for `PK_B32` is a 64-lane 32-bit mask, not 128 lanes.
+- `reduce_max_native` and `reduce_sum_native` keep the result at physical
+  lane zero of the full FP32 register; other lanes are not a defined result.
+
+All offsets are in the backing Tile's elements. Bounds and initialization
+are checked using the actual source/store footprint rather than counting
+unused physical register lanes. Only the explicitly supported native
+operations may be combined inside the scope; unsupported operations fail
+codegen rather than being silently lowered through logical VMI.

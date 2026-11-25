@@ -59,9 +59,41 @@ def mem_bar(kind: str) -> ir.Call:
     return _call("mem_bar", [], kind=kind)
 
 
-def load(tile: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0, *, lanes: int) -> Reg:
-    """Read lanes consecutive initialized elements from a Vec Tile."""
+def load(
+    tile: Tile | ir.Expr,
+    offset: int | Scalar | ir.Expr = 0,
+    *,
+    lanes: int,
+    native: bool = False,
+    dtype: DataType | None = None,
+    dist: str | None = None,
+) -> Reg:
+    """Read logical Vec lanes; native attrs are the canonical IR spelling."""
+    if native:
+        if dtype is None or dist is None:
+            raise TypeError("Native load requires dtype and dist")
+        return load_native(tile, offset, dtype=dtype, lanes=lanes, mode=dist)
+    if dtype is not None or dist is not None:
+        raise TypeError("dtype/dist require native=True")
     return Reg(_call("load", [_expr(tile), _expr(offset)], lanes=_lanes(lanes)))
+
+
+def load_native(
+    tile: Tile | ir.Expr,
+    offset: int | Scalar | ir.Expr = 0,
+    *,
+    dtype: DataType,
+    lanes: int,
+    mode: str = "NORM",
+) -> Reg:
+    """Load a full physical 256-byte register using an explicit A5 distribution.
+
+    Unlike logical load, ``UNPK4`` reads 64 bytes, ``BRC_B32`` one 32-bit
+    value, and ``E2B_B16`` eight 16-bit values. ``dtype`` may reinterpret the
+    storage bits without changing the byte width. The containing register
+    scope is lowered to physical PTO micro-ops, not VMI's logical vectors.
+    """
+    return Reg(_call("load", [_expr(tile), _expr(offset)], native=True, dtype=dtype, lanes=_lanes(lanes), dist=mode))
 
 
 def store(
@@ -71,6 +103,8 @@ def store(
     mask: Reg | ir.Expr | None = None,
     *,
     block_stride: int | None = None,
+    native: bool = False,
+    dist: str | None = None,
 ) -> Tile:
     """Write active lanes, optionally striding between 32-byte blocks.
 
@@ -79,6 +113,12 @@ def store(
     """
     if value is None:
         raise TypeError("reg.store requires value")
+    if native:
+        if mask is None or dist is None or block_stride is not None:
+            raise TypeError("Native store requires mask/dist and does not take block_stride")
+        return store_native(tile, offset, value, mask, mode=dist)
+    if dist is not None:
+        raise TypeError("dist requires native=True")
     args = [_expr(tile), _expr(offset), _expr(value)]
     if mask is not None:
         args.append(_expr(mask))
@@ -87,6 +127,24 @@ def store(
     if stride is not None:
         kwargs["block_stride"] = stride
     return Tile(expr=_call("store", args, **kwargs))
+
+
+def store_native(
+    tile: Tile | ir.Expr,
+    offset: int | Scalar | ir.Expr,
+    value: Reg | ir.Expr,
+    mask: Reg | ir.Expr,
+    *,
+    mode: str = "NORM",
+) -> Tile:
+    """Store a physical register using NORM, ONEPT_B32 or PK_B32.
+
+    The latter packs the even BF16 lanes under a 32-bit predicate; ONEPT_B32
+    stores only lane zero. Offsets are destination element offsets.
+    """
+    return Tile(
+        expr=_call("store", [_expr(tile), _expr(offset), _expr(value), _expr(mask)], native=True, dist=mode)
+    )
 
 
 def broadcast(scalar: Reg | Scalar | ir.Expr | int | float, *, lanes: int, dtype: DataType) -> Reg:
@@ -218,9 +276,25 @@ def maximum(
 
 
 def convert(
-    value: Reg | ir.Expr, *, dtype: DataType, rounding: str | None = None, saturate: bool | None = None
+    value: Reg | ir.Expr,
+    mask: Reg | ir.Expr | None = None,
+    *,
+    dtype: DataType,
+    rounding: str | None = None,
+    saturate: bool | None = None,
+    native: bool = False,
+    part: str | None = None,
+    lanes: int | None = None,
 ) -> Reg:
-    """Convert an explicitly supported dtype pair, preserving logical lanes."""
+    """Convert a dtype pair, preserving logical lanes by default."""
+    if native:
+        if mask is None or part is None or lanes is None:
+            raise TypeError("Native convert requires mask, part and lanes")
+        return convert_native(
+            value, mask, dtype=dtype, lanes=lanes, part=part, rounding=rounding, saturate=saturate
+        )
+    if mask is not None or part is not None or lanes is not None:
+        raise TypeError("mask/part/lanes require native=True")
     expr = _expr(value)
     if not isinstance(expr.type, ir.RegType) or expr.type.kind != ir.RegKind.VecReg:
         raise TypeError("reg.convert requires VecReg")
@@ -238,6 +312,30 @@ def convert(
     if saturate is not None:
         kwargs["saturate"] = saturate
     return Reg(_call("convert", [expr], **kwargs))
+
+
+def convert_native(
+    value: Reg | ir.Expr,
+    mask: Reg | ir.Expr,
+    *,
+    dtype: DataType,
+    lanes: int,
+    part: str,
+    rounding: str | None = None,
+    saturate: bool | None = None,
+) -> Reg:
+    """Convert full physical registers while preserving PART_P0/EVEN/ODD.
+
+    In particular FP32 -> BF16 returns a full 128-lane physical register
+    with populated even or odd lanes, unlike the compact logical conversion.
+    Use ``dintlv`` or ``store_native(mode="PK_B32")`` to pack even lanes.
+    """
+    kwargs: dict[str, Any] = {"dtype": dtype, "lanes": _lanes(lanes), "part": part, "native": True}
+    if rounding is not None:
+        kwargs["rounding"] = rounding
+    if saturate is not None:
+        kwargs["saturate"] = saturate
+    return Reg(_call("convert", [_expr(value), _expr(mask)], **kwargs))
 
 
 def compare(lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, seed: Reg | ir.Expr, *, predicate: str) -> Reg:
@@ -447,7 +545,12 @@ def _reduction(
 
 
 def reduce_sum(
-    value: Reg | ir.Expr, mask: Reg | ir.Expr, *, reassoc: bool = False, group_size: int | None = None
+    value: Reg | ir.Expr,
+    mask: Reg | ir.Expr,
+    *,
+    reassoc: bool = False,
+    group_size: int | None = None,
+    native: bool = False,
 ) -> Reg:
     """Reduce active lanes to one lane, or to one lane per group.
 
@@ -456,17 +559,37 @@ def reduce_sum(
     With group_size, the source splits into equal contiguous groups and the
     result holds one lane per group in group order; see group_broadcast.
     """
+    if native:
+        if group_size is not None:
+            raise TypeError("Native reduction does not take group_size")
+        return reduce_sum_native(value, mask, reassoc=reassoc)
     return _reduction("reduce_sum", value, mask, group_size, reassoc=reassoc)
 
 
-def reduce_max(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, group_size: int | None = None) -> Reg:
+def reduce_max(
+    value: Reg | ir.Expr, mask: Reg | ir.Expr, *, group_size: int | None = None, native: bool = False
+) -> Reg:
     """Reduce to one lane, or one lane per group; inactive inputs give the dtype minimum or -inf."""
+    if native:
+        if group_size is not None:
+            raise TypeError("Native reduction does not take group_size")
+        return reduce_max_native(value, mask)
     return _reduction("reduce_max", value, mask, group_size)
 
 
 def reduce_min(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, group_size: int | None = None) -> Reg:
     """Reduce to one lane, or one lane per group; inactive inputs give the dtype maximum or +inf."""
     return _reduction("reduce_min", value, mask, group_size)
+
+
+def reduce_max_native(value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
+    """Native FP32 maximum reduction: result in lane zero of the full register."""
+    return Reg(_call("reduce_max", [_expr(value), _expr(mask)], native=True))
+
+
+def reduce_sum_native(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, reassoc: bool) -> Reg:
+    """Native FP32 sum reduction: result in lane zero of the full register."""
+    return Reg(_call("reduce_sum", [_expr(value), _expr(mask)], native=True, reassoc=reassoc))
 
 
 def group_broadcast(value: Reg | ir.Expr, *, lanes: int) -> Reg:

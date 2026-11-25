@@ -207,6 +207,10 @@ class InitializationChecker : public IRVisitor {
           // generators prove only a prefix, not the entire register width.
           active = it == masks_.end() ? 0 : it->second;
         }
+        // Native packed/one-point stores may write fewer elements than the
+        // physical register or mask width. Cap initialization at the declared footprint.
+        if (GetKwargOr<bool>(call->kwargs_, "native", false))
+          active = std::min(active, (end - begin) / bytes);
         const int64_t stride = GetKwargOr<int>(call->kwargs_, "block_stride", 1);
         const int64_t block = 32 / bytes;
         // Credit only written blocks; the enclosing interval contains gaps.

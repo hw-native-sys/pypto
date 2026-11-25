@@ -113,10 +113,53 @@ int64_t Product(const std::vector<ExprPtr>& shape) {
   return result;
 }
 
+// Physical-register loads distinguish the complete 256-byte register from
+// the source memory footprint. For example UNPK4 reads 64 bytes and places
+// them in every fourth byte; BRC_B32 reads only one scalar.
+int64_t NativeLoadExtent(const Kwargs& kwargs) {
+  const auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", "reg.load_native");
+  const auto lanes = Lanes(kwargs);
+  CHECK(lanes * dtype.GetByte() == 256) << "Native load requires a full 256-byte register";
+  const auto mode = GetRequiredKwarg<std::string>(kwargs, "dist", "reg.load_native");
+  if (mode == "UNPK4") {
+    CHECK(dtype == DataType::FP4E2M1X2 || dtype == DataType::FP8E4M3FN)
+        << "UNPK4 native load requires FP4E2M1X2 or FP8E4M3FN";
+    return 64;
+  }
+  if (mode == "BRC_B32") {
+    CHECK(dtype.GetByte() == 4 && Supported(dtype)) << "BRC_B32 requires a supported 32-bit dtype";
+    return 1;
+  }
+  if (mode == "E2B_B16") {
+    CHECK(dtype == DataType::BF16 || dtype == DataType::UINT16 || dtype == DataType::INT16)
+        << "E2B_B16 requires BF16/UINT16/INT16";
+    return 8;
+  }
+  CHECK(mode == "NORM" && Supported(dtype)) << "Unsupported native load distribution";
+  return lanes;
+}
+
+int64_t NativeStoreExtent(const RegTypePtr& value, const Kwargs& kwargs) {
+  CHECK(value->GetShape() * value->GetDType().GetByte() == 256)
+      << "Native store requires a full 256-byte register";
+  const auto mode = GetRequiredKwarg<std::string>(kwargs, "dist", "reg.store_native");
+  if (mode == "PK_B32") {
+    CHECK(value->GetDType() == DataType::BF16) << "PK_B32 native store requires BF16";
+    return 64;
+  }
+  if (mode == "ONEPT_B32") {
+    CHECK(value->GetDType().GetByte() == 4) << "ONEPT_B32 requires a 32-bit dtype";
+    return 1;
+  }
+  CHECK(mode == "NORM") << "Unsupported native store distribution";
+  return value->GetShape();
+}
+
 // The bounding extent includes gaps for bounds/dependency checks, but gaps
 // must never be credited as initialized. Arithmetic is checked before multiplying.
 int64_t StoreExtent(const Args& args, const Kwargs& kwargs) {
   auto value = Register(args[2], RegKind::VecReg);
+  if (GetKwargOr<bool>(kwargs, "native", false)) return NativeStoreExtent(value, kwargs);
   int stride = GetKwargOr<int>(kwargs, "block_stride", 1);
   CHECK_SPAN(stride > 0 && stride <= std::numeric_limits<int16_t>::max(), args[0]->span_)
       << "block_stride must be a positive i16 integer (1..32767)";
@@ -236,6 +279,34 @@ TypePtr Binary(const Args& a, const Kwargs& k, const std::string& name) {
 }
 
 TypePtr Convert(const Args& a, const Kwargs& k) {
+  if (GetKwargOr<bool>(k, "native", false)) {
+    CHECK(a.size() == 2) << "reg.convert_native requires source and mask";
+    auto x = As<RegType>(a[0]->GetType());
+    CHECK(x && x->GetRegKind() == RegKind::VecReg && x->GetShape() * x->GetDType().GetByte() == 256)
+        << "Native convert requires a full 256-byte input register";
+    auto mask = Register(a[1], RegKind::MaskReg);
+    CHECK(mask->GetShape() == x->GetShape()) << "Native convert mask must match the source width";
+    auto dst = GetRequiredKwarg<DataType>(k, "dtype", "reg.convert_native");
+    auto part = GetRequiredKwarg<std::string>(k, "part", "reg.convert_native");
+    auto src = x->GetDType();
+    bool widening = (src == DataType::FP4E2M1X2 && dst == DataType::BF16) ||
+                    (src == DataType::FP8E4M3FN && dst == DataType::FP32);
+    bool narrowing = src == DataType::FP32 && dst == DataType::BF16;
+    CHECK(widening || narrowing) << "Unsupported native convert dtype pair";
+    CHECK((widening && part == "PART_P0") || (narrowing && (part == "PART_EVEN" || part == "PART_ODD")))
+        << "Unsupported native convert part for dtype pair";
+    if (narrowing) {
+      CHECK(GetKwargOr<std::string>(k, "rounding", "") == "R" && !GetKwargOr<bool>(k, "saturate", true))
+          << "Native FP32 -> BF16 requires ROUND_R and saturation disabled";
+    } else {
+      CHECK(!std::any_of(k.begin(), k.end(), [](const auto& attr) {
+        return attr.first == "rounding" || attr.first == "saturate";
+      })) << "Native widening conversion does not take rounding or saturation";
+    }
+    auto lanes = Lanes(k);
+    CHECK(lanes * dst.GetByte() == 256) << "Native convert requires a full 256-byte result register";
+    return std::make_shared<RegType>(lanes, dst, RegKind::VecReg);
+  }
   CHECK(a.size() == 1) << "reg.convert expects one VecReg";
   auto x = Register(a[0], RegKind::VecReg);
   auto dst = GetRequiredKwarg<DataType>(k, "dtype", "reg.convert");
@@ -355,6 +426,12 @@ TypePtr Reduction(const Args& args, const Kwargs& kwargs, const std::string& nam
   Mask(args[1], x);
   if (name == "reduce_sum" && Float(x->GetDType())) {
     CHECK(GetKwargOr<bool>(kwargs, "reassoc", false)) << "Floating reduce_sum requires reassoc=True";
+  }
+  if (GetKwargOr<bool>(kwargs, "native", false)) {
+    CHECK(GetKwargOr<int>(kwargs, "group_size", 0) == 0) << "Native reduction does not take group_size";
+    CHECK(x->GetShape() * x->GetDType().GetByte() == 256 && x->GetDType() == DataType::FP32)
+        << "Native reduction requires a full FP32 register";
+    return x;
   }
   // An absent group_size means a full reduction to one lane, the original
   // contract. Detect absence by key, not by a zero default: raw IR may pass
@@ -477,11 +554,21 @@ REGISTER_OP("reg.load")
     .add_argument("tile", "Source Vec Tile")
     .add_argument("offset", "Element offset")
     .set_attr<int>("lanes")
+    .set_attr<bool>("native")
+    .set_attr<DataType>("dtype")
+    .set_attr<std::string>("dist")
     .set_input_memory(0, MemorySpace::Vec)
     .set_arg_effect(0, ArgEffect::Read)
     .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
       CHECK(a.size() == 2) << "reg.load expects tile, offset";
       auto lanes = Lanes(k);
+      if (GetKwargOr<bool>(k, "native", false)) {
+        auto dtype = GetRequiredKwarg<DataType>(k, "dtype", "reg.load_native");
+        auto tile = Memory(a, NativeLoadExtent(k), true);
+        CHECK(tile->dtype_.GetByte() == dtype.GetByte())
+            << "Native load storage/result byte widths must agree";
+        return std::make_shared<RegType>(lanes, dtype, RegKind::VecReg);
+      }
       auto t = Memory(a, lanes, true);
       return std::make_shared<RegType>(lanes, t->dtype_, RegKind::VecReg);
     });
@@ -494,6 +581,8 @@ REGISTER_OP("reg.store")
     .add_argument("value", "VecReg value")
     .add_argument("mask", "Optional MaskReg")
     .set_attr<int>("block_stride")
+    .set_attr<bool>("native")
+    .set_attr<std::string>("dist")
     .set_arg_effect(0, ArgEffect::Write)
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -501,10 +590,18 @@ REGISTER_OP("reg.store")
     .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
       CHECK(a.size() == 3 || a.size() == 4) << "reg.store expects tile, offset, value, optional mask";
       auto v = Register(a[2], RegKind::VecReg);
+      if (GetKwargOr<bool>(k, "native", false)) {
+        CHECK(a.size() == 4 && GetKwargOr<int>(k, "block_stride", 0) == 0)
+            << "Native store requires mask and does not take block_stride";
+      }
       auto t = Memory(a, StoreExtent(a, k), false);
       CHECK(t->dtype_ == v->GetDType()) << "Store dtype mismatch";
       if (a.size() == 4) {
-        CHECK(Register(a[3], RegKind::MaskReg)->GetShape() == v->GetShape()) << "Mask lane mismatch";
+        auto mask_lanes = v->GetShape();
+        if (GetKwargOr<bool>(k, "native", false) && GetStringKwarg(k, "dist", "") == "PK_B32") {
+          mask_lanes = 64;
+        }
+        CHECK(Register(a[3], RegKind::MaskReg)->GetShape() == mask_lanes) << "Mask lane mismatch";
       }
       return t;
     });
@@ -535,9 +632,13 @@ REGISTER_OP("reg.convert")
     .set_description("Explicit whitelist register conversion")
     .set_reg_op("pto.vmi.vcvt")
     .add_argument("value", "VecReg")
+    .add_argument("mask", "Optional native source-width MaskReg")
     .set_attr<DataType>("dtype")
     .set_attr<std::string>("rounding")
     .set_attr<bool>("saturate")
+    .set_attr<bool>("native")
+    .set_attr<std::string>("part")
+    .set_attr<int>("lanes")
     .no_arg_writes()
     .f_deduce_type(Convert);
 
@@ -828,6 +929,7 @@ static bool RegisterComputeFamilies() {
         .add_argument("value", "VecReg")
         .add_argument("mask", "MaskReg")
         .set_attr<int>("group_size")
+        .set_attr<bool>("native")
         .no_arg_writes()
         .f_deduce_type([op_name = name](const Args& args, const Kwargs& kwargs) {
           return Reduction(args, kwargs, op_name);
@@ -1054,8 +1156,11 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
   auto validated_reg = As<RegType>(load ? validated->GetType() : call->args_[2]->GetType());
   INTERNAL_CHECK_SPAN(validated_reg, call->span_)
       << "Register memory effect validation produced a non-register result";
-  int64_t extent =
-      IsOp(call, "reg.store") ? StoreExtent(call->args_, call->kwargs_) : validated_reg->GetShape();
+  int64_t extent = IsOp(call, "reg.store")
+                       ? StoreExtent(call->args_, call->kwargs_)
+                       : (IsOp(call, "reg.load") && GetKwargOr<bool>(call->kwargs_, "native", false)
+                              ? NativeLoadExtent(call->kwargs_)
+                              : validated_reg->GetShape());
   // Endpoints are half-open ELEMENT coordinates relative to MemRef.base,
   // including both byte_offset / element_bytes and the TileView origin.
   // An absent root or endpoint means unknown, never an empty/zero access.
