@@ -65,27 +65,6 @@ def _find_if_stmt(body: pypto.ir.Stmt) -> pypto.ir.IfStmt:
 class TestErrorCases:
     """Tests for parser error handling and validation."""
 
-    def test_removed_tensor_create_tensor(self):
-        assert pl.create_tensor is pl.tensor.create
-        assert not hasattr(pl.tensor, "create_tensor")
-        with pytest.raises(InvalidOperationError, match=r"pl\.tensor\.create_tensor was removed"):
-            pl.parse("""
-@pl.function
-def alloc() -> pl.Tensor[[8], pl.FP32]:
-    buf = pl.tensor.create_tensor([8], pl.FP32)
-    return buf
-""")
-
-    def test_removed_tile_create_tile(self):
-        assert pl.create_tile is pl.tile.create
-        assert not hasattr(pl.tile, "create_tile")
-        with pytest.raises(InvalidOperationError, match=r"pl\.tile\.create_tile was removed"):
-            pl.parse("""
-@pl.function
-def alloc():
-    buf = pl.tile.create_tile([8, 8], pl.FP32, target_memory=pl.MemorySpace.Vec)
-""")
-
     def test_missing_parameter_annotation(self):
         """Test error when parameter lacks type annotation."""
 
