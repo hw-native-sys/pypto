@@ -93,7 +93,9 @@ def load_native(
     storage bits without changing the byte width. The containing register
     scope is lowered to physical PTO micro-ops, not VMI's logical vectors.
     """
-    return Reg(_call("load", [_expr(tile), _expr(offset)], native=True, dtype=dtype, lanes=_lanes(lanes), dist=mode))
+    return Reg(
+        _call("load", [_expr(tile), _expr(offset)], native=True, dtype=dtype, lanes=_lanes(lanes), dist=mode)
+    )
 
 
 def store(

@@ -1691,7 +1691,7 @@ def native_decode():
 
 @pytest.mark.ptoas_compile
 def test_native_fp8_pack_store_compiles_with_ptoas(tmp_path):
-    program = pl.parse('''
+    program = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def native_pack():
     raw = pl.tile.full([128], pl.UINT8, 0)
@@ -1705,12 +1705,16 @@ def native_pack():
         raw1 = pl.reg.load_native(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, mode="UNPK4")
         x0 = pl.reg.convert_native(raw0, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
         x1 = pl.reg.convert_native(raw1, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
-        b0 = pl.reg.convert_native(x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False)
-        b1 = pl.reg.convert_native(x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False)
+        b0 = pl.reg.convert_native(
+            x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False
+        )
+        b1 = pl.reg.convert_native(
+            x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False
+        )
         packed, unused = pl.reg.dintlv(b0, b1)
         written = pl.reg.store(out, 0, packed, m16, block_stride=17, post_update=True)
         pk_written = pl.reg.store_native(packed_out, 0, b0, m32, mode="PK_B32")
-''')
+""")
     source = generate(program)
     assert source.count('part = "PART_P0"') == 2
     assert source.count('part = "PART_EVEN"') == 2
@@ -1723,7 +1727,7 @@ def native_pack():
 
 @pytest.mark.ptoas_compile
 def test_native_scalar_load_and_store_compiles_with_ptoas(tmp_path):
-    program = pl.parse('''
+    program = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def native_scalar():
     src = pl.tile.full([1], pl.FP32, 1.0)
@@ -1733,18 +1737,21 @@ def native_scalar():
         x = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="BRC_B32")
         written = pl.reg.store_native(dst, 0, x, one, mode="ONEPT_B32")
     y = pl.tile.add(written, written)
-''')
+""")
     source = generate(program)
     assert 'dist = "BRC_B32"' in source
     assert 'dist = "1PT_B32"' in source
     compile_review_pto(source, tmp_path)
 
 
-@pytest.mark.parametrize("size,dtype,lanes,match", [
-    (63, "FP4E2M1X2", 256, "capacity bounds"),
-    (64, "FP4E2M1X2", 128, "full 256-byte register"),
-    (64, "BF16", 128, "UNPK4 native load requires"),
-])
+@pytest.mark.parametrize(
+    "size,dtype,lanes,match",
+    [
+        (63, "FP4E2M1X2", 256, "capacity bounds"),
+        (64, "FP4E2M1X2", 128, "full 256-byte register"),
+        (64, "BF16", 128, "UNPK4 native load requires"),
+    ],
+)
 def test_native_load_checks_physical_footprint(size, dtype, lanes, match):
     # Reject an undersized payload and register geometry at the IR schema
     # boundary, before either codegen or a device access is possible.
@@ -1763,7 +1770,7 @@ def test_native_scale_gather_and_reduction_compile_with_ptoas(tmp_path):
     # Decode's E2B and gather2 scale broadcasts remain in the same micro
     # scope as BF16 arithmetic. A separate full FP32 scope uses the exact
     # reduction, register permutation and one-point store operations.
-    program = pl.parse('''
+    program = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def native_scale_reduction():
     scale = pl.tile.full([8], pl.UINT16, 0x3f80)
@@ -1786,7 +1793,7 @@ def native_scale_reduction():
         rep = pl.reg.gather_lanes(mx, first)
         total = pl.reg.reduce_sum_native(rep, all32, reassoc=True)
         written = pl.reg.store_native(dst, 0, total, one, mode="ONEPT_B32")
-''')
+""")
     source = generate(program)
     for op in ("pto.vgather2", "pto.vmul", "pto.vcmax", "pto.vselr", "pto.vcadd"):
         assert op in source
