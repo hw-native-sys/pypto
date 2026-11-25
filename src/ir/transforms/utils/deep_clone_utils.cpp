@@ -37,9 +37,8 @@ namespace ir {
 
 namespace {
 
-/// Mutator that deep-copies an IR subtree, creating fresh Var/IterArg/MemRef
-/// objects at every definition site (DefField). Uses GetFieldDescriptors
-/// reflection to identify which Var fields are definition sites.
+/// Clone definition sites (DefFields) and remap their uses within the subtree.
+/// In pre-SSA mode, ordinary Vars keep their identity when their type is unchanged.
 class DeepCloneMutator : public IRMutator {
  public:
   explicit DeepCloneMutator(const std::unordered_map<const Var*, ExprPtr>& var_map, bool clone_def_vars,
@@ -93,7 +92,7 @@ class DeepCloneMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const SimtLaunchStmtPtr& op) override {
-    if (clone_def_vars_) PreRegisterDefFields(*op);
+    PreRegisterDefFields(*op);
     auto result = std::static_pointer_cast<const SimtLaunchStmt>(IRMutator::VisitStmt_(op));
     // The base visitor may retype a result to match a substituted argument.
     // Publish that final definition in the map used by later uses and GetVarMap.
@@ -106,7 +105,7 @@ class DeepCloneMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    if (clone_def_vars_) PreRegisterDefFields(*op);
+    PreRegisterDefFields(*op);
     return IRMutator::VisitStmt_(op);
   }
 
@@ -116,7 +115,7 @@ class DeepCloneMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    if (clone_def_vars_) PreRegisterDefFields(*op);
+    PreRegisterDefFields(*op);
     return IRMutator::VisitStmt_(op);
   }
 
@@ -169,6 +168,11 @@ class DeepCloneMutator : public IRMutator {
     if (new_slot_index.has_value() && *new_slot_index) {
       new_slot_index = IRMutator::VisitExpr(*new_slot_index);
     }
+    // An unchanged storage annotation must also leave its pre-SSA Var unchanged.
+    if (!clone_def_vars_ && new_base == op->base_ && new_offset == op->byte_offset_ &&
+        new_slot_index == op->slot_index_) {
+      return op;
+    }
     // A clone denotes the same storage as its source, so it keeps
     // is_pinned_ and its slot fields: dropping them would silently un-bind every tile in a cloned
     // region — e.g. the per-stage bodies LowerPipelineLoops produces.
@@ -216,7 +220,6 @@ class DeepCloneMutator : public IRMutator {
   /// embedded MemRef's byte_offset are substituted via expr_map_ — otherwise
   /// the fresh Var's type would still reference the caller's old Var pointers.
   void CloneVar(const VarPtr& op) {
-    if (!clone_def_vars_) return;
     if (expr_map_.count(op.get())) return;  // Already mapped (e.g. pre-seeded)
     // Check if the actual runtime type is MemRef / WindowBuffer — don't create a
     // plain Var for those; their dedicated VisitExpr_ overloads handle cloning.
@@ -224,6 +227,9 @@ class DeepCloneMutator : public IRMutator {
       return;
     }
     auto new_type = RemapTypeViaVisitor(op->GetType());
+    // Pre-SSA reassignments share one binding. Only split it when this
+    // substitution changes the declared type, e.g. buf[i] becomes buf[0].
+    if (!clone_def_vars_ && new_type == op->GetType()) return;
     auto name = fresh_name_ ? fresh_name_(op->name_hint_) : op->name_hint_;
     auto fresh = std::make_shared<Var>(std::move(name), std::move(new_type), op->span_);
     expr_map_[op.get()] = fresh;

@@ -41,12 +41,10 @@ struct DeepCloneResult {
 /// @param var_map Pre-seeded substitutions. Entries map original Var pointers to
 ///               replacement expressions. Supports both Var→Var (function param
 ///               cloning) and Var→ConstInt (loop unrolling).
-///               Variables NOT in this map get fresh copies at definition sites.
 ///               Variables in this map are substituted directly at use sites.
 /// @param clone_def_vars If true (default), create fresh Var copies at every
-///               definition site. If false, keep original Var objects at def
-///               sites — useful when the IR uses shared Var pointers for the
-///               same source-level variable across multiple assignments.
+///               definition site. If false, keep the original Var when its
+///               type is unchanged so pre-SSA reassignments share a binding.
 /// @param fresh_name Optional naming callback for cloned definition-site Vars.
 ///               Seeded replacements and IterArg names are preserved.
 /// @return DeepCloneResult with cloned body and definition-site var mapping.

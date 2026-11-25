@@ -20,6 +20,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/scalar_expr.h"
@@ -55,9 +56,9 @@ int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
  *
  * With shared Var pointers (the parser reuses the same Var object for
  * reassignments of the same source-level variable), we use DeepClone with
- * clone_def_vars=false so the original Var pointers are preserved across
- * unrolled iterations. The SSA pass (which always runs after unrolling)
- * handles versioning naturally.
+ * clone_def_vars=false so reassignments keep their shared identity unless
+ * their declared type depends on the iteration. ConvertToSSA versions them
+ * after unrolling.
  */
 class LoopUnrollMutator : public IRMutator {
  public:
@@ -90,10 +91,6 @@ class LoopUnrollMutator : public IRMutator {
                               "). Reduce the loop range or use pl.range() instead");
     }
 
-    // Generate unrolled bodies. With shared Var pointers (parser reuses the
-    // same Var object for reassignments), we pass clone_def_vars=false so
-    // DeepClone keeps the original Var pointers. The SSA pass (which always
-    // runs after unrolling) handles versioning naturally.
     std::vector<StmtPtr> unrolled;
 
     auto emit_iteration = [&](int64_t i) {
@@ -102,6 +99,13 @@ class LoopUnrollMutator : public IRMutator {
       sub_map[op->loop_var_.get()] = const_expr;
       auto [cloned_body, def_var_map] = DeepClone(op->body_, sub_map, /*clone_def_vars=*/false);
       unrolled.push_back(VisitStmt(cloned_body));
+      // A tile defined in a plain loop can be read after it. Remember its
+      // latest binding, including any further specialization by a nested loop.
+      for (const auto& [original, cloned] : def_var_map) {
+        if (original->GetKind() == ObjectKind::Var) {
+          latest_defs_[original->UniqueId()] = VisitExpr(cloned);
+        }
+      }
     };
 
     if (step > 0) {
@@ -162,6 +166,14 @@ class LoopUnrollMutator : public IRMutator {
   }
 
  private:
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto it = latest_defs_.find(op->UniqueId());
+    if (it != latest_defs_.end()) return it->second;
+    return IRMutator::VisitExpr_(op);
+  }
+
+  // Nested unrolling can replace intermediate clones and release their pointers.
+  std::unordered_map<uint64_t, ExprPtr> latest_defs_;
   const std::unordered_set<const ForStmt*>* ancestors_;
 };
 

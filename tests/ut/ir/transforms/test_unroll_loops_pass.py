@@ -9,14 +9,15 @@
 
 """Unit tests for UnrollLoops pass.
 
-Tests use the Before/Expected pattern with @pl.program decorator.
-Unrolled IR is piped through convert_to_ssa() so that structural
-equality (assert_structural_equal) can be used for all comparisons.
+Tests compare unrolled programs with hand-expanded equivalents. Checks on the
+pre-SSA IR cover shared bindings, and convert_to_ssa() exposes their versions.
 """
 
 import pypto.language as pl
 import pytest
 from pypto import InternalError, ir, passes
+from pypto.arith import Analyzer
+from pypto.backend import BackendType
 from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics import ParserSyntaxError
 
@@ -28,6 +29,88 @@ def _unroll_and_ssa(program):
 
 class TestBasicUnroll:
     """Tests for basic loop unrolling."""
+
+    def test_unroll_specializes_declared_tile_slots(self, tmp_path):
+        """A two-row copy uses both slots of one allocation and threads the output through both stores."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, x: pl.Tensor[[2, 64], pl.FP32], y: pl.Out[pl.Tensor[[2, 64], pl.FP32]]
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                for i in pl.unroll(2):
+                    v: pl.Tile[[1, 64], pl.FP32, pl.MemRef("buf", slots=2)[i], pl.Mem.Vec] = pl.load(
+                        x, [i, 0], [1, 64]
+                    )
+                    y = pl.store(v, [i, 0], y)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, x: pl.Tensor[[2, 64], pl.FP32], y: pl.Out[pl.Tensor[[2, 64], pl.FP32]]
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                v0: pl.Tile[[1, 64], pl.FP32, pl.MemRef("buf", slots=2)[0], pl.Mem.Vec] = pl.load(
+                    x, [pl.const(0, pl.INDEX), 0], [1, 64]
+                )
+                y = pl.store(v0, [pl.const(0, pl.INDEX), 0], y)
+                v1: pl.Tile[[1, 64], pl.FP32, pl.MemRef("buf", slots=2)[1], pl.Mem.Vec] = pl.load(
+                    x, [pl.const(1, pl.INDEX), 0], [1, 64]
+                )
+                y = pl.store(v1, [pl.const(1, pl.INDEX), 0], y)
+                return y
+
+        after = passes.unroll_loops()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected))
+        ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
+        assert any((tmp_path / "kernels").rglob("*.pto"))
+
+    def test_unroll_uses_last_declared_tile_after_loop(self):
+        """A use outside nested loops reads the tile selected by their final iterations."""
+        buf = pl.MemRef("buf", slots=4)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, x: pl.Tensor[[2, 64], pl.FP32], y: pl.Out[pl.Tensor[[2, 64], pl.FP32]]
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                for i in pl.unroll(2):
+                    for j in pl.unroll(1, -1, -1):
+                        v: pl.Tile[[1, 64], pl.FP32, buf[2 * i + j], pl.Mem.Vec] = pl.load(x, [i, 0], [1, 64])
+                return pl.store(v, [0, 0], y)
+
+        # The leaked tile's input annotation still refers to loop-local i and j.
+        # Check its scope after UnrollLoops has replaced both indices.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            func = passes.unroll_loops()(Before).get_function("main")
+        *loads, ret = ir.flatten_to_stmts(func.body)
+        assert ret.value[0].args[0] is loads[-1].var
+        simplify = Analyzer().simplify
+        assert [simplify(load.var.type.memref.slot_index_).value for load in loads] == [1, 0, 3, 2]
+
+    def test_unroll_preserves_fixed_slot_accumulator(self):
+        """Reassigning a tile with a fixed slot still updates its original binding before SSA."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tile[[1, 64], pl.FP32]:
+                acc: pl.Tile[[1, 64], pl.FP32, pl.MemRef("buf", slots=2)[0], pl.Mem.Vec] = pl.load(
+                    x, [0, 0], [1, 64]
+                )
+                for _ in pl.unroll(2):
+                    acc = pl.add(acc, 1.0)
+                return acc
+
+        after = passes.unroll_loops()(Before).get_function("main")
+        init, first, second, ret = ir.flatten_to_stmts(after.body)
+        assert first.var is first.value.args[0] is init.var
+        assert second.var is second.value.args[0] is init.var
+        assert ret.value[0] is init.var
 
     def test_unroll_preserves_enclosing_iter_arg(self):
         """The clone_def_vars=false path must also preserve external loop state."""
