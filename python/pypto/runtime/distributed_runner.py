@@ -2030,22 +2030,9 @@ class DistributedWorker(Worker):
         window_sources = normalize_window_sources(window_sources)
         reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
         host_ranges, self._inherited_inputs = _inherited_input_ranges(inherited_host_tensors)
-        inherited, self._inherited_host_spans = self._resolve_inherited_host_tensors(host_ranges)
-        self._inherited_host_tensors = inherited
-        # `is_shared()` is kept as a one-way signal: True confirms a torch-managed shared
-        # backing, False is inconclusive. Warn once rather than per tensor, and never
-        # reject or silently fall back to staging — falling back would hide the cost this
-        # facility exists to remove, and rejecting would refuse the valid external mapping.
-        unverifiable = sum(1 for tensor in inherited if not tensor.is_shared())
-        if unverifiable:
-            warnings.warn(
-                f"DistributedWorker: {unverifiable} of {len(inherited)} inherited_host_tensors "
-                "cannot be verified as cross-process visible (torch.is_shared() is False, which "
-                "is inconclusive for external MAP_SHARED mappings). Naming them relies on the "
-                "caller's guarantee; a MAP_PRIVATE backing yields stale or incorrect data.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+        self._inherited_host_tensors, self._inherited_host_spans = self._resolve_inherited_host_tensors(
+            host_ranges
+        )
         self._buffer_owner_id: bytes | None = None
         self._buffer_id_seq = 0
         # One Buffer object per canonical inherited host span, not per copy. Reusing only its
@@ -2825,6 +2812,20 @@ class DistributedWorker(Worker):
                     "listed both read-only and writable; one allocation has one access mode."
                 )
             span_read_only[span] = is_marked
+        # `is_shared()` is kept as a one-way signal: True confirms a torch-managed shared
+        # backing, False is inconclusive. Warn once rather than per tensor, and never
+        # reject or silently fall back to staging — falling back would hide the cost this
+        # facility exists to remove, and rejecting would refuse the valid external mapping.
+        unverifiable = sum(1 for tensor in tensors if not tensor.is_shared())
+        if unverifiable:
+            warnings.warn(
+                f"DistributedWorker: {unverifiable} of {len(tensors)} inherited_host_tensors "
+                "cannot be verified as cross-process visible (torch.is_shared() is False, which "
+                "is inconclusive for external MAP_SHARED mappings). Naming them relies on the "
+                "caller's guarantee; a MAP_PRIVATE backing yields stale or incorrect data.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
         return tuple(tensors), tuple(sorted(span_read_only.items()))
 
     def _named_buffer_for_span(self, host_ptr: int, nbytes: int, *, read_only: bool) -> Any:
