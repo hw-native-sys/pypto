@@ -117,10 +117,10 @@ int64_t Product(const std::vector<ExprPtr>& shape) {
 // the source memory footprint. For example UNPK4 reads 64 bytes and places
 // them in every fourth byte; BRC_B32 reads only one scalar.
 int64_t NativeLoadExtent(const Kwargs& kwargs) {
-  const auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", "reg.load_native");
+  const auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", "reg.load");
   const auto lanes = Lanes(kwargs);
   CHECK(lanes * dtype.GetByte() == 256) << "Native load requires a full 256-byte register";
-  const auto mode = GetRequiredKwarg<std::string>(kwargs, "dist", "reg.load_native");
+  const auto mode = GetRequiredKwarg<std::string>(kwargs, "dist", "reg.load");
   if (mode == "UNPK4") {
     CHECK(dtype == DataType::FP4E2M1X2 || dtype == DataType::FP8E4M3FN)
         << "UNPK4 native load requires FP4E2M1X2 or FP8E4M3FN";
@@ -142,7 +142,7 @@ int64_t NativeLoadExtent(const Kwargs& kwargs) {
 int64_t NativeStoreExtent(const RegTypePtr& value, const Kwargs& kwargs) {
   CHECK(value->GetShape() * value->GetDType().GetByte() == 256)
       << "Native store requires a full 256-byte register";
-  const auto mode = GetRequiredKwarg<std::string>(kwargs, "dist", "reg.store_native");
+  const auto mode = GetRequiredKwarg<std::string>(kwargs, "dist", "reg.store");
   if (mode == "PK_B32") {
     CHECK(value->GetDType() == DataType::BF16) << "PK_B32 native store requires BF16";
     return 64;
@@ -282,14 +282,14 @@ TypePtr Binary(const Args& a, const Kwargs& k, const std::string& name) {
 
 TypePtr Convert(const Args& a, const Kwargs& k) {
   if (GetKwargOr<bool>(k, "native", false)) {
-    CHECK(a.size() == 2) << "reg.convert_native requires source and mask";
+    CHECK(a.size() == 2) << "reg.convert requires source and mask";
     auto x = As<RegType>(a[0]->GetType());
     CHECK(x && x->GetRegKind() == RegKind::VecReg && x->GetShape() * x->GetDType().GetByte() == 256)
         << "Native convert requires a full 256-byte input register";
     auto mask = Register(a[1], RegKind::MaskReg);
     CHECK(mask->GetShape() == x->GetShape()) << "Native convert mask must match the source width";
-    auto dst = GetRequiredKwarg<DataType>(k, "dtype", "reg.convert_native");
-    auto part = GetRequiredKwarg<std::string>(k, "part", "reg.convert_native");
+    auto dst = GetRequiredKwarg<DataType>(k, "dtype", "reg.convert");
+    auto part = GetRequiredKwarg<std::string>(k, "part", "reg.convert");
     auto src = x->GetDType();
     bool widening = (src == DataType::FP4E2M1X2 && dst == DataType::BF16) ||
                     (src == DataType::FP8E4M3FN && dst == DataType::FP32);
@@ -565,7 +565,7 @@ REGISTER_OP("reg.load")
       CHECK(a.size() == 2) << "reg.load expects tile, offset";
       auto lanes = Lanes(k);
       if (GetKwargOr<bool>(k, "native", false)) {
-        auto dtype = GetRequiredKwarg<DataType>(k, "dtype", "reg.load_native");
+        auto dtype = GetRequiredKwarg<DataType>(k, "dtype", "reg.load");
         auto tile = Memory(a, NativeLoadExtent(k), true);
         CHECK(tile->dtype_.GetByte() == dtype.GetByte())
             << "Native load storage/result byte widths must agree";

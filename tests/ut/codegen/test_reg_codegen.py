@@ -1680,9 +1680,9 @@ def native_decode():
     raw = pl.tile.full([64], pl.UINT8, 0)
     out = pl.tile.create([{lanes}], pl.{target}, target_memory=pl.Mem.Vec)
     with pl.reg_scope():
-        raw_reg = pl.reg.load_native(raw, dtype=pl.{dtype}, lanes=256, mode="UNPK4")
+        raw_reg = pl.reg.load(raw, dtype=pl.{dtype}, lanes=256, dist="UNPK4", native=True)
         mask8 = pl.reg.full_mask(lanes=256)
-        value = pl.reg.convert_native(raw_reg, mask8, dtype=pl.{target}, lanes={lanes}, part="PART_P0")
+        value = pl.reg.convert(raw_reg, mask8, dtype=pl.{target}, lanes={lanes}, part="PART_P0", native=True)
         out_mask = pl.reg.full_mask(lanes={lanes})
         written = pl.reg.store(out, 0, value, out_mask)
     result = pl.tile.add(written, written)
@@ -1709,19 +1709,19 @@ def native_pack():
         m8 = pl.reg.full_mask(lanes=256)
         m32 = pl.reg.full_mask(lanes=64)
         m16 = pl.reg.full_mask(lanes=128)
-        raw0 = pl.reg.load_native(raw, 0, dtype=pl.FP8E4M3FN, lanes=256, mode="UNPK4")
-        raw1 = pl.reg.load_native(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, mode="UNPK4")
-        x0 = pl.reg.convert_native(raw0, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
-        x1 = pl.reg.convert_native(raw1, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
-        b0 = pl.reg.convert_native(
-            x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False
+        raw0 = pl.reg.load(raw, 0, dtype=pl.FP8E4M3FN, lanes=256, dist="UNPK4", native=True)
+        raw1 = pl.reg.load(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, dist="UNPK4", native=True)
+        x0 = pl.reg.convert(raw0, m8, dtype=pl.FP32, lanes=64, part="PART_P0", native=True)
+        x1 = pl.reg.convert(raw1, m8, dtype=pl.FP32, lanes=64, part="PART_P0", native=True)
+        b0 = pl.reg.convert(
+            x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False, native=True
         )
-        b1 = pl.reg.convert_native(
-            x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False
+        b1 = pl.reg.convert(
+            x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False, native=True
         )
         packed, unused = pl.reg.dintlv(b0, b1)
         written = pl.reg.store(out, 0, packed, m16, block_stride=17, post_update=True)
-        pk_written = pl.reg.store_native(packed_out, 0, b0, m32, mode="PK_B32")
+        pk_written = pl.reg.store(packed_out, 0, b0, m32, dist="PK_B32", native=True)
 """)
     source = generate_native_test(program)
     assert source.count('part = "PART_P0"') == 2
@@ -1742,8 +1742,8 @@ def native_scalar():
     dst = pl.tile.full([8], pl.FP32, 0.0)
     with pl.reg_scope():
         one = pl.reg.active_mask(1, lanes=64)
-        x = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="BRC_B32")
-        written = pl.reg.store_native(dst, 0, x, one, mode="ONEPT_B32")
+        x = pl.reg.load(src, dtype=pl.FP32, lanes=64, dist="BRC_B32", native=True)
+        written = pl.reg.store(dst, 0, x, one, dist="ONEPT_B32", native=True)
     y = pl.tile.add(written, written)
 """)
     source = generate_native_test(program)
@@ -1769,7 +1769,7 @@ def test_native_load_checks_physical_footprint(size, dtype, lanes, match):
 def invalid_native():
     raw = pl.tile.full([{size}], pl.UINT8, 0)
     with pl.reg_scope():
-        x = pl.reg.load_native(raw, dtype=pl.{dtype}, lanes={lanes}, mode="UNPK4")
+        x = pl.reg.load(raw, dtype=pl.{dtype}, lanes={lanes}, dist="UNPK4", native=True)
 """)
 
 
@@ -1790,19 +1790,19 @@ def native_scale_reduction():
         indices = pl.reg.index_gen(0, lanes=128, dtype=pl.UINT16)
         group = pl.reg.shift_rights(indices, 5, m16)
         scale_bits = pl.reg.gather(scale, group, m16)
-        e2b = pl.reg.load_native(scale, dtype=pl.BF16, lanes=128, mode="E2B_B16")
+        e2b = pl.reg.load(scale, dtype=pl.BF16, lanes=128, dist="E2B_B16", native=True)
         scale_bf = pl.reg.interpret_cast(scale_bits, dtype=pl.BF16)
         val = pl.reg.mul(scale_bf, e2b, m16)
         scale_written = pl.reg.store(scale_out, 0, val, m16)
     with pl.reg_scope():
         all32 = pl.reg.full_mask(lanes=64)
         one = pl.reg.active_mask(1, lanes=64)
-        x = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="NORM")
-        mx = pl.reg.reduce_max_native(x, all32)
+        x = pl.reg.load(src, dtype=pl.FP32, lanes=64, native=True)
+        mx = pl.reg.reduce_max(x, all32, native=True)
         first = pl.reg.broadcast(0, lanes=64, dtype=pl.UINT32)
         rep = pl.reg.gather_lanes(mx, first)
         total = pl.reg.reduce_sum_native(rep, all32, reassoc=True)
-        written = pl.reg.store_native(dst, 0, total, one, mode="ONEPT_B32")
+        written = pl.reg.store(dst, 0, total, one, dist="ONEPT_B32", native=True)
 """)
     source = generate_native_test(program)
     for op in ("pto.vgather2", "pto.vmul", "pto.vcmax", "pto.vselr", "pto.vcadd"):
@@ -1823,7 +1823,7 @@ def native_math():
     out = pl.tile.create([64], pl.FP32, target_memory=pl.Mem.Vec)
     with pl.reg_scope():
         heads = pl.reg.active_mask(32, lanes=64)
-        a = pl.reg.load_native(src, dtype=pl.FP32, lanes=64, mode="NORM")
+        a = pl.reg.load(src, dtype=pl.FP32, lanes=64, native=True)
         b = pl.reg.load(other, lanes=64)
         scaled = pl.reg.muls(a, 0.0441941731, heads)
         mx = pl.reg.maximum(scaled, b, heads)
@@ -1832,7 +1832,7 @@ def native_math():
         mul = pl.reg.mul(exp, b, heads)
         added = pl.reg.add(mul, exp, heads)
         value = pl.reg.div(exp, added, heads)
-        written = pl.reg.store_native(out, 0, value, heads, mode="NORM")
+        written = pl.reg.store(out, 0, value, heads, native=True)
         pl.reg.mem_bar("VST_VLD")
 """)
     source = generate_native_test(program)

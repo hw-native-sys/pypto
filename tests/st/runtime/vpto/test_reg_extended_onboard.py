@@ -51,6 +51,7 @@ CASES = (
     "histogram256",
     "reinterpret",
     "mx_quant",
+    "native_fp8_decode",
     "unmasked_f32",
     "unmasked_bf16",
     "block_stride128",
@@ -294,6 +295,32 @@ def _mx_quant_body():
     return body
 
 
+def _native_fp8_decode_body():
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], pl.UINT8],
+        out: pl.InOut[pl.Tensor[[1, 1024], pl.FP32]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], pl.FP32]:
+        raw = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.Mem.Vec), [256])
+        dst = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.Mem.Vec), [1024])
+        count = pl.cast(n, pl.INDEX)
+        with pl.reg_scope():
+            x = pl.reg.load(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, native=True, dist="UNPK4")
+            bytes_mask = pl.reg.full_mask(lanes=256)
+            values = pl.reg.convert(x, bytes_mask, dtype=pl.FP32, lanes=64, native=True, part="PART_P0")
+            full = pl.reg.full_mask(lanes=64)
+            prefix = pl.reg.active_mask(count, lanes=64)
+            one = pl.reg.active_mask(1, lanes=64)
+            maximum = pl.reg.reduce_max(values, full, native=True)
+            dst = pl.reg.store(dst, 64, values, prefix, native=True)
+            dst = pl.reg.store(dst, 192, maximum, one, native=True, dist="ONEPT_B32")
+        pl.store(pl.reshape(dst, [1, 1024]), [0, 0], out)
+        return out
+
+    return body
+
+
 def _unmasked_body(dtype):
     register_dtype = pl.BF16 if dtype == pl.UINT16 else pl.FP32
 
@@ -341,8 +368,11 @@ def _program(case):
         "histogram256": pl.UINT8,
         "reinterpret": pl.UINT32,
         "unmasked_bf16": pl.UINT16,
+        "native_fp8_decode": pl.UINT8,
     }.get(case, pl.FP32)
     output_dtype = pl.UINT16 if case.startswith("histogram") else dtype
+    if case == "native_fp8_decode":
+        output_dtype = pl.FP32
     bins = 128 if case == "histogram128" else 256
     if case == "float32":
 
@@ -379,6 +409,8 @@ def _program(case):
         body = _histogram_body(bins)
     elif case == "reinterpret":
         body = _reinterpret_body()
+    elif case == "native_fp8_decode":
+        body = _native_fp8_decode_body()
     elif case == "mx_quant":
         body = _mx_quant_body()
     elif case.startswith("unmasked_"):
@@ -486,6 +518,8 @@ def _build(output):
             if case.startswith("histogram")
             else ("interpret_cast", "create_group_mask")
             if case == "reinterpret"
+            else ("vlds", "vcvt", "vcmax", "vsts")
+            if case == "native_fp8_decode"
             else MX_OPS
             if case == "mx_quant"
             else ("mul", "store")
@@ -495,8 +529,8 @@ def _build(output):
             else ("gather", "scatter")
         )
         for op in ops:
-            mnemonic = MNEMONICS.get(op, f"v{op}")
-            assert any(f"pto.vmi.{mnemonic}" in helper for helper in helpers), (case, op)
+            opcode = f"pto.{op}" if case == "native_fp8_decode" else "pto.vmi." + MNEMONICS.get(op, f"v{op}")
+            assert any(opcode in helper for helper in helpers), (case, op)
         if case == "mx_quant":
             # The grouped forms must carry the group COUNT, not the group width,
             # and the reduction result must be narrowed to one lane per group.
@@ -520,6 +554,11 @@ def _build(output):
 
 
 def _inputs(case, repeat):
+    if case == "native_fp8_decode":
+        # Finite normal E4M3FN encodings with distinct values and both signs.
+        bits = (0x10 + np.arange(256) % 96).astype(np.uint8)
+        bits[::3] |= np.uint8(0x80)
+        return np.roll(bits, 11 * repeat)
     if case == "unmasked_bf16" or case.startswith("block_stride"):
         # Distinct finite BF16 bit patterns test lane ordering without rounding
         # or NaN equality obscuring a misplaced payload. UINT16 transports the
@@ -571,6 +610,8 @@ def _inputs(case, repeat):
 
 
 def _initial(case, data):
+    if case == "native_fp8_decode":
+        return np.full(1024, -777, dtype=np.float32)
     if case.startswith("block_stride"):
         return np.full(4096, 0xA55A, dtype=np.uint16)
     if case == "unmasked_bf16":
@@ -585,6 +626,11 @@ def _initial(case, data):
 
 def _golden(case, data, n):
     expected = _initial(case, data)
+    if case == "native_fp8_decode":
+        values = torch.from_numpy(data[64:128]).view(torch.float8_e4m3fn).float().numpy()
+        expected[64 : 64 + n] = values[:n]
+        expected[192] = values.max()
+        return expected
     if case.startswith("block_stride"):
         # Independent ND -> NZ reference: [row, panel, column] is transposed
         # to [panel, row, column]. Row 1 matches the C++ producer's row*16

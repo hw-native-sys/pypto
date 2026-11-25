@@ -573,22 +573,23 @@ squeeze-store 的对齐状态使用物理 micro 指令，含流的整个 registe
 
 ### 显式物理寄存器模式（A5）
 
-逐指令移植 native VF kernel 时，可使用 `pl.reg.load_native`、
-`pl.reg.convert_native` 和 `pl.reg.store_native`。这些操作保留完整的
+逐指令移植 native VF kernel 时，可在 `pl.reg.load`、`pl.reg.convert` 和
+`pl.reg.store` 中指定 `native=True`。这些操作保留完整的
 256 字节物理寄存器，所在 `reg_scope` 采用 PTO micro lowering。普通
 逻辑寄存器接口及其默认 VMI lowering 不变；native scope 中的寄存器和
 掩码需对应完整硬件宽度。
 
-- `load_native(..., dtype, lanes, mode="UNPK4")` 读取 64 字节 FP4/FP8
+- `load(..., native=True, dtype=..., lanes=256, dist="UNPK4")` 读取 64 字节 FP4/FP8
   打包数据，得到 256-lane 寄存器。`BRC_B32` 读取一个 32 位元素，
-  `E2B_B16` 读取八个 16 位 group scale，`NORM` 读取整个寄存器。
-- `convert_native(..., mask, dtype, lanes, part="PART_P0")` 支持 FP4 到 BF16
+  `E2B_B16` 读取八个 16 位 group scale，默认的 `NORM` 读取整个寄存器。
+- `convert(x, mask, native=True, dtype=..., lanes=..., part="PART_P0")` 支持 FP4 到 BF16
   或 FP8 到 FP32。FP32 到 BF16 使用 `PART_EVEN` 或 `PART_ODD`，舍入
   `R` 且关闭饱和，结果保留 128 个物理 lane。
 - 两个 BF16 物理寄存器可用 `dintlv` 收集偶数 lane；单个寄存器可用
-  `store_native(..., mode="PK_B32")` 紧凑写出偶数 lane。`ONEPT_B32`
-  写出 lane 0。`PK_B32` 使用 64-lane 的 32 位 mask，而非 128-lane mask。
-- `reduce_max_native`、`reduce_sum_native` 的有定义结果位于完整 FP32
+  `store(..., native=True, dist="PK_B32")` 紧凑写出偶数 lane。`ONEPT_B32`
+  写出 lane 0。省略 `dist` 时按 mask 正常写回。
+  `PK_B32` 使用 64-lane 的 32 位 mask，而非 128-lane mask。
+- `reduce_max(x, mask, native=True)`、`reduce_sum_native` 的有定义结果位于完整 FP32
   寄存器的 lane 0，其他 lane 不是计算结果。
 
 偏移量以 backing Tile 元素为单位。边界与初始化检查遵循实际访存范围，
