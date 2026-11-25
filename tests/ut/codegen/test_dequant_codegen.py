@@ -32,12 +32,13 @@ def test_dequant_result_preserves_tile_shape(src_dtype, src_cols, valid_cols):
 
     assert isinstance(result_type, ir.TileType)
     assert result_type.dtype == pl.FP32
-    assert [dim.value for dim in result_type.shape] == [16, src_cols]
+    assert all(isinstance(dim, ir.ConstInt) for dim in result_type.shape)
+    assert [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)] == [16, src_cols]
     assert result_type.tile_view is not None
     rows, cols = result_type.tile_view.valid_shape
-    assert rows.value == 10
+    assert isinstance(rows, ir.ConstInt) and rows.value == 10
     if isinstance(valid_cols, int):
-        assert cols.value == valid_cols
+        assert isinstance(cols, ir.ConstInt) and cols.value == valid_cols
     else:
         assert isinstance(cols, ir.Var) and cols.name_hint == valid_cols.name_hint
 
@@ -88,27 +89,32 @@ def test_dequant_rejects_incomplete_source_vectors(src_dtype, src_cols, valid_co
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize(("src_dtype", "pto_dtype", "width"), [(pl.INT8, "i8", 32), (pl.INT16, "i16", 96)])
-def test_dequant_assembles_a5(src_dtype, pto_dtype, width, tmp_path):
+@pytest.mark.parametrize(
+    ("src_dtype", "pto_dtype", "width", "offset_rows"),
+    [(pl.INT8, "i8", 32, 16), (pl.INT16, "i16", 96, 16), (pl.INT8, "i8", 64, 32)],
+)
+def test_dequant_assembles_a5(src_dtype, pto_dtype, width, offset_rows, tmp_path):
     physical_width = (width + 63) // 64 * 64
 
     @pl.jit.incore
     def dequant_kernel(
         src: pl.Tensor[[16, width], src_dtype],
         scale: pl.Tensor[[16, 1], pl.FP32],
-        offset: pl.Tensor[[16, 1], pl.FP32],
+        offset: pl.Tensor[[offset_rows, 1], pl.FP32],
         out: pl.Out[pl.Tensor[[16, width], pl.FP32]],
     ) -> pl.Tensor[[16, width], pl.FP32]:
         values = pl.tile.load(src, [0, 0], [16, physical_width], valid_shape=[16, width])
         scales = pl.tile.load(scale, [0, 0], [16, 1])
-        offsets = pl.tile.load(offset, [0, 0], [16, 1])
+        offsets = pl.tile.load(offset, [0, 0], [offset_rows, 1])
+        if offset_rows != 16:
+            offsets = pl.tile.slice(offsets, [16, 1], [0, 0])
         return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)
 
     @pl.jit
     def dequant_program(
         src: pl.Tensor[[16, width], src_dtype],
         scale: pl.Tensor[[16, 1], pl.FP32],
-        offset: pl.Tensor[[16, 1], pl.FP32],
+        offset: pl.Tensor[[offset_rows, 1], pl.FP32],
         out: pl.Out[pl.Tensor[[16, width], pl.FP32]],
     ) -> pl.Tensor[[16, width], pl.FP32]:
         return dequant_kernel(src, scale, offset, out)
@@ -134,3 +140,9 @@ def test_dequant_assembles_a5(src_dtype, pto_dtype, width, tmp_path):
         assert f"valid_col = %c{width}_index" in allocation
     assert f"!pto.partition_tensor_view<16x{width}x{pto_dtype}>" in mlir
     assert f"!pto.partition_tensor_view<16x{width}xf32>" in mlir
+    if offset_rows != 16:
+        assert "pto.tmov" in mlir
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

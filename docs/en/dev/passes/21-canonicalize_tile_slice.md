@@ -27,6 +27,10 @@ so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned alloca
 
 Both Vec materializations place the `tile.extract` **at the slice's definition** whenever that is provably equivalent, so the copy stays where the author wrote the slice — in particular inside the same `pl.split_aiv` region — and a slice with several consumers is copied once. A slice is a view that reads its source when consumed, so a copy taken at the definition is equivalent only when nothing writes that storage in between; when a write may reach it, the extract is placed before each consumer instead (see [Where a Vec extract goes](#where-a-vec-extract-goes)).
 
+For A5 `tile.dequant`, the native instruction requires a single tile type for both coefficient operands.
+An aligned coefficient subview is therefore copied through a fresh Vec `tile.move` at the consumer
+to match its logical descriptor and preserve the original view's contents.
+
 **Pipeline position**: After [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](22-infer_tile_memory_space.md).
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.

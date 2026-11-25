@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -74,9 +75,9 @@ TypePtr DeduceDequantType(const std::vector<ExprPtr>& args) {
 
   const auto cols = As<ConstInt>(src->shape_[1]);
   constexpr int64_t kFp32VectorLanes = 64;
-  constexpr int64_t kVectorBlockBytes = 32;
+  const int64_t row_alignment = src->dtype_ == DataType::INT8 ? 32 : 16;
   CHECK_SPAN(cols && cols->value_ > 0 && cols->value_ <= std::numeric_limits<int32_t>::max() &&
-                 cols->value_ % (kVectorBlockBytes / src->dtype_.GetByte()) == 0,
+                 cols->value_ % row_alignment == 0,
              source_span)
       << "tile.dequant requires a static positive source width with 32-byte row alignment";
 

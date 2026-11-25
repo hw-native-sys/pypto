@@ -1085,7 +1085,7 @@ class CanonicalizeMutator : public IRMutator {
     if (auto rewrite = TryRewriteColExpand(assign)) {
       return SeqStmts::Flatten(std::move(*rewrite), assign->span_);
     }
-    if (auto rewrite = TryMaterializeUnalignedVecCall(call)) {
+    if (auto rewrite = TryMaterializeVecCall(call)) {
       auto new_assign = MutableCopy(assign);
       new_assign->value_ = rewrite->call;
       rewrite->extracts.push_back(new_assign);
@@ -1100,7 +1100,7 @@ class CanonicalizeMutator : public IRMutator {
     auto eval = As<EvalStmt>(base);
     if (!eval) return base;
     auto call = As<Call>(eval->expr_);
-    auto rewrite = TryMaterializeUnalignedVecCall(call);
+    auto rewrite = TryMaterializeVecCall(call);
     if (!rewrite) return base;
 
     auto new_eval = MutableCopy(eval);
@@ -1440,7 +1440,9 @@ class CanonicalizeMutator : public IRMutator {
   /// the alignment contract belongs to PTO vector operands, not to one
   /// elementwise opcode. `tile.slice` is only another view and remains peeled;
   /// `tile.extract` has its own direct slice-folding rewrite above.
-  std::optional<MaterializedCall> TryMaterializeUnalignedVecCall(const CallPtr& call) {
+  /// Aligned dequantization coefficient views also require their own dense
+  /// allocation to match the native coefficient template type.
+  std::optional<MaterializedCall> TryMaterializeVecCall(const CallPtr& call) {
     if (!call || !call->op_ || IsOp(call, "tile.slice") || IsOp(call, "tile.extract")) {
       return std::nullopt;
     }
@@ -1453,7 +1455,21 @@ class CanonicalizeMutator : public IRMutator {
       auto operand = AsVarLike(call->args_[i]);
       if (!operand) continue;
       auto it = slices_.find(operand.get());
-      if (it == slices_.end() || !NeedsAlignedVecMaterialization(it->second)) continue;
+      if (it == slices_.end()) continue;
+      // TDEQUANT uses a single native template type for scale and offset.
+      // An aligned subview may still retain its parent's physical descriptor.
+      // Copy coefficient windows into dense tiles with matching descriptors.
+      const bool unaligned = NeedsAlignedVecMaterialization(it->second);
+      if (IsOp(call, "tile.dequant") && i > 0 && IsVecOrUnassigned(it->second) && !unaligned) {
+        auto move = OpRegistry::GetInstance().Create("tile.move", {operand},
+                                                     {{"target_memory", MemorySpace::Vec}}, sp);
+        auto var = std::make_shared<Var>(operand->name_hint_ + "_dequant_coeff", move->GetType(), sp);
+        extracts.push_back(std::make_shared<AssignStmt>(var, move, sp));
+        new_args[i] = var;
+        rewrote = true;
+        continue;
+      }
+      if (!unaligned) continue;
       auto extract = BuildOperandExtract(operand, it->second, MemorySpace::Vec, sp);
       extracts.push_back(extract);
       new_args[i] = extract->var_;
