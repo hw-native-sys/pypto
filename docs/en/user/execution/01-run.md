@@ -158,6 +158,19 @@ when the installed PyTorch provides it. Generated orchestration describes
 allocations for `pl.HF8` and `pl.FP4E1M2X2` as `UINT8` byte buffers while
 in-core code preserves their declared element types.
 
+### Owner-local service registrations
+
+A prepared `DistributedWorker` can optionally accept
+`chip_service_factories={rank: factory}`. Factories execute inside the chip's
+allocation-owner process after initialization and return services with `close()`.
+For a whole resident tensor, `token, descriptor = rt.retain_service_tensor(t, rank)`
+keeps the underlying allocation alive. Pass the descriptor to the owner-local
+service, then call `rt.release_service_tensor(token)` only after its native
+unregister completes. A live registration refuses intentional free/close before
+any auto-free occurs. It does not synchronize computation: callers must fence
+and protect the data being accessed. This narrow path supports L3 device malloc;
+ordinary workers start no services.
+
 ### `RunConfig` fields that affect dispatch
 
 `RunConfig` carries both compile-side and runtime-side settings; the compile-side ones are

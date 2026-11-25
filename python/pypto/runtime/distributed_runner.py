@@ -627,6 +627,7 @@ def _construct_worker(
     num_sub: int,
     enable_sdma: bool = False,
     startup_timeout_s: float | None = None,
+    chip_service_factories: dict[int, Callable[..., Any]] | None = None,
 ) -> Any:
     """Construct a simpler ``Worker(level=3)`` from the distributed config."""
     if startup_timeout_s is not None and (not math.isfinite(startup_timeout_s) or startup_timeout_s <= 0):
@@ -649,6 +650,8 @@ def _construct_worker(
     }
     if startup_timeout_s is not None:
         worker_config["startup_timeout_s"] = startup_timeout_s
+    if chip_service_factories:
+        worker_config["chip_service_factories"] = chip_service_factories
     return Worker(**worker_config)
 
 
@@ -1988,6 +1991,7 @@ class DistributedWorker(Worker):
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
         startup_timeout_s: float | None = None,
+        chip_service_factories: dict[int, Callable[..., Any]] | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         # Simpler owns allocations as Buffer objects. PyPTO continues exposing
@@ -1995,6 +1999,7 @@ class DistributedWorker(Worker):
         # table at every control-plane operation. The retained handle is also
         # attached to DeviceTensor for address-free wire TaskArgs.
         self._device_buffers: dict[tuple[int, int], Any] = {}
+        self._service_tokens: set[str] = set()
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
         window_sources = normalize_window_sources(window_sources)
         reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
@@ -2148,6 +2153,7 @@ class DistributedWorker(Worker):
                 num_sub,
                 enable_sdma=enable_sdma,
                 startup_timeout_s=startup_timeout_s,
+                **({"chip_service_factories": chip_service_factories} if chip_service_factories else {}),
             )
             from .tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415
 
@@ -2678,6 +2684,33 @@ class DistributedWorker(Worker):
         handle = self._device_buffer(ptr, worker_id, "free")
         self._w.free(handle)
         del self._device_buffers[(worker_id, ptr)]
+
+    def retain_service_tensor(self, tensor: DeviceTensor, worker_id: int = 0) -> tuple[str, Any]:
+        """Retain a resident allocation for an owner-local chip service.
+
+        The returned canonical descriptor is passed to that service's pin().
+        Release the token only after native unregister has completed.
+        """
+        with self._dispatch_submit_mu:
+            self._require_open("retain_service_tensor")
+            if self._closing:
+                raise RuntimeError("retain_service_tensor: worker is closing")
+            if self._owned_tensors.get((worker_id, tensor.data_ptr)) is not tensor:
+                raise ValueError("retain_service_tensor requires a live tensor owned by the selected worker")
+            buffer = self._device_buffer(tensor.data_ptr, worker_id, "retain_service_tensor")
+            if tensor.buffer is not buffer or tensor.nbytes != buffer.nbytes:
+                raise ValueError("retain_service_tensor requires the complete allocation, not a tensor view")
+            token, descriptor = self._w.retain_service_buffer(buffer)
+            self._service_tokens.add(token)
+            return token, descriptor
+
+    def release_service_tensor(self, token: str) -> None:
+        """Release a registration retain after confirmed owner-local unregister."""
+        with self._dispatch_submit_mu:
+            if token not in self._service_tokens:
+                raise ValueError("release_service_tensor: unknown registration token")
+            self._w.release_service_buffer(token)
+            self._service_tokens.remove(token)
 
     def committed_device_memory(self, worker_id: int = 0) -> int:
         """Total device HBM (bytes) committed by chip *worker_id*'s ``MemoryAllocator``
@@ -3409,6 +3442,10 @@ class DistributedWorker(Worker):
                 if first_error is None:
                     first_error = exc
 
+    def _require_retired_services(self) -> None:
+        if self._service_tokens:
+            raise RuntimeError("chip service tensors must be unregistered before worker close")
+
     def close(self) -> None:
         """Release runtime resources, retrying incomplete Worker cleanup."""
         # Serialize the admission transition with submit() and prevent two
@@ -3417,6 +3454,7 @@ class DistributedWorker(Worker):
             if self._close_complete or self._closing:
                 return
             self._w.check_exports_retired()
+            self._require_retired_services()
             self._closing = True
             first_attempt = not self._closed
             if first_attempt:
