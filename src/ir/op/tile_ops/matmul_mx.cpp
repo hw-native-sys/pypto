@@ -151,6 +151,11 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
            ProveValidExtentEqual(k_valid_rhs, k_phys_rhs) == ProofResult::kTrue &&
            ProveValidExtentEqual(n_valid, n_phys) == ProofResult::kTrue))
         << "The operator " << op_name << " requires full valid K and N for packed FP4";
+    // A5 PTO-ISA's TGEMV_MX_IMPL takes K and N from the operand valid columns,
+    // checks MMAD_MAX_SUPPORT_LENGTH (4095), and passes them to mad_mx.
+    // These are active logical element counts, including the two values per
+    // packed FP4 carrier expanded by GetMatmulLogicalShape. The padded physical
+    // extents describe storage pitch and can be larger than the active region.
     constexpr int64_t kMaxValidExtent = 4095;
     for (const auto& dim : {k_valid_lhs, k_valid_rhs, n_valid}) {
       const auto extent = As<ConstInt>(dim);
