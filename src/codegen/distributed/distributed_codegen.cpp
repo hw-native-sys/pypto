@@ -45,6 +45,7 @@
 #include "pypto/ir/transforms/utils/external_window.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/window_view_utils.h"
 #include "pypto/ir/type.h"
 #include "task_interface/data_type.h"
@@ -138,6 +139,7 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   unwrap_hoisted_var_refs_ = false;
   tuple_element_tensors_.clear();
   returned_param_indices_.clear();
+  rank_wire_args_.clear();
   tuple_element_task_handles_.clear();
   emitted_builtin_variants_.clear();
   builtin_next_level_specs_.clear();
@@ -313,6 +315,7 @@ void DistributedCodegen::EmitImports() {
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
   // namespacing half is a no-op when DFX is off.
   emitter_.EmitLine("from pypto.runtime.distributed_runner import add_chip_tensor_arg, _submit_chip");
+  emitter_.EmitLine("from pypto.runtime.distributed_runner import prepare_rank_column");
 }
 
 void DistributedCodegen::EmitExternalWindowArgs(const ir::FunctionPtr& func) {
@@ -648,7 +651,9 @@ void DistributedCodegen::EmitHostOrchDynamicDimBindings(const ir::FunctionPtr& f
         << "expressions. Host-slice dynamic dims must be recoverable from a runtime tensor shape via "
         << "'var' or a single-var affine form (var +/-/*// const_int); at least one tensor parameter "
         << "must expose the variable in one of these forms.";
-    emitter_.EmitLine(SanitizeName(src.var->name_hint_) + " = " + value_expr);
+    const auto name = SanitizeName(src.var->name_hint_);
+    local_names_.insert(name);
+    emitter_.EmitLine(name + " = " + value_expr);
   }
 }
 
@@ -834,8 +839,17 @@ void DistributedCodegen::EmitEntryMarker(const std::string& func_name) {
 }
 
 void DistributedCodegen::RegisterParamsAndEmitScalarBindings(const ir::FunctionPtr& func) {
+  local_names_.clear();
+  if (func->body_) {
+    ir::var_collectors::VarDefUseCollector collector;
+    collector.VisitStmt(func->body_);
+    for (const auto* var : collector.GetAllVarRefs()) {
+      local_names_.insert(SanitizeName(var->name_hint_));
+    }
+  }
   for (const auto& param : func->params_) {
     std::string name = SanitizeName(param->name_hint_);
+    local_names_.insert(name);
     if (ir::As<ir::ScalarType>(param->GetType()) || ir::IsA<ir::CommCtxType>(param->GetType())) {
       emitter_.EmitLine(name + " = tensors[\"" + name + "\"]");
     }
@@ -1011,6 +1025,46 @@ void DistributedCodegen::VisitStmt_(const ir::ReturnStmtPtr& /* op */) {
   // No Python return statement is generated.
 }
 
+namespace {
+// A column is safe to prepare once when the only operation after the slices
+// is a chip dispatch, and each slice reads an invariant function parameter.
+ir::CallPtr RankLoopDispatch(const ir::SeqStmtsPtr& seq) {
+  if (!seq || seq->stmts_.size() < 2) return nullptr;
+  for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
+    auto assign = ir::As<ir::AssignStmt>(seq->stmts_[i]);
+    if (!assign || !ir::IsOp(ir::As<ir::Call>(assign->value_), "tensor.slice")) return nullptr;
+  }
+  const auto& last = seq->stmts_.back();
+  if (auto eval = ir::As<ir::EvalStmt>(last)) return ir::transform_utils::AsCallOrSubmitView(eval->expr_);
+  if (auto assign = ir::As<ir::AssignStmt>(last)) {
+    return ir::transform_utils::AsCallOrSubmitView(assign->value_);
+  }
+  return nullptr;
+}
+
+std::optional<std::string> RankColumnShape(const ir::CallPtr& slice, const ir::VarPtr& rank,
+                                           const std::string& count) {
+  if (slice->args_.size() != 5) return std::nullopt;
+  const auto dims = ir::As<ir::MakeTuple>(slice->args_[1]);
+  const auto offsets = ir::As<ir::MakeTuple>(slice->args_[2]);
+  const auto drop = ir::As<ir::MakeTuple>(slice->args_[4]);
+  if (!dims || !offsets || !drop || drop->elements_.size() != 1 || offsets->elements_.empty() ||
+      offsets->elements_.size() != dims->elements_.size() || offsets->elements_[0] != rank) {
+    return std::nullopt;
+  }
+  auto axis = ir::As<ir::ConstInt>(drop->elements_[0]);
+  if (!axis || axis->value_ != 0) return std::nullopt;
+  std::string shape = "(" + count + ",";
+  for (size_t i = 1; i < dims->elements_.size(); ++i) {
+    auto offset = ir::As<ir::ConstInt>(offsets->elements_[i]);
+    auto dim = ir::As<ir::ConstInt>(dims->elements_[i]);
+    if (!offset || offset->value_ != 0 || !dim) return std::nullopt;
+    shape += " " + std::to_string(dim->value_) + ",";
+  }
+  return shape + ")";
+}
+}  // namespace
+
 void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
 
@@ -1028,10 +1082,53 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   std::string step = current_expr_value_;
   current_expr_value_ = "";
 
+  const auto seq = ir::As<ir::SeqStmts>(op->body_);
+  const auto dispatch = start == "0" && step == "1" ? RankLoopDispatch(seq) : nullptr;
+  auto gv = dispatch ? std::dynamic_pointer_cast<const ir::GlobalVar>(dispatch->op_) : nullptr;
+  auto callee = gv ? program_->GetFunction(gv->name_) : nullptr;
+  std::map<size_t, std::string> columns;
+  if (callee && callee->level_ == ir::Level::CHIP && callee->role_ == ir::Role::Orchestrator) {
+    std::unordered_set<ir::ExprPtr> inputs(current_func_->params_.begin(), current_func_->params_.end());
+    std::unordered_set<ir::ExprPtr> args(dispatch->args_.begin(), dispatch->args_.end());
+    for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
+      auto assign = ir::As<ir::AssignStmt>(seq->stmts_[i]);
+      auto slice = ir::As<ir::Call>(assign->value_);
+      auto shape = RankColumnShape(slice, op->loop_var_, stop);
+      if (!shape || !inputs.count(slice->args_[0]) || !args.count(assign->var_)) continue;
+      auto name = SanitizeName(assign->var_->name_hint_);
+      auto source = GetExprAsCode(slice->args_[0]);
+      auto column = "__rank_column_" + name;
+      while (!local_names_.insert(column).second) column += "_";
+      emitter_.EmitLine(column + " = prepare_rank_column(callables, orch._worker, \"" +
+                        SanitizeName(current_func_->name_) + "." + name + "\", tensors[\"" + source +
+                        "\"], " + *shape + ") if " + stop + " > 0 else None");
+      columns.emplace(i, column);
+    }
+  }
   emitter_.EmitLine("for " + loop_var + " in range(" + start + ", " + stop + ", " + step + "):");
   emitter_.IncreaseIndent();
 
-  if (op->body_) {
+  if (!columns.empty()) {
+    for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
+      auto it = columns.find(i);
+      if (it == columns.end()) {
+        VisitStmt(seq->stmts_[i]);
+        continue;
+      }
+      const auto& col = it->second;
+      auto name = SanitizeName(ir::As<ir::AssignStmt>(seq->stmts_[i])->var_->name_hint_);
+      auto target = "tensors[\"" + name + "\"]";
+      emitter_.EmitLine("if " + col + " is None:");
+      emitter_.IncreaseIndent();
+      VisitStmt(seq->stmts_[i]);
+      emitter_.DecreaseIndent();
+      emitter_.EmitLine("else:");
+      emitter_.EmitLine("    " + target + " = " + col + "[0][" + loop_var + "]");
+      rank_wire_args_[name] = col + "[1][" + loop_var + "] if " + col + " is not None else " + target;
+    }
+    VisitStmt(seq->stmts_.back());
+    rank_wire_args_.clear();
+  } else if (op->body_) {
     VisitStmt(op->body_);
   } else {
     emitter_.EmitLine("pass");
@@ -1360,9 +1457,10 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_str +
                           "\"]), " + tag + ")");
       } else {
-        emitter_.EmitLine("add_chip_tensor_arg(" + ta_var + ", orch._worker, tensors[\"" + arg_str + "\"], " +
-                          tag + ", callables, \"" + callee->name_ + "\", " + std::to_string(tensor_index) +
-                          ")");
+        auto wire = rank_wire_args_.find(arg_str);
+        auto arg = wire == rank_wire_args_.end() ? "tensors[\"" + arg_str + "\"]" : wire->second;
+        emitter_.EmitLine("add_chip_tensor_arg(" + ta_var + ", orch._worker, " + arg + ", " + tag +
+                          ", callables, \"" + callee->name_ + "\", " + std::to_string(tensor_index) + ")");
       }
       ++tensor_index;
       continue;
