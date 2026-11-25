@@ -5555,7 +5555,7 @@ class TestTileBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                tile_c: pl.Tile[[16, 16], pl.FP32] = pl.maximums(tile_a, 0.0)
+                tile_c: pl.Tile[[16, 16], pl.FP32] = pl.maximum(tile_a, 0.0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
