@@ -109,15 +109,20 @@ Tuple carries allocate constraints lazily for projected elements; reusing a wide
 tuple across loops does not eagerly copy every tensor leaf.
 For example, an `[8, 256]` window of a `[10, 288]` parent retains `[288, 1]`.
 
-This AIV refinement requires static physical strides consistent across every
-call to the same parameter. Mixed dense/sliced calls with different pitches,
-dynamic pitches, and conflicting explicit parameter strides or layouts are diagnosed.
-External C++ AIV kernels may use runtime pitch when every reaching operand
-has packed ND storage and the formal accepts packed ND. For example, selecting
-one rank from a packed `[ranks, batch, width]` table preserves a dense
-`[batch, width]` block with row pitch `width`. A cropped or shifted inner axis,
-or a derived window whose inherited pitch changes at another caller or loop
-backedge, still requires static stride specialization.
+Generated AIV kernels specialize a sliced parameter only when its physical
+strides are static and agree across calls. A Graph can forward whole packed ND
+tensors with different caller shape symbols to the same packed parameter.
+A slice inside the Graph still uses the callers' physical pitches. For
+example, slicing an `[8, 32]` buffer through an `[8, W]` formal keeps `[32, 1]`.
+
+An external C++ AIV kernel can read its runtime descriptor when its formal has
+implicit layout and fixed inner extents. For dynamic inner extents, every
+reaching operand must retain packed ND addressing. A full per-rank
+`[batch, width]` slab qualifies, as does a `[1, width]` slice of a packed
+parent with adjacent columns. Its row pitch is unused because it has only one
+row. A cropped multi-row window with dynamic width can have gaps between
+rows and still requires a static pitch. Calls that mix ND and DN layouts cannot share a sliced
+parameter, and explicit strides must agree with the actual storage.
 A layout-only declaration is still a storage contract: runtime-allocated ND outputs
 cannot satisfy a DN formal, even when it declares no stride.
 Loop-carried and branch-merged tensors must agree on physical strides at every
