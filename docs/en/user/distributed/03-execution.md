@@ -354,9 +354,9 @@ They must contain at least the logical window size. Keep their storage and conte
 stable until initialization completes. Runtime capability checks run during worker
 setup rather than on each submit.
 
-## Creating a worker-owned communication domain
+## Sharing an external table between programs
 
-List local worker indices in domain-rank order and supply one source per member for each host-backed buffer. In this example each source supplies 65 bytes and each slot occupies 128 bytes. Leaving the domain context releases the allocation.
+Prepare the ordinary inputs and outputs before constructing the worker. Both HOST entries declare a static `pld.DistributedTensor[[1, 65], pl.UINT8]` table argument. Rank sources follow the declared member order. Here each source supplies 65 bytes and each physical slot occupies 128 bytes.
 
 ```python
 from pypto import DataType
@@ -370,4 +370,13 @@ with DistributedWorker([prefill, decode]) as worker:
         window_sources={"weights": [rank0_file, rank1_file]},
     ) as domain:
         weights = domain.tensor("weights")
+        worker.submit(prefill, weights, prefill_output).result()
+        worker.submit(decode, weights, decode_output).result()
 ```
+
+`members` lists local worker indices in domain-rank order. Bind the resulting
+windows on their creating worker. For the default `memory_source="device"`,
+omit `window_sources` and populate each window with a CHIP task. A5 Host
+asynchronous peer GET requires `workspace_engines=("urma",)` and the native
+runtime's dense member order starting at worker zero. Leaving the domain's
+`with` block waits for accepted work and releases its allocations.

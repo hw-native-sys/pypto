@@ -107,3 +107,24 @@ current run's completion fence, and retains its allocation across successful
 runs. PyPTO releases the domains after draining all dispatch handles when the
 prepared worker closes; Simpler owns cleanup on failure. No private domain
 registry or run-resource journal is modified by PyPTO.
+
+## Worker-owned external domains
+
+A prepared worker can create a retained domain with `create_comm_domain` and pass
+its named windows to independently compiled HOST entries. Each entry declares a
+static, contiguous ND `pld.DistributedTensor` for each window. Each invocation
+selects the owner and slot through its actual `DomainTensor` arguments.
+Internal persistent-window reset applies only to program-owned allocations.
+
+The schema 4 sidecar marks external parameters with `is_distributed` in declaration order.
+Reload uses these parameters to reconstruct the scalar suffix. Each window
+occupies one scalar slot holding its buffer index. The paired hidden context at
+the end occupies three uint64 slots for the eight-byte little-endian owner ID,
+domain ID and generation. The runner passes these scalars through the native HOST callback’s `TaskArgs`. Ordinary tensors and typed Python scalars remain available by name for HOST slicing and control flow. At each
+invocation the HOST entry resolves each distinct ref through the active
+orchestrator, materializes each member's named buffer and device context, and
+attaches one ordering buffer per distinct domain to a CHIP dispatch.
+HOST orchestration passes distributed windows from the start of their named buffer.
+Submissions sharing a domain wait for the previous use to complete. Release
+and worker close also drain accepted uses. Cold reload requires callers to
+create the runtime resources and supply the windows again.

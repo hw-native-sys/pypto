@@ -185,6 +185,7 @@ def patched_setup():
     simpler = ModuleType("simpler")
     simpler.__path__ = []
     task_interface = ModuleType("simpler.task_interface")
+    setattr(task_interface, "TaskArgs", MagicMock)
     setattr(task_interface, "DataType", SimpleNamespace(UINT8=object()))
     setattr(simpler, "task_interface", task_interface)
     # `simpler.buffer` is the zero-copy naming path: a test can tell a named range from a
@@ -4986,3 +4987,48 @@ def test_persistent_domain_identity_includes_source_and_workspace():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_external_release_fences_interrupted_submission(patched_setup):
+    """An accepted run can outlive the submit() call that raised."""
+    from pypto.runtime.comm_domain import CommDomain, DomainBufferSpec, build_domain_layout  # noqa: PLC0415
+
+    m = patched_setup
+    compiled = _fake_compiled(
+        [_ParamInfo("a", ParamDirection.In, (4,), DataType.FP32, "ND", is_distributed=True)], []
+    )
+    entry, _ = m["load_entry"].return_value
+    entry._window_requirements = {0: (True, (), None)}
+    native = _ControlledNativeHandle()
+    m["worker"]._accepted_run_handles = set()
+    m["worker"]._hierarchical_start_cv = threading.Condition()
+    ref = MagicMock(owner_instance_id=b"instance", domain_id=10, generation=1)
+
+    def accepted(*_args, **_kwargs):
+        m["worker"]._accepted_run_handles.add(native)
+        raise KeyboardInterrupt("accepted")
+
+    m["submit_dispatch"].side_effect = accepted
+    with DistributedWorker(compiled) as worker:
+        slots, _ = build_domain_layout([DomainBufferSpec("table", (4,), DataType.FP32)])
+        domain = CommDomain(worker, (0,), slots, "device", ())
+        domain._native = MagicMock(freed=False)
+        domain._native.release.side_effect = lambda: setattr(domain._native, "freed", True)
+        domain._ref = ref
+        domain._state = "live"
+        domain._tokens[0] = MagicMock()
+        worker._external_domains[ref] = domain
+        table = domain.tensor("table")
+        with pytest.raises(KeyboardInterrupt, match="accepted"):
+            worker.submit(compiled, table)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            release = pool.submit(domain.release)
+            assert native.result_started.wait(timeout=2)
+            domain._native.release.assert_not_called()
+            m["worker"].release_buffer.assert_not_called()
+            native.complete()
+            release.result(timeout=2)
+        domain._native.release.assert_called_once()
+        m["worker"].release_buffer.assert_called_once()
+        with pytest.raises(RuntimeError, match="released"):
+            worker.submit(compiled, table)

@@ -35,14 +35,17 @@ from typing import TYPE_CHECKING, Any, BinaryIO, cast
 import numpy as np
 import torch
 
-from .comm_domain import CommDomain, DomainBufferSpec, allocate_external_domain
+from .comm_domain import CommDomain, DomainBufferSpec, DomainTensor, allocate_external_domain
 from .device_tensor import DeviceTensor, StackedDeviceTensor
+from .distributed_args import entry_window_requirements, pack_window_args
 from .runtime_base import Worker
 from .window_sources import normalize_window_sources
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from simpler.task_interface import TaskArgs
+
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
     from .runner import RunConfig
@@ -112,6 +115,7 @@ class _DispatchFrame:
     """One of two reusable, pre-fork dispatch metadata frames."""
 
     slot_id: int
+    external_domains: tuple[CommDomain, ...] = ()
     in_use: bool = False
     tensors: dict[str, Any] = field(default_factory=dict[str, Any])
     keepalive: list[Any] = field(default_factory=list[Any])
@@ -229,18 +233,24 @@ class DistributedRunHandle:
             self._wait_in_progress = True
 
         error: BaseException | None = None
+        native_handle = self._native_handle
         try:
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            native_handle = self._native_handle
             if native_handle is None:
                 raise RuntimeError("DistributedRunHandle lost its native handle before completion")
             native_handle.result(timeout=remaining)
-        except TimeoutError:
-            with self._cv:
-                self._wait_in_progress = False
-                self._cv.notify_all()
-            raise
-        except BaseException as exc:  # noqa: BLE001 - cached for every waiter
+        except BaseException as exc:
+            if isinstance(exc, TimeoutError) or (
+                isinstance(exc, (KeyboardInterrupt, SystemExit))
+                and native_handle is not None
+                and not native_handle.done
+            ):
+                # Waiting can be interrupted before the native fence. Retain the frame
+                # and its resources for the next waiter, including release or close.
+                with self._cv:
+                    self._wait_in_progress = False
+                    self._cv.notify_all()
+                raise
             error = exc
 
         worker = self._worker
@@ -472,8 +482,18 @@ def _assemble_chip_callables(
     :meth:`DistributedCompiledProgram.from_dir` (the ``runtime_dir`` replay path).
     """
     artifact_runtime = vars(compiled).get("_artifact_runtime")
-    if artifact_runtime is not None:
-        chips = artifact_runtime.load()
+    from ._prebuilt import BINARY_MANIFEST, BuildKind, load_prebuilt  # noqa: PLC0415
+
+    ready_entry = (
+        any(p.is_distributed for p in (vars(compiled).get("_param_infos") or ()))
+        and (compiled.output_dir / BINARY_MANIFEST).is_file()
+    )
+    if artifact_runtime is not None or ready_entry:
+        chips = (
+            artifact_runtime.load()
+            if artifact_runtime is not None
+            else load_prebuilt(compiled.output_dir, compiled.platform, BuildKind.DISTRIBUTED)
+        )
         callables = _ChipCallables()
         for name, (chip_callable, _, config) in chips.items():
             callables.add(name, chip_callable, config)
@@ -1557,7 +1577,7 @@ def _make_dispatch_orchestration(
     # binds ``pld.system.world_size()`` to this kwarg uniformly across comm
     # and comm-less paths.
 
-    def orch_fn(orch: Any, _unused_args: Any, _unused_cfg: Any) -> None:
+    def orch_fn(orch: Any, args: Any, _unused_cfg: Any) -> None:
         # Install the per-card DFX dispatch counter. On a prepared or persistent
         # worker the child survives across runs, so ``dfx_dispatch_idx`` is the
         # worker-owned dict and its numbering continues (the child's
@@ -1575,7 +1595,7 @@ def _make_dispatch_orchestration(
         orch._pypto_commless_seq = 0
         entry_fn(
             orch,
-            _unused_args,
+            args,
             call_config,
             tensors=tensors,
             callables=chip_cids,
@@ -1588,7 +1608,7 @@ def _make_dispatch_orchestration(
     return orch_fn
 
 
-def _submit_dispatch(
+def _submit_dispatch(  # noqa: PLR0913 - compatibility wrapper for prepared and one-shot callers
     w: Any,
     entry_fn: Any,
     tensors: dict[str, Any],
@@ -1598,6 +1618,7 @@ def _submit_dispatch(
     device_nums: int,
     keepalive: list[Any],
     *,
+    entry_args: TaskArgs | None = None,
     dfx_dispatch_idx: dict[str, int] | None = None,
     window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
 ) -> Any:
@@ -1613,7 +1634,7 @@ def _submit_dispatch(
         dfx_dispatch_idx=dfx_dispatch_idx,
         window_sources=window_sources,
     )
-    return w.submit(orch_fn)
+    return w.submit(orch_fn, entry_args) if entry_args is not None else w.submit(orch_fn)
 
 
 def _dispatch(
@@ -2111,12 +2132,14 @@ class DistributedWorker(Worker):
                             alloc_fn, base_tensors, len(prog._distributed_config.device_ids)
                         )
                     base_tensor_frames.append(base_tensors)
+                infos = prog._get_metadata()[0]
                 self._states[prog] = {
+                    "window_requirements": entry_window_requirements(entry_fn, infos),
                     "entry_fn": entry_fn,
                     "window_sources": {key: window_sources[key] for key in source_keys},
                     "base_tensor_frames": tuple(base_tensor_frames),
                     "call_config": _make_call_config(prog._distributed_config),
-                    "param_infos": tuple(prog._get_metadata()[0]),
+                    "param_infos": tuple(infos),
                     "device_nums": len(prog._distributed_config.device_ids),
                     "persistent_id": f"p{program_index}",
                 }
@@ -2261,6 +2284,7 @@ class DistributedWorker(Worker):
             self._run_dispatch_cleanup(frame.cleanup)
         finally:
             with self._dispatch_cv:
+                frame.external_domains = ()
                 frame.tensors.clear()
                 frame.keepalive.clear()
                 frame.handle = None
@@ -2313,6 +2337,11 @@ class DistributedWorker(Worker):
         with self._dispatch_cv:
             self._active_dispatch_handles.discard(handle)
             if frame.handle is handle:
+                if error is not None:
+                    for domain in frame.external_domains:
+                        if domain._state == "live":
+                            domain._state = "invalid"
+                frame.external_domains = ()
                 frame.tensors.clear()
                 frame.keepalive.clear()
                 frame.cleanup.clear()
@@ -2509,7 +2538,7 @@ class DistributedWorker(Worker):
             _reset_dfx_dispatch_state(orch, state["chip_cids"], dispatch_idx=self._dfx_dispatch_idx)
             state["entry_fn"](
                 orch,
-                None,
+                _args,
                 call_config,
                 tensors=tensors,
                 callables=state["chip_cids"],
@@ -2521,6 +2550,8 @@ class DistributedWorker(Worker):
             )
 
         try:
+            if "entry_args" in state:
+                return self._w.submit(run_request, state["entry_args"])
             return self._w.submit(run_request)
         except Exception as exc:
             self._persistent_error = exc
@@ -2558,6 +2589,7 @@ class DistributedWorker(Worker):
             keepalive,
             dfx_dispatch_idx=self._dfx_dispatch_idx,
             window_sources=state["window_sources"],
+            **({"entry_args": state["entry_args"]} if "entry_args" in state else {}),
         )
 
     def _submit_native_dispatch(
@@ -2602,6 +2634,8 @@ class DistributedWorker(Worker):
         """Blocking compatibility composition used by diagnostic two-pass runs."""
         cleanup: list[Callable[[], None]] = []
         error: BaseException | None = None
+        before = self._accepted_native_handles()
+        native_handle = None
         try:
             native_handle = self._submit_prepared_native(
                 state,
@@ -2613,6 +2647,15 @@ class DistributedWorker(Worker):
             native_handle.result()
         except BaseException as exc:  # noqa: BLE001 - preserve the dispatch failure across cleanup
             error = exc
+            if native_handle is None:
+                recovered = self._recover_accepted_native_handle(before)
+                if recovered is not None:
+                    try:
+                        recovered.result()
+                    except BaseException as native_error:
+                        error = self._remember_close_error(error, native_error)
+            for domain in state.get("external_domains", ()):
+                domain._state = "invalid"
         try:
             self._run_dispatch_cleanup(cleanup)
         except BaseException as exc:  # noqa: BLE001 - cleanup remains mandatory on failure
@@ -3265,8 +3308,6 @@ class DistributedWorker(Worker):
                 "registered when this worker was constructed."
             )
 
-        if any(p.is_distributed for p in state["param_infos"]):
-            raise TypeError("This HOST entry requires external communication-window bindings")
         param_infos = state["param_infos"]
         n_params = len(param_infos)
         if len(args) != n_params:
@@ -3286,7 +3327,17 @@ class DistributedWorker(Worker):
             tensors.update(state["base_tensor_frames"][frame.slot_id])
             frame.keepalive.clear()
             frame.keepalive.extend((compiled, call_config, config, *args))
+            if state["window_requirements"]:
+                entry_args, domains = pack_window_args(param_infos, args, self, state["window_requirements"])
+                frame.external_domains = domains
+                # Frame-local ordering buffers, distinct from the user-named tensors.
+                tensors[".domain_tokens"] = {domain.ref: domain._tokens for domain in domains}
+                state = {**state, "entry_args": entry_args, "external_domains": domains}
             for info, arg in zip(param_infos, args, strict=True):
+                if isinstance(arg, DomainTensor):
+                    if not state["window_requirements"]:
+                        raise TypeError(f"Parameter {info.name!r} does not accept a DomainTensor")
+                    continue
                 if info.shape is None:
                     # Scalar parameter (e.g. seq_len): forwarded as-is to the entry.
                     tensors[info.name] = arg
@@ -3515,8 +3566,25 @@ class DistributedWorker(Worker):
         Returns:
             A handle that owns the dispatch lifetime and cached outcome.
         """
-        with self._domain_gate, self._dispatch_submit_mu:
-            return self._submit_compiled(compiled, *args, config=config)
+        with self._domain_gate:
+            owners = {value._owner for value in args if isinstance(value, DomainTensor)}
+            self._wait_domain_uses(owners)
+            with self._dispatch_submit_mu:
+                return self._submit_compiled(compiled, *args, config=config)
+
+    def _wait_domain_uses(self, owners: set[CommDomain]) -> None:
+        if not owners:
+            return
+        for handle in self._domain_handles(owners):
+            handle.result()
+
+    def _domain_handles(self, owners: set[CommDomain]) -> list[DistributedRunHandle]:
+        with self._dispatch_cv:
+            return [
+                frame.handle
+                for frame in self._dispatch_frames
+                if frame.handle is not None and owners.intersection(frame.external_domains)
+            ]
 
     def create_comm_domain(
         self,
@@ -3569,6 +3637,14 @@ class DistributedWorker(Worker):
         with self._domain_gate:
             if domain._state == "released":
                 return
+            domain._state = "closing"
+            try:
+                self._wait_domain_uses({domain})
+            except BaseException:
+                if not self._domain_handles({domain}):
+                    domain._free()
+                    self._external_domains.pop(domain.ref, None)
+                raise
             domain._free()
             self._external_domains.pop(domain.ref, None)
 

@@ -10,12 +10,19 @@
 """Distributed entry ABI persistence and execution of generated HOST dispatch."""
 
 import json
+import py_compile
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto import DataType, ir
 from pypto.ir.param_info import _extract_func_param_infos
 from pypto.pypto_core import codegen, passes
+from pypto.runtime import DomainBufferSpec
+from pypto.runtime.comm_domain import CommDomain, build_domain_layout
+from pypto.runtime.distributed_args import decode_domain_ref, encode_domain_ref, pack_window_args
 
 
 @pl.program
@@ -64,6 +71,104 @@ def test_public_parameter_metadata_follows_source_order():
         ("b", True),
         ("x", False),
     ]
+
+
+def test_actual_dispatch_values_follow_runtime_slots():
+    CommDomainRef = pytest.importorskip("simpler.comm_domain").CommDomainRef
+
+    program, params = plan()
+    module = {}
+    exec(codegen.DistributedCodegen().generate(program), module)
+    worker = MagicMock(_external_domains={}, dc=SimpleNamespace(device_ids=[4, 2, 5]))
+    orch = MagicMock()
+    domains = []
+    for id_ in (1, 2):
+        specs = [DomainBufferSpec(k, (65,), DataType.UINT8) for k in ("p", "q")]
+        owner = CommDomain(worker, (2, 0), build_domain_layout(specs)[0], "device", ())
+        owner._ref = CommDomainRef(b"instance", id_, 1)
+        owner._state = "live"
+        worker._external_domains[owner.ref] = owner
+        native = MagicMock()
+        native.workers = (2, 0)
+        native.buffers = [SimpleNamespace(name=k, count=65, nbytes=128) for k in ("p", "q")]
+        native.device_context.side_effect = lambda rank, base=id_: base * 100 + rank
+        native[2].buffers = {k: MagicMock() for k in ("p", "q")}
+        for k in ("p", "q"):
+            native[2].buffers[k].tensor.return_value = f"{id_}/{k}"
+        owner._tokens[2] = MagicMock()
+        owner._tokens[2].tensor.return_value = f"order/{id_}"
+        domains.append((owner, native))
+    orch.get_domain.side_effect = dict((o.ref, n) for o, n in domains).__getitem__
+    module["TaskArgs"] = MagicMock
+    module["_submit_chip"] = submit = MagicMock()
+    (d, _), (e, _) = domains
+    for a, b, expected in [
+        (d.tensor("q"), d.tensor("p"), ["1/q", "1/p", "order/1", -7, 102, 102]),
+        (e.tensor("p"), d.tensor("q"), ["2/p", "1/q", "order/2", "order/1", -7, 202, 102]),
+        (e.tensor("p"), e.tensor("p"), ["2/p", "2/p", "order/2", -7, 202, 202]),
+    ]:
+        entry_args, owners = pack_window_args(
+            params, [a, -7, b, object()], worker, module["_PYPTO_WINDOW_REQUIREMENTS"]
+        )
+        scalars = tuple(entry_args.scalar(i) for i in range(entry_args.scalar_count()))
+        assert scalars == (
+            a.buffer_index,
+            2**32 - 7,
+            b.buffer_index,
+            *encode_domain_ref(a.domain_ref),
+            *encode_domain_ref(b.domain_ref),
+        )
+        assert entry_args.tensor_count() == 0
+        tensors = {"n": -7, "x": object(), ".domain_tokens": {owner.ref: owner._tokens for owner in owners}}
+        orch.get_domain.reset_mock()
+        module["host"](
+            orch,
+            entry_args,
+            None,
+            tensors=tensors,
+            callables={"chip": 1},
+            sub_ids={},
+            _keep=[],
+            world_size=3,
+        )
+        assert orch.get_domain.call_count == len({a.domain_ref, b.domain_ref})
+        calls = submit.call_args.args[2].mock_calls
+        assert [call.args[0] for call in calls] == expected
+        submit.reset_mock()
+        for pos in (0, 2):
+            invalid_args = type(entry_args)()
+            for i, value in enumerate(scalars):
+                invalid_args.add_scalar(2 if i == pos else value)  # Both domains have two buffers.
+            with pytest.raises(IndexError):
+                module["host"](
+                    orch,
+                    invalid_args,
+                    None,
+                    tensors=tensors,
+                    callables={"chip": 1},
+                    sub_ids={},
+                    _keep=[],
+                    world_size=3,
+                )
+        submit.assert_not_called()
+    reqs = module["_PYPTO_WINDOW_REQUIREMENTS"]
+    args = [d.tensor("p"), 7, e.tensor("q"), object()]
+    with pytest.raises(ValueError, match="different worker"):
+        pack_window_args(params, args, MagicMock(_external_domains={}, dc=worker.dc), reqs)
+    with pytest.raises(ValueError, match="target worker 1"):
+        pack_window_args(params, args, worker, {**reqs, 0: (True, (), None)})
+    with pytest.raises(ValueError, match="requires urma"):
+        pack_window_args(params, args, worker, {**reqs, 2: (False, (2,), "urma")})
+    with pytest.raises(TypeError, match="requires DomainTensor"):
+        pack_window_args(params, [object(), *args[1:]], worker, reqs)
+    ref = CommDomainRef(b"\xff" * 8, 2**64 - 1, 2**63)
+    encoded = encode_domain_ref(ref)
+    from simpler.task_interface import TaskArgs  # noqa: PLC0415
+
+    args = TaskArgs()
+    for value in encoded:
+        args.add_scalar(value)
+    assert decode_domain_ref(args, 0) == ref
 
 
 @pl.jit.incore
@@ -119,6 +224,33 @@ def test_external_window_cold_load(tmp_path):
     metadata.write_text(json.dumps(raw))
     with pytest.raises(ValueError, match="Incompatible .* schema 7"):
         type(compiled).from_dir(tmp_path)
+
+
+def test_recompile_external_window_retires_previous_chip_binaries(tmp_path):
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+    from pypto.runtime._binary_cache import binary_context_path  # noqa: PLC0415
+    from pypto.runtime._prebuilt import BINARY_MANIFEST  # noqa: PLC0415
+    from pypto.runtime.distributed_runner import _assemble_chip_callables  # noqa: PLC0415
+
+    # An earlier prebuild and an ordinary dispatch both left reusable binaries.
+    chip = tmp_path / "next_levels" / "read_window_chip"
+    stamp = binary_context_path(chip)
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text("{}")
+    config = chip / "kernel_config.py"
+    config.write_text("KERNELS = []")
+    bytecode = chip / "__pycache__" / "kernel_config.previous.pyc"
+    py_compile.compile(str(config), cfile=str(bytecode), doraise=True)
+    marker = tmp_path / BINARY_MANIFEST
+    marker.write_text('{"schema":2,"platform":"a5","chips":["read_window_chip"]}')
+
+    # A source-only build emits new PTO but no executable CHIP configuration.
+    ir.compile(read_window.specialize(), output_dir=str(tmp_path), skip_ptoas=True)
+    with pytest.raises(RuntimeError, match="No chip-level tasks"):
+        _assemble_chip_callables(DistributedCompiledProgram.from_dir(tmp_path))
+    assert not marker.exists()
+    assert not stamp.exists()
+    assert not bytecode.exists()
 
 
 def test_external_parameter_and_local_scratch_have_separate_bindings():

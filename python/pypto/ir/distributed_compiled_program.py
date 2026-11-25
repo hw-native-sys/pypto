@@ -524,7 +524,9 @@ class DistributedCompiledProgram:
 
         param_infos, output_indices, return_types = self._get_metadata()
         if any(p.is_distributed for p in param_infos):
-            raise TypeError("This HOST entry requires external communication-window bindings")
+            raise TypeError(
+                "Use a prepared DistributedWorker and pass a DomainTensor for each external window"
+            )
         n_params = len(param_infos)
         n_inputs = n_params - len(output_indices)
         has_return = len(return_types) > 0

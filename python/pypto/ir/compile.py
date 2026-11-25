@@ -57,6 +57,25 @@ def _write_files(files: dict[str, str], output_dir: str) -> None:
             f.write(content)
 
 
+def _invalidate_distributed_build(directory: Path) -> None:
+    """Retire the previous build before codegen starts replacing its sources."""
+    from pypto.runtime._binary_cache import binary_context_path  # noqa: PLC0415
+    from pypto.runtime._prebuilt import BINARY_MANIFEST  # noqa: PLC0415
+
+    from ._artifact_metadata import _DISTRIBUTED_META_FILENAME  # noqa: PLC0415
+
+    (directory / _DISTRIBUTED_META_FILENAME).unlink(missing_ok=True)
+    (directory / BINARY_MANIFEST).unlink(missing_ok=True)
+    for config in (directory / "next_levels").glob("*/kernel_config.py"):
+        # Ordinary assembly will rebuild binaries without a context stamp. Only
+        # executable children of the new build should regain a kernel_config.py.
+        binary_context_path(config.parent).unlink(missing_ok=True)
+        # A same-size rewrite within one second can otherwise import the old config.
+        for bytecode in (config.parent / "__pycache__").glob("kernel_config.*.pyc"):
+            bytecode.unlink(missing_ok=True)
+        config.unlink(missing_ok=True)
+
+
 def _ensure_orchestration_headers(output_dir: str) -> None:
     """Add the ``runtime.h`` / ``<iostream>`` includes the runtime requires.
 
@@ -685,6 +704,9 @@ def _compile_to_files(  # noqa: PLR0913
             validate_lowered_signature(logical, lowered)
             if _passes.is_host_build_graph(effective_runtime):
                 validate_kernel_host_access(transformed_program)
+
+        if _is_distributed(transformed_program):
+            _invalidate_distributed_build(Path(output_dir))
 
         # Codegen target selection is owned by the per-backend BackendHandler;
         # any value of the ``BackendType`` enum is a valid PTO codegen target.

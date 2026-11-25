@@ -90,3 +90,19 @@ native handle 会一直挂在 PyPTO 的有界 dispatch handle 上直到完成。
 （completion fence），并在成功运行之间保留其分配。prepared worker 关闭时，
 PyPTO 等待所有 dispatch handle 完成后释放通信域；失败时由 Simpler 负责清理。
 PyPTO 不再修改私有的通信域 registry 或 run-resource journal。
+
+## Worker 持有的外部通信域
+
+已准备好的 worker 可以通过 `create_comm_domain` 建域，将命名窗口传给独立编译的
+HOST 入口。每个入口以静态、连续 ND 的 `pld.DistributedTensor` 声明窗口。
+每次调用传入的 `DomainTensor` 决定域和槽位。内部持久化窗口的 reset 仅作用于程序内分配。
+
+schema 4 的分布式 metadata 按声明顺序记录形参，用 `is_distributed` 标记外部窗口。
+冷加载时按这个顺序恢复 scalar 后缀。每个窗口占一个 scalar 槽，存放
+buffer index。配对的隐藏 ctx 位于后缀，占三个 uint64 槽，依次为按小端编码的
+8 字节 owner ID、domain ID 和 generation。这些 scalar 由 HOST 回调原有的 `TaskArgs` 传递。普通 tensor 和保留 Python 类型的 scalar 仍按名称供 HOST 切片和控制流使用。
+每次运行通过当前 orchestrator 查询各个不同的 ref，按成员取命名 buffer 和设备 ctx，
+每个 CHIP 派发为各个不同的域追加一个排序 buffer。HOST 编排从命名 buffer 的起点传递分布式窗口。
+共用同一域的提交会等待前一次
+使用完成。释放域和关闭 worker 也会等已接受的调用完成。冷加载时由调用方重新建立
+资源，并传入对应窗口。
