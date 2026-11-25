@@ -70,6 +70,8 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 `tget_scale_addr` 前移到这次写入之前。对于固定且对齐的 A5 L0 分配，codegen 直接
 指定 scale 地址（`data_byte_address / 16`），避免抽取之间的 scalar pipe 依赖。
 其他情况下，在对应 data tile 已定义后、抽取之前发射地址绑定。
+直接 scale 抽取要求先定义配对的 data tile，且 scale 结果仅由配对的 MX matmul 消费，
+使 scale 的生命周期不会超过其 L0 data 分配的生命周期。
 
 ## 相关
 

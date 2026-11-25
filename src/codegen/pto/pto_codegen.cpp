@@ -1410,19 +1410,41 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
      public:
       std::map<const ir::Var*, ir::VarPtr> bindings;
       std::set<const ir::Var*> extracts;
+      std::map<const ir::Var*, size_t> uses;
+      std::map<const ir::Var*, size_t> binding_uses;
+      std::map<const ir::Var*, size_t> definitions;
+      size_t next_definition = 1;
 
      protected:
       void VisitStmt_(const ir::AssignStmtPtr& stmt) override {
         if (ir::IsOp(ir::As<ir::Call>(stmt->value_), "tile.extract")) {
           extracts.insert(stmt->var_.get());
         }
-        ir::IRVisitor::VisitStmt_(stmt);
+        // Count only RHS uses; assignment targets are definitions.
+        VisitExpr(stmt->value_);
+        definitions[stmt->var_.get()] = next_definition++;
       }
+      void VisitStmt_(const ir::IfStmtPtr& stmt) override {
+        ir::IRVisitor::VisitStmt_(stmt);
+        for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
+      }
+      void VisitStmt_(const ir::ForStmtPtr& stmt) override {
+        for (const auto& arg : stmt->iter_args_) definitions[arg.get()] = next_definition++;
+        ir::IRVisitor::VisitStmt_(stmt);
+        for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
+      }
+      void VisitStmt_(const ir::WhileStmtPtr& stmt) override {
+        for (const auto& arg : stmt->iter_args_) definitions[arg.get()] = next_definition++;
+        ir::IRVisitor::VisitStmt_(stmt);
+        for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
+      }
+      void VisitExpr_(const ir::VarPtr& var) override { ++uses[var.get()]; }
       void VisitExpr_(const ir::CallPtr& call) override {
         if (ir::IsOp(call, "tile.tget_scale_addr")) {
           auto scale = ir::AsVarLike(call->args_[0]);
           auto data = ir::AsVarLike(call->args_[1]);
           if (scale && data) {
+            ++binding_uses[scale.get()];
             auto [it, inserted] = bindings.emplace(scale.get(), data);
             if (!inserted && it->second != data) it->second.reset();
           }
@@ -1431,12 +1453,24 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       }
     };
     MxScaleBindingCollector collector;
+    for (const auto& param : func->params_) collector.definitions[param.get()] = 0;
     collector.VisitStmt(func->body_);
     // Only the producer's own destination can be rebound before TEXTRACT.
     for (auto it = collector.bindings.begin(); it != collector.bindings.end();) {
       if (!collector.extracts.count(it->first)) {
         it = collector.bindings.erase(it);
       } else {
+        CHECK_SPAN(collector.uses[it->first] == collector.binding_uses[it->first], it->first->span_)
+            << "MX scale TEXTRACT output must only be used by its paired MX matmul";
+        CHECK_SPAN(it->second, it->first->span_)
+            << "MX scale TEXTRACT requires a single corresponding data tile";
+        const auto def = collector.definitions.find(it->second.get());
+        // The scale's live range must be contained in that of its data tile.
+        // A scale-first producer could otherwise overlap another scale while
+        // the allocator reuses the two non-overlapping L0 data addresses.
+        CHECK_SPAN(def != collector.definitions.end() && def->second < collector.definitions.at(it->first),
+                   it->first->span_)
+            << "Define the MX data tile before extracting its corresponding scale tile";
         ++it;
       }
     }
@@ -3371,12 +3405,19 @@ void PTOCodegen::EmitMxScaleExtractBinding(const std::string& scale, const std::
   auto result = GetCurrentResultVar();
   auto it = fs_.mx_scale_extract_data.find(result.get());
   if (it == fs_.mx_scale_extract_data.end()) return;
-  if (fs_.early_bound_mx_scale_extracts.count(result.get())) return;
   CHECK_SPAN(it->second, span) << "MX scale TEXTRACT requires a single corresponding data tile";
   const auto& data = it->second;
   const auto data_name = LookupVarName(data);
-  CHECK_SPAN(!data_name.empty(), span)
+  // The data value must already be live when its scale is written. Otherwise
+  // the independently planned L0 data lifetime could reuse an address while
+  // two scales are simultaneously live. Checking only the registered name
+  // would also accept a descriptor whose alloc_tile has not been emitted.
+  // For an in-place alias, LookupVarName resolves to the dominating handle.
+  const auto scope = fs_.tile_alloc_scope.find(data_name);
+  CHECK_SPAN(scope != fs_.tile_alloc_scope.end() && fs_.active_tile_alloc_scopes.count(scope->second) != 0,
+             span)
       << "Define the MX data tile before extracting its corresponding scale tile";
+  if (fs_.early_bound_mx_scale_extracts.count(result.get())) return;
   Emit("pto.tget_scale_addr ins(" + data_name + " : " + GetExprTypeAnnotation(data) + ") outs(" + scale +
        " : " + scale_type + ")");
   fs_.early_bound_mx_scale_extracts.insert(result.get());

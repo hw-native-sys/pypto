@@ -256,6 +256,79 @@ def test_mx_scale_extract_is_bound_before_the_write(tmp_path, planner):
     assert "TEXTRACT(" in _assemble_mx(mlir, tmp_path, planner=planner)
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_mx_scale_extract_rejects_scale_before_paired_data(planner):
+    """A scale-first write may outlive the data slot reused by the previous pair."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            a: pl.Tensor[[64, 256], pl.FP8E4M3FN],
+            b: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+            sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            sb: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+            out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+        ) -> pl.Tensor[[64, 256], pl.FP32]:
+            am = pl.load(a, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+            bm = pl.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+            sam = pl.load(sa, [0, 0], [64, 8], target_memory=pl.Mem.Mat)
+            sbm = pl.load(sb, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+            a0 = pl.tile.extract(am, 0, 0, [64, 128], target_memory=pl.Mem.Left)
+            b0 = pl.tile.extract(bm, 0, 0, [128, 256], target_memory=pl.Mem.Right)
+            sa0 = pl.tile.extract(sam, 0, 0, [64, 4], target_memory=pl.Mem.LeftScale)
+            sb0 = pl.tile.extract(sbm, 0, 0, [4, 256], target_memory=pl.Mem.RightScale)
+            # Both scale pairs are live here, while the two L0 data pairs can
+            # be allocated at the same physical address by MemoryReuse.
+            sa1 = pl.tile.extract(sam, 0, 4, [64, 4], target_memory=pl.Mem.LeftScale)
+            sb1 = pl.tile.extract(sbm, 4, 0, [4, 256], target_memory=pl.Mem.RightScale)
+            acc = pl.matmul_mx(a0, sa0, b0, sb0)
+            a1 = pl.tile.extract(am, 0, 128, [64, 128], target_memory=pl.Mem.Left)
+            b1 = pl.tile.extract(bm, 128, 0, [128, 256], target_memory=pl.Mem.Right)
+            acc = pl.matmul_mx_acc(acc, a1, sa1, b1, sb1)
+            return pl.store(acc, [0, 0], out)
+
+    with pytest.raises(
+        ValueError, match="Define the MX data tile before extracting its corresponding scale tile"
+    ):
+        _emit_incore_mlir(Program, planner=planner)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_mx_scale_extract_accepts_defined_inplace_data_alias(tmp_path, planner):
+    """SetValidShape updates an existing descriptor without allocating another L0 tile."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            a: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+            b: pl.Tensor[[128, 256], pl.FP8E4M3FN],
+            sa: pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+            sb: pl.Tensor[[4, 256], pl.FP8E8M0, pl.MX_B_NN],
+            m: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+        ) -> pl.Tensor[[64, 256], pl.FP32]:
+            am = pl.load(a, [0, 0], [64, 128], valid_shape=[m, 128], target_memory=pl.Mem.Mat)
+            bm = pl.load(b, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+            sam = pl.load(sa, [0, 0], [64, 4], valid_shape=[m, 4], target_memory=pl.Mem.Mat)
+            sbm = pl.load(sb, [0, 0], [4, 256], target_memory=pl.Mem.Mat)
+            a0 = pl.tile.extract(am, 0, 0, [64, 128], target_memory=pl.Mem.Left)
+            b0 = pl.tile.extract(bm, 0, 0, [128, 256], target_memory=pl.Mem.Right)
+            a_valid = pl.set_validshape(a0, m, 128)
+            sa0 = pl.tile.extract(sam, 0, 0, [64, 4], target_memory=pl.Mem.LeftScale)
+            sb0 = pl.tile.extract(sbm, 0, 0, [4, 256], target_memory=pl.Mem.RightScale)
+            acc = pl.matmul_mx(a_valid, sa0, b0, sb0)
+            return pl.store(acc, [0, 0], out)
+
+    mlir = _emit_incore_mlir(Program, planner=planner)
+    assert "pto.set_validshape" in mlir
+    assert "TEXTRACT(" in _assemble_mx(mlir, tmp_path, planner=planner)
+
+
 class TestMxMatmulCodegen:
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
     @pytest.mark.parametrize("hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NOT_ALLOC_KEEP])

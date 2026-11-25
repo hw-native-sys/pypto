@@ -75,6 +75,9 @@ Unlike Mat-to-scale `tmov`, PTOAS 0.78 does not hoist a later
 codegen instead assigns the scale address directly (`data_byte_address / 16`),
 avoiding a scalar pipe dependency between extracts. Otherwise the binding is
 emitted before the extraction, once the associated data tile is defined.
+Direct scale extraction requires the paired data tile to be defined first
+and the scale result to be used only by its paired MX matmul consumers, so
+the scale's lifetime cannot exceed the lifetime of its L0 data allocation.
 
 ## Related
 
