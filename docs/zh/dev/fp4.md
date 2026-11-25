@@ -119,6 +119,8 @@ A5 上还可通过 Vec plain store 写入匹配的 `pl.NZ` FP8E4M3FN GM 张量�
 
 要通过 `tpush_to_aic` 传输带 padding 的 NZ tile，可在 cast 或其结果的
 `TileView` 中设置 `compact=pl.CompactMode.row_plus_one`。
+若 cast 指定 RowPlusOne 且其结果带有显式的 NZ `TileView` 注解，该注解也必须选择
+RowPlusOne。
 
 ```python
 fp8_nz = pl.cast(

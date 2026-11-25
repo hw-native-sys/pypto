@@ -142,6 +142,8 @@ signed zero, so physical-byte acceptance uses A5 hardware.
 
 For a padded NZ tile to send with `tpush_to_aic`, set
 `compact=pl.CompactMode.row_plus_one` on the cast or its result's `TileView`.
+If the cast requests RowPlusOne and its result explicitly annotates an NZ
+`TileView`, that annotation must also select RowPlusOne.
 
 ```python
 fp8_nz = pl.cast(

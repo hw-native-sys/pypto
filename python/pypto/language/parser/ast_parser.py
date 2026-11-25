@@ -1021,15 +1021,22 @@ class ASTParser:
     def _annotated_call_kwargs(call: ir.Call, annotation: ir.Type) -> Mapping[str, Any]:
         """Keep the annotated cast layout when compiler passes re-deduce its result type."""
         if (
-            call.op.name == ir.get_op("tile.cast").name
-            and isinstance(annotation, ir.TileType)
-            and annotation.tile_view is not None
-            and annotation.tile_view.compact == ir.CompactMode.row_plus_one
+            call.op.name != ir.get_op("tile.cast").name
+            or not isinstance(annotation, ir.TileType)
+            or annotation.tile_view is None
         ):
-            if call.kwargs.get("layout") != ir.TensorLayout.NZ:
-                raise ParserTypeError("RowPlusOne tile.cast requires layout=pl.NZ", span=call.span)
-            return {**call.kwargs, "compact": ir.CompactMode.row_plus_one.value}
-        return call.kwargs
+            return call.kwargs
+        if annotation.tile_view.compact != ir.CompactMode.row_plus_one:
+            if call.kwargs.get("compact") == ir.CompactMode.row_plus_one.value:
+                raise ParserTypeError(
+                    "RowPlusOne tile.cast conflicts with TileView compact annotation",
+                    span=call.span,
+                    hint="Use pl.CompactMode.row_plus_one in the annotation or omit it from the cast",
+                )
+            return call.kwargs
+        if call.kwargs.get("layout") != ir.TensorLayout.NZ:
+            raise ParserTypeError("RowPlusOne tile.cast requires layout=pl.NZ", span=call.span)
+        return {**call.kwargs, "compact": ir.CompactMode.row_plus_one.value}
 
     def _assign_or_let(
         self,
