@@ -90,6 +90,19 @@ the program's chips in submit order. Each leaf holds the flat artefacts
 from the table above, so the L2 contract applies unchanged within one
 dispatch directory.
 
+A prepared worker with chip swimlane enabled writes each call under
+`dfx_outputs/session-<worker UUID>/run-<dispatch ID>/rank{r}/d{k}/`. Both passes
+use the same run directory. The converter reads only that directory, so earlier
+decode steps keep their records, dependency graphs, program names and traces.
+To locate one call programmatically, use `handle = worker.submit(...)`, wait
+with `handle.result()`, and pass `handle.capture_directory` to the offline converter
+with `--dispatch dN` or `--dispatch-id RUN_ID:TASK_SLOT` for the dispatch of interest.
+
+Closing the worker leaves its session available for analysis. The first swimlane
+call of a new worker in the same output directory clears sessions marked closed.
+Concurrent workers keep separate sessions. An interrupted process can leave an
+unmarked session directory that can be removed once its worker has exited.
+
 The path records *where* a dispatch ran, not *what* it ran, so
 `_submit_chip` also drops a `dispatch_program.json` naming the
 `next_levels/<program>` behind it. Kernel names must be resolved through

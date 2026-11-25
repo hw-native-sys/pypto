@@ -662,6 +662,95 @@ class TestPreparedSwimlaneTwoPass:
 
     _CALL_CONFIG_ARG = 5
 
+    @pytest.mark.parametrize("prebuilt", [False, True])
+    def test_consecutive_runs_retain_and_convert_only_their_captures(
+        self, patched_setup, tmp_path, monkeypatch, fake_swimlane_converter, prebuilt
+    ):
+        compiled = _fake_compiled([], [])
+        compiled.platform = "a2a3"
+        compiled.output_dir = tmp_path / "program"
+        run_dir = tmp_path / "runs" if prebuilt else compiled.output_dir
+        if prebuilt:
+            compiled._artifact_runtime = SimpleNamespace(directory=compiled.output_dir, run_directory=run_dir)
+        programs = {"target": object(), "drafter": object()}
+        for program in programs:
+            _write_chip_program(compiled.output_dir, program, f"{program}_kernel")
+            if prebuilt:
+                manifest = {"schema": 2, "kernels": [{"func_id": 0, "name": f"{program}_kernel"}]}
+                (compiled.output_dir / "next_levels" / program / "binary_manifest.json").write_text(
+                    json.dumps(manifest)
+                )
+        converted = TestCollectL3Swimlane._spy_generate_swimlane(monkeypatch)
+        config = RunConfig(platform="a2a3", enable_chip_swimlane=1)
+        captures: list[Path] = []
+
+        def emit_pass(*args, dfx_dispatch_idx, **_kwargs):
+            cfg = args[self._CALL_CONFIG_ARG]
+            k = len(captures)
+            program = ("target", "drafter")[k // 2]
+            capture = _write_capture(
+                Path(cfg.output_prefix) / "rank0",
+                f"d{k}",
+                deps=cfg.enable_dep_gen,
+                records=bool(cfg.enable_chip_swimlane),
+                run_id=k,
+                capture_index=k,
+                digest=program,
+            )
+            orch = _RecordingOrch()
+            _reset_dfx_dispatch_state(orch, programs, dispatch_idx=dfx_dispatch_idx)
+            _submit_chip(orch, programs[program], None, cfg, 0)
+            captures.append(capture)
+            return _ImmediateNativeHandle()
+
+        with DistributedWorker(compiled) as worker:
+            monkeypatch.setattr(
+                sys.modules["simpler.task_interface"], "CallConfig", _BoolStrictCallConfig, raising=False
+            )
+            patched_setup["make_call_config"].side_effect = _make_call_config
+            patched_setup["submit_dispatch"].side_effect = emit_pass
+            worker.run(compiled, config=config)
+            worker.run(compiled, config=config)
+
+        assert [call.out_dir for call in converted] == captures[::2]
+        for capture, program in zip(captures[::2], ("target", "drafter"), strict=True):
+            assert (capture / "deps.json").is_file()
+            assert (capture / "chip_swimlane_records.json").is_file()
+            assert (capture / "dispatch_identity.timing.json").is_file()
+            assert json.loads((capture / "dispatch_program.json").read_text())["program"] == program
+            assert json.loads((capture / "name_map.json").read_text())["callable_id_to_name"]["0"] == (
+                f"{program}_kernel"
+            )
+        assert captures[0].parent.parent != captures[2].parent.parent
+        assert all(capture.is_relative_to(run_dir / "dfx_outputs") for capture in captures)
+
+    def test_new_session_cleans_only_closed_workers(self, patched_setup, tmp_path):
+        compiled = _fake_compiled([], [])
+        compiled.output_dir = tmp_path
+        config = RunConfig(platform="a2a3sim", enable_chip_swimlane=1)
+
+        def capture(worker: DistributedWorker) -> Path:
+            handle = worker.submit(compiled, config=config)
+            handle.result()
+            directory = handle.capture_directory
+            assert directory is not None
+            _write_dfx_dispatch_dirs(directory, "rank0/d0")
+            return directory
+
+        with DistributedWorker(compiled) as first:
+            first_dir = capture(first)
+            first.run(compiled, config=RunConfig(platform="a2a3sim", enable_dep_gen=True))
+            assert (first_dir / "rank0/d0/chip_swimlane_records.json").is_file()
+            with DistributedWorker(compiled) as second:
+                second_dir = capture(second)
+                assert second_dir != first_dir
+            assert second_dir.is_dir()
+            with DistributedWorker(compiled) as third:
+                third_dir = capture(third)
+                assert third_dir.is_dir()
+                assert first_dir.is_dir()
+                assert not second_dir.exists()
+
     def test_onboard_reuses_worker_for_graph_then_clean_timing(self, patched_setup, tmp_path, capsys):
         m = patched_setup
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -688,28 +777,24 @@ class TestPreparedSwimlaneTwoPass:
             enable_scope_stats=True,
             enable_dump_args=2,
         )
-        with (
-            patch(
-                "pypto.runtime.distributed_runner._clear_dfx_dispatch_dirs",
-                side_effect=lambda _path: events.append("clear"),
-            ) as clear,
-            patch(
-                "pypto.runtime.distributed_runner._collect_l3_swimlane",
-                side_effect=lambda _output, _platform: events.append("collect"),
-            ) as collect,
-        ):
-            rt(_resident(rt, (16, 16)), config=run_config)
+        with patch(
+            "pypto.runtime.distributed_runner._collect_l3_swimlane",
+            side_effect=lambda *args, **kwargs: events.append("collect"),
+        ) as collect:
+            handle = rt.submit(compiled, _resident(rt, (16, 16)), config=run_config)
+            handle.result()
 
-        assert events == ["clear", "deps", "timing", "collect"]
+        assert events == ["deps", "timing", "collect"]
         assert m["submit_dispatch"].call_count == 2
         assert all(call.args[0] is m["worker"] for call in m["submit_dispatch"].call_args_list)
         assert m["construct"].call_count == 1
         assert m["worker"].init.call_count == 1
-        clear.assert_called_once_with(tmp_path / "dfx_outputs")
-        collect.assert_called_once_with(tmp_path, "a2a3")
+        assert handle.capture_directory is not None
+        collect.assert_called_once_with(tmp_path, "a2a3", dfx_base=handle.capture_directory)
 
         assert m["make_call_config"].call_count == 2
         deps_build, timing_build = m["make_call_config"].call_args_list
+        assert deps_build.kwargs["dfx_base"] == timing_build.kwargs["dfx_base"] == handle.capture_directory
         deps_config = deps_build.args[1]
         assert deps_config.enable_chip_swimlane == 0
         assert deps_config.enable_dep_gen is True
@@ -747,16 +832,18 @@ class TestPreparedSwimlaneTwoPass:
             enable_chip_swimlane=1,  # AICore-timing level, not just "on"
         )
         with patch("pypto.runtime.distributed_runner._collect_l3_swimlane") as collect:
-            rt(_resident(rt, (16, 16)), config=run_config)
+            handle = rt.submit(compiled, _resident(rt, (16, 16)), config=run_config)
+            handle.result()
 
         m["submit_dispatch"].assert_called_once()
         assert m["submit_dispatch"].call_args.args[self._CALL_CONFIG_ARG] is call_config
         m["make_call_config"].assert_called_once_with(
             compiled._distributed_config,
             run_config,
-            dfx_base=tmp_path / "dfx_outputs",
+            dfx_base=handle.capture_directory,
         )
-        collect.assert_called_once_with(tmp_path, "a2a3sim")
+        assert handle.capture_directory is not None
+        collect.assert_called_once_with(tmp_path, "a2a3sim", dfx_base=handle.capture_directory)
         rt.close()
 
     def test_dep_gen_without_swimlane_keeps_single_pass(self, patched_setup, tmp_path):

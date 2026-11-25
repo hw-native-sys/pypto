@@ -534,7 +534,7 @@ def _gang_span_from_records(path: Path) -> float | None:
     return _span_from_named_tasks(list(converted.get("tasks") or []))
 
 
-def collect_swimlane_spans_us(output_dir: Path) -> dict[int, float]:
+def collect_swimlane_spans_us(dfx: Path) -> dict[int, float]:
     """Collective completion per rank (last-completing block), in microseconds.
 
     Prefers raw ``chip_swimlane_records.json`` + ``name_map.json`` (onboard
@@ -542,7 +542,6 @@ def collect_swimlane_spans_us(output_dir: Path) -> dict[int, float]:
     often omits the builtin collective from converted traces; name_map on the
     CHIP pipeline dispatch is what actually names ``all_to_all_v``.
     """
-    dfx = Path(output_dir) / "dfx_outputs"
     spans: dict[int, float] = {}
     if not dfx.is_dir():
         return spans
@@ -1080,11 +1079,13 @@ def _timed_session(  # noqa: PLR0913
             runtime.run(compiled, inputs, send_counts, outputs, recv_out, config=run_config)
         for _ in range(rounds):
             t0 = time.perf_counter()
-            runtime.run(compiled, inputs, send_counts, outputs, recv_out, config=run_config)
+            handle = runtime.submit(compiled, inputs, send_counts, outputs, recv_out, config=run_config)
+            handle.result()
             slot_us = (time.perf_counter() - t0) * 1e6
             host_slots.append(slot_us)
             if collect_aiv:
-                spans = collect_swimlane_spans_us(compiled.output_dir)
+                assert handle.capture_directory is not None
+                spans = collect_swimlane_spans_us(handle.capture_directory)
                 for r, span in spans.items():
                     per_rank[str(r)].append(float(span))
             else:
