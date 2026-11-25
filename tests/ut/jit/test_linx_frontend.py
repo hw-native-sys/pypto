@@ -21,12 +21,9 @@ from pypto.pypto_core import ir as core_ir
 from pypto.runtime import RunConfig
 
 
-def _scope_statements(program: ir.Program, entry: str):
-    fn = program.get_function(entry)
-    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
-    (scope,) = (stmt for stmt in fn.body.stmts if isinstance(stmt, ir.ScopeStmt))
-    assert isinstance(scope.body, ir.SeqStmts)
-    return scope.body.stmts
+def _incore_function(program: ir.Program) -> ir.Function:
+    (kernel,) = (fn for fn in program.functions.values() if fn.func_type == ir.FunctionType.InCore)
+    return kernel
 
 
 def _check_assignment(stmt: ir.Stmt, op: str, space: ir.MemorySpace) -> ir.AssignStmt:
@@ -36,10 +33,10 @@ def _check_assignment(stmt: ir.Stmt, op: str, space: ir.MemorySpace) -> ir.Assig
     return stmt
 
 
-def _check_store(stmt: ir.Stmt, value: ir.Var):
-    assert isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call)
-    assert stmt.expr.op.name == core_ir.get_op("tile.store").name
-    assert stmt.expr.args[0].same_as(value)
+def _check_store(stmt: ir.Stmt, value: ir.Var, out: ir.Var):
+    assert isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+    assert stmt.value.op.name == core_ir.get_op("tile.store").name
+    assert stmt.value.args[0].same_as(value) and stmt.value.args[2].same_as(out)
 
 
 def test_local_add():
@@ -56,14 +53,16 @@ def test_local_add():
             pl.store(total, [0, 0], out)
 
     program = add.lower(config=RunConfig(backend_type=BackendType.Linx))
-    lhs, rhs, total, store = _scope_statements(program, "add")
+    kernel = _incore_function(program)
+    assert isinstance(kernel.body, ir.SeqStmts)
+    lhs, rhs, total, store, _ = kernel.body.stmts
     local = ir.MemorySpace.Local
     lhs = _check_assignment(lhs, "tile.load", local)
     rhs = _check_assignment(rhs, "tile.load", local)
     total = _check_assignment(total, "tile.add", local)
     assert isinstance(total.value, ir.Call)
     assert total.value.args[0].same_as(lhs.var) and total.value.args[1].same_as(rhs.var)
-    _check_store(store, total.var)
+    _check_store(store, total.var, kernel.params[2])
 
 
 def test_shared_roundtrip():
@@ -76,7 +75,9 @@ def test_shared_roundtrip():
             pl.store(local, [0, 0], out)
 
     program = exchange.lower(config=RunConfig(backend_type=BackendType.Linx))
-    load, publish, broadcast, store = _scope_statements(program, "exchange")
+    kernel = _incore_function(program)
+    assert isinstance(kernel.body, ir.SeqStmts)
+    load, publish, broadcast, store, _ = kernel.body.stmts
     load = _check_assignment(load, "tile.load", ir.MemorySpace.Local)
     publish = _check_assignment(publish, "tile.publish_shared", ir.MemorySpace.Shared)
     broadcast = _check_assignment(broadcast, "tile.broadcast_shared", ir.MemorySpace.Local)
@@ -87,7 +88,7 @@ def test_shared_roundtrip():
         assert isinstance(tile, ir.TileType) and tile.tile_view is not None
         assert [cast(ir.ConstInt, dim).value for dim in tile.shape] == [8, 32]
         assert [cast(ir.ConstInt, dim).value for dim in tile.tile_view.valid_shape] == [7, 23]
-    _check_store(store, broadcast.var)
+    _check_store(store, broadcast.var, kernel.params[1])
 
 
 def test_shared_add_reports_user_source():

@@ -727,6 +727,9 @@ Pass AutoTileMatmulL0();
  */
 Pass CanonicalizeTileSlice();
 
+/// Place Linx tile producers in PE-local storage and check tile operand spaces.
+Pass LowerLinxTiles();
+
 /**
  * @brief Infer target memory space for TileType variables in InCore functions
  *

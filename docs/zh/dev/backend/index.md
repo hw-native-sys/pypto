@@ -62,7 +62,7 @@ Python 和 C++ 中的 `BackendType.Ascend910B` 均保留为 `BackendType.Ascend9
 ## Linx 超标量后端
 
 使用 `ir.lower(program, backend_type=BackendType.Linx)` 可执行 IR lowering。
-初始流水线依次执行 SSA 转换、表达式简化、语句结构规范化和嵌套调用展平。
+流水线将 InCore 张量加法降为 GM 加载、PE 的 Local 加法和对输出张量的写回。
 Pass instrument 可通过当前上下文查询 Linx 后端。进程级 PTO 目标保持原有配置。
 JIT 函数可用 `fn.lower(config=RunConfig(backend_type=BackendType.Linx))` 选择目标。
 Linx 的 PTO 代码生成和运行时启动尚未接入。

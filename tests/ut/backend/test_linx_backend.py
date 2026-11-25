@@ -13,6 +13,18 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 
+_LINX_PIPELINE = [
+    "InlineFunctions",
+    "ConvertToSSA",
+    "Simplify",
+    "NormalizeStmtStructure",
+    "FlattenCallExpr",
+    "OutlineIncoreScopes",
+    "ConvertTensorToTileOps",
+    "LowerLinxTiles",
+    "IRVerifier",
+]
+
 
 def test_physical_topology():
     target = backend.get_backend_instance(backend.BackendType.Linx)
@@ -70,7 +82,7 @@ def test_lower_scalar_ir(configured):
     with ir.PassContext([passes.CallbackInstrument(before_pass=before_pass)]):
         lowered = ir.lower(ScalarProgram, backend_type=backend.BackendType.Linx)
 
-    assert seen == ["ConvertToSSA", "Simplify", "NormalizeStmtStructure", "FlattenCallExpr"]
+    assert seen == _LINX_PIPELINE
     assert " + " not in ir.python_print(lowered)
     assert backend.is_backend_configured() == (configured is not None)
     if configured is not None:
@@ -82,12 +94,7 @@ def test_nested_pass_context_inherits_linx_and_restores_ascend():
     with ir.PassContext([], backend_type=backend.BackendType.Linx):
         with ir.PassContext([]) as inner:
             assert inner.get_backend() is backend.BackendLinx.instance()
-            assert ir.PassManager.get_strategy().pass_names == [
-                "ConvertToSSA",
-                "Simplify",
-                "NormalizeStmtStructure",
-                "FlattenCallExpr",
-            ]
+            assert ir.PassManager.get_strategy().pass_names == _LINX_PIPELINE
     assert backend.get_backend_type() == backend.BackendType.Ascend910
 
 

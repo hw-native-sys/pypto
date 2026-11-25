@@ -25,6 +25,21 @@ and the existing parameter/return contracts.
 - **Strategy-based Pipelines**: Pre-configured optimization levels (`Default`)
 - **Immutable Transformations**: Return new IR nodes, don't modify in place
 
+## Linx tile lowering
+
+Selecting `BackendType.Linx` runs `InlineFunctions`, then `ConvertToSSA`,
+`Simplify`, `NormalizeStmtStructure`, and `FlattenCallExpr`.
+`OutlineIncoreScopes` extracts the compute kernel. `ConvertTensorToTileOps`
+introduces GM loads and stores and preserves the binding of an explicit output.
+For example, a static 2D FP32 tensor add writing an existing output becomes
+two GM loads, a tile add and a store to that output.
+
+`LowerLinxTiles` places unresolved loads and tile allocations in Local storage
+and propagates placement through SSA uses. A publication consumes Local and produces
+Shared. Broadcast consumes Shared and produces Local with the same valid region.
+The pass checks the storage used by each tile operation, including Local operands
+for addition and stores. The final `IRVerifier` checks InCore tensor conversion, types and use-after-definition.
+
 ## IRProperty System
 
 ### IRProperty Enum

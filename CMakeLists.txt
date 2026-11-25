@@ -200,6 +200,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/allocate_memory_addr_pass.cpp
     src/ir/transforms/block_mx_scale_tensor_views_pass.cpp
     src/ir/transforms/block_nz_tensor_views_pass.cpp
+    src/ir/transforms/lower_linx_tiles_pass.cpp
     src/ir/transforms/canonicalize_tile_slice_pass.cpp
     src/ir/transforms/fold_no_op_reshape_pass.cpp
     src/ir/transforms/stamp_tfree_split_pass.cpp

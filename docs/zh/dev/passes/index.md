@@ -25,6 +25,8 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | ---- | ---- |
 | [Pass、PassContext、PassPipeline 和 PassManager](00-pass_manager.md) | 带属性跟踪、插桩与策略化流水线的 pass 组织与执行框架 |
 
+张量转换后，[Linx 流水线](00-pass_manager.md#linx-tile-降级) 执行面向该目标的 tile 放置。
+
 ## 默认流水线
 
 | 序号 | Pass | 作用 |
