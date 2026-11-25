@@ -13,7 +13,8 @@ The public import paths in specializer remain aliases of these definitions;
 body rewriting and metadata inference must use the same DynDim identity.
 """
 
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
@@ -92,3 +93,34 @@ class TensorMeta:
     def dynamic_dim_indices(self) -> set[int]:
         """Indices of dims that are DynDim-bound at this specialization."""
         return {i for i, d in enumerate(self.shape) if isinstance(d, DynDim)}
+
+
+def merge_tensor_metas(lhs: TensorMeta | None, rhs: TensorMeta | None) -> TensorMeta | None:
+    """Merge equal tensor types without losing known layout or dynamic-axis identity."""
+    if (
+        lhs is None
+        or rhs is None
+        or lhs.shape != rhs.shape
+        or lhs.dtype != rhs.dtype
+        or lhs.is_distributed != rhs.is_distributed
+    ):
+        return None
+    # An omitted annotation layout spells ND, not an arbitrary layout wildcard.
+    lhs_layout = TensorLayout.ND if lhs.layout is None else lhs.layout
+    rhs_layout = TensorLayout.ND if rhs.layout is None else rhs.layout
+    if lhs_layout != rhs_layout:
+        return None
+    if any(
+        isinstance(old, DynDim) and old.synthesized and old is not new
+        for old, new in zip(lhs.shape, rhs.shape, strict=True)
+    ):
+        return None
+    # Keep explicit ND so a later helper annotation cannot overwrite it as unspecified.
+    result = rhs if lhs.layout is None and rhs.layout is not None else lhs
+    # A branch join retains only extent identities proved by both arms.
+    runtime_dims = {axis: dim for axis, dim in lhs.runtime_dims.items() if rhs.runtime_dims.get(axis) is dim}
+    return replace(result, inexact_axes=lhs.inexact_axes | rhs.inexact_axes, runtime_dims=runtime_dims)
+
+
+UnpackMetas = Mapping[tuple[int, int], tuple[TensorMeta | None, ...]]
+UnpackMetaLookup = Callable[[], UnpackMetas]

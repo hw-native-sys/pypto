@@ -305,6 +305,7 @@ def build_contexts(
         contexts.append(
             build_specialize_context(
                 func=function._func,
+                discover_deps=discover,
                 func_name=names[variant_id],
                 func_type=function._func_type,
                 level=function._level,

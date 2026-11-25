@@ -2,7 +2,7 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
-PyPTO requires PTOAS v0.78 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `a5349f4` pins PTO-ISA `45435c06` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
+PyPTO requires PTOAS v0.78 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `0647a437` pins PTO-ISA `45435c06` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
 
 PyPTO emits `index` for element offsets in pointer arithmetic, scalar memory
 accesses and VMI loads and stores. In `pto.vmi.vload` and `pto.vmi.vstore`,

@@ -34,6 +34,7 @@ from ._call_syntax import dependency_call
 from ._call_syntax import writeback_return_operand as _writeback_return_operand
 from ._scalar_meta import ScalarTypes
 from ._specialize_body import BodyTransformer
+from ._specialize_types import merge_tensor_metas
 from .specializer import (
     DynDim,
     ShapeDim,
@@ -242,6 +243,7 @@ class _ReturnMeta:
     metas: dict[ast.expr, TensorMeta | None] = field(default_factory=dict[ast.expr, TensorMeta | None])
     tuples: dict[str, _TupleMeta] = field(default_factory=dict[str, _TupleMeta])
     tuple_result: _TupleMeta | None = None
+    unpacks: dict[tuple[int, int], _TupleMeta] | None = None
 
     def read_tuple(
         self, value: ast.expr | None, resolve_expr: Callable[[ast.expr], TensorMeta | None]
@@ -264,6 +266,8 @@ class _ReturnMeta:
                 names = _target_names(target)
                 if len(names) != len(items):
                     continue
+                if self.unpacks is not None:
+                    self.unpacks[target.lineno, target.col_offset] = items
                 for name, meta in zip(names, items, strict=True):
                     if meta is None:
                         local.pop(name, None)
@@ -587,6 +591,26 @@ def specialized_return_metas(
     """Read result metadata at the return using this variant's parameter metadata."""
     summary = _summarize_dep_results(dep, seed_meta, constexpr_values, discover_deps, track_returns=True)
     return summary.metas if summary is not None else None
+
+
+def infer_unpack_metas(
+    func: Any,
+    seed_meta: dict[str, TensorMeta],
+    func_type: str | None,
+    constexpr_values: Mapping[str, str],
+    discover_deps: _call_binding.DiscoverDeps,
+) -> dict[tuple[int, int], _TupleMeta]:
+    """Capture inferred RHS slots from the source-ordered analysis before simultaneous stores."""
+    slots: dict[tuple[int, int], _TupleMeta] = {}
+    extract_local_tensor_metas(
+        func,
+        seed_meta,
+        caller_func_type=func_type or "orchestration",
+        constexpr_values=constexpr_values,
+        discover_deps=discover_deps,
+        scan=LocalMetaScan(return_meta=_ReturnMeta(None, [], unpacks=slots)),
+    )
+    return slots
 
 
 def _instantiate_dep_results(
@@ -1203,33 +1227,6 @@ def _declared_dim_values(
     return declarations
 
 
-def _merge_tensor_metas(lhs: TensorMeta | None, rhs: TensorMeta | None) -> TensorMeta | None:
-    """Merge equal tensor types without losing known layout or dynamic-axis identity."""
-    if (
-        lhs is None
-        or rhs is None
-        or lhs.shape != rhs.shape
-        or lhs.dtype != rhs.dtype
-        or lhs.is_distributed != rhs.is_distributed
-    ):
-        return None
-    # An omitted annotation layout spells ND, not an arbitrary layout wildcard.
-    lhs_layout = _ir.TensorLayout.ND if lhs.layout is None else lhs.layout
-    rhs_layout = _ir.TensorLayout.ND if rhs.layout is None else rhs.layout
-    if lhs_layout != rhs_layout:
-        return None
-    if any(
-        isinstance(old, DynDim) and old.synthesized and old is not new
-        for old, new in zip(lhs.shape, rhs.shape, strict=True)
-    ):
-        return None
-    # Keep explicit ND so a later helper annotation cannot overwrite it as unspecified.
-    result = rhs if lhs.layout is None and rhs.layout is not None else lhs
-    # A branch join retains only extent identities proved by both arms.
-    runtime_dims = {axis: dim for axis, dim in lhs.runtime_dims.items() if rhs.runtime_dims.get(axis) is dim}
-    return replace(result, inexact_axes=lhs.inexact_axes | rhs.inexact_axes, runtime_dims=runtime_dims)
-
-
 def _resolve_dim_binop(elt: ast.BinOp, resolve: Callable[[ast.expr], _DimValue]) -> _DimValue:
     lhs = resolve(elt.left)
     rhs = resolve(elt.right)
@@ -1733,7 +1730,7 @@ def _walk_local_tensor_meta_stmts(
     def join_tuple(name: str, left: _TupleMeta | None, right: _TupleMeta | None) -> None:
         tuple_undo.append((name, tuples.get(name)))
         if left is not None and right is not None and len(left) == len(right):
-            tuples[name] = tuple(_merge_tensor_metas(x, y) for x, y in zip(left, right, strict=True))
+            tuples[name] = tuple(merge_tensor_metas(x, y) for x, y in zip(left, right, strict=True))
         else:
             tuples.pop(name, None)
 
@@ -1777,7 +1774,7 @@ def _walk_local_tensor_meta_stmts(
             lhs = true_tensors.get(name, local.get(name))
             rhs = false_tensors.get(name, local.get(name))
             tensor_undo.append((name, local.get(name)))
-            merged = _merge_tensor_metas(lhs, rhs)
+            merged = merge_tensor_metas(lhs, rhs)
             if merged is not None:
                 local[name] = merged
             else:
@@ -2035,7 +2032,9 @@ def _preview_static_expressions(
     )
     emitted: list[ast.stmt] = []
     try:
-        for stmt in copy.deepcopy(func_def.body):
+        body = copy.deepcopy(func_def.body)
+        transformer.track_conditional_inputs(body)
+        for stmt in body:
             rewritten = transformer.visit(stmt)
             if summarize_return and rewritten is not None:
                 emitted.extend(

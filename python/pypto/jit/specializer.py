@@ -50,6 +50,8 @@ from typing import TYPE_CHECKING, Any, cast, get_args, get_origin
 if TYPE_CHECKING:
     from pypto.jit.external.protocols import ExternalJITBinding
 
+    from ._call_binding import DiscoverDeps
+
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import (
     DUAL_AIV_DISPATCH_ATTR,
@@ -72,7 +74,7 @@ from . import _specialize_values as values
 from ._call_syntax import dependency_call
 from ._source import _UNBOUND, cache_in_snapshot, function_namespace
 from ._specialize_body import BodyTransformer, remap_peer_references
-from ._specialize_types import DynDim, ShapeDim, TensorMeta
+from ._specialize_types import DynDim, ShapeDim, TensorMeta, UnpackMetaLookup
 from .external._call_normalizer import CallBinding, normalize_calls
 from .external.contracts import KernelContract
 from .external.normalization import plan_call, plan_results
@@ -238,6 +240,7 @@ class SpecializeContext:
     # A shared function reached by distinct peer sets diagnoses actual imports.
     peer_func_scope_ambiguous: bool = False
     external_preflight_source: str = ""
+    unpack_metas: UnpackMetaLookup | None = None
     external_preflight_symbol: str = ""
     external_binary_policy: str = "ordinary"
     external_binding: ExternalJITBinding | None = None
@@ -2567,6 +2570,7 @@ class Specializer:
         dep_names = set(ctx.dep_names)
         transformer = BodyTransformer(
             tensor_meta=ctx.tensor_meta,
+            unpack_metas=ctx.unpack_metas,
             constexpr_values=ctx.constexpr_values,
             dep_names=dep_names,
             param_names=all_param_names,
@@ -2580,6 +2584,7 @@ class Specializer:
                 else {}
             ),
         )
+        transformer.track_conditional_inputs(func_def.body)
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         self._graph_rebinds[ctx.func_name] = (
             transformer.graph_rebinds if transformer.graph_rebinds or transformer.has_scope_capture else None
@@ -2601,6 +2606,7 @@ class Specializer:
             else:
                 flat_body.append(item)
 
+        transformer.inline_untyped_shape_reads(flat_body, all_param_names)
         if not flat_body:
             flat_body = [ast.Pass()]
 
@@ -3092,6 +3098,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     dep_call_variants: dict[tuple[str, int], str] | None = None,
     requires_return_contract: bool = False,
     return_metas: tuple[TensorMeta | None, ...] | None = None,
+    discover_deps: DiscoverDeps | None = None,
     peer_func_names: Mapping[str, str | None] | None = None,
     peer_func_scope_ambiguous: bool = False,
 ) -> SpecializeContext:
@@ -3159,6 +3166,15 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         else _EagerTileAnnotations()
     )
 
+    unpack_metas = None
+    if discover_deps is not None:
+        from ._tensor_meta import infer_unpack_metas  # noqa: PLC0415
+
+        unpack_metas = functools.cache(
+            functools.partial(
+                infer_unpack_metas, func, tensor_meta, func_type, constexpr_values or {}, discover_deps
+            )
+        )
     return SpecializeContext(
         func_name=func_name,
         source_func_name=func.__name__,
@@ -3181,6 +3197,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         eager_return_annotation=signature.return_annotation,
         requires_return_contract=requires_return_contract,
         return_metas=return_metas,
+        unpack_metas=unpack_metas,
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,

@@ -6505,7 +6505,6 @@ class TestRuntimeSizedLocalExtents:
             "transitive_shape_alias",
             "annotated_shape_alias",
             "rebound_shape_alias",
-            "rebound_source_shape_alias",
         ],
     )
     def test_descriptor_reshape_local_integer_unary_plus_stays_unknown(self, source):
@@ -6528,12 +6527,6 @@ class TestRuntimeSizedLocalExtents:
             flat = pl.reshape(src, [+width])
             return flat
 
-        def rebound_source_shape_alias(src, other):
-            src = other
-            width = src.shape[1]
-            flat = pl.reshape(src, [+width])
-            return flat
-
         seed = {
             "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
             "other": TensorMeta(shape=(1, 64), dtype=DataType.INT8),
@@ -6542,12 +6535,29 @@ class TestRuntimeSizedLocalExtents:
             "transitive_shape_alias": transitive_shape_alias,
             "annotated_shape_alias": annotated_shape_alias,
             "rebound_shape_alias": rebound_shape_alias,
-            "rebound_source_shape_alias": rebound_source_shape_alias,
         }
         metas = extract_local_tensor_metas(
             bodies[source], seed_meta=seed, discover_deps=_discover_dep_bindings
         )
         assert "flat" not in metas
+
+    def test_descriptor_reshape_uses_known_rebound_source_width(self):
+        @jit
+        def flatten(src: pl.Tensor[[1, 128], pl.INT8], other: pl.Tensor[[1, 64], pl.INT8]):
+            src = other
+            width = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
+            flat = pl.reshape(src, [+width])
+            return flat
+
+        seed = {
+            "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+            "other": TensorMeta(shape=(1, 64), dtype=DataType.INT8),
+        }
+        metas = extract_local_tensor_metas(
+            flatten._func, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
+        assert metas["flat"].shape == (64,)
+        assert isinstance(flatten.lower(), ir.Program)
 
     @pytest.mark.parametrize(
         "rows_expr,total_expr,error",

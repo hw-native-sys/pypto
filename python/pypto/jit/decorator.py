@@ -1848,6 +1848,7 @@ class JITFunction:
                 contexts.append(
                     build_specialize_context(
                         func=self._func,
+                        discover_deps=_discover_dep_bindings,
                         func_name=gen_names[key],
                         func_type=self._func_type,
                         level=self._level,
@@ -1897,6 +1898,7 @@ class JITFunction:
             contexts.append(
                 build_specialize_context(
                     func=dep._func,
+                    discover_deps=_discover_dep_bindings,
                     func_name=gen_names[key],
                     func_type=dep._func_type,
                     level=dep._level,

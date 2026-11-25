@@ -459,7 +459,7 @@ _CASES = [
 class TestRemainderFamily:
     """A2/A3 exact-op coverage for TREM, TREMS, TFMOD, and TFMODS."""
 
-    @pytest.mark.platforms("a2a3")
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("op_name,dtype,valid_shape,scalar,high_precision,boundary_values", _CASES)
     def test_remainder(
         self, test_runner, op_name, dtype, valid_shape, scalar, high_precision, boundary_values
