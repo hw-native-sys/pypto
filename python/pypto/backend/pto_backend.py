@@ -1185,8 +1185,28 @@ _SPLIT_FIFO_TEMPLATE_MARKERS = (
 _RUNTIME_SPLIT_FIFO_LANE_ARG = "PYPTO_SPLIT_RUNTIME_LANE_ARG"
 
 
-def _second_call_argument_end(code: str, args_start: int, args_end: int, func_name: str) -> int:
-    """Return where a runtime lane argument belongs after a FIFO call's tile argument."""
+def _uses_explicit_aiv_fifo_lane(func: _ir_core.Function) -> bool:
+    """Identify authored logical lanes independently of the runtime bridge backend."""
+    arities = {
+        _ir_core.get_op("tile.tpush_to_aic").name: 2,
+        _ir_core.get_op("tile.tpop_from_aic").name: 1,
+    }
+
+    class Finder(_ir_core.IRVisitor):
+        found = False
+
+        def visit_call(self, op: _ir_core.Call) -> None:
+            if len(op.args) == arities.get(op.op.name):
+                self.found = True
+            super().visit_call(op)
+
+    finder = Finder()
+    finder.visit_stmt(func.body)
+    return finder.found
+
+
+def _second_call_argument_end(code: str, args_start: int, args_end: int, func_name: str) -> int | None:
+    """Return the insertion point, or None when the call already has an explicit lane."""
 
     depths = {"(": 0, "[": 0, "{": 0, "<": 0}
     closing_to_opening = {")": "(", "]": "[", "}": "{", ">": "<"}
@@ -1201,10 +1221,10 @@ def _second_call_argument_end(code: str, args_start: int, args_end: int, func_na
                 depths[opening] -= 1
         elif char == "," and all(depth == 0 for depth in depths.values()):
             top_level_commas += 1
-            if top_level_commas == 2:
-                return index
+    if top_level_commas == 2:
+        return None
     if top_level_commas != 1:
-        raise RuntimeError(f"{func_name}: expected split TPUSH/TPOP to have at least pipe and tile arguments")
+        raise RuntimeError(f"{func_name}: expected split TPUSH/TPOP to have pipe, tile and an optional lane")
     return args_end
 
 
@@ -1226,22 +1246,8 @@ def _forward_runtime_lane_to_split_fifo_calls(
         return ptoas_code, False
 
     params_start, params_end, body_start, body_end = _find_ptoas_function(func.name, ptoas_code)
-    add_runtime_param = not _uses_dynamic_subblock_id(func)
-    if add_runtime_param:
-        subblock_param = "__pypto_runtime_subblock_idx"
-    else:
-        trailing_param = re.search(
-            r"(?:^|,)\s*int32_t\s+([A-Za-z_]\w*)\s*$",
-            ptoas_code[params_start + 1 : params_end],
-        )
-        if trailing_param is None:
-            raise RuntimeError(
-                f"{func.name}: PTOAS function is missing its trailing runtime subblock parameter"
-            )
-        subblock_param = trailing_param.group(1)
-
     call_pattern = re.compile(r"\b(TPUSH|TPOP)\s*(<)")
-    insertions: list[tuple[int, str]] = []
+    lane_positions: list[int] = []
     rewritten_counts = {"TPUSH": 0, "TPOP": 0}
     position = body_start + 1
     while (match := call_pattern.search(ptoas_code, position, body_end)) is not None:
@@ -1263,7 +1269,8 @@ def _forward_runtime_lane_to_split_fifo_calls(
         if args_end < 0 or args_end >= body_end:
             raise RuntimeError(f"{func.name}: unterminated split {match.group(1)} call")
         insertion_at = _second_call_argument_end(ptoas_code, args_start, args_end, func.name)
-        insertions.append((insertion_at, f" {_RUNTIME_SPLIT_FIFO_LANE_ARG}({subblock_param})"))
+        if insertion_at is not None:
+            lane_positions.append(insertion_at)
         rewritten_counts[match.group(1)] += 1
         position = args_end + 1
 
@@ -1276,6 +1283,28 @@ def _forward_runtime_lane_to_split_fifo_calls(
             f"PTOAS push/pop={rewritten_counts['TPUSH']}/{rewritten_counts['TPOP']}"
         )
 
+    # Explicit operands already select their logical lanes. Do not append a
+    # second lane, or add an unused hidden parameter when every call is explicit.
+    # Counts above still include these endpoints to retain the fail-closed check.
+    if not lane_positions:
+        return ptoas_code, False
+
+    add_runtime_param = not _uses_dynamic_subblock_id(func)
+    if add_runtime_param:
+        subblock_param = "__pypto_runtime_subblock_idx"
+    else:
+        trailing_param = re.search(
+            r"(?:^|,)\s*int32_t\s+([A-Za-z_]\w*)\s*$",
+            ptoas_code[params_start + 1 : params_end],
+        )
+        if trailing_param is None:
+            raise RuntimeError(
+                f"{func.name}: PTOAS function is missing its trailing runtime subblock parameter"
+            )
+        subblock_param = trailing_param.group(1)
+    insertions = [
+        (position, f" {_RUNTIME_SPLIT_FIFO_LANE_ARG}({subblock_param})") for position in lane_positions
+    ]
     if add_runtime_param:
         separator = "" if not ptoas_code[params_start + 1 : params_end].strip() else ", "
         insertions.append((params_end, f"{separator}int32_t {subblock_param}"))
@@ -1479,8 +1508,18 @@ def _generate_kernel_wrapper(
 
     deferred_completion_adapter = _DEFERRED_COMPLETION_ADAPTER if func_uses_deferred_completion else ""
     urma_transfer_adapter = _generate_urma_transfer_adapter(func) if func_uses_urma_transfer else ""
+    # The current PTO-ISA CPU implementation has no logical-lane overload.
+    # Reject it explicitly instead of stripping the operand and changing data
+    # selection. Device builds retain the authored call unchanged.
+    explicit_lane_guard = ""
+    if _uses_explicit_aiv_fifo_lane(func):
+        explicit_lane_guard = (
+            "#if defined(__CPU_SIM)\n"
+            '#error "Explicit aiv_subblockid requires NPU execution; CPU simulation is unsupported."\n'
+            "#endif\n"
+        )
     return (
-        f"{header}\n{deferred_completion_adapter}{urma_transfer_adapter}{fifo_lane_arg_bridge}"
+        f"{explicit_lane_guard}{header}\n{deferred_completion_adapter}{urma_transfer_adapter}{fifo_lane_arg_bridge}"
         f"// --- ptoas-generated code ---\n{ptoas_body}\n{fifo_lane_arg_cleanup}{wrapper_func}"
     )
 

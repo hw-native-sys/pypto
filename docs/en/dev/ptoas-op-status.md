@@ -168,9 +168,9 @@ output elements outside the valid rectangle.
 | pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 host-prequant frontend+codegen+ST for all four E4M3FN/E5M2 pairs; native FP4×FP4 tiles use PTOAS v0.72 logical Cube dimensions; mixed FP4/FP8 requires an explicit cast; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
 | pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_acc`) |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_bias`) |
-| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
+| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Shares `pto.tmatmul`'s operand-pair table, so A5 also accepts the four FP8 pairs (E4M3FN / E5M2, either order) and HF8 x HF8; see [Cube operand dtype pairs](ir/05-operators.md#cube-operand-dtype-pairs). A5 ST covers every dtype (the static-valid Acc bridge is what makes a5 GEMV assemble at all) |
+| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; acc_in stays FP32. A5 ST covers every dtype, split-K and `init_cond` |
+| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; bias stays FP32. A5 ST covers every dtype |
 | pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
@@ -298,7 +298,7 @@ output elements outside the valid rectangle.
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 standalone quantization frontend+codegen+hardware ST (`group_axis` A/B), MXFP8 from FP16/BF16/FP32 and MXFP4_E2M1 from FP16/BF16; `pl.tile.quant_mx_raw` also covers the raw TQUANT form |
 | pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | the current backend emits `pto.tstore.fp` |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ❌ | ✅ | — | A5 numerical ST covers signed INT8 and INT16 with per-row scale and offset. |
 | **Synchronization (8)** |  |  |  |  |  |  |  |  |
 | pto.barrier | pipe_barrier / dsb | internal | ✅ | — | — | ✅ | — | emitted automatically by compiler/system lowering |
 | pto.barrier_sync | barrier lowering | internal | ✅ | — | — | — | — | internal synchronization/scheduling primitive; no standalone ST |

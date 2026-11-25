@@ -28,6 +28,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -105,6 +106,16 @@ template <typename LookupArgCtx>
   OpPtr op;
   const std::vector<ExprPtr>* args = nullptr;
   if (auto call = As<Call>(expr)) {
+    auto aliases = TupleResultAliasOperands(call);
+    if (!aliases.empty()) {
+      std::vector<VarPtr> result(aliases.size());
+      for (size_t i = 0; i < aliases.size(); ++i) {
+        if (aliases[i] && As<DistributedTensorType>(aliases[i]->GetType())) {
+          result[i] = lookup_arg_ctx(aliases[i]);
+        }
+      }
+      return result;
+    }
     op = call->op_;
     args = &call->args_;
   } else if (auto submit = As<Submit>(expr)) {

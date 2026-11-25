@@ -266,9 +266,10 @@ def _packed_fp4_destination_program(root_dtype, result_dtype) -> ir.Program:
     [(pl.UINT8, pl.FP4E2M1X2), (pl.FP4E2M1X2, pl.UINT8)],
     ids=["byte-to-packed", "packed-to-byte"],
 )
-def test_shared_packed_fp4_destination_requires_matching_storage(root_dtype, result_dtype):
+def test_shared_destination_rejects_packed_fp4_treshape(root_dtype, result_dtype):
+    # Equal carrier sizes do not make packed-FP4 treshape legal in PTOAS.
     program = _packed_fp4_destination_program(root_dtype, result_dtype)
-    with pytest.raises(ValueError, match="packed FP4 shared destinations require matching storage"):
+    with pytest.raises(ValueError, match="FP4E2M1X2 tile aliases require PYPTO or DSA_RP addressed memory"):
         _generate(program, backend_type=BackendType.Ascend950)
 
 

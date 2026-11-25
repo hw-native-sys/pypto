@@ -68,6 +68,7 @@ using pto_ops_detail::EnsureStaticViewTileSsa;
 using pto_ops_detail::EnsureTileViewSsa;
 using pto_ops_detail::GenerateInsOutsClause;
 using pto_ops_detail::GetTileViewTypeAnnotation;
+using pto_ops_detail::HasStaticValidShape;
 using pto_ops_detail::MaterializeSubviewOperandIfNeeded;
 using pto_ops_detail::MutableTileViewShape;
 using pto_ops_detail::RequireStaticValidShapeForPtoas;
@@ -186,6 +187,8 @@ static const std::unordered_set<std::string_view>& LayoutAwareOps() {
       "tile.row_expand_max",
       "tile.row_expand_min",
       "tile.row_expand_expdif",
+      // Dequantization broadcasts per-row coefficients using their layout.
+      "tile.dequant",
       // Padding writes the tile's physical edge.
       "tile.fillpad",
       // Fractal / window / index addressed.
@@ -323,6 +326,11 @@ static std::string MatmulAttrs(const CallPtr& op, codegen::PTOCodegen& codegen) 
   return attrs + ", " + phase.substr(2);
 }
 
+/// Is @p op one of the three ordinary GEMV operators?
+static bool IsOrdinaryGemv(const CallPtr& op) {
+  return ir::IsOp(op, "tile.gemv") || ir::IsOp(op, "tile.gemv_acc") || ir::IsOp(op, "tile.gemv_bias");
+}
+
 /// Reject a Cube operand pair the configured target cannot multiply.
 ///
 /// Which (lhs, rhs) element types `pto.tmatmul*` / `pto.tgemv*` accept is an
@@ -342,10 +350,7 @@ static void CheckMatmulOperandArch(const CallPtr& op, size_t lhs_index, size_t r
   auto lhs = As<ir::TileType>(op->args_[lhs_index]->GetType());
   auto rhs = As<ir::TileType>(op->args_[rhs_index]->GetType());
   if (!lhs || !rhs) return;
-  const auto family =
-      ir::IsOp(op, "tile.gemv") || ir::IsOp(op, "tile.gemv_acc") || ir::IsOp(op, "tile.gemv_bias")
-          ? backend::CubeOpFamily::kGemv
-          : backend::CubeOpFamily::kMatmul;
+  const auto family = IsOrdinaryGemv(op) ? backend::CubeOpFamily::kGemv : backend::CubeOpFamily::kMatmul;
   const auto* pair = backend::FindCubeOperandPair(family, lhs->dtype_, rhs->dtype_);
   if (pair == nullptr) return;
   const auto* handler = codegen.GetBackendHandler();
@@ -359,12 +364,110 @@ static void CheckMatmulOperandArch(const CallPtr& op, size_t lhs_index, size_t r
       << ". Mixed and 1-byte float operand pairs require the Ascend950 ('a5') backend.";
 }
 
+/// A GEMV accumulator re-typed so its *type* carries the static valid extents.
+struct StaticValidAccView {
+  std::string ssa;   ///< empty when no bridge is needed
+  std::string type;  ///< the view's tile_buf type string
+};
+
+/// On A5, bridge an ordinary GEMV's accumulator to a static-valid view.
+///
+/// PTOAS v0.72 verifies a GEMV's operands on A5 through `verifyGemvTileOperandsA5`
+/// (lib/PTO/IR/PTOTile/PTOMatrixOperandVerification.cpp), which chains into the
+/// *matmul* operand verifier `verifyMatTileOperandsA2A3` to pick up the A5 layout
+/// rules -- and inherits its shape rule, "static matmul tile shapes lhs[M,K],
+/// rhs[K,N], and dst[M,N]". That rule compares `getMatmulLogicalShapeVec`
+/// (lib/PTO/IR/PTOTile/PTOStoreVerification.cpp:365), which falls back to the
+/// *physical* extent whenever the type's valid is dynamic. PyPTO's generic
+/// `pto.alloc_tile` path deliberately emits `v_row=?, v_col=?` and carries the
+/// live extent in separate `valid_row` / `valid_col` operands, and a GEMV result
+/// is the mandatory 16-row FP32 Acc box holding one logical row -- so the rule
+/// compares lhs rows 1 against dst rows 16 and rejects the op, at every dtype.
+///
+/// A2/A3 never reaches that rule: `verifyGemvTileOperandsA2A3` uses
+/// `verifyGemvValidShapes`, which compares *valid* rows only, where a dynamic
+/// valid simply skips the comparison. So the bridge is A5-only -- on A2/A3 the
+/// emitted instruction must stay byte-for-byte what it was.
+///
+/// The bridge is the one `pto.tquant.mx` already uses (`EmitStaticValidTileView`
+/// in pto_ops_datamove.cpp): a zero-copy `pto.treshape` whose *result type* holds
+/// the static valid extents. It aliases the same Acc address, so the downstream
+/// `pto.tstore` keeps reading the original SSA with its original type, and only
+/// the GEMV instruction sees the re-typed handle.
+///
+/// Returns an empty `ssa` when the bridge does not apply:
+///
+/// - a non-A5 target, or a non-GEMV operator;
+/// - a result whose valid extents are not compile-time constants. A
+///   runtime-valued N has no static type to offer, so there is nothing to
+///   re-type, and PTOAS must be the one to report it rather than this emitter
+///   inventing a wrong constant;
+/// - a result whose valid N is *narrower* than its physical N. Making the dst
+///   logical shape static turns on comparisons the other operands cannot answer:
+///   the same rule also requires `rhs logical N == dst logical N`, and the rhs
+///   type's valid stays dynamic, so `getMatmulLogicalShapeVec` reads its
+///   *physical* N. A static dst N of 40 against a physical rhs N of 64 is a fresh
+///   mismatch the bridge would have introduced. Full-valid N is the case where
+///   the two provably agree, because `BuildGemvResultType` takes the result's
+///   physical N straight from the rhs's. A partially-valid N needs every GEMV
+///   operand re-typed, not just the accumulator -- deliberately out of scope here.
+static StaticValidAccView EmitStaticValidGemvAccView(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                                     const std::string& acc_ssa,
+                                                     const std::string& acc_type) {
+  if (!IsOrdinaryGemv(op)) return {};
+  const auto* handler = codegen.GetBackendHandler();
+  INTERNAL_CHECK_SPAN(handler, op->span_)
+      << "Internal error: " << op->op_->name_ << " codegen requires a backend handler";
+  if (handler->GetPtoTargetArch() != "a5") return {};
+  if (acc_ssa.empty() || acc_type.empty()) return {};
+  // Nothing to bridge when the type already states its valid extents.
+  if (acc_type.find("v_row=?") == std::string::npos) return {};
+
+  const auto acc_tile_type = codegen.GetCurrentResultTileType();
+  if (!HasStaticValidShape(acc_tile_type)) return {};
+  // Columns must be fully valid -- see the narrow-N paragraph above. Rows are not
+  // checked: a GEMV result is one valid row in a 16-row box by construction, and
+  // that mismatch is exactly what the bridge exists to resolve.
+  const auto acc_valid = ir::GetValidShape(acc_tile_type);
+  const auto valid_cols = ir::As<ir::ConstInt>(acc_valid.back());
+  const auto physical_cols = ir::As<ir::ConstInt>(acc_tile_type->shape_.back());
+  if (!valid_cols || !physical_cols || valid_cols->value_ != physical_cols->value_) return {};
+
+  const std::string static_type = codegen.GetViewTileBufTypeStringFromTileType(acc_tile_type);
+  if (static_type.empty() || static_type.find("v_row=?") != std::string::npos) return {};
+
+  const std::string view = codegen.NewNamedTemp("gemv_acc_static");
+  codegen.RegisterTileBufType(view, static_type, acc_tile_type);
+  // Record the alias so later readers resolving through the view still reach the
+  // accumulator's own storage.
+  codegen.RegisterTileViewName(view, acc_ssa);
+  codegen.Emit(view + " = pto.treshape " + acc_ssa + " : " + acc_type + " -> " + static_type);
+  return {view, static_type};
+}
+
 static std::string MakePhasedMatmulCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
                                               codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
   CheckMatmulOperandArch(op, /*lhs_index=*/0, /*rhs_index=*/1, codegen);
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + MatmulAttrs(op, codegen));
+  // The A5 GEMV accumulator needs a static-valid type at the instruction; every
+  // other case keeps the shared ins/outs clause verbatim.
+  const auto acc_view = EmitStaticValidGemvAccView(op, codegen, codegen.GetCurrentResultTarget(),
+                                                   codegen.GetCurrentResultTileBufTypeString());
+  if (acc_view.ssa.empty()) {
+    codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + MatmulAttrs(op, codegen));
+    return "";
+  }
+  std::string clause = GenerateInsOutsClause(op, codegen);
+  // Retarget only outs(): the ins() operands are the lhs / rhs / bias tiles.
+  const std::string outs_from =
+      "outs(" + codegen.GetCurrentResultTarget() + " : " + codegen.GetCurrentResultTileBufTypeString() + ")";
+  const std::string outs_to = "outs(" + acc_view.ssa + " : " + acc_view.type + ")";
+  const auto pos = clause.rfind(outs_from);
+  INTERNAL_CHECK_SPAN(pos != std::string::npos, op->span_)
+      << "Internal error: " << pto_op_name << " ins/outs clause has no outs() to retarget";
+  clause.replace(pos, outs_from.size(), outs_to);
+  codegen.Emit(pto_op_name + " " + clause + MatmulAttrs(op, codegen));
   return "";
 }
 
@@ -379,15 +482,11 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
   std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string tmp_ssa = codegen.GetExprAsCode(op->args_[3]);
-  // Fall back to tmp's annotation when src lacks a MemRef (ForStmt result var, tile.reshape view).
-  if (src_type.empty()) {
-    src_type = codegen.GetExprTypeAnnotation(op->args_[3]);
-  }
-
-  // Both operands carry src's annotation (pto.ttrans requires a matched type
-  // pair); when src_type is empty, EmitInsOuts omits the whole `: types` clause.
+  std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[3]);
+  if (src_type.empty()) src_type = tmp_type;
+  if (tmp_type.empty()) tmp_type = src_type;
   EmitInsOuts(codegen, GetPtoNativeOpSpec("tile.transpose").native_op,
-              {{src_ssa, src_type}, {tmp_ssa, src_type}});
+              {{src_ssa, src_type}, {tmp_ssa, tmp_type}});
   return std::string("");
 }
 
@@ -489,9 +588,8 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
 // PTO-ISA 83b1b2b52 uses one scratch row: candidate values, a 32-byte-aligned
 // comparison mask, and a 32-byte address buffer. INT32 keeps the FP32 dividend,
 // divisor and quotient chain in tmp so the sources stay read-only: three data
-// areas for TREM, two for TREMS. High-precision TREM adds staged vector state
-// plus a fused buffer of up to 8 vectors (TREM_HP_FUSED_CHUNK_A2A3); using the
-// physical width bounds dynamic valid columns.
+// areas for TREM, two for TREMS. HpScratchRequiredColsV in PTO-ISA reserves
+// ten 64-float compensation vectors for each of up to eight batched vectors.
 static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::TileType>& src, bool is_trem,
                                               bool high_precision, const ir::Span& span) {
   const auto columns = As<ir::ConstInt>(src->shape_[1]);
@@ -502,11 +600,13 @@ static int64_t GetA2A3RemainderScratchColumns(const std::shared_ptr<const ir::Ti
   const int64_t data_areas = src->dtype_ == DataType::INT32 ? (is_trem ? 3 : 2) : 1;
   int64_t required = data_areas * row_stride + ((row_stride + 255) / 256) * 8 + 8;
   if (high_precision) {
+    constexpr int64_t kFp32LanesPerVector = 64;
     const auto valid_columns = As<ir::ConstInt>(ir::GetValidShape(src)[1]);
     const int64_t width = valid_columns ? valid_columns->value_ : columns->value_;
-    const int64_t vectors = std::max<int64_t>(width / 64, 1);
-    const int64_t staged = 192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? 64 : 0) +
-                           512 * std::min<int64_t>(vectors, 8);
+    const int64_t vectors = std::max<int64_t>(width / kFp32LanesPerVector, 1);
+    const int64_t compensation = 10 * kFp32LanesPerVector * std::min<int64_t>(vectors, 8);
+    const int64_t staged =
+        192 * vectors + ((vectors + 3) / 4) * 8 + 8 + (vectors == 1 ? kFp32LanesPerVector : 0) + compensation;
     required = std::max(required, staged);
   }
   return required;
@@ -620,6 +720,32 @@ static std::string MakeFullCodegenPTO(const std::string& pto_op_name, const Call
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, 2);
   const ir::ExprPtr& scalar = op->args_[1];
+  auto tile = As<ir::TileType>(op->GetType());
+  if (tile && (tile->dtype_ == DataType::INT64 || tile->dtype_ == DataType::UINT64) &&
+      codegen.GetBackendHandler()->GetPtoTargetArch() == "a5") {
+    // A5 TEXPANDS has no 64-bit integer lane. TSETVAL takes an element
+    // offset and preserves all 64 bits of the scalar without narrowing.
+    int64_t count = 1;
+    for (const auto& dim : tile->shape_) {
+      const auto extent = codegen.GetConstIntValue(dim);
+      INTERNAL_CHECK_SPAN(extent > 0 && count <= std::numeric_limits<int64_t>::max() / extent, op->span_)
+          << "tile.full requires a representable static element count";
+      count *= extent;
+    }
+    const auto end = codegen.GetOrEmitConstant(count, DataType::INDEX);
+    const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    const auto one = codegen.GetOrEmitConstant(int64_t{1}, DataType::INDEX);
+    const auto index = codegen.NewNamedTemp("fill_index");
+    const auto fill =
+        ir::GetScalarDtype(scalar) == tile->dtype_ ? scalar : ir::MakeCast(scalar, tile->dtype_, op->span_);
+    const auto value = codegen.GetExprAsCode(fill);
+    codegen.EmitStructural("scf.for " + index + " = " + zero + " to " + end + " step " + one + " {");
+    codegen.IncreaseIndent();
+    EmitInsOuts(codegen, "pto.tsetval", {{index, "index"}, {value, codegen.GetTypeString(tile->dtype_)}});
+    codegen.DecreaseIndent();
+    codegen.EmitStructural("}");
+    return "";
+  }
   EmitInsOuts(codegen, pto_op_name, {{codegen.GetExprAsCode(scalar), codegen.GetExprTypeAnnotation(scalar)}});
   return "";
 }
@@ -984,6 +1110,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_expand_max", nullptr,                2},
     {"tile.row_expand_min", nullptr,                2},
     {"tile.row_expand_expdif", "pto.trowexpandexpdif", 2},
+    {"tile.dequant",         "pto.tdequant",        3},
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
@@ -1359,6 +1486,15 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
       CheckMatmulOperandArch(op, /*lhs_index=*/1, /*rhs_index=*/2, codegen);
+      // An A5 ordinary GEMV needs a static-valid accumulator type at the
+      // instruction (see EmitStaticValidGemvAccView). Here the accumulator is
+      // both the ins() acc_in and the outs() dst -- the same SSA by
+      // construction, since InitMemRef makes the result reuse the accumulator's
+      // MemRef -- so the view replaces it in both positions and they stay equal.
+      if (auto acc_view = EmitStaticValidGemvAccView(op, codegen, dst, dst_type); !acc_view.ssa.empty()) {
+        dst = acc_view.ssa;
+        dst_type = acc_view.type;
+      }
       const std::string attrs = MatmulAttrs(op, codegen);
 
       // ins() carries the accumulator only on the accumulating form; the

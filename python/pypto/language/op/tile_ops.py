@@ -73,6 +73,7 @@ from ._tile_elementwise import cast as cast
 from ._tile_elementwise import cmp as cmp
 from ._tile_elementwise import cmps as cmps
 from ._tile_elementwise import cos as cos
+from ._tile_elementwise import dequant as dequant
 from ._tile_elementwise import div as div
 from ._tile_elementwise import divs as divs
 from ._tile_elementwise import exp as exp
@@ -149,7 +150,6 @@ from ._tile_memory import assemble as assemble
 from ._tile_memory import ci as ci
 from ._tile_memory import concat as concat
 from ._tile_memory import create as create
-from ._tile_memory import create_tile as create_tile
 from ._tile_memory import extract as extract
 from ._tile_memory import fillpad as fillpad
 from ._tile_memory import fillpad_expand as fillpad_expand
@@ -207,7 +207,6 @@ from .system_ops import tpush_to_aiv as tpush_to_aiv
 __all__ = [
     "MemRefType",
     "alloc",
-    "create_tile",
     "create",
     "read",
     "write",
@@ -235,6 +234,7 @@ __all__ = [
     "add",
     "sub",
     "mul",
+    "dequant",
     "div",
     "adds",
     "subs",

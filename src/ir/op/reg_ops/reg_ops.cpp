@@ -28,6 +28,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir {
@@ -41,20 +42,48 @@ bool Supported(DataType t) {
          t == DataType::UINT32;
 }
 
+bool IsLinearContiguousVecTile(const TileType& tile) {
+  if (tile.shape_.empty() || tile.shape_.size() > 2) return false;
+  const TileView view = tile_view_semantics::GetEffectiveTileView(tile);
+  if (view.pad != PadValue::null || view.compact != CompactMode::null ||
+      view.slayout != TileLayout::none_box ||
+      (!view.stride.empty() && view.stride.size() != tile.shape_.size())) {
+    return false;
+  }
+  // Append follows flattened row-major element order. Explicit dense strides
+  // describe the same storage as implicit ones; singleton axes create no gaps.
+  int64_t expected_stride = 1;
+  bool vector_shaped = tile.shape_.size() == 1;
+  for (size_t i = tile.shape_.size(); i > 0; --i) {
+    const auto dimension = As<ConstInt>(tile.shape_[i - 1]);
+    if (!dimension || dimension->value_ <= 0 ||
+        dimension->value_ > std::numeric_limits<int64_t>::max() / expected_stride) {
+      return false;
+    }
+    vector_shaped |= dimension->value_ == 1;
+    if (!view.stride.empty() && dimension->value_ != 1) {
+      const auto stride = As<ConstInt>(view.stride[i - 1]);
+      if (!stride || stride->value_ != expected_stride) return false;
+    }
+    expected_stride *= dimension->value_;
+  }
+  return view.blayout == TileLayout::row_major || (view.blayout == TileLayout::col_major && vector_shaped);
+}
+
 RegTypePtr Register(const ExprPtr& e, RegKind kind, bool allow_fp8 = false) {
   auto t = As<RegType>(e->GetType());
-  CHECK_SPAN(t && t->kind_ == kind, e->span_)
+  CHECK_SPAN(t && t->GetRegKind() == kind, e->span_)
       << "Expected " << (kind == RegKind::VecReg ? "VecReg" : "MaskReg");
-  CHECK_SPAN(
-      kind == RegKind::MaskReg || Supported(t->dtype_) || (allow_fp8 && t->dtype_ == DataType::FP8E4M3FN),
-      e->span_)
-      << "Unsupported register dtype " << t->dtype_.ToString();
+  CHECK_SPAN(kind == RegKind::MaskReg || Supported(t->GetDType()) ||
+                 (allow_fp8 && t->GetDType() == DataType::FP8E4M3FN),
+             e->span_)
+      << "Unsupported register dtype " << t->GetDType().ToString();
   return t;
 }
 
 void Match(const RegTypePtr& a, const RegTypePtr& b) {
-  CHECK(a->shape_ == b->shape_) << "Register lane shape mismatch";
-  CHECK(a->dtype_ == b->dtype_) << "Register dtype mismatch (including signedness)";
+  CHECK(a->GetShape() == b->GetShape()) << "Register lane shape mismatch";
+  CHECK(a->GetDType() == b->GetDType()) << "Register dtype mismatch (including signedness)";
 }
 
 int Lanes(const Kwargs& kw) {
@@ -91,18 +120,18 @@ int64_t StoreExtent(const Args& args, const Kwargs& kwargs) {
   int stride = GetKwargOr<int>(kwargs, "block_stride", 1);
   CHECK_SPAN(stride > 0 && stride <= std::numeric_limits<int16_t>::max(), args[0]->span_)
       << "block_stride must be a positive i16 integer (1..32767)";
-  const auto bytes = static_cast<int64_t>(value->dtype_.GetByte());
+  const auto bytes = static_cast<int64_t>(value->GetDType().GetByte());
   CHECK_SPAN(bytes > 0 && bytes <= 32, args[2]->span_)
       << "Register store element size must be in [1, 32] bytes";
   const int64_t block = 32 / bytes;
-  const int64_t last = value->shape_ - 1;
+  const int64_t last = value->GetShape() - 1;
   const int64_t tail = last % block + 1;
   CHECK(last / block <= (std::numeric_limits<int64_t>::max() - tail) / (stride * block))
       << "Register strided extent overflows";
   return (last / block) * stride * block + tail;
 }
 
-TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
+TileTypePtr Memory(const Args& args, int64_t lanes, bool read, bool linear_destination = false) {
   auto t = As<TileType>(args[0]->GetType());
   CHECK_SPAN(t, args[0]->span_) << "reg.load/store requires a Vec Tile";
   CHECK(t->GetMemorySpace() == MemorySpace::Vec) << "reg.load/store requires Vec UB memory";
@@ -114,17 +143,23 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
   int64_t offset = offset_const ? offset_const->value_ : 0;
   CHECK(lanes <= capacity && (!offset_const || (offset >= 0 && offset <= capacity - lanes)))
       << "Register access exceeds capacity bounds";
+  if (linear_destination) {
+    CHECK_SPAN(IsLinearContiguousVecTile(*t), args[0]->span_)
+        << "squeeze_store destination requires a contiguous one- or two-dimensional Vec Tile view";
+  }
   if (t->tile_view_) {
     const auto& v = *t->tile_view_;
     // Offsets and block strides address flat storage. A boxed/padded View
     // needs a separate physical-layout contract; block_stride alone does not
     // make its logical indexing contiguous.
-    CHECK(v.blayout == TileLayout::row_major && v.slayout == TileLayout::none_box &&
-          v.compact == CompactMode::null)
-        << "Register memory requires a contiguous row-major View";
+    if (!linear_destination) {
+      CHECK(v.blayout == TileLayout::row_major && v.slayout == TileLayout::none_box &&
+            v.compact == CompactMode::null)
+          << "Register memory requires a contiguous row-major View";
+    }
     // Verify the full physical stride, not just the last dimension: flattening
     // a padded row would otherwise read padding as the next logical row.
-    if (!v.stride.empty()) {
+    if (!linear_destination && !v.stride.empty()) {
       CHECK(v.stride.size() == t->shape_.size()) << "View stride rank mismatch";
       int64_t stride = 1;
       for (size_t i = t->shape_.size(); i > 0; --i) {
@@ -155,7 +190,10 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
       }
     }
   } else {
-    CHECK(t->shape_.size() == 1) << "2D register memory access requires an explicit contiguous View";
+    // Stream destinations have already proved their effective (possibly
+    // implicit) layout above; ordinary register accesses retain their contract.
+    CHECK(linear_destination || t->shape_.size() == 1)
+        << "2D register memory access requires an explicit contiguous View";
   }
   if (t->memref_ && !(*t->memref_)->is_pinned_ && offset_const) {
     // A View may be smaller than its allocation, but its base offset still
@@ -186,11 +224,13 @@ TypePtr Binary(const Args& a, const Kwargs& k, const std::string& name) {
   CHECK(a.size() == 2 || a.size() == 3) << "Binary register operation expects 2 operands and optional mask";
   auto x = Register(a[0], RegKind::VecReg);
   Match(x, Register(a[1], RegKind::VecReg));
-  if (a.size() == 3) CHECK(Register(a[2], RegKind::MaskReg)->shape_ == x->shape_) << "Mask lane mismatch";
+  if (a.size() == 3) {
+    CHECK(Register(a[2], RegKind::MaskReg)->GetShape() == x->GetShape()) << "Mask lane mismatch";
+  }
   CHECK(GetStringKwarg(k, "pmode", "zero") == "zero") << "P0 pmode must be zero (merge unsupported)";
-  CHECK(name != "mul" || (x->dtype_ != DataType::INT8 && x->dtype_ != DataType::UINT8))
+  CHECK(name != "mul" || (x->GetDType() != DataType::INT8 && x->GetDType() != DataType::UINT8))
       << "reg.mul rejects 8-bit dtype";
-  CHECK(name != "div" || x->dtype_ == DataType::FP16 || x->dtype_ == DataType::FP32)
+  CHECK(name != "div" || x->GetDType() == DataType::FP16 || x->GetDType() == DataType::FP32)
       << "reg.div requires FP16/FP32 dtype";
   return x;
 }
@@ -199,7 +239,7 @@ TypePtr Convert(const Args& a, const Kwargs& k) {
   CHECK(a.size() == 1) << "reg.convert expects one VecReg";
   auto x = Register(a[0], RegKind::VecReg);
   auto dst = GetRequiredKwarg<DataType>(k, "dtype", "reg.convert");
-  const auto src = x->dtype_;
+  const auto src = x->GetDType();
   // Pooling and normalization round through BF16 without changing logical lanes.
   bool narrow_float =
       src == DataType::FP32 && (dst == DataType::FP16 || dst == DataType::BF16 || dst == DataType::FP8E4M3FN);
@@ -230,21 +270,21 @@ TypePtr Convert(const Args& a, const Kwargs& k) {
   }
   CHECK(!(narrow_float || float_int || narrow_int) || saturate) << "convert requires explicit saturate";
   CHECK(!(narrow_float || float_int) || rounding) << "convert requires normalized rounding";
-  return std::make_shared<RegType>(x->shape_, dst, RegKind::VecReg);
+  return std::make_shared<RegType>(x->GetShape(), dst, RegKind::VecReg);
 }
 bool Integer(DataType dtype) { return dtype.IsInt() && dtype.GetBit() <= 32 && dtype.GetBit() >= 8; }
 bool Float(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::FP32; }
 
 RegTypePtr Vec(const ExprPtr& expr) {
   auto type = Register(expr, RegKind::VecReg);
-  CHECK_SPAN(Integer(type->dtype_) || Float(type->dtype_), expr->span_)
-      << "Unsupported VF dtype " << type->dtype_.ToString();
+  CHECK_SPAN(Integer(type->GetDType()) || Float(type->GetDType()), expr->span_)
+      << "Unsupported VF dtype " << type->GetDType().ToString();
   return type;
 }
 
 RegTypePtr Mask(const ExprPtr& expr, const RegTypePtr& vector) {
   auto mask = Register(expr, RegKind::MaskReg);
-  CHECK_SPAN(mask->shape_ == vector->shape_, expr->span_) << "Mask lane mismatch";
+  CHECK_SPAN(mask->GetShape() == vector->GetShape(), expr->span_) << "Mask lane mismatch";
   return mask;
 }
 
@@ -255,7 +295,7 @@ void Pmode(const Kwargs& kwargs) {
 TypePtr Unary(const Args& args, const Kwargs& kwargs, const std::string& name) {
   CHECK(args.size() == 1 || args.size() == 2) << "Unary VF expects value and optional mask";
   auto x = Vec(args[0]);
-  auto dtype = x->dtype_;
+  auto dtype = x->GetDType();
   if (name == "abs") {
     CHECK(Float(dtype) || dtype.IsSignedInt()) << "reg.abs requires float or signed integer dtype";
   } else if (name == "relu") {
@@ -274,7 +314,7 @@ TypePtr IntegerBinary(const Args& args, const Kwargs& kwargs) {
   CHECK(args.size() == 2 || args.size() == 3) << "Binary VF expects two vectors and optional mask";
   auto x = Vec(args[0]);
   auto y = Vec(args[1]);
-  CHECK(Integer(x->dtype_)) << "Bitwise and shift operations require integer dtype";
+  CHECK(Integer(x->GetDType())) << "Bitwise and shift operations require integer dtype";
   Match(x, y);
   if (args.size() == 3) Mask(args[2], x);
   Pmode(kwargs);
@@ -286,14 +326,14 @@ TypePtr ScalarOperation(const Args& args, const Kwargs& kwargs, const std::strin
   auto x = Vec(args[0]);
   auto scalar = As<ScalarType>(args[1]->GetType());
   bool shift = name == "shift_lefts" || name == "shift_rights";
-  auto dtype = shift ? DataType::INT16 : x->dtype_;
+  auto dtype = shift ? DataType::INT16 : x->GetDType();
   CHECK(scalar && scalar->dtype_ == dtype) << "Scalar dtype mismatch (shifts require i16)";
-  if (shift) CHECK(Integer(x->dtype_)) << "Scalar shift requires integer dtype";
-  if (name == "muls") CHECK(x->dtype_.GetBit() >= 16) << "reg.muls rejects 8-bit dtype";
+  if (shift) CHECK(Integer(x->GetDType())) << "Scalar shift requires integer dtype";
+  if (name == "muls") CHECK(x->GetDType().GetBit() >= 16) << "reg.muls rejects 8-bit dtype";
   auto mask = Mask(args[2], x);
   Pmode(kwargs);
   if (name != "compares") return x;
-  CHECK(Float(x->dtype_) || x->dtype_ == DataType::INT32 || x->dtype_ == DataType::UINT32)
+  CHECK(Float(x->GetDType()) || x->GetDType() == DataType::INT32 || x->GetDType() == DataType::UINT32)
       << "Unsupported compares dtype";
   auto predicate = GetRequiredKwarg<std::string>(kwargs, "predicate", "reg.compares");
   CHECK(predicate == "eq" || predicate == "ne" || predicate == "lt" || predicate == "le" ||
@@ -311,9 +351,9 @@ bool GroupCount(int64_t groups) { return groups == 1 || groups == 2 || groups ==
 TypePtr Reduction(const Args& args, const Kwargs& kwargs, const std::string& name) {
   CHECK(args.size() == 2) << "Reduction requires source and mask";
   auto x = Vec(args[0]);
-  CHECK(x->dtype_.GetBit() >= 16) << "Reduction rejects 8-bit dtype";
+  CHECK(x->GetDType().GetBit() >= 16) << "Reduction rejects 8-bit dtype";
   Mask(args[1], x);
-  if (name == "reduce_sum" && Float(x->dtype_)) {
+  if (name == "reduce_sum" && Float(x->GetDType())) {
     CHECK(GetKwargOr<bool>(kwargs, "reassoc", false)) << "Floating reduce_sum requires reassoc=True";
   }
   // An absent group_size means a full reduction to one lane, the original
@@ -322,14 +362,14 @@ TypePtr Reduction(const Args& args, const Kwargs& kwargs, const std::string& nam
   // degrading to a full reduction.
   const auto entry = std::find_if(kwargs.begin(), kwargs.end(),
                                   [](const auto& kwarg) { return kwarg.first == "group_size"; });
-  if (entry == kwargs.end()) return std::make_shared<RegType>(1, x->dtype_, RegKind::VecReg);
+  if (entry == kwargs.end()) return std::make_shared<RegType>(1, x->GetDType(), RegKind::VecReg);
   const auto group_size = AnyCast<int>(entry->second, "group_size");
-  CHECK(group_size > 0 && x->shape_ % group_size == 0)
-      << "reg." << name << " group_size must be positive and divide the " << x->shape_ << " source lanes";
-  const int64_t groups = x->shape_ / group_size;
+  CHECK(group_size > 0 && x->GetShape() % group_size == 0)
+      << "reg." << name << " group_size must be positive and divide the " << x->GetShape() << " source lanes";
+  const int64_t groups = x->GetShape() / group_size;
   CHECK(GroupCount(groups)) << "reg." << name << " supports 1, 2, 4 or 8 groups; group_size " << group_size
-                            << " over " << x->shape_ << " lanes requests " << groups;
-  return std::make_shared<RegType>(groups, x->dtype_, RegKind::VecReg);
+                            << " over " << x->GetShape() << " lanes requests " << groups;
+  return std::make_shared<RegType>(groups, x->GetDType(), RegKind::VecReg);
 }
 
 TypePtr Fused(const Args& a, const Kwargs& k, const std::string& name) {
@@ -337,7 +377,7 @@ TypePtr Fused(const Args& a, const Kwargs& k, const std::string& name) {
   CHECK(a.size() == inputs + 1 || (name == "mula" && a.size() == inputs))
       << "reg." << name << " has invalid operand count";
   auto x = Register(a[0], RegKind::VecReg);
-  const auto dtype = x->dtype_;
+  const auto dtype = x->GetDType();
   if (name == "mula") {
     CHECK(dtype != DataType::INT8 && dtype != DataType::UINT8)
         << "reg.mula requires floating-point or 16/32-bit integer registers";
@@ -355,7 +395,7 @@ TypePtr Fused(const Args& a, const Kwargs& k, const std::string& name) {
   if (a.size() > inputs) Mask(a.back(), x);
   Pmode(k);
   // EXPDIF widens its FP16 inputs; it is not a dtype-preserving binary op.
-  if (name == "expdif") return std::make_shared<RegType>(x->shape_, DataType::FP32, RegKind::VecReg);
+  if (name == "expdif") return std::make_shared<RegType>(x->GetShape(), DataType::FP32, RegKind::VecReg);
   return x;
 }
 
@@ -370,17 +410,17 @@ TypePtr Paired(const Args& a, const Kwargs& k, const std::string& name) {
   if (a.size() >= 3) Mask(a.back(), x);
   if (carry_in) Mask(a[2], x);
   if (carry || name == "mull") {
-    CHECK(x->dtype_ == DataType::INT32 || x->dtype_ == DataType::UINT32)
+    CHECK(x->GetDType() == DataType::INT32 || x->GetDType() == DataType::UINT32)
         << "reg." << name << " requires INT32/UINT32 registers";
   }
   if (name == "mull") {
-    CHECK(x->shape_ == 64 || x->shape_ == 128 || x->shape_ == 256)
+    CHECK(x->GetShape() == 64 || x->GetShape() == 128 || x->GetShape() == 256)
         << "reg.mull requires 64, 128, or 256 lanes";
   } else if (!carry) {
-    CHECK(x->shape_ % 2 == 0) << "Interleave/deinterleave require even lane counts";
+    CHECK(x->GetShape() % 2 == 0) << "Interleave/deinterleave require even lane counts";
   }
   if (!carry) Pmode(k);
-  TypePtr second = carry ? std::make_shared<RegType>(x->shape_, DataType::BOOL, RegKind::MaskReg) : x;
+  TypePtr second = carry ? std::make_shared<RegType>(x->GetShape(), DataType::BOOL, RegKind::MaskReg) : x;
   return std::make_shared<TupleType>(std::vector<TypePtr>{x, second});
 }
 
@@ -395,18 +435,18 @@ TileTypePtr IndexedMemory(const Args& a, bool read) {
   auto base = a.size() > base_index ? a[base_index] : zero;
   auto tile = Memory({a[0], base}, 1, false);
   auto offsets = Register(a[1], RegKind::VecReg);
-  CHECK(offsets->dtype_ == DataType::UINT16 || offsets->dtype_ == DataType::UINT32)
+  CHECK(offsets->GetDType() == DataType::UINT16 || offsets->GetDType() == DataType::UINT32)
       << "Indexed register memory requires UINT16/UINT32 element offsets";
   // The physical indexed paths use 16-bit offsets for byte/halfword data,
   // and 32-bit offsets for word data. Byte gathers promote their result.
   const auto offset_dtype = tile->dtype_.GetBit() == 32 ? DataType::UINT32 : DataType::UINT16;
-  CHECK(offsets->dtype_ == offset_dtype)
+  CHECK(offsets->GetDType() == offset_dtype)
       << "Indexed memory requires UINT16 offsets for 8/16-bit data and UINT32 offsets for 32-bit data";
   Mask(a[read ? 2 : 3], offsets);
   if (!read) {
     auto value = Register(a[2], RegKind::VecReg);
-    CHECK(value->shape_ == offsets->shape_) << "Indexed value/offset lane mismatch";
-    CHECK(value->dtype_ == tile->dtype_) << "Scatter dtype mismatch";
+    CHECK(value->GetShape() == offsets->GetShape()) << "Indexed value/offset lane mismatch";
+    CHECK(value->GetDType() == tile->dtype_) << "Scatter dtype mismatch";
   }
   return tile;
 }
@@ -462,8 +502,10 @@ REGISTER_OP("reg.store")
       CHECK(a.size() == 3 || a.size() == 4) << "reg.store expects tile, offset, value, optional mask";
       auto v = Register(a[2], RegKind::VecReg);
       auto t = Memory(a, StoreExtent(a, k), false);
-      CHECK(t->dtype_ == v->dtype_) << "Store dtype mismatch";
-      if (a.size() == 4) CHECK(Register(a[3], RegKind::MaskReg)->shape_ == v->shape_) << "Mask lane mismatch";
+      CHECK(t->dtype_ == v->GetDType()) << "Store dtype mismatch";
+      if (a.size() == 4) {
+        CHECK(Register(a[3], RegKind::MaskReg)->GetShape() == v->GetShape()) << "Mask lane mismatch";
+      }
       return t;
     });
 
@@ -511,12 +553,12 @@ REGISTER_OP("reg.interpret_cast")
       auto x = Register(a[0], RegKind::VecReg, true);
       auto dtype = GetRequiredKwarg<DataType>(k, "dtype", "reg.interpret_cast");
       CHECK(Supported(dtype)) << "Unsupported reinterpret destination dtype";
-      const auto source_bits = static_cast<int64_t>(x->dtype_.GetBit());
+      const auto source_bits = static_cast<int64_t>(x->GetDType().GetBit());
       const auto target_bits = static_cast<int64_t>(dtype.GetBit());
       INTERNAL_CHECK(source_bits > 0 && target_bits > 0) << "Supported register widths must be positive";
-      CHECK(x->shape_ <= std::numeric_limits<int64_t>::max() / source_bits)
+      CHECK(x->GetShape() <= std::numeric_limits<int64_t>::max() / source_bits)
           << "Reinterpret total bit count is too large";
-      const int64_t bits = x->shape_ * source_bits;
+      const int64_t bits = x->GetShape() * source_bits;
       CHECK(bits % target_bits == 0) << "Reinterpret total bits must form whole destination lanes";
       CHECK(bits / target_bits <= std::numeric_limits<int>::max())
           << "Reinterpret result lane count is too large";
@@ -537,11 +579,11 @@ REGISTER_OP("reg.group_broadcast")
       // grouped-reduction result, so passing num_groups separately could only
       // disagree with it. `lanes` is the width to expand back to.
       const auto lanes = Lanes(k);
-      CHECK(GroupCount(x->shape_)) << "reg.group_broadcast source must hold 1, 2, 4 or 8 group lanes, got "
-                                   << x->shape_;
-      CHECK(lanes % x->shape_ == 0) << "reg.group_broadcast requires the " << x->shape_
-                                    << " groups to divide the " << lanes << " result lanes";
-      return std::make_shared<RegType>(lanes, x->dtype_, RegKind::VecReg);
+      CHECK(GroupCount(x->GetShape()))
+          << "reg.group_broadcast source must hold 1, 2, 4 or 8 group lanes, got " << x->GetShape();
+      CHECK(lanes % x->GetShape() == 0) << "reg.group_broadcast requires the " << x->GetShape()
+                                        << " groups to divide the " << lanes << " result lanes";
+      return std::make_shared<RegType>(lanes, x->GetDType(), RegKind::VecReg);
     });
 
 REGISTER_OP("reg.create_group_mask")
@@ -583,9 +625,9 @@ static bool RegisterHistograms() {
           CHECK(a.size() == 3) << "Histogram expects accumulator, source and mask";
           auto acc = Register(a[0], RegKind::VecReg);
           auto source = Register(a[1], RegKind::VecReg);
-          CHECK(acc->dtype_ == DataType::UINT16 && (acc->shape_ == 128 || acc->shape_ == 256))
+          CHECK(acc->GetDType() == DataType::UINT16 && (acc->GetShape() == 128 || acc->GetShape() == 256))
               << "Histogram accumulator must be UINT16 with 128 or 256 bins";
-          CHECK(source->dtype_ == DataType::UINT8) << "Histogram source must be UINT8";
+          CHECK(source->GetDType() == DataType::UINT8) << "Histogram source must be UINT8";
           Mask(a[2], source);
           return acc;
         });
@@ -623,8 +665,8 @@ static bool RegisterGenerators() {
         if (op == "broadcast" && As<RegType>(a[0]->GetType())) {
           // Broadcast reductions directly without a UB store/load or scalar transfer.
           auto value = Register(a[0], RegKind::VecReg);
-          CHECK(value->shape_ == 1) << "Register broadcast requires a one-lane VecReg";
-          CHECK(value->dtype_ == dtype) << "Register broadcast dtype mismatch";
+          CHECK(value->GetShape() == 1) << "Register broadcast requires a one-lane VecReg";
+          CHECK(value->GetDType() == dtype) << "Register broadcast dtype mismatch";
         } else {
           Scalar(a[0], dtype);
         }
@@ -665,9 +707,9 @@ REGISTER_OP("reg.compare")
       auto x = Register(a[0], RegKind::VecReg);
       Match(x, Register(a[1], RegKind::VecReg));
       auto m = Register(a[2], RegKind::MaskReg);
-      CHECK(m->shape_ == x->shape_) << "Mask lane mismatch";
-      CHECK(x->dtype_ == DataType::FP16 || x->dtype_ == DataType::FP32 || x->dtype_ == DataType::INT32 ||
-            x->dtype_ == DataType::UINT32)
+      CHECK(m->GetShape() == x->GetShape()) << "Mask lane mismatch";
+      CHECK(x->GetDType() == DataType::FP16 || x->GetDType() == DataType::FP32 ||
+            x->GetDType() == DataType::INT32 || x->GetDType() == DataType::UINT32)
           << "Unsupported compare dtype";
       auto p = GetRequiredKwarg<std::string>(k, "predicate", "reg.compare");
       CHECK(p == "eq" || p == "ne" || p == "lt" || p == "le" || p == "gt" || p == "ge")
@@ -687,8 +729,8 @@ REGISTER_OP("reg.select")
       auto m = Register(a[0], RegKind::MaskReg);
       auto v = Register(a[1], RegKind::VecReg);
       Match(v, Register(a[2], RegKind::VecReg));
-      CHECK(v->shape_ == m->shape_) << "Mask lane mismatch";
-      CHECK(v->dtype_ != DataType::BF16) << "select rejects BF16 dtype";
+      CHECK(v->GetShape() == m->GetShape()) << "Mask lane mismatch";
+      CHECK(v->GetDType() != DataType::BF16) << "select rejects BF16 dtype";
       return v;
     });
 static bool RegisterMaskLogic() {
@@ -809,10 +851,11 @@ REGISTER_OP("reg.gather_lanes")
       CHECK(args.size() == 2) << "gather_lanes requires source and indices";
       auto x = Vec(args[0]);
       auto indices = Vec(args[1]);
-      auto width = x->dtype_.GetBit();
-      CHECK(Integer(indices->dtype_) && indices->dtype_.GetBit() == width) << "Index width mismatch";
-      CHECK(indices->shape_ == x->shape_) << "Index lane mismatch";
-      CHECK(x->shape_ == 64 || (width <= 16 && x->shape_ == 128) || (width == 8 && x->shape_ == 256))
+      auto width = x->GetDType().GetBit();
+      CHECK(Integer(indices->GetDType()) && indices->GetDType().GetBit() == width) << "Index width mismatch";
+      CHECK(indices->GetShape() == x->GetShape()) << "Index lane mismatch";
+      CHECK(x->GetShape() == 64 || (width <= 16 && x->GetShape() == 128) ||
+            (width == 8 && x->GetShape() == 256))
           << "Unsupported vselr lane count";
       return x;
     });
@@ -879,10 +922,10 @@ REGISTER_OP("reg.gather")
       // The byte gather form zero-extends, including signed byte sources.
       if (dtype == DataType::INT8) dtype = DataType::INT16;
       if (dtype == DataType::UINT8) dtype = DataType::UINT16;
-      CHECK(indices->dtype_ != DataType::UINT16 || dtype.GetBit() == 16)
+      CHECK(indices->GetDType() != DataType::UINT16 || dtype.GetBit() == 16)
           << "UINT16 gather offsets require 16-bit results";
       Pmode(k);
-      return std::make_shared<RegType>(indices->shape_, dtype, RegKind::VecReg);
+      return std::make_shared<RegType>(indices->GetShape(), dtype, RegKind::VecReg);
     });
 REGISTER_OP("reg.scatter")
     .set_op_category("RegOp")
@@ -903,7 +946,101 @@ REGISTER_OP("reg.scatter")
       return IndexedMemory(a, false);
     });
 
+// A stream is represented by explicit state edges, including through loop
+// carries. It is not an ordinary Tile version or a per-call compress_store.
+REGISTER_OP("reg.squeeze")
+    .set_op_category("RegOp")
+    .set_description("Pack selected UINT16/UINT32 lanes in stable order")
+    .set_reg_op("pto.vmi.compress")
+    .add_argument("value", "One physical UINT16/UINT32 VecReg")
+    .add_argument("mask", "Matching MaskReg")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "reg.squeeze expects value and mask";
+      auto value = Register(a[0], RegKind::VecReg);
+      CHECK(value->GetDType() == DataType::UINT16 || value->GetDType() == DataType::UINT32)
+          << "reg.squeeze requires UINT16/UINT32";
+      CHECK(value->GetShape() == 256 / value->GetDType().GetByte())
+          << "reg.squeeze requires one full 256-byte register";
+      CHECK(Register(a[1], RegKind::MaskReg)->GetShape() == value->GetShape())
+          << "Squeeze mask lane mismatch";
+      return value;
+    });
+
+REGISTER_OP("reg.squeeze_store_init")
+    .set_op_category("RegOp")
+    .set_description("Initialize a region-local UReg squeeze-store state")
+    .set_reg_op("pto.init_align")
+    .add_argument("dst", "Destination Vec Tile")
+    .add_argument("offset", "Initial element offset")
+    .set_input_memory(0, MemorySpace::Vec)
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "squeeze_store_init expects destination and offset";
+      auto tile = Memory(a, 0, false, /*linear_destination=*/true);
+      CHECK(tile->dtype_ == DataType::UINT16 || tile->dtype_ == DataType::UINT32)
+          << "squeeze_store requires UINT16/UINT32 destination";
+      return RegType::GetUReg();
+    });
+
+REGISTER_OP("reg.squeeze_store_step")
+    .set_op_category("RegOp")
+    .set_description("Append selected lanes and return the next UReg squeeze-store state")
+    .set_reg_op("pto.vstur")
+    .add_argument("ureg", "Current UReg squeeze-store state")
+    .add_argument("dst", "The stream destination")
+    .add_argument("value", "One physical UINT16/UINT32 VecReg")
+    .add_argument("mask", "Matching MaskReg")
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_arg_effect(1, ArgEffect::Write)
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 4) << "squeeze_store_step expects UReg value, destination, VecReg and MaskReg";
+      CHECK(IsURegType(a[0]->GetType())) << "Expected current UReg squeeze-store state";
+      auto packed = OpRegistry::GetInstance().Create("reg.squeeze", {a[2], a[3]}, k, a[2]->span_);
+      auto tile = As<TileType>(a[1]->GetType());
+      CHECK(tile && tile->GetMemorySpace() == MemorySpace::Vec) << "Expected Vec Tile destination";
+      CHECK(tile->dtype_ == As<RegType>(packed->GetType())->GetDType())
+          << "Squeeze destination dtype mismatch";
+      CHECK(IsLinearContiguousVecTile(*tile))
+          << "squeeze_store destination must have a contiguous linear Vec Tile view; flatten the Tile or "
+             "use a contiguous row-major view";
+      return RegType::GetUReg();
+    });
+
+REGISTER_OP("reg.squeeze_store_flush")
+    .set_op_category("RegOp")
+    .set_description("Finalize the UReg squeeze-store state and return the destination alias")
+    .set_reg_op("pto.vstar")
+    .add_argument("ureg", "Final UReg squeeze-store state")
+    .add_argument("dst", "The stream destination")
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_output_reuses_input(1)
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 2) << "squeeze_store_flush expects final UReg value and destination";
+      CHECK(IsURegType(a[0]->GetType())) << "Expected final UReg squeeze-store state";
+      auto tile = As<TileType>(a[1]->GetType());
+      CHECK(tile && tile->GetMemorySpace() == MemorySpace::Vec &&
+            (tile->dtype_ == DataType::UINT16 || tile->dtype_ == DataType::UINT32))
+          << "Expected UINT16/UINT32 Vec Tile destination";
+      CHECK(IsLinearContiguousVecTile(*tile))
+          << "squeeze_store destination must have a contiguous linear Vec Tile view; flatten the Tile or "
+             "use a contiguous row-major view";
+      return tile;
+    });
+
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
+  if (IsOp(call, "reg.squeeze_store_step") || IsOp(call, "reg.squeeze_store_flush")) {
+    (void)OpRegistry::GetInstance().Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
+    auto tile = As<TileType>(call->args_[1]->GetType());
+    // Selected counts and the post-updated cursor are dynamic. Neither a full
+    // Tile overwrite nor initialization of its untouched tail can be inferred.
+    return {call->args_[1],   tile->memref_ ? (*tile->memref_)->base_ : nullptr,
+            ArgEffect::Write, std::nullopt,
+            std::nullopt,     IsOp(call, "reg.squeeze_store_step") ? call->args_[3] : nullptr};
+  }
+
   CHECK(IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter"))
       << "Memory effect requires reg.load/store/gather/scatter";
@@ -917,7 +1054,8 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
   auto validated_reg = As<RegType>(load ? validated->GetType() : call->args_[2]->GetType());
   INTERNAL_CHECK_SPAN(validated_reg, call->span_)
       << "Register memory effect validation produced a non-register result";
-  int64_t extent = IsOp(call, "reg.store") ? StoreExtent(call->args_, call->kwargs_) : validated_reg->shape_;
+  int64_t extent =
+      IsOp(call, "reg.store") ? StoreExtent(call->args_, call->kwargs_) : validated_reg->GetShape();
   // Endpoints are half-open ELEMENT coordinates relative to MemRef.base,
   // including both byte_offset / element_bytes and the TileView origin.
   // An absent root or endpoint means unknown, never an empty/zero access.

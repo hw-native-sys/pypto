@@ -351,7 +351,7 @@ def _scalar(
     name: str, value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, pmode: str
 ) -> Reg:
     expr = _expr(value)
-    if not isinstance(expr.type, ir.RegType):
+    if not isinstance(expr.type, ir.RegType) or expr.type.kind != ir.RegKind.VecReg:
         raise TypeError("Vector-scalar operations require VecReg")
     dtype = DataType.INT16 if name in ("shift_lefts", "shift_rights") else expr.type.dtype
     return Reg(_call(name, [expr, _expr(scalar, dtype), _expr(mask)], pmode=pmode))
@@ -424,7 +424,7 @@ def compares(
 ) -> Reg:
     """Compare each vector lane with a matching scalar under the seed mask."""
     expr = _expr(value)
-    if not isinstance(expr.type, ir.RegType):
+    if not isinstance(expr.type, ir.RegType) or expr.type.kind != ir.RegKind.VecReg:
         raise TypeError("reg.compares requires VecReg")
     return Reg(_call("compares", [expr, _expr(scalar, expr.type.dtype), _expr(seed)], predicate=predicate))
 
@@ -489,7 +489,7 @@ def _pair(name: str, args: list[ir.Expr], **kwargs: Any) -> tuple[Reg, Reg]:
 
 def _scalar_for(value: Scalar | ir.Expr | int | float, vector: Reg | ir.Expr) -> ir.Expr:
     expr = _expr(vector)
-    if not isinstance(expr.type, ir.RegType):
+    if not isinstance(expr.type, ir.RegType) or expr.type.kind != ir.RegKind.VecReg:
         raise TypeError("Expected a vector register for scalar dtype inference")
     return _expr(value, expr.type.dtype)
 
@@ -711,3 +711,65 @@ def scatter(
     if not isinstance(base_offset, int) or base_offset != 0:
         args.append(_expr(base_offset))
     return Tile(expr=_call("scatter", args))
+
+
+def squeeze(value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
+    """Pack selected UINT16/UINT32 lanes in order; the remaining lanes are undefined.
+
+    value must fill one 256-byte register (128 UINT16 or 64 UINT32 lanes).
+    Use squeeze_store_step(curr_ureg, dst, value, mask) to append the result to UB.
+    """
+    return Reg(_call("squeeze", [_expr(value), _expr(mask)]))
+
+
+def squeeze_store_init(dst: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0) -> ir.Expr:
+    """Initialize the UReg state for dense squeeze-store output.
+
+    Args:
+        dst: Static UINT16/UINT32 Vec Tile, one-dimensional or a two-dimensional
+            view that is contiguous in flattened row-major order.
+        offset: Initial element offset from the Tile view origin, evaluated
+            once. The existing view start_offset is included in the address.
+
+    The Tile remains the UB memory destination; this operation returns the
+    opaque UReg state and does not initialize the Tile's storage. Offset is a
+    linear element index, not a pointer or a Tile coordinate. Carry the
+    returned value through a loop with ``pl.range(..., init_values=(ureg,))``
+    and finish it with :func:`squeeze_store_flush`, including after zero loop
+    iterations. Only one chain may be active in the current AR-based lowering;
+    after flush another chain may open in the same register scope.
+
+    Returns:
+        Opaque ``RegKind.UReg`` value representing the initialized append state.
+    """
+    return _call("squeeze_store_init", [_expr(dst), _expr(offset)])
+
+
+def squeeze_store_step(
+    curr_ureg: ir.Expr, dst: Tile | ir.Expr, value: Reg | ir.Expr, mask: Reg | ir.Expr
+) -> ir.Expr:
+    """Append mask-selected lanes from one VecReg and return updated state.
+
+    Args:
+        curr_ureg: Current opaque UReg state returned by init or the previous step.
+        dst: The same destination Tile passed to init.
+        value: One full 256-byte UINT16/UINT32 VecReg.
+        mask: Matching BOOL MaskReg; true lanes are appended in input order.
+
+    The position continues from init and earlier steps; there is no per-step
+    offset. The caller guarantees enough output capacity for all selected lanes.
+    """
+    return _call("squeeze_store_step", [curr_ureg, _expr(dst), _expr(value), _expr(mask)])
+
+
+def squeeze_store_flush(final_ureg: ir.Expr, dst: Tile | ir.Expr) -> Tile:
+    """Finalize the append sequence and return an alias of its destination Tile.
+
+    Args:
+        final_ureg: Final opaque UReg state produced by init/step and loop-carried SSA.
+        dst: The same destination Tile passed to init and every step.
+
+    Exactly one flush is required even if no step ran. An empty chain leaves
+    the destination unchanged; flush does not initialize the unwritten tail.
+    """
+    return Tile(expr=_call("squeeze_store_flush", [final_ureg, _expr(dst)]))

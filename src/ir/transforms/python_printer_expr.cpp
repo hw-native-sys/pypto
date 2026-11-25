@@ -38,6 +38,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/core/python_string.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
@@ -312,6 +313,17 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     stream_ << (std::any_cast<bool>(value) ? "True" : "False");
   } else if (t == typeid(std::string)) {
     PrintStringLiteral(std::any_cast<std::string>(value));
+  } else if (t == typeid(AccPushEpilogue)) {
+    stream_ << "{";
+    bool first = true;
+    for (const auto& [key, field] : std::any_cast<AccPushEpilogue>(value)) {
+      if (!first) stream_ << ", ";
+      first = false;
+      PrintStringLiteral(key);
+      stream_ << ": ";
+      PrintStringLiteral(field);
+    }
+    stream_ << "}";
   } else if (t == typeid(double)) {
     stream_ << FormatFloatLiteral(std::any_cast<double>(value));
   } else if (t == typeid(float)) {
@@ -917,8 +929,13 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
 
   const bool window_view = IsOp(op, "tensor.view") && (op->args_.size() == 4 || op->args_.size() == 5);
 
+  // The lane remains a dataflow operand; the DSL exposes it as a keyword.
+  const bool aiv_lane = (IsOp(op, "tile.tpush_to_aic") && op->args_.size() == 2) ||
+                        (IsOp(op, "tile.tpop_from_aic") && op->args_.size() == 1);
+
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
+    if (aiv_lane && i == op->args_.size() - 1) continue;
     if (gather_row_kw_valid && i == 5) continue;
     if (acc_kw_init_cond && i == 3) continue;
     if (ci_kw_tmp && i == 2) continue;
@@ -949,7 +966,12 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   }
 
   // Print kwargs as keyword arguments
-  bool need_comma = !op->args_.empty();
+  bool need_comma = op->args_.size() > (aiv_lane ? 1U : 0U);
+  if (aiv_lane) {
+    stream_ << (need_comma ? ", " : "") << "aiv_subblockid=";
+    VisitExpr(op->args_.back());
+    need_comma = true;
+  }
   if (gather_row_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[5]);
@@ -1053,6 +1075,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         // same way `mode` is restored, so a printed cast reparses as the call
         // the author would have written.
         stream_ << "'" << SaturationModeToName(int_val) << "'";
+      } else if (key == "compact" && IsOp(op, "tile.cast")) {
+        stream_ << prefix_ << ".CompactMode." << CompactModeToString(static_cast<CompactMode>(int_val));
       } else if (key == "atomic") {
         // Stored as int (the DSL casts AtomicType -> int before stashing on
         // kwargs_; nb::isinstance<AtomicType> in bindings does the same). The
@@ -1097,6 +1121,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       } else {
         stream_ << "'" << str_val << "'";
       }
+    } else if (value.type() == typeid(AccPushEpilogue)) {
+      PrintAttrValue(value, op->span_);
     } else if (value.type() == typeid(double)) {
       stream_ << FormatFloatLiteral(AnyCast<double>(value, "printing kwarg: " + key));
     } else if (value.type() == typeid(float)) {

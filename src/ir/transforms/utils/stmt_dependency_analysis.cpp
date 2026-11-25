@@ -71,6 +71,7 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
   class StorageEffectPresence final : public IRVisitor {
    public:
     bool found = false;
+    bool has_wait = false;
     ProgramPtr program;
 
    protected:
@@ -83,6 +84,7 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
       IRVisitor::VisitStmt_(op);
     }
     void VisitExpr_(const CallPtr& call) override {
+      if (IsOp(call, "pld.system.wait_event")) has_wait = true;
       auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
       if (callee && callee->func_type_ == FunctionType::VF) found = true;
       auto& registry = OpRegistry::GetInstance();
@@ -93,9 +95,24 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
     }
   } effects;
   effects.program = program;
-  effects.VisitStmt(region);
+  // A wait observes DMA completion even when its boolean result is unused.
+  // Bound each segment by its adjacent waits. Independent statements within
+  // a segment can still reorder, and each contributes at most two edges.
+  const Stmt* last_wait = nullptr;
+  size_t segment_begin = 0;
+  for (size_t i = 0; i < graph.stmts.size(); ++i) {
+    const auto& stmt = graph.stmts[i];
+    effects.has_wait = false;
+    effects.VisitStmt(stmt);
+    auto& predecessors = graph.predecessors[stmt.get()];
+    if (last_wait) predecessors.insert(last_wait);
+    if (effects.has_wait) {
+      for (size_t j = segment_begin; j < i; ++j) predecessors.insert(graph.stmts[j].get());
+      last_wait = stmt.get();
+      segment_begin = i + 1;
+    }
+  }
   const Stmt* previous = nullptr;
-
   for (const auto& stmt : graph.stmts) {
     var_collectors::VarDefUseCollector collector;
     collector.VisitStmt(stmt);

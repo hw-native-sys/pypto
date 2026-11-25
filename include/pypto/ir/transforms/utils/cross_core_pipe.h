@@ -15,10 +15,13 @@
 #include <any>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -34,6 +37,12 @@ struct PipeDirectionMetadata {
   bool has_inconsistent_slot_size = false;
   std::optional<int64_t> slot_size_bytes;
   std::vector<int64_t> observed_slot_sizes;
+  // C2V consumer physical layouts, accumulated across nested scopes and peers.
+  std::set<std::string> acc_push_layouts;
+  bool has_acc_push = false;
+  std::optional<DataType> non_fp32_acc_push;
+  bool has_non_acc_push = false;
+  bool has_nonzero_split = false;
 };
 
 struct CrossCorePipeMetadata {
@@ -117,7 +126,8 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 // never falls back to its own `dir_mask` derivation for a pipe pypto built.
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf, int slot_num,
-                             std::optional<int> local_slot_num, const Span& span);
+                             std::optional<int> local_slot_num, const Span& span,
+                             const std::optional<AccPushEpilogue>& epilogue = std::nullopt);
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata);
 CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtPtr>& stmts);
@@ -130,7 +140,8 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
                                            const std::vector<StmtPtr>& aiv_stmts,
                                            std::optional<int> slot_num_override,
-                                           std::optional<int> local_slot_num_override, const Span& span);
+                                           std::optional<int> local_slot_num_override,
+                                           bool explicit_c2v_layout, const Span& span);
 
 std::vector<StmtPtr> PrependPipeSetup(const std::vector<StmtPtr>& prologue, const std::vector<StmtPtr>& body);
 

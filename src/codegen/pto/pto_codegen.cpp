@@ -270,6 +270,13 @@ std::string EscapeMlirString(const std::string& str) {
   return escaped;
 }
 
+// Parameter setup belongs to the function prologue; a frontend may only
+// have a source location for the individual parameter.
+const ir::Span* ParameterPrologueSpan(const ir::Function& function, const ir::Var& parameter) {
+  const auto& span = function.span_;
+  return span.is_valid() && !span.filename_.empty() ? &span : &parameter.span_;
+}
+
 // True when `inner` is a source range nested inside `outer` — the invariant a
 // sub-expression's span satisfies with respect to its enclosing statement's span.
 //
@@ -1128,6 +1135,10 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   reg_addresses_.clear();
   reg_tuple_values_.clear();
   inside_reg_scope_ = false;
+  micro_reg_scope_ = false;
+  squeeze_destination_.reset();
+  squeeze_cursor_.clear();
+  squeeze_pointer_type_.clear();
   size_t incore_count = 0, aic_count = 0, aiv_count = 0;
   for (const auto& [_, function] : program->functions_) {
     incore_count += ir::IsInCoreType(function->func_type_);
@@ -1775,6 +1786,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     if (auto tile_type = As<ir::TileType>(param->GetType());
         tile_type && tile_type->memory_space_ == ir::MemorySpace::Vec) {
+      SpanScope param_loc(this, ParameterPrologueSpan(*func, *param));
       const auto ptr = GetVarName(param);
       const auto addr = NewNamedTemp(param->name_hint_ + "_addr");
       Emit(addr + " = pto.castptr " + ptr + " : !pto.ptr<" + GetTypeString(tile_type->dtype_) +
@@ -1813,6 +1825,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   stream_.str("");
   stream_.clear();
   EmitMakeTensorViews(tensor_views);
+  SpanScope prologue_loc(this, &func->span_);
   EmitExtraAllocTiles();
   std::string prologue_content = stream_.str();
 
@@ -1875,8 +1888,8 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
 void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& views) {
   for (const auto& view : views) {
     const auto& param = view.parameter;
+    SpanScope param_loc(this, ParameterPrologueSpan(*fs_.current_function, *param));
     const auto& tensor_type = view.type;
-    SpanScope param_loc(this, &param->span_);
     const auto& tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
     auto emit_index = [&](const ExprPtr& expr) {
@@ -1908,8 +1921,7 @@ void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& vie
       }
     }
 
-    // Buffer the statement so Emit() writes it as one line and can suffix the
-    // parameter's source location.
+    // Buffer the statement so Emit() writes it as one line.
     std::ostringstream view_line;
     view_line << tensor_view << " = pto.make_tensor_view ";
     view_line << GetVarName(param);
@@ -2812,11 +2824,11 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
     return output;
   }
 
-  // Implicit packed destinations reuse a matching descriptor. An explicit
-  // dense byte reinterpret_view checks the physical span of the source.
+  // Packed FP4 can reuse an identical descriptor, but PTOAS cannot treshape
+  // to or from the packed dtype. Address-backed aliases returned above.
   CHECK_SPAN(!actual->second->dtype_.IsPackedFp4() && !tile_type->dtype_.IsPackedFp4(), var->span_)
-      << op_name
-      << ": packed FP4 shared destinations require matching storage descriptors under PTOAS planning";
+      << op_name << ": FP4E2M1X2 tile aliases require PYPTO or DSA_RP addressed memory; "
+      << "PTOAS does not support packed-FP4 tile treshape";
 
   // Mirror the storage constraints of PTOAS treshape.
   const __int128 src_bits = static_cast<__int128>(src.rows) * src.cols * actual->second->dtype_.GetBit();
@@ -3020,7 +3032,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         return;
       }
     }
-    if (As<ir::RegType>(op->var_->GetType()) && As<ir::TupleGetItemExpr>(op->value_)) {
+    if ((ir::IsVecRegType(op->var_->GetType()) || ir::IsMaskRegType(op->var_->GetType())) &&
+        As<ir::TupleGetItemExpr>(op->value_)) {
       BindVarToMlir(op->var_, GetExprAsCode(op->value_));
       return;
     }
@@ -3366,7 +3379,8 @@ std::string PTOCodegen::LocSuffix() const {
 }
 
 std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
-  if (auto item = As<ir::TupleGetItemExpr>(expr); item && As<ir::RegType>(item->GetType())) {
+  if (auto item = As<ir::TupleGetItemExpr>(expr);
+      item && (ir::IsVecRegType(item->GetType()) || ir::IsMaskRegType(item->GetType()))) {
     auto tuple = AsVarLike(item->tuple_);
     auto it = reg_tuple_values_.find(tuple.get());
     CHECK_SPAN(inside_reg_scope_ && it != reg_tuple_values_.end() && item->index_ >= 0 &&

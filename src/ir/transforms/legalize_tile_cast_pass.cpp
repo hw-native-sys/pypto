@@ -35,7 +35,6 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -49,10 +48,8 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -61,13 +58,9 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
-#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
-#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -325,26 +318,6 @@ bool HasFutureAivSplit(const FunctionPtr& func) {
   return collector.requested;
 }
 
-// A byte extraction reads the parent directly. The original slice still has
-// to be emitted when another operation uses its descriptor.
-class DropUnusedPackedWindows : public IRMutator {
- public:
-  std::unordered_set<const Var*> candidates;
-
-  StmtPtr Prune(const StmtPtr& body) {
-    if (candidates.empty()) return body;
-    var_collectors::VarDefUseCollector refs;
-    refs.VisitStmt(body);
-    for (const auto* var : refs.var_uses) candidates.erase(var);
-    return candidates.empty() ? body : VisitStmt(body);
-  }
-
- protected:
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    return candidates.count(op->var_.get()) ? SeqStmts::Flatten({}, op->span_) : op;
-  }
-};
-
 class LegalizeTileCastMutator : public IRMutator {
  public:
   LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name, bool addressed_fp4_cast,
@@ -354,15 +327,6 @@ class LegalizeTileCastMutator : public IRMutator {
         addressed_fp4_cast_(addressed_fp4_cast),
         future_aiv_split_(future_aiv_split),
         diags_(diags) {}
-
-  FunctionPtr VisitFunction(const FunctionPtr& func) override {
-    auto rewritten = IRMutator::VisitFunction(func);
-    auto body = replaced_windows_.Prune(rewritten->body_);
-    if (body == rewritten->body_) return rewritten;
-    auto result = MutableCopy(rewritten);
-    result->body_ = std::move(body);
-    return result;
-  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     definitions_[op->var_.get()] = op->value_;
@@ -386,7 +350,7 @@ class LegalizeTileCastMutator : public IRMutator {
     // backend keeps its source-located geometry/alignment diagnostics for it.
     const bool allow_direct_fp4_to_fp8 =
         addressed_fp4_cast_ && HasDirectFp4ToFp8SourceGeometry(src_tile) &&
-        (explicit_nz || (!future_aiv_split_ && GetPackedSource(call->args_[0]) != PackedSource::kSlice));
+        (explicit_nz || (!future_aiv_split_ && !HasSliceSource(call->args_[0])));
     const bool direct_pair = src == DataType::FP4E2M1X2 && dst == DataType::FP8E4M3FN;
     // Packed FP4 cannot use PTOAS treshape to acquire static valid columns.
     // Addressed planners rebind a typed descriptor; addressless plain casts
@@ -433,9 +397,6 @@ class LegalizeTileCastMutator : public IRMutator {
     ExprPtr cur = VisitExpr(call->args_[0]);
     std::vector<StmtPtr> stmts;
     stmts.reserve(chain.size());
-    if (src == DataType::FP4E2M1X2 && !explicit_nz) {
-      cur = MaterializePackedWindow(cur, stmts, op->span_);
-    }
 
     for (size_t i = 0; i + 1 < chain.size(); ++i) {
       ExprPtr cast_expr = MakeCast(cur, chain[i], mode, op->span_);
@@ -467,102 +428,45 @@ class LegalizeTileCastMutator : public IRMutator {
   }
 
  private:
-  enum class PackedSource { kOther, kSlice, kFifo };
-
-  // The widening bridge reads packed rows from an aligned UB tile. Copy an ND
-  // window in byte units so even an odd carrier offset keeps both nibbles and
-  // TEXTRACT uses the parent's physical pitch. Direct NZ casts retain their
-  // descriptor and the backend's native alignment check.
-  ExprPtr MaterializePackedWindow(const ExprPtr& input, std::vector<StmtPtr>& stmts, const Span& span) {
-    const auto var = AsVarLike(input);
-    const auto def = definitions_.find(var.get());
-    const auto slice = def == definitions_.end() ? nullptr : As<Call>(def->second);
-    if (!slice || !IsOp(slice, "tile.slice") || slice->args_.size() < 3 || slice->args_.size() > 4) {
-      return input;
-    }
-    const auto& parent = slice->args_[0];
-    const auto tile = As<TileType>(parent->GetType());
-    const auto window = As<TileType>(input->GetType());
-    const auto offsets = As<MakeTuple>(slice->args_[2]);
-    if (!tile || tile->GetMemorySpace().value_or(MemorySpace::Vec) != MemorySpace::Vec ||
-        tile->shape_.size() != 2 || !window || !offsets || offsets->elements_.size() != 2 ||
-        GetPackedSource(parent) != PackedSource::kOther ||
-        !PhysicalShapesEqual(window->shape_, GetValidShape(window)) ||
-        !PhysicalShapesEqual(tile->shape_, GetValidShape(tile))) {
-      return input;
-    }
-    const auto layout = tile_view_semantics::GetEffectiveTileView(*tile);
-    const auto start = As<ConstInt>(layout.start_offset);
-    if (layout.blayout != TileLayout::row_major || layout.slayout != TileLayout::none_box ||
-        layout.compact != CompactMode::null || (layout.start_offset && (!start || start->value_ != 0))) {
-      return input;
-    }
-    if (!layout.stride.empty()) {
-      const auto dense_stride =
-          tensor_view_semantics::BuildLogicalStridesFromLayout(tile->shape_, TensorLayout::ND);
-      if (!tile_view_semantics::ShapeExprListsEquivalent(layout.stride, dense_stride)) return input;
-    }
-
-    replaced_windows_.candidates.insert(var.get());
-    auto bind = [&](const std::string& suffix, const CallPtr& value) {
-      auto tmp = std::make_shared<Var>(var->name_hint_ + suffix, value->GetType(), span);
-      stmts.push_back(std::make_shared<AssignStmt>(tmp, value, span));
-      return tmp;
-    };
-    auto& reg = OpRegistry::GetInstance();
-    const auto bytes =
-        bind("_bytes", reg.Create("tile.reinterpret_view", {parent}, {{"dtype", DataType::INT8}}, span));
-    const auto copy =
-        bind("_extract", reg.Create("tile.extract",
-                                    {bytes, offsets->elements_[0], offsets->elements_[1], slice->args_[1]},
-                                    {{"target_memory", MemorySpace::Vec}}, span));
-    return bind("_packed",
-                reg.Create("tile.reinterpret_view", {copy}, {{"dtype", DataType::FP4E2M1X2}}, span));
-  }
-
-  PackedSource GetPackedSource(const ExprPtr& expr) {
-    const auto [cached, inserted] = packed_sources_.emplace(expr.get(), PackedSource::kOther);
+  bool HasSliceSource(const ExprPtr& expr) {
+    const auto [cached, inserted] = slice_sources_.emplace(expr.get(), false);
     if (!inserted) return cached->second;
-    auto source = PackedSource::kOther;
+    bool sliced = false;
     if (const auto var = AsVarLike(expr)) {
       const auto definition = definitions_.find(var.get());
-      if (definition != definitions_.end()) source = GetPackedSource(definition->second);
+      sliced = definition != definitions_.end() && HasSliceSource(definition->second);
     } else if (const auto call = As<Call>(expr)) {
       if (IsOp(call, "tile.slice")) {
         // A slice can hide an unaligned or runtime address until backend
         // emission. Plain ND keeps its previous bridge for these views; NZ
         // explicitly requests the direct decoder and its alignment checks.
-        source = PackedSource::kSlice;
-      } else if (op_predicates::IsTPop(call)) {
-        // The FIFO supplies the tile descriptor, so it cannot back a local byte alias.
-        source = PackedSource::kFifo;
+        sliced = true;
       } else if (call->op_ && OpRegistry::GetInstance().IsRegistered(call->op_->name_)) {
         const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
         const auto reuses_input = entry.GetOutputReusesInputArg();
         const auto& memory = entry.GetMemorySpec();
         if (reuses_input.has_value() && *reuses_input < call->args_.size()) {
-          source = GetPackedSource(call->args_[*reuses_input]);
+          sliced = HasSliceSource(call->args_[*reuses_input]);
         } else if (memory.has_value() && memory->output_inherits_input) {
           for (const auto& arg : call->args_) {
             if (As<TileType>(arg->GetType())) {
-              source = GetPackedSource(arg);
+              sliced = HasSliceSource(arg);
               break;
             }
           }
         }
       }
     }
-    packed_sources_[expr.get()] = source;
-    return source;
+    slice_sources_[expr.get()] = sliced;
+    return sliced;
   }
 
   std::string arch_name_;
   AdjList adj_;
   bool addressed_fp4_cast_;
   bool future_aiv_split_;
-  DropUnusedPackedWindows replaced_windows_;
   std::unordered_map<const Var*, ExprPtr> definitions_;
-  std::unordered_map<const Expr*, PackedSource> packed_sources_;
+  std::unordered_map<const Expr*, bool> slice_sources_;
   std::size_t temp_counter_ = 0;
   std::vector<Diagnostic>* diags_;
 };

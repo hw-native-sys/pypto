@@ -124,6 +124,7 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | ---- | ---- | ---- |
 | `quant_mx` | `pl.` (T/t) | Ascend950 block-32 动态量化，生成 FP8E4M3FN 或 packed `fp4e2m1x2` 数据及 FP8E8M0 scale。FP4 输入须为 FP16/BF16；axis1 返回 `[M,K/2]`，axis0 将 `[N,K]` 转置为 `[K,N/2]`。`quant_scale_alg="ocp"` 为默认值；`"nv"` 在 axis0 支持所有源 dtype，在 axis1 仅支持 FP32，PTOAS 不支持 axis1 的 FP16/BF16 NV。Tensor 调用物化 GM 数据和 MX layout scale，tile 调用保留在片上。经 GM 暂存的 FP8/FP4 结果可供 `tensor.matmul_mx` 使用；片上 FP4 量化结果仍需显式跨核搬运，并经受支持的 Mat→Left/Right 放置后用于 tile 矩阵乘（见 [FP4](../../dev/fp4.md)）。 |
 | `quant_mx_raw` | `pl.tile.` (t) | 直接使用 Ascend950 TQUANT，显式提供 max/scaling 工作区。返回原生 FP4E2M1X2 或 INT8 数据及原始 UINT8 指数，不进行 MX scale 分块打包。axis1 允许任意正行数和 32 的倍数 K（原生 FP4 为 64 的倍数）；源有效行数可小于物理行数。axis0 直接使用源朝向，每 32 个有效行分组；FP16/BF16 行数为 64 的倍数时，可用 `interleave=True` 交错相邻指数对。 |
+| `dequant` | `pl.tile.` (t) | Ascend950 有符号 INT8/INT16 逐行反量化为 FP32，每个有效行使用一个 FP32 scale 和 offset。 |
 | `tmov_x2zz` | `pl.` (t) | Ascend950 指数 X-to-ZZ 布局转换（UINT8）。`tmp` 为只写 workspace；axis1 需 `dst_rows`/`dst_cols` 指定 ZZ `[M,G]`（相对 TQUANT 扁平 exp）。通常由 `quant_mx` 降级使用，而非直接调用 |
 
 ## 线性代数
@@ -134,7 +135,7 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | [`matmul_acc`][pypto.language.matmul_acc] | `pl.` | 乘累加进已有的 `Acc` tile。操作数配对同 `matmul`；累加器使用 FP32 / INT32 结果类型 |
 | [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | 带 bias 操作数的乘法。操作数配对同 `matmul`；bias 与累加器类型一致 |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
-| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式 |
+| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式，`M == 1`。操作数配对与 `matmul` 相同（含 Ascend950 上的 FP8 / HF8 配对）；结果、累加器与 bias 为 FP32 / INT32 |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor，返回 FP32。Tensor 支持两侧均为 FP8E4M3FN 或两侧均为打包 FP4（E2M1/E1M2，可混合）。打包 ND/DN Tensor 的形状按字节载体计，scale 和输出按逻辑维度计。Tile API 及其专有的 `_acc` 和 `_bias` 形式支持 FP8E4M3FN/FP8E5M2 的四种组合和两侧均为打包 FP4 的组合 |
 
 `pl.tile.matmul`、`pl.tile.matmul_acc` 和 GEMV 家族通过
@@ -186,6 +187,7 @@ Matmul 的 `acc_phase` 仅接受关键字传参；`matmul_acc` 保留现有 `ini
 | [`tpop_from_aic`][pypto.language.system.tpop_from_aic] [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] | `pl.` | 弹出对端推来的 tile |
 | [`tfree_to_aic`][pypto.language.system.tfree_to_aic] [`tfree_to_aiv`][pypto.language.system.tfree_to_aiv] | `pl.` | 把弹出的 slot 释放回生产者 |
 | [`aic_initialize_pipe`][pypto.language.system.aic_initialize_pipe] [`aiv_initialize_pipe`][pypto.language.system.aiv_initialize_pipe] | `pl.` | 建立跨核管道 |
+| `set_quant_scalar` `set_quant_vector` | `pl.` / `pl.system.` | 设置 FP32 标量或 packed 64-bit 向量 Fixpipe 控制字 |
 | [`aiv_shard`][pypto.language.tile.aiv_shard] [`aic_gather`][pypto.language.tile.aic_gather] | `pl.` | 在 AIV lane 间分片 / 在 AIC 上聚回 |
 | `AUTO` | `pl.` | 由编译器选择管道参数的哨兵值 |
 

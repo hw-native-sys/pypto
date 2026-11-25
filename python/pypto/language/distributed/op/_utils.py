@@ -12,8 +12,18 @@
 from typing import Any, overload
 
 from pypto.language.op._utils import _normalize_intlike
+from pypto.language.typing import AsyncEvent
+from pypto.language.typing.tensor import TensorT
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import Expr
+
+
+def _wrap_async_transfer_result(dst: TensorT, call: _ir.Call) -> tuple[TensorT, AsyncEvent]:
+    """Project the destination alias and event from one transfer submission."""
+    return (
+        dst.__class__(expr=_ir.TupleGetItemExpr(call, 0, call.span)),
+        AsyncEvent(expr=_ir.TupleGetItemExpr(call, 1, call.span)),
+    )
 
 
 def _unwrap(value: Any) -> Any:
@@ -85,4 +95,4 @@ def _unwrap_distributed_tensors(op_name: str, **named: Any) -> tuple[Expr, ...]:
     return tuple(exprs)
 
 
-__all__ = ["_normalize_intlike", "_unwrap", "_unwrap_distributed_tensors"]
+__all__ = ["_normalize_intlike", "_unwrap", "_unwrap_distributed_tensors", "_wrap_async_transfer_result"]

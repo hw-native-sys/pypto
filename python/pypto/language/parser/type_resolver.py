@@ -132,6 +132,8 @@ _MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,
     "AsyncEventType": ir.AsyncEventType.get,
     "AsyncEvent": ir.AsyncEventType.get,
+    "SqueezeStore": ir.RegType.ureg,
+    "SqueezeStoreType": ir.RegType.ureg,
     "AsyncSessionType": ir.AsyncSessionType.get,
     "AsyncSession": ir.AsyncSessionType.get,
     "CommCtxType": ir.CommCtxType.get,
@@ -221,6 +223,7 @@ class TypeResolver:
         "Bias": ir.MemorySpace.Bias,
         "LeftScale": ir.MemorySpace.LeftScale,
         "RightScale": ir.MemorySpace.RightScale,
+        "Scaling": ir.MemorySpace.Scaling,
         # Must mirror MemorySpaceToString (src/ir/memref.cpp) exactly: any name the
         # printer can emit has to parse back, or the round trip loses the space.
         "ScalarLocal": ir.MemorySpace.ScalarLocal,
@@ -578,7 +581,12 @@ class TypeResolver:
             and node.value.attr == "_dump"
             and isinstance(node.value.value, ast.Name)
         ):
-            getters = {"WindowBuffer": ir.WindowBufferType.get, "Unknown": ir.UnknownType}
+            getters = {
+                "WindowBuffer": ir.WindowBufferType.get,
+                "Unknown": ir.UnknownType,
+                "UReg": ir.RegType.ureg,
+                "SqueezeStore": ir.RegType.ureg,
+            }
             getter = getters.get(node.attr)
             return getter() if getter is not None else None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
@@ -652,14 +660,16 @@ class TypeResolver:
                 if (
                     isinstance(kind_node, ast.Attribute)
                     and is_reg_kind
-                    and kind_node.attr in ("VecReg", "MaskReg")
+                    and kind_node.attr in ("VecReg", "MaskReg", "UReg")
                 ):
-                    kind = ir.RegKind.VecReg if kind_node.attr == "VecReg" else ir.RegKind.MaskReg
+                    kind = getattr(ir.RegKind, kind_node.attr)
                 else:
                     success, resolved_kind = self.expr_evaluator.try_eval_expr(kind_node)
                     if not success or not isinstance(resolved_kind, ir.RegKind):
                         raise ParserTypeError("Reg kind must be a RegKind", span=self._get_span(kind_node))
                     kind = resolved_kind
+            if kind == ir.RegKind.UReg:
+                raise ParserTypeError("UReg has no lanes or dtype", span=self._get_span(value))
             return ir.RegType(shape, self.resolve_dtype(dtype_node), kind)
 
         if type_name == "Array":
@@ -2322,13 +2332,18 @@ class TypeResolver:
         compact_modes = {
             "null": ir.CompactMode.null,
             "normal": ir.CompactMode.normal,
+            "row_plus_one": ir.CompactMode.row_plus_one,
         }
         if isinstance(node, ast.Attribute) and node.attr in compact_modes:
             return compact_modes[node.attr]
+        if isinstance(node, ast.Name):
+            success, value = self.expr_evaluator.try_eval_expr(node)
+            if success and isinstance(value, ir.CompactMode):
+                return value
         raise ParserTypeError(
             f"Unknown CompactMode value: {ast.unparse(node)}",
             span=self._get_span(node),
-            hint="Use pl.CompactMode.null or pl.CompactMode.normal",
+            hint="Use pl.CompactMode.null, pl.CompactMode.normal, or pl.CompactMode.row_plus_one",
         )
 
     @staticmethod

@@ -495,7 +495,7 @@ std::optional<ir::MemorySpace> UniquePipeMemorySpace(std::vector<ir::MemorySpace
 bool IsL0Memory(ir::MemorySpace space) {
   return space == ir::MemorySpace::Left || space == ir::MemorySpace::Right || space == ir::MemorySpace::Acc ||
          space == ir::MemorySpace::Bias || space == ir::MemorySpace::LeftScale ||
-         space == ir::MemorySpace::RightScale;
+         space == ir::MemorySpace::RightScale || space == ir::MemorySpace::Scaling;
 }
 
 bool HasDirectMemoryRoute(const Backend& backend, ir::MemorySpace source, ir::MemorySpace destination) {

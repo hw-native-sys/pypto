@@ -75,6 +75,11 @@ Builder 累积中间语句，提供基本 tile 操作和结构化控制流
 
 ## 算法（`tile.tquant_mx` 规则）
 
+FP8E5M2 路径对每组 32 个源元素求最大绝对值，根据 E5M2 的最大普通指数 15 计算
+OCP 共享指数，乘以缩放因子的倒数，并将结果限制到 E5M2 的有限范围，再执行原生转换。全零和极小值组
+使用最小 E8M0 缩放值。含 NaN 的组使用 E8M0 编码 255 和 NaN 数据。指数仍通过
+X-to-ZZ 打包，B 侧返回转置后的缩放视图。
+
 降级创建 dtype 与源一致的 `max` / `scaling` 只写 workspace tile，再 `Bind` 值返回的 `tile.tquant_mx_raw(src, max, scaling)`，用 `TupleGetItem` 投影出 `TupleType{INT8 dst, UINT8 exp}`（与 `tile.gather_compare` 相同的 SSA 形态）。codegen 经 `ResolveTupleResultElements` 解析投影并发射带四个 outs 的 `pto.tquant.mx`。公开 `group_axis` 对齐 PTOAS `grpAxis`：axis1 保持 `[M,K]` 并返回 scale `[M,K/32]`；axis0 先把 `[N,K]` 转置为 `[K,N]` 再返回 `[K/32,N]`。两种形式再 `Bind` 值返回的 `tile.tmov_x2zz(exp, tmp)`。Axis1 tmp 容量为 `64 + ceil(rows/16)*cols` 字节（通常 32 字节对齐）；axis0 使用 `TMovDnTo2Zz` 所需的最小 32 字节 Vec pad。Axis0 遵循 pto-isa `TMovDnTo2Zz`（pin `be5ccb76`）：DN `[M̂,N]` → ZZ `[N,M̂]` row/row，再经零拷贝 `tile.transpose_view` 得到公开 `[M̂,N]` col/col scale。最后补上零拷贝 FP8 data alias 与 FP8E8M0 scale alias。workspace 参数上的 Write effect 保证公开结果未消费时 Call 也不会被 DCE 删掉。
 
 在 Ascend950 上，PTOAS 规划缓冲区地址时，代码生成器通过同一段字节的 `uint8` 视图转置 Vec 中打包的 E8M0 缩放因子。量化数据和缩放因子可以在同一个 InCore mixed task 内直接供 `matmul_mx` 使用。[ExpandMixedKernel](26-expand_mixed_kernel.md#mx-scale-的-v2c-传输) 会把两个结果直接经 V2C 传递。

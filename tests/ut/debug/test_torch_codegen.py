@@ -1282,6 +1282,88 @@ def test_split_mode_to_int_invalid_value_raises():
         torch_codegen_module._split_mode_to_int("bad_split")
 
 
+@pytest.fixture
+def _reference_fifo_namespace():
+    # Execute only the trusted helper definitions, never a generated kernel or simulator.
+    namespace: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("split", [1, 2])
+@pytest.mark.parametrize("pipe_id", [0, 7])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_v2c_fifo_frame_order_follows_physical_aiv(_reference_fifo_namespace, split, pipe_id, explicit):
+    """One producer can advance two frames without pairing with itself."""
+    namespace = _reference_fifo_namespace
+    runtime = namespace["_cross_core_rt"]
+    set_lane = namespace["_set_subblock_idx"]
+    axis = 0 if split == 1 else 1
+    frames = [torch.arange(16).reshape(4, 4).float() + frame * 100 for frame in (0, 1)]
+    other_id = 7 if pipe_id == 0 else 0
+    other = torch.arange(16).reshape(4, 4).float() + 900
+    for physical in (0, 1):
+        set_lane(physical)
+        # Physical AIV0 runs both iterations before AIV1 starts. Logical band
+        # choice changes while each producer's FIFO frame sequence stays fixed.
+        for frame in (0, 1):
+            logical = physical ^ frame if explicit else physical
+            kwargs = {"aiv_subblockid": logical} if explicit else {}
+            runtime.push_to_aic(frames[frame].narrow(axis, logical * 2, 2), split, pipe_id, **kwargs)
+        runtime.push_to_aic(other.narrow(axis, physical * 2, 2), split, other_id)
+    for expected in frames:
+        torch.testing.assert_close(runtime.pop_from_aiv(split, pipe_id), expected, rtol=0, atol=0)
+    torch.testing.assert_close(runtime.pop_from_aiv(split, other_id), other, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("split", [1, 2, 3, 4])
+@pytest.mark.parametrize("pipe_id", [0, 7])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_c2v_fifo_frame_order_follows_physical_aiv(_reference_fifo_namespace, split, pipe_id, explicit):
+    """Each physical reader consumes its next frame, then selects its logical band."""
+    namespace = _reference_fifo_namespace
+    runtime = namespace["_cross_core_rt"]
+    set_lane = namespace["_set_subblock_idx"]
+    axis = 0 if split in (1, 3) else 1
+    frames = [torch.arange(16).reshape(4, 4).float() + frame * 100 for frame in (0, 1)]
+    other_id = 7 if pipe_id == 0 else 0
+    other = torch.arange(16).reshape(4, 4).float() + 900
+    valid_shape = [4, 4]
+    if split in (3, 4):
+        valid_shape[axis] = 3
+    for tile, target_id in ((frames[0], pipe_id), (other, other_id), (frames[1], pipe_id)):
+        setattr(tile, "_pypto_valid_shape", tuple(valid_shape))
+        setattr(tile, "_pypto_full_shape", (4, 4))
+        runtime.push_to_aiv(tile, split, pipe_id=target_id)
+    for physical in (0, 1):
+        set_lane(physical)
+        for frame in (0, 1):
+            logical = physical ^ frame if explicit else physical
+            kwargs = {"aiv_subblockid": logical} if explicit else {}
+            actual = runtime.pop_from_aic(split, pipe_id, **kwargs)
+            torch.testing.assert_close(actual, frames[frame].narrow(axis, logical * 2, 2), rtol=0, atol=0)
+            expected_valid = [4, 4]
+            expected_valid[axis] = 1 if split in (3, 4) and logical == 1 else 2
+            assert getattr(actual, "_pypto_valid_shape") == tuple(expected_valid)
+        # Frame progress belongs to the pipe too, not to a global reader cursor.
+        actual = runtime.pop_from_aic(split, other_id)
+        torch.testing.assert_close(actual, other.narrow(axis, physical * 2, 2), rtol=0, atol=0)
+
+
+def test_c2v_fifo_frame_readers_have_independent_storage(_reference_fifo_namespace):
+    """A physical reader must not mutate another reader's queued GM band."""
+    namespace = _reference_fifo_namespace
+    runtime = namespace["_cross_core_rt"]
+    tile = torch.arange(16).reshape(4, 4).float()
+    runtime.push_to_aiv(tile, 1, pipe_id=7)
+    namespace["_set_subblock_idx"](0)
+    first = runtime.pop_from_aic(1, 7, aiv_subblockid=0)
+    first.add_(100)
+    namespace["_set_subblock_idx"](1)
+    second = runtime.pop_from_aic(1, 7, aiv_subblockid=0)
+    torch.testing.assert_close(second, tile[:2], rtol=0, atol=0)
+
+
 def test_cross_core_split_merge_preserves_region_attrs():
     """Split/merge path should preserve valid/full region metadata."""
     ns: dict[str, Any] = {}

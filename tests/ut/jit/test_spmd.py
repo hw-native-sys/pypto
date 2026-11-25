@@ -27,6 +27,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, passes
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir import compile as compile_ir
 from pypto.jit.decorator import jit
 from pypto.pypto_core import ir
@@ -39,6 +40,99 @@ _HIDDEN = 512
 _K_CHUNK = 128
 _HALF = _HIDDEN // 2  # columns of `hidden` handled by each SPMD block
 _CHUNKS = _HALF // _K_CHUNK  # pl.pipeline iterations per block
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_inline_while_carries_counter_and_store_result(tmp_path, ascend_backend):
+    """A zero-trip publish returns its input; subsequent trips use both updated values."""
+
+    @pl.jit.inline(auto_scope=False)
+    def publish(cache: pl.Tensor, targets: pl.Tile[[8], pl.INT64, pl.Mem.Vec], rows: pl.Scalar[pl.INDEX]):
+        row = 0
+        while row < rows:
+            slot = pl.tile.read(targets, [row])
+            value = pl.tile.full([1, 32], dtype=pl.UINT8, value=0)
+            cache = pl.store(value, [slot, 0], cache)
+            cache = pl.store(value, [slot, 32], cache)
+            row = row + 1
+        return cache
+
+    @pl.jit
+    def example(cache: pl.InOut[pl.Tensor[[8, 64], pl.UINT8]], rows: pl.Scalar[pl.INDEX]):
+        with pl.spmd(1):
+            targets = pl.tile.full([8], dtype=pl.INT64, value=0)
+            cache = publish(cache, targets, rows)
+        return cache
+
+    program = passes.convert_to_ssa()(passes.inline_functions()(example.specialize()))
+    loops = []
+
+    class Collect(ir.IRVisitor):
+        def visit_while_stmt(self, op):
+            loops.append(op)
+
+    main = program.get_function("example")
+    assert main is not None
+    Collect().visit_function(main)
+    (loop,) = loops
+    cache_arg = next(arg for arg in loop.iter_args if isinstance(arg.type, ir.TensorType))
+    row_arg = next(arg for arg in loop.iter_args if isinstance(arg.type, ir.ScalarType))
+    assert cache_arg.initValue.same_as(main.params[0])
+    assert loop.condition.left.same_as(row_arg)
+    store_name = ir.get_op("tile.store").name
+    first, second = [
+        stmt
+        for stmt in loop.body.stmts
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == store_name
+    ]
+    assert isinstance(first.value, ir.Call) and isinstance(second.value, ir.Call)
+    assert first.value.args[-1].same_as(cache_arg)
+    assert second.value.args[-1].same_as(first.var)
+    advance, outputs = loop.body.stmts[-2:]
+    assert advance.value.left.same_as(row_arg)
+    assert advance.value.right.value == 1
+    carried = dict(zip((arg.unique_id for arg in loop.iter_args), outputs.value, strict=True))
+    assert carried[row_arg.unique_id].same_as(advance.var)
+    assert carried[cache_arg.unique_id].same_as(second.var)
+    compiled = example.compile(
+        config=RunConfig(backend_type=ascend_backend, codegen_only=True, save_kernels_dir=str(tmp_path))
+    )
+    assert compiled is not None
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_spmd_inline_reg_scope_compiles_as_device_call(tmp_path, ascend_backend):
+    @pl.jit.inline(auto_scope=False)
+    def double_tile(dst: pl.Tensor):
+        tile: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[1, 64], stride=[64, 1])] = (
+            pl.tile.load(dst, [0, 0], [1, 64], [1, 64], target_memory=pl.Mem.Vec)
+        )
+        with pl.reg_scope():
+            lanes = pl.reg.load(tile, lanes=64)
+            result = pl.reg.store(tile, value=pl.reg.add(lanes, lanes))
+        return pl.store(result, [0, 0], dst)
+
+    @pl.jit
+    def entry(dst: pl.InOut[pl.Tensor[[1, 64], pl.FP32]]):
+        with pl.spmd(1):
+            dst = double_tile(dst)
+        return dst
+
+    entry.compile(
+        config=RunConfig(backend_type=ascend_backend, codegen_only=True, save_kernels_dir=str(tmp_path))
+    )
+    aiv = tmp_path / "kernels" / "aiv"
+    if find_ptoas_binary() is None:
+        # Raw PTO keeps the register work inside the AIV kernel.
+        (kernel,) = aiv.glob("*.pto")
+        emitted = kernel.read_text()
+        assert "pto.vecscope" in emitted and "pto.vmi.vadd " in emitted
+    else:
+        (kernel,) = aiv.glob("*.cpp")
+        emitted = (tmp_path / "ptoas" / f"{kernel.stem}.pto").read_text()
+        assert "func.call @__pypto_vf_" in emitted
 
 
 def test_spmd_scatter_different_output_shapes(tmp_path):

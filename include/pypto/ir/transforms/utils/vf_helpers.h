@@ -94,9 +94,13 @@ inline RegScopeStmtPtr BindVFRegion(const FunctionPtr& function, const CallPtr& 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
       auto value = VisitExpr(op->value_);
       auto call = As<Call>(value);
-      if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter")) {
+      const bool stream_flush = IsOp(call, "reg.squeeze_store_flush");
+      if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter") || stream_flush) {
+        // Flush returns a Tile alias just like store. Later streams must use
+        // the actual caller storage type, not the formal helper's unbound type.
+        const auto& target = call->args_[stream_flush ? 1 : 0];
         auto typed_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_,
-                                                 call->args_[0]->GetType(), call->span_);
+                                                 target->GetType(), call->span_);
         auto var = std::make_shared<Var>(op->var_->name_hint_, typed_call->GetType(), op->var_->span_);
         var_remap_[op->var_.get()] = var;
         return std::make_shared<AssignStmt>(var, typed_call, op->span_, op->leading_comments_);

@@ -23,19 +23,25 @@ float_type = ir.ScalarType(DataType.FP32)
 
 ### Register IR descriptors
 
-`RegType(shape, dtype, kind)` inherits directly from `Type`. Its shape is a
-single positive integer counting logical lanes, independent of the physical
-vector width. `lanes` aliases that integer. `RegKind.VecReg` rejects `BOOL`;
-`RegKind.MaskReg` requires `BOOL`. Invalid shapes, unknown dtypes and unknown kinds fail at
-construction or deserialization.
+`RegType` inherits directly from `Type`. Its three kinds are `VecReg`, `MaskReg`,
+and `UReg`. For VecReg and MaskReg, the `RegType(shape, dtype, kind)` constructor
+takes a positive logical lane count independent of the physical vector width.
+`lanes` aliases that integer. `RegKind.VecReg` rejects `BOOL` and
+`RegKind.MaskReg` requires `BOOL`. Invalid shapes, unknown dtypes, and unknown
+kinds fail at construction or deserialization.
+
+`ir.RegType.ureg()` returns the descriptor for the opaque SSA state used by
+squeeze-store. Its kind is `RegKind.UReg`, and its `shape`, `lanes`, and `dtype`
+are `None` in Python. IR dumps spell the type `pl._dump.UReg`.
 
 ```python
 vector = ir.RegType(64, DataType.FP32, ir.RegKind.VecReg)
 mask = ir.RegType(64, DataType.BOOL, ir.RegKind.MaskReg)
+ureg_type = ir.RegType.ureg()
 ```
 
-The annotation forms are `pl.Reg[64, pl.FP32]` (VecReg by default) and
-`pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]`. These descriptors, the fieldless
+The DSL uses `pl.Reg[64, pl.FP32]` for the default `VecReg` kind and
+`pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]` for `MaskReg`. These descriptors, the fieldless
 `ir.RegScopeStmt(name_hint, body, span, leading_comments=[], attrs=None)`, and
 `ir.ForStmt.hardware_loop_policy` are IR infrastructure. Direct construction,
 visitor/mutator traversal, structural comparison and binary serialization are
@@ -49,6 +55,23 @@ never silently become Auto. Unknown serialized policy values fail. Hardware
 loop analysis and emission are not implemented by this infrastructure change.
 Simplify may remove proven zero-trip Sequential Require loops and return initial
 carried values; nonempty Require loops, including single-trip loops, are preserved.
+
+#### Squeeze-store state
+
+The public `squeeze_store_init/step/flush` operations expose the UReg state
+chain. `init` receives the destination Tile and element offset, then initializes
+the UReg state. The first possible write to Tile storage occurs at `step` or
+`flush`. Every operation names the destination Tile so memory effects and
+aliases remain visible; the frontend does not expose a pointer. A step consumes
+the current loop-carried UReg value and returns its successor;
+`pl.range(..., init_values=...)` carries it through sequential loops. It lowers
+to `!pto.align`, cannot cross a RegScope/function boundary or be duplicated, and
+must be flushed exactly once, including when no step ran or a loop was empty.
+The current AR-based lowering permits one live chain; closing it permits another
+in the same region. This is distinct from the hardware unalign-register limit.
+Compiler-generated linear renames, such as an
+eliminated zero-trip loop's result, consume the previous SSA name; reusing that
+name is rejected.
 
 ### Internal buffer types
 
@@ -674,6 +697,7 @@ must also provide the tile memory space as a separate `pl.Mem.*` argument.
 | Value | Description |
 | ----- | ----------- |
 | `DDR` | Main memory (off-chip) |
+| `Scaling` | Packed 64-bit Fixpipe controls. See [C2V Fixpipe](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-contract). |
 | `Vec` | Vector/unified buffer (on-chip) |
 | `Mat` | Matrix/L1 buffer |
 | `Left` | Left matrix operand buffer |

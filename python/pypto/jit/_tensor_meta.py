@@ -2673,7 +2673,10 @@ def extract_local_tensor_metas(
     # op starts safe by default and must be added here deliberately, never
     # silently assumed same-shape (#2638).
     _qualified_call_handlers: _QualifiedCallHandlers = {
-        **{("pl", "tensor", attr): handler for attr, handler in _pl_attr_handlers.items()},
+        **{
+            ("pl", "tensor", "create" if attr == "create_tensor" else attr): handler
+            for attr, handler in _pl_attr_handlers.items()
+        },
         ("pl", "tile", "store"): store_meta,
         ("pld", "tensor", "window"): _pl_attr_handlers["window"],
         ("pld", "tensor", "all_to_all_v"): _same_operand_meta(local, 1, "target"),

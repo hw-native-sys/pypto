@@ -44,14 +44,14 @@ from collections.abc import Sequence
 from typing import overload
 
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
-from pypto.language.typing import IntLike, Ptr
+from pypto.language.typing import AsyncEvent, IntLike, Ptr
 from pypto.language.typing.tensor import Tensor, TensorT
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, CommEngine, Expr, ReduceOp
 
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
+from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors, _wrap_async_transfer_result
 
 _ALLREDUCE_SIGNAL_MISSING = object()
 
@@ -663,6 +663,26 @@ def put_async(
             engine=engine,
         )
     return DistributedTensor(expr=call)
+
+
+def get_async_event(
+    dst: TensorT, peer: IntLike, src: DistributedTensor, *, engine: CommEngine = CommEngine.URMA
+) -> tuple[TensorT, AsyncEvent]:
+    """Submit a single-peer GET of dense GM views and expose its completion event.
+
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        engine: Communication engine. Currently only URMA is supported.
+
+    Returns:
+        A pair containing an alias of dst and the pending AsyncEvent. Wait for the event before
+        reading dst in this kernel, or defer it to the task.
+    """
+    (src_expr,) = _unwrap_distributed_tensors("pld.tensor.get_async_event", src=src)
+    call = _ir_tensor.get_async_event(_unwrap(dst), _unwrap(peer), src_expr, engine=engine)
+    return _wrap_async_transfer_result(dst, call)
 
 
 def get_async(
@@ -1332,6 +1352,7 @@ __all__ = [
     "broadcast",
     "get",
     "get_async",
+    "get_async_event",
     "put",
     "put_async",
     "remote_store",

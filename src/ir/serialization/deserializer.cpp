@@ -418,23 +418,37 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
     std::string type_kind;
     bool has_type_kind = false;
+    const msgpack::object* register_kind = nullptr;
     for (uint32_t i = 0; i < obj.via.map.size; ++i) {
       const auto& entry = obj.via.map.ptr[i];
-      if (entry.key.as<std::string>() == "type_kind") {
+      const auto key = entry.key.as<std::string>();
+      if (key == "type_kind") {
         CHECK(!has_type_kind) << "Type has duplicate field 'type_kind'";
         entry.val.convert(type_kind);
         has_type_kind = true;
+      } else if (key == "kind") {
+        register_kind = &entry.val;
       }
     }
     // Decode final buffer descriptors before the legacy shape-expression path.
     // Every descriptor field is required; malformed blobs must not acquire
     // default dtypes, layouts, or storage identities during deserialization.
     if (type_kind == "RegType") {
+      CHECK(register_kind) << "RegType is missing required field 'kind'";
+      const auto kind = static_cast<RegKind>(ReadTypeInteger<uint8_t>(*register_kind, "kind"));
+      if (kind == RegKind::UReg) {
+        ReadRequiredTypeFields(obj, type_kind, {"type_kind", "kind"});
+        return RegType::GetUReg();
+      }
       const auto fields = ReadRequiredTypeFields(obj, type_kind, {"type_kind", "shape", "dtype", "kind"});
       return std::make_shared<RegType>(
           ReadTypeInteger<int64_t>(fields.at("shape"), "shape"),
-          detail::DataTypeFromSerializedCode(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
-          static_cast<RegKind>(ReadTypeInteger<uint8_t>(fields.at("kind"), "kind")));
+          detail::DataTypeFromSerializedCode(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")), kind);
+    }
+    // Older squeeze-store dumps used a separate, fieldless type.
+    if (type_kind == "SqueezeStoreType") {
+      ReadRequiredTypeFields(obj, type_kind, {"type_kind"});
+      return RegType::GetUReg();
     }
     if (type_kind == "VoidType") {
       ReadRequiredTypeFields(obj, type_kind, {"type_kind"});

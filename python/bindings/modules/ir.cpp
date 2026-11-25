@@ -10,6 +10,7 @@
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
@@ -34,6 +35,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -178,6 +180,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<std::string>(item.second));
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else if (key == "acc_push_epilogue" && nb::isinstance<nb::dict>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<AccPushEpilogue>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
       // Lists/tuples carry exactly one element type, dispatched by attr key:
       //   - kAttrArgDirections             -> vector<ArgDirection>
@@ -497,13 +501,21 @@ void BindIR(nb::module_& m) {
 
   nb::enum_<RegKind>(ir, "RegKind", "Register descriptor kind")
       .value("VecReg", RegKind::VecReg, "Vector register holding non-BOOL lanes")
-      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes");
-  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Static logical register descriptor");
+      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes")
+      .value("UReg", RegKind::UReg, "Linear squeeze-store alignment state");
+  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Logical register descriptor");
   // The lane count must be an integer, not text coerced by older nanobind releases.
   reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape").noconvert(), nb::arg("dtype"),
                      nb::arg("kind"), "Create a register descriptor with a positive logical lane count");
+  reg_type_class.def_static("ureg", &RegType::GetUReg, "Get the type of the linear squeeze-store state.");
   BindFields<RegType>(reg_type_class);
-  reg_type_class.def_prop_ro("lanes", &RegType::GetLanes, "Logical lane count (alias of shape)");
+  reg_type_class.def_prop_ro(
+      "lanes",
+      [](const RegType& type) -> std::optional<int64_t> {
+        if (type.GetRegKind() == RegKind::UReg) return std::nullopt;
+        return type.GetLanes();
+      },
+      "Logical lane count (alias of shape), or None for UReg");
 
   // ScalarType - const shared_ptr
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
@@ -812,6 +824,7 @@ void BindIR(nb::module_& m) {
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
       .value("LeftScale", MemorySpace::LeftScale, "L0A-side MX block-scale buffer (A5)")
+      .value("Scaling", MemorySpace::Scaling, "Packed 64-bit Fixpipe control buffer")
       .value("RightScale", MemorySpace::RightScale, "L0B-side MX block-scale buffer (A5)")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
@@ -847,7 +860,8 @@ void BindIR(nb::module_& m) {
   // CompactMode enum - must be before TileView.
   nb::enum_<CompactMode>(ir, "CompactMode", "Partial-tile compact mode enumeration")
       .value("null", CompactMode::null, "Ordinary non-compact layout")
-      .value("normal", CompactMode::normal, "Compact valid-region layout");
+      .value("normal", CompactMode::normal, "Compact valid-region layout")
+      .value("row_plus_one", CompactMode::row_plus_one, "Vec NZ with one padded row per panel");
 
   // Final device buffer descriptors carry no MemRef or runtime expressions.
   auto buffer_type_class = nb::class_<BufferType, Type>(
@@ -874,6 +888,7 @@ void BindIR(nb::module_& m) {
   // Fields are read-only from Python so that hash and equality remain stable
   // across an instance's lifetime (Python's hash contract). Construct via the
   // constructor, not by mutating fields.
+  // An empty ExprPtr becomes None in Python, which nanobind must accept in both overloads.
   nb::class_<TileView>(
       ir, "TileView",
       "Tile view representation with valid shape, stride, start offset, layouts, fractal, pad, and "
@@ -882,14 +897,14 @@ void BindIR(nb::module_& m) {
       .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue, CompactMode>(),
            nb::arg("valid_shape") = std::vector<ExprPtr>{}, nb::arg("stride") = std::vector<ExprPtr>{},
-           nb::arg("start_offset") = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
+           nb::arg("start_offset").none() = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
            nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
            nb::arg("pad") = PadValue::null, nb::arg("compact") = CompactMode::null,
            "Create a tile view; fields default to empty/null/row_major/none_box/512/null/null. "
            "fractal is a size in bytes, not elements.")
       .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue, CompactMode>(),
-           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
+           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset").none(),
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
            nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
            nb::arg("compact") = CompactMode::null,
@@ -1076,9 +1091,22 @@ void BindIR(nb::module_& m) {
       nb::arg("op_name"), "Get an operator instance by name");
 
   ir.def(
+      "get_op_tuple_result_aliases",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetTupleResultAliases();
+      },
+      nb::arg("op_name"), "Map tuple result indices to the input tensor arguments they alias.");
+  ir.def(
       "get_op_output_arity",
       [](const std::string& op_name) { return OpRegistry::GetInstance().GetEntry(op_name).GetOutputArity(); },
       nb::arg("op_name"), "Number of SSA results (0 means VoidType, >1 means TupleType)");
+
+  ir.def(
+      "get_op_mutable_session_arg",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetMutableSessionArg();
+      },
+      nb::arg("op_name"), "Index of the mutable AsyncSession argument, if present.");
 
   ir.def(
       "op_arg_is_workspace",
@@ -1470,6 +1498,8 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(std::string)) {
         result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(AccPushEpilogue)) {
+        result[key.c_str()] = nb::cast(AnyCast<AccPushEpilogue>(value));
       } else if (value.type() == typeid(double)) {
         result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(float)) {

@@ -780,6 +780,14 @@ class OpRegistryEntry {
     return memory_spec_->output_reuses_input_arg;
   }
 
+  /// Identify the tuple element that returns an existing destination tensor. Other
+  /// elements (e.g. a transfer event) remain independent SSA results.
+  OpRegistryEntry& set_tuple_result_alias(size_t result_index, size_t arg_index);
+
+  [[nodiscard]] const std::map<size_t, size_t>& GetTupleResultAliases() const {
+    return tuple_result_aliases_;
+  }
+
   /// Mark this operation as NOT safe for in-place execution (src buffer == dst buffer).
   /// The shared allocation-constraint analysis prevents producer-consumer reuse
   /// for such operations in both MemoryReuse and DSA-RP.
@@ -983,8 +991,8 @@ class OpRegistryEntry {
 
   /// Declare how many values this operator produces. `N > 1` means the deduced
   /// result is a `TupleType` with exactly N elements, and every element is an
-  /// output: destination tiles must NOT appear in `add_argument()`, because a
-  /// caller cannot pre-allocate a buffer that `InitMemRef` owns. Default 1.
+  /// output. A tuple result that updates an existing destination tensor must
+  /// declare the corresponding operand with `set_tuple_result_alias()`. Default 1.
   /// SIMT operations may declare zero results: they access borrowed storage,
   /// while updated functional values are defined by SimtLaunchStmt.
   inline OpRegistryEntry& set_output_arity(size_t arity) {
@@ -1027,6 +1035,16 @@ class OpRegistryEntry {
   /// tools can inspect a contract without mutating the global registry.
   void ValidateIRStage() const;
   void ValidateCall(const std::vector<ExprPtr>& args, const TypePtr& result_type, const Span& span) const;
+
+  /// Opaque queue state shared by submissions on the issuing core.
+  OpRegistryEntry& set_mutable_session_arg(size_t arg_index) {
+    CHECK(arg_index < GetArgumentCount() && !mutable_session_arg_)
+        << "Operator '" << name_ << "' must name one existing AsyncSession argument";
+    mutable_session_arg_ = arg_index;
+    return set_arg_effect(arg_index, ArgEffect::ReadWrite);
+  }
+
+  [[nodiscard]] std::optional<size_t> GetMutableSessionArg() const { return mutable_session_arg_; }
 
   /// Declare argument `arg_index` to be scratch: the hardware writes it, but it
   /// carries no result the caller reads. Its storage may be supplied by the
@@ -1231,9 +1249,11 @@ class OpRegistryEntry {
   bool output_arity_declared_{false};
   std::map<size_t, BufferArgEffect> buffer_arg_effects_;
   std::map<size_t, BufferResultSpec> buffer_results_;
-  std::set<size_t> workspace_args_;           ///< Args written as scratch rather than as results
-  std::set<size_t> pointwise_validity_args_;  ///< Data args sharing element-indexed validity
-  std::optional<std::string> template_dir_;   ///< Package resource for builtin templates.
+  std::map<size_t, size_t> tuple_result_aliases_;  ///< Tuple result index to aliased tensor operand
+  std::optional<size_t> mutable_session_arg_;      ///< Opaque state updated by an async submission
+  std::set<size_t> workspace_args_;                ///< Args written as scratch rather than as results
+  std::set<size_t> pointwise_validity_args_;       ///< Data args sharing element-indexed validity
+  std::optional<std::string> template_dir_;        ///< Package resource for builtin templates.
 };
 
 /**
@@ -1413,7 +1433,7 @@ class OpRegistry {
    * multi-input operator. The registry cannot see a destination directly, so it
    * checks the two shapes that betray one: an argument nobody classified (the
    * default `Read` then hides the write), and a written argument that was not
-   * declared scratch via `set_workspace_arg()`.
+   * declared scratch via `set_workspace_arg()` or returned via `set_tuple_result_alias()`.
    *
    * Also rejects `set_output_reuses_input(N)` on a multi-output operator: with
    * several results, "the output reuses input N" cannot say which one.

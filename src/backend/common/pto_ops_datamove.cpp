@@ -1259,12 +1259,14 @@ static StaticValidTileView EmitStaticValidTileView(codegen::PTOCodegen& codegen,
   const std::string view = codegen.NewNamedTemp(name_hint);
   codegen.RegisterTileBufType(view, static_type, tile_type);
   if (tile_type->dtype_.IsPackedFp4()) {
-    // Quantization's output descriptor needs static valid extents at the
-    // planned UB address of its packed carriers.
+    // PTOAS cannot treshape a custom packed FP4 type. Quantization's fresh
+    // destination can instead carry static valid extents at its planned UB
+    // address, preserving both the packed carrier shape and allocation.
     const auto memref = ir::GetDefinedMemRef(tile_type);
     const auto offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr;
     CHECK_SPAN(codegen.EmitTileAddr() && offset, arg->span_)
-        << "MXFP4 quantization requires a static PYPTO or DSA_RP memory allocation for its output descriptor";
+        << "MXFP4 quantization requires a static PYPTO or DSA_RP memory allocation; "
+           "PTOAS does not support packed FP4 treshape";
     const std::string address = codegen.GetOrEmitConstant(offset->value_, DataType::INT64);
     codegen.Emit(view + " = pto.alloc_tile addr = " + address + " : " + static_type);
   } else {
@@ -1429,9 +1431,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         << "tile.slice offset tuple must have at least 2 elements (row, col), got "
         << offset_tuple->elements_.size();
     const auto pto_offsets = codegen::GetPtoTileCoordinates(*source_tile_type, offset_tuple->elements_);
-    // A subview takes index operands even when a DSL offset or its packed-FP4
-    // coordinate calculation has an integer type.
-    const auto offset_codes = GetSizeCodes(pto_offsets, codegen);
+    const auto offset_codes = GetSizeCodes({pto_offsets[0], pto_offsets[1]}, codegen);
 
     auto shape_tuple = ir::As<ir::MakeTuple>(op->args_[1]);
     INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "tile.slice shape must be a literal tuple";
@@ -1489,7 +1489,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     }
     if (has_explicit_valid_shape) {
       const auto pto_valid = codegen::GetPtoTileCoordinates(*source_tile_type, valid_tuple->elements_);
-      valid_codes = GetSizeCodes(pto_valid, codegen);
+      valid_codes = GetSizeCodes({pto_valid[0], pto_valid[1]}, codegen);
       // Explicit valid operands take precedence over PTOAS type inference. Each dim is
       // honored independently: a ConstInt valid operand yields a static result
       // dim, a dynamic operand yields a dynamic one. Do NOT promote both dims
@@ -1516,7 +1516,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       // Bind a full-window address carrier, then initialize a dynamic reshape
       // below. The carrier is never read or written as data; both descriptors
       // retain the slice offset without allocating another payload buffer.
-      valid_codes = GetSizeCodes(pto_shape, codegen);
+      valid_codes = GetSizeCodes({pto_shape[0], pto_shape[1]}, codegen);
       has_explicit_valid_shape = true;
       view_type_info.v_row = view_type_info.rows;
       view_type_info.v_col = view_type_info.cols;
@@ -1777,7 +1777,6 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         << "Internal error: tile.reinterpret_view requires TileType source and result";
 
     const bool fp4_alias = source_tile->dtype_.IsPackedFp4() || result_tile->dtype_.IsPackedFp4();
-
     const std::string result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
     const bool result_has_memref = result_tile->memref_.has_value();
     const std::string existing_type = codegen.GetSSATileBufType(result_target);
@@ -1786,7 +1785,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       CHECK_SPAN(source_tile->memref_.has_value() && result_has_memref &&
                      (!codegen.EmitTileAddr() || (!existing_type.empty() && existing_type == result_type)),
                  op->span_)
-          << "FP4E2M1X2 UB alias requires an address-backed tile; MemRef-less inputs such as "
+          << "FP4E2M1X2 UB alias requires a planned tile; MemRef-less inputs such as "
              "tile.tpop_from_aic are unsupported. Load a dense byte-carrier tile from GM before aliasing";
 
       // Slice types omit the parent pitch. InitMemRef retains the touched byte

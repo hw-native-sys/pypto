@@ -113,7 +113,7 @@ from pypto.ir.utils import (
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, PadValue, TensorLayout
+from pypto.pypto_core.ir import AtomicType, CompactMode, PadValue, TensorLayout
 
 from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -1168,7 +1168,7 @@ def quant_mx(
     Tensor calls materialize data and correctly laid-out scale tensors in GM;
     tile calls retain the existing on-chip behavior. Both forms use
     ``group_axis=1`` for A-oriented input and ``group_axis=0`` for B-oriented
-    input.
+    input. ``dtype=FP8E5M2`` requires OCP scaling on A5.
     """
     if isinstance(src, Tensor):
         return _tensor.quant_mx(src, group_axis=group_axis, dtype=dtype, quant_scale_alg=quant_scale_alg)
@@ -1647,6 +1647,7 @@ def cast(
     *,
     saturation_mode: str | int | None = None,
     layout: TensorLayout | None = None,
+    compact: CompactMode | None = None,
 ) -> Tile: ...
 
 
@@ -1667,6 +1668,7 @@ def cast(
     saturation_mode: str | int | None = None,
     *,
     layout: TensorLayout | None = None,
+    compact: CompactMode | None = None,
 ) -> Tensor | Tile | Scalar:
     """Type casting, dispatched by input type.
 
@@ -1694,16 +1696,22 @@ def cast(
 
         layout: Tile-only output layout. ``pl.NZ`` selects the fused A5
             E2M1-to-E4M3 decoder.
+        compact: Set ``pl.CompactMode.row_plus_one`` to pad each destination
+            NZ panel by one row.
 
     Example:
         >>> quantized = pl.cast(rounded_fp16, pl.INT8, mode="trunc", saturation_mode="on")
     """
     if not isinstance(input, Tile) and layout is not None:
         raise TypeError("pl.cast: layout is supported only for Tile inputs")
+    if not isinstance(input, Tile) and compact is not None:
+        raise TypeError("pl.cast: compact is supported only for Tile inputs")
     if isinstance(input, Tensor):
         return _tensor.cast(input, target_type, mode, saturation_mode=saturation_mode)
     if isinstance(input, Tile):
-        return _tile.cast(input, target_type, mode, saturation_mode=saturation_mode, layout=layout)
+        return _tile.cast(
+            input, target_type, mode, saturation_mode=saturation_mode, layout=layout, compact=compact
+        )
     if _is_scalar_like(input):
         # ``resolve_cast_mode`` runs first, so an invalid mode is still a ValueError;
         # only a *valid* mode this path cannot honour reaches the TypeError below.

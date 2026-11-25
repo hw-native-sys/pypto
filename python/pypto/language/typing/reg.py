@@ -33,8 +33,11 @@ class Reg:
         return RegType(shape, dtype, kind)
 
     def __init__(self, expr: object) -> None:
-        if not isinstance(expr, ir.Expr) or not isinstance(expr.type, RegType):
-            raise TypeError("Reg requires an expression with RegType")
+        if not isinstance(expr, ir.Expr):
+            raise TypeError("Reg requires an expression with VecReg or MaskReg type")
+        reg_type = expr.type
+        if not isinstance(reg_type, RegType) or reg_type.kind == RegKind.UReg:
+            raise TypeError("Reg requires an expression with VecReg or MaskReg type")
         self._expr = expr
 
     def unwrap(self) -> ir.Expr:

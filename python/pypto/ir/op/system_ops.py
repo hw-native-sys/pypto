@@ -751,6 +751,7 @@ def _build_pipe_init_kwargs(
     pre_relu: bool,
     ptoas_plan_memory: bool,
     ptoas_buffer_id_sync: bool,
+    fixpipe_options: tuple[bool | None, dict[str, str] | None],
 ) -> dict[str, Any]:
     """Build the attribute kwargs shared by aic/aiv_initialize_pipe.
 
@@ -759,6 +760,12 @@ def _build_pipe_init_kwargs(
     dir_mask / slot_size are handled, so they are not re-checked here.
     """
     kwargs: dict[str, Any] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    nosplit, acc_push_epilogue = fixpipe_options
+    if acc_push_epilogue is not None:
+        kwargs["acc_push_epilogue"] = acc_push_epilogue
+        kwargs["nosplit"] = True if nosplit is None else nosplit
+    elif nosplit is not None:
+        kwargs["nosplit"] = nosplit
     if slot_num is not None:
         kwargs["slot_num"] = slot_num
     if local_slot_num is not None:
@@ -768,6 +775,10 @@ def _build_pipe_init_kwargs(
     # Match store's compile-time ReLU semantics, without introducing a scale:
     # the pipe's payload dtype selects an unscaled FP32 conversion instead.
     _, relu = resolve_fixpipe_epilogue("initialize_pipe", None, pre_relu)
+    if acc_push_epilogue is not None and (c2v_dtype is not None or relu):
+        raise ValueError("initialize_pipe: acc_push_epilogue cannot be combined with c2v_dtype/pre_relu")
+    if c2v_dtype is not None and nosplit is False:
+        raise ValueError("initialize_pipe: c2v_dtype requires nosplit=true")
     if relu and c2v_dtype is None:
         raise ValueError("initialize_pipe: pre_relu=True requires an explicit c2v_dtype")
     if c2v_dtype is not None:
@@ -800,6 +811,8 @@ def aic_initialize_pipe(  # noqa: PLR0913
     pre_relu: bool = False,
     ptoas_plan_memory: bool = False,
     ptoas_buffer_id_sync: bool = False,
+    nosplit: bool | None = None,
+    acc_push_epilogue: dict[str, str] | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIC side.
@@ -826,6 +839,9 @@ def aic_initialize_pipe(  # noqa: PLR0913
             mixed kernel to PTOAS. Both initializers must agree.
         ptoas_buffer_id_sync: Use PTOAS buffer ID synchronization for the
             outlined A5 mixed kernel. Both initializers must agree.
+        nosplit: Defaults to true with an epilogue and is omitted otherwise.
+        acc_push_epilogue: C2V Fixpipe ``layout``, ``quant`` and ``relu`` record, with split=0.
+            Mutually exclusive with c2v_dtype/pre_relu.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -839,6 +855,7 @@ def aic_initialize_pipe(  # noqa: PLR0913
         pre_relu,
         ptoas_plan_memory,
         ptoas_buffer_id_sync,
+        (nosplit, acc_push_epilogue),
     )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
@@ -857,6 +874,8 @@ def aiv_initialize_pipe(  # noqa: PLR0913
     pre_relu: bool = False,
     ptoas_plan_memory: bool = False,
     ptoas_buffer_id_sync: bool = False,
+    nosplit: bool | None = None,
+    acc_push_epilogue: dict[str, str] | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIV side.
@@ -881,6 +900,9 @@ def aiv_initialize_pipe(  # noqa: PLR0913
             mixed kernel to PTOAS. Both initializers must agree.
         ptoas_buffer_id_sync: Use PTOAS buffer ID synchronization for the
             outlined A5 mixed kernel. Both initializers must agree.
+        nosplit: Defaults to true with an epilogue and is omitted otherwise.
+        acc_push_epilogue: C2V Fixpipe ``layout``, ``quant`` and ``relu`` record, with split=0.
+            Mutually exclusive with c2v_dtype/pre_relu.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -894,9 +916,22 @@ def aiv_initialize_pipe(  # noqa: PLR0913
         pre_relu,
         ptoas_plan_memory,
         ptoas_buffer_id_sync,
+        (nosplit, acc_push_epilogue),
     )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
+
+
+def set_quant_scalar(scale: Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set the FP32 scale for the specified scalar-mode Fixpipe pipe."""
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.set_quant_scalar", [scale], {"id": id}, actual_span)
+
+
+def set_quant_vector(controls: Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set packed INT64/UINT64 Scaling controls for the specified ``deqf16_vec`` pipe."""
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.set_quant_vector", [controls], {"id": id}, actual_span)
 
 
 def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> Call:

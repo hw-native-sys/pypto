@@ -77,9 +77,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
            std::to_string(multi_buffer->slot_count_) + ")";
   }
   if (auto reg = As<RegType>(type)) {
-    return prefix_ + ".Reg[" + std::to_string(reg->shape_) + ", " + prefix_ + "." +
-           DataTypeToString(reg->dtype_) + ", " + prefix_ + ".RegKind." +
-           (reg->kind_ == RegKind::VecReg ? "VecReg" : "MaskReg") + "]";
+    if (reg->GetRegKind() == RegKind::UReg) return prefix_ + "._dump.UReg";
+    return prefix_ + ".Reg[" + std::to_string(reg->GetShape()) + ", " + prefix_ + "." +
+           DataTypeToString(reg->GetDType()) + ", " + prefix_ + ".RegKind." +
+           (reg->GetRegKind() == RegKind::VecReg ? "VecReg" : "MaskReg") + "]";
   }
   if (auto scalar_type = As<ScalarType>(type)) {
     // Print as pl.Scalar[pl.INT64] for proper round-trip support
@@ -445,15 +446,7 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
   // compact — omit if null (default)
   if (tile_view.compact != CompactMode::null) {
     maybe_comma();
-    oss << "compact=" << prefix_ << ".CompactMode.";
-    switch (tile_view.compact) {
-      case CompactMode::null:
-        oss << "null";
-        break;
-      case CompactMode::normal:
-        oss << "normal";
-        break;
-    }
+    oss << "compact=" << prefix_ << ".CompactMode." << CompactModeToString(tile_view.compact);
   }
 
   // If all fields were at defaults, return empty string to skip tile_view entirely

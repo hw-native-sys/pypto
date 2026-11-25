@@ -136,9 +136,8 @@ struct AccumulatorTileGeometry {
 ///   arithmetic the fallback already performs. So falling back is either
 ///   unreachable or identical, never a silent approximation.
 ///
-/// ``CompactMode`` is deliberately not a factor: PTO only widens the stride for
-/// its ``RowPlusOne`` mode, which PyPTO's ``CompactMode`` (``null`` / ``normal``)
-/// never spells, so ``normal`` addresses exactly like ``null``.
+/// ``CompactMode`` is deliberately not a factor here: ``normal`` addresses exactly
+/// like ``null`` in L0C. The padded ``row_plus_one`` layout is Vec-only.
 inline std::optional<AccumulatorTileGeometry> GetAccumulatorTileGeometry(const TileView& view,
                                                                          const std::vector<ExprPtr>& shape,
                                                                          const DataType& dtype) {
@@ -284,6 +283,11 @@ inline TileLayoutSpec GetImplicitTileLayout(const std::vector<ExprPtr>& shape,
         layout.blayout = TileLayout::row_major;
         layout.slayout = TileLayout::row_major;
         break;
+      case MemorySpace::Scaling:
+        // Packed Fixpipe control words use a flat layout regardless of shape.
+        layout.blayout = TileLayout::row_major;
+        layout.slayout = TileLayout::none_box;
+        break;
       case MemorySpace::RightScale:
         // ISA TileRightScale: ColMajor / ColMajor.
         layout.blayout = TileLayout::col_major;
@@ -316,6 +320,23 @@ inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
   implicit_view.valid_shape = shape;
   SetTileLayout(implicit_view, GetImplicitTileLayout(shape, memory_space));
   return implicit_view;
+}
+
+inline const char* ValidateFixpipeControlRow(const std::vector<ExprPtr>& shape, const TileView& view) {
+  const auto cols = shape.size() == 2 ? As<ConstInt>(shape[1]) : nullptr;
+  if (!cols || !IsConstValue(shape[0], 1) || cols->value_ <= 0 || cols->value_ % 16) {
+    return "requires shape [1, N] with N a positive multiple of 16 (128-byte alignment)";
+  }
+  const auto& valid = view.valid_shape.empty() ? shape : view.valid_shape;
+  if (valid.size() != 2 || !IsConstValue(valid[0], 1) || !IsConstValue(valid[1], cols->value_)) {
+    return "requires valid_shape to cover the full [1, N] shape";
+  }
+  const auto& stride = view.stride;
+  if (stride.empty() ||
+      (stride.size() == 2 && IsConstValue(stride[0], cols->value_) && IsConstValue(stride[1], 1))) {
+    return nullptr;
+  }
+  return "requires packed row-major stride [N, 1]";
 }
 
 /// Return whether TileView matches the printer's raw TileView() defaults.

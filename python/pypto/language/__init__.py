@@ -109,6 +109,8 @@ from .op.system_ops import (
     aiv_initialize_pipe,
     import_peer_buffer,
     reserve_buffer,
+    set_quant_scalar,
+    set_quant_vector,
     tfree_to_aic,
     tfree_to_aiv,
     tpop_from_aic,
@@ -117,6 +119,7 @@ from .op.system_ops import (
     tpush_to_aiv,
 )
 from .op.tensor_ops import ci as arange
+from .op.tensor_ops import create as create_tensor
 
 # Names that also exist at tile level are imported below from ``unified_ops``
 # instead so the Tensor/Tile dispatch wins. Keep this block to names the tile
@@ -125,7 +128,6 @@ from .op.tensor_ops import ci as arange
 # at all (``full``, ``random``, and the block-identity queries).
 from .op.tensor_ops import (
     create_l1,
-    create_tensor,
     dim,
     dump_tag,
     expand_clone,
@@ -147,7 +149,6 @@ from .op.tile_ops import (
     aic_gather,
     aiv_shard,
     cmps,
-    create_tile,
     gatherb,
     gemv,
     gemv_acc,
@@ -173,6 +174,9 @@ from .op.tile_ops import (
     subc,
     subsc,
     tri,
+)
+from .op.tile_ops import (
+    create as create_tile,
 )
 from .op.tile_ops import (
     mscatter as mscatter,
@@ -540,6 +544,8 @@ __all__ = [
     "aic_gather",
     "tpop_from_aic",
     "tpop_from_aiv",
+    "set_quant_scalar",
+    "set_quant_vector",
     "aic_initialize_pipe",
     "aiv_initialize_pipe",
     "reserve_buffer",

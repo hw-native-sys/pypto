@@ -112,9 +112,9 @@ def _make_program(
     # With N=64, DEFAULT needs 64 candidate + 8 mask + 8 address elements;
     # INT32 keeps three (TREM) or two (TREMS) 64-element data areas.
     # HIGH_PRECISION TREM additionally needs staged state and a fused buffer
-    # (784 elements total).
+    # (912 elements total).
     if high_precision:
-        scratch_cols = 784
+        scratch_cols = 912
     elif dtype == DataType.INT32:
         scratch_cols = 208 if op_name == "rem" else 144
     else:

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""DSL wrappers for the opaque async-prefetch handles.
+"""DSL wrappers for asynchronous DMA handles.
 
 Three handle classes back the ``pl.prefetch.*`` surface, each serving the two
 roles ``pld.CommCtx`` does:
@@ -62,9 +62,10 @@ class PrefetchAsyncContext(_OpaqueHandle):
 
 
 class AsyncEvent(_OpaqueHandle):
-    """Handle to an in-flight asynchronous prefetch completion event.
+    """Handle to an in-flight asynchronous DMA completion event.
 
-    Produced by [`pl.prefetch.async_prefetch`][pypto.language.prefetch.async_prefetch]; consumed by
+    Distributed PUT and GET return events for ``pld.system.wait_event`` or ``pld.system.defer_wait_event``.
+    [`pl.prefetch.async_prefetch`][pypto.language.prefetch.async_prefetch] produces an event consumed by
     [`pl.prefetch.wait`][pypto.language.prefetch.wait] together with the matching
     [`AsyncSession`][pypto.language.AsyncSession].
     """
@@ -73,7 +74,8 @@ class AsyncEvent(_OpaqueHandle):
 class AsyncSession(_OpaqueHandle):
     """Handle to the asynchronous session an [`AsyncEvent`][pypto.language.AsyncEvent] belongs to.
 
-    Produced by [`pl.prefetch.session`][pypto.language.prefetch.session]; consumed by
+    Distributed PUT and GET use ``pld.system.make_session`` to create a peer-independent URMA session.
+    [`pl.prefetch.session`][pypto.language.prefetch.session] supplies the session to
     [`pl.prefetch.wait`][pypto.language.prefetch.wait].
     """
 

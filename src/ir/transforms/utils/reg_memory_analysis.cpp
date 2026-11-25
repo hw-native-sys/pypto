@@ -57,7 +57,8 @@ class RegisterRoots : public IRVisitor {
       return;
     }
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       auto effect = GetRegMemoryEffect(call);
       auto tile = As<TileType>(effect.target->GetType());
       if (effect.root) {
@@ -145,7 +146,7 @@ class InitializationChecker : public IRVisitor {
     auto call = As<Call>(stmt->value_);
     if (!call || ResolveVFCall(call, program_)) return;  // Alias returns establish no new initialization.
     if (IsOp(call, "reg.full_mask")) {
-      masks_[stmt->var_.get()] = As<RegType>(stmt->var_->GetType())->shape_;
+      masks_[stmt->var_.get()] = As<RegType>(stmt->var_->GetType())->GetShape();
     } else if (IsOp(call, "reg.active_mask")) {
       // Runtime counts may be zero, so they establish no definite initialized
       // prefix. Keep them unknown instead of assuming a constant operand.
@@ -154,7 +155,7 @@ class InitializationChecker : public IRVisitor {
       }
     }
     if (IsOp(call, "tile.create") || IsOp(call, "reg.store") || IsOp(call, "reg.scatter") ||
-        op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        IsOp(call, "reg.squeeze_store_flush") || op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
       return;
     }
     // An actual Tile-producing operation initializes its valid output region.
@@ -172,7 +173,8 @@ class InitializationChecker : public IRVisitor {
       return;
     }
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       auto effect = GetRegMemoryEffect(call);
       if (!effect.root || !roots_.count(effect.root.get())) {
         IRVisitor::VisitExpr_(call);
@@ -197,7 +199,7 @@ class InitializationChecker : public IRVisitor {
             << "reg.load reads an uninitialized interval";
       } else {
         const auto reg = As<RegType>(call->args_[2]->GetType());
-        int64_t active = reg->shape_;
+        int64_t active = reg->GetShape();
         if (effect.mask) {
           auto mask = AsVarLike(effect.mask);
           auto it = masks_.find(mask.get());

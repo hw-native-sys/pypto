@@ -16,6 +16,7 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 | **SyncOp** | UnknownType (barriers); ScalarType (task / launch queries) | Pipeline barriers, synchronization, TaskId and SPMD launch-shape queries | `src/ir/op/sync_ops/` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV cross-core communication | `src/ir/op/sync_ops/cross_core.cpp` |
 | **PrefetchOp** | Opaque handles | Asynchronous GM→L2 cache prefetch | `src/ir/op/prefetch/prefetch_async.cpp` |
+| **DistributedOp** | GM tensors and opaque handles | [Explicit PUT and GET completion](../distributed_ops.md) | `src/ir/op/distributed/` |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
 
@@ -51,97 +52,7 @@ DSL operations; lowering creates them from the corresponding Tile queries.
 
 ### Typed Buffer elementwise recipes
 
-`backend/common/buffer_elementwise_recipes` is the shared production table for
-logical-to-Buffer conversion, explicit operand contracts, and native mnemonics.
-`LowerTileToBuffer` selects a typed recipe and creates a real Buffer call. Direct
-PTO emission reads that same recipe; it does not reconstruct Tile IR, invoke
-legacy callbacks, or choose storage. The table is deliberately separate from
-legacy backend callback registration.
-
-| Logical operation | Buffer operation | Native instruction | Inputs |
-| ----------------- | ---------------- | ------------------ | ------ |
-| `tile.add` | `buffer.add` | `pto.tadd` | 2 |
-| `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
-| `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
-| `tile.div` | `buffer.div` | `pto.tdiv` | 2 |
-| `tile.maximum` | `buffer.maximum` | `pto.tmax` | 2 |
-| `tile.minimum` | `buffer.minimum` | `pto.tmin` | 2 |
-| `tile.abs` | `buffer.abs` | `pto.tabs` | 1 |
-| `tile.exp` | `buffer.exp` | `pto.texp` | 1 |
-| `tile.sqrt` | `buffer.sqrt` | `pto.tsqrt` | 1 |
-| `tile.neg` | `buffer.neg` | `pto.tneg` | 1 |
-| `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
-| `tile.log` | `buffer.log` | `pto.tlog` | 1 |
-| `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
-| `tile.adds` | `buffer.adds` | `pto.tadds` | buffer, scalar |
-| `tile.subs` | `buffer.subs` | `pto.tsubs` | buffer, scalar |
-| `tile.muls` | `buffer.muls` | `pto.tmuls` | buffer, scalar |
-| `tile.divs` | `buffer.divs` | `pto.tdivs` | buffer, scalar |
-| `tile.maximums` | `buffer.maximums` | `pto.tmaxs` | buffer, scalar |
-| `tile.minimums` | `buffer.minimums` | `pto.tmins` | buffer, scalar |
-| `tile.lrelu` | `buffer.lrelu` | `pto.tlrelu` | buffer, scalar |
-| `tile.full` | `buffer.full` | `pto.texpands` | scalar |
-
-Every call has its destination as the final operand and returns `Void`. Sources
-read data and metadata; destinations write active data and read metadata. This
-is not a whole-allocation initialization guarantee. All buffer operands need identical
-physical descriptors; broadcasting and partial-combine semantics are separate
-recipes. These operators are compiler-internal, not new public DSL functions.
-
-Recipes other than `add` and `mul` require FP32, rank 1 or 2, static
-valid extents, dense row-major Vec storage, `none_box`, fractal 512, and no padding
-or compact mode. Their dtype contract does not inherit FP16 support from the
-native descriptor formatter. `add`/`mul` require FP16/FP32/INT32 operands.
-Automatic conversion and ordinary GM transfers support static rank-2
-FP16/BF16/FP32/INT32 descriptors; BF16 arithmetic requires a separate native
-recipe. Both Ascend910 and Ascend950 use these contracts.
-
-The public `tile.full` wrapper accepts both numeric literals and parsed scalar
-constants, so positional and keyword fill values agree. Integer placeholders
-use `ConstFloat` for a floating destination; explicitly typed constants keep
-their declared dtype until lowering. The Python printer emits `tile.full` fill
-constants as `pl.const(value, dtype)` so print-to-parse roundtrips preserve the
-fill dtype independently of the tile dtype. Runtime fill values remain invalid.
-
-At the Buffer-call boundary, scalar operands must match the destination element
-dtype and have no memory effects. Before constructing that call, lowering converts
-supported source scalar expressions using explicit `Cast` expressions for signed integers,
-INDEX, FP16, BF16 and FP32; INDEX uses an intermediate INT64 cast. Other
-scalar source types remain unsupported. `tile.full(shape, dtype=..., value=...)`
-consumes shape/dtype when selecting its destination, then emits
-`buffer.full(value_f32, destination)`. Codegen performs no scalar type repair:
-
-```python
-# Logical input: result = tile.adds(value, count_i32)
-scalar_f32 = ir.Cast(count_i32, DataType.FP32, span)
-# Buffer IR diagnostic notation; the internal op has no public DSL wrapper.
-buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
-```
-
-`div`, `log`, and `recip` preserve the optional boolean `high_precision` kwarg.
-The recipe selects the corresponding native precision attribute; false uses
-the native default. No implicit workspace, copy, or allocation is introduced.
-`recip` requires source and destination storage to be disjoint. Construction
-rejects one handle used in both positions. `BufferIR` verification checks placed
-ranges across different handles for every table recipe: partial overlap is
-rejected, and equal complete windows are accepted only by exact-in-place recipes.
-Distinct addressless allocations are disjoint; unknown provenance or placement
-requires a later recipe. Constant scalar address definitions are evaluated with
-memoization and integer-width checks. Direct emission consumes this verified
-contract without performing allocation or alias analysis.
-
-Table recipes accept dense descriptors whose valid extents are static or
-runtime (`-1`); the native instructions read each handle's current valid
-metadata, which must agree across operands at execution time.
-
-Integer/bitwise operations, `rsqrt` and its optional workspace,
-partial combines, broadcasts, reductions, random generators and other layouts
-remain separate migration work. The public
-`backend.get_buffer_elementwise_recipe_names()` API returns a sorted independent
-snapshot from this actual table. A listed name denotes the restricted recipe
-above, not every form of that logical operator. Tests exercise public lowering,
-binary round trips, BufferIR verification, explicit destination identities, and
-native compilation; they do not substitute for numerical device acceptance.
+See [Typed Buffer elementwise recipes](05-tensor-tile-ops.md#typed-buffer-elementwise-recipes) for supported operations, dtype constraints, and native instructions.
 
 ## Type System
 
@@ -175,6 +86,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `no_arg_writes()` | Classified: writes through no argument | `.no_arg_writes()` |
 | `set_write_channel(c)` | Hardware path the op's writes take | `.set_write_channel(WriteChannel::Dma)` |
 | `set_output_arity(N)` | Values produced; `N > 1` means a `TupleType` result — see [Multi-Output Operators](09-multi_output_ops.md) | `.set_output_arity(2)` |
+| `set_tuple_result_alias(result, arg)` | Tuple element returning an existing destination tensor | `.set_tuple_result_alias(0, 0)` |
 | `set_workspace_arg(i)` | Argument `i` is compiler-supplied scratch, not a result | `.set_workspace_arg(2)` |
 
 ### Argument effects
@@ -280,17 +192,76 @@ is PyPTO's copy of PTOAS `verifyMatmulTypeTriple` and pto-isa `npu/a5/TMatmul.hp
 | FP16 x FP16 | FP32 | yes | yes | matmul, gemv |
 | BF16 x BF16 | FP32 | yes | yes | matmul, gemv |
 | FP32 x FP32 | FP32 | yes | yes | matmul, gemv |
-| FP8E4M3FN x FP8E4M3FN | FP32 | no | yes | matmul, mx |
-| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul |
-| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul |
-| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul |
-| HF8 x HF8 | FP32 | no | yes | matmul |
+| FP8E4M3FN x FP8E4M3FN | FP32 | no | yes | matmul, gemv, mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul, gemv |
+| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul, gemv |
+| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul, gemv |
+| HF8 x HF8 | FP32 | no | yes | matmul, gemv |
 
 So on Ascend950 `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`,
 `tile.batch_matmul*`, `tensor.matmul`, and `tensor.matmul_acc` accept **mixed FP8
 operands in either order**; the accumulator, the `matmul_acc` input, and the
 `matmul_bias` bias stay FP32. `tf32_mode` remains FP32-only, so an FP8 operand
 pair rejects it.
+
+The ordinary GEMV family — `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias` — is the
+`M == 1` specialization of that matmul and shares the table: `pto.tgemv`,
+`pto.tgemv.acc` and `pto.tgemv.bias` all verify their element types through the
+same `verifyMatmulTypeTriple`, and their a5 TileLib templates carry the matmul
+`MATMUL_*_DTYPES` signature lists. So the FP8 and HF8 pairs are available there
+too, with the same FP32 result, FP32 `gemv_acc` accumulator and FP32 `gemv_bias`
+bias. The **MX** GEMV ops are a different instruction with a different table and
+are not covered by these rows.
+
+GEMV's dtype check (`ValidateGemvInputDtypes`, `src/ir/op/tile_ops/matmul.cpp`)
+is a *closed* allow-list, unlike matmul's: GEMV never had the historical
+same-dtype escape hatch, so an unlisted pair is rejected in type deduction rather
+than passed down to PTOAS. It writes its pairs out longhand instead of querying
+`FindCubeOperandPair`, and a `static_assert` in the same file
+(`HandWrittenGemvListMatchesCubeTable`) holds the two descriptions to each other
+in both directions, with the accumulator dtype.
+
+That assertion is load-bearing, not tidiness. The `gemv` family bits on the five
+FP8 / HF8 rows have one remaining reader — codegen's `CheckMatmulOperandArch`,
+which looks the operand pair up in the `kGemv` rows and **returns without
+checking when it finds none**. A pair the longhand list accepted but the table
+did not carry would therefore lose its "FP8 needs the a5 backend" rejection
+silently and reach PTOAS on hardware that cannot multiply it, so that drift
+direction is pinned at compile time rather than left to review.
+
+##### A5 GEMV: the static-valid accumulator bridge
+
+An ordinary GEMV on Ascend950 also needs its accumulator **re-typed at the
+instruction**, independently of the operand dtype. PTOAS v0.72's
+`verifyGemvTileOperandsA5` chains into the *matmul* operand verifier to pick up
+the A5 layout rules, and inherits its shape rule — "static matmul tile shapes
+lhs[M,K], rhs[K,N], and dst[M,N]". That rule compares `getMatmulLogicalShapeVec`,
+which falls back to the *physical* extent whenever the type's valid is dynamic.
+PyPTO's generic `pto.alloc_tile` emits `v_row=?, v_col=?` and carries the live
+extent in separate `valid_row` / `valid_col` operands, and a GEMV result is the
+mandatory 16-row FP32 Acc box holding one logical row — so the rule compared lhs
+rows 1 against dst rows 16 and rejected every `pto.tgemv*` for a5, at every
+dtype. A2/A3 never reaches that rule: `verifyGemvTileOperandsA2A3` uses
+`verifyGemvValidShapes`, which compares *valid* rows only.
+
+`EmitStaticValidGemvAccView` (`src/backend/common/pto_ops_elementwise.cpp`)
+therefore emits, on a5 only, a zero-copy `pto.treshape` whose *result type*
+carries the accumulator's static valid extents — the same bridge `pto.tquant.mx`
+uses — and points the GEMV's `outs()` (and, for `.acc`, its `ins()` accumulator)
+at that view. The accumulator's own allocation and the downstream `pto.tstore`
+are untouched, and the emitted A2/A3 instruction is byte-for-byte unchanged.
+
+Two cases decline the bridge, both deliberately:
+
+| Case | Why |
+| ---- | --- |
+| Accumulator valid extents not compile-time constants | There is no static type to offer; PTOAS reports it rather than codegen inventing a constant |
+| Accumulator valid N narrower than its physical N | A static dst N turns on the rule's `rhs logical N == dst logical N` clause, and the rhs type's valid stays dynamic, so that clause would read the rhs's *physical* N — a fresh mismatch. A partially-valid N needs every GEMV operand re-typed, not just the accumulator |
+
+Physical K for a GEMV lhs is a function of the operand dtype: the Mat-to-Left
+extract (`TExtractToAVector`, pto-isa `npu/a5/TExtractCommon.hpp`) requires
+`Cols % (512 / sizeof(dtype)) == 0`, i.e. a whole 512-byte K block — K = 512 for a
+1-byte operand, 256 for 2-byte, 128 for 4-byte.
 
 The contract is split across two layers, because the legal set depends on the
 compilation target while type deduction does not see one. Type deduction
@@ -462,7 +433,17 @@ Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` s
 
 - MX-layout sources reject `tensor.slice`, `tensor.reshape`, `tensor.transpose`, `tensor.reinterpret_view`, ordinary `tensor.view`, `pld.tile.remote_load`, and tensor/tile `gather_row`. The subview path cannot represent a base offset. GM staging supports product-preserving FP8E8M0 shaped aliases between ND backing and `MX_A_ZZ` / `MX_B_NN`.
 - FP4 Tensor/Tile shapes, `valid_shape`, strides, and offsets count byte carriers. Torch E2M1 x2 and explicitly annotated UINT8 retain these units in JIT and compiled calls. Native tile matmul expands the contiguous axis for logical M/K/N inference, and both native paths retain packed operands.
-- `pl.quant_mx` accepts FP16/BF16/FP32 for MXFP8 and FP16/BF16 for E2M1 MXFP4. FP4 results need supported Mat and Left/Right placement for tile matmul. See [FP4](../fp4.md) for alignment, memory planners, and the native FP4 geometry introduced in PTOAS #1700.
+- `pl.quant_mx` accepts FP16/BF16/FP32 for MXFP8 and FP16/BF16 for E2M1 MXFP4.
+  `dtype=pl.FP8E5M2` uses OCP scaling on A5 for both A- and B-oriented inputs.
+  Fully valid packed scale returns from tensor `pl.quant_mx` preserve the `MX_A_ZZ` or `MX_B_NN` GM layout.
+  Whole-buffer packed scale stores are legalized to a single-row ND backing view without changing bytes.
+  Partial packed scale stores are not supported; an explicit single-row backing view can also be used for a whole scale tile.
+  FP4 results need supported Mat and Left/Right placement for tile matmul. See [FP4](../fp4.md) for alignment, memory planners, and the native FP4 geometry introduced in PTOAS #1700.
+- `pl.tile.quant_mx_raw(..., group_axis=1, canonical_axis1=True)` supports FP32 source tiles with
+  padded columns. The source must have at least two valid rows and a valid column count divisible by 32.
+  The UINT8 exponent tile has valid shape `[valid_rows, valid_cols/32]` and 32-byte row alignment.
+  Both FP32 workspaces hold a compact prefix, using either a grouped descriptor with
+  full, aligned rows or a single aligned row. Omitting the flag preserves the flat exponent shape `[1, valid_rows*valid_cols/32]`.
 
 #### MX / Ascend950: pto-isa constraints
 
@@ -748,8 +729,10 @@ Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu` |
-| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu` |
+| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu`, `nosplit`, `acc_push_epilogue` |
+| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu`, `nosplit`, `acc_push_epilogue` |
+| `system.set_quant_scalar` | 1 (FP32 scalar) | Fixpipe scalar quant state | optional `id` matching a [Fixpipe epilogue](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-contract) |
+| `system.set_quant_vector` | 1 (Scaling INT64/UINT64 tile) | Fixpipe packed vector controls | optional `id` matching a [Fixpipe epilogue](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-contract) |
 
 - `slot_num` (when set, must be > 0) pins the GM ring-buffer slot count; omit it to let PTOAS pick its default (8 unidirectional, 4 per direction bidirectional).
 - `local_slot_num` (a2/a3 only, must be > 0 and `<= slot_num`) pins the local slot count.
@@ -815,6 +798,17 @@ class CrossCoreExample:
 ```
 
 See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Buffer Management](../../reference/pto-isa/02-buffer_management.md) for hardware details.
+
+## Distributed PUT and GET completion
+
+| Operator | Result |
+| -------- | ------ |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | An AIV-local session reusable across peers and transfer directions |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | A pair containing an alias of the local destination and a completion event |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the local destination |
+| `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the remote destination window |
+| `pld.system.wait_event(event[, session])` | A BOOL success flag after waiting in the issuing kernel |
+| `pld.system.defer_wait_event(event[, session])` | A statement registering the event for completion by the issuing task |
 
 ## PrefetchOp: Asynchronous GM→L2 Prefetch
 

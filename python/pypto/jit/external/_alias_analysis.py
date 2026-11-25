@@ -169,7 +169,7 @@ class AliasTracker:
             return [self._assignment_roots(element) for element in value.elts]
         if isinstance(value, ast.Call) and ast.unparse(value.func) in {
             "pl.create_tensor",
-            "pl.tensor.create_tensor",
+            "pl.tensor.create",
         }:
             return self.fresh()
         return self._roots_of(value) if value is not None else None

@@ -334,6 +334,30 @@ def put_async(
     return _ir_core.create_op_call("pld.tensor.put_async", args, {"engine": engine_value}, actual_span)
 
 
+def get_async_event(
+    dst: Expr, peer: int | Expr, src: Expr, *, engine: CommEngine = CommEngine.URMA, span: Span | None = None
+) -> Call:
+    """Submit a single-peer GET of dense GM views and expose its completion event.
+
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        engine: Communication engine. Currently only URMA is supported.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A tuple-valued call. Element 0 aliases dst and element 1 is its pending AsyncEventType
+        handle.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    engine_value = _normalize_async_engine(engine, "pld.tensor.get_async_event")
+    return _ir_core.create_op_call(
+        "pld.tensor.get_async_event", [dst, peer_expr, src], {"engine": engine_value}, actual_span
+    )
+
+
 def get_async(
     dst: Expr,
     peer: int | Expr,
@@ -695,6 +719,7 @@ __all__ = [
     "broadcast",
     "get",
     "get_async",
+    "get_async_event",
     "put",
     "put_async",
     "remote_store",

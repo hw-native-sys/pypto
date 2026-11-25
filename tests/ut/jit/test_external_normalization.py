@@ -362,7 +362,7 @@ def test_signature_reuses_renamed_dynamic_symbols(tmp_path):
         "alias = x\nwith pl.scope():\n    alias = state\nproducer(alias, state, out)",
         "with pl.manual_scope():\n    alias = state\nproducer(alias, state, out)",
         "alias = x\nwith pl.manual_scope():\n    alias = state\nproducer(alias, state, out)",
-        "local = pl.tensor.create_tensor([32], pl.FP32)\n"
+        "local = pl.tensor.create([32], pl.FP32)\n"
         "view = pl.slice(local, [32], [0])\nproducer(view, local, out)",
         "pair = (state, x)\nalias = pair[0]\nproducer(alias, state, out)",
         "pair = (x, state)\nalias = pair[-1]\nproducer(alias, state, out)",

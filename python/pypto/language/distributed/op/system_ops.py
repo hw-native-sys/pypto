@@ -37,12 +37,53 @@ Typical use sites for ``world_size``:
 from collections.abc import Sequence
 
 from pypto.ir.op.distributed import system_ops as _ir_system
-from pypto.language.typing import IntLike, Scalar
-from pypto.pypto_core.ir import Call, NotifyOp, WaitCmp
+from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Scalar
+from pypto.pypto_core.ir import Call, CommEngine, NotifyOp, WaitCmp
 
 from ..typing.comm_ctx import CommCtx
 from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap
+
+
+def make_session(comm_ctx: CommCtx, *, engine: CommEngine = CommEngine.URMA) -> AsyncSession:
+    """Create an AIV-local communication session that PUT and GET can reuse across peers.
+
+    Args:
+        comm_ctx: Communication context identifying the workspace.
+        engine: Communication engine. Currently only URMA is supported.
+
+    Returns:
+        An async session shared by submissions from this AIV.
+    """
+    return AsyncSession(expr=_ir_system.make_session(_unwrap(comm_ctx), engine=engine))
+
+
+def wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Scalar:
+    """Wait in the issuing kernel for a distributed PUT or GET to complete.
+
+    Args:
+        event: Completion event returned by the transfer.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
+
+    Returns:
+        A BOOL scalar indicating success. After success the kernel can read the GET destination or
+        reuse the PUT source.
+    """
+    return Scalar(expr=_ir_system.wait_event(_unwrap(event), _unwrap(session)))
+
+
+def defer_wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Call:
+    """Hand completion of a distributed transfer to the issuing task.
+
+    Args:
+        event: Completion event returned by the transfer.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
+
+    Returns:
+        A statement call that registers the event. Dependent tasks can use the data after task
+        completion.
+    """
+    return _ir_system.defer_wait_event(_unwrap(event), _unwrap(session))
 
 
 def num_workers() -> Scalar:
@@ -216,4 +257,16 @@ def defer_wait(
     return _ir_system.defer_wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "num_workers", "rank", "wait", "world_size"]
+__all__ = [
+    "defer_wait",
+    "defer_wait_event",
+    "get_comm_ctx",
+    "make_session",
+    "notify",
+    "nranks",
+    "num_workers",
+    "rank",
+    "wait",
+    "wait_event",
+    "world_size",
+]

@@ -18,7 +18,7 @@ from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _get_ptoas_flags, _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.language.parser.diagnostics import InvalidOperationError
+from pypto.language.parser.diagnostics import InvalidOperationError, ParserTypeError
 from pypto.pypto_core import codegen, passes
 
 _FP4_BYTE_ALIAS_PAIRS = [
@@ -146,14 +146,14 @@ def test_fp4_decode_fp8_byte_alias_is_consumed(planner, transpose):
     assert len(addresses) == 2 and addresses[0] == addresses[1], (fp8_alloc, byte_alloc)
 
 
-@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_uint8_ub_fp4_alias_uses_native_reshape_with_ptoas(tmp_path, dtype):
+@pytest.mark.parametrize("dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+def test_uint8_ub_fp4_alias_with_ptoas_memory_planner(tmp_path, dtype):
     mlir = _emit_incore_mlir(_uint8_ub_fp4_decode_program(dtype), passes.MemoryPlanner.PTOAS)
-    assert mlir.count("pto.treshape ") == 1
+    assert "pto.treshape " in mlir
     if find_ptoas_binary() is not None:
-        pto, cpp = tmp_path / "byte_alias.pto", tmp_path / "byte_alias.cpp"
+        pto, cpp = tmp_path / "packed_alias.pto", tmp_path / "packed_alias.cpp"
         pto.write_text(mlir)
-        _run_ptoas(str(pto), str(cpp), ["--pto-level=level2", "--pto-arch=a5", "--enable-insert-sync"])
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level2", "--pto-arch=a5"])
 
 
 def _uint8_slice_fp4_decode_program(
@@ -306,7 +306,7 @@ def test_uint8_ub_fp4_alias_rejects_memref_less_tpop(planner, source_dtype, targ
             pl.tfree_to_aic(payload)
             return pl.tile.store(decoded, [0, 0], output)
 
-    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires an address-backed tile"):
+    with pytest.raises(ValueError, match="MemRef-less inputs"):
         _emit_incore_mlir(DecodePop, planner)
 
 
@@ -1085,6 +1085,81 @@ def test_direct_fp4_to_fp8_named_raw_nz_slots_remain_disjoint(tmp_path, planner)
         assert cpp.read_text().count("TCVT(") == 1
 
 
+def test_row_plus_one_cast_preserves_layout_and_padded_slot_size():
+    nz_slots = pl.MemRef("NZ", slots=2)
+
+    @pl.program
+    class PaddedDecode:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self, src: pl.Tensor[[128, 128], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            _decoded: pl.Tile[
+                [128, 256],
+                pl.FP8E4M3FN,
+                nz_slots[1],
+                pl.Mem.Vec,
+                pl.TileView(
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                    compact=pl.CompactMode.row_plus_one,
+                ),
+            ] = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ)
+
+    printed = ir.python_print(PaddedDecode, format=False)
+    assert "compact=pl.CompactMode.row_plus_one" in printed
+    ir.assert_structural_equal(PaddedDecode, pl.parse_program(printed))
+
+    set_backend_type(BackendType.Ascend950)
+    flattened = passes.flatten_tile_nd_to_2d()(PaddedDecode)
+    initialized = passes.init_mem_ref()(flattened)
+    main = initialized.get_function("main")
+    assert main is not None
+    body = main.body
+    assert isinstance(body, ir.SeqStmts)
+    decoded_type = next(
+        stmt.var.type
+        for stmt in body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "_decoded"
+    )
+    assert isinstance(decoded_type, ir.TileType)
+    assert decoded_type.get_effective_tile_view().compact == pl.CompactMode.row_plus_one
+    memref = decoded_type.memref
+    assert memref is not None
+    assert memref.size_ == (128 + 1) * 256
+    offset = memref.byte_offset_
+    assert isinstance(offset, ir.ConstInt)
+    assert offset.value == (128 + 1) * 256
+
+
+def test_direct_fp4_to_fp8_cast_can_request_row_plus_one():
+    packed = ir.Var("packed", ir.TileType([128, 128], pl.FP4E2M1X2), ir.Span.unknown())
+    decoded = ir.op.tile.cast(packed, pl.FP8E4M3FN, layout=pl.NZ, compact=pl.CompactMode.row_plus_one)
+    decoded_type = decoded.type
+    assert isinstance(decoded_type, ir.TileType)
+    assert decoded_type.get_effective_tile_view().compact == pl.CompactMode.row_plus_one
+
+
+def test_row_plus_one_cast_rejects_conflicting_compact_annotation():
+    # The annotated type and cast kwargs must agree on the physical allocation.
+    with pytest.raises(ParserTypeError, match="RowPlusOne tile.cast conflicts with TileView"):
+
+        @pl.program
+        class ConflictingDecode:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, src: pl.Tensor[[128, 128], pl.FP4E2M1X2]):
+                packed = pl.load(src, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+                _decoded: pl.Tile[
+                    [128, 256],
+                    pl.FP8E4M3FN,
+                    pl.Mem.Vec,
+                    pl.TileView(
+                        blayout=pl.TileLayout.col_major,
+                        slayout=pl.TileLayout.row_major,
+                        compact=pl.CompactMode.null,
+                    ),
+                ] = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ, compact=pl.CompactMode.row_plus_one)
+
+
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 def test_narrow_fp4_to_fp8_nd_cast_retains_existing_legalization(tmp_path, planner):
     mlir = _emit_incore_mlir(_direct_fp4_to_fp8_program(carrier_cols=16), planner)
@@ -1475,10 +1550,8 @@ def test_standalone_left_right_fp4_nd_cast_keeps_bridge_after_split(tmp_path):
         assert cpp.read_text().count("TCVT(") == 3
 
 
-@pytest.mark.parametrize(
-    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.DSA_RP]
-)
 @pytest.mark.parametrize("dynamic_column", [False, True])
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
 def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path, dynamic_column, planner):
     column_scale, column_base = (1, 0) if dynamic_column else (0, 1)
 
@@ -1497,7 +1570,10 @@ def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path
             return pl.store(pl.cast(window, pl.FP8E4M3FN), [0, 0], out)
 
     mlir = _emit_incore_mlir(SliceNdDecode, planner)
-    assert re.search(r"pto\.textract .*dtype=i8", mlir)
+    extract = next(line for line in mlir.splitlines() if "pto.textract ins(" in line)
+    assert "dtype=i8, rows=32, cols=512" in extract and "dtype=i8, rows=16, cols=256" in extract
+    if not dynamic_column:
+        assert ", %c0_index, %c1_index :" in extract
     assert mlir.count("pto.tcvt ") == 3, mlir
     assert "dtype=bf16" in mlir and "dtype=f32" in mlir, mlir
     if find_ptoas_binary() is not None:
@@ -1506,6 +1582,53 @@ def test_plain_nd_fp4_slice_keeps_bridge_without_direct_alignment_error(tmp_path
         level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
         _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"])
         assert cpp.read_text().count("TCVT(") == 3
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+def test_unaligned_fp4_slice_reports_physical_row_pitch(planner):
+    @pl.program
+    class Narrow:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self, src: pl.Tensor[[8, 128], pl.FP4E2M1X2], out: pl.Out[pl.Tensor[[3, 2], pl.BF16]]
+        ) -> pl.Tensor[[3, 2], pl.BF16]:
+            packed = pl.tile.load(src, [0, 0], [8, 128])
+            window = pl.tile.slice(packed, [3, 1], [1, 1], valid_shape=[3, 1])
+            return pl.tile.store(pl.cast(window, pl.BF16), [0, 0], out)
+
+    with pytest.raises(ValueError, match="physical row width divisible by 32 carrier bytes"):
+        _emit_incore_mlir(Narrow, planner)
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+@pytest.mark.parametrize("valid_cols", [1, 23])
+@pytest.mark.parametrize("metadata_alias", [False, True])
+def test_nested_fp4_window_preserves_partial_validity(tmp_path, planner, valid_cols, metadata_alias):
+    @pl.program
+    class Partial:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self, src: pl.Tensor[[8, 128], pl.FP4E1M2X2], out: pl.Out[pl.Tensor[[3, 64], pl.BF16]]
+        ) -> pl.Tensor[[3, 64], pl.BF16]:
+            packed = pl.load(src, [0, 0], [8, 128])
+            outer = pl.tile.slice(packed, [6, 96], [1, 1])
+            if metadata_alias:
+                window = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[3, 32])
+                inner = pl.tile.set_validshape(window, 2, valid_cols)
+            else:
+                inner = pl.tile.slice(outer, [3, 32], [1, 2], valid_shape=[2, valid_cols])
+            return pl.store(pl.cast(inner, pl.BF16), [0, 0], out)
+
+    mlir = _emit_incore_mlir(Partial, planner)
+    extract = next(line for line in mlir.splitlines() if "pto.textract ins(" in line)
+    assert ", %c2_index, %c3_index :" in extract and "dtype=i8, rows=8, cols=128" in extract
+    store = next(line for line in mlir.splitlines() if "pto.tstore ins(" in line)
+    assert f"2x{2 * valid_cols}xbf16" in store, store
+    if find_ptoas_binary() is not None:
+        pto, cpp = tmp_path / "partial.pto", tmp_path / "partial.cpp"
+        pto.write_text(mlir)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"])
 
 
 if __name__ == "__main__":

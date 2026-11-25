@@ -327,17 +327,20 @@ class RegKind(enum.Enum):
     MaskReg = 1
     """Predicate register holding BOOL lanes."""
 
+    UReg = 2
+    """Linear squeeze-store alignment state."""
+
 class RegType(Type):
-    """Static logical register descriptor, independent of ShapedType storage."""
+    """Logical register descriptor, independent of ShapedType storage."""
 
-    shape: Final[int]
-    """Logical register lane count as declared by the shape argument."""
+    shape: Final[int | None]
+    """Logical register lane count, or None for UReg."""
 
-    lanes: Final[int]
+    lanes: Final[int | None]
     """Logical lane count (alias of shape)."""
 
-    dtype: Final[DataType]
-    """Register element data type."""
+    dtype: Final[DataType | None]
+    """Register element data type, or None for UReg."""
 
     kind: Final[RegKind]
     """Register descriptor kind."""
@@ -348,8 +351,13 @@ class RegType(Type):
         Args:
             shape: Logical lane count.
             dtype: Register element data type.
-            kind: Register descriptor kind.
+            kind: VecReg or MaskReg.
         """
+
+    @staticmethod
+    def ureg() -> RegType:
+        """Get the type of the linear squeeze-store state."""
+        ...
 
 class ShapedType(Type):
     """Base class for shaped types (tensors and tiles)."""
@@ -451,6 +459,9 @@ class CompactMode(enum.Enum):
 
     normal = ...
     """Compact valid-region layout."""
+
+    row_plus_one = ...
+    """Vec NZ with one padded row per panel."""
 
 class TensorView:
     """Tensor view representation with stride, layout, valid shape, and pad mode."""
@@ -1052,6 +1063,8 @@ class MemorySpace(enum.Enum):
     """Bias buffer."""
     LeftScale = ...
     """L0A-side MX block-scale buffer (A5)."""
+    Scaling = ...
+    """Packed 64-bit Fixpipe control buffer (PTO loc=scaling)."""
     RightScale = ...
     """L0B-side MX block-scale buffer (A5)."""
 
@@ -1117,7 +1130,7 @@ class PrefetchAsyncContextType(Type):
         ...
 
 class AsyncEventType(Type):
-    """Singleton marker type for ``prefetch.async_prefetch`` outputs.
+    """Opaque event type shared by asynchronous prefetch and distributed PUT/GET.
 
     Opaque handle to an in-flight asynchronous DMA completion event. Paired
     with an :class:`AsyncSessionType` in ``prefetch.wait``; lowers to PTOAS
@@ -1131,7 +1144,7 @@ class AsyncEventType(Type):
         ...
 
 class AsyncSessionType(Type):
-    """Singleton marker type for ``prefetch.session`` outputs.
+    """Opaque session type shared by asynchronous prefetch and distributed PUT/GET.
 
     Opaque handle to the asynchronous DMA session an event belongs to. Paired
     with an :class:`AsyncEventType` in ``prefetch.wait``; lowers to PTOAS
@@ -1409,7 +1422,9 @@ class Call(Expr):
         """
 
     kwargs: Final[Mapping[str, Any]]
-    """Keyword arguments (metadata)."""
+    """Keyword arguments (metadata). Pipe init accepts a structured
+    ``acc_push_epilogue`` dict with ``layout``, ``quant`` and ``relu`` fields.
+    """
 
     @overload
     def __init__(self, op: Op, args: Sequence[Expr], span: Span) -> None:
@@ -3237,7 +3252,17 @@ def create_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3262,7 +3287,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3297,7 +3332,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     type: Type,
     span: Span,
@@ -3590,6 +3635,9 @@ def get_op_lane_invariant_arg(op_name: str, arg_index: int) -> LaneInvariantArg 
         Exception: If operator is not registered
     """
 
+def get_op_tuple_result_aliases(op_name: str) -> dict[int, int]:
+    """Map tuple result indices to the input tensor arguments they alias."""
+
 def get_op_output_arity(op_name: str) -> int:
     """Number of values an operator produces.
 
@@ -3608,12 +3656,14 @@ def get_op_output_arity(op_name: str) -> int:
         Exception: If operator is not registered
     """
 
+def get_op_mutable_session_arg(op_name: str) -> int | None:
+    """Index of the mutable AsyncSession argument, if present."""
+
 def op_arg_is_workspace(op_name: str, arg_index: int) -> bool:
     """Whether an argument is compiler-supplied scratch rather than a result.
 
-    A Functional-stage multi-output operator may write through an argument only when that
-    argument is declared a workspace; an undeclared written argument is a
-    destination tile leaked into the argument list.
+    A Functional-stage multi-output operator declares its written arguments as
+    workspace or as tensor operands returned through a specified tuple element.
 
     Args:
         op_name: Name of the operator

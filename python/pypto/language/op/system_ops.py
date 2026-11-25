@@ -35,7 +35,7 @@ from pypto.ir.op.system_ops import (
 )
 from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PipeType, Span
 
 from ..typing import Array, IntLike, Scalar, Tensor, Tile
 
@@ -53,6 +53,8 @@ __all__ = [
     "wait_intra_block",
     "set_ffts",
     "barrier",
+    "set_quant_scalar",
+    "set_quant_vector",
     "fence",
     "cacheinvalid",
     "syncall",
@@ -116,6 +118,22 @@ def wait_flag(
     """Block ``dst_pipe`` until the matching source event is signalled."""
     event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
+
+
+def set_quant_scalar(scale: Scalar | Expr | float, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set the pipe's FP32 quant scale in the same block before TPUSH."""
+    if isinstance(scale, float):
+        scale = ConstFloat(scale, DataType.FP32, _get_span_or_capture(span, frame_offset=1))
+    elif isinstance(scale, int):
+        raise TypeError("set_quant_scalar requires an FP32 scalar or floating-point literal")
+    return _ir_ops.set_quant_scalar(scale.unwrap() if isinstance(scale, Scalar) else scale, id=id, span=span)
+
+
+def set_quant_vector(controls: Tile | Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set packed INT64/UINT64 Scaling controls for a ``deqf16_vec`` pipe before TPUSH."""
+    return _ir_ops.set_quant_vector(
+        controls.unwrap() if isinstance(controls, Tile) else controls, id=id, span=span
+    )
 
 
 def sync_set(
@@ -412,7 +430,14 @@ def tpush_to_aiv(
     )
 
 
-def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
+def tpush_to_aic(
+    tile: Tile,
+    *,
+    split: int,
+    id: int | None = None,
+    aiv_subblockid: IntLike | None = None,
+    span: Span | None = None,
+) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe.
 
     The Cube side receives it with [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] and releases the
@@ -424,9 +449,14 @@ def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | 
         split: Split mode (0=none, 1=up-down, 2=left-right). Selects the axis along
             which the two AIV lanes divide the tile; 0 sends it whole.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
-    return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, span=span)
+    lane = aiv_subblockid.unwrap() if isinstance(aiv_subblockid, Scalar) else aiv_subblockid
+    return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, aiv_subblockid=lane, span=span)
 
 
 def tfree_to_aic(
@@ -474,6 +504,7 @@ def tpop_from_aic(
     split: int = 0,
     lane_stride: int | None = None,
     id: int | None = None,
+    aiv_subblockid: IntLike | None = None,
     span: Span | None = None,
 ) -> Tile:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -486,10 +517,15 @@ def tpop_from_aic(
         lane_stride: Partition stride carried when a ragged boundary was
             balanced across the two AIV lanes; omit for the box partition
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2/3/4 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
+    lane = aiv_subblockid.unwrap() if isinstance(aiv_subblockid, Scalar) else aiv_subblockid
     call = _ir_ops.tpop_from_aic(
-        shape=shape, dtype=dtype, split=split, lane_stride=lane_stride, id=id, span=span
+        shape=shape, dtype=dtype, split=split, lane_stride=lane_stride, id=id, aiv_subblockid=lane, span=span
     )
     return Tile(expr=call)
 

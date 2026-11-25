@@ -2159,8 +2159,9 @@ std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmt
     const auto cast_call = As<Call>(cast->second->value_);
     const int uses = count(index.use_counts, cb);
     const int operands = count(index.matmul_operand_uses, cb);
-    if (cb_type && CastFoldableToFixpipeMat(cast_call, type, cb_type->dtype_) && plan.result_uses == 1 &&
-        uses >= 1 && uses == operands) {
+    // Mat scratch would replace the cast's declared allocation and slot.
+    if (cb_type && !cb_type->memref_ && CastFoldableToFixpipeMat(cast_call, type, cb_type->dtype_) &&
+        plan.result_uses == 1 && uses >= 1 && uses == operands) {
       plan.scratch_dtype = cb_type->dtype_;
       plan.remap_target = cb;
       plan.extra_remap = result;
@@ -2439,7 +2440,8 @@ class AutoTileMutator : public IRMutator {
       if (auto cast_as = std::dynamic_pointer_cast<const AssignStmt>(current)) {
         auto cast = As<Call>(cast_as->value_);
         auto cb_ty = As<TileType>(cast_as->var_->GetType());
-        if (cast && IsOp(cast, "tile.cast") && !cast->args_.empty() && cb_ty) {
+        // Like the output-grid fold, this peephole requires compiler-owned cast storage.
+        if (cast && IsOp(cast, "tile.cast") && !cast->args_.empty() && cb_ty && !cb_ty->memref_) {
           auto src = AsVarLike(cast->args_[0]);
           auto src_ty = src ? As<TileType>(src->GetType()) : nullptr;
           const bool src_acc = src_ty && src_ty->memory_space_ == MemorySpace::Acc;

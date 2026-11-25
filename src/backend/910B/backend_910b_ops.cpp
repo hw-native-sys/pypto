@@ -29,11 +29,10 @@ namespace backend {
 static const bool kOpsRegistered = [] {
   RegisterSelectOps(Backend910B::Instance(), BackendType::Ascend910);
   RegisterCastOps(Backend910B::Instance(), BackendType::Ascend910);
-  // MX block-scale matmul, scale-address binding, and quantization are A5-only.
-  // Keep them out of the A2/A3 registry so direct codegen cannot emit PTO ops that the target ISA does not
-  // support.
-  RegisterPTOOps(Backend910B::Instance(), {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias",
-                                           "tile.tget_scale_addr", "tile.tquant_mx_raw", "tile.tmov_x2zz"});
+  // Only the A5 backend exposes these MX operations and row-wise dequantization.
+  RegisterPTOOps(Backend910B::Instance(),
+                 {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias", "tile.tget_scale_addr",
+                  "tile.tquant_mx_raw", "tile.tmov_x2zz", "tile.dequant"});
   return true;
 }();
 

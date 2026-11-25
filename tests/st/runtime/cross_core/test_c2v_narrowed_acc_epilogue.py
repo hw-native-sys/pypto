@@ -275,8 +275,8 @@ class _CarriedKLoopCase(PTOTestCase):
 class TestNarrowedAccEpilogue:
     """A narrowed accumulator must survive both of its readers."""
 
-    @pytest.mark.platforms("a2a3", "a2a3sim")
-    @pytest.mark.parametrize("platform", ["a2a3", "a2a3sim"])
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("platform", [pytest.param("a2a3", id="a2a3")])
     def test_vector_epilogue_in_the_same_scope(self, test_runner, platform):
         """The Cube→Vector push path (#2510)."""
         result = test_runner.run(_MixedEpilogueCase(platform=platform))

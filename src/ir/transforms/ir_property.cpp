@@ -135,6 +135,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "SimtOutputsMaterialized";
     case IRProperty::SimtSpecialized:
       return "SimtSpecialized";
+    case IRProperty::AsyncHandleProvenance:
+      return "AsyncHandleProvenance";
     default:
       return "Unknown";
   }
@@ -205,7 +207,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::FixpipeEpilogueValid,
                                    IRProperty::AccCompactValid,
                                    IRProperty::AtomicAddDtypeValid,
-                                   IRProperty::AccStorePhaseValid};
+                                   IRProperty::AccStorePhaseValid,
+                                   IRProperty::AsyncHandleProvenance};
   return props;
 }
 
@@ -261,7 +264,8 @@ const IRPropertySet& GetDefaultVerifyProperties() {
                                    IRProperty::OutParamNotShadowed,
                                    IRProperty::NoNestedInCore,
                                    IRProperty::TileTypeCoherence,
-                                   IRProperty::ArrayNotEscaped};
+                                   IRProperty::ArrayNotEscaped,
+                                   IRProperty::AsyncHandleProvenance};
   return props;
 }
 

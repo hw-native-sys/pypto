@@ -273,7 +273,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
-// tensor.quant_mx: GM MXFP8 quantization
+// tensor.quant_mx: GM block-scale quantization
 // ============================================================================
 
 TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
@@ -293,13 +293,15 @@ TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(group_axis == 0 || group_axis == 1, span)
       << kOpName << " group_axis must be 0 or 1, but got " << group_axis;
   const DataType dtype = GetKwarg<DataType>(kwargs, "dtype", DataType::FP8E4M3FN);
-  CHECK_SPAN(dtype == DataType::FP8E4M3FN || dtype == DataType::FP4E2M1X2, span)
-      << kOpName << " supports dtype FP8E4M3FN or FP4E2M1X2, but got " << dtype.ToString();
+  CHECK_SPAN(dtype == DataType::FP8E4M3FN || dtype == DataType::FP8E5M2 || dtype == DataType::FP4E2M1X2, span)
+      << kOpName << " supports dtype FP8E4M3FN, FP8E5M2, or FP4E2M1X2, but got " << dtype.ToString();
   CHECK_SPAN(dtype != DataType::FP4E2M1X2 || src->dtype_ != DataType::FP32, span)
       << kOpName << " requires FP16 or BF16 source for MXFP4_E2M1";
   const std::string algorithm = GetKwarg<std::string>(kwargs, "quant_scale_alg", "ocp");
   CHECK_SPAN(algorithm == "ocp" || algorithm == "nv", span)
       << kOpName << " requires quant_scale_alg 'ocp' or 'nv', but got " << algorithm;
+  CHECK_SPAN(dtype != DataType::FP8E5M2 || algorithm == "ocp", span)
+      << kOpName << " requires OCP for FP8E5M2";
   CHECK_SPAN(algorithm != "nv" || group_axis != 1 || src->dtype_ == DataType::FP32, span)
       << kOpName << " does not support axis1 FP16/BF16 NV quantization in PTOAS";
 

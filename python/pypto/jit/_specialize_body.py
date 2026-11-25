@@ -47,6 +47,10 @@ def _scope_call_name(value: ast.expr | None) -> str | None:
     return None
 
 
+def _with_scope_names(node: ast.With) -> set[str | None]:
+    return {_scope_call_name(item.context_expr) for item in node.items}
+
+
 def _constant_condition(node: ast.expr) -> bool | None:
     """Resolve a literal-only condition using the DSL's expression semantics."""
     if isinstance(node, ast.Constant):
@@ -157,6 +161,7 @@ class BodyTransformer(ast.NodeTransformer):
         self.has_scope_capture = False
         self._simt_depth: int = 0
         self._simt_runtime_names: set[str] = set()
+        self._while_runtime_names: set[str] = set()
         # Pre-register function parameters as "already assigned at depth 0" so
         # that body assignments like `x = pl.load(x, ...)` are treated as
         # rebindings and get alpha-renamed to `x_v1`.
@@ -358,6 +363,11 @@ class BodyTransformer(ast.NodeTransformer):
                 return None
         return cast("ast.stmt", self.generic_visit(node))
 
+    def _needs_runtime_shape_write(self, name: str) -> bool:
+        return name in self._while_runtime_names or (
+            self._simt_depth > 0 and name in self._simt_runtime_names
+        )
+
     def _expand_shape_unpacking(
         self, node: ast.Assign, param_name: str, target_names: list[ast.expr]
     ) -> list[ast.stmt]:
@@ -367,7 +377,7 @@ class BodyTransformer(ast.NodeTransformer):
         for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
             if not isinstance(tgt, ast.Name):
                 continue
-            if tgt.id in self._var_renames or (self._simt_depth and tgt.id in self._simt_runtime_names):
+            if tgt.id in self._var_renames or self._needs_runtime_shape_write(tgt.id):
                 # Keep the current binding updated after scalar renaming or a
                 # conditional write. Folding only the source name would leave
                 # reads pointing at its old alias. Expand tuples into scalars
@@ -462,7 +472,7 @@ class BodyTransformer(ast.NodeTransformer):
                 node.targets[0].id not in self._var_renames
                 or self._is_folded_graph_capture(node.targets[0].id)
             )
-            and not (self._simt_depth and node.targets[0].id in self._simt_runtime_names)
+            and not self._needs_runtime_shape_write(node.targets[0].id)
             and isinstance(node.value, ast.Subscript)
             and isinstance(node.value.value, ast.Attribute)
             and node.value.value.attr == "shape"
@@ -486,7 +496,21 @@ class BodyTransformer(ast.NodeTransformer):
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             return self._visit_simple_assign(node)
 
+        # Keep destructuring as one assignment so all RHS reads see the
+        # previous iteration, including when two loop-carried values swap.
+        if self._while_runtime_names:
+            for target in node.targets:
+                self._retarget_while_store(target)
         return cast("ast.stmt", self.generic_visit(node))
+
+    def _retarget_while_store(self, target: ast.expr) -> None:
+        if isinstance(target, ast.Name) and target.id in self._while_runtime_names:
+            target.id = self._var_renames.get(target.id, target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                self._retarget_while_store(item)
+        elif isinstance(target, ast.Starred):
+            self._retarget_while_store(target.value)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt | None:
         """Handle annotated assignments (``x: T = value``) with alpha-renaming."""
@@ -803,7 +827,9 @@ class BodyTransformer(ast.NodeTransformer):
                     exposed.update(self._names_by_ctx(item.context_expr, ast.Load) - written)
                     if item.optional_vars is not None:
                         written.update(self._names_by_ctx(item.optional_vars, ast.Store))
-                self._collect_upward_exposed(stmt.body, written, exposed, may_skip_loops=may_skip_loops)
+                # SIMT can read enclosing values, but its writes are private.
+                body_written = written.copy() if "simt_scope" in _with_scope_names(stmt) else written
+                self._collect_upward_exposed(stmt.body, body_written, exposed, may_skip_loops=may_skip_loops)
             else:
                 # Expr / Return / Assert / ... — pure reads.
                 exposed.update(self._names_by_ctx(stmt, ast.Load) - written)
@@ -882,6 +908,7 @@ class BodyTransformer(ast.NodeTransformer):
         for var_name in rebind_vars:
             # Get the current read-name for this variable (could already be an alias)
             current_name = self._var_renames.get(var_name, var_name)
+            folded = self._active_shape_fold(var_name)
             source = self._known_tensor_name(var_name)
             value_meta = self._meta.get(source) if source is not None else None
             new_name = self._rebind(var_name)
@@ -891,7 +918,9 @@ class BodyTransformer(ast.NodeTransformer):
             self._assign_depth[var_name] = self._scope_depth
             bridge = ast.Assign(
                 targets=[ast.Name(id=new_name, ctx=ast.Store())],
-                value=ast.Name(id=current_name, ctx=ast.Load()),
+                value=ast.Name(id=current_name, ctx=ast.Load())
+                if folded is None
+                else ast.Constant(value=folded),
                 lineno=0,
                 col_offset=0,
             )
@@ -911,6 +940,39 @@ class BodyTransformer(ast.NodeTransformer):
                 names.update(cls._names_by_ctx(target, ast.Store))
         return names
 
+    @classmethod
+    def _for_scoped_names(cls, node: ast.For) -> set[str]:
+        if _scope_call_name(node.iter) == "while_":
+            return cls._names_by_ctx(node.target, ast.Store)
+        target = node.target
+        if isinstance(target, ast.Tuple) and target.elts:
+            target = target.elts[0]
+        return {target.id} if isinstance(target, ast.Name) else set()
+
+    @classmethod
+    def _enclosing_writes(cls, node: ast.AST) -> set[str]:
+        """Collect stores visible to the enclosing loop, respecting nested loop bindings."""
+        if isinstance(node, ast.Name):
+            return {node.id} if isinstance(node.ctx, ast.Store) else set()
+        written: set[str] = set()
+        if isinstance(node, ast.For):
+            for child in (node.target, *node.body):
+                written.update(cls._enclosing_writes(child))
+            written.difference_update(cls._for_scoped_names(node))
+            # An assignment-form yield publishes its target even when it has
+            # the same name as a private loop binding.
+            written.update(cls._loop_yield_targets(node.body))
+            children = (node.iter, *node.orelse)
+        elif isinstance(node, ast.With) and "simt_scope" in _with_scope_names(node):
+            # visit_With processes the context items before saving the outer
+            # bindings and restores those bindings after the SIMT body.
+            children = node.items
+        else:
+            children = ast.iter_child_nodes(node)
+        for child in children:
+            written.update(cls._enclosing_writes(child))
+        return written
+
     def visit_For(self, node: ast.For) -> ast.stmt | list[ast.stmt]:
         """Visit For loop, incrementing scope depth for its body.
 
@@ -927,13 +989,7 @@ class BodyTransformer(ast.NodeTransformer):
         # carries. Both shadow incoming aliases/folds inside the body, but the
         # parser publishes assignment-form yield targets as post-loop results.
         is_explicit_while = _scope_call_name(node.iter) == "while_"
-        target = node.target
-        if isinstance(target, ast.Tuple) and target.elts:
-            target = target.elts[0]
-        induction_names: set[str] = (
-            {target.id} if isinstance(target, ast.Name) and not is_explicit_while else set()
-        )
-        scoped_names = self._names_by_ctx(node.target, ast.Store) if is_explicit_while else induction_names
+        scoped_names = self._for_scoped_names(node)
         yielded_names = self._loop_yield_targets(node.body)
         saved = (
             {name: self._meta[name] for name in scoped_names if name in self._meta},
@@ -980,18 +1036,38 @@ class BodyTransformer(ast.NodeTransformer):
             _restore_bindings(self._assign_depth, saved[3], restore_names)
             _restore_bindings(self._var_renames, saved[4], restore_names)
 
-    def visit_While(self, node: ast.While) -> ast.stmt:
-        """Keep SIMT while-body updates on the incoming private binding."""
+    def visit_While(self, node: ast.While) -> ast.stmt | list[ast.stmt]:
+        """Keep the condition, body writes, and loop exit on the same binding."""
+        bridges: list[ast.stmt] = []
+        outer_runtime_names = self._while_runtime_names
         if not self._simt_depth:
-            return cast("ast.stmt", self.generic_visit(node))
+            # Sibling loops can reuse a body-local name. A read in the
+            # condition counts as a read before the first body assignment.
+            self._scope_depth += 1
+            try:
+                carried, fresh = self._classify_loop_locals([ast.Expr(value=node.test), *node.body])
+            finally:
+                self._scope_depth -= 1
+            # A folded dimension has no defining IR assignment. Materialize
+            # it before testing the condition, including for zero iterations.
+            written = self._enclosing_writes(node) & self._assign_count.keys()
+            runtime_names = written.difference(fresh)
+            folded = sorted(name for name in runtime_names if self._active_shape_fold(name) is not None)
+            bridges = self._make_bridge_assignments(list(dict.fromkeys([*carried, *folded])))
+            self._while_runtime_names = outer_runtime_names | runtime_names
+            for name in fresh:
+                self._forget_rename_bookkeeping(name)
+                self._shape_inlined.pop(name, None)
         node.test = self.visit(node.test)
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
-        node.orelse = self._visit_scoped_body(node.orelse)
-        return node
+            self._while_runtime_names = outer_runtime_names
+        if node.orelse:
+            node.orelse = self._visit_scoped_body(node.orelse)
+        return [*bridges, node] if bridges else node
 
     @staticmethod
     def _is_attribute_call(expr: ast.expr | None, name: str) -> bool:
@@ -1140,7 +1216,7 @@ class BodyTransformer(ast.NodeTransformer):
 
     def visit_With(self, node: ast.With) -> ast.stmt | list[ast.stmt]:
         """Visit With block, incrementing scope depth for its body."""
-        scope_names = {_scope_call_name(item.context_expr) for item in node.items}
+        scope_names = _with_scope_names(node)
         graph = "graph" in scope_names
         captures, capture_prefix = self._visit_with_captures(node)
         simt = "simt_scope" in scope_names

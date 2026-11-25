@@ -25,6 +25,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -217,7 +218,14 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
           throw TypeError("Missing 'value' field for " + std::string(expected_type) + " kwarg: " + key);
         }
       };
-      if (type_name == "ArgDirection") {
+      if (type_name == "AccPushEpilogue") {
+        CHECK(has_value_obj && value_obj_inner.type == msgpack::type::MAP)
+            << "Invalid serialized AccPushEpilogue";
+        auto epilogue = value_obj_inner.as<AccPushEpilogue>();
+        const auto error = ValidateAccPushEpilogue(epilogue);
+        CHECK(error.empty()) << "Invalid serialized AccPushEpilogue: " << error;
+        kwargs.emplace_back(key, std::move(epilogue));
+      } else if (type_name == "ArgDirection") {
         if (!has_value_obj || value_obj_inner.type != msgpack::type::POSITIVE_INTEGER) {
           throw TypeError("ArgDirection kwarg '" + key + "' must have integer value");
         }

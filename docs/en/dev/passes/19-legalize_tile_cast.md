@@ -13,10 +13,7 @@ For each `var = tile.cast(...)`:
 2. Already native and descriptor-compatible: leave unchanged (including FIXPIPE-foldable
    `FP32→BF16/FP16` with `mode=rint`). A5 E2M1→E4M3 uses the direct edge only
    for contiguous ND sources with physical carrier columns divisible by 32;
-   otherwise the existing BF16/FP32 bridge remains available. The bridge
-   materializes a full-valid 2D ND slice by extracting signed byte
-   carriers from a dense parent tile, preserving its row pitch and the slice's packed-column offset.
-   A tile received from a FIFO carries its own descriptor, which the bridge uses directly for its slices.
+   otherwise the existing BF16/FP32 bridge remains available.
 3. Non-native: BFS for a shortest path; among equal-length paths prefer "same byte-width → float, then adjust width".
 
 Typical A5 results: `INT32→FP16` → `INT32→FP32→FP16`; `FP16→BF16` → `FP16→FP32→BF16`.

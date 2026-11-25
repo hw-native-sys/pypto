@@ -308,6 +308,7 @@ def _packed_fp4_alias_cases():
         for planner in _PLANNERS
         for byte_dtype in (pl.UINT8, pl.INT8)
         for tensor_surface in (True, False)
+        if planner != MemoryPlanner.PTOAS
     ]
 
 

@@ -27,6 +27,14 @@ base + (off_row * base_cols + off_col) * storage_bits
 
 两种 Vec 实例化只要可证明等价，就把 `tile.extract` 放在 **slice 的定义处**，使拷贝留在作者书写 slice 的位置——尤其是同一个 `pl.split_aiv` 区域内——且有多个消费者的 slice 只拷贝一次。slice 是在被消费时才读取源的视图，因此在定义处拷贝只有在两处之间没有任何写入该存储时才等价；若可能有写入到达，则改为在每个消费者之前放置 extract（见[Vec extract 的放置位置](#vec-extract-的放置位置)）。
 
+对于 A5 `tile.dequant`，原生指令要求两个系数操作数使用同一个 tile 类型。
+当任一系数引用 slice 或其他元数据视图时，两者均在消费者处被复制到形状一致的对齐 FP32 列 tile。
+标量读写保留各视图的源步长、偏移和有效行数，包括显式缩小有效形状及未对齐的窗口。
+transpose view、交换轴的向量 reshape 及降低秩的列 slice 保留相应的父窗口坐标映射，包括后续链式 slice 引入的偏移。
+该归一化在通用 slice 物化前运行，只移除不再被使用的原系数纯视图祖先。
+循环携带的系数在每轮读取当前存储。对于视图形式的列系数，先将初值标量复制到原物理形状的对齐 tile，
+且不改变初值的独立消费者；A5 Vec-to-Vec extract 仅支持 ND，无法物化未对齐的列主序初值。
+
 **Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](22-infer_tile_memory_space.md)。
 
 **前置属性 (Required)**：`SSAForm`、`SplitIncoreOrch`、`IncoreTileOps`、`TileOps2D`、`NormalizedStmtStructure`。
@@ -35,7 +43,7 @@ base + (off_row * base_cols + off_col) * storage_bits
 
 **失效属性 (Invalidated)**：无。
 
-**何时使用**：一律在默认 tile 阶段流水线中运行。如果不存在规范 `tile.slice`，本 pass 是 no-op。
+**何时使用**：一律在默认 tile 阶段流水线中运行。也处理带有显式有效范围、保留完整秩的打包 FP4 ND 切片。
 
 ## API
 
@@ -53,7 +61,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 对每个 InCore 类型的 function，分四步：
 
-1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。分析前会解析直接的 `ConstInt` SSA 定义及其普通别名，避免字面量偏移在 `ConvertToSSA` 后被误判为动态值；同时保留标量 SSA 定义用于模对齐证明，例如 `block_idx * 32` 虽是动态值，但可静态确定其为 32 个元素的倍数。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
+1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。分析前会解析直接的 `ConstInt` SSA 定义及其普通别名，避免字面量偏移在 `ConvertToSSA` 后被误判为动态值；同时保留标量 SSA 定义用于模对齐证明，例如 `block_idx * 32` 虽是动态值，但可静态确定其为 32 个元素的倍数。普通改写处理三参数形式。FP4 解码还处理带显式有效范围、保留完整秩的打包 ND 窗口。
 
 2. **规划定义处 extract (Plan definition-site extracts)**（仅 Vec slice） —— 同时满足以下两点时，slice 通过把其自身定义替换为 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)` 来实例化：
    - 按下面的消费者规则，某个消费者会实例化它（一个惰性 textract 不是恒等拷贝的 `tile.col_expand_*` 操作数，或地址无法证明对齐的普通 call 操作数、别名、循环初始值或 yield）；并且
@@ -70,9 +78,13 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
    Vec 消费者规则只作用于第 2 步未规划的 slice——即其存储可能在定义与消费者之间被写入的 slice。此时只有放在消费者处的拷贝才能读到视图本应读到的内容。
 
-4. **删除死 slice (Drop dead slices)** —— 结果不再被任何使用者引用的 `tile.slice` 被删除。链式 slice（slice 的 slice）只有在消费它的那个 slice 被删除后才会变死，因此该步骤迭代至不动点（迭代次数以 slice 数量为上界）。结束时仍被使用的 slice，说明其消费者不被本 pass 规范化——保持原样，相对 pass 前的 IR 无回退。
+   BF16 转换消费未对齐的打包 FP4 ND 切片时，pass 在转换处按有符号字节读取父 tile，
+   提取所需窗口。SSA 重命名和 `tile.set_validshape` 会保留父 tile 和字节偏移。
+   转换按操作数的有效范围解码原始打包类型。
 
-本 pass 是 `FunctionPass`；当不存在规范 `tile.slice` 时 function 原样返回。
+4. **删除死 slice (Drop dead slices)** —— 收集剩余消费者后，逆序遍历切片定义。每个活跃切片将其父切片标记为活跃，随后删除未使用的窗口，包括带显式 FP4 有效范围的链式切片。
+
+本 pass 按函数运行。
 
 ## 示例
 
@@ -359,10 +371,11 @@ stride，应放宽或删除该拒绝，而不是把它保留为长期规则。
 | 被上述某条 Vec 规则实例化、且其存储在 function 中从未被写入的 Vec `tile.slice` | **定义**被替换为 `tile.extract`；所有消费者读取它（一次拷贝，位于作者的区域中） |
 | 被上述某条 Vec 规则实例化、且其存储在 function 中可能被写入的 Vec `tile.slice` | 在**每个消费者**之前插入 extract；删除 slice |
 | 链式 Mat `tile.slice`（slice 的 slice） | 剥离；累加偏移 |
-| 带 `valid_shape` / `drop_dims` 的 `tile.slice` | 跳过（不是普通窗口）。若这样的 slice 同时不满足上述任一恒等拷贝条件——动态偏移（例如降秩的 `t[i]`）或非连续窗口——并喂给 col-expand op，codegen 会以 `INTERNAL_CHECK` 直接报错，而不是生成会破坏源 tile 的代码。上面的 Acc 累加器检查对这类 slice 仍然生效：它只需要物理基址和偏移，而这些信息对每个窗口都会记录，与是否可规范化无关 |
+| 由 BF16 cast 消费的满秩打包 FP4 ND `tile.slice`，含显式指定 `valid_shape` 的窗口 | 源地址无法证明为 32 字节对齐时，按父 tile 的行跨度提取载体字节，并在解码时保留有效区域 |
+| 其他带 `valid_shape` 或 `drop_dims` 的 `tile.slice` | 普通改写会跳过这类 slice。若消费者为 col-expand，动态偏移或非连续窗口会触发 codegen 的 `INTERNAL_CHECK`。Acc 累加器检查使用每个窗口记录的物理基址和偏移 |
 | 用作 matmul **累加器**、且窗口既不覆盖父 tile 全部行范围、也不落在单个 16 列 block 内的 `Acc` `tile.slice` | **拒绝**并抛出 `ValueError`，错误信息给出切列的写法——MAD 没有目的地 stride，该写入会静默落到错误的行 tile 上（pto-isa#253）。操作数不必**就是**该 slice：循环 `IterArg` 携带、普通 SSA 别名，或保持形状的视图 / 原地算子都会被解析回同一窗口（见"把累加器操作数解析回它所指的窗口"） |
 | 其他位于 Left/Right/Acc 的 `tile.slice`，含**连续**的 Acc 累加器窗口 | 不处理（无匹配的消费者） |
-| 不含规范 `tile.slice` 的 function | 原样返回 |
+| 既无规范 slice 也无已跟踪的打包 FP4 ND 窗口的函数 | 完成 Acc 累加器检查后原样返回 |
 
 ## 参见
 

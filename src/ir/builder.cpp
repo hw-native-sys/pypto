@@ -128,6 +128,8 @@ void IRBuilder::BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const
     throw pypto::RuntimeError("Cannot begin for loop: not inside a function or another valid context at " +
                               span.to_string());
   }
+  CHECK_SPAN(CurrentContext()->GetType() != BuildContext::Type::PROGRAM, span)
+      << "Cannot begin for loop directly in a program context";
 
   context_stack_.push_back(
       std::make_unique<ForLoopContext>(loop_var, start, stop, step, span, kind, std::move(attrs), policy));
@@ -193,6 +195,8 @@ void IRBuilder::BeginWhileLoop(const ExprPtr& condition, const Span& span) {
     throw pypto::RuntimeError("Cannot begin while loop: not inside a function or another valid context at " +
                               span.to_string());
   }
+  CHECK_SPAN(CurrentContext()->GetType() != BuildContext::Type::PROGRAM, span)
+      << "Cannot begin while loop directly in a program context";
 
   context_stack_.push_back(std::make_unique<WhileLoopContext>(condition, span));
 }
@@ -258,6 +262,8 @@ StmtPtr IRBuilder::EndWhileLoop(const Span& end_span) {
 void IRBuilder::BeginIf(const ExprPtr& condition, const Span& span) {
   CHECK(!context_stack_.empty())
       << "Cannot begin if statement: not inside a function or another valid context at " << span.to_string();
+  CHECK_SPAN(CurrentContext()->GetType() != BuildContext::Type::PROGRAM, span)
+      << "Cannot begin if statement directly in a program context";
   context_stack_.push_back(std::make_unique<IfStmtContext>(condition, span));
 }
 
@@ -393,7 +399,8 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
     for (const auto& [key, value] : kwargs) {
       if (key == "dtype") dtype = std::any_cast<DataType>(&value);
     }
-    no_op_convert = source != nullptr && dtype != nullptr && source->dtype_ == *dtype;
+    no_op_convert =
+        source && source->GetRegKind() == RegKind::VecReg && dtype && source->GetDType() == *dtype;
   }
   Emit(std::make_shared<AssignStmt>(var, no_op_convert ? args[0] : ExprPtr(call), span));
   return var;
@@ -417,6 +424,8 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
                            std::vector<std::pair<std::string, std::any>> attrs) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
+  CHECK_SPAN(CurrentContext()->GetType() != BuildContext::Type::PROGRAM, span)
+      << "Cannot begin scope directly in a program context";
   CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
       << "Hierarchy scope requires a level at " << span.to_string();
   CHECK(scope_kind != ScopeKind::Runtime || manual.has_value())
@@ -535,11 +544,9 @@ StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
 
 // ========== Program Building ==========
 void IRBuilder::BeginProgram(const std::string& name, const Span& span) {
-  if (InProgram()) {
-    throw pypto::RuntimeError("Cannot begin program '" + name + "': already inside program '" +
-                              static_cast<ProgramContext*>(CurrentContext())->GetName() + "' at " +
-                              CurrentContext()->GetBeginSpan().to_string());
-  }
+  // A program owns the outermost context. Reject invalid nesting before
+  // changing the stack so callers can still close the existing context.
+  CHECK_SPAN(context_stack_.empty(), span) << "BeginProgram requires an empty builder context";
 
   context_stack_.push_back(std::make_unique<ProgramContext>(name, span));
 }
@@ -725,6 +732,10 @@ void IRBuilder::ValidateInWhileLoop(const std::string& operation) {
 
 void IRBuilder::ValidateInProgram(const std::string& operation) {
   CHECK(InProgram()) << operation << " can only be called inside a program context";
+  // Program operations downcast the current context, not the enclosing one.
+  // Validate the stack top before accessing it or consuming a pending region.
+  CHECK(CurrentContext()->GetType() == BuildContext::Type::PROGRAM)
+      << operation << " must be called directly in program context, not nested";
 }
 
 // ========== ProgramContext Implementation ==========

@@ -79,6 +79,18 @@ comm-less 的（没有 `device=`）则按被分配到的芯片——这类 dispa
 顺序在程序的各芯片间轮询分配。每个叶子目录内是上表所述的扁平产物，
 因此在单个 dispatch 目录内 L2 契约完全适用。
 
+prepared worker 开启芯片泳道后，每次调用都写入
+`dfx_outputs/session-<worker UUID>/run-<dispatch ID>/rank{r}/d{k}/`。
+同一次调用的抓图和计时共用一个 run 目录，转换器只读取该目录。此前各个
+decode 步骤的计时记录、依赖图、程序名和 trace 都会保留。若需定位某次调用，
+可通过 `handle = worker.submit(...)` 提交，等待 `handle.result()` 返回，
+再将 `handle.capture_directory` 传给离线转换器，并用 `--dispatch dN`
+或 `--dispatch-id RUN_ID:TASK_SLOT` 选择要分析的 dispatch。
+
+worker 关闭后仍可分析其 session。新 worker 首次在同一输出目录采集泳道时，
+会清理已标记关闭的 session。并发 worker 分别使用各自的 session。若进程异常
+退出，可能留下未标记的 session 目录，确认 worker 已退出后可手动删除。
+
 该路径只记录 dispatch 跑在**哪里**，不记录它跑的是**什么**，因此
 `_submit_chip` 还会写一份 `dispatch_program.json`，指明背后的
 `next_levels/<program>`。kernel 名称必须经由它解析：`func_id` 是

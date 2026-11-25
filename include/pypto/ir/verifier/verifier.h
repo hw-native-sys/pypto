@@ -92,6 +92,9 @@ PropertyVerifierPtr CreateSimtSpecializedPropertyVerifier();
  */
 PropertyVerifierPtr CreateTypeCheckPropertyVerifier();
 
+/// Verify distributed async event and session provenance after SSA conversion.
+PropertyVerifierPtr CreateAsyncHandleProvenanceVerifier();
+
 /**
  * @brief Factory function for creating no nested call property verifier
  * @return Shared pointer to NoNestedCall PropertyVerifier
