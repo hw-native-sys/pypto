@@ -92,11 +92,8 @@ PropertyVerifierPtr CreateSimtSpecializedPropertyVerifier();
  */
 PropertyVerifierPtr CreateTypeCheckPropertyVerifier();
 
-/// Verify distributed async event and session provenance after SSA conversion.
+/// Verify async handle provenance and tile GET completion on the domain-materialized program.
 PropertyVerifierPtr CreateAsyncHandleProvenanceVerifier();
-
-/// Pair each flattened tile GET with one completion in its branch and loop iteration.
-PropertyVerifierPtr CreateTileGetEventPairingVerifier();
 
 /**
  * @brief Factory function for creating no nested call property verifier

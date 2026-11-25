@@ -162,7 +162,6 @@ enum class IRProperty : uint64_t {
   SimtOutputsMaterialized,    ///< Writable SIMT Tiles use initialized, dedicated output storage
   SimtSpecialized,            ///< Reachable helpers carry resources matching their launch dimensions
   AsyncHandleProvenance,      ///< Distributed events and sessions trace to matching SSA definitions
-  TileGetEventPairing,        ///< Each tile GET has one completion in its branch and iteration
   kCount                      ///< Sentinel (must be last)
 };
 
@@ -298,7 +297,7 @@ enum class VerificationLevel {
  * ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D,
  * HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized,
  * GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid,
- * AccStorePhaseValid, AsyncHandleProvenance, TileGetEventPairing} — lightweight checks for common IR errors.
+ * AccStorePhaseValid, AsyncHandleProvenance} — lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 
@@ -319,8 +318,8 @@ const IRPropertySet& GetStructuralProperties();
  *
  * Returns {SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls,
  * BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence,
- * ArrayNotEscaped, AsyncHandleProvenance, TileGetEventPairing} — the properties checked by run_verifier()
- * when no explicit set is given.
+ * ArrayNotEscaped, AsyncHandleProvenance} — the properties checked by run_verifier() when no explicit set is
+ * given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();
 

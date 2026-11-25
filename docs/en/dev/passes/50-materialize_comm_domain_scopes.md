@@ -233,8 +233,10 @@ absent definitions are outside this contract. Legacy informational
 | Field | Value |
 | ----- | ----- |
 | `required` | `{}` |
-| `produced` | `{IRProperty::CommDomainScopesMaterialized}` |
+| `produced` | `{IRProperty::CommDomainScopesMaterialized, IRProperty::AsyncHandleProvenance}` |
 | `invalidated` | `{}` |
+
+The async handle verifier now sees the lowered loop bodies. For example, a GET issued before a single-trip pipeline loop can defer its event inside that loop: after expansion the verifier sees one submission followed by one completion.
 
 ## Reference
 

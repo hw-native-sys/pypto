@@ -189,8 +189,10 @@ pass 运行之后：
 | 字段 | 取值 |
 | ---- | ---- |
 | `required` | `{}` |
-| `produced` | `{IRProperty::CommDomainScopesMaterialized}` |
+| `produced` | `{IRProperty::CommDomainScopesMaterialized, IRProperty::AsyncHandleProvenance}` |
 | `invalidated` | `{}` |
+
+异步句柄校验在此处看到的是降级后的循环体。例如，在只迭代一次的流水线循环外提交 GET、在循环内移交事件，展开后对应一次提交和一次移交，可以通过校验。
 
 ## 参考
 

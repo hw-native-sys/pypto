@@ -181,9 +181,7 @@ void BindPass(nb::module_& m) {
              "Writable SIMT Tiles have dedicated initialized output storage")
       .value("SimtSpecialized", IRProperty::SimtSpecialized, "SIMT helper resources match their launches")
       .value("AsyncHandleProvenance", IRProperty::AsyncHandleProvenance,
-             "Distributed async events and sessions trace to matching SSA definitions")
-      .value("TileGetEventPairing", IRProperty::TileGetEventPairing,
-             "Each tile GET has exactly one completion in its branch and iteration");
+             "Distributed async events and sessions trace to matching SSA definitions");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

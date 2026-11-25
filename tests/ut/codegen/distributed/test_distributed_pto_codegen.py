@@ -46,7 +46,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from _pto_loc_common import strip_loc
-from pypto import DataType, backend, codegen, ir, passes
+from pypto import DataType, Error, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import generate
@@ -2467,6 +2467,30 @@ def test_urma_scatter_get_reuses_session_and_destination():
     assert "scf.if" in mlir and "scf.for" in mlir
     assert f"{first[5]} = pto.addptr" in mlir
     assert "defer_wait_event" not in strip_loc(mlir)
+
+
+@pytest.mark.parametrize("trips", [0, 1, 2])
+def test_scatter_get_pairs_completion_after_pipeline_lowering(trips):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, window: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]):
+            src = pl.tensor.view(window, [32], offsets=[0])
+            dst = pl.tensor.view(window, [32], offsets=[32])
+            session = pld.system.make_session(pld.get_comm_ctx(window))
+            pair = pld.tile.get_async(dst, 1, src, session)
+            for _ in pl.pipeline(0, trips, 1, stage=2):
+                pld.system.defer_wait_event(pair[1], session)
+
+    # Lowering the single-trip loop leaves one completion for the one submitted GET.
+    if trips == 1:
+        assert _generate_mlir_a5(P).count("func.call @pypto_urma_scatter_get_f32") == 1
+    else:
+        diagnostic = "exactly one" if trips == 0 else "unconsumed"
+        with pytest.raises(
+            Error, match=f"(?s)'MaterializeCommDomainScopes'.*AsyncHandleProvenance.*{diagnostic}"
+        ):
+            _generate_mlir_a5(P)
 
 
 def test_scatter_get_tensor_projections_share_the_submitted_window_view():

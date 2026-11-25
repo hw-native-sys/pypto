@@ -115,9 +115,12 @@ def test_get_async_round_trips_engine():
     ir.assert_structural_equal(P, reparsed)
 
 
-def _verify_through_ssa(program: ir.Program) -> None:
+def _verify_async_handles(program: ir.Program) -> None:
     pipeline = passes.PassPipeline()
     pipeline.add_pass(passes.convert_to_ssa())
+    pipeline.add_pass(passes.normalize_stmt_structure())
+    pipeline.add_pass(passes.flatten_call_expr())
+    pipeline.add_pass(passes.materialize_comm_domain_scopes())
     with passes.PassContext([], passes.VerificationLevel.BASIC):
         pipeline.run(program)
 
@@ -151,7 +154,7 @@ class P:
     assert isinstance(call.type.types[1], ir.AsyncEventType)
     assert ir.returned_param_indices(_get_func(program, "kernel"), program) == [0]
     assert str(program).count(f"{op}(") == 1
-    _verify_through_ssa(program)
+    _verify_async_handles(program)
     ir.assert_structural_equal(program, pl.parse_program(str(program)))
     ir.assert_structural_equal(program, ir.deserialize(ir.serialize(program)))
 
@@ -269,18 +272,11 @@ class P:
         session = pld.system.make_session(pld.system.get_comm_ctx(src))
 {indent(body, " " * 8)}
 """)
-    pipeline = passes.PassPipeline()
-    pipeline.add_pass(passes.convert_to_ssa())
-    pipeline.add_pass(passes.normalize_stmt_structure())
-    pipeline.add_pass(passes.flatten_call_expr())
-    with passes.PassContext([], passes.VerificationLevel.BASIC):
-        if diagnostic is None:
-            pipeline.run(program)
-        else:
-            with pytest.raises(
-                Error, match=f"(?s)after 'FlattenCallExpr'.*TileGetEventPairing.*{diagnostic}"
-            ):
-                pipeline.run(program)
+    if diagnostic is None:
+        _verify_async_handles(program)
+    else:
+        with pytest.raises(Error, match=f"(?s)after 'MaterializeCommDomainScopes'.*{diagnostic}"):
+            _verify_async_handles(program)
 
 
 def test_tile_get_event_reuses_session_for_dynamic_peers(ascend_backend):
@@ -305,7 +301,7 @@ def test_tile_get_event_reuses_session_for_dynamic_peers(ascend_backend):
     assert printed.count("pld.system.make_session(") == 1
     assert printed.count("pld.tile.get_async(") == 2
     assert "pld.CommEngine.URMA" in printed
-    _verify_through_ssa(P)
+    _verify_async_handles(P)
     ir.assert_structural_equal(P, pl.parse_program(printed))
 
 
@@ -332,7 +328,7 @@ def test_put_and_get_share_session_across_peers_and_completion_paths(ascend_back
     assert ir.get_op_arg_effect("pld.tile.put_async", 0) == ir.ArgEffect.ReadWrite
     assert ir.get_op_arg_effect("pld.tile.put_async", 2) == ir.ArgEffect.Read
     assert ir.get_op_arg_effect("pld.tile.put_async", 3) == ir.ArgEffect.ReadWrite
-    _verify_through_ssa(P)
+    _verify_async_handles(P)
     ir.assert_structural_equal(P, pl.parse_program(printed))
     ir.assert_structural_equal(P, ir.deserialize(ir.serialize(P)))
 
@@ -420,7 +416,7 @@ def test_reassigned_event_and_session_use_the_reaching_submission(ascend_backend
 
     # The parser reuses each Var on reassignment. Each wait has one reaching
     # definition once ConvertToSSA splits the two session/event pairs.
-    _verify_through_ssa(P)
+    _verify_async_handles(P)
 
 
 def test_wait_event_on_a_tensor_get_infers_its_session(ascend_backend):
@@ -431,7 +427,7 @@ def test_wait_event_on_a_tensor_get_infers_its_session(ascend_backend):
             _out, fetched = pld.tensor.get_async_event(dst, 1, src)
             _ok = pld.system.wait_event(fetched)
 
-    _verify_through_ssa(P)
+    _verify_async_handles(P)
     ir.assert_structural_equal(P, pl.parse_program(str(P)))
 
 
@@ -446,8 +442,8 @@ def test_wait_event_rejects_another_session_for_put(ascend_backend):
             _dst_after, event = pld.tile.put_async(dst, 1, src, session)
             pld.system.wait_event(event, other)
 
-    with pytest.raises(Error, match="(?s)after 'ConvertToSSA'.*same session"):
-        _verify_through_ssa(P)
+    with pytest.raises(Error, match="(?s)after 'MaterializeCommDomainScopes'.*same session"):
+        _verify_async_handles(P)
 
 
 def test_defer_wait_event_rejects_a_reassigned_session(ascend_backend):
@@ -461,8 +457,8 @@ def test_defer_wait_event_rejects_a_reassigned_session(ascend_backend):
             session = pld.system.make_session(ctx)
             pld.system.defer_wait_event(event, session)
 
-    with pytest.raises(Error, match="(?s)after 'ConvertToSSA'.*same session"):
-        _verify_through_ssa(P)
+    with pytest.raises(Error, match="(?s)after 'MaterializeCommDomainScopes'.*same session"):
+        _verify_async_handles(P)
 
 
 def test_prefetch_handles_cannot_be_used_for_urma_get_or_defer(ascend_backend):
@@ -476,8 +472,8 @@ def test_prefetch_handles_cannot_be_used_for_urma_get_or_defer(ascend_backend):
             pld.tile.get_async(dst, 1, src, session)
             pld.system.defer_wait_event(event)
 
-    with pytest.raises(Error, match="after 'ConvertToSSA'") as exc:
-        _verify_through_ssa(P)
+    with pytest.raises(Error, match="after 'MaterializeCommDomainScopes'") as exc:
+        _verify_async_handles(P)
     assert "session from pld.system.make_session" in str(exc.value)
     assert "distributed transfer event" in str(exc.value)
 
@@ -495,7 +491,7 @@ class P:
         pld.system.{completion}(event, session)
 """)
     with pytest.raises(Error, match=rf"{completion}.*omit the session"):
-        _verify_through_ssa(program)
+        _verify_async_handles(program)
 
 
 @pytest.mark.parametrize("condition", ["cond", "pl.const(1, pl.INDEX) == pl.const(1, pl.INDEX)"])
@@ -533,7 +529,7 @@ def test_prefetch_wait_accepts_loop_carried_prefetch_event(ascend_backend):
                     event = pl.prefetch.async_prefetch(x, ctx)
             pl.prefetch.wait(event, session)
 
-    _verify_through_ssa(P)
+    _verify_async_handles(P)
 
 
 @pytest.mark.parametrize(
@@ -629,7 +625,7 @@ def test_prefetch_wait_rejects_unknown_event_after_branch(ascend_backend):
             pl.prefetch.wait(event, ps)
 
     with pytest.raises(Error, match="prefetch.wait requires an event traceable to prefetch.async_prefetch"):
-        _verify_through_ssa(P)
+        _verify_async_handles(P)
 
 
 def _subregion_program(op_name: str):

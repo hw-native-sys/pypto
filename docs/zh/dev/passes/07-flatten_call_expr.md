@@ -33,7 +33,7 @@ SIMT 函数保留完整的 `while` 条件表达式，包括其中的嵌套调用
 **所有**元素：`(f(), value)[1]` 仍须执行 `f()`。在 `LowerCompositeOps` 折叠元组投影前提取这些调用，
 可以保留未选中元素中的原子更新。返回元组的 `Call` 和 `Submit` 表达式也会在投影前绑定到临时变量。
 
-当调用或提交的参数从元组中取出 Tensor 时，Pass 也将该投影绑定到变量，供后续 GM 操作解析张量视图及其存储。本 Pass 完成后，`TileGetEventPairing` 检查每笔 tile GET 的完成事件配对，覆盖 `defer_wait_event(get_async(...)[1])` 等内联写法。
+当调用或提交的参数从元组中取出 Tensor 时，Pass 也将该投影绑定到变量，供后续 GM 操作解析张量视图及其存储。
 
 ## API
 

@@ -69,7 +69,7 @@ Both directions can reuse a session across peers and views of the same InCore
 window parameter, even when the host places both windows in the same domain.
 For tensor GET, call `wait_event(event)` or `defer_wait_event(event)`. For tile PUT and GET,
 wait and defer also accept the session that submitted the transfer. An in-kernel wait returns success to the caller. Deferring hands completion
-to the task so its consumers can use the destination after logical completion. The A5 TMR backend lowers an explicit session and single-segment tile GET through Simpler. Each GET must reach exactly one `defer_wait_event` in the same branch and loop iteration. Tile PUT, tensor event GET and in-kernel `wait_event` have frontend and IR support only.
+to the task so its consumers can use the destination after logical completion. The A5 TMR backend lowers an explicit session and single-segment tile GET through Simpler. In the lowered control flow, each GET must reach exactly one `defer_wait_event` in its branch and iteration. Tile PUT, tensor event GET and in-kernel `wait_event` have frontend and IR support only.
 
 One session can fetch from different peers. Each GET immediately submits and registers a task completion. Dependent tasks can consume the destinations after the issuing task retires.
 
