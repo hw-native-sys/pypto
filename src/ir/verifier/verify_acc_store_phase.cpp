@@ -13,9 +13,10 @@
  * @file verify_acc_store_phase.cpp
  * @brief Verify the final accumulator-producer / final-store unit-flag protocol.
  *
- * On A2/A3, ``acc_phase=pl.AccPhase.Final`` lowers to a producer-side
+ * On A2/A3 and A5, ``acc_phase=pl.AccPhase.Final`` lowers to a producer-side
  * check-and-set. The matching ``st_phase=pl.STPhase.Final`` store performs the
- * consumer-side check-and-clear. Omitting either side is not a benign metadata
+ * consumer-side check-and-clear (also through direct split-M Vec writeback on
+ * A5). Omitting either side is not a benign metadata
  * mismatch: the device can wait forever on an unset flag, or leave a set flag
  * behind and stall a later accumulator producer.
  *
@@ -241,17 +242,21 @@ class AccStorePhaseVisitor : public IRVisitor {
   std::optional<TokenId> ProcessCall(const CallPtr& call, MemRefPtr destination = nullptr) {
     if (!call) return std::nullopt;
 
-    if (IsOp(call, "tile.store")) {
+    const bool writeback = IsOp(call, "tile.writeback_to_vec");
+    if (IsOp(call, "tile.store") || writeback) {
+      const size_t source_index = writeback ? 1 : 0;
       std::optional<TokenId> source_token;
-      if (!call->args_.empty()) source_token = ProcessValue(call->args_[0]);
-      for (size_t i = 1; i < call->args_.size(); ++i) ScanExpr(call->args_[i]);
+      if (source_index < call->args_.size()) source_token = ProcessValue(call->args_[source_index]);
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        if (i != source_index) ScanExpr(call->args_[i]);
+      }
       // An earlier alias has no token, or a consumed token from a prior Final.
       // Neither permits a plain store while this storage has a newer live Final.
       // A final store of that alias is already rejected by exact-value checks.
-      if ((!source_token || pending_.count(*source_token) == 0) && !call->args_.empty() &&
+      if ((!source_token || pending_.count(*source_token) == 0) && source_index < call->args_.size() &&
           call->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified)) ==
               static_cast<int>(STPhase::kUnspecified)) {
-        CheckUndrainedStorage(call, AccumulatorStorage(call->args_[0]->GetType()));
+        CheckUndrainedStorage(call, AccumulatorStorage(call->args_[source_index]->GetType()));
       }
       CheckStore(call, source_token);
       return std::nullopt;
@@ -359,6 +364,7 @@ class AccStorePhaseVisitor : public IRVisitor {
   }
 
   void CheckStore(const CallPtr& store, const std::optional<TokenId>& source_token) {
+    const std::string& store_name = store->op_->name_;
     const int st_phase = store->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified));
     if (!IsValidSTPhase(st_phase)) {
       if (source_token.has_value() && ConsumePending(*source_token)) {
@@ -366,7 +372,7 @@ class AccStorePhaseVisitor : public IRVisitor {
       }
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/5,
-          "tile.store st_phase in function '" + func_name_ +
+          store_name + " st_phase in function '" + func_name_ +
               "' must encode pl.STPhase.Unspecified (0) or pl.STPhase.Final (3), but got " +
               std::to_string(st_phase) +
               ". A final accumulator producer must be consumed with pl.STPhase.Final so its unit flag is "
@@ -378,7 +384,7 @@ class AccStorePhaseVisitor : public IRVisitor {
       if (!source_token.has_value()) {
         diagnostics_.emplace_back(
             DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/1,
-            "tile.store(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
+            store_name + "(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
                 "' must consume the exact SSA value produced by tile.matmul, tile.matmul_acc, "
                 "tile.gemv, tile.gemv_acc, or tile.gemv_bias with acc_phase=pl.AccPhase.Final in the "
                 "same straight-line region. A final "
@@ -391,7 +397,7 @@ class AccStorePhaseVisitor : public IRVisitor {
       if (!ConsumePending(*source_token)) {
         diagnostics_.emplace_back(
             DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/2,
-            "tile.store(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
+            store_name + "(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
                 "' does not have a live matching final accumulator producer in this straight-line region. "
                 "The producer may already have been consumed, or the value crossed a control-flow boundary; "
                 "either case makes the unit-flag clear ambiguous and can stall device execution.",
@@ -406,7 +412,7 @@ class AccStorePhaseVisitor : public IRVisitor {
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/3,
           "final accumulator producer '" + producer.op_name + "' in function '" + func_name_ +
-              "' is consumed by tile.store with st_phase=pl.STPhase." +
+              "' is consumed by " + store_name + " with st_phase=pl.STPhase." +
               STPhaseToString(static_cast<STPhase>(st_phase)) +
               ". Use st_phase=pl.STPhase.Final so the store performs check-and-clear; otherwise the "
               "producer's "
@@ -441,7 +447,8 @@ class AccStorePhaseVisitor : public IRVisitor {
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/4,
           "final accumulator producer '" + producer.op_name + "' in function '" + func_name_ +
-              "' must be consumed exactly once by tile.store(..., st_phase=pl.STPhase.Final) using that SSA "
+              "' must be consumed exactly once by tile.store(..., st_phase=pl.STPhase.Final) or "
+              "tile.writeback_to_vec(..., st_phase=pl.STPhase.Final) using that SSA "
               "value " +
               description +
               ". acc_phase=pl.AccPhase.Final performs check-and-set; leaving it uncleared can stall a later "

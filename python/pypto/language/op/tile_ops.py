@@ -157,6 +157,7 @@ from ._tile_memory import fillpad_inplace as fillpad_inplace
 from ._tile_memory import full as full
 from ._tile_memory import gather_row as gather_row
 from ._tile_memory import load as load
+from ._tile_memory import mark_remote_written as mark_remote_written
 from ._tile_memory import move as move
 from ._tile_memory import random as random
 from ._tile_memory import read as read
@@ -169,6 +170,7 @@ from ._tile_memory import transpose as transpose
 from ._tile_memory import transpose_view as transpose_view
 from ._tile_memory import tri as tri
 from ._tile_memory import write as write
+from ._tile_memory import writeback_to_vec as writeback_to_vec
 from ._tile_reduction import col_argmax as col_argmax
 from ._tile_reduction import col_argmin as col_argmin
 from ._tile_reduction import col_expand as col_expand
@@ -214,6 +216,8 @@ __all__ = [
     "store",
     "assemble",
     "gather_row",
+    "mark_remote_written",
+    "writeback_to_vec",
     "extract",
     "scatter_update",
     "concat",

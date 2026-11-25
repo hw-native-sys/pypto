@@ -478,7 +478,7 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k
 在 `init_cond` 之前，这一步是由剥离的首个 K 步隐式完成的 —— 一条直线展开的
 `pl.tile.gemv` 会铸造出类型正确的累加器，代价是两个分支之间的一个 phi。
 
-### 累加器阶段（Accumulator phases，A2/A3）
+### 累加器阶段（Accumulator phases，A2/A3 和 A5）
 
 `tile.matmul`、`tile.matmul_acc`、`tile.gemv`、`tile.gemv_acc` 和
 `tile.gemv_bias` 的 `acc_phase` 可设为 `pl.AccPhase.Unspecified`（默认值）、
@@ -495,7 +495,7 @@ store 会检查未更新分块，而 MAD 并未设置这些分块的 unit flag�
 区域相匹配的累加器窗口，或保持部分更新，直到整个有效区域完成最终累加。
 
 在使用 unit flag 的路径上，最后一个累加生产者必须与
-`pl.store(..., st_phase=pl.STPhase.Final)` 配对。final 生产者负责置位，final
+`pl.store(..., st_phase=pl.STPhase.Final)`（A5 还支持 `pl.tile.writeback_to_vec(..., split=1, st_phase=pl.STPhase.Final)`）配对。final 生产者负责置位，final
 store 负责检查并清位；普通 store 则有意保留默认的
 `pl.STPhase.Unspecified` 行为。PTO-ISA 的 check-only store phase 需要有序的
 多消费者生命周期，因此 PyPTO 不对外提供该阶段。编译器会双向校验所支持的
@@ -506,6 +506,20 @@ final 配对：应绑定 final 生产者的结果，并在同一个直线控制�
 完整配对是受支持的；尚未排空的 final 结果跨分支、循环或 scope 边界则会被拒绝。
 [`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) 保留该契约：中间 K 分块
 使用 `Partial`，只有最后一个分块使用 `Final`。显式阶段不会删除其他自动插入的同步。
+
+#### A5 split-M FIXPIPE 直接写回
+
+`pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` 将完整 FP32 Acc Tile
+直接写入两侧 AIV 手工指定地址的行主序 FP32 Vec 存储，各接收一半行。
+行列坐标均为每侧本地目标坐标，`TINSERT` 保留完整目标行跨度。例如 64×64
+累加器可写入 64×256 目标的第 0 或 32 行、第 64 列。Final 累加器必须
+使用 `st_phase=pl.STPhase.Final`，且目标为零偏移的完整 32×64 Tile；
+此时 `TMOV` 执行 unit flag check-and-clear。不引入 TPipe 槽位或额外同步。
+
+AIC 与 AIV 需约定物理 UB 地址并手工管理事件握手。AIV 等待生产者后，
+在寄存器作用域读取前对连续接收视图调用 `pl.tile.mark_remote_written(view)`。
+该显式内存效果标注不生成指令，仅记入目标视图的有效范围，不标记整个
+底层分配。它不是同步操作。
 
 存储检查遵循注册的原地操作与视图关系，包括 Final 更新之前创建的别名，以及
 直线代码中的 tuple 转发和嵌套 tuple 投影。分支选择保留可能来源，同时保留
@@ -545,6 +559,8 @@ op_instance = ir.get_op("tensor.add")
 ## Kwargs（关键字参数）
 
 Call 表达式 (Expression) 将 Expr 参数与元数据参数通过 kwargs 分离。
+
+
 
 ### Kwargs vs Args vs 属性 (Property)
 

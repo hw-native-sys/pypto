@@ -236,6 +236,8 @@ print(pto_code)
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
 | `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / A5 BF16 NZ Vec-to-Mat 插入 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
+| `tile.writeback_to_vec(dst, acc, [row, col], split=1, st_phase=...)` | A5 split-M FIXPIPE 直接写回：`pto.tinsert`，或整窗 final 写回使用带 `stPhase=final` 的 `pto.tmov` |
+| `tile.mark_remote_written(tile)` | 不产生指令；为寄存器分析标记对端已初始化的 UB 区间 |
 | `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc`（`src0 + src1 + carry`） |

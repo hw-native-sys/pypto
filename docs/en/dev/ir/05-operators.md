@@ -487,7 +487,7 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # then gemv_acc(..., init_cond=(k0 
 Before `init_cond`, the peel did this implicitly — a straight-line `pl.tile.gemv`
 mints a correctly typed accumulator, at the cost of a phi between the branches.
 
-### Accumulator phases (A2/A3)
+### Accumulator phases (A2/A3 and A5)
 
 `tile.matmul`, `tile.matmul_acc`, `tile.gemv`, `tile.gemv_acc`, and
 `tile.gemv_bias` accept `acc_phase` as `pl.AccPhase.Unspecified` (the default),
@@ -506,7 +506,8 @@ whose unit flags the MAD did not set. Use a matching accumulator window, or
 keep the update partial until the whole valid rectangle is finalized.
 
 On a unit-flag-aware path, the final accumulator producer must be paired with
-`pl.store(..., st_phase=pl.STPhase.Final)`. The final producer sets the unit flag
+`pl.store(..., st_phase=pl.STPhase.Final)`, or on A5
+`pl.tile.writeback_to_vec(..., split=1, st_phase=pl.STPhase.Final)`. The final producer sets the unit flag
 and the final store checks and clears it; a plain store intentionally keeps the
 default `pl.STPhase.Unspecified` behavior. PyPTO does not expose PTO-ISA's
 check-only store phase because that phase requires an ordered multi-consumer
@@ -521,6 +522,25 @@ pending final result across a branch, loop, or scope boundary is rejected.
 [`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) preserves this contract:
 intermediate K blocks use `Partial`, and the last block alone uses `Final`.
 Explicit phases do not remove other automatically inserted synchronization.
+
+#### Direct split-M FIXPIPE on A5
+
+`pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` writes a full FP32 Acc
+tile into the manually addressed row-major FP32 Vec storage of both AIV lanes,
+each receiving half the accumulator rows. The destination row and column
+offsets address each lane's local view; the full destination pitch is
+preserved by `TINSERT`. For example, a 64×64 accumulator can write into a
+64×256 destination at row 0 or 32 and column 64. For a final accumulator
+producer use `st_phase=pl.STPhase.Final` with a complete 32×64 destination at
+offset [0, 0]; `TMOV` performs the required unit-flag check-and-clear.
+No TPipe slot or extra synchronization is introduced.
+
+The AIC and AIV authors must agree on the physical UB addresses and manage
+the event handshake. After the AIV waits for the producer, call
+`pl.tile.mark_remote_written(view)` on the contiguous received Vec view before
+reading it from a register scope. This explicit memory-effect annotation
+introduces no instructions and credits only the view's valid region, not
+the backing allocation. It is not a synchronization operation.
 
 Storage checks follow registered in-place operations and views, including
 aliases made before a Final update and straight-line tuple forwarding or

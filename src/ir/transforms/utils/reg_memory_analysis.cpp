@@ -163,6 +163,11 @@ class InitializationChecker : public IRVisitor {
     Initialize(stmt->var_);
   }
   void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "tile.mark_remote_written")) {
+      // Record exactly the externally initialized view, not its backing pool.
+      Initialize(call->args_[0]);
+      return;
+    }
     if (auto helper = ResolveVFCall(call, program_)) {
       // Borrow the caller's current initialized intervals. InOut denotes a
       // memory effect, not proof that the entire argument was initialized.

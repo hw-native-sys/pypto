@@ -174,7 +174,8 @@ def matmul(
             Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
-            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
+            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)`` or
+            an A5 ``pl.tile.writeback_to_vec(..., split=1, st_phase=pl.STPhase.Final)``.
 
     Returns:
         Tile wrapping the matmul operation
@@ -245,7 +246,8 @@ def matmul_acc(
             Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
-            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
+            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)`` or
+            an A5 ``pl.tile.writeback_to_vec(..., split=1, st_phase=pl.STPhase.Final)``.
 
     Returns:
         Tile wrapping the matmul_acc operation
