@@ -672,8 +672,8 @@ scope must describe full hardware vectors or masks.
   write a single register's packed even lanes. `ONEPT_B32` writes lane zero.
   Omitting `dist` selects a normal masked store.
   The mask for `PK_B32` is a 64-lane 32-bit mask, not 128 lanes.
-- `reduce_max(x, mask, native=True)` and `reduce_sum_native` keep the result at physical
-  lane zero of the full FP32 register; other lanes are not a defined result.
+- `reduce_max(x, mask, native=True)` and `reduce_sum(x, mask, native=True, reassoc=True)`
+  return a full FP32 register. Lane zero holds the reduction result.
 
 All offsets are in the backing Tile's elements. Bounds and initialization
 are checked using the actual source/store footprint rather than counting

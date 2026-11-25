@@ -589,8 +589,8 @@ squeeze-store 的对齐状态使用物理 micro 指令，含流的整个 registe
   `store(..., native=True, dist="PK_B32")` 紧凑写出偶数 lane。`ONEPT_B32`
   写出 lane 0。省略 `dist` 时按 mask 正常写回。
   `PK_B32` 使用 64-lane 的 32 位 mask，而非 128-lane mask。
-- `reduce_max(x, mask, native=True)`、`reduce_sum_native` 的有定义结果位于完整 FP32
-  寄存器的 lane 0，其他 lane 不是计算结果。
+- `reduce_max(x, mask, native=True)` 和 `reduce_sum(x, mask, native=True, reassoc=True)`
+  返回完整的 FP32 寄存器，归约结果位于 lane 0。
 
 偏移量以 backing Tile 元素为单位。边界与初始化检查遵循实际访存范围，
 而非未使用的物理 lane 数量。native scope 只支持明确实现的算子，

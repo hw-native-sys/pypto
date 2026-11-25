@@ -313,8 +313,10 @@ def _native_fp8_decode_body():
             prefix = pl.reg.active_mask(count, lanes=64)
             one = pl.reg.active_mask(1, lanes=64)
             maximum = pl.reg.reduce_max(values, full, native=True)
+            total = pl.reg.reduce_sum(values, prefix, native=True, reassoc=True)
             dst = pl.reg.store(dst, 64, values, prefix, native=True)
             dst = pl.reg.store(dst, 192, maximum, one, native=True, dist="ONEPT_B32")
+            dst = pl.reg.store(dst, 200, total, one, native=True, dist="ONEPT_B32")
         pl.store(pl.reshape(dst, [1, 1024]), [0, 0], out)
         return out
 
@@ -518,7 +520,7 @@ def _build(output):
             if case.startswith("histogram")
             else ("interpret_cast", "create_group_mask")
             if case == "reinterpret"
-            else ("vlds", "vcvt", "vcmax", "vsts")
+            else ("vlds", "vcvt", "vcmax", "vcadd", "vsts")
             if case == "native_fp8_decode"
             else MX_OPS
             if case == "mx_quant"
@@ -630,6 +632,7 @@ def _golden(case, data, n):
         values = torch.from_numpy(data[64:128]).view(torch.float8_e4m3fn).float().numpy()
         expected[64 : 64 + n] = values[:n]
         expected[192] = values.max()
+        expected[200] = values[:n].sum()
         return expected
     if case.startswith("block_stride"):
         # Independent ND -> NZ reference: [row, panel, column] is transposed

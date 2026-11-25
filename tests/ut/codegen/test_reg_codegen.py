@@ -1801,7 +1801,7 @@ def native_scale_reduction():
         mx = pl.reg.reduce_max(x, all32, native=True)
         first = pl.reg.broadcast(0, lanes=64, dtype=pl.UINT32)
         rep = pl.reg.gather_lanes(mx, first)
-        total = pl.reg.reduce_sum_native(rep, all32, reassoc=True)
+        total = pl.reg.reduce_sum(rep, all32, native=True, reassoc=True)
         written = pl.reg.store(dst, 0, total, one, dist="ONEPT_B32", native=True)
 """)
     source = generate_native_test(program)

@@ -518,11 +518,12 @@ def reduce_sum(
     Inactive input lanes contribute zero. No implicit widening is performed.
     With group_size, the source splits into equal contiguous groups and the
     result holds one lane per group in group order; see group_broadcast.
+    With native=True, the FP32 sum is in lane zero of a full register.
     """
     if native:
         if group_size is not None:
             raise TypeError("Native reduction does not take group_size")
-        return reduce_sum_native(value, mask, reassoc=reassoc)
+        return _reduction("reduce_sum", value, mask, None, native=True, reassoc=reassoc)
     return _reduction("reduce_sum", value, mask, group_size, reassoc=reassoc)
 
 
@@ -543,11 +544,6 @@ def reduce_max(
 def reduce_min(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, group_size: int | None = None) -> Reg:
     """Reduce to one lane, or one lane per group; inactive inputs give the dtype maximum or +inf."""
     return _reduction("reduce_min", value, mask, group_size)
-
-
-def reduce_sum_native(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, reassoc: bool) -> Reg:
-    """Native FP32 sum reduction: result in lane zero of the full register."""
-    return Reg(_call("reduce_sum", [_expr(value), _expr(mask)], native=True, reassoc=reassoc))
 
 
 def group_broadcast(value: Reg | ir.Expr, *, lanes: int) -> Reg:
