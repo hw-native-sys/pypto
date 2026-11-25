@@ -679,3 +679,6 @@ are checked using the actual source/store footprint rather than counting
 unused physical register lanes. Only the explicitly supported native
 operations may be combined inside the scope; unsupported operations fail
 codegen rather than being silently lowered through logical VMI.
+
+`store(..., block_stride=N, post_update=True)` selects the native
+strided post-update encoding while discarding the updated temporary pointer.

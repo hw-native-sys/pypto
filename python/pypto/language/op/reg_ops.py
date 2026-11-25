@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Logical register operations, valid within an A5 InCore/AIV reg_scope."""
+"""Logical and explicit physical A5 register operations inside reg_scope."""
 
 from typing import Any
 
@@ -103,6 +103,7 @@ def store(
     mask: Reg | ir.Expr | None = None,
     *,
     block_stride: int | None = None,
+    post_update: bool = False,
     native: bool = False,
     dist: str | None = None,
 ) -> Tile:
@@ -110,11 +111,13 @@ def store(
 
     offset is in elements; block_stride is a positive static i16 integer.
     Gaps and inactive lanes retain their previous destination contents.
+    ``post_update=True`` selects the native strided POST_UPDATE encoding.
+    The updated temporary pointer is discarded; the Tile alias is unchanged.
     """
     if value is None:
         raise TypeError("reg.store requires value")
     if native:
-        if mask is None or dist is None or block_stride is not None:
+        if mask is None or dist is None or block_stride is not None or post_update:
             raise TypeError("Native store requires mask/dist and does not take block_stride")
         return store_native(tile, offset, value, mask, mode=dist)
     if dist is not None:
@@ -126,6 +129,10 @@ def store(
     stride = _normalize_reg_block_stride(block_stride)
     if stride is not None:
         kwargs["block_stride"] = stride
+    if post_update:
+        if stride is None:
+            raise TypeError("post_update requires block_stride")
+        kwargs["post_update"] = True
     return Tile(expr=_call("store", args, **kwargs))
 
 

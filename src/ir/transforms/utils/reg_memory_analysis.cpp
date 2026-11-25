@@ -209,8 +209,9 @@ class InitializationChecker : public IRVisitor {
         }
         // Native packed/one-point stores may write fewer elements than the
         // physical register or mask width. Cap initialization at the declared footprint.
-        if (GetKwargOr<bool>(call->kwargs_, "native", false))
+        if (GetKwargOr<bool>(call->kwargs_, "native", false)) {
           active = std::min(active, (end - begin) / bytes);
+        }
         const int64_t stride = GetKwargOr<int>(call->kwargs_, "block_stride", 1);
         const int64_t block = 32 / bytes;
         // Credit only written blocks; the enclosing interval contains gaps.

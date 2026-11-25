@@ -594,3 +594,6 @@ squeeze-store 的对齐状态使用物理 micro 指令，含流的整个 registe
 偏移量以 backing Tile 元素为单位。边界与初始化检查遵循实际访存范围，
 而非未使用的物理 lane 数量。native scope 只支持明确实现的算子，
 其余算子会在 codegen 报错，不会静默切换到逻辑 VMI。
+
+`store(..., block_stride=N, post_update=True)` 选择 native stride store 的
+POST_UPDATE 编码，并丢弃更新后的临时指针，不改变 Tile view。

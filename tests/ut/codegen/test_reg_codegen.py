@@ -1708,7 +1708,7 @@ def native_pack():
         b0 = pl.reg.convert_native(x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False)
         b1 = pl.reg.convert_native(x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False)
         packed, unused = pl.reg.dintlv(b0, b1)
-        written = pl.reg.store(out, 0, packed, m16, block_stride=17)
+        written = pl.reg.store(out, 0, packed, m16, block_stride=17, post_update=True)
         pk_written = pl.reg.store_native(packed_out, 0, b0, m32, mode="PK_B32")
 ''')
     source = generate(program)
@@ -1716,6 +1716,7 @@ def native_pack():
     assert source.count('part = "PART_EVEN"') == 2
     assert source.count("pto.vdintlv") == 1
     assert source.count("pto.vsstb") == 1
+    assert "native_store_post" in source
     assert 'dist = "PK_B32"' in source
     compile_review_pto(source, tmp_path)
 

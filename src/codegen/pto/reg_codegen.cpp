@@ -26,6 +26,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -80,7 +81,8 @@ class ScopeOperands : public IRVisitor {
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    micro |= IsOp(call, "reg.squeeze_store_init") || GetKwargOr<bool>(call->kwargs_, "native", false);
+    micro |= IsOp(call, "reg.squeeze_store_init") || GetKwargOr<bool>(call->kwargs_, "native", false) ||
+             GetKwargOr<bool>(call->kwargs_, "post_update", false);
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
         IsOp(call, "reg.squeeze_store_flush")) {
@@ -330,8 +332,12 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
     // PTOAS spells ONEPT_B32 as 1PT_B32; an omitted NORM distribution
     // is the natural element-width store (NORM is only a load token).
     if (IsOp(call, "reg.store")) {
-      if (dist == "NORM") dist.clear();
-      if (dist == "ONEPT_B32") dist = "1PT_B32";
+      if (dist == "NORM") {
+        dist.clear();
+      }
+      if (dist == "ONEPT_B32") {
+        dist = "1PT_B32";
+      }
     }
     const auto attr = dist.empty() ? "" : " {dist = \"" + dist + "\"}";
     if (IsOp(call, "reg.load")) {
@@ -360,8 +366,13 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
         CHECK_SPAN(!native, call->span_) << "Native distribution and block_stride cannot be combined";
         const auto block = GetOrEmitConstant(static_cast<int64_t>(block_stride), DataType::INT16);
         const auto repeat = GetOrEmitConstant(int64_t{0}, DataType::INT16);
-        Emit("pto.vsstb " + value(args[2]) + ", " + base + ", " + block + ", " + repeat + ", " + mask +
-             " : " + type(args[2]) + ", " + ptr_type + ", i16, i16, " + mask_type);
+        const bool post = GetKwargOr<bool>(call->kwargs_, "post_update", false);
+        const auto post_result = post ? NewNamedTemp("native_store_post") + " = " : "";
+        // PTOAS selects the hardware POST_UPDATE mode when the op produces
+        // the updated temporary pointer. The caller's Tile view is unchanged.
+        Emit(post_result + "pto.vsstb " + value(args[2]) + ", " + base + ", " + block + ", " + repeat + ", " +
+             mask + " : " + type(args[2]) + ", " + ptr_type + ", i16, i16, " + mask_type +
+             (post ? " -> " + ptr_type : ""));
       } else {
         Emit("pto.vsts " + value(args[2]) + ", " + base + "[" + zero + "], " + mask + attr + " : " +
              type(args[2]) + ", " + ptr_type + ", index, " + mask_type);
@@ -396,7 +407,9 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
   auto result_type = GetRegTypeString(result_reg);
   if (IsOp(call, "reg.convert") && GetKwargOr<bool>(call->kwargs_, "native", false)) {
     std::string attrs = "{part = \"" + GetStringKwarg(call->kwargs_, "part", "") + "\"";
-    if (GetStringKwarg(call->kwargs_, "rounding", "") != "") attrs += ", rnd = \"R\", sat = \"RS_DISABLE\"";
+    if (!GetStringKwarg(call->kwargs_, "rounding", "").empty()) {
+      attrs += R"(, rnd = "R", sat = "RS_DISABLE")";
+    }
     attrs += "}";
     Emit(name + " = pto.vcvt " + value(args[0]) + ", " + value(args[1]) + " " + attrs + " : " +
          type(args[0]) + ", " + type(args[1]) + " -> " + result_type);
@@ -462,6 +475,10 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
              IsOp(call, "reg.exp") || IsOp(call, "reg.muls") || IsOp(call, "reg.shift_rights") ||
              IsOp(call, "reg.reduce_max") || IsOp(call, "reg.reduce_sum") || IsOp(call, "reg.gather_lanes")) {
     const auto& spec = OpRegistry::GetInstance().GetEntry(call->op_->name_).GetRegSpec();
+    if (!spec) {
+      INTERNAL_CHECK_SPAN(false, call->span_) << "Missing native register emitter metadata";
+      return false;
+    }
     auto opcode = std::string("pto.") + spec->emitter.substr(std::string("pto.vmi.").size());
     std::string operands, types;
     for (const auto& arg : args) {
@@ -472,8 +489,8 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
       operands += value(arg);
       types += type(arg);
     }
-    CHECK_SPAN(IsOp(call, "reg.gather_lanes") ||
-                   As<RegType>(args.back()->GetType())->GetRegKind() == RegKind::MaskReg,
+    const auto predicate = As<RegType>(args.back()->GetType());
+    CHECK_SPAN(IsOp(call, "reg.gather_lanes") || (predicate && predicate->GetRegKind() == RegKind::MaskReg),
                call->span_)
         << "Physical native math requires explicit predicate";
     Emit(name + " = " + opcode + " " + operands + " : " + types + " -> " + result_type);

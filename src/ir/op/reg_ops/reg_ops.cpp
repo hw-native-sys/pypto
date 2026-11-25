@@ -159,7 +159,9 @@ int64_t NativeStoreExtent(const RegTypePtr& value, const Kwargs& kwargs) {
 // must never be credited as initialized. Arithmetic is checked before multiplying.
 int64_t StoreExtent(const Args& args, const Kwargs& kwargs) {
   auto value = Register(args[2], RegKind::VecReg);
-  if (GetKwargOr<bool>(kwargs, "native", false)) return NativeStoreExtent(value, kwargs);
+  if (GetKwargOr<bool>(kwargs, "native", false)) {
+    return NativeStoreExtent(value, kwargs);
+  }
   int stride = GetKwargOr<int>(kwargs, "block_stride", 1);
   CHECK_SPAN(stride > 0 && stride <= std::numeric_limits<int16_t>::max(), args[0]->span_)
       << "block_stride must be a positive i16 integer (1..32767)";
@@ -581,6 +583,7 @@ REGISTER_OP("reg.store")
     .add_argument("value", "VecReg value")
     .add_argument("mask", "Optional MaskReg")
     .set_attr<int>("block_stride")
+    .set_attr<bool>("post_update")
     .set_attr<bool>("native")
     .set_attr<std::string>("dist")
     .set_arg_effect(0, ArgEffect::Write)
@@ -590,6 +593,11 @@ REGISTER_OP("reg.store")
     .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
       CHECK(a.size() == 3 || a.size() == 4) << "reg.store expects tile, offset, value, optional mask";
       auto v = Register(a[2], RegKind::VecReg);
+      if (GetKwargOr<bool>(k, "post_update", false)) {
+        CHECK(GetKwargOr<int>(k, "block_stride", 0) > 0 && !GetKwargOr<bool>(k, "native", false) &&
+              v->GetShape() * v->GetDType().GetByte() == 256)
+            << "Native strided post-update requires block_stride and a full physical register";
+      }
       if (GetKwargOr<bool>(k, "native", false)) {
         CHECK(a.size() == 4 && GetKwargOr<int>(k, "block_stride", 0) == 0)
             << "Native store requires mask and does not take block_stride";
