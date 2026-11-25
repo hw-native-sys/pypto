@@ -175,8 +175,19 @@ def test_capture_admission_polls_warmup_but_defers_its_finalization(
         return original_done.__get__(submission)
 
     monkeypatch.setattr(env.api.PreparedSubmission, "done", property(poll))
-    env.run_queue()
-    env.runs[0].complete = True  # The user's Torch synchronization completed warmup.
+    # A warmup can still be queued on the host or running on the device.
+    # Neither refusal should acquire a capture ticket or fail the Worker.
+    for queued in (True, False):
+        if not queued:
+            env.run_queue()
+        env.capture = 42
+        env.events.clear()
+        with pytest.raises(RuntimeError, match="synchronize.*before capture"):
+            copy_kernel(x, 2, out)
+        assert env.state.state is KernelState.READY and env.state._submissions == [warmup]
+        assert "prepare" not in env.events and len(env.queue) == int(queued)
+        env.capture = False
+    env.framework.npu.synchronize(0)
     env.events.clear()
     env.capture = 42
     copy_kernel(x, 2, out)

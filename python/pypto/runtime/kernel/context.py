@@ -280,6 +280,10 @@ class _ProcessKernelState:
                 ]
                 self._fail_admission(exc)
                 raise RuntimeError("Kernel Worker failed after an earlier asynchronous launch error") from exc
+            if capturing and self._warmup_submissions:
+                # Incomplete eager work is retryable. Keep the Worker ready and
+                # let the caller synchronize outside the recording boundary.
+                raise RuntimeError("Kernel eager work is still pending; synchronize the NPU before capture")
             ticket = prepare(self._worker)
             self._submissions.append(ticket)
             try:

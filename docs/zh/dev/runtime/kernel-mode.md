@@ -218,6 +218,8 @@ UT 使用真实初始化状态转换、JIT passes/codegen、公共产物发布/�
 每个 specialization 都必须先执行 eager 调用并同步，再进入 capture。`compile()` 和
 `warmup()` 使用 PROGRAM contract，不能代替 Kernel 注册。capture 只查找已有 KERNEL
 specialization 和 callable，不编译、不加载新 binary、不初始化 Worker。初始化时须关闭诊断。
+如果之前的 eager 调用仍在排队或执行，Worker 会在入队前拒绝本次录图调用。
+结束录图并同步 NPU 后，可以重新录制。
 
 如果 `CacheConfig.extra_source_paths` 中的路径缺失，eager 预热可能通过私有构建成功，
 但 capture 无法按指纹找到该产物。恢复缺失的输入，或在使用进程默认配置时调用

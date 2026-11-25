@@ -280,6 +280,8 @@ Call each specialization eagerly and synchronize before capture. `compile()` and
 `warmup()` request the PROGRAM contract and do not prepare a Kernel registration.
 Capture uses the existing KERNEL specialization and callable; it never compiles,
 loads a new binary or initializes a Worker. Initialize with diagnostics disabled.
+If earlier eager work is still queued or running, the Worker refuses the captured
+call before enqueue. End capture, synchronize the NPU, and retry recording.
 
 If a configured `CacheConfig.extra_source_paths` entry is missing, eager warmup
 can succeed with a private build whose fingerprint capture cannot look up.
