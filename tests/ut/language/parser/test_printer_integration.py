@@ -402,6 +402,7 @@ class TestWhileLoopRoundTrip:
         printed = func.as_python()
         assert "pl.tile.create(" in printed
         assert "pl.tile.create_tile(" not in printed
+        ir.assert_structural_equal(func, parse(printed))
 
 
 def _roundtrip_program(params=(), values=()):
