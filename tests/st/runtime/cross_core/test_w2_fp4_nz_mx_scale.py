@@ -43,7 +43,7 @@ OUTPUT_SENTINEL = -999.0
 
 
 @pl.jit.incore(level=pl.Level.AIV)
-def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8], compact_mode: pl.constexpr):
+def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8], compact_mode: pl.constexpr = pl.CompactMode.null):
     # Shapes and lane offsets are already per-AIV; suppress another halving.
     pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
     peer = pl.import_peer_buffer(name="w2_weights", peer_func="w2_cube")
@@ -166,7 +166,7 @@ def w2_group(
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
     out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
-    compact_mode: pl.constexpr,
+    compact_mode: pl.constexpr = pl.CompactMode.null,
 ):
     out = w2_cube(a, a_scale, b_scale, counts, out)
     w2_vector(weight, compact_mode)
