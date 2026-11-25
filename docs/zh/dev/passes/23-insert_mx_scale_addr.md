@@ -63,6 +63,14 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 
 已有的显式 `tget_scale_addr` 也会使状态失效。因此重复执行 pass 会保守地再增加一层绑定；标准 lowering pipeline 只运行该 pass 一次。
 
+### 直接抽取到 L0 scale buffer
+
+对于由 `tile.extract` 直接生成的 scale tile，codegen 在发射 `textract` 之前将目标与
+对应的 MX data 操作数配对。不同于 Mat 到 scale 的 `tmov`，PTOAS 0.78 不会将后续
+`tget_scale_addr` 前移到这次写入之前。对于固定且对齐的 A5 L0 分配，codegen 直接
+指定 scale 地址（`data_byte_address / 16`），避免抽取之间的 scalar pipe 依赖。
+其他情况下，在对应 data tile 已定义后、抽取之前发射地址绑定。
+
 ## 相关
 
 - 算子注册与类型检查：`src/ir/op/tile_ops/matmul_mx.cpp`

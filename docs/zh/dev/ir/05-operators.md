@@ -434,7 +434,7 @@ FP32 源 tile。有效行数至少为 2，有效列数须为 32 的倍数。UINT
 | payload | scale 为 FP8E8M0；操作数为 FP8E4M3FN 对或打包 FP4 对（E2M1/E1M2）。拒绝 FP8E5M2 与 FP4/FP8 混合。K 和 scale 组数使用逻辑数值维度，scale fractal 为 32。 |
 | layout | `mx_a_zz` → row-major ZZ；`mx_b_nn` → col-major NN；`TLoadMxCube*`（AZZ2ZZ 等） |
 | `TMov` `CommonCheckMX` | 允许 `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right；canonical：ui8 Mat reshape 再 ui8→f8 Scale |
-| bind-then-fill | **先** `GetScaleAddr(Left/Right)` 再填 sidecar；写 provisional alloc 地址在 rebound 后无效 |
+| bind-then-fill | **先**绑定对应 Left/Right 地址再填 sidecar；运行时 `GetScaleAddr` 或直接抽取时的 A5 静态配对均可；写 provisional alloc 地址在 rebound 后无效 |
 | 对齐 | 逻辑物理维度 `M%16==0`、`K%64==0`、`N%32==0`（FP4 为 `N%64==0`），另须满足分块载体 tile 对齐；数值检查仅作用于常量维。 |
 
 #### MX / Ascend950：PTOAS 约束
@@ -445,7 +445,7 @@ FP32 源 tile。有效行数至少为 2，有效列数须为 32 的倍数。UINT
 | dtype 必须 `!pto.f8E8M0` | `ui8`+`scaling` 会错成 Fixpipe `TileType::Scaling`；进 Scale 前需提升为 FP8E8M0 |
 | 禁止 Mat↔Scaling `treshape` | 不同 loc；reshape 留在 Mat（ui8），再 `tmov` 进 scaling |
 | shape-matched Mat→Scale `tmov` | flat `[1,G]` 须先 `treshape` 到 `[M,K/32]`（或 B 侧 shape） |
-| 顺序 | PyPTO 按源序发 Mat→scaling `tmov`；PTOAS `PTOA5NormalizeTMovPass` 把 `tget_scale_addr` 重排到它前面（ISA bind-before-fill） |
+| 顺序 | PyPTO 按源序发 Mat→scaling `tmov`；PTOAS `PTOA5NormalizeTMovPass` 把 `tget_scale_addr` 重排到它前面（ISA bind-before-fill）；FP8E8M0 scale 的直接 `textract` 在 codegen 中先绑定或静态配对地址 |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；codegen 发射逻辑 rank-2 `make_tensor_view`（PTOAS v0.60 InferPTOLayout / EmitC 映射物理 pack） |
 | 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/15-lower_composite_ops.md) |
 

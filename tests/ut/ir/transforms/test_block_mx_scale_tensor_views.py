@@ -414,6 +414,30 @@ def test_mx_modes_require_proven_non_negative_offset(logical_views):
         _run(Before, logical_views=logical_views)
 
 
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_modes_accept_clamped_aligned_offset(logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scale: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ], block: pl.Scalar[pl.INDEX]):
+            _ = pl.load(scale, [pl.max(block, 0) * 16, 0], [16, 2], target_memory=pl.Mem.Mat)
+
+    after = _run(Before, logical_views=logical_views)
+    assert len(_mx_loads(after)) == 1
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_modes_accept_aligned_floor_remainder(logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scale: pl.Tensor[[4, 32], pl.FP8E8M0, pl.MX_B_NN], panel: pl.Scalar[pl.INDEX]):
+            _ = pl.load(scale, [0, (panel % 2) * 16], [2, 16], target_memory=pl.Mem.Mat)
+
+    after = _run(Before, logical_views=logical_views)
+    assert len(_mx_loads(after)) == 1
+
+
 def test_logical_mx_preserves_windows_and_narrowed_tile_valid_shape():
     @pl.program
     class Before:

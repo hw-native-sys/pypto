@@ -374,6 +374,14 @@ class PTOCodegen : public CodegenBase {
    */
   [[nodiscard]] ir::VarPtr GetCurrentResultVar() const;
 
+  /// Bind an extracted MX scale buffer before TEXTRACT writes its contents.
+  /// The InsertMxScaleAddr pass supplies the paired data operand at its consumer.
+  void EmitMxScaleExtractBinding(const std::string& scale, const std::string& scale_type,
+                                 const ir::Span& span);
+
+  /// True when the identical scale/data binding was emitted before extraction.
+  [[nodiscard]] bool HasEarlyMxScaleExtractBinding(const ir::ExprPtr& scale, const ir::ExprPtr& data) const;
+
   /**
    * @brief Get tensor_view type string for a TensorType (e.g., "!pto.tensor_view<?x?xf32>")
    */
@@ -1341,6 +1349,8 @@ class PTOCodegen : public CodegenBase {
     ir::VarPtr current_result_var;
     std::string current_result_buf;
     std::shared_ptr<const ir::TileType> current_result_tile_type;
+    std::map<const ir::Var*, ir::VarPtr> mx_scale_extract_data;
+    std::set<const ir::Var*> early_bound_mx_scale_extracts;
 
     std::string gm_slot_buffer_ssa;
     DataType gm_slot_buffer_dtype = DataType::FP32;
@@ -1451,6 +1461,8 @@ class PTOCodegen : public CodegenBase {
       current_result_var.reset();
       current_result_buf.clear();
       current_result_tile_type = nullptr;
+      mx_scale_extract_data.clear();
+      early_bound_mx_scale_extracts.clear();
 
       gm_slot_buffer_ssa.clear();
       gm_slot_buffer_dtype = DataType::FP32;

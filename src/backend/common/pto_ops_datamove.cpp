@@ -912,6 +912,7 @@ static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::Codeg
   const auto dst = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!dst.empty() && dst == codegen.GetExprAsCode(op->args_[0]), op->span_)
       << "tile.tget_scale_addr result must alias its dst_scale input";
+  if (codegen.HasEarlyMxScaleExtractBinding(op->args_[0], op->args_[1])) return "";
   return EmitScaleAddressBinding(codegen, op->args_[1]);
 }
 
@@ -1792,6 +1793,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       codegen.RegisterTileBufType(result_target, result_type, codegen.GetCurrentResultTileType());
     }
 
+    codegen.EmitMxScaleExtractBinding(result_target, result_type, op->span_);
     std::ostringstream oss;
     oss << "pto.textract ins(" << src << ", " << offsets[0] << ", " << offsets[1];
     if (!src_type.empty()) {

@@ -123,6 +123,8 @@ MX_B_NN [g0, n0] -> [0, n0/16, g0/2, 0, 0]
 - scalar SSA 定义；
 - 常量、乘法、加法，以及用于整除证明的减法；
 - 正的 2 的幂 floor division，包括 `k0 // 32`；
+- 用于非负性证明的 `max`（至少一个操作数可证明非负）和正的常量除数的 floor remainder，
+  例如 `max(row, 0)` 或 `panel % 9`；
 - start 与 step 为常量的循环变量；
 - `tile.get_block_idx` 和 `tile.get_block_num` 的非负结果；
 - 经每个 Call 与 Submit 调用点传播的 scalar 参数。

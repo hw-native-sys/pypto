@@ -66,6 +66,16 @@ SSA identity alone is insufficient because aliases may share a mutable buffer. A
 
 An explicit earlier `tget_scale_addr` also invalidates the state. Consequently, repeated pass execution conservatively adds another binding layer; the standard lowering pipeline runs the pass once.
 
+### Direct extraction into L0 scale buffers
+
+For a scale tile produced directly by `tile.extract`, codegen associates its
+destination with the corresponding MX data operand before emitting `textract`.
+Unlike Mat-to-scale `tmov`, PTOAS 0.78 does not hoist a later
+`tget_scale_addr` before this write. With a fixed, aligned A5 L0 allocation,
+codegen instead assigns the scale address directly (`data_byte_address / 16`),
+avoiding a scalar pipe dependency between extracts. Otherwise the binding is
+emitted before the extraction, once the associated data tile is defined.
+
 ## Related
 
 - Op registration / type checks: `src/ir/op/tile_ops/matmul_mx.cpp`

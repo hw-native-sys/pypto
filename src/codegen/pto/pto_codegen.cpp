@@ -1402,6 +1402,47 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   fs_.current_function = func;
   fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(func->body_, func->params_);
 
+  // TEXTRACT writes the scale tile immediately. Unlike TMOV, PTOAS 0.78 does
+  // not move a later tget_scale_addr ahead of that write. Index the MX pairs
+  // once so the extraction emitter can bind the address before writing it.
+  {
+    class MxScaleBindingCollector : public ir::IRVisitor {
+     public:
+      std::map<const ir::Var*, ir::VarPtr> bindings;
+      std::set<const ir::Var*> extracts;
+
+     protected:
+      void VisitStmt_(const ir::AssignStmtPtr& stmt) override {
+        if (ir::IsOp(ir::As<ir::Call>(stmt->value_), "tile.extract")) {
+          extracts.insert(stmt->var_.get());
+        }
+        ir::IRVisitor::VisitStmt_(stmt);
+      }
+      void VisitExpr_(const ir::CallPtr& call) override {
+        if (ir::IsOp(call, "tile.tget_scale_addr")) {
+          auto scale = ir::AsVarLike(call->args_[0]);
+          auto data = ir::AsVarLike(call->args_[1]);
+          if (scale && data) {
+            auto [it, inserted] = bindings.emplace(scale.get(), data);
+            if (!inserted && it->second != data) it->second.reset();
+          }
+        }
+        ir::IRVisitor::VisitExpr_(call);
+      }
+    };
+    MxScaleBindingCollector collector;
+    collector.VisitStmt(func->body_);
+    // Only the producer's own destination can be rebound before TEXTRACT.
+    for (auto it = collector.bindings.begin(); it != collector.bindings.end();) {
+      if (!collector.extracts.count(it->first)) {
+        it = collector.bindings.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    fs_.mx_scale_extract_data = std::move(collector.bindings);
+  }
+
   // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
   // not carry its DPS destinations in args_ — the parser desugars them into
   // separate AssignStmts — so an emitter has to look them up. Resolving each
@@ -2470,6 +2511,27 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
   AllocTileFields fields = ComputeAllocTileFields(tile_type);
 
+  // On A5 the MX scale address is the corresponding L0 data byte address
+  // divided by 16 (see PTO ISA GetScaleAddr). When PyPTO owns a fixed L0
+  // allocation, materialize that address directly. A runtime tget_scale_addr
+  // between TEXTRACTs would otherwise add MTE1 -> S -> MTE1 dependencies even
+  // though the two slot addresses are compile-time constants.
+  const auto paired_data = fs_.mx_scale_extract_data.find(tile_var.get());
+  if (emit_tile_addr_ && backend_->GetHandler()->GetPtoTargetArch() == "a5" &&
+      paired_data != fs_.mx_scale_extract_data.end() && paired_data->second) {
+    auto data_tile = ir::GetTileTypeWithMemRef(paired_data->second->GetType());
+    auto data_memref = data_tile ? ir::GetDefinedMemRef(data_tile) : nullptr;
+    auto scale_memref = ir::GetDefinedMemRef(tile_type);
+    auto address = data_memref ? As<ir::ConstInt>(data_memref->byte_offset_) : nullptr;
+    constexpr int64_t kA5MxScaleAddressRatio = 16;
+    if (address && address->value_ >= 0 && address->value_ % kA5MxScaleAddressRatio == 0 &&
+        data_memref->slot_count_ == 1 && scale_memref->slot_count_ == 1 &&
+        !IsParameterBackedTile(data_tile)) {
+      fields.addr_ssa = GetOrEmitConstant(address->value_ / kA5MxScaleAddressRatio, DataType::INT64);
+      fs_.early_bound_mx_scale_extracts.insert(tile_var.get());
+    }
+  }
+
   std::ostringstream line;
   line << tile_buf << " = pto.alloc_tile";
   if (!fields.addr_ssa.empty()) line << " addr = " << fields.addr_ssa;
@@ -3303,6 +3365,29 @@ void PTOCodegen::VisitExpr_(const CallPtr& op) {
 std::string PTOCodegen::GetCurrentResultTarget() const { return fs_.current_result_buf; }
 
 ir::VarPtr PTOCodegen::GetCurrentResultVar() const { return fs_.current_result_var; }
+
+void PTOCodegen::EmitMxScaleExtractBinding(const std::string& scale, const std::string& scale_type,
+                                           const ir::Span& span) {
+  auto result = GetCurrentResultVar();
+  auto it = fs_.mx_scale_extract_data.find(result.get());
+  if (it == fs_.mx_scale_extract_data.end()) return;
+  if (fs_.early_bound_mx_scale_extracts.count(result.get())) return;
+  CHECK_SPAN(it->second, span) << "MX scale TEXTRACT requires a single corresponding data tile";
+  const auto& data = it->second;
+  const auto data_name = LookupVarName(data);
+  CHECK_SPAN(!data_name.empty(), span)
+      << "Define the MX data tile before extracting its corresponding scale tile";
+  Emit("pto.tget_scale_addr ins(" + data_name + " : " + GetExprTypeAnnotation(data) + ") outs(" + scale +
+       " : " + scale_type + ")");
+  fs_.early_bound_mx_scale_extracts.insert(result.get());
+}
+
+bool PTOCodegen::HasEarlyMxScaleExtractBinding(const ir::ExprPtr& scale, const ir::ExprPtr& data) const {
+  auto scale_var = ir::AsVarLike(scale);
+  if (!scale_var || !fs_.early_bound_mx_scale_extracts.count(scale_var.get())) return false;
+  auto it = fs_.mx_scale_extract_data.find(scale_var.get());
+  return it != fs_.mx_scale_extract_data.end() && it->second == ir::AsVarLike(data);
+}
 
 std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::VarPtr& tuple_var,
                                                                size_t arity) const {

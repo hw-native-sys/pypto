@@ -450,11 +450,11 @@ Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` s
 
 #### MX / Ascend950: pto-isa constraints
 
-Cube uses separate `TileType::ScaleLeft` and `TileType::ScaleRight` buffers. The logical scale fractal is 32. Loads use `TLoadMxCube*` (AZZ2ZZ) for row-major `mx_a_zz` or col-major `mx_b_nn`. `TMov` `CommonCheckMX` allows UINT8 Mat to FP8E8M0 scale moves. Fill scales only after `GetScaleAddr(Left/Right)` binds their destination. The provisional allocation is no longer used after binding.
+Cube uses separate `TileType::ScaleLeft` and `TileType::ScaleRight` buffers. The logical scale fractal is 32. Loads use `TLoadMxCube*` (AZZ2ZZ) for row-major `mx_a_zz` or col-major `mx_b_nn`. `TMov` `CommonCheckMX` allows UINT8 Mat to FP8E8M0 scale moves. Fill scales only after the destination has been bound to the corresponding Left/Right address. `GetScaleAddr` supplies this address at runtime; a direct scale extraction can instead use the statically paired A5 address. The provisional allocation is no longer used after runtime binding.
 
 #### MX / Ascend950: PTOAS constraints
 
-PTOAS uses one `loc=scaling`. EmitC recovers the side. UINT8 in that location selects Fixpipe scaling, so promote during the shape-matched Mat-to-scale `tmov`. Reshape flat `[1,G]` scales to the logical A or B shape while they are still UINT8 in Mat. `PTOA5NormalizeTMovPass` moves `tget_scale_addr` before the scale fill. Codegen emits logical rank-2 `make_tensor_view` with `#pto.layout` (PTOAS InferPTOLayout and EmitC map it to physical packing). PTOAS supports `pto.tmatmul.mx`, `.acc`, `.bias`, `pto.tget_scale_addr`, and `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md).
+PTOAS uses one `loc=scaling`. EmitC recovers the side. UINT8 in that location selects Fixpipe scaling, so promote during the shape-matched Mat-to-scale `tmov`. Reshape flat `[1,G]` scales to the logical A or B shape while they are still UINT8 in Mat. `PTOA5NormalizeTMovPass` moves `tget_scale_addr` before a Mat-to-scale `tmov` fill. For direct `textract` of packed FP8E8M0 scales, codegen binds the destination before the write (or statically pairs the allocation). Codegen emits logical rank-2 `make_tensor_view` with `#pto.layout` (PTOAS InferPTOLayout and EmitC map it to physical packing). PTOAS supports `pto.tmatmul.mx`, `.acc`, `.bias`, `pto.tget_scale_addr`, and `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md).
 
 ### Tile-only GEMV family (A2/A3)
 

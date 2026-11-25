@@ -10,6 +10,7 @@
 """Codegen tests for MXFP8, native FP4, and explicit FP4-to-FP8 legalization."""
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -189,6 +190,70 @@ class Program:
 """)
     actual = _simulate_mx_load(program, tmp_path, backing, sizes, major)
     np.testing.assert_array_equal(np.array(actual).reshape(sizes), window)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_mx_scale_extract_is_bound_before_the_write(tmp_path, planner):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            a: pl.Tensor[[64, 256], pl.FP8E4M3FN],
+            b: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+            sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            sb: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+            out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+        ) -> pl.Tensor[[64, 256], pl.FP32]:
+            am = pl.load(a, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+            bm = pl.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+            sam = pl.load(sa, [0, 0], [64, 8], target_memory=pl.Mem.Mat)
+            sbm = pl.load(sb, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+            a0 = pl.tile.extract(am, 0, 0, [64, 128], target_memory=pl.Mem.Left)
+            b0 = pl.tile.extract(bm, 0, 0, [128, 256], target_memory=pl.Mem.Right)
+            a1 = pl.tile.extract(am, 0, 128, [64, 128], target_memory=pl.Mem.Left)
+            b1 = pl.tile.extract(bm, 128, 0, [128, 256], target_memory=pl.Mem.Right)
+            sa0 = pl.tile.extract(sam, 0, 0, [64, 4], target_memory=pl.Mem.LeftScale)
+            sb0 = pl.tile.extract(sbm, 0, 0, [4, 256], target_memory=pl.Mem.RightScale)
+            sa1 = pl.tile.extract(sam, 0, 4, [64, 4], target_memory=pl.Mem.LeftScale)
+            sb1 = pl.tile.extract(sbm, 4, 0, [4, 256], target_memory=pl.Mem.RightScale)
+            acc = pl.matmul_mx(a0, sa0, b0, sb0)
+            acc = pl.matmul_mx_acc(acc, a1, sa1, b1, sb1)
+            return pl.store(acc, [0, 0], out)
+
+    mlir = _emit_incore_mlir(Program, planner=planner)
+    lines = mlir.splitlines()
+    extracts = [
+        (index, line.split("outs(", 1)[1].split(" :", 1)[0])
+        for index, line in enumerate(lines)
+        if "pto.textract " in line and "loc=scaling" in line.split("outs(", 1)[1]
+    ]
+    assert len(extracts) == 4
+    if planner == passes.MemoryPlanner.PYPTO:
+        # The physical scale address is paired to the data allocation before
+        # extraction, even when the independent scale allocator chose a
+        # different second-slot address. No scalar pipe round trip is needed.
+        addresses = {
+            name: int(offset)
+            for name, offset in re.findall(r"(%\S+) = pto\.alloc_tile addr = %c(\d+)_i64", mlir)
+        }
+        assert "pto.tget_scale_addr " not in mlir
+        for line in lines:
+            if "pto.tmatmul.mx" not in line:
+                continue
+            a, sa, b, sb = line.split("ins(", 1)[1].split(" :", 1)[0].split(", ")[-4:]
+            assert addresses[sa] == addresses[a] // 16
+            assert addresses[sb] == addresses[b] // 16
+    else:
+        for index, destination in extracts:
+            bindings = [
+                i
+                for i, line in enumerate(lines)
+                if "pto.tget_scale_addr " in line and f"outs({destination} :" in line
+            ]
+            assert len(bindings) == 1 and bindings[0] < index
+    assert "TEXTRACT(" in _assemble_mx(mlir, tmp_path, planner=planner)
 
 
 class TestMxMatmulCodegen:
