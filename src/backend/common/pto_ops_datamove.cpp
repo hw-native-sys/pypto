@@ -1688,9 +1688,18 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       codegen.Emit("pto.tmov ins(" + acc_code + " : " + acc_type + ") outs(" + dst_code + " : " + dst_type +
                    ") {" + mode + ", stPhase = #pto<st_phase final>}");
     } else {
-      auto indices = GetIndexOffsetCodes(offset->elements_, codegen);
-      const auto& row = indices[0];
-      const auto& col = indices[1];
+      // This manually addressed primitive has an explicit in-bounds offset
+      // contract. Cast to index without the partition_view helper's runtime
+      // clamp: that would silently redirect an invalid hand-scheduled write
+      // and add scalar work to a known non-negative FIXPIPE offset.
+      auto index_code = [&](const ExprPtr& expr) {
+        if (auto value = As<ir::ConstInt>(expr)) {
+          return codegen.GetOrEmitConstant(value->value_, DataType::INDEX);
+        }
+        return codegen.EmitCastToIndex(expr, codegen.GetExprAsCode(expr));
+      };
+      auto row = index_code(offset->elements_[0]);
+      auto col = index_code(offset->elements_[1]);
       // TINSERT, rather than a subview+TMOV, preserves the parent ND row
       // stride and applies the offsets in each AIV's local address space.
       codegen.Emit("pto.tinsert ins(" + acc_code + ", " + row + ", " + col + " : " + acc_type +

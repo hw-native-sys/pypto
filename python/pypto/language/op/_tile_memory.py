@@ -389,7 +389,8 @@ def writeback_to_vec(
 
     Only split=1 (DualModeSplitM) is currently supported. Each AIV receives
     half the source rows; the row and column offsets address its local
-    destination, which may have capacity for multiple received tiles. The
+    destination, which may have capacity for multiple received tiles. Runtime
+    offsets must stay within that capacity; this primitive does not clamp them. The
     destination must be row-major FP32 Vec storage, the source a full FP32 Acc
     tile. With st_phase=Final, the exact Final accumulator SSA value must be
     drained to a complete [M/2, N] destination at offset [0, 0].

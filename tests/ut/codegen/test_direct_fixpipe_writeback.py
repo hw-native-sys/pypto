@@ -81,6 +81,9 @@ def test_direct_pv_writeback(tmp_path):
     assert "rows=64, cols=64" in insert and "rows=64, cols=256" in insert
     assert "#pto.acc_to_vec_mode<dual_mode_split_m>" in insert
     assert "pto.tpush" not in mlir
+    # The placement is explicitly controlled by the caller (row 0 or 32
+    # in the reference). Do not insert a scalar offset clamp.
+    assert "arith.maxsi" not in mlir
     cpp = compile_native(tmp_path, mlir).read_text()
     assert "TINSERT<" in cpp and "AccToVecMode::DualModeSplitM" in cpp
 
