@@ -147,10 +147,11 @@ class UrmaEventPlanner : public IRVisitor {
           << "defer_wait_event requires one preceding tile.get_async in the same branch and loop iteration";
       --pending_total_;
       --pending_in_loop_;
-      auto get = As<Call>(tuple.value);
-      CHECK_SPAN(op->args_.size() == 1 || Resolve(op->args_[1]).binding == Resolve(get->args_[3]).binding,
-                 op->span_)
-          << "defer_wait_event requires the same session that submitted the GET";
+      if (op->args_.size() == 2) {
+        auto get = As<Call>(tuple.value);
+        INTERNAL_CHECK_SPAN(Resolve(op->args_[1]).binding == Resolve(get->args_[3]).binding, op->span_)
+            << "defer_wait_event requires the same session that submitted the GET";
+      }
     }
     IRVisitor::VisitExpr_(op);
   }
