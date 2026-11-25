@@ -12,6 +12,7 @@
 import pytest
 from pypto import DataType, ir
 from pypto.ir import IRBuilder
+from pypto.pypto_core.ir import IRBuilder as NativeIRBuilder
 
 
 class TestIRBuilderFunction:
@@ -1474,6 +1475,117 @@ class TestIRBuilderBreakContinue:
         func = f.get_result()
         printed = func.as_python()
         assert "continue" in printed
+
+
+class TestIRBuilderScopeMirrorDiscipline:
+    """The Python scope mirror must stay truthful across a failing close.
+
+    ``begin_scope`` appends to the mirror only on C++ success; ``end_scope``
+    must pop only on C++ success too — otherwise a rejected close (nothing
+    open, or a mismatched context on top) leaves the mirror claiming a scope
+    closed while the native builder still has it open.
+    """
+
+    def test_end_scope_with_nothing_open_raises(self):
+        ib = IRBuilder()
+        with pytest.raises(ValueError, match="not inside a scope"):
+            ib.end_scope()
+        assert ib.innermost_scope_kind() is None
+
+    def test_mismatched_end_scope_leaves_mirror_unchanged(self):
+        """A close rejected by the native builder (a for-loop context is on
+        top, not a scope) must not pop the Python-side mirror."""
+        ib = IRBuilder()
+        with ib.function("f"):
+            ib.begin_scope(ir.ScopeKind.InCore)
+            i = ib.var("i", ir.ScalarType(DataType.INT32))
+            ib.begin_for_loop(i, 0, 4, 1)
+
+            with pytest.raises(ValueError, match="not inside a scope"):
+                ib.end_scope()
+            # the mirror still reports the open InCore scope
+            assert ib.innermost_scope_kind() == ir.ScopeKind.InCore
+            assert ib.is_inside_scope(ir.ScopeKind.InCore)
+
+            # unwinding in the correct order still succeeds
+            ib.end_for_loop()
+            ib.end_scope()
+            assert ib.innermost_scope_kind() is None
+
+    def test_comm_domain_scope_updates_mirror(self):
+        ib = IRBuilder()
+        span = ir.Span("test.py", 1, 1)
+
+        with ib.function("f"):
+            with ib.comm_domain_scope([], [], "comm", span):
+                assert ib.innermost_scope_kind() == ir.ScopeKind.CommDomain
+                assert ib.is_inside_scope(ir.ScopeKind.CommDomain)
+            assert ib.innermost_scope_kind() is None
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_begin_scope_rejects_program_parent(self, native):
+        ib = NativeIRBuilder() if native else IRBuilder()
+        span = ir.Span("test.py", 1, 1)
+        ib.begin_program("P", span)
+        with pytest.raises(ValueError, match="program context"):
+            ib.begin_scope(ir.ScopeKind.InCore, span)
+        if isinstance(ib, IRBuilder):
+            assert ib.innermost_scope_kind() is None
+        assert ib.end_program(span).name == "P"
+
+    @pytest.mark.parametrize("native", [False, True])
+    @pytest.mark.parametrize("region", ["for", "while", "if"])
+    def test_begin_control_flow_rejects_program_parent(self, native, region):
+        ib = NativeIRBuilder() if native else IRBuilder()
+        span = ir.Span("test.py", 1, 1)
+        ib.begin_program("P", span)
+        if region == "for":
+            loop_var = ib.var("i", ir.ScalarType(DataType.INDEX), span)
+            zero = ir.ConstInt(0, DataType.INDEX, span)
+
+        with pytest.raises(ValueError, match="program context"):
+            if region == "for":
+                ib.begin_for_loop(loop_var, zero, zero, zero, span)
+            elif region == "while":
+                ib.begin_while_loop(ir.ConstBool(True, span), span)
+            else:
+                ib.begin_if(ir.ConstBool(True, span), span)
+        assert ib.end_program(span).name == "P"
+
+    @pytest.mark.parametrize("native", [False, True])
+    @pytest.mark.parametrize("inner_context", ["function", "if", "scope"])
+    def test_end_program_rejects_open_context(self, native, inner_context):
+        # Both public surfaces must reject a non-program stack top without
+        # consuming it, so the caller can unwind and retry in LIFO order.
+        ib = NativeIRBuilder() if native else IRBuilder()
+        span = ir.Span("test.py", 1, 1)
+        ib.begin_program("P", span)
+        ib.begin_function("f", span)
+        if inner_context == "if":
+            ib.begin_if(ir.ConstBool(True, span), span)
+        elif inner_context == "scope":
+            ib.begin_scope(ir.ScopeKind.InCore, span)
+
+        with pytest.raises(ValueError, match="directly in program context"):
+            ib.end_program(span)
+
+        if inner_context == "if":
+            ib.end_if(span)
+        elif inner_context == "scope":
+            ib.end_scope(span)
+        ib.end_function(span)
+        assert ib.end_program(span).name == "P"
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_begin_program_rejects_open_function(self, native):
+        ib = NativeIRBuilder() if native else IRBuilder()
+        span = ir.Span("test.py", 1, 1)
+        ib.begin_function("f", span)
+        with pytest.raises(ValueError, match="empty builder context"):
+            ib.begin_program("P", span)
+        assert ib.end_function(span).name == "f"
+        ib.begin_program("P", span)
+        assert ib.end_program(span).name == "P"
 
 
 if __name__ == "__main__":

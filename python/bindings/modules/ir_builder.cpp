@@ -166,7 +166,8 @@ void BindIRBuilder(nb::module_& m) {
           "    hardware_loop_policy: Auto (default) or Require. Require needs a Sequential\n"
           "        loop inside RegScope, INDEX start=0 and step=1, and empty attrs.\n\n"
           "Raises:\n"
-          "    RuntimeError: If not inside a valid context")
+          "    RuntimeError: If not inside a valid context\n"
+          "    ValueError: If the current context is a program")
 
       .def("add_iter_arg", &IRBuilder::AddIterArg, nb::arg("iter_arg"),
            "Add an iteration argument to the current for loop.\n\n"
@@ -204,7 +205,8 @@ void BindIRBuilder(nb::module_& m) {
            "    condition: Condition expression\n"
            "    span: Source location for loop definition\n\n"
            "Raises:\n"
-           "    RuntimeError: If not inside a valid context")
+           "    RuntimeError: If not inside a valid context\n"
+           "    ValueError: If the current context is a program")
 
       .def("add_while_iter_arg", &IRBuilder::AddWhileIterArg, nb::arg("iter_arg"),
            "Add an iteration argument to the current while loop.\n\n"
@@ -250,7 +252,8 @@ void BindIRBuilder(nb::module_& m) {
            "    condition: Condition expression\n"
            "    span: Source location for if statement\n\n"
            "Raises:\n"
-           "    RuntimeError: If not inside a valid context")
+           "    RuntimeError: If not inside a valid context\n"
+           "    ValueError: If the current context is a program")
 
       .def("begin_else", &IRBuilder::BeginElse, nb::arg("span"),
            "Begin the else branch of the current if statement.\n\n"
@@ -311,7 +314,8 @@ void BindIRBuilder(nb::module_& m) {
           "        ``OutlineHierarchyScopes`` propagate onto the synthesised\n"
           "        ``Call``.\n\n"
           "Raises:\n"
-          "    RuntimeError: If not inside a function or loop")
+          "    ValueError: If there is no valid enclosing context or the current\n"
+          "        context is a program")
       .def(
           "end_scope",
           [](IRBuilder& self, const Span& end_span, std::vector<int64_t> devices,
@@ -425,7 +429,7 @@ void BindIRBuilder(nb::module_& m) {
            "    name: Program name\n"
            "    span: Source location for program definition\n\n"
            "Raises:\n"
-           "    RuntimeError: If already inside another program")
+           "    ValueError: If any builder context is already open")
 
       .def("declare_function", &IRBuilder::DeclareFunction, nb::arg("func_name"),
            "Declare a function in the current program.\n\n"
@@ -436,7 +440,8 @@ void BindIRBuilder(nb::module_& m) {
            "Returns:\n"
            "    GlobalVar: GlobalVar that can be used in Call expressions\n\n"
            "Raises:\n"
-           "    RuntimeError: If not inside a program context")
+           "    ValueError: If not inside a program context or if another\n"
+           "        builder context is currently open")
 
       .def("get_global_var", &IRBuilder::GetGlobalVar, nb::arg("func_name"),
            "Get a GlobalVar for a declared function.\n\n"
@@ -446,7 +451,9 @@ void BindIRBuilder(nb::module_& m) {
            "Returns:\n"
            "    GlobalVar: GlobalVar for the function\n\n"
            "Raises:\n"
-           "    RuntimeError: If not inside a program context or function not declared")
+           "    ValueError: If not inside a program context or if another\n"
+           "        builder context is currently open\n"
+           "    RuntimeError: If the function has not been declared")
 
       .def("add_function", &IRBuilder::AddFunction, nb::arg("func"),
            "Add a completed function to the current program.\n\n"
@@ -454,7 +461,8 @@ void BindIRBuilder(nb::module_& m) {
            "Args:\n"
            "    func: Completed function to add\n\n"
            "Raises:\n"
-           "    RuntimeError: If not inside a program context")
+           "    ValueError: If not inside a program context or if another\n"
+           "        builder context is currently open")
 
       .def("end_program", &IRBuilder::EndProgram, nb::arg("end_span"),
            "End building a program.\n\n"
@@ -464,7 +472,7 @@ void BindIRBuilder(nb::module_& m) {
            "Returns:\n"
            "    Program: The built program\n\n"
            "Raises:\n"
-           "    RuntimeError: If not inside a program context")
+           "    ValueError: If the current context is not the program")
 
       .def("get_function_return_types", &IRBuilder::GetFunctionReturnTypes, nb::arg("gvar"),
            "Get return types for a function by its GlobalVar.\n\n"

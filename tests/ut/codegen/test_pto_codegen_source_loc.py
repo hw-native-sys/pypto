@@ -34,6 +34,7 @@ import pytest
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import emit_source_loc_default
+from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 _THIS_FILE = os.path.abspath(__file__)
@@ -129,6 +130,49 @@ _MULTILINE_ADD_RANGE = (
 
 
 @pl.program
+class PrologueProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_prologue(  # PROLOGUE_DEF_LINE
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],  # PROLOGUE_PARAM_LINE
+        o: pl.Tensor[[128, 128], pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+        return pl.store(t, [0, 0], o)
+
+
+# Lines the prologue assertions resolve to: the ``def`` line owns the synthesized
+# preamble, and the parameter declaration lines deliberately differ from it.
+_PROLOGUE_DEF_LINE = next(i for i, ln in enumerate(_SOURCE_LINES, 1) if "# PROLOGUE_DEF_LINE" in ln)
+_PROLOGUE_PARAM_LINE = next(i for i, ln in enumerate(_SOURCE_LINES, 1) if "# PROLOGUE_PARAM_LINE" in ln)
+
+
+def _build_unpinned_with_function() -> ir.Function:
+    builder = ir.IRBuilder()
+    tensor_type = ir.TensorType([16, 32], ir.DataType.FP32)
+    with builder.function("copy", type=ir.FunctionType.InCore) as function:  # UNPINNED_WITH_LINE
+        a = function.param("a", tensor_type)
+        out = function.param("out", tensor_type, direction=ir.ParamDirection.Out)
+        function.return_type(tensor_type)
+        loaded = builder.let("loaded", tile.load(a, [0, 0], [16, 32]))
+        stored = builder.let("stored", tile.store(loaded, [0, 0], out))
+        builder.return_stmt(stored)
+    return function.get_result()
+
+
+_UNPINNED_WITH_LINE = next(i for i, ln in enumerate(_SOURCE_LINES, 1) if "# UNPINNED_WITH_LINE" in ln)
+
+
+def _generate_unpinned_with_function() -> str:
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    function = _build_unpinned_with_function()
+    program = ir.Program([function], "P", function.span)
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    return codegen.PTOCodegen().generate(optimized, emit_source_loc=True)
+
+
+@pl.program
 class ControlFlowProg:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_loop(
@@ -198,6 +242,90 @@ class TestSourceLocEmission:
         constants = [ln for ln in mlir.splitlines() if "arith.constant" in ln]
         assert constants, f"no constants section in:\n{mlir}"
         assert not [ln.strip() for ln in constants if "loc(" in ln]
+
+
+class TestPrologueSpan:
+    """Tensor parameter views prefer the function location and otherwise use the parameter location."""
+
+    def test_make_tensor_view_carries_the_function_span(self):
+        assert _PROLOGUE_DEF_LINE != _PROLOGUE_PARAM_LINE, "markers collapsed onto one line"
+        mlir = _generate(PrologueProg)
+        views = [ln for ln in mlir.splitlines() if "pto.make_tensor_view" in ln]
+        assert views, f"no make_tensor_view in:\n{mlir}"
+        for line in views:
+            match = _LOC_RE.search(line)
+            assert match is not None, f"make_tensor_view carries no loc: {line.strip()}"
+            reported = int(match.group(2))
+            assert reported == _PROLOGUE_DEF_LINE, (
+                f"{line.strip()} reports line {reported}, expected the function def line "
+                f"{_PROLOGUE_DEF_LINE} (param line is {_PROLOGUE_PARAM_LINE})"
+            )
+
+    def test_views_use_parameter_spans_when_function_span_is_unknown(self):
+        builder = ir.IRBuilder()
+        builder.begin_function("copy", type=ir.FunctionType.InCore)
+        tensor = ir.TensorType([16, 32], ir.DataType.FP32)
+        a = builder.func_arg("a", tensor, ir.Span("kernel.py", 10, 5))
+        out = builder.func_arg("out", tensor, ir.Span("kernel.py", 11, 5), ir.ParamDirection.Out)
+        builder.return_type(tensor)
+        loaded = builder.let("loaded", tile.load(a, [0, 0], [16, 32]))
+        builder.return_stmt(builder.let("stored", tile.store(loaded, [0, 0], out)))
+        func = builder.end_function()
+        mlir = _generate(ir.Program([func], "P", func.span))
+        views = [line for line in mlir.splitlines() if "pto.make_tensor_view" in line]
+        assert len(views) == 2
+        for view, row in zip(views, (10, 11), strict=True):
+            assert view.endswith(f' loc("kernel.py":{row}:5)')
+
+    def test_unpinned_context_manager_carries_user_span(self):
+        mlir = _generate_unpinned_with_function()
+        views = [ln for ln in mlir.splitlines() if "pto.make_tensor_view" in ln]
+        assert views, f"no make_tensor_view in:\n{mlir}"
+        for line in views:
+            match = _LOC_RE.search(line)
+            assert match is not None, f"make_tensor_view carries no loc: {line.strip()}"
+            assert int(match.group(2)) == _UNPINNED_WITH_LINE
+            assert "contextlib.py" not in line
+
+    def test_vec_tile_parameter_setup_carries_function_span(self):
+        @pl.function(type=pl.FunctionType.AIV)
+        def borrowed_tile(src: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec]):
+            with pl.reg_scope():
+                value = pl.reg.load(src, lanes=64)
+                _stored = pl.reg.store(src, value=value)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        program = ir.Program([borrowed_tile], "BorrowedTile", borrowed_tile.span)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        mlir = codegen.PTOCodegen().generate(optimized, emit_source_loc=True)
+        # These parameter handles are emitted before the user body and must
+        # inherit the function location just like synthesized GM views.
+        handles = [ln for ln in mlir.splitlines() if "pto.castptr" in ln or "pto.alloc_tile" in ln]
+        assert any("pto.castptr" in ln for ln in handles)
+        assert any("pto.alloc_tile" in ln for ln in handles)
+        for line in handles:
+            match = _LOC_RE.search(line)
+            assert match is not None, line
+            assert match.group(1) == borrowed_tile.span.filename
+            assert int(match.group(2)) == borrowed_tile.span.begin_line
+
+    def test_vec_tile_setup_uses_its_own_parameter_location(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        builder = ir.IRBuilder()
+        builder.begin_function("borrowed", type=ir.FunctionType.AIV)
+        for name, row in (("src", 10), ("dst", 11)):
+            tile_type = ir.TileType(
+                [1, 128], ir.DataType.FP32, ir.MemRef(name), memory_space=ir.MemorySpace.Vec
+            )
+            builder.func_arg(name, tile_type, ir.Span("kernel.py", row, 5))
+        func = builder.end_function()
+        mlir = codegen.PTOCodegen().generate(ir.Program([func], "P", func.span), emit_source_loc=True)
+        for op in ("pto.castptr", "pto.alloc_tile"):
+            ops = [line for line in mlir.splitlines() if op in line]
+            for line, row in zip(ops, (10, 11), strict=True):
+                assert line.endswith(f' loc("kernel.py":{row}:5)')
 
 
 class TestSourceLocDisabled:

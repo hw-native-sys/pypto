@@ -270,6 +270,13 @@ std::string EscapeMlirString(const std::string& str) {
   return escaped;
 }
 
+// Parameter setup belongs to the function prologue; a frontend may only
+// have a source location for the individual parameter.
+const ir::Span* ParameterPrologueSpan(const ir::Function& function, const ir::Var& parameter) {
+  const auto& span = function.span_;
+  return span.is_valid() && !span.filename_.empty() ? &span : &parameter.span_;
+}
+
 // True when `inner` is a source range nested inside `outer` — the invariant a
 // sub-expression's span satisfies with respect to its enclosing statement's span.
 //
@@ -1734,6 +1741,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     if (auto tile_type = As<ir::TileType>(param->GetType());
         tile_type && tile_type->memory_space_ == ir::MemorySpace::Vec) {
+      SpanScope param_loc(this, ParameterPrologueSpan(*func, *param));
       const auto ptr = GetVarName(param);
       const auto addr = NewNamedTemp(param->name_hint_ + "_addr");
       Emit(addr + " = pto.castptr " + ptr + " : !pto.ptr<" + GetTypeString(tile_type->dtype_) +
@@ -1772,6 +1780,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   stream_.str("");
   stream_.clear();
   EmitMakeTensorViews(tensor_views);
+  SpanScope prologue_loc(this, &func->span_);
   EmitExtraAllocTiles();
   std::string prologue_content = stream_.str();
 
@@ -1834,8 +1843,8 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
 void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& views) {
   for (const auto& view : views) {
     const auto& param = view.parameter;
+    SpanScope param_loc(this, ParameterPrologueSpan(*fs_.current_function, *param));
     const auto& tensor_type = view.type;
-    SpanScope param_loc(this, &param->span_);
     const auto& tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
     auto emit_index = [&](const ExprPtr& expr) {
@@ -1867,8 +1876,7 @@ void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& vie
       }
     }
 
-    // Buffer the statement so Emit() writes it as one line and can suffix the
-    // parameter's source location.
+    // Buffer the statement so Emit() writes it as one line.
     std::ostringstream view_line;
     view_line << tensor_view << " = pto.make_tensor_view ";
     view_line << GetVarName(param);
