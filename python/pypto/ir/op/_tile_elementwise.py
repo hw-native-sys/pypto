@@ -15,6 +15,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Call,
+    CompactMode,
     Expr,
     ScalarType,
     Span,
@@ -983,6 +984,7 @@ def cast(
     tmp: Expr | None = None,
     saturation_mode: str | int | None = None,
     layout: TensorLayout | None = None,
+    compact: CompactMode | None = None,
 ) -> Call:
     """Cast tile to target data type (element-wise).
 
@@ -1004,6 +1006,8 @@ def cast(
 
         layout: Optional destination layout. A5 E2M1-to-E4M3 tiles support
             ``NZ`` directly, without an intermediate ND tile.
+        compact: Set ``CompactMode.row_plus_one`` to pad each destination
+            NZ panel by one row.
 
     Returns:
         Call expression for element-wise cast to target dtype
@@ -1021,6 +1025,8 @@ def cast(
         kwargs["saturation_mode"] = deviation
     if layout is not None:
         kwargs["layout"] = layout
+    if compact is not None and compact != CompactMode.null:
+        kwargs["compact"] = compact.value
     args: list[Expr] = [tile] if tmp is None else [tile, tmp]
     return _ir_core.create_op_call("tile.cast", args, kwargs, actual_span)
 

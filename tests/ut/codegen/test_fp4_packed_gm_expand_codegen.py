@@ -18,7 +18,7 @@ from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _get_ptoas_flags, _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.language.parser.diagnostics import InvalidOperationError
+from pypto.language.parser.diagnostics import InvalidOperationError, ParserTypeError
 from pypto.pypto_core import codegen, passes
 
 _FP4_BYTE_ALIAS_PAIRS = [
@@ -1083,6 +1083,81 @@ def test_direct_fp4_to_fp8_named_raw_nz_slots_remain_disjoint(tmp_path, planner)
         pto.write_text(mlir)
         _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
         assert cpp.read_text().count("TCVT(") == 1
+
+
+def test_row_plus_one_cast_preserves_layout_and_padded_slot_size():
+    nz_slots = pl.MemRef("NZ", slots=2)
+
+    @pl.program
+    class PaddedDecode:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self, src: pl.Tensor[[128, 128], pl.FP4E2M1X2]):
+            packed = pl.load(src, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            _decoded: pl.Tile[
+                [128, 256],
+                pl.FP8E4M3FN,
+                nz_slots[1],
+                pl.Mem.Vec,
+                pl.TileView(
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                    compact=pl.CompactMode.row_plus_one,
+                ),
+            ] = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ)
+
+    printed = ir.python_print(PaddedDecode, format=False)
+    assert "compact=pl.CompactMode.row_plus_one" in printed
+    ir.assert_structural_equal(PaddedDecode, pl.parse_program(printed))
+
+    set_backend_type(BackendType.Ascend950)
+    flattened = passes.flatten_tile_nd_to_2d()(PaddedDecode)
+    initialized = passes.init_mem_ref()(flattened)
+    main = initialized.get_function("main")
+    assert main is not None
+    body = main.body
+    assert isinstance(body, ir.SeqStmts)
+    decoded_type = next(
+        stmt.var.type
+        for stmt in body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "_decoded"
+    )
+    assert isinstance(decoded_type, ir.TileType)
+    assert decoded_type.get_effective_tile_view().compact == pl.CompactMode.row_plus_one
+    memref = decoded_type.memref
+    assert memref is not None
+    assert memref.size_ == (128 + 1) * 256
+    offset = memref.byte_offset_
+    assert isinstance(offset, ir.ConstInt)
+    assert offset.value == (128 + 1) * 256
+
+
+def test_direct_fp4_to_fp8_cast_can_request_row_plus_one():
+    packed = ir.Var("packed", ir.TileType([128, 128], pl.FP4E2M1X2), ir.Span.unknown())
+    decoded = ir.op.tile.cast(packed, pl.FP8E4M3FN, layout=pl.NZ, compact=pl.CompactMode.row_plus_one)
+    decoded_type = decoded.type
+    assert isinstance(decoded_type, ir.TileType)
+    assert decoded_type.get_effective_tile_view().compact == pl.CompactMode.row_plus_one
+
+
+def test_row_plus_one_cast_rejects_conflicting_compact_annotation():
+    # The annotated type and cast kwargs must agree on the physical allocation.
+    with pytest.raises(ParserTypeError, match="RowPlusOne tile.cast conflicts with TileView"):
+
+        @pl.program
+        class ConflictingDecode:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, src: pl.Tensor[[128, 128], pl.FP4E2M1X2]):
+                packed = pl.load(src, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+                _decoded: pl.Tile[
+                    [128, 256],
+                    pl.FP8E4M3FN,
+                    pl.Mem.Vec,
+                    pl.TileView(
+                        blayout=pl.TileLayout.col_major,
+                        slayout=pl.TileLayout.row_major,
+                        compact=pl.CompactMode.null,
+                    ),
+                ] = pl.cast(packed, pl.FP8E4M3FN, layout=pl.NZ, compact=pl.CompactMode.row_plus_one)
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])

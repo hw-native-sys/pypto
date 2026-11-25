@@ -239,9 +239,17 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
   }
   InheritTileViewLayout(tile_view, tile_type);
   std::optional<TensorLayout> requested_layout;
+  CompactMode requested_compact = CompactMode::null;
   for (const auto& [key, value] : kwargs) {
     if (key == "layout") requested_layout = AnyCast<TensorLayout>(value, "tile.cast layout");
+    if (key == "compact") {
+      requested_compact = static_cast<CompactMode>(AnyCast<int>(value, "tile.cast compact"));
+    }
   }
+  CHECK_SPAN(requested_compact == CompactMode::null ||
+                 (requested_compact == CompactMode::row_plus_one && requested_layout == TensorLayout::NZ),
+             span)
+      << "tile.cast compact supports row_plus_one with layout=NZ";
   if (requested_layout.has_value()) {
     CHECK_SPAN(*requested_layout == TensorLayout::ND || *requested_layout == TensorLayout::NZ, span)
         << "tile.cast layout must be ND or NZ";
@@ -254,6 +262,7 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
       tile_view.blayout = TileLayout::col_major;
       tile_view.slayout = TileLayout::row_major;
       tile_view.fractal = 512;
+      tile_view.compact = requested_compact;
       // ND source element strides do not describe the destination's NZ panels.
       tile_view.stride.clear();
     } else {
@@ -390,6 +399,7 @@ REGISTER_OP("tile.cast")
     // backend default" — see include/pypto/ir/cast_saturation.h.
     .set_attr<int>("saturation_mode")
     .set_attr<TensorLayout>("layout")
+    .set_attr<int>("compact")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)

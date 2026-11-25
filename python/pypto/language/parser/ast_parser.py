@@ -10,7 +10,7 @@
 """AST entry point composing focused DSL parsers and shared parse services."""
 
 import ast
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, NoReturn, cast
 
 from pypto._function_attrs import AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR
@@ -999,7 +999,7 @@ class ASTParser:
             value_expr = ir.Call(
                 value_expr.op,
                 value_expr.args,
-                value_expr.kwargs,
+                self._annotated_call_kwargs(value_expr, override_type),
                 value_expr.attrs,
                 override_type,
                 value_expr.span,
@@ -1016,6 +1016,27 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self.ops.track_buffer_meta(var_name, stmt.value)
+
+    @staticmethod
+    def _annotated_call_kwargs(call: ir.Call, annotation: ir.Type) -> Mapping[str, Any]:
+        """Keep the annotated cast layout when compiler passes re-deduce its result type."""
+        if (
+            call.op.name != ir.get_op("tile.cast").name
+            or not isinstance(annotation, ir.TileType)
+            or annotation.tile_view is None
+        ):
+            return call.kwargs
+        if annotation.tile_view.compact != ir.CompactMode.row_plus_one:
+            if call.kwargs.get("compact") == ir.CompactMode.row_plus_one.value:
+                raise ParserTypeError(
+                    "RowPlusOne tile.cast conflicts with TileView compact annotation",
+                    span=call.span,
+                    hint="Use pl.CompactMode.row_plus_one in the annotation or omit it from the cast",
+                )
+            return call.kwargs
+        if call.kwargs.get("layout") != ir.TensorLayout.NZ:
+            raise ParserTypeError("RowPlusOne tile.cast requires layout=pl.NZ", span=call.span)
+        return {**call.kwargs, "compact": ir.CompactMode.row_plus_one.value}
 
     def _assign_or_let(
         self,

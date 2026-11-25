@@ -59,7 +59,7 @@ inline std::optional<uint64_t> L0cPhysicalBytes(int64_t m, int64_t n, uint64_t e
 
 /// Static physical allocation bytes for a shaped value in ``space``.
 ///
-/// Non-L0C spaces use their logical element count. L0C aligns the logical M
+/// Vec NZ RowPlusOne reserves one extra row per panel. L0C aligns the logical M
 /// dimension (the penultimate dimension; leading dimensions are batch axes)
 /// according to the active backend. Dynamic/non-positive shapes and overflow
 /// return nullopt.
@@ -72,6 +72,16 @@ inline std::optional<uint64_t> StaticPhysicalAllocationBytes(const ShapedTypePtr
     auto value = As<ConstInt>(dim);
     if (!value || value->value_ <= 0) return std::nullopt;
     extents.push_back(static_cast<uint64_t>(value->value_));
+  }
+
+  if (auto tile = As<TileType>(type);
+      tile && tile->tile_view_ && tile->tile_view_->compact == CompactMode::row_plus_one) {
+    // The public RowPlusOne shape has complete 16-row NZ blocks. Each column
+    // panel adds a 32-byte row without changing the logical tile dimensions.
+    if (space != MemorySpace::Vec || extents.size() != 2 || extents[0] % 16 != 0) {
+      return std::nullopt;
+    }
+    ++extents[0];
   }
 
   if (space == MemorySpace::Acc) {

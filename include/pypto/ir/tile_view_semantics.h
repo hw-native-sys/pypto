@@ -136,9 +136,8 @@ struct AccumulatorTileGeometry {
 ///   arithmetic the fallback already performs. So falling back is either
 ///   unreachable or identical, never a silent approximation.
 ///
-/// ``CompactMode`` is deliberately not a factor: PTO only widens the stride for
-/// its ``RowPlusOne`` mode, which PyPTO's ``CompactMode`` (``null`` / ``normal``)
-/// never spells, so ``normal`` addresses exactly like ``null``.
+/// ``CompactMode`` is deliberately not a factor here: ``normal`` addresses exactly
+/// like ``null`` in L0C. The padded ``row_plus_one`` layout is Vec-only.
 inline std::optional<AccumulatorTileGeometry> GetAccumulatorTileGeometry(const TileView& view,
                                                                          const std::vector<ExprPtr>& shape,
                                                                          const DataType& dtype) {

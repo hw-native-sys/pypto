@@ -44,7 +44,10 @@ def w2_module(monkeypatch: pytest.MonkeyPatch, pytestconfig: pytest.Config) -> M
     return module
 
 
-@pytest.mark.parametrize("case_index,row_base,valid_rows", [(0, 5, 13), (1, 17, 7), (2, 31, 1)])
+@pytest.mark.parametrize(
+    "case_index,row_base,valid_rows",
+    [(0, 5, 13), (1, 17, 7), (2, 31, 1), (3, 5, 13)],
+)
 def test_w2_collection_defers_inputs_and_preserves_bytes(
     w2_module: ModuleType, case_index: int, row_base: int, valid_rows: int
 ) -> None:
@@ -54,7 +57,8 @@ def test_w2_collection_defers_inputs_and_preserves_bytes(
         if marker.name == "parametrize"
     )
     cases = marker.args[1]
-    assert len(cases) == 3
+    # The RowPlusOne case reuses the first case's inputs with a different layout.
+    assert len(cases) == 4
     specs = cases[case_index].tensor_specs
     assert [spec.name for spec in specs] == ["a", "a_scale", "weight", "b_scale", "counts", "out"]
     expected = w2_module._w2_inputs(row_base, valid_rows)

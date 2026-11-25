@@ -352,10 +352,12 @@ TileLayout StringToTileLayout(const std::string& str);
  * Controls how partial boxed tiles are packed by layout-changing operations:
  * - null: Use the ordinary physical-tile layout
  * - normal: Pack only the valid region for a boundary tile
+ * - row_plus_one: Add one physical row per Vec NZ panel
  */
 enum class CompactMode {
-  null,    ///< Ordinary non-compact layout
-  normal,  ///< Compact valid-region layout
+  null,          ///< Ordinary non-compact layout
+  normal,        ///< Compact valid-region layout
+  row_plus_one,  ///< Padded Vec NZ panel pitch
 };
 
 /**

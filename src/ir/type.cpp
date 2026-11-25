@@ -133,6 +133,24 @@ void CanonicalizeTileViewInPlace(std::optional<TileView>& tile_view, const std::
   }
 }
 
+void ValidateRowPlusOneTile(const std::optional<TileView>& tile_view, const std::vector<ExprPtr>& shape,
+                            DataType dtype, const std::optional<MemorySpace>& memory_space) {
+  if (!tile_view || tile_view->compact != CompactMode::row_plus_one) return;
+
+  const auto& view = *tile_view;
+  CHECK((!memory_space || *memory_space == MemorySpace::Vec) && dtype == DataType::FP8E4M3FN &&
+        view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major && view.fractal == 512)
+      << "RowPlusOne requires an FP8E4M3FN Vec tile with standard 512-byte NZ layout";
+  CHECK(shape.size() == 2) << "RowPlusOne requires a static 2D tile shape";
+  const auto rows = As<ConstInt>(shape[0]);
+  const auto cols = As<ConstInt>(shape[1]);
+  CHECK(rows && cols && rows->value_ > 0 && cols->value_ > 0 && rows->value_ % 16 == 0 &&
+        cols->value_ % 32 == 0)
+      << "RowPlusOne requires positive static rows divisible by 16 and columns divisible by 32";
+  // The producer and split transfer must derive the same padded pitch.
+  CHECK(view.valid_shape.empty()) << "RowPlusOne requires the full logical tile to be valid";
+}
+
 }  // namespace
 
 bool operator==(const TileView& lhs, const TileView& rhs) {
@@ -275,6 +293,8 @@ std::string CompactModeToString(CompactMode mode) {
       return "null";
     case CompactMode::normal:
       return "normal";
+    case CompactMode::row_plus_one:
+      return "row_plus_one";
     default:
       throw TypeError("Unknown CompactMode value: " + std::to_string(static_cast<int>(mode)));
   }
@@ -285,6 +305,8 @@ CompactMode StringToCompactMode(const std::string& str) {
     return CompactMode::null;
   } else if (str == "normal") {
     return CompactMode::normal;
+  } else if (str == "row_plus_one") {
+    return CompactMode::row_plus_one;
   }
   throw TypeError("Unknown CompactMode string: " + str);
 }
@@ -438,6 +460,7 @@ TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optio
       tile_view_(std::move(tile_view)),
       memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
   CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
+  ValidateRowPlusOneTile(tile_view_, shape_, dtype_, memory_space_);
 }
 
 TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
@@ -446,6 +469,7 @@ TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<Mem
       tile_view_(std::move(tile_view)),
       memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
   CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
+  ValidateRowPlusOneTile(tile_view_, shape_, dtype_, memory_space_);
 }
 
 std::optional<MemorySpace> TileType::GetMemorySpace() const { return memory_space_; }

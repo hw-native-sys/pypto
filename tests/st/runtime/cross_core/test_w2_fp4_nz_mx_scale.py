@@ -43,7 +43,7 @@ OUTPUT_SENTINEL = -999.0
 
 
 @pl.jit.incore(level=pl.Level.AIV)
-def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8]):
+def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8], compact_mode: pl.constexpr = pl.CompactMode.null):
     # Shapes and lane offsets are already per-AIV; suppress another halving.
     pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
     peer = pl.import_peer_buffer(name="w2_weights", peer_func="w2_cube")
@@ -68,6 +68,7 @@ def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8]):
                 pl.TileView(
                     blayout=pl.TileLayout.col_major,
                     slayout=pl.TileLayout.row_major,
+                    compact=compact_mode,
                 ),
             ] = pl.cast(packed0, pl.FP8E4M3FN, layout=pl.NZ)
             pl.tpush_to_aic(nz0, split=1)
@@ -87,6 +88,7 @@ def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8]):
                 pl.TileView(
                     blayout=pl.TileLayout.col_major,
                     slayout=pl.TileLayout.row_major,
+                    compact=compact_mode,
                 ),
             ] = pl.cast(packed1, pl.FP8E4M3FN, layout=pl.NZ)
             pl.tpush_to_aic(nz1, split=1)
@@ -164,9 +166,10 @@ def w2_group(
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
     out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
+    compact_mode: pl.constexpr = pl.CompactMode.null,
 ):
     out = w2_cube(a, a_scale, b_scale, counts, out)
-    w2_vector(weight)
+    w2_vector(weight, compact_mode)
     return out
 
 
@@ -178,9 +181,10 @@ def routed_w2(
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
     out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
+    compact_mode: pl.constexpr = pl.CompactMode.null,
 ):
     with pl.spmd(1):
-        out = w2_group(a, a_scale, weight, b_scale, counts, out)
+        out = w2_group(a, a_scale, weight, b_scale, counts, out, compact_mode)
     return out
 
 
@@ -285,9 +289,19 @@ def _retained_w2_case(_st_case, test_runner, tmp_path, monkeypatch):
             atol=0.0,
         )
         for base, rows in ((5, 13), (17, 7), (31, 1))
-    ]
+    ],
+    st.case(
+        routed_w2,
+        inputs={"compact_mode": pl.CompactMode.row_plus_one},
+        tensors=_w2_specs(5, 13),
+        name="w2_fp4_row_plus_one_split_v2c",
+        golden=_w2_golden,
+        memory_planner=MemoryPlanner.PYPTO,
+        rtol=0.0,
+        atol=0.0,
+    ),
 )
-def test_w2_nz_and_compact_scale_loads(_retained_w2_case):
+def test_w2_nz_and_compact_scale_loads(_retained_w2_case, _st_case):
     run, work_dir = _retained_w2_case
     run.assert_passed()
     sources = list((work_dir / "kernels").rglob("*.cpp"))
@@ -298,6 +312,8 @@ def test_w2_nz_and_compact_scale_loads(_retained_w2_case):
     assert "TCVT" in cpp
     assert re.search(r"float4_e2m1x2_t", cpp)
     assert not re.search(r"Tile<\s*(?:pto::)?TileType::Vec,\s*(?:float|bfloat16_t)\s*,", cpp)
+    if _st_case.name == "w2_fp4_row_plus_one_split_v2c":
+        assert "CompactMode::RowPlusOne" in cpp
 
 
 if __name__ == "__main__":
