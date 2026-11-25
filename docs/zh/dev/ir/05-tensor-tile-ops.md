@@ -146,6 +146,23 @@ Packed `FP4E2M1X2` 的 tile 字节别名需要 PYPTO 或 DSA_RP；PTOAS 0.65
 planner 要求；编排层另支持 shape 相同的 FP4/字节别名。
 Carrier 单位约定与可用路径见 [FP4](../fp4.md)。
 
+### 逐行整数反量化（Ascend950）
+
+| 算子 | 输入 | 结果 |
+| ---- | ---- | ---- |
+| `tile.dequant` | 行主序有符号 INT8 或 INT16 tile，以及 FP32 scale 和 offset 列 tile | 物理形状和有效形状均与源 tile 相同的 FP32 tile |
+
+`pl.tile.dequant(src, scale, offset)` 生成 `pto.tdequant`，对每个有效元素计算
+`(float(src[i,j]) - offset[i,0]) * scale[i,0]`。scale 和 offset 均只有一列有效数据，
+有效行数与源 tile 相同。由于 PTO ISA 指令使用同一个模板类型，scale 和 offset 必须使用相同的物理形状和布局。
+系数视图（包括 reshape 和显式缩小有效形状的 subview）在降低前被复制到具有对齐物理行数且形状一致的 FP32 列 tile。
+拷贝按原视图的步长读取有效系数。
+
+A5 指令始终读取完整的 64 元素源向量，包括最后不足 64 列的部分。源 tile 的物理行须按 32 字节对齐，
+物理列数至少达到有效列数向上取整到 64 的倍数后的值。有效列数在运行时确定时，物理列数须为 64 的倍数。
+例如，对于形状为 `[16, 96]` 的张量，`pl.tile.load(src, [0, 0], [16, 128], valid_shape=[16, 96])`
+会分配所需的物理列数，并读取 96 列有效数据。
+
 ### tile.move 的结果 view
 
 推导出的结果 `TileView` 按字段分别取值：

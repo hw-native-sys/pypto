@@ -187,6 +187,8 @@ static const std::unordered_set<std::string_view>& LayoutAwareOps() {
       "tile.row_expand_max",
       "tile.row_expand_min",
       "tile.row_expand_expdif",
+      // Dequantization broadcasts per-row coefficients using their layout.
+      "tile.dequant",
       // Padding writes the tile's physical edge.
       "tile.fillpad",
       // Fractal / window / index addressed.
@@ -1108,6 +1110,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_expand_max", nullptr,                2},
     {"tile.row_expand_min", nullptr,                2},
     {"tile.row_expand_expdif", "pto.trowexpandexpdif", 2},
+    {"tile.dequant",         "pto.tdequant",        3},
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)

@@ -27,6 +27,14 @@ base + (off_row * base_cols + off_col) * storage_bits
 
 两种 Vec 实例化只要可证明等价，就把 `tile.extract` 放在 **slice 的定义处**，使拷贝留在作者书写 slice 的位置——尤其是同一个 `pl.split_aiv` 区域内——且有多个消费者的 slice 只拷贝一次。slice 是在被消费时才读取源的视图，因此在定义处拷贝只有在两处之间没有任何写入该存储时才等价；若可能有写入到达，则改为在每个消费者之前放置 extract（见[Vec extract 的放置位置](#vec-extract-的放置位置)）。
 
+对于 A5 `tile.dequant`，原生指令要求两个系数操作数使用同一个 tile 类型。
+当任一系数引用 slice 或其他元数据视图时，两者均在消费者处被复制到形状一致的对齐 FP32 列 tile。
+标量读写保留各视图的源步长、偏移和有效行数，包括显式缩小有效形状及未对齐的窗口。
+transpose view、交换轴的向量 reshape 及降低秩的列 slice 保留相应的父窗口坐标映射，包括后续链式 slice 引入的偏移。
+该归一化在通用 slice 物化前运行，只移除不再被使用的原系数纯视图祖先。
+循环携带的系数在每轮读取当前存储。对于视图形式的列系数，先将初值标量复制到原物理形状的对齐 tile，
+且不改变初值的独立消费者；A5 Vec-to-Vec extract 仅支持 ND，无法物化未对齐的列主序初值。
+
 **Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](22-infer_tile_memory_space.md)。
 
 **前置属性 (Required)**：`SSAForm`、`SplitIncoreOrch`、`IncoreTileOps`、`TileOps2D`、`NormalizedStmtStructure`。

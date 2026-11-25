@@ -51,6 +51,25 @@ def _create_tile_binary_call(
 # ============================================================================
 
 
+def dequant(src: Expr, scale: Expr, offset: Expr, span: Span | None = None) -> Call:
+    """Dequantize an A5 integer tile to FP32 with per-row parameters.
+
+    Computes `(float(src[i,j]) - offset[i,0]) * scale[i,0]` on the valid region.
+    Physical source rows must be 32-byte aligned and have room for each full
+    64-element vector touched by the valid columns.
+
+    Args:
+        src: Row-major rank-2 signed INT8 or INT16 tile.
+        scale: FP32 column tile with one value per valid source row.
+        offset: FP32 column tile with the same shape and layout as scale.
+        span: Optional source span for debugging.
+
+    Returns:
+        Call producing an FP32 tile with the same physical and valid shapes as src.
+    """
+    return _ir_core.create_op_call("tile.dequant", [src, scale, offset], {}, _get_span_or_capture(span))
+
+
 def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tile and tile or scalar.
 

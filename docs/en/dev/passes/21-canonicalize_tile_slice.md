@@ -27,6 +27,19 @@ so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned alloca
 
 Both Vec materializations place the `tile.extract` **at the slice's definition** whenever that is provably equivalent, so the copy stays where the author wrote the slice — in particular inside the same `pl.split_aiv` region — and a slice with several consumers is copied once. A slice is a view that reads its source when consumed, so a copy taken at the definition is equivalent only when nothing writes that storage in between; when a write may reach it, the extract is placed before each consumer instead (see [Where a Vec extract goes](#where-a-vec-extract-goes)).
 
+For A5 `tile.dequant`, the native instruction requires a single tile type for both coefficient operands.
+When either coefficient refers to a slice or other metadata view, both are copied at the consumer into matching
+aligned FP32 column tiles.
+Scalar reads and writes preserve each view's source pitch, offset, and valid rows, including explicitly narrowed
+valid shapes and unaligned windows. Transpose views, vector reshapes that swap axes, and rank-reduced column slices
+preserve the corresponding parent coordinate mapping, including offsets introduced by later chained slices.
+This normalization runs before generic slice materialization, and removes only the original pure coefficient-view
+ancestors whose values have no remaining consumers.
+A coefficient loop carry is read from its current storage on every iteration.
+For view-backed column coefficients, a scalar copy of the initializer into the original physical shape
+provides an aligned carry without changing independent uses of the initializer; an unaligned column-major
+initializer cannot be materialized using the A5 ND-only Vec-to-Vec extract.
+
 **Pipeline position**: After [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](22-infer_tile_memory_space.md).
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.

@@ -279,7 +279,7 @@ MIGRATION_FAMILIES = (
         ),
     ),
     MigrationFamily(
-        "G15: A5 MX and scale binding",
+        "G15: A5 quantization, MX and scale binding",
         (
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
@@ -287,6 +287,7 @@ MIGRATION_FAMILIES = (
             "tile.tget_scale_addr",
             "tile.tquant_mx_raw",
             "tile.tmov_x2zz",
+            "tile.dequant",
         ),
         targets=frozenset({backend.BackendType.Ascend950}),
     ),

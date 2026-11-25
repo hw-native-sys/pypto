@@ -160,6 +160,29 @@ rejects FP4 `treshape`. InCore tensor reinterpret operations lower to tile
 aliases and require the same planners; same-shape orchestration FP4/byte aliases are also supported.
 See [FP4](../fp4.md) for the carrier-unit contract and supported alias paths.
 
+### Row-wise integer dequantization (Ascend950)
+
+| Operation | Inputs | Result |
+| --------- | ------ | ------ |
+| `tile.dequant` | Row-major signed INT8 or INT16 tile and FP32 scale and offset column tiles | FP32 tile with the same physical and valid shapes as the source |
+
+`pl.tile.dequant(src, scale, offset)` emits `pto.tdequant`. Each valid
+element is `(float(src[i,j]) - offset[i,0]) * scale[i,0]`. Scale and
+offset each have one valid column and as many valid rows as the source.
+They must share their physical shape and layout because the PTO ISA
+intrinsic uses one template type for both.
+Coefficient views, including reshapes and subviews with explicitly narrowed valid
+shapes, are copied into matching FP32 column tiles with aligned physical row
+counts before lowering. The copies read only the valid coefficient values using
+the original view's pitch.
+
+The A5 instruction reads full 64-element source vectors, including the
+last partial vector. The physical source row must be 32-byte aligned and
+wide enough to cover the valid columns rounded up to 64 elements. With a
+runtime valid width, the physical width must be a multiple of 64 elements.
+For a `[16, 96]` tensor, `pl.tile.load(src, [0, 0], [16, 128], valid_shape=[16, 96])`
+allocates the required tile width and reads the 96 valid columns.
+
 ### Result view of `tile.move`
 
 The deduced result `TileView` splits by field:
