@@ -2442,10 +2442,9 @@ jobs:
   # Always run after all tests, including failed/skipped dependencies. A skipped
   # job counts as success to GitHub rulesets, so only this explicit validation
   # may produce the full-result signal consumed by the trusted status publisher.
+  # Manual dispatches on main validate the same outputs without publishing PR statuses.
   full-result:
-    if: >-
-      always() && github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/main' && inputs.pr_number != ''
+    if: always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs:
       - changes
       - toolchain
@@ -2486,14 +2485,14 @@ jobs:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: python .github/scripts/ci_control.py aggregate
       - name: Request full status publication
-        if: always()
+        if: always() && inputs.pr_number != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh workflow run ci-full-status.yml --repo "$GITHUB_REPOSITORY" --ref main
           -f run_id="$GITHUB_RUN_ID" -f wait_for_completion=true
       - name: Reconcile full job checks
-        if: always()
+        if: always() && inputs.pr_number != ''
         # Progress is informational; its dispatch cannot invalidate passing tests.
         continue-on-error: true
         env:

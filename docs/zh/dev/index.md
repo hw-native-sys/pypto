@@ -124,7 +124,8 @@ head 未变时不会重新运行 lint；full 测试固定的主线合并版本�
 时适用。变更 `PTOAS_VERSION` 的 PR 必须同时通过 `serving-guard-a2a3` 和 `serving-guard-a5`。
 两个任务调用 `hw-native-sys/pypto-serving@main` 的同一份 CI 工作流，分别选择 `unit-tests` 和
 `v41-a5-smoke`，并传入本次测试的 PyPTO
-合并提交 SHA。Runner、模型测试和设备配置由 serving 维护。手动启动 full 且不填写 PR 参数时也会运行两项看护。
+合并提交 SHA。Runner、模型测试和设备配置由 serving 维护。在 PyPTO `main` 上手动启动 full 且不填写
+PR 参数时，测试的是触发时的提交，两个选中的 serving 任务都必须返回成功。
 Wheel 预热失败不单独
 阻止合入，因为测试任务可以自行构建；所有适用测试都必须成功。
 
@@ -147,6 +148,7 @@ PR 保留原有 lint 检查，并在 PR 检查列表中以独立的 `full / <job
 这些状态不会向 lint 工作流增加任务。使用提交状态可避开 Actions 的 `GITHUB_TOKEN`
 创建检查记录时的分组及 Details 链接覆盖问题。排队和运行均显示 pending，由说明文字区分；
 跳过或中立结果显示 success，说明文字保留真实结论。只有 `ci/full` 判定必需测试是否通过。
+切换前测过的提交还可能显示历史状态 `full / serving-guard`。
 `CI Full Progress` 使用 GitHub 托管 runner，单个 full 运行时约每分钟读取 GitHub
 元数据并刷新检查，不执行 PR 代码，也不向测试任务提供写入 token。并发运行增多或
 共享 API 配额不足时降低刷新频率，预留 200 次请求给门禁发布器和其他自动化，

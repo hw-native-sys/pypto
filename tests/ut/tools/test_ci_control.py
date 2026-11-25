@@ -133,7 +133,7 @@ def test_applicable_conditional_job_must_run(control, needs, job, flag, result):
 
 
 @pytest.mark.parametrize("platform", ["a2a3", "a5"])
-@pytest.mark.parametrize("actual", ["skipped", "failure", None])
+@pytest.mark.parametrize("actual", ["skipped", "failure", "cancelled", None])
 def test_successful_call_requires_its_selected_serving_job(control, needs, platform, actual):
     needs["changes"]["outputs"]["ptoas_version_changed"] = "true"
     for name, output in control.SERVING_RESULTS.items():
@@ -887,8 +887,12 @@ def test_workflow_wiring_covers_every_full_job(control):
     for platform in ("a2a3", "a5"):
         guard = jobs[f"serving-guard-{platform}"]
         assert guard["uses"] == "hw-native-sys/pypto-serving/.github/workflows/ci.yml@main"
-        assert guard["with"]["platform"] == platform
-        assert guard["with"]["pypto-revision"] == "${{ needs.changes.outputs.checkout_sha }}"
+        assert guard["with"] == {
+            "platform": platform,
+            "pypto-repository": "${{ github.repository }}",
+            "pypto-revision": "${{ needs.changes.outputs.checkout_sha }}",
+        }
+        assert guard["permissions"] == {"contents": "read"}
         assert "needs.changes.outputs.ptoas_version_changed == 'true'" in guard["if"]
     # The full aggregate itself is not the required context: it is attached to
     # main in dispatch runs. Only trusted control jobs write the PR status.
@@ -2720,15 +2724,22 @@ def test_progress_resolution_keeps_api_failure_for_retry(control, monkeypatch, p
         control.resolved_event(REPO, publication_event)
 
 
-def test_full_finalizer_explicitly_notifies_publishers_even_after_failure():
+def test_full_finalizer_validates_all_main_dispatches_and_only_notifies_for_prs():
     jobs = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())["jobs"]
     finalizer = jobs["full-result"]
     assert finalizer["runs-on"] == "ubuntu-latest"
     assert finalizer["permissions"]["actions"] == "write"
-    assert "github.ref == 'refs/heads/main'" in finalizer["if"]
+    assert finalizer["if"] == (
+        "always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+    )
+    aggregate = next(
+        step for step in finalizer["steps"] if step.get("run", "").endswith("ci_control.py aggregate")
+    )
+    assert "if" not in aggregate
+    assert aggregate["env"]["CI_NEEDS"] == "${{ toJSON(needs) }}"
     notifications = finalizer["steps"][-2:]
     for step, workflow in zip(notifications, ["ci-full-status.yml", "ci-full-progress.yml"]):
-        assert step["if"] == "always()"
+        assert step["if"] == "always() && inputs.pr_number != ''"
         assert f"gh workflow run {workflow}" in step["run"]
         assert "--ref main" in step["run"]
         assert 'run_id="$GITHUB_RUN_ID"' in step["run"]
