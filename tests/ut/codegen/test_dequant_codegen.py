@@ -90,33 +90,58 @@ def test_dequant_rejects_incomplete_source_vectors(src_dtype, src_cols, valid_co
 
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize(
-    ("src_dtype", "pto_dtype", "width", "offset_rows"),
-    [(pl.INT8, "i8", 32, 16), (pl.INT16, "i16", 96, 16), (pl.INT8, "i8", 64, 32)],
+    ("src_dtype", "pto_dtype", "width", "offset_rows", "coeff_cols", "valid_rows"),
+    [
+        (pl.INT8, "i8", 32, 16, 1, 16),
+        (pl.INT16, "i16", 96, 16, 1, 16),
+        (pl.INT8, "i8", 64, 32, 1, 16),
+        (pl.INT8, "i8", 64, 32, 1, 10),
+        (pl.INT8, "i8", 64, 16, 8, 16),
+        (pl.INT8, "i8", 64, 16, 8, 9),
+        (pl.INT8, "i8", 64, 1, 1, 16),
+    ],
 )
-def test_dequant_assembles_a5(src_dtype, pto_dtype, width, offset_rows, tmp_path):
+def test_dequant_assembles_a5(src_dtype, pto_dtype, width, offset_rows, coeff_cols, valid_rows, tmp_path):
     physical_width = (width + 63) // 64 * 64
+    offset_cols = 16 if offset_rows == 1 else coeff_cols
 
     @pl.jit.incore
     def dequant_kernel(
-        src: pl.Tensor[[16, width], src_dtype],
-        scale: pl.Tensor[[16, 1], pl.FP32],
-        offset: pl.Tensor[[offset_rows, 1], pl.FP32],
-        out: pl.Out[pl.Tensor[[16, width], pl.FP32]],
-    ) -> pl.Tensor[[16, width], pl.FP32]:
-        values = pl.tile.load(src, [0, 0], [16, physical_width], valid_shape=[16, width])
-        scales = pl.tile.load(scale, [0, 0], [16, 1])
-        offsets = pl.tile.load(offset, [0, 0], [offset_rows, 1])
-        if offset_rows != 16:
+        src: pl.Tensor[[valid_rows, width], src_dtype],
+        scale: pl.Tensor[[16, coeff_cols], pl.FP32],
+        offset: pl.Tensor[[offset_rows, offset_cols], pl.FP32],
+        out: pl.Out[pl.Tensor[[valid_rows, width], pl.FP32]],
+    ) -> pl.Tensor[[valid_rows, width], pl.FP32]:
+        values = pl.tile.load(src, [0, 0], [16, physical_width], valid_shape=[valid_rows, width])
+        if coeff_cols == 1:
+            scales = pl.tile.load(scale, [0, 0], [16, 1], valid_shape=[valid_rows, 1])
+            offsets = pl.tile.load(offset, [0, 0], [offset_rows, offset_cols])
+            if offset_rows == 1:
+                offsets = pl.tile.reshape(offsets, [16, 1])
+            elif offset_rows != 16:
+                if valid_rows == 16:
+                    offsets = pl.tile.slice(offsets, [16, 1], [0, 0])
+                else:
+                    offsets = pl.tile.slice(offsets, [16, 1], [0, 0], valid_shape=[valid_rows, 1])
+        elif valid_rows == 16:
+            scales = pl.tile.load(scale, [0, 0], [16, coeff_cols], valid_shape=[16, 1])
+            offsets = pl.tile.load(offset, [0, 0], [offset_rows, coeff_cols], valid_shape=[16, 1])
+            scales = pl.tile.slice(scales, [16, 1], [0, 0])
             offsets = pl.tile.slice(offsets, [16, 1], [0, 0])
+        else:
+            scales = pl.tile.load(scale, [0, 0], [16, coeff_cols])
+            offsets = pl.tile.load(offset, [0, 0], [offset_rows, coeff_cols])
+            scales = pl.tile.slice(scales, [valid_rows, 1], [1, 1])
+            offsets = pl.tile.slice(offsets, [valid_rows, 1], [1, 1])
         return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)
 
     @pl.jit
     def dequant_program(
-        src: pl.Tensor[[16, width], src_dtype],
-        scale: pl.Tensor[[16, 1], pl.FP32],
-        offset: pl.Tensor[[offset_rows, 1], pl.FP32],
-        out: pl.Out[pl.Tensor[[16, width], pl.FP32]],
-    ) -> pl.Tensor[[16, width], pl.FP32]:
+        src: pl.Tensor[[valid_rows, width], src_dtype],
+        scale: pl.Tensor[[16, coeff_cols], pl.FP32],
+        offset: pl.Tensor[[offset_rows, offset_cols], pl.FP32],
+        out: pl.Out[pl.Tensor[[valid_rows, width], pl.FP32]],
+    ) -> pl.Tensor[[valid_rows, width], pl.FP32]:
         return dequant_kernel(src, scale, offset, out)
 
     compiled = dequant_program.compile(
@@ -138,10 +163,11 @@ def test_dequant_assembles_a5(src_dtype, pto_dtype, width, offset_rows, tmp_path
             line for line in mlir.splitlines() if "pto.alloc_tile" in line and tile_type in line
         )
         assert f"valid_col = %c{width}_index" in allocation
-    assert f"!pto.partition_tensor_view<16x{width}x{pto_dtype}>" in mlir
-    assert f"!pto.partition_tensor_view<16x{width}xf32>" in mlir
-    if offset_rows != 16:
-        assert "pto.tmov" in mlir
+    assert f"!pto.partition_tensor_view<{valid_rows}x{width}x{pto_dtype}>" in mlir
+    assert f"!pto.partition_tensor_view<{valid_rows}x{width}xf32>" in mlir
+    if offset_rows != 16 or coeff_cols != 1:
+        assert "pto.tgetval" in mlir
+        assert "pto.tsetval" in mlir
 
 
 if __name__ == "__main__":

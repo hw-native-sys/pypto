@@ -171,8 +171,10 @@ element is `(float(src[i,j]) - offset[i,0]) * scale[i,0]`. Scale and
 offset each have one valid column and as many valid rows as the source.
 They must share their physical shape and layout because the PTO ISA
 intrinsic uses one template type for both.
-Aligned coefficient subviews are materialized as dense Vec tiles before lowering
-to the intrinsic so their native descriptors match.
+Coefficient views, including reshapes and subviews with explicitly narrowed valid
+shapes, are copied into matching FP32 column tiles with aligned physical row
+counts before lowering. The copies read only the valid coefficient values using
+the original view's pitch.
 
 The A5 instruction reads full 64-element source vectors, including the
 last partial vector. The physical source row must be 32-byte aligned and

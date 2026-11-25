@@ -528,12 +528,30 @@ class SliceCollector : public IRVisitor {
   /// the MAD with exactly the same broken stride — and then extended along
   /// identity-preserving edges by `BindWindowAlias`.
   std::unordered_map<const Var*, SliceInfo> windows;
+  // A non-slice metadata view can also have a different native valid-shape
+  // template from an allocation even when its logical geometry is identical.
+  std::unordered_set<const Var*> coefficient_views;
+  bool has_dequant = false;
   /// Slice definitions considered for rewriting, in source-before-use order.
   std::vector<VarPtr> slice_order;
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op && op->var_) {
+      auto call = As<Call>(op->value_);
+      has_dequant |= IsOp(call, "tile.dequant");
+      auto tile = As<TileType>(op->var_->GetType());
+      if (tile && tile->dtype_ == DataType::FP32 && tile->shape_.size() == 2) {
+        auto source = AsVarLike(op->value_);
+        auto& registry = OpRegistry::GetInstance();
+        if ((source && coefficient_views.count(source.get())) ||
+            (call && call->op_ && registry.IsRegistered(call->op_->name_) &&
+             op_predicates::OutputInheritsSourceBuffer(call->op_->name_) &&
+             registry.GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
+                 ExecutionMemoryAccessEvidence::NoAccess)) {
+          coefficient_views.insert(op->var_.get());
+        }
+      }
       if (As<ScalarType>(op->var_->GetType())) scalar_defs.emplace(op->var_.get(), op->value_);
       if (As<ConstInt>(op->value_)) {
         known_consts_.emplace(op->var_.get(), op->value_);
@@ -903,8 +921,11 @@ class SliceStorageAnalysis : public IRVisitor {
     // peeled and a tile.extract operand is folded, so neither materializes.
     if (!IsOp(call, "tile.slice") && !IsOp(call, "tile.extract")) {
       const bool col_expand = IsColExpandMaterializingOp(call->op_) && call->args_.size() == 2;
-      for (const auto& arg : call->args_) {
-        auto var = AsVarLike(arg);
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        // Dequantization normalizes coefficient windows at their consumer,
+        // including windows whose narrow physical shape cannot be allocated.
+        if (IsOp(call, "tile.dequant") && i > 0) continue;
+        auto var = AsVarLike(call->args_[i]);
         if (!var) continue;
         auto& uses = uses_[var.get()];
         uses.vec_operand = true;
@@ -998,6 +1019,8 @@ class CanonicalizeMutator : public IRMutator {
  public:
   explicit CanonicalizeMutator(const SliceCollector& collector)
       : slices_(collector.slices),
+        windows_(collector.windows),
+        coefficient_views_(collector.coefficient_views),
         packed_windows_(collector.packed_windows),
         scalar_defs_(collector.scalar_defs) {}
 
@@ -1440,8 +1463,8 @@ class CanonicalizeMutator : public IRMutator {
   /// the alignment contract belongs to PTO vector operands, not to one
   /// elementwise opcode. `tile.slice` is only another view and remains peeled;
   /// `tile.extract` has its own direct slice-folding rewrite above.
-  /// Aligned dequantization coefficient views also require their own dense
-  /// allocation to match the native coefficient template type.
+  /// Dequantization coefficients are normalized separately to a shared
+  /// allocatable native descriptor.
   std::optional<MaterializedCall> TryMaterializeVecCall(const CallPtr& call) {
     if (!call || !call->op_ || IsOp(call, "tile.slice") || IsOp(call, "tile.extract")) {
       return std::nullopt;
@@ -1451,25 +1474,16 @@ class CanonicalizeMutator : public IRMutator {
     std::vector<StmtPtr> extracts;
     std::vector<ExprPtr> new_args = call->args_;
     bool rewrote = false;
+    if (IsOp(call, "tile.dequant")) {
+      rewrote = NormalizeDequantCoefficients(call, extracts, new_args);
+    }
     for (size_t i = 0; i < call->args_.size(); ++i) {
+      if (IsOp(call, "tile.dequant") && i > 0) continue;
       auto operand = AsVarLike(call->args_[i]);
       if (!operand) continue;
       auto it = slices_.find(operand.get());
       if (it == slices_.end()) continue;
-      // TDEQUANT uses a single native template type for scale and offset.
-      // An aligned subview may still retain its parent's physical descriptor.
-      // Copy coefficient windows into dense tiles with matching descriptors.
-      const bool unaligned = NeedsAlignedVecMaterialization(it->second);
-      if (IsOp(call, "tile.dequant") && i > 0 && IsVecOrUnassigned(it->second) && !unaligned) {
-        auto move = OpRegistry::GetInstance().Create("tile.move", {operand},
-                                                     {{"target_memory", MemorySpace::Vec}}, sp);
-        auto var = std::make_shared<Var>(operand->name_hint_ + "_dequant_coeff", move->GetType(), sp);
-        extracts.push_back(std::make_shared<AssignStmt>(var, move, sp));
-        new_args[i] = var;
-        rewrote = true;
-        continue;
-      }
-      if (!unaligned) continue;
+      if (!NeedsAlignedVecMaterialization(it->second)) continue;
       auto extract = BuildOperandExtract(operand, it->second, MemorySpace::Vec, sp);
       extracts.push_back(extract);
       new_args[i] = extract->var_;
@@ -1480,6 +1494,82 @@ class CanonicalizeMutator : public IRMutator {
     auto& reg = OpRegistry::GetInstance();
     auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
     return MaterializedCall{std::move(extracts), std::move(new_call)};
+  }
+
+  /// A coefficient subview can have a parent's row pitch or a different native
+  /// valid-shape template. Copy both coefficients into aligned column tiles so
+  /// TDEQUANT receives one shared native type. Scalar copies read only valid
+  /// values at the original window offsets, including unaligned/narrow windows.
+  bool NormalizeDequantCoefficients(const CallPtr& call, std::vector<StmtPtr>& stmts,
+                                    std::vector<ExprPtr>& args) {
+    if (call->args_.size() != 3) return false;
+    auto scale = AsVarLike(call->args_[1]);
+    auto offset = AsVarLike(call->args_[2]);
+    if (!scale || !offset ||
+        (!windows_.count(scale.get()) && !windows_.count(offset.get()) &&
+         !coefficient_views_.count(scale.get()) && !coefficient_views_.count(offset.get()))) {
+      return false;
+    }
+
+    const auto& span = call->span_;
+    auto& registry = OpRegistry::GetInstance();
+    const auto coeff = As<TileType>(scale->GetType());
+    const auto rows = As<ConstInt>(coeff->shape_[0]);
+    INTERNAL_CHECK_SPAN(rows, span) << "dequantization coefficient rows must be static";
+    constexpr int64_t kFp32Block = 8;
+    const auto padded_rows = (rows->value_ + kFp32Block - 1) / kFp32Block * kFp32Block;
+    const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+    const auto padded = std::make_shared<ConstInt>(padded_rows, DataType::INDEX, span);
+    const auto shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{padded, one}, span);
+
+    for (size_t i = 1; i < args.size(); ++i) {
+      auto operand = AsVarLike(args[i]);
+      const auto type = As<TileType>(operand->GetType());
+      const auto valid = GetValidShape(type);
+      const auto window = windows_.find(operand.get());
+      ExprPtr base = operand;
+      ExprPtr row_offset = zero;
+      ExprPtr col_offset = zero;
+      if (window != windows_.end()) {
+        base = VisitExpr(window->second.base);
+        row_offset = window->second.off_row;
+        col_offset = window->second.off_col;
+      }
+      const auto base_type = As<TileType>(base->GetType());
+      const auto base_view = tile_view_semantics::GetEffectiveTileView(*base_type);
+      auto allocate = registry.Create("tile.create", {shape},
+                                      {{"dtype", DataType::FP32}, {"target_memory", MemorySpace::Vec}}, span);
+      auto dest = std::make_shared<Var>(operand->name_hint_ + "_dequant_coeff", allocate->GetType(), span);
+      stmts.push_back(std::make_shared<AssignStmt>(dest, allocate, span));
+
+      auto row = std::make_shared<Var>(operand->name_hint_ + "_coeff_row",
+                                       std::make_shared<ScalarType>(DataType::INDEX), span);
+      auto input_row = MakeCanonicalIndexAdd(row, row_offset, span);
+      std::vector<ExprPtr> indices{input_row, col_offset};
+      if (base_view.blayout == TileLayout::col_major) {
+        auto flat = MakeAdd(MakeMul(col_offset, base_type->shape_[0], span), input_row, span);
+        // tile.read takes rank-matched indices and codegen linearizes them
+        // in row-major order; convert the physical column-major offset.
+        indices = {MakeFloorDiv(flat, base_type->shape_[1], span),
+                   MakeFloorMod(flat, base_type->shape_[1], span)};
+      }
+      auto read_index = std::make_shared<MakeTuple>(indices, span);
+      auto read = registry.Create("tile.read", {base, read_index}, span);
+      auto value = std::make_shared<Var>(operand->name_hint_ + "_coeff_value", read->GetType(), span);
+      auto write_index = std::make_shared<MakeTuple>(std::vector<ExprPtr>{row, zero}, span);
+      auto write = registry.Create("tile.write", {dest, write_index, value}, span);
+      auto body = SeqStmts::Flatten(
+          {std::make_shared<AssignStmt>(value, read, span), std::make_shared<EvalStmt>(write, span)}, span);
+      stmts.push_back(std::make_shared<ForStmt>(row, zero, valid[0], one, std::vector<IterArgPtr>{}, body,
+                                                std::vector<VarPtr>{}, span));
+      auto set_valid = registry.Create("tile.set_validshape", {dest, valid[0], one}, span);
+      auto normalized =
+          std::make_shared<Var>(operand->name_hint_ + "_coeff_valid", set_valid->GetType(), span);
+      stmts.push_back(std::make_shared<AssignStmt>(normalized, set_valid, span));
+      args[i] = normalized;
+    }
+    return true;
   }
 
   /// Replace a plain SSA alias of an unaligned slice with an extract assigned
@@ -1541,6 +1631,8 @@ class CanonicalizeMutator : public IRMutator {
 
   /// Own copy: planning rebases chained windows in place.
   std::unordered_map<const Var*, SliceInfo> slices_;
+  const std::unordered_map<const Var*, SliceInfo>& windows_;
+  const std::unordered_set<const Var*>& coefficient_views_;
   const std::unordered_map<const Var*, SliceInfo>& packed_windows_;
   const std::unordered_map<const Var*, ExprPtr>& scalar_defs_;
   /// Slice Var -> the `tile.extract` assignment that replaces its definition.
@@ -1619,7 +1711,10 @@ Pass CanonicalizeTileSlice() {
     // Phase 1 — index every canonical tile.slice.
     SliceCollector collector;
     collector.VisitStmt(func->body_);
-    if (collector.slice_order.empty()) return func;
+    if (collector.slice_order.empty() &&
+        !(collector.has_dequant && (!collector.windows.empty() || !collector.coefficient_views.empty()))) {
+      return func;
+    }
 
     // Phase 2 — materialize Vec slices at their definition where that is
     // provably equivalent, then fold or materialize the remaining consumers.

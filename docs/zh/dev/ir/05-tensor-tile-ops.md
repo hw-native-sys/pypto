@@ -155,7 +155,8 @@ Carrier 单位约定与可用路径见 [FP4](../fp4.md)。
 `pl.tile.dequant(src, scale, offset)` 生成 `pto.tdequant`，对每个有效元素计算
 `(float(src[i,j]) - offset[i,0]) * scale[i,0]`。scale 和 offset 均只有一列有效数据，
 有效行数与源 tile 相同。由于 PTO ISA 指令使用同一个模板类型，scale 和 offset 必须使用相同的物理形状和布局。
-对于已对齐的系数 subview，编译器在降低到该指令之前将其物化为稠密 Vec tile，以保证原生描述符一致。
+系数视图（包括 reshape 和显式缩小有效形状的 subview）在降低前被复制到具有对齐物理行数且形状一致的 FP32 列 tile。
+拷贝按原视图的步长读取有效系数。
 
 A5 指令始终读取完整的 64 元素源向量，包括最后不足 64 列的部分。源 tile 的物理行须按 32 字节对齐，
 物理列数至少达到有效列数向上取整到 64 的倍数后的值。有效列数在运行时确定时，物理列数须为 64 的倍数。
