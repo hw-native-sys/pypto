@@ -186,7 +186,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   YieldFixupMutator() = default;
 
   StmtPtr Run(const StmtPtr& body, const std::vector<VarPtr>& parameters) {
-    views_.emplace(body);
+    views_.Analyze(body);
     if (canonical_branch_storage_) names_.Collect(body, parameters);
     if (selections_) {
       for (const auto& [old_var, replacement] : selections_->tiles) {
@@ -244,7 +244,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // own extent and inheriting the repaired source's allocation/slot identity.
       auto view_call = As<Call>(assignment->value_);
       auto relative_offset =
-          ComputeViewByteOffset(view_call, new_input_tile, views_->GetWindowRowStride(input));
+          ComputeViewByteOffset(view_call, new_input_tile, views_.GetWindowRowStride(input));
       target = MakeAliasingMemRef(target, relative_offset, GetDefinedMemRef(output_tile)->size_, op->span_);
     } else if (!SamePhysicalWindow(GetDefinedMemRef(output_tile), GetDefinedMemRef(input_tile))) {
       return result;
@@ -505,7 +505,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
  private:
   std::optional<StorageSelectionPlan> selections_;
-  std::optional<BufferViewAnalysis> views_;
+  BufferViewAnalysis views_;
 
   static StmtPtr SelectionBarrier(const Span& span) {
     return std::make_shared<EvalStmt>(OpRegistry::GetInstance().Create("system.bar_all", {}, {}, span), span);
@@ -1259,7 +1259,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
       : unsettled_(std::move(unsettled)) {}
 
   StmtPtr Run(const StmtPtr& body) {
-    views_.emplace(body);
+    views_.Analyze(body);
     return VisitStmt(body);
   }
 
@@ -1404,7 +1404,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     if (!reuse_idx) {
       // Derive only the view-relative offset. A writeback's transfer offset
       // selects what it writes; its result still denotes the whole destination.
-      auto relative = ComputeViewByteOffset(call, new_in->GetType(), views_->GetWindowRowStride(in_var));
+      auto relative = ComputeViewByteOffset(call, new_in->GetType(), views_.GetWindowRowStride(in_var));
       target = MakeAliasingMemRef(target, relative, (*lhs->memref_)->size_, (*lhs->memref_)->span_);
     }
     if (SamePhysicalWindow(*lhs->memref_, target) && lhs->GetMemorySpace() == input->GetMemorySpace()) {
@@ -1420,7 +1420,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
 
   std::map<VarPtr, ExprPtr> subst_;
   std::set<const Var*> unsettled_;
-  std::optional<BufferViewAnalysis> views_;
+  BufferViewAnalysis views_;
 };
 
 /// Every IfStmt return_var (phi) reachable in a body.  These are the vars whose

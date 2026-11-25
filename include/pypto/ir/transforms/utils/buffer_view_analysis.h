@@ -44,7 +44,14 @@ class BufferViewAnalysis : public IRVisitor {
     bool preserves_axes = true;
   };
 
-  explicit BufferViewAnalysis(const StmtPtr& body) { VisitStmt(body); }
+  BufferViewAnalysis() = default;
+  explicit BufferViewAnalysis(const StmtPtr& body) { Analyze(body); }
+
+  /// Rebuild the index before visiting a new function body.
+  void Analyze(const StmtPtr& body) {
+    views_.clear();
+    VisitStmt(body);
+  }
 
   View Get(const ExprPtr& value) const {
     const auto var = AsVarLike(value);

@@ -1653,10 +1653,10 @@ class TopDownRetargeter {
   std::map<const Var*, const Var*> branch_storage_handle_bases_;
   std::set<const Var*> pinned_branch_bases_;
   uint64_t branch_storage_counter_ = 0;
-  std::optional<BufferViewAnalysis> views_;
+  BufferViewAnalysis views_;
 
   void BuildAnalysis(const StmtPtr& func_body, bool index_branch_storage = false) {
-    if (index_branch_storage) views_.emplace(func_body);
+    if (index_branch_storage) views_.Analyze(func_body);
     storage_handle_counts_.clear();
     branch_storage_handle_bases_.clear();
     DefMapVisitor def_v;
@@ -1739,7 +1739,7 @@ class TopDownRetargeter {
     auto target = GetDefinedMemRef(input);
     if (call && !op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
       target =
-          MakeAliasingMemRef(target, ComputeViewByteOffset(call, input, views_->GetWindowRowStride(source)),
+          MakeAliasingMemRef(target, ComputeViewByteOffset(call, input, views_.GetWindowRowStride(source)),
                              GetDefinedMemRef(output)->size_, result->span_);
     }
     if (!SamePhysicalWindow(GetDefinedMemRef(output), target) ||
@@ -2846,7 +2846,7 @@ class RetypeApplier : public IRMutator {
         entries_(std::move(entries)) {}
 
   StmtPtr Run(const StmtPtr& body) {
-    views_.emplace(body);
+    views_.Analyze(body);
     return VisitStmt(body);
   }
 
@@ -2947,7 +2947,7 @@ class RetypeApplier : public IRMutator {
     // The registered alias contract also holds when only the source's offset,
     // extent or slot changed, or the output already carried a stale descriptor.
     auto additional =
-        ComputeViewByteOffset(orig_call, sub->second->GetType(), views_->GetWindowRowStride(in_var));
+        ComputeViewByteOffset(orig_call, sub->second->GetType(), views_.GetWindowRowStride(in_var));
     auto new_mr = MakeAliasingMemRef(in_new, additional, out_mr->size_, out_mr->span_);
     // OutputMemoryInheritsInput also requires the view's memory space to follow its
     // input: if the retarget moved across memory spaces, carry the new space too.
@@ -3069,7 +3069,7 @@ class RetypeApplier : public IRMutator {
   std::map<VarPtr, VarPtr> var_substitution_;
   std::map<const IterArg*, VarPtr> initializers_;
   std::map<const Stmt*, std::vector<StmtPtr>> entries_;
-  std::optional<BufferViewAnalysis> views_;
+  BufferViewAnalysis views_;
 };
 
 }  // namespace
