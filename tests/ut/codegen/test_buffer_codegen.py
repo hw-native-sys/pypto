@@ -273,11 +273,9 @@ def test_native_gm_runtime_windows_and_valid_casts_remain_inside_loop(tmp_path):
     for partition in partitions:
         extent = re.search(r"sizes = \[(%\w+),", partition)
         assert extent is not None
-        cast = re.search(rf"{re.escape(extent[1])} = arith.index_cast (%\w+) : i64 to index", text)
+        cast = re.search(rf"{re.escape(extent[1])} = arith\.index_castui (%\w+) : i8 to index", text)
         assert cast is not None
-        widen = re.search(rf"{re.escape(cast[1])} = arith.extui (%\w+) : i8 to i64", text)
-        assert widen is not None
-        assert f"{widen[1]} = builtin.unrealized_conversion_cast %arg3 : ui8 to i8" in text
+        assert f"{cast[1]} = builtin.unrealized_conversion_cast %arg3 : ui8 to i8" in text
         assert text.index(cast[0]) > loop_position
     assert len(_allocations(text)) == 1
     # This checks native syntax and unsigned dataflow, not numerical execution.
@@ -780,8 +778,26 @@ def test_native_unsigned_address_and_valid_operands_use_signless_integer_casts(t
     text = _emit(program, False)
     assert "ui32 to i32" in text
     assert re.search(r"arith\.extui %\w+ : i32 to i64", text)
-    assert re.search(r"arith\.index_cast %\w+ : i64 to index", text)
-    assert not re.search(r"arith\.(extui|index_cast) %\w+ : ui32", text)
+    assert re.search(r"arith\.index_castui %\w+ : i32 to index", text)
+    assert not re.search(r"arith\.(extui|index_castui) %\w+ : ui32", text)
+    _compile_native(tmp_path, text, addressed=True)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "conversion"),
+    [
+        (DataType.INT16, "arith.extsi %arg0 : i16 to i64"),
+        (DataType.UINT64, "builtin.unrealized_conversion_cast %arg0 : ui64 to i64"),
+        (DataType.INDEX, "arith.index_cast %arg0 : index to i64"),
+    ],
+)
+def test_native_buffer_address_uses_i64_operand(tmp_path, dtype, conversion):
+    address = _scalar("address", dtype)
+    _, allocation = _alloc("storage", address=address)
+    text = _emit(_program([allocation], [address]))
+    allocated_address = re.search(r"addr = (%\w+)", text)
+    assert allocated_address is not None
+    assert f"{allocated_address[1]} = {conversion}" in text
     _compile_native(tmp_path, text, addressed=True)
 
 
@@ -797,11 +813,9 @@ def test_native_uint8_valid_extents_preserve_the_high_bit(tmp_path):
     updated_valid = re.search(r"pto\.set_validshape %\w+, %\w+, (%\w+)", text)
     assert allocated_valid is not None and updated_valid is not None
     for extent in (allocated_valid[1], updated_valid[1]):
-        index_cast = re.search(rf"{re.escape(extent)} = arith\.index_cast (%\w+) : i64 to index", text)
+        index_cast = re.search(rf"{re.escape(extent)} = arith\.index_castui (%\w+) : i8 to index", text)
         assert index_cast is not None
-        extension = re.search(rf"{re.escape(index_cast[1])} = arith\.extui (%\w+) : i8 to i64", text)
-        assert extension is not None
-        assert f"{extension[1]} = builtin.unrealized_conversion_cast %arg0 : ui8 to i8" in text
+        assert f"{index_cast[1]} = builtin.unrealized_conversion_cast %arg0 : ui8 to i8" in text
     assert not re.search(r"arith\.index_cast %\w+ : i8 to index", text)
     _compile_native(tmp_path, text, addressed=False)
 

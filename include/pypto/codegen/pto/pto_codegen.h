@@ -1018,7 +1018,6 @@ class PTOCodegen : public CodegenBase {
   static bool UsesBufferIR(const ir::FunctionPtr& func);
   void GenerateBufferFunction(const ir::FunctionPtr& func);
   bool TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& result = nullptr);
-  std::string EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataType target);
   std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs, const ir::ExprPtr& destination,
                                   const std::string& attributes = "");
   std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,

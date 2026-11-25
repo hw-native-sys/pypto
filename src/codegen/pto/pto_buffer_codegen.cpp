@@ -529,37 +529,6 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   stream_ << "  }\n";
 }
 
-std::string PTOCodegen::EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataType target) {
-  if (auto constant = As<ir::ConstInt>(expr)) return GetOrEmitConstant(constant->value_, target);
-  const auto type = As<ir::ScalarType>(expr->GetType());
-  INTERNAL_CHECK_SPAN(type, expr->span_) << "Internal error: buffer integer operand must be scalar";
-  std::string value = GetExprAsCode(expr);
-  if (type->dtype_ == target) return value;
-  std::string from = GetTypeString(type->dtype_);
-  if (type->dtype_.IsUnsignedInt()) {
-    const std::string signless = NewTemp();
-    const std::string signless_type = from.substr(1);
-    Emit(signless + " = builtin.unrealized_conversion_cast " + value + " : " + from + " to " + signless_type);
-    value = signless;
-    from = signless_type;
-    if (target == DataType::INT64 && type->dtype_.GetBit() == 64) return value;
-    if (target == DataType::INDEX && type->dtype_.GetBit() < 64) {
-      // index_cast sign-extends its input. Preserve the high bit of a narrow
-      // unsigned extent (for example UINT8 valid_col=200) before that cast.
-      const std::string widened = NewTemp();
-      Emit(widened + " = arith.extui " + value + " : " + from + " to i64");
-      value = widened;
-      from = "i64";
-    }
-  }
-  const std::string result = NewTemp();
-  const bool index_cast = target == DataType::INDEX || type->dtype_ == DataType::INDEX;
-  const std::string cast =
-      index_cast ? "arith.index_cast" : (type->dtype_.IsUnsignedInt() ? "arith.extui" : "arith.extsi");
-  Emit(result + " = " + cast + " " + value + " : " + from + " to " + GetTypeString(target));
-  return result;
-}
-
 std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,
                                             const ir::ExprPtr& destination, const std::string& attributes) {
   return BufferInsOutsClause(inputs, std::vector<ir::ExprPtr>{destination}, attributes);
@@ -615,12 +584,10 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const size_t first_native_axis = 2 - type->shape_.size();
     for (size_t axis = 0; axis < type->valid_shape_.size(); ++axis) {
       if (type->valid_shape_[axis] == -1) {
-        dimensions[first_native_axis + axis] =
-            EmitBufferIntegerOperand(valid->elements_[dynamic++], DataType::INDEX);
+        dimensions[first_native_axis + axis] = EmitArithOperand(valid->elements_[dynamic++], "index");
       }
     }
-    const std::string address =
-        call->args_.size() == 2 ? EmitBufferIntegerOperand(call->args_[1], DataType::INT64) : "";
+    const std::string address = call->args_.size() == 2 ? EmitArithOperand(call->args_[1], "i64") : "";
     const std::string name = NewNamedTemp(result->name_hint_);
     const std::string descriptor = BufferTypeString(type, call->span_);
     Emit(name + " = pto.alloc_tile" + (address.empty() ? "" : " addr = " + address) +
@@ -636,15 +603,15 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const std::string source_type = GetExprTypeAnnotation(call->args_[0]);
     if (ir::IsOp(call, "buffer.subview")) {
       const auto offsets = As<ir::MakeTuple>(call->args_[1]);
-      const auto row = EmitBufferIntegerOperand(offsets->elements_[0], DataType::INDEX);
-      const auto col = EmitBufferIntegerOperand(offsets->elements_[1], DataType::INDEX);
+      const auto row = EmitArithOperand(offsets->elements_[0], "index");
+      const auto col = EmitArithOperand(offsets->elements_[1], "index");
       // PTOAS types each result valid dimension from the explicit clause:
       // a constant operand for a static dimension, an SSA value for `?`.
       std::string valid;
       if (call->args_.size() == 3) {
         const auto extents = As<ir::MakeTuple>(call->args_[2]);
-        valid = " valid [" + EmitBufferIntegerOperand(extents->elements_[0], DataType::INDEX) + ", " +
-                EmitBufferIntegerOperand(extents->elements_[1], DataType::INDEX) + "]";
+        valid = " valid [" + EmitArithOperand(extents->elements_[0], "index") + ", " +
+                EmitArithOperand(extents->elements_[1], "index") + "]";
       }
       Emit(name + " = pto.subview " + source + "[" + row + ", " + col + "] sizes [" +
            std::to_string(type->shape_[0]) + ", " + std::to_string(type->shape_[1]) + "]" + valid + " : " +
@@ -659,7 +626,7 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     std::vector<std::string> dimensions;
     if (shape->elements_.size() == 1) dimensions.push_back(GetOrEmitConstant(int64_t{1}, DataType::INDEX));
     for (const auto& extent : shape->elements_) {
-      dimensions.push_back(EmitBufferIntegerOperand(extent, DataType::INDEX));
+      dimensions.push_back(EmitArithOperand(extent, "index"));
     }
     Emit("pto.set_validshape " + GetExprAsCode(call->args_[0]) + ", " + dimensions[0] + ", " + dimensions[1] +
          " : " + GetExprTypeAnnotation(call->args_[0]));
@@ -673,10 +640,10 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     std::vector<std::string> offset_values;
     std::vector<std::string> extent_values;
     for (const auto& offset : offsets->elements_) {
-      offset_values.push_back(EmitBufferIntegerOperand(offset, DataType::INDEX));
+      offset_values.push_back(EmitArithOperand(offset, "index"));
     }
     for (const auto& extent : extents->elements_) {
-      extent_values.push_back(EmitBufferIntegerOperand(extent, DataType::INDEX));
+      extent_values.push_back(EmitArithOperand(extent, "index"));
     }
     const auto type = As<ir::TensorType>(tensor->GetType());
     const std::string partition_type = backend::pto_ops_detail::MakePartitionTensorViewType(
@@ -732,8 +699,8 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
          BufferInsOutsClause(inputs, call->args_[2]) +
          FormatMatmulTf32Attr(call, GetBackendHandler()->GetPtoTargetArch()));
   } else if (ir::IsOp(call, "buffer.extract")) {
-    const std::string row = EmitBufferIntegerOperand(call->args_[1], DataType::INDEX);
-    const std::string col = EmitBufferIntegerOperand(call->args_[2], DataType::INDEX);
+    const std::string row = EmitArithOperand(call->args_[1], "index");
+    const std::string col = EmitArithOperand(call->args_[2], "index");
     Emit("pto.textract ins(" + GetExprAsCode(call->args_[0]) + ", " + row + ", " + col + " : " +
          GetExprTypeAnnotation(call->args_[0]) + ", index, index) outs(" + GetExprAsCode(call->args_[3]) +
          " : " + GetExprTypeAnnotation(call->args_[3]) + ")");
