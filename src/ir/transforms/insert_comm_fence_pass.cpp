@@ -149,7 +149,7 @@ ExprPtr PublishingWriteTarget(const CallPtr& call) {
   if (IsOp(call, "pld.tile.get") || IsOp(call, "pld.tensor.get")) {
     return call->args_.empty() ? nullptr : call->args_[0];  // (dst, ...) — local destination
   }
-  if (IsOp(call, "tile.store")) {
+  if (IsOp(call, "tile.store") || IsOp(call, "tile.store_fp")) {
     return call->args_.size() > 2 ? call->args_[2] : nullptr;  // (tile, indices, dst)
   }
   if (IsOp(call, "tensor.write")) {

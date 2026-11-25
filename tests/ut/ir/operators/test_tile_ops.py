@@ -10016,7 +10016,7 @@ def test_omitted_cache_policy_stays_absent():
 def test_move_to_fixpipe_scaling_requires_one_aligned_i64_row():
     for shape, dtype in [([2, 16], DataType.INT64), ([1, 8], DataType.INT64), ([1, 16], DataType.FP32)]:
         src = ir.Var("params", ir.TileType(shape, dtype, memory_space=ir.MemorySpace.Mat), ir.Span.unknown())
-        with pytest.raises((TypeError, ValueError), match="FIXPIPE scale"):
+        with pytest.raises((TypeError, ValueError), match="Fixpipe Scaling"):
             ir.op.tile.move(src, ir.MemorySpace.Scaling)
 
 
@@ -10041,6 +10041,7 @@ def test_fixpipe_move_checks_scale_coverage_and_dtype_pair():
     with pytest.raises((TypeError, ValueError), match="does not support FIXPIPE"):
         ir.op.tile.move_fp(acc, scale, dtype=DataType.FP32)
     out = ir.op.tile.move_fp(acc, scale, dtype=DataType.FP16)
+    assert isinstance(out.type, ir.TileType)
     assert out.type.dtype == DataType.FP16
     assert out.type.memory_space == ir.MemorySpace.Mat
 

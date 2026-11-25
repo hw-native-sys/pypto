@@ -1522,7 +1522,7 @@ REGISTER_OP("tile.store_fp")
       constexpr auto name = "tile.store_fp";
       CHECK(args.size() == 4) << name << " requires tile, offsets, output_tensor and scale";
       const auto offsets = As<MakeTuple>(args[1]);
-      const auto out = As<TensorType>(args[2]->GetType());
+      const auto out = AsTensorTypeLike(args[2]->GetType());
       CHECK_SPAN(out && out->shape_.size() == 2 && offsets && offsets->elements_.size() == 2 &&
                      (!out->tensor_view_ || out->tensor_view_->layout == TensorLayout::ND),
                  args[2]->span_)

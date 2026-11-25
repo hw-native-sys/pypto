@@ -38,6 +38,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -247,7 +248,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 // tile.store: emit pto.partition_view + pto.tstore
 static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  const bool has_vector_scale = op->op_->name_ == "tile.store_fp";
+  const bool has_vector_scale = ir::IsOp(op, "tile.store_fp");
   if (has_vector_scale) {
     CHECK_SPAN(codegen.EmitTileAddr(), op->span_)
         << "tile.store_fp requires a PyPTO memory planner to enforce the 4 KiB FIXPIPE limit";

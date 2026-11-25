@@ -21,6 +21,7 @@ import warnings
 
 import pypto
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
@@ -3824,6 +3825,27 @@ class TestFixpipeEpilogueCodegen:
         assert "TSTORE_FP" in cpp
         assert "TMOV_FP" in cpp
         assert "TileType::Scaling" in cpp
+
+    def test_a5_vector_fixpipe_distributed_store(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 64], pl.INT8],
+                rhs: pl.Tensor[[64, 32], pl.INT8],
+                scale: pl.Tensor[[1, 32], pl.UINT64],
+                out: pl.InOut[pld.DistributedTensor[[32, 32], pl.FP16]],
+            ):
+                fp_mat = pl.tile.load(scale, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+                fp = pl.tile.move(fp_mat, pl.Mem.Scaling)
+                a = pl.tile.load(lhs, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(pl.tile.move(a, pl.Mem.Left), pl.tile.move(b, pl.Mem.Right))
+                return pl.tile.store_fp(c, [0, 0], out, fp)
+
+        mlir = self._generate_mlir_all_incore(Prog, backend_type=BackendType.Ascend950)
+        assert re.search(r"pto\.tstore ins\(.* fp %.*loc=scaling", mlir), mlir
 
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_acc_to_mat_assemble_emits_pre_quant_clause_and_relu_attr(self, backend_type):
