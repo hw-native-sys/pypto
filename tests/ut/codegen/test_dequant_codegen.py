@@ -170,5 +170,96 @@ def test_dequant_assembles_a5(src_dtype, pto_dtype, width, offset_rows, coeff_co
         assert "pto.tsetval" in mlir
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    ("base_rows", "origin_row", "origin_col", "chained", "window_rows"),
+    [(16, 0, 0, False, 16), (32, 3, 4, False, 16), (32, 8, 8, True, 16), (32, 3, 4, False, 1)],
+)
+def test_dequant_transposed_coefficients(base_rows, origin_row, origin_col, chained, window_rows, tmp_path):
+    valid_cols = 2 if chained else 1
+
+    @pl.jit.incore
+    def kernel(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        offset: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        values = pl.tile.load(src, [0, 0], [16, 64])
+        scale_parent = pl.tile.transpose_view(pl.tile.load(scale, [0, 0], [base_rows, base_rows]))
+        offset_parent = pl.tile.transpose_view(pl.tile.load(offset, [0, 0], [base_rows, base_rows]))
+        scale_window = pl.tile.slice(
+            scale_parent, [window_rows, 16], [origin_row, origin_col], valid_shape=[valid_cols, 16]
+        )
+        offset_window = pl.tile.slice(
+            offset_parent, [window_rows, 16], [origin_row, origin_col], valid_shape=[valid_cols, 16]
+        )
+        scales = pl.tile.transpose_view(scale_window)
+        offsets = pl.tile.transpose_view(offset_window)
+        if chained:
+            scales = pl.tile.slice(scales, [16, 1], [0, 1])
+            offsets = pl.tile.slice(offsets, [16, 1], [0, 1])
+        return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)
+
+    @pl.jit
+    def program(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        offset: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        return kernel(src, scale, offset, out)
+
+    compiled = program.compile(
+        config=RunConfig(
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            save_kernels_dir=str(tmp_path),
+        )
+    )
+    mlir = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.pto"))
+    assert "pto.tgetval" in mlir
+    assert "pto.tsetval" in mlir
+    assert "pto.tdequant ins(" in mlir
+
+
+@pytest.mark.ptoas_compile
+def test_dequant_preserves_shared_coefficient_view(tmp_path):
+    @pl.jit.incore
+    def kernel(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[32, 1], pl.FP32],
+        offset: pl.Tensor[[16, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        values = pl.tile.load(src, [0, 0], [16, 64])
+        scales = pl.tile.slice(pl.tile.load(scale, [0, 0], [32, 1]), [16, 1], [0, 0])
+        offsets = pl.tile.load(offset, [0, 0], [16, 1])
+        result = pl.tile.dequant(values, scales, offsets)
+        # The original view is still read independently after dequantization.
+        pl.tile.write(result, [0, 0], pl.tile.read(scales, [0, 0]))
+        return pl.tile.store(result, [0, 0], out)
+
+    @pl.jit
+    def program(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[32, 1], pl.FP32],
+        offset: pl.Tensor[[16, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        return kernel(src, scale, offset, out)
+
+    compiled = program.compile(
+        config=RunConfig(
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            save_kernels_dir=str(tmp_path),
+        )
+    )
+    mlir = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.pto"))
+    assert "pto.subview" in mlir
+    assert "pto.tdequant ins(" in mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

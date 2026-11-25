@@ -31,7 +31,10 @@ For A5 `tile.dequant`, the native instruction requires a single tile type for bo
 When either coefficient refers to a slice or other metadata view, both are copied at the consumer into matching
 aligned FP32 column tiles.
 Scalar reads and writes preserve each view's source pitch, offset, and valid rows, including explicitly narrowed
-valid shapes and unaligned windows.
+valid shapes and unaligned windows. Transpose views, vector reshapes that swap axes, and rank-reduced column slices
+preserve the corresponding parent coordinate mapping, including offsets introduced by later chained slices.
+This normalization runs before generic slice materialization, and removes only the original pure coefficient-view
+ancestors whose values have no remaining consumers.
 
 **Pipeline position**: After [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](22-infer_tile_memory_space.md).
 

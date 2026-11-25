@@ -102,8 +102,128 @@ def _dequant_cases():
         )
 
 
+def _dequant_transpose_program(base_rows, origin_row, origin_col, chained, window_rows):
+    valid_cols = 2 if chained else 1
+
+    @pl.jit.incore
+    def kernel(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        offset: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        values = pl.tile.load(src, [0, 0], [16, 64])
+        scale_parent = pl.tile.transpose_view(pl.tile.load(scale, [0, 0], [base_rows, base_rows]))
+        offset_parent = pl.tile.transpose_view(pl.tile.load(offset, [0, 0], [base_rows, base_rows]))
+        scale_window = pl.tile.slice(
+            scale_parent, [window_rows, 16], [origin_row, origin_col], valid_shape=[valid_cols, 16]
+        )
+        offset_window = pl.tile.slice(
+            offset_parent, [window_rows, 16], [origin_row, origin_col], valid_shape=[valid_cols, 16]
+        )
+        scales = pl.tile.transpose_view(scale_window)
+        offsets = pl.tile.transpose_view(offset_window)
+        if chained:
+            scales = pl.tile.slice(scales, [16, 1], [0, 1])
+            offsets = pl.tile.slice(offsets, [16, 1], [0, 1])
+        return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)
+
+    @pl.jit
+    def program(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        offset: pl.Tensor[[base_rows, base_rows], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        return kernel(src, scale, offset, out)
+
+    return program
+
+
+def _dequant_transpose_cases():
+    for base_rows, origin_row, origin_col, chained, window_rows in (
+        (16, 0, 0, False, 16),
+        (32, 3, 4, False, 16),
+        (32, 8, 8, True, 16),
+        (32, 3, 4, False, 1),
+    ):
+        indices = torch.arange(base_rows, dtype=torch.float32)
+        scale = indices[:, None] * 100 + indices[None, :] + 1
+        offset = torch.zeros_like(scale) if base_rows == 16 else indices[:, None] * 2 + indices[None, :]
+        column = origin_row + int(chained)
+        yield st.case(
+            _dequant_transpose_program(base_rows, origin_row, origin_col, chained, window_rows),
+            torch.ones((16, 64), dtype=torch.int8),
+            scale,
+            offset,
+            torch.empty((16, 64), dtype=torch.float32),
+            name=f"int8_transpose_view_{base_rows}_{origin_row}_{origin_col}_{chained}_{window_rows}",
+            golden=lambda t, row=origin_col, col=column: (
+                t["src"].float() - t["offset"][row : row + 16, col : col + 1]
+            )
+            * t["scale"][row : row + 16, col : col + 1],
+            rtol=0,
+            atol=0,
+        )
+
+
+def _dequant_vector_view_program(drop_axis):
+    @pl.jit.incore
+    def kernel(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[32, 32], pl.FP32],
+        offset: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        values = pl.tile.load(src, [0, 0], [16, 64])
+        scales = pl.tile.load(scale, [0, 0], [32, 32])
+        offsets = pl.tile.load(offset, [0, 0], [32, 32])
+        if drop_axis:
+            scale_window = pl.tile.slice(scales, [16, 1], [4, 3], drop_dims=[1])
+            offset_window = pl.tile.slice(offsets, [16, 1], [4, 3], drop_dims=[1])
+            scales = pl.tile.transpose_view(scale_window)
+            offsets = pl.tile.transpose_view(offset_window)
+        else:
+            scale_window = pl.tile.slice(scales, [1, 16], [3, 4])
+            offset_window = pl.tile.slice(offsets, [1, 16], [3, 4])
+            scales = pl.tile.reshape(scale_window, [16, 1])
+            offsets = pl.tile.reshape(offset_window, [16, 1])
+        return pl.tile.store(pl.tile.dequant(values, scales, offsets), [0, 0], out)
+
+    @pl.jit
+    def program(
+        src: pl.Tensor[[16, 64], pl.INT8],
+        scale: pl.Tensor[[32, 32], pl.FP32],
+        offset: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        return kernel(src, scale, offset, out)
+
+    return program
+
+
+def _dequant_vector_view_cases():
+    indices = torch.arange(32, dtype=torch.float32)
+    scale = indices[:, None] * 100 + indices[None, :] + 1
+    offset = indices[:, None] * 2 + indices[None, :]
+    for drop_axis in (False, True):
+        window = (slice(4, 20), slice(3, 4)) if drop_axis else (slice(3, 4), slice(4, 20))
+        yield st.case(
+            _dequant_vector_view_program(drop_axis),
+            torch.ones((16, 64), dtype=torch.int8),
+            scale,
+            offset,
+            torch.empty((16, 64), dtype=torch.float32),
+            name=f"int8_vector_view_drop_axis_{drop_axis}",
+            golden=lambda t, window=window: (t["src"].float() - t["offset"][window].reshape(16, 1))
+            * t["scale"][window].reshape(16, 1),
+            rtol=0,
+            atol=0,
+        )
+
+
 @pytest.mark.platforms("a5")
-@st.cases(*_dequant_cases())
+@st.cases(*_dequant_cases(), *_dequant_transpose_cases(), *_dequant_vector_view_cases())
 def test_dequantization(case_run):
     case_run.assert_passed()
 
