@@ -1993,8 +1993,9 @@ jobs:
       needs.changes.outputs.ptoas_version_changed == 'true'
     permissions:
       contents: read
-    uses: hw-native-sys/pypto-serving/.github/workflows/serving-guard-a2a3.yml@main
+    uses: hw-native-sys/pypto-serving/.github/workflows/ci.yml@main
     with:
+      platform: a2a3
       pypto-repository: ${{ github.repository }}
       pypto-revision: ${{ needs.changes.outputs.checkout_sha }}
 
@@ -2010,8 +2011,9 @@ jobs:
       needs.changes.outputs.ptoas_version_changed == 'true'
     permissions:
       contents: read
-    uses: hw-native-sys/pypto-serving/.github/workflows/serving-guard-a5.yml@main
+    uses: hw-native-sys/pypto-serving/.github/workflows/ci.yml@main
     with:
+      platform: a5
       pypto-repository: ${{ github.repository }}
       pypto-revision: ${{ needs.changes.outputs.checkout_sha }}
 

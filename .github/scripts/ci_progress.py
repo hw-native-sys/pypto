@@ -32,6 +32,7 @@ API_RESERVE = 200
 POLL_REQUESTS_PER_HOUR = 500
 MONITOR_SECONDS = 5 * 60 * 60
 HIDDEN_JOBS = {"changes", "toolchain", "lint-gate", "pre-commit", "clang-tidy", "full-result"}
+SERVING_JOBS = {"serving-guard-a2a3": "unit-tests", "serving-guard-a5": "v41-a5-smoke"}
 STATUS_SOURCE = re.compile(r"Full CI ([1-9][0-9]*) attempt ([1-9][0-9]*): .+")
 
 
@@ -51,8 +52,9 @@ def job_context(name: str) -> str:
     """Keep matrix legs distinct even when a long name must be shortened."""
     # Actions adds the called workflow's job name when the guard runs, while
     # a skipped call can have just the caller name. Publish one context for both.
-    if name in {"serving-guard-a2a3 / guard", "serving-guard-a5 / guard"}:
-        name = name.partition(" / ")[0]
+    caller, _, child = name.partition(" / ")
+    if SERVING_JOBS.get(caller) == child:
+        name = caller
     context = f"full / {name}"
     if len(context) <= 100:
         return context
@@ -80,6 +82,15 @@ def sync_jobs(
     jobs = control.effective_jobs(repo, run)
     writes = 0
     for job in jobs:
+        caller, _, child = job["name"].partition(" / ")
+        # The two calls select different jobs from the same serving workflow.
+        if (
+            caller in SERVING_JOBS
+            and child
+            and child != SERVING_JOBS[caller]
+            and job.get("conclusion") == "skipped"
+        ):
+            continue
         if job["name"] in HIDDEN_JOBS:
             continue
         context = job_context(job["name"])

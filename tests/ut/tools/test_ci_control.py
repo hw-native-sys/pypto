@@ -122,12 +122,26 @@ def test_warmup_failure_does_not_hide_successful_tests(control, needs, job):
 def test_applicable_conditional_job_must_run(control, needs, job, flag, result):
     for name in control.CONDITIONAL:
         needs[name]["result"] = "success"
+    for guard, output in control.SERVING_RESULTS.items():
+        needs[guard]["outputs"] = {output: "success"}
     needs[job]["result"] = result
     needs["changes"]["outputs"][flag] = "true"
     with pytest.raises(ValueError, match=job):
         control.aggregate(needs)
     needs[job]["result"] = "success"
     control.aggregate(needs)
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("actual", ["skipped", "failure", None])
+def test_successful_call_requires_its_selected_serving_job(control, needs, platform, actual):
+    needs["changes"]["outputs"]["ptoas_version_changed"] = "true"
+    for name, output in control.SERVING_RESULTS.items():
+        needs[name] = {"result": "success", "outputs": {output: "success"}}
+    name = f"serving-guard-{platform}"
+    needs[name]["outputs"] = {f"{platform}-result": actual} if actual else {}
+    with pytest.raises(ValueError, match=name):
+        control.aggregate(needs)
 
 
 def test_unknown_classification_blocks_merge(control, needs):
@@ -872,10 +886,8 @@ def test_workflow_wiring_covers_every_full_job(control):
                 assert step["with"]["checkout-ref"] == "${{ needs.changes.outputs.checkout_sha }}"
     for platform in ("a2a3", "a5"):
         guard = jobs[f"serving-guard-{platform}"]
-        assert (
-            guard["uses"]
-            == f"hw-native-sys/pypto-serving/.github/workflows/serving-guard-{platform}.yml@main"
-        )
+        assert guard["uses"] == "hw-native-sys/pypto-serving/.github/workflows/ci.yml@main"
+        assert guard["with"]["platform"] == platform
         assert guard["with"]["pypto-revision"] == "${{ needs.changes.outputs.checkout_sha }}"
         assert "needs.changes.outputs.ptoas_version_changed == 'true'" in guard["if"]
     # The full aggregate itself is not the required context: it is attached to
