@@ -32,7 +32,7 @@ def quant(src: Tile, scale: Tile, offset: Tile | None = None) -> Tile:
             divisible by 32 and cover the valid column count rounded up to 64.
             For runtime valid columns, the physical column count must be a
             multiple of 64. Use a padded tile load to keep a smaller valid width.
-        scale: Unboxed FP32 column tile with one coefficient per valid source row.
+        scale: Column-major unboxed FP32 tile with one coefficient per valid source row.
         offset: Optional FP32 column tile with the same shape and layout as scale.
 
     Returns:

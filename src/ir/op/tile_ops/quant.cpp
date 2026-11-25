@@ -11,6 +11,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,9 +43,9 @@ void CheckQuantParameter(const TileTypePtr& tile, const TileView& view, const Ex
   auto physical_cols = As<ConstInt>(tile->shape_[1]);
   auto parameter_cols = As<ConstInt>(view.valid_shape[1]);
   CHECK_SPAN(physical_cols && physical_cols->value_ == 1 && parameter_cols && parameter_cols->value_ == 1 &&
-                 view.slayout == TileLayout::none_box,
+                 view.blayout == TileLayout::col_major && view.slayout == TileLayout::none_box,
              span)
-      << "tile.quant requires " << role << " to be an unboxed [rows, 1] column tile";
+      << "tile.quant requires " << role << " to be an unboxed column-major [rows, 1] column tile";
   CHECK_SPAN(AreExprsEqual(view.valid_shape[0], valid_rows), span)
       << "tile.quant requires " << role << " to have the same valid row count as the source";
 }

@@ -627,19 +627,6 @@ UINT32 + INT32 → INT32 (signed precedence)
 数据算子 API、扁平 gather、有效区域语义、Tile 布局与掩码模式，参见
 [Tensor 与 Tile 算子](05-tensor-tile-ops.md)。
 
-### A5 逐行量化
-
-`tile.quant(src, scale[, offset])` 返回与源 tile 的物理形状和有效形状一致的 8 位 Vec
-tile。源 tile 为行主序无分形 FP32，物理列数须为 32 的倍数。每次原生加载读取 64 个
-FP32 元素，因此物理列数必须覆盖向上对齐到 64 的有效列数。有效列数为动态值时，物理列数
-须为 64 的倍数。可以通过带填充的 tile 加载和 `valid_shape` 保留较小的有效列数。
-Scale 和可选的 offset 为无分形 FP32 列 tile，每个有效源行对应一个参数。两个参数的物理
-类型须一致。
-
-对称形式使用 `pto.tquant` 的 `INT8_SYM`，将 `src * scale` 舍入并饱和到 INT8。
-非对称形式使用 `INT8_ASYM`，将 `src * scale + offset` 舍入并饱和到 UINT8。
-两种形式均采用最近偶数舍入。
-
 ## SyncOp：同步操作
 
 **用途**：硬件同步与屏障，以及共用 `system.` 命名空间的 TaskId 与 SPMD 启动形状查询

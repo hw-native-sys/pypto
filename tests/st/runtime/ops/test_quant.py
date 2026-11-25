@@ -128,3 +128,7 @@ def _quant_cases():
 @st.cases(*_quant_cases())
 def test_quant(case_run):
     case_run.assert_passed()
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

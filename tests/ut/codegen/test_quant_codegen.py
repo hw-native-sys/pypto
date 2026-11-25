@@ -20,7 +20,7 @@ from pypto.runtime import RunConfig
 @pytest.mark.parametrize(
     ("offset_shape", "offset_dtype", "message"),
     [
-        ((16, 2), pl.FP32, r"unboxed \[rows, 1\]"),
+        ((16, 2), pl.FP32, r"unboxed column-major \[rows, 1\]"),
         ((8, 1), pl.FP32, "same valid row count"),
         ((16, 1), pl.FP16, "rank-2 FP32 offset"),
     ],
@@ -35,17 +35,42 @@ def test_quant_rejects_invalid_offset(offset_shape, offset_dtype, message):
         ir.op.tile.quant(src, scale, offset)
 
 
+def _const_value(dim: ir.Expr) -> int:
+    assert isinstance(dim, ir.ConstInt)
+    return dim.value
+
+
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_quant_rejects_row_major_coefficients(asymmetric):
+    span = ir.Span.unknown()
+    src = ir.Var("src", ir.TileType([16, 64], pl.FP32), span)
+    row_major = ir.TileView(valid_shape=[16, 1], blayout=ir.TileLayout.row_major)
+    bad = ir.Var("bad", ir.TileType([16, 1], pl.FP32, tile_view=row_major), span)
+    scale = ir.Var("scale", ir.TileType([16, 1], pl.FP32), span)
+    with pytest.raises(ValueError, match="column-major"):
+        if asymmetric:
+            ir.op.tile.quant(src, scale, bad)
+        else:
+            ir.op.tile.quant(src, bad)
+
+
 def test_quant_preserves_valid_shape():
     span = ir.Span.unknown()
     src = ir.Var("src", ir.TileType([16, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[10, 47])), span)
-    scale = ir.Var("scale", ir.TileType([16, 1], pl.FP32, tile_view=ir.TileView(valid_shape=[10, 1])), span)
+    scale = ir.Var(
+        "scale",
+        ir.TileType(
+            [16, 1], pl.FP32, tile_view=ir.TileView(valid_shape=[10, 1], blayout=ir.TileLayout.col_major)
+        ),
+        span,
+    )
     result_type = ir.op.tile.quant(src, scale).type
 
     assert isinstance(result_type, ir.TileType)
     assert result_type.dtype == pl.INT8
-    assert [dim.value for dim in result_type.shape] == [16, 64]
+    assert [_const_value(dim) for dim in result_type.shape] == [16, 64]
     assert result_type.tile_view is not None
-    assert [dim.value for dim in result_type.tile_view.valid_shape] == [10, 47]
+    assert [_const_value(dim) for dim in result_type.tile_view.valid_shape] == [10, 47]
 
 
 @pytest.mark.parametrize(
@@ -78,7 +103,7 @@ def test_quant_requires_source_pitch_for_full_vector_reads(physical_cols, valid_
 
     result_type = ir.op.tile.quant(src, scale).type
     assert isinstance(result_type, ir.TileType)
-    assert result_type.shape[1].value == physical_cols
+    assert _const_value(result_type.shape[1]) == physical_cols
 
 
 @pytest.mark.ptoas_compile
@@ -115,3 +140,7 @@ def test_quant_assembles_a5(asymmetric, dst_dtype, mode, tmp_path):
     mlir = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.pto"))
     assert "pto.tquant ins(" in mlir
     assert f"quant_type = #pto<quant_type {mode}>" in mlir
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
