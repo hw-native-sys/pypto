@@ -353,3 +353,21 @@ Tensor sources are copied as raw bytes at domain creation, with no dtype convers
 They must contain at least the logical window size. Keep their storage and contents
 stable until initialization completes. Runtime capability checks run during worker
 setup rather than on each submit.
+
+## Creating a worker-owned communication domain
+
+List local worker indices in domain-rank order and supply one source per member for each host-backed buffer. In this example each source supplies 65 bytes and each slot occupies 128 bytes. Leaving the domain context releases the allocation.
+
+```python
+from pypto import DataType
+from pypto.runtime import DistributedWorker, DomainBufferSpec
+
+with DistributedWorker([prefill, decode]) as worker:
+    with worker.create_comm_domain(
+        members=[0, 1],
+        buffers=[DomainBufferSpec("weights", (1, 65), DataType.UINT8)],
+        memory_source="host",
+        window_sources={"weights": [rank0_file, rank1_file]},
+    ) as domain:
+        weights = domain.tensor("weights")
+```

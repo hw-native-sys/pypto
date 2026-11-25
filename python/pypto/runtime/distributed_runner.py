@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, cast
 import numpy as np
 import torch
 
+from .comm_domain import CommDomain, DomainBufferSpec, allocate_external_domain
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .runtime_base import Worker
 from .window_sources import normalize_window_sources
@@ -2036,7 +2037,7 @@ class DistributedWorker(Worker):
         self._persistent_error: BaseException | None = None
         self._persistent_error_reported = False
         self._persistent_domains_by_program: dict[str, dict[str, tuple[tuple[Any, ...], Any]]] = {}
-        self._dispatch_submit_mu = threading.Lock()
+        self._init_external_domains()
         self._dispatch_cv = threading.Condition()
         self._dispatch_frames = [_DispatchFrame(slot_id) for slot_id in range(2)]
         self._active_dispatch_handles: set[DistributedRunHandle] = set()
@@ -3412,10 +3413,10 @@ class DistributedWorker(Worker):
                     first_error = exc
 
     def close(self) -> None:
-        """Release runtime resources, retrying incomplete Worker cleanup."""
+        """Drain registered runs and release all worker-owned resources."""
         # Serialize the admission transition with submit() and prevent two
         # callers from running teardown concurrently.
-        with self._dispatch_submit_mu:
+        with self._domain_gate, self._dispatch_submit_mu:
             if self._close_complete or self._closing:
                 return
             self._w.check_exports_retired()
@@ -3456,12 +3457,16 @@ class DistributedWorker(Worker):
                 for handle in list(self._handles):
                     handle._mark_closed()
                 self._handles.clear()
+            with self._domain_gate:
+                first_error = self._free_external_domains(first_error)
             try:
                 self._w.close()
             except BaseException as exc:  # noqa: BLE001 - report after local teardown
                 first_error = self._remember_close_error(first_error, exc)
             else:
-                self._close_complete = True
+                with self._domain_gate:
+                    first_error = self._free_external_domains(first_error, worker_closed=True)
+                    self._close_complete = not (self._external_domains or self._external_cleanup)
                 self._close_swimlane_session()
             finally:
                 self._inherited_host_tensors = ()
@@ -3510,8 +3515,62 @@ class DistributedWorker(Worker):
         Returns:
             A handle that owns the dispatch lifetime and cached outcome.
         """
-        with self._dispatch_submit_mu:
+        with self._domain_gate, self._dispatch_submit_mu:
             return self._submit_compiled(compiled, *args, config=config)
+
+    def create_comm_domain(
+        self,
+        *,
+        members: Sequence[int],
+        buffers: Sequence[DomainBufferSpec],
+        memory_source: str = "device",
+        workspace_engines: Sequence[str] = (),
+        window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
+    ) -> CommDomain:
+        """Create and synchronously initialize a retained, worker-owned communication domain."""
+        with self._domain_gate:
+            self._require_open("create_comm_domain")
+            if self._closing:
+                raise RuntimeError("cannot create a communication domain while worker is closing")
+            error = self._drain_dispatch_handles()
+            if error is not None:
+                raise error
+            return allocate_external_domain(
+                self, members, buffers, memory_source, workspace_engines, window_sources
+            )
+
+    def _init_external_domains(self) -> None:
+        # This gate serializes control operations and submission admission. Completion
+        # callbacks use only _dispatch_cv and never need the control gate.
+        self._dispatch_submit_mu = threading.Lock()
+        self._domain_gate = threading.RLock()
+        self._external_domains: dict[Any, CommDomain] = {}
+        self._external_cleanup: set[CommDomain] = set()
+        self._next_external_domain = 0
+
+    def _free_external_domains(
+        self, first_error: BaseException | None, *, worker_closed: bool = False
+    ) -> BaseException | None:
+        for domain in set(self._external_domains.values()) | self._external_cleanup:
+            try:
+                if worker_closed:
+                    domain._after_worker_close()
+                else:
+                    domain._free()
+            except BaseException as exc:
+                first_error = self._remember_close_error(first_error, exc)
+            else:
+                if domain._ref is not None:
+                    self._external_domains.pop(domain._ref, None)
+                self._external_cleanup.discard(domain)
+        return first_error
+
+    def _release_external_domain(self, domain: CommDomain) -> None:
+        with self._domain_gate:
+            if domain._state == "released":
+                return
+            domain._free()
+            self._external_domains.pop(domain.ref, None)
 
     def run(
         self,

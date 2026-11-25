@@ -317,3 +317,21 @@ Rank 列表也可以包含连续 CPU `torch.Tensor`，例如
 `window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`，或混合文件与 tensor。
 Tensor 在创建域时按原始字节复制，不转换 dtype；来源至少包含窗口逻辑字节数。
 初始化完成前须保持来源的存储与内容稳定。运行时能力检查在 worker 初始化阶段完成，不在每次 submit 重复执行。
+
+## 创建由 worker 持有的通信域
+
+按域内 rank 顺序列出本地 worker 下标。对每个 Host 缓冲区，按这个顺序为每个成员提供一份源数据。本例中每份源数据为 65 字节，每个物理槽占 128 字节。退出域的上下文时会释放分配。
+
+```python
+from pypto import DataType
+from pypto.runtime import DistributedWorker, DomainBufferSpec
+
+with DistributedWorker([prefill, decode]) as worker:
+    with worker.create_comm_domain(
+        members=[0, 1],
+        buffers=[DomainBufferSpec("weights", (1, 65), DataType.UINT8)],
+        memory_source="host",
+        window_sources={"weights": [rank0_file, rank1_file]},
+    ) as domain:
+        weights = domain.tensor("weights")
+```
