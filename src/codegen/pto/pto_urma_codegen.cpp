@@ -10,164 +10,21 @@
  */
 
 #include <algorithm>
-#include <map>
-#include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/op_registry.h"
-#include "pypto/ir/transforms/base/visitor.h"
 
 namespace pypto::codegen {
 namespace {
 
-using ir::As;
-using ir::AssignStmtPtr;
-using ir::AsVarLike;
-using ir::AsyncEventType;
-using ir::AsyncSessionType;
-using ir::BreakStmtPtr;
-using ir::Call;
-using ir::CallPtr;
-using ir::ContinueStmtPtr;
-using ir::ExprPtr;
-using ir::ForStmtPtr;
-using ir::IfStmtPtr;
-using ir::IRVisitor;
-using ir::IsA;
-using ir::ReturnStmtPtr;
-using ir::StmtPtr;
-using ir::TupleGetItemExpr;
-using ir::TupleType;
-using ir::Var;
-using ir::VarPtr;
-using ir::WhileStmtPtr;
-
 constexpr char kSession[] = "!emitc.opaque<\"simpler::urma::UrmaSession\">";
 constexpr char kSessionPtr[] = R"(!emitc.ptr<!emitc.opaque<"simpler::urma::UrmaSession">>)";
 
-// Track the identity of each submission through SSA copies and tuple projections.
-// The combined Simpler request transfers ownership at the GET, so every execution
-// of that GET must also reach its unique completion marker.
-class UrmaEventPlanner : public IRVisitor {
- public:
-  explicit UrmaEventPlanner(std::map<const Var*, VarPtr>& destinations) : destinations_(destinations) {}
-
-  void Check(const StmtPtr& body) { VisitRegion(body); }
-
- private:
-  void VisitRegion(const StmtPtr& body) {
-    auto enclosing = std::move(pending_);
-    pending_.clear();
-    VisitStmt(body);
-    CHECK_SPAN(pending_.empty(), body->span_)
-        << "pld.tile.get_async requires a matching defer_wait_event in the same branch and loop iteration";
-    pending_ = std::move(enclosing);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    VisitExpr(op->condition_);
-    VisitRegion(op->then_body_);
-    if (op->else_body_) VisitRegion(*op->else_body_);
-  }
-  void VisitLoop(const StmtPtr& body) {
-    const auto enclosing = pending_in_loop_;
-    pending_in_loop_ = 0;
-    VisitRegion(body);
-    pending_in_loop_ = enclosing;
-  }
-  void VisitStmt_(const ForStmtPtr& op) override { VisitLoop(op->body_); }
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    VisitExpr(op->condition_);
-    VisitLoop(op->body_);
-  }
-
-  void VisitStmt_(const ReturnStmtPtr& op) override {
-    CHECK_SPAN(pending_total_ == 0, op->span_)
-        << "tile.get_async requires a matching defer_wait_event before return";
-    IRVisitor::VisitStmt_(op);
-  }
-  void VisitStmt_(const BreakStmtPtr& op) override {
-    CHECK_SPAN(pending_in_loop_ == 0, op->span_)
-        << "break can bypass the defer_wait_event for tile.get_async";
-  }
-  void VisitStmt_(const ContinueStmtPtr& op) override {
-    CHECK_SPAN(pending_in_loop_ == 0, op->span_)
-        << "continue can bypass the defer_wait_event for tile.get_async";
-  }
-
-  struct Definition {
-    const Var* binding;
-    ExprPtr value;
-  };
-
-  Definition Resolve(const ExprPtr& expr) const {
-    auto var = AsVarLike(expr);
-    if (var) {
-      auto it = definitions_.find(var.get());
-      if (it != definitions_.end()) return it->second;
-    }
-    return {var.get(), expr};
-  }
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    auto definition = Resolve(op->value_);
-    if (IsA<TupleType>(op->var_->GetType()) || IsA<AsyncEventType>(op->var_->GetType()) ||
-        IsA<AsyncSessionType>(op->var_->GetType())) {
-      if (!definition.binding) definition.binding = op->var_.get();
-      definitions_[op->var_.get()] = definition;
-    }
-    if (IsOp(As<Call>(op->value_), "pld.tile.get_async")) {
-      pending_.insert(op->var_.get());
-      ++pending_total_;
-      ++pending_in_loop_;
-      return;
-    }
-    if (auto item = As<TupleGetItemExpr>(definition.value); item && item->index_ == 0) {
-      auto get = As<Call>(Resolve(item->tuple_).value);
-      if (IsOp(get, "pld.tile.get_async")) destinations_[op->var_.get()] = AsVarLike(get->args_[0]);
-    }
-    VisitExpr(op->value_);
-  }
-
-  void VisitExpr_(const CallPtr& op) override {
-    CHECK_SPAN(!IsOp(op, "pld.tile.get_async"), op->span_)
-        << "tile.get_async requires a matching defer_wait_event on its event result";
-    CHECK_SPAN(!IsOp(op, "pld.system.wait_event"), op->span_)
-        << "pld.system.wait_event is not supported by URMA codegen";
-    if (IsOp(op, "pld.system.defer_wait_event")) {
-      auto item = As<TupleGetItemExpr>(Resolve(op->args_[0]).value);
-      auto tuple = item && item->index_ == 1 ? Resolve(item->tuple_) : Definition{};
-      CHECK_SPAN(pending_.erase(tuple.binding) == 1, op->span_)
-          << "defer_wait_event requires one preceding tile.get_async in the same branch and loop iteration";
-      --pending_total_;
-      --pending_in_loop_;
-      if (op->args_.size() == 2) {
-        auto get = As<Call>(tuple.value);
-        INTERNAL_CHECK_SPAN(Resolve(op->args_[1]).binding == Resolve(get->args_[3]).binding, op->span_)
-            << "defer_wait_event requires the same session that submitted the GET";
-      }
-    }
-    IRVisitor::VisitExpr_(op);
-  }
-
-  std::map<const Var*, Definition> definitions_;
-  std::set<const Var*> pending_;
-  size_t pending_total_ = 0;
-  size_t pending_in_loop_ = 0;
-  std::map<const Var*, VarPtr>& destinations_;
-};
-
 }  // namespace
-
-void PTOCodegen::PlanUrmaEventCompletions(const ir::StmtPtr& body) {
-  UrmaEventPlanner(fs_.urma_destination_aliases).Check(body);
-}
 
 void PTOCodegen::EmitUrmaMakeSession(const ir::CallPtr& op) {
   CHECK_SPAN(GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_)
@@ -187,6 +44,8 @@ void PTOCodegen::EmitUrmaScatterGet(const ir::CallPtr& op) {
   const auto dst = ir::AsVarLike(op->args_[0]);
   const auto src = ir::AsVarLike(op->args_[2]);
   INTERNAL_CHECK_SPAN(dst && src, op->span_) << "Scatter GET endpoints must be materialized tensor variables";
+  // The first tuple element borrows the submitted destination's view and storage.
+  fs_.urma_get_destinations[GetCurrentResultVar().get()] = dst;
   const auto type = ir::AsTensorTypeLike(dst->GetType());
   const auto bits = type->dtype_.GetBit();
   CHECK_SPAN(bits >= 8 && bits % 8 == 0, op->span_) << "pld.tile.get_async requires byte-sized elements";

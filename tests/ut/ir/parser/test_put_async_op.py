@@ -16,6 +16,8 @@ compile-time ``engine`` kwarg. The printer restores the enum spelling
 losing the engine or the destination alias.
 """
 
+from textwrap import indent
+
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -229,6 +231,49 @@ class P:
         if isinstance(expr, ir.Call) and expr.op.name in (op, wait, access):
             ordered.append(expr.op.name)
     assert ordered == [op, wait, access] * stage
+
+
+@pytest.mark.parametrize("completion", ["wait_event", "defer_wait_event"])
+@pytest.mark.parametrize(
+    ("body", "diagnostic"),
+    [
+        ("GET", "exactly one"),
+        ("GET\nDONE\nDONE", "unconsumed"),
+        ("GET\nif peer > 0:\n    DONE", "same branch"),
+        ("GET\nfor i in pl.range(peer):\n    DONE", "same branch"),
+        (
+            "for i in pl.range(peer):\n    GET\n    if peer > 1:\n        break\n    DONE",
+            "can exit",
+        ),
+        (
+            "for i in pl.range(peer):\n    GET\n    if peer > 1:\n        continue\n    DONE",
+            "can exit",
+        ),
+        ("GET\nif peer > 0:\n    return\nDONE", "can exit"),
+        ("for i in pl.range(peer):\n    if i > 0:\n        GET\n        DONE", None),
+        (
+            "GET\nfor i in pl.range(peer):\n    if i > 0:\n        break\nDONE",
+            None,
+        ),
+    ],
+)
+def test_verifier_pairs_tile_get_in_its_branch_and_iteration(ascend_backend, completion, body, diagnostic):
+    body = body.replace("GET", "_, event = pld.tile.get_async(dst, peer, src, session)")
+    body = body.replace("DONE", f"pld.system.{completion}(event)")
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32],
+               peer: pl.Scalar[pl.INT32]):
+        session = pld.system.make_session(pld.system.get_comm_ctx(src))
+{indent(body, " " * 8)}
+""")
+    if diagnostic is None:
+        _verify_through_ssa(program)
+    else:
+        with pytest.raises(Error, match=f"(?s)after 'ConvertToSSA'.*AsyncHandleProvenance.*{diagnostic}"):
+            _verify_through_ssa(program)
 
 
 def test_tile_get_event_reuses_session_for_dynamic_peers(ascend_backend):

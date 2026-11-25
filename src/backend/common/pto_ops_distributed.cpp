@@ -1569,7 +1569,7 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
     AsPto(backend).EmitUrmaScatterGet(op);
     return std::string{};
   });
-  // PlanUrmaEventCompletions verified the matching GET. Its helper has already registered completion.
+  // The verifier pairs the event with its GET, whose helper registers completion at submission.
   reg("pld.system.defer_wait_event", [](const ir::CallPtr&, codegen::CodegenBase&) { return std::string{}; });
   // V1 asynchronous URMA transfer, emitted straight from the tensor-level op
   // (no tile staging, no lower-to-tile step).

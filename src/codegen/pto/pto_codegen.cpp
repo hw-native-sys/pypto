@@ -904,7 +904,6 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// the hidden raw dispatch-args parameter shared with deferred completion and
   /// the wrapper-defined URMA transfer adapter.
   [[nodiscard]] bool UsesUrmaTransfer() const { return uses_urma_transfer_; }
-  [[nodiscard]] bool UsesUrmaEvents() const { return uses_urma_events_; }
 
   /// Returns true when the visited body invokes tile.get_block_idx or
   /// tile.get_block_num. Drives PTOCodegen's decision to append two synthetic
@@ -950,11 +949,6 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
         uses_deferred_completion_ = true;
       }
-      if (!uses_urma_events_ &&
-          (ir::IsOp(op, "pld.tile.get_async") || ir::IsOp(op, "pld.system.defer_wait_event") ||
-           ir::IsOp(op, "pld.system.wait_event"))) {
-        uses_urma_events_ = true;
-      }
       if (!uses_urma_transfer_ &&
           (ir::IsOp(op, "pld.tensor.put_async") || ir::IsOp(op, "pld.tensor.get_async") ||
            ir::IsOp(op, "pld.system.make_session") || ir::IsOp(op, "pld.tile.get_async"))) {
@@ -988,7 +982,6 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   bool uses_sdma_workspace_ = false;
   bool uses_deferred_completion_ = false;
   bool uses_urma_transfer_ = false;
-  bool uses_urma_events_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
   bool uses_l2_bypass_load_ = false;
@@ -1432,7 +1425,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   const bool uses_sdma_workspace = collector.UsesSdmaWorkspace();
   const bool uses_deferred_completion = collector.UsesDeferredCompletion();
   const bool uses_urma_transfer = collector.UsesUrmaTransfer();
-  if (collector.UsesUrmaEvents()) PlanUrmaEventCompletions(func->body_);
   const bool uses_raw_dispatch_args = uses_deferred_completion || uses_urma_transfer;
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
@@ -3009,6 +3001,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
   if (TryEmitVFCall(call, op->var_)) return;
   if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
+    if (auto it = fs_.urma_get_destinations.find(rhs.get()); it != fs_.urma_get_destinations.end()) {
+      fs_.urma_get_destinations[op->var_.get()] = it->second;
+      return;
+    }
     if (auto it = vf_return_aliases_.find(rhs.get()); it != vf_return_aliases_.end()) {
       vf_return_aliases_[op->var_.get()] = it->second;
       return;
@@ -3176,8 +3172,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // Non-fatal: if the RHS has no registered view, fall through to the generic
   // handling rather than throwing eagerly on a view that may never be consumed.
   auto rhs_var = AsVarLike(op->value_);
-  if (auto it = fs_.urma_destination_aliases.find(op->var_.get()); it != fs_.urma_destination_aliases.end()) {
-    rhs_var = it->second;
+  if (auto item = As<ir::TupleGetItemExpr>(op->value_); item && item->index_ == 0) {
+    auto tuple = AsVarLike(item->tuple_);
+    auto it = fs_.urma_get_destinations.find(tuple.get());
+    if (it != fs_.urma_get_destinations.end()) rhs_var = it->second;
   }
   if (rhs_var) {
     if (As<TileType>(op->var_->GetType()) && As<TileType>(rhs_var->GetType())) {

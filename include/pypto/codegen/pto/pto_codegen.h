@@ -1035,7 +1035,6 @@ class PTOCodegen : public CodegenBase {
 
   /// Emit the external URMA async transfer helper declarations.
   void EmitUrmaTransferAdapterDeclarations();
-  void PlanUrmaEventCompletions(const ir::StmtPtr& body);
 
   /**
    * @brief Build variable identity to MemRef mapping from function body
@@ -1379,7 +1378,8 @@ class PTOCodegen : public CodegenBase {
     /// the tuple Var. Built once on function entry so a multi-output emitter
     /// resolves its destinations by lookup rather than by rescanning the body.
     std::map<const ir::Var*, std::vector<ir::VarPtr>> tuple_element_index;
-    std::map<const ir::Var*, ir::VarPtr> urma_destination_aliases;
+    /// Scatter GET result tuple to its borrowed destination tensor (element zero).
+    std::map<const ir::Var*, ir::VarPtr> urma_get_destinations;
 
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
@@ -1443,7 +1443,7 @@ class PTOCodegen : public CodegenBase {
       slot_index_ssa.clear();
 
       tuple_element_index.clear();
-      urma_destination_aliases.clear();
+      urma_get_destinations.clear();
       current_function.reset();
       current_result_var.reset();
       current_result_buf.clear();

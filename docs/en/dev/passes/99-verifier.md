@@ -66,7 +66,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **SimtOutputsMaterialized** | SimtOutputsMaterialized | Each writable Tile uses a dedicated initialized SIMT output seed. |
 | **SimtSpecialized** | SimtSpecialized | Each launched helper has derived resources matching its block dimensions and target. |
 | **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency; call-boundary layout agreement |
-| **AsyncHandleProvenance** | AsyncHandleProvenance | After `ConvertToSSA`, trace each distributed event to its submission. Match explicit tile sessions by SSA identity. Tensor GET completion accepts only the event. A prefetch wait requires a prefetch event and a prefetch session on every incoming path. |
+| **AsyncHandleProvenance** | AsyncHandleProvenance | After `ConvertToSSA`, trace each distributed event to its submission. Match explicit tile sessions by SSA identity. A tile GET must reach exactly one wait or defer in the same branch and loop iteration, including on paths with early exits. Tensor GET completion accepts only the event. A prefetch wait requires a prefetch event and a prefetch session on every incoming path. |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
 | **UseAfterDefCheck** | UseAfterDef | Every Var use dominated by a definition (param, AssignStmt, loop var, iter_arg, return_var) |

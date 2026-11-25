@@ -2590,31 +2590,14 @@ def test_urma_scatter_get_mix_members_share_scratch_payload(tmp_path):
         )
 
 
-@pytest.mark.parametrize(
-    ("completion", "diagnostic"),
-    [
-        ("if peer > 0:\n            pld.system.defer_wait_event(ev)", "same branch"),
-        ("for i in pl.range(peer):\n            pld.system.defer_wait_event(ev)", "same branch"),
-        ("pld.system.wait_event(ev)", "wait_event is not supported"),
-        ("pld.system.rank(ctx)", "matching defer_wait_event"),
-        (
-            "pld.system.defer_wait_event(ev)\n        pld.system.defer_wait_event(ev)",
-            "preceding tile.get_async",
-        ),
-    ],
-)
-def test_urma_scatter_get_completion_contract(completion, diagnostic):
-    program = pl.parse_program(
-        f"""@pl.program
-class P:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32],
-               peer: pl.Scalar[pl.INT32]):
-        ctx = pld.system.get_comm_ctx(src)
-        session = pld.system.make_session(ctx)
-        after, ev = pld.tile.get_async(dst, peer, src, session)
-        {completion}
-"""
-    )
-    with pytest.raises(ValueError, match=diagnostic):
-        _generate_mlir_a5(program)
+def test_urma_scatter_get_wait_event_has_no_backend_lowering():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]):
+            session = pld.system.make_session(pld.system.get_comm_ctx(src))
+            _, event = pld.tile.get_async(dst, 1, src, session)
+            pld.system.wait_event(event)
+
+    with pytest.raises(ValueError, match="No codegen registered for operation: pld.system.wait_event"):
+        _generate_mlir_a5(P)
