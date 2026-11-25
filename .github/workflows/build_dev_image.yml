@@ -1,25 +1,6 @@
 name: Maintain Development Images
 
 on:
-  schedule:
-    - cron: '37 19 * * *'  # UTC; Beijing 03:37, away from the hourly peak.
-  push:
-    branches: [main]
-    paths:
-      - 'docker/**'
-      - 'toolchain/versions.env'
-      - 'build-constraints.txt'
-      - 'tests/lint/test_dev_image_ci.py'
-      - 'tests/lint/test_dev_container_scripts.py'
-      - '.github/workflows/build_dev_image.yml'
-  pull_request:
-    paths:
-      - 'docker/**'
-      - 'toolchain/versions.env'
-      - 'build-constraints.txt'
-      - 'tests/lint/test_dev_image_ci.py'
-      - 'tests/lint/test_dev_container_scripts.py'
-      - '.github/workflows/build_dev_image.yml'
   workflow_dispatch:
     inputs:
       publish:
@@ -38,8 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -58,13 +37,7 @@ jobs:
 
   image:
     needs: config
-    # Only explicitly trusted PR source repositories may execute on this host.
-    # Review additions to this allowlist as changes to runner trust.
-    if: >-
-      github.repository == 'hw-native-sys/pypto' &&
-      (github.event_name != 'pull_request' ||
-       contains(fromJSON('["hw-native-sys/pypto", "luohuan19/pypto"]'),
-                github.event.pull_request.head.repo.full_name))
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'hw-native-sys/pypto'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
@@ -80,13 +53,10 @@ jobs:
     env:
       IMAGE_NAME: ${{ matrix.name }}
       PYPTO_DOCKER_PROXY: http://127.0.0.1:7892
-      PYPTO_PR_REPOSITORY: ${{ github.event.pull_request.head.repo.clone_url }}
     steps:
       - uses: actions/checkout@v4
         with:
           path: image-checkout
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Prepare isolated Docker credentials directory
         id: prepare
@@ -125,10 +95,7 @@ jobs:
           eval "$bundle_env"
           python3.10 docker/ci/maintain.py validate --directory "$IMAGE_STATE"
       - name: Publish validated image to SWR
-        if: >-
-          github.event_name != 'pull_request' &&
-          github.ref == 'refs/heads/main' &&
-          (github.event_name != 'workflow_dispatch' || inputs.publish)
+        if: github.ref == 'refs/heads/main' && inputs.publish
         env:
           SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
           SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
