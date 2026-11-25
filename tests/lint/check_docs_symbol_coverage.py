@@ -350,8 +350,14 @@ def main() -> int:
 
     # Bare identifiers collapse categories: pld.tensor.get must not satisfy the
     # check for pld.tile.get. Require the category-qualified spelling.
+    #
+    # The package level needs the same treatment for the opposite reason: a bare
+    # lookup accepts `foo` extracted from `pld.tensor.foo`, so a short alias in
+    # pld.__all__ would count as covered while `pld.foo` is never written. The
+    # short form is the spelling users type, so it has to appear on its own.
     qualified_documented = documented_qualified_pld(USER_DOCS)
     for prefix, module in (
+        ("pld", DISTRIBUTED_INIT),
         ("pld.tensor", TENSOR_OPS),
         ("pld.tile", TILE_OPS),
         ("pld.system", SYSTEM_OPS),
