@@ -214,6 +214,35 @@ def conditional_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.
     return dst
 
 
+def test_while_keeps_folded_shape_after_simt_private_write():
+    @pl.jit.aiv
+    def kernel(
+        src: pl.Tensor[[1, 32], pl.FP32],
+        dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+        trips: pl.Scalar[pl.INDEX],
+    ):
+        n = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
+        while trips > 0:
+            with pl.simt_scope(dims=(1, 1, 1)):
+                n = n - 1
+                pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+            trips = trips - 1
+        for i in pl.unroll(n):
+            with pl.simt_scope(dims=(1, 1, 1)):
+                pl.simt.store(dst, (0, i), pl.const(0.0, pl.FP32))
+        return dst
+
+    bounds = []
+
+    class Collector(ir.IRVisitor):
+        def visit_for_stmt(self, op: ir.ForStmt) -> None:
+            bounds.append(op.stop)
+
+    Collector().visit_program(kernel.specialize())
+    (bound,) = bounds
+    assert isinstance(bound, ir.ConstInt) and bound.value == 32
+
+
 def test_conditional_private_reassignment_materializes_live_in_shape():
     lowered = conditional_shape_rebind.specialize()
     conditions: list[ir.Expr] = []

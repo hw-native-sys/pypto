@@ -17,6 +17,8 @@ on TMR.
 
 **When to use**: Always, as part of the default pipeline. The pass is a no-op when no Inline functions exist.
 
+When inlining exposes device work inside an SPMD body, the pass encloses it in an InCore scope for per-block execution unless an existing scope or task dispatch already provides that boundary. Tile operations, register regions, synchronous VF calls, and SIMT launches execute inside the per-block kernel.
+
 ## API
 
 | C++ | Python | Level |

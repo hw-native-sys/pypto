@@ -16,6 +16,8 @@
 
 **何时使用**: 始终作为默认流水线的一部分。当程序中没有 Inline 函数时,该 pass 是空操作。
 
+在 SPMD 函数体中内联后，如果设备运算缺少已有作用域或任务调度提供的执行边界，此 pass 会添加 InCore 作用域，以便提取每个 block 执行的 kernel。Tile 运算、寄存器区域、同步 VF 调用和 SIMT 启动都在该 kernel 内执行。
+
 ## API
 
 | C++ | Python | 级别 |

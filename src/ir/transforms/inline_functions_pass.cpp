@@ -830,6 +830,47 @@ void ValidateInlineTileArgs(const FunctionPtr& callee, const std::vector<ExprPtr
   if (has_tile_arg) DeduceCallReturnType(callee->params_, args, {}, /*is_inline=*/true);
 }
 
+// Inspect the expanded SPMD body. An inline helper may itself contain a
+// dispatch or an explicit scope, both of which own their execution boundary.
+class SpmdDeviceBodyProbe : public IRVisitor {
+ public:
+  explicit SpmdDeviceBodyProbe(const InlineFunctionMap& functions) : functions_(functions) {}
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    // Register regions execute in the enclosing kernel, including before
+    // OutlineRegScopes has replaced them with synchronous VF calls.
+    if (As<RegScopeStmt>(stmt) || As<SimtLaunchStmt>(stmt)) {
+      has_device_work = true;
+      return;
+    }
+    if (As<ScopeStmt>(stmt)) has_boundary = true;
+    if (!has_boundary) IRVisitor::VisitStmt(stmt);
+  }
+
+  void VisitExpr_(const CallPtr& call) override {
+    if (As<GlobalVar>(call->op_)) {
+      const auto callee = functions_.find(call->op_->name_);
+      if (callee != functions_.end() && callee->second->func_type_ == FunctionType::VF) {
+        has_device_work = true;
+      } else {
+        has_boundary = true;
+      }
+      return;
+    }
+    const auto* entry = LookupOpEntry(call->op_);
+    has_device_work |= entry && entry->GetOpCategory() == "TileOp";
+    IRVisitor::VisitExpr_(call);
+  }
+
+  void VisitExpr_(const SubmitPtr&) override { has_boundary = true; }
+
+  bool has_boundary = false;
+  bool has_device_work = false;
+
+ private:
+  const InlineFunctionMap& functions_;
+};
+
 class InlineCallsMutator : public IRMutator {
  public:
   InlineCallsMutator(const std::unordered_map<std::string, FunctionPtr>& inline_fns,
@@ -919,6 +960,21 @@ class InlineCallsMutator : public IRMutator {
     copy->return_vars_ = std::move(vars);
     return copy;
   }
+  StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
+    const auto before = splice_count_;
+    auto scope = As<SpmdScopeStmt>(IRMutator::VisitStmt_(op));
+    if (before == splice_count_) return scope;
+    // A dispatch-form SPMD scope can lose its sole callee to inlining.
+    // Give the exposed tile computation a kernel for OutlineIncoreScopes
+    // to extract, including caller-local tiles used by the helper.
+    SpmdDeviceBodyProbe probe(functions_);
+    probe.VisitStmt(scope->body_);
+    if (probe.has_boundary || !probe.has_device_work) return scope;
+    auto copy = MutableCopy(scope);
+    copy->body_ = std::make_shared<InCoreScopeStmt>(SplitMode::None, "", scope->body_, scope->span_);
+    return copy;
+  }
+
   bool Changed() const { return changed_; }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -1431,6 +1487,7 @@ class InlineCallsMutator : public IRMutator {
         }
       }
     }
+    if (spliced) ++splice_count_;
     return spliced;
   }
 
@@ -1479,6 +1536,7 @@ class InlineCallsMutator : public IRMutator {
   bool fold_param_dims_;
   bool validate_tile_args_;
   std::unordered_set<const Var*> caller_dimensions_;
+  size_t splice_count_ = 0;
   bool changed_ = false;
   // LHS Var → return values, populated by SpliceAssignCallSite for multi-return
   // call sites. Subsequent TupleGetItemExpr uses of the Var are substituted
