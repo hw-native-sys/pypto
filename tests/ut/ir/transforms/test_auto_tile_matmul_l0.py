@@ -4786,6 +4786,112 @@ def _native_cast_fold(program, planner, backend_type, tmp_path):
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 )
+@pytest.mark.parametrize("m,n", [(16, 32), (256, 256)], ids=["fits-L0C", "oversized"])
+def test_chained_cast_preserves_declared_slot(planner, m, n):
+    """The whole-cast and output-grid folds must preserve an explicit cast destination."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[m, 64], pl.BF16],
+            b: pl.Tensor[[64, n], pl.BF16],
+            e: pl.Tensor[[n, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[m, 16], pl.FP32]],
+        ) -> pl.Tensor[[m, 16], pl.FP32]:
+            at = pl.load(a, [0, 0], [m, 64], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [64, n], target_memory=pl.Mem.Mat)
+            et = pl.load(e, [0, 0], [n, 16], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(at, bt)
+            cb: pl.Tile[[m, n], pl.BF16, pl.MemRef("cast_slots", slots=2)[0], pl.Mem.Vec] = pl.cast(
+                c, pl.BF16, mode="rint"
+            )
+            result = pl.tile.matmul(cb, et)
+            return pl.store(result, [0, 0], out)
+
+    if m == 16:
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[m, 64], pl.BF16],
+                b: pl.Tensor[[64, n], pl.BF16],
+                e: pl.Tensor[[n, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[m, 16], pl.FP32]],
+            ) -> pl.Tensor[[m, 16], pl.FP32]:
+                at = pl.load(a, [0, 0], [m, 64], target_memory=pl.Mem.Mat)
+                bt = pl.load(b, [0, 0], [64, n], target_memory=pl.Mem.Mat)
+                et = pl.load(e, [0, 0], [n, 16], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(at, bt)
+                cb: pl.Tile[[m, n], pl.BF16, pl.MemRef("cast_slots", slots=2)[0], pl.Mem.Vec] = pl.cast(
+                    c, pl.BF16, mode="rint"
+                )
+                result = pl.tile.matmul(cb, et)
+                return pl.store(result, [0, 0], out)
+
+    else:
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[m, 64], pl.BF16],
+                b: pl.Tensor[[64, n], pl.BF16],
+                e: pl.Tensor[[n, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[m, 16], pl.FP32]],
+            ) -> pl.Tensor[[m, 16], pl.FP32]:
+                at = pl.load(a, [0, 0], [m, 64], target_memory=pl.Mem.Mat)
+                bt = pl.load(b, [0, 0], [64, n], target_memory=pl.Mem.Mat)
+                et = pl.load(e, [0, 0], [n, 16], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(at, bt)
+                cb: pl.Tile[[m, n], pl.BF16, pl.MemRef("cast_slots", slots=2)[0], pl.Mem.Vec] = pl.cast(
+                    c, pl.BF16, mode="rint"
+                )
+                seed = pl.tile.create([m, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                staged = pl.tile.move(cb, target_memory=pl.Mem.Mat)
+                for k, (acc,) in pl.pipeline(0, n, 64, stage=2, init_values=(seed,)):
+                    lhs = pl.tile.extract(staged, 0, k, [m, 64], target_memory=pl.Mem.Left)
+                    rhs = pl.tile.extract(et, k, 0, [64, 16], target_memory=pl.Mem.Right)
+                    partial = pl.tile.matmul_acc(acc, lhs, rhs, init_cond=(k == 0))
+                    result = pl.yield_(partial)
+                return pl.store(result, [0, 0], out)
+
+    before = passes.convert_to_ssa()(Before)
+    expected = passes.convert_to_ssa()(Expected)
+    _verify_cast_fold_source(before)
+    original = next(
+        stmt.var for stmt in _cast_fold_assignments(before) if stmt.var.name_hint.startswith("cb__")
+    )
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    ir.assert_structural_equal(after, expected)
+    _assert_ssa_valid(after, "chained_cast_preserves_declared_slot")
+    casts = [
+        stmt
+        for stmt in _cast_fold_assignments(after)
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == ir.get_op("tile.cast").name
+    ]
+    assert len(casts) == 1
+    assert isinstance(original.type, ir.TileType)
+    result_type = casts[0].var.type
+    assert isinstance(result_type, ir.TileType)
+    assert result_type.memory_space == ir.MemorySpace.Vec
+    assert result_type.memref is not None and original.type.memref is not None
+    assert result_type.memref.base_.same_as(original.type.memref.base_)
+    assert result_type.memref.slot_count_ == 2
+    assert isinstance(result_type.memref.slot_index_, ir.ConstInt)
+    assert result_type.memref.slot_index_.value == 0
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
 @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize(
     "valid_m,valid_n", [(7, 32), (16, 17), (16, 32)], ids=["partial-M", "partial-N", "full-control"]
