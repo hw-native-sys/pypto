@@ -806,6 +806,55 @@ class TestSliceView:
         assert dynamic.size_ == 3904
         assert [evaluate(dynamic.byte_offset_, row) for row in (0, 4, 8)] == [2144, 3168, 4192]
 
+    @pytest.mark.parametrize("reanchor", [False, True])
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_loop_carried_tile_view_inherits_physical_row_stride(self, reanchor, loop_kind):
+        if loop_kind == "for":
+            header = "        for _i, (carried,) in pl.range(count, init_values=(outer,)):\n"
+            loop_yield = "            final = pl.yield_(carried)\n"
+        else:
+            header = (
+                "        for carried, step in pl.while_(init_values=(outer, 0)):\n"
+                "            pl.cond(step < count)\n"
+            )
+            loop_yield = "            final, _steps = pl.yield_(carried, step + 1)\n"
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, x: pl.Tensor[[64, 64], pl.FP32], count: pl.Scalar[pl.INDEX],
+             out: pl.Out[pl.Tensor[[2, 8], pl.FP32]]):
+        root = pl.tile.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+        outer = pl.tile.view(root, [32, 32], offsets=[8, 16])
+{header}            row = pl.tile.view(carried, [1, 16], offsets=[4, 8])
+            relabeled = pl.tile.reshape(row, [2, 8])
+            pl.tile.store(relabeled, [0, 0], out)
+{loop_yield}        post_row = pl.tile.view(final, [1, 16], offsets=[4, 8])
+        post_relabeled = pl.tile.reshape(post_row, [2, 8])
+        pl.tile.store(post_relabeled, [0, 0], out)
+""")
+
+        after = passes.init_mem_ref()(before)
+        if reanchor:
+            after = passes.memory_reuse()(passes.materialize_semantic_aliases()(after))
+
+        refs = {}
+
+        class Views(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                if isinstance(op.var.type, ir.TileType):
+                    refs[op.var.name_hint] = op.var.type.memref
+                super().visit_assign_stmt(op)
+
+        Views().visit_program(after)
+        # The carry keeps the initializer's origin, and its nested row uses
+        # the root's 64-element stride, both inside and after a zero-trip loop.
+        for name in ("row", "relabeled", "post_row", "post_relabeled"):
+            ref = refs[name]
+            assert ref.base_.same_as(refs["root"].base_)
+            assert isinstance(ref.byte_offset_, ir.ConstInt)
+            assert (ref.byte_offset_.value, ref.size_) == (3168, 64)
+
     @pytest.mark.parametrize("row_step", [1, 2])
     def test_tensor_slices_preserve_gm_window_strides(self, row_step):
         @pl.program

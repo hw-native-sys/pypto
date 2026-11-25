@@ -103,6 +103,9 @@ class BufferViewAnalysis : public IRVisitor {
   void VisitVarLike_(const VarPtr&) override {}
   void VisitExpr_(const IterArgPtr&) override {}
 
+  void VisitStmt_(const ForStmtPtr& loop) override { VisitLoop(loop); }
+  void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
+
   void VisitStmt_(const AssignStmtPtr& assign) override {
     if (!As<TileType>(assign->var_->GetType())) return;
     auto view = Get(assign->var_);
@@ -142,6 +145,30 @@ class BufferViewAnalysis : public IRVisitor {
   }
 
  private:
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& loop) {
+    // A tile carry and its result denote the initializer's storage, including
+    // when the loop executes zero times. Yield reconciliation writes into that
+    // storage; the logical carry shape alone cannot describe a window's pitch.
+    // Bind each carry once at the region boundary, not recursively at every use.
+    // Ordinary dense carries keep their own SSA root; only windows inherit
+    // the lineage needed to recover their physical row stride.
+    for (const auto& argument : loop->iter_args_) {
+      if (As<TileType>(argument->GetType())) {
+        const auto view = Get(argument->initValue_);
+        if (view.window) views_.emplace(argument.get(), view);
+      }
+    }
+    IRVisitor::VisitStmt_(loop);
+    for (size_t i = 0; i < loop->return_vars_.size() && i < loop->iter_args_.size(); ++i) {
+      const auto& result = loop->return_vars_[i];
+      if (As<TileType>(result->GetType())) {
+        const auto view = Get(loop->iter_args_[i]);
+        if (view.window) views_.emplace(result.get(), view);
+      }
+    }
+  }
+
   static std::optional<int64_t> PhysicalRowBytes(const TileTypePtr& tile) {
     if (!tile || tile->shape_.size() != 2) return std::nullopt;
     const auto cols = As<ConstInt>(tile->shape_[1]);
