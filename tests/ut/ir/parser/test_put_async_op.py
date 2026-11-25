@@ -269,11 +269,18 @@ class P:
         session = pld.system.make_session(pld.system.get_comm_ctx(src))
 {indent(body, " " * 8)}
 """)
-    if diagnostic is None:
-        _verify_through_ssa(program)
-    else:
-        with pytest.raises(Error, match=f"(?s)after 'ConvertToSSA'.*AsyncHandleProvenance.*{diagnostic}"):
-            _verify_through_ssa(program)
+    pipeline = passes.PassPipeline()
+    pipeline.add_pass(passes.convert_to_ssa())
+    pipeline.add_pass(passes.normalize_stmt_structure())
+    pipeline.add_pass(passes.flatten_call_expr())
+    with passes.PassContext([], passes.VerificationLevel.BASIC):
+        if diagnostic is None:
+            pipeline.run(program)
+        else:
+            with pytest.raises(
+                Error, match=f"(?s)after 'FlattenCallExpr'.*TileGetEventPairing.*{diagnostic}"
+            ):
+                pipeline.run(program)
 
 
 def test_tile_get_event_reuses_session_for_dynamic_peers(ascend_backend):

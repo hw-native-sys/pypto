@@ -38,6 +38,8 @@ Extracting those calls before `LowerCompositeOps` folds tuple projections keeps
 unselected atomic updates observable. Tuple-returning `Call` and `Submit`
 expressions are also bound before projection.
 
+Call and submit arguments that project a Tensor from a tuple are also bound to a variable so GM consumers can resolve the tensor view and its storage. After this pass, `TileGetEventPairing` matches each tile GET to its completion, including inline expressions such as `defer_wait_event(get_async(...)[1])`.
+
 ## API
 
 | C++ | Python | Level |

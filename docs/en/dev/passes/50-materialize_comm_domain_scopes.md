@@ -27,7 +27,7 @@ through `Call`/`Submit` arguments, returned aliases, views and loop carries to
 each underlying window-buffer allocation. Uncalled functions do not configure
 unrelated buffers.
 
-`put_async`/`get_async` require URMA on their remote operand. `remote_load`/
+Tensor `put_async`/`get_async` require URMA on their remote operand. A5 Scatter `pld.tile.get_async` also requires URMA on its local `DistributedTensor` destination so compatible source and destination windows share a registered memory region on each rank. `remote_load`/
 `remote_store` and `put`/`get` require MTE on their remote operand, including
 lowered tile forms. An allocation requiring both is rejected, regardless of
 peer rank; two views of one allocation cannot be separated into different domains.

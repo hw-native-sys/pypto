@@ -2433,14 +2433,14 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-def _scatter_get_program():
+def _scatter_get_program(dtype=pl.FP32):
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            dst: pl.Tensor[[32], pl.FP32],
-            src: pld.DistributedTensor[[64], pl.FP32],
+            dst: pl.Tensor[[32], dtype],
+            src: pld.DistributedTensor[[64], dtype],
             peer: pl.Scalar[pl.INT32],
         ):
             ctx = pld.system.get_comm_ctx(src)
@@ -2469,6 +2469,33 @@ def test_urma_scatter_get_reuses_session_and_destination():
     assert "defer_wait_event" not in strip_loc(mlir)
 
 
+def test_scatter_get_tensor_projections_share_the_submitted_window_view():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, window: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]):
+            session = pld.system.make_session(pld.get_comm_ctx(window))
+            src = pl.tensor.view(window, [32], offsets=[0])
+            dst = pl.tensor.view(window, [32], offsets=[32])
+            pair = pld.tile.get_async(dst, 1, src, session)
+            pld.system.defer_wait_event(pair[1])
+            # Each projection borrows the same offset destination, including an inline operand.
+            first = pair[0]
+            second = pair[0]
+            _, e1 = pld.tile.get_async(first, 1, src, session)
+            pld.system.defer_wait_event(e1)
+            _, e2 = pld.tile.get_async(second, 1, src, session)
+            pld.system.defer_wait_event(e2)
+            pld.system.defer_wait_event(pld.tile.get_async(pair[0], 1, src, session)[1])
+
+    mlir = _generate_mlir_a5(P)
+    calls = re.findall(r"func.call @pypto_urma_scatter_get_f32\(([^)]+)\)", mlir)
+    assert len(calls) == 4
+    destinations = {args.split(", ")[4] for args in calls}
+    assert len(destinations) == 1
+    assert f"{destinations.pop()} = pto.addptr" in mlir
+
+
 @pytest.mark.parametrize("elements", [256 << 20, (256 << 20) + 1])
 def test_urma_scatter_get_single_segment_byte_limit(elements):
     @pl.program
@@ -2488,7 +2515,8 @@ def test_urma_scatter_get_single_segment_byte_limit(elements):
             _generate_mlir_a5(P)
 
 
-def test_urma_scatter_get_compiles_with_a5_runtime(tmp_path):
+@pytest.mark.parametrize("dtype", [pl.FP32, pl.HF8], ids=["fp32", "hf8"])
+def test_urma_scatter_get_compiles_with_a5_runtime(tmp_path, dtype):
     if not (os.getenv("ASCEND_HOME_PATH") and os.getenv("PTO_ISA_ROOT") and find_ptoas_binary()):
         pytest.skip("Requires PTOAS, CANN and PTO-ISA for A5 kernel compilation")
     pytest.importorskip("simpler_setup")
@@ -2496,7 +2524,7 @@ def test_urma_scatter_get_compiles_with_a5_runtime(tmp_path):
 
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
-    program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_scatter_get_program())
+    program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_scatter_get_program(dtype))
     files = generate(program, str(tmp_path))
     source = tmp_path / "scatter_get.cpp"
     source.write_text(files["kernels/aiv/kernel.cpp"])

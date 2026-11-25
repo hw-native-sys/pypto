@@ -331,7 +331,8 @@ class BufferEngineCollector : public IRVisitor {
       return;
     }
     size_t target = 0;
-    const bool urma_get = IsOp(op, "pld.tensor.get_async") || IsOp(op, "pld.tile.get_async");
+    const bool scatter_get = IsOp(op, "pld.tile.get_async");
+    const bool urma_get = IsOp(op, "pld.tensor.get_async") || scatter_get;
     const bool urma = IsOp(op, "pld.tensor.put_async") || urma_get;
     if (urma_get || IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) {
       target = 2;
@@ -343,6 +344,11 @@ class BufferEngineCollector : public IRVisitor {
     }
     INTERNAL_CHECK_SPAN(args.size() > target, span)
         << "Communication primitive is missing its window operand";
+    // Scatter descriptors require the local destination to reside in the session's registered MR.
+    // Classify a destination window before engine grouping separates it from the remote source.
+    if (scatter_get && IsA<DistributedTensorType>(args[0]->GetType())) {
+      if (const auto* dst = Resolve(args[0])) Record(dst, 0);
+    }
     if (const auto* buffer = Resolve(args[target])) Record(buffer, urma ? 0 : 1);
   }
 

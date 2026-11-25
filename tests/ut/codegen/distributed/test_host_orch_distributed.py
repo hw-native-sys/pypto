@@ -2696,6 +2696,56 @@ def test_async_local_window_does_not_require_remote_urma(async_op, same_domain):
     assert code.count('workspace_engines=("urma",)') == 1
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_scatter_get_groups_both_endpoint_windows_with_urma(tmp_path):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def fetch(
+            self,
+            src: pld.DistributedTensor[[32], pl.FP32],
+            dst: pl.InOut[pld.DistributedTensor[[32], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[1], pl.INT32]],
+        ):
+            ctx = pld.get_comm_ctx(src)
+            peer = 1 - pld.rank(ctx)
+            session = pld.system.make_session(ctx)
+            _after, event = pld.tile.get_async(dst, peer, src, session)
+            pld.system.defer_wait_event(event)
+            pld.system.notify(signal, peer=peer, offsets=[0], value=1, op=pld.NotifyOp.Set)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            src: pld.DistributedTensor[[32], pl.FP32],
+            dst: pl.InOut[pld.DistributedTensor[[32], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[1], pl.INT32]],
+        ):
+            self.fetch(src, dst, signal)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self):
+            src_buf = pld.alloc_window_buffer(128)
+            dst_buf = pld.alloc_window_buffer(128)
+            sig_buf = pld.alloc_window_buffer(64)
+            for rank in pl.range(2):
+                src = pld.window(src_buf, [32], dtype=pl.FP32)
+                dst = pld.window(dst_buf, [32], dtype=pl.FP32)
+                signal = pld.window(sig_buf, [1], dtype=pl.INT32)
+                self.chip(src, dst, signal, worker=rank)
+
+    result = ir.compile(P, output_dir=str(tmp_path), backend_type=BackendType.Ascend950, skip_ptoas=True)
+    code = (result.output_dir / "orchestration" / "host_orch.py").read_text()
+    assert code.count('workspace_engines=("urma",)') == 1
+    # The independent MTE signal must not pull the local Scatter window out of the source MR.
+    buffers = {
+        name: domain
+        for domain, name in re.findall(r'(__comm_d\d+)\[[^\]]+\]\.buffers\["(\w+?)__ssa_v0"\]', code)
+    }
+    assert buffers["src_buf"] == buffers["dst_buf"]
+    assert buffers["sig_buf"] != buffers["src_buf"]
+
+
 def test_make_session_requests_urma_workspace_without_a_transfer():
     program = _primitive_engine_program("get", "make_session", local_peer=False, same_domain=False)
     assert _lower(program).count('workspace_engines=("urma",)') == 1

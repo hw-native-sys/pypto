@@ -137,6 +137,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "SimtSpecialized";
     case IRProperty::AsyncHandleProvenance:
       return "AsyncHandleProvenance";
+    case IRProperty::TileGetEventPairing:
+      return "TileGetEventPairing";
     default:
       return "Unknown";
   }
@@ -208,7 +210,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::AccCompactValid,
                                    IRProperty::AtomicAddDtypeValid,
                                    IRProperty::AccStorePhaseValid,
-                                   IRProperty::AsyncHandleProvenance};
+                                   IRProperty::AsyncHandleProvenance,
+                                   IRProperty::TileGetEventPairing};
   return props;
 }
 
@@ -265,7 +268,8 @@ const IRPropertySet& GetDefaultVerifyProperties() {
                                    IRProperty::NoNestedInCore,
                                    IRProperty::TileTypeCoherence,
                                    IRProperty::ArrayNotEscaped,
-                                   IRProperty::AsyncHandleProvenance};
+                                   IRProperty::AsyncHandleProvenance,
+                                   IRProperty::TileGetEventPairing};
   return props;
 }
 

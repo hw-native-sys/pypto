@@ -837,7 +837,8 @@ class TupleConsumerCollector : public ir::IRVisitor {
     if (ir::ResolveVFCall(call, program_) || (source && aliases_.count(source.get()))) {
       aliases_.insert(op->var_.get());
     }
-    if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
+    // PrepareTupleOutputs allocates Tile destinations. Tensor projections borrow GM storage.
+    if (auto tge = As<ir::TupleGetItemExpr>(op->value_); tge && As<TileType>(op->var_->GetType())) {
       if (auto base = As<ir::Var>(tge->tuple_); base && tge->index_ >= 0) {
         // VF tuple elements are borrowed aliases, not hardware DPS destinations.
         if (aliases_.count(base.get())) return;

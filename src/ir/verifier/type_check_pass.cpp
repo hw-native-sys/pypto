@@ -275,24 +275,63 @@ void TypeChecker::CollectVarValues() {
 
 // A source-level variable can be rebound. Only ConvertToSSA's output gives each
 // use a unique defining Var pointer. Keep the provenance walk local to its function.
-class AsyncHandleChecker : public IRVisitor {
+class AsyncHandleVisitor : public IRVisitor {
  public:
-  AsyncHandleChecker(StmtPtr body, std::vector<Diagnostic>& diagnostics)
-      : body_(std::move(body)), diagnostics_(diagnostics) {}
+  AsyncHandleVisitor(StmtPtr body, std::vector<Diagnostic>& diagnostics, const char* rule)
+      : body_(std::move(body)), diagnostics_(diagnostics), rule_(rule) {}
 
+ protected:
+  // Identical make_session calls still produce distinct mutable session objects.
+  struct Definition {
+    ExprPtr identity;
+    ExprPtr value;
+  };
+  Definition ResolveAsyncDefinition(const ExprPtr& expr);
+  Definition EventProducer(const ExprPtr& event);
+  const VarValueCollector& Values();
+  void Report(const Span& span, const std::string& message);
+
+ private:
+  StmtPtr body_;
+  std::vector<Diagnostic>& diagnostics_;
+  const char* rule_;
+  std::optional<VarValueCollector> var_values_;
+  std::unordered_map<const Var*, Definition> async_definitions_;
+};
+
+class AsyncHandleChecker : public AsyncHandleVisitor {
+ public:
+  using AsyncHandleVisitor::AsyncHandleVisitor;
+  static constexpr const char* kName = "AsyncHandleProvenance";
+  void VisitExpr_(const CallPtr& op) override;
+
+ private:
+  std::optional<std::unordered_map<const Var*, bool>> prefetch_handles_;
+  bool IsPrefetchHandle(const ExprPtr& expr);
+  void CheckAsyncOperands(const CallPtr& op);
+};
+
+class TileGetEventChecker : public AsyncHandleVisitor {
+ public:
+  using AsyncHandleVisitor::AsyncHandleVisitor;
+  static constexpr const char* kName = "TileGetEventPairing";
   void VisitStmt(const StmtPtr& stmt) override;
   void VisitExpr_(const CallPtr& op) override;
 
  private:
   // A GET and its completion must execute in the same branch and loop iteration.
   struct Region {
-    Region* outer;
-    bool loop_body;
+    // Ancestor sets stay unchanged while visiting a child: completion consumes only a local GET.
+    bool outer_pending_on_return;
+    bool outer_pending_on_loop_exit;
     std::unordered_set<const Var*> pending_gets;
+    [[nodiscard]] bool PendingOnReturn() const { return outer_pending_on_return || !pending_gets.empty(); }
+    [[nodiscard]] bool PendingOnLoopExit() const {
+      return outer_pending_on_loop_exit || !pending_gets.empty();
+    }
   };
   Region* region_ = nullptr;
   StmtPtr statement_;
-  void Report(const Span& span, const std::string& message);
   void CheckExit(const StmtPtr& stmt);
   void VisitStmt_(const ReturnStmtPtr& stmt) override {
     IRVisitor::VisitStmt_(stmt);
@@ -300,77 +339,88 @@ class AsyncHandleChecker : public IRVisitor {
   }
   void VisitStmt_(const BreakStmtPtr& stmt) override { CheckExit(stmt); }
   void VisitStmt_(const ContinueStmtPtr& stmt) override { CheckExit(stmt); }
-  StmtPtr body_;
-  std::vector<Diagnostic>& diagnostics_;
-  std::optional<VarValueCollector> var_values_;
-  std::optional<std::unordered_map<const Var*, bool>> prefetch_handles_;
-  // Keep the SSA definition as well as its RHS: two executions of an identical
-  // make_session call still produce distinct mutable session objects.
-  struct Definition {
-    ExprPtr identity;
-    ExprPtr value;
-  };
-  std::unordered_map<const Var*, Definition> async_definitions_;
-  Definition ResolveAsyncDefinition(const ExprPtr& expr);
-
-  bool IsPrefetchHandle(const ExprPtr& expr);
-  void CheckAsyncOperands(const CallPtr& op);
 };
 
-void AsyncHandleChecker::Report(const Span& span, const std::string& message) {
-  diagnostics_.emplace_back(DiagnosticSeverity::Error, "AsyncHandleProvenance",
+void AsyncHandleVisitor::Report(const Span& span, const std::string& message) {
+  diagnostics_.emplace_back(DiagnosticSeverity::Error, rule_,
                             static_cast<int>(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH), message, span);
 }
 
-void AsyncHandleChecker::VisitStmt(const StmtPtr& stmt) {
+void TileGetEventChecker::VisitStmt(const StmtPtr& stmt) {
   // The direct statement children of an if are its arms, and of a loop its body.
   // Other statement containers (e.g. SeqStmts) preserve the current region.
   auto parent = std::exchange(statement_, stmt);
   const bool loop_body = IsA<ForStmt>(parent) || IsA<WhileStmt>(parent);
   if (!parent || loop_body || IsA<IfStmt>(parent)) {
-    Region region{region_, loop_body, {}};
-    region_ = &region;
+    // Return can leave all ancestors. Break and continue leave only regions inside the innermost loop.
+    Region region{
+        region_ && region_->PendingOnReturn(), !loop_body && region_ && region_->PendingOnLoopExit(), {}};
+    auto* outer = std::exchange(region_, &region);
     IRVisitor::VisitStmt(stmt);
     if (!region.pending_gets.empty()) {
       Report(stmt->span_,
              "pld.tile.get_async requires exactly one wait_event or defer_wait_event "
              "in the same branch and loop iteration");
     }
-    region_ = region.outer;
+    region_ = outer;
   } else {
     IRVisitor::VisitStmt(stmt);
   }
   statement_ = std::move(parent);
 }
 
-void AsyncHandleChecker::CheckExit(const StmtPtr& stmt) {
-  // A return exits every region. A break or continue exits through the innermost loop only.
-  for (auto* region = region_; region; region = region->outer) {
-    if (!region->pending_gets.empty()) {
-      Report(stmt->span_,
-             "control flow can exit before the wait_event or defer_wait_event for pld.tile.get_async");
-      return;
-    }
-    if (!IsA<ReturnStmt>(stmt) && region->loop_body) break;
+void TileGetEventChecker::CheckExit(const StmtPtr& stmt) {
+  if (IsA<ReturnStmt>(stmt) ? region_->PendingOnReturn() : region_->PendingOnLoopExit()) {
+    Report(stmt->span_,
+           "control flow can exit before the wait_event or defer_wait_event for pld.tile.get_async");
   }
 }
 
-AsyncHandleChecker::Definition AsyncHandleChecker::ResolveAsyncDefinition(const ExprPtr& expr) {
+const VarValueCollector& AsyncHandleVisitor::Values() {
+  if (!var_values_) var_values_.emplace().VisitStmt(body_);
+  return *var_values_;
+}
+
+AsyncHandleVisitor::Definition AsyncHandleVisitor::ResolveAsyncDefinition(const ExprPtr& expr) {
   auto var = AsVarLike(expr);
   if (!var) return {expr, expr};
   // A loop-carried handle can refer back to itself. Merged values and function
   // parameters without a unique local producer cannot identify a submission.
   auto [entry, inserted] = async_definitions_.try_emplace(var.get());
   if (!inserted) return entry->second;
-  if (!var_values_) {
-    var_values_.emplace().VisitStmt(body_);
-  }
-  auto found = var_values_->values.find(var.get());
-  if (found == var_values_->values.end() || found->second.size() != 1) return {};
+  const auto& values = Values().values;
+  auto found = values.find(var.get());
+  if (found == values.end() || found->second.size() != 1) return {};
   const auto& rhs = found->second.front();
   auto& definition = entry->second;
   definition = AsVarLike(rhs) ? ResolveAsyncDefinition(rhs) : Definition{var, rhs};
   return definition;
+}
+
+AsyncHandleVisitor::Definition AsyncHandleVisitor::EventProducer(const ExprPtr& event) {
+  auto field = As<TupleGetItemExpr>(ResolveAsyncDefinition(event).value);
+  return field && field->index_ == 1 ? ResolveAsyncDefinition(field->tuple_) : Definition{};
+}
+
+void TileGetEventChecker::VisitExpr_(const CallPtr& op) {
+  if (IsOp(op, "pld.tile.get_async")) {
+    auto assign = As<AssignStmt>(statement_);
+    if (assign && assign->value_ == op) {
+      region_->pending_gets.insert(assign->var_.get());
+    } else {
+      Report(op->span_, "pld.tile.get_async requires a bound event for wait_event or defer_wait_event");
+    }
+  } else if (!op->args_.empty() &&
+             (IsOp(op, "pld.system.wait_event") || IsOp(op, "pld.system.defer_wait_event"))) {
+    const auto producer = EventProducer(op->args_[0]);
+    if (IsOp(As<Call>(producer.value), "pld.tile.get_async") &&
+        !region_->pending_gets.erase(AsVarLike(producer.identity).get())) {
+      Report(op->span_, op->op_->name_ +
+                            " requires a preceding, unconsumed pld.tile.get_async event "
+                            "in the same branch and loop iteration");
+    }
+  }
+  IRVisitor::VisitExpr_(op);
 }
 
 bool IsTileAsyncTransfer(const CallPtr& op) {
@@ -385,8 +435,7 @@ bool AsyncHandleChecker::IsPrefetchHandle(const ExprPtr& expr) {
   auto var = AsVarLike(expr);
   if (!var) return is_prefetch(expr);
   if (!prefetch_handles_) {
-    if (!var_values_) var_values_.emplace().VisitStmt(body_);
-    prefetch_handles_ = var_values_->CommonOrigins<bool>(
+    prefetch_handles_ = Values().CommonOrigins<bool>(
         [](const TypePtr& type) { return IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type); },
         [&](const ExprPtr& value) { return std::make_pair(AsVarLike(value).get(), is_prefetch(value)); });
   }
@@ -398,14 +447,6 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   const auto mismatch = [&](const std::string& message) {
     Report(op->span_, op->op_->name_ + " " + message);
   };
-  if (IsOp(op, "pld.tile.get_async")) {
-    auto assign = As<AssignStmt>(statement_);
-    if (assign && assign->value_ == op) {
-      region_->pending_gets.insert(assign->var_.get());
-    } else {
-      mismatch("requires a bound event for wait_event or defer_wait_event");
-    }
-  }
   if (IsTileAsyncTransfer(op) && op->args_.size() == 4) {
     if (!IsOp(As<Call>(ResolveAsyncDefinition(op->args_[3]).value), "pld.system.make_session")) {
       mismatch("requires a session from pld.system.make_session in this function");
@@ -426,15 +467,7 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
     }
     return;
   }
-  auto event = ResolveAsyncDefinition(op->args_[0]).value;
-  auto field = As<TupleGetItemExpr>(event);
-  const auto producer = field && field->index_ == 1 ? ResolveAsyncDefinition(field->tuple_) : Definition{};
-  auto submit = As<Call>(producer.value);
-  if (IsOp(submit, "pld.tile.get_async") &&
-      !region_->pending_gets.erase(AsVarLike(producer.identity).get())) {
-    mismatch(
-        "requires a preceding, unconsumed pld.tile.get_async event in the same branch and loop iteration");
-  }
+  auto submit = As<Call>(EventProducer(op->args_[0]).value);
   const bool implicit_session = IsOp(submit, "pld.tensor.get_async_event");
   const bool explicit_session = IsTileAsyncTransfer(submit);
   if (!implicit_session && !explicit_session) {
@@ -460,15 +493,16 @@ void AsyncHandleChecker::VisitExpr_(const CallPtr& op) {
   IRVisitor::VisitExpr_(op);
 }
 
-class AsyncHandleProvenanceVerifier : public PropertyVerifier {
+template <typename Checker>
+class AsyncHandleVerifier : public PropertyVerifier {
  public:
-  [[nodiscard]] std::string GetName() const override { return "AsyncHandleProvenance"; }
+  [[nodiscard]] std::string GetName() const override { return Checker::kName; }
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     for (const auto& [gvar, func] : program->functions_) {
       if (func && func->body_) {
-        AsyncHandleChecker checker(func->body_, diagnostics);
+        Checker checker(func->body_, diagnostics, Checker::kName);
         checker.VisitStmt(func->body_);
       }
     }
@@ -1091,7 +1125,11 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
 };
 
 PropertyVerifierPtr CreateAsyncHandleProvenanceVerifier() {
-  return std::make_shared<AsyncHandleProvenanceVerifier>();
+  return std::make_shared<AsyncHandleVerifier<AsyncHandleChecker>>();
+}
+
+PropertyVerifierPtr CreateTileGetEventPairingVerifier() {
+  return std::make_shared<AsyncHandleVerifier<TileGetEventChecker>>();
 }
 
 // Factory function for creating TypeCheck property verifier

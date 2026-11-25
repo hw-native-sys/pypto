@@ -24,7 +24,7 @@
 分组合并前，本 Pass 沿 `Call`/`Submit` 实参、返回别名、视图和循环携带值，将引擎需求
 追踪到每个底层窗口 buffer 分配。未调用函数不会为无关 buffer 申请引擎。
 
-`put_async`/`get_async` 的远端操作数需要 URMA；`remote_load`/`remote_store` 和
+Tensor 层的 `put_async`/`get_async` 要求远端操作数使用 URMA。A5 Scatter `pld.tile.get_async` 还要求本地 `DistributedTensor` 目标使用 URMA，使设备覆盖范围和内存来源兼容的源窗口与目标窗口在每个 rank 上共享注册内存区。`remote_load`/`remote_store` 和
 `put`/`get` 的远端操作数需要 MTE，包括 lowering 后的 tile 形式。同一分配同时需要两者
 时直接报错，不分析 peer rank；同一分配的两个 view 不能靠拆域解决冲突。
 MTE 只是编译器内部分类，不是运行时 workspace engine 名称。

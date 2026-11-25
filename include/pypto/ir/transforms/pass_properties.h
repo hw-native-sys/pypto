@@ -159,9 +159,11 @@ inline const PassProperties kConvertToSSAProperties{
 
 // -- Expression / statement normalisation passes ------------------------------
 
+// After flattening, even an inline get_async(...)[1] has a named submission to pair.
 inline const PassProperties kFlattenCallExprProperties{
     .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
-    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure}};
+    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure,
+                 IRProperty::TileGetEventPairing}};
 
 inline const PassProperties kNormalizeStmtStructureProperties{
     .produced = {IRProperty::NormalizedStmtStructure}};
