@@ -263,7 +263,7 @@ def store(
             A5, where an fp32 accumulator + cast is required instead.
         st_phase: Consumer-side unit-flag phase. A producer that finishes with
             ``acc_phase=pl.AccPhase.Final`` must be consumed by a final
-            store (or A5 ``tile.writeback_to_vec``) with
+            store (or A5 direct ``tpush_to_aiv(..., dst=...)``) with
             ``st_phase=pl.STPhase.Final`` so the unit flag is cleared.
         pre_quant: Scale applied by the cube's FIXPIPE while it drains an ``Acc``
             tile to global memory — the write becomes ``out = tile * pre_quant``
@@ -371,33 +371,6 @@ def assemble(
         pre_relu=pre_relu,
     )
     return Tile(expr=call_expr)
-
-
-def writeback_to_vec(
-    dst: Tile,
-    acc: Tile,
-    offset: Sequence[IntLike],
-    *,
-    split: int,
-    st_phase: STPhase = STPhase.Unspecified,
-) -> Call:
-    """Write an Acc tile directly into the two AIV UB views using A5 FIXPIPE.
-
-    This expert primitive does not use TPipe or allocate a transport buffer.
-    The author must establish identical physical addresses in both kernels
-    and order reuse/consumption with explicit synchronization.
-
-    Only split=1 (DualModeSplitM) is currently supported. Each AIV receives
-    half the source rows; the row and column offsets address its local
-    destination, which may have capacity for multiple received tiles. Runtime
-    offsets must stay within that capacity; this primitive does not clamp them. The
-    destination must be row-major FP32 Vec storage, the source a full FP32 Acc
-    tile. With st_phase=Final, the exact Final accumulator SSA value must be
-    drained to a complete [M/2, N] destination at offset [0, 0].
-    """
-    return _ir_ops.writeback_to_vec(
-        dst.unwrap(), acc.unwrap(), _normalize_intlike(offset), split=split, st_phase=st_phase
-    )
 
 
 def mark_remote_written(tile: Tile) -> Call:

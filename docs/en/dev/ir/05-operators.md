@@ -507,7 +507,7 @@ keep the update partial until the whole valid rectangle is finalized.
 
 On a unit-flag-aware path, the final accumulator producer must be paired with
 `pl.store(..., st_phase=pl.STPhase.Final)`, or on A5
-`pl.tile.writeback_to_vec(..., split=1, st_phase=pl.STPhase.Final)`. The final producer sets the unit flag
+`pl.tpush_to_aiv(..., split=1, dst=..., st_phase=pl.STPhase.Final)`. The final producer sets the unit flag
 and the final store checks and clears it; a plain store intentionally keeps the
 default `pl.STPhase.Unspecified` behavior. PyPTO does not expose PTO-ISA's
 check-only store phase because that phase requires an ordered multi-consumer
@@ -523,7 +523,7 @@ pending final result across a branch, loop, or scope boundary is rejected.
 intermediate K blocks use `Partial`, and the last block alone uses `Final`.
 Explicit phases do not remove other automatically inserted synchronization.
 
-On A5, `pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` directly writes a full FP32 Acc into manually addressed ND UB; each AIV receives half the rows. `TINSERT` preserves the destination pitch, and the caller guarantees valid local offsets.
+On A5, `pl.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col])` directly writes a full FP32 Acc into manually addressed ND UB; each AIV receives half the rows. `TINSERT` preserves the destination pitch, and the caller guarantees valid local offsets.
 A Final producer requires `st_phase=pl.STPhase.Final`, a complete [M/2, N] destination and zero offset; `TMOV` checks and clears the unit flag. No TPipe slots or extra synchronization are introduced.
 After waiting for the peer, AIV code calls `pl.tile.mark_remote_written(view)` before reading its contiguous received view in a register scope. This annotation records only the valid region as initialized, not the backing allocation, and emits no instruction. The author owns address agreement and event handshakes.
 
@@ -724,6 +724,7 @@ Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
 | `tile.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `split`, optional `id` |
+| `tile.tpush_to_aiv_direct` (internal) | 3 (Acc, dst, offset) | Direct push into peer UB, no FIFO | `split=1`, `st_phase` |
 | `tile.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `split`, optional `id` |
 | `tile.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `split`, optional `id` |
 | `tile.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `split`, optional `id` |

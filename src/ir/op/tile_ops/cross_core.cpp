@@ -467,32 +467,33 @@ void CheckSplitBoundaryCarriesValid(const std::string& op_name, const std::vecto
 // ============================================================================
 
 // Direct FIXPIPE uses the caller's explicitly addressed remote UB storage,
-// not the TPipe slot/credit protocol. The target row offset addresses the
+// not the TPipe slot/credit protocol. The public tpush_to_aiv wrapper selects
+// this internal operation only when the author supplies dst. The target row offset addresses the
 // local half received by each vector lane.
-REGISTER_OP("tile.writeback_to_vec")
+REGISTER_OP("tile.tpush_to_aiv_direct")
     .set_description("Drain an Acc tile directly to both AIV UB views with split-M FIXPIPE")
     .set_op_category("CrossCoreOp")
     .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("tile", "FP32 Acc tile")
     .add_argument("dst", "Destination row-major FP32 Vec tile")
-    .add_argument("acc", "FP32 Acc tile")
     .add_argument("offset", "Destination row and column offsets")
-    .set_arg_effect(0, ArgEffect::Write)
+    .set_arg_effect(1, ArgEffect::Write)
     .set_attr<int>("split")
     .set_attr<int>("st_phase")
     .no_memory_spec()
     .f_deduce_type([](const auto& args, const auto& kwargs) -> TypePtr {
-      CHECK(args.size() == 3) << "tile.writeback_to_vec requires dst, acc, and offset";
-      auto dst = As<TileType>(args[0]->GetType());
-      auto acc = As<TileType>(args[1]->GetType());
+      CHECK(args.size() == 3) << "Direct tpush_to_aiv requires tile, dst, and offset";
+      auto acc = As<TileType>(args[0]->GetType());
+      auto dst = As<TileType>(args[1]->GetType());
       auto offset = As<MakeTuple>(args[2]);
       CHECK(dst && acc && dst->shape_.size() == 2 && acc->shape_.size() == 2 &&
             dst->dtype_ == DataType::FP32 && acc->dtype_ == DataType::FP32)
-          << "tile.writeback_to_vec requires 2D FP32 tiles";
+          << "Direct tpush_to_aiv requires 2D FP32 tiles";
       CHECK(dst->memory_space_ == MemorySpace::Vec && acc->memory_space_ == MemorySpace::Acc)
-          << "tile.writeback_to_vec requires explicit Vec destination and Acc source";
+          << "Direct tpush_to_aiv requires explicit Vec destination and Acc source";
       auto dst_view = tile_view_semantics::GetEffectiveTileView(*dst);
       CHECK(dst_view.blayout == TileLayout::row_major && dst_view.slayout == TileLayout::none_box)
-          << "tile.writeback_to_vec requires a row-major ND destination";
+          << "Direct tpush_to_aiv requires a row-major ND destination";
       // FIXPIPE takes the parent channel's Cols as its physical ND pitch.
       // An independently strided destination view would lose that pitch.
       if (!dst_view.stride.empty()) {
@@ -500,17 +501,17 @@ REGISTER_OP("tile.writeback_to_vec")
         auto inner = As<ConstInt>(dst_view.stride.back());
         auto row = As<ConstInt>(dst_view.stride[0]);
         CHECK(cols && inner && row && inner->value_ == 1 && row->value_ == cols->value_)
-            << "tile.writeback_to_vec requires the contiguous destination parent, not a strided subview";
+            << "Direct tpush_to_aiv requires the contiguous destination parent, not a strided subview";
       }
-      CHECK(offset && offset->elements_.size() == 2) << "tile.writeback_to_vec requires two index offsets";
+      CHECK(offset && offset->elements_.size() == 2) << "Direct tpush_to_aiv requires two index offsets";
       auto split = GetKwargOr<int>(kwargs, "split", 0);
       auto phase = GetKwargOr<int>(kwargs, "st_phase", static_cast<int>(STPhase::kUnspecified));
-      CHECK(split == 1) << "tile.writeback_to_vec currently supports only split=1 (split M)";
-      CHECK(IsValidSTPhase(phase)) << "tile.writeback_to_vec has invalid st_phase";
+      CHECK(split == 1) << "Direct tpush_to_aiv currently supports only split=1 (split M)";
+      CHECK(IsValidSTPhase(phase)) << "Direct tpush_to_aiv has invalid st_phase";
       auto acc_view = tile_view_semantics::GetEffectiveTileView(*acc);
       CHECK(acc_view.valid_shape.size() == 2 && acc_view.blayout == TileLayout::col_major &&
             acc_view.slayout == TileLayout::row_major && acc_view.fractal == 1024)
-          << "tile.writeback_to_vec requires the standard FP32 Acc layout";
+          << "Direct tpush_to_aiv requires the standard FP32 Acc layout";
       int64_t dst_dims[2], acc_dims[2];
       for (size_t i = 0; i < 2; ++i) {
         auto d = As<ConstInt>(dst->shape_[i]);
@@ -518,21 +519,21 @@ REGISTER_OP("tile.writeback_to_vec")
         auto valid = As<ConstInt>(acc_view.valid_shape[i]);
         auto index = As<ScalarType>(offset->elements_[i]->GetType());
         CHECK(d && a && valid && d->value_ > 0 && a->value_ > 0 && valid->value_ == a->value_)
-            << "tile.writeback_to_vec requires static destination dimensions and fully valid source";
+            << "Direct tpush_to_aiv requires static destination dimensions and fully valid source";
         CHECK(index && (index->dtype_ == DataType::INDEX || index->dtype_ == DataType::INT64 ||
                         index->dtype_ == DataType::INT32))
-            << "tile.writeback_to_vec offsets must be integer scalars";
+            << "Direct tpush_to_aiv offsets must be integer scalars";
         dst_dims[i] = d->value_;
         acc_dims[i] = a->value_;
         int64_t extent = i == 0 ? a->value_ / 2 : a->value_;
-        CHECK(extent <= d->value_) << "tile.writeback_to_vec source does not fit destination";
+        CHECK(extent <= d->value_) << "Direct tpush_to_aiv source does not fit destination";
         if (auto value = As<ConstInt>(offset->elements_[i])) {
           CHECK(value->value_ >= 0 && value->value_ <= d->value_ - extent)
-              << "tile.writeback_to_vec offset exceeds destination capacity";
+              << "Direct tpush_to_aiv offset exceeds destination capacity";
         }
       }
       CHECK(acc_dims[0] % 2 == 0 && dst_dims[1] % 8 == 0)
-          << "tile.writeback_to_vec requires even source rows and a 32-byte-aligned destination pitch";
+          << "Direct tpush_to_aiv requires even source rows and a 32-byte-aligned destination pitch";
       if (phase == static_cast<int>(STPhase::kFinal)) {
         // PTOAS v0.78 supports the unit-flag consumer on TMOV, not TINSERT.
         auto row = As<ConstInt>(offset->elements_[0]);

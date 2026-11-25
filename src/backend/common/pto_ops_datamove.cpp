@@ -1671,12 +1671,12 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     return std::string("");
   });
 
-  reg("tile.writeback_to_vec", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  reg("tile.tpush_to_aiv_direct", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     CHECK_SPAN(codegen.GetBackendHandler()->GetPtoTargetArch() == "a5" && codegen.IsAICFunction(), op->span_)
-        << "tile.writeback_to_vec requires an explicit A5 AIC function";
-    const auto& dst = op->args_[0];
-    const auto& acc = op->args_[1];
+        << "Direct tpush_to_aiv requires an explicit A5 AIC function";
+    const auto& acc = op->args_[0];
+    const auto& dst = op->args_[1];
     const auto offset = As<ir::MakeTuple>(op->args_[2]);
     auto dst_code = codegen.GetExprAsCode(dst);
     auto acc_code = codegen.GetExprAsCode(acc);

@@ -378,23 +378,6 @@ def assemble(
     return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], kwargs, actual_span)
 
 
-def writeback_to_vec(
-    dst: Expr,
-    acc: Expr,
-    offset: Sequence[int | Expr] | _ir_core.MakeTuple,
-    *,
-    split: int,
-    st_phase: STPhase = STPhase.Unspecified,
-    span: Span | None = None,
-) -> Call:
-    """Direct A5 FIXPIPE write into a peer Vec tile; see the DSL wrapper."""
-    actual_span = _get_span_or_capture(span)
-    kwargs = {"split": split, "st_phase": int(st_phase)}
-    return _ir_core.create_op_call(
-        "tile.writeback_to_vec", [dst, acc, _to_make_tuple(offset, actual_span)], kwargs, actual_span
-    )
-
-
 def mark_remote_written(tile: Expr, *, span: Span | None = None) -> Call:
     """Credit a completed peer write to a Vec view without emitting an instruction."""
     return _ir_core.create_op_call("tile.mark_remote_written", [tile], {}, _get_span_or_capture(span))

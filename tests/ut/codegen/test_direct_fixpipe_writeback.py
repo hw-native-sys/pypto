@@ -11,7 +11,7 @@ import subprocess
 import pypto
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen
+from pypto import backend, codegen, ir
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.diagnostics import InvalidOperationError
@@ -73,7 +73,7 @@ def test_direct_pv_writeback(tmp_path):
             )
             flat = pl.tile.slice(pool, [1, 16384], [0, group * 16384])
             channel = pl.tile.reshape(flat, [64, 256])
-            pl.tile.writeback_to_vec(channel, acc, [row, 64], split=1)
+            pl.tpush_to_aiv(acc, split=1, dst=channel, offset=[row, 64])
             pl.system.set_intra_block(12, pipe=pl.PipeType.FIX)
 
     mlir = generated_mlir(Program)
@@ -102,7 +102,7 @@ def qk_program(writeback_phase, producer_phase):
             )
             flat = pl.tile.slice(pool, [1, 4096], [0, 32768])
             score = pl.tile.reshape(flat, [32, 128])
-            pl.tile.writeback_to_vec(score, acc, [0, 0], split=1, st_phase=writeback_phase)
+            pl.system.tpush_to_aiv(acc, split=1, dst=score, st_phase=writeback_phase)
             pl.system.set_intra_block(12, pipe=pl.PipeType.FIX)
 
     return Program
@@ -186,7 +186,7 @@ class Program:
     def kernel(self):
         acc = pl.tile.create([64,64],pl.FP32,target_memory=pl.Mem.Acc)
         channel = pl.tile.create([64,256],pl.FP32,target_memory=pl.Mem.Vec)
-        pl.tile.writeback_to_vec(channel,acc,[32,64],split=1,st_phase=pl.STPhase.Final)
+        pl.tile.tpush_to_aiv(acc,split=1,dst=channel,offset=[32,64],st_phase=pl.STPhase.Final)
 """)
 
 
@@ -200,8 +200,43 @@ class Program:
     def kernel(self):
         acc = pl.tile.create([64,64],pl.FP32,target_memory=pl.Mem.Acc)
         channel = pl.tile.create([64,256],pl.FP32,target_memory=pl.Mem.Vec)
-        pl.tile.writeback_to_vec(channel,acc,[0,0],split=2)
+        pl.tile.tpush_to_aiv(acc,split=2,dst=channel)
 """)
+
+
+def test_public_tpush_roundtrips_direct_mode():
+    program = qk_program(pl.STPhase.Final, pl.AccPhase.Final)
+    printed = ir.python_print(program)
+    # The internal direct operation is not a separately exposed DSL API.
+    assert ".tpush_to_aiv(" in printed and "dst=" in printed
+    assert "tpush_to_aiv_direct(" not in printed
+    ir.assert_structural_equal(program, pl.parse_program(printed))
+
+
+def test_legacy_fifo_push_keeps_one_operand_and_original_kwargs():
+    span = ir.Span.unknown()
+    acc = ir.Var("acc", ir.TileType([64, 64], pl.FP32, memory_space=pl.Mem.Acc), span)
+    call = ir.op.tile.tpush_to_aiv(acc, split=1, id=3, lane_stride=32)
+    assert call.op.name == ir.get_op("tile.tpush_to_aiv").name
+    assert len(call.args) == 1
+    assert call.kwargs == {"split": 1, "id": 3, "lane_stride": 32}
+
+
+@pytest.mark.parametrize("kwargs", [{"id": 1}, {"lane_stride": 32}])
+def test_direct_push_rejects_fifo_controls(kwargs):
+    span = ir.Span.unknown()
+    acc = ir.Var("acc", ir.TileType([64, 64], pl.FP32, memory_space=pl.Mem.Acc), span)
+    dst = ir.Var("dst", ir.TileType([32, 64], pl.FP32, memory_space=pl.Mem.Vec), span)
+    with pytest.raises(ValueError, match="cannot use FIFO id or lane_stride"):
+        ir.op.tile.tpush_to_aiv(acc, split=1, dst=dst, **kwargs)
+
+
+@pytest.mark.parametrize("kwargs", [{"offset": [0, 0]}, {"st_phase": pl.STPhase.Final}])
+def test_fifo_push_rejects_direct_controls_without_dst(kwargs):
+    span = ir.Span.unknown()
+    acc = ir.Var("acc", ir.TileType([64, 64], pl.FP32, memory_space=pl.Mem.Acc), span)
+    with pytest.raises(ValueError, match="require an explicit dst"):
+        ir.op.tile.tpush_to_aiv(acc, split=1, **kwargs)
 
 
 if __name__ == "__main__":

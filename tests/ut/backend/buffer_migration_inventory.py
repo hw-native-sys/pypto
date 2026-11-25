@@ -253,6 +253,8 @@ MIGRATION_FAMILIES = (
             "tile.concat",
             "tile.extract",
             "tile.assemble",
+            # Direct cross-core FIXPIPE currently has a TileIR callback only.
+            "tile.tpush_to_aiv_direct",
         ),
         restricted=frozenset({"tile.move", "tile.cast", "tile.transpose"}),
     ),
@@ -264,6 +266,9 @@ MIGRATION_FAMILIES = (
             "tile.transpose_view",
             "tile.slice",
             "tile.set_validshape",
+            # This is an initialization-analysis annotation, not a migrated
+            # native BufferIR operation.
+            "tile.mark_remote_written",
         ),
         restricted=frozenset({"tile.reshape"}),
     ),

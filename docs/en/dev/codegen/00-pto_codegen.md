@@ -258,7 +258,7 @@ print(pto_code)
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / A5 BF16 NZ Vec-to-Mat inserts / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
-| `tile.writeback_to_vec(dst, acc, [row, col], split=1, st_phase=...)` | A5 direct split-M FIXPIPE: `pto.tinsert`, or `pto.tmov` with `stPhase=final` for a complete final writeback |
+| `tile.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col], st_phase=...)` | A5 direct split-M FIXPIPE: `pto.tinsert`, or `pto.tmov` with `stPhase=final` for a complete final writeback |
 | `tile.mark_remote_written(tile)` | No instruction; records peer-initialized UB for register analysis |
 | `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
@@ -272,14 +272,10 @@ print(pto_code)
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`; scalar is same-width signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
-**`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and the
-fallback `tile.assemble` path use `pto.subview`, a pure alias of the source tile (no
-data movement, no extra `pto.alloc_tile`).  `pto.subview` requires the
-result `tile_buf` to share `dtype`, `memory_space`, `blayout`, `slayout`,
-`fractal`, `pad`, and `compact` with the source — `DeduceTileSliceType` propagates
-those five `TileView` fields from the source so the produced `TileType`
-satisfies the constraints by construction.  Backend codegen also runs a
-`CheckSubviewTileCompat` guard at lowering time:
+**`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and fallback `tile.assemble` use `pto.subview`, a pure source alias with no data movement or extra `pto.alloc_tile`.
+The result `tile_buf` must share the source's `dtype`, `memory_space`, `blayout`, `slayout`, `fractal`, `pad`, and `compact`.
+`DeduceTileSliceType` propagates the five `TileView` fields to satisfy these constraints by construction.
+Backend codegen also runs a `CheckSubviewTileCompat` guard at lowering time:
 
 - Source and result must both carry an explicit `TileView`.
 - `dtype`, `blayout`, `slayout`, `fractal`, `pad`, and `compact` must match exactly.

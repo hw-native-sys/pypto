@@ -495,7 +495,7 @@ store 会检查未更新分块，而 MAD 并未设置这些分块的 unit flag�
 区域相匹配的累加器窗口，或保持部分更新，直到整个有效区域完成最终累加。
 
 在使用 unit flag 的路径上，最后一个累加生产者必须与
-`pl.store(..., st_phase=pl.STPhase.Final)`（A5 还支持 `pl.tile.writeback_to_vec(..., split=1, st_phase=pl.STPhase.Final)`）配对。final 生产者负责置位，final
+`pl.store(..., st_phase=pl.STPhase.Final)`（A5 还支持 `pl.tpush_to_aiv(..., split=1, dst=..., st_phase=pl.STPhase.Final)`）配对。final 生产者负责置位，final
 store 负责检查并清位；普通 store 则有意保留默认的
 `pl.STPhase.Unspecified` 行为。PTO-ISA 的 check-only store phase 需要有序的
 多消费者生命周期，因此 PyPTO 不对外提供该阶段。编译器会双向校验所支持的
@@ -507,7 +507,7 @@ final 配对：应绑定 final 生产者的结果，并在同一个直线控制�
 [`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) 保留该契约：中间 K 分块
 使用 `Partial`，只有最后一个分块使用 `Final`。显式阶段不会删除其他自动插入的同步。
 
-A5 上，`pl.tile.writeback_to_vec(dst, acc, [row, col], split=1)` 将完整 FP32 Acc 直接写入手工指定地址的 ND UB，各 AIV 接收一半行。`TINSERT` 保留目标行跨度，由调用者保证本地行列偏移有效。
+A5 上，`pl.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col])` 将完整 FP32 Acc 直接写入手工指定地址的 ND UB，各 AIV 接收一半行。`TINSERT` 保留目标行跨度，由调用者保证本地行列偏移有效。
 Final 生产者要求 `st_phase=pl.STPhase.Final`、完整 [M/2, N] 目标和零偏移；`TMOV` 执行 unit flag 检查与清位。不引入 TPipe 槽位或额外同步。
 AIV 等待对端后，在寄存器作用域读取连续接收视图之前调用 `pl.tile.mark_remote_written(view)`；仅将该视图的有效区间标记为已初始化，不标记整个底层分配，也不生成指令。由作者负责地址一致性与事件握手。
 
@@ -702,6 +702,7 @@ SHARED，两个 kernel 中都会出现。屏障在 **`pl.pipeline` 内被拒绝*
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
 | `tile.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `split`，可选 `id` |
+| `tile.tpush_to_aiv_direct`（内部） | 3 (Acc, dst, offset) | 直接推送到对端 UB，不使用 FIFO | `split=1`，`st_phase` |
 | `tile.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `split`，可选 `id` |
 | `tile.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `split`，可选 `id` |
 | `tile.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `split`，可选 `id` |

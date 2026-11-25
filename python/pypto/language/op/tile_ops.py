@@ -170,7 +170,6 @@ from ._tile_memory import transpose as transpose
 from ._tile_memory import transpose_view as transpose_view
 from ._tile_memory import tri as tri
 from ._tile_memory import write as write
-from ._tile_memory import writeback_to_vec as writeback_to_vec
 from ._tile_reduction import col_argmax as col_argmax
 from ._tile_reduction import col_argmin as col_argmin
 from ._tile_reduction import col_expand as col_expand
@@ -217,7 +216,6 @@ __all__ = [
     "assemble",
     "gather_row",
     "mark_remote_written",
-    "writeback_to_vec",
     "extract",
     "scatter_update",
     "concat",

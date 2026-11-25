@@ -242,21 +242,17 @@ class AccStorePhaseVisitor : public IRVisitor {
   std::optional<TokenId> ProcessCall(const CallPtr& call, MemRefPtr destination = nullptr) {
     if (!call) return std::nullopt;
 
-    const bool writeback = IsOp(call, "tile.writeback_to_vec");
-    if (IsOp(call, "tile.store") || writeback) {
-      const size_t source_index = writeback ? 1 : 0;
+    if (IsOp(call, "tile.store") || IsOp(call, "tile.tpush_to_aiv_direct")) {
       std::optional<TokenId> source_token;
-      if (source_index < call->args_.size()) source_token = ProcessValue(call->args_[source_index]);
-      for (size_t i = 0; i < call->args_.size(); ++i) {
-        if (i != source_index) ScanExpr(call->args_[i]);
-      }
+      if (!call->args_.empty()) source_token = ProcessValue(call->args_[0]);
+      for (size_t i = 1; i < call->args_.size(); ++i) ScanExpr(call->args_[i]);
       // An earlier alias has no token, or a consumed token from a prior Final.
       // Neither permits a plain store while this storage has a newer live Final.
       // A final store of that alias is already rejected by exact-value checks.
-      if ((!source_token || pending_.count(*source_token) == 0) && source_index < call->args_.size() &&
+      if ((!source_token || pending_.count(*source_token) == 0) && !call->args_.empty() &&
           call->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified)) ==
               static_cast<int>(STPhase::kUnspecified)) {
-        CheckUndrainedStorage(call, AccumulatorStorage(call->args_[source_index]->GetType()));
+        CheckUndrainedStorage(call, AccumulatorStorage(call->args_[0]->GetType()));
       }
       CheckStore(call, source_token);
       return std::nullopt;
@@ -364,7 +360,8 @@ class AccStorePhaseVisitor : public IRVisitor {
   }
 
   void CheckStore(const CallPtr& store, const std::optional<TokenId>& source_token) {
-    const std::string& store_name = store->op_->name_;
+    const std::string store_name =
+        IsOp(store, "tile.tpush_to_aiv_direct") ? "tile.tpush_to_aiv" : store->op_->name_;
     const int st_phase = store->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified));
     if (!IsValidSTPhase(st_phase)) {
       if (source_token.has_value() && ConsumePending(*source_token)) {
@@ -448,7 +445,7 @@ class AccStorePhaseVisitor : public IRVisitor {
           DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/4,
           "final accumulator producer '" + producer.op_name + "' in function '" + func_name_ +
               "' must be consumed exactly once by tile.store(..., st_phase=pl.STPhase.Final) or "
-              "tile.writeback_to_vec(..., st_phase=pl.STPhase.Final) using that SSA "
+              "tile.tpush_to_aiv(..., dst=..., st_phase=pl.STPhase.Final) using that SSA "
               "value " +
               description +
               ". acc_phase=pl.AccPhase.Final performs check-and-set; leaving it uncleared can stall a later "
