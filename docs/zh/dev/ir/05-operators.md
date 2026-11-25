@@ -785,7 +785,7 @@ class CrossCoreExample:
 | ---- | ------ |
 | `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | 当前 AIV 的 session，可跨 peer 和传输方向复用 |
 | `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | 本地目标张量的别名与完成事件组成的二元组 |
-| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与本地目标张量共享存储 |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与本地目标张量共享存储。受当前 A5 Scatter GET ISA 约束，`dst` 和 `src` 的存储必须位于同一通信域。 |
 | `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与远端目标窗口共享存储 |
 | `pld.system.wait_event(event[, session])` | 发起传输的核等待完成后获得的 BOOL 成功标志 |
 | `pld.system.defer_wait_event(event[, session])` | 将事件登记到发起传输的 task，由该 task 负责完成的语句 |

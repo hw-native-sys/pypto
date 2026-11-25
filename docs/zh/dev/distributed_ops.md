@@ -53,7 +53,7 @@ SSA 值而存在。
 | ---- | ---- |
 | `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | 当前 AIV 与 workspace 的 `pl.AsyncSession`，可跨 peer 复用 |
 | `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | `(dst, event)`，元组第 0 项与本地目标别名相同 |
-| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与本地目标张量共享存储 |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与本地目标张量共享存储。受当前 A5 Scatter GET ISA 约束，`dst` 和 `src` 的存储必须位于同一通信域。 |
 | `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与远端目标窗口共享存储 |
 | `pld.system.wait_event(event[, session])` | 在当前核等待，返回 `BOOL` 成功标志 |
 | `pld.system.defer_wait_event(event[, session])` | 将完成责任移交给发起传输的 task |
@@ -63,16 +63,16 @@ PUT 的目标与 GET 的源分别位于远端窗口。对同一 InCore `Distribu
 不同的远端窗口形参分别创建 session，即使 HOST 将它们放在同一通信域。
 Tensor GET 的事件使用 `wait_event(event)` 或 `defer_wait_event(event)`。对于 Tile PUT 和 GET，
 等待和移交也可传入发起该次提交的 session。核内等待返回成功标志；
-移交将完成责任交给 task，依赖方在发起 task 逻辑完成后可以使用目标。这六个操作目前支持 DSL 构造、IR 验证和打印。
+移交将完成责任交给 task，依赖方在发起 task 逻辑完成后可以使用目标。A5 TMR 后端通过 Simpler 生成显式 session 和单段 tile GET。每笔 GET 都必须在同一分支、同一次循环迭代中执行一次对应的 `defer_wait_event`。Tile PUT、tensor 层的事件 GET 和核内 `wait_event` 目前仅支持前端和 IR。
 
-后续操作使用返回的目标别名。下面的 PUT 读取 GET 的结果，因此先在核内等待 GET 完成。
+同一个 session 可以依次从不同 peer 取数。每个 GET 在调用处提交并登记 task 完成条件，依赖该 task 的下游任务在其逻辑完成后可使用目标张量。
 
 ```python
 session = pld.system.make_session(pld.system.get_comm_ctx(window))
-local, fetched = pld.tile.get_async(local, first_peer, window, session)
-pld.system.wait_event(fetched, session)
-window, sent = pld.tile.put_async(window, second_peer, local, session)
-pld.system.defer_wait_event(sent, session)
+left, first = pld.tile.get_async(left, first_peer, window, session)
+right, second = pld.tile.get_async(right, second_peer, window, session)
+pld.system.defer_wait_event(first)
+pld.system.defer_wait_event(second, session)
 ```
 
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`

@@ -53,6 +53,7 @@ class Ascend950Handler : public BackendHandler {
   }
   [[nodiscard]] bool HonorsHighPrecisionAlgorithm() const override { return true; }
 
+  [[nodiscard]] int64_t GetUrmaScatterScratchBytes() const override;
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
   [[nodiscard]] bool SupportsC2VFixpipeEpilogue() const override { return true; }
   // Each A5 transport slot has a corresponding local consumer slot.

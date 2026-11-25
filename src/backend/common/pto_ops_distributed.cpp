@@ -1561,6 +1561,16 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeGetCodegenPTO(op, codegen); });
   reg("pld.tile.put",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakePutCodegenPTO(op, codegen); });
+  reg("pld.system.make_session", [](const ir::CallPtr& op, codegen::CodegenBase& backend) {
+    AsPto(backend).EmitUrmaMakeSession(op);
+    return std::string{};
+  });
+  reg("pld.tile.get_async", [](const ir::CallPtr& op, codegen::CodegenBase& backend) {
+    AsPto(backend).EmitUrmaScatterGet(op);
+    return std::string{};
+  });
+  // PlanUrmaEventCompletions verified the matching GET. Its helper has already registered completion.
+  reg("pld.system.defer_wait_event", [](const ir::CallPtr&, codegen::CodegenBase&) { return std::string{}; });
   // V1 asynchronous URMA transfer, emitted straight from the tensor-level op
   // (no tile staging, no lower-to-tile step).
   reg("pld.tensor.put_async", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

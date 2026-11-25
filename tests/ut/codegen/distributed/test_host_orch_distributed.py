@@ -2561,6 +2561,7 @@ def _primitive_engine_program(
 ):
     mte_source = memory_source if same_domain else ("device" if memory_source == "host" else "host")
     async_get = async_op == "get"
+    session_only = async_op == "make_session"
     single_rank = rank_count == 1
     async_peer = 0 if single_rank else 1
     mte_get = mte_op == "get"
@@ -2587,7 +2588,9 @@ def _primitive_engine_program(
             else:
                 peer = pl.const(1, pl.INT32)
             if enable_engines:
-                if async_get:
+                if session_only:
+                    _session = pld.system.make_session(ctx)
+                elif async_get:
                     if window_local:
                         mte_window = pld.tensor.get_async(mte_window, async_peer, async_window)
                     else:
@@ -2691,6 +2694,11 @@ def test_async_local_window_does_not_require_remote_urma(async_op, same_domain):
     code = _lower(program)
     assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
     assert code.count('workspace_engines=("urma",)') == 1
+
+
+def test_make_session_requests_urma_workspace_without_a_transfer():
+    program = _primitive_engine_program("get", "make_session", local_peer=False, same_domain=False)
+    assert _lower(program).count('workspace_engines=("urma",)') == 1
 
 
 @pytest.mark.parametrize("async_op", ["get", "put"])

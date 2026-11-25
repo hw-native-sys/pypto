@@ -29,7 +29,13 @@ Adapter symbols and C++ element types reuse the shared dtype conversions.
   Thus `[1, 32]` inside `[16, 64]` and `[1, 2, 64]` inside `[2, 4, 64]` are
   contiguous, but `[2, 32]` and `[2, 1, 64]`, respectively, are not.
 
-## Supported async transfers
+## Explicit-session Scatter GET on A5 TMR
+
+`pld.tile.get_async(dst, peer, src, session)` submits one contiguous range of 1 byte through 256 MiB. The helper writes one ScatterSegment and one ScatterSource into task-owned GM scratch, then calls Simpler's combined submission and completion-registration entry point. Each physical AIV has its own descriptor cache line. A session is local to the issuing AIV and reads its URMA workspace from the source window's communication domain. See [Explicit PUT and GET completion](distributed_ops.md#explicit-put-and-get-completion-frontend-and-ir) for the event pairing requirement.
+
+The current ISA requires both endpoints to use the session's communication domain. The entire `dst` byte range must lie in the local registered memory region (MR), and the entire `src` range in the MR registered for `peer`. A plain `Tensor` is a valid destination when its storage meets this requirement. [PTO-ISA #457](https://github.com/hw-native-sys/pto-isa/issues/457)
+
+## Supported tensor async transfers
 
 | Dimension | Current support | Not yet supported |
 | --------- | --------------- | ----------------- |
@@ -97,6 +103,4 @@ failures are loud; there is no silent SDMA/RDMA fallback.
 Capacity validation adds no generated-kernel ABI change; symbolic view/slot
 sizes are checked in host orchestration. Static window declarations are now
 validated at compile time, so an existing program whose window view exceeds its
-backing allocation is rejected instead of compiling. Support for sessions/events,
-`wait`/`test`, SDMA/RDMA engines, native PTOAS lowering, per-request release and
-multi-SGE will be added incrementally.
+backing allocation is rejected instead of compiling. The explicit-session GET path is described above. In-kernel `wait`/`test`, native PTOAS lowering and multi-SGE transfers are future work.

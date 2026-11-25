@@ -32,6 +32,8 @@ class ResourceCatalog;
 
 namespace backend {
 
+inline constexpr char kUrmaScatterScratchParam[] = "__urma_scatter_scratch";
+
 class Backend;
 
 /**
@@ -250,6 +252,9 @@ class BackendHandler {
    * Ascend950 uses on-chip cross-core hardware and does not need it.
    */
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
+
+  /// Per-dispatch GM storage for single-segment URMA Scatter descriptors.
+  [[nodiscard]] virtual int64_t GetUrmaScatterScratchBytes() const { return 0; }
 
   /// Number of slots physically reserved by the C2V consumer's local ring.
   [[nodiscard]] virtual int GetC2VConsumerRingSlotCount(int /*slot_num*/, int local_slot_num) const {

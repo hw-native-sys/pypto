@@ -719,6 +719,9 @@ class PTOCodegen : public CodegenBase {
    */
   std::string RegisterUrmaTransferAdapter(bool is_put, DataType dtype);
 
+  void EmitUrmaMakeSession(const ir::CallPtr& op);
+  void EmitUrmaScatterGet(const ir::CallPtr& op);
+
   /**
    * @brief SSA name of the synthetic SPMD block_idx param.
    *
@@ -1032,6 +1035,7 @@ class PTOCodegen : public CodegenBase {
 
   /// Emit the external URMA async transfer helper declarations.
   void EmitUrmaTransferAdapterDeclarations();
+  void PlanUrmaEventCompletions(const ir::StmtPtr& body);
 
   /**
    * @brief Build variable identity to MemRef mapping from function body
@@ -1375,6 +1379,7 @@ class PTOCodegen : public CodegenBase {
     /// the tuple Var. Built once on function entry so a multi-output emitter
     /// resolves its destinations by lookup rather than by rescanning the body.
     std::map<const ir::Var*, std::vector<ir::VarPtr>> tuple_element_index;
+    std::map<const ir::Var*, ir::VarPtr> urma_destination_aliases;
 
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
@@ -1438,6 +1443,7 @@ class PTOCodegen : public CodegenBase {
       slot_index_ssa.clear();
 
       tuple_element_index.clear();
+      urma_destination_aliases.clear();
       current_function.reset();
       current_result_var.reset();
       current_result_buf.clear();
@@ -1472,8 +1478,8 @@ class PTOCodegen : public CodegenBase {
   /// True when the module needs the wrapper-defined counter-completion adapter.
   bool needs_deferred_completion_adapter_ = false;
 
-  /// URMA async transfer helper symbol -> MLIR element type.
-  std::map<std::string, std::string> urma_adapter_element_types_;
+  /// External URMA helper symbols and their PTOAS function signatures.
+  std::map<std::string, std::string> urma_adapter_signatures_;
 
   /// Sites already reported by WarnIfHighPrecisionIgnored, cleared by Generate
   /// so a second compilation in the same process warns again.

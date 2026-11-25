@@ -16,14 +16,14 @@ codegen 负责：双向 `dir_mask=3` pipe 按一个共享双向工作区计量�
 按 `(pipe id, direction)` 分配互不重叠的 GM 区域，从而让 PTO codegen 可以独立映射
 每条 frontend pipe。
 
-本 Pass 受 `BackendHandler::RequiresGMPipeBuffer()` **后端门控**。不需要 GM 路由 pipe 的后端（例如带直连核间通道的 Ascend950）会把它视为 no-op。
+在 Ascend950 上，`pld.tile.get_async` 通过相同的参数传递与调用点分配机制获得 `__urma_scatter_scratch`。每个 task 为每个物理 AIV 分配一条缓存行来保存 Scatter 描述符。Simpler 在提交时读取这两个描述符。
 
 **前置要求**：
 
 - 输入 IR 已完成 AIC/AIV 拆分并带有跨核 pipe setup（先运行 `ExpandMixedKernel`）。
-- 后端报告 `RequiresGMPipeBuffer() == true`，否则本 Pass 为 no-op。
+- 后端请求 GM pipe 缓冲区或正数大小的 URMA Scatter 临时缓冲区。
 
-**何时使用**：在 `ExpandMixedKernel` 之后，针对 Ascend910（或任意上报 `RequiresGMPipeBuffer` 的后端）运行。默认 tile pipeline 已经把它放在正确的位置。
+**何时使用**：在 `ExpandMixedKernel` 之后，针对请求上述缓冲区的后端运行。默认 tile pipeline 已经把它放在正确的位置。
 
 > **说明**：本 Pass 是从 `ExpandMixedKernel` 中拆分出来的，让原先的 Pass 聚焦于 AIC/AIV 拆分逻辑，把 GM 工作区这一关注点收敛到一个由后端门控的独立 transform。
 
@@ -125,10 +125,10 @@ Pass InjectGMPipeBuffer();
 
 **实现**：`src/ir/transforms/inject_gm_pipe_buffer_pass.cpp`
 
-- `HasInitializePipeOps` —— 递归扫描 `aic_initialize_pipe` / `aiv_initialize_pipe`（通过 `op_predicates::IsInitializePipe`）
-- `AddGMSlotBufferParam` —— 追加 Out-tensor 参数
+- `ScratchUseFinder` —— 递归扫描 `aic_initialize_pipe` / `aiv_initialize_pipe`（通过 `op_predicates::IsInitializePipe`）
+- `AddScratchParam` —— 追加 Out-tensor 参数
 - `RewriteCallsForGMBuffer` —— 改写调用者的调用点
-- `CreateGMPipeBufferTensorCreate` —— 构造 Orchestration 侧的占位 `tensor.create`
+- `CreateScratchTensor` —— 构造 Orchestration 侧的占位 `tensor.create`
 - `RewriteCallsWithPerCallGMBuffer` —— 驱动 Orchestration 侧的改写：插入占位并按调用点转发工作区
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
@@ -148,7 +148,7 @@ passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
 | Produced | SSAForm、MixedKernelExpanded、NormalizedStmtStructure |
 | Invalidated | — |
 
-本 Pass 保留它所需要的所有属性（非 910B 后端为 no-op；910B 上是同形改写）。
+本 Pass 保留它所需要的所有属性。
 
 ## 设计取舍
 

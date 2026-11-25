@@ -20,10 +20,16 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
 #include "pypto/sync/resource_catalog.h"
+#include "runtime/src/a5/platform/include/common/platform_config.h"
 #include "src/backend/common/sync_resources.h"
 
 namespace pypto {
 namespace backend {
+
+int64_t Ascend950Handler::GetUrmaScatterScratchBytes() const {
+  // Each physical AIV writes one private descriptor cache line.
+  return PLATFORM_MAX_AIV_PER_THREAD * 64;
+}
 
 Ascend950Handler::Ascend950Handler() : BackendHandler(Backend950::Instance()) {}
 

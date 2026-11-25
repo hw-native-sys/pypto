@@ -11,19 +11,19 @@ On Ascend910, cross-core `tpush`/`tpop` rides through a shared GM buffer instead
 3. Propagates the parameter upward through the call graph: any caller of a function that took the new parameter also gets it added (so the workspace flows from Orchestration down to AIC/AIV).
 4. Stops at Orchestration functions — they do **not** receive the parameter. Instead, the pass injects a per-call-site placeholder `tensor.create` that codegen later sizes and materializes on the host side.
 
-The pass only wires the `__gm_pipe_buffer` argument through IR. GM buffer footprint and slot allocation
+For cross-core pipes the pass wires the `__gm_pipe_buffer` argument through IR. GM buffer footprint and slot allocation
 are codegen responsibilities: codegen sizes bidirectional `dir_mask=3` pipes as one shared bidirectional
 workspace, and otherwise allocates disjoint GM regions per `(pipe id, direction)` so PTO codegen can map
 each explicit frontend pipe independently.
 
-The pass is **backend-gated** on `BackendHandler::RequiresGMPipeBuffer()`. Backends without GM-routed pipes (e.g. Ascend950 with its direct cross-core fabric) see this pass as a no-op.
+On Ascend950, `pld.tile.get_async` uses the same parameter and call-site allocation mechanism for `__urma_scatter_scratch`. Each task receives one cache line per physical AIV for its Scatter descriptors. Simpler consumes the descriptors during submission.
 
 **Requirements**:
 
 - Input IR must have AIC/AIV split with cross-core pipe setup already in place (run `ExpandMixedKernel` first).
-- Backend must report `RequiresGMPipeBuffer() == true`. Otherwise the pass is a no-op.
+- The backend requests GM pipe storage or a positive URMA Scatter scratch size.
 
-**When to use**: Run after `ExpandMixedKernel` when targeting Ascend910 (or any backend that signals `RequiresGMPipeBuffer`). The default tile pipeline already places it in the correct slot.
+**When to use**: Run after `ExpandMixedKernel` when targeting a backend that requests either workspace. The default tile pipeline already places it in the correct slot.
 
 > **Note**: This pass was extracted from `ExpandMixedKernel` to keep that pass focused on the AIC/AIV split logic and to scope the GM-workspace concern to a single, backend-gated transform.
 
@@ -126,10 +126,10 @@ Pass InjectGMPipeBuffer();
 
 **Implementation**: `src/ir/transforms/inject_gm_pipe_buffer_pass.cpp`
 
-- `HasInitializePipeOps` — recursive scan for `aic_initialize_pipe` / `aiv_initialize_pipe` (uses `op_predicates::IsInitializePipe`)
-- `AddGMSlotBufferParam` — append the Out-tensor parameter
+- `ScratchUseFinder` — recursive scan for `aic_initialize_pipe` / `aiv_initialize_pipe` (uses `op_predicates::IsInitializePipe`)
+- `AddScratchParam` — append the Out-tensor parameter
 - `RewriteCallsForGMBuffer` — rewrite a caller's call sites
-- `CreateGMPipeBufferTensorCreate` — synthesize the Orchestration-side placeholder `tensor.create`
+- `CreateScratchTensor` — synthesize the Orchestration-side placeholder `tensor.create`
 - `RewriteCallsWithPerCallGMBuffer` — drive the Orchestration-side rewrite, hoisting the placeholder and forwarding the workspace per call site
 
 **Python binding**: `python/bindings/modules/passes.cpp`
@@ -149,7 +149,7 @@ passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
 | Produced | SSAForm, MixedKernelExpanded, NormalizedStmtStructure |
 | Invalidated | — |
 
-The pass preserves all properties it requires (no-op on non-910B backends; same-shape rewrite on 910B).
+The pass preserves all properties it requires.
 
 ## Design Decisions
 

@@ -381,6 +381,9 @@ MIGRATION_FAMILIES = (
         (
             "pld.tile.get",
             "pld.tile.put",
+            "pld.system.make_session",
+            "pld.tile.get_async",
+            "pld.system.defer_wait_event",
             "pld.tensor.get_async",
             "pld.tensor.put_async",
             "pld.tile.remote_load",
