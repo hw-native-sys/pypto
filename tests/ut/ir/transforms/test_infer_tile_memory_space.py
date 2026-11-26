@@ -4330,6 +4330,12 @@ for n in pl.range(0, 2, 1):
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     def test_marked_mx_scale_panel_hoists_load_but_keeps_extracts(self):
+        """On Ascend950, hoist the invariant Mat load of the compiler-created lhs scale panel.
+
+        Keep both L0 scale extracts in the loop so each iteration stages the
+        windows its MX matmuls consume. The external rhs scale load is the negative
+        control because its input lacks the compiler's read-only buffer proof.
+        """
         params = """
 lhs: pl.Tensor[[16, 64], pl.FP8E4M3FN],
 rhs: pl.Tensor[[64, 128], pl.FP8E4M3FN],

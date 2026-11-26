@@ -604,6 +604,12 @@ class TestMxMatmulCodegen:
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
 
     def test_mx_scale_extract_binds_write_destination(self):
+        """Verify that TEXTRACT fills the same bound scale handle the MX matmul reads.
+
+        Binding after the extract can redirect the matmul to an address that the
+        extract never filled. Check both the order and the shared destination handle.
+        """
+
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)

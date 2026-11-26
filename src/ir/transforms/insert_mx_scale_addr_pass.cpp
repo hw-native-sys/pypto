@@ -21,7 +21,6 @@
  * flow invalidate the corresponding state conservatively.
  */
 
-#include <any>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -208,13 +207,16 @@ class MxScaleAddrInserter : public IRMutator {
                                      const VarPtr& payload) {
     const auto& call = extract.call;
     const auto scale_type = As<TileType>(extract.result->GetType());
+    const auto scale_space = scale_type->GetMemorySpace();
+    INTERNAL_CHECK_SPAN(scale_space.has_value(), call->span_)
+        << "The matched MX scale extract must have a resolved memory space";
     const auto span = call->span_;
     auto& registry = OpRegistry::GetInstance();
     // Keep the copy at its original position. The payload is already in scope:
     // any intervening definition or use on this L0 side invalidates the candidate.
     auto valid_shape = std::make_shared<MakeTuple>(GetValidShape(scale_type), span);
     auto bind = registry.Create("tile.bind_scale_addr", {payload, call->args_[3], valid_shape},
-                                {{"target_memory", *scale_type->GetMemorySpace()}}, span);
+                                {{"target_memory", *scale_space}}, span);
     // The write aliases this handle, so carry any explicit scale slot onto
     // the handle's allocation as well as the original result.
     auto dst = std::make_shared<Var>(extract.result->name_hint_ + "_dst", scale_type, span);
