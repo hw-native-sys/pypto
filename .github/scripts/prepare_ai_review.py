@@ -239,10 +239,11 @@ def prepare(event_name: str, event: dict, repo: str, destination: Path, outputs:
             }
         )
     )
-    # Do not embed ref names or discussion text into workflow shell expressions.
+    # The publisher receives the authorized target branch through its environment.
     with outputs.open("a") as stream:
         stream.write(
-            f"number={pr['number']}\nhead={pr['head']['sha']}\nbase={pr['base']['sha']}\nready=true\n"
+            f"number={pr['number']}\nhead={pr['head']['sha']}\nbase={pr['base']['sha']}\n"
+            f"base_ref={pr['base']['ref']}\nready=true\n"
         )
 
 

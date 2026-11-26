@@ -347,7 +347,9 @@ def test_prepare_writes_safe_outputs(collector, pr, comment_event, monkeypatch, 
         "head": "a" * 40,
         "base_ref": pr["base"]["ref"],
     }
-    assert outputs.read_text() == f"number=2911\nhead={'a' * 40}\nbase={'b' * 40}\nready=true\n"
+    assert outputs.read_text() == (
+        f"number=2911\nhead={'a' * 40}\nbase={'b' * 40}\nbase_ref={pr['base']['ref']}\nready=true\n"
+    )
 
 
 def test_oversized_context_not_silently_truncated(collector, pr, comment_event, monkeypatch, tmp_path):

@@ -64,11 +64,16 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict:
     return result
 
 
-def load_review(path: Path) -> dict:
-    """Validate every field before a review can authorize an approval."""
+def read_review(path: Path) -> str:
+    """Read a bounded UTF-8 artifact from either reviewer."""
     if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= MAX_BYTES:
         raise ValueError("Review must be a non-empty regular file of at most 60000 bytes")
-    review = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    return path.read_text(encoding="utf-8")
+
+
+def parse_review(text: str) -> dict:
+    """Validate every field before a review can authorize an approval."""
+    review = json.loads(text, object_pairs_hook=unique_object)
     if not isinstance(review, dict) or set(review) != {"verdict", "summary", "findings"}:
         raise ValueError("Review must contain exactly verdict, summary, and findings")
     if review["verdict"] not in ("pass", "findings", "incomplete"):
@@ -123,7 +128,7 @@ def extract_session(events: Path, output: Path) -> str:
     if not completed or session_id is None or not isinstance(final_text, str):
         raise ValueError("Missing completed Codex review or session ID")
     output.write_text(final_text)
-    load_review(output)
+    parse_review(read_review(output))
     return session_id
 
 
@@ -312,14 +317,21 @@ def matches_revision(pr: dict, head: str, base_ref: str) -> bool:
     )
 
 
-def approval_blocker(endpoint: str, pr: dict, review: dict, enabled: bool) -> str | None:
+def approval_blocker(
+    endpoint: str, pr: dict, review: dict, gemini_verdict: str | None, enabled: bool
+) -> str | None:
     """Return why human review is needed, or None if all approval gates pass."""
     if not enabled:
         return "Automatic approval is disabled"
     if pr["user"]["login"] == "github-actions[bot]":
         return "GitHub Actions cannot approve its own pull request"
     if review["verdict"] != "pass":
-        return "Review contains findings or is incomplete"
+        return "Codex reported findings or an incomplete review"
+    if gemini_verdict != "pass":
+        return {
+            "findings": "Gemini reported findings",
+            "incomplete": "Gemini review was incomplete",
+        }.get(gemini_verdict, "A verified Gemini review is unavailable")
     files = github_api(f"{endpoint}/files?per_page=100", paginate=True)
     if len(files) != pr["changed_files"] or not files:
         return "Cannot verify the complete changed-file list"
@@ -363,15 +375,24 @@ def revoke_approvals(repo: str, number: str) -> None:
             ]
             subprocess.run(
                 command,
-                input=json.dumps({"message": "Superseded by a new Codex review"}),
+                input=json.dumps({"message": "Superseded by a new AI review"}),
                 text=True,
                 capture_output=True,
                 check=True,
             )
 
 
-def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: str, enabled: bool) -> str:
-    """Post a review, approving only a complete clean review of the current revision."""
+def publish(
+    path: Path | None,
+    repo: str,
+    number: str,
+    head: str,
+    base: str,
+    base_ref: str,
+    enabled: bool,
+    gemini_verdict: str | None = None,
+) -> str:
+    """Replace our approval only when both models passed on the current diff."""
     endpoint = pull_request_endpoint(repo, number)
     if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head, base)):
         raise ValueError("Expected full commit SHA values")
@@ -381,18 +402,17 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
 
     # A bad replacement result must not leave our earlier approval in force.
     revoke_approvals(repo, number)
-    review = load_review(path)
+    if path is None:
+        return "Withdrew any previous AI approval for the current revision"
+    review = parse_review(read_review(path))
     reviewed_merge_base = optional_merge_base_sha(repo, base, head)
     current_merge_base = optional_merge_base_sha(repo, pr["base"]["sha"], head)
     diff_verified = reviewed_merge_base is not None and current_merge_base == reviewed_merge_base
-    reason = approval_blocker(endpoint, pr, review, enabled)
+    reason = approval_blocker(endpoint, pr, review, gemini_verdict, enabled)
     if not diff_verified:
         reason = "Cannot verify that the reviewed PR diff is current"
     approve = reason is None
 
-    body = f"{MARKER}\n## Codex Review\n\nReviewed `{head}` against base `{base}`.\n\n"
-    body += "> Automated assessment of untrusted PR content; not a guarantee of correctness.\n\n"
-    body += review["summary"]
     findings_body, comments = render_findings(
         repo, endpoint, head, reviewed_merge_base if diff_verified else None, review["findings"]
     )
@@ -406,8 +426,11 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
         reason = "Cannot verify that the reviewed PR diff is current"
         approve = False
         findings_body, comments = render_findings(repo, endpoint, head, None, review["findings"])
-    body += findings_body
-    body += "\n\nApproval policy: passed." if approve else f"\n\nNo automatic approval: {reason}."
+    heading = "AI Review" if approve else "Codex Review"
+    body = f"{MARKER}\n## {heading}\n\nReviewed `{head}` against base `{base}`.\n\n"
+    body += "> Automated assessment of untrusted PR content; not a guarantee of correctness.\n\n"
+    body += review["summary"] + findings_body
+    body += "\n\nCodex and Gemini both passed." if approve else f"\n\nNo automatic approval: {reason}."
     if len(body.encode()) + sum(len(item["body"].encode()) for item in comments) > MAX_BYTES:
         raise ValueError("Rendered review exceeds 60000 bytes")
     posted = github_api(
@@ -447,16 +470,24 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     return "Approved reviewed commit" if approve else f"Commented: {reason}"
 
 
-def publish_gemini(path: Path, repo: str, number: str, head: str, base: str, base_ref: str) -> str:
-    """Attach the runner's plain-text feedback as a comment on the reviewed commit."""
+def publish_gemini(path: Path, repo: str, number: str, head: str, base: str, base_ref: str) -> str | None:
+    """Post escaped feedback and return the validated verdict for this commit."""
     endpoint = pull_request_endpoint(repo, number)
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
-        raise ValueError("Expected a regular Gemini response file of at most 60000 bytes")
-    feedback = path.read_text(encoding="utf-8").strip()
+    feedback = read_review(path).strip()
     if not feedback:
         raise ValueError("Gemini returned an empty response")
+    try:
+        review = parse_review(feedback)
+    except (ValueError, RecursionError):
+        # Older launchers return prose. Keep it visible without granting a vote.
+        verdict = "incomplete"
+    else:
+        verdict = review["verdict"]
+        feedback = "\n\n".join(
+            [review["summary"]] + [f"{finding['title']}\n{finding['body']}" for finding in review["findings"]]
+        )
     body = (
-        f"## Gemini Review\n\nReviewed `{head}` against base `{base}`.\n\n"
+        f"## Gemini Review\n\nReviewed `{head}` against base `{base}`. Verdict: `{verdict}`.\n\n"
         f"<pre>{html.escape(feedback, quote=False)}</pre>"
     )
     if len(body.encode()) > MAX_BYTES:
@@ -464,12 +495,12 @@ def publish_gemini(path: Path, repo: str, number: str, head: str, base: str, bas
 
     pr = github_api(endpoint)
     if not matches_revision(pr, head, base_ref):
-        return "Skipped obsolete or non-reviewable PR"
+        return None
     current_base = pr["base"]["sha"]
     if current_base != base and merge_base_sha(repo, current_base, head) != merge_base_sha(repo, base, head):
-        return "Skipped Gemini review because the PR diff changed"
+        return None
     github_api(f"{endpoint}/reviews", {"commit_id": head, "event": "COMMENT", "body": body})
-    return "Posted Gemini review"
+    return verdict
 
 
 if __name__ == "__main__":
@@ -486,6 +517,17 @@ if __name__ == "__main__":
             os.environ["REVIEW_BASE_REF"],
         )
         if sys.argv[1] == "--gemini":
-            print(publish_gemini(Path(sys.argv[2]), *target))
+            verdict = publish_gemini(Path(sys.argv[2]), *target)
+            if verdict is not None:
+                with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
+                    stream.write(f"verdict={verdict}\n")
         else:
-            print(publish(Path(sys.argv[1]), *target, enabled=os.environ.get("AUTO_APPROVE") == "true"))
+            path = None if sys.argv[1] == "--withdraw-current" else Path(sys.argv[1])
+            print(
+                publish(
+                    path,
+                    *target,
+                    enabled=os.environ.get("AUTO_APPROVE") == "true",
+                    gemini_verdict=os.environ.get("GEMINI_VERDICT"),
+                )
+            )

@@ -51,6 +51,7 @@ jobs:
       number: ${{ steps.context.outputs.number }}
       head: ${{ steps.context.outputs.head }}
       base: ${{ steps.context.outputs.base }}
+      base_ref: ${{ steps.context.outputs.base_ref }}
     steps:
       - name: Checkout trusted context collector
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,8 +63,6 @@ jobs:
         id: context
         env:
           GH_TOKEN: ${{ github.token }}
-          # A rerun of codex-review.yml evaluates the original enable flag.
-          CODEX_REVIEW_ENABLED: ${{ vars.CODEX_REVIEW_ENABLED }}
           AI_REVIEW_RERUN_TOKEN: >-
             ${{ github.event_name == 'issue_comment' &&
             (secrets.AI_REVIEW_RERUN_TOKEN || secrets.CODEX_REVIEW_RERUN_TOKEN) || '' }}
@@ -607,15 +606,12 @@ jobs:
 
   publish:
     needs: [prepare, review, gemini]
-    if: >-
-      !cancelled() &&
-      ((needs.review.result == 'success' && needs.review.outputs.completed == 'true') ||
-       needs.gemini.result == 'success')
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
       group: codex-publish-${{ needs.prepare.outputs.number }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: read
@@ -625,54 +621,55 @@ jobs:
       PR_NUMBER: ${{ needs.prepare.outputs.number }}
       REVIEW_HEAD_SHA: ${{ needs.prepare.outputs.head }}
       REVIEW_BASE_SHA: ${{ needs.prepare.outputs.base }}
+      REVIEW_BASE_REF: ${{ needs.prepare.outputs.base_ref }}
 
     steps:
       # Execute publisher code from the trusted workflow commit, never the PR head.
       - name: Checkout trusted publisher
+        id: trusted
+        if: ${{ always() }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
           sparse-checkout: .github/scripts
 
-      - name: Download reviewed discussion snapshot
-        id: discussion
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ai-review-context-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ai-review-context
-
-      - name: Download Codex result
-        id: codex_result
-        if: needs.review.result == 'success' && needs.review.outputs.completed == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/codex-review-artifact
-
-      - name: Publish Codex review and conditionally approve
-        if: steps.codex_result.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          AUTO_APPROVE: ${{ vars.CODEX_REVIEW_AUTO_APPROVE }}
-        run: |
-          export REVIEW_BASE_REF
-          REVIEW_BASE_REF=$(jq -er .base_ref "$RUNNER_TEMP/ai-review-context/discussion.json")
-          python .github/scripts/publish_ai_review.py "$RUNNER_TEMP/codex-review-artifact/codex-review.json"
-
       - name: Download Gemini feedback
         id: gemini_result
-        if: ${{ !cancelled() && steps.discussion.outcome == 'success' && needs.gemini.result == 'success' }}
+        if: ${{ !cancelled() && steps.trusted.outcome == 'success' && needs.gemini.result == 'success' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: gemini-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/gemini-review-artifact
 
       - name: Publish Gemini feedback on the reviewed commit
+        id: gemini_feedback
         if: ${{ !cancelled() && steps.gemini_result.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          export REVIEW_BASE_REF
-          REVIEW_BASE_REF=$(jq -er .base_ref "$RUNNER_TEMP/ai-review-context/discussion.json")
-          python .github/scripts/publish_ai_review.py --gemini "$RUNNER_TEMP/gemini-review-artifact/response.txt"
+        run: python .github/scripts/publish_ai_review.py --gemini "$RUNNER_TEMP/gemini-review-artifact/response.txt"
+
+      - name: Download Codex result
+        id: codex_result
+        if: >-
+          !cancelled() && steps.trusted.outcome == 'success' &&
+          needs.review.result == 'success' && needs.review.outputs.completed == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review-artifact
+
+      - name: Publish Codex feedback and decide joint approval
+        id: decision
+        if: ${{ !cancelled() && steps.codex_result.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTO_APPROVE: ${{ vars.AI_REVIEW_AUTO_APPROVE || vars.CODEX_REVIEW_AUTO_APPROVE }}
+          GEMINI_VERDICT: ${{ steps.gemini_feedback.outcome == 'success' && steps.gemini_feedback.outputs.verdict || '' }}
+        run: python .github/scripts/publish_ai_review.py "$RUNNER_TEMP/codex-review-artifact/codex-review.json"
+
+      - name: Withdraw prior approval when the decision could not complete
+        if: ${{ always() && steps.trusted.outcome == 'success' && (cancelled() || steps.decision.outcome != 'success') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/publish_ai_review.py --withdraw-current
