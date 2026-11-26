@@ -1997,7 +1997,7 @@ jobs:
     with:
       platform: a2a3
       # The npu-xp runners have the Qwen3 weights used by this guard.
-      a2a3-runner-labels: '["self-hosted", "linux", "npu-xp"]'
+      runner-labels: '["self-hosted", "linux", "npu-xp"]'
       pypto-repository: ${{ github.repository }}
       pypto-revision: ${{ needs.changes.outputs.checkout_sha }}
 
@@ -2016,6 +2016,7 @@ jobs:
     uses: hw-native-sys/pypto-serving/.github/workflows/ci.yml@main
     with:
       platform: a5
+      runner-labels: '["self-hosted", "linux", "npu-a5"]'
       pypto-repository: ${{ github.repository }}
       pypto-revision: ${{ needs.changes.outputs.checkout_sha }}
 
