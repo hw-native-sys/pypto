@@ -109,6 +109,18 @@ class MxScaleAddrInserter : public IRMutator {
     return IRMutator::VisitExpr_(op);
   }
 
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto result = As<AssignStmt>(IRMutator::VisitStmt_(op));
+    auto call = As<Call>(result->value_);
+    if (call && IsOp(call, "tile.extract") && call->args_.size() == 5) {
+      // This extraction binds its destination before writing to it in codegen.
+      auto data = AsVarLike(call->args_[4]);
+      INTERNAL_CHECK_SPAN(data, call->span_) << "Scale extraction requires a named MX payload tile";
+      BindingFor(result->var_) = Binding{result->var_, data, result->var_};
+    }
+    return result;
+  }
+
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
     bool changed = false;
     std::vector<StmtPtr> new_stmts;
@@ -157,6 +169,11 @@ class MxScaleAddrInserter : public IRMutator {
 
   std::optional<Binding> left_binding_;
   std::optional<Binding> right_binding_;
+
+  std::optional<Binding>& BindingFor(const VarPtr& scale) {
+    return As<TileType>(scale->GetType())->GetMemorySpace() == MemorySpace::LeftScale ? left_binding_
+                                                                                      : right_binding_;
+  }
 
   void ClearBindings() {
     left_binding_.reset();
@@ -222,9 +239,7 @@ class MxScaleAddrInserter : public IRMutator {
              "RightScale↔Right pairing before inserting tile.tget_scale_addr (run "
              "InferTileMemorySpace first)";
 
-      auto& binding = As<TileType>(scale->GetType())->GetMemorySpace() == MemorySpace::LeftScale
-                          ? left_binding_
-                          : right_binding_;
+      auto& binding = BindingFor(scale);
       if (!binding || binding->scale.get() != scale.get() || binding->data.get() != data.get()) {
         auto binding_call = registry.Create("tile.tget_scale_addr", {scale, data}, {}, call->span_);
         auto bound_scale =

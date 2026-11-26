@@ -872,6 +872,19 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   return "";
 }
 
+static void EmitScaleAddressBinding(codegen::PTOCodegen& codegen, const ExprPtr& data, const std::string& dst,
+                                    const std::string& dst_ty) {
+  const auto src = codegen.GetExprAsCode(data);
+  const auto src_ty = codegen.GetExprTypeAnnotation(data);
+  std::ostringstream oss;
+  oss << "pto.tget_scale_addr ins(" << src;
+  if (!src_ty.empty()) oss << " : " << src_ty;
+  oss << ") outs(" << dst;
+  if (!dst_ty.empty()) oss << " : " << dst_ty;
+  oss << ")";
+  codegen.Emit(oss.str());
+}
+
 // Helper for compiler-generated tile.tget_scale_addr (DPS, A5):
 //   pto.tget_scale_addr ins(%src : src_ty) outs(%dst_scale : dst_ty)
 //
@@ -882,8 +895,6 @@ static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::Codeg
   INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
       << op->op_->name_ << " requires 2 arguments (dst_scale, src), but got " << op->args_.size();
 
-  std::string src = codegen.GetExprAsCode(op->args_[1]);
-  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_ty = codegen.GetCurrentResultTileBufTypeString();
 
@@ -896,17 +907,7 @@ static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::Codeg
       << ". This usually means IsInPlaceInput0DpsOp is out of sync with the op registry's "
          "set_output_reuses_input flag.";
 
-  std::ostringstream oss;
-  oss << "pto.tget_scale_addr ins(" << src;
-  if (!src_ty.empty()) {
-    oss << " : " << src_ty;
-  }
-  oss << ") outs(" << dst;
-  if (!dst_ty.empty()) {
-    oss << " : " << dst_ty;
-  }
-  oss << ")";
-  codegen.Emit(oss.str());
+  EmitScaleAddressBinding(codegen, op->args_[1], dst, dst_ty);
   return "";
 }
 
@@ -1734,9 +1735,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
   reg("tile.extract", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
-        << "tile.extract requires 4 arguments (src, index_row, index_col, shape), but got "
-        << op->args_.size();
+    INTERNAL_CHECK_SPAN(op->args_.size() == 4 || op->args_.size() == 5, op->span_)
+        << "tile.extract requires (src, index_row, index_col, shape[, scale_for])";
 
     std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -1753,6 +1753,11 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     }
     if (!result_type.empty()) {
       codegen.RegisterTileBufType(result_target, result_type, codegen.GetCurrentResultTileType());
+    }
+
+    // An explicitly allocated scale tile must be bound before the copy writes to it.
+    if (op->args_.size() == 5) {
+      EmitScaleAddressBinding(codegen, op->args_[4], result_target, result_type);
     }
 
     std::ostringstream oss;

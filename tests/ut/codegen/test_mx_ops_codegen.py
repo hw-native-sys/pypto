@@ -10,6 +10,7 @@
 """Codegen tests for MXFP8, native FP4, and explicit FP4-to-FP8 legalization."""
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -602,6 +603,39 @@ class TestMxMatmulCodegen:
         lines = mlir.splitlines()
         first_tget = next(i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line)
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
+
+    def test_scale_extract_binds_payload_slot_before_write(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[80, 256], pl.FP8E4M3FN],
+                b: pl.Tensor[[256, 160], pl.FP8E4M3FN, pl.NZ],
+                sa: pl.Tensor[[80, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                sb: pl.Tensor[[8, 160], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[80, 160], pl.FP32]],
+            ):
+                am = pl.load(a, [0, 0], [80, 256], target_memory=pl.Mem.Mat)
+                bm = pl.load(b, [0, 0], [256, 160], target_memory=pl.Mem.Mat)
+                sam = pl.load(sa, [0, 0], [80, 8], target_memory=pl.Mem.Mat)
+                sbm = pl.load(sb, [0, 0], [8, 160], target_memory=pl.Mem.Mat)
+                al = pl.tile.extract(am, 0, 128, [80, 128], target_memory=pl.Mem.Left)
+                bl = pl.tile.extract(bm, 128, 0, [128, 160], target_memory=pl.Mem.Right)
+                sal = pl.tile.extract(sam, 0, 4, [80, 4], target_memory=pl.Mem.LeftScale, scale_for=al)
+                sbl = pl.tile.extract(sbm, 4, 0, [4, 160], target_memory=pl.Mem.RightScale, scale_for=bl)
+                acc = pl.matmul_mx(al, sal, bl, sbl)
+                pl.store(acc, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        # Explicit allocation addresses in level3 require PyPTO to order the
+        # binding before the scale copy and to use the same destination handle.
+        bindings = list(re.finditer(r"pto\.tget_scale_addr[^\n]*outs\((%\w+)", mlir))
+        assert len(bindings) == 2
+        for binding in bindings:
+            [extract] = list(re.finditer(rf"pto\.textract[^\n]*outs\({binding[1]} :", mlir))
+            assert binding.start() < extract.start()
+        _assemble_mx(mlir, tmp_path)
 
     @pytest.mark.ptoas_compile
     def test_nd_backing_alias_emits_logical_mx_views(self, tmp_path):

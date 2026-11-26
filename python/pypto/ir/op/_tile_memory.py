@@ -886,6 +886,7 @@ def extract(
     index_row: int | Expr,
     index_col: int | Expr,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    scale_for: Expr | None = None,
     *,
     target_memory: MemorySpace,
     span: Span | None = None,
@@ -900,6 +901,8 @@ def extract(
         index_row: Starting row offset (int or Expr)
         index_col: Starting col offset (int or Expr)
         shape: Static destination shape (2-element sequence or MakeTuple of ConstInt)
+        scale_for: L0 payload tile that provides the scale address before copying.
+            Used for E8M0 Mat-to-LeftScale/RightScale extraction.
         target_memory: Destination memory space (Left/Right for Mat sources, Mat for Acc sources)
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -910,9 +913,12 @@ def extract(
     shape_tuple = _to_make_tuple(shape, actual_span)
     row_expr = _normalize_expr(index_row, actual_span, int_dtype=DataType.INDEX)
     col_expr = _normalize_expr(index_col, actual_span, int_dtype=DataType.INDEX)
+    args = [src, row_expr, col_expr, shape_tuple]
+    if scale_for is not None:
+        args.append(scale_for)
     return _ir_core.create_op_call(
         "tile.extract",
-        [src, row_expr, col_expr, shape_tuple],
+        args,
         {"target_memory": target_memory},
         actual_span,
     )

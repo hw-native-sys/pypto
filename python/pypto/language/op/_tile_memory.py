@@ -441,6 +441,7 @@ def extract(
     index_row: IntLike,
     index_col: IntLike,
     shape: Sequence[IntLike],
+    scale_for: Tile | None = None,
     *,
     target_memory: MemorySpace,
 ) -> Tile:
@@ -454,6 +455,8 @@ def extract(
         index_row: Starting row offset
         index_col: Starting col offset
         shape: Static 2D shape of the extracted sub-tile
+        scale_for: L0 payload tile that provides the scale address before copying.
+            Used for E8M0 Mat-to-LeftScale/RightScale extraction.
         target_memory: Destination memory space —
             ``Left`` / ``Right`` for Mat sources, ``Mat`` for Acc sources
 
@@ -466,6 +469,7 @@ def extract(
         row,
         col,
         shape=_normalize_intlike(shape),
+        scale_for=scale_for.unwrap() if scale_for is not None else None,
         target_memory=target_memory,
     )
     return Tile(expr=call_expr)
