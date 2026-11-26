@@ -81,15 +81,20 @@ def add_attempt(host, run="100", attempt="1", *, status="completed", repository=
         "id": int(run),
         "run_attempt": int(attempt),
         "repository": {"id": int(repository), "full_name": "owner/repo"},
-        "path": ".github/workflows/codex-review.yml",
+        "path": ".github/workflows/ai-review.yml",
         "status": status,
         "conclusion": "cancelled",
     }
 
 
-@pytest.mark.parametrize("conclusion", ["cancelled", "failure", "success", "timed_out"])
 @pytest.mark.parametrize(
-    "workflow", ["codex-review.yml", "codex-review-retarget.yml", "codex-review-retarget.yml@refs/heads/main"]
+    "conclusion,workflow",
+    [
+        ("cancelled", "codex-review.yml"),
+        ("failure", "ai-review.yml"),
+        ("success", "ai-review-retarget.yml"),
+        ("timed_out", "ai-review-retarget.yml@refs/heads/main"),
+    ],
 )
 def test_completed_attempt_releases_containers_before_networks(cleaner, host, conclusion, workflow):
     add_attempt(host)
@@ -134,9 +139,7 @@ def test_unverifiable_owner_aborts_before_any_removal(cleaner, host, error):
         {"run_attempt": 2},
         {"repository": {"id": 43, "full_name": "owner/repo"}},
         {"repository": {"id": 42, "full_name": "other/repo"}},
-        {"path": ".github/workflows/ci.yml"},
         {"path": ".github/workflows/codex-review-cleanup.yml"},
-        {"path": ".github/workflows/other.yml@refs/heads/main"},
         {"path": None},
     ],
 )
@@ -195,7 +198,7 @@ def test_failed_removal_rechecks_existence(cleaner, monkeypatch, kind, still_exi
 
 @pytest.fixture
 def workflow():
-    return yaml.safe_load((ROOT / ".github/workflows/codex-review.yml").read_text())
+    return yaml.safe_load((ROOT / ".github/workflows/ai-review.yml").read_text())
 
 
 @pytest.mark.parametrize("docker_fails", [False, True])

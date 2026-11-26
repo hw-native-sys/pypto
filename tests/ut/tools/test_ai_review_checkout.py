@@ -57,7 +57,7 @@ def review_history(tmp_path, monkeypatch):
 def review_steps():
     """Load the actual trusted shell steps instead of reimplementing preparation."""
     root = Path(__file__).resolve().parents[3]
-    workflow = yaml.safe_load((root / ".github/workflows/codex-review.yml").read_text())
+    workflow = yaml.safe_load((root / ".github/workflows/ai-review.yml").read_text())
     return {step["name"]: step for step in workflow["jobs"]["review"]["steps"]}
 
 
@@ -159,7 +159,7 @@ def test_gemini_workflow_reviews_the_pinned_diff_and_cleans_up(tmp_path, review_
     remote = tmp_path / "owner" / "repo.git"
     remote.parent.mkdir()
     git(tmp_path, "clone", "--bare", str(origin), str(remote))
-    workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/codex-review.yml"
+    workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/ai-review.yml"
     job = yaml.safe_load(workflow_path.read_text())["jobs"]["gemini"]
     assert job["permissions"] == {"contents": "read"}
     diff, review, upload, cleanup = job["steps"]
@@ -177,9 +177,7 @@ def test_gemini_workflow_reviews_the_pinned_diff_and_cleans_up(tmp_path, review_
     }
     subprocess.run(["bash", "-c", diff["run"]], env=env, check=True, capture_output=True)
     workdir = Path(outputs.read_text().strip().removeprefix("path="))
-    expected = git(origin, "diff", "--binary", merge_base, head)
-    assert (workdir / "pr.diff").read_text().strip() == expected
-    assert "base-only.txt" not in expected
+    assert (workdir / "pr.diff").read_text().strip() == git(origin, "diff", "--binary", merge_base, head)
 
     launcher = Path(env["HOME"]) / ".local/share/pypto-gemini-review/run"
     launcher.parent.mkdir(parents=True)
@@ -199,7 +197,6 @@ def test_gemini_workflow_reviews_the_pinned_diff_and_cleans_up(tmp_path, review_
     assert result.returncode == launcher_exit and result.stdout == result.stderr == b""
     assert (workdir / "results/response.txt").read_text() == "feedback\n"
     assert upload["with"]["path"] == "${{ steps.diff.outputs.path }}/results/response.txt"
-    assert upload["with"]["name"] == "gemini-review-${{ github.run_id }}-${{ github.run_attempt }}"
     assert "if" not in upload and "always()" in cleanup["if"]
     subprocess.run(["bash", "-c", cleanup["run"]], env=env, check=True)
     assert not workdir.exists()

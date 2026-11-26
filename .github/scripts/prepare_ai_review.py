@@ -18,10 +18,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from publish_codex_review import github_api, pull_request_endpoint
-from rerun_codex_review import route_review
+from publish_ai_review import github_api, pull_request_endpoint
+from rerun_ai_review import route_review
 
-COMMAND = "@pypto-codex review"
+COMMANDS = {"/ai-review", "@pypto-codex review"}
 MAX_CONTEXT_BYTES = 8 * 1024 * 1024
 
 
@@ -49,7 +49,7 @@ def requests_review(body: str) -> bool:
             elif marker[0] == fence[0] and len(marker) >= len(fence) and match.end() == len(stripped):
                 fence = None
             continue
-        if fence is None and stripped.casefold() == COMMAND:
+        if fence is None and stripped.casefold() in COMMANDS:
             return True
     return False
 

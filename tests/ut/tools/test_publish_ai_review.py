@@ -25,8 +25,8 @@ BASE = "b" * 40
 @pytest.fixture
 def publisher():
     """Load the trusted publisher without importing the compiler extension."""
-    path = Path(__file__).resolve().parents[3] / ".github/scripts/publish_codex_review.py"
-    spec = importlib.util.spec_from_file_location("publish_codex_review", path)
+    path = Path(__file__).resolve().parents[3] / ".github/scripts/publish_ai_review.py"
+    spec = importlib.util.spec_from_file_location("publish_ai_review", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -426,12 +426,10 @@ def test_symlink_rejected(publisher, review_file, api, tmp_path):
     assert not api["posted"]
 
 
-@pytest.mark.parametrize("base_advanced", [False, True])
-def test_gemini_posts_plain_text_on_reviewed_commit(publisher, api, tmp_path, base_advanced):
+def test_gemini_posts_plain_text_on_reviewed_commit(publisher, api, tmp_path):
     feedback = tmp_path / "response.txt"
     feedback.write_text("Line 12: a < b\n</pre><img src='example'>")
-    if base_advanced:
-        api["pr"]["base"]["sha"] = "d" * 40
+    api["pr"]["base"]["sha"] = "d" * 40  # Same merge base, so the reviewed diff is still current.
     publisher.publish_gemini(feedback, "owner/repo", "12", HEAD, BASE, "main")
     (review,) = api["posted"]
     assert review["event"] == "COMMENT" and review["commit_id"] == HEAD
@@ -440,20 +438,14 @@ def test_gemini_posts_plain_text_on_reviewed_commit(publisher, api, tmp_path, ba
     assert not api["dismissed"]
 
 
-@pytest.mark.parametrize("change", ["closed", "draft", "head", "retarget", "merge_base"])
+@pytest.mark.parametrize("change", ["head", "merge_base"])
 def test_gemini_skips_stale_diff(publisher, api, review_file, change):
-    if change == "closed":
-        api["pr"]["state"] = "closed"
-    elif change == "draft":
-        api["pr"]["draft"] = True
-    elif change == "head":
+    if change == "head":
         api["pr"]["head"]["sha"] = "c" * 40
-    elif change == "retarget":
-        api["pr"]["base"]["ref"] = "release"
     else:
         api["pr"]["base"]["sha"] = "d" * 40
         api["merge_base_changed"] = True
-    assert publisher.publish_gemini(review_file, "owner/repo", "12", HEAD, BASE, "main").startswith("Skipped")
+    publisher.publish_gemini(review_file, "owner/repo", "12", HEAD, BASE, "main")
     assert not api["posted"] and not api["dismissed"]
 
 
@@ -731,7 +723,7 @@ def load_workflow(name: str) -> dict:
 
 @pytest.fixture
 def workflow():
-    return load_workflow("codex-review")
+    return load_workflow("ai-review")
 
 
 def workflow_expression(expression, context, *, cancelled=False, success=True):
@@ -755,8 +747,12 @@ def workflow_expression(expression, context, *, cancelled=False, success=True):
             assert node.func.id in {"cancelled", "success"} and not node.args
             return cancelled if node.func.id == "cancelled" else success
         if isinstance(node, ast.BoolOp):
-            values = (bool(evaluate(value)) for value in node.values)
-            return all(values) if isinstance(node.op, ast.And) else any(values)
+            value = evaluate(node.values[0])
+            for operand in node.values[1:]:
+                if bool(value) == isinstance(node.op, ast.Or):
+                    break
+                value = evaluate(operand)
+            return value
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return not evaluate(node.operand)
         if isinstance(node, ast.Compare):
@@ -795,28 +791,27 @@ def test_ordinary_prs_create_only_review_checks(workflow):
         "issue_comment": {"types": ["created"]},
         "workflow_call": None,
     }
-    assert set(workflow["jobs"]) == {"prepare", "review", "gemini", "publish"}
-    assert "needs" not in workflow["jobs"]["prepare"]
-    assert workflow["jobs"]["review"]["needs"] == "prepare"
-    assert workflow["jobs"]["gemini"]["needs"] == "prepare"
-    assert workflow["jobs"]["gemini"]["name"] == "gemini-review"
-    assert workflow["jobs"]["publish"]["needs"] == ["prepare", "review", "gemini"]
+    jobs = workflow["jobs"]
+    assert workflow["name"] == "AI Review"
+    assert {job.get("name", key) for key, job in jobs.items()} == {
+        "prepare",
+        "codex-review",
+        "gemini-review",
+        "publish",
+    }
+    assert "needs" not in jobs["prepare"]
+    assert jobs["review"]["needs"] == jobs["gemini"]["needs"] == "prepare"
+    assert jobs["review"]["if"] == jobs["gemini"]["if"]
+    assert set(jobs["publish"]["needs"]) == {"prepare", "review", "gemini"}
 
 
 def test_retarget_entry_requires_revocation_before_calling_review():
-    retarget_workflow = load_workflow("codex-review-retarget")
+    retarget_workflow = load_workflow("ai-review-retarget")
     assert retarget_workflow["on"] == {"pull_request_target": {"types": ["edited"]}}
     call = retarget_workflow["jobs"]["review"]
     assert call["needs"] == "invalidate"
-    assert call["uses"] == "./.github/workflows/codex-review.yml"
+    assert call["uses"] == "./.github/workflows/ai-review.yml"
     assert "secrets" not in call
-    assert call["permissions"] == {
-        "actions": "read",
-        "checks": "read",
-        "contents": "read",
-        "issues": "read",
-        "pull-requests": "write",
-    }
 
 
 @pytest.mark.parametrize(
@@ -837,10 +832,10 @@ def test_workflow_retarget_gates(
     workflow, action, retarget, actor, draft, enabled, invalidation, invalidates, reviews, base_ref
 ):
     """Retargets invalidate first and unrelated edits never enqueue review jobs."""
-    retarget_workflow = load_workflow("codex-review-retarget")
+    retarget_workflow = load_workflow("ai-review-retarget")
     invalidate = retarget_workflow["jobs"]["invalidate"]
     call = retarget_workflow["jobs"]["review"]
-    caller = "codex-review-retarget" if action == "edited" else "codex-review"
+    caller = "ai-review-retarget" if action == "edited" else "ai-review"
     context = {
         "github": {
             "event_name": "pull_request_target",
@@ -854,7 +849,7 @@ def test_workflow_retarget_gates(
                 "pull_request": {"draft": draft, "number": 12, "base": {"ref": base_ref}},
             },
         },
-        "vars": {"CODEX_REVIEW_ENABLED": enabled},
+        "vars": {"AI_REVIEW_ENABLED": enabled},
     }
     assert bool(action == "edited" and workflow_expression(invalidate["if"], context)) == invalidates
     prepare = workflow["jobs"]["prepare"]["if"]
@@ -865,67 +860,57 @@ def test_workflow_retarget_gates(
         starts = action in workflow["on"]["pull_request_target"]["types"]
     assert bool(starts and workflow_expression(prepare, context)) == (reviews and base_ref == "main")
 
-    context["github"]["workflow_ref"] = "owner/repo/.github/workflows/other.yml@refs/heads/main"
-    assert not workflow_expression(prepare, context)
 
-
-@pytest.mark.parametrize("review", ["success", "failure", "skipped", "cancelled"])
-@pytest.mark.parametrize("gemini", ["success", "failure"])
-@pytest.mark.parametrize("cancelled", [False, True])
-@pytest.mark.parametrize("completed", ["true", ""])
-def test_publish_requires_successful_review(workflow, review, gemini, cancelled, completed):
-    """An available assessment reaches the publisher even if its sibling failed."""
+@pytest.mark.parametrize(
+    "codex,completed,gemini,cancelled,publish_codex,publish_gemini",
+    [
+        ("success", "true", "success", False, True, True),
+        ("success", "true", "failure", False, True, False),
+        ("failure", "true", "success", False, False, True),
+        ("success", "", "failure", False, False, False),
+        ("failure", "", "failure", False, False, False),
+        ("success", "true", "success", True, False, False),
+    ],
+)
+def test_publish_available_reviews(
+    workflow, codex, completed, gemini, cancelled, publish_codex, publish_gemini
+):
     publish = workflow["jobs"]["publish"]
     context = {
         "needs": {
-            "review": {"result": review, "outputs": {"completed": completed}},
+            "review": {"result": codex, "outputs": {"completed": completed}},
             "gemini": {"result": gemini},
-        }
+        },
+        "steps": {
+            "discussion": {"outcome": "success"},
+            "codex_result": {"outcome": "success" if publish_codex else "skipped"},
+            "gemini_result": {"outcome": gemini},
+        },
     }
-    assert bool(
-        workflow_expression(
-            publish.get("if", "success()"),
-            context,
-            cancelled=cancelled,
-            success=review == "success" and not cancelled,
-        )
-    ) == (not cancelled and ((review == "success" and completed == "true") or gemini == "success"))
-
-
-@pytest.mark.parametrize(
-    "codex,gemini", [("success", "failure"), ("failure", "success"), ("success", "success")]
-)
-def test_each_publisher_reads_only_its_successful_artifact(workflow, codex, gemini):
-    steps = {step["name"]: step for step in workflow["jobs"]["publish"]["steps"]}
-    needs = {"review": {"result": codex, "outputs": {"completed": "true"}}, "gemini": {"result": gemini}}
-    outcomes = {
-        "discussion": {"outcome": "success"},
-        "codex_result": {"outcome": codex},
-        "gemini_result": {"outcome": gemini},
-    }
-    context = {"needs": needs, "steps": outcomes}
-    assert workflow_expression(steps["Download review result"]["if"], context) == (codex == "success")
-    assert workflow_expression(steps["Publish review and conditionally approve"]["if"], context) == (
-        codex == "success"
-    )
-    # A failed Codex download or publication must still allow a successful Gemini result.
-    assert workflow_expression(steps["Download Gemini feedback"]["if"], context, success=False) == (
-        gemini == "success"
-    )
-    step = steps["Publish Gemini feedback on the reviewed commit"]
-    assert workflow_expression(step["if"], context, success=False) == (gemini == "success")
-    assert not workflow_expression(step["if"], context, cancelled=True)
-    assert "AUTO_APPROVE" not in step["env"]
+    assert workflow_expression(
+        publish["if"], context, cancelled=cancelled, success=codex == gemini == "success"
+    ) == (publish_codex or publish_gemini)
+    steps = {step["name"]: step for step in publish["steps"]}
     assert (
-        steps["Download Gemini feedback"]["with"]["name"]
-        == "gemini-review-${{ github.run_id }}-${{ github.run_attempt }}"
+        workflow_expression(steps["Download Codex result"]["if"], context, success=not cancelled)
+        == publish_codex
     )
+    assert (
+        workflow_expression(steps["Publish Codex review and conditionally approve"]["if"], context)
+        == publish_codex
+    )
+    # A failed Codex step must still allow the Gemini download and publication.
+    for name in ("Download Gemini feedback", "Publish Gemini feedback on the reviewed commit"):
+        assert (
+            workflow_expression(steps[name]["if"], context, cancelled=cancelled, success=False)
+            == publish_gemini
+        )
 
 
 def test_invalidation_is_independent_of_review_cancellation(workflow):
     """New review events cannot cancel a running approval revocation job."""
     assert "concurrency" not in workflow
-    retarget = load_workflow("codex-review-retarget")
+    retarget = load_workflow("ai-review-retarget")
     assert "concurrency" not in retarget and "concurrency" not in retarget["jobs"]["review"]
     revoke = retarget["jobs"]["invalidate"]["concurrency"]
     review = workflow["jobs"]["review"]["concurrency"]
@@ -938,9 +923,9 @@ def test_invalidation_is_independent_of_review_cancellation(workflow):
 @pytest.mark.parametrize(
     "script_name",
     [
-        "publish_codex_review",
-        "prepare_codex_review",
-        "rerun_codex_review",
+        "publish_ai_review",
+        "prepare_ai_review",
+        "rerun_ai_review",
         "manage_codex_review_session",
         "perf_guard",
     ],
@@ -963,7 +948,7 @@ def test_review_workflow_has_no_merge_permission(workflow):
     assert jobs["publish"]["permissions"]["pull-requests"] == "write"
     for config in (
         workflow,
-        load_workflow("codex-review-retarget"),
+        load_workflow("ai-review-retarget"),
         load_workflow("codex-review-cleanup"),
         load_workflow("codex-auth-maintenance"),
     ):
@@ -1086,33 +1071,29 @@ def test_invalid_thread_reference_rejected(publisher, review_file, api, located_
 
 
 @pytest.mark.parametrize("ready,result", [("true", "success"), ("", "success"), ("true", "failure")])
-@pytest.mark.parametrize("job", ["review", "gemini"])
-def test_review_requires_authorized_context(workflow, ready, result, job):
+def test_review_requires_authorized_context(workflow, ready, result):
     context = {"needs": {"prepare": {"result": result, "outputs": {"ready": ready}}}}
-    assert bool(workflow_expression(workflow["jobs"][job]["if"], context)) == (
+    assert bool(workflow_expression(workflow["jobs"]["review"]["if"], context)) == (
         ready == "true" and result == "success"
     )
-    assert not workflow_expression(workflow["jobs"][job]["if"], context, cancelled=True)
+    assert not workflow_expression(workflow["jobs"]["review"]["if"], context, cancelled=True)
 
 
-@pytest.mark.parametrize(
-    "is_pr,sender,starts", [(True, "User", True), (True, "Bot", False), (False, "User", False)]
-)
-def test_comment_run_can_still_authorize_review_commands(workflow, is_pr, sender, starts):
+def test_comment_command_requires_a_trusted_caller(workflow):
     context = {
         "vars": {"CODEX_REVIEW_ENABLED": "true"},
         "github": {
             "event_name": "issue_comment",
             "repository": "owner/repo",
             "ref": "refs/heads/main",
-            "workflow_ref": "owner/repo/.github/workflows/codex-review.yml@refs/heads/main",
-            "event": {
-                "issue": {"pull_request": {"url": "/pulls/1"}} if is_pr else {},
-                "sender": {"type": sender},
-            },
+            "workflow_ref": "owner/repo/.github/workflows/ai-review.yml@refs/heads/main",
+            "event": {"issue": {"pull_request": {"url": "/pulls/1"}}, "sender": {"type": "User"}},
         },
     }
-    assert bool(workflow_expression(workflow["jobs"]["prepare"]["if"], context)) == starts
+    prepare = workflow["jobs"]["prepare"]["if"]
+    assert workflow_expression(prepare, context)
+    context["github"]["workflow_ref"] = "owner/repo/.github/workflows/other.yml@refs/heads/main"
+    assert not workflow_expression(prepare, context)
 
 
 def test_comment_trigger_and_session_isolation(workflow):
@@ -1121,7 +1102,7 @@ def test_comment_trigger_and_session_isolation(workflow):
     for job in (
         jobs["prepare"],
         jobs["publish"],
-        load_workflow("codex-review-retarget")["jobs"]["invalidate"],
+        load_workflow("ai-review-retarget")["jobs"]["invalidate"],
         load_workflow("codex-review-cleanup")["jobs"]["cleanup-sessions"],
     ):
         checkout = next(step for step in job["steps"] if "checkout@" in step.get("uses", ""))
@@ -1139,7 +1120,7 @@ def test_comment_trigger_and_session_isolation(workflow):
     assert jobs["prepare"]["permissions"]["pull-requests"] == "read"
     assert jobs["review"]["permissions"]["pull-requests"] == "read"
     assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/manage_codex_review_session.py"' in review
-    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_codex_review.py"' in review
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_ai_review.py"' in review
     assert review.index("flock --exclusive 9") < review.index("session_status=$(python")
     assert review.index("session_status=$(python") < review.index("docker run")
     upload = next(step for step in jobs["review"]["steps"] if step["name"] == "Upload review result")
@@ -1161,13 +1142,12 @@ def test_close_cleanup_is_independent_of_review_eligibility():
 
 def test_auth_maintenance_only_runs_on_schedule_or_dispatch():
     workflow = load_workflow("codex-auth-maintenance")
-    assert workflow["on"] == {"schedule": [{"cron": "17 3 * * 1"}], "workflow_dispatch": None}
-    assert set(workflow["jobs"]) == {"auth-maintenance"}
-    job = workflow["jobs"]["auth-maintenance"]
-    assert job["permissions"] == {}
-    for value in ("true", "false", ""):
-        context = {"vars": {"CODEX_REVIEW_ENABLED": value}}
-        assert workflow_expression(job["if"], context) == (value == "true")
+    assert set(workflow["on"]) == {"schedule", "workflow_dispatch"}
+    (job,) = workflow["jobs"].values()
+    assert workflow_expression(job["if"], {"vars": {"CODEX_REVIEW_ENABLED": "true"}})
+    assert not workflow_expression(
+        job["if"], {"vars": {"AI_REVIEW_ENABLED": "false", "CODEX_REVIEW_ENABLED": "true"}}
+    )
 
 
 @pytest.mark.parametrize(

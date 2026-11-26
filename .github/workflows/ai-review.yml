@@ -1,4 +1,4 @@
-name: Codex Review
+name: AI Review
 
 # This file must already exist on the default branch of the base repository.
 # pull_request_target uses the trusted workflow from the base branch while the
@@ -25,9 +25,9 @@ jobs:
   prepare:
     # Only these trusted entry points own review runs and their runner resources.
     if: >-
-      (github.workflow_ref == format('{0}/.github/workflows/codex-review.yml@{1}', github.repository, github.ref) ||
-       github.workflow_ref == format('{0}/.github/workflows/codex-review-retarget.yml@{1}', github.repository, github.ref)) &&
-      vars.CODEX_REVIEW_ENABLED == 'true' &&
+      (github.workflow_ref == format('{0}/.github/workflows/ai-review.yml@{1}', github.repository, github.ref) ||
+       github.workflow_ref == format('{0}/.github/workflows/ai-review-retarget.yml@{1}', github.repository, github.ref)) &&
+      (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true' &&
       ((github.event_name == 'pull_request_target' &&
         github.event.pull_request.base.ref == 'main' &&
         github.event.pull_request.draft == false &&
@@ -62,13 +62,15 @@ jobs:
         id: context
         env:
           GH_TOKEN: ${{ github.token }}
-          CODEX_REVIEW_RERUN_TOKEN: ${{ github.event_name == 'issue_comment' && secrets.CODEX_REVIEW_RERUN_TOKEN || '' }}
-        run: python .github/scripts/prepare_codex_review.py "$RUNNER_TEMP/discussion.json"
+          AI_REVIEW_RERUN_TOKEN: >-
+            ${{ github.event_name == 'issue_comment' &&
+            (secrets.AI_REVIEW_RERUN_TOKEN || secrets.CODEX_REVIEW_RERUN_TOKEN) || '' }}
+        run: python .github/scripts/prepare_ai_review.py "$RUNNER_TEMP/discussion.json"
       - name: Upload review routing identity
         if: steps.context.outputs.ready == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codex-target-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ai-review-target-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/review-target.json
           if-no-files-found: error
           retention-days: 30
@@ -76,12 +78,13 @@ jobs:
         if: steps.context.outputs.ready == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codex-context-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ai-review-context-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/discussion.json
           if-no-files-found: error
           retention-days: 1
 
   review:
+    name: codex-review
     needs: prepare
     if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.ready == 'true' }}
     runs-on: [self-hosted, Linux, ARM64, cpu-codex]
@@ -106,8 +109,8 @@ jobs:
       - name: Download discussion snapshot
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: codex-context-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/codex-context
+          name: ai-review-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-context
       - name: Create a fresh review checkout directory
         id: workspace
         run: |
@@ -185,14 +188,14 @@ jobs:
           test "$(git rev-parse HEAD)" = "$HEAD_SHA"
           git show "$TRUSTED_WORKFLOW_SHA:.github/codex-review-schema.json" >"$schema"
           chmod 644 "$schema"
-          discussion="$RUNNER_TEMP/codex-context/discussion.json"
+          discussion="$RUNNER_TEMP/ai-review-context/discussion.json"
           chmod 644 "$discussion"
           log="$RUNNER_TEMP/codex-review.log"
           events="$RUNNER_TEMP/codex-review-events.jsonl"
           session_tools="$RUNNER_TEMP/codex-session-tools"
           mkdir -p "$session_tools"
-          session_reader="$session_tools/publish_codex_review.py"
-          git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_codex_review.py" >"$session_reader"
+          session_reader="$session_tools/publish_ai_review.py"
+          git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_ai_review.py" >"$session_reader"
           git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/manage_codex_review_session.py" \
             >"$session_tools/manage_codex_review_session.py"
           # Only conversation rollouts and their index persist, never auth/config.
@@ -634,10 +637,10 @@ jobs:
         id: discussion
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: codex-context-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/codex-context
+          name: ai-review-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-context
 
-      - name: Download review result
+      - name: Download Codex result
         id: codex_result
         if: needs.review.result == 'success' && needs.review.outputs.completed == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -645,15 +648,15 @@ jobs:
           name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/codex-review-artifact
 
-      - name: Publish review and conditionally approve
+      - name: Publish Codex review and conditionally approve
         if: steps.codex_result.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           AUTO_APPROVE: ${{ vars.CODEX_REVIEW_AUTO_APPROVE }}
         run: |
           export REVIEW_BASE_REF
-          REVIEW_BASE_REF=$(jq -er .base_ref "$RUNNER_TEMP/codex-context/discussion.json")
-          python .github/scripts/publish_codex_review.py "$RUNNER_TEMP/codex-review-artifact/codex-review.json"
+          REVIEW_BASE_REF=$(jq -er .base_ref "$RUNNER_TEMP/ai-review-context/discussion.json")
+          python .github/scripts/publish_ai_review.py "$RUNNER_TEMP/codex-review-artifact/codex-review.json"
 
       - name: Download Gemini feedback
         id: gemini_result
@@ -669,5 +672,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           export REVIEW_BASE_REF
-          REVIEW_BASE_REF=$(jq -er .base_ref "$RUNNER_TEMP/codex-context/discussion.json")
-          python .github/scripts/publish_codex_review.py --gemini "$RUNNER_TEMP/gemini-review-artifact/response.txt"
+          REVIEW_BASE_REF=$(jq -er .base_ref "$RUNNER_TEMP/ai-review-context/discussion.json")
+          python .github/scripts/publish_ai_review.py --gemini "$RUNNER_TEMP/gemini-review-artifact/response.txt"

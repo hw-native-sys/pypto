@@ -10,7 +10,7 @@ permissions: {}
 
 jobs:
   auth-maintenance:
-    if: vars.CODEX_REVIEW_ENABLED == 'true'
+    if: (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true'
     runs-on: [self-hosted, Linux, ARM64, cpu-codex]
     timeout-minutes: 10
     permissions: {}

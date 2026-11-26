@@ -29,8 +29,9 @@ DIFF_READ_ERRORS = (OSError, subprocess.CalledProcessError, KeyError, TypeError,
 def is_review_workflow(path: object) -> bool:
     """Match the caller workflow path reported by Actions, optionally suffixed with @ref."""
     return isinstance(path, str) and path.split("@", 1)[0] in (
-        ".github/workflows/codex-review.yml",
-        ".github/workflows/codex-review-retarget.yml",
+        ".github/workflows/ai-review.yml",
+        ".github/workflows/ai-review-retarget.yml",
+        ".github/workflows/codex-review.yml",  # Runs created before the workflow was renamed.
     )
 
 

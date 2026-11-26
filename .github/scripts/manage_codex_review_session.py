@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 
-from publish_codex_review import github_api, pull_request_endpoint
+from publish_ai_review import github_api, pull_request_endpoint
 
 EPOCH_LABEL = "org.pypto.codex-review.close-epoch"
 

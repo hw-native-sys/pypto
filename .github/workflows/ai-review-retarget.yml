@@ -1,4 +1,4 @@
-name: Codex Review Retarget
+name: AI Review Retarget
 
 on:
   pull_request_target:
@@ -31,13 +31,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: python .github/scripts/publish_codex_review.py --revoke
+        run: python .github/scripts/publish_ai_review.py --revoke
 
   review:
     name: Review new target
     needs: invalidate
     if: >-
-      vars.CODEX_REVIEW_ENABLED == 'true' &&
+      (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true' &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.draft == false
     # The called workflow narrows this token for each job.
@@ -47,4 +47,4 @@ jobs:
       contents: read
       issues: read
       pull-requests: write
-    uses: ./.github/workflows/codex-review.yml
+    uses: ./.github/workflows/ai-review.yml

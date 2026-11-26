@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 
-from publish_codex_review import is_review_workflow
+from publish_ai_review import is_review_workflow
 
 LABEL = "org.pypto.codex-review."
 RESOURCE_FORMAT = (
