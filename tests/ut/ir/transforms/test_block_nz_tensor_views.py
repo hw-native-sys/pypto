@@ -29,7 +29,8 @@ from collections.abc import Sequence
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
-from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.backend import BackendType, pto_backend, reset_for_testing, set_backend_type
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserError
@@ -498,6 +499,47 @@ def test_codegen_emits_blocked_nz_descriptor():
     assert "%c1_index, %c16_index, %c16_index, %c16_index, %c32_index" in line  # shape
     # pto-isa NZ strides, batch stride included
     assert "%c131072_index, %c8192_index, %c512_index, %c32_index, %c1_index" in line
+
+
+@pytest.mark.parametrize("compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)])
+def test_codegen_loads_prepacked_int8_expert_panel(tmp_path, compile_with_ptoas):
+    """Expert, row-panel, and column-panel indices select one native NZ matrix."""
+
+    @pl.jit
+    def _expert_panel(
+        x: pl.Tensor[[16, 512], pl.INT8],
+        w: pl.Tensor[[4, 2, 8, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[16, 256], pl.INT32]],
+    ):
+        for _ in pl.spmd(1, name_hint="expert_panel"):
+            xt = pl.slice(x, [16, 512], [0, 0])
+            wt = w[1:2, 1:2, 3:4, 0:256, 0:512]
+            acc = pl.matmul(xt, wt, b_trans=True, out_dtype=pl.INT32)
+            out[0:16, 0:256] = pl.reshape(acc, [16, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _expert_panel._bind_args_from_signature({})
+    program = _expert_panel._compile_to_program(tm, sd, cx, dyn, pl)
+    optimized = _run(program)
+    assert _values(_nz_param(optimized).shape) == [64, 16, 16, 16, 32]
+    load = _nz_load(optimized)
+    assert _values(_elements(load.args[1])) == [27, 0, 0, 0, 0]
+    assert _values(_elements(load.args[2])) == [1, 16, 16, 16, 32]
+
+    mlir = _emit_pto(program)
+    nz_view = next(line for line in mlir.splitlines() if "make_tensor_view" in line and "layout<nz>" in line)
+    assert "%c64_index, %c16_index, %c16_index, %c16_index, %c32_index" in nz_view
+    assert "%c131072_index, %c8192_index, %c512_index, %c32_index, %c1_index" in nz_view
+    assert "!pto.partition_tensor_view<1x16x16x16x32xi8>" in mlir
+
+    if compile_with_ptoas:
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "expert_panel", str(tmp_path))
+        assert (
+            "GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>, "
+            "pto::Stride<131072, 8192, 512, 32, 1>, pto::Layout::NZ>" in cpp
+        )
 
 
 def test_codegen_rank_is_consistent_across_all_three_sites():

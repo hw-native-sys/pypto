@@ -25,8 +25,9 @@
  * whether or not the logical tensor has a leading axis. A logical rank-2
  * ``[N, K]`` weight therefore blocks to ``[1, K/c0, N/16, 16, c0]``, with the
  * batch materialised as 1 — blocking it to rank 4 instead produces a view PTOAS
- * refuses ("user-specified layout=nz requires a rank-5 view"). Logical rank 4+
- * has no canonical form yet and is rejected in ``CheckNzLogicalRank``.
+ * refuses ("user-specified layout=nz requires a rank-5 view"). For logical
+ * rank 4+, the contiguous leading axes are folded into the batch slot while
+ * the trailing matrix retains its own fractal geometry.
  *
  * This pass rewrites the IR into exactly that form:
  *
