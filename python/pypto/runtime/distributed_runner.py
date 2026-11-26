@@ -2096,12 +2096,13 @@ class DistributedWorker(Worker):
                 if missing_sources:
                     raise ValueError(f"Missing window_sources for Host window init keys: {missing_sources}")
                 consumed_sources |= source_keys
-                from .prepared_decode import load as load_prepared_decode
-                prepared_decode = (
-                    load_prepared_decode(entry_fn, prog.output_dir / "orchestration" / "host_orch.py")
-                    if self._persistent and not self._reset_persistent_windows
-                    else None
-                )
+                prepared_decode = None
+                if self._persistent and not self._reset_persistent_windows:
+                    from .prepared_decode import load as load_prepared_decode
+
+                    prepared_decode = load_prepared_decode(
+                        entry_fn, prog.output_dir / "orchestration" / "host_orch.py"
+                    )
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
                 consumed |= set(prog_callbacks)
@@ -3307,7 +3308,10 @@ class DistributedWorker(Worker):
                 tensors[info.name] = arg
             selection = (
                 prepared_decode.select(self, state, tensors, call_config, args, frame.slot_id)
-                if prepared_decode is not None and not two_pass_swimlane else None
+                if prepared_decode is not None
+                and not two_pass_swimlane
+                and hasattr(self._w, "_submit_retained_decode")
+                else None
             )
             if selection is None:
                 for info, arg in zip(param_infos, args, strict=True):

@@ -1,12 +1,21 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
 """Cache fixed decode rank bindings without caching submission authorization."""
 
 import ast
 from collections import OrderedDict
 from hashlib import sha256
+from pathlib import Path
 from time import perf_counter_ns
 
 import torch
-from simpler.prepared_local import PreparedLocalChipTask
 
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 
@@ -84,23 +93,32 @@ class PrepareRanks(ast.NodeTransformer):
 
 
 def load(entry, path):
+    if not isinstance(path, Path) or not path.is_file():
+        return None
     source = path.read_bytes()
-    if sha256(source).hexdigest() not in HOST_SOURCES:
+    if not isinstance(source, (bytes, bytearray)) or sha256(source).hexdigest() not in HOST_SOURCES:
+        return None
+    try:
+        from simpler.prepared_local import PreparedLocalChipTask
+    except ImportError:
         return None
     tree = ast.parse(source, filename=str(path))
     fn = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == entry.__name__)
-    fn.args.kwonlyargs.extend(ast.arg(arg=name) for name in ("_cache_hit", "_domain_prefix", "_registered_domains", "_submit_chip"))
+    fn.args.kwonlyargs.extend(
+        ast.arg(arg=name) for name in ("_cache_hit", "_domain_prefix", "_registered_domains", "_submit_chip")
+    )
     fn.args.kw_defaults.extend((None, None, None, None))
     PrepareRanks().visit(fn)
     namespace = {**entry.__globals__, "_domain_scope": _domain_scope}
     module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
     exec(compile(module, str(path), "exec"), namespace)
-    return PreparedDecode(namespace[entry.__name__])
+    return PreparedDecode(namespace[entry.__name__], task_cls=PreparedLocalChipTask)
 
 
 class PreparedDecode:
-    def __init__(self, prepare):
+    def __init__(self, prepare, *, task_cls):
         self.prepare = prepare
+        self._task_cls = task_cls
         self.entries = OrderedDict()
         self.trace = None
         self.hits = 0
@@ -132,7 +150,7 @@ class PreparedDecode:
             entry = None
 
         def record(orch, handle, args, _config, rank):
-            tasks.append(PreparedLocalChipTask(orch, handle, args, rank))
+            tasks.append(self._task_cls(orch, handle, args, rank))
 
         roots = tuple(tensors.values()) if entry is None else entry[0]
         self.prepare(orch, None, config, tensors=tensors, callables=callables, sub_ids=sub_ids,

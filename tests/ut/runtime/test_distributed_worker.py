@@ -4984,5 +4984,27 @@ def test_persistent_domain_identity_includes_source_and_workspace():
     assert len({device, host, urma}) == 3
 
 
+def test_prepared_decode_defers_simpler_prepared_local_import(tmp_path, monkeypatch):
+    from hashlib import sha256
+    from pypto.runtime import prepared_decode
+
+    orch_path = tmp_path / "host_orch.py"
+    source = b"def entry(orch, *args, **kwargs):\n    pass\n"
+    orch_path.write_bytes(source)
+    digest = sha256(source).hexdigest()
+
+    stub_simpler = ModuleType("simpler")
+    stub_simpler.__path__ = []
+    monkeypatch.setitem(sys.modules, "simpler", stub_simpler)
+    monkeypatch.delitem(sys.modules, "simpler.prepared_local", raising=False)
+    monkeypatch.setattr(prepared_decode, "HOST_SOURCES", {digest})
+
+    def entry(orch, *args, **kwargs):
+        pass
+
+    assert prepared_decode.load(entry, orch_path) is None
+    assert prepared_decode.load(entry, tmp_path / "missing.py") is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
