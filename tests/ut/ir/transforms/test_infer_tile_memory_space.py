@@ -4366,12 +4366,37 @@ for n in pl.range(2):
         )
         backend.set_backend_type(BackendType.Ascend950)
         after = passes.infer_tile_memory_space()(passes.convert_to_ssa()(before))
-        printed = ir.python_print(after)
-        loop = self._line_index(printed, "for n")
-        assert self._line_index(printed, "tile.load(lhs_scale") < loop
-        assert self._line_index(printed, "sa0", "tile.extract") > loop
-        assert self._line_index(printed, "sa1", "tile.extract") > loop
-        assert self._line_index(printed, "tile.load(rhs_scale") > loop
+        kernel = after.get_function("kernel")
+        assert kernel is not None
+        assert isinstance(kernel.body, ir.SeqStmts)
+        lhs_scale, rhs_scale = kernel.params[2:4]
+
+        def loads_from(stmts, source):
+            return [
+                stmt
+                for stmt in stmts
+                if isinstance(stmt, ir.AssignStmt)
+                and isinstance(stmt.value, ir.Call)
+                and stmt.value.op.name == _OP_TILE_LOAD
+                and stmt.value.args[0].same_as(source)
+            ]
+
+        (loop,) = [stmt for stmt in kernel.body.stmts if isinstance(stmt, ir.ForStmt)]
+        assert isinstance(loop.body, ir.SeqStmts)
+        before_loop = kernel.body.stmts[: kernel.body.stmts.index(loop)]
+        (panel,) = loads_from(before_loop, lhs_scale)
+        assert not loads_from(loop.body.stmts, lhs_scale)
+        assert not loads_from(before_loop, rhs_scale)
+        assert len(loads_from(loop.body.stmts, rhs_scale)) == 1
+        extracts = [
+            stmt
+            for stmt in loop.body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "tile.extract"
+            and stmt.value.args[0].same_as(panel.var)
+        ]
+        assert len(extracts) == 2
 
     def test_marked_transposed_mat_panel_fanout_hoists_only_load(self):
         """A transposed Mat view may fan out while its staging stays local."""
