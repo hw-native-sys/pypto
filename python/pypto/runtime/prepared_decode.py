@@ -58,6 +58,7 @@ def _domain_scope(
 
 def _host_key(value: torch.Tensor) -> tuple[Any, ...]:
     storage_cdata: Any = getattr(value.untyped_storage(), "_cdata")
+    is_shared = bool(getattr(value, "is_shared")())
     return (
         id(value),
         value.data_ptr(),
@@ -65,16 +66,17 @@ def _host_key(value: torch.Tensor) -> tuple[Any, ...]:
         tuple(value.shape),
         value.stride(),
         value.dtype,
-        value.is_shared(),
+        is_shared,
     )
 
 
 def _binding_key(value: Any) -> Any:
-    if type(value) in (DeviceTensor, StackedDeviceTensor):
+    cls: type[Any] = type(value)
+    if cls in (DeviceTensor, StackedDeviceTensor):
         return id(value)
-    if type(value) is torch.Tensor:
+    if cls is torch.Tensor:
         return _host_key(value)
-    if type(value) is list:
+    if cls is list:
         items: list[Any] = value
         if all(type(item) is torch.Tensor for item in items):
             return tuple(_host_key(item) for item in items)
@@ -120,8 +122,10 @@ class PrepareRanks(ast.NodeTransformer):
             args=ast.arguments(
                 posonlyargs=[],
                 args=[],
+                vararg=None,
                 kwonlyargs=[],
                 kw_defaults=[],
+                kwarg=None,
                 defaults=[],
             ),
             body=call,
