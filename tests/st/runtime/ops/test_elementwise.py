@@ -14,6 +14,7 @@ Verifies that the migrated tile_add_64/tile_add_128/tile_mul_64/tile_mul_128 ker
 from ``examples.beginner.elementwise`` produce results matching torch references.
 """
 
+import pypto.language as pl
 import pytest
 import torch
 from examples.beginner.elementwise import (
@@ -54,6 +55,31 @@ def test_tile_add(case_run):
 @st.cases(_mul_case(64), _mul_case(128))
 def test_tile_mul(case_run):
     """Elementwise multiply matches the torch reference at both sizes."""
+    case_run.assert_passed()
+
+
+@pl.jit
+def _mul_column_coefficients(
+    x: pl.Tensor[[8, 32], pl.FP32],
+    c: pl.Tensor[[1, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        out = pl.assemble(out, pl.mul(x, c), [0, 0])
+    return out
+
+
+def _column_broadcast_case():
+    # Every column has a distinct coefficient and every input row is different.
+    x = torch.arange(1, 257, dtype=torch.float32).reshape(8, 32)
+    c = torch.arange(1, 33, dtype=torch.float32).reshape(1, 32)
+    return st.case(
+        _mul_column_coefficients, x, c, torch.zeros_like(x), golden=lambda _: x * c, rtol=0, atol=0
+    )
+
+
+@st.cases(_column_broadcast_case())
+def test_tensor_mul_column_broadcast(case_run):
     case_run.assert_passed()
 
 

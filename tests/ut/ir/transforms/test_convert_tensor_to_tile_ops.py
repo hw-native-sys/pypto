@@ -400,6 +400,32 @@ _COL_EXPAND_OPS = [
 ]
 
 
+# Only the multiply expression varies across the five expected programs.
+@pl.inline
+def _col_mul_rhs(x, y):
+    return pl.tile.col_expand_mul(x, y)
+
+
+@pl.inline
+def _col_mul_lhs(x, y):
+    return pl.tile.col_expand_mul(y, x)
+
+
+@pl.inline
+def _row_mul_rhs(x, y):
+    return pl.tile.row_expand_mul(x, y)
+
+
+@pl.inline
+def _row_mul_lhs(x, y):
+    return pl.tile.row_expand_mul(y, x)
+
+
+@pl.inline
+def _equal_shape_mul(x, y):
+    return pl.tile.mul(x, y)
+
+
 class TestConvertTensorToTileOps:
     """Test ConvertTensorToTileOps pass."""
 
@@ -1292,6 +1318,89 @@ class TestConvertTensorToTileOps:
         for arg in div.args:
             assert isinstance(arg.type, ir.TileType)
             assert arg.type.dtype == DataType.FP32
+
+    @pytest.mark.parametrize(
+        ("lhs_shape", "rhs_shape", "expected_mul"),
+        [
+            pytest.param([8, 32], [1, 32], _col_mul_rhs, id="per-column-rhs"),
+            pytest.param([1, 32], [8, 32], _col_mul_lhs, id="per-column-lhs"),
+            pytest.param([8, 32], [8, 1], _row_mul_rhs, id="per-row-rhs"),
+            pytest.param([8, 1], [8, 32], _row_mul_lhs, id="per-row-lhs"),
+            pytest.param([8, 32], [8, 32], _equal_shape_mul, id="equal-shapes"),
+        ],
+    )
+    def test_mul_broadcast(self, lhs_shape, rhs_shape, expected_mul):
+        """Check the multiply inputs and follow its result through the store and the caller."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[lhs_shape, pl.FP32], y: pl.Tensor[rhs_shape, pl.FP32]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                product = pl.mul(x, y)
+                return product
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[lhs_shape, pl.FP32], y: pl.Tensor[rhs_shape, pl.FP32]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                result = self.kernel(x, y)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[lhs_shape, pl.FP32],
+                y: pl.Tensor[rhs_shape, pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], lhs_shape)
+                y_tile = pl.load(y, [0, 0], rhs_shape)
+                product = expected_mul(x_tile, y_tile)
+                stored = pl.store(product, [0, 0], out)
+                return stored
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[lhs_shape, pl.FP32], y: pl.Tensor[rhs_shape, pl.FP32]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                out = pl.create_tensor([8, 32], dtype=pl.FP32)
+                result = self.kernel(x, y, out)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    @pytest.mark.parametrize(("lhs", "rhs"), [([8, 1], [1, 32]), ([8, 32], [1, 1]), ([8, 32], [32])])
+    def test_mul_rejects_unsupported_broadcast(self, lhs, rhs):
+        before = _make_before(
+            in_specs=[("x", lhs, DataType.FP32), ("c", rhs, DataType.FP32)],
+            out_shape=[8, 32],
+            out_dtype=DataType.FP32,
+            body=lambda ib, xs: ib.let("z", tensor_ops.mul(*xs)),
+        )
+        with pytest.raises(ValueError, match="tensor.mul cannot lower broadcast"):
+            passes.convert_tensor_to_tile_ops()(before)
+
+    def test_mul_rejects_short_coefficient_row(self):
+        """A physically wide coefficient row still needs a valid coefficient for every output column."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                c: pl.Tensor[[1, 32], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[1, 16])],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                result = pl.mul(x, c)
+                return result
+
+        with pytest.raises(ValueError, match="broadcast vector must cover the matrix valid region"):
+            passes.convert_tensor_to_tile_ops()(Before)
 
     def test_div_default_row_broadcast_routes_to_row_expand_div(self):
         """The supported [M, N] / [M, 1] tensor broadcast never reaches exact tile.div."""
