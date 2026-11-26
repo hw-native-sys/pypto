@@ -3026,59 +3026,6 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
   if (region_boundary) fs_.slot_index_ssa.clear();
 }
 
-void PTOCodegen::VisitStmt_(const ir::SeqStmtsPtr& op) {
-  std::map<const ir::Var*, size_t> definitions;
-  std::map<ir::MemorySpace, const ir::Var*> scale_extracts;
-  for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    const auto assign = As<ir::AssignStmt>(op->stmts_[i]);
-    const auto eval = As<ir::EvalStmt>(op->stmts_[i]);
-    const auto call = assign ? As<ir::Call>(assign->value_) : eval ? As<ir::Call>(eval->expr_) : nullptr;
-    if (assign) definitions.emplace(assign->var_.get(), i);
-
-    // Flags change pipeline ordering without accessing either scale handle.
-    if (ir::IsOp(call, "system.set_flag") || ir::IsOp(call, "system.wait_flag")) continue;
-    const auto type = assign ? As<TileType>(assign->var_->GetType()) : nullptr;
-    if (type && (type->memory_space_ == ir::MemorySpace::LeftScale ||
-                 type->memory_space_ == ir::MemorySpace::RightScale)) {
-      const auto side = *type->memory_space_;
-      if (ir::IsOp(call, "tile.extract")) {
-        const auto source = As<TileType>(call->args_[0]->GetType());
-        if (source && source->memory_space_ == ir::MemorySpace::Mat) {
-          scale_extracts[side] = assign->var_.get();
-          continue;
-        }
-      }
-      if (ir::IsOp(call, "tile.tget_scale_addr")) {
-        const auto scale = ir::AsVarLike(call->args_[0]);
-        const auto data = ir::AsVarLike(call->args_[1]);
-        const auto extract = scale_extracts.find(side);
-        const auto data_def = definitions.find(data.get());
-        if (extract != scale_extracts.end() && extract->second == scale.get() &&
-            data_def != definitions.end() && data_def->second < definitions.at(scale.get()) &&
-            fs_.mx_extract_scale_data.emplace(scale.get(), data).second) {
-          fs_.early_mx_scale_bindings.insert(assign.get());
-        }
-        scale_extracts.erase(side);
-        continue;
-      }
-    }
-    // Other operations may access the same hardware scale storage, including through aliases.
-    scale_extracts.clear();
-  }
-  ir::IRVisitor::VisitStmt_(op);
-}
-
-void PTOCodegen::EmitMxScaleAddress(const ir::ExprPtr& data, const std::string& scale,
-                                    const std::string& scale_type) {
-  Emit("pto.tget_scale_addr ins(" + GetExprAsCode(data) + " : " + GetExprTypeAnnotation(data) + ") outs(" +
-       scale + " : " + scale_type + ")");
-}
-
-void PTOCodegen::EmitMxExtractScaleAddress(const std::string& scale, const std::string& scale_type) {
-  const auto data = fs_.mx_extract_scale_data.find(fs_.current_result_var.get());
-  if (data != fs_.mx_extract_scale_data.end()) EmitMxScaleAddress(data->second, scale, scale_type);
-}
-
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (inside_reg_scope_) {
     if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
@@ -3244,8 +3191,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         const auto destination = PrepareTileDestination(op->var_, storage, call->op_->name_);
         fs_.current_result_buf = destination.name;
       }
-      // Keep the in-place result alias above and skip the binding already emitted at TEXTRACT.
-      if (!elide_move && !fs_.early_mx_scale_bindings.count(op.get())) VisitExpr(op->value_);
+      if (!elide_move) VisitExpr(op->value_);
       // If codegen changed the result buffer (e.g., reshape allocated a new tile),
       // update variable mapping so subsequent references use the new buffer
       if (!fs_.current_result_buf.empty() && (is_set_validshape || fs_.current_result_buf != result_buf)) {

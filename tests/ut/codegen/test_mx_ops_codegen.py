@@ -621,10 +621,19 @@ class TestMxMatmulCodegen:
                 bsm = pl.load(b_s, [0, 0], [4, 32], target_memory=pl.Mem.Mat)
                 al = pl.tile.extract(am, 0, 64, [16, 64], target_memory=pl.Mem.Left)
                 br = pl.tile.extract(bm, 64, 0, [64, 32], target_memory=pl.Mem.Right)
-                asl = pl.tile.extract(asm, 0, 2, [16, 2], target_memory=pl.Mem.LeftScale)
+                asl: pl.Tile[[16, 2], pl.FP8E8M0, pl.MemRef("left_scale", slots=2)[1], pl.Mem.LeftScale] = (
+                    pl.tile.extract(asm, 0, 2, [16, 2], target_memory=pl.Mem.LeftScale)
+                )
                 bsr = pl.tile.extract(bsm, 2, 0, [2, 32], target_memory=pl.Mem.RightScale)
                 result = pl.matmul_mx(al, asl, br, bsr)
                 pl.store(result, [0, 0], out)
+
+        rewritten = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(Program))
+        rewritten_source = ir.python_print(rewritten)
+        assert rewritten_source.count("tile.bind_scale_addr") == 2
+        assert rewritten_source.count("tile.extract_into") == 2
+        assert "tile.tget_scale_addr(" not in rewritten_source
+        ir.assert_structural_equal(rewritten, pl.parse_program(rewritten_source))
 
         mlir = _emit_incore_mlir(Program)
         lines = mlir.splitlines()

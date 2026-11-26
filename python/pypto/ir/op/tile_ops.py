@@ -157,11 +157,13 @@ from ._tile_memory import _validate_offsets_shapes as _validate_offsets_shapes
 from ._tile_memory import alloc as alloc
 from ._tile_memory import arange as arange
 from ._tile_memory import assemble as assemble
+from ._tile_memory import bind_scale_addr as bind_scale_addr
 from ._tile_memory import ci as ci
 from ._tile_memory import concat as concat
 from ._tile_memory import create as create
 from ._tile_memory import create_tile as create_tile
 from ._tile_memory import extract as extract
+from ._tile_memory import extract_into as extract_into
 from ._tile_memory import fillpad as fillpad
 from ._tile_memory import fillpad_expand as fillpad_expand
 from ._tile_memory import fillpad_inplace as fillpad_inplace
