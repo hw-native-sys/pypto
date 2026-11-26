@@ -2653,3 +2653,107 @@ def test_urma_scatter_get_wait_event_has_no_backend_lowering():
 
     with pytest.raises(ValueError, match="No codegen registered for operation: pld.system.wait_event"):
         _generate_mlir_a5(P)
+
+
+def _gather_put_program():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[64], pl.FP32],
+            src: pl.Tensor[[32], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            ctx = pld.system.get_comm_ctx(dst)
+            session = pld.system.make_session(ctx)
+            view = pl.tensor.view(dst, [32], offsets=[16])
+            if peer > 0:
+                for rank in pl.range(peer):
+                    after, first = pld.tile.put_async(view, rank, src, session)
+                    _result, second = pld.tile.put_async(after, 0, src, session)
+                    pld.system.defer_wait_event(first, session)
+                    pld.system.defer_wait_event(second)
+
+    return P
+
+
+def test_urma_gather_put_emits_its_adapter_and_wrapper():
+    """The emitted MLIR names a symbol the generated C++ must actually define.
+
+    The codegen tests below assert on ``func.call @pypto_urma_gather_put_f32`` in
+    MLIR, which comes from pto_urma_codegen.cpp. The definition comes from a
+    different file, so a wrapper routed into the wrong bucket, or a dropped
+    ``_URMA_GATHER_ADAPTER``, leaves the call referring to nothing and is caught
+    only by the device compiler, which the unit lanes skip.
+    """
+    from pypto.backend.pto_backend import _generate_urma_transfer_adapter  # noqa: PLC0415
+
+    func = _gather_put_program().get_function("kernel")
+    assert func is not None
+    adapter = _generate_urma_transfer_adapter(func)
+    assert "pypto_urma_gather_put_f32" in adapter
+    assert "pypto_urma_gather_put(args, comm, session, scratch, dst, src, bytes, peer);" in adapter
+    assert "PyptoGatherDescriptors" in adapter
+    assert "UrmaTput(&desc.destination, 1, &desc.source, 1)" in adapter
+    # The payload is local for a PUT, so preceding stores must be drained before
+    # the engine reads src. Publishing the descriptor alone is not enough.
+    assert "pipe_barrier(PIPE_ALL);" in adapter
+
+
+def test_urma_gather_put_reuses_session_and_destination():
+    """Two PUTs on one session differ only in peer, and the destination is reused.
+
+    The mirror of the Scatter GET case. The window-bound endpoint is ``dst`` here
+    rather than ``src``, so the viewed pointer the ``pto.addptr`` assertion looks
+    for moves from call argument 5 to argument 4.
+    """
+    mlir = _generate_mlir_a5(_gather_put_program())
+    assert mlir.count("func.call @pypto_urma_make_session") == 1
+    calls = re.findall(r"func.call @pypto_urma_gather_put_f32\(([^)]+)\)", mlir)
+    assert len(calls) == 2
+    first, second = (args.split(", ") for args in calls)
+    assert first[:-1] == second[:-1]
+    assert first[-1] != second[-1]
+    assert "scf.if" in mlir and "scf.for" in mlir
+    assert f"{first[4]} = pto.addptr" in mlir
+    assert "defer_wait_event" not in strip_loc(mlir)
+
+
+@pytest.mark.parametrize("elements", [256 << 20, (256 << 20) + 1])
+def test_urma_gather_put_single_segment_byte_limit(elements):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, dst: pld.DistributedTensor[[elements], pl.UINT8], src: pl.Tensor[[elements], pl.UINT8]
+        ):
+            session = pld.system.make_session(pld.get_comm_ctx(dst))
+            _after, event = pld.tile.put_async(dst, 1, src, session)
+            pld.system.defer_wait_event(event)
+
+    if elements == 256 << 20:
+        assert f"arith.constant {elements} : i64" in _generate_mlir_a5(P)
+    else:
+        with pytest.raises(ValueError, match="1 byte through 256 MiB"):
+            _generate_mlir_a5(P)
+
+
+def test_urma_gather_put_wait_event_has_no_backend_lowering():
+    """In-kernel wait is unimplemented for PUT as it is for GET.
+
+    The mirror of the Scatter GET case above. RFC #3304's V2 example calls
+    ``pld.system.wait_event`` directly after a PUT, so the limitation is the one
+    a user is most likely to hit on this path.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, dst: pld.DistributedTensor[[32], pl.FP32], src: pl.Tensor[[32], pl.FP32]):
+            session = pld.system.make_session(pld.system.get_comm_ctx(dst))
+            _, event = pld.tile.put_async(dst, 1, src, session)
+            pld.system.wait_event(event)
+
+    with pytest.raises(ValueError, match="No codegen registered for operation: pld.system.wait_event"):
+        _generate_mlir_a5(P)

@@ -1870,10 +1870,11 @@ class TestL3UrmaAsyncChunking:
             )
 
 
-def _build_local_async(is_put: bool, *, scatter: bool = False):
-    """Use ordinary endpoints for contiguous transfers and two rows of one window for Scatter."""
-    window_rows = 2 if scatter else 1
-    readback_row = 1 if scatter else 0
+def _build_local_async(is_put: bool, *, scatter: bool = False, gather: bool = False):
+    """Use ordinary endpoints for contiguous transfers and two rows of one window for the tile forms."""
+    registered = scatter or gather
+    window_rows = 2 if registered else 1
+    readback_row = 1 if registered else 0
 
     @pl.jit.incore
     def fill(
@@ -1925,6 +1926,21 @@ def _build_local_async(is_put: bool, *, scatter: bool = False):
         src = pl.tensor.view(data, [1, SIZE], offsets=[0, 0])
         dst = pl.tensor.view(data, [1, SIZE], offsets=[1, 0])
         _after, event = pld.tile.get_async(dst, 1 - pld.rank(ctx), src, session)
+        pld.system.defer_wait_event(event, session)
+        return data
+
+    @pl.jit.incore
+    def gather_put_local(
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+        ready: pld.DistributedTensor[[2, 1], pl.INT32],
+    ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
+        # The mirror of scatter_get_local: PUT's window-bound endpoint is the
+        # destination, so the offset is taken from dst and re-based onto the peer.
+        ctx = pld.get_comm_ctx(data)
+        session = pld.system.make_session(ctx)
+        src = pl.tensor.view(data, [1, SIZE], offsets=[0, 0])
+        dst = pl.tensor.view(data, [1, SIZE], offsets=[1, 0])
+        _after, event = pld.tile.put_async(dst, 1 - pld.rank(ctx), src, session)
         pld.system.defer_wait_event(event, session)
         return data
 
@@ -1981,7 +1997,25 @@ def _build_local_async(is_put: bool, *, scatter: bool = False):
         done_signal = rendezvous(transferred, done)
         return readback(transferred, done_signal, out)
 
-    chip_orch = chip_scatter_get if scatter else (chip_put if is_put else chip_get)
+    @pl.jit
+    def chip_gather_put(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+        ready: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        done: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        initialized = fill(inp, data)
+        ready_signal = rendezvous(initialized, ready)
+        transferred = gather_put_local(initialized, ready_signal)
+        done_signal = rendezvous(transferred, done)
+        return readback(transferred, done_signal, out)
+
+    if gather:
+        chip_orch = chip_gather_put
+    else:
+        chip_orch = chip_scatter_get if scatter else (chip_put if is_put else chip_get)
 
     @pl.jit.host
     def host_orch(
@@ -2004,18 +2038,23 @@ def _build_local_async(is_put: bool, *, scatter: bool = False):
 
 @pytest.mark.platforms("a5", reason="URMA async transfers require the A5 backend")
 @pytest.mark.parametrize(
-    ("is_put", "scatter"),
-    [(True, False), (False, False), (False, True)],
-    ids=["put_plain_src", "get_plain_dst", "scatter_get_registered_dst"],
+    ("is_put", "scatter", "gather"),
+    [(True, False, False), (False, False, False), (False, True, False), (True, False, True)],
+    ids=[
+        "put_plain_src",
+        "get_plain_dst",
+        "scatter_get_registered_dst",
+        "gather_put_registered_dst",
+    ],
 )
-def test_plain_local_async_endpoint(test_config, device_ids, is_put, scatter):
+def test_plain_local_async_endpoint(test_config, device_ids, is_put, scatter, gather):
     """The consumer reads the peer data after the transfer task completes."""
     if len(device_ids) < 2:
         pytest.skip("Async transfer needs two devices")
     inputs = torch.arange(2 * SIZE, dtype=torch.float32).reshape(2, 1, SIZE)
     scratch = torch.full_like(inputs, -17)
     outputs = torch.zeros_like(inputs)
-    compiled = _build_local_async(is_put, scatter=scatter).compile(
+    compiled = _build_local_async(is_put, scatter=scatter, gather=gather).compile(
         inputs,
         scratch,
         outputs,

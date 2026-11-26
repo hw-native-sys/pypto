@@ -495,6 +495,55 @@ static __aicore__ void pypto_urma_scatter_get(
 #endif
 """
 
+_URMA_GATHER_ADAPTER = """\
+#if defined(PTO_URMA_SUPPORTED)
+// One cache line per physical sender in the task's GM scratch tensor. The
+// immediate submission consumes both descriptors before this slot is reused.
+struct alignas(64) PyptoGatherDescriptors {
+  pto::comm::GatherDestination destination;
+  pto::comm::GatherSegment source;
+};
+static_assert(sizeof(PyptoGatherDescriptors) == 64);
+
+template <typename T>
+static __aicore__ void pypto_urma_gather_put(
+    __gm__ int64_t* raw_args, __gm__ int64_t* comm_raw, simpler::urma::UrmaSession* session,
+    __gm__ uint8_t* scratch, __gm__ T* dst, __gm__ T* src, int64_t nbytes, int64_t peer) {
+  AsyncCtx async = get_async_ctx(raw_args);
+  if (!session->valid) return;  // The builder already published the error.
+  auto* comm = reinterpret_cast<__gm__ CommContext*>(comm_raw);
+  // PUT's window-bound endpoint is dst, where GET's is src. The offset is taken
+  // from this rank's window and re-based onto the peer's, exactly as V1 does for
+  // whichever endpoint is remote.
+  const auto offset = reinterpret_cast<uint64_t>(dst) - comm->windowsIn[comm->rankId];
+  if (peer < 0 || static_cast<uint64_t>(peer) >= comm->rankNum ||
+      nbytes <= 0 || nbytes > (256LL << 20) || offset > comm->winSize ||
+      static_cast<uint64_t>(nbytes) > comm->winSize - offset) {
+    pto2::detail::set_urma_error(async, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+    pto2::detail::defer_flush(async);
+    return;
+  }
+  auto& desc = reinterpret_cast<__gm__ PyptoGatherDescriptors*>(scratch)[async.urma_sender_id];
+  desc.destination.addr = pto2::urma_backend::peer_mr_ptr<uint8_t>(session->domain_workspace, peer, offset);
+  desc.destination.segCount = 1;
+  desc.destination.peer = static_cast<uint32_t>(peer);
+  desc.source.addr = reinterpret_cast<__gm__ const uint8_t*>(src);
+  desc.source.length = static_cast<uint32_t>(nbytes);
+#if !defined(__CPU_SIM)
+  // The payload is the local endpoint for a PUT, so preceding local stores into
+  // src must retire before the engine reads it. DcciCachelines and dsb publish
+  // the descriptor only; neither drains an outstanding MTE3 store. V1 takes the
+  // same barrier for the same reason.
+  pipe_barrier(PIPE_ALL);
+  pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t*>(&desc), sizeof(desc));
+  dsb(DSB_DDR);
+#endif
+  // Simpler publishes submission and registration failures to this task.
+  send_request_entry(async, UrmaTput(&desc.destination, 1, &desc.source, 1), *session);
+}
+#endif
+"""
+
 _URMA_TRANSFER_ADAPTER_TEMPLATE = """\
 // --- URMA async transfer adapter ---
 // V1 completion is owned by the enclosing task: the helpers below only submit
@@ -940,8 +989,12 @@ _DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").n
 _URMA_PUT_ASYNC_OP = _ir_core.get_op("pld.tensor.put_async").name
 _URMA_GET_ASYNC_OP = _ir_core.get_op("pld.tensor.get_async").name
 _URMA_SCATTER_OP = _ir_core.get_op("pld.tile.get_async").name
+_URMA_GATHER_OP = _ir_core.get_op("pld.tile.put_async").name
 _URMA_SESSION_OP = _ir_core.get_op("pld.system.make_session").name
-_URMA_TRANSFER_OPS = frozenset({_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP, _URMA_SCATTER_OP, _URMA_SESSION_OP})
+_URMA_TILE_OPS = frozenset({_URMA_SCATTER_OP, _URMA_GATHER_OP})
+_URMA_TRANSFER_OPS = frozenset(
+    {_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP, _URMA_SCATTER_OP, _URMA_GATHER_OP, _URMA_SESSION_OP}
+)
 _TILE_LOAD_OP = _ir_core.get_op("tile.load").name
 
 
@@ -1009,7 +1062,7 @@ def _collect_urma_transfer_dtypes(func: _ir_core.Function) -> set[tuple[str, _Da
         def visit_call(self, op: _ir_core.Call) -> None:
             ir_op = getattr(op, "op", None)
             if isinstance(ir_op, _ir_core.Op) and op.args:
-                if ir_op.name in {_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP, _URMA_SCATTER_OP}:
+                if ir_op.name in {_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP, *_URMA_TILE_OPS}:
                     endpoint = op.args[0].type
                     if isinstance(endpoint, _ir_core.TensorType):
                         self.pairs.add((ir_op.name, endpoint.dtype))
@@ -1033,20 +1086,27 @@ def _generate_urma_transfer_adapter(*functions: _ir_core.Function) -> str:
         parts.append(_URMA_SESSION_ADAPTER)
     wrappers: list[str] = []
     scatter_wrappers: list[str] = []
+    gather_wrappers: list[str] = []
     for name, dtype in sorted(pairs, key=lambda item: (item[0], str(item[1]))):
         suffix = _codegen_core.data_type_to_mlir(dtype)
-        if name == _URMA_SCATTER_OP:
+        if name in _URMA_TILE_OPS:
             suffix = suffix.removeprefix("!pto.")
         if suffix.startswith("!pto.") or suffix in {"index", "i1"}:
             raise ValueError(f"{name} does not support element type {suffix!r}")
         cpp_type = dtype.to_c_type_string()
-        if name == _URMA_SCATTER_OP:
-            scatter_wrappers.append(
-                f'extern "C" {{ static __aicore__ void pypto_urma_scatter_get_{suffix}(\n'
+        if name in _URMA_TILE_OPS:
+            # Both directions take the same argument order; only the helper they
+            # forward to differs. dst/src keep their op meaning, so the Gather
+            # helper treats dst as the remote endpoint and Scatter treats src as
+            # one.
+            helper = "pypto_urma_scatter_get" if name == _URMA_SCATTER_OP else "pypto_urma_gather_put"
+            bucket = scatter_wrappers if name == _URMA_SCATTER_OP else gather_wrappers
+            bucket.append(
+                f'extern "C" {{ static __aicore__ void {helper}_{suffix}(\n'
                 "    __gm__ int64_t* args, __gm__ int64_t* comm, simpler::urma::UrmaSession* session,\n"
                 f"    __gm__ uint8_t* scratch, __gm__ {cpp_type}* dst, __gm__ {cpp_type}* src,\n"
                 "    int64_t bytes, int64_t peer) {\n"
-                "  pypto_urma_scatter_get(args, comm, session, scratch, dst, src, bytes, peer);\n} }"
+                f"  {helper}(args, comm, session, scratch, dst, src, bytes, peer);\n}} }}"
             )
             continue
         is_put = name == _URMA_PUT_ASYNC_OP
@@ -1071,6 +1131,8 @@ def _generate_urma_transfer_adapter(*functions: _ir_core.Function) -> str:
         )
     if scatter_wrappers:
         parts.extend([_URMA_SCATTER_ADAPTER, "#if defined(PTO_URMA_SUPPORTED)", *scatter_wrappers, "#endif"])
+    if gather_wrappers:
+        parts.extend([_URMA_GATHER_ADAPTER, "#if defined(PTO_URMA_SUPPORTED)", *gather_wrappers, "#endif"])
     return "\n".join(parts)
 
 

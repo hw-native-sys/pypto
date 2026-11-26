@@ -284,15 +284,20 @@ class AsyncHandleChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& op) override;
 
  private:
-  // A GET and its completion must execute in the same branch and loop iteration.
+  // A tile async transfer and its completion must execute in the same branch and loop
+  // iteration. Both directions carry the event at tuple index 1, so one pending set covers
+  // pld.tile.get_async and pld.tile.put_async alike.
   struct Region {
-    // Ancestor sets stay unchanged while visiting a child: completion consumes only a local GET.
+    // Ancestor sets stay unchanged while visiting a child: completion consumes only a local
+    // transfer.
     bool outer_pending_on_return;
     bool outer_pending_on_loop_exit;
-    std::unordered_set<const Var*> pending_gets;
-    [[nodiscard]] bool PendingOnReturn() const { return outer_pending_on_return || !pending_gets.empty(); }
+    std::unordered_set<const Var*> pending_transfers;
+    [[nodiscard]] bool PendingOnReturn() const {
+      return outer_pending_on_return || !pending_transfers.empty();
+    }
     [[nodiscard]] bool PendingOnLoopExit() const {
-      return outer_pending_on_loop_exit || !pending_gets.empty();
+      return outer_pending_on_loop_exit || !pending_transfers.empty();
     }
   };
   Region* region_ = nullptr;
@@ -339,9 +344,9 @@ void AsyncHandleChecker::VisitStmt(const StmtPtr& stmt) {
         region_ && region_->PendingOnReturn(), !loop_body && region_ && region_->PendingOnLoopExit(), {}};
     auto* outer = std::exchange(region_, &region);
     IRVisitor::VisitStmt(stmt);
-    if (!region.pending_gets.empty()) {
+    if (!region.pending_transfers.empty()) {
       Report(stmt->span_,
-             "pld.tile.get_async requires exactly one wait_event or defer_wait_event "
+             "a tile async transfer requires exactly one wait_event or defer_wait_event "
              "in the same branch and loop iteration");
     }
     region_ = outer;
@@ -354,7 +359,8 @@ void AsyncHandleChecker::VisitStmt(const StmtPtr& stmt) {
 void AsyncHandleChecker::CheckExit(const StmtPtr& stmt) {
   if (IsA<ReturnStmt>(stmt) ? region_->PendingOnReturn() : region_->PendingOnLoopExit()) {
     Report(stmt->span_,
-           "control flow can exit before the wait_event or defer_wait_event for pld.tile.get_async");
+           "control flow can exit before the wait_event or defer_wait_event for a tile async "
+           "transfer");
   }
 }
 
@@ -403,10 +409,10 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   const auto mismatch = [&](const std::string& message) {
     Report(op->span_, op->op_->name_ + " " + message);
   };
-  if (IsOp(op, "pld.tile.get_async")) {
+  if (IsTileAsyncTransfer(op)) {
     auto assign = As<AssignStmt>(statement_);
     if (assign && assign->value_ == op) {
-      region_->pending_gets.insert(assign->var_.get());
+      region_->pending_transfers.insert(assign->var_.get());
     } else {
       mismatch("requires a bound event for wait_event or defer_wait_event");
     }
@@ -435,10 +441,9 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   auto field = As<TupleGetItemExpr>(event);
   const auto producer = field && field->index_ == 1 ? ResolveAsyncDefinition(field->tuple_) : Definition{};
   auto submit = As<Call>(producer.value);
-  if (IsOp(submit, "pld.tile.get_async") &&
-      !region_->pending_gets.erase(AsVarLike(producer.identity).get())) {
+  if (IsTileAsyncTransfer(submit) && !region_->pending_transfers.erase(AsVarLike(producer.identity).get())) {
     mismatch(
-        "requires a preceding, unconsumed pld.tile.get_async event in the same branch and loop iteration");
+        "requires a preceding, unconsumed tile async transfer event in the same branch and loop iteration");
   }
   const bool implicit_session = IsOp(submit, "pld.tensor.get_async_event");
   const bool explicit_session = IsTileAsyncTransfer(submit);

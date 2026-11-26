@@ -332,8 +332,11 @@ class BufferEngineCollector : public IRVisitor {
     }
     size_t target = 0;
     const bool scatter_get = IsOp(op, "pld.tile.get_async");
+    const bool gather_put = IsOp(op, "pld.tile.put_async");
     const bool urma_get = IsOp(op, "pld.tensor.get_async") || scatter_get;
-    const bool urma = IsOp(op, "pld.tensor.put_async") || urma_get;
+    // pld.tile.put_async belongs here and NOT in urma_get: that flag also selects
+    // target = 2, the source operand, while PUT's window is args_[0].
+    const bool urma = IsOp(op, "pld.tensor.put_async") || gather_put || urma_get;
     if (urma_get || IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) {
       target = 2;
     } else if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) {
@@ -348,6 +351,11 @@ class BufferEngineCollector : public IRVisitor {
     // Classify a destination window before engine grouping separates it from the remote source.
     if (scatter_get && IsA<DistributedTensorType>(args[0]->GetType())) {
       if (const auto* dst = Resolve(args[0])) Record(dst, 0);
+    }
+    // The Gather mirror: PUT's window is args[0], so the local source at args[2] is the endpoint
+    // engine grouping would otherwise separate from it. Same MR requirement, opposite direction.
+    if (gather_put && args.size() > 2 && IsA<DistributedTensorType>(args[2]->GetType())) {
+      if (const auto* src = Resolve(args[2])) Record(src, 0);
     }
     if (const auto* buffer = Resolve(args[target])) Record(buffer, urma ? 0 : 1);
   }

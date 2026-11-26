@@ -46,6 +46,11 @@ def put_async(
 ) -> tuple[DistributedTensor, AsyncEvent]:
     """Submit a single-peer PUT from a dense local GM view to a remote window.
 
+    The current A5 Gather PUT ISA requires dst and src to use the same communication domain.
+    The full src range must lie in the session's local registered memory region (MR), and the
+    full dst range in the peer's MR for that session. A plain Tensor can serve as src when
+    its storage meets this requirement.
+
     Args:
         dst: Window-bound destination on the remote rank.
         peer: Rank receiving the transfer.

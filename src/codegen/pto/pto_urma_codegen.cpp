@@ -43,22 +43,38 @@ void PTOCodegen::EmitUrmaMakeSession(const ir::CallPtr& op) {
   SetCurrentExprValue(session);
 }
 
-void PTOCodegen::EmitUrmaScatterGet(const ir::CallPtr& op) {
+// Shared by both directions. pld.tile.get_async and pld.tile.put_async have the
+// same op shape - result arity 2, tuple element 0 aliasing args_[0] and element 1
+// carrying the event, session at args_[3] - so only two things differ: which
+// endpoint is window-bound and supplies the CommContext, and which adapter the
+// emitted call names.
+void PTOCodegen::EmitUrmaTileTransfer(const ir::CallPtr& op, bool is_put) {
   const auto dst = ir::AsVarLike(op->args_[0]);
   const auto src = ir::AsVarLike(op->args_[2]);
-  INTERNAL_CHECK_SPAN(dst && src, op->span_) << "Scatter GET endpoints must be materialized tensor variables";
+  const auto* kind = is_put ? "Gather PUT" : "Scatter GET";
+  const auto* op_name = is_put ? "pld.tile.put_async" : "pld.tile.get_async";
+  CHECK_SPAN(GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_)
+      << op_name << " requires the A5 backend";
+  INTERNAL_CHECK_SPAN(dst && src, op->span_) << kind << " endpoints must be materialized tensor variables";
   // The first tuple element borrows the submitted destination's view and storage.
-  fs_.urma_get_destinations[GetCurrentResultVar().get()] = dst;
+  // The result var must be bound: an unbound transfer lowers to an EvalStmt, where
+  // GetCurrentResultVar() is null, and a null key here is matched by any later
+  // TupleGetItemExpr over a non-Var tuple, silently rebinding that result to this
+  // destination.
+  const auto result = GetCurrentResultVar();
+  INTERNAL_CHECK_SPAN(result, op->span_)
+      << kind << " must bind its result tuple before the destination alias is recorded";
+  fs_.urma_transfer_destinations[result.get()] = dst;
   const auto type = ir::AsTensorTypeLike(dst->GetType());
   const auto bits = type->dtype_.GetBit();
-  CHECK_SPAN(bits >= 8 && bits % 8 == 0, op->span_) << "pld.tile.get_async requires byte-sized elements";
+  CHECK_SPAN(bits >= 8 && bits % 8 == 0, op->span_) << op_name << " requires byte-sized elements";
   constexpr int64_t kMaxBytes = int64_t{256} << 20;
   int64_t fixed_bytes = static_cast<int64_t>(bits / 8);
   std::vector<ir::ExprPtr> dynamic_dims;
   for (const auto& dim : type->shape_) {
     if (auto extent = ir::As<ir::ConstInt>(dim)) {
       CHECK_SPAN(extent->value_ > 0 && extent->value_ <= kMaxBytes / fixed_bytes, op->span_)
-          << "URMA Scatter GET requires 1 byte through 256 MiB per request";
+          << "URMA " << kind << " requires 1 byte through 256 MiB per request";
       fixed_bytes *= extent->value_;
     } else {
       dynamic_dims.push_back(dim);
@@ -81,7 +97,8 @@ void PTOCodegen::EmitUrmaScatterGet(const ir::CallPtr& op) {
   const auto element = GetTypeString(type->dtype_);
   const std::string ptr = "!pto.ptr<" + element + ">";
   const auto suffix = element.rfind("!pto.", 0) == 0 ? element.substr(5) : element;
-  const auto name = "pypto_urma_scatter_get_" + suffix;
+  const auto* adapter = is_put ? "pypto_urma_gather_put_" : "pypto_urma_scatter_get_";
+  const auto name = adapter + suffix;
   const auto signature = std::string("(!pto.ptr<i64>, !pto.ptr<i64>, ") + kSessionPtr + ", !pto.ptr<ui8>, " +
                          ptr + ", " + ptr + ", i64, i64)";
   urma_adapter_signatures_[name] = signature;
@@ -89,17 +106,32 @@ void PTOCodegen::EmitUrmaScatterGet(const ir::CallPtr& op) {
   const auto scratch = std::find_if(params.begin(), params.end(), [](const auto& param) {
     return param->name_hint_ == backend::kUrmaScatterScratchParam;
   });
-  CHECK_SPAN(scratch != params.end(), op->span_)
-      << "URMA Scatter GET requires materialized GM descriptor scratch";
+  // InjectGMPipeBuffer establishes both of these, not the user, so a failure here
+  // is a compiler bug rather than bad input - notably a third transfer op left out
+  // of that pass's matches lambda.
+  INTERNAL_CHECK_SPAN(scratch != params.end(), op->span_)
+      << "URMA " << kind << " requires materialized GM descriptor scratch";
   const auto buffer = ir::AsTensorTypeLike((*scratch)->GetType());
   const auto extent =
       buffer && buffer->shape_.size() == 1 ? ir::As<ir::ConstInt>(buffer->shape_[0]) : nullptr;
-  CHECK_SPAN(extent && buffer->dtype_ == DataType::UINT8 &&
-                 extent->value_ >= GetBackendHandler()->GetUrmaScatterScratchBytes(),
-             op->span_)
-      << "URMA Scatter descriptor scratch must cover every physical sender";
-  Emit("func.call @" + name + "(" + GetDeferredCompletionRawArgsSSA() + ", " + GetCommCtxSSAFor(src.get()) +
-       ", " + GetExprAsCode(op->args_[3]) + ", " + GetTensorBasePtr(*scratch) + ", " + GetTensorBasePtr(dst) +
-       ", " + GetTensorBasePtr(src) + ", " + bytes + ", " + peer + ") : " + signature + " -> ()");
+  INTERNAL_CHECK_SPAN(extent && buffer->dtype_ == DataType::UINT8 &&
+                          extent->value_ >= GetBackendHandler()->GetUrmaScatterScratchBytes(),
+                      op->span_)
+      << "URMA descriptor scratch must cover every physical sender";
+  // PUT writes into the remote window through dst; GET reads the remote window
+  // through src. The CommContext comes from whichever endpoint is window-bound.
+  const auto* remote = is_put ? dst.get() : src.get();
+  const auto comm_ctx = GetCommCtxSSAFor(remote);
+  // Interpolating an empty context would emit a call with a missing operand and
+  // fail downstream in PTOAS as an unrelated parse error.
+  INTERNAL_CHECK_SPAN(!comm_ctx.empty(), op->span_)
+      << kind << " has no CommContext bound to its window endpoint";
+  Emit("func.call @" + name + "(" + GetDeferredCompletionRawArgsSSA() + ", " + comm_ctx + ", " +
+       GetExprAsCode(op->args_[3]) + ", " + GetTensorBasePtr(*scratch) + ", " + GetTensorBasePtr(dst) + ", " +
+       GetTensorBasePtr(src) + ", " + bytes + ", " + peer + ") : " + signature + " -> ()");
 }
+
+void PTOCodegen::EmitUrmaScatterGet(const ir::CallPtr& op) { EmitUrmaTileTransfer(op, /*is_put=*/false); }
+
+void PTOCodegen::EmitUrmaGatherPut(const ir::CallPtr& op) { EmitUrmaTileTransfer(op, /*is_put=*/true); }
 }  // namespace pypto::codegen

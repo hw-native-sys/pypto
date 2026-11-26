@@ -152,7 +152,9 @@ REGISTER_OP("pld.system.make_session")
 // ============================================================================
 
 REGISTER_OP("pld.tile.put_async")
-    .set_description("Submit one URMA write to the given peer and return (destination, completion event).")
+    .set_description(
+        "Submit one URMA write to the given peer and return (destination, completion event). "
+        "The current A5 Gather PUT ISA requires dst and src to use the same communication domain.")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote window-bound GM destination")
     .add_argument("peer", "Remote rank for this submission")

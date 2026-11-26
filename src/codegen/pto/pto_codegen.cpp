@@ -996,7 +996,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       }
       if (!uses_urma_transfer_ &&
           (ir::IsOp(op, "pld.tensor.put_async") || ir::IsOp(op, "pld.tensor.get_async") ||
-           ir::IsOp(op, "pld.system.make_session") || ir::IsOp(op, "pld.tile.get_async"))) {
+           ir::IsOp(op, "pld.system.make_session") || ir::IsOp(op, "pld.tile.get_async") ||
+           ir::IsOp(op, "pld.tile.put_async"))) {
         uses_urma_transfer_ = true;
       }
       if (!uses_spmd_block_ops_ &&
@@ -3048,8 +3049,9 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
   if (TryEmitVFCall(call, op->var_)) return;
   if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
-    if (auto it = fs_.urma_get_destinations.find(rhs.get()); it != fs_.urma_get_destinations.end()) {
-      fs_.urma_get_destinations[op->var_.get()] = it->second;
+    if (auto it = fs_.urma_transfer_destinations.find(rhs.get());
+        it != fs_.urma_transfer_destinations.end()) {
+      fs_.urma_transfer_destinations[op->var_.get()] = it->second;
       return;
     }
     if (auto it = vf_return_aliases_.find(rhs.get()); it != vf_return_aliases_.end()) {
@@ -3221,8 +3223,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto rhs_var = AsVarLike(op->value_);
   if (auto item = As<ir::TupleGetItemExpr>(op->value_); item && item->index_ == 0) {
     auto tuple = AsVarLike(item->tuple_);
-    auto it = fs_.urma_get_destinations.find(tuple.get());
-    if (it != fs_.urma_get_destinations.end()) rhs_var = it->second;
+    auto it = fs_.urma_transfer_destinations.find(tuple.get());
+    if (it != fs_.urma_transfer_destinations.end()) rhs_var = it->second;
   }
   if (rhs_var) {
     if (As<TileType>(op->var_->GetType()) && As<TileType>(rhs_var->GetType())) {

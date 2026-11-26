@@ -236,47 +236,95 @@ class P:
     assert ordered == [op, wait, access] * stage
 
 
+# A tile transfer's signature differs between directions only in which endpoint
+# carries the window, and the window is what supplies the session's CommContext.
+_TILE_TRANSFER_SIGNATURES = {
+    "get": ("pl.Tensor[[32], pl.FP32]", "pld.DistributedTensor[[32], pl.FP32]", "src"),
+    "put": ("pld.DistributedTensor[[32], pl.FP32]", "pl.Tensor[[32], pl.FP32]", "dst"),
+}
+
+
+def _tile_transfer_kernel(direction: str, body: str) -> str:
+    """Render a kernel whose body is `body`, with SUBMIT bound to `direction`."""
+    dst_type, src_type, window = _TILE_TRANSFER_SIGNATURES[direction]
+    body = body.replace("SUBMIT", f"_, event = pld.tile.{direction}_async(dst, peer, src, session)")
+    return f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, dst: {dst_type}, src: {src_type},
+               peer: pl.Scalar[pl.INT32]):
+        session = pld.system.make_session(pld.system.get_comm_ctx({window}))
+{indent(body, " " * 8)}
+"""
+
+
+@pytest.mark.parametrize("direction", ["get", "put"])
 @pytest.mark.parametrize("completion", ["wait_event", "defer_wait_event"])
 @pytest.mark.parametrize(
     ("body", "diagnostic"),
     [
-        ("GET", "exactly one"),
-        ("GET\nDONE\nDONE", "unconsumed"),
-        ("GET\nif peer > 0:\n    DONE", "same branch"),
-        ("GET\nfor i in pl.range(peer):\n    DONE", "same branch"),
+        ("SUBMIT", "exactly one"),
+        ("SUBMIT\nDONE\nDONE", "unconsumed"),
+        ("SUBMIT\nif peer > 0:\n    DONE", "same branch"),
+        ("SUBMIT\nfor i in pl.range(peer):\n    DONE", "same branch"),
         (
-            "for i in pl.range(peer):\n    GET\n    if peer > 1:\n        break\n    DONE",
+            "for i in pl.range(peer):\n    SUBMIT\n    if peer > 1:\n        break\n    DONE",
             "can exit",
         ),
         (
-            "for i in pl.range(peer):\n    GET\n    if peer > 1:\n        continue\n    DONE",
+            "for i in pl.range(peer):\n    SUBMIT\n    if peer > 1:\n        continue\n    DONE",
             "can exit",
         ),
-        ("GET\nif peer > 0:\n    return\nDONE", "can exit"),
-        ("for i in pl.range(peer):\n    if i > 0:\n        GET\n        DONE", None),
+        ("SUBMIT\nif peer > 0:\n    return\nDONE", "can exit"),
+        ("for i in pl.range(peer):\n    if i > 0:\n        SUBMIT\n        DONE", None),
         (
-            "GET\nfor i in pl.range(peer):\n    if i > 0:\n        break\nDONE",
+            "SUBMIT\nfor i in pl.range(peer):\n    if i > 0:\n        break\nDONE",
             None,
         ),
     ],
 )
-def test_verifier_pairs_tile_get_in_its_branch_and_iteration(ascend_backend, completion, body, diagnostic):
-    body = body.replace("GET", "_, event = pld.tile.get_async(dst, peer, src, session)")
+def test_verifier_pairs_tile_transfer_in_its_branch_and_iteration(
+    ascend_backend, direction, completion, body, diagnostic
+):
+    """Both directions carry the event at tuple index 1, so the rule is shared.
+
+    The pairing is a property of the submission, not of the data direction: an
+    outstanding PUT owns its session slot exactly as an outstanding GET does.
+    """
     body = body.replace("DONE", f"pld.system.{completion}(event)")
-    program = pl.parse_program(f"""
-@pl.program
-class P:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32],
-               peer: pl.Scalar[pl.INT32]):
-        session = pld.system.make_session(pld.system.get_comm_ctx(src))
-{indent(body, " " * 8)}
-""")
+    program = pl.parse_program(_tile_transfer_kernel(direction, body))
     if diagnostic is None:
         _verify_async_handles(program)
     else:
         with pytest.raises(Error, match=f"(?s)after 'MaterializeCommDomainScopes'.*{diagnostic}"):
             _verify_async_handles(program)
+
+
+@pytest.mark.parametrize("direction", ["get", "put"])
+def test_verifier_rejects_completion_on_a_different_session(ascend_backend, direction):
+    """RFC #3304's fourth V2 acceptance case, for the one combination the suite misses.
+
+    test_wait_event_rejects_another_session_for_put covers PUT with wait_event and a
+    distinct session; test_defer_wait_event_rejects_a_reassigned_session covers GET with
+    defer_wait_event and a *reassigned* one. Neither covers defer_wait_event against a
+    separately constructed session, and neither is parametrized over both directions.
+    """
+    dst_type, src_type, window = _TILE_TRANSFER_SIGNATURES[direction]
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, dst: {dst_type}, src: {src_type},
+               peer: pl.Scalar[pl.INT32]):
+        ctx = pld.system.get_comm_ctx({window})
+        session = pld.system.make_session(ctx)
+        other = pld.system.make_session(ctx)
+        _, event = pld.tile.{direction}_async(dst, peer, src, session)
+        pld.system.defer_wait_event(event, other)
+""")
+    with pytest.raises(Error, match="(?s)after 'MaterializeCommDomainScopes'.*same session"):
+        _verify_async_handles(program)
 
 
 def test_tile_get_event_reuses_session_for_dynamic_peers(ascend_backend):

@@ -29,11 +29,13 @@ Adapter symbols and C++ element types reuse the shared dtype conversions.
   Thus `[1, 32]` inside `[16, 64]` and `[1, 2, 64]` inside `[2, 4, 64]` are
   contiguous, but `[2, 32]` and `[2, 1, 64]`, respectively, are not.
 
-## Explicit-session Scatter GET on A5 TMR
+## Explicit-session Scatter GET and Gather PUT on A5 TMR
 
 `pld.tile.get_async(dst, peer, src, session)` submits one contiguous range of 1 byte through 256 MiB. The helper writes one ScatterSegment and one ScatterSource into task-owned GM scratch, then calls Simpler's combined submission and completion-registration entry point. Each physical AIV has its own descriptor cache line. A session is local to the issuing AIV and reads its URMA workspace from the source window's communication domain. See [Explicit PUT and GET completion](distributed_ops.md#explicit-put-and-get-completion-frontend-and-ir) for the event pairing requirement.
 
 The current ISA requires both endpoints to use the session's communication domain. The entire `dst` byte range must lie in the local registered memory region (MR), and the entire `src` range in the MR registered for `peer`. A plain `Tensor` is a valid destination when its storage meets this requirement. [PTO-ISA #457](https://github.com/hw-native-sys/pto-isa/issues/457)
+
+`pld.tile.put_async(dst, peer, src, session)` is the mirror and shares the emitter, the descriptor scratch line and the event-pairing rules. The window-bound endpoint is `dst` rather than `src`, so the session reads its URMA workspace from the destination window's communication domain and the offset is taken from `dst`. The local endpoint is the payload for a PUT, so the helper drains preceding local stores before submission. The entire `src` range must lie in the local MR and the entire `dst` range in the MR registered for `peer`.
 
 ## Supported tensor async transfers
 
