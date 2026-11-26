@@ -1899,13 +1899,12 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     std::string view_type;  // static valid dims — see tile.reshape above
     bool result_has_memref = false;
     bool parameter_backed = false;
-    if (auto result_var = codegen.GetCurrentResultVar()) {
-      if (auto result_tile = ir::As<ir::TileType>(result_var->GetType())) {
-        result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
-        view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
-        result_has_memref = result_tile->memref_.has_value();
-        parameter_backed = codegen.IsParameterBackedTile(result_tile);
-      }
+    const auto result_tile = codegen.GetCurrentResultTileType();
+    if (result_tile) {
+      result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
+      view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
+      result_has_memref = result_tile->memref_.has_value();
+      parameter_backed = codegen.IsParameterBackedTile(result_tile);
     }
     // A `pto.subview` source is a *strided window*, and a strided window has no
     // transposed form on A2/A3 -- so neither path below can express it. A Mat
@@ -1967,8 +1966,23 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       return std::string("");
     }
 
-    // No declaration carries the transposed type — reinterpret the source in
-    // place via pto.treshape reading its SSA, exactly like tile.reshape.
+    const auto src_tile = ir::As<ir::TileType>(op->args_[0]->GetType());
+    const auto is_vec_scale = [](const ir::TileTypePtr& tile) {
+      return tile && tile->GetMemorySpace() == ir::MemorySpace::Vec &&
+             ir::tile_view_semantics::IsMxScaleView(*tile);
+    };
+    if (is_vec_scale(src_tile) && is_vec_scale(result_tile) &&
+        codegen.GetBackendHandler()->GetPtoTargetArch() == "a5") {
+      // PTOAS accepts the direct boxed E8M0 transpose only in Mat. Both Vec
+      // orientations alias the same packed bytes: transpose a uint8 view,
+      // then bind the result's E8M0 type over those bytes.
+      for (const auto& scale : {src_tile, result_tile}) {
+        auto bytes = std::make_shared<ir::TileType>(scale->shape_, DataType::UINT8, scale->memref_,
+                                                    scale->tile_view_, scale->memory_space_);
+        src_ssa = codegen.EnsureTileView(src_ssa, src_type, bytes, "mx_scale_bytes");
+        src_type = codegen.GetSSATileBufType(src_ssa);
+      }
+    }
     EmitTreshapeViewFromSsa(codegen, src_ssa, src_type, result_target, view_type, "transpose_view_buf");
     return std::string("");
   });

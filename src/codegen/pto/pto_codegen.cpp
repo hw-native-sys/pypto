@@ -372,26 +372,33 @@ class TilePhiBaseCollector : public ir::IRVisitor {
 //   0.63 fixed it; 0.64 and 0.65 prime both slots again and fail on device the
 //   same two ways.
 //
-// This collector only counts slot selections per loop body. The legacy PTOAS
-// planner path retains its conservative guard. The opt-in path validates slot
-// expressions and uses parent-buffer subviews for runtime/predicated schedules.
-// The ping-pong the region form exists for takes ONE slot per iteration and is
-// guarded correctly. Straight-line code is untouched: with no loop there is no
-// cross-iteration reuse to guard.
+// Two unconditional full writes to complementary slots have no loop-carried
+// payload when each loop fills its own slots before use and neither escapes
+// through a phi. Keep read-only bindings, preloads and predication guarded.
 class CoLiveSlotCollector : public ir::IRVisitor {
  public:
   std::set<const ir::Var*> bases;  ///< Allocations with >= 2 slots live in one loop body
+  std::set<const ir::Var*> may_read_previous_iteration;
 
-  void VisitStmt_(const ir::ForStmtPtr& op) override { VisitLoop(op); }
-  void VisitStmt_(const ir::WhileStmtPtr& op) override { VisitLoop(op); }
+  void VisitStmt_(const ir::ForStmtPtr& op) override { VisitLoop(op, op.get()); }
+  void VisitStmt_(const ir::WhileStmtPtr& op) override { VisitLoop(op, nullptr); }
+
+  void VisitStmt_(const ir::IfStmtPtr& op) override {
+    ++branch_depth_;
+    ir::IRVisitor::VisitStmt_(op);
+    --branch_depth_;
+  }
 
   void VisitStmt_(const ir::AssignStmtPtr& op) override {
-    if (loop_depth_ > 0) {
-      if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-        const auto memref = ir::GetDefinedMemRef(tile_type);
-        if (memref->slot_count_ > 1 && memref->slot_index_.has_value() && *memref->slot_index_) {
-          // Second slot-selecting tile on this allocation in the same loop body.
-          if (!per_loop_seen_.insert(memref->base_.get()).second) bases.insert(memref->base_.get());
+    if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
+      const auto memref = ir::GetDefinedMemRef(tile_type);
+      if (memref->slot_count_ > 1 && memref->slot_index_.value_or(nullptr)) {
+        const auto* base = memref->base_.get();
+        if (loop_depth_ > 0 && !per_loop_seen_.insert(base).second) bases.insert(base);
+        const auto call = As<ir::Call>(op->value_);
+        const auto phase = FreshWritePhase(tile_type, *memref, call);
+        if (!phase || !per_loop_writes_.emplace(base, *phase).second) {
+          may_read_previous_iteration.insert(base);
         }
       }
     }
@@ -399,19 +406,48 @@ class CoLiveSlotCollector : public ir::IRVisitor {
   }
 
  private:
+  [[nodiscard]] std::optional<unsigned> FreshWritePhase(const ir::TileTypePtr& tile, const ir::MemRef& memref,
+                                                        const ir::CallPtr& call) const {
+    if (!loop_ || loop_depth_ != 1 || branch_depth_ || memref.slot_count_ != 2 || !call ||
+        !(ir::IsOp(call, "tile.load") || ir::IsOp(call, "tile.matmul")) ||
+        !ir::PhysicalShapesEqual(tile->shape_, ir::GetValidShape(tile))) {
+      return std::nullopt;
+    }
+    const auto index = memref.slot_index_.value_or(nullptr);
+    // The simplifier drops i % 2 when the loop bounds already imply it.
+    // CanonicalSlotCollector checks those bounds before the region is emitted.
+    if (index.get() == loop_->loop_var_.get()) return 0;
+    const auto mod = As<ir::FloorMod>(index);
+    if (!mod || ir::transform_utils::EvalConstInt(mod->right_) != 2) return std::nullopt;
+    if (mod->left_.get() == loop_->loop_var_.get()) return 0;
+    const auto add = As<ir::Add>(mod->left_);
+    if (add && add->left_.get() == loop_->loop_var_.get() &&
+        ir::transform_utils::EvalConstInt(add->right_) == 1) {
+      return 1;
+    }
+    return std::nullopt;
+  }
+
   template <typename LoopPtr>
-  void VisitLoop(const LoopPtr& op) {
+  void VisitLoop(const LoopPtr& op, const ir::ForStmt* loop) {
     // Each loop body counts on its own: two slots in *sibling* loops are never
     // live together, and a nested loop's own body is the iteration that matters.
-    auto saved = std::move(per_loop_seen_);
-    per_loop_seen_.clear();
+    auto saved = std::exchange(per_loop_seen_, {});
+    auto saved_writes = std::exchange(per_loop_writes_, {});
+    const auto* previous = loop_;
+    loop_ = loop;
     ++loop_depth_;
     ir::IRVisitor::VisitStmt_(op);
     --loop_depth_;
+    loop_ = previous;
     per_loop_seen_ = std::move(saved);
+    per_loop_writes_ = std::move(saved_writes);
   }
 
   int loop_depth_ = 0;
+  int branch_depth_ = 0;
+  const ir::ForStmt* loop_ = nullptr;
+  std::set<std::pair<const ir::Var*, unsigned>> per_loop_writes_;
   std::set<const ir::Var*> per_loop_seen_;
 };
 
@@ -482,17 +518,23 @@ class CanonicalSlotCollector : public ir::IRVisitor {
     auto mod = As<ir::FloorMod>(index);
     // An INDEX result can still hide narrowing in an operand or alias. Only
     // an entirely INDEX affine chain supports the unsigned slot proof.
-    if (!mod || !IsIndex(mod) || !IsIndex(mod->right_)) return false;
-    auto divisor = As<ir::ConstInt>(mod->right_);
-    if (!divisor || divisor->value_ <= 0 || static_cast<uint64_t>(divisor->value_) != count) return false;
-    ExprPtr induction = ResolveScalarAlias(mod->left_);
-    if (!induction) return false;
+    if (!IsIndex(index)) return false;
+    ExprPtr induction = index;
     int64_t offset = 0;
-    if (auto add = As<ir::Add>(induction)) {
-      auto constant = As<ir::ConstInt>(add->right_);
-      if (!constant || !IsIndex(constant) || constant->value_ < 0) return false;
-      induction = ResolveScalarAlias(add->left_);
-      offset = constant->value_;
+    if (mod) {
+      auto divisor = As<ir::ConstInt>(mod->right_);
+      if (!divisor || !IsIndex(divisor) || divisor->value_ <= 0 ||
+          static_cast<uint64_t>(divisor->value_) != count) {
+        return false;
+      }
+      induction = ResolveScalarAlias(mod->left_);
+      if (!induction) return false;
+      if (auto add = As<ir::Add>(induction)) {
+        auto constant = As<ir::ConstInt>(add->right_);
+        if (!constant || !IsIndex(constant) || constant->value_ < 0) return false;
+        induction = ResolveScalarAlias(add->left_);
+        offset = constant->value_;
+      }
     }
     auto found = loops_.find(ir::AsVarLike(induction).get());
     if (found == loops_.end()) return false;
@@ -501,6 +543,9 @@ class CanonicalSlotCollector : public ir::IRVisitor {
     if (!As<ir::ConstInt>(loop->stop_) && !loop->HasAttr(ir::kSoftwarePipelineSlotsAttr)) return false;
     auto start = As<ir::ConstInt>(loop->start_);
     const auto stop_bound = analyzer_.const_int_bound(loop->stop_);
+    if (!mod && (stop_bound.max_value < 0 || static_cast<uint64_t>(stop_bound.max_value) > count)) {
+      return false;
+    }
     auto step = As<ir::ConstInt>(loop->step_);
     return start && step && start->value_ >= 0 && step->value_ > 0 &&
            (offset == 0 || stop_bound.max_value <= std::numeric_limits<int64_t>::max() - offset);
@@ -2066,13 +2111,13 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   if (func->body_) {
     phi_collector.VisitStmt(func->body_);
     colive_collector.VisitStmt(func->body_);
-    if (emit_tile_addr_) canonical_collector.VisitStmt(func->body_);
+    if (emit_tile_addr_ || !colive_collector.bases.empty()) canonical_collector.VisitStmt(func->body_);
   }
   // PTOAS 0.64/0.65 mis-synchronize co-live prefetch slots even with static
   // trip counts (#1519). Parent subviews keep alias identity without relying
   // on the affected multi-tile startup/drain event calculation.
   if (emit_tile_addr_ && !colive_collector.bases.empty()) use_addressed_slots = true;
-  fs_.unsigned_slot_remainders = std::move(canonical_collector.remainders);
+  if (emit_tile_addr_) fs_.unsigned_slot_remainders = std::move(canonical_collector.remainders);
 
   /// One allocation's slots, accumulated over every tile bound to it. `blocker`
   /// is empty while the allocation can still become a region, and otherwise says
@@ -2191,13 +2236,15 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     } else if (phi_collector.bases.count(memref->base_.get()) != 0) {
       candidate.blocker = "one of its slots is carried out of an if or a loop as a phi";
     } else if (colive_collector.bases.count(memref->base_.get()) != 0 &&
-               (!emit_tile_addr_ || !use_addressed_slots ||
+               ((emit_tile_addr_
+                     ? !use_addressed_slots
+                     : colive_collector.may_read_previous_iteration.count(memref->base_.get()) != 0) ||
                 canonical_collector.unsupported_bases.count(memref->base_.get()) != 0)) {
       candidate.blocker =
           "two of its slots are live at once inside a loop, and ptoas mis-synchronizes one form of "
           "that — a slot filled an iteration ahead of its read — into wrong data or a device hang "
-          "(hw-native-sys/PTOAS#1519: fixed in 0.63, broken again since 0.64). Take one slot per "
-          "iteration, which is the shape the region form accelerates";
+          "(hw-native-sys/PTOAS#1519). Use one slot per iteration or fill both complementary "
+          "slots with unconditional loads or fresh matmuls before consuming them in that iteration";
     }
 
     if (emit_tile_addr_ && candidate.blocker.empty()) {

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen, ir
+from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -161,8 +161,21 @@ class TestQuantMxCodegen:
         assert "dtype=!pto.f4E2M1x2, rows=64, cols=32" in stores[0]
 
     @pytest.mark.ptoas_compile
-    @pytest.mark.parametrize(("case", "slot_num"), [("direct", 4), ("none", 4), ("split", 4), ("none", 2)])
-    def test_public_mx_gather_compiles(self, case, slot_num, tmp_path):
+    @pytest.mark.parametrize(
+        ("case", "slot_num", "planner"),
+        [
+            pytest.param("direct", 4, passes.MemoryPlanner.PYPTO, id="direct-4"),
+            # Quantizing the RHS and passing its scale to the cube uses both
+            # orientations of a boxed Vec scale with no preassigned address.
+            pytest.param("direct", 4, passes.MemoryPlanner.PTOAS, id="direct-4-ptoas"),
+            pytest.param("none", 4, passes.MemoryPlanner.PYPTO, id="none-4"),
+            pytest.param("split", 4, passes.MemoryPlanner.PYPTO, id="split-4"),
+            pytest.param("none", 2, passes.MemoryPlanner.PYPTO, id="none-2"),
+        ],
+    )
+    def test_public_mx_gather_compiles(
+        self, case, slot_num, planner, tmp_path, pass_verification_instruments
+    ):
         """Both public MX scale orientations survive an explicit AIV/AIC crossing."""
 
         @pl.jit
@@ -222,11 +235,12 @@ class TestQuantMxCodegen:
             "split": split_gather,
         }[case]
         config = RunConfig(platform="a5", save_kernels_dir=str(tmp_path))
-        if slot_num == 2:
-            with pytest.raises(ValueError, match="slot_num=2 is insufficient for 4"):
-                kernel.compile(config=config)
-            return
-        compiled = kernel.compile(config=config)
+        with passes.PassContext(pass_verification_instruments, memory_planner=planner):
+            if slot_num == 2:
+                with pytest.raises(ValueError, match="slot_num=2 is insufficient for 4"):
+                    kernel.compile(config=config)
+                return
+            compiled = kernel.compile(config=config)
         mlir = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.pto"))
         assert "pto.tmatmul.mx" in mlir
         scale_pops = [line for line in mlir.splitlines() if "pto.tpop" in line and "f8E8M0" in line]

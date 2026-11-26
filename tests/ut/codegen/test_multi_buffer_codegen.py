@@ -201,11 +201,8 @@ class CoLiveSlotsInLoop:
     """Two slots of one allocation live at the same time inside a loop.
 
     ptoas 0.54 left the second load unguarded against the next iteration's write
-    (hw-native-sys/PTOAS#1118, fixed in 0.56). The pinned ptoas mis-syncs the
-    prefetch form of this shape (hw-native-sys/PTOAS#1519: fixed in 0.63, broken again
-    since 0.64), and codegen cannot tell the two apart, so the region is refused rather
-    than miscompiled — the ping-pong the region form accelerates takes one slot per
-    iteration.
+    (hw-native-sys/PTOAS#1118, fixed in 0.56). Both slots are overwritten
+    before their consumers in this iteration.
     """
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -224,6 +221,25 @@ class CoLiveSlotsInLoop:
             )
             s: pl.Tile[[64, 64], pl.FP32] = pl.add(lo, hi)
             output = pl.store(s, [i * 64, 0], output)
+        return output
+
+
+@pl.program
+class PartiallyWrittenSlotsInLoop:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        for i in pl.range(2):
+            lo: pl.Tile[[64, 64], pl.FP32, CO_LIVE[i % 2], pl.Mem.Vec] = pl.load(
+                a, [0, 0], [64, 64], valid_shape=[32, 64]
+            )
+            hi: pl.Tile[[64, 64], pl.FP32, CO_LIVE[(i + 1) % 2], pl.Mem.Vec] = pl.load(
+                a, [0, 0], [64, 64], valid_shape=[32, 64]
+            )
+            output = pl.store(pl.add(lo, hi), [0, 0], output)
         return output
 
 
@@ -709,11 +725,56 @@ class TestPtoasPlannerEmitsMultiBuffer:
         slots = {get.split("[")[1].split("]")[0] for get in gets}
         assert len(slots) == 2, f"the two slots must be distinct:\n{mlir}"
 
+    def test_complementary_writes_in_one_iteration_use_both_slots(self):
+        mlir = _codegen(CoLiveSlotsInLoop, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 2
+        assert len(_lines(mlir, "pto.tload")) == 2
+
+    @pytest.mark.parametrize(
+        ("iterations", "first_slot_modulus"),
+        [(2, 2), (4, 2), (4, 4)],
+        ids=["bounded-induction", "rotating-slots", "out-of-range-induction"],
+    )
+    def test_sibling_loops_can_each_fill_both_slots(self, iterations, first_slot_modulus):
+        @pl.program
+        class SiblingPairs:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 64], pl.FP32]],
+            ) -> pl.Tensor[[512, 64], pl.FP32]:
+                for i in pl.range(iterations):
+                    lo: pl.Tile[[64, 64], pl.FP32, SIBLING_LOOPS[i % first_slot_modulus], pl.Mem.Vec] = (
+                        pl.load(a, [0, 0], [64, 64])
+                    )
+                    hi: pl.Tile[[64, 64], pl.FP32, SIBLING_LOOPS[(i + 1) % 2], pl.Mem.Vec] = pl.load(
+                        a, [64, 0], [64, 64]
+                    )
+                    out = pl.store(pl.add(lo, hi), [i * 64, 0], out)
+                for j in pl.range(iterations):
+                    left: pl.Tile[[64, 64], pl.FP32, SIBLING_LOOPS[j % 2], pl.Mem.Vec] = pl.load(
+                        a, [0, 0], [64, 64]
+                    )
+                    right: pl.Tile[[64, 64], pl.FP32, SIBLING_LOOPS[(j + 1) % 2], pl.Mem.Vec] = pl.load(
+                        a, [64, 0], [64, 64]
+                    )
+                    out = pl.store(pl.sub(left, right), [(iterations + j) * 64, 0], out)
+                return out
+
+        if first_slot_modulus > 2:
+            with pytest.raises(ValueError, match="slots"):
+                _codegen(SiblingPairs, passes.MemoryPlanner.PTOAS)
+            return
+        mlir = _codegen(SiblingPairs, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 4
+
     def test_sibling_loops_each_taking_one_slot_still_form_a_region(self):
         """The co-live blocker is per loop body, not per function.
 
-        Two slots that can never be live together — one per sibling loop — still
-        describe a region; only slots co-live in one iteration are refused.
+        Two slots used in separate sibling loops still describe one region.
         """
         mlir = _codegen(SequentialSlotsInSiblingLoops, passes.MemoryPlanner.PTOAS)
         assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
@@ -1044,8 +1105,8 @@ class TestUnsupportedShapesAreLoud:
             (MixedSlotShapes, "differently shaped tiles"),
             (MixedSlotValidShapes, "different valid shapes"),
             (RuntimeValidShapeSlots, "runtime valid shape"),
-            (CoLiveSlotsInLoop, "two of its slots are live at once inside a loop"),
             (PrefetchSlotInLoop, "two of its slots are live at once inside a loop"),
+            (PartiallyWrittenSlotsInLoop, "two of its slots are live at once inside a loop"),
             (UnsubscriptedBinding, "without selecting a slot"),
         ],
         ids=[
@@ -1053,14 +1114,21 @@ class TestUnsupportedShapesAreLoud:
             "non-uniform-slot-type",
             "non-uniform-valid-shape",
             "runtime-valid-shape",
-            "co-live-slots-in-loop",
             "prefetch-slot-in-loop",
+            "partial-slot-writes-in-loop",
             "unsubscripted-binding",
         ],
     )
     def test_blocked_shape_names_itself(self, program, reason):
         with pytest.raises(ValueError, match=reason):
             _codegen(program, passes.MemoryPlanner.PTOAS)
+
+    def test_compile_rejects_loop_carried_prefetch(self, tmp_path, pass_verification_instruments):
+        with (
+            passes.PassContext(pass_verification_instruments, memory_planner=passes.MemoryPlanner.PTOAS),
+            pytest.raises(RuntimeError, match="live at once inside a loop"),
+        ):
+            ir.compile(PrefetchSlotInLoop, output_dir=str(tmp_path), skip_ptoas=True)
 
     @pytest.mark.parametrize(
         "program",

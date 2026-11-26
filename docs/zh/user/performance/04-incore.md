@@ -104,9 +104,11 @@ check(explicit_slots)
 | 规划器 | slot 的下降形式 | 一次迭代内两个 slot 同时存活 |
 | ------ | --------------- | ---------------------------- |
 | `PYPTO`（默认） | 烘焙地址（`alloc_tile`） | 支持 |
-| `PTOAS` | 一个 `alloc_multi_tile` 区域 + 每次使用一个 `multi_tile_get` | **codegen 拒绝** |
+| `PTOAS` | 一个 `alloc_multi_tile` 区域 + 每次使用一个 `multi_tile_get` | 支持下述两个 slot 轮转的写法 |
 
-PTOAS 的这个拒绝是刻意的，在你围绕它做设计之前值得理解：ptoas 在循环里同步两个同时存活的 slot 时出过错。较早的版本不保护第二个 slot 的 load，使它与下一次迭代的写入竞争，这在设备上被实测出错。当前固定的版本仍会把这种形状中的一种——比读取提前一轮迭代填充的 slot——同步错，结果是算错或设备挂死（[PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519)，ptoas 0.63 修复，0.64 起又回退）。**一次迭代一个 slot 存活**才是区域形式存在的目的，也是你如果可能换规划器时该写的形状。
+在非嵌套的计数循环中，用 `i % 2` 和 `(i + 1) % 2` 选择两个 slot。每轮迭代都要无条件地写满每个 slot 一次，可以加载完整的 tile，也可以写入 matmul 新计算的完整结果。两个结果都要在本轮读取。
+
+使用 PTOAS 时，PyPTO 会拒绝跨迭代预取。例如，本轮从 `i % 2` 读取上一轮加载的数据，同时向 `(i + 1) % 2` 预取下一轮的数据。这种写法可能导致计算结果错误或设备挂起。见 [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519)。
 
 ## 看清片上预算
 

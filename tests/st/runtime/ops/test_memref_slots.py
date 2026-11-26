@@ -51,9 +51,8 @@ M, K, N = 64, 64, 256
 TN = 64
 NT = N // TN
 
-# Vec case: NT row tiles of [TR, TC] fp32 -- 16 KB per slot.
+# Vec case: [TR, TC] row tiles of fp32 -- 16 KB per slot.
 TR, TC = 64, 64
-ROWS = TR * NT
 
 
 @pl.jit
@@ -86,14 +85,10 @@ def matmul_slot_pingpong(
 
 
 @pl.jit
-def vector_slot_pingpong(
-    a: pl.Tensor[[ROWS, TC], pl.FP32],
-    b: pl.Tensor[[ROWS, TC], pl.FP32],
-    out: pl.Out[pl.Tensor[[ROWS, TC], pl.FP32]],
-):
+def vector_slot_pingpong(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor], trips: pl.constexpr):
     """Two UB slots co-live per iteration, summed -- `a + b`, which `b + b` cannot fake."""
     for _ in pl.spmd(1, name_hint="memref_slots_vec"):
-        for i in pl.range(NT):
+        for i in pl.range(trips):
             lo: pl.Tile[[TR, TC], pl.FP32, pl.MemRef("ub", slots=2)[i % 2], pl.Mem.Vec] = pl.load(
                 a, [i * TR, 0], [TR, TC], target_memory=pl.Mem.Vec
             )
@@ -132,26 +127,28 @@ def _acc_pingpong_case():
     )
 
 
-def _vec_pingpong_case():
+def _vec_pingpong_case(trips=NT):
     """UB ping-pong: the sum is ``a + b``, not ``b + b``."""
     torch.manual_seed(0)
-    a = torch.randn(ROWS, TC, dtype=torch.float32)
-    b = torch.randn(ROWS, TC, dtype=torch.float32)
-    out = torch.zeros((ROWS, TC), dtype=torch.float32)
+    rows = TR * trips
+    a = torch.randn(rows, TC, dtype=torch.float32)
+    b = torch.randn(rows, TC, dtype=torch.float32)
+    out = torch.zeros((rows, TC), dtype=torch.float32)
     return st.case(
         vector_slot_pingpong,
         a,
         b,
         out,
-        name="vector_slot_pingpong",
+        trips,
+        name="vector_slot_pingpong" if trips == NT else "vector_slot_pingpong_odd",
         golden=lambda _: a + b,
         rtol=1e-3,
         atol=1e-3,
     )
 
 
-@pytest.mark.platforms("a2a3", "a2a3sim")
-@st.cases(_acc_pingpong_case(), _vec_pingpong_case())
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5")
+@st.cases(_acc_pingpong_case(), _vec_pingpong_case(), _vec_pingpong_case(3))
 def test_slots_rotate_at_runtime(case_run):
     """Runtime-indexed slots of one declared allocation, on device."""
     case_run.assert_passed()
