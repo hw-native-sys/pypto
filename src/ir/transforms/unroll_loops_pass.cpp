@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/transforms/utils/unroll_loops.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

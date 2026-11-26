@@ -923,13 +923,75 @@ class TestSlots:
         contents = {}
         for stmt in ir.flatten_to_stmts(branch.else_body):
             if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-                if stmt.value.op.name == "tile.load":
+                if stmt.value.op.name == ir.get_op("tile.load").name:
                     offsets = stmt.value.args[1]
                     assert isinstance(offsets, ir.MakeTuple) and isinstance(offsets.elements[0], ir.ConstInt)
                     contents[address(stmt.var)] = offsets.elements[0].value
-                elif stmt.value.op.name == "tile.move":
+                elif stmt.value.op.name == ir.get_op("tile.move").name:
                     contents[address(stmt.var)] = contents[address(stmt.value.args[0])]
         assert [contents[address(var)] for var in branch.return_vars] == [2, 3, 2]
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    @pytest.mark.parametrize("source_cols", [48, 64])
+    def test_branch_transfer_preserves_each_yielded_view(self, planner, source_cols, ascend_backend):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[3, 64], pl.FP32]],
+            ) -> pl.Tensor[[3, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(
+                        x, [0, 0], [1, 64], valid_shape=[1, source_cols]
+                    )
+                    av = pl.tile.slice(a, [1, 64], [0, 0], valid_shape=[1, 32])
+                    small, full, again = pl.yield_(av, a, av)
+                else:
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(
+                        x, [1, 0], [1, 64], valid_shape=[1, source_cols]
+                    )
+                    bv = pl.tile.slice(b, [1, 64], [0, 0], valid_shape=[1, 32])
+                    small, full, again = pl.yield_(bv, b, bv)
+                out = pl.store(small, [0, 0], out)
+                out = pl.store(full, [1, 0], out)
+                return pl.store(again, [2, 0], out)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+        stmts = ir.flatten_to_stmts(branch.else_body)
+        moves = [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.move").name
+        ]
+        (move,) = moves
+
+        def descriptor(var: ir.Expr) -> tuple[int, int]:
+            tile = var.type
+            assert isinstance(tile, ir.TileType) and tile.memref is not None
+            view = tile.tile_view
+            shape = view.valid_shape if view and view.valid_shape else tile.shape
+            cols = shape[-1]
+            assert isinstance(cols, ir.ConstInt)
+            return cols.value, _const_offset(tile.memref)
+
+        assert isinstance(move.value, ir.Call)
+        read_cols, src = descriptor(move.value.args[0])
+        write_cols, dst = descriptor(move.var)
+        assert read_cols == write_cols == source_cols and src != dst
+        result = next(s for s in stmts if isinstance(s, ir.YieldStmt))
+        assert [descriptor(var) for var in result.value] == [(32, dst), (source_cols, dst), (32, dst)]
 
     def test_slot_size_is_the_largest_tile_on_any_slot(self):
         """Slots are uniform, so one slot must hold the biggest bound tile.

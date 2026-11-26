@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_UNROLL_LOOPS_H_
 
 #include "pypto/ir/function.h"
+#include "pypto/ir/stmt.h"
 
 namespace pypto::ir::transform_utils {
 /// Keep iteration-dependent storage on the declaring assignment when a mutable
