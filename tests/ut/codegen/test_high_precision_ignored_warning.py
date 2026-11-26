@@ -261,7 +261,7 @@ def _source_location(warning_line: str) -> str:
         (HighPrecisionRecip, "tile.recip"),
     ],
 )
-def test_ascend910b_warns_naming_the_op_and_the_arch(program_cls, op_name, capfd):
+def test_ascend910_warns_naming_the_op_and_the_arch(program_cls, op_name, capfd):
     _incore_mlir(program_cls, BackendType.Ascend910)
     warnings = _warnings(capfd)
 

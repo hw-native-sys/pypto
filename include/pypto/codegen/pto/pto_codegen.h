@@ -883,7 +883,7 @@ class PTOCodegen : public CodegenBase {
 
   /**
    * @brief Check if the current function carries the `dual_aiv_dispatch`
-   * attribute (910B no-split dual-AIV dispatch). In that mode the single cube
+   * attribute (910 no-split dual-AIV dispatch). In that mode the single cube
    * consumer reads the FULL slot while two AIV subblocks share it, so the
    * cross-core tpush transport widens only the COLUMN axis to the producer's
    * box (carrying its fillpad'd columns) while PRESERVING the row

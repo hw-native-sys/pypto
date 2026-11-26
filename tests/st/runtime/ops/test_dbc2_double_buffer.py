@@ -31,7 +31,7 @@ PLATFORMS_DBC = ["a2a3", "a2a3sim"]
 
 
 def _choose_a2a3_dbc(m: int, k: int, n: int, *, planner: MemoryPlanner, bytes_a: int, bytes_b: int):
-    """Mirror the planner-specific 910B choice for a historical dbC problem."""
+    """Mirror the planner-specific 910 choice for a historical dbC problem."""
     cfg = _core_passes.l0_tile_chooser.L0TileConfig()
     cfg.M, cfg.K, cfg.N = m, k, n
     cfg.l0a_bytes = cfg.l0b_bytes = 64 * 1024

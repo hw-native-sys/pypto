@@ -95,7 +95,7 @@ segfaults while cleaning up at session end (pre-existing; every test still
 passes first).
 
 ```bash
-# Default: run a2a3 only (matches legacy CI; requires Ascend 910B hardware)
+# Default: run a2a3 only (matches legacy CI; requires Ascend 910 hardware)
 pytest tests/st/ -v --forked
 
 # Run only the a2a3 simulator
@@ -104,7 +104,7 @@ pytest tests/st/ -v --forked --platform=a2a3sim
 # Run only the Ascend 950 simulator
 pytest tests/st/ -v --forked --platform=a5sim
 
-# Run on real Ascend 910B hardware (requires NPU device)
+# Run on real Ascend 910 hardware (requires NPU device)
 pytest tests/st/ -v --forked --platform=a2a3 --device=0
 
 # Run on real Ascend 950 hardware

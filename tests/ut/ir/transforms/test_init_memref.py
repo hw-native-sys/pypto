@@ -194,13 +194,13 @@ class TestBasic:
         ("backend_type", "expected_acc_bytes"),
         [
             pytest.param(None, 16384, id="unconfigured-safe-fallback"),
-            pytest.param(BackendType.Ascend910, 16384, id="ascend910b"),
+            pytest.param(BackendType.Ascend910, 16384, id="ascend910"),
             pytest.param(BackendType.Ascend950, 8192, id="ascend950"),
         ],
     )
     def test_int32_acc_allocation_uses_backend_physical_m_rows(self, backend_type, expected_acc_bytes):
         """A logical 16x128 INT32 accumulator occupies 32 physical M rows on
-        910B, while 950 retains the ordinary 16-row footprint. An unconfigured
+        910, while 950 retains the ordinary 16-row footprint. An unconfigured
         bare pass uses the larger current-backend footprint rather than
         underallocating."""
         _backend.reset_for_testing()
@@ -1863,7 +1863,7 @@ class TestPtoLevel3Scratch:
         """The static-view fix must keep level-2 scratch ownership in PTOAS."""
         after = self._run(
             self._cast_program(src_dtype, dst_dtype),
-            BackendType.Ascend910B,
+            BackendType.Ascend910,
             planner=passes.MemoryPlanner.PTOAS,
         )
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]

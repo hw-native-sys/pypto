@@ -20,38 +20,20 @@ import pickle
 import pytest
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
-from pypto.runtime import CompileOptions, ExecutionMode, RunConfig
 
 
-def test_ascend910_legacy_alias_has_canonical_identity():
-    """Old callers and serialized enum values must select the canonical member."""
+def test_backend_type_serialization():
     canonical = _backend_core.BackendType.Ascend910
-    legacy = _backend_core.BackendType.Ascend910B
-    assert legacy is canonical
-    assert legacy.name == "Ascend910"
+    assert canonical.name == "Ascend910"
     assert canonical.value == 0
     assert _backend_core.BackendType.Ascend950.value == 1
-    assert _backend_core.BackendType.__members__["Ascend910B"] is canonical
-    assert pickle.loads(pickle.dumps(legacy)) is canonical
-    assert _backend_core.get_backend_instance(legacy) is _backend_core.get_backend_instance(canonical)
-
-
-@pytest.mark.parametrize("mode", [ExecutionMode.SIM, ExecutionMode.ONBOARD])
-def test_ascend910_legacy_alias_normalizes_target(mode):
-    """Alias use must not fork compile options or the internal platform identity."""
-    canonical = RunConfig(backend_type=_backend_core.BackendType.Ascend910, execution_mode=mode)
-    legacy = RunConfig(backend_type=_backend_core.BackendType.Ascend910B, execution_mode=mode)
-    assert legacy.compile_kwargs() == canonical.compile_kwargs()
-    assert legacy.platform == canonical.platform
-    assert (
-        CompileOptions(backend_type=legacy.backend_type, execution_mode=mode).platform == canonical.platform
-    )
+    assert pickle.loads(pickle.dumps(canonical)) is canonical
 
 
 class TestBackendHandlerValues:
     """Per-backend handler returns the expected behavioural values."""
 
-    def test_ascend910b_handler_values(self):
+    def test_ascend910_handler_values(self):
         handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend910).get_handler()
 
         assert handler.get_pto_target_arch() == "a2a3"
@@ -106,7 +88,7 @@ class TestBackendHandlerValues:
 class TestBackendHandlerSingletons:
     """Handlers must be stable singletons so callers can hold raw pointers."""
 
-    def test_ascend910b_handler_is_singleton(self):
+    def test_ascend910_handler_is_singleton(self):
         h1 = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend910).get_handler()
         h2 = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend910).get_handler()
         # Identity is exposed on the C++ side as the same singleton; on the
@@ -129,7 +111,7 @@ class TestGlobalHandlerAccessor:
         if previous is not None:
             _backend_core.set_backend_type(previous)
 
-    def test_global_handler_matches_configured_backend_910b(self):
+    def test_global_handler_matches_configured_backend_910(self):
         _backend_core.set_backend_type(_backend_core.BackendType.Ascend910)
         handler = _backend_core.get_handler()
         assert handler.get_pto_target_arch() == "a2a3"

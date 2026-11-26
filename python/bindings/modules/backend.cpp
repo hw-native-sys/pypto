@@ -27,7 +27,7 @@
 #include <vector>
 
 #include "../module.h"
-#include "pypto/backend/910B/backend_910b.h"
+#include "pypto/backend/910/backend_910.h"
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
@@ -46,7 +46,7 @@ namespace pypto {
 namespace python {
 
 using pypto::backend::Backend;
-using pypto::backend::Backend910B;
+using pypto::backend::Backend910;
 using pypto::backend::Backend950;
 using pypto::backend::BackendHandler;
 using pypto::backend::BackendType;
@@ -66,16 +66,10 @@ void BindBackend(nb::module_& m) {
                   "each recipe still restricts physical forms");
 
   // ========== BackendType enum ==========
-  auto backend_type =
-      nb::enum_<BackendType>(backend_mod, "BackendType",
-                             "Backend type for passes and codegen (use Instance internally)")
-          .value("Ascend910", BackendType::Ascend910, "910 backend (A2/A3 PTO assembly codegen)")
-          .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
-
-  // Register the old spelling as the same Python object. A second .value()
-  // creates a distinct nanobind enum member and breaks Python identity/equality.
-  backend_type.attr("Ascend910B") = backend_type.attr("Ascend910");
-  backend_type.attr("_member_map_")["Ascend910B"] = backend_type.attr("Ascend910");
+  nb::enum_<BackendType>(backend_mod, "BackendType",
+                         "Backend type for passes and codegen (use Instance internally)")
+      .value("Ascend910", BackendType::Ascend910, "910 backend (A2/A3 PTO assembly codegen)")
+      .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
 
   // ========== Mem class ==========
   nb::class_<Mem>(backend_mod, "Mem", "Memory component")
@@ -264,10 +258,10 @@ void BindBackend(nb::module_& m) {
       .def_prop_ro(
           "soc", [](const Backend& backend) -> const SoC& { return backend.GetSoC(); }, "Get SoC object");
 
-  // ========== Backend910B concrete implementation ==========
-  nb::class_<Backend910B, Backend>(backend_mod, "Backend910B", "910B backend implementation")
-      .def_static("instance", &Backend910B::Instance, nb::rv_policy::reference,
-                  "Get singleton instance of 910B backend");
+  // ========== Backend910 concrete implementation ==========
+  nb::class_<Backend910, Backend>(backend_mod, "Backend910", "910 backend implementation")
+      .def_static("instance", &Backend910::Instance, nb::rv_policy::reference,
+                  "Get singleton instance of 910 backend");
 
   // ========== Backend950 concrete implementation ==========
   nb::class_<Backend950, Backend>(backend_mod, "Backend950", "950 PTO backend implementation")

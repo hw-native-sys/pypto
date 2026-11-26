@@ -32,7 +32,7 @@ body:
       label: NPU Kind
       description: Target NPU architecture
       options:
-        - Ascend 910B
+        - Ascend 910 (Atlas A2)
         - Ascend 910C
         - Other (please specify in description)
         - N/A (CPU-only issue)

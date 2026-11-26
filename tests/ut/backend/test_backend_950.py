@@ -177,7 +177,7 @@ class TestBackend950L0Tiling:
 
     These accessors feed ChooseL0Tile / AutoTileMatmulL0; their values must match
     the 950 SoC AIC core memory layout (Create950SoC), notably the larger
-    256 KiB Acc compared to 910B's 128 KiB.
+    256 KiB Acc compared to 910's 128 KiB.
     """
 
     def test_l0_capacities_match_soc(self):

@@ -114,9 +114,9 @@ int SoC::TotalCoreCount() const {
   });
 }
 
-// ========== 910B SoC Factory ==========
+// ========== 910 SoC Factory ==========
 
-const SoC& Create910BSoC() {
+const SoC& Create910SoC() {
   // Singleton instance shared by all backends
   static SoC soc = []() {
     // AIC (CUBE) core configuration

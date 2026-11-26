@@ -14,7 +14,7 @@
  * @brief Inject the __gm_pipe_buffer workspace parameter for cross-core pipes on backends
  *        that route slot data through GM, and per-dispatch A5 URMA Scatter descriptor scratch.
  *
- * On 910B, cross-core tpush/tpop rides through a shared GM buffer instead of a
+ * On 910, cross-core tpush/tpop rides through a shared GM buffer instead of a
  * direct inter-core fabric. This pass runs after ExpandMixedKernel has split
  * mixed InCore functions into AIC/AIV pairs, and:
  *

@@ -499,7 +499,7 @@ def test_constexpr_manual_parallel_tensor_and_taskid_merge_compiles(tmp_path, mo
 
     compiled = entry.compile(
         config=RunConfig(
-            backend_type=BackendType.Ascend910B,
+            backend_type=BackendType.Ascend910,
             execution_mode=ExecutionMode.ONBOARD,
             memory_planner=passes.MemoryPlanner.PYPTO,
             save_kernels=True,

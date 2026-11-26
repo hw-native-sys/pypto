@@ -155,7 +155,7 @@ passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
 | 决策 | 理由 |
 | ---- | ---- |
 | 与 `ExpandMixedKernel` 解耦 | 让原 Pass 专注于 AIC/AIV 函数体构建，并把 GM 工作区这一关注点收敛到一个可单独禁用的 Pass |
-| 通过 `BackendHandler::RequiresGMPipeBuffer()` 进行后端门控 | 后端可按需启用，无需在 Pass 代码中散落 `if (backend == "910B")` 之类的分支（参见 `pass-context-config.md`） |
+| 通过 `BackendHandler::RequiresGMPipeBuffer()` 进行后端门控 | 后端可按需启用，无需在 Pass 代码中散落 `if (backend == "910")` 之类的分支（参见 `pass-context-config.md`） |
 | 通过 `initialize_pipe` 操作识别种子，而非按函数名匹配 | 对函数重命名不敏感，也避免误改不需要 setup 的函数 |
 | 在 Orchestration 停止传播 | Orchestration 是主机侧调度层，由它来物化工作区并下发给设备侧被调函数最为自然 |
 | IR 分配保持为占位 | 让该 IR Pass 聚焦于参数连线，由 codegen 处理后端 footprint 和每条 pipe 的 GM offset |

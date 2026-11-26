@@ -79,7 +79,7 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 
 - Defaults to `1` (single block — the previous behaviour).
 - Mesh only: `mode="ring"` requires `core_num == 1`.
-- Must not exceed the target's AIV core count (48 on 910B, 36 on 950) — the
+- Must not exceed the target's AIV core count (48 on 910, 36 on 950) — the
   launch requires all blocks to be admitted at once, so an over-subscribed
   request is rejected at compile time.
 - An explicit `signal` needs one lane per block: `[world_size(), stride]` with

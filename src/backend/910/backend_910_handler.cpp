@@ -9,11 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/backend/910B/backend_910b_handler.h"
+#include "pypto/backend/910/backend_910_handler.h"
 
 #include <initializer_list>
 
-#include "pypto/backend/910B/backend_910b.h"
+#include "pypto/backend/910/backend_910.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -25,23 +25,23 @@
 namespace pypto {
 namespace backend {
 
-Ascend910BHandler::Ascend910BHandler() : BackendHandler(Backend910B::Instance()) {}
+Ascend910Handler::Ascend910Handler() : BackendHandler(Backend910::Instance()) {}
 
-const Ascend910BHandler& Ascend910BHandler::Instance() {
-  static const Ascend910BHandler instance;
+const Ascend910Handler& Ascend910Handler::Instance() {
+  static const Ascend910Handler instance;
   return instance;
 }
 
 /// Own the A2/A3 resource model independently of the process-global target.
-const sync::ResourceCatalog& Ascend910BHandler::GetSyncResourceCatalog() const {
+const sync::ResourceCatalog& Ascend910Handler::GetSyncResourceCatalog() const {
   // PTOAS UnifiedSyncModel::ResourceModel uses K=0 for A3. Preserve that
   // unavailable buffer-credit pool for PyPTO's combined a2a3 target.
   static const auto catalog = MakeAscendSyncResourceCatalog(GetPtoTargetArch(), 0);
   return catalog;
 }
 
-ir::TileView Ascend910BHandler::BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
-                                                           const ir::TileView& original_view) const {
+ir::TileView Ascend910Handler::BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
+                                                          const ir::TileView& original_view) const {
   // Ascend910 (a2a3): cross-core transfer goes through GM. All GM -> Mat
   // transfers must be in NZ layout (hardware constraint), so Left / Right /
   // Mat destinations all use NZ at the transfer boundary. The final
@@ -70,7 +70,7 @@ ir::TileView Ascend910BHandler::BuildCrossCoreTransferView(ir::MemorySpace dest_
 // ISA Supported Conversions (pto-isa tcvt docs, a2a3 column). a2a3 uniquely
 // provides INT32 -> FP16 as a deq instruction and the INT4 pair; it has no
 // FP8 / HF8 / FP4 support at all. Grouped by source, mirroring the ISA table.
-const TcvtAdjacency& Ascend910BHandler::GetTcvtAdjacency() const {
+const TcvtAdjacency& Ascend910Handler::GetTcvtAdjacency() const {
   static const TcvtAdjacency kTable = [] {
     TcvtAdjacency t;
     auto add = [&t](DataType from, std::initializer_list<DataType> tos) {

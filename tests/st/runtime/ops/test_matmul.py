@@ -32,7 +32,7 @@ from pypto.runtime.runner import RunConfig
 
 # Tolerance for the plain FP32 matmul goldens below. The cube accumulates the K
 # reduction in a different order than torch's single-pass BLAS matmul, so results
-# drift by a few FP32 ULP *of the partial sums* — measured on 910B over 489 runs
+# drift by a few FP32 ULP *of the partial sums* — measured on 910 over 489 runs
 # of the cases below at K=64..128: median 1.1e-5, peak 3.4e-5 absolute. That
 # drift is set by the partial-sum magnitude, not by |result|, so on a
 # cancellation-heavy element — where `torch.isclose`'s `atol + rtol * |golden|`
@@ -282,7 +282,7 @@ def _choose_a2a3_l0(
     reduction_pipeline_stages: int = 1,
     independent_output_tiles: bool = False,
 ) -> _core_passes.l0_tile_chooser.L0TileResult:
-    """Mirror AutoTileMatmulL0's calibrated 910B chooser configuration.
+    """Mirror AutoTileMatmulL0's calibrated 910 chooser configuration.
 
     The device tests assert this design point before checking numerics, so a
     cost-model change cannot silently turn a named K-split / A-stationary /
@@ -1311,7 +1311,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
        MemoryReuse's greedy pass retyped up's producer/init vars onto gate's
        buffer but left up's loop-carried iter_arg/return_var on its own buffer,
        splitting the chain; YieldFixupMutator then bridged the two Acc buffers
-       with ``tile.move acc→acc`` ops that ptoas rejects on Ascend 910B with
+       with ``tile.move acc→acc`` ops that ptoas rejects on Ascend 910 with
        ``'pto.tmov' op expects a supported tmov address-space pair for this
        target``.  The fix (``AlignLoopCarriesToInitMutator`` in
        ``src/ir/transforms/memory_reuse_pass.cpp``) re-aligns loop-carried
@@ -1783,7 +1783,7 @@ class TestMatmulOperations:
     @pytest.mark.parametrize("planner", _AUTOL0_PLANNERS)
     @pytest.mark.parametrize("m,k,n,l0_k", _AUTOL0_K_SPLIT_SHAPES)
     def test_matmul_autol0(self, test_runner, platform, planner, m, k, n, l0_k):
-        """910B FP32 operands — calibrated K-split schedules under every planner."""
+        """910 FP32 operands — calibrated K-split schedules under every planner."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=4, bytes_b=4)
         assert (choice.m, choice.n, choice.k) == (m, n, l0_k)
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
@@ -2053,7 +2053,7 @@ class TestMatmulOperations:
 
         This reproduces the exact gate_up_silu kernel shape from Qwen3-32B
         that triggered 'pto.tmov expects a supported tmov address-space pair'
-        on Ascend 910B.  Without the MemoryReuse fix (AlignLoopCarriesToInit)
+        on Ascend 910.  Without the MemoryReuse fix (AlignLoopCarriesToInit)
         the kernel fails to compile; with the fix the up accumulator's chain
         lands on a single reused Acc buffer, so no acc→acc move is emitted and
         the kernel compiles and produces numerically correct results.

@@ -258,7 +258,7 @@ def test_a5_resource_inference(threads, regs):
 
 def test_unsupported_target_and_codegen_fail_explicitly():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     try:
         program, launch = make_program()
         with pytest.raises(ValueError, match="unsupported"):

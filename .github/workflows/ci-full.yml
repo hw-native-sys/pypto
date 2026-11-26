@@ -2068,7 +2068,7 @@ jobs:
     #   4. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
-    # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
+    # a2a3 (910) only: `system-tests*` run --platform=a2a3, and
     # `system-tests-a5sim` runs the a5 profile in the SIMULATOR. This job is the
     # first per-PR run of those paths on real A5 silicon.
     #
@@ -2119,7 +2119,7 @@ jobs:
     # valid-shape, split-reduce parity) — pytest deselects them under --platform=a5,
     # so listing them would only add collection noise; and test_fused_matmul_scatter.py,
     # whose test cases hardcode `get_backend_type() -> Ascend910`, so under
-    # --platform=a5 it would compile for 910B and run on A5 silicon. Widen this
+    # --platform=a5 it would compile for 910 and run on A5 silicon. Widen this
     # list once those are made arch-agnostic.
     #
     # --- mx-tests-a5 ---

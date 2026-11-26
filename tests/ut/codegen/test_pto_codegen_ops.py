@@ -7,10 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 """
-910B PTO Backend: Block-level Operations Codegen Test.
+910 PTO Backend: Block-level Operations Codegen Test.
 
 This test validates code generation for all supported tile-level operations
-(Tile-Tile and Tile-Scalar) in the 910B PTO backend. It creates kernels for
+(Tile-Tile and Tile-Scalar) in the 910 PTO backend. It creates kernels for
 each operation type, compiles them through the PassManager and PTOCodegen,
 and verifies the generated orchestration code.
 """
@@ -507,8 +507,8 @@ def build_tile_ops_test_program(dtype: DataType = DataType.FP32):
     return BlockOperationsTest
 
 
-class Test910BBlockOpsCodegen:
-    """Tests for 910B PTO backend tile-level operations code generation."""
+class TestBlockOpsCodegen910:
+    """Tests for 910 PTO backend tile-level operations code generation."""
 
     def test_tile_ops_codegen(self):
         """Test code generation for all tile-level operations."""
@@ -3444,7 +3444,7 @@ class TestTileAssembleCodegen:
         with pytest.raises(ValueError, match="BF16 NZ Vec->Mat.*multiple of 16"):
             codegen.PTOCodegen().generate(program)
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     @pytest.mark.parametrize("dtype", ["BF16", "FP16"])
     def test_bf16_nz_vec_mat_assemble_tinsert_scope(self, backend_type, dtype):
         """The new selection must not broaden A2/A3 or other dtype contracts."""
@@ -3491,7 +3491,7 @@ class TestTileAssembleCodegen:
         assert "rows=16, cols=128" in destination
         assert "pto.subview" not in mlir
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     @pytest.mark.parametrize("dtype", [pl.FP32, pl.FP16, pl.BF16])
     @pytest.mark.parametrize(
         ("rows", "cols", "row_offset", "col_offset", "valid_rows", "valid_cols"),
@@ -3528,7 +3528,7 @@ class TestTileAssembleCodegen:
         # Buffer IR; runtime tests separately cover the default pipeline.
         with passes.PassContext([], enable_buffer_ir=False):
             optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
-        if backend_type == BackendType.Ascend910B and col_offset == 1:
+        if backend_type == BackendType.Ascend910 and col_offset == 1:
             # A5 supports unaligned insertion; A2/A3 would assert on device.
             with pytest.raises(ValueError, match="32-byte-aligned column offset"):
                 codegen.PTOCodegen().generate(optimized)
@@ -5003,7 +5003,7 @@ class TestTileMoveAccAddressInvariant:
         loop-carried iter_arg/return_var on its own buffer, splitting the chain.
         YieldFixupMutator (bottom-up) then bridged the two Acc buffers with
         ``tile.move`` ops that lowered to acc→acc ``pto.tmov`` — which ptoas
-        rejects on Ascend 910B.
+        rejects on Ascend 910.
 
         The fix (AlignLoopCarriesToInitMutator) re-aligns loop-carried MemRefs to
         their reused init top-down, so the whole up chain lands on the single
@@ -5853,7 +5853,7 @@ class TestCrossCoreSyncCodegen:
 
 def test_pipeline_flags_codegen_static_and_dynamic():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class Prog:
@@ -5879,7 +5879,7 @@ def test_pipeline_flags_codegen_static_and_dynamic():
 def test_pipeline_flags_folded_dynamic_event_round_trip():
     """Folding an INDEX event must preserve the dynamic form through IR dumps."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class Prog:

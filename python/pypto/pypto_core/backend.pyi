@@ -18,7 +18,6 @@ class BackendType:
     """Backend type for passes and codegen."""
 
     Ascend910: BackendType
-    Ascend910B: BackendType  # Compatibility alias of Ascend910.
     Ascend950: BackendType
     __members__: ClassVar[dict[str, BackendType]]
     """Every member, keyed by name — the canonical way to enumerate the enum."""
@@ -248,12 +247,12 @@ class Backend:
     @property
     def soc(self) -> SoC: ...
 
-class Backend910B(Backend):
-    """910B backend implementation (singleton)."""
+class Backend910(Backend):
+    """910 backend implementation (singleton)."""
 
     @staticmethod
-    def instance() -> Backend910B:
-        """Get singleton instance of 910B backend."""
+    def instance() -> Backend910:
+        """Get singleton instance of 910 backend."""
         ...
 
 class Backend950(Backend):

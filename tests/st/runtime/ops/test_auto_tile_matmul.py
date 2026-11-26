@@ -30,7 +30,7 @@ Validates on device the cases from examples/advanced/02_auto_tile_matmul.py:
 
 Golden: torch. This is the on-device validation the unit / codegen / pto-verify checks cannot
 give (actual execution). Ascend910 (``a2a3``): the Mat-scratch / fits-L0c Acc->Mat lowering is
-the 910B bf16 ``pto.tinsert`` FIXPIPE path (the f32 accumulator is downcast into the bf16
+the 910 bf16 ``pto.tinsert`` FIXPIPE path (the f32 accumulator is downcast into the bf16
 scratch); the a5 f32 converting-``pto.tmov`` assemble is a separate lowering.
 """
 

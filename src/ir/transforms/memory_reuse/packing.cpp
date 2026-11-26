@@ -133,7 +133,7 @@ struct PackedBuffer {
  * below (load+tpop hazard, no-alias) is checked in **both directions**.
  *
  * @param hazard  Ascend910 load + tpop_from_aic guard inputs.  Empty when the
- *                guard is inactive (non-910B / non-split-AIV), in which case the
+ *                guard is inactive (non-910 / non-split-AIV), in which case the
  *                hazard check is a no-op and reuse behaviour is unchanged.
  * @param forbid_alias  Per-output forbidden-input map (ForbidAliasCollector):
  *                an op may forbid its output from sharing a buffer with specific
@@ -273,7 +273,7 @@ ReuseMap IdentifyReuseOpportunities(
   // Ascend910 split-AIV hazard (directional): `writer` consumes a
   // tile.tpop_from_aic value and is defined exactly where the load-derived
   // `input` is last read, so placing writer's output on input's buffer forms the
-  // in-place load+tpop touch.  `hazard` is empty off-910B, so this is a no-op.
+  // in-place load+tpop touch.  `hazard` is empty off-910, so this is a no-op.
   auto hazard_blocks = [&hazard](const LifetimeInterval& writer, const LifetimeInterval& input) {
     return writer.def_point == input.last_use_point && hazard.reads_tpop.count(writer.variable.get()) != 0 &&
            hazard.load_derived.count(input.variable.get()) != 0;

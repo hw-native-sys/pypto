@@ -1356,7 +1356,7 @@ std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
 ///
 /// Computes the cross-core transfer view by delegating to the active
 /// BackendHandler. See BackendHandler::BuildCrossCoreTransferView and the
-/// per-backend implementations in src/backend/910B/backend_910b_handler.cpp
+/// per-backend implementations in src/backend/910/backend_910_handler.cpp
 /// and src/backend/950/backend_950_handler.cpp for the layout rules.
 TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
   return PassContext::Current()->GetBackendHandler()->BuildCrossCoreTransferView(dest_ms, original_view);

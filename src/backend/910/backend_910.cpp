@@ -9,11 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/backend/910B/backend_910b.h"
+#include "pypto/backend/910/backend_910.h"
 
 #include <string>
 
-#include "pypto/backend/910B/backend_910b_handler.h"
+#include "pypto/backend/910/backend_910_handler.h"
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/soc.h"
@@ -23,19 +23,19 @@
 namespace pypto {
 namespace backend {
 
-Backend910B::Backend910B() : Backend(Create910BSoC()) {
+Backend910::Backend910() : Backend(Create910SoC()) {
   // Operators are registered via REGISTER_BACKEND_OP macro
-  // in backend_910b_ops.cpp during static initialization
+  // in backend_910_ops.cpp during static initialization
 }
 
-Backend910B& Backend910B::Instance() {
-  static Backend910B instance;
+Backend910& Backend910::Instance() {
+  static Backend910 instance;
   return instance;
 }
 
-const BackendHandler* Backend910B::GetHandler() const { return &Ascend910BHandler::Instance(); }
+const BackendHandler* Backend910::GetHandler() const { return &Ascend910Handler::Instance(); }
 
-std::string Backend910B::GenerateCode(const ir::ProgramPtr& program) {
+std::string Backend910::GenerateCode(const ir::ProgramPtr& program) {
   codegen::PTOCodegen codegen(this);
   return codegen.Generate(program);
 }

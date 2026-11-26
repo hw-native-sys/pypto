@@ -156,7 +156,7 @@ def test_acl_device_probe_selects_and_cleans_up(monkeypatch, failure):
             assert ("aclrtResetDevice", (4,)) in calls
 
 
-@pytest.mark.parametrize("name", ["Ascend950PR_9599", "Ascend910B"])
+@pytest.mark.parametrize("name", ["Ascend950PR_9599", "Ascend910"])
 def test_vf_preflight_retains_device_type_check(monkeypatch, tmp_path, name):
     root = Path(__file__).resolve().parents[4]
     fixture = runpy.run_path(str(root / "tests/st/runtime/vpto/conftest.py"))["vpto_onboard_session"]

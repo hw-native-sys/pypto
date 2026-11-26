@@ -364,7 +364,7 @@ def test_different_pipe_pairs_emit_without_equating_pipes(pipe, wait_pipe):
 )
 def test_a3_codegen_rejects_a5_only_forms(event, pipe, message):
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     span = ir.Span.unknown()
     stmt = ir.EvalStmt(system_ops.set_intra_block(event, pipe=pipe), span)
     function = ir.Function(

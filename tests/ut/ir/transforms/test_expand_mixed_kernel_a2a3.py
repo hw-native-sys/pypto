@@ -383,7 +383,7 @@ def test_hand_written_group_members_share_canonical_abi():
 
 
 def test_hand_written_no_split_pipe_group_infers_dual_aiv_dispatch():
-    """910B explicit pipe members get the same lane-1 handshake replay as auto-expanded mixed kernels."""
+    """910 explicit pipe members get the same lane-1 handshake replay as auto-expanded mixed kernels."""
 
     @pl.program
     class Program:
@@ -1956,7 +1956,7 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
         assert stmts[-1].value[0].same_as(copy.var)
 
 
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 def test_branch_local_mat_fifo_yield_rejected(backend_type: BackendType):
     """Automatic V2C receives cannot be materialized with a Mat-to-Mat copy."""
     backend.reset_for_testing()
@@ -1991,7 +1991,7 @@ def test_branch_local_mat_fifo_yield_rejected(backend_type: BackendType):
         _run_pipeline(Before)
 
 
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 def test_loop_local_mat_fifo_view_yield_rejected(backend_type: BackendType):
     """Views of explicit Mat receives retain the same materialization limit."""
     backend.reset_for_testing()

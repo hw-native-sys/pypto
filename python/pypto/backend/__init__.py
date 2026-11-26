@@ -12,7 +12,7 @@
 from pypto.pypto_core.backend import (
     # Backend type and implementations
     Backend,
-    Backend910B,
+    Backend910,
     Backend950,
     BackendType,
     Cluster,
@@ -45,7 +45,7 @@ __all__ = [
     "OpScratchStatus",
     "TileScratchSpec",
     "Backend",
-    "Backend910B",
+    "Backend910",
     "Backend950",
     "BackendType",
     "set_backend_type",

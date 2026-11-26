@@ -308,7 +308,7 @@ backend.RegisterOp("tile.<op_name>").f_codegen(
 
 | Backend | Ops Registration | Codegen |
 | ------- | ---------------- | ------- |
-| 910B | `src/backend/910B/backend_910b_ops.cpp` | `src/codegen/pto/pto_codegen.cpp` |
+| 910 | `src/backend/910/backend_910_ops.cpp` | `src/codegen/pto/pto_codegen.cpp` |
 
 ---
 

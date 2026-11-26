@@ -10,7 +10,7 @@
 #
 # Build and run the PyPTO on-device development image.
 #
-#   docker/scripts/pypto-dev.sh build a3        # Ascend910B (A2/A3)
+#   docker/scripts/pypto-dev.sh build a3        # Ascend910 (A2/A3)
 #   docker/scripts/pypto-dev.sh build a5        # Ascend950  (A5)
 #   docker/scripts/pypto-dev.sh run   a3 [device-id]   # create or re-enter
 #

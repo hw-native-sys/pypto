@@ -51,7 +51,7 @@ struct TcvtAdjacency {
  * @brief Closed-form GEMM cost-model parameters consumed by ChooseL0Tile.
  *
  * Bandwidths are in BYTES PER CORE CYCLE, so the chooser can weight L1->L0
- * traffic and the L0C drain directly in cycles. Defaults are Ascend a2a3 (910B),
+ * traffic and the L0C drain directly in cycles. Defaults are Ascend a2a3 (910),
  * on-device sweep-calibrated: L1->L0A ~130, L1->L0B ~85 B/cyc (~1.52:1). The
  * FIXPIPE L0C drain is PER-M-ROW, per output tile (scaled by the tile count
  * `ceil(M/m)*ceil(N/n)`):
@@ -140,7 +140,7 @@ struct SimtLimits {
  * obtained from PassContext or from a Backend instance.
  *
  * Adding a new backend requires only:
- *   1. Implement a Backend subclass (see Backend910B / Backend950).
+ *   1. Implement a Backend subclass (see Backend910 / Backend950).
  *   2. Implement a BackendHandler subclass.
  *   3. Override Backend::GetHandler() to return the new handler singleton.
  *
@@ -606,7 +606,7 @@ class BackendHandler {
    * @brief Closed-form GEMM cost-model parameters (L1<->L0 / drain bandwidths
    * and MAD constants) consumed by ChooseL0Tile.
    *
-   * Default is Ascend a2a3 (910B), validated against the pto-isa perf-sim. The
+   * Default is Ascend a2a3 (910), validated against the pto-isa perf-sim. The
    * a5 (950) numbers are not yet measured; the a2a3 default stands in as a
    * placeholder until characterised — override here once measured.
    */

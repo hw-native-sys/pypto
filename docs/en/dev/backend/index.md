@@ -62,9 +62,7 @@ instruction mappings or claiming complete form coverage.
 ## Backend names
 
 Use `BackendType.Ascend910` for the A2/A3 backend and `BackendType.Ascend950`
-for A5. `BackendType.Ascend910B` remains a compatibility alias of
-`BackendType.Ascend910` in both Python and C++; both names select the same target.
-The canonical `.name` and newly written artifact metadata use `Ascend910`.
-Existing artifacts containing `Ascend910B` remain readable; older PyPTO releases
-may not recognize new artifacts containing `Ascend910`. Platform strings
-(`a2a3`, `a2a3sim`, `a5`, `a5sim`) and enum integer values are unchanged.
+for A5. The A2/A3 singleton is `Backend910.instance()`. Its type name is
+`910`, and its serialized backend enum name is `Ascend910`.
+When loading an artifact that uses the former A2/A3 spelling, update its
+`backend_type` field to `Ascend910`. Its platform remains `a2a3` or `a2a3sim`.

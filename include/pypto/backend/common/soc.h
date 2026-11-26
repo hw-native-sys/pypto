@@ -237,21 +237,21 @@ class SoC {
 };
 
 /**
- * @brief Create 910B SoC configuration (singleton)
+ * @brief Create 910 SoC configuration (singleton)
  *
- * Returns a reference to the singleton 910B SoC instance.
+ * Returns a reference to the singleton 910 SoC instance.
  * The instance is created on first call and persists for program lifetime.
  *
- * @return Const reference to 910B SoC
+ * @return Const reference to 910 SoC
  */
-const SoC& Create910BSoC();
+const SoC& Create910SoC();
 
 /**
  * @brief Create 950 SoC configuration (singleton)
  *
  * Returns a reference to the singleton 950 SoC instance.
  * The instance is created on first call and persists for program lifetime.
- * NOTE: Current configuration is a placeholder matching 910B specs.
+ * NOTE: Current configuration is a placeholder matching 910 specs.
  * Update with actual 950 hardware specs when available.
  *
  * @return Const reference to 950 SoC

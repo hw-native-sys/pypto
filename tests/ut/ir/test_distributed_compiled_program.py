@@ -170,13 +170,9 @@ def test_compile_persists_distributed_meta(compiled, tmp_path):
     assert meta["distributed_config"]["aicpu_thread_num"] == 0
 
 
-@pytest.mark.parametrize("backend_name", ["Ascend910", "Ascend910B"])
-def test_from_dir_accepts_ascend910_backend_names(compiled, tmp_path, backend_name):
-    """The shared metadata reader must also retain compatibility for L3 artifacts."""
+def test_from_dir_preserves_backend_metadata(compiled, tmp_path):
+    """Reload the backend identity without rewriting L3 artifact metadata."""
     meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
-    meta = json.loads(meta_path.read_text())
-    meta["backend_type"] = backend_name
-    meta_path.write_text(json.dumps(meta))
     persisted = meta_path.read_bytes()
 
     reloaded = DistributedCompiledProgram.from_dir(tmp_path)

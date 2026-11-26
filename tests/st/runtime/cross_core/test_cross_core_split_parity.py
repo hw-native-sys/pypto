@@ -426,7 +426,7 @@ class TestSplitParityRuntime:
 #
 # Inputs are constant (a=1.0, b=2.0) so each output element is deterministic:
 # ``(a @ b) = K * 1 * 2 = 128``. Pinned to a2a3 (the split_aiv / GM-pipe-buffer
-# path is 910B-gated); the loop-nested / multi-mode region survives Default and
+# path is 910-gated); the loop-nested / multi-mode region survives Default and
 # matches the torch golden.
 # ---------------------------------------------------------------------------
 

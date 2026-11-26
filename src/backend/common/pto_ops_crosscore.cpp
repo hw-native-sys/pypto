@@ -85,7 +85,7 @@ static bool EmitTpushTransportValidShape(const char* target, const CallPtr& op, 
                                          int split) {
   // split == 0 normally means no cross-core split. Two physical FIFO cases
   // still require a box-normalized transport: partial Acc->Vec payloads and
-  // the 910B no-split dual-AIV dispatch path. The latter
+  // the 910 no-split dual-AIV dispatch path. The latter
   // (function attr `dual_aiv_dispatch`) runs the producer on TWO AIV subblocks
   // that share one FIFO slot while the single cube consumer pops the FULL
   // slot. If the producer narrowed its valid_shape (e.g. set_validshape on a
@@ -157,7 +157,7 @@ static bool EmitTpushTransportValidShape(const char* target, const CallPtr& op, 
     transport_row = valid_shape[0];
   }
 
-  // For the 910B no-split dual-AIV path there is NO genuine cross-core row
+  // For the 910 no-split dual-AIV path there is NO genuine cross-core row
   // split: subblock 0 runs the full computation while subblock 1 is a
   // pipe-balancing replay whose tile carries valid_shape (0, 0). So here we
   // widen the COLUMNS only -- carrying the producer's fillpad'd cols >=
@@ -170,7 +170,7 @@ static bool EmitTpushTransportValidShape(const char* target, const CallPtr& op, 
     transport_row = valid_shape[0];
     // A statically-zero-row producer IS the subblock-1 pipe-balancing replay:
     // it moves no data regardless of the column box, so a col-widening
-    // transport is pure overhead AND (on 910B) perturbs the shared-slot
+    // transport is pure overhead AND (on 910) perturbs the shared-slot
     // dual-AIV merge -- emitting it regressed the cross_core_v2c_nosplit
     // golden. Only the real subblock-0 push (non-zero rows, possibly narrowed
     // by set_validshape) needs the full-column transport.

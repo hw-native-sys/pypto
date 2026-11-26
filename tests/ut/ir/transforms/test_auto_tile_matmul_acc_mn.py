@@ -202,7 +202,7 @@ def canonical_split_k_n_boundary_retiles_k_predicated(
 class BoxedCapacityBefore:
     """Tile-level canonical input for a realizable boxed-capacity counterexample.
 
-    The reviewer's exact (656,80,768) panels exceed the 910B Mat arena when
+    The reviewer's exact (656,80,768) panels exceed the 910 Mat arena when
     co-resident. This equivalent shape exercises the same post-selection N-box
     overflow while keeping unrelated operand capacity out of the regression.
     """

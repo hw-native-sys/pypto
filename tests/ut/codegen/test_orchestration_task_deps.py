@@ -1293,7 +1293,7 @@ def test_at_allow_early_resolve_emits_hint():
 
 def test_spmd_submit_aic_direct_dispatch():
     """spmd_submit of a directly-declared AIC (cube) kernel routes through the
-    direct dispatch path: rt_submit_aic_task + launch spec (910B)."""
+    direct dispatch path: rt_submit_aic_task + launch spec (910)."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
 

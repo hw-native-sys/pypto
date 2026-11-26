@@ -1778,13 +1778,13 @@ def test_put_atomic_add_variant():
     assert "!pto.partition_tensor_view<128xf32>" in mlir_add
 
 
-def test_put_atomic_add_bf16_on_ascend910b():
+def test_put_atomic_add_bf16_on_ascend910():
     """A bf16 remote atomic-add is legal on A2/A3 (pto-isa set_atomic_bf16).
 
     TPUT lands its chunks through the same store pipe as ``tile.store``, so the
     bf16 gate is the shared ``BackendHandler::SupportsBf16AtomicAdd``. The
     Ascend950 rejection lives in the ``AtomicAddDtypeValid`` verifier — see
-    ``tests/ut/ir/verifier/test_atomic_add_dtype.py``; here the 910B fixture
+    ``tests/ut/ir/verifier/test_atomic_add_dtype.py``; here the 910 fixture
     backend must let the put through and emit the combine attr.
     """
 

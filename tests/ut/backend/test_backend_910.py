@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for Backend910B implementation."""
+"""Tests for Backend910 implementation."""
 
 import tempfile
 from pathlib import Path
@@ -15,40 +15,40 @@ from pathlib import Path
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.backend import Backend910B
+from pypto.backend import Backend910
 
 
-class TestBackend910BConstruction:
-    """Tests for 910B backend construction and basic properties."""
+class TestBackend910Construction:
+    """Tests for 910 backend construction and basic properties."""
 
-    def test_backend_910b_construction(self):
-        """Test Backend910B singleton instance."""
-        backend = Backend910B.instance()
+    def test_backend_910_construction(self):
+        """Test Backend910 singleton instance."""
+        backend = Backend910.instance()
 
         assert backend is not None
         assert backend.soc is not None
-        assert backend.get_type_name() == "910B"
+        assert backend.get_type_name() == "910"
 
         # Verify singleton behavior
-        backend2 = Backend910B.instance()
+        backend2 = Backend910.instance()
         assert backend is backend2
 
     def test_soc_structure(self):
-        """Test SoC structure matches 910B specification."""
-        backend = Backend910B.instance()
+        """Test SoC structure matches 910 specification."""
+        backend = Backend910.instance()
         soc = backend.soc
 
-        # 910B has 1 die with 24 AIC cores + 48 AIV cores = 72 total cores
+        # 910 has 1 die with 24 AIC cores + 48 AIV cores = 72 total cores
         assert soc.total_die_count() == 1
         assert soc.total_core_count() == 24 + 48
 
 
-class TestBackend910BMemoryPath:
-    """Tests for 910B backend memory path finding."""
+class TestBackend910MemoryPath:
+    """Tests for 910 backend memory path finding."""
 
     def test_find_mem_paths(self):
         """Test finding memory paths between different memory spaces."""
-        backend = Backend910B.instance()
+        backend = Backend910.instance()
 
         # Test cases: (from, to, expected_path)
         test_cases = [
@@ -84,12 +84,12 @@ class TestBackend910BMemoryPath:
             )
 
 
-class TestBackend910BMemorySize:
-    """Tests for 910B backend memory size calculation."""
+class TestBackend910MemorySize:
+    """Tests for 910 backend memory size calculation."""
 
     def test_get_mem_sizes(self):
         """Test getting memory sizes for different memory types."""
-        backend = Backend910B.instance()
+        backend = Backend910.instance()
 
         # Test cases: (memory_type, expected_size_in_KB)
         test_cases = [
@@ -113,12 +113,12 @@ class TestBackend910BMemorySize:
             )
 
 
-class TestBackend910BMemoryHierarchy:
-    """Tests for 910B memory hierarchy configuration."""
+class TestBackend910MemoryHierarchy:
+    """Tests for 910 memory hierarchy configuration."""
 
     def test_memory_hierarchy_connections(self):
         """Test memory hierarchy connections are correctly configured."""
-        backend = Backend910B.instance()
+        backend = Backend910.instance()
 
         # Test cases: (from, to, expected_path_length)
         test_cases = [
@@ -142,15 +142,15 @@ class TestBackend910BMemoryHierarchy:
             assert path[-1] == to_mem, f"Path should end with {to_mem}"
 
 
-class TestBackend910BL0Tiling:
-    """Tests for the L0-tiling parameters exposed on the 910B BackendHandler.
+class TestBackend910L0Tiling:
+    """Tests for the L0-tiling parameters exposed on the 910 BackendHandler.
 
     These accessors feed ChooseL0Tile / AutoTileMatmulL0; their values must match
-    the 910B SoC AIC core memory layout (Create910BSoC).
+    the 910 SoC AIC core memory layout (Create910SoC).
     """
 
     def test_l0_capacities_match_soc(self):
-        backend = Backend910B.instance()
+        backend = Backend910.instance()
         handler = backend.get_handler()
 
         assert handler.get_capacity_bytes(ir.MemorySpace.Left) == 64 * 1024
@@ -167,16 +167,16 @@ class TestBackend910BL0Tiling:
         assert handler.get_capacity_bytes(ir.MemorySpace.Mat) == backend.get_mem_size(ir.MemorySpace.Mat)
 
     def test_l0_fractal_alignment_default(self):
-        handler = Backend910B.instance().get_handler()
+        handler = Backend910.instance().get_handler()
         assert handler.get_l0_fractal_alignment() == 16
 
     def test_l0c_physical_m_alignment(self):
-        handler = Backend910B.instance().get_handler()
+        handler = Backend910.instance().get_handler()
         assert handler.get_l0c_m_alignment(pl.INT32) == 32
         assert handler.get_l0c_m_alignment(pl.FP32) == 16
 
     def test_mat_to_bias_move_dtype_contract(self):
-        handler = Backend910B.instance().get_handler()
+        handler = Backend910.instance().get_handler()
         assert handler.supports_mat_to_bias_move(pl.INT32, pl.INT32)
         assert handler.supports_mat_to_bias_move(pl.FP32, pl.FP32)
         assert handler.supports_mat_to_bias_move(pl.FP16, pl.FP32)
@@ -184,16 +184,16 @@ class TestBackend910BL0Tiling:
         assert not handler.supports_mat_to_bias_move(pl.BF16, pl.FP32)
 
     def test_min_l0_tile_dim_default(self):
-        handler = Backend910B.instance().get_handler()
+        handler = Backend910.instance().get_handler()
         assert handler.get_min_l0_tile_dim() == 16
 
 
-class TestBackend910BSerialization:
-    """Tests for 910B backend serialization."""
+class TestBackend910Serialization:
+    """Tests for 910 backend serialization."""
 
     def test_export_backend(self):
-        """Test exporting Backend910B singleton."""
-        backend = Backend910B.instance()
+        """Test exporting Backend910 singleton."""
+        backend = Backend910.instance()
 
         with tempfile.NamedTemporaryFile(suffix=".msgpack", delete=False) as f:
             temp_path = f.name

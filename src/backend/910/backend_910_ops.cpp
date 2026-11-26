@@ -10,16 +10,16 @@
  */
 
 /**
- * @file backend_910b_ops.cpp
- * @brief Backend op registration for Backend910B
+ * @file backend_910_ops.cpp
+ * @brief Backend op registration for Backend910
  *
- * Registers all standard PTO ops to the 910B backend by delegating
+ * Registers all standard PTO ops to the 910 backend by delegating
  * to the shared RegisterPTOOps() function. To override specific ops for
  * this backend, register them before calling RegisterPTOOps() and pass
  * the op names in the exclude_ops set.
  */
 
-#include "pypto/backend/910B/backend_910b.h"
+#include "pypto/backend/910/backend_910.h"
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/pto_ops_common.h"
 
@@ -27,13 +27,12 @@ namespace pypto {
 namespace backend {
 
 static const bool kOpsRegistered = [] {
-  RegisterSelectOps(Backend910B::Instance(), BackendType::Ascend910);
-  RegisterCastOps(Backend910B::Instance(), BackendType::Ascend910);
+  RegisterSelectOps(Backend910::Instance(), BackendType::Ascend910);
+  RegisterCastOps(Backend910::Instance(), BackendType::Ascend910);
   // Only the A5 backend exposes these MX operations and row-wise dequantization.
-  RegisterPTOOps(
-      Backend910B::Instance(),
-      {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias", "tile.bind_scale_addr",
-       "tile.extract_into", "tile.tget_scale_addr", "tile.tquant_mx_raw", "tile.tmov_x2zz", "tile.dequant"});
+  RegisterPTOOps(Backend910::Instance(), {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias",
+                                          "tile.bind_scale_addr", "tile.extract_into", "tile.tget_scale_addr",
+                                          "tile.tquant_mx_raw", "tile.tmov_x2zz", "tile.dequant"});
   return true;
 }();
 

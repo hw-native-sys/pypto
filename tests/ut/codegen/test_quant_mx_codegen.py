@@ -455,7 +455,7 @@ class TestQuantMxCodegen:
         mlir = _generate_mlir(Program)
         assert "pto.tquant.mx" in mlir
 
-    def test_not_registered_on_ascend910b(self):
+    def test_not_registered_on_ascend910(self):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)

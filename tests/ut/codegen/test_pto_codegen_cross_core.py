@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 """
-910B PTO Backend: Cross-Core Communication (TPUSH/TPOP) Codegen Test.
+910 PTO Backend: Cross-Core Communication (TPUSH/TPOP) Codegen Test.
 
 This test validates code generation for the complete TPUSH/TPOP cross-core
 communication protocol. Elementwise ops (add, exp) run on Vector cores, while
@@ -1283,7 +1283,7 @@ class TestCrossCoreTpushTpopCodegen:
     def test_no_split_dual_aiv_tpush_widens_cols_preserves_rows(self):
         """No-split dual-AIV tpush widens COLUMNS to the box but PRESERVES rows.
 
-        On 910B the no-split dual-AIV dispatch runs a mixed root's producer on
+        On 910 the no-split dual-AIV dispatch runs a mixed root's producer on
         two AIV subblocks that share one FIFO slot while the single cube
         consumer pops the full slot. A producer that narrowed its valid_shape
         (e.g. set_validshape on a partial attention block) would otherwise leave
@@ -1417,7 +1417,7 @@ class TestCrossCoreTpushTpopCodegen:
 
         BuildNoSplitLane1ReplayStmts zeroes the replay tile's valid_shape to
         (0, 0). A col-widening transport for a 0-row push moves no data yet
-        (on 910B) perturbs the shared-slot dual-AIV merge -- emitting one
+        (on 910) perturbs the shared-slot dual-AIV merge -- emitting one
         regressed the cross_core_v2c_nosplit golden. So when the producer's
         transport rows are statically 0, EmitSplitTpushTransportValidShape
         skips the transport entirely; only the real, non-zero-row subblock-0

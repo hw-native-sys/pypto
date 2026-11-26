@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_BACKEND_910B_BACKEND_910B_H_
-#define PYPTO_BACKEND_910B_BACKEND_910B_H_
+#ifndef PYPTO_BACKEND_910_BACKEND_910_H_
+#define PYPTO_BACKEND_910_BACKEND_910_H_
 
 #include <string>
 
@@ -22,14 +22,14 @@ namespace pypto {
 namespace backend {
 
 /**
- * @brief Backend implementation for 910B hardware with PTO code generation
+ * @brief Backend implementation for 910 hardware with PTO code generation
  *
- * Provides PTO (MLIR) code generation for 910B architecture.
- * Uses shared 910B SoC configuration created by Create910BSoC().
+ * Provides PTO (MLIR) code generation for 910 architecture.
+ * Uses shared 910 SoC configuration created by Create910SoC().
  * Operators are registered via REGISTER_BACKEND_OP macro in separate
  * compilation units.
  */
-class Backend910B : public Backend {
+class Backend910 : public Backend {
  public:
   /**
    * @brief Get registration instance for static operator registration
@@ -39,14 +39,14 @@ class Backend910B : public Backend {
    *
    * @return Reference to registration instance
    */
-  static Backend910B& Instance();
+  static Backend910& Instance();
 
   /**
    * @brief Get backend type name
    *
-   * @return "910B"
+   * @return "910"
    */
-  [[nodiscard]] std::string GetTypeName() const override { return "910B"; }
+  [[nodiscard]] std::string GetTypeName() const override { return "910"; }
 
   /**
    * @brief Get the BackendHandler singleton for this backend.
@@ -68,10 +68,10 @@ class Backend910B : public Backend {
    * Constructor is private to enforce singleton pattern.
    * Use Instance() to get the singleton instance.
    */
-  Backend910B();
+  Backend910();
 };
 
 }  // namespace backend
 }  // namespace pypto
 
-#endif  // PYPTO_BACKEND_910B_BACKEND_910B_H_
+#endif  // PYPTO_BACKEND_910_BACKEND_910_H_
