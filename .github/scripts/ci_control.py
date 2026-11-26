@@ -52,7 +52,11 @@ REQUIRED = {
     "system-tests-a5sim",
 }
 OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-tidy"}
-CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
+SERVING_RESULTS = {"serving-guard-a2a3": "a2a3-result", "serving-guard-a5": "a5-result"}
+CONDITIONAL = {
+    "docs-examples": "docs_changed",
+    **dict.fromkeys(SERVING_RESULTS, "ptoas_version_changed"),
+}
 MERGE_WAIT_SECONDS = 60
 MERGE_POLL_SECONDS = 5
 REBASE_BEHIND_LIMIT = 10
@@ -690,6 +694,10 @@ def aggregate(needs: dict[str, Any]) -> None:
         allowed = {"success"} if value == "true" else {"skipped", "success"}
         if value not in {"true", "false"} or needs[name]["result"] not in allowed:
             failed.append(name)
+        elif value == "true" and name in SERVING_RESULTS:
+            # A reusable workflow can succeed with skipped jobs. Require the selected job itself.
+            if needs[name].get("outputs", {}).get(SERVING_RESULTS[name]) != "success":
+                failed.append(name)
     if failed:
         raise ValueError(f"Full CI did not pass required jobs: {', '.join(sorted(failed))}")
     report("All required full CI jobs passed. Wheel warm-up jobs are advisory.")

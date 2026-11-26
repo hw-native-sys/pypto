@@ -159,8 +159,12 @@ The downstream run skips both lint jobs. A lightweight gate verifies their
 reuse before tests start; revision checks and toolchain preparation still run.
 Full includes the reused lint result, wheel warm-up, unit, example, codegen, system, distributed,
 pypto-lib and A5 onboard tests, plus simulator tests. Core tests execute even for documentation-only
-PRs. `docs-examples` applies when documentation changes; `serving-guard` applies
-when `PTOAS_VERSION` changes. A failed wheel warm-up is advisory because test
+PRs. `docs-examples` applies when documentation changes. A `PTOAS_VERSION` change requires
+both `serving-guard-a2a3` and `serving-guard-a5` to pass. They select `unit-tests` and `v41-a5-smoke`, respectively,
+from the serving CI workflow on `hw-native-sys/pypto-serving@main` and pass the tested PyPTO merge SHA. Serving owns the runner,
+model tests and device configuration. A manual full run on PyPTO `main` without PR inputs tests the dispatched
+commit and requires both selected serving jobs to report success.
+A failed wheel warm-up is advisory because test
 jobs build locally if necessary; every applicable test must succeed.
 
 ### Results and retries
@@ -173,6 +177,7 @@ overridden Details links of check runs created with Actions' `GITHUB_TOKEN`.
 Queued and running jobs both display pending, with the phase in the description;
 skipped/neutral jobs display success with their actual conclusion in the description.
 Only `ci/full` determines whether the required tests passed.
+Commits tested before the rollout may also display the historical `full / serving-guard` status.
 `CI Full Progress` reads GitHub metadata on a GitHub-hosted runner and refreshes
 these statuses roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
 monitor runs while waiting for a comment. Polling slows down with concurrent

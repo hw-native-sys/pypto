@@ -541,27 +541,12 @@ mounts that file read-only at its original path too, preserving the machine's jo
 ### Maintaining published images in CI
 
 [`docker/images.json`](../../../docker/images.json) is the maintenance entrypoint.
-The `Maintain Development Images` workflow runs daily at 19:37 UTC (03:37 Beijing),
-on changes to `docker/`, toolchain pins, build constraints or its workflow on `main`,
-and through **Run workflow**. PRs touching those paths run configuration and
-offline script tests on GitHub-hosted runners. Only PRs whose source repository is
-`hw-native-sys/pypto` or the explicitly trusted fork `luohuan19/pypto` also build
-the image and validate doctor, single-card decode and a two-card distributed case on the
-configured NPU runner. All other forks skip that job. The allowlist lives in the
-workflow's `image.if` condition; adding a repository grants its code execution on
-the persistent host and requires a maintainer trust review.
-Because PRs can edit workflow YAML, this allowlist alone is not a security boundary.
-Before enabling shared-runner PR builds, an administrator must configure **Settings
-→ Actions → General → Require approval for all external contributors** and ensure
-that maintainers approve only trusted sources and reviewed code, including workflow
-changes. This repository-wide policy affects all external PR workflows; pending
-approval also prevents their configuration checks from running. It does not isolate
-approved code. See [GitHub's fork workflow approval settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories).
-Scheduled runs become active only after this workflow is merged into the default
-branch (`main`). A matching change merged into `main` also triggers an immediate
-build and publication; configure the SWR secrets before merging.
-PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
-Manual runs validate without publishing by default; publication also requires `main`.
+Start a build manually from **Actions → Maintain Development Images → Run workflow**.
+Each run checks the configuration and runs offline script tests. In `hw-native-sys/pypto`,
+it then builds each enabled image and validates it with doctor, single-card decode, and a
+two-card distributed case on the configured NPU runner. By default the run stops after
+validation and cleanup. To publish validated images to SWR, select the `main` branch
+and enable the `publish` input when starting the run.
 
 The configuration enables three native images, all using CANN 9.2.0:
 
@@ -621,9 +606,8 @@ expectation and published tag together.
 
 Each run freezes the PyPTO and pypto-lib revisions before building. With PyPTO
 `ref: main`, it uses the workflow checkout's commit so the Docker recipe and helper
-scripts belong to the same event snapshot. For PRs, this is the exact PR head commit
-cloned from its source repository, including forks, rather than a temporary merge
-commit. Explicitly configured PyPTO refs keep their configured source repository.
+scripts match the commit selected for the manual run. Explicitly configured PyPTO refs
+keep their configured source repository.
 Other refs and pypto-lib refs resolve
 to full commit IDs. Runtime always follows PyPTO's gitlink; PTO-ISA follows that
 runtime's `pto_isa.pin`, and PTOAS follows the selected PyPTO toolchain pin.

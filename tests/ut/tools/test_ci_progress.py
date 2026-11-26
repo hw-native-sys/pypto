@@ -613,6 +613,27 @@ def test_progress_reconciles_legacy_full_run(progress, monkeypatch, event, harne
     assert writes[-1][1]["state"] == "success"
 
 
+@pytest.mark.parametrize(
+    "job,child", [("serving-guard-a2a3", "unit-tests"), ("serving-guard-a5", "v41-a5-smoke")]
+)
+def test_serving_guard_call_and_skipped_job_share_one_status(progress, job, child):
+    assert progress.job_context(f"{job} / {child}") == progress.job_context(job) == f"full / {job}"
+
+
+def test_serving_call_publishes_only_the_selected_platform_status(progress, harness):
+    run, _, jobs, writes, _ = harness
+    jobs[:] = [
+        {"id": i, "name": f"serving-guard-a5 / {name}", "status": "completed", "conclusion": result}
+        for i, (name, result) in enumerate(
+            [("pre-commit", "skipped"), ("unit-tests", "skipped"), ("v41-a5-smoke", "failure")], start=101
+        )
+    ]
+    progress.sync_jobs(REPO, HEAD, run, {})
+    assert [(payload["context"], payload["state"]) for _, payload, _ in writes] == [
+        ("full / serving-guard-a5", "failure")
+    ]
+
+
 def test_long_matrix_names_do_not_collide(progress):
     prefix = "unit-tests (" + "a" * 120
     first = progress.job_context(prefix + ", python3.10)")
