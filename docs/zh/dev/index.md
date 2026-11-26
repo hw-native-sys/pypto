@@ -123,8 +123,8 @@ head 未变时不会重新运行 lint；full 测试固定的主线合并版本�
 以及 A5 板上测试及模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
 时适用。变更 `PTOAS_VERSION` 的 PR 必须同时通过 `serving-guard-a2a3` 和 `serving-guard-a5`。
 两个任务调用 `hw-native-sys/pypto-serving@main` 的同一份 CI 工作流，分别选择 `unit-tests` 和
-`v41-a5-smoke`，并传入本次测试的 PyPTO
-合并提交 SHA。Runner、模型测试和设备配置由 serving 维护。在 PyPTO `main` 上手动启动 full 且不填写
+`v41-a5-smoke`，并传入本次测试的 PyPTO 合并提交 SHA。PyPTO 通过 `runner-labels` 为 A2/A3 选择 `npu-xp`，
+为 A5 选择 `npu-a5`。Serving 维护模型测试和设备配置。在 PyPTO `main` 上手动启动 full 且不填写
 PR 参数时，测试的是触发时的提交，两个选中的 serving 任务都必须返回成功。
 Wheel 预热失败不单独
 阻止合入，因为测试任务可以自行构建；所有适用测试都必须成功。

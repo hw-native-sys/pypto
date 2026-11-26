@@ -884,10 +884,12 @@ def test_workflow_wiring_covers_every_full_job(control):
                 assert options["persist-credentials"] is False
             if step.get("uses") == "./.github/actions/setup-ci-job":
                 assert step["with"]["checkout-ref"] == "${{ needs.changes.outputs.checkout_sha }}"
-    for platform in ("a2a3", "a5"):
+    for platform, runner_label in (("a2a3", "npu-xp"), ("a5", "npu-a5")):
         guard = jobs[f"serving-guard-{platform}"]
         assert guard["uses"] == "hw-native-sys/pypto-serving/.github/workflows/ci.yml@main"
-        assert guard["with"] == {
+        inputs = dict(guard["with"])
+        assert json.loads(inputs.pop("runner-labels")) == ["self-hosted", "linux", runner_label]
+        assert inputs == {
             "platform": platform,
             "pypto-repository": "${{ github.repository }}",
             "pypto-revision": "${{ needs.changes.outputs.checkout_sha }}",
