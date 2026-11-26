@@ -1693,6 +1693,9 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   auto saved_var_objects = var_objects_;
   auto saved_known_names = known_names_;
   auto saved_required_outputs = required_outputs_;
+  // Outlined parameters bind the original captures. Caller loop bindings must
+  // only be resolved when reconstructing the call in the parent.
+  auto saved_var_remap = std::exchange(var_remap_, {});
   auto saved_renames = store_target_renames_;
   auto saved_renamed_by_value = renamed_by_value_;
   func_name_ = outlined_func_name;
@@ -1720,6 +1723,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   required_outputs_ = saved_required_outputs;
   store_target_renames_ = saved_renames;
   renamed_by_value_ = saved_renamed_by_value;
+  var_remap_ = std::move(saved_var_remap);
 
   // Create fresh parameters for the outlined function.
   // Infer param directions from the inner callee when possible (requires program_).
@@ -2100,21 +2104,9 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   auto global_var = std::make_shared<GlobalVar>(outlined_func_name);
   std::vector<ExprPtr> call_args;
   for (const auto& input_var : input_vars) {
-    // The argument must be the value current as of this scope. A store
-    // target written by an earlier sibling scope has been renamed; its
-    // latest Var lives in store_target_renames_ keyed on the original Var
-    // (the map is flat — see CreateFreshStoreTargetVar — so one lookup
-    // yields the current value regardless of how many scopes wrote it).
-    // Everything else passes through var_objects_ unchanged.
-    auto rename_it = store_target_renames_.find(input_var.get());
-    if (rename_it != store_target_renames_.end()) {
-      call_args.push_back(rename_it->second);
-      continue;
-    }
-    auto var_it = var_objects_.find(input_var.get());
-    CHECK(var_it != var_objects_.end())
-        << "Variable " << input_var->name_hint_ << " not found in var_objects";
-    call_args.push_back(var_it->second);
+    // Captures must use the current caller binding. A loop carry can have a
+    // new header binding when an earlier outlined scope rewrites its seed.
+    call_args.push_back(VisitExpr(input_var));
   }
 
   // ``with pl.at(..., deps=[...]) as tid:`` attaches metadata to the
@@ -2475,11 +2467,10 @@ void ScopeOutliner::RegisterVar(const VarPtr& var) {
  */
 VarPtr ScopeOutliner::CreateFreshStoreTargetVar(const VarPtr& original_var, const Span& span) {
   std::string fresh_name = GenerateFreshSSAName(original_var->name_hint_);
-  auto type = original_var->GetType();
-  auto fresh_var = std::make_shared<Var>(fresh_name, type, span);
-  auto current = store_target_renames_.find(original_var.get());
-  NoteStoreTargetRename(original_var, current != store_target_renames_.end() ? current->second : original_var,
-                        fresh_var);
+  auto seed = AsVarLike(VisitExpr(original_var));
+  INTERNAL_CHECK_SPAN(seed, span) << "Store target must resolve to a caller variable";
+  auto fresh_var = std::make_shared<Var>(fresh_name, seed->GetType(), span);
+  NoteStoreTargetRename(original_var, seed, fresh_var);
   SetStoreTargetRename(original_var, fresh_var);
   RegisterVar(fresh_var);
   return fresh_var;

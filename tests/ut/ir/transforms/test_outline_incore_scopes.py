@@ -4010,6 +4010,37 @@ class TestOutlineScopeInControlFlow:
         assert len(inner.iter_args) == 1
         assert len(inner.return_vars) == 1
 
+    def test_outlined_store_seed_and_branch_use_same_loop_carry(self):
+        """When outlining changes the loop seed, calls and branch yields must use the new binder."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                y: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                state = pl.create_tensor([8, 32], pl.FP32)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    seed = pl.load(x, [0, 0], [8, 32])
+                    pl.store(seed, [0, 0], state)
+                for i in pl.range(2):
+                    if i == 0:
+                        with pl.at(level=pl.Level.CORE_GROUP):
+                            old = pl.load(state, [0, 0], [8, 32])
+                            state = pl.store(pl.add(old, 1.0), [0, 0], state)
+                    else:
+                        with pl.at(level=pl.Level.CORE_GROUP):
+                            other = pl.load(state, [0, 0], [8, 32])
+                            state = pl.store(pl.mul(other, 2.0), [0, 0], state)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    result = pl.load(state, [0, 0], [8, 32])
+                    pl.store(result, [0, 0], y)
+                return y
+
+        assert not self._structural_errors(self._outline(Before))
+
     def test_loop_writer_read_after_the_loop_is_threaded_as_a_carry(self):
         """The canonical shape: written by an in-loop scope, read by a later one."""
 
