@@ -566,7 +566,12 @@ Pass InjectGMPipeBuffer() {
     if (bytes > 0) {
       changed |= InjectScratchInPlace(
           functions, {backend::kUrmaScatterScratchParam, "urma_scatter_scratch_", bytes, DataType::UINT8,
-                      [](const CallPtr& op) { return IsOp(op, "pld.tile.get_async"); }, true});
+                      [](const CallPtr& op) {
+                        // One shared scratch serves both directions: the slot is per
+                        // physical AIV and a Gather pair fits the same 64-byte line.
+                        return IsOp(op, "pld.tile.get_async") || IsOp(op, "pld.tile.put_async");
+                      },
+                      true});
     }
     if (!changed) return program;
     return std::make_shared<Program>(functions, program->name_, program->span_);

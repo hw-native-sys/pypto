@@ -721,6 +721,8 @@ class PTOCodegen : public CodegenBase {
 
   void EmitUrmaMakeSession(const ir::CallPtr& op);
   void EmitUrmaScatterGet(const ir::CallPtr& op);
+  void EmitUrmaGatherPut(const ir::CallPtr& op);
+  void EmitUrmaTileTransfer(const ir::CallPtr& op, bool is_put);
 
   /**
    * @brief SSA name of the synthetic SPMD block_idx param.
@@ -1378,8 +1380,8 @@ class PTOCodegen : public CodegenBase {
     /// the tuple Var. Built once on function entry so a multi-output emitter
     /// resolves its destinations by lookup rather than by rescanning the body.
     std::map<const ir::Var*, std::vector<ir::VarPtr>> tuple_element_index;
-    /// Scatter GET result tuple to its borrowed destination tensor (element zero).
-    std::map<const ir::Var*, ir::VarPtr> urma_get_destinations;
+    /// Tile async transfer result tuple to its borrowed destination tensor (element zero).
+    std::map<const ir::Var*, ir::VarPtr> urma_transfer_destinations;
 
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
@@ -1443,7 +1445,7 @@ class PTOCodegen : public CodegenBase {
       slot_index_ssa.clear();
 
       tuple_element_index.clear();
-      urma_get_destinations.clear();
+      urma_transfer_destinations.clear();
       current_function.reset();
       current_result_var.reset();
       current_result_buf.clear();

@@ -24,11 +24,13 @@ adapter 符号与 C++ 元素类型复用公共 dtype 转换。
   所以 `[16, 64]` 中的 `[1, 32]` 和 `[2, 4, 64]` 中的 `[1, 2, 64]` 连续，
   而对应的 `[2, 32]` 和 `[2, 1, 64]` 不连续。
 
-## A5 TMR 上的显式 session Scatter GET
+## A5 TMR 上的显式 session Scatter GET 与 Gather PUT
 
 `pld.tile.get_async(dst, peer, src, session)` 提交一个连续区间，支持 1 字节到 256 MiB（含边界）。helper 在 task 的 GM 临时缓冲中填入一个 ScatterSegment 和一个 ScatterSource，再调用 Simpler 组合接口完成提交和登记。每个物理 AIV 独占一条描述符缓存行。session 属于发起请求的 AIV，从源窗口所属通信域获取 URMA workspace。事件配对要求见[分布式算子文档](distributed_ops.md)。
 
 受当前 ISA 约束，`dst` 和 `src` 的存储必须位于 session 所属的同一通信域。`dst` 的完整字节区间须落在本地注册内存区（MR）内，`src` 的完整字节区间须落在该域为 `peer` 注册的 MR 内。满足此条件的普通 `Tensor` 也可作为 `dst`。[PTO-ISA #457](https://github.com/hw-native-sys/pto-isa/issues/457)
+
+`pld.tile.put_async(dst, peer, src, session)` 是其镜像，复用同一个发射器、同一条描述符缓存行以及相同的事件配对规则。窗口绑定端是 `dst` 而非 `src`，因此 session 从目标窗口所属通信域获取 URMA workspace，偏移量也取自 `dst`。PUT 的本地端是载荷，所以 helper 在提交前会排空先前的本地写入。`src` 的完整区间须落在本地 MR 内，`dst` 的完整区间须落在该域为 `peer` 注册的 MR 内。
 
 ## 支持的 tensor 异步传输
 

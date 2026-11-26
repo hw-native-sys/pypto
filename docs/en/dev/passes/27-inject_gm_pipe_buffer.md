@@ -16,7 +16,7 @@ are codegen responsibilities: codegen sizes bidirectional `dir_mask=3` pipes as 
 workspace, and otherwise allocates disjoint GM regions per `(pipe id, direction)` so PTO codegen can map
 each explicit frontend pipe independently.
 
-On Ascend950, `pld.tile.get_async` uses the same parameter and call-site allocation mechanism for `__urma_scatter_scratch`. Each task receives one cache line per physical AIV for its Scatter descriptors. Simpler consumes the descriptors during submission.
+On Ascend950, `pld.tile.get_async` and `pld.tile.put_async` use the same parameter and call-site allocation mechanism for `__urma_scatter_scratch`. Each task receives one cache line per physical AIV, shared by both directions: a Scatter descriptor pair and a Gather descriptor pair are both 64 bytes, so a kernel using both still takes one `Out` parameter. Simpler consumes the descriptors during submission.
 
 **Requirements**:
 

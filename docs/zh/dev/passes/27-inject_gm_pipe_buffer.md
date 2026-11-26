@@ -16,7 +16,7 @@ codegen 负责：双向 `dir_mask=3` pipe 按一个共享双向工作区计量�
 按 `(pipe id, direction)` 分配互不重叠的 GM 区域，从而让 PTO codegen 可以独立映射
 每条 frontend pipe。
 
-在 Ascend950 上，`pld.tile.get_async` 通过相同的参数传递与调用点分配机制获得 `__urma_scatter_scratch`。每个 task 为每个物理 AIV 分配一条缓存行来保存 Scatter 描述符。Simpler 在提交时读取这两个描述符。
+在 Ascend950 上，`pld.tile.get_async` 与 `pld.tile.put_async` 通过相同的参数传递与调用点分配机制获得 `__urma_scatter_scratch`。每个 task 为每个物理 AIV 分配一条缓存行，两个方向共用：Scatter 与 Gather 的描述符对均为 64 字节，因此同时使用两个方向的 kernel 仍只需一个 `Out` 参数。Simpler 在提交时读取这两个描述符。
 
 **前置要求**：
 
