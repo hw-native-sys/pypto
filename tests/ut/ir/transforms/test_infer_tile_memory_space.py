@@ -23,6 +23,7 @@ import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
 
+_OP_TILE_EXTRACT = ir.get_op("tile.extract").name
 _OP_TILE_GET_BLOCK_IDX = ir.get_op("tile.get_block_idx").name
 _OP_TILE_LOAD = ir.get_op("tile.load").name
 _OP_TILE_MATMUL = ir.get_op("tile.matmul").name
@@ -4393,7 +4394,7 @@ for n in pl.range(2):
             for stmt in loop.body.stmts
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "tile.extract"
+            and stmt.value.op.name == _OP_TILE_EXTRACT
             and stmt.value.args[0].same_as(panel.var)
         ]
         assert len(extracts) == 2
