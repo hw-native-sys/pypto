@@ -1123,6 +1123,13 @@ class TestUnsupportedShapesAreLoud:
         with pytest.raises(ValueError, match=reason):
             _codegen(program, passes.MemoryPlanner.PTOAS)
 
+    def test_compile_rejects_loop_carried_prefetch(self, tmp_path, pass_verification_instruments):
+        with (
+            passes.PassContext(pass_verification_instruments, memory_planner=passes.MemoryPlanner.PTOAS),
+            pytest.raises(RuntimeError, match="live at once inside a loop"),
+        ):
+            ir.compile(PrefetchSlotInLoop, output_dir=str(tmp_path), skip_ptoas=True)
+
     @pytest.mark.parametrize(
         "program",
         [

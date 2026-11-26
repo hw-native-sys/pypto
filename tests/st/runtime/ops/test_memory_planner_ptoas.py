@@ -31,11 +31,10 @@ both planners against one golden is what shows the region form is equivalent.
 
 The double-buffer case is the shape the region form exists for — one slot live per
 iteration — and its golden checks the WAR edge ptoas derives from the slot index.
-Two slots live at once inside a loop is **rejected** under PTOAS. ptoas 0.54 guarded
-only the first ``multi_tile_get`` of an iteration, which was measured wrong on device
-(hw-native-sys/PTOAS#1118, fixed in 0.56); the pinned ptoas mis-syncs the
-prefetch form of the shape (hw-native-sys/PTOAS#1519: fixed in 0.63, broken again
-since 0.64), which codegen cannot tell apart. ``MultiBufferCoLiveProgram`` is the case that pins the refusal.
+The co-live case writes and consumes both rotating slots in the same iteration.
+Its golden checks that the second load preserves the first slot's value
+(hw-native-sys/PTOAS#1118). Loop-carried prefetch is guarded separately
+(hw-native-sys/PTOAS#1519).
 """
 
 from typing import Any
@@ -45,10 +44,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto import backend as _backend
-from pypto import ir
-from pypto.backend import BackendType
-from pypto.backend.pto_backend import PartialCodegenError
 from pypto.pypto_core.passes import MemoryPlanner
 
 
@@ -215,17 +210,7 @@ MULTI_BUF_CONST = pl.MemRef(slots=2)
 
 @pl.program
 class MultiBufferCoLiveProgram:
-    """Two UB slots co-live per iteration — rejected under PTOAS, correct under PYPTO.
-
-    ptoas 0.54 derived the per-slot WAR guard only for the first ``multi_tile_get`` of
-    a region in an iteration, so the second load raced the next iteration's write.
-    Measured wrong on device: ``out`` came back as ``a[block i+1] + a[block i]``
-    instead of ``a + b`` (hw-native-sys/PTOAS#1118, fixed in 0.56). The pinned ptoas
-    mis-syncs the prefetch form of this shape (hw-native-sys/PTOAS#1519: fixed in 0.63,
-    broken again since 0.64), and codegen cannot tell the forms apart, so it refuses
-    both; this kernel is the ST that pins that refusal — under PYPTO the same source is
-    fine.
-    """
+    """Fill two complementary UB slots each iteration and consume both in the sum."""
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
@@ -554,7 +539,7 @@ def _ramp(rows: int, cols: int, scale: float, bias: float) -> torch.Tensor:
 
 
 class MultiBufferCoLiveCase(PTOTestCase):
-    """Two co-live UB slots — runnable under PYPTO, refused by PTOAS codegen."""
+    """Check both co-live slot values against the elementwise sum."""
 
     def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
         super().__init__(config, platform=platform, memory_planner=memory_planner)
@@ -740,27 +725,10 @@ class TestMemoryPlannerPtoas:
         result = test_runner.run(ColVecIfPhiCarryCase(planner))
         assert result.passed, f"colvec if-phi carry ({_planner_tag(planner)}) failed: {result.error}"
 
-    @pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP], ids=_planner_tag)
-    def test_multi_buffer_colive_slots_run_under_pypto_planners(self, test_runner, planner):
-        # Two co-live slots are a legal program — both PyPTO-owned address
-        # planners preserve the declared region and its per-slot offsets. This
-        # controls the PTOAS refusal below: the unsupported part is that
-        # lowering, not the source program.
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_multi_buffer_colive_slots(self, test_runner, planner):
         result = test_runner.run(MultiBufferCoLiveCase(planner))
         assert result.passed, f"multi-buffer co-live ({_planner_tag(planner)}) failed: {result.error}"
-
-    def test_multi_buffer_colive_slots_rejected_under_ptoas(self):
-        # Two co-live slots include a prefetch form the pinned ptoas mis-syncs
-        # (hw-native-sys/PTOAS#1519: fixed in 0.63, broken again since 0.64; 0.54 also got this
-        # same-iteration form wrong on device, #1118). Refuse rather than miscompile.
-        #
-        # Asserted here through the real `ir.compile` entry point, which surfaces a
-        # kernel's ValueError as PartialCodegenError; the exact reason string is
-        # pinned in tests/ut/codegen/test_multi_buffer_codegen.py.
-        _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910)
-        with pytest.raises(PartialCodegenError):
-            ir.compile(MultiBufferCoLiveProgram, memory_planner=MemoryPlanner.PTOAS)
 
     @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
     def test_multi_buffer_double_buffer(self, test_runner, planner):
