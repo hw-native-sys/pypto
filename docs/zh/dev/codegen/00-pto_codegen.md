@@ -2,7 +2,7 @@
 
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
-PyPTO 要求 PTOAS v0.78 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `a5349f4` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `45435c06`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
+PyPTO 要求 PTOAS v0.78 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `ec5dd4f` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `45435c06`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
 
 PyPTO 在指针运算、标量访存和 VMI 读写中将元素偏移类型写为 `index`。
 `pto.vmi.vload` 和 `pto.vmi.vstore` 将该类型放在 UB 指针类型之后。

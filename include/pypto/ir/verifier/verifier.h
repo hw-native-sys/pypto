@@ -92,7 +92,7 @@ PropertyVerifierPtr CreateSimtSpecializedPropertyVerifier();
  */
 PropertyVerifierPtr CreateTypeCheckPropertyVerifier();
 
-/// Verify distributed async event and session provenance after SSA conversion.
+/// Verify async handle provenance and tile GET completion on the domain-materialized program.
 PropertyVerifierPtr CreateAsyncHandleProvenanceVerifier();
 
 /**

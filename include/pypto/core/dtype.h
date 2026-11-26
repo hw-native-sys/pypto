@@ -295,6 +295,8 @@ class DataType {
         return "double";
       case kBf16Code:
         return "bfloat16_t";
+      case kHf8Code:
+        return "hifloat8_t";
       case kFp8e4m3fnCode:
         return "float8_e4m3_t";
       case kFp8e5m2Code:

@@ -55,6 +55,7 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 | `GetExtraPtoasFlags()` | ptoas 额外参数 | `[]` | `["--pto-arch", "a5"]` |
 | `HonorsHighPrecisionAlgorithm()` | PTO-ISA 是否会根据 `high_precision=True` 生成的 `precisionType` 属性选择不同算法；为 false 时两个 PTO 发射路径（Tile 算子回调与 Buffer IR）都会告警该请求被丢弃 | `false` | `true` |
 | `RequiresGMPipeBuffer()` | `ExpandMixedKernel` 是否注入 GM 槽位缓冲 | `true` | `false` |
+| `GetUrmaScatterScratchBytes()` (`get_urma_scatter_scratch_bytes()`) | 每次派发为 URMA Scatter 描述符预留的 GM 临时缓冲区大小（字节） | `0` | `4608` |
 | `SupportsRuntimeBoundLocalSoftwarePipeline()` | 是否对运行时迭代次数启用本地 Vec 软流水降低 | `true` | `false` |
 | `SupportsLocalPipeDepth()` | 本地消费者深度是否可独立于跨核传输环深度设置 | `true` | `false` |
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse 是否做 load + tpop_from_aic 原地复用危害规避 | `true` | `false` |

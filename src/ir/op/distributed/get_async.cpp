@@ -185,7 +185,8 @@ REGISTER_OP("pld.tensor.get_async_event")
 
 REGISTER_OP("pld.tile.get_async")
     .set_description(
-        "Submit a single-peer GET using an existing URMA session and return (destination, completion event).")
+        "Submit a single-peer GET using an existing URMA session and return (destination, completion event). "
+        "The current A5 Scatter GET ISA requires dst and src to use the same communication domain.")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Local GM destination tensor")
     .add_argument("peer", "Remote rank")

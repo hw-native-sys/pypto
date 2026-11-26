@@ -43,6 +43,11 @@ def put_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Sp
 def get_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Span | None = None) -> Call:
     """Submit a single-peer GET from a remote window into a dense local GM view.
 
+    The current A5 Scatter GET ISA requires dst and src to use the same communication domain.
+    The full dst range must lie in the session's local registered memory region (MR), and the
+    full src range in the peer's MR for that session. A plain Tensor can serve as dst when
+    its storage meets this requirement.
+
     Args:
         dst: Local GM destination with the same shape and dtype as src.
         peer: Rank supplying the data.

@@ -38,6 +38,8 @@ Extracting those calls before `LowerCompositeOps` folds tuple projections keeps
 unselected atomic updates observable. Tuple-returning `Call` and `Submit`
 expressions are also bound before projection.
 
+Call and submit arguments that project a Tensor from a tuple are also bound to a variable so GM consumers can resolve the tensor view and its storage.
+
 ## API
 
 | C++ | Python | Level |

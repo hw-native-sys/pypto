@@ -24,7 +24,13 @@ adapter 符号与 C++ 元素类型复用公共 dtype 转换。
   所以 `[16, 64]` 中的 `[1, 32]` 和 `[2, 4, 64]` 中的 `[1, 2, 64]` 连续，
   而对应的 `[2, 32]` 和 `[2, 1, 64]` 不连续。
 
-## 支持的异步传输
+## A5 TMR 上的显式 session Scatter GET
+
+`pld.tile.get_async(dst, peer, src, session)` 提交一个连续区间，支持 1 字节到 256 MiB（含边界）。helper 在 task 的 GM 临时缓冲中填入一个 ScatterSegment 和一个 ScatterSource，再调用 Simpler 组合接口完成提交和登记。每个物理 AIV 独占一条描述符缓存行。session 属于发起请求的 AIV，从源窗口所属通信域获取 URMA workspace。事件配对要求见[分布式算子文档](distributed_ops.md)。
+
+受当前 ISA 约束，`dst` 和 `src` 的存储必须位于 session 所属的同一通信域。`dst` 的完整字节区间须落在本地注册内存区（MR）内，`src` 的完整字节区间须落在该域为 `peer` 注册的 MR 内。满足此条件的普通 `Tensor` 也可作为 `dst`。[PTO-ISA #457](https://github.com/hw-native-sys/pto-isa/issues/457)
+
+## 支持的 tensor 异步传输
 
 | 维度 | 当前支持 | 尚未支持 |
 | ---- | -------- | -------- |
@@ -79,6 +85,4 @@ workspace。所有失败都是显式的；不存在静默的 SDMA/RDMA 回退。
 
 **兼容性。** 返回类型（`dst`）与完成保证保持稳定。容量校验不改变生成 kernel 的
 ABI；符号化的视图/槽位大小在 host orchestration 中检查。静态窗口声明现在会在编译期
-校验，因此窗口视图超出其后备分配的现有程序会被拒绝，而不是继续编译。对 session/event、
-`wait`/`test`、SDMA/RDMA 引擎、PTOAS 原生下降、按请求释放和多 SGE 的支持将以
-增量方式加入。
+校验，因此窗口视图超出其后备分配的现有程序会被拒绝，而不是继续编译。显式 session GET 的支持范围见上文。核内 `wait`/`test`、PTOAS 原生 lowering 和多 SGE 传输属于后续工作。

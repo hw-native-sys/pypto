@@ -280,9 +280,31 @@ class AsyncHandleChecker : public IRVisitor {
   AsyncHandleChecker(StmtPtr body, std::vector<Diagnostic>& diagnostics)
       : body_(std::move(body)), diagnostics_(diagnostics) {}
 
+  void VisitStmt(const StmtPtr& stmt) override;
   void VisitExpr_(const CallPtr& op) override;
 
  private:
+  // A GET and its completion must execute in the same branch and loop iteration.
+  struct Region {
+    // Ancestor sets stay unchanged while visiting a child: completion consumes only a local GET.
+    bool outer_pending_on_return;
+    bool outer_pending_on_loop_exit;
+    std::unordered_set<const Var*> pending_gets;
+    [[nodiscard]] bool PendingOnReturn() const { return outer_pending_on_return || !pending_gets.empty(); }
+    [[nodiscard]] bool PendingOnLoopExit() const {
+      return outer_pending_on_loop_exit || !pending_gets.empty();
+    }
+  };
+  Region* region_ = nullptr;
+  StmtPtr statement_;
+  void Report(const Span& span, const std::string& message);
+  void CheckExit(const StmtPtr& stmt);
+  void VisitStmt_(const ReturnStmtPtr& stmt) override {
+    IRVisitor::VisitStmt_(stmt);
+    CheckExit(stmt);
+  }
+  void VisitStmt_(const BreakStmtPtr& stmt) override { CheckExit(stmt); }
+  void VisitStmt_(const ContinueStmtPtr& stmt) override { CheckExit(stmt); }
   StmtPtr body_;
   std::vector<Diagnostic>& diagnostics_;
   std::optional<VarValueCollector> var_values_;
@@ -295,10 +317,51 @@ class AsyncHandleChecker : public IRVisitor {
   };
   std::unordered_map<const Var*, Definition> async_definitions_;
   Definition ResolveAsyncDefinition(const ExprPtr& expr);
+  const VarValueCollector& Values();
 
   bool IsPrefetchHandle(const ExprPtr& expr);
   void CheckAsyncOperands(const CallPtr& op);
 };
+
+void AsyncHandleChecker::Report(const Span& span, const std::string& message) {
+  diagnostics_.emplace_back(DiagnosticSeverity::Error, "AsyncHandleProvenance",
+                            static_cast<int>(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH), message, span);
+}
+
+void AsyncHandleChecker::VisitStmt(const StmtPtr& stmt) {
+  // The direct statement children of an if are its arms, and of a loop its body.
+  // Other statement containers (e.g. SeqStmts) preserve the current region.
+  auto parent = std::exchange(statement_, stmt);
+  const bool loop_body = IsA<ForStmt>(parent) || IsA<WhileStmt>(parent);
+  if (!parent || loop_body || IsA<IfStmt>(parent)) {
+    // Return can leave all ancestors. Break and continue leave only regions inside the innermost loop.
+    Region region{
+        region_ && region_->PendingOnReturn(), !loop_body && region_ && region_->PendingOnLoopExit(), {}};
+    auto* outer = std::exchange(region_, &region);
+    IRVisitor::VisitStmt(stmt);
+    if (!region.pending_gets.empty()) {
+      Report(stmt->span_,
+             "pld.tile.get_async requires exactly one wait_event or defer_wait_event "
+             "in the same branch and loop iteration");
+    }
+    region_ = outer;
+  } else {
+    IRVisitor::VisitStmt(stmt);
+  }
+  statement_ = std::move(parent);
+}
+
+void AsyncHandleChecker::CheckExit(const StmtPtr& stmt) {
+  if (IsA<ReturnStmt>(stmt) ? region_->PendingOnReturn() : region_->PendingOnLoopExit()) {
+    Report(stmt->span_,
+           "control flow can exit before the wait_event or defer_wait_event for pld.tile.get_async");
+  }
+}
+
+const VarValueCollector& AsyncHandleChecker::Values() {
+  if (!var_values_) var_values_.emplace().VisitStmt(body_);
+  return *var_values_;
+}
 
 AsyncHandleChecker::Definition AsyncHandleChecker::ResolveAsyncDefinition(const ExprPtr& expr) {
   auto var = AsVarLike(expr);
@@ -307,11 +370,9 @@ AsyncHandleChecker::Definition AsyncHandleChecker::ResolveAsyncDefinition(const 
   // parameters without a unique local producer cannot identify a submission.
   auto [entry, inserted] = async_definitions_.try_emplace(var.get());
   if (!inserted) return entry->second;
-  if (!var_values_) {
-    var_values_.emplace().VisitStmt(body_);
-  }
-  auto found = var_values_->values.find(var.get());
-  if (found == var_values_->values.end() || found->second.size() != 1) return {};
+  const auto& values = Values().values;
+  auto found = values.find(var.get());
+  if (found == values.end() || found->second.size() != 1) return {};
   const auto& rhs = found->second.front();
   auto& definition = entry->second;
   definition = AsVarLike(rhs) ? ResolveAsyncDefinition(rhs) : Definition{var, rhs};
@@ -330,8 +391,7 @@ bool AsyncHandleChecker::IsPrefetchHandle(const ExprPtr& expr) {
   auto var = AsVarLike(expr);
   if (!var) return is_prefetch(expr);
   if (!prefetch_handles_) {
-    if (!var_values_) var_values_.emplace().VisitStmt(body_);
-    prefetch_handles_ = var_values_->CommonOrigins<bool>(
+    prefetch_handles_ = Values().CommonOrigins<bool>(
         [](const TypePtr& type) { return IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type); },
         [&](const ExprPtr& value) { return std::make_pair(AsVarLike(value).get(), is_prefetch(value)); });
   }
@@ -341,10 +401,16 @@ bool AsyncHandleChecker::IsPrefetchHandle(const ExprPtr& expr) {
 
 void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   const auto mismatch = [&](const std::string& message) {
-    diagnostics_.emplace_back(DiagnosticSeverity::Error, "AsyncHandleProvenance",
-                              static_cast<int>(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH),
-                              op->op_->name_ + " " + message, op->span_);
+    Report(op->span_, op->op_->name_ + " " + message);
   };
+  if (IsOp(op, "pld.tile.get_async")) {
+    auto assign = As<AssignStmt>(statement_);
+    if (assign && assign->value_ == op) {
+      region_->pending_gets.insert(assign->var_.get());
+    } else {
+      mismatch("requires a bound event for wait_event or defer_wait_event");
+    }
+  }
   if (IsTileAsyncTransfer(op) && op->args_.size() == 4) {
     if (!IsOp(As<Call>(ResolveAsyncDefinition(op->args_[3]).value), "pld.system.make_session")) {
       mismatch("requires a session from pld.system.make_session in this function");
@@ -367,7 +433,13 @@ void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
   }
   auto event = ResolveAsyncDefinition(op->args_[0]).value;
   auto field = As<TupleGetItemExpr>(event);
-  auto submit = field && field->index_ == 1 ? As<Call>(ResolveAsyncDefinition(field->tuple_).value) : nullptr;
+  const auto producer = field && field->index_ == 1 ? ResolveAsyncDefinition(field->tuple_) : Definition{};
+  auto submit = As<Call>(producer.value);
+  if (IsOp(submit, "pld.tile.get_async") &&
+      !region_->pending_gets.erase(AsVarLike(producer.identity).get())) {
+    mismatch(
+        "requires a preceding, unconsumed pld.tile.get_async event in the same branch and loop iteration");
+  }
   const bool implicit_session = IsOp(submit, "pld.tensor.get_async_event");
   const bool explicit_session = IsTileAsyncTransfer(submit);
   if (!implicit_session && !explicit_session) {

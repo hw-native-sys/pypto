@@ -261,6 +261,7 @@ class TestDataTypeString:
         """Test string representation of Hisilicon float types."""
         assert pypto.DT_HF4.to_string() == "hf4"
         assert pypto.DT_HF8.to_string() == "hf8"
+        assert pypto.DT_HF8.to_c_type_string() == "hifloat8_t"
 
     def test_bool_string(self):
         """Test string representation of boolean type."""

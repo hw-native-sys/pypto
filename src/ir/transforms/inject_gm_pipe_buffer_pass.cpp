@@ -12,7 +12,7 @@
 /**
  * @file inject_gm_pipe_buffer_pass.cpp
  * @brief Inject the __gm_pipe_buffer workspace parameter for cross-core pipes on backends
- *        that route slot data through GM (currently Ascend910).
+ *        that route slot data through GM, and per-dispatch A5 URMA Scatter descriptor scratch.
  *
  * On 910B, cross-core tpush/tpop rides through a shared GM buffer instead of a
  * direct inter-core fabric. This pass runs after ExpandMixedKernel has split
@@ -24,9 +24,9 @@
  *      which instead get a per-call-site placeholder tensor.create. Codegen
  *      owns the real hardware workspace size and per-pipe offsets.
  *
- * The pass is gated on BackendHandler::RequiresGMPipeBuffer(); other backends
- * see it as a no-op. Nothing else in the pipeline depends on its output, so it
- * produces the same IR properties it requires (MixedKernelExpanded).
+ * For A5 Scatter GET, the backend supplies the exact size of the sender slots.
+ * Orchestration allocates that tensor before each dispatch. MIX members share
+ * the same argument layout and select their slot by physical sender ID.
  */
 
 #include <any>
@@ -52,6 +52,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -70,30 +71,35 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 /// Well-known parameter name for the GM slot buffer.
 constexpr const char* kGMPipeBufferName = "__gm_pipe_buffer";
 
-/// Check if a statement list contains aic_initialize_pipe or aiv_initialize_pipe.
-bool HasInitializePipeOps(const std::vector<StmtPtr>& stmts) {
-  for (const auto& stmt : stmts) {
-    if (op_predicates::IsInitializePipe(transform_utils::GetCallFromStmt(stmt))) return true;
-    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      if (HasInitializePipeOps(FlattenBody(for_stmt->body_))) return true;
-    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      if (HasInitializePipeOps(FlattenBody(if_stmt->then_body_))) return true;
-      const auto& else_body = if_stmt->else_body_;
-      if (else_body.has_value()) {
-        if (HasInitializePipeOps(FlattenBody(*else_body))) return true;
-      }
-    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      if (HasInitializePipeOps(FlattenBody(while_stmt->body_))) return true;
-    } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
-      if (HasInitializePipeOps(FlattenBody(scope->body_))) return true;
-    }
-  }
-  return false;
-}
+struct ScratchSpec {
+  const char* param;
+  const char* prefix;
+  int64_t elements;
+  DataType dtype;
+  bool (*matches)(const CallPtr&);
+  // New scratch arguments precede the user prefix so a Submit can still omit
+  // its trailing Out parameters. Pipe callers keep their existing trailing ABI.
+  bool prepend = false;
+};
+const ScratchSpec kPipeScratch{kGMPipeBufferName, "gm_pipe_buffer_", 1, DataType::FP32,
+                               op_predicates::IsInitializePipe};
 
-bool HasGMPipeBufferParam(const FunctionPtr& func) {
+class ScratchUseFinder : public IRVisitor {
+ public:
+  explicit ScratchUseFinder(const ScratchSpec& scratch) : scratch_(scratch) {}
+  bool found = false;
+
+ private:
+  void VisitExpr_(const CallPtr& call) override {
+    found |= scratch_.matches(call);
+    if (!found) IRVisitor::VisitExpr_(call);
+  }
+  const ScratchSpec& scratch_;
+};
+
+bool HasScratchParam(const FunctionPtr& func, const ScratchSpec& scratch) {
   for (const auto& param : func->params_) {
-    if (param->name_hint_ == kGMPipeBufferName) return true;
+    if (param->name_hint_ == scratch.param) return true;
   }
   return false;
 }
@@ -168,27 +174,44 @@ void BuildCallGraphFromFunctions(const std::vector<FunctionPtr>& functions,
   }
 }
 
-FunctionPtr AddGMSlotBufferParam(const FunctionPtr& func, int64_t gm_buffer_elems) {
-  auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{gm_buffer_elems}, DataType::FP32,
+FunctionPtr AddScratchParam(const FunctionPtr& func, const ScratchSpec& scratch) {
+  auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{scratch.elements}, scratch.dtype,
                                               std::nullopt, std::nullopt);
-  auto gm_var = std::make_shared<Var>(kGMPipeBufferName, gm_type, func->span_);
+  auto gm_var = std::make_shared<Var>(scratch.param, gm_type, func->span_);
   auto new_params = func->params_;
-  new_params.push_back(gm_var);
+  new_params.insert(scratch.prepend ? new_params.begin() : new_params.end(), gm_var);
   auto new_directions = func->param_directions_;
-  new_directions.push_back(ParamDirection::Out);
+  new_directions.insert(scratch.prepend ? new_directions.begin() : new_directions.end(), ParamDirection::Out);
   auto result = MutableCopy(func);
   result->params_ = new_params;
   result->param_directions_ = new_directions;
   return result;
 }
 
-/// Append @p gm_param to every call/submit of a function in @p modified_funcs.
+template <typename CallLike>
+ExprPtr WithScratchOperand(const std::shared_ptr<const CallLike>& call, const VarPtr& gm_param,
+                           bool prepend) {
+  auto updated = MutableCopy(call);
+  auto& args = updated->args_;
+  args.insert(prepend ? args.begin() : args.end(), gm_param);
+  for (auto& [key, value] : updated->attrs_) {
+    if (key == kAttrArgDirections) {
+      auto& directions = std::any_cast<std::vector<ArgDirection>&>(value);
+      directions.insert(prepend ? directions.begin() : directions.end(), ArgDirection::OutputExisting);
+    } else if (prepend && key == kAttrArgDirectionOverrides) {
+      for (auto& index : std::any_cast<std::vector<int32_t>&>(value)) ++index;
+    }
+  }
+  return updated;
+}
+
+/// Forward @p gm_param to every call/submit of a function in @p modified_funcs.
 ///
 /// Walks one statement level and recurses only into bodies that can hold a
 /// call. Rewritten nodes are mutable copies; a subtree that produces no change
 /// is returned by pointer so unchanged statements stay shared.
 StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<std::string>& modified_funcs,
-                                const VarPtr& gm_param) {
+                                const VarPtr& gm_param, bool prepend) {
   auto stmts = FlattenBody(body);
   std::vector<StmtPtr> new_stmts;
   bool any_changed = false;
@@ -203,15 +226,11 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     if (!expr) return nullptr;
     if (auto call = std::dynamic_pointer_cast<const Call>(expr)) {
       if (!should_rewrite(call->op_)) return nullptr;
-      auto new_call = MutableCopy(call);
-      new_call->args_.push_back(gm_param);
-      return new_call;
+      return WithScratchOperand(call, gm_param, prepend);
     }
     if (auto submit = std::dynamic_pointer_cast<const Submit>(expr)) {
       if (!should_rewrite(submit->op_)) return nullptr;
-      auto new_submit = MutableCopy(submit);
-      new_submit->args_.push_back(gm_param);
-      return new_submit;
+      return WithScratchOperand(submit, gm_param, prepend);
     }
     return nullptr;
   };
@@ -237,7 +256,7 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     // Control-flow and scope statements: recurse into the body, and rebuild
     // the node only when that body changed.
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto nb = RewriteCallsForGMBuffer(for_stmt->body_, modified_funcs, gm_param);
+      auto nb = RewriteCallsForGMBuffer(for_stmt->body_, modified_funcs, gm_param, prepend);
       if (nb != for_stmt->body_) {
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = nb;
@@ -247,11 +266,11 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
         new_stmts.push_back(stmt);
       }
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto nt = RewriteCallsForGMBuffer(if_stmt->then_body_, modified_funcs, gm_param);
+      auto nt = RewriteCallsForGMBuffer(if_stmt->then_body_, modified_funcs, gm_param, prepend);
       std::optional<StmtPtr> ne;
       const auto& else_body = if_stmt->else_body_;
       if (else_body.has_value()) {
-        ne = RewriteCallsForGMBuffer(*else_body, modified_funcs, gm_param);
+        ne = RewriteCallsForGMBuffer(*else_body, modified_funcs, gm_param, prepend);
       }
       bool body_changed = (nt != if_stmt->then_body_);
       if (!body_changed && ne.has_value() && else_body.has_value()) {
@@ -267,7 +286,7 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
         new_stmts.push_back(stmt);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto nb = RewriteCallsForGMBuffer(while_stmt->body_, modified_funcs, gm_param);
+      auto nb = RewriteCallsForGMBuffer(while_stmt->body_, modified_funcs, gm_param, prepend);
       if (nb != while_stmt->body_) {
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = nb;
@@ -277,7 +296,7 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
         new_stmts.push_back(stmt);
       }
     } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
-      auto nb = RewriteCallsForGMBuffer(scope->body_, modified_funcs, gm_param);
+      auto nb = RewriteCallsForGMBuffer(scope->body_, modified_funcs, gm_param, prepend);
       if (nb != scope->body_) {
         new_stmts.push_back(CloneScopeWithBody(scope, nb));
         any_changed = true;
@@ -293,17 +312,17 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
   return SeqStmts::Flatten(std::move(new_stmts), body->span_);
 }
 
-CallPtr CreateGMPipeBufferTensorCreate(const Span& span) {
-  auto shape_elem = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+CallPtr CreateScratchTensor(const ScratchSpec& scratch, const Span& span) {
+  auto shape_elem = std::make_shared<ConstInt>(scratch.elements, DataType::INDEX, span);
   auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{shape_elem}, span);
   return OpRegistry::GetInstance().Create("tensor.create", {shape_tuple},
-                                          {{"dtype", std::any(DataType::FP32)},
+                                          {{"dtype", std::any(scratch.dtype)},
                                            {"layout", std::any(TensorLayout::ND)},
                                            {"manual_dep", std::any(true)}},
                                           span);
 }
 
-/// Append a per-call GM pipe buffer to every call/submit of a function in
+/// Allocate a private GM buffer for each call/submit of a function in
 /// @p modified_funcs.
 ///
 /// Unlike :func:`RewriteCallsForGMBuffer`, each rewritten call gets its own
@@ -311,8 +330,8 @@ CallPtr CreateGMPipeBufferTensorCreate(const Span& span) {
 /// expression so the caller can place it next to the call it serves.
 StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
                                         const std::unordered_set<std::string>& modified_funcs,
-                                        int64_t gm_buffer_elems, const Span& span, int& counter) {
-  auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{gm_buffer_elems}, DataType::FP32,
+                                        const ScratchSpec& scratch, const Span& span, int& counter) {
+  auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{scratch.elements}, scratch.dtype,
                                               std::nullopt, std::nullopt);
   auto stmts = FlattenBody(body);
   std::vector<StmtPtr> new_stmts;
@@ -323,9 +342,9 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
     return gv && modified_funcs.count(gv->name_);
   };
   auto make_gm_create = [&]() -> std::pair<StmtPtr, VarPtr> {
-    std::string var_name = std::string("gm_pipe_buffer_") + std::to_string(counter++);
+    std::string var_name = std::string(scratch.prefix) + std::to_string(counter++);
     auto gm_var = std::make_shared<Var>(var_name, gm_type, span);
-    auto create_call = CreateGMPipeBufferTensorCreate(span);
+    auto create_call = CreateScratchTensor(scratch, span);
     auto create_stmt = std::make_shared<AssignStmt>(gm_var, create_call, span);
     return std::make_pair(StmtPtr(create_stmt), gm_var);
   };
@@ -338,16 +357,12 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
 
       // Preserve the original Call's kwargs_ / attrs_ (compiler metadata such as
       // Call::arg_directions_) by copying rather than reconstructing.
-      auto new_call = MutableCopy(call);
-      new_call->args_.push_back(gm_var);
-      return std::make_pair(create_stmt, ExprPtr(new_call));
+      return std::make_pair(create_stmt, WithScratchOperand(call, gm_var, scratch.prepend));
     }
     if (auto submit = std::dynamic_pointer_cast<const Submit>(expr)) {
       if (!should_rewrite(submit->op_)) return std::make_pair(StmtPtr{}, ExprPtr{});
       auto [create_stmt, gm_var] = make_gm_create();
-      auto new_submit = MutableCopy(submit);
-      new_submit->args_.push_back(gm_var);
-      return std::make_pair(create_stmt, ExprPtr(new_submit));
+      return std::make_pair(create_stmt, WithScratchOperand(submit, gm_var, scratch.prepend));
     }
     return std::make_pair(StmtPtr{}, ExprPtr{});
   };
@@ -379,8 +394,7 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
     // Control-flow and scope statements: recurse into the body, and rebuild
     // the node only when that body changed.
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto nb =
-          RewriteCallsWithPerCallGMBuffer(for_stmt->body_, modified_funcs, gm_buffer_elems, span, counter);
+      auto nb = RewriteCallsWithPerCallGMBuffer(for_stmt->body_, modified_funcs, scratch, span, counter);
       if (nb != for_stmt->body_) {
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = nb;
@@ -390,12 +404,11 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         new_stmts.push_back(stmt);
       }
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto nt = RewriteCallsWithPerCallGMBuffer(if_stmt->then_body_, modified_funcs, gm_buffer_elems, span,
-                                                counter);
+      auto nt = RewriteCallsWithPerCallGMBuffer(if_stmt->then_body_, modified_funcs, scratch, span, counter);
       std::optional<StmtPtr> ne;
       const auto& else_body = if_stmt->else_body_;
       if (else_body.has_value()) {
-        ne = RewriteCallsWithPerCallGMBuffer(*else_body, modified_funcs, gm_buffer_elems, span, counter);
+        ne = RewriteCallsWithPerCallGMBuffer(*else_body, modified_funcs, scratch, span, counter);
       }
       bool body_changed = (nt != if_stmt->then_body_);
       if (!body_changed && ne.has_value() && else_body.has_value()) {
@@ -411,8 +424,7 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         new_stmts.push_back(stmt);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto nb =
-          RewriteCallsWithPerCallGMBuffer(while_stmt->body_, modified_funcs, gm_buffer_elems, span, counter);
+      auto nb = RewriteCallsWithPerCallGMBuffer(while_stmt->body_, modified_funcs, scratch, span, counter);
       if (nb != while_stmt->body_) {
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = nb;
@@ -422,7 +434,7 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         new_stmts.push_back(stmt);
       }
     } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
-      auto nb = RewriteCallsWithPerCallGMBuffer(scope->body_, modified_funcs, gm_buffer_elems, span, counter);
+      auto nb = RewriteCallsWithPerCallGMBuffer(scope->body_, modified_funcs, scratch, span, counter);
       if (nb != scope->body_) {
         new_stmts.push_back(CloneScopeWithBody(scope, nb));
         any_changed = true;
@@ -437,29 +449,38 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
   return SeqStmts::Flatten(std::move(new_stmts), body->span_);
 }
 
-void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
+bool InjectScratchInPlace(std::vector<FunctionPtr>& functions, const ScratchSpec& scratch) {
   std::unordered_map<std::string, FunctionPtr*> func_by_name;
   for (auto& func : functions) func_by_name[func->name_] = &func;
 
   std::unordered_map<std::string, std::unordered_set<std::string>> callers, callees;
-  BuildCallGraphFromFunctions(functions, callers, callees);
 
-  std::unordered_set<std::string> pipe_funcs;
+  std::unordered_set<std::string> scratch_funcs;
   for (const auto& func : functions) {
-    if (!HasGMPipeBufferParam(func) && func->body_ && HasInitializePipeOps(FlattenBody(func->body_))) {
-      pipe_funcs.insert(func->name_);
+    ScratchUseFinder finder(scratch);
+    if (func->body_ && !HasScratchParam(func, scratch)) finder.VisitStmt(func->body_);
+    if (finder.found) {
+      scratch_funcs.insert(func->name_);
     }
   }
-  if (pipe_funcs.empty()) return;
+  if (scratch_funcs.empty()) return false;
+  BuildCallGraphFromFunctions(functions, callers, callees);
 
   // Propagate upward, stopping at Orchestration boundaries (they materialize
   // the buffer locally instead of taking it as a parameter).
-  std::unordered_set<std::string> needs_gm_param = pipe_funcs;
+  std::unordered_set<std::string> needs_gm_param = scratch_funcs;
   std::unordered_set<std::string> orch_needs_tensor_create;
-  std::vector<std::string> worklist(pipe_funcs.begin(), pipe_funcs.end());
+  std::vector<std::string> worklist(scratch_funcs.begin(), scratch_funcs.end());
   while (!worklist.empty()) {
     std::string name = worklist.back();
     worklist.pop_back();
+    // MIX members unpack one shared tensor/scalar payload. Adding a tensor to
+    // just the submitting AIV would shift the scalar slots seen by its siblings.
+    if ((*func_by_name.at(name))->func_type_ == FunctionType::Group) {
+      for (const auto& member : callees[name]) {
+        if (needs_gm_param.insert(member).second) worklist.push_back(member);
+      }
+    }
     auto it = callers.find(name);
     if (it == callers.end()) continue;
     for (const auto& caller_name : it->second) {
@@ -473,11 +494,9 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     }
   }
 
-  constexpr int64_t kGMPipeBufferPlaceholderElems = 1;
-
   for (auto& func : functions) {
-    if (needs_gm_param.count(func->name_) && !HasGMPipeBufferParam(func)) {
-      func = AddGMSlotBufferParam(func, kGMPipeBufferPlaceholderElems);
+    if (needs_gm_param.count(func->name_) && !HasScratchParam(func, scratch)) {
+      func = AddScratchParam(func, scratch);
     }
   }
 
@@ -486,13 +505,13 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
 
     VarPtr gm_param;
     for (const auto& p : func->params_) {
-      if (p->name_hint_ == kGMPipeBufferName) {
+      if (p->name_hint_ == scratch.param) {
         gm_param = p;
         break;
       }
     }
     INTERNAL_CHECK_SPAN(gm_param, func->span_)
-        << "Internal error: " << func->name_ << " should have " << kGMPipeBufferName;
+        << "Internal error: " << func->name_ << " should have " << scratch.param;
 
     std::unordered_set<std::string> mod_callees;
     auto ci = callees.find(func->name_);
@@ -503,7 +522,7 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     }
 
     if (!mod_callees.empty()) {
-      auto nb = RewriteCallsForGMBuffer(func->body_, mod_callees, gm_param);
+      auto nb = RewriteCallsForGMBuffer(func->body_, mod_callees, gm_param, scratch.prepend);
       auto updated = MutableCopy(func);
       updated->body_ = nb;
       func = updated;
@@ -513,19 +532,18 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   for (auto& func : functions) {
     // Must stay in lockstep with the boundary marking above: widening only one
     // side leaves a caller passing the old arity to a rewritten ``__gm_pipe_buffer``.
-    if (!IsOrchestrationLike(func->func_type_)) continue;
-    if (!func->body_) continue;
+    if (!orch_needs_tensor_create.count(func->name_)) continue;
 
     const std::unordered_set<std::string>& mod_callees = needs_gm_param;
     if (mod_callees.empty()) continue;
 
     int counter = 0;
-    auto new_body = RewriteCallsWithPerCallGMBuffer(func->body_, mod_callees, kGMPipeBufferPlaceholderElems,
-                                                    func->span_, counter);
+    auto new_body = RewriteCallsWithPerCallGMBuffer(func->body_, mod_callees, scratch, func->span_, counter);
     auto updated = MutableCopy(func);
     updated->body_ = new_body;
     func = updated;
   }
+  return true;
 }
 
 }  // namespace
@@ -534,8 +552,7 @@ namespace pass {
 
 Pass InjectGMPipeBuffer() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    if (!backend::BackendConfig::IsConfigured() ||
-        !PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+    if (!backend::BackendConfig::IsConfigured()) {
       return program;
     }
     std::vector<FunctionPtr> functions;
@@ -543,7 +560,15 @@ Pass InjectGMPipeBuffer() {
     for (const auto& [gvar, func] : program->functions_) {
       functions.push_back(func);
     }
-    InjectGMSlotBufferInPlace(functions);
+    const auto& backend = PassContext::Current()->GetBackendHandler();
+    bool changed = backend->RequiresGMPipeBuffer() && InjectScratchInPlace(functions, kPipeScratch);
+    const auto bytes = backend->GetUrmaScatterScratchBytes();
+    if (bytes > 0) {
+      changed |= InjectScratchInPlace(
+          functions, {backend::kUrmaScatterScratchParam, "urma_scatter_scratch_", bytes, DataType::UINT8,
+                      [](const CallPtr& op) { return IsOp(op, "pld.tile.get_async"); }, true});
+    }
+    if (!changed) return program;
     return std::make_shared<Program>(functions, program->name_, program->span_);
   };
 

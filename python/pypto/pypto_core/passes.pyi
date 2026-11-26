@@ -725,8 +725,8 @@ def inject_gm_pipe_buffer() -> Pass:
     On backends whose cross-core pipe rides through GM (currently Ascend910), adds a
     ``__gm_pipe_buffer`` Out-tensor parameter to functions that issue ``initialize_pipe``
     ops and propagates it through callers. Orchestration functions materialize the
-    buffer locally via ``tensor.create`` instead of receiving it as a parameter. No-op
-    on backends that don't require a GM slot buffer.
+    buffer locally via ``tensor.create``. Ascend950 uses the same mechanism for its
+    per-dispatch URMA Scatter descriptor scratch.
     """
 
 def split_vector_kernel() -> Pass:

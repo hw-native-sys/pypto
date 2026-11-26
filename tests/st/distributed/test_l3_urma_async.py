@@ -1870,19 +1870,21 @@ class TestL3UrmaAsyncChunking:
             )
 
 
-def _build_plain_local_async(is_put: bool):
-    """Use ordinary dispatch tensors for the local URMA endpoint on two ranks."""
+def _build_local_async(is_put: bool, *, scatter: bool = False):
+    """Use ordinary endpoints for contiguous transfers and two rows of one window for Scatter."""
+    window_rows = 2 if scatter else 1
+    readback_row = 1 if scatter else 0
 
     @pl.jit.incore
     def fill(
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-    ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
         return pl.store(pl.load(inp, [0, 0], [1, SIZE]), [0, 0], data)
 
     @pl.jit.incore
     def rendezvous(
-        dep: pl.Tensor[[1, SIZE], pl.FP32],
+        dep: pl.Tensor[[window_rows, SIZE], pl.FP32],
         signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
     ) -> pld.DistributedTensor[[2, 1], pl.INT32]:
         # dep orders publication after its producer's asynchronous completion.
@@ -1895,16 +1897,16 @@ def _build_plain_local_async(is_put: bool):
     @pl.jit.incore
     def put_local(
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
         ready: pld.DistributedTensor[[2, 1], pl.INT32],
-    ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+    ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
         peer = 1 - pld.rank(pld.get_comm_ctx(data))
         # inp is a normal device allocation, never a communication-window view.
         return pld.tensor.put_async(data, peer, inp)
 
     @pl.jit.incore
     def get_local(
-        data: pld.DistributedTensor[[1, SIZE], pl.FP32],
+        data: pld.DistributedTensor[[window_rows, SIZE], pl.FP32],
         scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
         ready: pld.DistributedTensor[[2, 1], pl.INT32],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
@@ -1913,19 +1915,33 @@ def _build_plain_local_async(is_put: bool):
         return pld.tensor.get_async(scratch, peer, data)
 
     @pl.jit.incore
+    def scatter_get_local(
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+        ready: pld.DistributedTensor[[2, 1], pl.INT32],
+    ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
+        # The ISA checks both payload ranges against this session's domain.
+        ctx = pld.get_comm_ctx(data)
+        session = pld.system.make_session(ctx)
+        src = pl.tensor.view(data, [1, SIZE], offsets=[0, 0])
+        dst = pl.tensor.view(data, [1, SIZE], offsets=[1, 0])
+        _after, event = pld.tile.get_async(dst, 1 - pld.rank(ctx), src, session)
+        pld.system.defer_wait_event(event, session)
+        return data
+
+    @pl.jit.incore
     def readback(
-        data: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.Tensor[[window_rows, SIZE], pl.FP32],
         done: pld.DistributedTensor[[2, 1], pl.INT32],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-        return pl.store(pl.load(data, [0, 0], [1, SIZE]), [0, 0], out)
+        return pl.store(pl.load(data, [readback_row, 0], [1, SIZE]), [0, 0], out)
 
     @pl.jit
     def chip_put(
         inp: pl.Tensor[[1, SIZE], pl.FP32],
         scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
         ready: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
         done: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
@@ -1940,7 +1956,7 @@ def _build_plain_local_async(is_put: bool):
         inp: pl.Tensor[[1, SIZE], pl.FP32],
         scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
         ready: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
         done: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
@@ -1950,7 +1966,22 @@ def _build_plain_local_async(is_put: bool):
         done_signal = rendezvous(transferred, done)
         return readback(transferred, done_signal, out)
 
-    chip_orch = chip_put if is_put else chip_get
+    @pl.jit
+    def chip_scatter_get(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        scratch: pl.InOut[pl.Tensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+        ready: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        done: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        initialized = fill(inp, data)
+        ready_signal = rendezvous(initialized, ready)
+        transferred = scatter_get_local(initialized, ready_signal)
+        done_signal = rendezvous(transferred, done)
+        return readback(transferred, done_signal, out)
+
+    chip_orch = chip_scatter_get if scatter else (chip_put if is_put else chip_get)
 
     @pl.jit.host
     def host_orch(
@@ -1958,11 +1989,11 @@ def _build_plain_local_async(is_put: bool):
         scratch: pl.InOut[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-        data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+        data_buf = pld.alloc_window_buffer(window_rows * SIZE * pl.FP32.get_byte())
         ready_buf = pld.alloc_window_buffer(64)
         done_buf = pld.alloc_window_buffer(64)
         for rank in pl.range(pld.world_size()):
-            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [window_rows, SIZE], dtype=pl.FP32)
             ready = pld.window(ready_buf, [2, 1], dtype=pl.INT32)
             done = pld.window(done_buf, [2, 1], dtype=pl.INT32)
             chip_orch(inputs[rank], scratch[rank], outputs[rank], data, ready, done, device=rank)
@@ -1972,15 +2003,19 @@ def _build_plain_local_async(is_put: bool):
 
 
 @pytest.mark.platforms("a5", reason="URMA async transfers require the A5 backend")
-@pytest.mark.parametrize("is_put", [True, False], ids=["put_plain_src", "get_plain_dst"])
-def test_plain_local_async_endpoint(test_config, device_ids, is_put):
-    """Plain local endpoints transfer peer data and order a later consumer task."""
+@pytest.mark.parametrize(
+    ("is_put", "scatter"),
+    [(True, False), (False, False), (False, True)],
+    ids=["put_plain_src", "get_plain_dst", "scatter_get_registered_dst"],
+)
+def test_plain_local_async_endpoint(test_config, device_ids, is_put, scatter):
+    """The consumer reads the peer data after the transfer task completes."""
     if len(device_ids) < 2:
-        pytest.skip("Plain local async transfer needs two devices")
+        pytest.skip("Async transfer needs two devices")
     inputs = torch.arange(2 * SIZE, dtype=torch.float32).reshape(2, 1, SIZE)
     scratch = torch.full_like(inputs, -17)
     outputs = torch.zeros_like(inputs)
-    compiled = _build_plain_local_async(is_put).compile(
+    compiled = _build_local_async(is_put, scatter=scatter).compile(
         inputs,
         scratch,
         outputs,
@@ -1994,8 +2029,8 @@ def test_plain_local_async_endpoint(test_config, device_ids, is_put):
         scratch.fill_(-17)
         outputs.zero_()
         compiled(inputs, scratch, outputs, config=RunConfig(platform=test_config.platform))
-        assert torch.equal(outputs, inputs.flip(0)), f"round {round_index}: plain local endpoint mismatch"
-        if not is_put:
+        assert torch.equal(outputs, inputs.flip(0)), f"round {round_index}: local endpoint mismatch"
+        if not is_put and not scatter:
             assert torch.equal(scratch, inputs.flip(0)), f"round {round_index}: GET destination mismatch"
 
 

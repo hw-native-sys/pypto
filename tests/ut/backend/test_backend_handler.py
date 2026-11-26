@@ -134,6 +134,7 @@ class TestGlobalHandlerAccessor:
         handler = _backend_core.get_handler()
         assert handler.get_pto_target_arch() == "a2a3"
         assert handler.requires_gm_pipe_buffer() is True
+        assert handler.get_urma_scatter_scratch_bytes() == 0
         # Python callers can feature-detect local depth before building a pipe.
         assert handler.supports_local_pipe_depth() is True
 
@@ -141,6 +142,8 @@ class TestGlobalHandlerAccessor:
         _backend_core.set_backend_type(_backend_core.BackendType.Ascend950)
         handler = _backend_core.get_handler()
         assert handler.get_pto_target_arch() == "a5"
+        # A5 reserves one 64-byte descriptor cache line per physical AIV.
+        assert handler.get_urma_scatter_scratch_bytes() == 72 * 64
         assert handler.supports_local_pipe_depth() is False
         assert handler.requires_vto_c_fractal_adapt() is True
 

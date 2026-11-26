@@ -837,7 +837,8 @@ class TupleConsumerCollector : public ir::IRVisitor {
     if (ir::ResolveVFCall(call, program_) || (source && aliases_.count(source.get()))) {
       aliases_.insert(op->var_.get());
     }
-    if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
+    // PrepareTupleOutputs allocates Tile destinations. Tensor projections borrow GM storage.
+    if (auto tge = As<ir::TupleGetItemExpr>(op->value_); tge && As<TileType>(op->var_->GetType())) {
       if (auto base = As<ir::Var>(tge->tuple_); base && tge->index_ >= 0) {
         // VF tuple elements are borrowed aliases, not hardware DPS destinations.
         if (aliases_.count(base.get())) return;
@@ -949,7 +950,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
         uses_deferred_completion_ = true;
       }
       if (!uses_urma_transfer_ &&
-          (ir::IsOp(op, "pld.tensor.put_async") || ir::IsOp(op, "pld.tensor.get_async"))) {
+          (ir::IsOp(op, "pld.tensor.put_async") || ir::IsOp(op, "pld.tensor.get_async") ||
+           ir::IsOp(op, "pld.system.make_session") || ir::IsOp(op, "pld.tile.get_async"))) {
         uses_urma_transfer_ = true;
       }
       if (!uses_spmd_block_ops_ &&
@@ -1115,7 +1117,7 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
-  urma_adapter_element_types_.clear();
+  urma_adapter_signatures_.clear();
   reported_precision_sites_.clear();
   for (const auto& [_, function] : program->functions_) {
     if (function->func_type_ == ir::FunctionType::SIMT) simt_functions_.emplace(function->name_, function);
@@ -1160,7 +1162,7 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
     }
   }
 
-  for (const auto& entry : urma_adapter_element_types_) {
+  for (const auto& entry : urma_adapter_signatures_) {
     for (const auto& [gvar, func] : program->functions_) {
       CHECK_SPAN(func->name_ != entry.first, func->span_)
           << "Function name '" << entry.first << "' is reserved for PyPTO's URMA async transfer adapter";
@@ -1332,14 +1334,15 @@ std::string PTOCodegen::RegisterUrmaTransferAdapter(bool is_put, DataType dtype)
   CHECK(element.rfind("!pto.", 0) != 0 && element != "index" && element != "i1")
       << "URMA async transfer does not support element type '" << element << "'";
   const std::string symbol = std::string("pypto_urma_") + (is_put ? "put" : "get") + "_async_" + element;
-  urma_adapter_element_types_[symbol] = element;
+  const std::string ptr = "!pto.ptr<" + element + ">";
+  urma_adapter_signatures_[symbol] =
+      "(!pto.ptr<i64>, !pto.ptr<i64>, " + ptr + ", " + ptr + ", i64, i64, i64, i64, i64, i64)";
   return symbol;
 }
 
 void PTOCodegen::EmitUrmaTransferAdapterDeclarations() {
-  for (const auto& entry : urma_adapter_element_types_) {
-    stream_ << "  func.func private @" << entry.first << "(!pto.ptr<i64>, !pto.ptr<i64>, !pto.ptr<"
-            << entry.second << ">, !pto.ptr<" << entry.second << ">, i64, i64, i64, i64, i64, i64)\n";
+  for (const auto& entry : urma_adapter_signatures_) {
+    stream_ << "  func.func private @" << entry.first << entry.second << "\n";
   }
 }
 
@@ -2998,6 +3001,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
   if (TryEmitVFCall(call, op->var_)) return;
   if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
+    if (auto it = fs_.urma_get_destinations.find(rhs.get()); it != fs_.urma_get_destinations.end()) {
+      fs_.urma_get_destinations[op->var_.get()] = it->second;
+      return;
+    }
     if (auto it = vf_return_aliases_.find(rhs.get()); it != vf_return_aliases_.end()) {
       vf_return_aliases_[op->var_.get()] = it->second;
       return;
@@ -3164,7 +3171,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // (VisitStmt_(IfStmtPtr)) does for merged tensors.
   // Non-fatal: if the RHS has no registered view, fall through to the generic
   // handling rather than throwing eagerly on a view that may never be consumed.
-  if (auto rhs_var = AsVarLike(op->value_)) {
+  auto rhs_var = AsVarLike(op->value_);
+  if (auto item = As<ir::TupleGetItemExpr>(op->value_); item && item->index_ == 0) {
+    auto tuple = AsVarLike(item->tuple_);
+    auto it = fs_.urma_get_destinations.find(tuple.get());
+    if (it != fs_.urma_get_destinations.end()) rhs_var = it->second;
+  }
+  if (rhs_var) {
     if (As<TileType>(op->var_->GetType()) && As<TileType>(rhs_var->GetType())) {
       // Keep this provenance even for emit_tile_addr_ codegen. RegScope may
       // occur later in the function and needs to canonicalize this alias.
@@ -3221,7 +3234,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // downstream ``pld.system.rank(ctx)`` / ``pld.system.nranks(ctx)`` codegen
   // resolve ``ctx`` via the standard ``GetExprAsCode(call->args_[0])`` path.
   const auto& var_type = op->var_->GetType();
-  if ((As<ScalarType>(var_type) || As<ir::RegType>(var_type) || As<CommCtxType>(var_type)) &&
+  if ((As<ScalarType>(var_type) || As<ir::RegType>(var_type) || As<CommCtxType>(var_type) ||
+       As<ir::AsyncSessionType>(var_type)) &&
       !fs_.current_expr_value.empty()) {
     BindVarToMlir(op->var_, fs_.current_expr_value);
   }

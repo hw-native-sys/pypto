@@ -438,6 +438,63 @@ _URMA_TRANSFER_INCLUDE = """\
 #include "platform_comm/comm_context.h"
 """
 
+_URMA_SESSION_ADAPTER = """\
+#if defined(PTO_URMA_SUPPORTED)
+extern "C" {
+static __aicore__ void pypto_urma_make_session(
+    __gm__ int64_t* raw_args, __gm__ int64_t* comm_raw, simpler::urma::UrmaSession* session) {
+  AsyncCtx async = get_async_ctx(raw_args);
+  auto* comm = reinterpret_cast<__gm__ CommContext*>(comm_raw);
+  if (!simpler::urma::build_urma_session(async, comm_workspace<CommWorkspaceKind::URMA>(*comm), *session)) {
+    pto2::detail::set_urma_error(async, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+    pto2::detail::defer_flush(async);
+  }
+}
+}
+#endif
+"""
+
+_URMA_SCATTER_ADAPTER = """\
+#if defined(PTO_URMA_SUPPORTED)
+// One cache line per physical sender in the task's GM scratch tensor. The
+// immediate submission consumes both descriptors before this slot is reused.
+struct alignas(64) PyptoScatterDescriptors {
+  pto::comm::ScatterSegment destination;
+  pto::comm::ScatterSource source;
+};
+static_assert(sizeof(PyptoScatterDescriptors) == 64);
+
+template <typename T>
+static __aicore__ void pypto_urma_scatter_get(
+    __gm__ int64_t* raw_args, __gm__ int64_t* comm_raw, simpler::urma::UrmaSession* session,
+    __gm__ uint8_t* scratch, __gm__ T* dst, __gm__ T* src, int64_t nbytes, int64_t peer) {
+  AsyncCtx async = get_async_ctx(raw_args);
+  if (!session->valid) return;  // The builder already published the error.
+  auto* comm = reinterpret_cast<__gm__ CommContext*>(comm_raw);
+  const auto offset = reinterpret_cast<uint64_t>(src) - comm->windowsIn[comm->rankId];
+  if (peer < 0 || static_cast<uint64_t>(peer) >= comm->rankNum ||
+      nbytes <= 0 || nbytes > (256LL << 20) || offset > comm->winSize ||
+      static_cast<uint64_t>(nbytes) > comm->winSize - offset) {
+    pto2::detail::set_urma_error(async, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+    pto2::detail::defer_flush(async);
+    return;
+  }
+  auto& desc = reinterpret_cast<__gm__ PyptoScatterDescriptors*>(scratch)[async.urma_sender_id];
+  desc.destination.addr = reinterpret_cast<__gm__ uint8_t*>(dst);
+  desc.destination.length = static_cast<uint32_t>(nbytes);
+  desc.source.addr = pto2::urma_backend::peer_mr_ptr<uint8_t>(session->domain_workspace, peer, offset);
+  desc.source.segCount = 1;
+  desc.source.peer = static_cast<uint32_t>(peer);
+#if !defined(__CPU_SIM)
+  pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t*>(&desc), sizeof(desc));
+  dsb(DSB_DDR);
+#endif
+  // Simpler publishes submission and registration failures to this task.
+  send_request_entry(async, UrmaTget(&desc.destination, 1, &desc.source, 1), *session);
+}
+#endif
+"""
+
 _URMA_TRANSFER_ADAPTER_TEMPLATE = """\
 // --- URMA async transfer adapter ---
 // V1 completion is owned by the enclosing task: the helpers below only submit
@@ -882,7 +939,9 @@ _SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
 _DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
 _URMA_PUT_ASYNC_OP = _ir_core.get_op("pld.tensor.put_async").name
 _URMA_GET_ASYNC_OP = _ir_core.get_op("pld.tensor.get_async").name
-_URMA_TRANSFER_OPS = frozenset({_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP})
+_URMA_SCATTER_OP = _ir_core.get_op("pld.tile.get_async").name
+_URMA_SESSION_OP = _ir_core.get_op("pld.system.make_session").name
+_URMA_TRANSFER_OPS = frozenset({_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP, _URMA_SCATTER_OP, _URMA_SESSION_OP})
 _TILE_LOAD_OP = _ir_core.get_op("tile.load").name
 
 
@@ -939,23 +998,21 @@ def _uses_urma_transfer(func: _ir_core.Function) -> bool:
     return _function_uses_ops(func, _URMA_TRANSFER_OPS)
 
 
-def _collect_urma_transfer_dtypes(func: _ir_core.Function) -> set[tuple[bool, _DataType]]:
-    """Collect ``(is_put, dtype)`` for every async transfer in *func*."""
+def _collect_urma_transfer_dtypes(func: _ir_core.Function) -> set[tuple[str, _DataType]]:
+    """Collect ``(op name, dtype)`` for every async transfer in *func*."""
 
     class _UrmaFinder(_ir_core.IRVisitor):
         def __init__(self) -> None:
             super().__init__()
-            self.pairs: set[tuple[bool, _DataType]] = set()
+            self.pairs: set[tuple[str, _DataType]] = set()
 
         def visit_call(self, op: _ir_core.Call) -> None:
             ir_op = getattr(op, "op", None)
             if isinstance(ir_op, _ir_core.Op) and op.args:
-                is_put = ir_op.name == _URMA_PUT_ASYNC_OP
-                is_get = ir_op.name == _URMA_GET_ASYNC_OP
-                if is_put or is_get:
-                    dtype = getattr(op.args[0].type, "dtype", None)
-                    if dtype is not None:
-                        self.pairs.add((is_put, dtype))
+                if ir_op.name in {_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP, _URMA_SCATTER_OP}:
+                    endpoint = op.args[0].type
+                    if isinstance(endpoint, _ir_core.TensorType):
+                        self.pairs.add((ir_op.name, endpoint.dtype))
             super().visit_call(op)
 
     finder = _UrmaFinder()
@@ -963,24 +1020,36 @@ def _collect_urma_transfer_dtypes(func: _ir_core.Function) -> set[tuple[bool, _D
     return finder.pairs
 
 
-def _generate_urma_transfer_adapter(func: _ir_core.Function) -> str:
+def _generate_urma_transfer_adapter(*functions: _ir_core.Function) -> str:
     """Render the C++ adapter for the async transfers in *func*.
 
     The PTOAS declaration is dtype-suffixed, so only the ``(put, dtype)`` /
     ``(get, dtype)`` pairs actually present get a C++ definition. The generic
     implementation is shared.
     """
-    pairs = _collect_urma_transfer_dtypes(func)
-    if not pairs:
-        return ""
-
+    pairs = {pair for func in functions for pair in _collect_urma_transfer_dtypes(func)}
+    parts: list[str] = []
+    if any(_function_uses_ops(func, frozenset({_URMA_SESSION_OP})) for func in functions):
+        parts.append(_URMA_SESSION_ADAPTER)
     wrappers: list[str] = []
-    for is_put, dtype in sorted(pairs, key=lambda item: (not item[0], str(item[1]))):
+    scatter_wrappers: list[str] = []
+    for name, dtype in sorted(pairs, key=lambda item: (item[0], str(item[1]))):
         suffix = _codegen_core.data_type_to_mlir(dtype)
+        if name == _URMA_SCATTER_OP:
+            suffix = suffix.removeprefix("!pto.")
         if suffix.startswith("!pto.") or suffix in {"index", "i1"}:
-            op = "put" if is_put else "get"
-            raise ValueError(f"pld.tensor.{op}_async does not support element type {suffix!r}")
+            raise ValueError(f"{name} does not support element type {suffix!r}")
         cpp_type = dtype.to_c_type_string()
+        if name == _URMA_SCATTER_OP:
+            scatter_wrappers.append(
+                f'extern "C" {{ static __aicore__ void pypto_urma_scatter_get_{suffix}(\n'
+                "    __gm__ int64_t* args, __gm__ int64_t* comm, simpler::urma::UrmaSession* session,\n"
+                f"    __gm__ uint8_t* scratch, __gm__ {cpp_type}* dst, __gm__ {cpp_type}* src,\n"
+                "    int64_t bytes, int64_t peer) {\n"
+                "  pypto_urma_scatter_get(args, comm, session, scratch, dst, src, bytes, peer);\n} }"
+            )
+            continue
+        is_put = name == _URMA_PUT_ASYNC_OP
         op = "put" if is_put else "get"
         k_put = "true" if is_put else "false"
         wrappers.append(
@@ -996,7 +1065,13 @@ def _generate_urma_transfer_adapter(func: _ir_core.Function) -> str:
             "}\n"
             '} // extern "C"'
         )
-    return _URMA_TRANSFER_ADAPTER_TEMPLATE.replace("__PYPTO_URMA_WRAPPERS__", "\n\n".join(wrappers))
+    if wrappers:
+        parts.append(
+            _URMA_TRANSFER_ADAPTER_TEMPLATE.replace("__PYPTO_URMA_WRAPPERS__", "\n\n".join(wrappers))
+        )
+    if scatter_wrappers:
+        parts.extend([_URMA_SCATTER_ADAPTER, "#if defined(PTO_URMA_SUPPORTED)", *scatter_wrappers, "#endif"])
+    return "\n".join(parts)
 
 
 def _uses_l2_cache_offset(func: _ir_core.Function) -> bool:
@@ -1375,6 +1450,7 @@ def _generate_kernel_wrapper(
     ptoas_code: str,
     *,
     group_uses_spmd: bool = False,
+    module_urma_adapter: str | None = None,
 ) -> str:
     """Generate a complete kernel wrapper file for one InCore function.
 
@@ -1390,6 +1466,8 @@ def _generate_kernel_wrapper(
     func_uses_l2_cache_offset = _uses_l2_cache_offset(func)
     func_uses_deferred_completion = _uses_deferred_completion(func)
     func_uses_urma_transfer = _uses_urma_transfer(func)
+    if module_urma_adapter is None:
+        module_urma_adapter = _generate_urma_transfer_adapter(func) if func_uses_urma_transfer else ""
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     ptoas_body = _honor_runtime_aiv_lane_control(func, ptoas_body)
     ptoas_body, fifo_uses_subblock = _forward_runtime_lane_to_split_fifo_calls(func, ptoas_body)
@@ -1401,7 +1479,7 @@ def _generate_kernel_wrapper(
         uses_sdma=func_uses_sdma,
         uses_l2_cache_offset=func_uses_l2_cache_offset,
         uses_deferred_completion=func_uses_deferred_completion,
-        uses_urma_transfer=func_uses_urma_transfer,
+        uses_urma_transfer=bool(module_urma_adapter),
     )
     unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
 
@@ -1507,7 +1585,6 @@ def _generate_kernel_wrapper(
     )
 
     deferred_completion_adapter = _DEFERRED_COMPLETION_ADAPTER if func_uses_deferred_completion else ""
-    urma_transfer_adapter = _generate_urma_transfer_adapter(func) if func_uses_urma_transfer else ""
     # The current PTO-ISA CPU implementation has no logical-lane overload.
     # Reject it explicitly instead of stripping the operand and changing data
     # selection. Device builds retain the authored call unchanged.
@@ -1519,7 +1596,7 @@ def _generate_kernel_wrapper(
             "#endif\n"
         )
     return (
-        f"{explicit_lane_guard}{header}\n{deferred_completion_adapter}{urma_transfer_adapter}{fifo_lane_arg_bridge}"
+        f"{explicit_lane_guard}{header}\n{deferred_completion_adapter}{module_urma_adapter}{fifo_lane_arg_bridge}"
         f"// --- ptoas-generated code ---\n{ptoas_body}\n{fifo_lane_arg_cleanup}{wrapper_func}"
     )
 
@@ -2038,9 +2115,12 @@ def _emit_group_output(
         _emit_vpto_object(result_files, os.path.join("kernels", f"{group_name}.o"), object_bytes, output_dir)
         return
     group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
+    # Each member compiles the whole PTOAS translation unit, including the
+    # sibling declarations that mention Simpler's session type.
+    module_urma_adapter = _generate_urma_transfer_adapter(*(f for f in members if _uses_urma_transfer(f)))
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
-            func, ptoas_cpp, group_uses_spmd=group_uses_spmd
+            func, ptoas_cpp, group_uses_spmd=group_uses_spmd, module_urma_adapter=module_urma_adapter
         )
 
 

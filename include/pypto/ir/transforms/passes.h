@@ -832,12 +832,11 @@ Pass ExpandMixedKernel();
 Pass LowerAutoVectorSplit();
 
 /**
- * @brief Inject __gm_pipe_buffer workspace parameter for cross-core pipes
+ * @brief Materialize per-dispatch GM workspace for cross-core pipes and URMA Scatter.
  *
- * Backend-gated (BackendHandler::RequiresGMPipeBuffer()). On Ascend910 the
- * cross-core tpush/tpop path rides through a shared GM buffer; this pass adds
- * the workspace parameter and propagates it upward through callers, stopping
- * at Orchestration functions which materialize the buffer locally.
+ * Ascend910 pipes use __gm_pipe_buffer. Ascend950 Scatter GET uses per-sender
+ * descriptor storage. Orchestration allocates the workspace and passes it
+ * through the callee chain, including members of a shared MIX payload.
  *
  * Must run after ExpandMixedKernel.
  */

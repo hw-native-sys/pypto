@@ -678,10 +678,8 @@ void BindPass(nb::module_& m) {
              "Preserve explicit AIV regions and localize boundary valid extents. "
              "Reject mixed function-level AUTO splitting; keep authored shapes and offsets.");
   passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
-             "Create a backend-gated pass that injects the __gm_pipe_buffer workspace parameter\n"
-             "into functions containing cross-core initialize_pipe ops, propagating the parameter\n"
-             "through callers (Orchestration functions materialize the buffer locally instead).\n"
-             "No-op on backends that don't require GM-backed pipe slots.");
+             "Inject per-call GM workspace for cross-core pipes and A5 URMA Scatter descriptors. "
+             "Orchestration callers allocate the scratch tensor and forward it to the kernel.");
   passes.def("split_vector_kernel", &pass::SplitVectorKernel,
              "Create a pass that splits vector kernels based on SplitMode "
              "(adjusts tpush/tpop split, halves tpop shapes, adjusts store offsets)");

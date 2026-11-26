@@ -57,8 +57,9 @@ inline const PassProperties kInlineFunctionsProperties{
 // with MaterializeCommDomainScopes (same gap).
 inline const PassProperties kSynthesizeAllReduceSignalsProperties{};
 
+// Check the actual per-kernel event stream after software-pipeline lowering and domain grouping.
 inline const PassProperties kMaterializeCommDomainScopesProperties{
-    .produced = {IRProperty::CommDomainScopesMaterialized}};
+    .produced = {IRProperty::CommDomainScopesMaterialized, IRProperty::AsyncHandleProvenance}};
 
 inline const PassProperties kLowerHostTensorCollectivesProperties{
     .required = {IRProperty::CommDomainScopesMaterialized},
@@ -152,10 +153,8 @@ inline const PassProperties kCtrlFlowTransformProperties{.produced = {IRProperty
 
 // -- SSA conversion pass ------------------------------------------------------
 
-// Handle provenance follows each use to its unique SSA definition.
-inline const PassProperties kConvertToSSAProperties{
-    .produced = {IRProperty::SSAForm, IRProperty::AsyncHandleProvenance},
-    .invalidated = {IRProperty::NormalizedStmtStructure}};
+inline const PassProperties kConvertToSSAProperties{.produced = {IRProperty::SSAForm},
+                                                    .invalidated = {IRProperty::NormalizedStmtStructure}};
 
 // -- Expression / statement normalisation passes ------------------------------
 

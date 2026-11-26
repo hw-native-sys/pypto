@@ -50,6 +50,7 @@
 #include "pypto/ir/transforms/utils/window_view_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
+#include "src/ir/transforms/utils/var_value_collector.h"
 
 namespace pypto {
 namespace ir {
@@ -259,6 +260,7 @@ class BufferEngineCollector : public IRVisitor {
       aliases.VisitStmt(func->body_);
       aliases_ = &aliases;
       VisitStmt(func->body_);
+      RecordSessionEngines(func->body_);
     }
     aliases_ = nullptr;
     // Record may append work; consume by index without retaining iterators.
@@ -302,6 +304,10 @@ class BufferEngineCollector : public IRVisitor {
   }
 
   void Analyze(const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span) {
+    if (IsOp(op, "pld.system.make_session")) {
+      session_contexts_.push_back(args[0]);
+      return;
+    }
     if (auto roles = GetCollectiveOperandRoles(op)) {
       for (size_t index : roles->context_args) {
         INTERNAL_CHECK_SPAN(index < args.size(), span) << "Collective is missing a remote operand";
@@ -325,8 +331,10 @@ class BufferEngineCollector : public IRVisitor {
       return;
     }
     size_t target = 0;
-    const bool urma = IsOp(op, "pld.tensor.put_async") || IsOp(op, "pld.tensor.get_async");
-    if (IsOp(op, "pld.tensor.get_async") || IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) {
+    const bool scatter_get = IsOp(op, "pld.tile.get_async");
+    const bool urma_get = IsOp(op, "pld.tensor.get_async") || scatter_get;
+    const bool urma = IsOp(op, "pld.tensor.put_async") || urma_get;
+    if (urma_get || IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) {
       target = 2;
     } else if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) {
       target = 1;
@@ -336,9 +344,35 @@ class BufferEngineCollector : public IRVisitor {
     }
     INTERNAL_CHECK_SPAN(args.size() > target, span)
         << "Communication primitive is missing its window operand";
+    // Scatter descriptors require the local destination to reside in the session's registered MR.
+    // Classify a destination window before engine grouping separates it from the remote source.
+    if (scatter_get && IsA<DistributedTensorType>(args[0]->GetType())) {
+      if (const auto* dst = Resolve(args[0])) Record(dst, 0);
+    }
     if (const auto* buffer = Resolve(args[target])) Record(buffer, urma ? 0 : 1);
   }
 
+  // A session may be constructed without issuing a GET. Provision each window
+  // that can supply its context, including branch yields and loop carries.
+  void RecordSessionEngines(const StmtPtr& body) {
+    if (session_contexts_.empty()) return;
+    VarValueCollector definitions;
+    definitions.VisitStmt(body);
+    std::unordered_set<const Var*> visited;
+    while (!session_contexts_.empty()) {
+      auto ctx = session_contexts_.back();
+      session_contexts_.pop_back();
+      if (auto query = As<Call>(ctx); IsOp(query, "pld.system.get_comm_ctx")) {
+        if (const auto* window = Resolve(query->args_[0])) Record(window, 0);
+      } else if (auto var = AsVarLike(ctx); var && visited.insert(var.get()).second) {
+        if (auto it = definitions.values.find(var.get()); it != definitions.values.end()) {
+          session_contexts_.insert(session_contexts_.end(), it->second.begin(), it->second.end());
+        }
+      }
+    }
+  }
+
+  std::vector<ExprPtr> session_contexts_;
   void Record(const Var* buffer, size_t engine) {
     if (engines_[buffer][engine]) return;
     engines_[buffer][engine] = true;

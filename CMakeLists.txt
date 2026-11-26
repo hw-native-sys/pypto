@@ -418,6 +418,7 @@ set(PYPTO_SOURCES
     src/codegen/pto/pto_buffer_codegen.cpp
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp
+    src/codegen/pto/pto_urma_codegen.cpp
     src/codegen/pto/pto_scalar_floor_div_mod_plan.cpp
     src/codegen/pto/pto_tensor_view_plan.cpp
     src/codegen/pto/pto_type_utils.cpp

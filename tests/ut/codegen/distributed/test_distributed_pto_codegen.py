@@ -39,14 +39,17 @@ Covers the InCore PTO codegen for ``pld.tile.remote_load``,
   ``cmp = #pto<wait_cmp …>``).
 """
 
+import os
 import re
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from _pto_loc_common import strip_loc
-from pypto import DataType, backend, codegen, ir, passes
+from pypto import DataType, Error, backend, codegen, ir, passes
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import generate
 from pypto.ir.builder import IRBuilder
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tile as tile_ops
@@ -2428,3 +2431,225 @@ def test_put_async_rejects_subbyte_element_type_before_byte_offset_codegen():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _scatter_get_program(dtype=pl.FP32):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pl.Tensor[[32], dtype],
+            src: pld.DistributedTensor[[64], dtype],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            ctx = pld.system.get_comm_ctx(src)
+            session = pld.system.make_session(ctx)
+            view = pl.tensor.view(src, [32], offsets=[16])
+            if peer > 0:
+                for rank in pl.range(peer):
+                    after, first = pld.tile.get_async(dst, rank, view, session)
+                    _result, second = pld.tile.get_async(after, 0, view, session)
+                    pld.system.defer_wait_event(first, session)
+                    pld.system.defer_wait_event(second)
+
+    return P
+
+
+def test_urma_scatter_get_reuses_session_and_destination():
+    mlir = _generate_mlir_a5(_scatter_get_program())
+    assert mlir.count("func.call @pypto_urma_make_session") == 1
+    calls = re.findall(r"func.call @pypto_urma_scatter_get_f32\(([^)]+)\)", mlir)
+    assert len(calls) == 2
+    first, second = (args.split(", ") for args in calls)
+    assert first[:-1] == second[:-1]
+    assert first[-1] != second[-1]
+    assert "scf.if" in mlir and "scf.for" in mlir
+    assert f"{first[5]} = pto.addptr" in mlir
+    assert "defer_wait_event" not in strip_loc(mlir)
+
+
+@pytest.mark.parametrize("trips", [0, 1, 2])
+def test_scatter_get_pairs_completion_after_pipeline_lowering(trips):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, window: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]):
+            src = pl.tensor.view(window, [32], offsets=[0])
+            dst = pl.tensor.view(window, [32], offsets=[32])
+            session = pld.system.make_session(pld.get_comm_ctx(window))
+            pair = pld.tile.get_async(dst, 1, src, session)
+            for _ in pl.pipeline(0, trips, 1, stage=2):
+                pld.system.defer_wait_event(pair[1], session)
+
+    # Lowering the single-trip loop leaves one completion for the one submitted GET.
+    if trips == 1:
+        assert _generate_mlir_a5(P).count("func.call @pypto_urma_scatter_get_f32") == 1
+    else:
+        diagnostic = "exactly one" if trips == 0 else "unconsumed"
+        with pytest.raises(
+            Error, match=f"(?s)'MaterializeCommDomainScopes'.*AsyncHandleProvenance.*{diagnostic}"
+        ):
+            _generate_mlir_a5(P)
+
+
+def test_scatter_get_tensor_projections_share_the_submitted_window_view():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, window: pl.InOut[pld.DistributedTensor[[64], pl.FP32]]):
+            session = pld.system.make_session(pld.get_comm_ctx(window))
+            src = pl.tensor.view(window, [32], offsets=[0])
+            dst = pl.tensor.view(window, [32], offsets=[32])
+            pair = pld.tile.get_async(dst, 1, src, session)
+            pld.system.defer_wait_event(pair[1])
+            # Each projection borrows the same offset destination, including an inline operand.
+            first = pair[0]
+            second = pair[0]
+            _, e1 = pld.tile.get_async(first, 1, src, session)
+            pld.system.defer_wait_event(e1)
+            _, e2 = pld.tile.get_async(second, 1, src, session)
+            pld.system.defer_wait_event(e2)
+            pld.system.defer_wait_event(pld.tile.get_async(pair[0], 1, src, session)[1])
+
+    mlir = _generate_mlir_a5(P)
+    calls = re.findall(r"func.call @pypto_urma_scatter_get_f32\(([^)]+)\)", mlir)
+    assert len(calls) == 4
+    destinations = {args.split(", ")[4] for args in calls}
+    assert len(destinations) == 1
+    assert f"{destinations.pop()} = pto.addptr" in mlir
+
+
+@pytest.mark.parametrize("elements", [256 << 20, (256 << 20) + 1])
+def test_urma_scatter_get_single_segment_byte_limit(elements):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, dst: pl.Tensor[[elements], pl.UINT8], src: pld.DistributedTensor[[elements], pl.UINT8]
+        ):
+            session = pld.system.make_session(pld.get_comm_ctx(src))
+            _after, event = pld.tile.get_async(dst, 1, src, session)
+            pld.system.defer_wait_event(event)
+
+    if elements == 256 << 20:
+        assert f"arith.constant {elements} : i64" in _generate_mlir_a5(P)
+    else:
+        with pytest.raises(ValueError, match="1 byte through 256 MiB"):
+            _generate_mlir_a5(P)
+
+
+@pytest.mark.parametrize("dtype", [pl.FP32, pl.HF8], ids=["fp32", "hf8"])
+def test_urma_scatter_get_compiles_with_a5_runtime(tmp_path, dtype):
+    if not (os.getenv("ASCEND_HOME_PATH") and os.getenv("PTO_ISA_ROOT") and find_ptoas_binary()):
+        pytest.skip("Requires PTOAS, CANN and PTO-ISA for A5 kernel compilation")
+    pytest.importorskip("simpler_setup")
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_scatter_get_program(dtype))
+    files = generate(program, str(tmp_path))
+    source = tmp_path / "scatter_get.cpp"
+    source.write_text(files["kernels/aiv/kernel.cpp"])
+    assert KernelCompiler("a5").compile_incore(
+        str(source), runtime_name="tensormap_and_ringbuffer", pto_isa_root=os.environ["PTO_ISA_ROOT"]
+    )
+
+
+def test_scatter_scratch_preserves_runtime_allocated_submit_output(tmp_path):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def fetch(
+            self, src: pld.DistributedTensor[[32], pl.FP32], dst: pl.Out[pl.Tensor[[32], pl.FP32]]
+        ) -> pl.Tensor[[32], pl.FP32]:
+            session = pld.system.make_session(pld.get_comm_ctx(src))
+            result, event = pld.tile.get_async(dst, 1, src, session)
+            pld.system.defer_wait_event(event)
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, src: pld.DistributedTensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
+            with pl.manual_scope():
+                result, _tid = pl.submit(self.fetch, src)
+            return result
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
+    files = generate(program, str(tmp_path), skip_ptoas=True)
+    orch = files["orchestration/chip.cpp"]
+    assert "add_output(urma_scatter_scratch_" in orch
+    assert re.search(r"add_output\(params_t\d+_synth_out_\d+\)", orch), orch
+
+
+def test_urma_scatter_get_mix_members_share_scratch_payload(tmp_path):
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube(
+            self,
+            dst: pl.Tensor[[32], pl.FP32],
+            src: pld.DistributedTensor[[32], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            return
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector(
+            self,
+            dst: pl.Tensor[[32], pl.FP32],
+            src: pld.DistributedTensor[[32], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            session = pld.system.make_session(pld.get_comm_ctx(src))
+            _dst, event = pld.tile.get_async(dst, peer, src, session)
+            pld.system.defer_wait_event(event)
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group(
+            self,
+            dst: pl.Tensor[[32], pl.FP32],
+            src: pld.DistributedTensor[[32], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            self.cube(dst, src, peer)
+            self.vector(dst, src, peer)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
+    for name in ("cube", "vector", "group"):
+        func = program.get_function(name)
+        assert func is not None
+        assert "__urma_scatter_scratch" in [p.name_hint for p in func.params]
+    if not (os.getenv("ASCEND_HOME_PATH") and os.getenv("PTO_ISA_ROOT") and find_ptoas_binary()):
+        pytest.skip("Requires PTOAS, CANN and PTO-ISA to compile MIX wrappers")
+    pytest.importorskip("simpler_setup")
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+    files = generate(program, str(tmp_path))
+    compiler = KernelCompiler("a5")
+    for core, member in (("aic", "cube"), ("aiv", "vector")):
+        wrapper = tmp_path / f"{member}.cpp"
+        wrapper.write_text(files[f"kernels/{core}/{member}.cpp"])
+        assert compiler.compile_incore(
+            str(wrapper),
+            core_type=core,
+            runtime_name="tensormap_and_ringbuffer",
+            pto_isa_root=os.environ["PTO_ISA_ROOT"],
+        )
+
+
+def test_urma_scatter_get_wait_event_has_no_backend_lowering():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, dst: pl.Tensor[[32], pl.FP32], src: pld.DistributedTensor[[32], pl.FP32]):
+            session = pld.system.make_session(pld.system.get_comm_ctx(src))
+            _, event = pld.tile.get_async(dst, 1, src, session)
+            pld.system.wait_event(event)
+
+    with pytest.raises(ValueError, match="No codegen registered for operation: pld.system.wait_event"):
+        _generate_mlir_a5(P)

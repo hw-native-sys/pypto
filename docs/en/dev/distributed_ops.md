@@ -57,7 +57,7 @@ See [Async transfer validation](distributed_async.md) for the supported transfer
 | --------- | ------ |
 | `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | A peer-independent `pl.AsyncSession` for this AIV and workspace |
 | `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | `(dst, event)`; tuple element 0 aliases the local destination |
-| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the local destination |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the local destination. The current A5 Scatter GET ISA requires `dst` and `src` to use the same communication domain. |
 | `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the remote destination window |
 | `pld.system.wait_event(event[, session])` | A `BOOL` success flag after waiting in the current kernel |
 | `pld.system.defer_wait_event(event[, session])` | A statement handing completion to the issuing task |
@@ -69,17 +69,16 @@ Both directions can reuse a session across peers and views of the same InCore
 window parameter, even when the host places both windows in the same domain.
 For tensor GET, call `wait_event(event)` or `defer_wait_event(event)`. For tile PUT and GET,
 wait and defer also accept the session that submitted the transfer. An in-kernel wait returns success to the caller. Deferring hands completion
-to the task so its consumers can use the destination after logical completion. These six
-operations currently support DSL construction, IR verification, and printing.
+to the task so its consumers can use the destination after logical completion. The A5 TMR backend lowers an explicit session and single-segment tile GET through Simpler. In the lowered control flow, each GET must reach exactly one `defer_wait_event` in its branch and iteration. Tile PUT, tensor event GET and in-kernel `wait_event` have frontend and IR support only.
 
-Use the returned destination in subsequent operations. The wait below completes the GET before the PUT reads its result.
+One session can fetch from different peers. Each GET immediately submits and registers a task completion. Dependent tasks can consume the destinations after the issuing task retires.
 
 ```python
 session = pld.system.make_session(pld.system.get_comm_ctx(window))
-local, fetched = pld.tile.get_async(local, first_peer, window, session)
-pld.system.wait_event(fetched, session)
-window, sent = pld.tile.put_async(window, second_peer, local, session)
-pld.system.defer_wait_event(sent, session)
+left, first = pld.tile.get_async(left, first_peer, window, session)
+right, second = pld.tile.get_async(right, second_peer, window, session)
+pld.system.defer_wait_event(first)
+pld.system.defer_wait_event(second, session)
 ```
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`

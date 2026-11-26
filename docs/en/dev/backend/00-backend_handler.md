@@ -58,6 +58,7 @@ to global state.
 | `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
 | `HonorsHighPrecisionAlgorithm()` | PTO-ISA selects a distinct algorithm from the `precisionType` attribute that `high_precision=True` emits; when false, both PTO emitters (Tile op callbacks and Buffer IR) warn that the request is dropped | `false` | `true` |
 | `RequiresGMPipeBuffer()` | inject GM-backed pipe slot in `ExpandMixedKernel` | `true` | `false` |
+| `GetUrmaScatterScratchBytes()` (`get_urma_scatter_scratch_bytes()`) | per-dispatch GM scratch size in bytes for URMA Scatter descriptors | `0` | `4608` |
 | `SupportsRuntimeBoundLocalSoftwarePipeline()` | enable local Vec software-pipeline lowering for runtime trip counts | `true` | `false` |
 | `SupportsLocalPipeDepth()` | local consumer depth can differ from the cross-core transport ring depth | `true` | `false` |
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse load + tpop_from_aic in-place hazard guard | `true` | `false` |
