@@ -878,6 +878,22 @@ ExprPtr ScopeOutliner::VisitExpr_(const IterArgPtr& op) {
   return it != store_target_renames_.end() ? it->second : IRMutator::VisitExpr_(op);
 }
 
+VarPtr ScopeOutliner::ResolveCallerBinding(const VarPtr& var) const {
+  auto current = var;
+  while (true) {
+    // Store-target entries already point to the latest value in this body.
+    if (auto it = store_target_renames_.find(current.get()); it != store_target_renames_.end()) {
+      return it->second;
+    }
+    auto it = var_remap_.find(current.get());
+    if (it == var_remap_.end() || it->second.get() == current.get()) return current;
+    // Follow the mutator's existing bindings. Visiting the terminal Var could
+    // rewrite its shape or initializer and create a Var with no definition.
+    current = AsVarLike(it->second);
+    INTERNAL_CHECK_SPAN(current, var->span_) << "Caller binding must resolve to a variable";
+  }
+}
+
 /**
  * @brief Process SeqStmts to analyze scope outputs using subsequent statements.
  *
@@ -2103,10 +2119,11 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // Build the call site in the parent function
   auto global_var = std::make_shared<GlobalVar>(outlined_func_name);
   std::vector<ExprPtr> call_args;
+  call_args.reserve(input_vars.size());
   for (const auto& input_var : input_vars) {
     // Captures must use the current caller binding. A loop carry can have a
     // new header binding when an earlier outlined scope rewrites its seed.
-    call_args.push_back(VisitExpr(input_var));
+    call_args.push_back(ResolveCallerBinding(input_var));
   }
 
   // ``with pl.at(..., deps=[...]) as tid:`` attaches metadata to the
@@ -2467,8 +2484,7 @@ void ScopeOutliner::RegisterVar(const VarPtr& var) {
  */
 VarPtr ScopeOutliner::CreateFreshStoreTargetVar(const VarPtr& original_var, const Span& span) {
   std::string fresh_name = GenerateFreshSSAName(original_var->name_hint_);
-  auto seed = AsVarLike(VisitExpr(original_var));
-  INTERNAL_CHECK_SPAN(seed, span) << "Store target must resolve to a caller variable";
+  auto seed = ResolveCallerBinding(original_var);
   auto fresh_var = std::make_shared<Var>(fresh_name, seed->GetType(), span);
   NoteStoreTargetRename(original_var, seed, fresh_var);
   SetStoreTargetRename(original_var, fresh_var);

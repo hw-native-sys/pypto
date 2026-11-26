@@ -264,6 +264,9 @@ class ScopeOutliner : public IRMutator {
   /// Record vars that become visible in the enclosing body after a child control-flow statement.
   void NoteLocalDefinitions(const std::vector<VarPtr>& vars);
 
+  /// Resolve an existing caller binding without rewriting its type or initializer.
+  [[nodiscard]] VarPtr ResolveCallerBinding(const VarPtr& var) const;
+
   /// Record @p fresh as the current value of store target @p original.
   ///
   /// When a control-flow body is open, the rename is also noted on the innermost
