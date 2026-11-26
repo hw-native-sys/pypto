@@ -384,6 +384,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     bool body_changed = false;
     std::vector<CarryCopy> else_copies;
     std::vector<MemRefPtr> targets(if_stmt->return_vars_.size());
+    std::vector<MemRefPtr> aligned_roots(targets.size());
     std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
@@ -422,6 +423,11 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // Check else branch: if MemRef differs from target, insert tile.move
       if (fixup_if_stmts_ && then_tile && else_tile) {
         auto else_memref = GetDefinedMemRef(else_tile);
+        const auto then_root = GetDefinedMemRef(GetTileTypeWithMemRef(BranchViewRoot(then_var)->GetType()));
+        if (SamePhysicalWindow(ProjectBranchWindow(else_var, BranchViewRoot(else_var), then_root),
+                               target_memref)) {
+          aligned_roots[i] = then_root;
+        }
         // Addresses, not allocations: an arm sitting on a sibling slot of the same
         // allocation still has to be copied into the phi's slot.
         const AddressRelation arm = CompareBaseAddress(else_memref, target_memref);
@@ -466,29 +472,42 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       const CarryRangeIndex targets_index(targets);
       // A swap has distinct destinations but needs a temporary. Two different
       // results assigned overlapping destinations cannot be preserved by reordering.
+      // Visit enclosing windows first, independent of tuple order. A full transfer can
+      // supply subviews; a subview transfer alone cannot supply its full tile.
+      std::stable_sort(else_copies.begin(), else_copies.end(),
+                       [](const CarryCopy& lhs, const CarryCopy& rhs) {
+                         return lhs.src_memref->size_ > rhs.src_memref->size_;
+                       });
       std::set<size_t> repeated;
       std::map<size_t, BranchTransfer> transfers;
       for (auto& copy : else_copies) {
         if (repeated.count(copy.index)) continue;
         const auto root = BranchViewRoot(copy.source);
+        const auto view = branch_views_.find(copy.source.get());
+        const auto cover = view == branch_views_.end() ? copy.source : view->second.cover;
         targets_index.ForEachOverlapping(copy.dst_memref, [&](size_t other) {
           if (other == copy.index) return;
           const auto sibling = AsVarLike(else_yield->value_.at(other));
           const auto source = GetTypeMemRef(else_yield->value_[other]->GetType());
-          CHECK_SPAN(source && SamePhysicalWindow(*source, copy.src_memref) &&
-                         SamePhysicalWindow(targets[other], copy.dst_memref),
-                     if_stmt->span_)
+          const bool same_windows = source && SamePhysicalWindow(*source, copy.src_memref) &&
+                                    SamePhysicalWindow(targets[other], copy.dst_memref);
+          const bool common_root =
+              sibling && root == BranchViewRoot(sibling) &&
+              GetTileTypeWithMemRef(root->GetType())->GetMemorySpace() == copy.dst_memory;
+          const bool can_rebuild =
+              common_root && copy.src_memref->size_ == copy.dst_memref->size_ &&
+              SamePhysicalWindow(ProjectBranchWindow(sibling, cover, copy.dst_memref), targets[other]);
+          // Even without an enclosing result, partial copies agree on their intersection
+          // when both branches place each view at the same offset within the paired roots.
+          const bool aligned =
+              common_root && SamePhysicalWindow(aligned_roots[copy.index], aligned_roots[other]);
+          CHECK_SPAN(same_windows || can_rebuild || aligned, if_stmt->span_)
               << "Branch results '" << new_return_vars[copy.index]->name_hint_ << "' and '"
               << new_return_vars[other]->name_hint_ << "' require overlapping destination slots";
-          if (!sibling) return;
           const bool distinct_views = sibling != copy.source;
-          if (distinct_views &&
-              (root != BranchViewRoot(sibling) ||
-               GetTileTypeWithMemRef(root->GetType())->GetMemorySpace() != copy.dst_memory)) {
-            return;
-          }
+          if ((distinct_views && !can_rebuild) || (!distinct_views && !same_windows)) return;
           auto it = transfers.try_emplace(copy.index, BranchTransfer{copy.source, {copy.index}}).first;
-          if (distinct_views) it->second.source = root;
+          if (distinct_views) it->second.source = cover;
           it->second.positions.push_back(other);
           repeated.insert(other);
         });
@@ -575,6 +594,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   struct BranchView {
     CallPtr call;
     VarPtr root;
+    VarPtr cover;    // highest ancestor with the same physical window
+    ExprPtr offset;  // relative to the immediate input
   };
   std::map<const Var*, BranchView> branch_views_;
 
@@ -594,23 +615,47 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     const auto input = AsVarLike(call->args_.front());
     const auto tile = GetTileTypeWithMemRef(assignment->var_->GetType());
     const auto parent = input ? GetTileTypeWithMemRef(input->GetType()) : nullptr;
-    if (!SameKnownTileMemorySpace(tile, parent) ||
-        !SamePhysicalWindow(GetDefinedMemRef(tile), GetDefinedMemRef(parent)))
+    if (!SameKnownTileMemorySpace(tile, parent)) return;
+    const auto window = GetDefinedMemRef(tile);
+    const auto offset = ComputeViewByteOffset(call, parent);
+    if (!SamePhysicalWindow(window, MakeAliasingMemRef(GetDefinedMemRef(parent), offset, window->size_))) {
       return;
+    }
 
-    // A transfer reads only the valid region. A full parent covers any same-window view.
-    // For a partially valid parent, a zero-origin slice or a valid-shape update can narrow it.
+    // A partially valid source can supply a slice only inside its valid region.
     const auto valid = GetValidShape(parent);
     if (!ValidExtentsEqual(valid, parent->shape_)) {
-      if ((!IsOp(call, "tile.slice") && !IsOp(call, "tile.set_validshape")) ||
-          !PhysicalShapesEqual(tile->shape_, parent->shape_))
-        return;
+      const auto slice = IsOp(call, "tile.slice");
+      if (!slice && !IsOp(call, "tile.set_validshape")) return;
       const auto view_valid = GetValidShape(tile);
+      const auto offsets = slice ? As<MakeTuple>(call->args_.at(2)) : nullptr;
+      if (view_valid.size() != valid.size() ||
+          (slice && (!offsets || offsets->elements_.size() != valid.size()))) {
+        return;
+      }
       for (size_t i = 0; i < valid.size(); ++i) {
-        if (ProveValidExtentLessEqual(view_valid[i], valid[i]) != ProofResult::kTrue) return;
+        const auto end = slice ? AddByteOffsets(offsets->elements_[i], view_valid[i]) : view_valid[i];
+        if (ProveValidExtentLessEqual(end, valid[i]) != ProofResult::kTrue) return;
       }
     }
-    branch_views_.emplace(assignment->var_.get(), BranchView{call, BranchViewRoot(input)});
+    const auto it = branch_views_.find(input.get());
+    const auto cover = SamePhysicalWindow(window, GetDefinedMemRef(parent))
+                           ? (it == branch_views_.end() ? input : it->second.cover)
+                           : assignment->var_;
+    branch_views_.emplace(assignment->var_.get(), BranchView{call, BranchViewRoot(input), cover, offset});
+  }
+
+  // Project a descendant's window onto a relocated ancestor. A sibling outside that
+  // subtree cannot be reconstructed from this transfer.
+  MemRefPtr ProjectBranchWindow(const VarPtr& value, const VarPtr& ancestor, const MemRefPtr& target) const {
+    if (value == ancestor) return target;
+    const auto it = branch_views_.find(value.get());
+    if (it == branch_views_.end()) return nullptr;
+    const auto& view = it->second;
+    const auto parent = ProjectBranchWindow(AsVarLike(view.call->args_.front()), ancestor, target);
+    if (!parent) return nullptr;
+    return MakeAliasingMemRef(parent, view.offset,
+                              GetDefinedMemRef(GetTileTypeWithMemRef(value->GetType()))->size_, value->span_);
   }
 
   VarPtr BranchViewRoot(const VarPtr& value) const {
@@ -620,13 +665,20 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
   // Rebuild each original descriptor from the relocated data, retaining view operands
   // such as runtime valid extents. Cache shared prefixes and identical yield positions.
-  VarPtr RebuildBranchView(const VarPtr& value, const MemRefPtr& target,
-                           std::map<const Var*, VarPtr>* rebuilt, std::vector<StmtPtr>* statements) const {
-    if (auto it = rebuilt->find(value.get()); it != rebuilt->end()) return it->second;
-    const auto& call = branch_views_.at(value.get()).call;
+  VarPtr RebuildBranchView(const VarPtr& value, std::map<const Var*, VarPtr>* rebuilt,
+                           std::vector<StmtPtr>* statements) const {
+    if (auto it = rebuilt->find(value.get()); it != rebuilt->end()) {
+      return it->second;
+    }
+    const auto& original = branch_views_.at(value.get());
+    const auto& call = original.call;
     auto args = call->args_;
-    args.front() = RebuildBranchView(AsVarLike(args.front()), target, rebuilt, statements);
-    const auto type = CloneTypeWithMemRef(value->GetType(), target);
+    const auto parent = RebuildBranchView(AsVarLike(args.front()), rebuilt, statements);
+    args.front() = parent;
+    const auto size = GetDefinedMemRef(GetTileTypeWithMemRef(value->GetType()))->size_;
+    const auto window = MakeAliasingMemRef(GetDefinedMemRef(GetTileTypeWithMemRef(parent->GetType())),
+                                           original.offset, size, value->span_);
+    const auto type = CloneTypeWithMemRef(value->GetType(), window);
     const auto view = std::make_shared<Var>(value->name_hint_ + "_mv_view", type, value->span_);
     const auto expr =
         std::make_shared<Call>(call->op_, std::move(args), call->kwargs_, call->attrs_, type, call->span_);
@@ -890,8 +942,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       if (it == transfers.end()) continue;
       std::map<const Var*, VarPtr> rebuilt{{it->second.source.get(), copy.moved_var}};
       for (size_t position : it->second.positions) {
-        new_yield->value_[position] =
-            RebuildBranchView(AsVarLike(yield->value_[position]), copy.dst_memref, &rebuilt, &moves);
+        new_yield->value_[position] = RebuildBranchView(AsVarLike(yield->value_[position]), &rebuilt, &moves);
       }
     }
     return InsertMovesAndReplaceYield(body, new_yield, moves);

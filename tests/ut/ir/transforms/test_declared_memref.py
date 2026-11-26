@@ -932,8 +932,13 @@ class TestSlots:
         assert [contents[address(var)] for var in branch.return_vars] == [2, 3, 2]
 
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
-    @pytest.mark.parametrize("source_cols", [48, 64])
-    def test_branch_transfer_preserves_each_yielded_view(self, planner, source_cols, ascend_backend):
+    @pytest.mark.parametrize(
+        ("source_cols", "view_cols", "then_col", "else_col"),
+        [(48, 64, 0, 0), (64, 64, 0, 0), (64, 32, 0, 0), (64, 32, 32, 32), (48, 32, 16, 16), (64, 32, 0, 32)],
+    )
+    def test_branch_transfer_preserves_each_yielded_view(
+        self, planner, source_cols, view_cols, then_col, else_col, ascend_backend
+    ):
         buf = pl.MemRef("buf", slots=2)
 
         @pl.program
@@ -949,19 +954,24 @@ class TestSlots:
                     a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(
                         x, [0, 0], [1, 64], valid_shape=[1, source_cols]
                     )
-                    av = pl.tile.slice(a, [1, 64], [0, 0], valid_shape=[1, 32])
+                    av = pl.tile.slice(a, [1, view_cols], [0, then_col], valid_shape=[1, 32])
                     small, full, again = pl.yield_(av, a, av)
                 else:
                     b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(
                         x, [1, 0], [1, 64], valid_shape=[1, source_cols]
                     )
-                    bv = pl.tile.slice(b, [1, 64], [0, 0], valid_shape=[1, 32])
+                    bv = pl.tile.slice(b, [1, view_cols], [0, else_col], valid_shape=[1, 32])
                     small, full, again = pl.yield_(bv, b, bv)
                 out = pl.store(small, [0, 0], out)
                 out = pl.store(full, [1, 0], out)
                 return pl.store(again, [2, 0], out)
 
         with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            if then_col != else_col:
+                # Preserving the full tile and simultaneously overwriting its first half is impossible.
+                with pytest.raises(ValueError, match="require overlapping destination slots"):
+                    _run_full_pipeline(Before, "AllocateMemoryAddr")
+                return
             after = _run_full_pipeline(Before, "AllocateMemoryAddr")
         func = after.get_function("main")
         assert func is not None
@@ -991,7 +1001,12 @@ class TestSlots:
         write_cols, dst = descriptor(move.var)
         assert read_cols == write_cols == source_cols and src != dst
         result = next(s for s in stmts if isinstance(s, ir.YieldStmt))
-        assert [descriptor(var) for var in result.value] == [(32, dst), (source_cols, dst), (32, dst)]
+        slice_dst = dst + then_col * 4
+        assert [descriptor(var) for var in result.value] == [
+            (32, slice_dst),
+            (source_cols, dst),
+            (32, slice_dst),
+        ]
 
     def test_slot_size_is_the_largest_tile_on_any_slot(self):
         """Slots are uniform, so one slot must hold the biggest bound tile.
