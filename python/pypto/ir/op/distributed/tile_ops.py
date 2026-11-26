@@ -156,6 +156,9 @@ def remote_store(
 ) -> Call:
     """Build a ``pld.tile.remote_store(src_tile, target, peer, offsets)`` Call.
 
+    Codegen drains the direct tile store and emits a GM release fence. Pair
+    the store with notify/wait to signal completion to the receiver.
+
     Args:
         src_tile: Local :class:`ir.Expr` with 2-D :class:`ir.TileType` (dtype
             must match ``target.dtype``).

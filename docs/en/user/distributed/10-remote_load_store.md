@@ -130,6 +130,12 @@ global-memory region: `put` streams through a staging tile and has the
 `chunk_rows` / `chunk_cols` / `pipeline` knobs, so it is not limited to what
 fits on-core. `remote_store` moves what you already have on-core, in one write.
 
+For a computed UB tile such as a `6 × 4096` FP32 slab, `pld.tile.remote_store`
+emits a direct `TSTORE` to the peer window. PyPTO drains the store before
+peer-addressed cache maintenance and emits a GM release fence. Follow the store
+with `pld.system.notify` and wait on the corresponding signal before reading on
+the peer.
+
 ## Edge cases
 
 > **Fatal pitfall — RMA before the ordering barrier.** `remote_load` reads

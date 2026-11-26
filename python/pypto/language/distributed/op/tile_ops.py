@@ -193,13 +193,14 @@ def remote_store(
     destination is a *remote* slice of a window-bound
     :class:`pld.DistributedTensor`. Address translation happens at codegen
     via inline peer-offset arithmetic + addptr + make_tensor_view.
+    Codegen drains the direct tile store and emits a GM release fence.
 
     .. code-block:: python
 
        # Write a computed tile into peer rank 1's data window.
        pld.tile.remote_store(tile, data, peer=1, offsets=[0, 0])
-       # remote_store is a raw write with no synchronization of its own —
-       # pair it with pld.system.notify()/wait() to signal completion.
+       # Pair the store with pld.system.notify()/wait() to signal completion
+       # to the receiver.
 
        # Combine instead of overwrite: sum every rank's contribution in place.
        pld.tile.remote_store(tile, data, peer=1, offsets=[0, 0], atomic=pld.AtomicType.Add)

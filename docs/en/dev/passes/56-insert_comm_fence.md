@@ -2,12 +2,8 @@
 
 ## Overview
 
-`InsertCommFence` implements the *data-before-signal* memory-consistency contract
-the latest PTOAS defines in its `pto-memory-consistency` pass and pushes onto the
-compiler. "Pushes onto the compiler" is literal: ptoas requires the markers but
-does not check for them, so satisfying the contract is entirely this pass's job
-(see [ptoas does not gate this](#ptoas-does-not-gate-this--the-markers-are-the-compilers-obligation)).
-The contract is **two-sided**:
+`InsertCommFence` emits the GM fences and cache maintenance for both sides of
+a cross-rank data-before-signal handshake.
 
 - **Publish side.** A `pto.comm.tnotify` requires an explicit
   `pto.fence.barrier_all #pto.fence_scope<gm>` after the matching
@@ -29,6 +25,12 @@ distinguished by arity:
 | ---- | -- | --------- |
 | Region | `system.cacheinvalid(tensor, shapes, offsets)` | `pto.cmo.cacheinvalid … single_cache_line` |
 | Whole-GM | `system.cacheinvalid()` (no args) | `pto.cmo.cacheinvalid all #pto.address_space<gm>` |
+
+The pass tags generated wait acquires as `system.cacheinvalid(comm_acquire=True)`.
+PTO codegen emits `{pto.comm_acquire}` on the whole-cache CMO. An assembler that
+supports this attribute may omit the CMO when it proves scalar GM cache
+maintenance is unnecessary. Other assemblers emit the whole-cache operation.
+Explicit cache maintenance and opaque-write release markers are untagged.
 
 `system.fence` lowers to `pto.fence.barrier_all #pto.fence_scope<gm>` — a GM
 barrier with DDR observability, stronger than a bare `pto.barrier <PIPE_ALL>`.

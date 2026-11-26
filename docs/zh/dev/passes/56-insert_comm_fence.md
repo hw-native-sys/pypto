@@ -2,10 +2,8 @@
 
 ## 概述
 
-`InsertCommFence` 实现最新 PTOAS 在其 `pto-memory-consistency` pass 中定义、并下放给
-编译器的 *data-before-signal* 内存一致性契约。「下放给编译器」是字面意思：ptoas 要求这些
-标记，但**不检查**它们是否存在，因此满足契约完全是本 pass 的职责
-（见 [ptoas 不做守门](#ptoas-不做守门--插标记是编译器的义务)）。该契约是**双向**的：
+`InsertCommFence` 为跨 rank 的先数据后信号协议在发布端和消费端生成 GM fence
+与缓存维护操作。
 
 - **发布侧。** `pto.comm.tnotify` 要求在其匹配的 `pto.cmo.cacheinvalid` 释放标记之后、
   信号之前，显式插入一条 `pto.fence.barrier_all #pto.fence_scope<gm>` —— 跨 rank 的写
@@ -24,6 +22,11 @@
 | ---- | -- | ------ |
 | 区域 | `system.cacheinvalid(tensor, shapes, offsets)` | `pto.cmo.cacheinvalid … single_cache_line` |
 | 全 GM | `system.cacheinvalid()`（无参） | `pto.cmo.cacheinvalid all #pto.address_space<gm>` |
+
+本 pass 用 `system.cacheinvalid(comm_acquire=True)` 标记生成的 wait acquire。
+PTO codegen 在整缓存 CMO 上生成 `{pto.comm_acquire}`。支持该属性的汇编器若能证明
+无需维护标量 GM 缓存，即可省略这条 CMO。其他汇编器照常发出整缓存操作。
+显式缓存维护和不透明发布写的 release 标记不带此属性。
 
 `system.fence` 降为 `pto.fence.barrier_all #pto.fence_scope<gm>` —— 带 DDR 可见性的 GM
 屏障，强于裸的 `pto.barrier <PIPE_ALL>`。
