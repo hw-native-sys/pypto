@@ -329,6 +329,86 @@ def test_mx_scale_extract_accepts_defined_inplace_data_alias(tmp_path, planner):
     assert "TEXTRACT(" in _assemble_mx(mlir, tmp_path, planner=planner)
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("alias", [False, True])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_mx_scale_extract_shared_data_lifetimes(planner, alias, overlap):
+    # Distinct scale values bound to the same physical data address must not
+    # overlap, even when the data operands are different SSA aliases.
+    second_data = "a_valid" if alias else "a0"
+    first_mma = "acc = pl.matmul_mx(a0, sa0, b0, sb0)"
+    second_extract = "sa1 = pl.tile.extract(sam, 0, 4, [64, 4], target_memory=pl.Mem.LeftScale)"
+    body = [second_extract, first_mma] if overlap else [first_mma, second_extract]
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def main(
+        self,
+        a: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+        b: pl.Tensor[[128, 256], pl.FP8E4M3FN],
+        sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+        sb: pl.Tensor[[4, 256], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        am = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        bm = pl.load(b, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+        sam = pl.load(sa, [0, 0], [64, 8], target_memory=pl.Mem.Mat)
+        sbm = pl.load(sb, [0, 0], [4, 256], target_memory=pl.Mem.Mat)
+        a0 = pl.tile.extract(am, 0, 0, [64, 128], target_memory=pl.Mem.Left)
+        b0 = pl.tile.extract(bm, 0, 0, [128, 256], target_memory=pl.Mem.Right)
+        a_valid = pl.set_validshape(a0, 64, 128)
+        sa0 = pl.tile.extract(sam, 0, 0, [64, 4], target_memory=pl.Mem.LeftScale)
+        sb0 = pl.tile.extract(sbm, 0, 0, [4, 256], target_memory=pl.Mem.RightScale)
+        {body[0]}
+        {body[1]}
+        acc = pl.matmul_mx_acc(acc, {second_data}, sa1, b0, sb0)
+        return pl.store(acc, [0, 0], out)
+""")
+    if overlap:
+        with pytest.raises(
+            ValueError, match="Overlapping MX scale extractions cannot share a data allocation"
+        ):
+            _emit_incore_mlir(program, planner=planner)
+    else:
+        assert "pto.tmatmul.mx.acc" in _emit_incore_mlir(program, planner=planner)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_mx_scale_extract_accepts_dominating_reshape(tmp_path, planner):
+    # The reshape may define a fresh pto.treshape handle rather than alloc_tile.
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            a: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+            b: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+            sa: pl.Tensor[[32, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            sb: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+            out: pl.Out[pl.Tensor[[32, 256], pl.FP32]],
+        ) -> pl.Tensor[[32, 256], pl.FP32]:
+            am = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+            bm = pl.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+            sam = pl.load(sa, [0, 0], [32, 8], target_memory=pl.Mem.Mat)
+            sbm = pl.load(sb, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+            a0 = pl.tile.extract(am, 0, 0, [64, 128], target_memory=pl.Mem.Left)
+            a_view = pl.tile.reshape(a0, [32, 256])
+            b0 = pl.move(bm, pl.Mem.Right)
+            sa0 = pl.tile.extract(sam, 0, 0, [32, 8], target_memory=pl.Mem.LeftScale)
+            sb0 = pl.move(sbm, pl.Mem.RightScale)
+            acc = pl.matmul_mx(a_view, sa0, b0, sb0)
+            return pl.store(acc, [0, 0], out)
+
+    mlir = _emit_incore_mlir(Program, planner=planner)
+    if planner == passes.MemoryPlanner.PTOAS:
+        view = re.search(r"(%\S+) = pto\.treshape", mlir)
+        assert view
+        assert mlir.index(f"pto.tget_scale_addr ins({view[1]} :") > view.start()
+    assert "TEXTRACT(" in _assemble_mx(mlir, tmp_path, planner=planner)
+
+
 class TestMxMatmulCodegen:
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
     @pytest.mark.parametrize("hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NOT_ALLOC_KEEP])

@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -1412,6 +1413,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       std::set<const ir::Var*> extracts;
       std::map<const ir::Var*, size_t> uses;
       std::map<const ir::Var*, size_t> binding_uses;
+      std::map<const ir::Var*, std::vector<ir::VarPtr>> bound_results;
       std::map<const ir::Var*, size_t> definitions;
       size_t next_definition = 1;
 
@@ -1419,6 +1421,11 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       void VisitStmt_(const ir::AssignStmtPtr& stmt) override {
         if (ir::IsOp(ir::As<ir::Call>(stmt->value_), "tile.extract")) {
           extracts.insert(stmt->var_.get());
+        }
+        if (auto call = As<ir::Call>(stmt->value_); ir::IsOp(call, "tile.tget_scale_addr")) {
+          if (auto scale = ir::AsVarLike(call->args_[0])) {
+            bound_results[scale.get()].push_back(stmt->var_);
+          }
         }
         // Count only RHS uses; assignment targets are definitions.
         VisitExpr(stmt->value_);
@@ -1472,6 +1479,62 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
                    it->first->span_)
             << "Define the MX data tile before extracting its corresponding scale tile";
         ++it;
+      }
+    }
+    // The data-first rule alone does not prevent two scales paired with the
+    // same data allocation from overwriting each other. Use the loop-aware
+    // individual live ranges (not the merged MemRef lifetime), extending each
+    // extracted scale through the consumers of its tget_scale_addr aliases.
+    // Non-overlapping scale writes may safely reuse the same derived address.
+    if (collector.bindings.size() > 1) {
+      const auto liveness = ir::AnalyzeAllocationLifetimes(func).var_liveness;
+      struct ScaleLifetime {
+        const ir::Var* scale;
+        ir::VarPtr data;
+        int first;
+        int last;
+      };
+      std::vector<ScaleLifetime> scales;
+      for (const auto& [scale, data] : collector.bindings) {
+        const auto [first, last] = liveness.at(scale);
+        int last_use = last;
+        for (const auto& bound : collector.bound_results[scale]) {
+          last_use = std::max(last_use, liveness.at(bound.get()).second);
+        }
+        scales.push_back({scale, data, first, last_use});
+      }
+      // Sweep in definition order, comparing only simultaneously live scales.
+      std::sort(scales.begin(), scales.end(),
+                [](const ScaleLifetime& a, const ScaleLifetime& b) { return a.first < b.first; });
+      for (size_t i = 0; i < scales.size(); ++i) {
+        const auto& a = scales[i];
+        auto a_type = ir::GetTileTypeWithMemRef(a.data->GetType());
+        for (size_t j = i + 1; j < scales.size(); ++j) {
+          const auto& b = scales[j];
+          if (a.last < b.first) break;
+          auto b_type = ir::GetTileTypeWithMemRef(b.data->GetType());
+          if (a_type && b_type && a_type->GetMemorySpace() != b_type->GetMemorySpace()) continue;
+          bool overlaps = a.data == b.data;
+          if (a_type && b_type) {
+            auto a_ref = ir::GetDefinedMemRef(a_type);
+            auto b_ref = ir::GetDefinedMemRef(b_type);
+            auto a_off = As<ir::ConstInt>(a_ref->byte_offset_);
+            auto b_off = As<ir::ConstInt>(b_ref->byte_offset_);
+            // Fixed offsets are absolute within each L0 address space.
+            // PTOAS offsets are relative to the planner's allocation identity.
+            if ((emit_tile_addr_ && a_off && b_off) || a_ref->base_ == b_ref->base_) {
+              overlaps = true;
+              if (a_off && b_off && a_ref->slot_count_ == 1 && b_ref->slot_count_ == 1) {
+                overlaps = a_off->value_ <= b_off->value_
+                               ? static_cast<uint64_t>(b_off->value_ - a_off->value_) < a_ref->size_
+                               : static_cast<uint64_t>(a_off->value_ - b_off->value_) < b_ref->size_;
+              }
+            }
+          }
+          CHECK_SPAN(!overlaps, b.scale->span_)
+              << "Overlapping MX scale extractions cannot share a data allocation; "
+                 "consume the first scale before extracting the next one";
+        }
       }
     }
     fs_.mx_scale_extract_data = std::move(collector.bindings);
@@ -2788,6 +2851,10 @@ void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::st
       }
     }
   }
+  // A newly emitted view defines its own descriptor in the current region,
+  // even though its storage is inherited from a dominating allocation.
+  // Preserve the original scope for address-backed views of existing handles.
+  fs_.tile_alloc_scope.try_emplace(ssa_name, fs_.tile_alloc_scope_stack.back());
   const auto source = fs_.tile_view_names.find(reshape_source);
   fs_.tile_view_names[ssa_name] = source != fs_.tile_view_names.end()
                                       ? source->second

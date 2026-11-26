@@ -72,6 +72,8 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 其他情况下，在对应 data tile 已定义后、抽取之前发射地址绑定。
 直接 scale 抽取要求先定义配对的 data tile，且 scale 结果仅由配对的 MX matmul 消费，
 使 scale 的生命周期不会超过其 L0 data 分配的生命周期。
+共享同一 L0 data 分配的不同抽取 scale 的生命周期不得重叠；应先消费第一个 scale，
+再抽取下一个 scale。如果 data view 的 descriptor 定义支配抽取操作，也允许使用该 view。
 
 ## 相关
 

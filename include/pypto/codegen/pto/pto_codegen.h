@@ -1336,7 +1336,7 @@ class PTOCodegen : public CodegenBase {
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).
     std::set<std::string> emitted_tile_alloc_names;
-    /// Declaration region for each emitted/staged alloc. Region 0 is the
+    /// Declaration region for each emitted/staged tile descriptor (alloc or view). Region 0 is the
     /// function body/head; every SCF region gets a unique ID, including sibling
     /// branches at the same nesting depth. Only active ancestor regions dominate
     /// the current emission point. Keep this separate from function-wide dedup.

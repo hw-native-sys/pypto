@@ -78,6 +78,9 @@ emitted before the extraction, once the associated data tile is defined.
 Direct scale extraction requires the paired data tile to be defined first
 and the scale result to be used only by its paired MX matmul consumers, so
 the scale's lifetime cannot exceed the lifetime of its L0 data allocation.
+Distinct extracted scales sharing an L0 data allocation must have non-overlapping
+live ranges; consume the first scale before extracting the next one. A previously
+defined data view is also valid when its descriptor dominates the extraction.
 
 ## Related
 
