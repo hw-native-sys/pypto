@@ -26,13 +26,14 @@ MAX_BYTES = 60000
 DIFF_READ_ERRORS = (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError)
 
 
-def is_review_workflow(path: object) -> bool:
-    """Match the caller workflow path reported by Actions, optionally suffixed with @ref."""
-    return isinstance(path, str) and path.split("@", 1)[0] in (
-        ".github/workflows/ai-review.yml",
-        ".github/workflows/ai-review-retarget.yml",
-        ".github/workflows/codex-review.yml",  # Runs created before the workflow was renamed.
-    )
+def is_review_workflow(path: object, *, include_legacy: bool = True) -> bool:
+    """Match the exact caller workflow path reported by Actions, optionally suffixed with @ref."""
+    if not isinstance(path, str):
+        return False
+    workflow = path.partition("@")[0]
+    if workflow == ".github/workflows/codex-review.yml":
+        return include_legacy
+    return workflow in (".github/workflows/ai-review.yml", ".github/workflows/ai-review-retarget.yml")
 
 
 def github_api(endpoint: str, payload: dict | None = None, *, paginate: bool = False) -> Any:

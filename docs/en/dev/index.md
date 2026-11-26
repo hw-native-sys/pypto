@@ -421,8 +421,10 @@ A small identity artifact is retained for 30 days; discussion content still
 expires after one day. Older runs can be verified from an unexpired discussion
 snapshot. If no verifiable run exists within GitHub's 30-day rerun window, the
 command falls back to standalone review and explicitly reports that existing
-PR Actions checks will not be replaced. Rerunning uses the original workflow revision. A run created by the earlier
-`Codex Review` workflow can still be rerun and reviews with Codex alone.
+PR Actions checks will not be replaced. Reruns use the original workflow revision.
+Pre-rename `Codex Review` runs use Codex alone and require `CODEX_REVIEW_ENABLED=true`.
+With that setting unset or disabled, the router skips those runs and uses another eligible run
+or starts a standalone AI Review.
 
 Conversation rollouts and the Codex session index persist in two Docker volumes
 on the dedicated runner, keyed by base repository ID and PR number. Later runs

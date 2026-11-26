@@ -31,6 +31,7 @@ def router(monkeypatch):
     spec.loader.exec_module(module)
     monkeypatch.setenv("AI_REVIEW_RERUN_TOKEN", "test-only-token")
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("CODEX_REVIEW_ENABLED", raising=False)
     monkeypatch.setattr(
         module.subprocess, "run", lambda *args, **kwargs: pytest.fail("Unexpected subprocess")
     )
@@ -135,20 +136,21 @@ def test_wrong_run_never_reads_artifact(router, run, pr, monkeypatch, field, val
 
 
 @pytest.mark.parametrize(
-    "path",
+    "path,legacy_enabled,reruns",
     [
-        "ai-review.yml",
-        "codex-review.yml@main",
-        "ai-review-retarget.yml@refs/heads/main",
-        "ai-review.yml@" + "b" * 40,
+        ("codex-review.yml", "", False),
+        ("codex-review.yml@main", "false", False),
+        ("codex-review.yml@" + "b" * 40, "TRUE", True),
+        ("ai-review-retarget.yml@refs/heads/main", "", True),
     ],
 )
-def test_workflow_path_accepts_optional_ref(router, run, pr, monkeypatch, path):
+def test_routes_only_to_enabled_workflows(router, run, pr, api, monkeypatch, path, legacy_enabled, reruns):
     run["path"] = f".github/workflows/{path}"
-    verified = []
-    monkeypatch.setattr(router, "snapshot_matches", lambda *args: verified.append(args) or True)
-    assert router.matching_run("owner/repo", run, pr)
-    assert verified == [("owner/repo", run, pr)]
+    monkeypatch.setenv("CODEX_REVIEW_ENABLED", legacy_enabled)
+    requested = []
+    monkeypatch.setattr(router.subprocess, "run", lambda args, **kwargs: requested.append(args[-1]))
+    assert router.route_review("owner/repo", pr) is reruns
+    assert requested == (["repos/owner/repo/actions/runs/123/rerun"] if reruns else [])
 
 
 def test_missing_credential_is_an_error_not_silent_fallback(router, pr, api, monkeypatch):
@@ -374,6 +376,7 @@ def install_snapshot(router, monkeypatch, pr, snapshot=None, name="discussion.js
 
 
 def test_fork_run_without_pr_links_verified_from_snapshot(router, run, pr, monkeypatch):
+    monkeypatch.setenv("CODEX_REVIEW_ENABLED", "true")
     install_snapshot(router, monkeypatch, pr)
     assert run["pull_requests"] == []
     run.update(
@@ -463,6 +466,7 @@ def test_workflow_limits_token_to_trusted_step():
     assert prepare["concurrency"]["cancel-in-progress"] is False
     assert prepare["concurrency"]["queue"] == "max"
     context = next(step for step in prepare["steps"] if step.get("id") == "context")
+    assert context["env"]["CODEX_REVIEW_ENABLED"] == "${{ vars.CODEX_REVIEW_ENABLED }}"
     assert context["env"]["AI_REVIEW_RERUN_TOKEN"] == (
         "${{ github.event_name == 'issue_comment' && "
         "(secrets.AI_REVIEW_RERUN_TOKEN || secrets.CODEX_REVIEW_RERUN_TOKEN) || '' }}"

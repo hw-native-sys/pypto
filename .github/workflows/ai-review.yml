@@ -62,6 +62,8 @@ jobs:
         id: context
         env:
           GH_TOKEN: ${{ github.token }}
+          # A rerun of codex-review.yml evaluates the original enable flag.
+          CODEX_REVIEW_ENABLED: ${{ vars.CODEX_REVIEW_ENABLED }}
           AI_REVIEW_RERUN_TOKEN: >-
             ${{ github.event_name == 'issue_comment' &&
             (secrets.AI_REVIEW_RERUN_TOKEN || secrets.CODEX_REVIEW_RERUN_TOKEN) || '' }}

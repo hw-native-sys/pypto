@@ -176,10 +176,11 @@ def target_is_current(repo: str, pr: dict) -> bool:
 
 
 def matching_run(repo: str, run: dict, pr: dict) -> bool:
-    """Require the workflow, base repository, and artifact-backed PR identity."""
+    """Require an enabled workflow, the base repository, and an artifact-backed PR identity."""
+    legacy_enabled = os.environ.get("CODEX_REVIEW_ENABLED", "").lower() == "true"
     if not (
         run["event"] == "pull_request_target"
-        and is_review_workflow(run["path"])
+        and is_review_workflow(run["path"], include_legacy=legacy_enabled)
         and run["repository"]["full_name"] == repo
     ):
         return False

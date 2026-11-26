@@ -325,7 +325,9 @@ PR 运行。同一个 PR 的准备任务会串行执行，最多保留 100 个�
 也不会回退到独立审查。小型身份产物保留
 30 天，完整讨论快照仍只保留一天；旧运行可以通过未过期的讨论快照验证。
 若 GitHub 允许重跑的 30 天窗口内没有可验证的运行，则回退为独立审查，
-并明确提示它不会替换 PR 原有的 Actions 检查。重跑使用原运行的工作流版本。原先由 `Codex Review` 创建的运行仍可重跑，当次审查只使用 Codex。
+并明确提示它不会替换 PR 原有的 Actions 检查。重跑使用原运行的工作流版本。
+改名前的 `Codex Review` 运行只使用 Codex，且要求 `CODEX_REVIEW_ENABLED=true`。
+旧开关未设置或已关闭时，路由会跳过这些运行，选择其他符合条件的运行，找不到时则启动独立的 AI Review。
 
 对话记录（rollout）和 Codex 会话索引保存在专用 runner 的两个 Docker 卷中，
 按目标仓库 ID 和 PR 编号隔离。后续运行通过 `codex exec resume <session-id>`
