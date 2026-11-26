@@ -520,13 +520,33 @@ static reads on the same allocation. Their own safety remains the caller's respo
 
 Paired results use one tuple-producing IR Call and two SSA results. The tuple,
 its projections and all carry masks remain local to the defining RegScope.
-Bind a paired call before indexing it: use `pair = pl.reg.mull(a, b, mask)`
-followed by `low = pair[0]`. Direct `pl.reg.mull(a, b, mask)[0]` is rejected.
+Use `low = pl.reg.mull(a, b, mask)[0]` when only one result is needed, including
+as an argument to another register operation. Each call is evaluated once;
+the parser binds the pair before projecting the selected result. To reuse both
+results, bind `pair = pl.reg.mull(a, b, mask)` and index `pair[0]` / `pair[1]`,
+or unpack it. Writing two separate calls still evaluates two calls.
+Nested register-call operands are evaluated left to right: positional arguments
+first, then keyword arguments in their written order. An earlier load therefore
+reads the old buffer value even when a later projected call writes that buffer.
 Unpack paired results before carrying them through `if` joins or loops: pass
 individual registers (for example, `low, high = pl.reg.mull(a, b, mask)`),
 not the tuple itself. The verifier rejects tuple-valued joins and loop carries.
 `mull` preserves input signedness in both halves. Subtraction carry masks use
 **true for no borrow**; they are distinct from the execution mask.
+
+For direct-projection A5 coverage, build `tests/st/runtime/vpto/test_reg_extended_onboard.py`
+with `--build OUTPUT --cases integer_u32 integer_i32 --direct-index`, then run
+`--worker OUTPUT "$TASK_DEVICE"`. This checks both indices of all seven paired
+operations, carry masks, inactive lanes, and guard regions against CPU goldens.
+Run the build through `task-submit --no-device` and execution through
+`task-submit --device auto`; execution reuses saved binaries and rejects compilation.
+The interleave runner below also accepts `--direct-index` at build time to test
+direct projections, including BF16 bit preservation and omitted masks.
+The extended runner's `projection_order_positional`, `projection_order_mixed`,
+`projection_order_keyword`, `projection_order_reversed`, and
+`projection_order_nested` cases check aliased reads and writes. Select them with
+`--cases` without `--direct-index`; they always use direct projections.
+
 PyPTO emits masked interleave directly. Both outputs of `intlv`/`dintlv`
 have zero in inactive lanes and preserve the bit patterns of active BF16
 values. Omitting the mask enables all lanes and preserves fusion opportunities.

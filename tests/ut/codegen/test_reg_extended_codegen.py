@@ -14,12 +14,13 @@ import subprocess
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, backend, codegen, ir, passes
+from pypto import CacheConfig, DataType, backend, codegen, ir, passes
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
 from pypto.ir.printer import python_print
 from pypto.language.parser import ParserError
+from pypto.runtime import ExecutionMode, RunConfig
 from pypto.runtime._vpto import ptoas_flags_for_source
 
 SPAN = ir.Span.unknown()
@@ -59,6 +60,19 @@ CASES = [
         for name in ("intlv", "dintlv")
         for dtype in ("FP16", "BF16", "INT32", "UINT32")
     ],
+]
+
+PAIRED_OPS = ("mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv")
+DIRECT_PAIR_CASES = [
+    (
+        name,
+        "UINT32",
+        f"{'carry' if index == 1 and name in ('addc', 'subc', 'addcs', 'subcs') else 'y'} = "
+        f"pl.reg.{name}({'x, x, m, m' if name in ('addcs', 'subcs') else 'x, x, m'})[{index}]"
+        + ("\n        y = x" if index == 1 and name in ("addc", "subc", "addcs", "subcs") else ""),
+    )
+    for name in PAIRED_OPS
+    for index in (0, 1)
 ]
 
 
@@ -158,7 +172,7 @@ def test_roundtrip_and_codegen(name, dtype, statement):
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("name,dtype,statement", CASES)
+@pytest.mark.parametrize("name,dtype,statement", CASES + DIRECT_PAIR_CASES)
 def test_extended_ops_compile_with_ptoas(name, dtype, statement, tmp_path):
     compiler = find_ptoas_binary()
     if compiler is None:
@@ -257,21 +271,72 @@ def kernel():
 """)
 
 
-@pytest.mark.parametrize("op_name", ["mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv"])
-@pytest.mark.parametrize("index", [0, 1])
-def test_direct_paired_call_projection_rejected_before_codegen(op_name, index):
-    args = "x, x, m, m" if op_name in ("addcs", "subcs") else "x, x, m"
-    # Direct indexing leaves the call nested inside TupleGetItemExpr. Reject it
-    # during verification rather than reaching an unbound codegen SSA lookup.
-    with pytest.raises((ValueError, ParserError), match="bind the paired call before indexing"):
-        pl.parse(f"""
-@pl.function(type=pl.FunctionType.AIV)
-def kernel():
-    with pl.reg_scope():
-        x = pl.reg.broadcast(2, lanes=64, dtype=pl.UINT32)
-        m = pl.reg.full_mask(lanes=64)
-        component = pl.reg.{op_name}({args})[{index}]
-""")
+@pytest.mark.parametrize("name,dtype,statement", DIRECT_PAIR_CASES)
+def test_direct_paired_call_projection(name, dtype, statement):
+    function = frontend(name, dtype, statement)
+    # Compare against the supported bound form, including consumption of the
+    # selected vector/carry. This detects swapped results and duplicated calls.
+    call = re.search(r"pl\.reg\.\w+\([^)]*\)", statement)
+    assert call is not None
+    bound_statement = f"pair = {call.group()}\n        {statement.replace(call.group(), 'pair')}"
+    expected = frontend(name, dtype, bound_statement)
+    ir.assert_structural_equal(function, expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(
+        function, pl.parse(python_print(function, format=False)), enable_auto_mapping=True
+    )
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    assert source.count(f"pto.vmi.v{name} ") == 1
+    pair = re.search(rf"(%[\w]+), (%[\w]+) = pto.vmi.v{name} ", source)
+    assert pair is not None
+    index = int(statement.split(")[", 1)[1][0])
+    consumer = "vsel" if statement.startswith("carry") else "vstore"
+    assert f"pto.vmi.{consumer} {pair.groups()[index]}," in source
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("form", ["positional", "mixed", "keyword", "reversed", "nested"])
+def test_direct_pair_projection_memory_order_compiles(form, tmp_path):
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    read = "pl.reg.load(dst, lanes=64)"
+    pair = "pl.reg.mull(pl.reg.load(pl.reg.store(dst, value=x), lanes=64), x, m)[0]"
+    expressions = {
+        "positional": f"pl.reg.add({read}, {pair})",
+        "mixed": f"pl.reg.add({read}, rhs={pair})",
+        "keyword": f"pl.reg.add(lhs={read}, rhs={pair})",
+        "reversed": f"pl.reg.add(rhs={read}, lhs={pair})",
+        "nested": f"pl.reg.add(pl.reg.add({read}, x), {pair})",
+    }
+    kernel = frontend("mull", "UINT32", f"y = {expressions[form]}", tensor_io=True)
+    with passes.PassContext([]):
+        ir.compile(
+            ir.Program([kernel], "ProjectionOrder", SPAN),
+            output_dir=str(tmp_path),
+            backend_type=backend.BackendType.Ascend950,
+            skip_ptoas=True,
+        )
+    pto = tmp_path / "kernels/aiv/kernel.pto"
+    source = pto.read_text()
+    memory_ops = re.findall(r"pto\.vmi\.(vload|vstore|vmull)\b", source)
+    # x load, old dst load, dst write, new dst load, multiply, final store.
+    assert memory_ops == ["vload", "vload", "vstore", "vload", "vmull", "vstore"]
+    result = subprocess.run(
+        [
+            compiler,
+            str(pto),
+            "--pto-arch=a5",
+            "--pto-level=level3",
+            "--emit-vpto",
+            "-o",
+            str(tmp_path / "order.vpto"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_unused_pair_projection_and_alias():
@@ -370,7 +435,7 @@ def test_indexed_view_origin_and_scatter_alias_compile(tmp_path, base_offset):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("name,dtype,statement", CASES)
+@pytest.mark.parametrize("name,dtype,statement", CASES + DIRECT_PAIR_CASES)
 def test_extended_ops_survive_default_pipeline(name, dtype, statement, tmp_path):
     # Tensor IO keeps the operation observable through the complete default
     # pipeline, including DCE, memory reuse and alias propagation.
@@ -384,6 +449,53 @@ def test_extended_ops_survive_default_pipeline(name, dtype, statement, tmp_path)
         )
     generated = (tmp_path / "kernels/aiv/kernel.pto").read_text()
     assert f"pto.vmi.v{name}" in generated
+
+
+@pytest.mark.ptoas_compile
+def test_direct_pair_projections_public_jit_compile(tmp_path):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is unavailable")
+
+    @pl.jit.aiv
+    def body(
+        src: pl.Tensor[[1, 128], pl.UINT32],
+        dst: pl.InOut[pl.Tensor[[1, 64], pl.UINT32]],
+    ):
+        a = pl.reshape(pl.load(src, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec), [128])
+        c = pl.reshape(pl.load(dst, [0, 0], [1, 64], target_memory=pl.MemorySpace.Vec), [64])
+        with pl.reg_scope():
+            x = pl.reg.load(a, lanes=64)
+            y = pl.reg.load(a, offset=64, lanes=64)
+            mask = pl.reg.active_mask(48, lanes=64)
+            high = pl.reg.mull(x, y, mask)[1]
+            total = pl.reg.addcs(x, y, pl.reg.addc(x, y, mask)[1], mask)[0]
+            merged = pl.reg.add(high, total, mask)
+            # Also exercise omitted-mask interleave and a projection used
+            # directly as a keyword operand, through public JIT specialization.
+            c = pl.reg.store(c, value=pl.reg.intlv(merged, y)[1])
+        pl.store(pl.reshape(c, [1, 64]), [0, 0], dst)
+        return dst
+
+    @pl.jit
+    def entry(
+        src: pl.Tensor[[1, 128], pl.UINT32],
+        dst: pl.InOut[pl.Tensor[[1, 64], pl.UINT32]],
+    ):
+        return body(src, dst)
+
+    entry.compile(
+        config=RunConfig(
+            backend_type=backend.BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            cache_config=CacheConfig(enabled=False),
+            save_kernels_dir=str(tmp_path),
+        )
+    )
+    helpers = list((tmp_path / "vpto").rglob("*.pto"))
+    assert len(helpers) == 1
+    source = helpers[0].read_text()
+    for name in ("mull", "addc", "addcs", "intlv"):
+        assert source.count(f"pto.vmi.v{name} ") == 1
 
 
 @pytest.mark.ptoas_compile

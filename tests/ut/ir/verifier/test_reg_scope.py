@@ -510,6 +510,28 @@ def test_tuple_cannot_hide_local_scalar_escape():
     assert any("escape" in d.message for d in verify(body))
 
 
+def test_raw_register_projection_still_requires_bound_pair():
+    mask = register("mask")
+    value = ir.create_op_call(
+        "reg.broadcast",
+        [ir.ConstInt(1, DataType.UINT32, SPAN)],
+        {"lanes": 64, "dtype": DataType.UINT32},
+        SPAN,
+    )
+    x = ir.Var("x", value.type, SPAN)
+    pair = ir.create_op_call("reg.mull", [x, x, mask], {}, SPAN)
+    projection = ir.TupleGetItemExpr(pair, 0, SPAN)
+    output = ir.Var("output", projection.type, SPAN)
+    diagnostics = verify(
+        region(
+            sequence(definition(mask), ir.AssignStmt(x, value, SPAN), ir.AssignStmt(output, projection, SPAN))
+        )
+    )
+    # The DSL now inserts a binding; hand-built IR must still satisfy codegen's
+    # SSA contract instead of hiding an unbound paired instruction in an Expr.
+    assert any("bound tuple variable" in diagnostic.message for diagnostic in diagnostics)
+
+
 @pytest.mark.parametrize("control_flow", ["if", "for"])
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("packed", [False, True])

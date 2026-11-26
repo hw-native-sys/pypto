@@ -394,6 +394,15 @@ class SubscriptParser:
             and 0 <= index < len(value_expr.elements)
         ):
             return value_expr.elements[index]
+        if (
+            isinstance(value_expr, ir.Call)
+            and isinstance(value_expr.type, ir.TupleType)
+            and all(isinstance(element, ir.RegType) for element in value_expr.type.types)
+        ):
+            # Paired register instructions bind both SSA results at assignment.
+            # Materialize once in the current block, just like tuple unpacking,
+            # so an indexed call also works inside another register operation.
+            value_expr = self.services.builder.let("_tuple_tmp", value_expr, span=span)
         return ir.TupleGetItemExpr(value_expr, index, span)
 
     def normalize_subscript_indices(self, subscript: ast.Subscript, span: ir.Span) -> list[ast.expr]:

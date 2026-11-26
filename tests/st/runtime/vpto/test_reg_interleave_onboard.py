@@ -14,6 +14,7 @@ Build with --build OUTPUT under task-submit --no-device, then execute with
 without the governing mask so ignored masks cannot hide behind masked stores.
 Default lengths cover physical registers and larger vectors. Pass --lanes 8 to
 run the short-vector hardware regression for PTOAS #1659 separately.
+Add --direct-index when building to exercise both direct result projections.
 """
 
 import argparse
@@ -52,7 +53,7 @@ def _storage(dtype):
     return getattr(pl, f"UINT{bits}"), np.dtype(f"uint{bits}")
 
 
-def _program(dtype_name, lanes, omitted):
+def _program(dtype_name, lanes, omitted, direct_index=False):
     storage, _ = _storage(dtype_name)
     dtype = getattr(pl, dtype_name)
 
@@ -72,12 +73,24 @@ def _program(dtype_name, lanes, omitted):
             x = pl.reg.interpret_cast(first, dtype=dtype)
             y = pl.reg.interpret_cast(second, dtype=dtype)
             if omitted:
-                low, high = pl.reg.intlv(x, y)
-                even, odd = pl.reg.dintlv(x, y)
+                if direct_index:
+                    low = pl.reg.intlv(x, y)[0]
+                    high = pl.reg.intlv(x, y)[1]
+                    even = pl.reg.dintlv(x, y)[0]
+                    odd = pl.reg.dintlv(x, y)[1]
+                else:
+                    low, high = pl.reg.intlv(x, y)
+                    even, odd = pl.reg.dintlv(x, y)
             else:
                 mask = pl.reg.active_mask(count, lanes=lanes)
-                low, high = pl.reg.intlv(x, y, mask)
-                even, odd = pl.reg.dintlv(x, y, mask)
+                if direct_index:
+                    low = pl.reg.intlv(x, y, mask)[0]
+                    high = pl.reg.intlv(x, y, mask)[1]
+                    even = pl.reg.dintlv(x, y, mask)[0]
+                    odd = pl.reg.dintlv(x, y, mask)[1]
+                else:
+                    low, high = pl.reg.intlv(x, y, mask)
+                    even, odd = pl.reg.dintlv(x, y, mask)
             low_bits = pl.reg.interpret_cast(low, dtype=storage)
             high_bits = pl.reg.interpret_cast(high, dtype=storage)
             even_bits = pl.reg.interpret_cast(even, dtype=storage)
@@ -135,13 +148,19 @@ def _golden(data, lanes, active):
     return expected
 
 
-def _build(output, dtypes, lengths, modes):
+def _build(output, dtypes, lengths, modes, direct_index=False):
     pin = _environment()
     compiler = find_ptoas_binary()
     assert compiler is not None
     version = subprocess.check_output([compiler, "--version"], text=True).strip()
     output.mkdir(parents=True, exist_ok=False)
-    manifest = {"runtime_commit": pin.installed, "ptoas": version, "cases": [], "compile_failures": []}
+    manifest = {
+        "runtime_commit": pin.installed,
+        "ptoas": version,
+        "direct_index": direct_index,
+        "cases": [],
+        "compile_failures": [],
+    }
     recorder = runpy.run_path(str(ROOT / "examples/runtime/vf_emitc_vpto.py"))["_record_compilation"]
     for dtype in dtypes:
         _, storage = _storage(dtype)
@@ -157,7 +176,7 @@ def _build(output, dtypes, lengths, modes):
                 directory = output / name
                 entry = {"name": name, "dtype": dtype, "lanes": lanes, "mode": mode}
                 try:
-                    compiled = _program(dtype, lanes, mode == "omitted").compile(
+                    compiled = _program(dtype, lanes, mode == "omitted", direct_index).compile(
                         config=RunConfig(
                             backend_type=BackendType.Ascend950,
                             execution_mode=ExecutionMode.ONBOARD,
@@ -170,8 +189,11 @@ def _build(output, dtypes, lengths, modes):
                     assert len(helpers) == 1
                     for helper in helpers:
                         source = helper.read_text()
-                        assert source.count("pto.vmi.vintlv ") == 1
-                        assert source.count("pto.vmi.vdintlv ") == 1
+                        # Direct projection uses two written calls to observe
+                        # both indices. Neither call may be duplicated by lowering.
+                        call_count = 2 if direct_index else 1
+                        assert source.count("pto.vmi.vintlv ") == call_count
+                        assert source.count("pto.vmi.vdintlv ") == call_count
                         assert "pto.vmi.vsel " not in source
                         assert "interleave_zero" not in source
                         # Only the two input and four output bit transports remain.
@@ -263,6 +285,7 @@ def _run(output, device):
                 "device": device,
                 "hardware_executed": True,
                 "incore_compilation_during_run": False,
+                "direct_index": manifest.get("direct_index", False),
                 "ptoas": manifest["ptoas"],
                 "runtime_commit": pin.installed,
                 "compile_failures": manifest["compile_failures"],
@@ -296,9 +319,10 @@ if __name__ == "__main__":
             help="Explicit lengths, including small-VL reproductions; defaults to physical width and above",
         )
         parser.add_argument("--modes", nargs="+", choices=MODES, default=MODES)
+        parser.add_argument("--direct-index", action="store_true")
         args = parser.parse_args()
         if args.build:
-            _build(args.build.resolve(), args.dtypes, args.lanes, args.modes)
+            _build(args.build.resolve(), args.dtypes, args.lanes, args.modes, args.direct_index)
         else:
             _run(Path(args.worker[0]).resolve(), int(args.worker[1]))
     else:
