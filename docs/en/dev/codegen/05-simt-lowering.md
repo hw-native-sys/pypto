@@ -8,7 +8,7 @@ persistent runtime. See the [canonical SIMT IR](../ir/11-simt.md).
 
 - A5 AIV callers, with constant three-dimensional block sizes specialized by
   `SpecializeSimtHelpers` (up to 2,048 threads).
-- Borrowed GM Tensor and UB Vec Tile storage with FP32 or INT32 elements.
+- Borrowed GM Tensor and UB Vec Tile storage with supported non-packed numeric elements.
   Tiles require affine, unboxed layouts. Physical strides and Tile start offsets
   determine addressing; logical `valid_shape` never replaces the physical stride.
   Borrowed `tile.slice`/reshape view handles are rejected because their types
@@ -20,16 +20,16 @@ persistent runtime. See the [canonical SIMT IR](../ir/11-simt.md).
   updates to dense storage remain supported while updates to views remain rejected.
   Explicit strides on supported storage take precedence; dense DN Tensor fallback transposes only the trailing
   two axes and keeps batch axes outermost.
-- FP32, INT32, INDEX and BOOL scalar values; structured `if`, `for`, and `while`.
+- FP16/BF16/FP32, signed/unsigned 8/16/32/64-bit integers, INDEX and BOOL scalar values; structured `if`, `for`, and `while`.
   Signed integer floor division/modulo retain floor semantics. FP32 inequality
   treats NaN as unequal, and numeric-to-BOOL conversion compares against zero.
 - Thread/block/grid coordinates and extents, lane ID, and scalar loads/stores.
   GM cache policies pass through unchanged to native PTOAS operations.
-- Active-lane votes/ballot, INT32/FP32 shuffle (width 16 or 32), and
-  INT32/FP32 add/min/max redux. Integer min/max lower with explicit signed
-  comparison. See the [collective contract](../ir/11-simt.md#warp-collectives).
+- Active-lane votes/ballot, FP16/FP32 and 32/64-bit integer shuffle (width 16 or 32), and
+  FP16/FP32 and 32-bit integer add/min/max redux. Integer min/max lower with explicit signed or unsigned
+  comparison, inferred from unsigned dtypes or the explicit carrier flag. Shuffle accepts a source-window `bound`. See the [collective contract](../ir/11-simt.md#warp-collectives).
 
-Unsigned arithmetic, other storage dtypes, scalar exponentiation (`**`), floating-point floor division/modulo,
+FP8 and packed storage, scalar exponentiation (`**`), floating-point floor division/modulo,
 early return, break/continue, boxed Tile layouts and grouped kernel execution
 currently produce explicit diagnostics. CPU simulation (`a5sim`) and other device
 backends cannot execute these native helpers. As in canonical IR, indexing must
@@ -65,10 +65,16 @@ ELF, and supplies its `.text` to the persistent runtime. Helper contents and
 compiler identities participate in binary caching; relocating an artifact does
 not require its original helper paths.
 
-LLVM export bypasses PTOAS's object-level SIMT size repair. The supported subset
-uses intrinsics; a SIMT module containing inline assembly is rejected before
-device compilation. The acceptance tests compare the linked `VF_SIMT` size with
-the callee symbol size. No instruction bytes are patched by PyPTO.
+LLVM export bypasses PTOAS's object-level SIMT size repair. Intrinsic-only helpers
+continue through LLVM export and Bisheng. SIMT helpers containing inline assembly
+use PTOAS's native device-object emission. PTOAS validates or repairs `VF_SIMT`
+sizes. PyPTO adds logical-name
+aliases with a relocatable link for the emitted `.vector` or `_mix_aiv` ABI symbols.
+The selected SDK's CANN installation is passed to PTOAS explicitly. Native object
+flags participate in cache identity, and compilation or alias-link failures do
+not fall back to unchecked LLVM compilation. No instruction bytes are patched by
+PyPTO. Acceptance tests compare each linked `VF_SIMT` size with its callee symbol
+size; this compilation support does not expose a public `keep/resume` API.
 
 ## Focused acceptance
 
@@ -117,7 +123,7 @@ participation and untouched inactive outputs.
 ## Atomic and synchronization acceptance
 
 The native mapping uses `pto.atomic_add/min/max/exch/cas`, `pto.syncthreads`,
-`pto.threadfence`, and `pto.threadfence_block`. Integer min/max carry `signed`.
+`pto.threadfence`, and `pto.threadfence_block`. Integer min/max carry `signed` or `unsigned`.
 Atoms use the same affine element offset calculation as scalar memory operations,
 followed by `pto.addptr`; no untyped byte-address or allocation bypass is exposed.
 All atomic targets are ReadWrite, even when the old scalar is unused. Synchronization
@@ -131,10 +137,10 @@ calls remain ordered effects; `no_arg_writes` does not declare them pure.
 | `syncthreads` and both fences | LLVM workitem synchronization/fence intrinsics | Four-warp UB/GM publication and consumption; subsequent MTE output |
 
 This matrix was validated on Ascend950DT_9581, PTOAS v0.72, CANN 9.3.0 and
-runtime `391b2fbcd4dd053204a677662c39b6b7636e8043`. Supported atomic locations
-are naturally aligned four-byte elements; UINT32/INT64, half/bfloat16, packed
-values, selectable ordering/scope and cross-AIV synchronization remain outside
-this frontend contract. See [API semantics and limits](../ir/11-simt.md#atomics-and-synchronization).
+runtime `391b2fbcd4dd053204a677662c39b6b7636e8043`. These device results cover naturally aligned four-byte atomic elements. Wider
+and half/bfloat16 interfaces now have separate compile coverage; see the
+[per-operation matrix](06-simt-interface-coverage.md). Packed values, selectable
+ordering/scope and cross-AIV synchronization remain outside this frontend contract. See [API semantics and limits](../ir/11-simt.md#atomics-and-synchronization).
 The publication test uses a rendezvous; it does not establish that a fence alone
 is a synchronization protocol or promise system-wide visibility.
 
@@ -267,3 +273,54 @@ matching PTOAS object emission, before invoking CANN Bisheng. It preserves
 instructions, synchronization and other attributes.
 Groups left empty by this cleanup and their references are removed together,
 since LLVM rejects empty attribute groups.
+
+## Pitched GM windows and launch-boundary acceptance
+
+The public [strided-copy example](../../../../examples/advanced/07_simt_strided_copy.py)
+passes three `[8, 256]` windows to an AIV helper: FP32 input with row pitch 288,
+FP32 output with pitch 320, and INT32 thread tags with pitch 352. All have
+nonzero row and column origins. `OptimizeOrchTensors` propagates these physical
+strides to read and writable AIV parameters; SIMT specialization then retains
+that metadata. Previously, the helper used logical pitch 256 for all three,
+which addressed the wrong rows after the first row.
+
+The acceptance case uses `thread_idx` and `block_dim` on all three axes, lane ID,
+and a thread-strided loop. It covers `(n, 1, 1)` for
+`n = 1, 256, 257, 512, 513, 1024, 1025, 2048`, plus `(8, 4, 8)`. Each variant
+checks `valid = 0, 1, 255, 256, 257, 2047, 2048` with two input changes:
+**126 exact device comparisons**. Checks include both complete output parents,
+all inactive elements and surrounding guards, and an unchanged source.
+Compilation also verifies each linked SIMT launch length.
+
+The 2026-11-16 A5 run passed all 126 checks with PTOAS v0.74, CANN 9.3.0,
+and pinned runtime `27fe21756a5230cc4cfe7e44fa360d07d782a111`. Prepare artifacts
+without reserving a device, then execute them on a queued device:
+
+```bash
+python tests/st/runtime/vpto/test_simt_ir_onboard.py \
+  --strided-worker build/simt-strided
+
+task-submit --device auto --max-time 600 --run \
+  'python tests/st/runtime/vpto/test_simt_ir_onboard.py --strided-worker build/simt-strided "$TASK_DEVICE"'
+```
+
+`strided-artifacts.json` records the prepared artifact directories;
+`strided-result.json` records the per-variant counts, device, and runtime pin.
+The opt-in pytest case is `test_simt_strided`, with the same build/persistent
+gates as the earlier acceptance cases.
+
+Generated AIV kernels require static physical strides for sliced arguments,
+consistent across calls to each parameter. If pitches vary, pass the full
+parent and use parent-relative indices. An external C++ AIV parameter with
+static inner extents and no explicit tensor view can use runtime descriptor
+strides. With dynamic inner extents, runtime strides require packed ND storage
+on all incoming paths. Explicit parameter views enforce their storage contract.
+Reshapes and shape-bearing ND views require packed storage on every incoming path.
+Nested slices, aliases, tuple projections, dropped axes, and manual `Submit`
+calls have pass-level regression coverage. Packed short vectors remain outside
+this executable subset; this acceptance does not add packed storage or APIs.
+
+## Interface coverage
+
+See the [SIMT interface coverage matrix](06-simt-interface-coverage.md) for
+first-batch additions, evidence, and remaining task 11.7 limitations.

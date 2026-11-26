@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -47,6 +48,8 @@ class BackendHandler;
 }  // namespace backend
 
 namespace codegen {
+
+struct TensorParameterView;
 
 /**
  * @brief Collect Vars referenced by a tensor-shape expression, in first-seen DFS order.
@@ -89,10 +92,11 @@ struct VFHelper {
   std::vector<std::string> parameter_types;
   std::vector<std::string> caller_parameter_types;
   std::vector<std::string> parameter_effects;
-  /// Helper argument -> caller argument; VF collapses memory onto one UB base,
-  /// while SIMT retains each storage pointer and scalar argument in ABI order.
+  /// Helper parameter -> caller operand supplying that pointer or scalar.
   std::vector<size_t> parameter_indices;
-  /// VF byte offsets from its shared UB base; zero for scalars and SIMT pointers.
+  /// Caller operand -> helper pointer parameter, or -1 for a scalar.
+  std::vector<int64_t> capture_base_indices;
+  /// Byte displacement relative to that selected pointer.
   std::vector<int64_t> capture_byte_offsets;
 };
 
@@ -358,7 +362,7 @@ class PTOCodegen : public CodegenBase {
   void RegisterTensorView(const ir::VarPtr& var, const std::string& tensor_view_name);
 
   /// Record the base pointer SSA for a tensor var (keyed by Var, like tensor_to_view).
-  void RegisterBasePtr(const ir::VarPtr& var, const std::string& ptr_name);
+  void RegisterBasePtr(const ir::VarPtr& var, const std::string& ptr_name, bool window_origin = false);
 
   /// Base pointer SSA for a tensor var; lets element-wise pl.read/pl.write recover
   /// the underlying !pto.ptr even after a slice-assign rebound the var to a view,
@@ -570,6 +574,25 @@ class PTOCodegen : public CodegenBase {
   /// of such a handle. Subviews and control-flow arguments are not eligible.
   void RegisterMutableTileName(const std::string& ssa_name);
   bool IsMutableTileName(const std::string& ssa_name) const;
+  /// Require all live valid-column updates of this BF16 NZ insert source to
+  /// remain multiples of 16. Checked after the whole function is emitted so
+  /// aliases, branches, and loop backedges cannot evade the requirement.
+  void RequireNZInsertSourceAlignment(const std::string& ssa_name, const ir::Span& span);
+  void RecordTileValidColumnUpdate(const std::string& ssa_name, const ir::ExprPtr& valid_cols);
+  /// Record a FIFO-backed descriptor accepted as a local source by PTOAS >= 0.74.
+  /// This does not grant user-facing mutation of arbitrary derived views.
+  void RegisterTpopTileName(const std::string& ssa_name, int c2v_pipe = -1);
+  /// Model returning a VF-borrowed slot on PIPE_V for PTOAS dependency insertion.
+  void EmitVFC2VRelease(const ir::ExprPtr& tile);
+  void RecordExplicitPipeFlag() { fs_.has_explicit_pipe_flags = true; }
+  void RecordVecReservation(const std::string& handle, int base, int size) {
+    fs_.vec_reservations[handle] = {base, static_cast<int64_t>(base) + size};
+  }
+  void RecordC2VBuffer(int pipe, const std::string& handle, int slot_size, int slot_count);
+  /// Whether contiguous reshape/subview ancestry reaches a local allocation or TPOP.
+  /// Subview offsets remain distinct for alias checks; unknown roots (including
+  /// control-flow arguments) are not accepted merely because they share a MemRef.
+  bool IsLocallyBoundTileName(const std::string& ssa_name) const;
   struct SubviewMaterializationInfo {
     std::string source_ssa;
     std::string source_type;
@@ -898,14 +921,31 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::Var*, std::vector<std::string>> reg_tuple_values_;
   /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
+  // VMI cannot consume/produce physical VPTO values. A streaming scope uses
+  // one physical register lowering path for its entire producer chain.
+  bool micro_reg_scope_ = false;
+  bool TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& result);
+  ir::ExprPtr squeeze_destination_;
+  std::string squeeze_cursor_;
+  std::string squeeze_pointer_type_;
   bool separate_vf_ = false;
   bool supported_vf_entries_ = false;
   std::vector<VFHelper> vf_helpers_;
+  /// Caller-local release marker definitions, deduplicated by Tile descriptor type.
+  std::map<std::string, std::string> c2v_release_symbols_;
   std::map<std::string, std::vector<std::string>> entry_helpers_;
   /// Separate membership index preserves first-use order without linear scans.
   std::set<std::pair<std::string, std::string>> entry_helper_uses_;
   void RecordEntryHelperUse(const std::string& symbol);
   std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
+  // Retained for the generation call: owns original Vars used as alias keys.
+  ir::ProgramPtr vf_program_;
+  // Bound regions own cloned Vars referenced by emission state. Both these
+  // regions and tuple alias mappings are cleared on the next GenerateImpl;
+  // per-function identities remain distinct within a multi-entry generation.
+  std::vector<ir::RegScopeStmtPtr> bound_vf_regions_;
+  std::map<const ir::Var*, std::vector<ir::ExprPtr>> vf_return_aliases_;
+  bool TryEmitVFCall(const ir::CallPtr& call, const ir::VarPtr& result = nullptr);
   void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
   void EmitVFAdapter(const VFHelper& helper);
   /// SIMT functions borrow storage through a pointer ABI, never Tile values.
@@ -965,31 +1005,6 @@ class PTOCodegen : public CodegenBase {
   std::string EmitCastToInt(const ir::ExprPtr& expr, const std::string& mlir_name, unsigned target_bits,
                             const char* api_name);
 
-  /// Whether `expr` cannot be negative at run time, evaluated at `dtype` -- the
-  /// width the enclosing operation is emitted at, since `EmitArithOperand`
-  /// narrows operands into it.
-  ///
-  /// A conservative syntactic check, not a bound analysis: it answers `false`
-  /// whenever it is unsure, and a `false` only costs the cheaper lowering. It
-  /// recognises just the shapes a slot index is built from -- a literal, an
-  /// induction variable whose loop starts at a non-negative literal, that
-  /// variable minus a non-negative literal no greater than the start, and floor
-  /// divisions or remainders of those by a positive literal.
-  ///
-  /// Sums and products are deliberately **not** recognised. Non-negative
-  /// operands do not give a non-negative fixed-width result: over an INDEX loop
-  /// `0, 1, 2`, `i * 4611686018427387904` wraps to INT64_MIN at i == 2. Every
-  /// shape above is closed under its own range instead -- a quotient or
-  /// remainder by a positive literal cannot exceed its dividend, and
-  /// `iv - start` with `0 <= start <= iv` stays in `[0, iv]` -- so none of them
-  /// can overflow.
-  ///
-  /// The point is FloorDiv/FloorMod: both follow the divisor's sign, which
-  /// costs a conditional correction over the hardware's truncating ops. With a
-  /// non-negative dividend and a positive divisor the two agree exactly, so the
-  /// correction is dead code.
-  [[nodiscard]] bool IsProvablyNonNegative(const ir::ExprPtr& expr, DataType dtype) const;
-
   /**
    * @brief Generate PTO-ISA MLIR for a single function
    */
@@ -1034,9 +1049,9 @@ class PTOCodegen : public CodegenBase {
   void BindVarToMemRef(const ir::VarPtr& var, const ir::Var* base_ptr);
 
   /**
-   * @brief Emit make_tensor_view for all tensor parameters
+   * @brief Emit make_tensor_view from prepared GM parameter views
    */
-  void EmitMakeTensorViews(const ir::FunctionPtr& func);
+  void EmitMakeTensorViews(const std::vector<TensorParameterView>& views);
 
   /**
    * @brief Bundle of fields needed to emit a `pto.alloc_tile` op.
@@ -1205,6 +1220,7 @@ class PTOCodegen : public CodegenBase {
     /// path to name the parameter the unbindable symbol came from.
     std::map<const ir::Var*, std::string> valid_shape_symbol_origin;
     std::map<const ir::Var*, std::string> tensor_to_view;
+    std::set<std::string> window_origins;  ///< Adjusted GM pointer SSAs for sampled tensor views
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
     std::map<std::string, std::string>
         view_ssa_to_base_ptr;  ///< tensor_view SSA → base ptr SSA (for rebinding IfStmt phi return_vars)
@@ -1234,17 +1250,9 @@ class PTOCodegen : public CodegenBase {
     // operation-specific semantics and need not equal the logical result's.
     std::map<std::string, std::shared_ptr<const ir::TileType>> ssa_to_tile_type;
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
-    /// Constant lower bound of each enclosing loop variable, while its body is
-    /// being emitted. `VisitStmt_(ForStmtPtr)` adds an entry when the loop's
-    /// start is a literal and removes it on the way out, so an entry means
-    /// "this variable is at least this value, here".
-    ///
-    /// Used only to prove a dividend non-negative, which is what lets a signed
-    /// FloorDiv/FloorMod lower to its cheap truncating form. Restricting it to
-    /// literal starts is deliberate: a symbolic start would need a real bound
-    /// analysis, and the shapes that matter -- a slot index derived from the
-    /// induction variable -- all have one.
-    std::map<const ir::Var*, int64_t> loop_var_lower_bound;
+
+    // Prepared before emission. Missing signed operations require floor semantics.
+    std::unordered_set<const ir::Expr*> truncating_floor_div_mod;
 
     /// View SSA -> actual storage origin. Only full-span treshape inherits its
     /// source's origin; subviews stay distinct because their window can differ.
@@ -1252,6 +1260,30 @@ class PTOCodegen : public CodegenBase {
     std::map<std::string, std::string> tile_view_names;
     /// Handles whose runtime valid extents can be updated by pto.set_validshape.
     std::set<std::string> mutable_tile_names;
+    /// Actual descriptor names, not IR Vars/MemRefs: aliases share updates,
+    /// whereas independently initialized views of the same storage do not.
+    std::map<std::string, ir::Span> nz_insert_sources;
+    std::set<std::string> unaligned_valid_column_updates;
+    /// FIFO storage is borrowed, but a TPOP descriptor can root initialized views.
+    std::set<std::string> tpop_tile_names;
+    struct C2VView {
+      std::string received;
+      int pipe;
+      int64_t byte_offset;
+    };
+    /// Descriptor -> dominating receive and byte displacement within its slot.
+    std::map<std::string, C2VView> c2v_views;
+    std::map<std::string, std::pair<int64_t, int64_t>> vec_reservations;
+    struct C2VBuffer {
+      std::pair<int64_t, int64_t> reservation;
+      int slot_size;
+    };
+    std::map<int, C2VBuffer> c2v_buffers;
+    std::set<std::string> vf_received_tiles;
+    bool has_explicit_pipe_flags = false;
+    /// Subview roots eligible for descriptor initialization, not general mutation.
+    /// Cached at emission time independently of full-span storage alias identity.
+    std::set<std::string> locally_bound_subview_names;
 
     /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
@@ -1308,7 +1340,6 @@ class PTOCodegen : public CodegenBase {
     DataType gm_slot_buffer_dtype = DataType::FP32;
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
     std::map<int, DataType> c2v_payload_dtypes;
-    std::set<const ir::Var*> ffts_workspace_vars;
 
     /// SSA name of the synthetic runtime-owned SDMA workspace pointer param.
     /// Empty when the current function does not use prefetch.make_context.
@@ -1360,6 +1391,7 @@ class PTOCodegen : public CodegenBase {
       var_to_mlir.clear();
       valid_shape_symbol_origin.clear();
       tensor_to_view.clear();
+      window_origins.clear();
       tensor_to_base_ptr.clear();
       view_ssa_to_base_ptr.clear();
       memref_to_mlir.clear();
@@ -1373,8 +1405,18 @@ class PTOCodegen : public CodegenBase {
       ssa_to_tile_buf_type.clear();
       ssa_to_tile_type.clear();
       subview_materializations.clear();
+      truncating_floor_div_mod.clear();
       tile_view_names.clear();
       mutable_tile_names.clear();
+      nz_insert_sources.clear();
+      unaligned_valid_column_updates.clear();
+      tpop_tile_names.clear();
+      c2v_views.clear();
+      vec_reservations.clear();
+      c2v_buffers.clear();
+      vf_received_tiles.clear();
+      has_explicit_pipe_flags = false;
+      locally_bound_subview_names.clear();
 
       temp_counter = 0;
       used_ssa_names.clear();
@@ -1405,7 +1447,6 @@ class PTOCodegen : public CodegenBase {
       gm_slot_buffer_dtype = DataType::FP32;
       gm_slot_buffer_region_by_pipe.clear();
       c2v_payload_dtypes.clear();
-      ffts_workspace_vars.clear();
 
       sdma_workspace_arg_ssa.clear();
       l2_cache_offset_arg.clear();
@@ -1515,6 +1556,7 @@ class PTOCodegen : public CodegenBase {
   /// Rebuilt per function: preserve caller storage instead of allocating locally.
   /// Unlike reg_addresses_, this tracks ownership, not emitted pointer SSA names.
   std::set<const ir::Var*> parameter_backed_tile_bases_;
+  void CheckLoopTensorYields(const std::vector<ir::IterArgPtr>& iter_args, const ir::Span& span) const;
   std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
 };
 

@@ -12,8 +12,10 @@
 import json
 import re
 import subprocess
+import textwrap
 from contextlib import ExitStack, nullcontext
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import pto_backend
@@ -21,6 +23,8 @@ from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _generate_pto_bundle
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
+from pypto.language.parser import parse_program
+from pypto.runtime._vpto import ptoas_flags_for_source
 from test_reg_codegen import SPAN, build_kernel
 
 
@@ -42,12 +46,7 @@ def compile_vf_bundle(bundle, tmp_path):
         (
             f"helper_{index}",
             helper.source,
-            [
-                "--pto-backend=vpto",
-                "--emit-vpto-llvm-ir",
-                "--vmi-fastmath=false",
-                "--enable-vecscope-mem-bar=true",
-            ],
+            list(ptoas_flags_for_source(helper.source, emit_llvm=True)),
         )
         for index, helper in enumerate(bundle.helpers)
     )
@@ -349,6 +348,7 @@ def test_captures_scalar_once_and_collapses_store_versions(dtype, element, scala
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
     compile_vf_bundle(bundle, tmp_path)
     assert bundle.helpers[0].parameter_types == [f"!pto.ptr<{element}, ub>", scalar_type]
+    assert bundle.helpers[0].capture_base_indices == [0, -1]
     assert bundle.helpers[0].parameter_effects == ["readwrite", "none"]
     assert bundle.helpers[0].caller_parameter_types[1] == scalar_type
     assert bundle.caller_source.count("pto.tile_buf_addr") == 1
@@ -511,7 +511,7 @@ def test_group_packaging_routes_helpers_by_entry_not_group_name(tmp_path, monkey
     original = pto_backend._generate_config_file
 
     def record_config(*args, **kwargs):
-        captured.update(kwargs["func_name_to_vpto_sources"])
+        captured.update(kwargs["compile_requirements"].vpto_sources)
         return original(*args, **kwargs)
 
     # Exercise production partitioning/manifest/config routing; native compiler
@@ -522,7 +522,7 @@ def test_group_packaging_routes_helpers_by_entry_not_group_name(tmp_path, monkey
     monkeypatch.setattr(pto_backend, "_check_ptoas_version", lambda _: None)
     files = pto_backend.generate(program, str(tmp_path))
     manifest = json.loads(files["vpto/mixed_group/manifest.json"])
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     symbols = manifest["entry_helpers"]["register_kernel"]
     assert len(symbols) == 1
     path = f"vpto/mixed_group/{symbols[0]}.pto"
@@ -533,6 +533,231 @@ def test_group_packaging_routes_helpers_by_entry_not_group_name(tmp_path, monkey
     config = files["kernel_config.py"]
     assert config.count('"vpto_sources"') == 1
     assert symbols[0] in config
+
+
+def test_fifo_writeback_and_reshape_pass_the_same_receive_to_both_adapters():
+    """Each call extracts its pointer from the actual receive, including after writeback."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self):
+            buffer = pl.reserve_buffer(name="c2v", size=1024, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=512, slot_num=2)
+            received: pl.Tile[[128], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            with pl.reg_scope():
+                value = pl.reg.load(received, lanes=64)
+                updated = pl.reg.store(received, value=value)
+            view = pl.reshape(updated, [128])
+            with pl.reg_scope():
+                value2 = pl.reg.load(view, lanes=64)
+                _written = pl.reg.store(view, value=value2)
+            pl.tfree_to_aic(received, split=0)
+
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(Before)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert len(bundle.helpers) == 2
+    caller = bundle.caller_source
+    (received,) = re.findall(r"(%\w+) = pto.tpop_from_aic", caller)
+    for helper in bundle.helpers:
+        assert f"func.call @{helper.adapter_symbol}({received})" in caller
+        assert helper.parameter_indices == helper.capture_base_indices == [0]
+        assert helper.capture_byte_offsets == [0]
+        assert helper.parameter_effects == ["readwrite"]
+
+
+@pytest.mark.ptoas_compile
+def test_ptoas_orders_store_completion_before_fifo_credit(tmp_path):
+    @pl.program
+    class WithPeer:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(self):
+            peer = pl.import_peer_buffer(name="c2v", peer_func="consumer")
+            pl.aic_initialize_pipe(peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(self, out: pl.Out[pl.Tensor[[4, 64], pl.FP32]]) -> pl.Tensor[[4, 64], pl.FP32]:
+            buffer = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            received = pl.tpop_from_aic(shape=[4, 64], dtype=pl.FP32, split=0)
+            flat = pl.reshape(received, [256])
+            with pl.reg_scope():
+                val = pl.reg.load(flat, lanes=64)
+                doubled = pl.reg.add(val, val)
+                written = pl.reg.store(flat, value=doubled)
+            tile = pl.reshape(written, [4, 64])
+            out = pl.store(tile, [0, 0], out)
+            pl.tfree_to_aic(received, split=0)
+            return out
+
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(WithPeer)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
+    (helper,) = bundle.helpers
+    caller = (tmp_path / "caller.cpp").read_text()
+    body = caller[caller.index("TPOP<") : caller.index("TFREE<")]
+    vf, store = body.index(helper.adapter_symbol), body.index("TSTORE(")
+    assert re.search(r"wait_flag\(PIPE_V, PIPE_MTE3, EVENT_ID\d+\)", body[vf:store])
+    assert re.search(
+        r"set_flag\(PIPE_MTE3, PIPE_V, (EVENT_ID\d+)\);.*?wait_flag\(PIPE_MTE3, PIPE_V, \1\);",
+        body[store:],
+        re.DOTALL,
+    )
+
+
+def fifo_program(body, *, slot_size=1024, reserved=2048):
+    return parse_program(
+        f"""
+@pl.program
+class FIFO:
+    @pl.function(type=pl.FunctionType.AIV)
+    def main(self, n: pl.Scalar[pl.INDEX]):
+        buffer = pl.reserve_buffer(name="c2v", size={reserved}, base=0)
+        pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size={slot_size}, slot_num=2)
+        received = pl.tpop_from_aic(shape=[4, 64], dtype=pl.FP32, split=0)
+"""
+        + textwrap.indent(textwrap.dedent(body), "        ")
+    )
+
+
+@pytest.mark.parametrize(
+    ("slot_size", "reserved", "message"),
+    [(512, 2048, "fit within the received tile"), (1024, 1024, "covering its ring")],
+)
+def test_fifo_capture_checks_physical_capacity(slot_size, reserved, message):
+    program = fifo_program(
+        """
+        flat = pl.reshape(received, [256])
+        with pl.reg_scope():
+            val = pl.reg.load(flat, lanes=64)
+            _updated = pl.reg.store(flat, value=val)
+        pl.tfree_to_aic(received, split=0)
+        """,
+        slot_size=slot_size,
+        reserved=reserved,
+    )
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+    with pytest.raises(ValueError, match=message):
+        codegen.PTOCodegen().generate_bundle(program)
+
+
+def test_fifo_slice_and_distinct_live_slots_keep_their_physical_bases():
+    program = fifo_program("""
+        second = pl.tpop_from_aic(shape=[4, 64], dtype=pl.FP32, split=0)
+        window = pl.slice(received, [1, 64], [2, 0])
+        tail = pl.reshape(window, [64])
+        flat = pl.reshape(received, [256])
+        other = pl.reshape(second, [256])
+        with pl.reg_scope():
+            value = pl.reg.load(tail, lanes=64)
+            _one = pl.reg.store(flat, value=value)
+            _two = pl.reg.store(other, value=value)
+        pl.tfree_to_aic(received, split=0)
+        pl.tfree_to_aic(second, split=0)
+    """)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    (helper,) = bundle.helpers
+    assert helper.parameter_indices == [0, 2]
+    assert helper.capture_base_indices == [0, 0, 1]
+    assert helper.capture_byte_offsets == [512, 0, 0]
+    assert helper.parameter_effects == ["read", "readwrite", "readwrite"]
+    (operands,) = re.findall(rf"func.call @{helper.adapter_symbol}\(([^)]+)\)", bundle.caller_source)
+    actuals = operands.split(", ")
+    assert actuals[0] == actuals[1] != actuals[2]
+    assert bundle.caller_source.count("func.call @__pypto_c2v_release_") == 2
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("window = pl.slice(received, [2, 32], [0, 0])", "contiguous view of a known AIV C2V receive"),
+        ("window = pl.slice(received, [1, 64], [n, 0])", "contiguous view of a known AIV C2V receive"),
+        ("window = received", "Cannot prove register offset bounds"),
+    ],
+)
+def test_fifo_capture_rejects_unproven_addresses(body, message):
+    offset = "n" if body == "window = received" else "0"
+    count = 256 if body == "window = received" else 64
+    program = fifo_program(f"""
+        {body}
+        flat = pl.reshape(window, [{count}])
+        with pl.reg_scope():
+            value = pl.reg.load(flat, offset={offset}, lanes=64)
+            _written = pl.reg.store(flat, value=value)
+        pl.tfree_to_aic(received, split=0)
+    """)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+    with pytest.raises(ValueError, match=message):
+        codegen.PTOCodegen().generate_bundle(program)
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_fifo_and_planned_captures_require_disjoint_storage(overlap):
+    program = fifo_program("""
+        flat = pl.reshape(received, [256])
+        local = pl.tile.full([64], dtype=pl.FP32, value=2.0)
+        with pl.reg_scope():
+            value = pl.reg.load(local, lanes=64)
+            _updated = pl.reg.store(flat, value=value)
+        pl.tfree_to_aic(received, split=0)
+    """)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+        if not overlap:
+            program = passes.allocate_memory_addr()(program)
+    if overlap:
+        with pytest.raises(ValueError, match="overlaps a reserved C2V buffer"):
+            codegen.PTOCodegen().generate_bundle(program)
+    else:
+        bundle = codegen.PTOCodegen().generate_bundle(program)
+        (helper,) = bundle.helpers
+        assert helper.capture_base_indices == helper.parameter_indices == [0, 1]
+        assert helper.capture_byte_offsets == [0, 0]
+        assert bundle.caller_source.count("pto.tile_buf_addr") == 2
+
+
+def test_same_slot_branch_keeps_the_canonical_capture_and_release():
+    program = fifo_program("""
+        if n > 0:
+            left = pl.reshape(received, [256])
+            selected = pl.yield_(left)
+        else:
+            right = pl.reshape(received, [256])
+            selected = pl.yield_(right)
+        with pl.reg_scope():
+            value = pl.reg.load(selected, lanes=64)
+            _updated = pl.reg.store(selected, value=value)
+        pl.tfree_to_aic(received, split=0)
+    """)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    (helper,) = bundle.helpers
+    calls = re.findall(r"func.call @[^ (]+\((%\w+)\) : \(!pto.tile_buf", bundle.caller_source)
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert helper.capture_base_indices == [0]
+
+
+def test_explicit_caller_flags_disable_fifo_vf_capture():
+    program = fifo_program("""
+        flat = pl.reshape(received, [256])
+        with pl.reg_scope():
+            value = pl.reg.load(flat, lanes=64)
+            _updated = pl.reg.store(flat, value=value)
+        pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 2)
+        pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 2)
+        pl.tfree_to_aic(received, split=0)
+    """)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+    with pytest.raises(ValueError, match="automatic caller synchronization"):
+        codegen.PTOCodegen().generate_bundle(program)
 
 
 def test_bundle_rejects_peer_functions():
@@ -710,6 +935,7 @@ def test_capture_offsets_exclude_tile_view_origin(origin, tmp_path):
     bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "Origins", SPAN))
     compile_vf_bundle(bundle, tmp_path)
     helper = bundle.helpers[0]
+    assert helper.capture_base_indices == [0, 0]
     assert helper.capture_byte_offsets == [0, 640]
     assert helper.parameter_indices == [0]
     assert "arith.constant 160 : index" in helper.source
@@ -849,7 +1075,7 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
     result = pto_backend._emit_unit(unit, str(tmp_path), skip_ptoas=True)
     assert result.error is None
     manifest = json.loads(result.files["vpto/register_kernel/manifest.json"])
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["entry_helpers"] == bundle.entry_helpers
     assert manifest["effect_scope"] == "whole-tile"
     assert manifest["synchronization"] == "ptoas-insert-sync"
@@ -858,6 +1084,7 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
     assert entry["adapter_symbol"] == helper.adapter_symbol
     assert entry["caller_parameter_types"] == helper.caller_parameter_types
     assert entry["parameter_types"] == helper.parameter_types
+    assert entry["capture_base_indices"] == helper.capture_base_indices
     assert entry["parameter_indices"] == helper.parameter_indices
     assert entry["capture_byte_offsets"] == helper.capture_byte_offsets
     assert entry["parameter_effects"] == ["read", "readwrite"]
@@ -1171,6 +1398,99 @@ def test_hardware_loop_bundle_rejects_scalar_carries():
                 builder.emit(ir.YieldStmt([carry], SPAN))
     with pytest.raises(ValueError, match="register or mask loop-carried values only"):
         codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "ScalarCarry", SPAN))
+
+
+@pytest.mark.ptoas_compile
+def test_manual_scope_bundle_policy_and_barrier(tmp_path):
+    ib = IRBuilder()
+    with ib.function("manual_kernel", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with ib.reg_scope(SPAN, auto_sync=False):
+            ib.emit_reg_mem_bar("VST_VLD", SPAN)
+    program = ir.Program([f.get_result()], "ManualSync", SPAN)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert len(bundle.helpers) == 1
+    assert bundle.helpers[0].source.startswith("// pypto.reg_auto_sync: false\n")
+    assert bundle.helpers[0].source.count('pto.mem_bar "VST_VLD"') == 1
+    compile_vf_bundle(bundle, tmp_path)
+    llvm = (tmp_path / "helper_0.ll").read_text()
+    assert "llvm.hivm.mem.bar" in llvm
+    with pytest.raises(ValueError, match="generate_bundle"):
+        codegen.PTOCodegen().generate(program, emit_source_loc=False)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "VV_ALL",
+        "VST_VLD",
+        "VLD_VST",
+        "VST_VST",
+        "VS_ALL",
+        "VST_LD",
+        "VLD_ST",
+        "VST_ST",
+        "SV_ALL",
+        "ST_VLD",
+        "LD_VST",
+        "ST_VST",
+        "SS_ALL",
+        "ST_LD",
+        "LD_ST",
+        "ST_ST",
+    ],
+)
+def test_explicit_barrier_codegen_exact_kind(kind):
+    ib = IRBuilder()
+    with ib.function("barrier_kernel", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with ib.reg_scope(SPAN):
+            ib.emit_reg_mem_bar(kind, SPAN)
+    program = ir.Program([f.get_result()], "BarrierKind", SPAN)
+    source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
+    assert source.count(f'pto.mem_bar "{kind}"') == 1
+
+
+def test_mixed_scope_sync_policies_have_independent_helpers():
+    ib = IRBuilder()
+    with ib.function("mixed_policy", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with ib.reg_scope(SPAN):
+            ib.emit_reg_mem_bar("VLD_VST", SPAN)
+        with ib.reg_scope(SPAN, auto_sync=False):
+            ib.emit_reg_mem_bar("VST_VLD", SPAN)
+    program = ir.Program([f.get_result()], "MixedPolicy", SPAN)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert len(bundle.helpers) == 2
+    assert bundle.helpers[0].source.startswith("// pypto.reg_auto_sync: true\n")
+    assert bundle.helpers[1].source.startswith("// pypto.reg_auto_sync: false\n")
+    assert 'pto.mem_bar "VLD_VST"' in bundle.helpers[0].source
+    assert 'pto.mem_bar "VST_VLD"' in bundle.helpers[1].source
+    assert all(not h.parameter_types for h in bundle.helpers)
+
+
+@pytest.mark.ptoas_compile
+def test_manual_store_load_barrier_survives_ptoas(tmp_path):
+    # The fence orders real aliasing UB memory, not merely an empty scope.
+    ib = IRBuilder()
+    with ib.function("manual_overlap", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = ib.let("dst", tile.full([128], dtype=DataType.FP32, value=1))
+        with ib.reg_scope(SPAN, auto_sync=False):
+            value = ib.emit_reg(
+                "value", "reg.load", [dst, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            updated = ib.emit_reg_store("updated", dst, value, span=SPAN)
+            ib.emit_reg_mem_bar("VST_VLD", SPAN)
+            loaded = ib.emit_reg(
+                "loaded", "reg.load", [updated, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            ib.emit_reg_store("out", updated, loaded, offset=64, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "ManualOverlap", SPAN))
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    helper = bundle.helpers[0]
+    assert helper.source.count('pto.mem_bar "VST_VLD"') == 1
+    assert helper.parameter_effects == ["readwrite"]
+    compile_vf_bundle(bundle, tmp_path)
+    llvm = (tmp_path / "helper_0.ll").read_text()
+    assert len(re.findall(r"call void @llvm\.hivm\.mem\.bar", llvm)) == 1
 
 
 if __name__ == "__main__":

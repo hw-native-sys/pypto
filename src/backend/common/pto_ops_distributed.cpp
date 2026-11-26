@@ -174,7 +174,7 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   // (2) addptr from the local pointer by that element offset.
   std::string peer_ptr = codegen.NewTemp();
   codegen.Emit(peer_ptr + " = pto.addptr " + target.local_ptr_ssa + ", " + delems + " : " + ptr_type +
-               " -> " + ptr_type);
+               ", index -> " + ptr_type);
 
   // (3) make_tensor_view at the call site. Mirror ``EmitMakeTensorViews`` so
   // local and peer views use identical shape/stride/layout metadata.
@@ -1099,7 +1099,8 @@ static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
 // pld.tensor.put_async / pld.tensor.get_async — asynchronous URMA transfer.
 //
 // IR surface: (dst, peer, src[, dst_offsets, src_offsets, shape]) -> dst.
-// Both endpoints are window-bound DistributedTensors. V1 has no native PTOAS
+// The remote endpoint is window-bound; the local endpoint may be a plain Tensor.
+// V1 has no native PTOAS
 // schema for the async transfer (RFC 141 VD6), so codegen issues a *private
 // external* func.call into a helper the Python backend generates per dtype:
 //
@@ -1133,26 +1134,39 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
       << op_name << " requires 3 (full slice) or 6 (subregion) arguments "
       << "(dst, peer, src[, dst_offsets, src_offsets, shape]), got " << n;
 
-  auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, op_name.c_str());
-  auto src_binding = ResolveDistTensorBinding(op->args_[2], codegen, op_name.c_str());
-  const DataType dtype = dst_binding.type->dtype_;
-  INTERNAL_CHECK_SPAN(dtype == src_binding.type->dtype_, op->span_)
+  auto remote_binding = ResolveDistTensorBinding(op->args_[is_put ? 0 : 2], codegen, op_name.c_str());
+  auto dst_var = AsVarLike(op->args_[0]);
+  auto src_var = AsVarLike(op->args_[2]);
+  INTERNAL_CHECK_SPAN(dst_var && src_var, op->span_)
+      << "Internal error: " << op_name << " endpoints must be Var-like expressions";
+  auto dst_type = ir::AsTensorTypeLike(dst_var->GetType());
+  auto src_type = ir::AsTensorTypeLike(src_var->GetType());
+  INTERNAL_CHECK_SPAN(dst_type && src_type, op->span_)
+      << "Internal error: " << op_name << " endpoints must be tensors";
+  const std::string dst_ptr = codegen.GetTensorBasePtr(dst_var);
+  const std::string src_ptr = codegen.GetTensorBasePtr(src_var);
+  const DataType dtype = dst_type->dtype_;
+  INTERNAL_CHECK_SPAN(dtype == src_type->dtype_, op->span_)
       << "Internal error: " << op_name << " endpoints have different dtypes (" << dtype.ToString() << " vs "
-      << src_binding.type->dtype_.ToString() << ")";
+      << src_type->dtype_.ToString() << ")";
   // Offsets on the wire are bytes; the IR offsets and shapes are element
   // counts. Both operands are element addresses, so the factor is the element
   // size in bytes.
-  const int64_t element_bytes = static_cast<int64_t>(dtype.GetBit()) / 8;
+  const size_t element_bits = dtype.GetBit();
+  CHECK_SPAN(element_bits >= 8 && element_bits % 8 == 0, op->span_)
+      << op_name << " supports only byte-sized element types, got " << dtype.ToString() << " ("
+      << element_bits << " bits)";
+  const int64_t element_bytes = static_cast<int64_t>(element_bits / 8);
   INTERNAL_CHECK_SPAN(element_bytes > 0, op->span_)
       << "Internal error: " << op_name << " element size is zero for " << dtype.ToString();
 
-  const size_t rank = dst_binding.type->shape_.size();
+  const size_t rank = dst_type->shape_.size();
   INTERNAL_CHECK_SPAN(rank >= 1, op->span_) << op_name << " requires rank >= 1";
 
   // Logical element strides. A direct parameter's wrapper pointer already
   // includes Tensor.start_offset, so only the subregion coordinates contribute
   // to the byte offset below.
-  auto logical_strides = [&](const std::shared_ptr<const ir::DistributedTensorType>& type) {
+  auto logical_strides = [&](const ir::TensorTypePtr& type) {
     std::vector<ExprPtr> strides;
     ir::TensorLayout layout = ir::TensorLayout::ND;
     if (type->tensor_view_.has_value()) {
@@ -1179,7 +1193,7 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
     if (auto constant = As<ir::ConstInt>(expr)) return constant->value_;
     return std::nullopt;
   };
-  auto static_element_offset = [&](const std::shared_ptr<const ir::DistributedTensorType>& type,
+  auto static_element_offset = [&](const ir::TensorTypePtr& type,
                                    const std::vector<ExprPtr>& offsets) -> std::optional<int64_t> {
     const auto strides = logical_strides(type);
     int64_t total = 0;
@@ -1187,12 +1201,15 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
       const auto coordinate = constant_int(offsets[i]);
       const auto stride = constant_int(strides[i]);
       if (!coordinate.has_value() || !stride.has_value()) return std::nullopt;
-      total += *coordinate * *stride;
+      int64_t term = 0;
+      if (__builtin_mul_overflow(*coordinate, *stride, &term) ||
+          __builtin_add_overflow(total, term, &total)) {
+        return std::nullopt;
+      }
     }
     return total;
   };
-  auto emit_element_offset = [&](const std::shared_ptr<const ir::DistributedTensorType>& type,
-                                 const std::vector<ExprPtr>& offsets,
+  auto emit_element_offset = [&](const ir::TensorTypePtr& type, const std::vector<ExprPtr>& offsets,
                                  std::optional<int64_t> known) -> std::string {
     if (known.has_value()) return codegen.GetOrEmitConstant(*known, DataType::INDEX);
     const auto strides = logical_strides(type);
@@ -1212,7 +1229,11 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
   const std::string element_bytes_index = codegen.GetOrEmitConstant(element_bytes, DataType::INDEX);
   auto emit_byte_offset = [&](const std::string& elements_index, std::optional<int64_t> known_elements) {
     if (known_elements.has_value()) {
-      return codegen.GetOrEmitConstant(*known_elements * element_bytes, DataType::INT64);
+      int64_t known_bytes = 0;
+      if (!__builtin_mul_overflow(*known_elements, element_bytes, &known_bytes)) {
+        return codegen.GetOrEmitConstant(known_bytes, DataType::INT64);
+      }
+      // Overflow: fall through to the runtime multiply rather than wrap.
     }
     const std::string bytes_index = codegen.NewTemp();
     codegen.Emit(bytes_index + " = arith.muli " + elements_index + ", " + element_bytes_index + " : index");
@@ -1225,10 +1246,12 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
     int64_t elements = 1;
     for (const auto& dim : shape) {
       const auto extent = constant_int(dim);
-      if (!extent.has_value()) return std::nullopt;
-      elements *= *extent;
+      if (!extent.has_value() || *extent <= 0) return std::nullopt;
+      if (__builtin_mul_overflow(elements, *extent, &elements)) return std::nullopt;
     }
-    return elements * element_bytes;
+    int64_t bytes = 0;
+    if (__builtin_mul_overflow(elements, element_bytes, &bytes)) return std::nullopt;
+    return bytes;
   };
   auto emit_byte_count = [&](const std::vector<ExprPtr>& shape, std::optional<int64_t> known) {
     if (known.has_value()) return codegen.GetOrEmitConstant(*known, DataType::INT64);
@@ -1254,19 +1277,24 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
   // IR verifier only bounds static coordinates, and the enclosing window holds
   // every registered buffer, so a window-only check would let an offset past
   // one tensor overwrite the next.
-  auto static_span_bytes =
-      [&](const std::shared_ptr<const ir::DistributedTensorType>& type) -> std::optional<int64_t> {
+  auto static_span_bytes = [&](const ir::TensorTypePtr& type) -> std::optional<int64_t> {
     const auto strides = logical_strides(type);
     int64_t elements = 1;
     for (size_t i = 0; i < type->shape_.size(); ++i) {
       const auto dim = constant_int(type->shape_[i]);
       const auto stride = constant_int(strides[i]);
-      if (!dim.has_value() || !stride.has_value()) return std::nullopt;
-      elements += (*dim - 1) * *stride;
+      if (!dim.has_value() || !stride.has_value() || *dim <= 0) return std::nullopt;
+      int64_t span = 0;
+      if (__builtin_mul_overflow(*dim - 1, *stride, &span) ||
+          __builtin_add_overflow(elements, span, &elements)) {
+        return std::nullopt;
+      }
     }
-    return elements * element_bytes;
+    int64_t bytes = 0;
+    if (__builtin_mul_overflow(elements, element_bytes, &bytes)) return std::nullopt;
+    return bytes;
   };
-  auto emit_span_bytes = [&](const std::shared_ptr<const ir::DistributedTensorType>& type) -> std::string {
+  auto emit_span_bytes = [&](const ir::TensorTypePtr& type) -> std::string {
     const auto known = static_span_bytes(type);
     if (known.has_value()) return codegen.GetOrEmitConstant(*known, DataType::INT64);
     const auto strides = logical_strides(type);
@@ -1292,7 +1320,7 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
 
   std::vector<ExprPtr> dst_offsets;
   std::vector<ExprPtr> src_offsets;
-  std::vector<ExprPtr> transfer_shape = dst_binding.type->shape_;
+  std::vector<ExprPtr> transfer_shape = dst_type->shape_;
   if (n == 6) {
     auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[3]);
     auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[4]);
@@ -1317,13 +1345,13 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
   // The full-slice form transfers nothing outside the view origin, so both
   // element offsets are the static zero.
   const auto dst_static_elements =
-      n == 6 ? static_element_offset(dst_binding.type, dst_offsets) : std::optional<int64_t>(0);
+      n == 6 ? static_element_offset(dst_type, dst_offsets) : std::optional<int64_t>(0);
   const auto src_static_elements =
-      n == 6 ? static_element_offset(src_binding.type, src_offsets) : std::optional<int64_t>(0);
-  const std::string dst_byte_offset = emit_byte_offset(
-      emit_element_offset(dst_binding.type, dst_offsets, dst_static_elements), dst_static_elements);
-  const std::string src_byte_offset = emit_byte_offset(
-      emit_element_offset(src_binding.type, src_offsets, src_static_elements), src_static_elements);
+      n == 6 ? static_element_offset(src_type, src_offsets) : std::optional<int64_t>(0);
+  const std::string dst_byte_offset =
+      emit_byte_offset(emit_element_offset(dst_type, dst_offsets, dst_static_elements), dst_static_elements);
+  const std::string src_byte_offset =
+      emit_byte_offset(emit_element_offset(src_type, src_offsets, src_static_elements), src_static_elements);
   std::string byte_count = emit_byte_count(transfer_shape, static_byte_count(transfer_shape));
   // A dynamic subregion can satisfy the flattened span check and still cross
   // an inner dimension: a 32-wide row slice starting at a runtime column 50 of
@@ -1344,20 +1372,33 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
       return codegen.EmitCastToIndex(expr, codegen.GetExprAsCode(expr));
     };
     std::string in_bounds;
-    auto append_dim_checks = [&](const std::shared_ptr<const ir::DistributedTensorType>& type,
-                                 const std::vector<ExprPtr>& offsets) {
+    auto append_dim_checks = [&](const ir::TensorTypePtr& type, const std::vector<ExprPtr>& offsets) {
       for (size_t dim = 0; dim < type->shape_.size(); ++dim) {
         const std::string off = unclamped_offset(offsets[dim]);
         const std::string extent = GetSizeCodes({transfer_shape[dim]}, codegen).front();
         const std::string limit = GetSizeCodes({type->shape_[dim]}, codegen).front();
-        const std::string non_negative = codegen.NewTemp();
-        codegen.Emit(non_negative + " = arith.cmpi sge, " + off + ", " + zero_index + " : index");
-        const std::string end = codegen.NewTemp();
-        codegen.Emit(end + " = arith.addi " + off + ", " + extent + " : index");
-        const std::string fits = codegen.NewTemp();
-        codegen.Emit(fits + " = arith.cmpi sle, " + end + ", " + limit + " : index");
+        // `off + extent <= limit` can wrap for large runtime coordinates and
+        // pass the upper-bound check. Bound the terms separately instead: both
+        // must be non-negative, the origin must fit, and the room left to the
+        // endpoint limit must cover the extent. A wrapped `limit - off` only
+        // feeds a guard whose `off_fits` term is already false.
+        const std::string off_non_negative = codegen.NewTemp();
+        codegen.Emit(off_non_negative + " = arith.cmpi sge, " + off + ", " + zero_index + " : index");
+        const std::string extent_non_negative = codegen.NewTemp();
+        codegen.Emit(extent_non_negative + " = arith.cmpi sge, " + extent + ", " + zero_index + " : index");
+        const std::string off_fits = codegen.NewTemp();
+        codegen.Emit(off_fits + " = arith.cmpi sle, " + off + ", " + limit + " : index");
+        const std::string room = codegen.NewTemp();
+        codegen.Emit(room + " = arith.subi " + limit + ", " + off + " : index");
+        const std::string extent_fits = codegen.NewTemp();
+        codegen.Emit(extent_fits + " = arith.cmpi sle, " + extent + ", " + room + " : index");
+        const std::string position_ok = codegen.NewTemp();
+        codegen.Emit(position_ok + " = arith.andi " + off_non_negative + ", " + extent_non_negative +
+                     " : i1");
+        const std::string length_ok = codegen.NewTemp();
+        codegen.Emit(length_ok + " = arith.andi " + off_fits + ", " + extent_fits + " : i1");
         const std::string dim_ok = codegen.NewTemp();
-        codegen.Emit(dim_ok + " = arith.andi " + non_negative + ", " + fits + " : i1");
+        codegen.Emit(dim_ok + " = arith.andi " + position_ok + ", " + length_ok + " : i1");
         if (in_bounds.empty()) {
           in_bounds = dim_ok;
         } else {
@@ -1367,15 +1408,15 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
         }
       }
     };
-    append_dim_checks(dst_binding.type, dst_offsets);
-    append_dim_checks(src_binding.type, src_offsets);
+    append_dim_checks(dst_type, dst_offsets);
+    append_dim_checks(src_type, src_offsets);
     const std::string zero_bytes = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INT64);
     const std::string guarded = codegen.NewTemp();
     codegen.Emit(guarded + " = arith.select " + in_bounds + ", " + byte_count + ", " + zero_bytes + " : i64");
     byte_count = guarded;
   }
-  const std::string dst_extent = emit_span_bytes(dst_binding.type);
-  const std::string src_extent = emit_span_bytes(src_binding.type);
+  const std::string dst_extent = emit_span_bytes(dst_type);
+  const std::string src_extent = emit_span_bytes(src_type);
   // The helper takes a 64-bit rank coordinate. Keeping the full width avoids
   // aliasing a wide value (2**32 + 1) to a valid but unintended rank.
   const std::string peer = codegen.EmitCastToI64(op->args_[1], codegen.GetExprAsCode(op->args_[1]));
@@ -1386,24 +1427,23 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
 
   const std::string pointer_type = "!pto.ptr<" + codegen.GetTypeString(dtype) + ">";
   const std::string adapter = codegen.RegisterUrmaTransferAdapter(is_put, dtype);
-  // PUT resolves its remote endpoint from dst and GET from src; those operands
-  // can belong to different communication domains, so the helper must receive
-  // the context of the endpoint it samples for the peer mapping.
-  const std::string comm_ctx_ssa = is_put ? dst_binding.ctx_ssa : src_binding.ctx_ssa;
-  codegen.Emit("func.call @" + adapter + "(" + raw_args + ", " + comm_ctx_ssa + ", " +
-               dst_binding.local_ptr_ssa + ", " + src_binding.local_ptr_ssa + ", " + dst_byte_offset + ", " +
-               src_byte_offset + ", " + byte_count + ", " + peer + ", " + dst_extent + ", " + src_extent +
-               ") : (!pto.ptr<i64>, !pto.ptr<i64>, " + pointer_type + ", " + pointer_type +
-               ", i64, i64, i64, i64, i64, i64) -> ()");
+  // PUT resolves its remote endpoint from dst and GET from src. The helper
+  // samples that endpoint's CommDomain context for the peer mapping.
+  const std::string comm_ctx_ssa = remote_binding.ctx_ssa;
+  codegen.Emit("func.call @" + adapter + "(" + raw_args + ", " + comm_ctx_ssa + ", " + dst_ptr + ", " +
+               src_ptr + ", " + dst_byte_offset + ", " + src_byte_offset + ", " + byte_count + ", " + peer +
+               ", " + dst_extent + ", " + src_extent + ") : (!pto.ptr<i64>, !pto.ptr<i64>, " + pointer_type +
+               ", " + pointer_type + ", i64, i64, i64, i64, i64, i64) -> ()");
 
   // The result names `dst`'s storage. Bind the pointer, the CommContext and the
   // existing tensor view so a later consumer addresses the same window instead
   // of the fresh temp VisitStmt_(AssignStmt) pre-allocated for this call.
   if (auto lhs = codegen.GetCurrentResultVar()) {
-    codegen.RegisterVarToMlir(lhs, dst_binding.local_ptr_ssa);
-    codegen.RegisterBasePtr(lhs, dst_binding.local_ptr_ssa);
-    codegen.RegisterCommCtxFor(lhs, dst_binding.ctx_ssa);
-    const std::string dst_view = codegen.TryGetTensorView(dst_binding.var);
+    codegen.RegisterVarToMlir(lhs, dst_ptr);
+    codegen.RegisterBasePtr(lhs, dst_ptr);
+    const std::string dst_ctx = codegen.GetCommCtxSSAFor(dst_var.get());
+    if (!dst_ctx.empty()) codegen.RegisterCommCtxFor(lhs, dst_ctx);
+    const std::string dst_view = codegen.TryGetTensorView(dst_var);
     if (!dst_view.empty()) codegen.RegisterTensorView(lhs, dst_view);
   }
   return "";
@@ -1418,7 +1458,7 @@ static std::string EmitLoadRankPair(codegen::PTOCodegen& cg, const std::string& 
   constexpr int64_t kRankSlotIdx = static_cast<int64_t>(cl::kRankIdOffset / cl::kWindowSlotStride);
   std::string slot_c = cg.GetOrEmitConstant(kRankSlotIdx, DataType::INDEX);
   std::string rk_pair = cg.NewTemp();
-  cg.Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + slot_c + "] : !pto.ptr<i64> -> i64");
+  cg.Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + slot_c + "] : !pto.ptr<i64>, index -> i64");
   return rk_pair;
 }
 

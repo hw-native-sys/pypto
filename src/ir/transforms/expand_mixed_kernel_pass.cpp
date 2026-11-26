@@ -53,6 +53,7 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
@@ -100,9 +101,10 @@ class SplitRegionFinder : public IRVisitor {
 
 // Native Vec-to-Mat transfers run on AIV. Automatic expansion binds Mat
 // handles on AIC, loses Vec operands of insert/extract, and stages moves via a
-// generic NZ-to-NZ copy that uses incorrect FP4 byte strides. Explicit AIV
-// kernels retain both handles and use the supported native transfer directly.
-class PackedFp4CrossCoreTransferValidator : public IRVisitor {
+// generic NZ-to-NZ copy that uses incorrect FP4 byte strides. BF16 NZ inserts
+// also need both handles on AIV; classifying them from the Mat target would
+// place MTE3 work on AIC. Explicit AIV kernels retain both handles.
+class NativeVecToMatTransferValidator : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& call) override {
     const bool insert = IsOp(call, "tile.assemble");
@@ -110,11 +112,19 @@ class PackedFp4CrossCoreTransferValidator : public IRVisitor {
         ((IsOp(call, "tile.move") || IsOp(call, "tile.extract")) && !call->args_.empty())) {
       auto target = As<TileType>(insert ? call->args_[0]->GetType() : call->GetType());
       auto source = As<TileType>(call->args_[insert ? 1 : 0]->GetType());
-      CHECK_SPAN(!target || !source || !source->dtype_.IsPackedFp4() ||
+      bool bf16_insert = false;
+      if (source && insert && source->dtype_ == DataType::BF16 &&
+          PassContext::Current()->GetBackendHandler()->GetPtoTargetArch() == "a5") {
+        const auto view = tile_view_semantics::GetEffectiveTileView(*source);
+        bf16_insert = view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major &&
+                      view.fractal == 512 && view.compact == CompactMode::null;
+      }
+      CHECK_SPAN(!target || !source || (!source->dtype_.IsPackedFp4() && !bf16_insert) ||
                      source->GetMemorySpace() != MemorySpace::Vec ||
                      target->GetMemorySpace() != MemorySpace::Mat,
                  call->span_)
-          << "Packed FP4 Vec-to-Mat transfer in a generic InCore function is unsupported "
+          << (bf16_insert ? "A5 BF16 NZ" : "Packed FP4")
+          << " Vec-to-Mat transfer in a generic InCore function is unsupported "
              "by mixed-core expansion; use an explicit FunctionType.AIV function to keep both tile "
              "handles on the vector core";
     }
@@ -733,10 +743,8 @@ void CheckOpDrivenBoundaryOperands(const std::vector<StmtPtr>& stmts,
 
 std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0, int lane_stride = 0) {
   std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split)}};
-  // The partition stride only rides along when a ragged boundary was rebalanced
-  // (when supplied explicitly). PTO codegen ignores it — it prints only
-  // id and split — but the torch reference runtime needs it to cut the two lanes
-  // where the compiler did.
+  // Carry an explicit stride when balancing a ragged boundary or preserving
+  // the box partition during A5 codegen. Torch uses it to split the same bands.
   if (lane_stride > 0) {
     kwargs.emplace_back("lane_stride", std::any(lane_stride));
   }
@@ -768,6 +776,11 @@ int BoundaryTransportSplitCode(const CVBoundaryMove& bm, const Span& span) {
 
 CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0,
                     int lane_stride = 0) {
+  // The generated TPOP and AIV offsets already use the authored shard's bands.
+  if (op_name == "tile.tpush_to_aiv" && split == kSplitUpDown && lane_stride == 0 &&
+      PassContext::Current()->GetBackendHandler()->SplitsCubeToVectorTransportInHardware()) {
+    lane_stride = cross_core_pipe::GetA5C2VRowTailBoxStride(tile->GetType()).value_or(0);
+  }
   return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split, lane_stride), span);
 }
 
@@ -937,7 +950,7 @@ MxV2CContracts BuildMxV2CContracts(const std::vector<FunctionPtr>& functions) {
     collector.VisitStmt(function->body_);
     auto facts = collector.Take();
     for (const auto& push : facts.v2c_pushes) {
-      if (push->args_.size() == 1) {
+      if (!push->args_.empty()) {
         auto source_type = As<TileType>(push->args_[0]->GetType());
         has_mx_push = has_mx_push || (source_type && IsMxScaleView(*source_type));
       }
@@ -961,7 +974,7 @@ MxV2CContracts BuildMxV2CContracts(const std::vector<FunctionPtr>& functions) {
     const auto& producer_pipe_index = all_indexes[producer_index];
     if (producer.function->func_type_ != FunctionType::AIV) continue;
     for (const auto& push : producer.v2c_pushes) {
-      if (push->args_.size() != 1) continue;
+      if (push->args_.empty()) continue;
       auto source_type = As<TileType>(push->args_[0]->GetType());
       if (!source_type || !IsMxScaleView(*source_type)) continue;
 
@@ -1223,8 +1236,10 @@ StmtPtr AdaptMxV2CPush(const EvalStmtPtr& stmt, const CallPtr& push, const MxV2C
 
   ValidateMxCarrierSize(*current_type, contract, stmt->span_);
 
-  auto adapted_push = std::make_shared<Call>(push->op_, std::vector<ExprPtr>{carrier}, push->kwargs_,
-                                             push->attrs_, push->GetType(), push->span_);
+  auto adapted_args = push->args_;
+  adapted_args[0] = carrier;
+  auto adapted_push = std::make_shared<Call>(push->op_, adapted_args, push->kwargs_, push->attrs_,
+                                             push->GetType(), push->span_);
   output.push_back(std::make_shared<EvalStmt>(adapted_push, stmt->span_));
   return SeqStmts::Flatten(std::move(output), stmt->span_);
 }
@@ -1253,7 +1268,7 @@ class AdaptManualVtoCPush : public IRMutator {
  protected:
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
     auto call = As<Call>(op->expr_);
-    if (!call || !IsOp(call, "tile.tpush_to_aic") || call->args_.size() != 1) {
+    if (!call || !IsOp(call, "tile.tpush_to_aic") || call->args_.empty()) {
       return IRMutator::VisitStmt_(op);
     }
     const ExprPtr& source = call->args_[0];
@@ -1301,8 +1316,10 @@ class AdaptManualVtoCPush : public IRMutator {
     // rides along for the same reason -- this rewrite replaces the pushed tile
     // and nothing else, so it must not quietly drop compiler metadata a caller
     // or an earlier pass attached to the op.
-    auto adapted_push = std::make_shared<Call>(call->op_, std::vector<ExprPtr>{adapted_var}, call->kwargs_,
-                                               call->attrs_, call->GetType(), call->span_);
+    auto adapted_args = call->args_;
+    adapted_args[0] = adapted_var;
+    auto adapted_push = std::make_shared<Call>(call->op_, adapted_args, call->kwargs_, call->attrs_,
+                                               call->GetType(), call->span_);
     std::vector<StmtPtr> out{std::make_shared<AssignStmt>(adapted_var, adapt_call, op->span_),
                              std::make_shared<EvalStmt>(adapted_push, op->span_)};
     return SeqStmts::Flatten(std::move(out), op->span_);
@@ -1429,7 +1446,10 @@ std::vector<StmtPtr> PromoteDirectC2VData(const std::vector<StmtPtr>& stmts,
       auto assign = As<AssignStmt>(stmt);
       auto eval = As<EvalStmt>(stmt);
       auto call = assign ? As<Call>(assign->value_) : eval ? As<Call>(eval->expr_) : nullptr;
-      if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait")) authored_sync = true;
+      if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait") ||
+          IsOp(call, "system.set_intra_block") || IsOp(call, "system.wait_intra_block")) {
+        authored_sync = true;
+      }
       if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe") ||
           IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpop_from_aic") ||
           IsOp(call, "tile.tpush_to_aic") || IsOp(call, "tile.tpop_from_aiv") ||
@@ -2452,6 +2472,78 @@ class ParameterTypeRemapper : public IRMutator {
   }
 };
 
+// Validate the complete body before partitioning: a SHARED loop/branch can be
+// copied as a whole, so checking only leaf statements while splitting misses
+// nested unpinned events. This fixed traversal remains linear in the body size.
+class NamedEventPlacementValidator : public IRVisitor {
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "system.set_intra_block") || IsOp(call, "system.wait_intra_block")) {
+      CHECK_SPAN(call->HasKwarg("core_type"), call->span_)
+          << call->op_->name_ << " in a mixed kernel requires core_type=KernelType.AIC or "
+          << "KernelType.AIV; an unpinned named event cannot be duplicated";
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+};
+
+class OutlinedPipeBufferRewriter : public IRMutator {
+ public:
+  OutlinedPipeBufferRewriter(const std::unordered_set<const Var*>& peer_buffers,
+                             const var_collectors::VarDefUseCollector& uses, const std::string& peer_name)
+      : peer_buffers_(peer_buffers), uses_(uses), peer_name_(peer_name) {}
+
+ protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& assign) override {
+    auto call = As<Call>(assign->value_);
+    const bool is_import = IsOp(call, "system.import_peer_buffer");
+    if (!is_import && !IsOp(call, "system.reserve_buffer")) return assign;
+    if (peer_buffers_.count(assign->var_.get()) && !uses_.var_uses.count(assign->var_.get())) {
+      return MakeBody({}, assign->span_);
+    }
+    if (!is_import || !call->GetKwarg<std::string>("peer_func", "").empty()) return assign;
+
+    auto updated = MutableCopy(call);
+    auto& kwargs = updated->kwargs_;
+    kwargs.erase(std::remove_if(kwargs.begin(), kwargs.end(),
+                                [](const auto& entry) { return entry.first == "peer_func"; }),
+                 kwargs.end());
+    kwargs.emplace_back("peer_func", peer_name_);
+    auto rebound = MutableCopy(assign);
+    rebound->value_ = updated;
+    return rebound;
+  }
+
+ private:
+  const std::unordered_set<const Var*>& peer_buffers_;
+  const var_collectors::VarDefUseCollector& uses_;
+  const std::string& peer_name_;
+};
+
+// Affinity analysis can copy authored pipe buffers to both peers. Keep each
+// declaration where it is used and resolve omitted import peers in the same
+// recursive walk, including pipe setup inside control flow.
+void RewriteOutlinedPipeBuffers(std::vector<StmtPtr>& body, const std::vector<StmtPtr>& peer,
+                                CoreSide peer_side, const std::string& peer_name) {
+  if (body.empty()) return;
+
+  std::unordered_set<const Var*> peer_buffers;
+  const auto initializer = core_side_ops::InitializePipeOp(peer_side);
+  for (const auto& call : cross_core_pipe::CollectPipeInitializers(peer)) {
+    if (!IsOp(call, initializer)) continue;
+    for (const auto& arg : call->args_) {
+      if (auto var = AsVarLike(arg)) peer_buffers.insert(var.get());
+    }
+  }
+
+  var_collectors::VarDefUseCollector uses;
+  if (!peer_buffers.empty()) {
+    for (const auto& stmt : body) uses.VisitStmt(stmt);
+  }
+  OutlinedPipeBufferRewriter rewriter(peer_buffers, uses, peer_name);
+  body = FlattenBody(rewriter.VisitStmt(MakeBody(body, body.front()->span_)));
+}
+
 struct ExpandedKernel {
   FunctionPtr aic_func;
   FunctionPtr aiv_func;
@@ -2459,7 +2551,8 @@ struct ExpandedKernel {
 };
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, const AivPlacement& placement,
-                                   bool had_regions) {
+                                   bool had_regions, const ProgramPtr& program) {
+  NamedEventPlacementValidator().VisitStmt(func->body_);
   // Custom pipelines may call this pass without LowerAutoVectorSplit. Do not
   // let retired mixed AUTO metadata reach the standalone AIV/AIC halving path.
   const auto split_mode = func->GetSplitMode();
@@ -2592,7 +2685,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // signature is what makes a yield of a parameter resolvable on either lane.
   auto aic_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map, remap_keys(aic_tpop_remap), func->params_),
-      CoreSide::AIC, aic_tpop_remap);
+      CoreSide::AIC, aic_tpop_remap, program);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
@@ -2600,7 +2693,25 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
                                  superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
-      CoreSide::AIV, aiv_tpop_remap);
+      CoreSide::AIV, aiv_tpop_remap, program);
+
+  const auto options = cross_core_pipe::CollectMixedPipePtoasOptions(func->body_);
+  auto core_attrs = func->attrs_;
+  auto apply_ptoas_option = [&](const char* attr, bool aic_requested, bool aiv_requested) {
+    CHECK_SPAN(aic_requested == aiv_requested, func->span_)
+        << "Mixed kernel initializers must agree on " << attr;
+    if (!aic_requested) return;
+    auto existing = std::find_if(core_attrs.begin(), core_attrs.end(),
+                                 [attr](const auto& entry) { return entry.first == attr; });
+    if (existing == core_attrs.end()) {
+      core_attrs.emplace_back(attr, true);
+    } else {
+      existing->second = true;
+    }
+  };
+  apply_ptoas_option(kAttrPtoasPlanMemory, options.aic.plan_memory, options.aiv.plan_memory);
+  apply_ptoas_option(cross_core_pipe::kAttrPtoasBufferIdSync, options.aic.buffer_id_sync,
+                     options.aiv.buffer_id_sync);
 
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery
@@ -2610,6 +2721,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";
+  RewriteOutlinedPipeBuffers(aic_final, aiv_final, CoreSide::AIV, aiv_name);
+  RewriteOutlinedPipeBuffers(aiv_final, aic_final, CoreSide::AIC, aic_name);
   // Pipe depths from pl.cross_core_slot, propagated as function attrs by the
   // outliner. Omission preserves the default transport depth and local footprint.
   std::optional<int> slot_num_override =
@@ -2617,9 +2730,21 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   std::optional<int> local_slot_num_override =
       func->HasAttr("local_slot_num") ? std::optional<int>(func->GetAttr<int>("local_slot_num", 0))
                                       : std::nullopt;
+  const bool explicit_c2v_layout =
+      std::any_of(boundary_moves.begin(), boundary_moves.end(), [](const auto& entry) {
+        const auto& [stmt, move] = entry;
+        if (move.op_driven || move.direction != CVDirection::CUBE_TO_VECTOR) return false;
+        const auto* assign = dynamic_cast<const AssignStmt*>(stmt);
+        const auto call = assign ? As<Call>(assign->value_) : nullptr;
+        if (!call || (!call->HasKwarg("blayout") && !call->HasKwarg("slayout"))) return false;
+        const auto tile = As<TileType>(move.result_type);
+        if (!tile) return false;
+        const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+        return view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box;
+      });
   auto automatic_pipe_setup =
       BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final, slot_num_override,
-                              local_slot_num_override, func->span_);
+                              local_slot_num_override, explicit_c2v_layout, func->span_);
   aic_final = PrependPipeSetup(automatic_pipe_setup.aic_stmts, aic_final);
   // Keep a leading get_subblock_idx binding (injected by the auto pl.split
   // LowerAutoVectorSplit path) above the pipe setup, matching the standalone
@@ -2708,7 +2833,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   (void)aic_clone_map_unused;
   auto aic_func = std::make_shared<Function>(aic_name, aic_params, func->param_directions_,
                                              std::vector<TypePtr>{}, aic_cloned_body, func->span_,
-                                             FunctionType::AIC, std::nullopt, std::nullopt, func->attrs_);
+                                             FunctionType::AIC, std::nullopt, std::nullopt, core_attrs);
 
   // Create AIV function with deep clone (fresh Vars for all params and locals,
   // ensuring no shared Var pointers with AIC for structural equality)
@@ -2762,7 +2887,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(aiv_body_stmt, aiv_map);
   (void)aiv_clone_map_unused;
-  auto aiv_attrs = func->attrs_;
+  auto aiv_attrs = std::move(core_attrs);
   if (needs_dual_aiv_dispatch) {
     aiv_attrs.erase(std::remove_if(aiv_attrs.begin(), aiv_attrs.end(),
                                    [](const auto& kv) { return kv.first == kAttrDualAivDispatch; }),
@@ -2999,8 +3124,8 @@ Pass ExpandMixedKernel() {
         continue;
       }
 
-      PackedFp4CrossCoreTransferValidator packed_transfer_validator;
-      packed_transfer_validator.VisitStmt(func->body_);
+      NativeVecToMatTransferValidator native_transfer_validator;
+      native_transfer_validator.VisitStmt(func->body_);
 
       SplitRegionConsumer consumer;
       SplitRegionFinder finder;
@@ -3011,6 +3136,25 @@ Pass ExpandMixedKernel() {
         consumed->body_ = std::move(body);
         func = consumed;
       }
+      // Early-outlined register helpers retain the original region's AIV
+      // affinity even though a GlobalVar call has no operator registration.
+      class VFPlacement : public IRVisitor {
+       public:
+        VFPlacement(ProgramPtr program, AivPlacement& placement)
+            : program_(std::move(program)), placement_(placement) {}
+
+       protected:
+        void VisitExpr_(const CallPtr& call) override {
+          auto callee = program_->GetFunction(call->op_->name_);
+          if (callee && callee->func_type_ == FunctionType::VF) placement_.insert(call.get());
+          IRVisitor::VisitExpr_(call);
+        }
+
+       private:
+        ProgramPtr program_;
+        AivPlacement& placement_;
+      } vf_placement(program, consumer.aiv_only_calls);
+      vf_placement.VisitStmt(func->body_);
       const auto& placement = consumer.aiv_only_calls;
 
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)
@@ -3056,7 +3200,7 @@ Pass ExpandMixedKernel() {
       bool has_group_caller = incore_with_group_caller.count(func->name_) > 0;
       bool needs_preserved_name = incore_with_preserved_name_caller.count(func->name_) > 0;
       auto expanded = ExpandMixedFunction(func, /*create_group=*/needs_preserved_name || !has_group_caller,
-                                          placement, consumer.had_regions);
+                                          placement, consumer.had_regions, program);
 
       new_functions.push_back(expanded.aic_func);
       new_functions.push_back(expanded.aiv_func);

@@ -18,7 +18,7 @@ from typing import Any, cast
 
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
-from pypto.language.optimizations import SPLIT_SLOT_NUM_DEPRECATION, CrossCoreSlot, cross_core_slot
+from pypto.language.constructs.optimizations import SPLIT_SLOT_NUM_DEPRECATION, CrossCoreSlot, cross_core_slot
 from pypto.language.typing import Scalar
 from pypto.pypto_core import DataType, ir
 
@@ -1943,6 +1943,7 @@ class ScopeParser:
             with (
                 self.regions.scope_kind_context(scope_kind),
                 self.regions.incore_user_split_context(scope_kind, split),
+                self.regions.distributed_hierarchy_context(scope_kind, level),
             ):
                 self.services.scope_manager.enter_scope(
                     "graph" if scope_kind == ir.ScopeKind.Graph else "scope"
@@ -2653,6 +2654,38 @@ class ScopeParser:
             finally:
                 self.services.scope_manager.exit_scope()
 
+    def parse_reg_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+        """Parse a compile-time policy without evaluating runtime bindings."""
+        span = self.services.span_tracker.get_span(stmt)
+        if (
+            context_expr.args
+            or len(context_expr.keywords) > 1
+            or any(keyword.arg != "auto_sync" for keyword in context_expr.keywords)
+        ):
+            raise ParserSyntaxError(
+                "reg_scope accepts only keyword auto_sync (captures are implicit)", span=span
+            )
+        auto_sync = True
+        if context_expr.keywords:
+            node = context_expr.keywords[0].value
+            # An IR binding takes precedence over captured Python constants:
+            # a runtime scalar must never silently become a static policy.
+            if any(
+                isinstance(part, ast.Name) and self.services.scope_manager.lookup_var(part.id) is not None
+                for part in ast.walk(node)
+            ):
+                raise ParserSyntaxError("auto_sync must be a compile-time bool", span=span)
+            success, value = self.services.expr_evaluator.try_eval_expr(node)
+            if not success or type(value) is not bool:
+                raise ParserSyntaxError("auto_sync must be a compile-time bool", span=span)
+            auto_sync = value
+        self.parse_scope_body(
+            stmt,
+            ir.ScopeKind.Reg,
+            span,
+            attrs=[("auto_sync", False)] if not auto_sync else [],
+        )
+
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
 
@@ -2717,12 +2750,7 @@ class ScopeParser:
                     return
 
                 if func.attr == "reg_scope":
-                    if context_expr.args or context_expr.keywords:
-                        raise ParserSyntaxError(
-                            "reg_scope takes no arguments (captures are implicit)",
-                            span=self.services.span_tracker.get_span(stmt),
-                        )
-                    self.parse_scope_body(stmt, ir.ScopeKind.Reg, self.services.span_tracker.get_span(stmt))
+                    self.parse_reg_scope(stmt, context_expr)
                     return
 
                 # Unified runtime scope: with pl.scope(mode=...): ...

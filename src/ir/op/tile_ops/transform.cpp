@@ -245,6 +245,10 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     tile_view.fractal = src_v.fractal;
     tile_view.pad = src_v.pad;
     tile_view.compact = src_v.compact;
+  } else if (tile_type->dtype_.IsPackedFp4()) {
+    // Slicing a packed column still leaves both nibbles on the parent's packing axis.
+    tile_view_semantics::SetTileLayout(
+        tile_view, tile_view_semantics::GetImplicitTileLayout(tile_type->shape_, tile_type->memory_space_));
   } else {
     tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
   }

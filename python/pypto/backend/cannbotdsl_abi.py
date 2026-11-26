@@ -10,9 +10,10 @@
 """Compile-only CANNBotDSL call adapters for TMR argument storage.
 
 This module constructs native arguments, not runtime tasks. Generated adapters
-have no kernel_entry and cannot be passed to tmr_bridge.materialize(). A future
-bridge must validate each binding and establish the manifest's resource,
-cache-line isolation, stack, loading and completion guarantees before calling it.
+have no kernel_entry and cannot be passed to tmr_bridge.materialize() directly.
+The cannbotdsl_runtime bridge wraps these adapters for the supported A5 subset,
+validates bindings and enforces resource, cache-line, stack, loading and completion
+requirements. Automatic JIT discovery and binding remain unsupported.
 """
 
 import hashlib

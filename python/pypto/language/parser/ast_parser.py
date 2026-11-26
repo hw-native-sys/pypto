@@ -10,7 +10,7 @@
 """AST entry point composing focused DSL parsers and shared parse services."""
 
 import ast
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, NoReturn, cast
 
 from pypto._function_attrs import AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR
@@ -335,6 +335,7 @@ class ASTParser:
         self.type_resolver.register_window_definitions(func_def)
         self.function.func_name = func_name
         self.function.func_level = func_level
+        self.regions.effective_level = func_level
         # auto_scope rides in func_attrs; absent ⇒ default True.
         self.function.func_auto_scope = bool((func_attrs or {}).get(AUTO_SCOPE_ATTR, True))
         self.function.func_type = func_type
@@ -886,6 +887,53 @@ class ASTParser:
                     override_type = ir.TileType(
                         resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
                     )
+            elif (
+                isinstance(resolved, ir.TensorType)
+                and isinstance(value_expr, ir.Call)
+                and value_expr.op.name == ir.get_op("tensor.view").name
+                and len(value_expr.args) >= 4
+                and isinstance(value_expr.type, ir.TensorType)
+            ):
+                # The parent and window operands determine the address map. A
+                # printed allocation may contribute a MemRef, but an annotation
+                # must never replace the computed strides or valid region.
+                inferred = value_expr.type
+                view = inferred.tensor_view
+                assert view is not None
+                ann_view = resolved.tensor_view
+                annotated_view = view
+                if ann_view is not None:
+                    annotated_view = ir.TensorView(
+                        ann_view.stride or view.stride,
+                        ann_view.layout,
+                        ann_view.valid_shape or view.valid_shape,
+                        ann_view.pad if ann_view.pad != ir.PadValue.null else view.pad,
+                    )
+                if isinstance(inferred, ir.DistributedTensorType):
+                    assert isinstance(resolved, ir.DistributedTensorType)
+                    window = inferred.window_buffer
+                    if resolved.window_buffer is not None and resolved.window_buffer is not window:
+                        raise ParserTypeError(
+                            f"WindowBuffer annotation for '{var_name}' conflicts with the parent window",
+                            span=span,
+                        )
+                    override_type = ir.DistributedTensorType(
+                        inferred.shape, inferred.dtype, resolved.memref, annotated_view, window
+                    )
+                else:
+                    override_type = ir.TensorType(
+                        inferred.shape, inferred.dtype, resolved.memref, annotated_view
+                    )
+                # FlattenCallExpr can bind a dimension read in the operands while
+                # the printed descriptor still carries the original expression.
+                if not types_match(override_type, inferred) and not ShapeDimAliasExpander(
+                    self.function.shape_dim_aliases
+                ).views_match(annotated_view, view):
+                    raise ParserTypeError(
+                        f"TensorView annotation for '{var_name}' conflicts with the sampled window",
+                        span=span,
+                        hint=f"Use the inferred descriptor: {ir.python_print_type(inferred)}",
+                    )
             elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
                 override_type = resolved
             elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
@@ -931,6 +979,17 @@ class ASTParser:
                     }
                 )
                 or not types_match(value_expr.type, override_type)
+                # A storage annotation constrains this definition, whereas an
+                # inherited Call binding describes its source. Preserve the
+                # explicit constraint on the Call too: SSA takes the RHS type
+                # so stale inferred LHS bindings cannot affect reassignments.
+                # types_match deliberately ignores MemRefs and cannot detect
+                # this difference. InitMemRef validates the actual address.
+                or (
+                    isinstance(override_type, ir.TileType)
+                    and override_type.memref is not None
+                    and override_type.memref.is_pinned_
+                )
             )
         ):
             # Carry attrs through the rebuild: a forward-referenced callee has no
@@ -940,7 +999,7 @@ class ASTParser:
             value_expr = ir.Call(
                 value_expr.op,
                 value_expr.args,
-                value_expr.kwargs,
+                self._annotated_call_kwargs(value_expr, override_type),
                 value_expr.attrs,
                 override_type,
                 value_expr.span,
@@ -957,6 +1016,27 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self.ops.track_buffer_meta(var_name, stmt.value)
+
+    @staticmethod
+    def _annotated_call_kwargs(call: ir.Call, annotation: ir.Type) -> Mapping[str, Any]:
+        """Keep the annotated cast layout when compiler passes re-deduce its result type."""
+        if (
+            call.op.name != ir.get_op("tile.cast").name
+            or not isinstance(annotation, ir.TileType)
+            or annotation.tile_view is None
+        ):
+            return call.kwargs
+        if annotation.tile_view.compact != ir.CompactMode.row_plus_one:
+            if call.kwargs.get("compact") == ir.CompactMode.row_plus_one.value:
+                raise ParserTypeError(
+                    "RowPlusOne tile.cast conflicts with TileView compact annotation",
+                    span=call.span,
+                    hint="Use pl.CompactMode.row_plus_one in the annotation or omit it from the cast",
+                )
+            return call.kwargs
+        if call.kwargs.get("layout") != ir.TensorLayout.NZ:
+            raise ParserTypeError("RowPlusOne tile.cast requires layout=pl.NZ", span=call.span)
+        return {**call.kwargs, "compact": ir.CompactMode.row_plus_one.value}
 
     def _assign_or_let(
         self,
@@ -1032,11 +1112,12 @@ class ASTParser:
                         span=span,
                         hint="Use a different variable name for tensors with different shapes or dtypes",
                     )
-                # Compatible: one side just has not been placed yet. Keep the
-                # binding on the Var's own type so the AssignStmt stays
-                # symmetric; InferTileMemorySpace resolves both sides together.
+                # Compatible: one side just has not been placed yet. Carry
+                # only the resolved space; this definition's metadata must not
+                # inherit a stale binding from the mutable Var's first value.
                 if (
                     isinstance(value_expr, ir.Call)
+                    and isinstance(value_type, ir.TileType)
                     and isinstance(existing_var.type, ir.TileType)
                     and existing_var.type.memory_space is not None
                 ):
@@ -1045,12 +1126,44 @@ class ASTParser:
                         value_expr.args,
                         value_expr.kwargs,
                         value_expr.attrs,
-                        existing_var.type,
+                        ir.TileType(
+                            value_type.shape,
+                            value_type.dtype,
+                            value_type.memref,
+                            value_type.tile_view,
+                            existing_var.type.memory_space,
+                        ),
                         value_expr.span,
                     )
             self.function.shape_dim_aliases.pop(existing_var.unique_id, None)
+            if (
+                isinstance(override_type, ir.TileType)
+                and override_type.memref is not None
+                and override_type.memref.is_pinned_
+                and not isinstance(value_expr, ir.Call)
+            ):
+                # A plain alias has no Call on which to carry this definition's
+                # annotation. Bind it separately so SSA sees the constraint
+                # without retyping the source or the reused mutable Var.
+                value_expr = self.builder.let(
+                    f"_{var_name}_binding", value_expr, type=override_type, span=span
+                )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
+        if (
+            override_type is None
+            and not isinstance(value_expr, ir.Call)
+            and isinstance(value_expr.type, ir.TileType)
+            and value_expr.type.memref is not None
+            and value_expr.type.memref.is_pinned_
+        ):
+            # The source may be a mutable Var whose parser type still describes
+            # its first value. Only explicit annotations constrain a fresh LHS;
+            # SSA will supply this alias's binding from the substituted RHS.
+            inferred = value_expr.type
+            override_type = ir.TileType(
+                inferred.shape, inferred.dtype, None, inferred.tile_view, inferred.memory_space
+            )
         var = self.builder.let(var_name, value_expr, type=override_type, span=span)
         if isinstance(value_expr, ir.Call) and value_expr.op.name == ir.get_op("tensor.dim").name:
             self.function.shape_dim_aliases[var.unique_id] = value_expr
@@ -1242,9 +1355,7 @@ class ASTParser:
         Parser-only concerns (everything else delegates to the DSL wrapper /
         IR builder / C++ deducer via :func:`invoke_dsl`):
 
-        - HOST-only, like ``world_size`` (see ``_validate_pld_op_call``): the
-          window buffer is a host-orchestration resource, not lowerable inside
-          InCore / SPMD scopes.
+        - Callable in HOST or CLUSTER_0 orchestration, outside InCore / SPMD scopes.
         - LHS must be a single ``ast.Name``.
         - That name must be globally unique within the ``@pl.program``.
         - User can't pass ``name=`` (it's parser-injected from the LHS).
@@ -1252,18 +1363,8 @@ class ASTParser:
         span = self.span_tracker.get_span(value)
         is_printed = _is_dump_call(value, "alloc_window_buffer")
 
-        in_device_scope = any(
-            self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
-        )
-        if not is_printed and (self.function.func_level != ir.Level.HOST or in_device_scope):
-            raise ParserSyntaxError(
-                "pld.tensor.alloc_window_buffer() can only be called in HOST orchestration "
-                "context (not inside InCore / SPMD scopes); "
-                f"current function level: {self.function.func_level}",
-                span=span,
-                hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                "on the enclosing function and call outside any nested device-side scope",
-            )
+        if not is_printed:
+            self.ops.validate_host_or_cluster_scope("pld.tensor.alloc_window_buffer", span)
 
         if not isinstance(target, ast.Name):
             raise ParserSyntaxError(

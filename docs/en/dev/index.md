@@ -36,6 +36,23 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 | [PTOAS Op Status Matrix](ptoas-op-status.md) | Which public and compatibility PTOAS ops the compiler currently emits |
 | [FP4](fp4.md) | Packed E2M1x2/E1M2x2 types, byte-carrier ABI, and existing E2M1 operator support |
 
+## Run A5 distributed CI on demand
+
+On an open PR targeting `main`, post `/ci a5-distributed` as a new conversation
+comment after automatic lint passes for the current PR head to run
+`onboard-tests-a5-distributed` on its test merge. If lint is missing, running or
+failed, the request ends before device scheduling. Post the command again after lint passes. The
+`ci/a5-distributed` check on the PR head links to the run and its artifacts.
+Repeated commands for the same PR head reuse an active or successful run. If a run ends without
+success, including a timeout, post the command again. The new request closes any unfinished checks
+from that run. New checks record their PR number so the command can also retire a pending check
+after its workflow run is deleted. Rerunning the entire workflow publishes the current attempt's
+check before device scheduling. A result-only retry completes the pending check directly.
+Only the dedicated comment requests this job. When the PR contains
+`tests/st/distributed/test_l3_urma_async.py`, it runs the suite on two A5 cards. Four-rank cases are skipped.
+Otherwise it runs the bootstrap placeholder. A passing placeholder does not
+verify hardware behavior.
+
 ## Comment-triggered full CI
 
 The PR-only `CI` workflow (`ci.yml`) runs `changes`, `toolchain`, `pre-commit`
@@ -141,9 +158,13 @@ while reusing lint for that head.
 The downstream run skips both lint jobs. A lightweight gate verifies their
 reuse before tests start; revision checks and toolchain preparation still run.
 Full includes the reused lint result, wheel warm-up, unit, example, codegen, system, distributed,
-pypto-lib and A5 tests (including the distributed lane), plus simulator tests. Core tests execute even for documentation-only
-PRs. `docs-examples` applies when documentation changes; `serving-guard` applies
-when `PTOAS_VERSION` changes. A failed wheel warm-up is advisory because test
+pypto-lib and A5 onboard tests, plus simulator tests. Core tests execute even for documentation-only
+PRs. `docs-examples` applies when documentation changes. A `PTOAS_VERSION` change requires
+both `serving-guard-a2a3` and `serving-guard-a5` to pass. They select `unit-tests` and `v41-a5-smoke`, respectively,
+from the serving CI workflow on `hw-native-sys/pypto-serving@main` and pass the tested PyPTO merge SHA. Serving owns the runner,
+model tests and device configuration. A manual full run on PyPTO `main` without PR inputs tests the dispatched
+commit and requires both selected serving jobs to report success.
+A failed wheel warm-up is advisory because test
 jobs build locally if necessary; every applicable test must succeed.
 
 ### Results and retries
@@ -156,6 +177,7 @@ overridden Details links of check runs created with Actions' `GITHUB_TOKEN`.
 Queued and running jobs both display pending, with the phase in the description;
 skipped/neutral jobs display success with their actual conclusion in the description.
 Only `ci/full` determines whether the required tests passed.
+Commits tested before the rollout may also display the historical `full / serving-guard` status.
 `CI Full Progress` reads GitHub metadata on a GitHub-hosted runner and refreshes
 these statuses roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
 monitor runs while waiting for a comment. Polling slows down with concurrent

@@ -63,8 +63,9 @@ enum class IRProperty : uint64_t {
                                     ///< requires materialization, RFC #1300 §2.2)
   ArrayNotEscaped,                  ///< ArrayType never appears as a function parameter or return type
   CommDomainScopesMaterialized,     ///< Host_orch bodies are wrapped in CommDomainScopeStmts (one per
-                                    ///< inferred comm domain) and pld.tensor.window result types carry
-                                    ///< DistributedTensorType.window_buffer_ back-references
+                                    ///< inferred comm domain), pld.tensor.window result types carry
+                                    ///< DistributedTensorType.window_buffer_ back-references, and every
+                                    ///< window-bearing view fits its slot's logical byte size
   DistTensorCtxMaterialized,        ///< No pld.system.get_comm_ctx survives outside host orchestration;
                                     ///< every chip-orchestration / device communication context is an
                                     ///< explicit CommCtxType SSA value traceable to a parameter
@@ -160,6 +161,7 @@ enum class IRProperty : uint64_t {
   SimtValid,                  ///< Canonical SIMT helper signatures, domains, and launch result mappings
   SimtOutputsMaterialized,    ///< Writable SIMT Tiles use initialized, dedicated output storage
   SimtSpecialized,            ///< Reachable helpers carry resources matching their launch dimensions
+  AsyncHandleProvenance,      ///< Distributed events and sessions trace to matching SSA definitions
   kCount                      ///< Sentinel (must be last)
 };
 
@@ -295,7 +297,7 @@ enum class VerificationLevel {
  * ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D,
  * HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized,
  * GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid,
- * AccStorePhaseValid} — lightweight checks that catch the most common IR errors.
+ * AccStorePhaseValid, AsyncHandleProvenance} — lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 
@@ -316,7 +318,8 @@ const IRPropertySet& GetStructuralProperties();
  *
  * Returns {SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls,
  * BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence,
- * ArrayNotEscaped} — the properties checked by run_verifier() when no explicit set is given.
+ * ArrayNotEscaped, AsyncHandleProvenance} — the properties checked by run_verifier() when no explicit set is
+ * given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();
 

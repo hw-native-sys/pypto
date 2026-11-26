@@ -23,8 +23,8 @@ module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
     %active = arith.cmpi slt, %tid, %valid : i32
     scf.if %active {
       %index = arith.index_cast %tid : i32 to index
-      %value = pto.ldg %src[%index] : !pto.ptr<f32, gm> -> f32
-      pto.stg %value, %dst[%index] : !pto.ptr<f32, gm>, f32
+      %value = pto.ldg %src[%index] : !pto.ptr<f32, gm>, index -> f32
+      pto.stg %value, %dst[%index] : !pto.ptr<f32, gm>, index, f32
     }
     return
   }

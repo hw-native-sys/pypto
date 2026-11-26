@@ -39,26 +39,26 @@ output_dir/
 
 ## 运行时配置 (`kernel_config.py`)
 
-`kernel_config.py` 暴露一个 `RUNTIME_CONFIG` 字典，派发路径据此启动程序。固定键：
+`kernel_config.py` 提供 `RUNTIME_CONFIG` 字典，派发路径据此启动程序。
 
-| 键 | 何时写入 | 备注 |
-| -- | -------- | ---- |
-| `runtime` | 总是 | `"tensormap_and_ringbuffer"`（默认）或 `"host_build_graph"` —— 由 `ir.compile(runtime=...)`（或把调用包在 `PassContext([], runtime=...)` 中）选定的 `RuntimeKind` 所对应的线上名字。 |
-| `aicpu_thread_num` | 总是 (`0`) | `0` 选择 runtime 的架构默认值（a2a3：4；a5：5），调用方也可显式覆盖。 |
+- `runtime` 记录目标平台实际使用的 Simpler 实现名。
+- `aicpu_thread_num` 默认为 `0`，表示使用运行时的架构默认值
+  （a2a3 为 4，a5 为 5）。调用方可以覆盖。
 
-runtime 由 `PassContext` 以 `ir::RuntimeKind` 携带，而不是仅作为 codegen 参数，
-这样需要针对特定 runtime 做合法化的 pass 可以 switch `PassContext::GetRuntime()`
-而不是比较字符串。之所以用枚举而非名字：这是一个封闭集合 —— `runtime/src/<arch>/
-runtime/` 下每个实现对应一个枚举值 —— 于是拼错是编译错误，而不是一个要到很晚才以
-晦涩 CCEC 报错（找不到 include 目录）浮现的取值。
+通过 `ir.compile(runtime=...)` 或 `PassContext([], runtime=...)` 选择
+`RuntimeKind`。需要按运行时做 IR 合法化的 pass 通过
+`PassContext::GetRuntime()` 获取该选择。代码生成根据目标平台解析实际实现，
+再写入 `RUNTIME_CONFIG["runtime"]`。
 
-线上名字只在两处跨越 ABI 边界：写 `kernel_config.py` 时用 `ir::RuntimeKindToName`，
-读回时用 `ir::RuntimeKindFromName`。两者都以
-`passes.runtime_kind_to_name` / `passes.runtime_kind_from_name` 暴露给 Python。
+- `TENSORMAP_AND_RINGBUFFER` 生成 `tensormap_and_ringbuffer`。
+- `HOST_BUILD_GRAPH` 在 A2/A3 上生成 `host_build_graph`，
+  在 A5 和 A5 模拟器上生成 `percounter`。
+- `HOST_BUILD_GRAPH_EXPERIMENTAL` 在 A5 和 A5 模拟器上生成
+  `host_build_graph`。
 
-runtime 同时是 `@pl.jit` 缓存键的一个维度：`host_build_graph` 的调用不能复用为
-`tensormap_and_ringbuffer` 编译出的产物 —— 后者 `kernel_config.py` 里写的
-runtime 没有任何匹配的 worker 会绑定。
+`passes.runtime_kind_to_name` 和 `passes.runtime_kind_from_name` 转换编译时的
+运行时选择。加载制品时，runner 直接读取记录的实现名，并选择对应的 Simpler
+运行时。实际实现名也参与构建 `@pl.jit` 缓存键。
 
 ## 参数解包
 

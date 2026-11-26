@@ -64,7 +64,8 @@ enum class FunctionType : uint8_t {
   Spmd = 6,           ///< SPMD data-parallel dispatch
   Inline = 7,         ///< Whole-body substitution at every call site
   Graph = 8,          ///< Recordable/replayable orchestration fragment
-  SIMT = 9            ///< Per-thread device helper launched inside an AIV task
+  SIMT = 9,           ///< Per-thread device helper launched inside an AIV task
+  VF = 10             ///< Synchronous register helper called inside an AIV task
 };
 
 /** @brief Function body representation, independent of its execution context. */
@@ -286,6 +287,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "Graph";
     case FunctionType::SIMT:
       return "SIMT";
+    case FunctionType::VF:
+      return "VF";
   }
   throw pypto::TypeError("Unknown FunctionType");
 }
@@ -324,7 +327,7 @@ inline bool IsInCoreType(FunctionType type) {
 /// Device helpers participate in device IR transforms without becoming
 /// independently scheduled InCore tasks or inheriting a SubWorker role.
 inline bool IsDeviceFunctionType(FunctionType type) {
-  return IsInCoreType(type) || type == FunctionType::SIMT;
+  return IsInCoreType(type) || type == FunctionType::SIMT || type == FunctionType::VF;
 }
 
 /**
@@ -380,6 +383,8 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::Inline;
   } else if (str == "Graph") {
     return FunctionType::Graph;
+  } else if (str == "VF") {
+    return FunctionType::VF;
   } else if (str == "SIMT") {
     return FunctionType::SIMT;
   } else {
@@ -521,6 +526,9 @@ inline constexpr const char* kAttrExternalSource = "external_source";
  * ambiguous signature must supply the explicit contract.
  */
 inline constexpr const char* kAttrExternalReturnParams = "external_return_params";
+
+// Native callback binary admission and completion policy (string).
+inline constexpr const char* kAttrExternalBinaryPolicy = "external_binary_policy";
 
 /**
  * @brief Bridge-owned host C++ checker definition and its callable symbol (strings).

@@ -75,6 +75,7 @@ class IRProperty(Enum):
     SimtValid = ...
     SimtOutputsMaterialized = ...
     SimtSpecialized = ...
+    AsyncHandleProvenance = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -129,11 +130,15 @@ class RuntimeKind(Enum):
     HOST_BUILD_GRAPH = ...
     """Host CPU builds the whole task graph up front; required for Graph Execution."""
 
+    HOST_BUILD_GRAPH_EXPERIMENTAL = ...
+    """Original A5 host graph implementation."""
+
+def is_host_build_graph(kind: RuntimeKind) -> bool: ...
 def runtime_kind_to_name(kind: RuntimeKind) -> str:
-    """Wire name written to ``RUNTIME_CONFIG["runtime"]``, e.g. ``"host_build_graph"``."""
+    """Application-facing runtime selection, e.g. ``"host_build_graph"``."""
 
 def runtime_kind_from_name(name: str) -> RuntimeKind:
-    """Parse a ``RUNTIME_CONFIG["runtime"]`` wire name back into a :class:`RuntimeKind`."""
+    """Parse an application-facing runtime selection into a :class:`RuntimeKind`."""
 
 class DiagnosticPhase(Enum):
     """Controls when DiagnosticInstrument runs registered checks (warnings + perf hints)."""
@@ -403,6 +408,10 @@ class PassPipeline:
 
 # Factory functions
 
+def outline_reg_scopes() -> Pass:
+    """Outline register scopes into synchronous device helpers before SSA conversion."""
+    ...
+
 def outline_simt_scopes() -> Pass:
     """Outline per-thread regions before SSA conversion."""
 
@@ -469,6 +478,7 @@ class TypeCheckErrorType(Enum):
     TILE_VIEW_MISMATCH = ...
     BUFFER_DESCRIPTOR_MISMATCH = ...
     TENSOR_LAYOUT_MISMATCH = ...
+    ASYNC_HANDLE_MISMATCH = ...
 
 def unroll_loops() -> Pass:
     """Create a loop unrolling pass that expands ForKind.Unroll loops at compile time."""
@@ -772,13 +782,19 @@ def expand_manual_phase_fence() -> Pass:
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
+def lower_graph_for_runtime() -> Pass:
+    """Convert Graph functions to Inline and remove Graph scope wrappers for TMR.
+
+    Uses the current PassContext runtime. Leaves HBG Graphs available for recording.
+    """
+
 def inline_functions() -> Pass:
     """Create a pass that eliminates ``FunctionType.Inline`` functions.
 
     Splices the body of every ``Inline``-typed function into each call site,
     alpha-renaming locals and substituting formal params with actual args. The
-    inline functions are then removed from the program. Runs as the first
-    pipeline pass so subsequent passes never observe Inline functions.
+    inline functions are then removed from the program so subsequent passes
+    never observe Inline functions.
 
     Detects cycles in the Inline → Inline call graph and raises
     :class:`pypto.ValueError`. Multi-return inline functions emit
@@ -1137,6 +1153,7 @@ __all__ = [
     "init_mem_ref",
     "materialize_simt_outputs",
     "outline_simt_scopes",
+    "outline_reg_scopes",
     "specialize_simt_helpers",
     "memory_reuse",
     "allocate_memory_addr",
@@ -1181,6 +1198,7 @@ __all__ = [
     "lower_tile_to_buffer",
     "select_buffer_ir_functions",
     "flatten_call_expr",
+    "lower_graph_for_runtime",
     "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",

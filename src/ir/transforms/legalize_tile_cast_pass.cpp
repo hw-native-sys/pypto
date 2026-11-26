@@ -56,8 +56,10 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -489,7 +491,13 @@ FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
     return func;
   }
   std::vector<Diagnostic> diags;
-  const bool addressed_fp4_cast = ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS;
+  bool addressed_fp4_cast = GetFunctionMemoryPlanner(func) != MemoryPlanner::PtoAS;
+  if (addressed_fp4_cast && func->func_type_ == FunctionType::InCore) {
+    // The pipe initializers carry the local override until ExpandMixedKernel
+    // attaches it to the outlined peers, which happens after cast legalization.
+    const auto options = cross_core_pipe::CollectMixedPipePtoasOptions(func->body_);
+    addressed_fp4_cast = !(options.aic.plan_memory && options.aiv.plan_memory);
+  }
   LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch(),
                                   addressed_fp4_cast, HasFutureAivSplit(func), &diags);
   auto result = mutator.VisitFunction(func);

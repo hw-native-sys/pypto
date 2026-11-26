@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -39,6 +40,34 @@ namespace {
 
 TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  return GetUnknownType();
+}
+
+// Lane is a scalar SSA operand, not a compile-time pipe attribute. The pop's
+// entry type may still be supplied by an annotation; codegen validates it once
+// memory inference has resolved the final Vec Tile entry.
+TypePtr DeduceAivTransferType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs, bool push) {
+  const size_t base_args = push ? 1 : 0;
+  CHECK(args.size() == base_args || args.size() == base_args + 1)
+      << "AIV transfer expects " << base_args << " operands plus optional aiv_subblockid";
+  if (args.size() == base_args) return GetUnknownType();
+  const auto& lane = args.back();
+  auto scalar = As<ScalarType>(lane->GetType());
+  CHECK_SPAN(scalar && scalar->dtype_ == DataType::INT64, lane->span_)
+      << "aiv_subblockid requires an INT64 scalar; explicitly cast other scalar dtypes";
+  if (auto value = As<ConstInt>(lane)) {
+    CHECK_SPAN(value->value_ == 0 || value->value_ == 1, lane->span_)
+        << "aiv_subblockid must be 0 or 1, got " << value->value_;
+  }
+  const int split = GetKwargOr<int>(kwargs, "split", 0);
+  CHECK_SPAN(split >= 1 && split <= 4, lane->span_) << "aiv_subblockid requires split=1, 2, 3, or 4";
+  if (push) {
+    auto tile = As<TileType>(args.front()->GetType());
+    CHECK_SPAN(tile && (!tile->memory_space_ || tile->GetMemorySpace() == MemorySpace::Vec),
+               args.front()->span_)
+        << "aiv_subblockid requires an AIV-side Vec Tile entry; GlobalTensor is unsupported";
+  }
   return GetUnknownType();
 }
 
@@ -437,6 +466,119 @@ void CheckSplitBoundaryCarriesValid(const std::string& op_name, const std::vecto
 // Cross-Core Tile Transfer Operations (tpush / tpop)
 // ============================================================================
 
+// Direct FIXPIPE uses the caller's explicitly addressed remote UB storage,
+// not the TPipe slot/credit protocol. The public tpush_to_aiv wrapper selects
+// this internal operation only when the author supplies dst. The target row offset addresses the
+// local half received by each vector lane.
+REGISTER_OP("tile.tpush_to_aiv_direct")
+    .set_description("Drain an Acc tile directly to both AIV UB views with split-M FIXPIPE")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("tile", "FP32 Acc tile")
+    .add_argument("dst", "Destination row-major FP32 Vec tile")
+    .add_argument("offset", "Destination row and column offsets")
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_attr<int>("split")
+    .set_attr<int>("st_phase")
+    .no_memory_spec()
+    .f_deduce_type([](const auto& args, const auto& kwargs) -> TypePtr {
+      CHECK(args.size() == 3) << "Direct tpush_to_aiv requires tile, dst, and offset";
+      auto acc = As<TileType>(args[0]->GetType());
+      auto dst = As<TileType>(args[1]->GetType());
+      auto offset = As<MakeTuple>(args[2]);
+      CHECK(dst && acc && dst->shape_.size() == 2 && acc->shape_.size() == 2 &&
+            dst->dtype_ == DataType::FP32 && acc->dtype_ == DataType::FP32)
+          << "Direct tpush_to_aiv requires 2D FP32 tiles";
+      CHECK(dst->memory_space_ == MemorySpace::Vec && acc->memory_space_ == MemorySpace::Acc)
+          << "Direct tpush_to_aiv requires explicit Vec destination and Acc source";
+      auto dst_view = tile_view_semantics::GetEffectiveTileView(*dst);
+      CHECK(dst_view.blayout == TileLayout::row_major && dst_view.slayout == TileLayout::none_box)
+          << "Direct tpush_to_aiv requires a row-major ND destination";
+      // FIXPIPE takes the parent channel's Cols as its physical ND pitch.
+      // An independently strided destination view would lose that pitch.
+      if (!dst_view.stride.empty()) {
+        auto cols = As<ConstInt>(dst->shape_[1]);
+        auto inner = As<ConstInt>(dst_view.stride.back());
+        auto row = As<ConstInt>(dst_view.stride[0]);
+        CHECK(cols && inner && row && inner->value_ == 1 && row->value_ == cols->value_)
+            << "Direct tpush_to_aiv requires the contiguous destination parent, not a strided subview";
+      }
+      CHECK(offset && offset->elements_.size() == 2) << "Direct tpush_to_aiv requires two index offsets";
+      auto split = GetKwargOr<int>(kwargs, "split", 0);
+      auto phase = GetKwargOr<int>(kwargs, "st_phase", static_cast<int>(STPhase::kUnspecified));
+      CHECK(split == 1) << "Direct tpush_to_aiv currently supports only split=1 (split M)";
+      CHECK(IsValidSTPhase(phase)) << "Direct tpush_to_aiv has invalid st_phase";
+      auto acc_view = tile_view_semantics::GetEffectiveTileView(*acc);
+      CHECK(acc_view.valid_shape.size() == 2 && acc_view.blayout == TileLayout::col_major &&
+            acc_view.slayout == TileLayout::row_major && acc_view.fractal == 1024)
+          << "Direct tpush_to_aiv requires the standard FP32 Acc layout";
+      int64_t dst_dims[2], acc_dims[2];
+      for (size_t i = 0; i < 2; ++i) {
+        auto d = As<ConstInt>(dst->shape_[i]);
+        auto a = As<ConstInt>(acc->shape_[i]);
+        auto valid = As<ConstInt>(acc_view.valid_shape[i]);
+        auto index = As<ScalarType>(offset->elements_[i]->GetType());
+        CHECK(d && a && valid && d->value_ > 0 && a->value_ > 0 && valid->value_ == a->value_)
+            << "Direct tpush_to_aiv requires static destination dimensions and fully valid source";
+        CHECK(index && (index->dtype_ == DataType::INDEX || index->dtype_ == DataType::INT64 ||
+                        index->dtype_ == DataType::INT32))
+            << "Direct tpush_to_aiv offsets must be integer scalars";
+        dst_dims[i] = d->value_;
+        acc_dims[i] = a->value_;
+        int64_t extent = i == 0 ? a->value_ / 2 : a->value_;
+        CHECK(extent <= d->value_) << "Direct tpush_to_aiv source does not fit destination";
+        if (auto value = As<ConstInt>(offset->elements_[i])) {
+          CHECK(value->value_ >= 0 && value->value_ <= d->value_ - extent)
+              << "Direct tpush_to_aiv offset exceeds destination capacity";
+        }
+      }
+      CHECK(acc_dims[0] % 2 == 0 && dst_dims[1] % 8 == 0)
+          << "Direct tpush_to_aiv requires even source rows and a 32-byte-aligned destination pitch";
+      if (phase == static_cast<int>(STPhase::kFinal)) {
+        // PTOAS v0.78 supports the unit-flag consumer on TMOV, not TINSERT.
+        auto row = As<ConstInt>(offset->elements_[0]);
+        auto col = As<ConstInt>(offset->elements_[1]);
+        CHECK(row && col && row->value_ == 0 && col->value_ == 0 && dst_dims[0] == acc_dims[0] / 2 &&
+              dst_dims[1] == acc_dims[1])
+            << "Final writeback requires the complete split-M destination at offset [0, 0]";
+      }
+      return GetUnknownType();
+    });
+
+// Explicit author assertion at the peer synchronization boundary. It writes
+// no local bytes, but records the externally produced region as initialized.
+REGISTER_OP("tile.mark_remote_written")
+    .set_description("Mark a Vec view written by a synchronized peer")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .add_argument("tile", "Destination Vec view initialized by peer")
+    .set_arg_effect(0, ArgEffect::Write)
+    .no_memory_spec()
+    .f_deduce_type([](const auto& args, const auto&) -> TypePtr {
+      CHECK(args.size() == 1) << "tile.mark_remote_written requires a tile";
+      auto tile = As<TileType>(args[0]->GetType());
+      CHECK(tile && tile->memory_space_ == MemorySpace::Vec && !tile->shape_.empty() &&
+            tile->shape_.size() <= 2)
+          << "tile.mark_remote_written requires explicit 1D or 2D Vec storage";
+      const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+      CHECK(view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box)
+          << "tile.mark_remote_written requires a contiguous row-major view";
+      // The static register initialization analysis tracks byte intervals.
+      // Do not claim bytes in a strided window's gaps.
+      if (!view.stride.empty()) {
+        auto inner = As<ConstInt>(view.stride.back());
+        CHECK(inner && inner->value_ == 1) << "tile.mark_remote_written requires contiguous elements";
+        if (tile->shape_.size() == 2) {
+          auto rows = As<ConstInt>(tile->shape_[0]);
+          auto cols = As<ConstInt>(tile->shape_[1]);
+          auto pitch = As<ConstInt>(view.stride[0]);
+          CHECK(rows && ((rows->value_ == 1) || (cols && pitch && cols->value_ == pitch->value_)))
+              << "tile.mark_remote_written cannot mark a strided multi-row view";
+        }
+      }
+      return GetUnknownType();
+    });
+
 // Push tile data to AIV (from AIC)
 REGISTER_OP("tile.tpush_to_aiv")
     .set_description("Push tile data from AIC to AIV via cross-core pipe")
@@ -445,8 +587,8 @@ REGISTER_OP("tile.tpush_to_aiv")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
-    // Optional partition stride (see tile.aiv_shard); consumed by the torch
-    // reference runtime, ignored by PTO codegen.
+    // Explicit partition stride used by Torch. On A5 it also preserves the
+    // box transport chosen by the split passes.
     .set_attr<int>("lane_stride")
     .set_attr<int>("id")
     .no_memory_spec()
@@ -459,10 +601,13 @@ REGISTER_OP("tile.tpush_to_aic")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
+    .add_argument("aiv_subblockid", "Optional INT64 logical AIV lane operand (0 or 1)")
     .set_attr<int>("split")
     .set_attr<int>("id")
     .no_memory_spec()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceAivTransferType(args, kwargs, true);
+    });
 
 // Pop tile data from AIC (into AIV)
 REGISTER_OP("tile.tpop_from_aic")
@@ -470,14 +615,16 @@ REGISTER_OP("tile.tpop_from_aic")
     .set_op_category("CrossCoreOp")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .set_cross_core_role(core_affinity::CrossCoreRole::TPop)
-    .no_argument()
+    .add_argument("aiv_subblockid", "Optional INT64 logical AIV lane operand (0 or 1)")
     .set_attr<int>("split")
     // Optional partition stride (see tile.aiv_shard); consumed by the torch
     // reference runtime, ignored by PTO codegen.
     .set_attr<int>("lane_stride")
     .set_attr<int>("id")
     .no_memory_spec()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceAivTransferType(args, kwargs, false);
+    });
 
 // Pop tile data from AIV (into AIC)
 REGISTER_OP("tile.tpop_from_aiv")

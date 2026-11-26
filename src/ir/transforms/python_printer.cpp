@@ -123,6 +123,7 @@ void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const
     param_ptrs.insert(p.get());
   }
   body_defined_vars_.clear();
+  printed_assignment_vars_ = param_ptrs;
   free_body_vars_.clear();
   if (body) {
     var_collectors::VarDefUseCollector body_collector;

@@ -53,7 +53,9 @@ program_with_memrefs = init_pass(program)
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
-   - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
+   - **借用的 FIFO 存储（borrowed FIFO storage）**：`tile.tpop_*` 结果、零拷贝 view、普通别名，以及 `reg.store` / `reg.scatter` 等物理写回结果均保持无 MemRef。写回依据 `output_reuses_input_arg` 追踪目标，包括带 mask 的写回；它们不会为接收缓冲区分配副本。`HasMemRefs` 使用同一分类规则。 对于已提取的 VF 调用，每个返回 Tile 或元组分量继承 VF 声明所指定实参的存储。内存分配和验证在检查分支合并时，都会沿实参追溯到原始接收值。显式绑定的结果必须与实参继承的地址一致。FIFO 槽位没有可静态证明的分配地址。
+   - **控制流结果**：`ForStmt` / `WhileStmt` 的循环携带值和结果继承初始缓冲区，包括借用值没有 MemRef 的情况；`IfStmt` 结果继承 yield 值的存储。`HasMemRefs` 在检查消费者前追踪借用的循环携带值和分支结果。
+     两个分支引用同一借用槽位时，PTO 代码生成通过 `scf.if` 传递 Tile 句柄，不分配 phi 缓冲区。不同借用槽位仍使用分配的 phi 缓冲区和分支内复制，保证槽位释放后结果仍然有效。这类复制仅支持 Vec 内存：如果 Mat FIFO 接收值需要复制到已分配的分支结果缓冲区，PTO 代码生成会拒绝该操作，包括在 `if` 之前定义的接收值。应在各分支内消费 Mat 值，而不是将其 yield 出去。借用的写回结果使用从输入句柄派生的目标 view，并保留 padding 等结果元数据。
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
 6. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
 7. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
@@ -103,9 +105,13 @@ pass 被 ptoas 整体替换，ptoas 侧也没有对应概念来接管。多槽�
 ptoas 区域，ptoas 被禁止合并这些物理段，详见
 [Python 语法](../language/00-python_syntax.md#在-ptoas-内存规划器下)。
 
-声明位于被赋值的 `Var` 上而非 RHS `Call` 上——`ConvertToSSA` 只把它合并进 Var 的类型，而算子类型
-推导永远不产生 MemRef——因此任何从 Call 重建类型的 pass 都必须显式携带它。`ConvertToSSA` 负责
-合并；`FlattenTileNdTo2D` 在四处重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；
+普通别名重新注解时，解析器先建立独立的带类型绑定，再更新可变变量，以保留约束而不修改源变量的类型。
+未注解的新别名在内联期间也保持 LHS 存储未绑定，直到 SSA 替换为当前源变量，避免把旧类型误作显式约束。
+声明由被赋值的 `Var` 携带；解析器也在 RHS `Call` 上保留显式的 pinned 注解，使重新赋值时能将
+它与 Var 之前推导出的绑定区分开。算子类型推导不分配存储，但可能继承输入的 MemRef
+（`tile.gather_row` 直接返回目标累加器的类型）。重建类型的 pass 必须保留显式约束，即使类型
+推导省略或继承了 MemRef。`ConvertToSSA` 选择每次定义的元数据；`FlattenTileNdTo2D` 在四处
+重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；
 `InferTileMemorySpace` 在把 Var 类型同步到重建后的 Call 时保留它。只克隆而不重建的 pass（包括
 `LowerPipelineLoops` 产出的各流水级 body）经由 `MemRef` 的克隆路径保留它。
 
@@ -121,8 +127,26 @@ ptoas 区域，ptoas 被禁止合并这些物理段，详见
 
 - 绑定的 tile 是动态 shape——声明式分配必须在编译期定型。
 - 同一 buffer 上的 tile 内存空间不一致。
-- 绑定 view / 原地算子（`tile.reshape`、`tile.matmul_acc` 等）的输出。这类结果物理上**就是**
-  其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
+- 将 view / 原地算子（`tile.reshape`、`tile.gather_row`、`tile.matmul_acc` 等）的输出
+  绑定到与其继承位置不同的存储。继承的绑定或显式绑定解析后若指向相同分配与字节偏移，
+  包括多槽位分配的同一槽位，则允许使用。不同分配、不同槽位，或无法证明相等的符号
+  偏移都会被拒绝；应改为绑定源 tile。view 按派生后的偏移校验，仅分配基址相同并不充分。
+
+例如，只为 gather 累加器添加绑定是合法的；未注解的结果通过类型推导与循环 SSA
+继承该声明：
+
+```python
+seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+    [8, 32], dtype=pl.BF16, value=0.0
+)
+result = seed
+for row in pl.range(8):
+    result = pl.gather_row(result, x, [row, 0], [row, 0], [1, 32])
+```
+
+`InitMemRef` 创建一块 pinned 的 `stage` 分配，由 seed、循环携带值与 gather 结果共享。
+显式结果注解会经过 SSA 与类型重新推导保留至此处校验。未注解的重新赋值跟随新源值的
+绑定；同一变量名之前推导出的绑定不会约束新的定义。
 
 第四条规则——绑定到**同一槽位**的 tile 生命周期不得重叠——需要生命周期信息，因此在
 [MemoryReuse](40-memory_reuse.md#声明式分配) 中检查。位于*不同*槽位的 tile 本来就应该同时

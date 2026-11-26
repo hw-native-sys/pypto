@@ -37,6 +37,10 @@ namespace graph_replay {
 /// region can never reach a replay in the first place.
 [[nodiscard]] bool IsTaskIdScalar(const TypePtr& type);
 
+/// Resource-cohort queries read fixed orchestration state throughout one run.
+/// Each later run records its own Graph Definition and queries its own cohort.
+[[nodiscard]] bool IsResourceCountQuery(const CallPtr& call);
+
 /// The values inside one Graph function that are the same on every replay.
 ///
 /// This is a *weaker* property than the one Step A hoists, and the distinction
@@ -51,7 +55,7 @@ namespace graph_replay {
 /// a constant-trip loop can stay frozen even though the caller cannot derive
 /// it. The two analyses keep those cases separate.
 ///
-/// Three seeds, each with its own reason for being constant across replays:
+/// Four seeds, each with its own reason for being constant across replays:
 ///
 /// * a **literal**, trivially;
 /// * a **constant-trip loop induction variable**. Recording walks the loop once
@@ -62,6 +66,9 @@ namespace graph_replay {
 /// * **`tensor.dim` of a boundary tensor parameter**. The runtime matches
 ///   its rank, shape and strides against the recorded GraphBoundaryMatchInfo,
 ///   so within one recording the boundary shape cannot change.
+/// * **resource-cohort queries** (`system.available_cluster_count` and
+///   `system.available_aiv_count`). The owning orchestration fixes its core
+///   cohort before recording, and that cohort lasts for the entire run.
 ///
 /// Metadata-only slice/reshape/view chains inherit the shape fact only after
 /// their source, shape/offset operands and result extents are invariant.
@@ -95,6 +102,10 @@ class ReplayInvariantSet {
 
   /// True when @p expr evaluates to the same value on every replay.
   [[nodiscard]] bool IsInvariant(const ExprPtr& expr) const;
+
+  /// A local resource query or its simple SSA alias, excluding boundary inputs
+  /// and arithmetic. Launch specifications use this narrower invariant proof.
+  [[nodiscard]] bool IsResourceCount(const ExprPtr& expr) const;
 
   /// True for `tensor.dim` of a boundary tensor or a proven metadata-only
   /// view of one, with a literal axis.
@@ -130,6 +141,18 @@ class ReplayInvariantSet {
   std::unordered_map<const Var*, std::vector<Proof>> fixed_local_axes_;
   std::unordered_map<const Var*, Roots> boundary_tensors_;
   std::unordered_map<const Var*, Roots> invariant_;
+  std::unordered_set<const Var*> resource_counts_;
+};
+
+/// Resolve resource-width aliases to their defining query, safe to emit at
+/// another allocation site. Cache each unchanged function's SSA definitions
+/// once; boundary scalars and arithmetic expressions never qualify.
+class ResourceCountResolver {
+ public:
+  [[nodiscard]] ExprPtr Resolve(const ExprPtr& expr, const FunctionPtr& func) const;
+
+ private:
+  mutable std::unordered_map<const Function*, std::unordered_map<const Var*, ExprPtr>> queries_;
 };
 
 }  // namespace graph_replay

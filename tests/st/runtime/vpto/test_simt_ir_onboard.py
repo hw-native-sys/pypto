@@ -202,6 +202,67 @@ def integration_acceptance(output: Path, device: int | None):
     (output / "integration-result.json").write_text(json.dumps({"checks": checks, "timings": timings}))
 
 
+STRIDED_DIMS = [(n, 1, 1) for n in (1, 256, 257, 512, 513, 1024, 1025, 2048)] + [(8, 4, 8)]
+STRIDED_LENGTHS = (0, 1, 255, 256, 257, 2047, 2048)
+
+
+def strided_acceptance(output: Path, device: int | None):
+    """Check physical pitches and origins across every register-budget boundary."""
+    output.mkdir(parents=True, exist_ok=True)
+    pin = check_runtime_pin(checkout_root=ROOT)
+    assert pin.matches and pin.installed == pin.pinned, pin
+    example = runpy.run_path(str(ROOT / "examples/advanced/07_simt_strided_copy.py"))
+    manifest = output / "strided-artifacts.json"
+    artifacts = json.loads(manifest.read_text()) if device is not None else {}
+    checks = {}
+    for dims in STRIDED_DIMS:
+        name = "x".join(str(n) for n in dims)
+        config = RunConfig(
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            device_id=device if device is not None else 0,
+            cache_config=CacheConfig(enabled=False),
+            save_kernels_dir=str(output / name),
+        )
+        if device is None:
+            compiled = example["strided_copy"].compile(X=dims[0], Y=dims[1], Z=dims[2], config=config)
+            helpers = list((compiled.output_dir / "vpto").rglob("*.pto"))
+            assert len(helpers) == 1
+            target = re.findall(r"pto\.simt_launch @([\w]+)<<<", helpers[0].read_text())
+            assert len(target) == 1
+            # Retain real device objects and validate the linked launch length,
+            # not just emitted resource annotations or a successful PTO parse.
+            record = runpy.run_path(str(ROOT / "examples/runtime/vf_emitc_vpto.py"))["_record_compilation"]
+            with record(output / name) as calls:
+                compiled.load()
+                assert len(calls) == 1
+                validation = runpy.run_path(str(FIXTURE / "simt_validation.py"))
+                validation["check_simt_launch_size"](output / name / "compilation-1", target[0])
+            artifacts[name] = str(compiled.output_dir.resolve())
+            continue
+        compiled = CompiledProgram.from_dir(artifacts[name])
+        compiled.load()
+        with ChipWorker(config=config, runtime=compiled.runtime_name) as worker:
+            handle = worker.register(compiled)
+            checks[name] = 0
+            for repeat in range(2):
+                for valid in STRIDED_LENGTHS:
+                    src, dst, tags = example["inputs"](repeat)
+                    original = src.clone()
+                    expected, expected_tags = example["expected_outputs"](src, dst, tags, valid, dims)
+                    handle(src, dst, tags, valid)
+                    torch.testing.assert_close(src, original, rtol=0, atol=0)
+                    torch.testing.assert_close(dst, expected, rtol=0, atol=0)
+                    torch.testing.assert_close(tags, expected_tags, rtol=0, atol=0)
+                    checks[name] += 1
+            print(f"PASS strided SIMT dims={dims}: {checks[name]} checks", flush=True)
+    if device is None:
+        manifest.write_text(json.dumps(artifacts, indent=2))
+    (output / "strided-result.json").write_text(
+        json.dumps({"checks": checks, "runtime": pin.installed, "device": device}, indent=2)
+    )
+
+
 def _variants(output: Path, case: str):
     pin = check_runtime_pin(checkout_root=ROOT)
     assert pin.matches and pin.installed == pin.pinned, pin
@@ -330,8 +391,27 @@ def test_simt_integration(tmp_path, onboard):
     assert result["checks"] == ({"gm": 21, "ub": 21, "row_simt": 21, "row_simd": 21} if onboard else {})
 
 
+@pytest.mark.parametrize("onboard", [False, True], ids=["build", "persistent"])
+def test_simt_strided(tmp_path, onboard):
+    gate = "PYPTO_RUN_VPTO_ONBOARD" if onboard else "PYPTO_RUN_VPTO_VF_VALIDATION"
+    if os.environ.get(gate) != "1":
+        pytest.skip(f"Opt in with {gate}=1")
+    support = runpy.run_path(str(FIXTURE / "test_validation.py"))
+    command = [sys.executable, Path(__file__).resolve(), "--strided-worker", tmp_path]
+    timeout = int(os.environ.get("PYPTO_VPTO_TIMEOUT", "600"))
+    support["run"](tmp_path, "strided-build", command, timeout=timeout)
+    if onboard:
+        command.append(os.environ["PYPTO_VPTO_DEVICE_ID"])
+        support["run"](tmp_path, "strided-onboard", command, timeout=timeout)
+    result = json.loads((tmp_path / "strided-result.json").read_text())
+    expected = {"x".join(str(n) for n in dims): 14 for dims in STRIDED_DIMS} if onboard else {}
+    assert result["checks"] == expected
+
+
 if __name__ == "__main__":
-    if len(sys.argv) in (3, 4) and sys.argv[1] == "--integration-worker":
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--strided-worker":
+        strided_acceptance(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) == 4 else None)
+    elif len(sys.argv) in (3, 4) and sys.argv[1] == "--integration-worker":
         integration_acceptance(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) == 4 else None)
     elif len(sys.argv) in (4, 5) and sys.argv[1] == "--worker":
         _acceptance(Path(sys.argv[2]), sys.argv[3], int(sys.argv[4]) if len(sys.argv) == 5 else None)

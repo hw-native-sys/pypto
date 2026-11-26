@@ -28,6 +28,7 @@ def test_function_type_enum():
         ir.FunctionType.Inline,
         ir.FunctionType.Graph,
         ir.FunctionType.SIMT,
+        ir.FunctionType.VF,
     ]
     assert len(all_types) == len(set(all_types))
     # Distinctness alone cannot notice a member missing from the list above, so

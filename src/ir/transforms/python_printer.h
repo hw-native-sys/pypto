@@ -169,6 +169,10 @@ class IRPythonPrinter : public IRVisitor {
   // Vars defined in the current function body (for PrintMemRef formatting).
   std::unordered_set<const Var*> body_defined_vars_;
 
+  // Definitions already emitted: a mutable Var's pinned type describes its
+  // first definition, not a new constraint on each later alias assignment.
+  std::unordered_set<const Var*> printed_assignment_vars_;
+
   // True while printing a function signature (parameter annotations and return
   // types). Body definitions are not in scope there, so a MemRef whose base Ptr
   // is allocated in the body must print as a string literal rather than a bare
@@ -390,7 +394,7 @@ class IRPythonPrinter : public IRVisitor {
 
   // Render one ``attrs={...}`` value as a parseable Python DSL expression. This
   // is the generic round-trip "safety net": every Call/Submit attr that has no
-  // bespoke kwarg surface (deps=/device=/dumps=) and is not emitted by a
+  // bespoke kwarg surface (deps=/worker=/dumps=) and is not emitted by a
   // dedicated emitter (dump_vars/arg_directions) is rendered here, so print ->
   // parse never silently drops an attr. Dispatches on the ``std::any`` value
   // type and FAILS LOUD (INTERNAL_CHECK_SPAN) on a type it cannot represent in

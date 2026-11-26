@@ -8,6 +8,7 @@
 | 页面 | 内容 |
 | ---- | ---- |
 | [PTO Codegen](00-pto_codegen.md) | 从 PyPTO IR 生成 PTO-ISA 方言的 MLIR |
+| [分块 Tile 尺寸校验](07-boxed-tile-extents.md) | 物理 tile 维度的分配网格校验与诊断 |
 | [编排代码生成](01-orchestration_codegen.md) | 生成向运行时提交任务的主机侧 C++ |
 | [PTO 内核包装器生成](02-kernel_wrapper.md) | 将 ptoas 生成的内核连接到运行时派发 |
 | [EmitC 与 VPTO VF 执行接入](03-vpto-vf-integration.md) | 独立 VF helper、同步契约与 A5 常驻执行 |
@@ -19,3 +20,5 @@
 - [Passes](../passes/index.md) —— codegen 运行前必须成立的全部前提。
 - [PTO ISA 参考](../../reference/index.md) —— 生成代码所使用的指令语义。
 - [PTOAS 算子状态矩阵](../ptoas-op-status.md) —— 可供发射的 PTOAS 算子范围。
+
+任务 11.7 的新增接口与剩余限制参见 [SIMT 接口覆盖](06-simt-interface-coverage.md)。

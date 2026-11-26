@@ -11,7 +11,7 @@
 - **单次往返、生产者角色** —— 恰好一个 `tpush` 和一个 `tpop`，且 `tpush` 的反向切片不通过 SSA 边喂给 body（cube：`QK → tpush`，`tpop → SV`）。两半仅通过有序的跨核 FIFO 关联，于是让生产者**提前 `D = max(2, stage-1)` 个迭代**运行（跨核默认 depth-2）：`produce(start … start+(D-1)·step)` 序言（prologue）、一个 `ForKind::Sequential` 稳态循环（其循环变量 `k` 作为每组的首个 produce 索引，把该组的 `D` 个 produce `produce(k+i·step)` 与滞后的 `D` 个 consume `consume(k-(D-i)·step)` 配对，`k` 以 `D·step` 为步长取值 `[start+D·step, start+trip·step)`）、以及 `consume(最后 D 个)` 尾声（epilogue）。cube 发出第 k 组的 `D` 个 `QK` 时，vector 正在跑第 k-D 组的 `D` 个 softmax。详见 [skew 深度](#skew-深度stage)。
 - **消费者角色，或多次往返** —— lead 算子通过 SSA 喂给 body（vector：弹出的 scores 喂给 softmax），或某个 FIFO 方向上有多于一条消息。此时**降级为普通的 `ForKind::Sequential` 循环**（body 不变）。这消除了 unroll 的背靠背 `tpop`，同时保持 FIFO 的有序性；跨核重叠则来自**对端**核的生产者 skew —— 它提前一步把每个 tile 放入 FIFO，使本核有序的 `tpop` 不再 block。
 
-每个**非跨核**的 pipeline 循环（同核 GM→L1、L1→L0、嵌套 matmul stage 循环 —— 没有 `tpush`/`tpop`）保持不变，交给 `LowerPipelineLoops` 复制。
+每个**非跨核**且不含块内同步事件或显式量化配置的 pipeline 循环（同核 GM→L1、L1→L0、嵌套 matmul stage 循环 —— 没有 `tpush`/`tpop`）保持不变，交给 `LowerPipelineLoops` 复制。 具名块内事件与 `system.set_quant_scalar` / `system.set_quant_vector` 优先将所有外层流水循环降为 Sequential，包括单向 C2V 和 `stage=1`。量化寄存器是 TPUSH 的隐式输入。降级保留 setter 和 push 的顺序。
 
 输出为 `ForKind::Sequential` 且不带 `pipeline_stages` 标记，因此 `LowerPipelineLoops`（触发条件 `kind == Pipeline`）会跳过它，`CanonicalizeIOOrder`（作用域限定在 pipeline body）也不会再去重排已手工排好序的 skew。
 
@@ -36,6 +36,15 @@ p = passes.skew_cross_core_pipeline()
    - 否则 —— `carried` 非空（消费者角色）、多于一个 `tpush`/`tpop`（多次往返；只 skew 一条消息会打乱有序 FIFO —— verifier 抓不到的静默数据错误）、动态边界、或 trip < 2 → **`DemoteToSequential`**。
 
 无论哪种，跨核循环**总是**以 `ForKind::Sequential`（无 `pipeline_stages` 标记）离开本 pass，因此永远不会以 Pipeline body 的形式到达 `LowerPipelineLoops` 或 `CanonicalizeIOOrder`。
+
+### 块内同步事件（intra-block events）
+
+包含 `system.set_intra_block` 或 `system.wait_intra_block` 的 pipeline
+循环一律降为 Sequential，包括 `stage=1` 以及嵌套控制流中的事件。
+此规则优先于 tpush/tpop skew。块内同步事件与数据访问之间没有 SSA 依赖，
+必须保留手写的事件/数据访问顺序和跨迭代的事件复用约束。
+pass 在正常遍历时统计事件，不会重复扫描嵌套循环体，也不会插入新的同步。
+不含块内同步事件的循环继续使用原有的 skew 或同核流水行为。
 
 ### skew 深度（stage）
 

@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/acc_push_epilogue.h"
+
 // clang-format off
 #include <msgpack.hpp>
 // clang-format on
@@ -436,9 +438,12 @@ class IRSerializer::Impl {
     type_map["type_kind"] = msgpack::object(type->TypeName(), zone);
 
     if (auto reg = As<RegType>(type)) {
-      type_map["shape"] = msgpack::object(reg->shape_, zone);
-      type_map["dtype"] = msgpack::object(reg->dtype_.Code(), zone);
-      type_map["kind"] = msgpack::object(static_cast<uint8_t>(reg->kind_), zone);
+      const auto kind = reg->GetRegKind();
+      type_map["kind"] = msgpack::object(static_cast<uint8_t>(kind), zone);
+      if (kind != RegKind::UReg) {
+        type_map["shape"] = msgpack::object(reg->GetShape(), zone);
+        type_map["dtype"] = msgpack::object(reg->GetDType().Code(), zone);
+      }
     } else if (auto scalar_type = As<ScalarType>(type)) {
       type_map["dtype"] = msgpack::object(scalar_type->dtype_.Code(), zone);
     } else if (type->GetKind() == ObjectKind::TensorType ||
@@ -809,6 +814,11 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
     } else if (value.type() == typeid(std::string)) {
       kwargs_msgs.push_back(
           make_pair(key, VisitLeafField(AnyCast<std::string>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(AccPushEpilogue)) {
+      std::map<std::string, msgpack::object> contract;
+      contract["type"] = msgpack::object("AccPushEpilogue", zone_);
+      contract["value"] = msgpack::object(AnyCast<AccPushEpilogue>(value), zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(contract, zone_)));
     } else if (value.type() == typeid(double)) {
       kwargs_msgs.push_back(
           make_pair(key, VisitLeafField(AnyCast<double>(value, "serializing kwarg: " + key))));
@@ -944,7 +954,7 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       pol_map["value"] = msgpack::object(entry_vec, zone_);
       kwargs_msgs.push_back(make_pair(key, msgpack::object(pol_map, zone_)));
     } else if (value.type() == typeid(ExprPtr)) {
-      // Reserved Expr-valued attr (e.g. kAttrDevice, the distributed
+      // Reserved Expr-valued attr (e.g. kAttrWorker, the distributed
       // device-placement expression). Serialize through the node-reference
       // machinery, like the Var-valued attrs above.
       const auto& expr = AnyCast<ExprPtr>(value, "serializing kwarg: " + key);

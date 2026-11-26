@@ -28,7 +28,8 @@ from pypto.jit._artifact_manifest import (
 )
 
 BINARY_MANIFEST = "binary_manifest.json"
-_BINARY_SCHEMA = 1
+# Schema 2 certifies that hardware kernel entries were checked before .text extraction.
+_BINARY_SCHEMA = 2
 _DIRECTIONS = {"SCALAR", "IN", "OUT", "INOUT"}
 
 
@@ -239,8 +240,11 @@ def _read_json(root: Path) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError(f"Unsupported prebuilt manifest schema: {root}")
     record_map = cast("dict[str, Any]", record)
-    if type(record_map.get("schema")) is not int or record_map["schema"] != 1:
-        raise ValueError(f"Unsupported prebuilt manifest schema: {root}")
+    if type(record_map.get("schema")) is not int or record_map["schema"] != _BINARY_SCHEMA:
+        raise ValueError(
+            f"Unsupported prebuilt manifest schema {record_map.get('schema')!r}: {root}. "
+            "Rebuild the artifact from source; legacy raw device binaries lack entry validation."
+        )
     return record_map
 
 

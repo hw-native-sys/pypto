@@ -150,6 +150,13 @@ parser / printer round-trips consuming printed `@pl.program` text (e.g.
 `examples/utils/parse_from_text.py`). If you believe `@pl.jit` cannot express a new ST
 case, **tell the user before falling back to `@pl.program`** — that gap is itself the finding.
 
+Direct external-kernel ABI/runtime integration tests under
+`tests/st/runtime/external_kernel/` may use the provider's native DSL and handwritten
+orchestration when they test a direct bridge not expressible through `@pl.jit`.
+Document that boundary and its dependencies in the test, and compile the device and
+orchestration binaries even in compile-only mode. This exception does not cover
+ordinary PyPTO kernels, examples, or tests of automatic JIT discovery.
+
 ## Examples Policy
 
 ### Examples Directory

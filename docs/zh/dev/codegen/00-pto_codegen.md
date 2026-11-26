@@ -2,7 +2,15 @@
 
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
-PyPTO 要求 PTOAS v0.74 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `27fe21756` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `83b1b2b52`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
+PyPTO 要求 PTOAS v0.78 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `a5349f4` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `45435c06`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
+
+PyPTO 在指针运算、标量访存和 VMI 读写中将元素偏移类型写为 `index`。
+`pto.vmi.vload` 和 `pto.vmi.vstore` 将该类型放在 UB 指针类型之后。
+带掩码的写操作还要在 `index` 后写出掩码类型。group stride 和 block stride
+的类型分别隐含为 `index` 和 `i16`。
+
+`tile.slice` 将偏移和有效范围转换为 `pto.subview` 的 `index` 操作数，
+也支持用整型标量参数指定这些值。
 
 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) 保留 MX 的逻辑二维形状、步幅和偏移。PTOAS 根据 `mx_a_zz` / `mx_b_nn` 构造打包后的物理描述符；不能将这些视图重新标记为 ND。
 
@@ -13,7 +21,7 @@ A2/A3 余数操作的 scratch 类型必须与输入相同，且不能与输入�
 | TREM | 2（PTOAS 要求） | `k*S + 8*ceil(S/256) + 8`，INT32 时 `k` = 3，否则为 1 |
 | TREMS | 1 | `k*S + 8*ceil(S/256) + 8`，INT32 时 `k` = 2，否则为 1 |
 
-`S` 是按 8 个元素对齐的源行跨度。FP32 高精度 TREM 要求的列数是该值与 `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8)` 的较大者，其中 `C = max(valid_cols // 64, 1)`；有效列数动态变化时，用物理宽度作为上界。
+`S` 是按 8 个元素对齐的源行跨度。FP32 高精度 TREM 要求的列数是该值与 `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 640*min(C, 8)` 的较大者，其中 `C = max(valid_cols // 64, 1)`。有效列数动态变化时，用物理宽度作为上界。
 
 ISA 将 INT32 中间结果保存在 scratch 中，不会写回输入。
 
@@ -39,6 +47,15 @@ ISA 将 INT32 中间结果保存在 scratch 中，不会写回输入。
 - **基于 Tile 变量的分配**: 为每个 Tile 变量生成带显式 `addr` 的 `pto.alloc_tile` 操作
 - **类型 (Type) 感知转换**: 从 TileType 元数据推导 tile_buf/tensor_view 类型
 
+### 同步模式选择
+
+自动提取的 A5 混合内核可以在 `aic_initialize_pipe` 和
+`aiv_initialize_pipe` 中同时设置 `ptoas_buffer_id_sync=True`，让整个混合模块
+通过 PTOAS 的 `--enable-bufid_sync` 使用 buffer ID 同步。生成的 PTO 会记录这一
+选择，重编产物时使用相同模式。两个初始化器同时设置
+`ptoas_plan_memory=True` 时，由 PTOAS 通过 `--pto-level=level2` 负责该模块的
+片上内存规划。
+
 ### 生成顺序
 
 有限浮点常量使用十进制科学计数法，NaN 和无穷使用目标类型位宽的十六进制位模式。
@@ -51,7 +68,7 @@ ISA 将 INT32 中间结果保存在 scratch 中，不会写回输入。
 代码生成按以下固定顺序生成 MLIR:
 
 1. **常量**: 索引和浮点值的 `arith.constant`
-2. **张量视图**: 所有张量参数的 `pto.make_tensor_view`
+2. **张量视图**: 函数体引用且需要视图的 GM 张量参数的 `pto.make_tensor_view`
 3. **分配**: 所有 Tile 变量的 `pto.alloc_tile` (按变量维度, 带 `addr` 属性)
 4. **操作**: 包含加载、计算、存储操作的函数体
 
@@ -218,7 +235,9 @@ print(pto_code)
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
-| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
+| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / A5 BF16 NZ Vec-to-Mat 插入 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
+| `tile.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col], st_phase=...)` | A5 split-M FIXPIPE 直接写回：`pto.tinsert`，或整窗 final 写回使用带 `stPhase=final` 的 `pto.tmov` |
+| `tile.mark_remote_written(tile)` | 不产生指令；为寄存器分析标记对端已初始化的 UB 区间 |
 | `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc`（`src0 + src1 + carry`） |
@@ -256,6 +275,21 @@ print(pto_code)
 A2/A3 的插入列偏移必须满足 32 字节对齐（8 个 FP32 或 16 个 FP16/BF16 元素）。
 代码生成会拒绝违反该限制的常量偏移；动态偏移也必须由调用方保证满足此条件。
 
+A5 上，BF16 Vec-to-Mat 插入在源目标使用相同的非紧凑 NZ 布局
+（`col_major`、`row_major`、fractal 512、无填充）时也通过 MTE3 的
+`pto.tinsert` 下沉。它保留父 Mat tile 的物理步长（physical pitch），支持
+在行偏移 0、16、……、112 处依次插入 16 行数据，填满 128 行目标。
+结果必须原地复用 Mat 目标；独立结果会被拒绝，因为保留目标其他元素需要
+不支持的 Mat-to-Mat 拷贝。源有效列数和列偏移必须是编译期确定的 16 的倍数：
+NZ 搬运按完整的 32 字节 BF16 列块复制。
+源句柄上的每次 `set_validshape` 更新（包括通过别名更新）也必须满足此对齐要求。
+该保守检查覆盖整个函数，包括后续更新和循环回边；动态或未对齐的更新会被拒绝，
+即使后续更新恢复了对齐也不例外。
+请使用显式 `FunctionType.AIV` 函数。通用 InCore 展开无法保证两个句柄都位于向量核，
+因此会拒绝此搬运；代码生成也会拒绝显式 AIC 函数中的此操作。
+此路径不扩展 ND-to-NZ 转换、其他 dtype 或 A2/A3 Vec-to-Mat 插入的支持范围。
+共享 L1 的生命周期以及与 Cube 消费者之间的同步仍由混合内核负责。
+
 **Acc 写回上的 FIXPIPE epilogue。** **发生类型转换的** `Acc → Mat` assemble，
 以及**任何** `Acc → GM` store，都是 cube 的 fix-pipe 在排空 L0C——它可以在写出的
 同时乘一个 FP32 scale 并施加 ReLU；两个 op 都用 `pre_quant` / `pre_relu` 承载这
@@ -281,15 +315,21 @@ PTOAS 0.65 通过为 scale 发出 `uint64_t`、为行列索引发出 `uint16_t`�
 仍由 `FixpipeEpilogueValid` 拒绝；范围更广的各后端能力表继续独立管辖 Acc-to-GM
 store。
 
-**`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
-`valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、
-`scf.if` 结果、跨核 pop slot。而**视图**——`tile.slice` 下沉出的 `pto.subview`，
-或 `pto.treshape`——把有效范围存在自身类型里，ptoas 会拒绝对它执行这条指令，所以
-PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发射点被记录，而不是从渲染出
-的维度推断：带运行时 `valid_shape` 的切片渲染成 `v_row=?, v_col=?`，与由 alloc
-承载的 handle 完全一样。要收窄视图，请给切片传 `valid_shape=`（它会落到
-`pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
-tile 调用 `set_validshape`。
+**`tile.set_validshape` 下沉。** PyPTO 将用户侧有效尺寸修改限制在受支持的可变 handle 上。
+任意 slice/reshape 视图仍会被拒绝，包括动态有效尺寸切片；视图身份独立于渲染出的维度进行跟踪。
+请在切片上使用 `valid_shape=`，或先收窄源 tile。编译器创建的动态描述符可以单独初始化。 非 FP4 静态空切片先通过全窗口 Subview 绑定地址，再用实际空有效尺寸初始化动态 reshape，避免静态零掩码，且不分配或复制数据。打包 FP4 按照 [FP4 切片限制](../fp4.md) 复用已初始化的带地址描述符。
+
+**空有效区域。** 任意有效维度为零都表示空区域，与物理分配大小无关。空区域或运行时有效尺寸的
+reshape/reinterpret 描述符使用动态有效维度，并在 `pto.treshape` 后通过 `pto.set_validshape`
+初始化；静态正数有效维度保持静态编码。普通 Tile/Buffer 传输跳过静态空窗口，并保护运行时窗口，
+保留输出身份和未写入区域的数据。Final 阶段 store 保持无条件执行，以清除配对生产者的单元标志；
+若要跳过 phased 操作，应在源码中同时保护生产者和 store，且仍须满足后端既有限制。
+
+PTOAS 支持本地分配、TPOP 派生及连续 Subview 派生的描述符
+（[#1724](https://github.com/hw-native-sys/PTOAS/issues/1724)、[#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)）。
+代码生成检查 SSA 来源，同时保留切片偏移和独立别名身份；推导出的运行时切片有效尺寸显式传给 PTOAS。
+每一层切片来源都必须连续；全宽子切片不能掩盖带跨步的父切片。跨步窗口、未知来源或控制流来源都需在初始化描述符前先物化。`SplitVectorKernel` 保留空 replay reshape/reinterpret/transpose
+别名及 TPOP/TPUSH/TFREE 握手；将这些 FIFO 别名替换为 `tile.create` 会额外分配完整数据缓冲区。
 
 ### 跨核操作到 PTO 指令
 
@@ -349,8 +389,7 @@ PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位�
   不一致，pop 的 stride 就会错位——这会静默破坏*有效*区域的数据，因为 ISA 中对应的
   断言在 release 构建里被编译掉了。所以部分有效的 Acc-to-Vec 传输无论是否切分，
   TPOP 以及 TPUSH 的**列**维度都使用完整物理 box，并在传输两侧立即恢复逻辑 valid
-  shape——消费侧通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地
-  绑定 tile，`pto.set_validshape` 无法就地修改它）。第一个例外是切分轴上的 extent：它必须保持
+  shape——消费侧通过纯元数据的 `pto.treshape` 恢复。第一个例外是切分轴上的 extent：它必须保持
   逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段起点——也正因如此，
   编译期无法核验的逐 lane extent 绝不能到达那里。显式 `pl.split_aiv` 中切分轴 extent 为运行期
   值的边界，会让被弹出的 tile 保留完整 box（`split_axis::WithFullSplitAxisValid`），使偶数
@@ -370,12 +409,13 @@ PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位�
   （deferred）时是 box 的一半——因此从来不需要 box 的其余行，而把行扩成 box 会像上面一样
   使 compact 的 L0C 读取错位（64 行 box 只有 16 行有效、跨 `pl.split(UP_DOWN)` 时，2048 个
   有效元素中有 1792 个是错的）。非 compact 的 tile 无论 `validRow` 为何都按 `Rows` 读取
-  L0C，因此其切分传输仍保持完整 box。在由硬件把行拆给两个 lane 的后端上
-  （`BackendHandler::SplitsCubeToVectorTransportInHardware`，即 A5 的 dual-mode TMOV），
-  传输的行数*就是* lane 划分，因此切分 push 保持完整 box，两种 pitch 不同的 compact tile
-  在该后端上会被**拒绝**。*运行期*行 extent 也按同样方式传输：`pl.split` 和
-  `pl.split_aiv` 两种形式随后都会 pop 完整 box（见上文 popped tile 规则）；lane 1 载入它的整个
-  一半，超出有效 extent 的行是旧数据，但从不被当作数据使用。
+  L0C，因此其切分传输仍保持完整 box。对运行期 extent，A2/A3 消费者可以 pop 完整 box，
+  再限制有效范围。
+- A5 上，手写 `split=1` 的 C2V push 在整列有效、管道无 dtype 转换且未指定 lane stride 时，
+  按 compact FP32 Acc 尾块的有效行切分。每条 lane 的槽位按物理行数的一半预留，消费开头的
+  `validRow // 2` 行。有效行数要求正偶数，包括运行期值。物理和 compact 行距始终一致的运行期
+  尾块沿用物理分区，可以兼容奇数行。shard 和独立 split pass 生成的
+  lane stride 用于保留 lowering 选定的物理分区。物理分区与 compact 行距冲突时仍会在编译时报错。
 - 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
 - 对于手写 pop 的 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
@@ -405,7 +445,9 @@ PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位�
 
 ### 张量视图生成
 
-对于每个 `TensorType` 参数, 代码生成器会生成:
+Tile 与 Buffer 路径共用入口视图准备逻辑。准备阶段筛选函数体引用的 GM 参数，
+并确定入口视图。需要原始指针的运行时工作区参数不生成视图。代码生成器读取已准备的
+布局和步幅，将形状和步幅发射为 `pto.make_tensor_view` 的操作数：
 
 ```mlir
 %0 = pto.make_tensor_view %arg0,
@@ -418,20 +460,20 @@ PTOAS 继续检查两端配置和切分方式。预留缓冲区与 FIFO 槽位�
 **关键要点**:
 
 - 形状来自 `TensorType.shape_`
-- 步幅按行主序计算: 二维张量为 `[dim1, 1]`
+- 优先使用显式步幅。紧凑的二维 ND 视图使用 `[dim1, 1]`。
 - 常量 (`%c32_index`, `%c1_index`) 自动生成, 包括只出现在复合 shape/stride 表达式里的常量
 - 复合维度下沉为算术运算, 例如 `M * 2` → `arith.muli %M, %c2_index`
 - 张量视图类型每个维度使用 `?` (如二维为 `?x?xf32`)
 
 #### 二维张量的 Layout 处理
 
-`make_tensor_view` 上的 `layout` 属性告诉 PTOAS 内存布局约定。代码生成器根据
-张量的 IR 类型和形状决定 shape、strides 和 layout:
+`make_tensor_view` 上的 `layout` 属性告诉 PTOAS 内存布局约定。准备阶段使用
+张量的 IR 类型和形状：
 
 | 情况 | 输出 Shape | 输出 Strides | Layout | 说明 |
 | ---- | ---------- | ------------ | ------ | ---- |
 | ND `[R, C]` | `[R, C]` | `[C, 1]` | `nd` | 标准行主序 |
-| DN `[R, C]` (均 > 1) | `[C, R]` | `[1, C]` | `dn` | Shape 交换以符合 PTOAS 列主序约定 |
+| DN `[R, C]` (均 > 1) | `[R, C]` | `[1, R]` | `dn` | 紧凑列主序 |
 | 列向量 `[M, 1]` | `[M, 1]` | `[1, M]` | `dn` | 自动检测, 无需 DN 标注 |
 
 **列向量自动 DN**: 任何最后一维为编译时常量 `1` 的二维张量 (即形状 `[M, 1]`)
@@ -656,41 +698,7 @@ ptoas 版本解析器拒绝尾随位置时的应急开关。
 
 ## 分块 Tile 尺寸校验
 
-PyPTO 发射的每一条 `pto.alloc_tile` 都会按 PTOAS 将要检查的分块网格先行校验。
-PTO 以「块」为单位寻址分块 tile，因此*物理*尺寸不是整数个块的 tile 根本没有地址。
-
-该规则与 PTOAS 的 `verifyBoxedTileLayout` 完全一致：
-
-| 布局 | 块尺寸（行 x 列） |
-| ---- | ----------------- |
-| fractal 1024（`Acc`） | 16 x 16 |
-| fractal 512，`slayout = row_major`（`Mat` / `Left`） | 16 x (32 / sizeof(dtype)) |
-| fractal 512，`slayout = col_major`（`Right`，转置对偶） | (32 / sizeof(dtype)) x 16 |
-| `slayout = none_box` | 非分块，无此约束 |
-
-并保留 PTOAS 自身的豁免：*行*方向的规则对 `Vec` 以及单行 tile（此时 NZ 映射退化）
-跳过，而列方向的规则始终生效。MX scale fractal 与亚字节载体交由 PTOAS 自行诊断。
-
-**为什么放在这里而不是交给 PTOAS。** PTOAS 会拒绝同样的形状，但它的报错只提及自身内部
-概念，也不给出修复方式：
-
-```text
-'pto.alloc_tile' op expects result boxed tile rows to be a multiple of innerRows (16), but got 100
-```
-
-在发射点报错则能同时给出 tile、出问题的轴、需要达到的尺寸，以及达到它的方式：
-
-```text
-a Mat tile of physical shape [100, 128] and dtype fp16 must be a whole number of
-16x16 fractal boxes, but its row extent 100 is not a multiple of 16. ...
-allocate 112 on that axis and declare 100 as the tile's valid_shape ...
-```
-
-`ComputeAllocTileFields` 是所有分配的唯一收口——逐变量声明、被提升出来的
-`extra_alloc_tiles`、以及控制流路径都经过它——因此校验看到的正是最终发射的内容，不会与之
-漂移。张量层的 `pl.matmul` / `pl.matmul_acc` 不会因 *M 轴*触发它：M 轴已由
-[`ConvertTensorToTileOps`](../passes/13-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing)
-自动对齐；仍需用户自行保证的是 `K` 与 `N`。
+布局相关的分配检查、诊断和修复方式见 [分块 Tile 尺寸校验](07-boxed-tile-extents.md)。
 
 ## 完整示例
 
@@ -818,6 +826,11 @@ tile_c = pl.mul(tile_a, tile_b)
 | `DataType::INT64` | `i64` |
 | `DataType::INT8` | `i8` |
 | `DataType::UINT8` | `ui8` |
+
+Tile 和 Buffer 代码生成在发射函数之前确定有符号 `FloorDiv` 和 `FloorMod` 的展开方式。
+准备阶段依据字面量或外层循环下界证明被除数非负，且除数为正的常量时，发射器可以使用
+`arith.divsi` 或 `arith.remsi`。证明须在发射位宽下成立，否则发射器使用
+`arith.floordivsi` 或带符号修正的余数。
 
 ### 标量布尔转换
 

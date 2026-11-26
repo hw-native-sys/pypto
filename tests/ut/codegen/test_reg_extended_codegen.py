@@ -21,7 +21,7 @@ from pypto.ir.op import tile
 from pypto.ir.printer import python_print
 from pypto.language.parser import ParserError
 from pypto.runtime import ExecutionMode, RunConfig
-from pypto.runtime._vpto import PTOAS_FLAGS
+from pypto.runtime._vpto import ptoas_flags_for_source
 
 SPAN = ir.Span.unknown()
 CASES = [
@@ -517,7 +517,7 @@ def test_extended_vf_helpers_compile_to_llvm(name, dtype, statement, tmp_path):
         [
             compiler,
             str(path),
-            *PTOAS_FLAGS,
+            *ptoas_flags_for_source(bundle.helpers[0].source, emit_llvm=True),
             "-o",
             str(tmp_path / "helper.ll"),
         ],
@@ -613,7 +613,13 @@ def kernel(n: pl.Scalar[pl.INDEX]):
     llvm = tmp_path / "histogram.ll"
     source.write_text(helper.source)
     result = subprocess.run(
-        [compiler, str(source), *PTOAS_FLAGS, "-o", str(llvm)],
+        [
+            compiler,
+            str(source),
+            *ptoas_flags_for_source(helper.source, emit_llvm=True),
+            "-o",
+            str(llvm),
+        ],
         capture_output=True,
         text=True,
         timeout=120,

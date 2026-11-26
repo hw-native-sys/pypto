@@ -840,7 +840,7 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body(enabled):
     # Buffer defines metadata at the logical load and guards the empty path;
     # the legacy Tile path initializes metadata entirely through alloc_tile.
     assert ("pto.set_validshape" in mlir_code) == enabled
-    assert ("scf.if" in mlir_code) == enabled
+    assert "scf.if" in mlir_code  # Both emitters guard runtime-empty GM windows.
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -883,7 +883,7 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body(enabled):
         f"Expected valid_col = %c16_index operand in alloc: {alloc_line}"
     )
     assert ("pto.set_validshape" in mlir_code) == enabled
-    assert ("scf.if" in mlir_code) == enabled
+    assert "scf.if" in mlir_code  # Both emitters guard runtime-empty GM windows.
 
 
 def test_pto_codegen_tile_load_lowering():
@@ -1058,7 +1058,7 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
 
 @pytest.mark.parametrize("dtype", [DataType.FP32, DataType.INT32, DataType.UINT32, DataType.INT64])
 def test_scalar_pointer_load_store_ptoas(tmp_path, dtype):
-    """Tensor scalar accesses use the unified PTOAS 0.64 pointer operations."""
+    """Tensor scalar accesses emit the explicit PTOAS pointer offset type."""
     tensor_type = ir.TensorType([4, 8], dtype)
     ib = IRBuilder()
     with ib.function("scalar_copy", type=ir.FunctionType.InCore) as f:
@@ -1076,6 +1076,8 @@ def test_scalar_pointer_load_store_ptoas(tmp_path, dtype):
     assert "%arg0[" in load
     assert ", %arg1[" in store
     assert load.split(" = ", 1)[0] in store
+    assert ", index -> " in load
+    assert ", index, " in store
     assert "pto.load_scalar" not in mlir
     assert "pto.store_scalar" not in mlir
 
@@ -1140,6 +1142,38 @@ def test_signed_floor_mod_emits_sign_correction(dtype):
     assert "arith.andi" in mlir
     assert "arith.addi" in mlir
     assert "arith.select" in mlir
+
+
+def test_loop_tile_metadata_uses_prepared_floor_divmod():
+    """A runtime extent embedded only in TileType is materialized inside its defining loop."""
+    span = ir.Span.unknown()
+    dtype = DataType.INDEX
+    size = ir.ConstInt(32, dtype, span)
+    start = ir.ConstInt(8, dtype, span)
+    ib = IRBuilder()
+    with ib.function("tile_metadata_divmod", type=ir.FunctionType.InCore) as f:
+        stop = f.param("stop", ir.ScalarType(dtype))
+        index = ib.var("i", ir.ScalarType(dtype))
+        with ib.for_loop(index, start, stop, 1):
+            offset = ir.Sub(index, start, dtype, span)
+            quotient = ir.FloorDiv(offset, size, dtype, span)
+            valid_cols = ir.FloorMod(quotient, size, dtype, span)
+            space = ir.MemorySpace.Vec
+            memref = ir.MemRef(space, ir.ConstInt(0, DataType.INT64, span), 32 * 32 * 4, 0)
+            view = ir.TileView(valid_shape=[size, valid_cols])
+            tile_type = ir.TileType([32, 32], DataType.FP32, memref, view, space)
+            ib.let("tile", tile.create([32, 32], DataType.FP32, space), type=tile_type)
+
+    mlir = _generate_mlir(ir.Program([f.get_result()], "TileMetadataDivMod", span))
+    lines = _get_mlir_lines(mlir)
+    division = _single_line(lines, " = arith.divsi ")
+    remainder = _single_line(lines, " = arith.remsi ")
+    allocation = _single_line(lines, " = pto.alloc_tile ")
+    assert lines.index(division) < lines.index(remainder) < lines.index(allocation)
+    assert f"valid_col = {remainder.split()[0]}" in allocation
+    assert mlir.index("scf.for") < mlir.index(division)
+    assert "arith.floordivsi" not in mlir
+    assert "arith.select" not in mlir
 
 
 def test_loop_start_literal_is_validated_at_its_own_width():
@@ -2701,6 +2735,75 @@ class TestGenerateKernelWrapper:
         assert "TileSplitAxis::TILE_UP_DOWN>(v3, v4 PYPTO_SPLIT_RUNTIME_LANE_ARG(v2));" in wrapper
         assert "int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);" in wrapper
         assert "split_vec(__pypto_spmd_subblock_idx);" in wrapper
+
+    @pytest.mark.parametrize(
+        "explicit_push,explicit_pop", [(True, True), (True, False), (False, True), (False, False)]
+    )
+    @pytest.mark.parametrize("runtime_lane_param", [False, True])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    def test_split_fifo_bridge_preserves_authored_lanes(
+        self, explicit_push, explicit_pop, runtime_lane_param, backend_type, tmp_path
+    ):
+        """Mixed calls bridge only omitted lanes; authored third operands survive."""
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        lane_op = "pl.tile.get_subblock_idx()" if runtime_lane_param else ""
+        push_kw = ", aiv_subblockid=1" if explicit_push else ""
+        pop_kw = ", aiv_subblockid=1" if explicit_pop else ""
+        program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def split_vec(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+        pl.func_attr({{"split": pl.SplitMode.UP_DOWN}})
+        {lane_op}
+        buf = pl.reserve_buffer(name="pipe", size=4096, base=0x1000)
+        pl.aiv_initialize_pipe(buf, buf, dir_mask=3, slot_size=1024)
+        popped: pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=1{pop_kw})
+        pl.tpush_to_aic(popped, split=1{push_kw})
+        pl.tfree_to_aic(popped)
+""")
+        func = program.get_function("split_vec")
+        assert func is not None
+        source = _split_ptoas_output_for(
+            func.name, runtime_lane_param=runtime_lane_param, direction="DIR_BOTH", include_push=True
+        )
+        pipe, popped, produced = ("v3", "v4", "v5") if runtime_lane_param else ("v2", "v3", "v4")
+        lane = "static_cast<int64_t>(1)"
+        for tile_name, explicit in ((popped, explicit_pop), (produced, explicit_push)):
+            if explicit:
+                source = source.replace(f">({pipe}, {tile_name});", f">({pipe}, {tile_name}, {lane});")
+        wrapper = _generate_kernel_wrapper(func, source)
+        diagnostic = "Explicit aiv_subblockid requires NPU execution; CPU simulation is unsupported."
+        if explicit_push or explicit_pop:
+            assert wrapper.startswith(f'#if defined(__CPU_SIM)\n#error "{diagnostic}"\n#endif\n')
+        else:
+            assert diagnostic not in wrapper
+
+        # Compile the emitted pre-header diagnostic only; no simulator or kernel runs.
+        compiler = shutil.which("g++") or shutil.which("c++")
+        assert compiler is not None, "A C++ compiler is required to verify the CPU-mode diagnostic"
+        guard_source = tmp_path / "lane_guard.cpp"
+        guard_source.write_text(wrapper.partition("#include")[0])
+        for cpu_sim in (False, True):
+            command = [compiler, "-E", "-x", "c++", str(guard_source)]
+            if cpu_sim:
+                command.append("-D__CPU_SIM")
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            rejected = cpu_sim and (explicit_push or explicit_pop)
+            assert (result.returncode != 0) == rejected, result.stderr
+            if rejected:
+                assert diagnostic in result.stderr
+
+        for tile_name, explicit in ((popped, explicit_pop), (produced, explicit_push)):
+            if explicit:
+                assert f">({pipe}, {tile_name}, {lane});" in wrapper
+                assert f"{tile_name} PYPTO_SPLIT_RUNTIME_LANE_ARG" not in wrapper
+            elif backend_type == BackendType.Ascend910:
+                assert f">({pipe}, {tile_name} PYPTO_SPLIT_RUNTIME_LANE_ARG(" in wrapper
+        if explicit_push and explicit_pop:
+            assert "PYPTO_SPLIT_RUNTIME_LANE_ARG" not in wrapper
+            assert "__pypto_runtime_subblock_idx" not in wrapper
 
     def test_legacy_fixed_lane_wrapper_keeps_compile_time_subblock_id(self):
         """Legacy lane-specialized AIV wrappers retain their fixed lane override."""
@@ -4466,6 +4569,100 @@ def test_pto_codegen_tensor_view_default_pipeline_variants():
         assert "{layout = #pto.layout<dn>}" in view_line
         view_ssa = view_line.split(" = ", 1)[0].strip()
         assert any(f"pto.partition_view {view_ssa}" in line for line in _get_mlir_lines(body))
+
+
+@pytest.mark.parametrize(("dynamic", "distributed"), [(False, False), (True, False), (False, True)])
+def test_nested_sampled_tensor_views_share_storage_and_compose_offsets(tmp_path, dynamic, distributed):
+    # Direct descriptor emission keeps even an unused view visible. Codegen
+    # and MemRef analysis must agree on origins for both static and runtime
+    # geometry without any load or store being present.
+    span = ir.Span.unknown()
+    ib = IRBuilder()
+    with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+        # A distributed parameter with row padding exposes any lost root stride.
+        row_pitch = 32 if distributed else 16
+        root_tensor = (
+            ir.DistributedTensorType(
+                [12, 16], DataType.FP32, tensor_view=ir.TensorView([32, 1], ir.TensorLayout.ND)
+            )
+            if distributed
+            else ir.TensorType([12, 16], DataType.FP32)
+        )
+        root = f.param("source", root_tensor)
+        origin = f.param("row", ir.ScalarType(DataType.INDEX)) if dynamic else 1
+        pitch = f.param("step", ir.ScalarType(DataType.INDEX)) if dynamic else 3
+        if distributed:
+            f.param("source_ctx", ir.CommCtxType.get())
+        outer = ib.let("outer", tensor_ops.view(root, [3, 8], offsets=[origin, 0], steps=[pitch, 2]))
+        row = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(row, 0, 2, 1) as loop:
+            carry = loop.iter_arg("carry", outer)
+            carried = loop.return_var("carried")
+            alias = ib.let("alias", carry)
+            ib.emit(ir.YieldStmt([alias], span))
+        ib.let("inner", tensor_ops.view(carried, [1, 3], offsets=[1, 2]))
+        ib.return_stmt()
+    program = ir.Program([f.get_result()], "SampledWindows", span)
+    initialized = passes.init_mem_ref()(program)
+    func = next(iter(initialized.functions.values()))
+    root_type = func.params[0].type
+    assert isinstance(root_type, ir.TensorType) and root_type.memref is not None
+    assert root_type.memref.size_ == (11 * row_pitch + 16) * 4
+    root_base = root_type.memref.base_
+    windows = []
+
+    class WindowRanges(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tensor.view").name:
+                assert isinstance(op.var.type, ir.TensorType) and op.var.type.memref is not None
+                assert isinstance(op.var.type, ir.DistributedTensorType) == distributed
+                memref = op.var.type.memref
+                assert memref.base_.same_as(root_base)
+                windows.append(memref)
+            super().visit_assign_stmt(op)
+
+    WindowRanges().visit_stmt(func.body)
+    assert len(windows) == 2
+    if dynamic:
+        assert all(not isinstance(window.byte_offset_, ir.ConstInt) for window in windows)
+    else:
+        # Relative offsets compose through the loop-carried alias.
+        assert [(w.byte_offset_.value, w.size_) for w in windows] == [
+            (row_pitch * 4, (6 * row_pitch + 15) * 4),
+            ((4 * row_pitch + 4) * 4, 5 * 4),
+        ]
+
+    mlir = _generate_mlir(initialized)
+    lines = _get_mlir_lines(mlir)
+    first_delta = "%" if dynamic else f"%c{row_pitch}_index"
+    last_delta = "%" if dynamic else f"%c{3 * row_pitch + 4}_index"
+    outer_ptr = _single_line(lines, f"pto.addptr %arg0, {first_delta}").split(" = ")[0]
+    inner_ptr = _single_line(lines, f"pto.addptr {outer_ptr}, {last_delta}").split(" = ")[0]
+    inner_descriptor = _single_line(lines, f"pto.make_tensor_view {inner_ptr},")
+    assert re.search(r"strides = \[%(?:\w+), %c2_index\]", inner_descriptor)
+    assert "pto.tload" not in mlir and "pto.alloc_tile" not in mlir
+    if dynamic:
+        assert "arith.muli" in mlir
+    if find_ptoas_binary() is not None:
+        pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+
+
+def test_sampled_tensor_view_rejects_loop_carried_origin_change():
+    ib = IRBuilder()
+    span = ir.Span.unknown()
+    with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+        source = f.param("source", ir.TensorType([8, 4], DataType.FP32))
+        seed = ib.let("seed", tensor_ops.view(source, [1, 4], offsets=[0, 0]))
+        row = ib.var("row", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(row, 0, 8, 1) as loop:
+            loop.iter_arg("carry", seed)
+            loop.return_var("last")
+            next_window = ib.let("next", tensor_ops.view(source, [1, 4], offsets=[row, 0]))
+            ib.emit(ir.YieldStmt([next_window], span))
+        ib.return_stmt()
+    program = ir.Program([f.get_result()], "WindowCarry", span)
+    with pytest.raises(ValueError, match="loop-carried tensor must keep its GM origin"):
+        _generate_mlir(program)
 
 
 def test_pto_codegen_tensor_view_with_tile_scalar_shape_default_pipeline():

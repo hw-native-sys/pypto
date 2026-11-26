@@ -568,6 +568,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void RegisterArrayCarry(const ir::Var* var, const std::string& array_name, int64_t size);
 
   const ir::ProgramPtr& program_;
+  bool require_task_completion_{false};
   KernelRegistrations* registrations_;
   std::unordered_map<const ir::Var*, std::string> emit_name_map_;
   // Only Graph boundary scalars are wrappers; body-local scalars hold values.

@@ -1,5 +1,9 @@
 # EmitC 与 VPTO VF 执行接入
 
+默认 pipeline 在 SIMT 提取之后、SSA 和 mixed-kernel 拆分之前，将寄存器区域提取为
+`FunctionType.VF` 辅助函数。Codegen 消费显式调用和函数定义，物理 UB 偏移在 caller
+完成内存规划后绑定。参见[作用域提取](../passes/01-outline_simt_scopes.md#outlineregscopes)。
+
 显式 `pl.reg_scope()` 可以通过常驻运行时（persistent runtime）在 A5 AIV
 kernel 内执行。普通 Tile 操作使用 EmitC，每个寄存器作用域生成一个独立编译的
 VPTO helper。本功能扩展 typed VMI lowering，不改变 DSL，也不自动选择向量作用域。
@@ -10,13 +14,12 @@ VPTO helper。本功能扩展 typed VMI lowering，不改变 DSL，也不自动�
 flowchart TD
   IR[完成内存规划的 A5 AIV 函数] --> Bundle[PTOCodegen.generate_bundle]
   Bundle --> Caller[Caller PTO: Tiles 与带注解 adapter]
-  Bundle --> Helper[Helper PTO: 公共 UB 基址与静态偏移]
+  Bundle --> Helper[Helper PTO: UB 指针与视图偏移]
   Caller --> EmitC[PTOAS EmitC 与 caller 同步]
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
-  Helper --> LLVM[PTOAS VPTO LLVM 与 VF 同步]
-  LLVM --> Symbols[检查 helper 外部符号]
-  Symbols --> HelperObj[Bisheng 设备 helper 对象]
+  Helper --> Native[PTOAS 插入 VF 同步并生成 AIV 对象]
+  Native --> HelperObj[通过 ld.lld -r 添加逻辑导出名]
   CallerObj --> Link[ld.lld: kernel_entry 位于首部]
   HelperObj --> Link
   Link --> ELF[验证链接后的设备 ELF]
@@ -38,24 +41,23 @@ Bundle 将 helper 产物与调用入口分开记录。`helpers` 中每个产物�
 没有 helper 的入口对应空列表；SIMT 定义和 adapter 不属于入口。
 复用的 SIMT 产物可以出现在多个入口的列表中，无需重复生成源码。
 每次代码生成都会重置该关系，已返回的 bundle 保留各自的元数据。
-执行驱动将该关系保存在第 4 版 helper manifest 中，并按生成的入口名称向
+执行驱动将该关系保存在第 5 版 helper manifest 中，并按生成的入口名称向
 kernel 配置添加 `vpto_sources`。对于 mixed Group，只有 AIV 入口链接 VF helper，
 AIC 入口没有 helper 依赖。Grouped SIMT 执行仍不受支持。
 
-Helper 发射复用 `PTOCodegen` 的寄存器操作 lowering。UB 指针对应内存规划得到的
-MemRef 基址；VMI 发射器为每次访问加上 Tile view 的元素起点，且只加一次。
-不同静态分配 view 的捕获项通过一个公共 UB 基址和常量位移重建，使独立编译后的
-helper 仍保留访问重叠关系。
-
-Tile 参数及其派生 view 会被拒绝：它们的运行时 UB 指针关系不能通过局部
-分配的规划偏移确定。
+VF 根据 AIV 调用点的实际参数绑定存储。规划的 Tile 共用捕获项中最低的 UB 地址。
+对于 C2V 接收值，适配器通过 `pto.tile_buf_addr` 取得本轮实际槽位的指针。
+同一接收值上连续、偏移已知的窗口共用该指针。编译器检查局部规划的分配与所捕获
+FIFO 的预留区互不重叠。manifest 的 `capture_base_indices` 记录各捕获项使用的
+指针形参序号（标量为 −1），`capture_byte_offsets` 记录相对该指针的字节偏移。
+VMI 在具体访存指令上再计入一次 Tile view 的元素起点。
 
 ## 两层同步边界
 
 | 边界 | PyPTO 提供的信息 | PTOAS 完成的工作 |
 | ---- | ---------------- | ---------------- |
 | Caller | SIMD adapter 上的 Tile 参数与 `pto.tileop.effects` | 为搬运和调用插入 MTE2 → V、V → MTE3 事件 |
-| VF body | 公共 UB 指针基址、常量偏移与 VMI 内存操作 | 为重叠的 WR、RW、WW 访问插入屏障 |
+| VF body | 规划的 UB 和 FIFO 指针基址、常量偏移、VMI 内存操作及作用域策略 | 自动模式下为重叠的 WR、RW、WW 访问插入屏障 |
 
 Caller adapter 在依赖分析期间保留 Tile，只有 adapter 函数体才通过
 `pto.tile_buf_addr` 取出 UB 指针并调用 helper。Tile 捕获项标记为 `read`；只要有
@@ -66,12 +68,19 @@ Masked store 使用 `readwrite`，表示未激活 lane 的内容需要保留，�
 PyPTO 不在调用前后添加固定的 `pipe_barrier(PIPE_ALL)`，正常的 kernel 尾部同步仍
 保留。调用边界契约依赖 A5 VF 完成语义，因此当前限定为 AIV helper。
 
-PTOAS 负责 VF 依赖分析与屏障插入，包括通过 SSA 数据依赖证明的执行顺序。
-PyPTO 将生成的 LLVM 交给 Bisheng，不再重新推导访存依赖或施加 LLVM 指令白名单。
-PTOAS/Bisheng 的错误会传递给调用者。下述独立的外部符号与设备镜像检查负责
-保证 helper 的打包契约。
+默认 `pl.reg_scope(auto_sync=True)` 模式下，PTOAS 负责 VF 依赖分析与屏障
+插入，包括通过 SSA 数据依赖证明的执行顺序。`pl.reg_scope(auto_sync=False)`
+为该 helper 传入 `--enable-vecscope-mem-bar=false`，由作者通过仅语句形式的
+`pl.reg.mem_bar(kind)` 提供所需的作用域内 UB 屏障。PyPTO 不覆盖其他插入
+设置，其默认值由所选工具链决定。每个生成的 helper 源码头部携带
+`// pypto.reg_auto_sync: true` 或 `false`，运行时编译与缓存身份从同一源码
+快照解析策略，因此独立 helper 的混合策略及产物搬迁均保留策略。旧的无标记
+helper 保持自动同步。合并诊断输出 `generate()`（含 `skip_ptoas=True`）
+拒绝手动作用域，须用 `generate_bundle()` 编译。调用方 effects、DMA 与 kernel
+尾部同步继续生效。
+PTOAS 负责依赖分析，并按该 helper 的同步策略生成设备代码。编译器诊断会传递给调用者。
 
-索引 gather/scatter 依赖固定的 PTOAS v0.74 或更新版本，对同一 vecscope 内
+自动模式下，索引 gather/scatter 依赖PTOAS v0.77 或更新版本，对同一 vecscope 内
 未知访存范围的 RAW/WAR/WAW 依赖进行保守同步。该版本包含
 [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 的修复，
 PyPTO 不再为每次索引访问添加 `VV_ALL` 屏障。Caller/helper 边界与 GM 同步
@@ -80,10 +89,15 @@ PyPTO 不再为每次索引访问添加 `VV_ALL` 屏障。Caller/helper 边界�
 ## 设备代码与 ABI
 
 LLVM 的 `ptr addrspace(6)`、PTO 的 `!pto.ptr<f32, ub>` 与 caller 的
-`__ubuf__ float*` 必须描述相同的 UB 地址空间和传参 ABI。Helper 编译保留
-`--cce-generic-addrspace=off`，使用 A5 vector 设备目标，生成设备对象而非 host fat
-object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helper 外部符号；相关编译选项
-全部参与二进制缓存标识。
+`__ubuf__ float*` 必须描述相同的 UB 地址空间和传参 ABI。PyPTO 对每个普通 VF helper 调用一次 PTOAS，
+传入 `--emit-vpto-device-object` 和该 helper 的同步策略。PTOAS 使用 SDK 选择的
+CANN 工具链生成可重定位的 AIV ELF。EmitC 调用方单独编译。
+
+若 PTOAS 生成的可见设备函数带有 CANN ABI 后缀（`.vector` 或 `_mix_aiv`），
+PyPTO 会通过可重定位链接补上逻辑名。例如，调用方可用 `helper` 引用对象中的
+`helper.vector`。最终设备链接会在调用方和所有 helper 对象中解析引用。
+缺少定义时，链接器会在报错中给出未解析的符号名。
+源码快照、编译器版本、选项和原生对象 ABI 版本均参与二进制缓存标识。
 
 运行时接收原始代码字节。本路径只提取 `.text`，因此链接后的镜像必须满足：
 
@@ -92,8 +106,8 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helpe
 - 没有未解析符号或剩余重定位。
 - 没有其他非空的已分配 section，包括 `.rodata`、`.data` 和 `.bss`。
 
-符号表和调试表可以留在 ELF 中，但不会装载。需要其他数据存储或 Bridge/外部函数
-的 helper 会被拒绝。结构检查不能证明任意手写机器码都与装载位置无关；helper
+符号表和调试表仅供构建时使用。运行所需的代码和数据都必须能随通过校验的
+`.text` 一起装载。结构检查不能证明任意手写机器码都与装载位置无关；helper
 仍必须遵守设备调用 ABI。
 
 ## 当前可执行子集
@@ -103,15 +117,18 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helpe
 | 目标 | A5、AIV、ONBOARD、PyPTO Tile 内存规划器 |
 | 分组 | 独立 AIV，或包含一个 AIC 函数和一个 AIV 函数的 mixed Group；同一个 AIV 函数可以在一个或两个 vector lane 上执行 |
 | 作用域 | 寄存器操作和最多四层嵌套的规范硬件循环 |
-| 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；不同 Tile dtype 共用 UB 基址 |
-| 别名 | 公共 UB 基址、静态 view 位移、store SSA 别名 |
+| 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；支持不同 dtype 及 FIFO 与局部 UB 混合捕获 |
+| 别名 | 同一接收值的别名共用指针、静态 view 位移、store SSA 别名 |
 | Mask 与标量 | 运行时 mask 与受支持的标量捕获 |
 | 打包 | 源码 artifact 迁移、包含 helper 标识的二进制缓存 |
 
-Mixed Group 的 VF 捕获项必须指向静态规划的局部 UB 分配。
-C2V 接收之后的 cast/copy 可以物化这样的分配；仅对 FIFO 接收结果做 reshape 并不会。
-直接捕获 FIFO 缓冲区、参数支持的 Tile、未分组 peer、更广泛的 Group 组合、
-grouped SIMT、设备对象的 CPU 模拟执行、Bridge 调用及一般 helper 控制流仍不受支持。
+Mixed Group 的 VF 可以直接在 AIV 的 FIFO 槽位上修改 Cube 结果。调用方让槽位跨
+VF 调用和后续 Tile 消费者保持有效。在 `tfree` 前，调用方通过一个 SIMD 适配器将
+归还槽位建模为 PIPE_V 对该 Tile 的 `readwrite`。当 GM store 还在读取槽位时，
+PTOAS 据此插入 MTE3 → V 事件对。显式使用流水线 flag 的调用方不支持这条路径，
+因为 PTOAS 可能跳过自动同步。参数支持的 Tile、跨行不连续或动态起点的 FIFO 窗口、
+未分组 peer、更广泛的 Group 组合、grouped SIMT、设备对象的 CPU 模拟执行、
+依赖额外运行时服务的 Bridge 操作及一般 helper 控制流仍不受支持。
 访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
 具体 dtype、mask 与索引访存契约见[寄存器操作参考](../language/06-register-operations.md)。
 
@@ -137,8 +154,8 @@ def mixed_reg(a: pl.Tensor[[32, 32], pl.BF16],
 
 `tests/st/runtime/vpto/test_mixed_reg_onboard.py` 覆盖这条路径，以及包含两个 helper
 的 split-AIV 变体。测试检查完整输出数值、未修改区域、AIC 符号隔离、AIV 链接、
-缓存命中、helper 内容变更失效和产物迁移。直接 FIFO 捕获还需要单独验证存储生命周期
-和操作完成条件，本次支持范围不包含它。
+缓存命中、helper 内容变更失效和产物迁移。直接接收 FP32 的用例在双槽环上连续传送七批不同数据，
+覆盖掩码写回、后续 Tile 消费以及归还槽位前的 MTE3 → V 事件。
 
 ## Required hardware loops
 
@@ -162,7 +179,7 @@ LLVM 计数器、不插入内存屏障，也不增加链接后指令校验。后
 
 ## 运行完整示例
 
-在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.74 或更新版本，
+在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.78 或更新版本，
 配置匹配的 CANN/Bisheng 工具链，保持 runtime pin 检查开启。先预约空闲 A5 设备，
 再运行以下命令：
 

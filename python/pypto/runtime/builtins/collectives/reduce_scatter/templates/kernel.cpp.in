@@ -108,6 +108,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
+  __gm__ CommContext *signal_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
 
   if (nranks <= 0 || nranks > kMaxSupportedRanks || target_tensor->ndims < 2) {
     pipe_barrier(PIPE_ALL);
@@ -146,7 +147,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // and wait until every peer's are too, before any remote read starts.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
+    pto::comm::Signal cell(CommRemotePtr(signal_ctx, signal_base + my_rank, peer));
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
@@ -206,7 +207,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // this window, until every peer has finished reading from it.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
+    pto::comm::Signal cell(CommRemotePtr(signal_ctx, signal_base + my_rank, peer));
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }

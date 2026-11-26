@@ -194,6 +194,12 @@ pass 抵达 codegen。参见 [GM 缓存访问策略](../language/05-cache-policy
 
 InCore、AIC、AIV、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 / 二a 中被改写。
 
+### 阶段三：传播参数方向
+
+该 Pass 先推导被调用函数的方向。零拷贝 reshape 与原张量共用缓冲区。
+当初始方向为 In 的参数支撑 reshape 且子调用写入这块缓冲区时，
+编译器推导为 InOut，以保留输入内容。显式 Out 声明仍表示仅输出。
+
 ## 桥接 load 落在哪个空间
 
 被列入某条 conversion 的 `input_reqs` 的操作数，必须以 tile 的形式抵达 converter：
@@ -679,10 +685,15 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 `AccCompactValid` 属性验证器拒绝。`FlattenTileNdTo2D` 调用同一个 helper，用于 ND 种子——
 它的收窄要等到 `tile.batch_matmul` 展开成 2D matmul 时才出现。
 
-两种情况下携带值保持原样：一是缓冲区的两种读法本来就不会分歧——单 fractal 块的 `[16, N]`
-累加器无论有效行是多少都按物理行打包（但已收窄种子的 compact 元数据仍需与 yield 对齐）；
-二是收窄用的表达式只在循环体内计算，重新声明的种子
-在那之前根本命名不到它。
+对于 `pl.pipeline(0, 2, stage=2)` 这样的循环，同一修复也支持直接用
+`pl.matmul_acc(acc, lhs, rhs, init_cond=(kb == 0))` 更新累加器。当累加器是该循环独占且未绑定
+存储的分配、编译期可证明循环非空且首轮必定覆盖时，pass 从操作数推导有效 M/N。有效范围须在
+循环入口可见。初值将有效 M/N 传递到循环内及最终写回。行步长一致时，初值沿用原有的
+compact 模式。例如单 fractal 块的 `[16, N]` 分配可以按物理行步长写回 7 个有效行。见
+[#3475](https://github.com/hw-native-sys/pypto/issues/3475)。
+
+对于其他携带值修复，行步长一致时跳过改写，已收窄种子的 compact 元数据需要与 yield 对齐
+的情况除外。修复要求在循环前声明初值的位置可以引用收窄后的有效范围。
 
 ## 实现
 

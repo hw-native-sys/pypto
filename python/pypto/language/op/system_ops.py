@@ -35,7 +35,7 @@ from pypto.ir.op.system_ops import (
 )
 from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PipeType, Span, STPhase
 
 from ..typing import Array, IntLike, Scalar, Tensor, Tile
 
@@ -49,8 +49,12 @@ __all__ = [
     "wait_flag",
     "sync_set",
     "sync_wait",
+    "set_intra_block",
+    "wait_intra_block",
     "set_ffts",
     "barrier",
+    "set_quant_scalar",
+    "set_quant_vector",
     "fence",
     "cacheinvalid",
     "syncall",
@@ -116,6 +120,22 @@ def wait_flag(
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
 
 
+def set_quant_scalar(scale: Scalar | Expr | float, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set the pipe's FP32 quant scale in the same block before TPUSH."""
+    if isinstance(scale, float):
+        scale = ConstFloat(scale, DataType.FP32, _get_span_or_capture(span, frame_offset=1))
+    elif isinstance(scale, int):
+        raise TypeError("set_quant_scalar requires an FP32 scalar or floating-point literal")
+    return _ir_ops.set_quant_scalar(scale.unwrap() if isinstance(scale, Scalar) else scale, id=id, span=span)
+
+
+def set_quant_vector(controls: Tile | Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set packed INT64/UINT64 Scaling controls for a ``deqf16_vec`` pipe before TPUSH."""
+    return _ir_ops.set_quant_vector(
+        controls.unwrap() if isinstance(controls, Tile) else controls, id=id, span=span
+    )
+
+
 def sync_set(
     event_id: IntLike,
     *,
@@ -164,6 +184,54 @@ def sync_wait(
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     kernel = _kernel_or_none(core_type, "sync_wait")
     return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=kernel, span=span)
+
+
+def set_intra_block(
+    event_id: IntLike,
+    *,
+    pipe: PipeType,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Signal an event to synchronize AIC and AIV within one execution block.
+
+    Args:
+        event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.
+            Dynamic INDEX is rejected; cast explicitly before calling. The author must
+            keep dynamic values in range and avoid TPipe's event allocation.
+        pipe: FIX, MTE1, MTE2, MTE3, V, or S on A5. The peer wait may use a
+            different legal pipe to order its own consumer pipeline.
+        core_type: AIC or AIV kernel placement, required for unambiguous mixed
+            kernels. This selects a core type, not AIV0 versus AIV1. Omit in
+            explicitly typed kernels. No lane operand or broadcast is added.
+        span: Optional source span.
+    """
+    event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.set_intra_block(event_expr, pipe=pipe, core_type=core_type, span=span)
+
+
+def wait_intra_block(
+    event_id: IntLike,
+    *,
+    pipe: PipeType,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Wait for an event from the peer core within the same execution block.
+
+    Args:
+        event_id: Static ID in 0-31 on A5, or an INT32/INT64 scalar expression.
+            Dynamic INDEX is rejected; cast explicitly before calling. The author must
+            keep dynamic values in range and avoid TPipe's event allocation.
+        pipe: FIX, MTE1, MTE2, MTE3, V, or S on A5. The peer set may use a
+            different legal pipe to order its own producer pipeline.
+        core_type: AIC or AIV kernel placement, required for unambiguous mixed
+            kernels. This selects a core type, not AIV0 versus AIV1. Omit in
+            explicitly typed kernels. No lane operand or broadcast is added.
+        span: Optional source span.
+    """
+    event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.wait_intra_block(event_expr, pipe=pipe, core_type=core_type, span=span)
 
 
 def set_ffts(workspace: object, *, span: Span | None = None) -> Call:
@@ -331,28 +399,65 @@ def tpush_to_aiv(
     split: int,
     lane_stride: int | None = None,
     id: int | None = None,
+    dst: Tile | None = None,
+    offset: Sequence[IntLike] | None = None,
+    st_phase: STPhase = STPhase.Unspecified,
     span: Span | None = None,
 ) -> Call:
-    """Push tile data from AIC to AIV via cross-core pipe.
+    """Push tile data from AIC to AIV.
 
-    The Vector side receives it with [`tpop_from_aic`][pypto.language.system.tpop_from_aic] and releases the
-    slot with [`tfree_to_aic`][pypto.language.system.tfree_to_aic]; ``split`` and ``id`` must match across all
-    three.
+    Without ``dst``, the existing cross-core FIFO mode is unchanged: the
+    Vector side receives it with [`tpop_from_aic`][pypto.language.system.tpop_from_aic]
+    and releases the slot with [`tfree_to_aic`][pypto.language.system.tfree_to_aic].
+    ``split`` and ``id`` must match across all three.
+
+    For a hand-written A5 C2V pipe without dtype conversion, ``split=1`` divides
+    a compact FP32 Acc row tail with full columns at half its positive even
+    valid row count. Each AIV reads half the rows from its physical half-slot.
+
+    With ``dst``, A5 instead pushes a fragment directly into a caller-addressed
+    ND FP32 Vec mailbox in both peer AIV UB spaces. ``split=1`` sends half the
+    FP32 Acc rows to each lane; ``offset`` addresses its local destination and
+    preserves the full mailbox row pitch. No FIFO, credit, token or ready/free
+    event is created. The author supplies the same peer addresses and manages
+    explicit synchronization, then calls ``tile.mark_remote_written`` on the
+    received view before register reads. Offsets must be in bounds at runtime;
+    no scalar clamp is inserted.
 
     Args:
-        tile: Tile to send. Its Cube-side buffer stays live until the consumer frees the slot.
+        tile: Tile to send. In FIFO mode its Cube-side buffer stays live
+            until the consumer frees the slot.
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
-            axes over an odd extent). Selects the axis along which the two AIV
-            lanes divide the tile, and how their extents relate; 0 sends it whole.
-        lane_stride: Partition stride carried when a ragged boundary was balanced
-            across the two AIV lanes; omit for the default box partition.
-        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
-        span: Optional source span
+            axes over an odd extent). Direct mode currently supports only 1.
+        lane_stride: FIFO partition stride for a ragged boundary or existing box partition.
+        id: Optional frontend FIFO pipe id. Omit to use PTOAS default id 0.
+        dst: Explicit direct peer Vec mailbox; incompatible with id/lane_stride.
+        offset: Local destination [row, col] in direct mode, default [0, 0].
+        st_phase: Direct FIXPIPE writeback phase. With ``STPhase.Final``, the exact
+            Final accumulator must be drained to a complete [M/2, N] destination
+            at offset [0, 0], checking and clearing its hardware unit flag.
+        span: Optional source span.
     """
-    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, lane_stride=lane_stride, id=id, span=span)
+    return _ir_ops.tpush_to_aiv(
+        tile.unwrap(),
+        split=split,
+        lane_stride=lane_stride,
+        id=id,
+        dst=dst.unwrap() if dst is not None else None,
+        offset=None if offset is None else [x.unwrap() if isinstance(x, Scalar) else x for x in offset],
+        st_phase=st_phase,
+        span=span,
+    )
 
 
-def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
+def tpush_to_aic(
+    tile: Tile,
+    *,
+    split: int,
+    id: int | None = None,
+    aiv_subblockid: IntLike | None = None,
+    span: Span | None = None,
+) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe.
 
     The Cube side receives it with [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] and releases the
@@ -364,9 +469,14 @@ def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | 
         split: Split mode (0=none, 1=up-down, 2=left-right). Selects the axis along
             which the two AIV lanes divide the tile; 0 sends it whole.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
-    return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, span=span)
+    lane = aiv_subblockid.unwrap() if isinstance(aiv_subblockid, Scalar) else aiv_subblockid
+    return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, aiv_subblockid=lane, span=span)
 
 
 def tfree_to_aic(
@@ -414,6 +524,7 @@ def tpop_from_aic(
     split: int = 0,
     lane_stride: int | None = None,
     id: int | None = None,
+    aiv_subblockid: IntLike | None = None,
     span: Span | None = None,
 ) -> Tile:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -426,10 +537,15 @@ def tpop_from_aic(
         lane_stride: Partition stride carried when a ragged boundary was
             balanced across the two AIV lanes; omit for the box partition
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2/3/4 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
+    lane = aiv_subblockid.unwrap() if isinstance(aiv_subblockid, Scalar) else aiv_subblockid
     call = _ir_ops.tpop_from_aic(
-        shape=shape, dtype=dtype, split=split, lane_stride=lane_stride, id=id, span=span
+        shape=shape, dtype=dtype, split=split, lane_stride=lane_stride, id=id, aiv_subblockid=lane, span=span
     )
     return Tile(expr=call)
 
@@ -473,12 +589,13 @@ def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None 
     return Scalar(DataType.INT32, call)
 
 
-def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Scalar:
+def import_peer_buffer(*, name: str, peer_func: str = "", span: Span | None = None) -> Scalar:
     """Import a buffer from a peer function in the same group.
 
     Args:
         name: Buffer name to import (must match peer's reserve_buffer name).
-        peer_func: Name of the peer function that owns the buffer.
+        peer_func: Name of the peer function that owns the buffer. Omit it in
+            an automatically outlined mixed kernel to select the other member.
         span: Optional source span.
 
     Returns:

@@ -191,6 +191,15 @@ def _find_baseline(op_name, n_args, tile_idx):
     ``UNSEEDED_OPS``) crossed with a per-argument shape from ``_SHAPE_CANDIDATES``, which is what
     lets the row/col-expand families — whose second operand is a vector — reach a baseline.
     """
+    if op_name == ir.get_op("tile.dequant").name:
+        # Native TDEQUANT requires a signed integer source covering each
+        # 64-element vector and two FP32 per-row column coefficients.
+        args = [
+            _tile("src", [64, 64], DataType.INT8),
+            _tile("scale", [64, 1], DataType.FP32),
+            _tile("offset", [64, 1], DataType.FP32),
+        ]
+        return args, _deduce(op_name, args)
     ordered = sorted(tile_idx)
     for dtype in _DTYPES:
         for shapes in itertools.product(_SHAPE_CANDIDATES, repeat=len(ordered)):

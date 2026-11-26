@@ -106,6 +106,11 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.Scalar[pl.FP32]` | A single value, not a buffer |
 | `M = pl.dynamic("M")` | The dimension is unknown at compile time and bound per launch |
 
+For host tensors passed through the native runtime, `Out` does not upload the
+host buffer's initial contents; unwritten elements are undefined. If a kernel
+updates only part of an output and must preserve the remaining host values,
+declare that parameter `InOut`, including on its enclosing entry and callees.
+
 ## Mechanics
 
 ### Data types
@@ -164,7 +169,7 @@ cast when intermediate rounding is intended.
 ND/DN carrier transfers and ND padding are supported. DN casts require full
 static dense 2D BF16/packed endpoints and PYPTO/DSA_RP static addresses.
 `pl.quant_mx(..., dtype=pl.fp4e2m1x2)` supports FP16/BF16 input; E1M2
-quantization and native packed FP4 matrix multiplication remain unsupported.
+quantization remains unsupported. Tensor `pl.matmul_mx` accepts packed E2M1 and E1M2 data.
 Ascend910/A2A3 execution remains unsupported for both formats. See
 [FP4](../../dev/fp4.md) for layout, alias, and memory-planner constraints.
 
@@ -317,8 +322,9 @@ subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`) and MX `remote_lo
 rejected. Exception: FP8E8M0 `pl.tensor.view` may alias packed ND
 backing to `MX_A_ZZ` / `MX_B_NN` / `MX_A_ND` as logical rank-2 views (`layout=mx_*`;
 PTOAS supplies the ISA descriptors). The matmul itself is `pl.matmul_mx` and its `_acc` /
-`_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
-the op must either both be `FP8E4M3FN` or both be packed FP4. Mixed FP4/FP8
+`_bias` variants, which take a data tile and a scale tile per operand. Each FP8 data tile can
+independently use `FP8E4M3FN` or `FP8E5M2`. The Tile API also accepts packed FP4
+on both sides. Mixed FP4/FP8
 operands require an explicit `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`.
 On A5, contiguous ND E2M1 tiles with physical carrier columns divisible by 32
 use one direct TCVT. Tile inputs also accept `layout=pl.NZ` to decode straight
@@ -338,9 +344,13 @@ full validity, `K%64==0`, axis1 `M%16==0`, and axis0 `N%64==0`.
 OCP is the default; NV FP16/BF16 is limited to axis0. E1M2 quantization is
 unsupported. PYPTO/DSA_RP static allocation is required for packed output.
 `pl.tile.quant_mx_raw` exposes raw UINT8 exponents and explicit workspaces.
-Only FP8 data/scale pairs feed tensor `pl.matmul_mx`, which is 2-D-only and
-returns FP32; tensor MX accumulation, bias, transpose flags, batches, dynamic
-shapes, and native packed FP4 matrix operands remain unsupported.
+Tensor `pl.matmul_mx` accepts two FP8E4M3FN operands or two packed FP4 operands
+with FP8E8M0 scales and returns a 2-D FP32 tensor. For packed FP4, valid K
+must be positive, agree across both operands, and span the same number of
+32-element scale groups as physical K. `MX_A_ZZ` and `MX_B_NN` require fully
+valid M and N respectively. `MX_A_ND` can match a partial M. Tensor MX
+accumulation, bias, transpose flags, batches, and dynamic shapes remain
+unsupported.
 
 ### Dynamic shapes
 

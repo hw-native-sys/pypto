@@ -17,24 +17,27 @@ import inspect
 import json
 import logging
 import math
+import shutil
 import sys
 import threading
 import time
 import types
+import uuid
 import warnings
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import numpy as np
 import torch
 
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .runtime_base import Worker
+from .window_sources import normalize_window_sources
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,25 @@ _DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
     # Simpler's FP4E2M1 element is one packed x2 byte; shapes/strides use carriers.
     "FP4E2M1": (ctypes.c_uint8, torch.uint8),
 }
+
+
+def validate_host_domain_runtime(orch: Any, *, initialized: bool = False) -> None:
+    """Check Host APIs once while loading an artifact, before constructing a worker.
+
+    Generated entries carry capability metadata; dispatch only binds sources and
+    requests domains. Accepting an instance also supports older generated entries.
+    """
+    required = {"memory_source", "workspace_engines"}
+    if initialized:
+        required.add("initializer")
+    for method in ("allocate_domain", "get_or_allocate_domain"):
+        api = getattr(orch, method, None)
+        if api is None or not required.issubset(inspect.signature(api).parameters):
+            version = "#2939" if initialized else "#2913"
+            raise RuntimeError(
+                f"memory_source='host' requires Simpler Host-source communication domains "
+                f"(simpler PR {version} or later); {method} must accept {sorted(required)}"
+            )
 
 
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
@@ -112,12 +134,15 @@ class DistributedRunHandle:
         frame: _DispatchFrame,
         dispatch_id: int,
         postprocess: Callable[[], None] | None = None,
+        *,
+        capture_directory: Path | None = None,
     ) -> None:
         self._worker: DistributedWorker | None = worker
         self._native_handle = native_handle
         self._frame: _DispatchFrame | None = frame
         self._dispatch_id = dispatch_id
         self._postprocess = postprocess
+        self._capture_directory = capture_directory
         self._cv = threading.Condition()
         self._wait_in_progress = False
         self._terminal = False
@@ -137,6 +162,8 @@ class DistributedRunHandle:
         cls,
         worker: DistributedWorker,
         error: BaseException | None = None,
+        *,
+        capture_directory: Path,
     ) -> DistributedRunHandle:
         handle = cls.__new__(cls)
         handle._worker = worker
@@ -144,11 +171,21 @@ class DistributedRunHandle:
         handle._frame = None
         handle._dispatch_id = 0
         handle._postprocess = None
+        handle._capture_directory = capture_directory
         handle._cv = threading.Condition()
         handle._wait_in_progress = False
         handle._terminal = True
         handle._error = error
         return handle
+
+    @property
+    def capture_directory(self) -> Path | None:
+        """Root of this submission's chip-swimlane capture, or None when disabled.
+
+        Read the artifacts after ``result()``. They survive worker close until a
+        new worker starts a profiling session in the same output root.
+        """
+        return self._capture_directory
 
     @property
     def done(self) -> bool:
@@ -359,15 +396,16 @@ def _run_directory(compiled: Any) -> Path:
     return runtime_output_directory(compiled)
 
 
-def _collect_program_swimlane(compiled: Any) -> None:
+def _collect_program_swimlane(compiled: Any, dfx_base: Path) -> None:
     artifact_fields = cast("dict[str, Any]", vars(compiled))
     if artifact_fields.get("_artifact_runtime") is None:
-        _collect_l3_swimlane(compiled.output_dir, compiled.platform)
+        _collect_l3_swimlane(compiled.output_dir, compiled.platform, dfx_base=dfx_base)
     else:
         _collect_l3_swimlane(
             artifact_fields["_artifact_runtime"].directory,
             compiled.platform,
             run_directory=_run_directory(compiled),
+            dfx_base=dfx_base,
         )
 
 
@@ -520,6 +558,12 @@ def _load_orch_entry(output_dir: Path) -> tuple[Any, Any]:
             f"orchestration module is malformed — regenerate via distributed codegen."
         )
     entry_fn = entry_candidates[0]
+    if getattr(entry_fn, "_requires_host_domain", False):
+        from simpler.orchestrator import Orchestrator  # noqa: PLC0415
+
+        validate_host_domain_runtime(
+            Orchestrator, initialized=bool(getattr(entry_fn, "_window_source_keys", ()))
+        )
 
     alloc_fn = getattr(orch_module, "_alloc_intermediates", None)
     return entry_fn, alloc_fn
@@ -898,6 +942,7 @@ _DISPATCH_DIR_GLOB = "d[0-9]*"
 # ``next_levels/<program>`` — so naming a dispatch's tasks needs this marker
 # (issue #2169).
 _DISPATCH_PROGRAM_FILE = "dispatch_program.json"
+_CLOSED_SWIMLANE_SESSION = ".pypto-swimlane-closed"
 
 # Written by the ChipWorker child into every capture directory it creates. The
 # child numbers captures per *process* (``local_capture_index``), not per run, so
@@ -1061,21 +1106,9 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
 
 
 def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
-    """Remove stale ``rank*/d{k}`` dispatch dirs before a fresh DFX run.
-
-    A prepared :class:`DistributedWorker` reusing one ``output_dir`` across runs
-    would otherwise leave ``d{k}`` dirs from an earlier, larger run on disk,
-    whether the child restarted its capture numbering or carried it forward.
-    ``_collect_l3_swimlane`` globs ``d[0-9]*``, so
-    those stale dirs would be re-converted as if they belonged to the current
-    run. Clearing them once, before the first dispatch of a DFX run, scopes the
-    artifacts (and their post-processing) to exactly this run. Called only when
-    DFX is enabled; best-effort (a removal failure must not abort the dispatch).
-    """
+    """Remove stale dispatch directories for DFX calls that reuse a flat output prefix."""
     if not dfx_base.is_dir():
         return
-    import shutil  # noqa: PLC0415
-
     for rank_dir in dfx_base.glob(_RANK_DIR_GLOB):
         if not rank_dir.is_dir():
             continue
@@ -1245,7 +1278,6 @@ def _consolidate_two_pass_captures(rank_dir: Path, pairs: dict[Path, Path]) -> N
     left exactly as it was, and its records are still converted where they lie.
     """
     import collections  # noqa: PLC0415
-    import shutil  # noqa: PLC0415
 
     # Several timed captures can share one graph pass — a benchmark loop repeats
     # the timing run against the graph it captured once. Folding them all into
@@ -1360,7 +1392,9 @@ def _write_dispatch_name_map(
     return name_map_path
 
 
-def _collect_l3_swimlane(output_dir: Path, platform: str, *, run_directory: Path | None = None) -> None:
+def _collect_l3_swimlane(
+    output_dir: Path, platform: str, *, dfx_base: Path | None = None, run_directory: Path | None = None
+) -> None:
     """Convert each dispatch's swimlane records into a ``merged_swimlane_*.json``.
 
     The runtime writes ``rank{r}/d{k}/deps.json`` in the graph pass and
@@ -1414,7 +1448,8 @@ def _collect_l3_swimlane(output_dir: Path, platform: str, *, run_directory: Path
     # ``_write_dispatch_name_map`` so each config is loaded once per run.
     name_map_cache: dict[str, dict[str, str]] = {}
 
-    dfx_base = (output_dir if run_directory is None else run_directory) / "dfx_outputs"
+    if dfx_base is None:
+        dfx_base = (output_dir if run_directory is None else run_directory) / "dfx_outputs"
     # See the docstring for why we glob rather than iterate a rank count.
     # 3.10-safe dir filter (``glob`` directory filtering is only reliable on 3.11+).
     rank_dirs = sorted(d for d in dfx_base.glob(_RANK_DIR_GLOB) if d.is_dir())
@@ -1514,6 +1549,7 @@ def _make_dispatch_orchestration(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
+    window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
 ) -> Callable[..., None]:
     """Build one orchestration closure over a handle-owned metadata frame."""
     # ``world_size`` is the only worker-level scalar the entry needs; codegen
@@ -1545,6 +1581,7 @@ def _make_dispatch_orchestration(
             sub_ids=sub_ids,
             _keep=keepalive,
             world_size=device_nums,
+            **({"_window_sources": window_sources} if window_sources else {}),
         )
 
     return orch_fn
@@ -1561,6 +1598,7 @@ def _submit_dispatch(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
+    window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
 ) -> Any:
     """Submit one orchestration closure and return Simpler's run handle."""
     orch_fn = _make_dispatch_orchestration(
@@ -1572,6 +1610,7 @@ def _submit_dispatch(
         device_nums,
         keepalive,
         dfx_dispatch_idx=dfx_dispatch_idx,
+        window_sources=window_sources,
     )
     return w.submit(orch_fn)
 
@@ -1743,7 +1782,7 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
 
     # Offline post-pass (reads the per-dispatch deps.json + records on disk).
     if swimlane:
-        _collect_program_swimlane(compiled)
+        _collect_program_swimlane(compiled, dfx_base)
 
 
 _EXECUTE_DISTRIBUTED_COMPILED_DEPRECATION = (
@@ -1871,6 +1910,13 @@ class DistributedWorker(Worker):
     runtime-owned POSIX-shm Buffers, so their CPU-contiguous host endpoints may
     be ordinary tensors created after ``prepare``.
 
+    ``window_sources`` maps compiled Host-window ``init`` keys to open binary
+    files or contiguous CPU tensors in domain rank order. Sources are copied only
+    when creating a domain. Host and Device windows both follow ``persistent``
+    and ``reset_persistent_windows``. Disable reset explicitly to retain loaded
+    table contents across dispatches. The caller owns
+    the files and must keep them open until initialization completes.
+
     ``inherited_host_tensors`` keeps such a host range alive for the worker's
     lifetime *and* is a caller guarantee about it: listing a tensor asserts that
     its backing is visible across processes — a ``MAP_SHARED`` mapping, whether
@@ -1937,6 +1983,7 @@ class DistributedWorker(Worker):
         *,
         persistent: bool = False,
         reset_persistent_windows: bool | None = None,
+        window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
@@ -1949,6 +1996,7 @@ class DistributedWorker(Worker):
         # attached to DeviceTensor for address-free wire TaskArgs.
         self._device_buffers: dict[tuple[int, int], Any] = {}
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
+        window_sources = normalize_window_sources(window_sources)
         reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
         inherited, self._inherited_host_spans = self._resolve_inherited_host_tensors(inherited_host_tensors)
         self._inherited_host_tensors = inherited
@@ -1981,6 +2029,9 @@ class DistributedWorker(Worker):
         # the child's ``local_capture_index``; a new Worker (new child) starts
         # fresh. See ``_reset_dfx_dispatch_state`` / ``_submit_chip``.
         self._dfx_dispatch_idx: dict[str, int] = {}
+        # Dispatch IDs restart on a new worker, even if it shares an output directory.
+        self._swimlane_session = f"session-{uuid.uuid4().hex}"
+        self._swimlane_session_dirs: set[Path] = set()
         self._reset_persistent_windows = reset_persistent_windows
         self._persistent_error: BaseException | None = None
         self._persistent_error_reported = False
@@ -2032,12 +2083,18 @@ class DistributedWorker(Worker):
             # required-callback manifest is enforced per program.
             callbacks = callbacks or {}
             consumed: set[str] = set()
+            consumed_sources: set[str] = set()
             for program_index, prog in enumerate(programs):
                 self._check_compatible(prog, primary)
                 chip_callables, prog_runtime, prog_enable_sdma = _assemble_chip_callables(prog)
                 runtime_name = self._unify_runtime(runtime_name, prog_runtime)
                 enable_sdma = enable_sdma or prog_enable_sdma
                 entry_fn, alloc_fn = _load_orch_entry(prog.output_dir)
+                source_keys = set(getattr(entry_fn, "_window_source_keys", ()))
+                missing_sources = sorted(source_keys - window_sources.keys())
+                if missing_sources:
+                    raise ValueError(f"Missing window_sources for Host window init keys: {missing_sources}")
+                consumed_sources |= source_keys
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
                 consumed |= set(prog_callbacks)
@@ -2055,6 +2112,7 @@ class DistributedWorker(Worker):
                     base_tensor_frames.append(base_tensors)
                 self._states[prog] = {
                     "entry_fn": entry_fn,
+                    "window_sources": {key: window_sources[key] for key in source_keys},
                     "base_tensor_frames": tuple(base_tensor_frames),
                     "call_config": _make_call_config(prog._distributed_config),
                     "param_infos": tuple(prog._get_metadata()[0]),
@@ -2068,6 +2126,11 @@ class DistributedWorker(Worker):
                     )
                 loaded.append((prog, chip_callables, sub_worker_fns))
 
+            unused_sources = sorted(window_sources.keys() - consumed_sources)
+            if unused_sources:
+                raise ValueError(
+                    f"window_sources keys are not used by any prepared program: {unused_sources}"
+                )
             unconsumed = sorted(set(callbacks) - consumed)
             if unconsumed:
                 raise ValueError(f"callbacks names {unconsumed} are not sub-workers of any prepared program.")
@@ -2279,6 +2342,11 @@ class DistributedWorker(Worker):
             tuple(int(worker) for worker in kwargs["workers"]),
             int(kwargs["window_size"]),
             buffers,
+            str(
+                getattr(kwargs.get("memory_source", "device"), "name", kwargs.get("memory_source", "device"))
+            ).lower(),
+            tuple(sorted(kwargs.get("workspace_engines", ()))),
+            tuple(getattr(kwargs.get("initializer"), "bindings", ())),
         )
 
     def _reset_persistent_domains(
@@ -2287,13 +2355,13 @@ class DistributedWorker(Worker):
         domains: dict[str, tuple[tuple[Any, ...], Any]],
         reset_buffers: dict[int, Any],
     ) -> None:
-        """Restore every named buffer in retained domains to its initial zero state.
+        """Restore all retained communication buffers to zero, regardless of backing.
 
-        The host Buffers are created before ``Worker.run`` and released after it;
-        this callback only issues copies while Simpler holds its submit lock.
+        Device windows use staged zero buffers; Host windows are zeroed through
+        their CPU mappings while Simpler holds its submit lock.
         """
         for domain_name, (spec, handle) in domains.items():
-            _workers, window_nbytes, buffer_specs = spec
+            _workers, window_nbytes, buffer_specs, memory_source, *_resource_spec = spec
             for worker_id in handle.workers:
                 actual_window_size = int(handle[worker_id].actual_window_size)
                 # Physical mappings can be rounded up to the platform's allocation
@@ -2305,7 +2373,6 @@ class DistributedWorker(Worker):
                     )
             for buffer_name, _dtype, _count, buffer_nbytes in buffer_specs:
                 nbytes = int(buffer_nbytes)
-                zero_buffer = reset_buffers[nbytes]
                 for worker_id in handle.workers:
                     dst_buffer = handle[worker_id].buffers[buffer_name]
                     if int(dst_buffer.nbytes) != nbytes:
@@ -2313,16 +2380,29 @@ class DistributedWorker(Worker):
                             f"persistent CommDomain buffer {buffer_name!r} changed size: "
                             f"{dst_buffer.nbytes} != {nbytes}"
                         )
-                    orch.copy_to(dst_buffer, zero_buffer)
+                    if memory_source == "host":
+                        # Each named buffer's shm covers the whole rank window.
+                        # Apply its offset and leave physical padding untouched.
+                        offset, _ = handle.buffer_range(buffer_name)
+                        with dst_buffer.shm.buf[offset : offset + nbytes] as target:
+                            if len(target) != nbytes:
+                                raise RuntimeError(
+                                    f"persistent Host buffer {buffer_name!r} mapping is too small: "
+                                    f"{len(target)} < {nbytes}"
+                                )
+                            if nbytes:
+                                ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(target)), 0, nbytes)
+                    else:
+                        orch.copy_to(dst_buffer, reset_buffers[nbytes])
 
     def _prepare_persistent_reset_buffers(
         self,
         domains: dict[str, tuple[tuple[Any, ...], Any]],
         reset_buffers: dict[int, Any],
     ) -> None:
-        """Create zero-filled host Buffers, shared by every named buffer of the same size."""
+        """Stage zeros for Device windows; Host windows need no staging allocation."""
         for domain_name, (spec, _handle) in domains.items():
-            _workers, window_nbytes, buffer_specs = spec
+            _workers, window_nbytes, buffer_specs, memory_source, *_resource_spec = spec
             named_nbytes = sum(int(buffer_spec[3]) for buffer_spec in buffer_specs)
             if named_nbytes != int(window_nbytes):
                 raise RuntimeError(
@@ -2330,6 +2410,8 @@ class DistributedWorker(Worker):
                     "to cover its window: "
                     f"named bytes {named_nbytes} != window size {window_nbytes}"
                 )
+            if memory_source == "host":
+                continue
             for _name, _dtype, _count, buffer_nbytes in buffer_specs:
                 nbytes = int(buffer_nbytes)
                 if nbytes in reset_buffers:
@@ -2434,6 +2516,7 @@ class DistributedWorker(Worker):
                 _keep=keepalive,
                 world_size=state["device_nums"],
                 _domain_provider=domain_provider,
+                **({"_window_sources": state["window_sources"]} if state["window_sources"] else {}),
             )
 
         try:
@@ -2473,6 +2556,7 @@ class DistributedWorker(Worker):
             state["device_nums"],
             keepalive,
             dfx_dispatch_idx=self._dfx_dispatch_idx,
+            window_sources=state["window_sources"],
         )
 
     def _submit_native_dispatch(
@@ -3190,9 +3274,8 @@ class DistributedWorker(Worker):
 
         frame, dispatch_id = self._acquire_dispatch_frame()
         try:
-            call_config, dfx_base, two_pass_swimlane = self._prepare_dispatch_config(
-                compiled,
-                config,
+            call_config, capture_directory, two_pass_swimlane = self._prepare_dispatch_config(
+                compiled, config, dispatch_id
             )
 
             tensors = frame.tensors
@@ -3210,11 +3293,11 @@ class DistributedWorker(Worker):
 
             if two_pass_swimlane:
                 assert config is not None
-                assert dfx_base is not None
+                assert capture_directory is not None
                 _run_l3_swimlane_two_pass(
                     compiled._distributed_config,
                     config,
-                    dfx_base,
+                    capture_directory,
                     lambda pass_config: self._dispatch_prepared(
                         state,
                         tensors,
@@ -3222,18 +3305,20 @@ class DistributedWorker(Worker):
                         frame.keepalive,
                     ),
                 )
-                _collect_program_swimlane(compiled)
+                _collect_program_swimlane(compiled, capture_directory)
                 self._release_unpublished_dispatch_frame(frame)
-                return DistributedRunHandle._completed(self)
+                return DistributedRunHandle._completed(self, capture_directory=capture_directory)
 
             postprocess: Callable[[], None] | None = None
-            if config is not None and config.enable_chip_swimlane > 0:
+            if capture_directory is not None:
 
                 def collect_swimlane() -> None:
-                    _collect_program_swimlane(compiled)
+                    _collect_program_swimlane(compiled, capture_directory)
 
                 postprocess = collect_swimlane
-            handle = DistributedRunHandle(self, None, frame, dispatch_id, postprocess)
+            handle = DistributedRunHandle(
+                self, None, frame, dispatch_id, postprocess, capture_directory=capture_directory
+            )
             try:
                 frame.handle = handle
                 with self._dispatch_cv:
@@ -3249,32 +3334,52 @@ class DistributedWorker(Worker):
                 self._release_unpublished_dispatch_frame(frame)
             raise
 
+    def _swimlane_capture_directory(self, dfx_base: Path, dispatch_id: int) -> Path:
+        """Start a session per output root and allocate one prefix for both passes."""
+        session_dir = dfx_base.resolve() / self._swimlane_session
+        if session_dir not in self._swimlane_session_dirs:
+            session_dir.mkdir(parents=True)
+            self._swimlane_session_dirs.add(session_dir)
+            # Other workers can profile into the same root. Only a worker that
+            # finished closing has released its captures for cleanup.
+            for marker in session_dir.parent.glob(f"session-*/{_CLOSED_SWIMLANE_SESSION}"):
+                if marker.is_file():
+                    shutil.rmtree(marker.parent, ignore_errors=True)
+        return session_dir / f"run-{dispatch_id:06d}"
+
+    def _close_swimlane_session(self) -> None:
+        for session_dir in self._swimlane_session_dirs:
+            try:
+                (session_dir / _CLOSED_SWIMLANE_SESSION).touch()
+            except OSError as exc:
+                logger.warning("Could not mark swimlane session %s for cleanup: %s", session_dir, exc)
+
     def _prepare_dispatch_config(
         self,
         compiled: DistributedCompiledProgram,
         config: RunConfig | None,
+        dispatch_id: int,
     ) -> tuple[Any, Path | None, bool]:
         """Snapshot one dispatch's runtime config after capacity admission."""
         if config is None:
             return _make_call_config(compiled._distributed_config), None, False
 
         dfx_base = _run_directory(compiled) / "dfx_outputs"
-        two_pass_swimlane = config.enable_chip_swimlane > 0 and not compiled.platform.endswith("sim")
+        capture_directory = None
+        if config.enable_chip_swimlane > 0:
+            capture_directory = self._swimlane_capture_directory(dfx_base, dispatch_id)
+        two_pass_swimlane = capture_directory is not None and not compiled.platform.endswith("sim")
         call_config = None
         if not two_pass_swimlane:
-            call_config = _make_call_config(compiled._distributed_config, config, dfx_base=dfx_base)
+            call_config = _make_call_config(
+                compiled._distributed_config, config, dfx_base=capture_directory or dfx_base
+            )
 
-        # This worker reuses one output_dir across dispatches, so stale
-        # ``rank*/d{k}`` dirs from an earlier, larger run must be cleared before
-        # this run writes new ones. The numbering does not restart with the run
-        # on a prepared worker — the child's capture counter spans the process —
-        # so the new dirs may start above zero.
         if config.dfx_options().any():
-            # Every dispatch writes below the same output directory. Finish
-            # earlier work before clearing or repopulating those paths.
             self._drain_dispatch_handles()
-            _clear_dfx_dispatch_dirs(dfx_base)
-        return call_config, dfx_base, two_pass_swimlane
+            if capture_directory is None:
+                _clear_dfx_dispatch_dirs(dfx_base)
+        return call_config, capture_directory, two_pass_swimlane
 
     def _run_compiled(
         self, compiled: DistributedCompiledProgram, *args: Any, config: RunConfig | None = None
@@ -3355,6 +3460,7 @@ class DistributedWorker(Worker):
                 first_error = self._remember_close_error(first_error, exc)
             else:
                 self._close_complete = True
+                self._close_swimlane_session()
             finally:
                 self._inherited_host_tensors = ()
                 self._inherited_host_spans = ()

@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -80,10 +81,10 @@ MatmulProductInfo DeduceMatmulProductInfo(const TileTypePtr& lhs_type, const Til
       << " requires rhs valid K to cover lhs valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
       << " and rhs K=" << PythonPrint(rhs_valid[0]);
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-  const auto accumulator_dtype = MatmulAccumulatorDataType(lhs_type->dtype_, rhs_type->dtype_);
+  // Operand dtypes need not be identical: on A5 the Cube multiplies the mixed
+  // FP8 orders (E4M3FN x E5M2 and E5M2 x E4M3FN) too. The accumulator the pair
+  // produces comes back from the same shared check.
+  const auto accumulator_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, op_name);
 
   return MatmulProductInfo{{lhs_shape[0], rhs_shape[1]}, {lhs_valid[0], rhs_valid[1]}, accumulator_dtype};
 }
@@ -309,20 +310,130 @@ void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwarg
                                     << acc_phase;
 }
 
+/// Is @p dtype one of the two IEEE FP8 Cube operand formats?
+constexpr bool IsFp8GemvOperand(DataType dtype) {
+  return dtype == DataType::FP8E4M3FN || dtype == DataType::FP8E5M2;
+}
+
+/// The low-precision GEMV pairs Ascend950 adds, and the only ones whose two
+/// operands may differ.
+///
+/// Any FP8 x FP8 combination, both orders, plus HF8 x HF8. PTOAS v0.72's
+/// `verifyMatmulTypeTriple` tests the two operands independently on its FP8 arm
+/// but requires `lhsElemTy == rhsElemTy` on the HiFloat8 arm, so HF8 never pairs
+/// with an FP8 in either order; the a5 TileLib `MATMUL_DTYPES` signature lists
+/// carry no such row either.
+constexpr bool IsLowPrecisionGemvPair(DataType lhs, DataType rhs) {
+  return (IsFp8GemvOperand(lhs) && IsFp8GemvOperand(rhs)) || (lhs == DataType::HF8 && rhs == DataType::HF8);
+}
+
+/// The wide operands every target has always multiplied, as identical pairs.
+constexpr bool IsWideGemvOperand(DataType dtype) {
+  return dtype == DataType::INT8 || dtype == DataType::FP16 || dtype == DataType::BF16 ||
+         dtype == DataType::FP32;
+}
+
+/// Validate the GEMV (lhs, rhs) operand pair and return the accumulator dtype.
+///
+/// `pto.tgemv`, `pto.tgemv.acc` and `pto.tgemv.bias` verify their element types
+/// through the *same* PTOAS rule as `pto.tmatmul` -- `verifyMatmulTypeTriple`,
+/// reached via `verifyMatmulOrGemv` / `verifyMatBiasCommon` -- and the a5
+/// TileLib templates for the three ops carry the matmul `MATMUL_*_DTYPES`
+/// signature lists. So on A5 the family also multiplies the four FP8 (E4M3FN /
+/// E5M2) pairs and HF8 x HF8.
+///
+/// The pairs are written out here rather than looked up in
+/// `backend::kCubeOperandPairs`, and `HandWrittenGemvListMatchesCubeTable()`
+/// below pins the two to each other at compile time.
+///
+/// This check is a closed allow-list: a pair outside it is rejected here rather
+/// than handed to PTOAS. Which of these pairs the *configured* target can run is
+/// a separate, codegen-time question (`CheckMatmulOperandArch`) -- type deduction
+/// also runs with no backend configured, so it cannot answer it.
 DataType ValidateGemvInputDtypes(const TileTypePtr& lhs_type, const TileTypePtr& rhs_type,
                                  const std::string& op_name) {
+  // The low-precision pairs come first because they are the only ones allowed to
+  // have differing operands; everything below them keeps the original contract.
+  if (IsLowPrecisionGemvPair(lhs_type->dtype_, rhs_type->dtype_)) return DataType::FP32;
+
   CHECK(lhs_type->dtype_ == rhs_type->dtype_)
       << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
       << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
 
   const auto input_dtype = lhs_type->dtype_;
-  CHECK(input_dtype == DataType::INT8 || input_dtype == DataType::FP16 || input_dtype == DataType::BF16 ||
-        input_dtype == DataType::FP32)
+  CHECK(IsWideGemvOperand(input_dtype))
       << "The operator " << op_name
-      << " supports only INT8 x INT8 -> INT32 and same-type FP16/BF16/FP32 inputs -> FP32, but got "
+      << " supports only INT8 x INT8 -> INT32 and same-type FP16/BF16/FP32 inputs -> FP32, plus "
+         "on Ascend950 any FP8 (E4M3FN / E5M2) pair in either order and HF8 x HF8 -> FP32, but got "
       << input_dtype.ToString();
   return input_dtype == DataType::INT8 ? DataType::INT32 : DataType::FP32;
 }
+
+/// The accumulator `ValidateGemvInputDtypes` returns for an accepted pair.
+constexpr DataType HandWrittenGemvAccumulator(DataType lhs, DataType rhs) {
+  if (IsLowPrecisionGemvPair(lhs, rhs)) return DataType::FP32;
+  return lhs == DataType::INT8 ? DataType::INT32 : DataType::FP32;
+}
+
+/// Does `ValidateGemvInputDtypes` accept this pair?
+constexpr bool HandWrittenGemvAccepts(DataType lhs, DataType rhs) {
+  return IsLowPrecisionGemvPair(lhs, rhs) || (lhs == rhs && IsWideGemvOperand(lhs));
+}
+
+/// The `kGemv` row for (lhs, rhs), or nullptr -- a constexpr `FindCubeOperandPair`.
+constexpr const backend::CubeOperandPair* FindGemvOperandRow(DataType lhs, DataType rhs) {
+  for (const auto& pair : backend::kCubeOperandPairs) {
+    if (pair.InFamily(backend::CubeOpFamily::kGemv) && pair.lhs == lhs && pair.rhs == rhs) {
+      return &pair;
+    }
+  }
+  return nullptr;
+}
+
+/// Do the hand-written list above and the `kGemv` rows of the shared Cube
+/// operand table describe the same set of pairs, with the same accumulator?
+///
+/// GEMV states its legal pairs longhand, so the table is a second place the same
+/// contract is written down, and the two can drift. One drift direction fails
+/// *open* and must not be left to review: codegen's `CheckMatmulOperandArch`
+/// looks the operand pair up in the `kGemv` rows and **returns early when it
+/// finds none**, so a pair this list accepts but the table does not carry would
+/// silently lose its "FP8 needs the a5 backend" rejection and reach PTOAS on
+/// hardware that cannot multiply it. That is why the five FP8 / HF8 rows carry
+/// the `kGemv` family bit even though this file no longer reads the table, and
+/// why removing those bits as "unused" would be a silent regression.
+///
+/// Both directions are checked. The second one needs a dtype universe, so it
+/// enumerates every dtype the Cube could plausibly be handed, including ones
+/// that must stay rejected.
+constexpr bool HandWrittenGemvListMatchesCubeTable() {
+  for (const auto& pair : backend::kCubeOperandPairs) {
+    if (!pair.InFamily(backend::CubeOpFamily::kGemv)) continue;
+    if (!HandWrittenGemvAccepts(pair.lhs, pair.rhs)) return false;
+    if (HandWrittenGemvAccumulator(pair.lhs, pair.rhs) != pair.accumulator) return false;
+  }
+
+  constexpr DataType kCandidateDtypes[] = {
+      DataType::INT8,      DataType::INT32,   DataType::UINT8,   DataType::FP16,
+      DataType::BF16,      DataType::FP32,    DataType::HF8,     DataType::HF4,
+      DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::FP8E8M0, DataType::FP4E2M1X2,
+  };
+  for (const auto lhs : kCandidateDtypes) {
+    for (const auto rhs : kCandidateDtypes) {
+      if (!HandWrittenGemvAccepts(lhs, rhs)) continue;
+      const auto* row = FindGemvOperandRow(lhs, rhs);
+      if (row == nullptr) return false;
+      if (row->accumulator != HandWrittenGemvAccumulator(lhs, rhs)) return false;
+    }
+  }
+  return true;
+}
+
+static_assert(HandWrittenGemvListMatchesCubeTable(),
+              "ValidateGemvInputDtypes and the kGemv rows of backend::kCubeOperandPairs disagree. "
+              "Every pair one accepts the other must carry, with the same accumulator dtype: "
+              "codegen's CheckMatmulOperandArch reads the table and skips the architecture check "
+              "for a pair it does not find.");
 
 TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_type,
                                 const TileTypePtr& rhs_type) {

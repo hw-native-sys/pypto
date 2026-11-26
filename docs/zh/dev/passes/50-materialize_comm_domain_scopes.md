@@ -21,12 +21,28 @@
 ## 异步工作区引擎
 
 `CommDomainScopeStmt.engines` 记录通信域需要的异步工作区引擎 (async workspace engines)。
-物化通信域之前，此 Pass 扫描整个 Program 中每个函数的 Call 和 Submit。
-只要发现 `pld.tensor.indexed_all_to_all_v` 或其降低后的 builtin，所有物化通信域都设置
-`engines=["urma"]`；否则为空列表。
+分组合并前，本 Pass 沿 `Call`/`Submit` 实参、返回别名、视图和循环携带值，将引擎需求
+追踪到每个底层窗口 buffer 分配。未调用函数不会为无关 buffer 申请引擎。
 
-当前采用保守策略，包括未调用函数和无关通信域。精确匹配留待后续实现。
-分布式代码生成仅根据该 IR 字段输出 `workspace_engines`，不再分析通信需求。
+`put_async`/`get_async` 的远端操作数需要 URMA；`remote_load`/`remote_store` 和
+`put`/`get` 的远端操作数需要 MTE，包括 lowering 后的 tile 形式。同一分配同时需要两者
+时直接报错，不分析 peer rank；同一分配的两个 view 不能靠拆域解决冲突。
+MTE 只是编译器内部分类，不是运行时 workspace engine 名称。
+
+通信域按 **设备覆盖范围、内存来源、引擎类别** 分组。范围相同的独立 MTE 和 URMA
+buffer 会分到不同域：MTE 的工作区列表为空，URMA 使用 `engines=["urma"]`。
+没有引擎需求的本地 buffer 可加入兼容分组：只有 URMA 的分组可以包含它们；两类引擎
+都存在时，它们加入默认的非 URMA 分组。域和 slot 的顺序由分配顺序确定。
+
+集合通信（collective）逐操作数收集引擎需求：普通 collective 的远端数据、signal
+和远端读取的 send counts 使用 MTE；indexed all-to-all-v 仅 target 使用 URMA，
+signal 和 send counts 使用 MTE。本地 input、receive counts 和 index 不产生远端引擎需求。
+此规则覆盖公开算子、HOST builtin 和合成的 CHIP kernel；lowering 后的 `notify`
+仍保留 signal 的 MTE 需求。每个远端操作数传递各自的 context，不要求操作数属于同域；
+参与设备、rank 顺序以及 collective 语义的兼容性由调用者保证。
+
+再次运行会刷新需求，必要时拆分已有 scope，并保持 tensor view 引用的 `WindowBuffer`
+对象身份不变。分布式代码生成只输出结果 IR 中的 `workspace_engines`，不再推断需求。
 结构比较、序列化和打印解析往返均保留该字段。
 
 ## 流水线位置
@@ -91,16 +107,20 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
    `pld.tensor.window` 物化的多个 view 共享同一 `shared_ptr<const WindowBuffer>`。
    chip-orch / InCore 形参类型不动。
 
-7. **聚类成 group**。按源代码顺序遍历 alloc 列表，匹配描述符已存在的
-   comm-domain scope 则追加 slot，否则新开一个。`CommDomainScopeStmt wrappers in each host_orch body` 最终
+7. **聚类成 group**。先拒绝单个分配的引擎冲突，再按源代码顺序遍历 alloc 列表，
+   按设备覆盖范围、内存来源和引擎类别匹配分组；匹配则追加 slot，否则新开一个。
+   引擎需求在分组前收集。`CommDomainScopeStmt wrappers in each host_orch body` 最终
    填充该列表。
 
 ## Sanity 校验
 
 下列情况抛 `pypto::ValueError`（携带 alloc 的 span）：
 
+- 同一分配被 URMA 和 MTE 通信原语共同使用。
 - 某 alloc 没有任何 `pld.tensor.window` 物化（dead alloc）。
 - 某 alloc 有 view 但没有 chip-orch dispatch 消费它。
+- `pld.tensor.window` 视图的连续布局字节数（`product(shape) * dtype_bytes`）超过分配的逻辑大小。
+  槽位的物理 cache-line 对齐填充不能通过视图访问。
 - dispatch 的 `device=` 既不是 `ConstInt`、也不是已识别的 `pl.range`
   归纳变量。
 - 同一 comm-domain scope 内 `name_hint_` 重名（parser 已在程序范围内做了唯一性
@@ -118,6 +138,10 @@ pass 运行之后：
 - 每个 `pld.tensor.window` 结果 Var 的类型是 `DistributedTensorType`，
   `window_buffer_` 字段指向对应的 `WindowBuffer`；定义它的 Call 带同一个类型——
   赋值两侧一致。
+- 每个 `pld.tensor.window` 声明都在物化时检查其连续布局字节数是否超过分配的
+  逻辑大小，前提是两者的大小在编译期已知。动态容量由 host codegen 在 window
+  声明处检查，与 dispatch 位置无关。host 操作支持在 codegen 中检查：
+  slice/assemble 仅接受普通 Tensor，view/reshape 没有注册 host lowering。
 - comm-domain 分析和 `LowerHostTensorCollectives` 看到的每个 host-level
   `pld.tensor.allreduce` 都已经有两个位置参数（在
   [`SynthesizeAllReduceSignals`](49-synthesize_allreduce_signals.md) 运行之后）。
@@ -128,6 +152,10 @@ pass 运行之后：
 - chip-orchestration 与 InCore 的形参类型 `window_buffer_` 仍是 `nullopt`。
   N7 codegen 在 *host_orch* 的 dispatch 处读取反向引用、再为 chip-orch 显式
   下发对应的 `CommContext` 指针。
+
+此 pass 在窗口声明处校验容量，不遍历整个 Program 的表达式类型或函数返回类型。
+属性验证器检查 comm-domain 结构：slot 列表非空、slot 非空指针，以及各 scope
+之间 slot 归属唯一。
 
 ## 文本 round-trip
 
@@ -173,3 +201,76 @@ pass 运行之后：
 - DSL：[`pld.tensor.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/tensor_ops.py)、
   [`pld.tensor.window`](../../../../python/pypto/language/distributed/op/tensor_ops.py)、
   [`pld.system.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py)。
+
+## Host DDR 窗口
+
+`pld.alloc_window_buffer(size, memory_source="host")` 选择 Host DDR 存储；
+默认值仍为 `"device"`。shape/dtype 重载也接受此关键字。
+`WindowBuffer.memory_source` 在克隆、序列化和私有 `window_buffer` 文本描述符中保留。
+通信域按设备覆盖范围和内存来源共同分组：Host 与 Device 分配不共享物理通信域。
+
+Host 代码生成向 Simpler 请求 `AddressSpace.HOST`。Host 与 Device buffer 使用上文相同的
+按分配分析引擎及分组规则；仅使用 Host 存储不会申请 URMA。
+各 rank 的 `device_context(rank)` 使用通信域已配置的引擎，并跟踪上下文生命周期。
+
+运行时 API 能力在 worker 初始化加载入口时检查一次，需要初始化时也检查 `initializer`
+参数；每次派发不再重复反射函数签名。平台和运行时组合由 Simpler 校验，当前 runtime
+子模块包含 Simpler #3146：未申请工作区引擎时，A5 Host 域会映射本地及 peer 窗口，
+支持 `tensormap_and_ringbuffer`、`host_build_graph` 和 `percounter` 的同步 MTE 读取。
+同时包含 #3174，为 Host URMA 域保留本地窗口基地址。
+
+引擎冲突由本 Pass 在创建通信域前拒绝。独立 buffer 分别使用 MTE 和 URMA 时，即使
+设备覆盖范围、内存来源相同，也会分到不同域。检查只按显式原语分类，不分析 peer 值：
+本卡 rank 和单 rank 域的 peer `0` 都不能豁免同一 buffer 的冲突。
+普通本地 load/store 不属于这些原语。Notify/wait、builtin 内部操作和外部 kernel
+不在此冲突检查范围内，仍需满足自身的通信域与硬件约束。
+`MaterializeDistTensorCtx` 只负责为生成的通信域物化上下文。
+
+### 运行时来源初始化
+
+用 `pld.alloc_window_buffer(size, memory_source="host", init="engram_l1")` 声明运行时来源键。
+编译阶段仅记录键和逻辑字节数，不打开或读取文件。编译完成后，为每个域内 rank 绑定一个已打开的二进制文件：
+
+```python
+from contextlib import ExitStack
+from pypto.runtime import DistributedWorker
+
+compiled = program.compile(...)  # 此时无需 shard 文件
+with ExitStack() as stack:
+    shard_files = [stack.enter_context(open(path, "rb")) for path in shard_paths]
+    with DistributedWorker(compiled, persistent=True, reset_persistent_windows=False,
+                           window_sources={"engram_l1": shard_files}) as worker:
+        worker(...)  # 创建通信域、加载文件，然后提交 chip 任务
+        worker(...)  # 复用已加载的 Host 域
+```
+
+`init` 必须是非空字符串，且只支持 Host 窗口。`window_sources` 属于 worker 的运行时配置，
+也可传给 `compiled.prepare`。文件序列按**域内 rank 顺序**排列，包括只覆盖部分 worker 的域。
+缺失或未使用的来源键、错误的文件数量都会报错。
+
+同一映射也接受连续的 CPU `torch.Tensor`，可以混合文件与 tensor：
+`window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`。
+Tensor 从视图的存储偏移起按原始字节复制，不转换 dtype、不创建暂存副本，支持 BF16 和 FP8。
+非 CPU、非连续、稀疏、量化以及共轭或负值视图会被拒绝。来源至少包含窗口逻辑字节数，
+多余尾部字节被忽略。绑定保留 tensor 对象而非内容快照；创建域时才读取数据，因此派发完成前须保持来源稳定。
+
+Codegen 输出 `(buffer_name, init_key, logical_nbytes)` 绑定，并向固定的
+`make_window_initializer` helper 传入 worker 的来源映射。Helper 创建内部回调，
+由 Simpler 在所有 rank 映射就绪后调用。对每项绑定，将
+`window_sources[init_key][domain_rank]` 复制到相应命名 buffer，偏移由
+`domain.buffer_range(buffer_name)` 获取。不会根据文件句柄或 tensor 内容动态生成 Python 函数。
+
+PyPTO 接入 Simpler #2939 的创建时 initializer，从文件偏移零开始，分块直接读入对应命名 buffer
+的 Host 映射，并恢复文件原先的位置。只复制逻辑字节数，不改动对齐填充，忽略文件尾部多余字节。
+文件过短会使域创建失败；异常路径释放所有 CPU memoryview，允许 Simpler 回滚分配。
+不会分配另一份完整表大小的暂存空间。文件必须是可读、可定位的二进制流，由调用者管理生命周期，
+首次派发完成前须保持打开；初始化过程中不要修改或并发访问这些文件流。
+
+持久域复用不调用 initializer，首次派发成功后即可关闭文件。新建域会重新读取文件。
+未启用 `persistent=True` 时，每次派发都会创建并初始化新域，因此文件须保持打开。
+worker 创建时固定来源映射与文件列表，修改原来的字典或列表不会重新加载持久表；更新数据需创建新 worker。
+
+持久执行的复用校验包含内存来源、工作区引擎和初始化绑定。Host 与 Device 窗口遵循相同策略：
+`persistent=True` 保留分配，`reset_persistent_windows` 控制复用前是否清零（默认开启）。
+清零后不会重新执行初始化。若要保留已加载的 Engram 表，设置 `reset_persistent_windows=False`；
+这也会关闭 Device scratch/signal buffer 的重置，其状态须由调用者管理。通信域仍由 Simpler 负责释放。

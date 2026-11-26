@@ -290,6 +290,11 @@ void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                             const std::string& op_name);
 
+/// Native DMA requires a unit physical inner stride. With transpose=True,
+/// gather_row presents the source's last axis as the inner axis of a DN view.
+void ValidateDmaInnerStride(const TensorTypePtr& tensor, const Span& span, const std::string& op_name,
+                            bool transpose = false);
+
 /**
  * @brief Validate the optional ``init_cond`` operand of an accumulating matmul
  *
@@ -310,15 +315,38 @@ void CheckMatmulInitCond(const std::vector<ExprPtr>& args, size_t index, const s
  * @brief Data type the Cube accumulator holds for a matmul over these operands
  *
  * The L0C accumulator is fixed by the operand domain, not by anything the caller
- * asks for: a pair of float operands accumulates in FP32, every other pair
- * (int operands, or a mixed pair) accumulates in INT32. ``tile.matmul`` and the
- * ``tensor.matmul`` that lowers to it must agree on this, so both read it here.
+ * asks for. Pairs the hardware really multiplies are listed in
+ * ``backend::kCubeOperandPairs`` and answer from there (every matmul pair
+ * accumulates in FP32 except INT8 x INT8, which accumulates in INT32); any other
+ * pair falls back to the historical rule, two floats accumulate in FP32 and
+ * everything else in INT32. ``tile.matmul`` and the ``tensor.matmul`` that lowers
+ * to it must agree on this, so both read it here.
  *
  * @param lhs Left operand element type
  * @param rhs Right operand element type
- * @return FP32 for two float operands, INT32 otherwise
+ * @return The L0C element type for this operand pair
  */
 DataType MatmulAccumulatorDataType(DataType lhs, DataType rhs);
+
+/**
+ * @brief Validate a matmul operand pair and return its accumulator dtype
+ *
+ * Accepts a pair when it is a known-good Cube matmul pair (``backend::
+ * kCubeOperandPairs``, which on A5 includes the mixed FP8 orders E4M3FN x E5M2
+ * and E5M2 x E4M3FN) **or** when both operands share one dtype. The second arm
+ * preserves the historical "identical lhs and rhs" contract: dtypes PTOAS would
+ * reject anyway still reach it as they always have, and only the backend's own
+ * check rejects them. Per-architecture availability is not decided here — the
+ * same DSL program is legal or not depending on the compilation target, which
+ * type deduction does not see; the matmul codegen checks it against the
+ * configured backend instead.
+ *
+ * @param lhs Left operand element type
+ * @param rhs Right operand element type
+ * @param op_name Operator name used in diagnostics
+ * @return The L0C element type the product accumulates in
+ */
+DataType ValidateMatmulOperandDataTypes(DataType lhs, DataType rhs, const std::string& op_name);
 
 /// Validate opt-in HF32 rounding: two rank-2 FP32 operands and a supported mode.
 void CheckMatmulTf32Mode(const std::vector<std::pair<std::string, std::any>>& kwargs, DataType lhs,
@@ -396,6 +424,10 @@ const char* DescribeCubeWritebackScaledConversion(DataType accumulator, DataType
  * @return One expression per tuple element
  */
 std::vector<ExprPtr> ExtractTupleElements(const ExprPtr& tuple_expr, size_t rank);
+
+/// A rectangular slice preserves the parent's physical stride on every retained
+/// axis. Rank-changing reinterprets and blocked layouts have other addressing rules.
+bool HasRectangularSliceStrides(const TensorTypePtr& parent, size_t window_rank, size_t offset_rank);
 
 /**
  * @brief Whether the substrate under a window read trims an over-extent window
@@ -835,6 +867,11 @@ inline void StampCompactForNarrowedAccRows(TileView& dst, const std::vector<Expr
   if (ProveValidExtentEqual(dst.valid_shape[0], physical_shape[0]) != ProofResult::kTrue) {
     dst.compact = CompactMode::normal;
   }
+}
+
+/// A5 MX accepts either E4M3FN or E5M2 on each FP8 data operand.
+[[nodiscard]] inline bool IsMxFp8DataType(const DataType& dtype) {
+  return dtype == DataType::FP8E4M3FN || dtype == DataType::FP8E5M2;
 }
 
 /// Matrix arithmetic uses logical value extents; packed FP4 tile types store

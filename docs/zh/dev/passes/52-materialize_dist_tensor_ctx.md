@@ -3,6 +3,10 @@
 本 pass 为每个 `DistributedTensorType` 函数参数显式物化一个对应的
 `CommCtxType` 参数和实参，SIMT helper 除外。
 
+引擎需求、单 buffer 冲突检查和通信域分组由
+[MaterializeCommDomainScopes](50-materialize_comm_domain_scopes.md#异步工作区引擎) 完成。
+本 Pass 只为这些通信域物化上下文；两个 Pass 共用分布式 tensor 的别名追踪工具。
+
 ## 概览
 
 DistributedTensor 的通信上下文需要沿完整调用链传递：host orchestration
@@ -66,6 +70,8 @@ property verifier 再独立校验一遍——这也覆盖了「程序里没有�
 该 pass 位于 `LowerHostTensorCollectives` 之后、最终 `Simplify` 之前。此时
 host window buffer 已由 `MaterializeCommDomainScopes` 填好，host tensor
 collective 也已降低完成，同时后续仍有一次 simplify 可清理转发别名。
+
+对于 InCore 中的 tile PUT 和 GET，本 pass 检查 session 的上下文与远端窗口是否源自同一个分布式张量形参。PUT 检查目标，GET 检查源，视图沿用其输入形参的上下文。若 session 可能来自另一个形参，编译时报错。
 
 ## 与 dynamic dim 的区别
 

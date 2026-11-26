@@ -14,6 +14,19 @@ from enum import Enum, auto
 
 from pypto.backend import BackendType
 from pypto.pypto_core import backend as _backend_core
+from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
+
+
+def runtime_implementation_name(kind: RuntimeKind, platform: str | None) -> str:
+    """Resolve an application selection for new artifacts and their cache keys."""
+    a5 = platform in ("a5", "a5sim")
+    if kind == RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL:
+        if not a5:
+            raise ValueError("The experimental host graph implementation requires an A5 target")
+        return "host_build_graph"
+    if a5 and kind == RuntimeKind.HOST_BUILD_GRAPH:
+        return "percounter"
+    return runtime_kind_to_name(kind)
 
 
 class ExecutionMode(Enum):

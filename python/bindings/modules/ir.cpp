@@ -10,6 +10,7 @@
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
@@ -34,6 +35,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -54,6 +56,7 @@
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -177,6 +180,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<std::string>(item.second));
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else if (key == "acc_push_epilogue" && nb::isinstance<nb::dict>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<AccPushEpilogue>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
       // Lists/tuples carry exactly one element type, dispatched by attr key:
       //   - kAttrArgDirections             -> vector<ArgDirection>
@@ -359,8 +364,51 @@ void CheckSlotCount(uint64_t slots) {
   CHECK(slots >= 1) << "A declared allocation must have at least one slot, got slots=" << slots;
 }
 
+/// Normalize a shape sequence that may mix constant extents with IR expressions.
+///
+/// ``shape: Sequence[Expr | int]`` is the declared contract of ``TensorType`` and
+/// ``TileType`` (see the stubs): a symbolic extent next to a literal one is
+/// ordinary, e.g. ``ir.TensorType([n, 16], dtype)``. The Python-side normalizer in
+/// ``pypto.ir.type`` cannot be the sole validator: depending on the Python
+/// version, nanobind construction may bypass its patched ``__init__``. Python
+/// wrappers forward raw extents here so both paths enforce the same contract.
+/// Use one native constructor for constant, symbolic, and mixed shapes so no
+/// homogeneous overload bypasses validation. Elements other than ``Expr`` or
+/// ``int`` (including ``bool``) are rejected with their offending index.
+std::vector<ExprPtr> NormalizeShapeSequence(const nb::sequence& shape) {
+  std::vector<ExprPtr> exprs;
+  exprs.reserve(static_cast<size_t>(nb::len(shape)));
+  size_t index = 0;
+  for (nb::handle dim : shape) {
+    if (nb::isinstance<Expr>(dim)) {
+      exprs.push_back(nb::cast<ExprPtr>(dim));
+    } else if (!nb::isinstance<nb::bool_>(dim) && nb::isinstance<nb::int_>(dim)) {
+      // Validate before casting: PyNumber_Index() converts a bool to 0/1, so a bare
+      // nb::cast<int64_t> would silently accept True/False as an extent, and any
+      // non-int would surface as a context-free `std::bad_cast` RuntimeError. The
+      // same holds for an int outside the int64 range: try_cast reports it so the
+      // diagnostic can name the offending dimension instead.
+      int64_t extent = 0;
+      if (!nb::try_cast<int64_t>(dim, extent)) {
+        throw pypto::ValueError("Shape extent at index " + std::to_string(index) +
+                                " is outside the int64 range (expected Expr | int)");
+      }
+      exprs.push_back(std::make_shared<ConstInt>(extent, DataType::INDEX, Span::unknown()));
+    } else {
+      const nb::str dim_type(nb::getattr(dim.type(), "__name__"));
+      throw pypto::TypeError("Unsupported shape element at index " + std::to_string(index) + ": " +
+                             dim_type.c_str() + " (expected Expr | int)");
+    }
+    ++index;
+  }
+  return exprs;
+}
+
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
+
+  ir.def("_get_a5_c2v_row_tail_box_stride", &cross_core_pipe::GetA5C2VRowTailBoxStride, nb::arg("type"),
+         "Return the box lane stride for an A5 compact FP32 C2V row tail, or None.");
 
   nb::enum_<HardwareLoopState>(ir, "HardwareLoopState")
       .value("Eligible", HardwareLoopState::Eligible)
@@ -453,13 +501,21 @@ void BindIR(nb::module_& m) {
 
   nb::enum_<RegKind>(ir, "RegKind", "Register descriptor kind")
       .value("VecReg", RegKind::VecReg, "Vector register holding non-BOOL lanes")
-      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes");
-  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Static logical register descriptor");
+      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes")
+      .value("UReg", RegKind::UReg, "Linear squeeze-store alignment state");
+  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Logical register descriptor");
   // The lane count must be an integer, not text coerced by older nanobind releases.
   reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape").noconvert(), nb::arg("dtype"),
                      nb::arg("kind"), "Create a register descriptor with a positive logical lane count");
+  reg_type_class.def_static("ureg", &RegType::GetUReg, "Get the type of the linear squeeze-store state.");
   BindFields<RegType>(reg_type_class);
-  reg_type_class.def_prop_ro("lanes", &RegType::GetLanes, "Logical lane count (alias of shape)");
+  reg_type_class.def_prop_ro(
+      "lanes",
+      [](const RegType& type) -> std::optional<int64_t> {
+        if (type.GetRegKind() == RegKind::UReg) return std::nullopt;
+        return type.GetLanes();
+      },
+      "Logical lane count (alias of shape), or None for UReg");
 
   // ScalarType - const shared_ptr
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
@@ -604,20 +660,15 @@ void BindIR(nb::module_& m) {
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
-  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>>(),
-                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
-                        "Create a tensor type");
-  tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>>(),
-                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
-                        "Create a tensor type");
+  // A single constructor keeps homogeneous overloads from bypassing validation.
   tensor_type_class.def(
-      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
+      "__init__",
+      [](TensorType* self, const nb::sequence& shape, DataType dtype, std::optional<MemRefPtr> memref,
+         std::optional<TensorView> tensor_view) {
+        new (self) TensorType(NormalizeShapeSequence(shape), dtype, memref, tensor_view);
+      },
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
-      "Create a tensor type with optional memory reference and tensor view");
-  tensor_type_class.def(
-      nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
-      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
-      "Create a tensor type with constant shape, optional memory reference and tensor view");
+      "Create a tensor type from constant extents, IR expressions, or a mix of both");
   BindFields<TensorType>(tensor_type_class);
 
   // DistributedTensorType - subclass of TensorType used as the param type for
@@ -662,17 +713,14 @@ void BindIR(nb::module_& m) {
   auto tile_type_class =
       nb::class_<TileType, ShapedType>(ir, "TileType", "Tile type representation (multi-dimensional tensor)");
   tile_type_class.def(
-      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>,
-               std::optional<MemorySpace>>(),
+      "__init__",
+      [](TileType* self, const nb::sequence& shape, DataType dtype, std::optional<MemRefPtr> memref,
+         std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space) {
+        new (self) TileType(NormalizeShapeSequence(shape), dtype, memref, tile_view, memory_space);
+      },
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
       nb::arg("memory_space") = nb::none(),
-      "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
-  tile_type_class.def(
-      nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>,
-               std::optional<MemorySpace>>(),
-      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
-      nb::arg("memory_space") = nb::none(),
-      "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
+      "Create a tile type from constant extents, IR expressions, or a mix of both");
   tile_type_class.def(
       "get_effective_tile_view",
       [](const TileType& self) { return tile_view_semantics::GetEffectiveTileView(self); },
@@ -776,6 +824,7 @@ void BindIR(nb::module_& m) {
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
       .value("LeftScale", MemorySpace::LeftScale, "L0A-side MX block-scale buffer (A5)")
+      .value("Scaling", MemorySpace::Scaling, "Packed 64-bit Fixpipe control buffer")
       .value("RightScale", MemorySpace::RightScale, "L0B-side MX block-scale buffer (A5)")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
@@ -811,7 +860,8 @@ void BindIR(nb::module_& m) {
   // CompactMode enum - must be before TileView.
   nb::enum_<CompactMode>(ir, "CompactMode", "Partial-tile compact mode enumeration")
       .value("null", CompactMode::null, "Ordinary non-compact layout")
-      .value("normal", CompactMode::normal, "Compact valid-region layout");
+      .value("normal", CompactMode::normal, "Compact valid-region layout")
+      .value("row_plus_one", CompactMode::row_plus_one, "Vec NZ with one padded row per panel");
 
   // Final device buffer descriptors carry no MemRef or runtime expressions.
   auto buffer_type_class = nb::class_<BufferType, Type>(
@@ -838,6 +888,7 @@ void BindIR(nb::module_& m) {
   // Fields are read-only from Python so that hash and equality remain stable
   // across an instance's lifetime (Python's hash contract). Construct via the
   // constructor, not by mutating fields.
+  // An empty ExprPtr becomes None in Python, which nanobind must accept in both overloads.
   nb::class_<TileView>(
       ir, "TileView",
       "Tile view representation with valid shape, stride, start offset, layouts, fractal, pad, and "
@@ -846,14 +897,14 @@ void BindIR(nb::module_& m) {
       .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue, CompactMode>(),
            nb::arg("valid_shape") = std::vector<ExprPtr>{}, nb::arg("stride") = std::vector<ExprPtr>{},
-           nb::arg("start_offset") = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
+           nb::arg("start_offset").none() = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
            nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
            nb::arg("pad") = PadValue::null, nb::arg("compact") = CompactMode::null,
            "Create a tile view; fields default to empty/null/row_major/none_box/512/null/null. "
            "fractal is a size in bytes, not elements.")
       .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue, CompactMode>(),
-           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
+           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset").none(),
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
            nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
            nb::arg("compact") = CompactMode::null,
@@ -1040,9 +1091,22 @@ void BindIR(nb::module_& m) {
       nb::arg("op_name"), "Get an operator instance by name");
 
   ir.def(
+      "get_op_tuple_result_aliases",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetTupleResultAliases();
+      },
+      nb::arg("op_name"), "Map tuple result indices to the input tensor arguments they alias.");
+  ir.def(
       "get_op_output_arity",
       [](const std::string& op_name) { return OpRegistry::GetInstance().GetEntry(op_name).GetOutputArity(); },
       nb::arg("op_name"), "Number of SSA results (0 means VoidType, >1 means TupleType)");
+
+  ir.def(
+      "get_op_mutable_session_arg",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetMutableSessionArg();
+      },
+      nb::arg("op_name"), "Index of the mutable AsyncSession argument, if present.");
 
   ir.def(
       "op_arg_is_workspace",
@@ -1386,7 +1450,8 @@ void BindIR(nb::module_& m) {
       nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("attrs").none(), nb::arg("type"),
       nb::arg("span"),
       "Create a function call expression with kwargs and explicit attrs map and type. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Call>(call_class);
 
@@ -1418,7 +1483,8 @@ void BindIR(nb::module_& m) {
       "allow_early_resolve opts this task in as a speculative early-dispatch producer. "
       "predicate is an optional comparison Expr (e.g. Gt(tensor.read(t, [i]), 0)) the scheduler "
       "evaluates at the dispatch point; omit it for an unconditional dispatch. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Submit>(submit_class);
 
@@ -1432,6 +1498,8 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(std::string)) {
         result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(AccPushEpilogue)) {
+        result[key.c_str()] = nb::cast(AnyCast<AccPushEpilogue>(value));
       } else if (value.type() == typeid(double)) {
         result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(float)) {
@@ -1501,7 +1569,7 @@ void BindIR(nb::module_& m) {
         // Used by ScopeStmt attrs["task_id_var"] (single producer TaskId Var).
         result[key.c_str()] = nb::cast(AnyCast<VarPtr>(value, "converting to Python: " + key));
       } else if (value.type() == typeid(ExprPtr)) {
-        // IR expressions stored in attrs (e.g. attrs["device"] and
+        // IR expressions stored in attrs (e.g. attrs["worker"] and
         // attrs["core_num"] on Orchestration dispatch calls).
         result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
       }
@@ -1929,6 +1997,8 @@ void BindIR(nb::module_& m) {
   reg_scope_stmt_class.def_prop_ro(
       "attrs", [kwargs_to_pydict](const RegScopeStmtPtr& self) { return kwargs_to_pydict(self->attrs_); },
       scope_attrs_doc);
+  reg_scope_stmt_class.def_prop_ro("auto_sync", &RegScopeStmt::AutoSync,
+                                   "Whether PTOAS automatic vecscope synchronization is enabled");
 
   // GraphScopeStmt
   auto graph_scope_stmt_class = nb::class_<GraphScopeStmt, ScopeStmt>(
@@ -2137,6 +2207,7 @@ void BindIR(nb::module_& m) {
       .value("Spmd", FunctionType::Spmd, "SPMD data-parallel dispatch")
       .value("Inline", FunctionType::Inline, "Whole-body substitution at every call site")
       .value("Graph", FunctionType::Graph, "Recordable/replayable orchestration fragment")
+      .value("VF", FunctionType::VF, "Synchronous register device helper")
       .value("SIMT", FunctionType::SIMT, "Per-thread device helper launched inside an AIV task")
       .export_values();
 
@@ -2300,9 +2371,10 @@ void BindIR(nb::module_& m) {
       "the exact mirror of how MemRef carries (base, byte_offset, size) under MemRefType. "
       "Constructed by the comm-collection pass; the alloc op's LHS at parse time is a "
       "plain Var(PtrType).");
-  window_buffer_class.def(nb::init<VarPtr, ExprPtr, bool, bool, Span>(), nb::arg("base"), nb::arg("size"),
-                          nb::arg("load_from_host") = false, nb::arg("store_to_host") = false,
-                          nb::arg("span") = Span::unknown(),
+  window_buffer_class.def(nb::init<VarPtr, ExprPtr, bool, bool, Span, std::string, std::string>(),
+                          nb::arg("base"), nb::arg("size"), nb::arg("load_from_host") = false,
+                          nb::arg("store_to_host") = false, nb::arg("span") = Span::unknown(),
+                          nb::arg("memory_source") = "device", nb::arg("init") = "",
                           "Create a WindowBuffer wrapping the given Ptr Var. The buffer's "
                           "runtime-unique identifier flows through the inherited "
                           "Var.name_hint (taken from base.name_hint).");

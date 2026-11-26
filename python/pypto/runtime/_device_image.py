@@ -38,12 +38,13 @@ def _string(table: bytes, offset: int) -> bytes:
     return table[offset:end]
 
 
-def _sections(data: bytes) -> tuple[int, list[_Section], bytes]:
+def _sections(data: bytes, *, relocatable: bool = False) -> tuple[int, list[_Section], bytes]:
     if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
         raise ValueError("Device image requires a little-endian ELF64 device image")
     elf_type, machine = struct.unpack_from("<HH", data, 16)
-    if elf_type != 2 or machine != 0x1029:
-        raise ValueError("Device image requires an executable AI Core ELF, not a host fatobj")
+    if elf_type != (1 if relocatable else 2) or machine != 0x1029:
+        kind = "relocatable" if relocatable else "executable"
+        raise ValueError(f"Device image requires a {kind} AI Core ELF, not a host fatobj")
     (entry,) = struct.unpack_from("<Q", data, 24)
     (offset,) = struct.unpack_from("<Q", data, 40)
     size, count, names_index = cast(tuple[int, int, int], struct.unpack_from("<HHH", data, 58))
@@ -62,7 +63,30 @@ def _sections(data: bytes) -> tuple[int, list[_Section], bytes]:
     return entry, sections, names.payload(data)
 
 
-def _text_section(entry: int, sections: list[_Section], strings: bytes, *, plain_callee: bool) -> int:
+def device_object_exports(data: bytes) -> frozenset[str]:
+    """Read defined, externally visible function names from an AI Core object."""
+    _, sections, _ = _sections(data, relocatable=True)
+    exports: set[str] = set()
+    for section in sections:
+        if section.kind != 2:
+            continue
+        if section.stride != 24 or section.size % 24:
+            raise ValueError("Device object has an invalid symbol table")
+        if not 0 < section.link < len(sections) or sections[section.link].kind != 3:
+            raise ValueError("Device object has an invalid symbol string table")
+        strings = sections[section.link].payload(data)
+        for position in range(section.offset, section.offset + section.size, 24):
+            name, info, visibility, defined_in, _, _ = struct.unpack_from("<IBBHQQ", data, position)
+            if info & 15 == 2 and info >> 4 in (1, 2) and visibility & 3 in (0, 3) and defined_in:
+                if not 0 < defined_in < len(sections):
+                    raise ValueError("Device object has a function outside its sections")
+                exports.add(_function_name(_string(strings, name)))
+    return frozenset(exports)
+
+
+def _text_section(
+    entry: int, sections: list[_Section], strings: bytes, *, plain_callee: bool, self_contained: bool = True
+) -> int:
     text_index = 0
     for index, section in enumerate(sections):
         name = _string(strings, section.name)
@@ -81,11 +105,16 @@ def _text_section(entry: int, sections: list[_Section], strings: bytes, *, plain
             if section.kind != 1 or section.flags != 6 or not section.size:
                 raise ValueError("Device image requires a nonempty executable .text section")
             if entry != section.address:
-                raise ValueError("Device image kernel_entry must be at the start of .text")
+                raise ValueError(
+                    "Device image kernel_entry must be at the start of .text: "
+                    f"entry={entry:#x}, .text={section.address:#x}, offset={entry - section.address:#x}. "
+                    "The persistent loader executes raw code from byte zero; "
+                    "link kernel_entry first or remove preceding out-of-line functions."
+                )
             text_index = index
-        elif section.flags & 2 and section.size:
+        elif self_contained and section.flags & 2 and section.size:
             raise ValueError(f"Device image needs unsupported allocated section {name!r}")
-        if section.kind in (4, 9) and section.size:
+        if self_contained and section.kind in (4, 9) and section.size:
             raise ValueError("Device image must have no remaining relocations")
     if not text_index:
         raise ValueError("Device image requires a nonempty .text section")
@@ -173,3 +202,15 @@ def validate_device_image(data: bytes, *, entry_symbol: str | None = None) -> fr
         raise ValueError("Device image has an unsupported ELF version")
     text_index = _text_section(entry, sections, strings, plain_callee=entry_symbol is not None)
     return _functions(data, sections, text_index, entry_symbol)
+
+
+def validate_device_entry(data: bytes) -> None:
+    """Check a linked device entry without imposing the self-contained callee contract.
+
+    All hardware images enter at byte zero of .text, including ordinary extern
+    builds without VPTO helpers. They may use AscendC block-local sections, so
+    this check preserves their data contract. Simulator SOs resolve their
+    entry by symbol and must not pass through device-image validation.
+    """
+    entry, sections, strings = _sections(data)
+    _text_section(entry, sections, strings, plain_callee=False, self_contained=False)

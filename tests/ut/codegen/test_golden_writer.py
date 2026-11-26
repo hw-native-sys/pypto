@@ -29,7 +29,7 @@ def _dummy_golden(tensors, params=None):
 
 @pytest.mark.parametrize(
     "dtype_name",
-    ["float8_e4m3fn", "float8_e8m0fnu", "float4_e2m1fn_x2"],
+    ["float8_e4m3fn", "float8_e5m2", "float8_e8m0fnu", "float4_e2m1fn_x2"],
 )
 def test_torch_dtype_str_supports_mx_dtypes(dtype_name):
     """Optional torch MX dtypes retain their qualified names in golden.py."""

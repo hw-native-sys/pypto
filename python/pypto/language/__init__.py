@@ -37,6 +37,9 @@ Typical usage:
         return x
 """
 
+import importlib
+from typing import TYPE_CHECKING, Any
+
 from pypto.ir import TensorView, TileView
 from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
@@ -61,8 +64,17 @@ from pypto.pypto_core.ir import (
 )
 
 from . import _dump as _dump
-from . import arg_direction as adir
-from . import optimizations, parser
+
+if TYPE_CHECKING:
+    # The lazy shim below resolves these at runtime (first access), so the
+    # dialect tier imports without the parser package; static readers see the
+    # declarations here, and the parser still imports nothing at module load.
+    from . import parser
+    from .parser.decorator import InlineFunction, function, inline, program
+    from .parser.text_parser import loads, loads_program, parse, parse_program
+
+from .constructs import optimizations as optimizations
+from .constructs.optimizations import cross_core_slot, split
 from .dsl_api import (
     at,
     cluster,
@@ -97,6 +109,8 @@ from .op.system_ops import (
     aiv_initialize_pipe,
     import_peer_buffer,
     reserve_buffer,
+    set_quant_scalar,
+    set_quant_vector,
     tfree_to_aic,
     tfree_to_aiv,
     tpop_from_aic,
@@ -105,6 +119,7 @@ from .op.system_ops import (
     tpush_to_aiv,
 )
 from .op.tensor_ops import ci as arange
+from .op.tensor_ops import create as create_tensor
 
 # Names that also exist at tile level are imported below from ``unified_ops``
 # instead so the Tensor/Tile dispatch wins. Keep this block to names the tile
@@ -113,7 +128,6 @@ from .op.tensor_ops import ci as arange
 # at all (``full``, ``random``, and the block-identity queries).
 from .op.tensor_ops import (
     create_l1,
-    create_tensor,
     dim,
     dump_tag,
     expand_clone,
@@ -135,7 +149,6 @@ from .op.tile_ops import (
     aic_gather,
     aiv_shard,
     cmps,
-    create_tile,
     gatherb,
     gemv,
     gemv_acc,
@@ -161,6 +174,9 @@ from .op.tile_ops import (
     subc,
     subsc,
     tri,
+)
+from .op.tile_ops import (
+    create as create_tile,
 )
 from .op.tile_ops import (
     mscatter as mscatter,
@@ -253,9 +269,6 @@ from .op.unified_ops import (
     xor,
     xors,
 )
-from .optimizations import cross_core_slot, split
-from .parser.decorator import InlineFunction, function, inline, program
-from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, reg_scope, scope, simt_scope, spmd_submit, submit
 from .typing import (
     RUNTIME,
@@ -278,9 +291,48 @@ from .typing import (
     constexpr,
     dynamic,
 )
+from .typing import arg_direction as adir
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace
+
+# The parser frontend stays lazy: the dialect tier (constructs, diagnostics,
+# typing) is shared with the tracing frontend and must import without the
+# parser package. PEP 562 keeps every ``pl.<name>`` spelling below working on
+# first access. Names are cached into module globals after the first hit.
+_LAZY_PARSER_MODULES: dict[str, str] = {
+    "parser": "pypto.language.parser",
+    "InlineFunction": "pypto.language.parser.decorator",
+    "function": "pypto.language.parser.decorator",
+    "inline": "pypto.language.parser.decorator",
+    "program": "pypto.language.parser.decorator",
+    "loads": "pypto.language.parser.text_parser",
+    "loads_program": "pypto.language.parser.text_parser",
+    "parse": "pypto.language.parser.text_parser",
+    "parse_program": "pypto.language.parser.text_parser",
+}
+
+
+if not TYPE_CHECKING:
+    # Static readers use the explicit imports above. Exposing this Any-valued
+    # runtime fallback to them would also accept misspelled DSL attributes.
+    def __getattr__(name: str) -> Any:
+        module_name = _LAZY_PARSER_MODULES.get(name)
+        if module_name is None:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        imported = importlib.import_module(module_name)
+        # A key naming the package itself (``parser``) resolves to the module,
+        # not to a same-named attribute inside it — importing a submodule binds
+        # it onto this package as an import side effect, but the FIRST access
+        # must not depend on that ordering.
+        value = imported if module_name.endswith("." + name) else getattr(imported, name)
+        globals()[name] = value
+        return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_PARSER_MODULES))
+
 
 # Re-export TensorLayout constants for convenience
 ND = TensorLayout.ND
@@ -492,6 +544,8 @@ __all__ = [
     "aic_gather",
     "tpop_from_aic",
     "tpop_from_aiv",
+    "set_quant_scalar",
+    "set_quant_vector",
     "aic_initialize_pipe",
     "aiv_initialize_pipe",
     "reserve_buffer",

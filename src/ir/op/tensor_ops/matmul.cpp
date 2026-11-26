@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -129,6 +130,11 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   CHECK(lhs_shape.size() >= 1) << "tensor.matmul requires lhs to have at least 1 dimension";
   CHECK(rhs_shape.size() >= 1) << "tensor.matmul requires rhs to have at least 1 dimension";
 
+  // Operand dtypes need not be identical: A5 multiplies the mixed FP8 orders.
+  // This also yields the accumulator the Cube produces for the pair.
+  const DataType accumulator =
+      ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, "tensor.matmul");
+
   // Read kwargs (with defaults)
   DataType out_dtype;
   bool out_dtype_requested = false;
@@ -136,9 +142,19 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     out_dtype = GetKwarg<DataType>(kwargs, "out_dtype");
     out_dtype_requested = true;
   } catch (const ValueError& e) {
-    auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-    CHECK(promoted) << "Cannot promote data types for tensor.matmul";
-    out_dtype = *promoted;
+    // A 1-byte float operand pair defaults to the accumulator, not to a promoted
+    // operand dtype: the unscaled FIXPIPE writeback cannot reproduce FP8 / HF8
+    // (CheckTensorMatmulOutDataType below rejects it when asked explicitly), and
+    // promotion of a mixed pair would additionally depend on operand order --
+    // E4M3FN for E4M3FN x E5M2 but E5M2 for the reverse. Wider operand pairs keep
+    // their historical promoted default.
+    if (backend::IsCubeFloat8Operand(lhs_type->dtype_) || backend::IsCubeFloat8Operand(rhs_type->dtype_)) {
+      out_dtype = accumulator;
+    } else {
+      auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
+      CHECK(promoted) << "Cannot promote data types for tensor.matmul";
+      out_dtype = *promoted;
+    }
   } catch (const TypeError& e) {
     throw TypeError("Invalid kwarg type for out_dtype: " + std::string(e.what()));
   }
@@ -257,7 +273,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
-// tensor.quant_mx: GM MXFP8 quantization
+// tensor.quant_mx: GM block-scale quantization
 // ============================================================================
 
 TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
@@ -277,13 +293,15 @@ TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(group_axis == 0 || group_axis == 1, span)
       << kOpName << " group_axis must be 0 or 1, but got " << group_axis;
   const DataType dtype = GetKwarg<DataType>(kwargs, "dtype", DataType::FP8E4M3FN);
-  CHECK_SPAN(dtype == DataType::FP8E4M3FN || dtype == DataType::FP4E2M1X2, span)
-      << kOpName << " supports dtype FP8E4M3FN or FP4E2M1X2, but got " << dtype.ToString();
+  CHECK_SPAN(dtype == DataType::FP8E4M3FN || dtype == DataType::FP8E5M2 || dtype == DataType::FP4E2M1X2, span)
+      << kOpName << " supports dtype FP8E4M3FN, FP8E5M2, or FP4E2M1X2, but got " << dtype.ToString();
   CHECK_SPAN(dtype != DataType::FP4E2M1X2 || src->dtype_ != DataType::FP32, span)
       << kOpName << " requires FP16 or BF16 source for MXFP4_E2M1";
   const std::string algorithm = GetKwarg<std::string>(kwargs, "quant_scale_alg", "ocp");
   CHECK_SPAN(algorithm == "ocp" || algorithm == "nv", span)
       << kOpName << " requires quant_scale_alg 'ocp' or 'nv', but got " << algorithm;
+  CHECK_SPAN(dtype != DataType::FP8E5M2 || algorithm == "ocp", span)
+      << kOpName << " requires OCP for FP8E5M2";
   CHECK_SPAN(algorithm != "nv" || group_axis != 1 || src->dtype_ == DataType::FP32, span)
       << kOpName << " does not support axis1 FP16/BF16 NV quantization in PTOAS";
 
@@ -323,7 +341,7 @@ TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
-// tensor.matmul_mx: oriented MXFP8 matrix multiplication
+// tensor.matmul_mx: oriented MXFP8/MXFP4 matrix multiplication
 // ============================================================================
 
 TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
@@ -342,12 +360,11 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
                  rhs_scale->shape_.size() == 2,
              span)
       << kOpName << " requires oriented 2D data and scale tensors";
-  CHECK_SPAN(!lhs->dtype_.IsPackedFp4() && !rhs->dtype_.IsPackedFp4(), span)
+  const bool packed = lhs->dtype_.IsPackedFp4() && rhs->dtype_.IsPackedFp4();
+  CHECK_SPAN(packed || (lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN), span)
       << kOpName
-      << " native FP4 matmul requires the tile API; load packed operands into Mat and use "
-         "pl.tile.matmul_mx with explicit Left/Right placement";
-  CHECK_SPAN(lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN, span)
-      << kOpName << " requires FP8E4M3FN data tensors";
+      << " requires two FP8E4M3FN data tensors or two packed FP4 data tensors; "
+         "mixed FP4/FP8 operands require an explicit cast";
   CHECK_SPAN(lhs_scale->dtype_ == DataType::FP8E8M0 && rhs_scale->dtype_ == DataType::FP8E8M0, span)
       << kOpName << " requires FP8E8M0 scale tensors";
   const auto lhs_layout =
@@ -358,10 +375,21 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires lhs_scale layout MX_A_ZZ or MX_A_ND";
   CHECK_SPAN(rhs_layout == TensorLayout::MX_B_NN, span) << kOpName << " requires rhs_scale layout MX_B_NN";
 
-  auto m = As<ConstInt>(lhs->shape_[0]);
-  auto k_lhs = As<ConstInt>(lhs->shape_[1]);
-  auto k_rhs = As<ConstInt>(rhs->shape_[0]);
-  auto n = As<ConstInt>(rhs->shape_[1]);
+  auto logical_shape = [span, kOpName](const TensorTypePtr& type, std::vector<ExprPtr> shape) {
+    if (!type->dtype_.IsPackedFp4()) return shape;
+    const auto layout = type->tensor_view_.value_or(TensorView{}).layout;
+    CHECK_SPAN(layout == TensorLayout::ND || layout == TensorLayout::DN, span)
+        << kOpName << " requires ND or DN packed FP4 data tensors";
+    const size_t axis = layout == TensorLayout::DN ? 0 : 1;
+    shape[axis] = AdjustPackedFp4CastLastDim({shape[axis]}, type->dtype_, DataType::FP32, span)[0];
+    return shape;
+  };
+  const auto lhs_shape = logical_shape(lhs, lhs->shape_);
+  const auto rhs_shape = logical_shape(rhs, rhs->shape_);
+  auto m = As<ConstInt>(lhs_shape[0]);
+  auto k_lhs = As<ConstInt>(lhs_shape[1]);
+  auto k_rhs = As<ConstInt>(rhs_shape[0]);
+  auto n = As<ConstInt>(rhs_shape[1]);
   CHECK_SPAN(
       m && k_lhs && k_rhs && n && m->value_ > 0 && k_lhs->value_ > 0 && k_rhs->value_ > 0 && n->value_ > 0,
       span)
@@ -370,6 +398,11 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires matching K dimensions, but got " << k_lhs->value_ << " and " << k_rhs->value_;
   CHECK_SPAN(m->value_ % 16 == 0 && n->value_ % 32 == 0 && k_lhs->value_ % 64 == 0, span)
       << kOpName << " requires M divisible by 16, N divisible by 32, and K divisible by 64";
+  // A 16-row Left box holds 32 logical FP4 rows because the bridge packs two rows per carrier row.
+  CHECK_SPAN(!packed || m->value_ % 32 == 0, span)
+      << kOpName << " requires FP4 logical M divisible by 32 for boxed carrier rows";
+  CHECK_SPAN(!packed || n->value_ % 64 == 0, span)
+      << kOpName << " requires FP4 logical N divisible by 64 for a 32-byte carrier row";
   const int64_t groups = k_lhs->value_ / 32;
   auto check_shape = [span, kOpName](const std::vector<ExprPtr>& shape, int64_t dim0, int64_t dim1,
                                      const char* operand) {
@@ -380,7 +413,59 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
   };
   check_shape(lhs_scale->shape_, m->value_, groups, "lhs_scale");
   check_shape(rhs_scale->shape_, groups, n->value_, "rhs_scale");
-  return std::make_shared<TensorType>(std::vector<ExprPtr>{lhs->shape_[0], rhs->shape_[1]}, DataType::FP32);
+  auto logical_valid_shape = [&](const TensorTypePtr& type) {
+    const auto& valid = GetEffectiveTensorValidShape(*type);
+    CHECK_SPAN(valid.size() == 2, span) << kOpName << " requires valid_shape rank to match the 2D data shape";
+    if (packed) {
+      // Loading into Mat repacks the axis that is unpacked in GM.
+      const size_t axis = type->tensor_view_.value_or(TensorView{}).layout == TensorLayout::DN ? 1 : 0;
+      auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
+      auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+      CHECK_SPAN(DimensionsEqual(MakeFloorMod(valid[axis], two, span), zero), span)
+          << kOpName << " requires an even FP4 valid extent on dimension " << axis << " for the Mat load";
+    }
+    return logical_shape(type, valid);
+  };
+  const auto lhs_valid = logical_valid_shape(lhs);
+  const auto rhs_valid = logical_valid_shape(rhs);
+  // Match Tile MX inference after converting each carrier's valid extent.
+  CHECK_SPAN(ProveValidExtentEqual(lhs_valid[1], rhs_valid[0]) != ProofResult::kFalse, span)
+      << kOpName << " requires matching logical valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
+      << " and rhs K=" << PythonPrint(rhs_valid[0]);
+  if (packed) {
+    // A fixed-size scale tile must satisfy both the physical-K matmul and valid-K binding.
+    const auto check_valid_k = [&](const ExprPtr& extent, const char* side) {
+      const auto valid = GetConstantDimension(extent);
+      if (!valid) return;
+      const int64_t physical = k_lhs->value_;
+      CHECK_SPAN(*valid > 0, span) << kOpName << " requires positive logical valid K, but got " << side
+                                   << " K=" << *valid;
+      CHECK_SPAN(*valid > physical - 32 && *valid <= physical, span)
+          << kOpName << " requires " << side
+          << " logical valid K to use the same scale-group count as physical K, but got physical K="
+          << physical << " and valid K=" << *valid;
+    };
+    check_valid_k(lhs_valid[1], "lhs");
+    check_valid_k(rhs_valid[0], "rhs");
+
+    const auto check_scale_valid = [&](const TensorTypePtr& scale, const ExprPtr& rows, const ExprPtr& cols,
+                                       const char* name, bool allow_partial) {
+      CHECK_SPAN(allow_partial || scale->tensor_view_->valid_shape.empty(), span)
+          << kOpName << " requires " << name << " to be fully valid for a packed MX scale layout";
+      const auto& valid = GetEffectiveTensorValidShape(*scale);
+      CHECK_SPAN(valid.size() == 2 && DimensionsEqual(valid[0], rows) && DimensionsEqual(valid[1], cols),
+                 span)
+          << kOpName << " requires " << name << " valid shape to match logical data validity ["
+          << PythonPrint(rows) << ", " << PythonPrint(cols) << "]";
+    };
+    check_scale_valid(lhs_scale, lhs_valid[0], lhs_scale->shape_[1], "lhs_scale",
+                      lhs_layout == TensorLayout::MX_A_ND);
+    check_scale_valid(rhs_scale, rhs_scale->shape_[0], rhs_valid[1], "rhs_scale", false);
+  }
+  std::vector<ExprPtr> output_shape{lhs_shape[0], rhs_shape[1]};
+  TensorView view;
+  view.valid_shape = {lhs_valid[0], rhs_valid[1]};
+  return std::make_shared<TensorType>(output_shape, DataType::FP32, std::nullopt, std::move(view));
 }
 
 // ============================================================================
@@ -418,10 +503,10 @@ REGISTER_OP("tensor.quant_mx")
 
 REGISTER_OP("tensor.matmul_mx")
     .set_op_category("TensorOp")
-    .set_description("MXFP8 matrix multiplication of oriented data and scale tensors")
-    .add_argument("lhs", "Left FP8E4M3FN tensor [M, K]")
+    .set_description("MXFP8/MXFP4 matrix multiplication of oriented data and scale tensors")
+    .add_argument("lhs", "Left FP8E4M3FN or packed FP4 tensor (logical [M, K])")
     .add_argument("lhs_scale", "Left FP8E8M0 MX_A_ZZ scale tensor [M, K/32]")
-    .add_argument("rhs", "Right FP8E4M3FN tensor [K, N]")
+    .add_argument("rhs", "Right FP8E4M3FN or packed FP4 tensor (logical [K, N])")
     .add_argument("rhs_scale", "Right FP8E8M0 MX_B_NN scale tensor [K/32, N]")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -478,12 +563,9 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
   CHECK(rhs_shape.size() >= 2) << "tensor.matmul_acc requires rhs to be at least 2D, but got "
                                << rhs_shape.size() << "D";
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "tensor.matmul_acc requires identical lhs and rhs dtypes, but got " << lhs_type->dtype_.ToString()
-      << " and " << rhs_type->dtype_.ToString();
-
-  auto result_dtype =
-      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
+  // Operand dtypes need not be identical: A5 multiplies the mixed FP8 orders.
+  // The shared check also answers which dtype the Cube accumulates them in.
+  auto result_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, "tensor.matmul_acc");
   CHECK(acc_type->dtype_ == result_dtype)
       << "tensor.matmul_acc requires accumulator dtype " << result_dtype.ToString() << ", but got "
       << acc_type->dtype_.ToString();

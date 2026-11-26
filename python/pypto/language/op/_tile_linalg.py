@@ -46,8 +46,10 @@ def quant_mx(
             ``group_axis=1``: ``[M, K]`` with ``M%16==0``, ``K%64==0``.
             ``group_axis=0``: ``[N, K]`` with ``N%32==0``, ``K%64==0``.
         group_axis: PTOAS grouping axis — ``1`` (A-side) or ``0`` (B-side).
-        dtype: ``FP8E4M3FN`` (default) or ``FP4E2M1X2``.
+        dtype: ``FP8E4M3FN`` (default), ``FP8E5M2``, or ``FP4E2M1X2``.
+            FP8E5M2 uses OCP scaling and a native A5 FP8 cast.
         quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
+            FP8E5M2 requires ``"ocp"``.
 
     Returns:
         ``group_axis=1``: ``(quant[M,K], scale[M,K/32])`` row/row ZZ scale.
@@ -80,12 +82,14 @@ def quant_mx_raw(
     dtype: DataType = DataType.FP8E4M3FN,
     quant_scale_alg: str = "ocp",
     interleave: bool = False,
+    canonical_axis1: bool = False,
 ) -> tuple[Tile, Tile]:
     """Quantize in source orientation and return unpacked UINT8 exponent codes.
 
     This tile primitive exposes PTOAS TQUANT without MX scale-layout conversion.
     Axis1 accepts any positive row count and a valid column count divisible by
-    32 (64 for native FP4); physical columns must equal valid columns. Axis0 groups 32 valid rows.
+    32 (64 for native FP4). The default flat axis1 mode requires physical
+    columns to equal valid columns. Axis0 groups 32 valid rows.
     FP4 output halves physical and valid columns; native FP4 additionally
     requires physical columns divisible by 64 (32 carrier bytes). Partial valid rows are allowed.
 
@@ -94,7 +98,13 @@ def quant_mx_raw(
     Axis1 may use flat valid shape ``[1, valid_rows*valid_cols/32]``; FP16/BF16
     OCP scaling capacity must round this group count up to 128 elements.
     Workspaces are write-only. FP4E2M1X2 returns native carriers; MXFP8 returns
-    INT8 carrier bytes. Exponents are flat on axis1 and grouped on axis0.
+    INT8 carrier bytes. Exponents are flat by default on axis1 and grouped on axis0.
+    Set ``canonical_axis1=True`` for FP32 axis1 inputs with at least two valid
+    rows. This mode permits padded input columns and returns a UINT8
+    exponent tile with valid shape ``[valid_rows, valid_cols/32]`` and a
+    32-byte aligned row stride. Both workspaces must hold a compact prefix
+    of ``valid_rows*valid_cols/32`` values with 32-byte aligned physical rows.
+    Use one flat workspace row when a grouped row is too narrow.
     ``interleave=True`` interleaves adjacent axis0 exponent groups along columns;
     FP16/BF16 physical and valid source rows must then be divisible by 64.
     """
@@ -106,6 +116,7 @@ def quant_mx_raw(
         group_axis=group_axis,
         quant_scale_alg=quant_scale_alg,
         interleave=interleave,
+        canonical_axis1=canonical_axis1,
     )
     span = call_expr.span
     return (
@@ -160,10 +171,11 @@ def matmul(
         lhs: Left-hand side tile
         rhs: Right-hand side tile
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
-            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
+            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)`` or
+            an A5 ``pl.tpush_to_aiv(..., split=1, dst=..., st_phase=pl.STPhase.Final)``.
 
     Returns:
         Tile wrapping the matmul operation
@@ -231,10 +243,11 @@ def matmul_acc(
         rhs: Right-hand side tile
         init_cond: Optional predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
-            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
+            chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)`` or
+            an A5 ``pl.tpush_to_aiv(..., split=1, dst=..., st_phase=pl.STPhase.Final)``.
 
     Returns:
         Tile wrapping the matmul_acc operation
@@ -287,7 +300,7 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = Non
         bias: Bias tile [1, N] with the accumulator dtype (FP32 for
             floating-point matrix operands, INT32 for integer matrix operands)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
 
     Returns:
         Tile wrapping the matmul_bias operation
@@ -299,17 +312,17 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = Non
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication.
 
-    Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Both data tiles
-    must either both be FP8E4M3FN or both be packed FP4 (either E2M1x2 or
-    E1M2x2). FP4 carrier extents expand along the contiguous axis; scales
+    Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Each FP8 data
+    tile can use FP8E4M3FN or FP8E5M2 independently. A packed FP4 pair can
+    use either E2M1x2 or E1M2x2 on each side. FP4 carrier extents expand along the contiguous axis; scales
     and the FP32 accumulator use logical value dimensions. Mixed FP4/FP8
     operands require an explicit FP4-to-FP8 cast. Native FP4 requires the
     PTOAS v0.72 logical Cube geometry contract (issue #1700).
 
     Args:
-        lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
+        lhs: Left-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
-        rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
+        rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
 
     Returns:
@@ -322,14 +335,15 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
 def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matmul with accumulation.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: both operands
-    are FP8E4M3FN or both are packed FP4, with logical scale and accumulator shapes.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: each FP8
+    operand can use FP8E4M3FN or FP8E5M2. Packed FP4 pairs use logical scale
+    and accumulator shapes.
 
     Args:
         acc: Accumulator tile
-        lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
+        lhs: Left-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
-        rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
+        rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
 
     Returns:
@@ -344,13 +358,14 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
 def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
     """MX block-scale matmul with bias.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: both operands
-    are FP8E4M3FN or both are packed FP4, with logical scale and accumulator shapes.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: each FP8
+    operand can use FP8E4M3FN or FP8E5M2. Packed FP4 pairs use logical scale
+    and accumulator shapes.
 
     Args:
-        lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)
+        lhs: Left-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
-        rhs: Right-hand side data tile (FP8E4M3FN or packed FP4)
+        rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
         bias: Bias tile
 
@@ -367,8 +382,19 @@ def gemv(lhs: Tile, rhs: Tile, acc_phase: AccPhase = AccPhase.Unspecified) -> Ti
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
 
     ``lhs`` must have exactly one physical and logical row. The rhs logical K
-    must cover the lhs logical K. Inputs must use the same INT8, FP16, BF16, or FP32
-    dtype; the output is INT32 for INT8 inputs and FP32 otherwise.
+    must cover the lhs logical K.
+
+    The operand dtypes must form a pair the Cube multiplies -- the same table
+    [`matmul`][pypto.language.matmul] uses, restricted to its GEMV rows: INT8,
+    FP16, BF16 or FP32 with itself on every target, plus any FP8 (E4M3FN /
+    E5M2, **either order**) pair and HF8 x HF8 on Ascend950. The output is
+    INT32 for INT8 inputs and FP32 for every other pair.
+
+    On Ascend950 the lhs needs a whole 512-byte block of physical K, because the
+    Mat-to-Left extract of a single row is a vector load: physical K must be a
+    multiple of ``512 / dtype_bytes`` -- 512 for a 1-byte operand, 256 for 2-byte,
+    128 for 4-byte. Logical (valid) K carries no such restriction. Narrowing the
+    *output* columns is not yet supported there; keep ``N`` fully valid.
 
     Args:
         lhs: Row vector tile [1, K]

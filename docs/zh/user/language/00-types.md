@@ -92,6 +92,10 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.Scalar[pl.FP32]` | 单个值，不是缓冲区 |
 | `M = pl.dynamic("M")` | 该维编译期未知，每次启动时绑定 |
 
+通过原生运行时传入 host tensor 时，`Out` 不会上传缓冲区的初始内容，未写入的
+元素没有定义。如果 kernel 只更新部分输出，并要求保留其余 host 数据，应将
+该参数声明为 `InOut`，外层入口和被调用函数也应保持这一契约。
+
 ## Mechanics
 
 ### 数据类型
@@ -140,7 +144,7 @@ nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 
 支持 ND/DN 载体搬运和 ND 填充。DN 转换要求完整静态连续的二维 BF16/打包类型端点，
 以及 PYPTO/DSA_RP 静态地址。`pl.quant_mx(..., dtype=pl.fp4e2m1x2)` 支持 FP16/BF16
-输入；E1M2 量化和原生打包 FP4 矩阵乘仍不支持。两种格式均不支持 Ascend910/A2A3 执行。
+输入；暂不支持 E1M2 量化。Tensor `pl.matmul_mx` 支持打包的 E2M1 和 E1M2 数据。两种格式均不支持 Ascend910/A2A3 执行。
 布局、别名与内存规划器限制见 [FP4](../../dev/fp4.md)。
 
 ### 标量绑定的类型注解
@@ -248,7 +252,7 @@ AIC `pl.load` 直接把 ND scales 转为 Mat ZZ，支持动态 compact 行基址
 `tensor.view(..., layout=pl.MX_A_ND)` 为相同字节建立别名，无需重新打包。
 `matmul_mx` scale 语义保持不变。
 
-这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` / `MX_A_ND` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS 提供 ISA 描述符）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须同为 `FP8E4M3FN` 或同为打包 FP4。混合 FP4/FP8 操作数须先显式调用 `pl.cast(fp4_tile, pl.FP8E4M3FN)`。
+这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` / `MX_A_ND` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS 提供 ISA 描述符）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。每块 FP8 data tile 可独立选择 `FP8E4M3FN` 或 `FP8E5M2`，Tile API 还支持两侧均为打包 FP4。混合 FP4/FP8 操作数须先显式调用 `pl.cast(fp4_tile, pl.FP8E4M3FN)`。
 A5 上，连续 ND E2M1 tile 的物理载体列数为 32 的倍数时，转换只需一次直接 TCVT。
 Tile 输入还支持 `layout=pl.NZ`，直接解码到采用普通物理存储的 cube 可用 NZ。
 NZ 物理行数须为 16 的倍数，有效行尾使用 `valid_shape`。
@@ -261,8 +265,10 @@ E1M2、FP8E5M2 目标及不满足直接路径约束的 E2M1 源描述符仍使�
 FP16/BF16、区域完全有效、`K%64==0`、axis1 的 `M%16==0` 及 axis0 的 `N%64==0`。
 默认采用 OCP；FP16/BF16 的 NV 仅支持 axis0。不支持 E1M2 量化。
 打包输出需要 PYPTO/DSA_RP 静态分配。`pl.tile.quant_mx_raw` 提供原始 UINT8 指数和显式工作区。
-只有 FP8 数据与缩放因子对可供 tensor `pl.matmul_mx` 使用；该接口仅支持二维并返回 FP32，
-仍不支持 tensor MX 累加、bias、transpose 标志、批处理、动态 shape 或原生打包 FP4 矩阵操作数。
+Tensor `pl.matmul_mx` 接受两个 FP8E4M3FN 操作数或两个打包 FP4 操作数，使用 FP8E8M0 缩放因子，返回二维 FP32 张量。
+打包 FP4 的两侧逻辑有效 K 必须为正且相同，所用的 32 元素缩放分组数须与物理 K 一致。
+`MX_A_ZZ` 和 `MX_B_NN` 分别要求 M 和 N 完全有效，`MX_A_ND` 可匹配部分有效的 M。
+仍不支持 tensor MX 累加、bias、transpose 标志、批处理和动态 shape。
 
 ### 动态 shape
 

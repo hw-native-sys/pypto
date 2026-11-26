@@ -66,6 +66,7 @@ static TypePtr DeduceTileGatherRowType(const std::vector<ExprPtr>& args,
                   << args[1]->GetType()->TypeName();
   CHECK_SPAN(!src_type->tensor_view_ || !IsMxTensorLayout(src_type->tensor_view_->layout), args[1]->span_)
       << "The operator " << op_name << " does not support MX-layout source tensors";
+  ValidateDmaInnerStride(src_type, args[1]->span_, op_name, GetKwargOr<bool>(kwargs, "transpose", false));
   CHECK(dst_type->dtype_ == src_type->dtype_)
       << "The operator " << op_name << " requires dst and src to share dtype, but got "
       << dst_type->dtype_.ToString() << " and " << src_type->dtype_.ToString();

@@ -9,6 +9,9 @@
 
 """A5 W2 integration: packed weights, NZ slots and compact row-major scales.
 
+The output is InOut because only valid expert rows are overwritten; its other
+rows retain their uploaded sentinel.
+
 The vector peers keep named RAW/NZ ping-pong allocations and transport nine
 ordered weight packets, each assembled from both AIV lanes. The cube loads A
 scales through MX_A_ND and B scales through MX_B_NN, preserving the [rows,72]
@@ -16,6 +19,7 @@ activation-scale GM ABI and dynamically selected partial expert rows.
 """
 
 import re
+from functools import cache
 
 import pypto.language as pl
 import pytest
@@ -39,7 +43,7 @@ OUTPUT_SENTINEL = -999.0
 
 
 @pl.jit.incore(level=pl.Level.AIV)
-def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8]):
+def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8], compact_mode: pl.constexpr = pl.CompactMode.null):
     # Shapes and lane offsets are already per-AIV; suppress another halving.
     pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
     peer = pl.import_peer_buffer(name="w2_weights", peer_func="w2_cube")
@@ -64,6 +68,7 @@ def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8]):
                 pl.TileView(
                     blayout=pl.TileLayout.col_major,
                     slayout=pl.TileLayout.row_major,
+                    compact=compact_mode,
                 ),
             ] = pl.cast(packed0, pl.FP8E4M3FN, layout=pl.NZ)
             pl.tpush_to_aic(nz0, split=1)
@@ -83,6 +88,7 @@ def w2_vector(weight: pl.Tensor[[K, N // 2], pl.UINT8]):
                 pl.TileView(
                     blayout=pl.TileLayout.col_major,
                     slayout=pl.TileLayout.row_major,
+                    compact=compact_mode,
                 ),
             ] = pl.cast(packed1, pl.FP8E4M3FN, layout=pl.NZ)
             pl.tpush_to_aic(nz1, split=1)
@@ -135,7 +141,7 @@ def w2_cube(
     a_scale: pl.Tensor[[ROWS, GROUPS], pl.FP8E8M0],
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
-    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
 ):
     pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
     buffer = pl.reserve_buffer(name="w2_weights", size=BUFFER_BYTES, base=pl.AUTO)
@@ -159,10 +165,11 @@ def w2_group(
     weight: pl.Tensor[[K, N // 2], pl.UINT8],
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
-    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
+    compact_mode: pl.constexpr = pl.CompactMode.null,
 ):
     out = w2_cube(a, a_scale, b_scale, counts, out)
-    w2_vector(weight)
+    w2_vector(weight, compact_mode)
     return out
 
 
@@ -173,10 +180,11 @@ def routed_w2(
     weight: pl.Tensor[[K, N // 2], pl.UINT8],
     b_scale: pl.Tensor[[GROUPS, N], pl.FP8E8M0],
     counts: pl.Tensor[[2], pl.INT32],
-    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
+    compact_mode: pl.constexpr = pl.CompactMode.null,
 ):
     with pl.spmd(1):
-        out = w2_group(a, a_scale, weight, b_scale, counts, out)
+        out = w2_group(a, a_scale, weight, b_scale, counts, out, compact_mode)
     return out
 
 
@@ -224,9 +232,20 @@ def _w2_specs(row_base, valid_rows):
         DataType.INT32,
         DataType.FP32,
     )
+    shapes = ([ROWS, K], [ROWS, GROUPS], [K, N // 2], [GROUPS, N], [2], [M, N])
+
+    # Collection must not initialize Torch's CPU thread pool: pytest-forked
+    # would inherit its state and can deadlock in an earlier case's golden.
+    # Materialize once per case, when the harness calls these initializers.
+    @cache
+    def inputs():
+        return _w2_inputs(row_base, valid_rows)
+
     return [
-        TensorSpec(name, list(value.shape), dtype, init_value=value, is_output=name == "out")
-        for name, dtype, value in zip(names, dtypes, _w2_inputs(row_base, valid_rows))
+        TensorSpec(
+            name, shape, dtype, init_value=lambda index=index: inputs()[index], is_output=name == "out"
+        )
+        for index, (name, shape, dtype) in enumerate(zip(names, shapes, dtypes))
     ]
 
 
@@ -270,9 +289,19 @@ def _retained_w2_case(_st_case, test_runner, tmp_path, monkeypatch):
             atol=0.0,
         )
         for base, rows in ((5, 13), (17, 7), (31, 1))
-    ]
+    ],
+    st.case(
+        routed_w2,
+        inputs={"compact_mode": pl.CompactMode.row_plus_one},
+        tensors=_w2_specs(5, 13),
+        name="w2_fp4_row_plus_one_split_v2c",
+        golden=_w2_golden,
+        memory_planner=MemoryPlanner.PYPTO,
+        rtol=0.0,
+        atol=0.0,
+    ),
 )
-def test_w2_nz_and_compact_scale_loads(_retained_w2_case):
+def test_w2_nz_and_compact_scale_loads(_retained_w2_case, _st_case):
     run, work_dir = _retained_w2_case
     run.assert_passed()
     sources = list((work_dir / "kernels").rglob("*.cpp"))
@@ -283,6 +312,8 @@ def test_w2_nz_and_compact_scale_loads(_retained_w2_case):
     assert "TCVT" in cpp
     assert re.search(r"float4_e2m1x2_t", cpp)
     assert not re.search(r"Tile<\s*(?:pto::)?TileType::Vec,\s*(?:float|bfloat16_t)\s*,", cpp)
+    if _st_case.name == "w2_fp4_row_plus_one_split_v2c":
+        assert "CompactMode::RowPlusOne" in cpp
 
 
 if __name__ == "__main__":

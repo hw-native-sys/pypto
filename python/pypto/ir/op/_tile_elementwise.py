@@ -15,6 +15,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Call,
+    CompactMode,
     Expr,
     ScalarType,
     Span,
@@ -48,6 +49,25 @@ def _create_tile_binary_call(
 # ============================================================================
 # Element-wise Operations
 # ============================================================================
+
+
+def dequant(src: Expr, scale: Expr, offset: Expr, span: Span | None = None) -> Call:
+    """Dequantize an A5 integer tile to FP32 with per-row parameters.
+
+    Computes `(float(src[i,j]) - offset[i,0]) * scale[i,0]` on the valid region.
+    Physical source rows must be 32-byte aligned and have room for each full
+    64-element vector touched by the valid columns.
+
+    Args:
+        src: Row-major rank-2 signed INT8 or INT16 tile.
+        scale: FP32 column tile with one value per valid source row.
+        offset: FP32 column tile with the same shape and layout as scale.
+        span: Optional source span for debugging.
+
+    Returns:
+        Call producing an FP32 tile with the same physical and valid shapes as src.
+    """
+    return _ir_core.create_op_call("tile.dequant", [src, scale, offset], {}, _get_span_or_capture(span))
 
 
 def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -157,9 +177,9 @@ def rem(
             ``k * S + 8 * ceil(S / 256) + 8`` columns, where S is the source
             row stride rounded to 8 elements and k is 3 for INT32, else 1.
             High-precision rem requires
-            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8))``,
-            with ``C = max(valid_cols // 64, 1)``; use physical columns to
-            bound dynamic valid columns. A5 does not consume scratch.
+            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 640*min(C, 8))``,
+            with ``C = max(valid_cols // 64, 1)``. Use physical columns to bound
+            dynamic valid columns. A5 does not consume scratch.
         span: Optional source span for debugging (auto-captured if not provided)
         high_precision: Select the FP32 high-precision TREM algorithm on A2/A3 and A5.
 
@@ -983,6 +1003,7 @@ def cast(
     tmp: Expr | None = None,
     saturation_mode: str | int | None = None,
     layout: TensorLayout | None = None,
+    compact: CompactMode | None = None,
 ) -> Call:
     """Cast tile to target data type (element-wise).
 
@@ -1004,6 +1025,8 @@ def cast(
 
         layout: Optional destination layout. A5 E2M1-to-E4M3 tiles support
             ``NZ`` directly, without an intermediate ND tile.
+        compact: Set ``CompactMode.row_plus_one`` to pad each destination
+            NZ panel by one row.
 
     Returns:
         Call expression for element-wise cast to target dtype
@@ -1021,6 +1044,8 @@ def cast(
         kwargs["saturation_mode"] = deviation
     if layout is not None:
         kwargs["layout"] = layout
+    if compact is not None and compact != CompactMode.null:
+        kwargs["compact"] = compact.value
     args: list[Expr] = [tile] if tmp is None else [tile, tmp]
     return _ir_core.create_op_call("tile.cast", args, kwargs, actual_span)
 

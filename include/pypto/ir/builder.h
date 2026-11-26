@@ -160,6 +160,7 @@ class IRBuilder {
    * @param span Source location for loop definition
    * @param kind Loop kind (Sequential or Parallel, default: Sequential)
    * @throws RuntimeError if not inside a function or another loop
+   * @throws ValueError if the current context is a program
    */
   void BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop, const ExprPtr& step,
                     const Span& span, ForKind kind = ForKind::Sequential,
@@ -210,6 +211,7 @@ class IRBuilder {
    * @param condition Condition expression
    * @param span Source location for loop definition
    * @throws RuntimeError if not inside a function or another loop
+   * @throws ValueError if the current context is a program
    */
   void BeginWhileLoop(const ExprPtr& condition, const Span& span);
 
@@ -268,6 +270,7 @@ class IRBuilder {
    * @param condition Condition expression
    * @param span Source location for if statement
    * @throws RuntimeError if not inside a function or loop
+   * @throws ValueError if the current context is a program
    */
   void BeginIf(const ExprPtr& condition, const Span& span);
 
@@ -307,7 +310,8 @@ class IRBuilder {
   void BeginSimtScope(const std::vector<ExprPtr>& block_dims, const Span& span);
   StmtPtr EndSimtScope(const Span& span, const std::vector<VarPtr>& private_scalars = {});
 
-  void BeginRegScope(const Span& span);
+  void BeginRegScope(const Span& span, bool auto_sync = true);
+  void EmitRegMemBar(const std::string& kind, const Span& span);
   StmtPtr EndRegScope(const Span& span);
   VarPtr EmitReg(const std::string& name, const std::string& op_name, const std::vector<ExprPtr>& args,
                  const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span);
@@ -327,7 +331,8 @@ class IRBuilder {
    * @param span Source location for scope statement
    * @param level Hierarchy level (for Hierarchy scopes)
    * @param role Function role (for Hierarchy scopes)
-   * @throws RuntimeError if not inside a function or loop
+   * @throws ValueError if there is no valid enclosing context or the current
+   * context is a program
    */
   void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
                   std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
@@ -489,7 +494,7 @@ class IRBuilder {
    *
    * @param name Program name
    * @param span Source location for program definition
-   * @throws RuntimeError if already inside another program
+   * @throws ValueError if another context is open
    */
   void BeginProgram(const std::string& name, const Span& span);
 
@@ -501,7 +506,8 @@ class IRBuilder {
    *
    * @param func_name Function name to declare
    * @return GlobalVar that can be used in Call expressions
-   * @throws RuntimeError if not inside a program context
+   * @throws ValueError if not inside a program context or if another context
+   * is currently open
    */
   GlobalVarPtr DeclareFunction(const std::string& func_name);
 
@@ -512,7 +518,9 @@ class IRBuilder {
    *
    * @param func_name Function name
    * @return GlobalVar for the function
-   * @throws RuntimeError if not inside a program context or function not declared
+   * @throws ValueError if not inside a program context or if another context
+   * is currently open
+   * @throws RuntimeError if the function has not been declared
    */
   GlobalVarPtr GetGlobalVar(const std::string& func_name);
 
@@ -522,7 +530,8 @@ class IRBuilder {
    * The function must have been previously declared with DeclareFunction.
    *
    * @param func Completed function to add
-   * @throws RuntimeError if not inside a program context
+   * @throws ValueError if not inside a program context or if another context
+   * is currently open
    */
   void AddFunction(const FunctionPtr& func);
 
@@ -530,10 +539,11 @@ class IRBuilder {
    * @brief End building a program
    *
    * Finalizes the program and pops the program context from the stack.
+   * All nested contexts must have been closed first.
    *
    * @param end_span Source location for end of program
    * @return The built program
-   * @throws RuntimeError if not inside a program context
+   * @throws ValueError if the current context is not the program
    */
   ProgramPtr EndProgram(const Span& end_span);
 

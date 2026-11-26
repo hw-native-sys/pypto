@@ -151,6 +151,13 @@ PID whitelist checks; a lease is a lifetime contract, not target-process
 authorization. Reuse one consumer mapping for each backing; repeated import of
 the same shareable handle is subject to CANN's restrictions.
 
+### Low-precision allocation dtypes
+
+The runtime names E5M2 tensors `FP8E5M2`. Use `torch.float8_e5m2` on the host
+when the installed PyTorch provides it. Generated orchestration describes
+allocations for `pl.HF8` and `pl.FP4E1M2X2` as `UINT8` byte buffers while
+in-core code preserves their declared element types.
+
 ### `RunConfig` fields that affect dispatch
 
 `RunConfig` carries both compile-side and runtime-side settings; the compile-side ones are

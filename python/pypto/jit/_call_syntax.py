@@ -11,6 +11,8 @@
 
 import ast
 
+PLACEMENT_KEYWORDS = frozenset({"worker", "device"})
+
 # Submit dispatch metadata belongs to the launch, never to the callee signature.
 SUBMIT_DISPATCH_KEYWORDS = frozenset(
     {
@@ -21,7 +23,7 @@ SUBMIT_DISPATCH_KEYWORDS = frozenset(
         "timing_slot",
         "core_num",
         "sync_start",
-        "device",
+        *PLACEMENT_KEYWORDS,
         "attrs",
     }
 )

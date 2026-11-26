@@ -15,8 +15,8 @@ from typing import cast
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.diagnostics import UnsupportedFeatureError
 from pypto.language.parser.diagnostics import ParserTypeError
-from pypto.language.parser.diagnostics.exceptions import UnsupportedFeatureError
 
 _OP_TILE_SLICE = ir.get_op("tile.slice").name
 

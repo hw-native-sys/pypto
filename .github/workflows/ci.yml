@@ -149,7 +149,7 @@ jobs:
           # PR change the pinned PTOAS_VERSION value? The version-file path is
           # only a cheap first filter: below, the assignment is compared at the
           # PR base and head so comments and wheel-sha updates do not consume
-          # cards for `serving-guard`.
+          # cards for the serving guards.
           docs_only=true
           docs_changed=false
           ptoas_version_changed=false

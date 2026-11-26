@@ -12,8 +12,11 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
+#include <cstddef>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -26,7 +29,7 @@ namespace pypto {
 namespace ir {
 namespace buffer_root {
 
-/// What SelectReturnRoot does for a single-return call when the owning buffer
+/// What RecordCallReturnRoots does for a single-return call when the owning buffer
 /// cannot be pinned to one Out/InOut arg by shape+dtype (no match, or two+
 /// distinct same-typed candidates). The right choice depends on the consumer:
 enum class AmbiguousRootPolicy {
@@ -48,19 +51,21 @@ enum class AmbiguousRootPolicy {
  * calls (Call and Submit alike). Pure structural analysis — no optimization
  * logic.
  *
- * For a call's single (non-tuple) return value the owning root is selected by
- * matching the return type's shape+dtype against the callee's Out/InOut args
- * (see SelectReturnRootInfo), so a differently-typed InOut scratch is never
- * mistaken for the real output buffer (issue #1564 / #1580). When that match is
- * ambiguous, the fallback is governed by @p ambiguous_policy (see
- * AmbiguousRootPolicy).
+ * With reshape tracking, returned-parameter lineage identifies the backing
+ * buffer. Unproven returns retain the known writable candidates for dependency
+ * analysis. Other consumers match the shape and dtype of a single return
+ * against the callee's Out/InOut arguments (issues #1564 / #1580), with
+ * @p ambiguous_policy controlling the fallback.
  */
 class BufferRootCollector : public IRVisitor {
  public:
   explicit BufferRootCollector(ProgramPtr program,
-                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip);
+                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip,
+                               bool follow_reshape = false);
 
   void Initialize(const std::vector<VarPtr>& params);
+
+  void VisitStmt(const StmtPtr& stmt) override;
 
   /// Var* -> owning buffer-root Var*. Populated by Initialize + VisitStmt.
   std::unordered_map<const Var*, const Var*> buffer_roots;
@@ -70,19 +75,21 @@ class BufferRootCollector : public IRVisitor {
   /// these vars conservatively; aliasing optimizations leave them unmapped.
   std::unordered_set<const Var*> ambiguous_buffer_vars;
 
-  /// Every owning-buffer-root candidate recorded for @p var, empty when the var
-  /// has no lineage. This is what "conservatively" above means in practice: a
-  /// write through an ambiguous var may land on *any* candidate, so a consumer
-  /// deriving dependencies has to account for all of them rather than skip the
-  /// var — skipping drops the dependency for every candidate at once.
-  ///
-  /// `buffer_roots` cannot express this: it holds one root, which is either the
-  /// single unambiguous answer or (under `kFirstOutput`) an arbitrary pick.
-  [[nodiscard]] const std::vector<const Var*>& RootCandidatesOf(const Var* var) const {
-    static const std::vector<const Var*> kNone;
-    auto it = root_candidates_.find(var);
-    return it == root_candidates_.end() ? kNone : it->second;
-  }
+  using RootSetId = size_t;
+
+  // Shared candidate unions. Leaves name a buffer. Interior nodes hold two
+  // operands with smaller IDs, so access facts can flow to the roots once.
+  // Keeping operands avoids expanding either set at each control-flow join.
+  struct RootSetNode {
+    const Var* root = nullptr;
+    RootSetId left = 0;
+    RootSetId right = 0;
+    bool region_only = false;
+  };
+
+  /// Zero represents the empty set.
+  [[nodiscard]] RootSetId RootSetOf(const Var* var) const;
+  [[nodiscard]] const std::vector<RootSetNode>& RootSets() const { return root_sets_; }
 
  protected:
   void VisitStmt_(const IfStmtPtr& if_stmt) override;
@@ -92,29 +99,43 @@ class BufferRootCollector : public IRVisitor {
   void VisitStmt_(const SimtLaunchStmtPtr& launch) override;
 
  private:
-  using RootCandidates = std::vector<const Var*>;
-
-  struct RootInfo {
-    RootCandidates roots;
-    bool ambiguous;
+  struct RootCandidates {
+    RootSetId set = 0;
+    // The first output is a property of this SSA value, independent of the
+    // membership shared with other values.
+    const Var* first = nullptr;
   };
 
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
   // with that arg's type so a single return value can be matched to the param
-  // it actually aliases (see SelectReturnRoot).
+  // it actually aliases (see RecordCallReturnRoots).
   struct OutputRoot {
-    RootInfo info;
-    TypePtr type;
+    ExprPtr argument;
+    RootCandidates roots;
+    bool ambiguous = false;
   };
 
-  [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
+  struct TupleOutputRoots {
+    CallPtr call;
+    std::vector<OutputRoot> outputs;
+    RootCandidates writable_roots;
+  };
+
+  [[nodiscard]] const RootCandidates& ResolveRootCandidates(const ExprPtr& expr) const;
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
-  void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
-  [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
-      const std::vector<IterArgPtr>& iter_args);
+  [[nodiscard]] bool HasStorageProof(const ExprPtr& expr) const;
+  void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
+  void BindRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved);
+  void MergeRootCandidates(const VarPtr& var, const std::vector<RootCandidates>& inputs, bool unresolved);
+  [[nodiscard]] RootCandidates UnionCandidates(RootCandidates left, const RootCandidates& right);
+  [[nodiscard]] RootSetId UnionRootSets(RootSetId left, RootSetId right);
+  void RecordOwningRoot(const VarPtr& var, bool region_only = false);
+  void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
+                                bool may_repeat);
   void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
-                             const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run);
+                             const std::vector<IterArgPtr>& iter_args, bool guaranteed_to_run);
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
+  [[nodiscard]] OutputRoot ResolveTupleOutputRoot(const TupleOutputRoots& tuple, size_t index);
 
   // Pick the buffer root for a call's single (non-tuple) return value. A
   // SubWorker group may take an InOut scratch (e.g. a matmul's kv_final)
@@ -123,8 +144,8 @@ class BufferRootCollector : public IRVisitor {
   // Issue #1564: without this, the FP32 scratch was fused onto the BF16 output,
   // making tensor.create -> tensor.slice(output) alias and corrupt the result.
   // When no unambiguous match exists, the fallback follows ambiguous_policy_.
-  [[nodiscard]] RootInfo SelectReturnRootInfo(const std::vector<OutputRoot>& out_roots,
-                                              const TypePtr& return_type) const;
+  void RecordCallReturnRoots(const VarPtr& result, const std::vector<OutputRoot>& out_roots,
+                             const CallPtr& call);
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
   // value aliases its source buffer with the same logical shape and dtype.
@@ -132,8 +153,17 @@ class BufferRootCollector : public IRVisitor {
 
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
+  bool follow_reshape_;
+  using RootSetPair = std::pair<RootSetId, RootSetId>;
+  struct RootSetPairHash {
+    size_t operator()(const RootSetPair& pair) const;
+  };
+
+  std::vector<RootSetNode> root_sets_{1};
+  std::unordered_map<const Var*, RootSetId> owning_sets_;
+  std::unordered_map<RootSetPair, RootSetId, RootSetPairHash> interned_sets_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
-  std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
+  std::unordered_map<const Var*, std::shared_ptr<const TupleOutputRoots>> tuple_output_roots_;
 };
 
 }  // namespace buffer_root

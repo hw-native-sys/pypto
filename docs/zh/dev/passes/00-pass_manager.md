@@ -2,6 +2,10 @@
 
 用于组织和执行中间表示 (IR) 变换 Pass 的框架，支持属性 (Property) 跟踪、插桩和基于策略的优化流水线，作用于 Program。
 
+初始作用域提取阶段依次运行 `OutlineSimtScopes` 和 `OutlineRegScopes`，早于
+内联、SSA 转换和 mixed-kernel 拆分。两者都在 Program 中显式生成设备辅助函数；
+VF 辅助函数使用同步调用以及现有参数和返回契约。
+
 ## 概述
 
 | 组件 | 描述 |
@@ -59,7 +63,7 @@
 | `OrchestrationReferencesResolved` | `FunctionType::Orchestration` 函数体内每一个非 builtin Call 必须对应到 Program 中存在的 Function |
 | `TensorViewCanonical` | TensorView 规范性已验证（弱模式：允许空 stride；严格模式：要求已材料化，RFC #1300 §2.2） |
 | `ArrayNotEscaped` | ArrayType 不会出现在函数参数或返回类型中 |
-| `CommDomainScopesMaterialized` | host_orch 函数体已被 CommDomainScopeStmt 包裹，且 `pld.tensor.window` 结果类型带有 `DistributedTensorType::window_buffer_` 反向引用 |
+| `CommDomainScopesMaterialized` | host_orch 函数体已被 CommDomainScopeStmt 包裹，`pld.tensor.window` 结果类型带有 `DistributedTensorType::window_buffer_` 反向引用 |
 | `DistTensorCtxMaterialized` | host orchestration 之外不再残留 `pld.system.get_comm_ctx`；每个 chip-orchestration / device 通信上下文都是可追溯到参数的显式 CommCtxType SSA 值 |
 | `RuntimeScopesMaterialized` | Orchestration 函数带有显式的 RuntimeScopeStmt 节点，codegen 不再隐式生成 `SIMPLER_SCOPE()` 包裹 |
 | `AssignTypeSymmetry` | 每个只被定义一次的 Var，在其定义所在的 AssignStmt 上满足 `structural_equal(var->GetType(), value->GetType())`（memref 作为分配细节被排除；pre-SSA 的重绑定没有唯一定义值） |
@@ -107,7 +111,9 @@ struct PassProperties {
 
 | Pass | 所需 | 产生 | 失效 |
 | ---- | ---- | ---- | ---- |
+| LowerGraphForRuntime | — | — | InlineFunctionsEliminated |
 | OutlineSimtScopes | — | — | SSAForm |
+| OutlineRegScopes | — | — | SSAForm |
 | InlineFunctions | — | InlineFunctionsEliminated | — |
 | UnrollLoops | — | UnrollResolved | — |
 | CtrlFlowTransform | — | StructuredCtrlFlow | — |
@@ -483,6 +489,10 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 ```
 
 ### 策略补充说明
+
+`Default` 流水线先运行 [LowerGraphForRuntime](01-lower_graph_for_runtime.md)。
+TMR 的 Graph 函数体随后交给 `InlineFunctions`，HBG 的 Graph 保留给作用域提取和
+边界合法化。SIMT 和寄存器作用域的提取均在 `InlineFunctions` 前运行。
 
 `Default` 的 PTO tile 阶段顺序为：
 

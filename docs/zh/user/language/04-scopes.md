@@ -12,7 +12,7 @@
 
 放置回答一个问题：**这段代码由哪块硬件执行。**
 
-一共四个构造，都用 `with`（或 `for`）书写，且可以组合：
+一共五个构造，使用 `with`（或 `for`）书写，各自具有执行域限制：
 
 | 构造 | 把工作放到 |
 | ---- | ---------- |
@@ -20,6 +20,7 @@
 | `pl.cluster` | 同一个物理 cluster —— 让 Cube 与 Vector kernel 协同调度 |
 | `pl.spmd` | `n` 个 block —— 同一个 kernel，每个 block 跑一份 |
 | `pl.split_aiv` | 两条 AIV lane —— 把一个区域切开分给两条 |
+| `pl.simt_scope` | A5 上显式 AIV 内核中的标量线程块 |
 
 `pl.at` 的替代写法是单独写一个 `@pl.jit.incore` 函数再调用它。两者产生的东西一样：编译时 `pl.at` 正是被 outline 成这样一个函数。区域短、且就该写在原地时用作用域；值得起个名字、或者要被多处调用时写成独立函数。
 
@@ -462,3 +463,90 @@ pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 
 - [任务与定序](../tasks/index.md) —— 被放置的工作相对其他任务什么时候跑。
 - [OutlineIncoreScopes](../../dev/passes/10-outline_incore_scopes.md) —— `pl.at` 如何变成函数。
 - [ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md) —— `pl.split` 驱动的是什么。
+
+## SIMT：AIV 内核中的标量线程
+
+在 `@pl.jit.aiv` 内使用 `pl.simt_scope`，可在 A5 上表达逐元素索引、不规则控制流、
+warp 集合操作和标量原子操作。Tile 操作应放在 scope 外；比较性能时，常规 Tile/SIMD
+实现仍是重要基线。SIMT 线程块属于当前 AIV 调用方，`dims` 不创建 runtime task，
+也不会把工作分配到多个 AIV 核。
+
+导入 `pypto.language as pl`，然后定义设备 helper 和 JIT 入口：
+
+```python
+@pl.jit.aiv
+def copy_aiv(src: pl.Tensor[[1, 32], pl.FP32],
+             dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+             valid: pl.Scalar[pl.INT32]):
+    with pl.simt_scope(dims=(32, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        if tid < valid:
+            value = pl.simt.load(src, (0, tid))
+            pl.simt.store(dst, (0, tid), value)
+    return dst
+
+@pl.jit
+def copy(src: pl.Tensor[[1, 32], pl.FP32],
+         dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+         valid: pl.Scalar[pl.INT32]):
+    return copy_aiv(src, dst, valid)
+```
+
+此例要求调用方提供 `0 <= valid <= 32` 和已初始化的 `dst`。索引不会自动做边界检查。
+有效范围外的线程不写入，因此输出尾部保持原值。部分更新的 GM 存储使用 `InOut`，
+不要使用 `Out`。SIMT store 的值类型必须与存储一致；将索引算术结果写入 INT32
+张量时，可使用 `pl.cast(value, pl.INT32)` 显式转换。
+
+- `dims=(x, y, z)` 必须是编译期正整数，乘积最多 2,048。资源上限由编译器推导，
+  无须手工设置线程或寄存器限制。
+- 使用 `pl.simt.Axis.X/Y/Z` 查询 `thread_idx` 和 `block_dim`。展平索引为
+  `x + block_dim(X) * (y + block_dim(Y) * z)`；使用
+  `pl.range(linear, valid, total_threads)` 可让一个线程块处理更多元素。
+- 标量局部值为线程私有，不能逃逸到 scope 外。可写存储捕获会自动重新绑定。
+  GM 别名观察同一份更新后的内存；保存的旧 Tile 值保持不变。
+- 在 scope 外创建视图。Tensor 子视图保留物理步长和非零原点；借用的 UB
+  slice/reshape 视图需要在启动前用 `pl.tile.extract` 物化，详见
+  [存储限制](../../dev/codegen/05-simt-lowering.md)。
+- 跨 AIV 函数边界传入的 Tensor 切片要求物理步长为静态值，且同一参数在所有调用处一致。
+  需要变化跨度时，传入完整父张量并在 helper 中使用相对父张量的索引。
+- 当前支持 FP32/INT32 存储，不支持 CPU 仿真、packed 值、嵌套 SIMT、在
+  `reg_scope` 内启动，以及提前 `return`/`break`/`continue`。
+  `syncthreads` 必须无条件到达；单独的 fence 不构成线程会合。
+
+使用 `RunConfig(backend_type=BackendType.Ascend950,
+execution_mode=ExecutionMode.ONBOARD)` 编译。编译不占用设备，执行时应使用已分配的
+A5 设备。以下可运行示例默认只编译：
+
+| 示例 | 使用场景 |
+| ---- | -------- |
+| [带步长拷贝](../../../../examples/advanced/07_simt_strided_copy.py) | 三维线程、不同物理行跨度的 GM 子视图、两个输出、保护区与尾部保留 |
+| [Warp 压缩](../../../../examples/advanced/04_simt_compaction.py) | 使用 ballot 或 shuffle scan 生成稳定索引和计数 |
+| [混合行更新](../../../../examples/advanced/06_simt_row_update.py) | Tile 生产 → SIMT 更新 → Tile 消费、旧 Tile 保留及 SIMD 对照 |
+| [原子直方图](../../../../examples/advanced/08_simt_atomic_histogram.py) | 竞争原子计数、旧值返回的桶内序号和按位成员掩码 |
+| [标量转换](../../../../examples/advanced/09_simt_scalar_conversion.py) | FP16/BF16 转换、显式整数舍入、FP32 bitcast 与符号位操作 |
+
+```bash
+python examples/advanced/07_simt_strided_copy.py --dims 8 4 8 --valid 257
+python examples/advanced/08_simt_atomic_histogram.py --valid 47
+python examples/advanced/09_simt_scalar_conversion.py --valid 47
+task-submit --device auto --max-time 600 --run \
+  'python examples/advanced/07_simt_strided_copy.py --device "$TASK_DEVICE" --dims 8 4 8 --valid 257'
+```
+
+两条命令均使用已配置的项目环境。数学、warp、原子及同步操作参见
+[API 契约](../../dev/ir/11-simt.md)；编译验证与硬件执行证据参见
+[原生验收](../../dev/codegen/05-simt-lowering.md)。
+
+直方图在宿主侧初始化计数器和掩码。`atomic_add` 返回唯一的桶内序号，但线程顺序
+不确定。`atomic_or` 将每桶的输入位置按
+16 类累计为位掩码，即使没有使用其返回值也会保留更新。
+转换示例使用包含舍入中点、有符号零和 FP16 溢出的有限输入。
+示例在 `ftof` 前显式裁剪到 FP16 的有限值范围；`ftoi` 对比向零截断
+与最近偶数舍入，`bitcast` 则保留 FP32 位表示。两个示例的 `--valid` 均支持
+0 到 64，带 `--device` 执行时会打印结果。
+
+使用 `pl.simt.lanemask_lt()` 选择低于当前 lane 的物理 lane，如压缩示例所示。
+`bitcast` 保留 FP32/INT32 位模式；`atomic_sub` 和 INT32 `atomic_and/or/xor`
+更新已初始化的 GM/UB 存储。min/max 原子与 redux 支持对 INT32 位载体指定
+`unsigned=True`。shuffle 的 `bound` 缩小源窗口，默认 width 不变。
+验证证据与剩余限制参见[覆盖矩阵](../../dev/codegen/06-simt-interface-coverage.md)。

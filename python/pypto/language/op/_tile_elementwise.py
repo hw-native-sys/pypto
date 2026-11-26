@@ -18,6 +18,7 @@ from pypto.ir.utils import (
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
+    CompactMode,
     Expr,
     TensorLayout,
 )
@@ -46,6 +47,24 @@ def _scalar_operand_to_expr(value: int | Scalar | Expr) -> Expr:
     if isinstance(value, Expr):
         return value
     return _ir_core.ConstInt(value, DataType.INDEX, _get_span_or_capture())
+
+
+def dequant(src: Tile, scale: Tile, offset: Tile) -> Tile:
+    """Dequantize an A5 integer tile to FP32 with per-row parameters.
+
+    Computes `(float(src[i,j]) - offset[i,0]) * scale[i,0]` on the valid region.
+    Physical source rows must be 32-byte aligned and have room for each full
+    64-element vector touched by the valid columns.
+
+    Args:
+        src: Row-major rank-2 signed INT8 or INT16 tile.
+        scale: FP32 column tile with one value per valid source row.
+        offset: FP32 column tile with the same shape and layout as scale.
+
+    Returns:
+        FP32 tile with the same physical and valid shapes as src.
+    """
+    return Tile(expr=_ir_ops.dequant(src.unwrap(), scale.unwrap(), offset.unwrap()))
 
 
 def add(lhs: Tile, rhs: Tile | int | float | Scalar | Expr) -> Tile:
@@ -339,6 +358,7 @@ def cast(
     tmp: Tile | None = None,
     saturation_mode: str | int | None = None,
     layout: TensorLayout | None = None,
+    compact: CompactMode | None = None,
 ) -> Tile:
     """Cast tile to target data type (element-wise).
 
@@ -366,6 +386,8 @@ def cast(
 
         layout: Optional output layout. ``pl.NZ`` selects the fused A5
             FP4E2M1X2-to-FP8E4M3FN NZ decoder.
+        compact: Set ``pl.CompactMode.row_plus_one`` to pad each destination
+            NZ panel by one row.
 
     Returns:
         Tile wrapping the cast operation
@@ -381,6 +403,7 @@ def cast(
         tmp=tmp_expr,
         saturation_mode=saturation_mode,
         layout=layout,
+        compact=compact,
     )
     return Tile(expr=call_expr)
 
@@ -495,9 +518,9 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
             ``k * S + 8 * ceil(S / 256) + 8`` columns, where S is the source
             row stride rounded to 8 elements and k is 3 for INT32, else 1.
             High-precision rem requires
-            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8))``,
-            with ``C = max(valid_cols // 64, 1)``; use physical columns to
-            bound dynamic valid columns. A5 does not consume scratch.
+            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 640*min(C, 8))``,
+            with ``C = max(valid_cols // 64, 1)``. Use physical columns to bound
+            dynamic valid columns. A5 does not consume scratch.
         high_precision: Select the FP32 high-precision TREM algorithm on A2/A3 and A5.
 
     Returns:

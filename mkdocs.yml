@@ -262,6 +262,7 @@ nav:
       - en/api/array.md
       - en/api/prefetch.md
       - en/api/optimizations.md
+      - en/api/distributed.md
   - Reference:
       - en/reference/index.md
       - PTO ISA:
@@ -288,6 +289,7 @@ nav:
       - en/dev/08-entry-points.md
       - en/dev/runtime/kernel-mode.md
       - en/dev/distributed_ops.md
+      - en/dev/distributed_async.md
       - en/dev/ptoas-op-status.md
       - en/dev/fp4.md
       - IR:
@@ -305,9 +307,11 @@ nav:
           - en/dev/ir/09-multi_output_ops.md
           - en/dev/ir/10-operator-effects.md
           - en/dev/ir/11-simt.md
+          - en/dev/ir/12-intra-block-sync.md
       - Passes:
           - en/dev/passes/index.md
           - en/dev/passes/00-pass_manager.md
+          - en/dev/passes/01-lower_graph_for_runtime.md
           - en/dev/passes/01-outline_simt_scopes.md
           - en/dev/passes/02-inline_functions.md
           - en/dev/passes/03-unroll_loops.md
@@ -389,6 +393,8 @@ nav:
           - en/dev/codegen/03-vpto-vf-integration.md
           - en/dev/codegen/04-simt-native-validation.md
           - en/dev/codegen/05-simt-lowering.md
+          - en/dev/codegen/06-simt-interface-coverage.md
+          - en/dev/codegen/07-boxed-tile-extents.md
       - Backend:
           - en/dev/backend/index.md
           - en/dev/backend/00-backend_handler.md

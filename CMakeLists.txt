@@ -135,6 +135,7 @@ set(PYPTO_SOURCES
     src/ir/op/reg_ops/reg_ops.cpp
     src/ir/op/tile_ops/batch_matmul.cpp
     src/ir/op/tile_ops/broadcast.cpp
+    src/ir/op/tile_ops/dequant.cpp
     src/ir/op/tile_ops/elementwise.cpp
     src/ir/op/tile_ops/matmul.cpp
     src/ir/op/tile_ops/matmul_mx.cpp
@@ -154,6 +155,7 @@ set(PYPTO_SOURCES
     src/ir/op/sync_ops/launch.cpp
     src/ir/op/distributed/memory.cpp
     src/ir/op/distributed/world_size.cpp
+    src/ir/op/distributed/num_workers.cpp
     src/ir/op/distributed/remote_load.cpp
     src/ir/op/distributed/remote_store.cpp
     src/ir/op/distributed/collective.cpp
@@ -161,6 +163,7 @@ set(PYPTO_SOURCES
     src/ir/op/distributed/put.cpp
     src/ir/op/distributed/get_async.cpp
     src/ir/op/distributed/put_async.cpp
+    src/ir/op/distributed/async_session.cpp
     src/ir/op/distributed/get_comm_ctx.cpp
     src/ir/op/distributed/system.cpp
     src/ir/op/distributed/allreduce.cpp
@@ -241,8 +244,10 @@ set(PYPTO_SOURCES
     src/ir/transforms/insert_mx_scale_addr_pass.cpp
     src/ir/transforms/loop_invariant_mat_residency.cpp
     src/ir/transforms/inline_functions_pass.cpp
+    src/ir/transforms/lower_graph_for_runtime_pass.cpp
     src/ir/transforms/materialize_simt_outputs_pass.cpp
     src/ir/transforms/outline_simt_scopes_pass.cpp
+    src/ir/transforms/outline_reg_scopes_pass.cpp
     src/ir/transforms/specialize_simt_helpers_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/utils/reg_memory_analysis.cpp
@@ -337,6 +342,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/utils/wrapper_call_utils.cpp
     src/ir/transforms/utils/window_alias_utils.cpp
+    src/ir/transforms/utils/window_view_utils.cpp
     src/ir/transforms/visitor.cpp
 
     # IR - Verifier
@@ -412,6 +418,8 @@ set(PYPTO_SOURCES
     src/codegen/pto/pto_buffer_codegen.cpp
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp
+    src/codegen/pto/pto_scalar_floor_div_mod_plan.cpp
+    src/codegen/pto/pto_tensor_view_plan.cpp
     src/codegen/pto/pto_type_utils.cpp
     src/codegen/distributed/distributed_codegen.cpp
     src/codegen/distributed/distributed_op_registry.cpp

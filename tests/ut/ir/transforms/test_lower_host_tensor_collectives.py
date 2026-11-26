@@ -187,7 +187,7 @@ def _match_builtin_dispatch(
     * every argument as the expected window-bound DistributedTensor, in order
       (a reordered arg or a wrong window view for an arg fails),
     * the exact arg directions, and
-    * the complete kwarg dict and attr set, with ``device`` bound to the loop
+    * the complete kwarg dict and attr set, with ``worker`` bound to the loop
       var.
     """
 
@@ -221,8 +221,8 @@ def _match_builtin_dispatch(
     assert isinstance(body, ir.EvalStmt)
     call = _as_call(body.expr)
 
-    # device attr is bound to the loop induction var
-    assert call.attrs["device"] is loop.loop_var
+    # The worker attr binds the loop induction variable.
+    assert call.attrs["worker"] is loop.loop_var
 
     # every leading argument is the expected window-bound DistributedTensor, in
     # order; an optional trailing scalar (e.g. all_to_all_v's core_num) is
@@ -252,8 +252,8 @@ def _match_builtin_dispatch(
     # complete kwarg dict
     assert dict(call.kwargs) == kwargs, f"kwargs mismatch: {dict(call.kwargs)} != {kwargs}"
 
-    # exact attr key set plus op-specific values (device / arg_directions above)
-    expected_attr_keys = {"device", "arg_directions", *(attrs or {})}
+    # Exact attr key set plus op-specific values (worker / arg_directions above).
+    expected_attr_keys = {"worker", "arg_directions", *(attrs or {})}
     assert set(call.attrs.keys()) == expected_attr_keys, (
         f"attr key mismatch: {set(call.attrs.keys())} != {expected_attr_keys}"
     )
@@ -1916,7 +1916,10 @@ def test_host_all_to_all_v_rejects_aliased_target_recv_counts_windows():
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            # `data` aliases this allocation, so the allocation must fit its
+            # [8, 256] FP32 view before the aliasing check can be exercised;
+            # every window view must fit its backing allocation.
+            recv_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)

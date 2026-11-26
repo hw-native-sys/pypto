@@ -2200,8 +2200,8 @@ class TestInlineFunctionsDynamicTypes:
         ir.assert_structural_equal(after, Expected)
         ir.assert_structural_equal(passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected))
 
-    def test_inline_alias_inherits_actual_memref(self):
-        """Structural type equality alone must not discard the RHS allocation."""
+    def test_inline_alias_defers_actual_memref_until_ssa(self):
+        """Inlining leaves inferred storage unbound; SSA selects the actual RHS allocation."""
 
         @pl.program
         class Before:
@@ -2226,20 +2226,18 @@ class TestInlineFunctionsDynamicTypes:
                 _alias = source
 
         after = passes.inline_functions()(Before)
-        for actual, expected in (
-            (after, Expected),
-            (passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected)),
-        ):
-            ir.assert_structural_equal(actual, expected)
-            main = next(iter(actual.functions.values()))
-            assert isinstance(main.body, ir.SeqStmts)
-            source, alias = main.body.stmts
-            assert isinstance(source, ir.AssignStmt)
-            assert isinstance(alias, ir.AssignStmt)
-            assert isinstance(source.var.type, ir.TileType)
-            assert isinstance(alias.var.type, ir.TileType)
-            assert source.var.type.memref is not None
-            assert alias.var.type.memref is source.var.type.memref
+        ir.assert_structural_equal(after, Expected)
+        converted = passes.convert_to_ssa()(after)
+        ir.assert_structural_equal(converted, passes.convert_to_ssa()(Expected))
+        main = next(iter(converted.functions.values()))
+        assert isinstance(main.body, ir.SeqStmts)
+        source, alias = main.body.stmts
+        assert isinstance(source, ir.AssignStmt)
+        assert isinstance(alias, ir.AssignStmt)
+        assert isinstance(source.var.type, ir.TileType)
+        assert isinstance(alias.var.type, ir.TileType)
+        assert source.var.type.memref is not None
+        assert alias.var.type.memref is source.var.type.memref
 
     def test_shared_formal_dimension_keeps_each_actual_tensor_shape(self):
         formal_rows = pl.dynamic("formal_rows")

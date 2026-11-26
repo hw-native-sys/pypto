@@ -25,6 +25,11 @@ mixed 函数级 AUTO 拆半已移除，包括跳过 `LowerAutoVectorSplit` 直�
 
 该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
+A5 BF16 NZ Vec-to-Mat `tile.assemble` 要求显式 `FunctionType.AIV` 函数。
+本 Pass 在核心分类前拒绝通用 InCore 函数中的此操作：按 Mat 目标分类会将 MTE3
+插入错误地放到 AIC，还可能丢弃由向量计算产生的源数据。
+显式 AIV 函数跳过展开，保留原生搬运所需的两个句柄。
+
 ### 动态参数类型与返回类型
 
 生成的 AIC、AIV 和 Group 各自拥有独立的参数身份（parameter identity）。
@@ -314,6 +319,33 @@ A5 拒绝显式本地深度，即使其值等于 `slot_num`，因为 PTOAS 的�
 链的前提下，将它延后到同一个 block 中更靠后的语句之后。若 AIC 侧的
 `tile.tpop_from_aiv` 结果还需要做同侧 `tile.move`（例如 Mat -> Left/Right/Bias），
 则生成的 `system.tfree_to_aiv(...)` 会改写为释放 canonical 的 popped tile，并可被延后到这条 carrier 链之后。
+
+默认流水线中，AIV 通过函数调用执行 VF。VF 声明记录每个返回 Tile 对应哪个调用实参。
+后续 store 通过返回值、元组分量或保持同一槽位的循环结果读取 Tile 时，原始接收槽位都必须保持有效。
+没有返回值的 VF 调用也会消费实参。单独对原始 `RegScope` 运行本 pass 时，分析会追踪其中
+`reg.store`、`reg.scatter` 等写回操作的别名。每条 pipe 按接收顺序释放槽位，移动用户
+显式编写的 `tfree` 时保留其属性。
+
+对于仅包含 Tile 操作的函数，分支或循环若 yield 在本区域接收的 Vec Tile，
+会先将 yield 的值或 view 复制到独立存储。顺序为
+`tpop` → view/消费者 → `tile.move` → `tfree` → `yield`。
+因此槽位释放后分支结果仍然有效，后续 phi 降低无需读取已释放的槽位，
+且 `yield` 始终是区域的最后一条语句。
+两个后端都只对 Vec 接收值执行这种自动复制。在本区域接收的 Mat Tile
+及其 view 若被 yield，会在物化前被拒绝：A2/A3 不支持 Mat-to-Mat `TMOV`，
+这里也尚未实现可跨后端使用的 Mat 复制方案。应在定义该接收值的分支或
+循环内完成对它的消费，再 yield 结果。
+
+对于包含 VF 调用或原始 `RegScope` 的调用方，在分支或循环体内部创建的接收值不能通过
+`yield` 逃逸出该区域；函数也不能返回借用存储，包括在嵌套分支或循环中返回外层
+接收值及其写回别名。在终结语句之前释放这样的值会使逃逸的别名失效，必须先物化独立存储
+再导出该值。外部接收值可以通过分支或循环结果传递，但每条路径必须保留同一个
+槽位，包括零次执行循环的初始值；与其他槽位或独立存储合并会被拒绝。
+外层接收值尚未释放时，嵌套区域不能在同一 pipe 上继续接收，否则其 free 会释放
+较早的槽位。应在进入嵌套区域前完成外层消费者并释放槽位，或使用另一条 pipe。
+嵌套区域也不能释放外层接收值。
+这些规则保证编译器层面的生命周期，不构成硬件完成条件的证明：
+直接 FIFO VF 捕获仍需验证运行时指针 ABI 和同步后才能开放。
 
 对于 Ascend910（a2a3），该 Pass 也支持**没有函数级 split 模式**的 mixed kernel（`split` 未设置或为
 `SplitMode.None`）。此时 Pass 会保留单个 AIV kernel body，并为其打上**双 AIV 派发**标记；后续 lowering
@@ -649,3 +681,13 @@ class After:
 | 自动生成 pipe setup | tensor 级 mixed kernel 无需手写 `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`；Pass 会根据跨核 tile 操作自动推导 |
 | 自动生成 tfree 链 | 消费侧拆分内核会补齐缺失的 `tfree`、将其改写为释放 canonical 的 popped tile，并在需要时把明显过早的 free 延后到同一个 block 内更靠后的位置；但不会重排彼此独立的 `tpop` 链顺序 |
 | Max-slot-size 策略 | 取所有 tile 字节大小的最大值作为单一 `initialize_pipe.slot_size`，对齐后端自动生成 setup 的假设，并保留旧有双向 `dir_mask=3` 行为 |
+
+## C2V Fixpipe 契约
+
+A5 两端 init 接受 `nosplit` 和 `acc_push_epilogue={layout, quant, relu}`。三个字段均必填。两端需匹配 epilogue、id、槽位字节数与数量、nosplit。生产者通过恒等 SSA 别名导入消费者的具名 reserve buffer。
+
+`nz2nd` 生成行优先无分形 Vec tile，`nz2dn` 生成列优先无分形 tile。`nz2nz` 使用列优先块布局、行优先子布局，仅支持 FP32 `no_convert`。
+
+`no_convert` 保持 FP32/INT32。`f32_f16` 和 `f32_bf16` 转换 FP32。`deqf16_scalar` 和 `deqf16_vec` 将 INT32 转为 FP16。`qf322f16_pre_scalar` 将 FP32 转为 FP16。量化前的 ReLU 可选 `no_relu` 或 `normal_relu`。使用 Acc 输入、`dir_mask=1`、`nosplit=true`，push/pop 用 `split=0`。Free 从 pop 继承 split 和 id。提供 epilogue 时 Python 默认 `nosplit=true`，其余情况保留省略。ND 简写要求 FP32 Acc 输入。`c2v_dtype` 选择 FP32、FP16 或 BF16 传输类型，pop 使用相同类型。`c2v_dtype` / `pre_relu` 与结构化 epilogue 互斥。标量控制值为 FP32。向量控制字为 packed i64/u64，从无分形行优先 Mat 移至同布局的 Scaling，与 MX 控制区独立。`[1, N]` 必须完全有效，`N > 0`、为 16 的倍数且覆盖生产者列数。Scaling 的规划预算为 4 KiB，控制字在 TPUSH 完成前不可改写，分配保持到函数结束。`deqf16_scalar` 和 `qf322f16_pre_scalar` 用标量 setter，`deqf16_vec` 用向量 setter，其余模式禁止 setter。配置与同 id 的 TPUSH 在同块且先于 TPUSH。请在向量 setter 前准备 Scaling tile，或在生成 Scaling tile 的操作之后重新调用 setter。控制流、另一 id 的 setter 或 `pre_quant` 写回会使旧状态失效。含 setter 的 pipeline 及祖先（含 stage=1）降为顺序循环。 以 32×16 向量量化为例，两端 init 均传 `dir_mask=1, slot_size=1024, slot_num=2, id=0, nosplit=True, acc_push_epilogue={"layout": "nz2nd", "quant": "deqf16_vec", "relu": "no_relu"}`，A5 省略 `local_slot_num`，消费者按 `slot_size * slot_num` 保留完整环缓冲区（本例 2048 字节），push 前调用 `pl.set_quant_vector(controls, id=0)`，push/pop 均用 `split=0`。
+
+`MixedKernelExpanded` 校验类型、物理布局、转换后槽位字节数、本地环容量及两端 id。当前 PTOAS 要求同 id 使用同一消费者 tile 类型。NZ2NZ 使用 Vec 的 512 字节装箱。验证器检查直线代码和简单布尔分支的端点计数，包括跨 Group 的共享实参与每次调用的布尔字面量绑定。调度任一 Fixpipe 端点的 Group 均须包含其匹配对端。同一对端点可以一起出现在多个 Group 中。跟踪嵌套块内尚未释放的槽位，验证环深度及 FIFO 释放顺序。请在 Orchestration 中编写条件调度。Spmd wrapper 传递实参并直接调度 Group。其他手写控制流由作者保证两端消息配对。自动设置要保留显式非 ND 布局时，A5 要求仅传输 Acc→Vec、`split=0`，且无手写管道设置。两端 init 使用同一布局，Buffer IR 同样适用。双向传输请显式分设管道，或执行行优先 move 后再做实际转置。省略布局时沿用原管道。transpose scratch 使用自身 SSA 类型。序列化、结构比较/哈希和打印保留 `ir::AccPushEpilogue`。`PipeDirectionMetadata` 记录 `acc_push_layouts`、`has_acc_push`、`has_non_acc_push` 、`has_nonzero_split` 和 `non_fp32_acc_push`。`CreateInitializePipe` 在两端写入契约。GlobalTensor FIFO 有独立契约。`test_c2v_fixpipe.py` 覆盖两端校验、往返和两种 Buffer IR 模式的真实 PTOAS 编译。JIT 系统用例以精确整数 golden 和行优先真实转置为对照，核对非方形 DN 转置视图。显式 AIC/AIV JIT 核由 `jit.incore` 声明，由 `CORE_GROUP` 调度。

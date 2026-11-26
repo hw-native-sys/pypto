@@ -15,7 +15,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from pypto import DataType, ir
+from pypto import DataType, backend, ir
 from pypto.debug import torch_codegen
 from pypto.debug.torch_codegen import TorchCodegen
 
@@ -170,6 +170,29 @@ def test_tensor_view_explicit_valid_shape_codegen_and_execution():
     assert actual._pypto_full_shape == (32, 128)
 
 
+def test_window_view_preserves_parent_origin_and_disjoint_columns():
+    src = _tensor_var("src", [8, 16])
+    row = _scalar("row", DataType.INDEX)
+    window = ir.op.tensor.view(src, [2, 4], offsets=[row, 1], steps=[3, 2])
+    v = ir.Var("v", window.type, _span())
+    inner = ir.op.tensor.view(v, [1, 2], offsets=[1, 1], steps=[1, 2])
+    w = ir.Var("w", inner.type, _span())
+    body = ir.SeqStmts(
+        [ir.AssignStmt(v, window, _span()), ir.AssignStmt(w, inner, _span()), ir.ReturnStmt([w], _span())],
+        _span(),
+    )
+    func = _simple_function("nested_window", [src, row], body, [w.type])
+    ns: dict = {}
+    exec(torch_codegen(func), ns)  # noqa: S102
+    x = torch.arange(128, dtype=torch.float32).reshape(8, 16)
+    expected = x.clone()
+    result = ns["nested_window"](x, 2)
+    assert torch.equal(result, x[5:6, 3:8:4])
+    result.fill_(-1)
+    expected[5:6, 3:8:4] = -1
+    assert torch.equal(x, expected)
+
+
 def test_tensor_view_same_layout_is_identity():
     """A layout-only view targeting the current layout should be an identity."""
     src = _tensor_var("src", [2, 4])
@@ -223,7 +246,9 @@ def test_tensor_matmul_with_transpose():
     func = _simple_function("f", [a, b], assign)
     code = torch_codegen(func)
     assert "a.mT" in code
-    assert "torch.matmul" in code
+    # Matmul emission routes through the `_cube_matmul` preamble helper, which
+    # widens 1-byte / mixed float operand pairs before calling torch.
+    assert "_cube_matmul" in code
 
 
 def test_tensor_matmul_respects_out_dtype():
@@ -235,7 +260,7 @@ def test_tensor_matmul_respects_out_dtype():
     assign = ir.AssignStmt(out, call, _span())
     func = _simple_function("f", [a, b], assign)
     code = torch_codegen(func)
-    assert "torch.matmul(a, b).to(torch.float32)" in code
+    assert "_cube_matmul(a, b).to(torch.float32)" in code
 
 
 @pytest.mark.parametrize("mode", ["round_even", "round_away"])
@@ -566,7 +591,7 @@ def test_tile_sels_and_prelu():
 
 
 def test_tile_matmul_acc():
-    """tile.matmul_acc should emit (acc + torch.matmul(lhs, rhs))."""
+    """tile.matmul_acc should emit (acc + _cube_matmul(lhs, rhs))."""
     acc = _tile_var("acc", [64, 64])
     a = _tile_var("a", [64, 128])
     b = _tile_var("b", [128, 64])
@@ -576,7 +601,7 @@ def test_tile_matmul_acc():
     assign = ir.AssignStmt(out, call, _span())
     func = _simple_function("f", [acc, a, b], assign)
     code = torch_codegen(func)
-    assert "acc + torch.matmul(a, b).float()" in code
+    assert "acc + _cube_matmul(a, b).float()" in code
 
 
 def test_tile_matmul_acc_runtime_init_cond_overwrites():
@@ -614,7 +639,7 @@ def test_tile_matmul_acc_runtime_init_cond_overwrites():
             return pl.store(acc_tile, [0, 0], output)
 
     code = torch_codegen(SplitKFromNonZeroAcc)
-    assert "_acc_init(acc_tile, torch.matmul(a, b).float(), (k0 == 0))" in code
+    assert "_acc_init(acc_tile, _cube_matmul(a, b).float(), (k0 == 0))" in code
 
     ns: dict = {}
     exec(code, ns)  # noqa: S102
@@ -665,9 +690,9 @@ def test_tile_matmul_acc_literal_init_cond_folds():
             return pl.store(out_tile, [0, 0], output)
 
     # True selects the overwrite arm outright -- the accumulator drops out.
-    assert "out_tile = torch.matmul(a, b).float()" in torch_codegen(MatmulAccInitTrue)
+    assert "out_tile = _cube_matmul(a, b).float()" in torch_codegen(MatmulAccInitTrue)
     # False selects the accumulating arm, identical to carrying no predicate.
-    assert "out_tile = (acc + torch.matmul(a, b).float())" in torch_codegen(MatmulAccInitFalse)
+    assert "out_tile = (acc + _cube_matmul(a, b).float())" in torch_codegen(MatmulAccInitFalse)
 
 
 def test_tile_gemv_acc_runtime_init_cond_overwrites():
@@ -702,7 +727,7 @@ def test_tile_gemv_acc_runtime_init_cond_overwrites():
             return pl.store(acc_tile, [0, 0], output)
 
     code = torch_codegen(GemvSplitKFromNonZeroAcc)
-    assert "_acc_init(acc_tile, torch.matmul(a, b).float(), (k0 == 0))" in code
+    assert "_acc_init(acc_tile, _cube_matmul(a, b).float(), (k0 == 0))" in code
 
     ns: dict = {}
     exec(code, ns)  # noqa: S102
@@ -740,7 +765,7 @@ def test_tensor_matmul_acc_init_cond_with_transpose():
             return pl.assemble(output, result, [0, 0])
 
     code = torch_codegen(TensorSplitK)
-    assert "_acc_init(result, torch.matmul(lhs.mT, rhs), (k0 == 0))" in code
+    assert "_acc_init(result, _cube_matmul(lhs.mT, rhs), (k0 == 0))" in code
 
 
 def test_tile_cmp():
@@ -1257,6 +1282,88 @@ def test_split_mode_to_int_invalid_value_raises():
         torch_codegen_module._split_mode_to_int("bad_split")
 
 
+@pytest.fixture
+def _reference_fifo_namespace():
+    # Execute only the trusted helper definitions, never a generated kernel or simulator.
+    namespace: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("split", [1, 2])
+@pytest.mark.parametrize("pipe_id", [0, 7])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_v2c_fifo_frame_order_follows_physical_aiv(_reference_fifo_namespace, split, pipe_id, explicit):
+    """One producer can advance two frames without pairing with itself."""
+    namespace = _reference_fifo_namespace
+    runtime = namespace["_cross_core_rt"]
+    set_lane = namespace["_set_subblock_idx"]
+    axis = 0 if split == 1 else 1
+    frames = [torch.arange(16).reshape(4, 4).float() + frame * 100 for frame in (0, 1)]
+    other_id = 7 if pipe_id == 0 else 0
+    other = torch.arange(16).reshape(4, 4).float() + 900
+    for physical in (0, 1):
+        set_lane(physical)
+        # Physical AIV0 runs both iterations before AIV1 starts. Logical band
+        # choice changes while each producer's FIFO frame sequence stays fixed.
+        for frame in (0, 1):
+            logical = physical ^ frame if explicit else physical
+            kwargs = {"aiv_subblockid": logical} if explicit else {}
+            runtime.push_to_aic(frames[frame].narrow(axis, logical * 2, 2), split, pipe_id, **kwargs)
+        runtime.push_to_aic(other.narrow(axis, physical * 2, 2), split, other_id)
+    for expected in frames:
+        torch.testing.assert_close(runtime.pop_from_aiv(split, pipe_id), expected, rtol=0, atol=0)
+    torch.testing.assert_close(runtime.pop_from_aiv(split, other_id), other, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("split", [1, 2, 3, 4])
+@pytest.mark.parametrize("pipe_id", [0, 7])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_c2v_fifo_frame_order_follows_physical_aiv(_reference_fifo_namespace, split, pipe_id, explicit):
+    """Each physical reader consumes its next frame, then selects its logical band."""
+    namespace = _reference_fifo_namespace
+    runtime = namespace["_cross_core_rt"]
+    set_lane = namespace["_set_subblock_idx"]
+    axis = 0 if split in (1, 3) else 1
+    frames = [torch.arange(16).reshape(4, 4).float() + frame * 100 for frame in (0, 1)]
+    other_id = 7 if pipe_id == 0 else 0
+    other = torch.arange(16).reshape(4, 4).float() + 900
+    valid_shape = [4, 4]
+    if split in (3, 4):
+        valid_shape[axis] = 3
+    for tile, target_id in ((frames[0], pipe_id), (other, other_id), (frames[1], pipe_id)):
+        setattr(tile, "_pypto_valid_shape", tuple(valid_shape))
+        setattr(tile, "_pypto_full_shape", (4, 4))
+        runtime.push_to_aiv(tile, split, pipe_id=target_id)
+    for physical in (0, 1):
+        set_lane(physical)
+        for frame in (0, 1):
+            logical = physical ^ frame if explicit else physical
+            kwargs = {"aiv_subblockid": logical} if explicit else {}
+            actual = runtime.pop_from_aic(split, pipe_id, **kwargs)
+            torch.testing.assert_close(actual, frames[frame].narrow(axis, logical * 2, 2), rtol=0, atol=0)
+            expected_valid = [4, 4]
+            expected_valid[axis] = 1 if split in (3, 4) and logical == 1 else 2
+            assert getattr(actual, "_pypto_valid_shape") == tuple(expected_valid)
+        # Frame progress belongs to the pipe too, not to a global reader cursor.
+        actual = runtime.pop_from_aic(split, other_id)
+        torch.testing.assert_close(actual, other.narrow(axis, physical * 2, 2), rtol=0, atol=0)
+
+
+def test_c2v_fifo_frame_readers_have_independent_storage(_reference_fifo_namespace):
+    """A physical reader must not mutate another reader's queued GM band."""
+    namespace = _reference_fifo_namespace
+    runtime = namespace["_cross_core_rt"]
+    tile = torch.arange(16).reshape(4, 4).float()
+    runtime.push_to_aiv(tile, 1, pipe_id=7)
+    namespace["_set_subblock_idx"](0)
+    first = runtime.pop_from_aic(1, 7, aiv_subblockid=0)
+    first.add_(100)
+    namespace["_set_subblock_idx"](1)
+    second = runtime.pop_from_aic(1, 7, aiv_subblockid=0)
+    torch.testing.assert_close(second, tile[:2], rtol=0, atol=0)
+
+
 def test_cross_core_split_merge_preserves_region_attrs():
     """Split/merge path should preserve valid/full region metadata."""
     ns: dict[str, Any] = {}
@@ -1290,6 +1397,40 @@ def test_cross_core_split_merge_preserves_region_attrs():
     assert tuple(merged.shape) == (2, 4)
     assert getattr(merged, "_pypto_valid_shape", None) == (2, 3)
     assert getattr(merged, "_pypto_full_shape", None) == (2, 4)
+
+
+@pytest.mark.parametrize("rows", [96, 160, 192])
+def test_cross_core_split_valid_rows_uses_matmul_result_type(rows):
+    """Matmul carries runtime row validity in IR even when its Torch result has no tile attribute."""
+
+    @pl.program
+    class Producer:
+        @pl.function(type=pl.FunctionType.AIC)
+        def produce(
+            self,
+            lhs: pl.Tensor[[192, 16], pl.FP32],
+            rhs: pl.Tensor[[16, 16], pl.FP32],
+            valid_rows: pl.Scalar[pl.INDEX],
+        ):
+            left = pl.move(
+                pl.load(lhs, [0, 0], [192, 16], valid_shape=[valid_rows, 16]), target_memory=pl.Mem.Left
+            )
+            right = pl.move(pl.load(rhs, [0, 0], [16, 16]), target_memory=pl.Mem.Right)
+            acc = pl.matmul(left, right)
+            pl.tpush_to_aiv(acc, split=1)
+
+    namespace: dict[str, Any] = {}
+    exec(torch_codegen(Producer, backend_type=backend.BackendType.Ascend950), namespace)  # noqa: S102
+    lhs = torch.arange(192 * 16, dtype=torch.float32).reshape(192, 16)
+    rhs = torch.eye(16)
+    namespace["produce"](lhs, rhs, rows)
+    half = rows // 2
+    for lane in (0, 1):
+        namespace["_set_subblock_idx"](lane)
+        payload = namespace["_cross_core_rt"].pop_from_aic(1)
+        assert payload.shape == (96, 16)
+        assert getattr(payload, "_pypto_valid_shape", None) == (half, 16)
+        torch.testing.assert_close(payload[:half], lhs[lane * half : (lane + 1) * half])
 
 
 def test_cross_core_rebalanced_split_slices_at_the_box_but_starts_at_the_stride():
@@ -1719,6 +1860,22 @@ def test_type_error_on_invalid_input():
     """torch_codegen should raise TypeError for non-Program/Function input."""
     with pytest.raises(TypeError, match="torch_codegen expects"):
         torch_codegen(ir.ConstInt(42, DataType.INT64, _span()))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("action", ["set", "wait"])
+@pytest.mark.parametrize("dtype", [None, DataType.INT32, DataType.INT64])
+def test_named_intra_block_debug_rejects_unmodeled_ordering(action, dtype):
+    """Generation must fail before a mixed-thread reference can elide a rendezvous."""
+    event = ir.Var("event", ir.ScalarType(dtype), _span()) if dtype is not None else None
+    params = [event] if event is not None else []
+    args: list[ir.Expr] = list(params)
+    kwargs = {"pipe": int(pl.PipeType.MTE2)}
+    if event is None:
+        kwargs["event_id"] = 17
+    call = _op_call(f"system.{action}_intra_block", args, kwargs)
+    function = _simple_function("named_event", params, ir.EvalStmt(call, _span()))
+    with pytest.raises(ValueError, match="cannot model named intra-block synchronization.*native PTO"):
+        torch_codegen(function)
 
 
 def test_unsupported_op_raises():

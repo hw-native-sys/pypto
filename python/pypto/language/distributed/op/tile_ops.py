@@ -17,13 +17,13 @@ from collections.abc import Sequence
 from typing import TypeGuard
 
 from pypto.ir.op.distributed import tile_ops as _ir_tile
-from pypto.language.typing import IntLike, Tile
-from pypto.language.typing.tensor import Tensor
+from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Tile
+from pypto.language.typing.tensor import Tensor, TensorT
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr
 
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _normalize_intlike, _unwrap
+from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors, _wrap_async_transfer_result
 
 
 def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
@@ -39,6 +39,44 @@ def _is_region_arg(x: object) -> TypeGuard[Sequence[IntLike]]:
     here; staging tiles never are.
     """
     return isinstance(x, (list, tuple))
+
+
+def put_async(
+    dst: DistributedTensor, peer: IntLike, src: Tensor, session: AsyncSession
+) -> tuple[DistributedTensor, AsyncEvent]:
+    """Submit a single-peer PUT from a dense local GM view to a remote window.
+
+    Args:
+        dst: Window-bound destination on the remote rank.
+        peer: Rank receiving the transfer.
+        src: Local GM source with the same shape and dtype as dst.
+        session: AIV-local URMA session created by pld.system.make_session.
+
+    Returns:
+        The destination alias and its completion event. Pass the event to wait_event or defer_wait_event.
+    """
+    (dst_expr,) = _unwrap_distributed_tensors("pld.tile.put_async", dst=dst)
+    call = _ir_tile.put_async(dst_expr, _unwrap(peer), _unwrap(src), _unwrap(session))
+    return _wrap_async_transfer_result(dst, call)
+
+
+def get_async(
+    dst: TensorT, peer: IntLike, src: DistributedTensor, session: AsyncSession
+) -> tuple[TensorT, AsyncEvent]:
+    """Submit a single-peer GET from a remote window into a dense local GM view.
+
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        session: AIV-local URMA session created by pld.system.make_session.
+
+    Returns:
+        The destination alias and its completion event. Pass the event to wait_event or defer_wait_event.
+    """
+    (src_expr,) = _unwrap_distributed_tensors("pld.tile.get_async", src=src)
+    call = _ir_tile.get_async(_unwrap(dst), _unwrap(peer), src_expr, _unwrap(session))
+    return _wrap_async_transfer_result(dst, call)
 
 
 def remote_load(
@@ -314,4 +352,4 @@ def get(
     return _ir_tile.get(dst_expr, _unwrap(peer), src_expr, stage_expr, stage2=stage2_expr)
 
 
-__all__ = ["get", "remote_load", "remote_store", "put"]
+__all__ = ["get", "get_async", "put_async", "remote_load", "remote_store", "put"]

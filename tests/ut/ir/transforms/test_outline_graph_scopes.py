@@ -20,6 +20,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.backend import BackendType
 from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics import ParserSyntaxError, UndefinedVariableError
 
@@ -27,6 +28,136 @@ from pypto.language.parser.diagnostics import ParserSyntaxError, UndefinedVariab
 def _graph_funcs(prog):
     """Graph-typed functions in ``prog``, in program order."""
     return [f for f in prog.functions.values() if f.func_type == ir.FunctionType.Graph]
+
+
+@pytest.mark.parametrize(
+    "view_statements",
+    [
+        "view = buffer",
+        "view = pl.reshape(buffer, [32, 64])",
+        "view = pl.slice(buffer, [16, 64], [0, 0])",
+        "flat = pl.reshape(buffer, [32, 64])\n            view = pl.slice(flat, [16, 64], [0, 0])",
+    ],
+)
+@pytest.mark.parametrize("read_before_write", [False, True])
+def test_graph_view_write_tracks_captured_storage(view_statements, read_before_write):
+    """A local view's writer determines the backing parameter's direction."""
+    value = "pl.load(view, [0, 0], [8, 64])" if read_before_write else "pl.tile.full([8, 64], pl.FP32, 1.0)"
+    before = pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function
+    def main(self, buffer: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+        with pl.graph("layer"):
+            {view_statements}
+            with pl.at(level=pl.Level.CORE_GROUP):
+                value = {value}
+                view = pl.store(value, [0, 0], view)
+        return buffer
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(before))
+    graph = _graph_funcs(after)[0]
+    expected = ir.ParamDirection.InOut if read_before_write else ir.ParamDirection.Out
+    assert list(graph.param_directions) == [expected]
+
+
+@pytest.mark.parametrize("submit", [False, True])
+@pytest.mark.parametrize("direction", ["Out", "InOut"])
+def test_graph_callee_view_write_tracks_captured_storage(submit, direction):
+    """Both call kinds attribute a view argument's effects to its backing tensor."""
+    launch = "_, done = pl.submit(self.update, view)" if submit else "view = self.update(view)"
+    before = pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def update(self, view: pl.{direction}[pl.Tensor[[32, 64], pl.FP32]]) -> pl.Tensor[[32, 64], pl.FP32]:
+        value = pl.tile.full([8, 64], pl.FP32, 1.0)
+        view = pl.store(value, [0, 0], view)
+        return view
+    @pl.function
+    def main(self, buffer: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+        with pl.graph("layer"):
+            view = pl.reshape(buffer, [32, 64])
+            with pl.manual_scope():
+                {launch}
+        return buffer
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(before))
+    expected = ir.ParamDirection.Out if direction == "Out" else ir.ParamDirection.InOut
+    assert list(_graph_funcs(after)[0].param_directions) == [expected]
+
+
+def test_graph_fresh_result_does_not_alias_input_view():
+    """Writing a fresh arithmetic result must leave the captured input read-only."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, buffer: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+            with pl.graph("layer"):
+                view = pl.reshape(buffer, [32, 64])
+                fresh = pl.add(view, view)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    value = pl.load(fresh, [0, 0], [8, 64])
+                    fresh = pl.store(value, [0, 0], fresh)
+            return buffer
+
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(Before))
+    assert list(_graph_funcs(after)[0].param_directions) == [ir.ParamDirection.In]
+
+
+@pytest.mark.parametrize("submit", [False, True])
+@pytest.mark.parametrize("fresh_result", [False, True])
+def test_graph_reads_returned_call_storage(submit, fresh_result):
+    """A read after a partial Out write needs the backing input, through either call kind.
+
+    A callee returning a fresh allocation is the negative control: its read
+    must not turn the unrelated write-only input into InOut.
+    """
+    launch = "view, done = pl.submit(self.update, view)" if submit else "view = self.update(view)"
+    result = "pl.create_tensor([32, 64], pl.FP32)" if fresh_result else "view"
+    before = pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def update(self, view: pl.Out[pl.Tensor[[32, 64], pl.FP32]]) -> pl.Tensor[[32, 64], pl.FP32]:
+        value = pl.tile.full([8, 64], pl.FP32, 1.0)
+        view = pl.store(value, [0, 0], view)
+        result = {result}
+        return result
+    @pl.function(type=pl.FunctionType.InCore)
+    def consume(
+        self, view: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+    ) -> pl.Tensor[[8, 64], pl.FP32]:
+        value = pl.load(view, [16, 0], [8, 64])
+        dst = pl.store(value, [0, 0], dst)
+        return dst
+    @pl.function
+    def main(
+        self, buffer: pl.InOut[pl.Tensor[[16, 128], pl.FP32]], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+    ) -> pl.Tensor[[8, 64], pl.FP32]:
+        with pl.graph("layer"):
+            view = pl.reshape(buffer, [32, 64])
+            with pl.manual_scope():
+                {launch}
+                dst = self.consume(view, dst)
+        return dst
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_graph_scopes()(passes.convert_to_ssa()(before))
+    graph = _graph_funcs(after)[0]
+    expected = ir.ParamDirection.Out if fresh_result else ir.ParamDirection.InOut
+    directions = [
+        direction
+        for param, direction in zip(graph.params, graph.param_directions)
+        if param.name_hint.startswith("buffer")
+    ]
+    assert directions == [expected]
 
 
 class TestOutlineGraphScopes:
@@ -973,6 +1104,119 @@ class P:
         source = _graph_dispatch_scope_source(False, True).replace(" as done:", " as (left, right):")
         with pytest.raises(ParserSyntaxError, match="plain variable name"):
             pl.parse_program(source)
+
+
+@pytest.mark.parametrize(
+    ("submit_kwarg", "after"),
+    [
+        (", deps=[seed]", ""),
+        (", predicate=(gate[0, 0] > 0)", ""),
+        ("", "            pl.system.task_dummy(deps=[done])\n"),
+    ],
+    ids=["incoming-dependency", "predicate", "completion-consumer"],
+)
+def test_tmr_reports_unsupported_graph_submit(submit_kwarg, after):
+    program = pl.parse_program(f"""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(c, [0, 0], [16, 16])
+            pl.store(pl.add(tile, 1.0), [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], gate: pl.Tensor[[1, 1], pl.INT32]):
+        with pl.manual_scope():
+            seed = pl.system.task_dummy(deps=[])
+            c, done = pl.submit(self.layer, c{submit_kwarg})
+{after}        return c
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower Graph submit.*layer"):
+            passes.lower_graph_for_runtime()(program)
+
+
+@pytest.mark.parametrize(
+    ("scope_args", "after"),
+    [(", deps=[seed]):", ""), (") as done:", "        pl.system.task_dummy(deps=[done])\n")],
+    ids=["incoming-dependency", "completion-consumer"],
+)
+def test_tmr_reports_unsupported_graph_scope_boundary(scope_args, after):
+    program = pl.parse_program(f"""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        seed = pl.system.task_dummy(deps=[])
+        with pl.graph("layer"{scope_args}
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(c, [0, 0], [16, 16])
+                pl.store(pl.add(tile, 1.0), [0, 0], c)
+{after}        return c
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower Graph scope.*layer"):
+            passes.lower_graph_for_runtime()(program)
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        "self.layer(c)",
+        'with pl.graph("direct"):\n                self.increment(c)',
+        "self.helper(c)",
+    ],
+    ids=["graph-call", "graph-scope", "inline-helper"],
+)
+def test_tmr_reports_graph_inside_manual_scope(tmp_path, region):
+    program = pl.parse_program(f"""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.InCore)
+    def increment(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.load(c, [0, 0], [16, 16])
+        return pl.store(pl.add(tile, 1.0), [0, 0], c)
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        self.increment(c)
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        self.layer(c)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        with pl.manual_scope():
+            {region}
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower.*manual scope"):
+            ir.compile(program, output_dir=str(tmp_path), backend_type=BackendType.Ascend950, skip_ptoas=True)
+
+
+def test_tmr_reports_inline_graph_scope_in_manual_submit_argument():
+    program = pl.parse_program("""@pl.program
+class Pipeline:
+    @pl.function(type=pl.FunctionType.InCore)
+    def increment(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.load(c, [0, 0], [16, 16])
+        return pl.store(pl.add(tile, 1.0), [0, 0], c)
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.graph("layer"):
+            self.increment(c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        with pl.manual_scope():
+            result, done = pl.submit(self.increment, self.helper(c))
+        return result
+""")
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        with pytest.raises(ValueError, match=r"TMR cannot lower Graph inside an enclosing manual scope"):
+            passes.lower_graph_for_runtime()(program)
 
 
 if __name__ == "__main__":

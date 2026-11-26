@@ -53,7 +53,9 @@ program_with_memrefs = init_pass(program)
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
-   - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
+   - **Borrowed FIFO storage**: `tile.tpop_*` results, zero-copy views, plain aliases, and physical writebacks such as `reg.store` / `reg.scatter` remain MemRef-less. Writebacks follow `output_reuses_input_arg`, including masked writes; they do not allocate a copy of the receive buffer. `HasMemRefs` uses the same classification. At an outlined VF call, each returned Tile or tuple projection inherits the storage of the actual operand identified by the VF declaration. Allocation and verification trace that operand back to the original receive when checking a branch join. An explicit result binding must resolve to the address inherited from its caller operand. A borrowed FIFO slot has no statically provable allocation address.
+   - **Control-flow results**: `ForStmt` / `WhileStmt` carries and results inherit the initial buffer, including a borrowed value's absent MemRef; `IfStmt` results inherit yielded storage. `HasMemRefs` tracks borrowed carries and branch results before checking their consumers.
+     When both branches refer to the same borrowed slot, PTO codegen carries the `IfStmt` result as a tile handle through `scf.if`, without a phi allocation. Distinct borrowed slots retain the allocated phi and branch copies, so the result survives their release. These copies are supported only in Vec memory: PTO codegen rejects a Mat FIFO receive that must be copied into an allocated branch result, including receives defined before the `if`. Consume the Mat value inside each branch instead of yielding it. Borrowed writebacks receive an input-derived destination view that preserves result metadata such as padding.
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
 6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
 7. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
@@ -116,10 +118,17 @@ instead. A multi-slot declaration is accepted — its slots become a ptoas regio
 segments ptoas is forbidden to merge — see
 [Python syntax](../language/00-python_syntax.md#under-the-ptoas-memory-planner).
 
-The declaration lives on the assigned `Var`, not on the RHS `Call` — `ConvertToSSA` merges
-it into the Var's type and op type deduction never produces a MemRef — so any pass that
-rebuilds a type from the Call must carry it over explicitly. `ConvertToSSA` does the
-merge; `FlattenTileNdTo2D` carries it through all four of its rebuilds (ND flatten,
+The declaration is carried by the assigned `Var`; the parser also preserves an explicit
+pinned annotation on the RHS `Call`, so reassignment can distinguish it from the Var's
+older inferred binding. A plain-alias reannotation uses a separate typed binding before
+updating the mutable variable, preserving the constraint without retyping its source.
+An unannotated fresh alias leaves its LHS storage unbound through inlining, until SSA
+substitutes the current source, so an older parser type cannot become an explicit constraint.
+Op type deduction does not allocate storage, but can inherit an
+input MemRef (`tile.gather_row` returns its destination's type). Passes that rebuild types
+must preserve explicit constraints even when deduction omits or inherits a MemRef.
+`ConvertToSSA` selects each definition's metadata; `FlattenTileNdTo2D` carries it through
+all four of its rebuilds (ND flatten,
 ≤2D `tile.load`, rank>2 `tile.create`/`tile.full`, generic tile op); `InferTileMemorySpace` keeps it when syncing the Var
 type to a rebuilt Call. Passes that clone rather than rebuild (including the per-stage
 bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
@@ -136,9 +145,31 @@ bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
 
 - A bound tile with a dynamic shape — a declared allocation must be sized at compile time.
 - Tiles on one allocation disagreeing on memory space.
-- Binding the output of a view / in-place op (`tile.reshape`, `tile.matmul_acc`, …).
-  Such a result lands in its source's allocation, so it cannot be placed elsewhere;
-  bind the source instead.
+- Binding the output of a view / in-place op (`tile.reshape`, `tile.gather_row`,
+  `tile.matmul_acc`, …) to storage different from the storage it inherits. An
+  inherited or explicit binding is accepted when it resolves to the same allocation
+  and byte offset, including the same slot of a multi-slot allocation. A different
+  allocation, a different slot, or symbolic offsets that cannot be proven equal
+  are rejected; bind the source instead. Views are checked at their derived offset,
+  so sharing only the allocation base is not sufficient.
+
+For example, annotating only a gather accumulator is legal; the unannotated
+result inherits the declaration through type deduction and loop SSA:
+
+```python
+seed: pl.Tile[[8, 32], pl.BF16, pl.MemRef("stage"), pl.Mem.Vec] = pl.tile.full(
+    [8, 32], dtype=pl.BF16, value=0.0
+)
+result = seed
+for row in pl.range(8):
+    result = pl.gather_row(result, x, [row, 0], [row, 0], [1, 32])
+```
+
+`InitMemRef` creates one pinned `stage` allocation and shares it across the seed,
+the loop-carried value, and the gather result.
+Explicit result annotations survive SSA and type re-inference until this check.
+An unannotated reassignment follows its new source's binding; an older inferred
+binding on the same variable name does not constrain the new definition.
 
 A fourth rule — tiles bound to **one slot** must not be live at the same time — needs
 lifetime information and is therefore checked in

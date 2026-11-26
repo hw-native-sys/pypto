@@ -32,12 +32,17 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -262,9 +267,37 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
                                                   : "no_convert";
     oss << ", nosplit = true, acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = " << quant
         << ", relu = " << (relu ? "normal_relu" : "no_relu") << ">";
+  } else {
+    if (op->HasKwarg("nosplit")) {
+      oss << ", nosplit = " << (op->GetKwarg<bool>("nosplit", false) ? "true" : "false");
+    }
+    if (op->HasKwarg("acc_push_epilogue")) {
+      const auto e = op->GetKwarg<ir::AccPushEpilogue>("acc_push_epilogue");
+      const auto schema_error = ir::ValidateAccPushEpilogue(e);
+      INTERNAL_CHECK_SPAN(schema_error.empty(), op->span_) << "Internal error: " << schema_error;
+      oss << ", acc_push_epilogue = #pto.acc_push_epilogue<layout = " << e.at("layout")
+          << ", quant = " << e.at("quant") << ", relu = " << e.at("relu") << ">";
+    }
   }
   oss << "}";
   return oss.str();
+}
+
+static std::string EmitAivLaneOperand(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                      const ir::TypePtr& entry_type, int split) {
+  const auto& lane = op->args_.back();
+  auto scalar = As<ScalarType>(lane->GetType());
+  CHECK_SPAN(scalar && scalar->dtype_ == DataType::INT64, op->span_)
+      << "aiv_subblockid requires an INT64 scalar; explicitly cast other scalar dtypes";
+  CHECK_SPAN(split >= 1 && split <= 4, op->span_) << "aiv_subblockid requires split=1, 2, 3, or 4";
+  auto tile = As<ir::TileType>(entry_type);
+  CHECK_SPAN(tile && tile->GetMemorySpace() == ir::MemorySpace::Vec, op->span_)
+      << "aiv_subblockid requires an AIV-side Vec Tile entry; GlobalTensor is unsupported";
+  if (auto value = As<ir::ConstInt>(lane)) {
+    CHECK_SPAN(value->value_ == 0 || value->value_ == 1, op->span_)
+        << "aiv_subblockid must be 0 or 1, got " << value->value_;
+  }
+  return " aiv_subblockid(" + codegen.GetExprAsCode(lane) + ")";
 }
 
 // tile.tpush_to_{aic,aiv}: Push a tile across cores (Cube<->Vector). `target`
@@ -274,8 +307,9 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
   auto& codegen = AsPto(codegen_base);
   const std::string op_name = std::string("tpush_to_") + target;
 
-  INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
-      << op_name << " requires 1 argument (tile), got " << op->args_.size();
+  const bool aiv_side = std::string_view(target) == "aic";
+  INTERNAL_CHECK_SPAN(op->args_.size() == 1 || (aiv_side && op->args_.size() == 2), op->span_)
+      << op_name << " requires a tile and, on AIV only, an optional aiv_subblockid operand";
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK_SPAN(tile, op->span_) << op_name << " first argument must be a Var or IterArg";
 
@@ -301,15 +335,24 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  // FixPipe divides the extent it reads. Keeping the compact Acc's valid rows
+  // both preserves MAD's pitch and places each half at the start of its lane's slot.
+  const bool split_valid_rows =
+      std::string_view(target) == "aiv" && split == ir::kSplitUpDown &&
+      codegen.GetBackendHandler()->SplitsCubeToVectorTransportInHardware() &&
+      !codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0)).has_value() && !op->HasKwarg("lane_stride") &&
+      ir::cross_core_pipe::GetA5C2VRowTailBoxStride(op->args_[0]->GetType()).has_value();
   const bool restore_valid_shape =
-      EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
+      !split_valid_rows && EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
+  const std::string lane =
+      op->args_.size() == 2 ? EmitAivLaneOperand(op, codegen, op->args_[0]->GetType(), split) : "";
 
   std::ostringstream oss;
   oss << "pto.tpush_to_" << target << "(" << tile_buf;
   if (!tile_type.empty()) {
     oss << " : " << tile_type;
   }
-  oss << ") " << FormatFrontendPipeAttrs(op, split);
+  oss << ") " << FormatFrontendPipeAttrs(op, split) << lane;
   codegen.Emit(oss.str());
   if (restore_valid_shape) {
     EmitLogicalTpushValidShapeRestore(op, codegen, tile_buf, tile_type);
@@ -325,8 +368,9 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   auto& codegen = AsPto(codegen_base);
   const std::string op_name = std::string("tpop_from_") + target;
 
-  INTERNAL_CHECK_SPAN(op->args_.size() == 0, op->span_)
-      << op_name << " takes no arguments, got " << op->args_.size();
+  const bool aiv_side = std::string_view(target) == "aic";
+  INTERNAL_CHECK_SPAN(op->args_.empty() || (aiv_side && op->args_.size() == 1), op->span_)
+      << op_name << " accepts only an optional AIV-side aiv_subblockid operand";
 
   if (std::string_view(target) == "aic") {
     if (auto dtype = codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0))) {
@@ -359,6 +403,7 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   // Keep a statically empty pop empty: the dual-AIV no-split replay balances
   // the pipe, and a split lane with zero localized extent must also move nothing.
   auto result_tile_type = codegen.GetCurrentResultTileType();
+  const std::string lane = !op->args_.empty() ? EmitAivLaneOperand(op, codegen, result_tile_type, split) : "";
   bool statically_empty = false;
   bool has_static_logical_shape = false;
   if (result_tile_type) {
@@ -426,17 +471,16 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     transport_col = EmitIndexOperand(codegen, result_tile_type->shape_[1], "tpop transport col");
   }
 
-  // A frontend tpop result is not itself a locally bound tile in PTOAS, so
-  // pto.set_validshape cannot mutate it directly. When transport uses the
-  // static transport extents, pop into a temporary and expose the logical result via
-  // pto.treshape. PTOAS has a dedicated zero-copy treshape-over-tpop lowering
+  // When transport uses static transport extents, pop into a temporary and
+  // expose the logical result via pto.treshape without changing transport metadata.
+  // PTOAS has a dedicated zero-copy treshape-over-tpop lowering
   // that preserves the FIFO tile handle while rebuilding its static valid
   // metadata. A full-box pto.subview is not equivalent here: PTOAS lowers that
   // path through a disconnected tile handle on A2/A3.
   //
-  // Treshape carries no valid-row/valid-col operands, so it can restore only
-  // static logical extents. Keep the existing direct TPOP behavior for dynamic
-  // valid shapes until PTO exposes a dynamic metadata rebind for pipe entries.
+  // This transport rebind uses a static result type. Dynamic and empty pops
+  // keep their explicit valid operands; later dynamic views initialize their
+  // own descriptor with set_validshape, supported for TPOP roots by PTOAS >= 0.74.
   std::string transport_buf = use_static_transport ? codegen.NewNamedTemp("tpop_transport") : result_buf;
   std::ostringstream oss;
   oss << transport_buf << " = pto.tpop_from_" << target;
@@ -445,11 +489,16 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
         << "Internal error: " << op_name << " dynamic valid_shape requires both valid_row and valid_col";
     oss << "(" << transport_row << ", " << transport_col << ")";
   }
-  oss << " " << FormatFrontendPipeAttrs(op, split);
+  oss << " " << FormatFrontendPipeAttrs(op, split) << lane;
   if (!result_type.empty()) {
     oss << " -> " << result_type;
   }
   codegen.Emit(oss.str());
+  const int c2v_pipe = std::string_view(target) == "aic" ? op->GetKwarg<int>("id", 0) : -1;
+  if (c2v_pipe >= 0 && result_tile_type) {
+    codegen.RegisterTileBufType(transport_buf, result_type, result_tile_type);
+  }
+  codegen.RegisterTpopTileName(transport_buf, c2v_pipe);
   if (use_static_transport) {
     std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
     INTERNAL_CHECK_SPAN(!logical_type.empty(), op->span_)
@@ -458,6 +507,10 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     codegen.Emit(logical_buf + " = pto.treshape " + transport_buf + " : " + result_type + " -> " +
                  logical_type);
     codegen.RegisterTileBufType(logical_buf, logical_type, result_tile_type);
+    // This descriptor changes validity only, retaining the TPOP's full physical
+    // shape and pitch. Keep its FIFO provenance without marking it as a general
+    // Tile view: SIMT can safely borrow it with the original dense layout.
+    codegen.RegisterTpopTileName(logical_buf, c2v_pipe);
     codegen.SetCurrentResultBuf(logical_buf);
   }
 
@@ -479,6 +532,7 @@ static std::string MakeTfreeCodegenPTO(const char* target, const CallPtr& op,
   const int split = op->GetKwarg<int>("split", 0);
 
   std::ostringstream oss;
+  if (std::string_view(target) == "aic") codegen.EmitVFC2VRelease(op->args_[0]);
   oss << "pto.tfree_from_" << target << " " << FormatFrontendPipeAttrs(op, split);
   codegen.Emit(oss.str());
 
@@ -538,6 +592,12 @@ static std::string MakeInitializePipeCodegenPTO(const char* target, const CallPt
   oss << "pto." << target << "_initialize_pipe "
       << FormatInitializePipeAttrs(op, dir_mask, slot_size, *codegen.GetBackendHandler());
   const int pipe_id = op->GetKwarg<int>("id", 0);
+  constexpr int c2v = ir::core_affinity::kDirMaskC2V;
+  constexpr int both = c2v | ir::core_affinity::kDirMaskV2C;
+  if (std::string_view(target) == "aiv" && (dir_mask == c2v || dir_mask == both)) {
+    const auto slots = op->GetKwarg<int>("slot_num", ir::cross_core_pipe::GetPtoasImplicitSlotNum(dir_mask));
+    codegen.RecordC2VBuffer(pipe_id, c2v_ssa, slot_size, slots);
+  }
   if (op->HasKwarg("c2v_dtype")) {
     codegen.RecordC2VPipeDtype(pipe_id, op->GetKwarg<DataType>("c2v_dtype"));
   }
@@ -593,6 +653,48 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
   return "";
 }
 
+static std::string MakeIntraBlockSyncCodegenPTO(const char* action, const CallPtr& op,
+                                                codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() <= 1, op->span_)
+      << "Named intra-block sync accepts at most one dynamic event-id operand";
+  const bool has_static_event_id = op->HasKwarg("event_id");
+  INTERNAL_CHECK_SPAN(has_static_event_id != !op->args_.empty(), op->span_)
+      << "Named intra-block sync requires exactly one static or dynamic event-id form";
+  INTERNAL_CHECK_SPAN(!op->HasKwarg("ffts_mode"), op->span_)
+      << "Named intra-block sync does not accept ffts_mode";
+  const int pipe = op->GetKwarg<int>("pipe");
+  INTERNAL_CHECK_SPAN(pipe >= static_cast<int>(ir::PipeType::MTE1) &&
+                          pipe <= static_cast<int>(ir::PipeType::FIX) && pipe != ir::PipeType::M,
+                      op->span_)
+      << "Named intra-block sync requires FIX, MTE1, MTE2, MTE3, V, or S";
+  if (has_static_event_id) {
+    const int event_id = op->GetKwarg<int>("event_id");
+    INTERNAL_CHECK_SPAN(event_id >= 0 && event_id <= 31, op->span_)
+        << "Named intra-block static event_id must be in [0, 31]";
+  }
+  if (codegen.GetBackendHandler()->GetPtoTargetArch() != "a5") {
+    CHECK_SPAN(pipe != static_cast<int>(ir::PipeType::S), op->span_)
+        << "Named intra-block PIPE_S requires A5; A2/A3 supports FIX, MTE1, MTE2, MTE3, or V";
+    CHECK_SPAN(!op->HasKwarg("event_id") || op->GetKwarg<int>("event_id") <= 15, op->span_)
+        << "Named intra-block static event_id on A2/A3 must be in [0, 15]";
+  }
+  std::ostringstream oss;
+  oss << "pto." << action << "_intra_block <PIPE_" << ir::PipeTypeToString(static_cast<ir::PipeType>(pipe))
+      << ">, ";
+  if (op->args_.empty()) {
+    oss << op->GetKwarg<int>("event_id");
+  } else {
+    auto type = ir::As<ScalarType>(op->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(type && (type->dtype_ == DataType::INT32 || type->dtype_ == DataType::INT64),
+                        op->span_)
+        << "Named intra-block dynamic event id must be INT32 or INT64";
+    oss << codegen.GetExprAsCode(op->args_[0]) << " : " << (type->dtype_ == DataType::INT32 ? "i32" : "i64");
+  }
+  codegen.Emit(oss.str());
+  return "";
+}
+
 static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
@@ -619,6 +721,7 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
 
   auto emit_flag = [](const ir::CallPtr& op, codegen::CodegenBase& base, const char* instruction) {
     auto& codegen = AsPto(base);
+    codegen.RecordExplicitPipeFlag();
     const int src = op->GetKwarg<int>("src_pipe");
     const int dst = op->GetKwarg<int>("dst_pipe");
     const std::string src_name = "PIPE_" + ir::PipeTypeToString(static_cast<ir::PipeType>(src));
@@ -666,11 +769,29 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
   reg("system.aiv_initialize_pipe", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeInitializePipeCodegenPTO("aiv", op, codegen);
   });
+  for (const auto* name : {"system.set_quant_scalar", "system.set_quant_vector"}) {
+    reg(name, [](const ir::CallPtr& op, codegen::CodegenBase& base) {
+      auto& codegen = AsPto(base);
+      INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_) << "set_quant requires one operand";
+      const bool vector = ir::IsOp(op, "system.set_quant_vector");
+      const auto operand = codegen.GetExprAsCode(op->args_[0]);
+      const auto type = vector ? codegen.GetExprTypeAnnotation(op->args_[0]) : "f32";
+      codegen.Emit(std::string("pto.set_quant_") + (vector ? "vector(" : "scalar(") + operand + " : " + type +
+                   ") {id = " + std::to_string(op->GetKwarg<int>("id", 0)) + "}");
+      return std::string("");
+    });
+  }
   reg("system.sync_set", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCrossCoreSyncCodegenPTO("set", op, codegen);
   });
   reg("system.sync_wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCrossCoreSyncCodegenPTO("wait", op, codegen);
+  });
+  reg("system.set_intra_block", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeIntraBlockSyncCodegenPTO("set", op, codegen);
+  });
+  reg("system.wait_intra_block", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeIntraBlockSyncCodegenPTO("wait", op, codegen);
   });
   reg("system.set_ffts", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeSetFFTSCodegenPTO(op, codegen);
@@ -704,6 +825,7 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
       location = "mat";
     } else if (codegen.IsAIVFunction()) {
       location = "vec";
+      if (!auto_alloc) codegen.RecordVecReservation(ssa_name, base, size);
     } else {
       location = "undefined";
     }

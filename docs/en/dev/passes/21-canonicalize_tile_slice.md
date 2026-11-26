@@ -27,6 +27,19 @@ so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned alloca
 
 Both Vec materializations place the `tile.extract` **at the slice's definition** whenever that is provably equivalent, so the copy stays where the author wrote the slice — in particular inside the same `pl.split_aiv` region — and a slice with several consumers is copied once. A slice is a view that reads its source when consumed, so a copy taken at the definition is equivalent only when nothing writes that storage in between; when a write may reach it, the extract is placed before each consumer instead (see [Where a Vec extract goes](#where-a-vec-extract-goes)).
 
+For A5 `tile.dequant`, the native instruction requires a single tile type for both coefficient operands.
+When either coefficient refers to a slice or other metadata view, both are copied at the consumer into matching
+aligned FP32 column tiles.
+Scalar reads and writes preserve each view's source pitch, offset, and valid rows, including explicitly narrowed
+valid shapes and unaligned windows. Transpose views, vector reshapes that swap axes, and rank-reduced column slices
+preserve the corresponding parent coordinate mapping, including offsets introduced by later chained slices.
+This normalization runs before generic slice materialization, and removes only the original pure coefficient-view
+ancestors whose values have no remaining consumers.
+A coefficient loop carry is read from its current storage on every iteration.
+For view-backed column coefficients, a scalar copy of the initializer into the original physical shape
+provides an aligned carry without changing independent uses of the initializer; an unaligned column-major
+initializer cannot be materialized using the A5 ND-only Vec-to-Vec extract.
+
 **Pipeline position**: After [`AutoTileMatmulL0`](20-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](22-infer_tile_memory_space.md).
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.
@@ -35,7 +48,7 @@ Both Vec materializations place the `tile.extract` **at the slice's definition**
 
 **Invalidates**: nothing.
 
-**When to use**: Always, as part of the default tile-stage pipeline. The pass is a no-op when no canonical `tile.slice` exists.
+**When to use**: Always, as part of the default tile-stage pipeline. The pass also handles full-rank packed FP4 ND slices with explicit valid extents.
 
 ## API
 
@@ -53,7 +66,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 For each InCore-typed function, in four steps:
 
-1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Scalar SSA definitions are also retained for modular alignment proofs: for example, `block_idx * 32` is dynamic but has a statically known 32-element multiple. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
+1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Scalar SSA definitions are also retained for modular alignment proofs: for example, `block_idx * 32` is dynamic but has a statically known 32-element multiple. The ordinary rewrites use the three-argument form. The FP4 decoder also handles full-rank packed ND windows with explicit valid extents.
 
 2. **Plan definition-site extracts** (Vec slices only) — a slice is materialized by replacing its own definition with `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)` when both hold:
    - some consumer would materialize it under the consumer rules below (a `tile.col_expand_*` operand with a non-identity lazy textract, or an ordinary call operand, alias, loop initializer, or yield whose address is not provably aligned); and
@@ -70,9 +83,14 @@ For each InCore-typed function, in four steps:
 
    The Vec consumer rules apply only to a slice step 2 did not plan — one whose storage may be written between the definition and the consumer. There, only a copy placed at the consumer reads what the view would have read.
 
-4. **Drop dead slices** — a `tile.slice` whose result no longer has any use is removed. A chained slice only becomes dead once the slice consuming it is dropped, so this iterates to a fixpoint (bounded by the slice count). A slice still used at the end had a consumer this pass does not canonicalize; it is left intact — no regression versus the pre-pass IR.
+   For an unaligned packed FP4 ND slice consumed by a BF16 cast, the pass reads
+   the parent as signed bytes and extracts the requested window at the cast site.
+   SSA renames and `tile.set_validshape` preserve the parent and byte offsets.
+   The cast uses the valid extents of its operand and decodes the original packed dtype.
 
-The pass is a `FunctionPass`; functions are returned unchanged when no canonical `tile.slice` is present.
+4. **Drop dead slices** — after collecting the remaining consumers, visit slice definitions in reverse order. Each live slice keeps its parent live. Remove unused windows, including chains with explicit FP4 valid extents.
+
+The pass runs per function.
 
 ## Examples
 
@@ -384,10 +402,11 @@ deleted rather than kept.
 | Vec `tile.slice` that one of the Vec rows above materializes, storage never written in the function | The **definition** is replaced by the `tile.extract`; every consumer reads it (one copy, in the author's region) |
 | Vec `tile.slice` that one of the Vec rows above materializes, storage possibly written in the function | The extract is inserted before **each consumer**; slice dropped |
 | Chained Mat `tile.slice` (slice of a slice) | Peeled; offsets accumulated |
-| `tile.slice` with `valid_shape` / `drop_dims` | Skipped (not a plain window). If such a slice *also* fails either identity-copy condition above — a dynamic offset (e.g. a rank-reducing `t[i]`) or a non-contiguous window — while feeding a col-expand op, codegen rejects it with an `INTERNAL_CHECK` rather than emitting the source-corrupting materialization. The Acc accumulator check above still applies to such a slice: it needs only the physical base and offset, which are recorded for every window regardless of canonicalization eligibility |
+| Full-rank packed FP4 ND `tile.slice` feeding a BF16 cast, including a slice with explicit `valid_shape` | When the source address cannot be proven 32-byte aligned, extracts the carrier bytes using the parent row pitch and preserves the valid rectangle for decoding |
+| Other `tile.slice` with `valid_shape` or `drop_dims` | The ordinary rewrites skip these slices. For a col-expand consumer, a dynamic offset or non-contiguous window triggers an `INTERNAL_CHECK` in codegen. The Acc accumulator check uses the physical base and offset recorded for every window |
 | `Acc`-resident `tile.slice` used as a matmul **accumulator**, window neither spanning the parent's full row extent nor inside one 16-column block | **Rejected** with a `ValueError` naming the column-slice spelling — the MAD has no destination stride, so the write would silently land in the wrong row tile (pto-isa#253). The operand does not have to *be* the slice: a loop `IterArg` carrying it, a plain SSA alias, or a shape-preserving view / in-place op over it resolves back to the same window (see "Resolving the accumulator operand back to its window") |
 | Other Left/Right/Acc-resident `tile.slice`, including a *contiguous* Acc accumulator window | Untouched (no matching consumer) |
-| Functions with no canonical `tile.slice` | Returned unchanged |
+| Functions containing neither a canonical slice nor a tracked packed FP4 ND window | Returned unchanged after the Acc accumulator checks |
 
 ## See also
 

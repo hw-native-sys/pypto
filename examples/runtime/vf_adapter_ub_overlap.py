@@ -124,10 +124,11 @@ def _prepare(directory: Path) -> CompiledProgram:
 def _check_tile_sync(directory: Path, wrapper: str) -> None:
     """Check the production caller/adapter contract without rewriting sources."""
     manifest = json.loads((directory / "vpto/body/manifest.json").read_text())
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["synchronization"] == "ptoas-insert-sync"
     assert manifest["effect_scope"] == "whole-tile"
     helper = manifest["helpers"][0]
+    assert helper["capture_base_indices"] == [0] * 5 + [-1] * 3
     assert helper["parameter_effects"] == ["readwrite"] * 5 + ["none"] * 3
     assert helper["parameter_types"] == ["!pto.ptr<f32, ub>", "i32", "f32", "f32"]
     assert all(t.startswith("!pto.tile_buf<") for t in helper["caller_parameter_types"][:5])
@@ -189,7 +190,9 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
         calls.append(str(args[0]))
         return binary
 
-    def recorded_run(self: "KernelCompiler", cmd: list[str], output: Path, label: str) -> bytes:
+    def recorded_run(
+        self: "KernelCompiler", cmd: list[str], output: Path, label: str, *, env: dict[str, str] | None = None
+    ) -> bytes:
         evidence = root / f"compilation-{len(calls) + 1}"
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / f"{output.name}.command.txt").write_text(
@@ -199,7 +202,7 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
             if arg.startswith("--symbol-ordering-file="):
                 order = Path(arg.split("=", 1)[1])
                 (evidence / order.name).write_bytes(order.read_bytes())
-        binary = original_run(self, cmd, output, label)
+        binary = original_run(self, cmd, output, label, env=env)
         (evidence / output.name).write_bytes(binary)
         return binary
 
@@ -245,10 +248,7 @@ def _check_values(worker: ChipWorker, compiled: CompiledProgram, stage: str) -> 
 
 def _check_internal_sync(output: Path) -> list[str]:
     directory = output / "compilation-1"
-    llvm = (directory / "vpto_0.ll").read_text()
-    expected = ["vld.vst", "vst.vld", "vld.vst", "vst.vst", "vst.vld"]
-    barriers = re.findall(r"call void @llvm.hivm.mem.bar.([a-z.]+)\(\)", llvm)
-    assert barriers == expected, barriers
+    expected = ["VLD_VST", "VST_VLD", "VLD_VST", "VST_VST", "VST_VLD"]
     objdump = Path(os.environ["ASCEND_HOME_PATH"]) / "bin/llvm-objdump"
     observed = {}
     for name in ("vpto_0.o", "kernel.elf"):
@@ -256,13 +256,13 @@ def _check_internal_sync(output: Path) -> list[str]:
         result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
         (directory / f"{name}-disassembly.log").write_text(result.stdout)
         (directory / f"{name}-disassembly.command.txt").write_text(shlex.join(command) + "\n")
-        machine = re.findall(r"\bSMEM_BAR.([A-Z_]+)", result.stdout)
-        assert machine == [item.upper().replace(".", "_") for item in expected], machine
+        machine = re.findall(r"\bSMEM_BAR\.([A-Z_]+)", result.stdout)
+        assert machine == expected, machine
         observed[name] = machine
     (output / "internal-sync.json").write_text(
-        json.dumps({"llvm": barriers, "machine": observed, "ptoas_inserted": True}, indent=2) + "\n"
+        json.dumps({"machine": observed, "ptoas_inserted": True}, indent=2) + "\n"
     )
-    return barriers
+    return [kind.lower().replace("_", ".") for kind in observed["kernel.elf"]]
 
 
 def _run(output: Path, device: int) -> None:

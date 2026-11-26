@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
+#include "pypto/ir/transforms/utils/ssa_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -84,7 +85,11 @@ class TypeCollector : public IRVisitor {
     for (const auto& result : op->results_) types[result.get()] = result->GetType();
   }
   void VisitStmt_(const AssignStmtPtr& op) override {
-    types[op->var_.get()] = GetAuthoritativeAssignmentType(op->var_->GetType(), op->value_);
+    auto lhs_type = op->var_->GetType();
+    if (types.count(op->var_.get()) && GetTypeMemRef(lhs_type)) {
+      lhs_type = CloneTypeWithMemRef(lhs_type, std::nullopt);
+    }
+    types[op->var_.get()] = GetAuthoritativeAssignmentType(lhs_type, op->value_);
   }
   void VisitStmt_(const ForStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const WhileStmtPtr& op) override { VisitStmt(op->body_); }
@@ -356,18 +361,10 @@ class SSAConverter {
 
   ExprPtr SubstExpr(const ExprPtr& e) { return e ? ExprSubstituter(*this).VisitExpr(e) : e; }
 
-  /// Substitute Var references stored in Call attrs. Currently covers:
-  ///   * ``kAttrManualDepEdges`` — ``std::vector<VarPtr>`` (dep edges)
-  ///   * ``kAttrDumpVars`` — ``std::vector<VarPtr>`` (selective dump
-  ///     targets from ``pl.dump_tag`` / ``dumps=``)
-  ///   * every ``IsExprValuedCallAttr`` key — ``ExprPtr`` (the host-orch
-  ///     dispatch ``device=`` selector, typically a loop induction Var that SSA
-  ///     must version; the SPMD ``core_num`` launch width). Routed through the
-  ///     shared predicate so a new Expr-valued attr cannot be added to some
-  ///     walkers and silently missed here.
-  ///
-  /// ``kAttrArgDirOverrideVars`` is scope-only and handled by the separate
-  /// ``SubstScopeAttrs`` path below.
+  /// Substitute reference-typed attrs on Call and Submit using MapAttrExprs.
+  /// ExprPtr placement/launch attrs (worker, core_num), VarPtr and Var lists
+  /// all retain the current SSA definitions. Dispatching by stored type keeps
+  /// newly introduced expression attrs visible without adding a key allowlist.
   /// Returns a rebuilt attrs vector when any Var was rewritten, otherwise
   /// std::nullopt so the caller can keep the existing attrs vector verbatim.
   std::optional<std::vector<std::pair<std::string, std::any>>> SubstCallAttrs(
@@ -498,7 +495,14 @@ class SSAConverter {
   StmtPtr ConvertAssign(const AssignStmtPtr& op) {
     auto val = SubstExpr(op->value_);
     auto key = op->var_.get();
-    auto authoritative_type = GetAuthoritativeAssignmentType(op->var_->GetType(), val);
+    // A reused Var still has its first definition's type. Missing storage on
+    // the new RHS is not a request to reuse that old binding (views commonly
+    // omit MemRefs). Explicit annotations travel on the RHS Call instead.
+    auto lhs_type = op->var_->GetType();
+    if (cur_.count(key) && GetTypeMemRef(lhs_type)) {
+      lhs_type = CloneTypeWithMemRef(lhs_type, std::nullopt);
+    }
+    auto authoritative_type = GetAuthoritativeAssignmentType(lhs_type, val);
     auto var = AllocVersion(key, authoritative_type, op->var_->span_);
     auto result = MutableCopy(op);
     result->var_ = var;
@@ -1256,6 +1260,8 @@ FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+FunctionPtr ConvertFunctionToSSA(const FunctionPtr& function) { return TransformConvertToSSA(function); }
 
 namespace pass {
 Pass ConvertToSSA() {

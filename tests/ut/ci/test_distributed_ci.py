@@ -24,7 +24,7 @@ def test_distributed_job_routes_and_propagates_failure(
     tmp_path: Path, has_suite: bool, exit_code: int
 ) -> None:
     """Run the actual workflow shell with recording substitutes for execution."""
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-a5-distributed.yml").read_text())
     steps = workflow["jobs"]["onboard-tests-a5-distributed"]["steps"]
     command = next(step["run"] for step in steps if "-m pytest" in step.get("run", ""))
     checkout = tmp_path / "a5-dist-checkout"
@@ -61,7 +61,7 @@ def test_distributed_job_routes_and_propagates_failure(
     assert result.returncode == exit_code, result.stderr
     executed = log.read_text()
     if has_suite:
-        assert "task-submit --device auto --device-num 4" in executed
+        assert "task-submit --device auto --device-num 2 --timeout 3600 --max-time 1800" in executed
         assert "tests/st/distributed/test_l3_urma_async.py" in executed
         assert "test_ci_placeholder.py" not in executed
     else:

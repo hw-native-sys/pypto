@@ -22,16 +22,77 @@ from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, NotifyOp, Span, WaitCmp
+from pypto.pypto_core.ir import Call, CommEngine, Expr, NotifyOp, Span, WaitCmp
 
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
+from .tensor_ops import _normalize_async_engine
+
+
+def make_session(comm_ctx: Expr, *, engine: CommEngine = CommEngine.URMA, span: Span | None = None) -> Call:
+    """Create an AIV-local communication session that PUT and GET can reuse across peers.
+
+    Args:
+        comm_ctx: Communication context identifying the workspace.
+        engine: Communication engine. Currently only URMA is supported.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A call returning an AsyncSessionType handle.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    engine_value = _normalize_async_engine(engine, "pld.system.make_session")
+    return _ir_core.create_op_call(
+        "pld.system.make_session", [comm_ctx], {"engine": engine_value}, actual_span
+    )
+
+
+def wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = None) -> Call:
+    """Wait in the issuing kernel for a distributed PUT or GET to complete.
+
+    Args:
+        event: Completion event returned by the transfer.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A call returning a BOOL scalar. After success the kernel can read the GET destination or
+        reuse the PUT source.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    args = [event] if session is None else [event, session]
+    return _ir_core.create_op_call("pld.system.wait_event", args, {}, actual_span)
+
+
+def defer_wait_event(event: Expr, session: Expr | None = None, *, span: Span | None = None) -> Call:
+    """Hand completion of a distributed transfer to the issuing task.
+
+    Args:
+        event: Completion event returned by the transfer.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A statement call with UnknownType that registers the event for task completion.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    args = [event] if session is None else [event, session]
+    return _ir_core.create_op_call("pld.system.defer_wait_event", args, {}, actual_span)
+
+
+def num_workers(*, span: Span | None = None) -> Call:
+    """Build the orchestration immediate-child count query, returning INT64.
+
+    Context legality is checked by the parser and the IR verifier. HOST counts
+    local devices; CLUSTER_0 counts nodes, independently of communication ranks.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.system.num_workers", [], {}, actual_span)
 
 
 def world_size(*, span: Span | None = None) -> Call:
     """Build a ``pld.system.world_size()`` Call returning ``ScalarType(INT64)``.
 
-    Host-only — the parser already validates the call site, so this builder
-    is unconditional.
+    The DSL parser checks the HOST or CLUSTER_0 call site.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("pld.system.world_size", [], {}, actual_span)
@@ -142,4 +203,16 @@ def defer_wait(
     )
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+__all__ = [
+    "defer_wait",
+    "defer_wait_event",
+    "get_comm_ctx",
+    "make_session",
+    "notify",
+    "nranks",
+    "num_workers",
+    "rank",
+    "wait",
+    "wait_event",
+    "world_size",
+]

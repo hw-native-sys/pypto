@@ -42,6 +42,7 @@ from _orchestration_codegen_common import (
 from pypto import backend
 from pypto.backend import BackendType, pto_backend
 from pypto.ir.compile import compile as ir_compile
+from pypto.ir.compiled_program import CompiledProgram
 from pypto.pypto_core import codegen, passes
 
 # ``kernel_config.py`` is only written when ptoas is not skipped, but these tests
@@ -1076,9 +1077,17 @@ class P:
     _assert_orchestration_compiles(main_cpp, arch=platform)
 
 
-@pytest.mark.parametrize("record_graph", [False, True], ids=["eager", "graph"])
+@pytest.mark.parametrize(
+    ("record_graph", "width_kind"),
+    [
+        (False, "literal"),
+        *[(True, kind) for kind in ("literal", "cluster", "cluster-alias", "aiv", "aiv-alias")],
+    ],
+)
 @pytest.mark.parametrize("manual", [False, True], ids=["spmd-scope", "manual-submit"])
-def test_gm_pipe_capacity_follows_each_launch_through_graph_boundary(tmp_path, record_graph, manual):
+def test_gm_pipe_capacity_follows_each_launch_through_graph_boundary(
+    tmp_path, record_graph, manual, width_kind
+):
     """Hoisted pipe storage keeps its own layout and SPMD block count.
 
     These are deliberately different groups: sizing both caller allocations from
@@ -1098,6 +1107,19 @@ def test_gm_pipe_capacity_follows_each_launch_through_graph_boundary(tmp_path, r
             out = self.large_group(out)
 """
     )
+    resource = ""
+    runtime_query = ""
+    if width_kind != "literal":
+        query = "available_cluster_count" if width_kind.startswith("cluster") else "available_aiv_count"
+        width = f"pl.system.{query}()"
+        runtime_query = f"rt_{query}()"
+        if width_kind.endswith("-alias"):
+            resource = f"        width = {width}\n        alias = width\n"
+            width = "alias"
+        launches = launches.replace("core_num=8", f"core_num={width}")
+        launches = launches.replace("core_num=2", f"core_num={width}")
+        launches = launches.replace("pl.spmd(8)", f"pl.spmd({width})")
+        launches = launches.replace("pl.spmd(2)", f"pl.spmd({width})")
     program = pl.parse_program(f"""@pl.program
 class PipeCapacities:
     @pl.function(type=pl.FunctionType.AIC)
@@ -1144,7 +1166,7 @@ class PipeCapacities:
 
     @pl.function(type=pl.FunctionType.{scope_type})
     def layer(self, out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
-{launches}
+{resource}{launches}
         return out
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
@@ -1178,7 +1200,10 @@ class PipeCapacities:
         launch = re.search(rf"// Group {group}: MixedKernels(.*?)rt_submit_task\(\w+, (\w+)\);", body, re.S)
         assert launch is not None, body
         params = launch.group(2)
-        assert f"{params}.launch_spec.set_block_num({core_num});" in launch.group(1), body
+        if width_kind == "literal":
+            assert f"{params}.launch_spec.set_block_num({core_num});" in launch.group(1), body
+        else:
+            assert runtime_query in body, body
         pipe = re.search(rf"{params}\.add_output\((gm_pipe_buffer_\w+)\);", launch.group(1))
         assert pipe is not None, launch.group(1)
         caller_pipe = pipe.group(1)
@@ -1190,6 +1215,11 @@ class PipeCapacities:
         shape = re.search(rf"{caller_pipe}_ci_shapes\[1\]\s*=\s*\{{([^}}]+)\}};", entry)
         assert shape is not None, entry
         expression = re.sub(r"\s+", "", shape.group(1)).replace("static_cast<uint32_t>", "")
+        if width_kind != "literal":
+            # Hoisting must emit a query, never the Graph-local alias. The C++
+            # integration check below independently catches leaked identifiers.
+            assert runtime_query in expression, expression
+            expression = expression.replace(runtime_query, str(core_num))
         factors = expression.replace("(", "").replace(")", "").split("*")
         assert all(factor.isdigit() for factor in factors), expression
         capacity = 1
@@ -1491,6 +1521,116 @@ def test_graph_scope_captures_outer_completion_and_keeps_dependencies(tmp_path, 
     assert launch is not None, entry
     assert f"{launch.group(1)}.set_dependencies(" in launch.group(2), entry
     assert re.search(r"TaskId done\w* = task_\d+_outs\.task_id\(\);", entry), entry
+
+
+@pytest.mark.parametrize("hbg_first", [False, True], ids=["tmr-first", "hbg-first"])
+def test_same_program_compiles_for_both_graph_paths(tmp_path, monkeypatch, hbg_first):
+    """Check ordinary launches, explicit edges and aliases after TMR expansion."""
+
+    @pl.program
+    class Pipeline:
+        @pl.function(type=pl.FunctionType.InCore)
+        def copy(
+            self, source: pl.Tensor[[16, 16], pl.FP32], target: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return pl.store(pl.load(source, [0, 0], [16, 16]), [0, 0], target)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def accumulate(
+            self, source: pl.Tensor[[16, 16], pl.FP32], target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x = pl.load(source, [0, 0], [16, 16])
+            y = pl.load(target, [0, 0], [16, 16])
+            return pl.store(pl.add(x, y), [0, 0], target)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            a: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            tmp = pl.create_tensor([16, 16], dtype=pl.FP32)
+            tmp, ready = pl.submit(self.copy, x, tmp)
+            barrier = pl.system.task_dummy(deps=[ready])
+            a, _first = pl.submit(self.accumulate, tmp, a, deps=[barrier])
+            b, _second = pl.submit(self.accumulate, tmp, b, deps=[barrier])
+            return a, b
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            a: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            first, second = a, b
+            for i in pl.range(4):
+                first, second = self.layer(x, first, second)
+                with pl.graph("finish"):
+                    first = self.accumulate(x, first)
+                    second = self.accumulate(x, second)
+            return a, b
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", lambda *_args, **_kwargs: _STUB_PTOAS_OUTPUT)
+    original = Pipeline.as_python()
+    tmr, hbg = passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH
+    for runtime in (hbg, tmr) if hbg_first else (tmr, hbg):
+        name = passes.runtime_kind_to_name(runtime)
+        output_dir = tmp_path / name
+        with passes.PassContext([], runtime=runtime):
+            compiled = ir_compile(Pipeline, output_dir=str(output_dir), dump_passes=False)
+
+        assert Pipeline.as_python() == original
+        assert isinstance(compiled, CompiledProgram)
+        metadata = compiled._artifact.metadata
+        assert metadata is not None
+        assert metadata.return_aliases == (1, 2)
+        source = output_dir / "orchestration" / "main.cpp"
+        orch = source.read_text()
+        _assert_orchestration_compiles(source, runtime_name=name)
+        assert f'"runtime": "{name}"' in (output_dir / "kernel_config.py").read_text()
+        assert orch.count("rt_submit_aiv_task(") == 5, orch
+        assert "rt_submit_dummy_task(" in orch, orch
+        assert orch.count("set_dependencies(") >= 3, orch
+        assert "for (int64_t" in _entry_body(orch), orch
+        if runtime == tmr:
+            assert "GraphTaskArgs" not in orch
+            assert "rt_submit_graph" not in orch
+            assert "alloc_tensors(" in orch, orch
+        else:
+            assert "GraphTaskArgs" in orch
+            assert orch.count("rt_submit_graph(") == 2, orch
+
+
+def test_tmr_graph_expansion_preserves_control_flow(tmp_path, monkeypatch):
+    @pl.program
+    class Loop:
+        @pl.function(type=pl.FunctionType.InCore)
+        def increment(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+            tile = pl.load(c, [0, 0], [16, 16])
+            return pl.store(pl.add(tile, 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], n: pl.Scalar[pl.INDEX]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            with pl.graph("repeat"):
+                for i in pl.range(n):
+                    if i > 0:
+                        c = self.increment(c)
+            return c
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", lambda *_args, **_kwargs: _STUB_PTOAS_OUTPUT)
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        ir_compile(Loop, output_dir=str(tmp_path), dump_passes=False)
+    source = tmp_path / "orchestration" / "main.cpp"
+    orch = source.read_text()
+    assert "rt_submit_graph" not in orch
+    assert re.search(r"for \(int64_t i\w* = 0; i\w* < n\w*;", orch), orch
+    assert re.search(r"if \(\(?0 < i\w*\)", orch), orch
+    assert orch.count("rt_submit_aiv_task(") == 1, orch
+    _assert_orchestration_compiles(source, runtime_name="tensormap_and_ringbuffer")
 
 
 if __name__ == "__main__":

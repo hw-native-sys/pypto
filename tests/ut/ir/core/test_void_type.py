@@ -233,13 +233,14 @@ def _submit_with_metadata(field: str, metadata: dict[str, object], span: ir.Span
 
 
 @pytest.mark.parametrize("field", ["attrs", "kwargs"])
-@pytest.mark.parametrize("key", ["device", "core_num", "custom_expr"])
+@pytest.mark.parametrize("key", ["worker", "device", "core_num", "custom_expr"])
 @pytest.mark.parametrize("explicit_span", [False, True])
 def test_submit_metadata_rejects_void_at_construction(field, key, explicit_span, void_call):
     """Reject void metadata at Submit construction, before conversion to a Call view."""
     span = ir.Span("submit_test.py", 2, 1) if explicit_span else ir.Span.unknown()
     context = "Submit attribute" if field == "attrs" else "Submit keyword argument"
-    with pytest.raises(ValueError, match=f"{context} '{key}'.*VoidType") as error:
+    canonical_key = "worker" if field == "attrs" and key == "device" else key
+    with pytest.raises(ValueError, match=f"{context} '{canonical_key}'.*VoidType") as error:
         _submit_with_metadata(field, {key: void_call}, span)
     assert ("submit_test.py" if explicit_span else "void_test.py") in str(error.value)
 

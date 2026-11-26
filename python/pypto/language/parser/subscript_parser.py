@@ -14,6 +14,7 @@ import warnings
 from collections.abc import Sequence
 
 from pypto.ir import op as ir_op
+from pypto.language.typing.type_utils import _const_int_value  # noqa: PLC2701 — the shared syntax-level seam
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core import arith as _arith
 
@@ -23,9 +24,6 @@ from .diagnostics import (
     UnsupportedFeatureError,
 )
 from .parser_state import ParseCallbacks, ParserServices
-from .type_resolver import (
-    _const_int_value,  # noqa: PLC2701
-)
 from .type_semantics import fold_const_slice_extent, get_source_valid_shape, shape_exprs_match
 
 

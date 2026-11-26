@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +27,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/core/python_string.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -106,8 +108,14 @@ bool SpmdInlineBodyRebuildsCarrier(const InCoreScopeStmtPtr& incore) {
 void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
   // Print with type annotation: var: type = value
   // In concise mode, omit the type annotation: var = value
+  const bool reassignment = !printed_assignment_vars_.insert(op->var_.get()).second;
+  auto tile = As<TileType>(op->var_->GetType());
+  // A reused Var retains its first definition's binding. Printing that as a
+  // fresh alias annotation would constrain the new source on reparsing.
+  const bool stale_alias_binding =
+      reassignment && !As<Call>(op->value_) && tile && tile->memref_ && (*tile->memref_)->is_pinned_;
   VisitExpr(op->var_);
-  if (!concise_) {
+  if (!concise_ && !stale_alias_binding) {
     stream_ << ": " << Print(op->var_->GetType());
   }
   stream_ << " = ";
@@ -557,9 +565,12 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const RegScopeStmtPtr& op) {
-  CHECK_SPAN(op->name_hint_.empty() && op->attrs_.empty(), op->span_)
+  CHECK_SPAN(
+      op->name_hint_.empty() && std::all_of(op->attrs_.begin(), op->attrs_.end(),
+                                            [](const auto& attr) { return attr.first == "auto_sync"; }),
+      op->span_)
       << "RegScope Python printing cannot preserve name_hint or attrs";
-  stream_ << "with " << prefix_ << ".reg_scope():\n";
+  stream_ << "with " << prefix_ << ".reg_scope(" << (op->AutoSync() ? "" : "auto_sync=False") << "):\n";
   IncreaseIndent();
   if (auto seq = As<SeqStmts>(op->body_); seq && seq->stmts_.empty()) {
     stream_ << GetIndent() << "pass";
@@ -816,7 +827,10 @@ std::string IRPythonPrinter::PrintWindowBuffer(const WindowBufferPtr& window) {
   oss << prefix_ << "._dump.window_buffer(" << std::quoted(GetWindowBufferName(window))
       << ", base=" << std::quoted(GetVarName(window->base_.get())) << ", size=" << PrintSubExpr(window->size_)
       << ", load_from_host=" << (window->load_from_host_ ? "True" : "False")
-      << ", store_to_host=" << (window->store_to_host_ ? "True" : "False") << ")";
+      << ", store_to_host=" << (window->store_to_host_ ? "True" : "False");
+  if (window->memory_source_ != "device") oss << ", memory_source=" << std::quoted(window->memory_source_);
+  if (!window->init_.empty()) oss << ", init=" << QuotePythonString(window->init_);
+  oss << ")";
   return oss.str();
 }
 

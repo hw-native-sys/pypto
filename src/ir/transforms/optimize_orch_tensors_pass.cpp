@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -36,10 +37,14 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/window_externalization.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -114,6 +119,7 @@ class IterArgReuseOptimizer {
  public:
   ProgramPtr Run(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
     auto reuse_results = Analyze(program, incore_names);
+    if (reuse_results.empty()) return program;
 
     // Rewrite InCore functions
     std::unordered_map<std::string, FunctionPtr> rewritten_incores;
@@ -1482,8 +1488,13 @@ class SliceInputStridesOptimizer {
   }
 
  private:
-  // func_name -> { param_index -> parent_shape }
-  using InputShapeMap = std::unordered_map<std::string, std::unordered_map<size_t, std::vector<ExprPtr>>>;
+  // func_name -> { param_index -> metadata }. Legacy InCore entries carry
+  // parent shapes; explicit AIV entries carry resolved physical strides.
+  struct InputMetadata {
+    std::vector<ExprPtr> dimensions;
+    TensorLayout layout = TensorLayout::ND;
+  };
+  using InputShapeMap = std::unordered_map<std::string, std::unordered_map<size_t, InputMetadata>>;
 
   static bool ShapesMatch(const std::vector<ExprPtr>& a, const std::vector<ExprPtr>& b) {
     if (a.size() != b.size()) return false;
@@ -1495,15 +1506,174 @@ class SliceInputStridesOptimizer {
     return true;
   }
 
+  static TypePtr WithView(const TensorTypePtr& tensor, TensorView view) {
+    if (auto distributed = As<DistributedTensorType>(tensor)) {
+      return std::make_shared<DistributedTensorType>(tensor->shape_, tensor->dtype_, tensor->memref_,
+                                                     std::move(view), distributed->window_buffer_);
+    }
+    return std::make_shared<TensorType>(tensor->shape_, tensor->dtype_, tensor->memref_, std::move(view));
+  }
+
+  static bool IsTensorMetadataView(const CallPtr& call) {
+    return IsOp(call, "tensor.transpose") || IsOp(call, "tensor.view") || IsOp(call, "tensor.reshape") ||
+           IsOp(call, "tensor.reinterpret_view") || IsOp(call, "tensor.set_validshape");
+  }
+
   class SliceAnalyzer : public IRVisitor {
    public:
     SliceAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names)
-        : program_(program), incore_names_(incore_names) {}
+        : program_(program), incore_names_(incore_names) {
+      for (const auto& [gvar, func] : program->functions_) functions_.emplace(func->name_, func);
+    }
 
-    const InputShapeMap& result() const { return result_; }
+    void AnalyzeFunctions() {
+      // Index each body once. Analyze a helper on its first call so returned
+      // views are available immediately; later callers constrain its bindings
+      // without rescanning the body, just like loop backedges.
+      class CalleeCollector : public IRVisitor {
+       public:
+        std::vector<std::string> names;
+        void VisitExpr_(const CallPtr& call) override {
+          if (As<GlobalVar>(call->op_)) names.push_back(call->op_->name_);
+          IRVisitor::VisitExpr_(call);
+        }
+        void VisitExpr_(const SubmitPtr& call) override {
+          if (As<GlobalVar>(call->op_)) names.push_back(call->op_->name_);
+          IRVisitor::VisitExpr_(call);
+        }
+      };
+      std::unordered_map<std::string, size_t> incoming;
+      std::unordered_map<std::string, std::vector<std::string>> outgoing;
+      for (const auto& [name, func] : functions_) {
+        if (!incore_names_.count(name)) incoming.emplace(name, 0);
+      }
+      for (const auto& [name, count] : incoming) {
+        CalleeCollector collector;
+        collector.VisitStmt(functions_.at(name)->body_);
+        for (const auto& callee : collector.names) {
+          if (auto edge = incoming.find(callee); edge != incoming.end()) {
+            ++edge->second;
+            outgoing[name].push_back(callee);
+          }
+        }
+      }
+      std::vector<std::string> ready;
+      for (const auto& [name, count] : incoming) {
+        if (count == 0) ready.push_back(name);
+      }
+      size_t visited = 0;
+      while (!ready.empty()) {
+        auto name = std::move(ready.back());
+        ready.pop_back();
+        AnalyzeFunction(functions_.at(name));
+        ++visited;
+        for (const auto& callee : outgoing[name]) {
+          if (--incoming.at(callee) == 0) ready.push_back(callee);
+        }
+      }
+      CHECK_SPAN(visited == incoming.size(), program_->span_)
+          << "Tensor stride propagation requires an acyclic orchestration call graph";
+    }
+
+    void AnalyzeFunction(const FunctionPtr& func) {
+      if (analyzed_.count(func->name_)) return;
+      CHECK_SPAN(analyzing_.insert(func->name_).second, func->span_)
+          << "Tensor stride propagation requires an acyclic orchestration call graph";
+      // Parameters exist before any branch, even without caller-derived storage.
+      // Seed them so non-SSA parameter writes remain visible at branch joins.
+      for (const auto& param : func->params_) BindStorage(param.get(), TypeStorage(param->GetType()));
+      if (auto bindings = caller_bindings_.find(func->name_); bindings != caller_bindings_.end()) {
+        for (const auto& [index, value] : bindings->second) BindStorage(func->params_[index].get(), value);
+      }
+      auto previous = current_function_;
+      current_function_ = func->name_;
+      VisitStmt(func->body_);
+      current_function_ = std::move(previous);
+      analyzing_.erase(func->name_);
+      analyzed_.insert(func->name_);
+    }
+
+    InputShapeMap result() {
+      // A later caller or backedge can introduce a slice or disprove packed ND
+      // storage. Each fact propagates once per edge, including around cycles.
+      std::vector<std::vector<size_t>> dependents(constraints_.size());
+      std::vector<bool> pitch_conflict(constraints_.size());
+      std::vector<size_t> pending;
+      for (size_t i = 0; i < constraints_.size(); ++i) {
+        for (const auto parent : constraints_[i].parents) dependents[parent].push_back(i);
+        pitch_conflict[i] = !constraints_[i].consistent;
+        if (constraints_[i].sliced || !constraints_[i].packed_nd || pitch_conflict[i]) pending.push_back(i);
+      }
+      while (!pending.empty()) {
+        auto index = pending.back();
+        pending.pop_back();
+        for (const auto dependent : dependents[index]) {
+          auto& child = constraints_[dependent];
+          const bool sliced = child.sliced || constraints_[index].sliced;
+          const bool conflict = pitch_conflict[dependent] || pitch_conflict[index];
+          const bool packed_nd = child.packed_nd && constraints_[index].packed_nd &&
+                                 !(child.uses_inherited_pitch && pitch_conflict[index]);
+          if (sliced == child.sliced && packed_nd == child.packed_nd &&
+              conflict == pitch_conflict[dependent]) {
+            continue;
+          }
+          child.sliced = sliced;
+          child.packed_nd = packed_nd;
+          pitch_conflict[dependent] = conflict;
+          pending.push_back(dependent);
+        }
+      }
+      for (const auto& root : external_roots_) {
+        const auto& binding = aiv_bindings_.at(root.function->name_).at(root.param);
+        const bool runtime_strides =
+            UsesRuntimeDescriptor(*root.function, root.param) ||
+            UsesPackedRuntimeStrides(*root.function, root.param, binding, pitch_conflict);
+        auto& roots = runtime_strides ? descriptor_roots_ : constraint_roots_;
+        roots.push_back(root.constraint);
+      }
+      // Loop backedges are known only after visiting their bodies. Validate the
+      // constraints reachable from AIV operands once, including operands used
+      // inside the loop. Indexed edges permit cycles without a fixed-point walk.
+      // Extern operands can keep different pitches after a join, but a
+      // zero-copy reshape still needs packed input on every incoming path.
+      ValidateConstraints(descriptor_roots_, false);
+      ValidateConstraints(std::move(constraint_roots_), true);
+
+      for (const auto& [name, params] : aiv_bindings_) {
+        for (const auto& [index, binding] : params) {
+          if (!binding.sliced && (!binding.constraint || !constraints_[*binding.constraint].sliced)) continue;
+          const auto& function = *functions_.at(name);
+          if (UsesPackedRuntimeStrides(function, index, binding, pitch_conflict)) continue;
+          if (UsesRuntimeDescriptor(function, index)) {
+            if (binding.consistent && !binding.strides.empty() &&
+                (!binding.constraint || !pitch_conflict[*binding.constraint]) &&
+                std::all_of(binding.strides.begin(), binding.strides.end(),
+                            [](const ExprPtr& stride) { return As<ConstInt>(stride) != nullptr; })) {
+              result_[name][index] = {binding.strides, binding.layout};
+            }
+            continue;
+          }
+          CHECK_SPAN(binding.consistent && !binding.strides.empty(), *binding.span)
+              << "AIV sliced tensor argument requires one consistent static stride per parameter across "
+                 "all call sites; pass the full parent tensor and use parent-relative indices instead";
+          for (const auto& stride : binding.strides) {
+            CHECK_SPAN(As<ConstInt>(stride), *binding.span)
+                << "AIV sliced tensor argument requires static physical strides; pass the full parent "
+                   "tensor and use parent-relative indices instead";
+          }
+          result_[name][index] = {binding.strides, binding.layout};
+        }
+      }
+      return result_;
+    }
 
    protected:
     void VisitStmt_(const AssignStmtPtr& op) override {
+      // Snapshot operand metadata at each definition, including before SSA
+      // conversion, when an assignment may reuse a variable identity.
+      auto value = ResolveStorage(op->value_);
+      IRVisitor::VisitStmt_(op);
+      BindStorage(op->var_.get(), std::move(value));
       auto call = As<Call>(op->value_);
       if (!call) return;
 
@@ -1524,8 +1694,10 @@ class SliceInputStridesOptimizer {
       auto fname = GetCallFuncName(call);
       if (!incore_names_.count(fname)) return;
 
-      auto incore_func = FindFunction(program_, fname);
-      if (!incore_func) return;
+      const auto found = functions_.find(fname);
+      if (found == functions_.end()) return;
+      const auto& incore_func = found->second;
+      if (incore_func->func_type_ == FunctionType::AIV) return;  // handled for Call and Submit below
 
       for (size_t i = 0; i < call->args_.size() && i < incore_func->param_directions_.size(); ++i) {
         if (incore_func->param_directions_[i] != ParamDirection::In) continue;
@@ -1539,7 +1711,7 @@ class SliceInputStridesOptimizer {
         auto conflict_key = fname + ":" + std::to_string(i);
         if (conflicted_.count(conflict_key)) continue;
 
-        auto& entry = result_[fname][i];
+        auto& entry = result_[fname][i].dimensions;
         if (entry.empty()) {
           entry = it->second;
         } else if (!ShapesMatch(entry, it->second)) {
@@ -1549,32 +1721,720 @@ class SliceInputStridesOptimizer {
       }
     }
 
+    void VisitExpr_(const CallPtr& op) override {
+      AnalyzeCall(op->op_, op->args_, op->span_, false);
+      IRVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const SubmitPtr& op) override {
+      AnalyzeCall(op->op_, op->args_, op->span_, true);
+      IRVisitor::VisitExpr_(op);
+    }
+
+    void VisitStmt_(const ReturnStmtPtr& op) override {
+      ValueGroups values;
+      for (const auto& value : op->value_) values.push_back(ResolveStorage(value));
+      const auto& signature = functions_.at(current_function_)->return_types_;
+      if (values.size() == 1 && signature.size() > 1 && TupleSize(values.front()) == signature.size()) {
+        // A forwarded tuple may spell several flat return positions. A single
+        // declared TupleType remains one nested value, as required by Submit.
+        auto tuple = values.front();
+        values.clear();
+        for (size_t i = 0; i < signature.size(); ++i) values.push_back(TupleElement(tuple, i));
+      }
+      auto [found, inserted] = returned_storage_.emplace(current_function_, values);
+      if (!inserted) {
+        for (size_t i = 0; i < values.size() && i < found->second.size(); ++i) {
+          found->second[i] = MergeStorage(found->second[i], values[i], op->span_);
+        }
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+
+    void VisitStmt_(const ForStmtPtr& op) override {
+      auto initial = SeedLoop(op->iter_args_, op->span_);
+      IRVisitor::VisitStmt_(op);
+      FinishLoop(initial, op->body_, op->return_vars_);
+    }
+
+    void VisitStmt_(const WhileStmtPtr& op) override {
+      auto initial = SeedLoop(op->iter_args_, op->span_);
+      IRVisitor::VisitStmt_(op);
+      FinishLoop(initial, op->body_, op->return_vars_);
+    }
+
+    void VisitStmt_(const IfStmtPtr& op) override {
+      VisitExpr(op->condition_);
+      auto then_result = AnalyzeBranch(op->then_body_);
+      auto else_result = op->else_body_ ? AnalyzeBranch(*op->else_body_) : BranchResult{};
+      // Both arms start from the incoming bindings. Join only written keys;
+      // unrelated storage entries are neither copied nor scanned.
+      for (const auto& [key, value] : then_result.bindings) {
+        auto other = else_result.bindings.find(key);
+        BindStorage(key, MergeStorage(
+                             value, other == else_result.bindings.end() ? CurrentStorage(key) : other->second,
+                             op->span_));
+      }
+      for (const auto& [key, value] : else_result.bindings) {
+        if (!then_result.bindings.count(key)) {
+          BindStorage(key, MergeStorage(CurrentStorage(key), value, op->span_));
+        }
+      }
+      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        auto value = i < then_result.yielded.size() ? then_result.yielded[i]
+                                                    : TypeStorage(op->return_vars_[i]->GetType());
+        const auto other = i < else_result.yielded.size() ? else_result.yielded[i] : Storage{};
+        BindStorage(op->return_vars_[i].get(), MergeStorage(value, other, op->span_));
+      }
+    }
+
    private:
+    struct LazyTuple;
+    struct Storage {
+      std::vector<ExprPtr> strides;
+      TensorLayout layout = TensorLayout::ND;
+      bool sliced = false;
+      bool packed_nd = false;
+      bool consistent = true;
+      const Span* span = nullptr;
+      std::optional<size_t> constraint;
+      std::shared_ptr<const std::vector<Storage>> elements;
+      LazyTuple* lazy = nullptr;
+    };
+    struct LazyTuple {
+      Storage initial;
+      size_t size;
+      const Span* span;
+      std::vector<Storage> alternatives;
+      std::unordered_map<size_t, Storage> projected;
+    };
+
+    struct StrideConstraint {
+      bool consistent = true;
+      bool sliced = false;
+      bool packed_nd = false;
+      const Span* span;
+      std::vector<size_t> parents;
+      bool uses_inherited_pitch = false;
+      bool requires_packed_nd = false;
+    };
+    struct ExternalRoot {
+      const Function* function;
+      size_t param;
+      size_t constraint;
+    };
+
+    // An opaque kernel receives a runtime descriptor. Its row pitch can vary
+    // when every reaching allocation/view has the packed strides of its own
+    // runtime shape. An explicit strided formal still requires specialization.
+    bool UsesPackedRuntimeStrides(const Function& function, size_t param, const Storage& value,
+                                  const std::vector<bool>& pitch_conflict) const {
+      if (!function.HasAttr(kAttrExternalSource) || !value.packed_nd ||
+          (value.constraint && !constraints_[*value.constraint].packed_nd)) {
+        return false;
+      }
+      const auto formal = AsTensorTypeLike(function.params_[param]->GetType());
+      if (!formal || formal->shape_.size() != value.strides.size()) return false;
+      const auto expected =
+          tensor_view_semantics::BuildLogicalStridesFromLayout(formal->shape_, TensorLayout::ND);
+      const auto& view = formal->tensor_view_;
+      if (view && (view->layout != TensorLayout::ND ||
+                   (!view->stride.empty() && !AreExprVectorsEqual(view->stride, expected)))) {
+        return false;
+      }
+      bool dynamic = false;
+      for (size_t i = 0; i < value.strides.size(); ++i) {
+        if (As<ConstInt>(expected[i])) {
+          if (!AreExprsEqual(expected[i], value.strides[i])) return false;
+          // Only the innermost unit stride follows from packed ND alone. A
+          // fixed outer stride must remain true for all incoming layouts.
+          if (i + 1 < expected.size() && value.constraint && pitch_conflict[*value.constraint]) return false;
+        }
+        dynamic |= !As<ConstInt>(value.strides[i]);
+      }
+      return dynamic;
+    }
+    using ValueGroups = std::vector<Storage>;
+    using Bindings = std::unordered_map<const Expr*, Storage>;
+    using UndoBindings = std::unordered_map<const Expr*, std::optional<Storage>>;
+    struct BranchResult {
+      ValueGroups yielded;
+      Bindings bindings;
+    };
+
+    static bool UsesRuntimeDescriptor(const Function& func, size_t index) {
+      if (!func.HasAttr(kAttrExternalSource)) return false;
+      auto tensor = AsTensorTypeLike(func.params_[index]->GetType());
+      // With dynamic inner extents, packed runtime pitch also depends on the
+      // operand's runtime shape. Those operands need the packed-storage proof.
+      return tensor && !tensor->tensor_view_.has_value() && !tensor->shape_.empty() &&
+             std::all_of(tensor->shape_.begin() + 1, tensor->shape_.end(),
+                         [](const ExprPtr& extent) { return As<ConstInt>(extent) != nullptr; });
+    }
+
+    void ValidateConstraints(std::vector<size_t> pending, bool require_consensus) {
+      if (pending.empty()) return;
+      std::vector<bool> visited(constraints_.size(), false);
+      while (!pending.empty()) {
+        const auto index = pending.back();
+        pending.pop_back();
+        if (visited[index]) continue;
+        visited[index] = true;
+        const auto& constraint = constraints_[index];
+        if (!require_consensus && constraint.requires_packed_nd) {
+          constraint_roots_.push_back(index);
+          continue;
+        }
+        if (require_consensus) {
+          CHECK_SPAN(constraint.consistent, *constraint.span)
+              << "AIV tensor argument requires consistent physical strides across loop carries and branches, "
+                 "and graph calls; tensor.reshape requires packed ND storage, as does shaped ND tensor.view; "
+                 "pass the full parent tensor and use parent-relative indices instead";
+        }
+        pending.insert(pending.end(), constraint.parents.begin(), constraint.parents.end());
+      }
+    }
+
+    Storage CurrentStorage(const Expr* expr) {
+      if (auto found = storage_.find(expr); found != storage_.end()) {
+        return found->second;
+      }
+      return TypeStorage(expr->GetType());
+    }
+
+    void BindStorage(const Expr* expr, Storage value) {
+      if (!branch_undo_.empty() && !branch_undo_.back().count(expr)) {
+        auto previous = storage_.find(expr);
+        branch_undo_.back().emplace(
+            expr, previous == storage_.end() ? std::nullopt : std::optional<Storage>(previous->second));
+      }
+      storage_[expr] = std::move(value);
+    }
+
+    BranchResult AnalyzeBranch(const StmtPtr& body) {
+      branch_undo_.emplace_back();
+      VisitStmt(body);
+      BranchResult result{YieldValues(body), {}};
+      auto undo = std::move(branch_undo_.back());
+      branch_undo_.pop_back();
+      for (const auto& [key, previous] : undo) {
+        if (previous) {
+          result.bindings.emplace(key, storage_.at(key));
+          storage_[key] = *previous;
+        } else {
+          // Local definitions escape only through explicit yields. Exporting
+          // them here would re-merge each one at every enclosing branch.
+          storage_.erase(key);
+        }
+      }
+      return result;
+    }
+
+    size_t AddConstraint(Storage& info, const Span& span) {
+      StrideConstraint constraint{info.consistent, info.sliced, info.packed_nd, &span, {}};
+      if (info.constraint) constraint.parents.push_back(*info.constraint);
+      const auto index = constraints_.size();
+      info.constraint = index;
+      constraints_.push_back(std::move(constraint));
+      return index;
+    }
+
+    // The proof for a derived view compares the strides inherited from the
+    // first incoming binding. Later callers/backedges may supply packed parents
+    // with a different pitch. A whole parent remains packed, but a window
+    // inferred from that first pitch is no longer known to be packed.
+    void RecordInheritedPitch(Storage& info, const Span& span) {
+      if (info.packed_nd && info.constraint) {
+        constraints_[AddConstraint(info, span)].uses_inherited_pitch = true;
+      }
+    }
+
+    void Constrain(size_t index, const Storage& initial, const Storage& yielded) {
+      auto& constraint = constraints_[index];
+      constraint.consistent &= yielded.consistent && initial.layout == yielded.layout &&
+                               AreExprVectorsEqual(initial.strides, yielded.strides);
+      constraint.sliced |= initial.sliced || yielded.sliced;
+      constraint.packed_nd &= initial.packed_nd && yielded.packed_nd;
+      if (yielded.constraint) constraint.parents.push_back(*yielded.constraint);
+    }
+
+    static size_t TupleSize(const Storage& value) {
+      return value.lazy ? value.lazy->size : (value.elements ? value.elements->size() : 0);
+    }
+
+    Storage TupleElement(const Storage& value, size_t index) {
+      if (index >= TupleSize(value)) return {};
+      if (!value.lazy) return (*value.elements)[index];
+      auto& node = *value.lazy;
+      if (auto found = node.projected.find(index); found != node.projected.end()) {
+        return found->second;
+      }
+      // Publish the seeded element before following backedges, which can refer
+      // to this tuple. Only projected paths acquire constraints; unused wide
+      // carries cost O(1) per loop instead of copying every tensor leaf.
+      auto seeded = SeedStorage(TupleElement(node.initial, index), *node.span);
+      node.projected.emplace(index, seeded);
+      for (const auto& other : node.alternatives) {
+        seeded = MergeStorage(seeded, TupleElement(other, index), *node.span, true);
+      }
+      node.projected[index] = seeded;
+      return seeded;
+    }
+
+    Storage SeedStorage(Storage value, const Span& span) {
+      if (value.elements || value.lazy) {
+        auto node = std::make_unique<LazyTuple>();
+        node->initial = value;
+        node->size = TupleSize(value);
+        node->span = &span;
+        value.elements.reset();
+        value.lazy = node.get();
+        lazy_tuples_.push_back(std::move(node));
+      } else if (!value.strides.empty()) {
+        AddConstraint(value, span);
+      }
+      return value;
+    }
+
+    Storage MergeStorage(Storage value, const Storage& other, const Span& span, bool backedge = false) {
+      if (value.elements || value.lazy) {
+        if ((value.lazy && value.lazy == other.lazy) ||
+            (value.elements && value.elements == other.elements)) {
+          return value;
+        }
+        if (!backedge || !value.lazy) value = SeedStorage(value, span);
+        auto& node = *value.lazy;
+        node.alternatives.push_back(other);
+        // Snapshot projected keys: following an alternative may lazily insert
+        // another element into this same node during a cyclic backedge.
+        std::vector<size_t> keys;
+        keys.reserve(node.projected.size());
+        for (const auto& [index, element] : node.projected) keys.push_back(index);
+        for (auto index : keys) {
+          auto element = node.projected.at(index);
+          auto alternate = TupleElement(other, index);
+          node.projected[index] = MergeStorage(element, alternate, span, true);
+        }
+      } else if (!value.strides.empty()) {
+        if (!backedge) AddConstraint(value, span);
+        if (value.constraint) Constrain(*value.constraint, value, other);
+        value.sliced |= other.sliced;
+        value.packed_nd &= other.packed_nd;
+      }
+      return value;
+    }
+
+    ValueGroups YieldValues(const StmtPtr& body) {
+      ValueGroups values;
+      if (auto yield = transform_utils::GetLastYieldStmt(body)) {
+        for (const auto& value : yield->value_) values.push_back(ResolveStorage(value));
+      }
+      return values;
+    }
+
+    ValueGroups SeedLoop(const std::vector<IterArgPtr>& iter_args, const Span& span) {
+      ValueGroups initial;
+      for (const auto& iter : iter_args) {
+        initial.push_back(SeedStorage(ResolveStorage(iter->initValue_), span));
+      }
+      // Resolve every initializer before binding any loop-local definitions.
+      for (size_t i = 0; i < iter_args.size(); ++i) BindStorage(iter_args[i].get(), initial[i]);
+      return initial;
+    }
+
+    void FinishLoop(ValueGroups& initial, const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+      auto yielded = YieldValues(body);
+      for (size_t i = 0; i < initial.size(); ++i) {
+        const auto other = i < yielded.size() ? yielded[i] : Storage{};
+        initial[i] = MergeStorage(initial[i], other, body->span_, true);
+        if (i < return_vars.size()) BindStorage(return_vars[i].get(), initial[i]);
+      }
+    }
+
+    Storage TypeStorage(const TypePtr& type) {
+      if (auto found = type_storage_.find(type.get()); found != type_storage_.end()) {
+        return found->second;
+      }
+      Storage info;
+      if (auto tuple = As<TupleType>(type)) {
+        auto elements = std::make_shared<std::vector<Storage>>();
+        for (const auto& element : tuple->types_) elements->push_back(TypeStorage(element));
+        info.elements = std::move(elements);
+        type_storage_.emplace(type.get(), info);
+        return info;
+      }
+      auto tensor = AsTensorTypeLike(type);
+      if (!tensor) return info;
+      const auto layout = tensor->tensor_view_ ? tensor->tensor_view_->layout : TensorLayout::ND;
+      info.layout = layout;
+      if (layout == TensorLayout::ND || layout == TensorLayout::DN) {
+        info.strides = tensor->tensor_view_ && !tensor->tensor_view_->stride.empty()
+                           ? tensor->tensor_view_->stride
+                           : tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, layout);
+        info.packed_nd =
+            layout == TensorLayout::ND &&
+            (!tensor->tensor_view_ || tensor->tensor_view_->stride.empty() ||
+             AreExprVectorsEqual(info.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                   tensor->shape_, TensorLayout::ND)));
+      }
+      return info;
+    }
+
+    std::vector<Storage> ResolveCallResults(const ExprPtr& expr) {
+      auto call = transform_utils::AsCallOrSubmitView(expr);
+      if (!call || !As<GlobalVar>(call->op_)) return {};
+      auto found = functions_.find(call->op_->name_);
+      if (found == functions_.end()) return {};
+      const auto& callee = found->second;
+      if (!incore_names_.count(callee->name_)) {
+        AnalyzeCall(call->op_, call->args_, expr->span_, As<Submit>(expr) != nullptr);
+      }
+      auto returned = returned_storage_.find(callee->name_);
+      const auto return_values = returned == returned_storage_.end() ? ValueGroups{} : returned->second;
+      auto [mapping, inserted] = return_params_.try_emplace(callee.get());
+      if (inserted) mapping->second = return_lineage::ReturnedParamIndices(callee, program_);
+      const auto param_indices = mapping->second;
+      // CallerSuppliedArg's prefix contract, computed once for all results.
+      // Submit may leave runtime-allocated Out slots before the CommCtx suffix.
+      const auto ctx = transform_utils::TrailingCommCtxParamCount(callee);
+      const auto supplied = call->args_.size() >= ctx && call->args_.size() <= callee->params_.size()
+                                ? call->args_.size() - ctx
+                                : 0;
+      std::vector<Storage> results;
+      for (size_t i = 0; i < callee->return_types_.size(); ++i) {
+        auto value = i < return_values.size() ? return_values[i] : TypeStorage(callee->return_types_[i]);
+        if (i < param_indices.size()) {
+          const auto& param = param_indices[i];
+          if (param) {
+            if (auto storage =
+                    ArgumentStorage(callee, call->args_, supplied, *param, As<Submit>(expr) != nullptr)) {
+              value = *storage;
+            }
+          }
+        }
+        results.push_back(std::move(value));
+      }
+      if (As<Submit>(expr)) results.emplace_back();  // TASK_ID has no tensor storage.
+      return results;
+    }
+
+    Storage ResolveStorage(const ExprPtr& expr) {
+      if (auto found = storage_.find(expr.get()); found != storage_.end()) {
+        return found->second;
+      }
+      if (auto item = As<TupleGetItemExpr>(expr)) {
+        auto tuple = ResolveStorage(item->tuple_);
+        if (item->index_ >= 0 && static_cast<size_t>(item->index_) < TupleSize(tuple)) {
+          return TupleElement(tuple, static_cast<size_t>(item->index_));
+        }
+      }
+      if (auto tuple = As<MakeTuple>(expr)) {
+        Storage info;
+        auto elements = std::make_shared<std::vector<Storage>>();
+        for (const auto& element : tuple->elements_) elements->push_back(ResolveStorage(element));
+        info.elements = std::move(elements);
+        return info;
+      }
+      if (auto iter = As<IterArg>(expr)) return ResolveStorage(iter->initValue_);
+      if (auto results = ResolveCallResults(expr); !results.empty()) {
+        const auto call = As<Call>(expr);
+        const auto found = call ? functions_.find(call->op_->name_) : functions_.end();
+        if (found != functions_.end() && found->second->return_types_.size() == 1) return results.front();
+        Storage info;
+        info.elements = std::make_shared<const std::vector<Storage>>(std::move(results));
+        return info;
+      }
+      auto info = TypeStorage(expr->GetType());
+      if (auto call = As<Call>(expr); call && IsOp(call, "tensor.slice")) {
+        info = ResolveStorage(call->args_[0]);
+        info.sliced = true;
+        const auto shape_type = As<TupleType>(call->args_[1]->GetType());
+        INTERNAL_CHECK_SPAN(shape_type, call->span_) << "tensor.slice shape must have tuple type";
+        const auto shape = ExtractTupleElements(call->args_[1], shape_type->types_.size());
+        const auto dropped =
+            ParseSliceDropDims(call->args_.size() > 4 ? call->args_[4] : nullptr, shape, "tensor.slice");
+        const auto source = AsTensorTypeLike(call->args_[0]->GetType());
+        INTERNAL_CHECK_SPAN(source, call->span_) << "tensor.slice source must have tensor type";
+        const auto source_rank = source->shape_.size();
+        // Match DeduceTensorSliceType: DN describes the trailing plane and
+        // survives only a same-rank window that drops leading axes alone.
+        bool trailing_plane_intact = shape.size() == source_rank && shape.size() - dropped.size() >= 2;
+        for (auto axis : dropped) {
+          if (axis < 0 || static_cast<size_t>(axis) + 2 >= source_rank) trailing_plane_intact = false;
+        }
+        if (!trailing_plane_intact) info.layout = TensorLayout::ND;
+        // Rank-reinterpreting windows use the parent's trailing axes, matching
+        // the existing InCore contract. Explicit drop_dims removes those axes.
+        if (shape.size() <= info.strides.size()) {
+          info.strides.erase(info.strides.begin(),
+                             info.strides.end() - static_cast<std::ptrdiff_t>(shape.size()));
+          info.strides = ApplyDropDims(info.strides, dropped);
+        } else {
+          info.strides.clear();
+        }
+        // Codegen clamps shapes to the source at runtime. A shifted or ragged
+        // inner axis could therefore shrink while still inheriting the original
+        // pitch. Only admit slabs retaining every inner extent at offset zero.
+        const auto result = AsTensorTypeLike(expr->GetType());
+        const auto offsets = ExtractTupleElements(call->args_[2], shape.size());
+        bool seen_leading = false;
+        bool full_inner_axes = shape.size() == source_rank && offsets.size() == source_rank;
+        for (size_t axis = 0; full_inner_axes && axis < source_rank; ++axis) {
+          if (!seen_leading) {
+            seen_leading =
+                std::find(dropped.begin(), dropped.end(), static_cast<int64_t>(axis)) == dropped.end();
+            continue;
+          }
+          const auto offset = As<ConstInt>(offsets[axis]);
+          full_inner_axes = offset && offset->value_ == 0 && AreExprsEqual(shape[axis], source->shape_[axis]);
+        }
+        info.packed_nd =
+            info.packed_nd && full_inner_axes && result && info.layout == TensorLayout::ND &&
+            AreExprVectorsEqual(info.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                  result->shape_, TensorLayout::ND));
+        RecordInheritedPitch(info, call->span_);
+      } else {
+        if (auto call = As<Call>(expr)) {
+          if (IsTensorMetadataView(call)) {
+            auto source = ResolveStorage(call->args_[0]);
+            auto tensor = AsTensorTypeLike(call->args_[0]->GetType());
+            if (tensor && !source.strides.empty()) {
+              auto view = tensor->tensor_view_.value_or(TensorView(std::vector<ExprPtr>{}, source.layout));
+              view.layout = source.layout;
+              view.stride = source.strides;
+              // Shape-bearing ND views also lower to Tensor::reshape. Record
+              // their constraints on the result for reachable AIV operands.
+              const bool requires_packed_nd =
+                  IsOp(call, "tensor.reshape") ||
+                  (IsOp(call, "tensor.view") && call->args_.size() >= 2 && info.layout == TensorLayout::ND &&
+                   (!tensor->tensor_view_ || tensor->tensor_view_->layout == TensorLayout::ND));
+              if (requires_packed_nd &&
+                  (source.layout != TensorLayout::ND ||
+                   !AreExprVectorsEqual(source.strides, tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                            tensor->shape_, TensorLayout::ND)))) {
+                info.sliced = source.sliced;
+                info.consistent = false;
+                info.packed_nd = false;
+                info.constraint = source.constraint;
+                constraints_[AddConstraint(info, call->span_)].requires_packed_nd = true;
+                return info;
+              }
+              auto args = call->args_;
+              args[0] = std::make_shared<Var>("view_source", WithView(tensor, std::move(view)),
+                                              call->args_[0]->span_);
+              auto inferred =
+                  OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_);
+              info = TypeStorage(inferred->GetType());
+              info.sliced = source.sliced;
+              info.packed_nd &= source.packed_nd;
+              info.consistent = source.consistent;
+              info.constraint = source.constraint;
+              if (requires_packed_nd && info.constraint) {
+                auto& constraint = constraints_[AddConstraint(info, call->span_)];
+                constraint.requires_packed_nd = true;
+                constraint.uses_inherited_pitch = info.packed_nd;
+              } else {
+                RecordInheritedPitch(info, call->span_);
+              }
+              return info;
+            }
+          }
+          if (auto index = ResultAliasedArgIndex(call)) {
+            return ResolveStorage(call->args_[*index]);
+          }
+        }
+      }
+      return info;
+    }
+
+    std::optional<Storage> ArgumentStorage(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
+                                           size_t supplied, size_t index, bool submit) {
+      if (index < supplied) return ResolveStorage(args[index]);
+      if (!submit || callee->param_directions_[index] != ParamDirection::Out) return std::nullopt;
+      auto tensor = AsTensorTypeLike(callee->params_[index]->GetType());
+      if (!tensor) return TypeStorage(callee->params_[index]->GetType());
+      // Synthesized outputs allocate shape/dtype only, hence packed row-major
+      // storage regardless of an explicit view on the formal parameter.
+      Storage value;
+      value.packed_nd = true;
+      value.strides = tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, TensorLayout::ND);
+      value.sliced = tensor->tensor_view_ && (!tensor->tensor_view_->stride.empty() ||
+                                              tensor->tensor_view_->layout != TensorLayout::ND);
+      return value;
+    }
+
+    void AnalyzeCall(const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span, bool submit) {
+      if (!As<GlobalVar>(op)) return;
+      auto found = functions_.find(op->name_);
+      if (found == functions_.end()) return;
+      const auto& callee = found->second;
+      const auto& params = callee->params_;
+      const auto ctx = transform_utils::TrailingCommCtxParamCount(callee);
+      const auto supplied = args.size() >= ctx && args.size() <= params.size() ? args.size() - ctx : 0;
+      if (!incore_names_.count(callee->name_)) {
+        auto& bindings = caller_bindings_[callee->name_];
+        for (size_t i = 0; i < params.size() - ctx; ++i) {
+          auto value = ArgumentStorage(callee, args, supplied, i, submit);
+          if (!value) continue;
+          auto [binding, inserted] = bindings.emplace(i, *value);
+          if (inserted) {
+            binding->second = SeedStorage(*value, span);
+          } else {
+            binding->second = MergeStorage(binding->second, *value, span, true);
+          }
+        }
+        AnalyzeFunction(callee);
+        return;
+      }
+      if (callee->func_type_ != FunctionType::AIV) return;
+      // Include omitted Out slots before the CommCtx suffix in consensus.
+      for (size_t i = 0; i < params.size() - ctx; ++i) {
+        auto tensor = AsTensorTypeLike(i < supplied ? args[i]->GetType() : params[i]->GetType());
+        if (!tensor) continue;
+        // Blocked layouts have their own legalization; their logical strides
+        // are not affine physical strides at this point in the pipeline.
+        const auto layout = tensor->tensor_view_ ? tensor->tensor_view_->layout : TensorLayout::ND;
+        if (layout != TensorLayout::ND && layout != TensorLayout::DN) continue;
+        auto value = ArgumentStorage(callee, args, supplied, i, submit);
+        if (!value) continue;
+        auto info = *value;
+        if (info.constraint) {
+          if (callee->HasAttr(kAttrExternalSource)) {
+            external_roots_.push_back({callee.get(), i, *info.constraint});
+          } else {
+            constraint_roots_.push_back(*info.constraint);
+          }
+        }
+        info.span = &span;
+        auto [binding, inserted] = aiv_bindings_[op->name_].emplace(i, info);
+        if (!inserted) {
+          binding->second.consistent &=
+              binding->second.layout == info.layout && ShapesMatch(binding->second.strides, info.strides);
+          binding->second = MergeStorage(binding->second, info, span);
+        }
+      }
+    }
+
     const ProgramPtr& program_;
     const std::unordered_set<std::string>& incore_names_;
     std::unordered_map<const Var*, std::vector<ExprPtr>> var_to_parent_shape_;
     std::unordered_set<std::string> conflicted_;
     InputShapeMap result_;
+    std::unordered_map<std::string, FunctionPtr> functions_;
+    Bindings storage_;
+    std::vector<UndoBindings> branch_undo_;
+    std::unordered_map<const Type*, Storage> type_storage_;
+    std::unordered_map<std::string, std::unordered_map<size_t, Storage>> caller_bindings_;
+    std::unordered_map<std::string, ValueGroups> returned_storage_;
+    std::unordered_set<std::string> analyzing_;
+    std::unordered_set<std::string> analyzed_;
+    std::string current_function_;
+    std::unordered_map<std::string, std::unordered_map<size_t, Storage>> aiv_bindings_;
+    std::unordered_map<const Function*, std::vector<std::optional<size_t>>> return_params_;
+    std::vector<std::unique_ptr<LazyTuple>> lazy_tuples_;
+    std::vector<StrideConstraint> constraints_;
+    std::vector<ExternalRoot> external_roots_;
+    std::vector<size_t> constraint_roots_;
+    std::vector<size_t> descriptor_roots_;
   };
 
   InputShapeMap Analyze(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    return_lineage::ScopedTraceCache trace_cache;
     SliceAnalyzer analyzer(program, incore_names);
-    for (const auto& [gvar, func] : program->functions_) {
-      if (incore_names.count(func->name_)) continue;
-      analyzer.VisitStmt(func->body_);
-    }
+    analyzer.AnalyzeFunctions();
     return analyzer.result();
   }
 
   class InParamSubstitutionMutator : public IRMutator {
    public:
+    explicit InParamSubstitutionMutator(bool refine_metadata) : refine_metadata_(refine_metadata) {}
+
     void AddSubstitution(const Var* old_ptr, const VarPtr& new_var) { subs_[old_ptr] = new_var; }
 
    protected:
+    ExprPtr VisitExpr_(const IterArgPtr& op) override {
+      if (auto it = subs_.find(op.get()); it != subs_.end()) {
+        return it->second;
+      }
+      auto rewritten = As<IterArg>(IRMutator::VisitExpr_(op));
+      if (structural_equal(op->GetType(), op->initValue_->GetType()) &&
+          !structural_equal(rewritten->GetType(), rewritten->initValue_->GetType())) {
+        rewritten = std::make_shared<IterArg>(op->name_hint_, rewritten->initValue_->GetType(),
+                                              rewritten->initValue_, op->span_);
+        subs_[op.get()] = rewritten;
+      }
+      return rewritten;
+    }
+
+    StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+      return RefineLoopResults(op, As<ForStmt>(IRMutator::VisitStmt_(op)));
+    }
+
+    StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+      return RefineLoopResults(op, As<WhileStmt>(IRMutator::VisitStmt_(op)));
+    }
+
+    StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+      auto rewritten = As<IfStmt>(IRMutator::VisitStmt_(op));
+      if (!op->else_body_ || !rewritten->else_body_ || op->return_vars_.empty()) return rewritten;
+      auto old_then = transform_utils::GetLastYieldStmt(op->then_body_);
+      auto old_else = transform_utils::GetLastYieldStmt(*op->else_body_);
+      auto new_then = transform_utils::GetLastYieldStmt(rewritten->then_body_);
+      auto new_else = transform_utils::GetLastYieldStmt(*rewritten->else_body_);
+      if (!old_then || !old_else || !new_then || !new_else) return rewritten;
+      auto result = MutableCopy(rewritten);
+      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        if (i >= old_then->value_.size() || i >= old_else->value_.size() || i >= new_then->value_.size() ||
+            i >= new_else->value_.size()) {
+          break;
+        }
+        const auto& old_type = op->return_vars_[i]->GetType();
+        if (!structural_equal(old_type, old_then->value_[i]->GetType()) ||
+            !structural_equal(old_type, old_else->value_[i]->GetType())) {
+          continue;
+        }
+        const auto& new_type = new_then->value_[i]->GetType();
+        CHECK_SPAN(StorageTypesMatch(new_type, new_else->value_[i]->GetType()), op->span_)
+            << "AIV branch yields disagree after physical stride refinement";
+        result->return_vars_[i] = RefineResult(op->return_vars_[i], result->return_vars_[i], new_type);
+      }
+      return result;
+    }
+
+    ExprPtr VisitExpr_(const CallPtr& op) override {
+      auto call = As<Call>(IRMutator::VisitExpr_(op));
+      if (call.get() != op.get() &&
+          (ResultAliasedArgIndex(call) ||
+           (refine_metadata_ && (IsTensorMetadataView(call) || IsOp(call, "tensor.slice"))))) {
+        // Metadata views change shape/layout without being whole-value aliases.
+        // Both kinds must infer from the refined operands, preserving attributes.
+        if (refine_metadata_ && IsOp(call, "tensor.reshape")) {
+          auto tensor = AsTensorTypeLike(call->args_[0]->GetType());
+          INTERNAL_CHECK_SPAN(tensor, call->span_) << "tensor.reshape source must have tensor type";
+          const auto& view = tensor->tensor_view_;
+          CHECK_SPAN(
+              !view ||
+                  (view->layout == TensorLayout::ND &&
+                   (view->stride.empty() ||
+                    AreExprVectorsEqual(view->stride, tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                          tensor->shape_, TensorLayout::ND)))),
+              call->span_)
+              << "tensor.reshape requires packed ND storage after AIV parameter refinement";
+        }
+        auto inferred =
+            OpRegistry::GetInstance().Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
+        return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_,
+                                      inferred->GetType(), call->span_);
+      }
+      return call;
+    }
+
     ExprPtr VisitExpr_(const VarPtr& op) override {
       auto it = subs_.find(op.get());
       if (it != subs_.end()) return it->second;
-      return op;
+      // The base mutator also remaps SSA results defined by a SIMT launch
+      // when a rewritten storage argument changes their view type.
+      return IRMutator::VisitExpr_(op);
     }
 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -1582,6 +2442,63 @@ class SliceInputStridesOptimizer {
     }
 
    private:
+    TypePtr EffectiveStorageType(const TypePtr& type) {
+      if (auto found = effective_types_.find(type.get()); found != effective_types_.end()) {
+        return found->second;
+      }
+      TypePtr result = type;
+      if (auto tensor = AsTensorTypeLike(type)) {
+        auto view = tensor->tensor_view_.value_or(TensorView(std::vector<ExprPtr>{}, TensorLayout::ND));
+        if (view.stride.empty() && (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)) {
+          view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, view.layout);
+          result = WithView(tensor, std::move(view));
+        }
+      } else if (auto tuple = As<TupleType>(type)) {
+        std::vector<TypePtr> elements;
+        for (const auto& element : tuple->types_) elements.push_back(EffectiveStorageType(element));
+        result = std::make_shared<TupleType>(std::move(elements));
+      }
+      effective_types_.emplace(type.get(), result);
+      return result;
+    }
+
+    bool StorageTypesMatch(const TypePtr& a, const TypePtr& b) {
+      return structural_equal(EffectiveStorageType(a), EffectiveStorageType(b));
+    }
+
+    VarPtr RefineResult(const VarPtr& original, const VarPtr& rewritten, const TypePtr& type) {
+      if (structural_equal(rewritten->GetType(), type)) return rewritten;
+      auto result = std::make_shared<Var>(original->name_hint_, type, original->span_);
+      subs_[original.get()] = result;
+      return result;
+    }
+
+    template <typename Loop>
+    StmtPtr RefineLoopResults(const std::shared_ptr<const Loop>& original,
+                              const std::shared_ptr<const Loop>& rewritten) {
+      // The base visitor rewrites the body once using the refined IterArgs.
+      // Only inspect its trailing yield; never rewalk a nested loop body.
+      auto yield = transform_utils::GetLastYieldStmt(rewritten->body_);
+      auto result = MutableCopy(rewritten);
+      for (size_t i = 0; i < original->iter_args_.size(); ++i) {
+        const auto& old_type = original->iter_args_[i]->GetType();
+        const auto& new_type = rewritten->iter_args_[i]->GetType();
+        if (structural_equal(old_type, new_type)) continue;
+        if (yield && i < yield->value_.size()) {
+          CHECK_SPAN(StorageTypesMatch(new_type, yield->value_[i]->GetType()), yield->span_)
+              << "AIV loop yield disagrees with its initializer after physical stride refinement";
+        }
+        if (i < original->return_vars_.size() &&
+            structural_equal(original->return_vars_[i]->GetType(), old_type)) {
+          result->return_vars_[i] =
+              RefineResult(original->return_vars_[i], result->return_vars_[i], new_type);
+        }
+      }
+      return result;
+    }
+
+    bool refine_metadata_;
+    std::unordered_map<const Type*, TypePtr> effective_types_;
     std::unordered_map<const Var*, VarPtr> subs_;
   };
 
@@ -1597,18 +2514,32 @@ class SliceInputStridesOptimizer {
       bool changed = false;
       std::vector<VarPtr> new_params = func->params_;
 
-      for (const auto& [param_idx, parent_shape] : param_idx_to_shape) {
+      for (const auto& [param_idx, metadata] : param_idx_to_shape) {
+        const auto& parent_shape = metadata.dimensions;
         if (parent_shape.empty()) continue;  // conflicted or not from slice
         if (param_idx >= func->params_.size()) continue;
 
-        auto full_strides = ComputeRowMajorStrides(parent_shape);
+        auto full_strides =
+            func->func_type_ == FunctionType::AIV ? parent_shape : ComputeRowMajorStrides(parent_shape);
         if (full_strides.empty()) continue;
 
-        auto tensor_type = As<TensorType>(func->params_[param_idx]->GetType());
+        auto tensor_type = AsTensorTypeLike(func->params_[param_idx]->GetType());
         if (!tensor_type) continue;
 
-        // Skip params that already have explicit strides
-        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) continue;
+        // An explicit AIV declaration must agree with the caller's storage.
+        if (func->func_type_ == FunctionType::AIV && tensor_type->tensor_view_) {
+          CHECK_SPAN(tensor_type->tensor_view_->layout == metadata.layout, func->params_[param_idx]->span_)
+              << "AIV tensor argument disagrees with the parameter's explicit layout; "
+                 "declare the actual storage layout or pass a matching tensor";
+        }
+        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
+          CHECK_SPAN(func->func_type_ != FunctionType::AIV ||
+                         (ShapesMatch(tensor_type->tensor_view_->stride, full_strides) &&
+                          tensor_type->tensor_view_->layout == metadata.layout),
+                     func->params_[param_idx]->span_)
+              << "AIV sliced tensor argument disagrees with the parameter's explicit physical strides";
+          continue;
+        }
 
         // NZ bytes are fractal-blocked, so the parent's logical row-major strides
         // do not describe them. BlockNzTensorViews derives the real strides from
@@ -1622,15 +2553,26 @@ class SliceInputStridesOptimizer {
         std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(in_rank),
                                      full_strides.end());
 
-        // Materialising the parent's strides says nothing about byte order, so
-        // keep whatever layout the parameter already declared. Hard-coding ND
-        // silently retyped an NZ or MX parameter and left the call site's
-        // argument disagreeing with it.
+        // AIV metadata resolves the physical layout as well as its strides.
+        // Legacy InCore metadata contains only a parent shape, so that path
+        // retains the layout already declared on the parameter.
         const TensorLayout param_layout =
-            tensor_type->tensor_view_ ? tensor_type->tensor_view_->layout : TensorLayout::ND;
-        TensorView view(std::move(strides), param_layout);
-        auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
-                                                     tensor_type->memref_, std::move(view));
+            func->func_type_ == FunctionType::AIV
+                ? metadata.layout
+                : (tensor_type->tensor_view_ ? tensor_type->tensor_view_->layout : TensorLayout::ND);
+        TensorView view =
+            tensor_type->tensor_view_.value_or(TensorView(std::vector<ExprPtr>{}, param_layout));
+        view.layout = param_layout;
+        view.stride = std::move(strides);
+        TypePtr new_type;
+        if (auto distributed = As<DistributedTensorType>(tensor_type)) {
+          new_type = std::make_shared<DistributedTensorType>(tensor_type->shape_, tensor_type->dtype_,
+                                                             tensor_type->memref_, std::move(view),
+                                                             distributed->window_buffer_);
+        } else {
+          new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
+                                                  tensor_type->memref_, std::move(view));
+        }
         auto new_param = std::make_shared<Var>(func->params_[param_idx]->name_hint_, new_type,
                                                func->params_[param_idx]->span_);
 
@@ -1640,17 +2582,15 @@ class SliceInputStridesOptimizer {
 
       if (!changed) continue;
 
-      InParamSubstitutionMutator mutator;
+      InParamSubstitutionMutator mutator(func->func_type_ == FunctionType::AIV);
       for (size_t i = 0; i < func->params_.size(); ++i) {
         if (new_params[i].get() != func->params_[i].get()) {
           mutator.AddSubstitution(func->params_[i].get(), new_params[i]);
         }
       }
-      auto new_body = mutator.VisitStmt(func->body_);
-
-      func = std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
-                                        new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                        func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
+      // The common function visitor also remaps reference-valued attributes,
+      // including external_return_params, through the same substitutions.
+      func = mutator.VisitFunction(func);
     }
   }
 };
@@ -1682,8 +2622,13 @@ Pass OptimizeOrchTensors() {
     // Pattern 3: Assemble-loop rewrite (sees Pattern 2 results)
     auto p3 = AssembleLoopRewriter().Run(p2, incore_names);
 
-    // Pattern 4: Slice input strides (propagate parent strides to In params)
-    auto p4 = SliceInputStridesOptimizer().Run(p3, incore_names);
+    // Explicit AIV functions bypass the InCore lowering patterns above, but
+    // still need sliced storage metadata at their call boundary.
+    auto stride_targets = incore_names;
+    for (const auto& [gvar, func] : p3->functions_) {
+      if (func->func_type_ == FunctionType::AIV) stride_targets.insert(func->name_);
+    }
+    auto p4 = SliceInputStridesOptimizer().Run(p3, stride_targets);
 
     // Optional Pattern 5 module: default off unless a kernel explicitly opts in.
     if (!window_externalization::HasWindowizeEnabledFunction(p4)) return p4;

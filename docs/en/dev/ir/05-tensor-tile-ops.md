@@ -134,7 +134,7 @@ re-export them through the existing public modules.
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
-| **Quantization** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950 block-32 quantization returning `{quant, FP8E8M0 scale}`. `dtype` is FP8E4M3FN or FP4E2M1X2 (FP16/BF16 source only). Axis1 maps `[M,K]` to FP4 `[M,K/2]`; axis0 maps `[N,K]` to `[K,N/2]`. Scales remain `[M,K/32]` / `[K/32,N]`. Requires a full valid region, `K % 64 == 0`, axis1 `M % 16 == 0`, axis0 `N % 32 == 0`; FP4 axis0 requires `N % 64 == 0` for the ISA carrier stride. `quant_scale_alg="ocp"` is the default; NV FP16/BF16 supports axis0 only. Packed FP4 uses the PYPTO or DSA_RP memory planner. [Pass 13](../passes/15-lower_composite_ops.md) emits TQUANT plus exponent X-to-ZZ TMOV. FP4 tile results need supported Mat→Left/Right placement before `matmul_mx`; tensor-level MX matmul remains FP8-only. `pl.tile.quant_mx_raw` exposes native TQUANT and UINT8 exponents without these blocked-scale alignments: axis1 allows arbitrary positive M and K%32 (native FP4 K%64); static partial valid regions are supported (axis1 requires tight physical columns). |
+| **Quantization** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950 block-32 quantization returning `{quant, FP8E8M0 scale}`. `dtype` is FP8E4M3FN (FP16/BF16/FP32 source) or FP4E2M1X2 (FP16/BF16 source only). Axis1 maps `[M,K]` to FP4 `[M,K/2]`; axis0 maps `[N,K]` to `[K,N/2]`. Scales remain `[M,K/32]` / `[K/32,N]`. Requires a full valid region, `K % 64 == 0`, axis1 `M % 16 == 0`, axis0 `N % 32 == 0`; FP4 axis0 requires `N % 64 == 0` for the ISA carrier stride. `quant_scale_alg="ocp"` is the default; NV FP16/BF16 supports axis0 only. Packed FP4 uses the PYPTO or DSA_RP memory planner. [Pass 13](../passes/15-lower_composite_ops.md) emits TQUANT plus exponent X-to-ZZ TMOV. FP4 tile results need supported Mat→Left/Right placement before `matmul_mx`; `tensor.matmul_mx` also accepts native packed FP4 with logical M/K/N aligned to 32/64/64 (see [FP4](../fp4.md)). `pl.tile.quant_mx_raw` exposes native TQUANT and UINT8 exponents without these blocked-scale alignments: axis1 allows arbitrary positive M and K%32 (native FP4 K%64); static partial valid regions are supported (axis1 requires tight physical columns). |
 | **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
 | - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat). The result's layout comes from `target_memory`'s implicit view, except `Left`/`Right`, which take the TEXTRACT-side L0 formats (these differ from `tile.move`'s TMOV-side ones) |
 | - | `tile.reshape` | Reshape tile to new dimensions (element count must match). Carries the source's `valid_shape` through without widening it — see [Reshape and the valid region](#reshape-and-the-valid-region) |
@@ -159,6 +159,29 @@ Packed `FP4E2M1X2` byte aliases require PYPTO or DSA_RP for tiles; PTOAS 0.65
 rejects FP4 `treshape`. InCore tensor reinterpret operations lower to tile
 aliases and require the same planners; same-shape orchestration FP4/byte aliases are also supported.
 See [FP4](../fp4.md) for the carrier-unit contract and supported alias paths.
+
+### Row-wise integer dequantization (Ascend950)
+
+| Operation | Inputs | Result |
+| --------- | ------ | ------ |
+| `tile.dequant` | Row-major signed INT8 or INT16 tile and FP32 scale and offset column tiles | FP32 tile with the same physical and valid shapes as the source |
+
+`pl.tile.dequant(src, scale, offset)` emits `pto.tdequant`. Each valid
+element is `(float(src[i,j]) - offset[i,0]) * scale[i,0]`. Scale and
+offset each have one valid column and as many valid rows as the source.
+They must share their physical shape and layout because the PTO ISA
+intrinsic uses one template type for both.
+Coefficient views, including reshapes and subviews with explicitly narrowed valid
+shapes, are copied into matching FP32 column tiles with aligned physical row
+counts before lowering. The copies read only the valid coefficient values using
+the original view's pitch.
+
+The A5 instruction reads full 64-element source vectors, including the
+last partial vector. The physical source row must be 32-byte aligned and
+wide enough to cover the valid columns rounded up to 64 elements. With a
+runtime valid width, the physical width must be a multiple of 64 elements.
+For a `[16, 96]` tensor, `pl.tile.load(src, [0, 0], [16, 128], valid_shape=[16, 96])`
+allocates the required tile width and reads the 96 valid columns.
 
 ### Result view of `tile.move`
 
@@ -305,3 +328,99 @@ with ib.function("tile_computation") as f:
     result = ib.let("result", tile.store(tile_sum, [0, 0], output))
     ib.return_stmt(result)
 ```
+
+## Typed Buffer elementwise recipes
+
+`backend/common/buffer_elementwise_recipes` is the shared production table for
+logical-to-Buffer conversion, explicit operand contracts, and native mnemonics.
+`LowerTileToBuffer` selects a typed recipe and creates a real Buffer call. Direct
+PTO emission reads that same recipe; it does not reconstruct Tile IR, invoke
+legacy callbacks, or choose storage. The table is deliberately separate from
+legacy backend callback registration.
+
+| Logical operation | Buffer operation | Native instruction | Inputs |
+| ----------------- | ---------------- | ------------------ | ------ |
+| `tile.add` | `buffer.add` | `pto.tadd` | 2 |
+| `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
+| `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
+| `tile.div` | `buffer.div` | `pto.tdiv` | 2 |
+| `tile.maximum` | `buffer.maximum` | `pto.tmax` | 2 |
+| `tile.minimum` | `buffer.minimum` | `pto.tmin` | 2 |
+| `tile.abs` | `buffer.abs` | `pto.tabs` | 1 |
+| `tile.exp` | `buffer.exp` | `pto.texp` | 1 |
+| `tile.sqrt` | `buffer.sqrt` | `pto.tsqrt` | 1 |
+| `tile.neg` | `buffer.neg` | `pto.tneg` | 1 |
+| `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
+| `tile.log` | `buffer.log` | `pto.tlog` | 1 |
+| `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
+| `tile.adds` | `buffer.adds` | `pto.tadds` | buffer, scalar |
+| `tile.subs` | `buffer.subs` | `pto.tsubs` | buffer, scalar |
+| `tile.muls` | `buffer.muls` | `pto.tmuls` | buffer, scalar |
+| `tile.divs` | `buffer.divs` | `pto.tdivs` | buffer, scalar |
+| `tile.maximums` | `buffer.maximums` | `pto.tmaxs` | buffer, scalar |
+| `tile.minimums` | `buffer.minimums` | `pto.tmins` | buffer, scalar |
+| `tile.lrelu` | `buffer.lrelu` | `pto.tlrelu` | buffer, scalar |
+| `tile.full` | `buffer.full` | `pto.texpands` | scalar |
+
+Every call has its destination as the final operand and returns `Void`. Sources
+read data and metadata; destinations write active data and read metadata. This
+is not a whole-allocation initialization guarantee. All buffer operands need identical
+physical descriptors; broadcasting and partial-combine semantics are separate
+recipes. These operators are compiler-internal, not new public DSL functions.
+
+Recipes other than `add` and `mul` require FP32, rank 1 or 2, static
+valid extents, dense row-major Vec storage, `none_box`, fractal 512, and no padding
+or compact mode. Their dtype contract does not inherit FP16 support from the
+native descriptor formatter. `add`/`mul` require FP16/FP32/INT32 operands.
+Automatic conversion and ordinary GM transfers support static rank-2
+FP16/BF16/FP32/INT32 descriptors; BF16 arithmetic requires a separate native
+recipe. Both Ascend910 and Ascend950 use these contracts.
+
+The public `tile.full` wrapper accepts both numeric literals and parsed scalar
+constants, so positional and keyword fill values agree. Integer placeholders
+use `ConstFloat` for a floating destination; explicitly typed constants keep
+their declared dtype until lowering. The Python printer emits `tile.full` fill
+constants as `pl.const(value, dtype)` so print-to-parse roundtrips preserve the
+fill dtype independently of the tile dtype. Runtime fill values remain invalid.
+
+On Ascend950 the Tile backend fills an INT64 or UINT64 tile with scalar element stores. The A5 vector broadcast instruction supports integer elements up to 32 bits.
+
+At the Buffer-call boundary, scalar operands must match the destination element
+dtype and have no memory effects. Before constructing that call, lowering converts
+supported source scalar expressions using explicit `Cast` expressions for signed integers,
+INDEX, FP16, BF16 and FP32; INDEX uses an intermediate INT64 cast. Other
+scalar source types remain unsupported. `tile.full(shape, dtype=..., value=...)`
+consumes shape/dtype when selecting its destination, then emits
+`buffer.full(value_f32, destination)`. Codegen performs no scalar type repair:
+
+```python
+# Logical input: result = tile.adds(value, count_i32)
+scalar_f32 = ir.Cast(count_i32, DataType.FP32, span)
+# Buffer IR diagnostic notation; the internal op has no public DSL wrapper.
+buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
+```
+
+`div`, `log`, and `recip` preserve the optional boolean `high_precision` kwarg.
+The recipe selects the corresponding native precision attribute; false uses
+the native default. No implicit workspace, copy, or allocation is introduced.
+`recip` requires source and destination storage to be disjoint. Construction
+rejects one handle used in both positions. `BufferIR` verification checks placed
+ranges across different handles for every table recipe: partial overlap is
+rejected, and equal complete windows are accepted only by exact-in-place recipes.
+Distinct addressless allocations are disjoint; unknown provenance or placement
+requires a later recipe. Constant scalar address definitions are evaluated with
+memoization and integer-width checks. Direct emission consumes this verified
+contract without performing allocation or alias analysis.
+
+Table recipes accept dense descriptors whose valid extents are static or
+runtime (`-1`); the native instructions read each handle's current valid
+metadata, which must agree across operands at execution time.
+
+Integer/bitwise operations, `rsqrt` and its optional workspace,
+partial combines, broadcasts, reductions, random generators and other layouts
+remain separate migration work. The public
+`backend.get_buffer_elementwise_recipe_names()` API returns a sorted independent
+snapshot from this actual table. A listed name denotes the restricted recipe
+above, not every form of that logical operator. Tests exercise public lowering,
+binary round trips, BufferIR verification, explicit destination identities, and
+native compilation; they do not substitute for numerical device acceptance.

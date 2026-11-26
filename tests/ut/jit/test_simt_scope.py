@@ -11,6 +11,7 @@
 
 import ast
 import json
+import os
 import re
 import runpy
 import subprocess
@@ -211,6 +212,35 @@ def conditional_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.
     with pl.simt_scope(dims=(32, 1, 1)):
         pl.simt.store(dst, (0, n - 32), pl.const(1.0, pl.FP32))
     return dst
+
+
+def test_while_keeps_folded_shape_after_simt_private_write():
+    @pl.jit.aiv
+    def kernel(
+        src: pl.Tensor[[1, 32], pl.FP32],
+        dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+        trips: pl.Scalar[pl.INDEX],
+    ):
+        n = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
+        while trips > 0:
+            with pl.simt_scope(dims=(1, 1, 1)):
+                n = n - 1
+                pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+            trips = trips - 1
+        for i in pl.unroll(n):
+            with pl.simt_scope(dims=(1, 1, 1)):
+                pl.simt.store(dst, (0, i), pl.const(0.0, pl.FP32))
+        return dst
+
+    bounds = []
+
+    class Collector(ir.IRVisitor):
+        def visit_for_stmt(self, op: ir.ForStmt) -> None:
+            bounds.append(op.stop)
+
+    Collector().visit_program(kernel.specialize())
+    (bound,) = bounds
+    assert isinstance(bound, ir.ConstInt) and bound.value == 32
 
 
 def test_conditional_private_reassignment_materializes_live_in_shape():
@@ -544,6 +574,7 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig, entry_na
             "vote.any",
             "vote.uni",
             "vote.ballot",
+            *(f"shfl.{mode}.{dtype}" for mode in ("idx", "up", "down", "bfly") for dtype in ("i32", "f32")),
             "redux.add.s32",
             "redux.min.s32",
             "redux.max.s32",
@@ -551,8 +582,36 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig, entry_na
             "redux.min.f32",
             "redux.max.f32",
         )
-        for intrinsic in ("vote.any",) if is_while else intrinsics:
-            assert f"@llvm.hivm.{intrinsic}" in llvm
+        # Match calls in the exported function. Declarations alone do not show
+        # that PTOAS preserved the active lanes of each collective.
+        function = re.search(r"^define [^\n]*\bsimt_entry\b[^\n]*\{\n(.*?)^}", llvm, re.M | re.S)
+        assert function is not None
+        body = function[1]
+        label = r"[\w.$-]+"
+        entry, *labeled_blocks = re.split(rf"^({label}):[^\n]*\n", body, flags=re.M)
+        blocks = dict(zip(labeled_blocks[::2], labeled_blocks[1::2], strict=True))
+        active_branch = re.search(rf"^  br i1 [^,\n]+, label %({label}), label %{label}$", entry, re.M)
+        assert active_branch is not None
+        collective_block = blocks[active_branch[1]]
+
+        if is_while:
+            # The loop must recalculate the vote and branch on its result on
+            # every active iteration. Follow the emitted edges rather than SSA numbers.
+            header_edge = re.search(rf"^  br label %({label})$", collective_block, re.M)
+            assert header_edge is not None
+            collective_block = blocks[header_edge[1]]
+            vote = re.search(rf"^  (%{label}) = call i1 @llvm\.hivm\.vote\.any\(", collective_block, re.M)
+            assert vote is not None
+            loop_branch = re.search(
+                rf"^  br i1 {re.escape(vote[1])}, label %({label}), label %{label}$", collective_block, re.M
+            )
+            assert loop_branch is not None
+            assert re.search(rf"^  br label %{re.escape(header_edge[1])}$", blocks[loop_branch[1]], re.M)
+
+        intrinsic_call = r"\bcall\b[^\n]*@llvm\.hivm\.((?:vote|shfl|redux)\.[\w.]+)\("
+        guarded_calls = re.findall(intrinsic_call, collective_block)
+        assert sorted(guarded_calls) == sorted(("vote.any",) if is_while else intrinsics)
+        assert re.findall(intrinsic_call, body) == guarded_calls
         assert "asm " not in llvm
     finally:
         backend.reset_for_testing()
@@ -814,7 +873,54 @@ def test_public_row_update_native_compile(tmp_path, use_simt):
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("script", ["04_simt_compaction.py", "06_simt_row_update.py"])
+@pytest.mark.parametrize("dims", [(n, 1, 1) for n in (1, 256, 257, 512, 513, 1024, 1025, 2048)] + [(8, 4, 8)])
+def test_public_strided_simt_compile(tmp_path, dims):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    example = Path(__file__).resolve().parents[3] / "examples/advanced/07_simt_strided_copy.py"
+    entry = runpy.run_path(str(example))["strided_copy"]
+    backend.reset_for_testing()
+    try:
+        compiled = entry.compile(
+            X=dims[0],
+            Y=dims[1],
+            Z=dims[2],
+            config=RunConfig(
+                backend_type=backend.BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
+                cache_config=CacheConfig(enabled=False),
+                save_kernels_dir=str(tmp_path),
+            ),
+        )
+        assert isinstance(compiled, CompiledProgram)
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        native = helpers[0].read_text()
+        threads = dims[0] * dims[1] * dims[2]
+        registers = 128 if threads <= 256 else 64 if threads <= 512 else 32 if threads <= 1024 else 16
+        assert f"pto.simt_max_threads = {threads}" in native
+        assert f"pto.simt_max_regs = {registers}" in native
+        # Logical width is 256, but all three captured GM windows have a
+        # different physical pitch. Losing any pitch crosses a row boundary.
+        for pitch in (288, 320, 352):
+            assert f"{pitch} : index" in native
+        assert native.count("pto.stg") == 2
+        assert "scf.for" in native and "pto.ldg" in native
+    finally:
+        backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "script",
+    [
+        "04_simt_compaction.py",
+        "06_simt_row_update.py",
+        "07_simt_strided_copy.py",
+        "08_simt_atomic_histogram.py",
+        "09_simt_scalar_conversion.py",
+    ],
+)
 def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
@@ -835,6 +941,213 @@ def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys
         assert "compiled; pass --device" in capsys.readouterr().out
     finally:
         backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "filename,entry_name",
+    [
+        ("08_simt_atomic_histogram.py", "histogram"),
+        ("09_simt_scalar_conversion.py", "convert_scalars"),
+    ],
+)
+def test_public_simt_interface_examples_device_compile(tmp_path, filename, entry_name):
+    """Compile the examples' real SIMT helpers with Bisheng, without an NPU."""
+    if os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1":
+        pytest.skip("Opt in to the A5 compiler with PYPTO_RUN_VPTO_VF_VALIDATION=1")
+    example = Path(__file__).resolve().parents[3] / "examples/advanced" / filename
+    # Import the real SDK in a child; unit-suite stubs cannot validate device code.
+    script = """
+import runpy
+import sys
+from pathlib import Path
+from pypto import CacheConfig
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
+from pypto.runtime.kernel_compiler import KernelCompiler
+
+entry = runpy.run_path(sys.argv[1])[sys.argv[3]]
+output = Path(sys.argv[2])
+entry.compile(config=RunConfig(
+    backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD,
+    cache_config=CacheConfig(enabled=False), save_kernels_dir=str(output),
+))
+helpers = tuple(str(path) for path in (output / "vpto").rglob("*.pto"))
+assert len(helpers) == 1
+objects = KernelCompiler("a5")._compile_vpto_helpers(helpers, output)
+assert len(objects) == 1 and objects[0].stat().st_size > 0
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(example), str(tmp_path), entry_name],
+        env={**os.environ, "PYPTO_SKIP_RUNTIME_PIN_CHECK": "0", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("entry_name", ["interface_entry", "subtraction_entry", "extended_entry"])
+def test_first_batch_simt_interfaces_native_compile(tmp_path, pytestconfig, entry_name):
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    pytestconfig.addinivalue_line("markers", "platforms(*ids, reason): supported ST platforms")
+    fixture = runpy.run_path(str(source))
+    backend.reset_for_testing()
+    try:
+        fixture["compile_case"](tmp_path, entry=fixture[entry_name])
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        text = helpers[0].read_text()
+        if entry_name == "interface_entry":
+            for name in ("sub", "and", "or", "xor", "min", "max"):
+                assert text.count(f"pto.atomic_{name} ") == 2
+            for relation in ("eq", "le", "lt", "ge", "gt"):
+                assert f"pto.get_lanemask_{relation}" in text
+            assert text.count(" unsigned :") == 6
+            assert "bound = 3 : i32" in text and "bound = 11 : i32" in text
+            assert "pto.bitcast" in text
+        elif entry_name == "subtraction_entry":
+            assert text.count("pto.atomic_sub ") == 4
+            assert "l2cache(nmfv)" in text
+        else:
+            for operation in (
+                "divf",
+                "ftof",
+                "ftoi",
+                "itof",
+                "mul_i32toi64",
+                "assert",
+                "get_veccoreid",
+            ):
+                assert f"pto.{operation}" in text
+            assert "precision_0ulp_ftz_true" in text
+        output = tmp_path / "interfaces.ll"
+        result = subprocess.run(
+            [
+                binary,
+                str(helpers[0]),
+                "--pto-arch=a5",
+                "--pto-backend=vpto",
+                "--emit-vpto-llvm-ir",
+                "-o",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert output.stat().st_size > 0
+        assert "asm sideeffect" not in output.read_text()
+    finally:
+        backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("entry_name", ["extended_entry", "remainder_entry"])
+def test_simt_interfaces_device_compile(tmp_path, entry_name):
+    """LLVM export alone accepted frem, which Bisheng then rejected on A5.
+
+    Use the actual runtime helper compiler and flags, without requiring an NPU.
+    Cover both the original failing kernel and a nonconstant divisor so LLVM
+    cannot remove exceptional-input paths before device instruction selection.
+    """
+    if os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1":
+        pytest.skip("Opt in to the A5 compiler with PYPTO_RUN_VPTO_VF_VALIDATION=1")
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    # The unit-suite import hooks stub the SDK. A subprocess must import the
+    # installed runtime so this exercises real compiler discovery and execution.
+    script = """
+import runpy
+import sys
+from pathlib import Path
+from pypto.runtime.kernel_compiler import KernelCompiler
+
+fixture = runpy.run_path(sys.argv[1])
+output = Path(sys.argv[2])
+fixture["compile_case"](output, entry=fixture[sys.argv[3]])
+helpers = tuple(str(path) for path in (output / "vpto").rglob("*.pto"))
+assert len(helpers) == 1
+objects = KernelCompiler("a5")._compile_vpto_helpers(helpers, output)
+assert len(objects) == 1 and objects[0].stat().st_size > 0
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(tmp_path), entry_name],
+        env={**os.environ, "PYPTO_SKIP_RUNTIME_PIN_CHECK": "0", "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not re.search(r"\bfrem\b", (tmp_path / "vpto_0.ll").read_text())
+
+
+@pytest.mark.parametrize("flush", [False, True])
+@pytest.mark.parametrize("corruption", ["none", "subnormal", "signed_zero", "nan"])
+def test_remainder_acceptance_ignores_host_fp_mode(flush, corruption):
+    """A correct device result must pass even when the host flushes denormals.
+
+    Use double-precision libm with flushing disabled as an independent reference
+    for the fixed bit-pattern oracle. Wrong results must still fail it.
+    Keep FP control-register changes in a child process to isolate other tests.
+    """
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_interface_gaps_onboard.py"
+    script = """
+import math
+import runpy
+import sys
+import pytest
+import torch
+
+fixture = runpy.run_path(sys.argv[1])
+flush = sys.argv[2] == "True"
+corruption = sys.argv[3]
+if not torch.set_flush_denormal(flush):
+    sys.exit(77)
+
+def device_result(lhs, rhs, output):
+    torch.set_flush_denormal(False)
+    results = []
+    for x, y in zip(lhs.reshape(-1).tolist(), rhs.reshape(-1).tolist(), strict=True):
+        try:
+            results.append(math.fmod(x, y))
+        except ValueError:
+            results.append(math.nan)
+    expected = torch.tensor(results, dtype=torch.float32).reshape_as(output)
+    output.view(torch.int32).copy_(expected.view(torch.int32))
+    torch.set_flush_denormal(flush)
+    bits = output.view(torch.int32).reshape(-1)
+    if corruption == "subnormal":
+        bits[6] = 0
+    elif corruption == "signed_zero":
+        bits[16] = 0
+    elif corruption == "nan":
+        bits[12] = 0x7F800000
+
+if corruption == "none":
+    fixture["check_remainders"](device_result)
+else:
+    with pytest.raises(AssertionError):
+        fixture["check_remainders"](device_result)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(flush), corruption],
+        env={**os.environ, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("Host does not support controlling denormal flushing")
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 if __name__ == "__main__":

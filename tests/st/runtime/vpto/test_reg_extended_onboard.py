@@ -594,7 +594,7 @@ def _build(output, cases=CASES, direct_index=False):
             assert all('pto.mem_bar "VV_ALL"' not in helper for helper in helpers)
         evidence = Path(tempfile.mkdtemp(prefix="compilation-", dir=directory))
         with recorder(evidence):
-            compiled.load()  # Production PTOAS -> LLVM -> Bisheng -> linked .text, no device.
+            compiled.load()  # Compile and link the native VF helper before reserving the device.
         for repeat in range(2):
             np.save(directory / f"input-{repeat}.npy", _inputs(case, repeat))
         manifest["cases"].append(

@@ -45,19 +45,19 @@ import unicodedata
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Any, cast, get_args, get_origin
+
+if TYPE_CHECKING:
+    from pypto.jit.external.protocols import ExternalJITBinding
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import (
     DUAL_AIV_DISPATCH_ATTR,
+    EXTERNAL_BINARY_POLICY_ATTR,
     EXTERNAL_PREFLIGHT_SOURCE_ATTR,
     EXTERNAL_PREFLIGHT_SYMBOL_ATTR,
     EXTERNAL_RETURN_PARAMS_ATTR,
 )
-from pypto.language.parser.expr_evaluator import ExprEvaluator
-from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
-from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call
-from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
 from pypto.language.typing.dynamic import DynVar as _LangDynVar
 from pypto.language.typing.scalar import Scalar as _LangScalar
@@ -239,6 +239,8 @@ class SpecializeContext:
     peer_func_scope_ambiguous: bool = False
     external_preflight_source: str = ""
     external_preflight_symbol: str = ""
+    external_binary_policy: str = "ordinary"
+    external_binding: ExternalJITBinding | None = None
 
     @property
     def source_def_name(self) -> str:
@@ -1628,6 +1630,11 @@ def _validate_extern_return_mapping(
     """
     if not ret_ann:
         return
+    # Imported here so ``pypto.language`` can pull in this module without
+    # dragging the parser package along (see tests/ut/language/test_dialect_isolation.py).
+    from pypto.language.parser.expr_evaluator import ExprEvaluator  # noqa: PLC0415
+    from pypto.language.parser.type_resolver import TypeResolver  # noqa: PLC0415
+
     namespace = {name: _LangDynVar(literal) for name, literal in ctx.dynvar_literals().items()}
     resolver = TypeResolver(ExprEvaluator(namespace))
     signature = ast.parse(f"def kernel({', '.join(params)}){ret_ann}: pass").body[0]
@@ -1951,6 +1958,8 @@ def _materialize_implicit_entry_output(
     while saved_out in used_names:
         suffix += 1
         saved_out = f"{saved_base}{suffix}"
+    from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call  # noqa: PLC0415
+
     insertion_index = 1 if body and is_docstring_stmt(body[0]) else 0
     while insertion_index < len(body) and is_pl_call(
         getattr(body[insertion_index], "value", None), "func_attr"
@@ -2233,18 +2242,7 @@ class Specializer:
         self._rename_map: dict[str, str] = {}
         self._graph_rebinds: dict[str, dict[str, str | int] | None] = {}
         self._submit_return_arities: dict[str, int] = {}
-        # Param order per function — lets the body transformer rewrite
-        # ``self.<dep>(a, out=out)`` keyword args into all-positional form
-        # (the parser rejects keyword args on inter-function calls).
-        self._dep_param_names: dict[str, list[str]] = {
-            ctx.func_name: list(ctx.param_names) for ctx in contexts
-        }
-        # Constexpr params per function. ``visit_Call`` drops their arguments
-        # when rewriting a call: the callee resolved them at compile time and no
-        # longer declares them, so passing one would be an arity mismatch.
-        self._dep_constexpr_params: dict[str, set[str]] = {
-            ctx.func_name: set(ctx.constexpr_values) for ctx in contexts
-        }
+        self._callee_contexts = {ctx.func_name: ctx for ctx in contexts}
         # generated-program absolute line → (orig_file, orig_line, orig_col),
         # built by specialize() so diagnostics map back to the user's .py (#1612).
         self._source_map: dict[int, tuple[str, int, int]] = {}
@@ -2322,8 +2320,12 @@ class Specializer:
             name: aliases for name, aliases in self._graph_rebinds.items() if aliases is not None
         }
         if graph_rebinds:
+            from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR  # noqa: PLC0415
+
             lines.append(f"    {JIT_GRAPH_REBINDS_ATTR} = {graph_rebinds!r}")
         if self._submit_return_arities:
+            from pypto.language.parser.parser_state import JIT_SUBMIT_RETURNS_ATTR  # noqa: PLC0415
+
             lines.append(f"    {JIT_SUBMIT_RETURNS_ATTR} = {self._submit_return_arities!r}")
         lines.extend(body_lines)
 
@@ -2570,8 +2572,7 @@ class Specializer:
             param_names=all_param_names,
             initial_used_names=all_defined,
             py_globals=ctx.py_globals,
-            dep_param_names=self._dep_param_names,
-            dep_constexpr_params=self._dep_constexpr_params,
+            callee_contexts=self._callee_contexts,
             dep_func_names=ctx.dep_func_names,
             dep_call_targets=(
                 _resolve_dep_call_targets(func_def, dep_names, ctx.dep_call_variants)
@@ -2885,13 +2886,18 @@ class Specializer:
             return [
                 f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
+                *(
+                    [f"    pl.func_attr({{{EXTERNAL_BINARY_POLICY_ATTR!r}: {ctx.external_binary_policy!r}}})"]
+                    if ctx.external_binary_policy != "ordinary"
+                    else []
+                ),
                 *preflight,
                 *result_contract,
                 "    ...",
             ]
 
-        # The @pl.jit.extern decorator guarantees the source(s) for the selected
-        # core_type are set; assert to narrow str | None -> str for the type checker.
+        # The source decorator or provider binding supplies the selected core
+        # sources; assert to narrow str | None -> str for the type checker.
         core = ctx.external_core_type
         if core == "aic":
             assert ctx.external_aic_source is not None

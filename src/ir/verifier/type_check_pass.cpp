@@ -38,6 +38,7 @@
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
+#include "src/ir/transforms/utils/var_value_collector.h"
 
 namespace pypto {
 namespace ir {
@@ -70,6 +71,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "TILE_VIEW_MISMATCH";
     case ErrorType::BUFFER_DESCRIPTOR_MISMATCH:
       return "BUFFER_DESCRIPTOR_MISMATCH";
+    case ErrorType::ASYNC_HANDLE_MISMATCH:
+      return "ASYNC_HANDLE_MISMATCH";
     case ErrorType::TENSOR_LAYOUT_MISMATCH:
       return "TENSOR_LAYOUT_MISMATCH";
     default:
@@ -80,7 +83,7 @@ std::string ErrorTypeToString(ErrorType type) {
 
 namespace {
 
-/// What an ND argument of a ``device=`` dispatch hands an NZ parameter, from
+/// What an ND argument of a ``worker=`` dispatch hands an NZ parameter, from
 /// best to worst so the worst of several possible values wins.
 enum class NzDispatchArg {
   kWholeMatrices,  ///< A host parameter, or slices of one keeping its last two axes whole
@@ -115,7 +118,7 @@ class TypeChecker : public IRVisitor {
   /// The function being checked; its body is where a dispatch argument is traced.
   FunctionPtr func_;
   /// Every value each Var can hold in ``func_``, and ``func_``'s parameters,
-  /// built on first use: only an ND-to-NZ dispatch argument needs tracing.
+  /// built on first use for layout checks.
   std::unordered_map<const Var*, std::vector<ExprPtr>> var_values_;
   std::unordered_set<const Var*> func_params_;
   bool var_values_built_ = false;
@@ -133,11 +136,11 @@ class TypeChecker : public IRVisitor {
                                  bool is_submit);
 
   /**
-   * @brief Trace an ND argument of a ``device=`` dispatch back to what it hands
+   * @brief Trace an ND argument of a ``worker=`` dispatch back to what it hands
    * an NZ parameter
    */
   NzDispatchArg ClassifyNzDispatchArg(const ExprPtr& arg);
-
+  void CollectVarValues();
   /**
    * @brief Record an error
    */
@@ -229,75 +232,6 @@ std::optional<TensorLayout> TensorLayoutOf(const TypePtr& type) {
   return tensor_type->tensor_view_->layout;
 }
 
-/// Every value each Var can hold in a function body: what an ``AssignStmt``
-/// binds it to (several before SSA), an ``IterArg``'s initial value and each
-/// value yielded back into it, and each value a loop or ``if`` result variable
-/// receives. A Var absent from the map is bound some other way.
-class VarValueCollector : public IRVisitor {
- public:
-  std::unordered_map<const Var*, std::vector<ExprPtr>> values;
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (op && op->var_) values[op->var_.get()].push_back(op->value_);
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    if (!op) return;
-    yield_targets_.push_back(RecordLoopCarried(op->iter_args_, op->return_vars_));
-    IRVisitor::VisitStmt_(op);
-    yield_targets_.pop_back();
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    if (!op) return;
-    yield_targets_.push_back(RecordLoopCarried(op->iter_args_, op->return_vars_));
-    IRVisitor::VisitStmt_(op);
-    yield_targets_.pop_back();
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    if (!op) return;
-    std::vector<const Var*> targets;
-    targets.reserve(op->return_vars_.size());
-    for (const auto& return_var : op->return_vars_) targets.push_back(return_var.get());
-    yield_targets_.push_back(std::move(targets));
-    IRVisitor::VisitStmt_(op);
-    yield_targets_.pop_back();
-  }
-
-  void VisitStmt_(const YieldStmtPtr& op) override {
-    if (op && !yield_targets_.empty()) {
-      const auto& targets = yield_targets_.back();
-      for (size_t i = 0; i < op->value_.size() && i < targets.size(); ++i) {
-        if (targets[i]) values[targets[i]].push_back(op->value_[i]);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  /// Per enclosing For / While / If, innermost last: the Vars its yields bind.
-  std::vector<std::vector<const Var*>> yield_targets_;
-
-  /// Record a loop's carried values; return the Vars its body's yields bind.
-  std::vector<const Var*> RecordLoopCarried(const std::vector<IterArgPtr>& iter_args,
-                                            const std::vector<VarPtr>& return_vars) {
-    std::vector<const Var*> targets;
-    targets.reserve(iter_args.size());
-    for (size_t i = 0; i < iter_args.size(); ++i) {
-      const auto& iter_arg = iter_args[i];
-      targets.push_back(iter_arg.get());
-      if (!iter_arg) continue;
-      values[iter_arg.get()].push_back(iter_arg->initValue_);
-      // The result holds the carried value after the last trip (or the initial
-      // value after none), which is exactly what the IterArg can hold.
-      if (i < return_vars.size() && return_vars[i]) values[return_vars[i].get()].push_back(iter_arg);
-    }
-    return targets;
-  }
-};
-
 /// Whether a ``tensor.slice`` takes the last two axes of its source whole: full
 /// extent at offset 0, and neither one dropped. Only such a slice selects whole
 /// matrices, whose bytes are the same run under ND and NZ order.
@@ -328,17 +262,155 @@ bool SliceKeepsMatrixWhole(const CallPtr& slice) {
 
 }  // namespace
 
+void TypeChecker::CollectVarValues() {
+  if (var_values_built_) return;
+  VarValueCollector collector;
+  if (func_ && func_->body_) collector.VisitStmt(func_->body_);
+  var_values_ = std::move(collector.values);
+  if (func_) {
+    for (const auto& param : func_->params_) func_params_.insert(param.get());
+  }
+  var_values_built_ = true;
+}
+
+// A source-level variable can be rebound. Only ConvertToSSA's output gives each
+// use a unique defining Var pointer. Keep the provenance walk local to its function.
+class AsyncHandleChecker : public IRVisitor {
+ public:
+  AsyncHandleChecker(StmtPtr body, std::vector<Diagnostic>& diagnostics)
+      : body_(std::move(body)), diagnostics_(diagnostics) {}
+
+  void VisitExpr_(const CallPtr& op) override;
+
+ private:
+  StmtPtr body_;
+  std::vector<Diagnostic>& diagnostics_;
+  std::optional<VarValueCollector> var_values_;
+  std::optional<std::unordered_map<const Var*, bool>> prefetch_handles_;
+  // Keep the SSA definition as well as its RHS: two executions of an identical
+  // make_session call still produce distinct mutable session objects.
+  struct Definition {
+    ExprPtr identity;
+    ExprPtr value;
+  };
+  std::unordered_map<const Var*, Definition> async_definitions_;
+  Definition ResolveAsyncDefinition(const ExprPtr& expr);
+
+  bool IsPrefetchHandle(const ExprPtr& expr);
+  void CheckAsyncOperands(const CallPtr& op);
+};
+
+AsyncHandleChecker::Definition AsyncHandleChecker::ResolveAsyncDefinition(const ExprPtr& expr) {
+  auto var = AsVarLike(expr);
+  if (!var) return {expr, expr};
+  // A loop-carried handle can refer back to itself. Merged values and function
+  // parameters without a unique local producer cannot identify a submission.
+  auto [entry, inserted] = async_definitions_.try_emplace(var.get());
+  if (!inserted) return entry->second;
+  if (!var_values_) {
+    var_values_.emplace().VisitStmt(body_);
+  }
+  auto found = var_values_->values.find(var.get());
+  if (found == var_values_->values.end() || found->second.size() != 1) return {};
+  const auto& rhs = found->second.front();
+  auto& definition = entry->second;
+  definition = AsVarLike(rhs) ? ResolveAsyncDefinition(rhs) : Definition{var, rhs};
+  return definition;
+}
+
+bool IsTileAsyncTransfer(const CallPtr& op) {
+  return IsOp(op, "pld.tile.get_async") || IsOp(op, "pld.tile.put_async");
+}
+
+bool AsyncHandleChecker::IsPrefetchHandle(const ExprPtr& expr) {
+  auto is_prefetch = [](const ExprPtr& value) {
+    auto call = As<Call>(value);
+    return IsOp(call, "prefetch.async_prefetch") || IsOp(call, "prefetch.session");
+  };
+  auto var = AsVarLike(expr);
+  if (!var) return is_prefetch(expr);
+  if (!prefetch_handles_) {
+    if (!var_values_) var_values_.emplace().VisitStmt(body_);
+    prefetch_handles_ = var_values_->CommonOrigins<bool>(
+        [](const TypePtr& type) { return IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type); },
+        [&](const ExprPtr& value) { return std::make_pair(AsVarLike(value).get(), is_prefetch(value)); });
+  }
+  auto it = prefetch_handles_->find(var.get());
+  return it != prefetch_handles_->end() && it->second;
+}
+
+void AsyncHandleChecker::CheckAsyncOperands(const CallPtr& op) {
+  const auto mismatch = [&](const std::string& message) {
+    diagnostics_.emplace_back(DiagnosticSeverity::Error, "AsyncHandleProvenance",
+                              static_cast<int>(typecheck::ErrorType::ASYNC_HANDLE_MISMATCH),
+                              op->op_->name_ + " " + message, op->span_);
+  };
+  if (IsTileAsyncTransfer(op) && op->args_.size() == 4) {
+    if (!IsOp(As<Call>(ResolveAsyncDefinition(op->args_[3]).value), "pld.system.make_session")) {
+      mismatch("requires a session from pld.system.make_session in this function");
+    }
+    return;
+  }
+  if (!IsOp(op, "pld.system.wait_event") && !IsOp(op, "pld.system.defer_wait_event") &&
+      !IsOp(op, "prefetch.wait")) {
+    return;
+  }
+  if (op->args_.empty()) return;
+  if (IsOp(op, "prefetch.wait")) {
+    if (!IsPrefetchHandle(op->args_[0])) {
+      mismatch("requires an event traceable to prefetch.async_prefetch");
+    }
+    if (op->args_.size() == 2 && !IsPrefetchHandle(op->args_[1])) {
+      mismatch("requires a prefetch session traceable to prefetch.session on every path");
+    }
+    return;
+  }
+  auto event = ResolveAsyncDefinition(op->args_[0]).value;
+  auto field = As<TupleGetItemExpr>(event);
+  auto submit = field && field->index_ == 1 ? As<Call>(ResolveAsyncDefinition(field->tuple_).value) : nullptr;
+  const bool implicit_session = IsOp(submit, "pld.tensor.get_async_event");
+  const bool explicit_session = IsTileAsyncTransfer(submit);
+  if (!implicit_session && !explicit_session) {
+    mismatch("requires a statically traceable distributed transfer event from this function");
+  } else if (implicit_session && op->args_.size() == 2) {
+    mismatch("requires the event-only form for tensor GET; omit the session argument");
+  } else if (op->args_.size() == 2) {
+    const auto session = ResolveAsyncDefinition(op->args_[1]);
+    if (!IsOp(As<Call>(session.value), "pld.system.make_session")) {
+      mismatch("requires an explicit session from pld.system.make_session");
+    } else if (explicit_session && submit->args_.size() == 4 &&
+               ResolveAsyncDefinition(submit->args_[3]).identity != session.identity) {
+      mismatch("requires the same session that submitted the transfer");
+    }
+  }
+}
+
+void AsyncHandleChecker::VisitExpr_(const CallPtr& op) {
+  if (IsTileAsyncTransfer(op) ||
+      (!op->args_.empty() && op->args_.front() && As<AsyncEventType>(op->args_.front()->GetType()))) {
+    CheckAsyncOperands(op);
+  }
+  IRVisitor::VisitExpr_(op);
+}
+
+class AsyncHandleProvenanceVerifier : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "AsyncHandleProvenance"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func && func->body_) {
+        AsyncHandleChecker checker(func->body_, diagnostics);
+        checker.VisitStmt(func->body_);
+      }
+    }
+  }
+};
+
 NzDispatchArg TypeChecker::ClassifyNzDispatchArg(const ExprPtr& arg) {
   if (auto var = AsVarLike(arg)) {
-    if (!var_values_built_) {
-      VarValueCollector collector;
-      if (func_ && func_->body_) collector.VisitStmt(func_->body_);
-      var_values_ = std::move(collector.values);
-      if (func_) {
-        for (const auto& param : func_->params_) func_params_.insert(param.get());
-      }
-      var_values_built_ = true;
-    }
+    CollectVarValues();
     // Only a parameter is the buffer as the host holds it. The trace stays in
     // this function, so a window passed into a helper arrives there as a
     // parameter and is not followed back to the caller.
@@ -404,7 +476,7 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
     // ``OptimizeOrchTensors`` also rewrites such a parameter's view with
     // explicit strides, which is what makes the pattern lower correctly.
     if (*want == TensorLayout::DN || *got == TensorLayout::DN) continue;
-    // A ``device=`` dispatch crosses from a host driver into a device program,
+    // A ``worker=`` dispatch crosses from a host driver into a device program,
     // and what crosses it is a buffer: the driver never reads these bytes, it
     // only says which card they are on. The callee's parameter is therefore the
     // only claim about their order, and an ND argument is the absence of a
@@ -498,7 +570,7 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
 
 void TypeChecker::VisitExpr_(const CallPtr& op) {
   if (op) {
-    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrWorker));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, false);
   }
   IRVisitor::VisitExpr_(op);
@@ -506,7 +578,7 @@ void TypeChecker::VisitExpr_(const CallPtr& op) {
 
 void TypeChecker::VisitExpr_(const SubmitPtr& op) {
   if (op) {
-    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrWorker));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, true);
   }
   IRVisitor::VisitExpr_(op);
@@ -950,6 +1022,10 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
     }
   }
 };
+
+PropertyVerifierPtr CreateAsyncHandleProvenanceVerifier() {
+  return std::make_shared<AsyncHandleProvenanceVerifier>();
+}
 
 // Factory function for creating TypeCheck property verifier
 PropertyVerifierPtr CreateTypeCheckPropertyVerifier() {

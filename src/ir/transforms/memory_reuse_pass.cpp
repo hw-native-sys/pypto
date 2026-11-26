@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
 
@@ -51,12 +52,16 @@ namespace {
  */
 FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MemoryReusePass cannot run on null function";
+  if (GetFunctionMemoryPlanner(func) == MemoryPlanner::PtoAS) return func;
   BufferIRFunctionScope buffer_scope(func);
 
   // Orchestration bodies submit tasks and never hold TileType variables, so
   // there is nothing for memory reuse to do — skip them silently. A Graph body
   // is orchestration too.
-  if (IsOrchestrationLike(func->func_type_) || func->func_type_ == FunctionType::SIMT) return func;
+  if (IsOrchestrationLike(func->func_type_) ||
+      (func->func_type_ == FunctionType::SIMT || func->func_type_ == FunctionType::VF)) {
+    return func;
+  }
 
   // Step 0 (semantic must-alias retarget) now runs in the preceding
   // MaterializeSemanticAliases pass, so the body here is already retargeted.

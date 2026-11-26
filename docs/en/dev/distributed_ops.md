@@ -49,29 +49,38 @@ exist for their cross-rank effect, not for an SSA value a consumer reads.
 
 ## Async transfer validation
 
-`pld.tensor.put_async` and `pld.tensor.get_async` lower on the A5 backend to a
-dtype-suffixed external helper call (`pypto_urma_{put,get}_async_<dtype>`). The
-helper validates the request against both endpoint tensor extents and the
-communication window, requests the URMA workspace from the IR `engines` field,
-and submits through the existing runtime entry point; it never polls. Task
-completion integration (the enclosing task releasing the consumer) is still
-pending. Both endpoints must be window-bound, dense row-major
-`DistributedTensor`s. The result aliases `dst`; returning from the op does not
-imply completion.
+See [Async transfer validation](distributed_async.md) for the supported transfer matrix, usage pattern, ABI notes and failure diagnostics.
 
-Adapter symbols and C++ element types reuse the shared dtype conversions.
+### Explicit PUT and GET completion (frontend and IR)
 
-- Python builders require `engine=pld.CommEngine.URMA` (also the default).
-  Integers, floats, booleans, strings, and unrelated enums are rejected before
-  integer conversion. Raw IR stores the engine as integer `1`.
-- `peer` must be an integer/index scalar. Negative constant ranks are rejected;
-  this check does not establish runtime rank bounds for a communication domain.
-- `dst_offsets`, `src_offsets`, and `shape` must be supplied together. A region
-  must be contiguous on both endpoints: skip leading transfer dimensions known
-  to equal one, then require every dimension after the first non-singleton to
-  span its full extent. Dynamic extents may exceed one and are not skipped.
-  Thus `[1, 32]` inside `[16, 64]` and `[1, 2, 64]` inside `[2, 4, 64]` are
-  contiguous, but `[2, 32]` and `[2, 1, 64]`, respectively, are not.
+| Operation | Result |
+| --------- | ------ |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | A peer-independent `pl.AsyncSession` for this AIV and workspace |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | `(dst, event)`; tuple element 0 aliases the local destination |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the local destination |
+| `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`, where `dst_after` aliases the remote destination window |
+| `pld.system.wait_event(event[, session])` | A `BOOL` success flag after waiting in the current kernel |
+| `pld.system.defer_wait_event(event[, session])` | A statement handing completion to the issuing task |
+
+PUT and GET submit dense GM views of matching shape and dtype. Each submission selects
+one peer. PUT takes a remote destination window and GET takes a remote source window.
+Both directions can reuse a session across peers and views of the same InCore
+`DistributedTensor` parameter. Build a separate session for each distinct remote
+window parameter, even when the host places both windows in the same domain.
+For tensor GET, call `wait_event(event)` or `defer_wait_event(event)`. For tile PUT and GET,
+wait and defer also accept the session that submitted the transfer. An in-kernel wait returns success to the caller. Deferring hands completion
+to the task so its consumers can use the destination after logical completion. These six
+operations currently support DSL construction, IR verification, and printing.
+
+Use the returned destination in subsequent operations. The wait below completes the GET before the PUT reads its result.
+
+```python
+session = pld.system.make_session(pld.system.get_comm_ctx(window))
+local, fetched = pld.tile.get_async(local, first_peer, window, session)
+pld.system.wait_event(fetched, session)
+window, sent = pld.tile.put_async(window, second_peer, local, session)
+pld.system.defer_wait_event(sent, session)
+```
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
@@ -882,7 +891,7 @@ Registers a local counter condition without `pto.comm.twait`. The kernel can ret
 release its AIV, but Simpler delays the ordinary TaskId's completion until every condition
 is ready; the kernel is never resumed.
 
-V1 accepts a direct window-bound INT32 `DistributedTensor` parameter with ND/DN
+The current implementation accepts a direct window-bound INT32 `DistributedTensor` parameter with ND/DN
 addressing, integer/index offsets and threshold, and only `WaitCmp::kGe`.
 Slices/views/SSA aliases, NZ layout, and rank-zero signals are rejected. Counter
 storage is INT32 but polling is unsigned `>=`: thresholds and published values must

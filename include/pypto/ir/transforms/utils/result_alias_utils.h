@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <vector>
 
 #include "pypto/ir/expr.h"
 
@@ -44,6 +45,10 @@ namespace ir {
  * decided, which is the state the argument-effect registry exists to remove.
  */
 [[nodiscard]] std::optional<size_t> ResultAliasedArgIndex(const CallPtr& call);
+
+/// For a registered tuple result, return its aliased operands by field index.
+/// Fresh fields have null entries. An empty vector means no declared aliases.
+[[nodiscard]] std::vector<ExprPtr> TupleResultAliasOperands(const CallPtr& call);
 
 }  // namespace ir
 }  // namespace pypto

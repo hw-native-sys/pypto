@@ -1083,18 +1083,21 @@ class TestValidateIr:
         with pytest.raises(FileNotFoundError, match="passes_dump"):
             cp.validate_ir({}, {})
 
-    def test_delegates_to_validator(self, tmp_path):
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    def test_delegates_to_validator(self, tmp_path, backend_type):
         prog = _make_program_with_orchestration()
         passes_dump = tmp_path / "passes_dump"
         passes_dump.mkdir()
-        cp = CompiledProgram(prog, str(tmp_path))
+        cp = CompiledProgram(prog, str(tmp_path), backend_type=backend_type)
 
         tensors = {"a": torch.zeros(4)}
         expected = {"c": torch.ones(4)}
         with patch("pypto.debug.validate_pass_ir_codegen_results") as validator:
             cp.validate_ir(tensors, expected, rtol=1e-3, atol=1e-4)
 
-        validator.assert_called_once_with(str(passes_dump), tensors, expected, rtol=1e-3, atol=1e-4)
+        validator.assert_called_once_with(
+            str(passes_dump), tensors, expected, rtol=1e-3, atol=1e-4, backend_type=backend_type
+        )
 
 
 class TestCompiledMetaAndFromDir:

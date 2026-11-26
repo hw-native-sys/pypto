@@ -83,6 +83,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -91,6 +92,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -271,6 +273,7 @@ StmtPtr MakeCacheInvalidAll(const Span& span) { return MakeNoArgOp("system.cache
 // the sole body of an if/for without an enclosing SeqStmts).
 class InsertCommMarkers : public IRMutator {
  public:
+  explicit InsertCommMarkers(ProgramPtr program) : program_(std::move(program)) {}
   // Entry point: process a function body (delegates to the same bare-body-aware
   // wrapping used for if/for/while bodies).
   StmtPtr MarkTopLevel(const StmtPtr& body) { return MarkBody(body); }
@@ -283,7 +286,7 @@ class InsertCommMarkers : public IRMutator {
     const auto& stmts = op->stmts_;
     for (size_t i = 0; i < stmts.size(); ++i) {
       const StmtPtr& child = stmts[i];
-      const Effect eff = StmtEffect(child);
+      const Effect eff = GetEffect(child);
       // A pure wait-loop (the mesh composite's `for src: if src != me: wait`)
       // performs no memory access between the waits, so ONE whole-GM
       // cacheinvalid after the loop replaces the per-wait invalidates inside
@@ -332,7 +335,7 @@ class InsertCommMarkers : public IRMutator {
           changed = true;
         }
       } else if (eff == Effect::kWait && !in_pure_wait_loop_) {
-        const bool next_is_wait = i + 1 < stmts.size() && StmtEffect(stmts[i + 1]) == Effect::kWait;
+        const bool next_is_wait = i + 1 < stmts.size() && GetEffect(stmts[i + 1]) == Effect::kWait;
         const bool already = i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]);
         if (!next_is_wait && !already) {
           out.push_back(MakeCacheInvalidAll(child->span_));
@@ -367,7 +370,7 @@ class InsertCommMarkers : public IRMutator {
   // After the first run a wrapped body is a SeqStmts, so the pass stays idempotent.
   StmtPtr MarkBody(const StmtPtr& body) {
     if (As<SeqStmts>(body)) return VisitStmt(body);
-    const Effect eff = StmtEffect(body);
+    const Effect eff = GetEffect(body);
     // A bare body that is itself a pure wait-loop (a single-loop function or an
     // if/for body) must suppress the per-wait invalidates while its body is
     // visited — exactly like the SeqStmts path does for a pure loop child — and
@@ -486,6 +489,16 @@ class InsertCommMarkers : public IRMutator {
     return IsLeafOp(stmt, "pld.system.wait") ? WaitPurity::kPureWithWait : WaitPurity::kNotPure;
   }
 
+  Effect GetEffect(const StmtPtr& stmt) const {
+    // VF declarations borrow local Tiles and cannot capture GM tensors. Their
+    // memory effects are synchronized by the annotated Tile adapter in PTOAS,
+    // so the opaque-call GM publication fallback would add a spurious fence.
+    if (ResolveVFCall(LeafCall(stmt), program_)) return Effect::kNone;
+    return StmtEffect(stmt);
+  }
+
+  ProgramPtr program_;
+
   /// Set while visiting a pure wait-loop's body: suppresses the per-wait
   /// consume-side cacheinvalid (the loop's containing sequence emits one
   /// whole-GM cacheinvalid after the loop instead).
@@ -498,23 +511,22 @@ class InsertCommMarkers : public IRMutator {
 }  // namespace
 
 Pass InsertCommFence() {
-  auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
-    if (!func || !func->body_) return func;
-    // The data-before-signal contract is an InCore-only concern: the publishing
-    // writes, waits, and the system.cacheinvalid / system.fence markers are
-    // InCore GM builtins. Orchestration / HOST functions only dispatch tasks —
-    // their cross-function calls are not GM publishing writes, and inserting an
-    // InCore builtin there is rejected by orchestration codegen.
-    if (!IsInCoreType(func->func_type_)) return func;
-    InsertCommMarkers mutator;
-    auto new_body = mutator.MarkTopLevel(func->body_);
-    if (new_body.get() == func->body_.get()) return func;
-    return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                      func->return_types_, new_body, func->span_, func->func_type_,
-                                      func->level_, func->role_, func->attrs_,
-                                      func->requires_runtime_binding_, func->ir_stage_);
+  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    auto result = MutableCopy(program);
+    for (auto& [gvar, func] : result->functions_) {
+      // Orchestration/HOST calls dispatch tasks, rather than publishing GM
+      // data in this kernel. Only InCore variants need communication markers.
+      if (!func || !func->body_ || !IsInCoreType(func->func_type_)) continue;
+      InsertCommMarkers mutator(program);
+      auto body = mutator.MarkTopLevel(func->body_);
+      if (body == func->body_) continue;
+      auto updated = MutableCopy(func);
+      updated->body_ = body;
+      func = updated;
+    }
+    return result;
   };
-  return CreateFunctionPass(pass_func, "InsertCommFence", kInsertCommFenceProperties);
+  return CreateProgramPass(pass_func, "InsertCommFence", kInsertCommFenceProperties);
 }
 
 }  // namespace pass

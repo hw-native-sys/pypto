@@ -37,7 +37,10 @@ def tquant_mx(
     quant_scale_alg: str = "ocp",
     span: Span | None = None,
 ) -> Call:
-    """MX block-32 dynamic quantization returning quantized data and scale."""
+    """MX block-32 dynamic quantization returning quantized data and scale.
+
+    FP8E5M2 uses OCP scaling and a native A5 FP8 cast.
+    """
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
     if quant_scale_alg != "ocp":
@@ -54,12 +57,15 @@ def tquant_mx_raw(
     group_axis: int = 1,
     quant_scale_alg: str = "ocp",
     interleave: bool = False,
+    canonical_axis1: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build the compiler-internal value-returning raw MX quantization Call.
 
     Returns ``TupleType{INT8 dst, UINT8 exp}``. ``max_scratch`` / ``scaling_scratch``
     are write-only per-group workspaces (same role as ``gather_compare``'s tmp).
+    With ``canonical_axis1=True``, a FP32 axis1 input produces one exponent
+    row per source row, with ``valid_cols/32`` valid exponents in each row.
     """
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
@@ -67,6 +73,8 @@ def tquant_mx_raw(
         kwargs["quant_scale_alg"] = quant_scale_alg
     if interleave:
         kwargs["interleave"] = True
+    if canonical_axis1:
+        kwargs["canonical_axis1"] = True
     return _ir_core.create_op_call(
         "tile.tquant_mx_raw",
         [src, max_scratch, scaling_scratch],
@@ -125,7 +133,7 @@ def matmul(
         rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. ``Final`` must be consumed
             by a store with ``STPhase.Final`` in the same straight-line region.
 
@@ -170,7 +178,7 @@ def matmul_acc(
         span: Optional source span for debugging (auto-captured if not provided)
         init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. ``Final`` must be consumed
             by a store with ``STPhase.Final`` in the same straight-line region.
 
@@ -199,7 +207,7 @@ def matmul_bias(
             floating-point matrix operands, INT32 for integer matrix operands)
         span: Optional source span for debugging (auto-captured if not provided)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication with bias
@@ -325,8 +333,18 @@ def gemv(
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
 
     ``lhs`` must have exactly one physical and logical row. The rhs logical K
-    must cover the lhs logical K. Inputs must use the same INT8, FP16, BF16, or FP32
-    dtype; the output is INT32 for INT8 inputs and FP32 otherwise.
+    must cover the lhs logical K.
+
+    The operand dtypes must form a pair the Cube multiplies -- the same table
+    :func:`matmul` uses, restricted to its GEMV rows: INT8, FP16, BF16 or FP32
+    with itself on every target, plus any FP8 (E4M3FN / E5M2, **either order**)
+    pair and HF8 x HF8 on Ascend950. The output is INT32 for INT8 inputs and
+    FP32 for every other pair.
+
+    On Ascend950 the lhs needs a whole 512-byte block of physical K (the
+    Mat-to-Left extract of a single row is a vector load), so physical K must be a
+    multiple of ``512 / dtype_bytes``; logical K carries no such restriction.
+    Narrowing the *output* columns is not yet supported there.
 
     Args:
         lhs: Row vector tile (TileType [1, K])

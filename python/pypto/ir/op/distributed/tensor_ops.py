@@ -30,7 +30,14 @@ from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 _ALLREDUCE_SIGNAL_MISSING = object()
 
 
-def alloc_window_buffer(size: int | Expr, *, name: str, span: Span | None = None) -> Call:
+def alloc_window_buffer(
+    size: int | Expr,
+    *,
+    name: str,
+    memory_source: str = "device",
+    init: str | None = None,
+    span: Span | None = None,
+) -> Call:
     """Build a ``pld.tensor.alloc_window_buffer(size)`` Call.
 
     The op's result type is the singleton :class:`ir.PtrType` (allocation
@@ -41,6 +48,9 @@ def alloc_window_buffer(size: int | Expr, *, name: str, span: Span | None = None
         size: Per-rank allocation size in bytes (``int`` or scalar
             :class:`ir.Expr`).
         name: Unique buffer identifier, kwarg-only.
+        memory_source: Physical backing, "device" or "host". Host requires URMA resources.
+        init: Non-empty runtime source key for a Host window. Bind rank-ordered binary files or
+            contiguous CPU tensors through DistributedWorker(window_sources=...) after compilation.
         span: Optional source span (auto-captured if absent).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -48,7 +58,20 @@ def alloc_window_buffer(size: int | Expr, *, name: str, span: Span | None = None
         size_expr: Expr = _ir_core.ConstInt(size, DataType.INT64, actual_span)
     else:
         size_expr = size
-    return _ir_core.create_op_call("pld.tensor.alloc_window_buffer", [size_expr], {"name": name}, actual_span)
+    if memory_source not in ("device", "host"):
+        raise ValueError(
+            f"alloc_window_buffer memory_source must be 'device' or 'host', got {memory_source!r}"
+        )
+    if init is not None and (type(init) is not str or not init):
+        raise ValueError("alloc_window_buffer init must be a non-empty string or None")
+    if init is not None and memory_source != "host":
+        raise ValueError("alloc_window_buffer init requires memory_source='host'")
+    kwargs = {"name": name}
+    if init is not None:
+        kwargs["init"] = init
+    if memory_source != "device":
+        kwargs["memory_source"] = memory_source
+    return _ir_core.create_op_call("pld.tensor.alloc_window_buffer", [size_expr], kwargs, actual_span)
 
 
 def window(
@@ -278,6 +301,9 @@ def put_async(
     completed. Completion is owned by the enclosing task and carried by the
     producer ``InOut`` -> consumer ``In`` dependency.
 
+    ``dst`` is a window-bound DistributedTensor; local ``src`` may be a
+    plain Tensor or a DistributedTensor from another communication domain.
+
     ``engine`` is a compile-time kwarg; V1 accepts :attr:`CommEngine.URMA` only
     and rejects any other engine. With no offsets/shape this transfers the full
     local ``src`` into the full peer ``dst`` slice. Supplying ``dst_offsets``,
@@ -308,6 +334,30 @@ def put_async(
     return _ir_core.create_op_call("pld.tensor.put_async", args, {"engine": engine_value}, actual_span)
 
 
+def get_async_event(
+    dst: Expr, peer: int | Expr, src: Expr, *, engine: CommEngine = CommEngine.URMA, span: Span | None = None
+) -> Call:
+    """Submit a single-peer GET of dense GM views and expose its completion event.
+
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        engine: Communication engine. Currently only URMA is supported.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A tuple-valued call. Element 0 aliases dst and element 1 is its pending AsyncEventType
+        handle.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    engine_value = _normalize_async_engine(engine, "pld.tensor.get_async_event")
+    return _ir_core.create_op_call(
+        "pld.tensor.get_async_event", [dst, peer_expr, src], {"engine": engine_value}, actual_span
+    )
+
+
 def get_async(
     dst: Expr,
     peer: int | Expr,
@@ -326,6 +376,9 @@ def get_async(
     result aliases argument 0); returning does **not** mean the data has
     arrived. Completion is owned by the enclosing task and carried by the
     producer ``InOut`` -> consumer ``In`` dependency.
+
+    ``src`` is a window-bound DistributedTensor; local ``dst`` may be a
+    plain Tensor or a DistributedTensor from another communication domain.
 
     ``engine`` is a compile-time kwarg; V1 accepts :attr:`CommEngine.URMA` only
     and rejects any other engine. With no offsets/shape this reads the full
@@ -666,6 +719,7 @@ __all__ = [
     "broadcast",
     "get",
     "get_async",
+    "get_async_event",
     "put",
     "put_async",
     "remote_store",

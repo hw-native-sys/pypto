@@ -9,6 +9,15 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+// Complexity exception for VF initialization validation: allocation and alias
+// lookup remain indexed, but VerifyRegMemoryInitialization visits each helper
+// with its call site's actual views, scalar values and initialized intervals.
+// Its bound is O((N + E) log(N + E)), where E is the sum of helper-body sizes
+// over VF call sites. E can be quadratic in the compact Program size when a
+// large helper is reused many times. In/InOut and alias-return declarations
+// alone cannot prove partially masked initialization. This exception requires
+// approval under .claude/rules/pass-complexity.md before merging.
+
 #include <algorithm>
 #include <any>
 #include <array>
@@ -58,8 +67,13 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/simplify.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -69,28 +83,117 @@ namespace ir {
 
 namespace {
 
-// A tile owns no general-pool buffer ("buffer-less by design") when its defining
-// value is a cross-core tpop result, or a non-permuting zero-copy view / plain
-// alias chained off a buffer-less source. `source_buffer_less` reports whether a
-// source Var is itself buffer-less (the MemRef-creating mutator queries the type;
-// the HasMemRefs verifier consults its tracked set). tile.transpose is excluded —
-// pto.ttrans is not in-place safe and always needs a fresh buffer.
-template <typename SourceBufferLess>
-bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source_buffer_less) {
-  if (auto call = std::dynamic_pointer_cast<const Call>(value)) {
-    if (!call->op_) return false;
-    if (IsOp(call, "tile.tpop_from_aic") || IsOp(call, "tile.tpop_from_aiv")) {
-      return true;
-    }
-    if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
-      auto in = AsVarLike(call->args_[0]);
-      return in && source_buffer_less(in.get());
-    }
-    return false;
+// A receive owns its FIFO slot. Views, physical writebacks and VF results can
+// borrow that slot under fresh SSA names. Both allocation and HasMemRefs need
+// the identity of the receive to distinguish two MemRef-less branch inputs.
+class BorrowedTileRoots {
+ public:
+  [[nodiscard]] const Var* Find(const ExprPtr& value) const {
+    auto var = AsVarLike(value);
+    auto it = roots_.find(var.get());
+    return it == roots_.end() ? nullptr : it->second;
   }
-  auto v = AsVarLike(value);
-  return v && source_buffer_less(v.get());
-}
+
+  [[nodiscard]] const Var* Definition(const VarPtr& result, const ExprPtr& value) const {
+    if (op_predicates::IsTPop(As<Call>(value))) return result.get();
+    return Find(op_predicates::GetBufferAliasSource(value));
+  }
+
+  void Bind(const VarPtr& result, const Var* root) {
+    if (root) roots_[result.get()] = root;
+  }
+
+  void BindAlias(const VarPtr& result, const ExprPtr& source) { Bind(result, Find(source)); }
+
+ private:
+  std::map<const Var*, const Var*> roots_;
+};
+
+// Track declared tensor aliases and VF tile returns across tuple copies and control flow.
+// A null field has no common operand and uses ordinary projection lowering.
+class TupleResultStorage {
+ public:
+  struct Storage {
+    TypePtr type;
+    const Var* root = nullptr;  // Canonical FIFO receive for a borrowed Tile.
+  };
+
+  void Record(const VarPtr& result, const std::vector<ExprPtr>& args, const BorrowedTileRoots& borrowed) {
+    auto& fields = fields_[result.get()];
+    fields.clear();
+    fields.reserve(args.size());
+    for (const auto& arg : args) {
+      fields.push_back(arg ? Storage{arg->GetType(), borrowed.Find(arg)} : Storage{});
+    }
+  }
+
+  [[nodiscard]] const std::vector<Storage>* Find(const ExprPtr& value) const {
+    auto var = AsVarLike(value);
+    auto it = fields_.find(var.get());
+    return it == fields_.end() ? nullptr : &it->second;
+  }
+
+  void Copy(const VarPtr& result, const ExprPtr& source) {
+    if (const auto* fields = Find(source)) fields_[result.get()] = *fields;
+  }
+
+  [[nodiscard]] const Storage* Project(const ExprPtr& value) const {
+    auto item = As<TupleGetItemExpr>(value);
+    if (!item) return nullptr;
+    const auto* fields = Find(item->tuple_);
+    if (!fields) return nullptr;
+    INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < fields->size(), item->span_)
+        << "Internal error: tuple result projection out of bounds";
+    const auto& field = (*fields)[item->index_];
+    return field.type ? &field : nullptr;
+  }
+
+  void Join(const VarPtr& result, const ExprPtr& lhs, const ExprPtr& rhs) {
+    const auto* left = Find(lhs);
+    const auto* right = Find(rhs);
+    if (!left || !right || left->size() != right->size()) return;
+    auto fields = *left;
+    auto tuple = As<TupleType>(result->GetType());
+    INTERNAL_CHECK_SPAN(tuple && tuple->types_.size() == fields.size(), result->span_)
+        << "Internal error: tuple result arity changed at control-flow join";
+    for (size_t i = 0; i < fields.size(); ++i) {
+      auto& field = fields[i];
+      const auto& other = (*right)[i];
+      if (field.type == other.type && field.root == other.root) continue;
+      if (field.root && field.root == other.root) {
+        // Different views can borrow one slot. Preserve the join's logical
+        // view rather than imposing one branch's metadata on both paths.
+        field.type =
+            CloneTypeWithMemRef(tuple->types_[i], std::nullopt, As<TileType>(field.type)->memory_space_);
+      } else {
+        field = {};
+      }
+    }
+    fields_[result.get()] = std::move(fields);
+  }
+
+  void JoinBranches(const IfStmtPtr& branch, const YieldStmtPtr& lhs, const YieldStmtPtr& rhs) {
+    if (!lhs || !rhs) return;
+    for (size_t i = 0; i < branch->return_vars_.size() && i < lhs->value_.size() && i < rhs->value_.size();
+         ++i) {
+      if (As<TupleType>(branch->return_vars_[i]->GetType())) {
+        Join(branch->return_vars_[i], lhs->value_[i], rhs->value_[i]);
+      }
+    }
+  }
+
+  void JoinLoop(const std::vector<VarPtr>& results, const std::vector<IterArgPtr>& carries,
+                const StmtPtr& body) {
+    auto yield = transform_utils::GetLastYieldStmt(body);
+    if (!yield) return;
+    for (size_t i = 0; i < results.size() && i < carries.size() && i < yield->value_.size(); ++i) {
+      if (As<TupleType>(results[i]->GetType())) Join(results[i], carries[i], yield->value_[i]);
+    }
+  }
+
+ private:
+  std::map<const Var*, std::vector<Storage>> fields_;
+};
 
 /// Byte envelope of a static slice of an NZ-boxed accumulator (L0C) parent.
 ///
@@ -134,6 +237,27 @@ std::optional<uint64_t> StaticAccSliceViewSpanBytes(
   return storage_size::StaticStorageBytes(last_box_start + box_elements, dtype);
 }
 
+// The positive-stride descriptor covers a byte envelope, including its gaps.
+// Only the individual addresses selected by the descriptor are read/written.
+std::optional<uint64_t> StaticTensorViewSpanBytes(const TensorTypePtr& tensor,
+                                                  const std::vector<ExprPtr>& shape) {
+  const auto& view = tensor->tensor_view_;
+  INTERNAL_CHECK(view && view->stride.size() == shape.size()) << "Tensor view stride rank mismatch";
+  uint64_t elements = 1;
+  for (size_t i = 0; i < shape.size(); ++i) {
+    const auto extent = As<ConstInt>(shape[i]);
+    const auto stride = As<ConstInt>(view->stride[i]);
+    if (!extent || !stride || extent->value_ <= 0 || stride->value_ <= 0) return std::nullopt;
+    uint64_t term;
+    if (__builtin_mul_overflow(static_cast<uint64_t>(extent->value_ - 1),
+                               static_cast<uint64_t>(stride->value_), &term) ||
+        __builtin_add_overflow(elements, term, &elements)) {
+      return std::nullopt;
+    }
+  }
+  return storage_size::StaticStorageBytes(elements, tensor->dtype_);
+}
+
 /// Byte envelope touched by a static packed slice, relative to its first
 /// element. This is deliberately distinct from the physical allocation size:
 /// L0C row padding belongs to the root allocation and must not be applied again
@@ -141,13 +265,33 @@ std::optional<uint64_t> StaticAccSliceViewSpanBytes(
 std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const ShapedTypePtr& parent,
                                                  const ShapedTypePtr& view) {
   if (!call || (!IsOp(call, "tensor.slice") && !IsOp(call, "tile.slice"))) return std::nullopt;
-  if (!parent || !view || call->args_.size() < 2) return std::nullopt;
+  if (!parent || !view || call->args_.size() < 3) return std::nullopt;
   // Use the requested pre-drop shape rather than the result rank so
   // tile.slice(..., drop_dims=...) keeps the parent strides of dimensions that
   // disappear from the result type.
   auto requested_shape = As<MakeTuple>(call->args_[1]);
   if (!requested_shape || parent->shape_.size() != requested_shape->elements_.size()) {
     return std::nullopt;
+  }
+
+  auto tensor = AsTensorTypeLike(parent);
+  auto indices = As<TupleType>(call->args_[2]->GetType());
+  if (indices &&
+      HasRectangularSliceStrides(tensor, requested_shape->elements_.size(), indices->types_.size())) {
+    auto extents = requested_shape->elements_;
+    const auto offsets = ExtractTupleElements(call->args_[2], indices->types_.size());
+    // A padded or clamped rectangle can extend past the parent; its GM
+    // envelope ends at the final physical element available on each axis.
+    for (size_t i = 0; i < extents.size(); ++i) {
+      auto bound = As<ConstInt>(parent->shape_[i]);
+      auto start = As<ConstInt>(offsets[i]);
+      auto extent = As<ConstInt>(extents[i]);
+      if (bound && start && extent && start->value_ >= 0 && bound->value_ >= 0) {
+        const int64_t available = bound->value_ - start->value_;
+        if (available < extent->value_) extents[i] = MakeIndexConst(std::max<int64_t>(0, available));
+      }
+    }
+    return StaticTensorViewSpanBytes(tensor, extents).value_or(0);
   }
 
   // Keep the span in the same layout model as the byte offset that
@@ -477,15 +621,11 @@ class DeclaredAllocCollector : public IRVisitor {
 class InitMemRefMutator : public IRMutator {
  public:
   InitMemRefMutator(const DeclaredAllocMap& declared_allocs, const backend::BackendHandler* handler,
-                    FunctionType func_type)
-      : declared_allocs_(declared_allocs), handler_(handler), func_type_(func_type) {}
-
-  /// Whether `type` is bound to one of this function's declared allocations.
-  [[nodiscard]] bool HasUserBinding(const TypePtr& type) const {
-    if (declared_allocs_.empty()) return false;
-    auto binding = GetDeclaredAlloc(type);
-    return binding && declared_allocs_.count(binding->base_.get()) > 0;
-  }
+                    FunctionType func_type, ProgramPtr program)
+      : declared_allocs_(declared_allocs),
+        handler_(handler),
+        func_type_(func_type),
+        program_(std::move(program)) {}
 
   /// The MemRef a user binding asks for, sized to the slot it selects.
   /// Returns nullopt when `type` carries no binding.
@@ -585,6 +725,12 @@ class InitMemRefMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(!As<TileType>(type) || static_size.has_value(), err_span)
         << "InitMemRef cannot represent the physical allocation size for static tile variable '" << var_name
         << "' without overflowing 64-bit bytes";
+    if (const auto tensor = AsTensorTypeLike(type); tensor && tensor->tensor_view_) {
+      const auto& view = *tensor->tensor_view_;
+      if (!view.stride.empty() && (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)) {
+        static_size = StaticTensorViewSpanBytes(tensor, tensor->shape_);
+      }
+    }
     const uint64_t size_bytes = static_size.value_or(0);
 
     auto base =
@@ -615,7 +761,10 @@ class InitMemRefMutator : public IRMutator {
         old_var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
         source_memory_space);
 
-    return std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
+    auto result = std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
+    borrowed_.BindAlias(result, new_init);
+    tuple_results_.Copy(result, new_init);
+    return result;
   }
 
   // Process normal Var variable (creates new MemRef based on usage)
@@ -709,6 +858,22 @@ class InitMemRefMutator : public IRMutator {
     return std::static_pointer_cast<const Expr>(GetNewVar(var_ptr));
   }
 
+  /// Validate a declaration against the storage an alias actually inherits.
+  /// Type deduction and SSA can carry the source's pinned declaration onto an
+  /// unannotated result (notably gather_row). Its presence alone is therefore
+  /// not a request for another buffer. Resolve it to a byte address before
+  /// comparing: base identity alone would also accept a different slot, while
+  /// MemRef pointer equality would reject independently rebuilt equal indices.
+  void CheckAliasBinding(const AssignStmtPtr& op, const MemRefPtr& inherited) const {
+    auto requested = UserBoundMemRef(op->var_->GetType());
+    if (!requested) return;
+    CHECK_SPAN(inherited && CompareBaseAddress(*requested, inherited) == AddressRelation::kSame,
+               op->var_->span_)
+        << "Tile '" << op->var_->name_hint_
+        << "' lands in its source tile's allocation, but its binding selects a different or "
+           "unproven address. Bind the source tile instead.";
+  }
+
   /**
    * @brief Create a view MemRef from a source expression for the LHS variable of an assignment.
    *
@@ -718,7 +883,10 @@ class InitMemRefMutator : public IRMutator {
    */
   StmtPtr ShareMemRefFrom(const ExprPtr& source, const AssignStmtPtr& op, const ExprPtr& new_value) {
     auto parent_memref_opt = GetTypeMemRef(source->GetType());
-    if (!parent_memref_opt.has_value()) return nullptr;
+    if (!parent_memref_opt.has_value()) {
+      CheckAliasBinding(op, nullptr);
+      return nullptr;
+    }
     const auto& parent_memref = *parent_memref_opt;
 
     // A nested slice can narrow a strided window's byte envelope back to its
@@ -757,14 +925,16 @@ class InitMemRefMutator : public IRMutator {
     // slice beginning at row 16 of a 32-row INT32 allocation must end at the
     // root boundary, not acquire another 32 rows of L0C padding. The envelope
     // is measured in the same layout model as the byte offset just computed —
-    // NZ boxes for the accumulator windows GetSliceAccumulatorGeometry accepts,
-    // row-major-dense elements for every other slice — so offset + span stays
-    // inside the root either way.
+    // physical strides for rectangular GM slices, NZ boxes for eligible
+    // accumulator windows, and row-major elements for packed slices.
     uint64_t view_size = parent_memref->size_;  // default: same size as parent
     if (auto call = As<Call>(new_value)) {
       auto parent_shaped = std::dynamic_pointer_cast<const ShapedType>(source->GetType());
       auto out_shaped = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
-      if (auto slice_span = StaticSliceViewSpanBytes(call, parent_shaped, out_shaped)) {
+      if (IsWindowTensorView(call)) {
+        auto tensor = AsTensorTypeLike(op->var_->GetType());
+        view_size = StaticTensorViewSpanBytes(tensor, tensor->shape_).value_or(0);
+      } else if (auto slice_span = StaticSliceViewSpanBytes(call, parent_shaped, out_shaped)) {
         view_size = *slice_span;
       }
     }
@@ -772,6 +942,7 @@ class InitMemRefMutator : public IRMutator {
     // Full aliases share the exact MemRef; subviews retain the source's slots
     // while narrowing the window. Later reanchoring uses the same construction.
     MemRefPtr view_memref = MakeAliasingMemRef(parent_memref, additional_offset, view_size, op->span_);
+    CheckAliasBinding(op, view_memref);
     if (non_dense_source) non_dense_view_memrefs_.insert(view_memref);
 
     std::optional<MemRefPtr> view_opt = view_memref;
@@ -784,9 +955,11 @@ class InitMemRefMutator : public IRMutator {
 
   // Rebuild an AssignStmt whose LHS tile var keeps its TileType + memory_space but
   // carries no MemRef. Used for tiles that own no general-pool buffer: cross-core
-  // tpop results and zero-copy views over them (codegen lowers those to
+  // tpop results and their physical writebacks / zero-copy views (codegen lowers views to
   // pto.treshape over the source rather than a fresh alloc_tile).
-  StmtPtr MakeMemRefLessAssign(const AssignStmtPtr& op, const ExprPtr& new_value) {
+  StmtPtr MakeMemRefLessAssign(const AssignStmtPtr& op, const ExprPtr& new_value, const Var* root) {
+    // A FIFO slot has no statically provable allocation address.
+    CheckAliasBinding(op, nullptr);
     auto var_expr = std::static_pointer_cast<const Expr>(op->var_);
     if (auto tile_type = std::dynamic_pointer_cast<const TileType>(var_expr->GetType())) {
       for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
@@ -802,38 +975,65 @@ class InitMemRefMutator : public IRMutator {
         ResolveTileMemorySpace(var_expr->GetType()));
     auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
     var_map_[op->var_] = new_var;
+    borrowed_.Bind(new_var, root);
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+  }
+
+  // A projected alias keeps the operand's complete view, including borrowed FIFO storage.
+  StmtPtr BindAliasedResult(const TupleResultStorage::Storage& storage, const AssignStmtPtr& op,
+                            const ExprPtr& value) {
+    CheckAliasBinding(op, GetTypeMemRef(storage.type).value_or(nullptr));
+    auto var = std::make_shared<Var>(op->var_->name_hint_, storage.type, op->var_->span_);
+    borrowed_.Bind(var, storage.root);
+    var_map_[op->var_] = var;
+    return std::make_shared<AssignStmt>(var, value, op->span_, op->leading_comments_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
 
-    // A tile that owns no general-pool buffer — a cross-core tpop result (its
-    // data lives in the reserved C2V/V2C slot, addressed via the pipe), or a
-    // zero-copy view / plain alias chained off one — stays MemRef-less, so
-    // AllocateMemoryAddr reserves no phantom buffer and no fresh, disconnected
-    // buffer is created.
-    if (As<TileType>(op->var_->GetType()) && ProducesBufferLessTile(new_value, [](const Var* v) {
-          return !GetTypeMemRef(v->GetType()).has_value();
-        })) {
-      return MakeMemRefLessAssign(op, new_value);
+    if (auto call = As<Call>(new_value)) {
+      auto helper = ResolveVFCall(call, program_);
+      auto aliases = helper ? VFReturnedArguments(helper, call) : TupleResultAliasOperands(call);
+      if (helper || !aliases.empty()) {
+        // Replace aliased result types with the actual operand views. Fresh fields
+        // such as a transfer event retain the result type deduced by the operator.
+        auto tuple = As<TupleType>(call->GetType());
+        std::vector<TypePtr> types;
+        types.reserve(aliases.size());
+        for (size_t i = 0; i < aliases.size(); ++i) {
+          types.push_back(aliases[i] ? aliases[i]->GetType() : tuple->types_[i]);
+        }
+        TypePtr type = types.size() == 1 ? types[0] : std::make_shared<TupleType>(types);
+        auto value =
+            std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, type, call->span_);
+        if (aliases.size() == 1) return BindAliasedResult({type, borrowed_.Find(aliases[0])}, op, value);
+        auto var = std::make_shared<Var>(op->var_->name_hint_, type, op->var_->span_);
+        var_map_[op->var_] = var;
+        tuple_results_.Record(var, aliases, borrowed_);
+        return std::make_shared<AssignStmt>(var, value, op->span_, op->leading_comments_);
+      }
+    }
+    if (tuple_results_.Find(new_value)) {
+      auto var = std::make_shared<Var>(op->var_->name_hint_, new_value->GetType(), op->var_->span_);
+      var_map_[op->var_] = var;
+      tuple_results_.Copy(var, new_value);
+      return std::make_shared<AssignStmt>(var, new_value, op->span_, op->leading_comments_);
+    }
+    if (auto storage = tuple_results_.Project(new_value)) return BindAliasedResult(*storage, op, new_value);
+
+    // FIFO storage is provided by the pipe. Follow physical aliases before
+    // allocating a Tile, including writebacks with a fresh SSA result.
+    if (As<TileType>(op->var_->GetType())) {
+      if (auto root = borrowed_.Definition(op->var_, new_value)) {
+        return MakeMemRefLessAssign(op, new_value, root);
+      }
     }
 
-    // Check if the RHS is a Call expression
-    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
+    if (auto call = As<Call>(op->value_)) {
       LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_hint_ << " with call to "
                 << call->op_->name_;
-
-      // A view / in-place result physically IS its source's buffer, so binding
-      // it to a different one cannot be honored. Say so instead of silently
-      // dropping the binding — the user asked for something impossible.
-      CHECK_SPAN(!op_predicates::OutputInheritsSourceBuffer(call->op_->name_) ||
-                     !HasUserBinding(op->var_->GetType()),
-                 op->var_->span_)
-          << "Tile '" << op->var_->name_hint_ << "' is produced by '" << call->op_->name_
-          << "', which lands in its source tile's allocation, so it cannot be given one of its own. "
-             "Bind the source tile instead.";
 
       // Handle view operations: output should share MemRef with input tile.
       // A pure metadata view (slice/reshape/...) inherits its input's buffer.  A
@@ -858,20 +1058,12 @@ class InitMemRefMutator : public IRMutator {
         }
       }
 
-      // Handle ops whose output lands in a specific input arg's MemRef.
-      //
-      // The registry's `set_output_reuses_input` slot, NOT the broader
-      // `ResultAliasedArgIndex`. The two answer different questions.  This pass
-      // asks a *physical* one — which argument's buffer does this result
-      // occupy, so the LHS can be bound to it — and only the registry
-      // declaration states that.  `ResultAliasedArgIndex` additionally covers
-      // host-level ops whose result names an argument for *lineage* purposes
-      // (`tensor.write`, and the `pld.tensor.*` collectives, whose result is
-      // the window they reduced or gathered into).  A window's storage belongs
-      // to the distributed runtime and is materialized later by
-      // LowerHostTensorCollectives, so binding the SSA result to it here
-      // rewrites a buffer this pass does not own.
-      auto reuse_arg_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+      // An InCore scalar write returns the destination descriptor at the same
+      // GM origin. Elsewhere, use explicit storage reuse: host collectives
+      // acquire their physical storage later in LowerHostTensorCollectives.
+      const auto reuse_arg_idx = IsInCoreType(func_type_) && IsOp(call, "tensor.write")
+                                     ? ResultAliasedArgIndex(call)
+                                     : op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
       if (reuse_arg_idx.has_value()) {
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call && *reuse_arg_idx < new_call->args_.size()) {
@@ -885,11 +1077,12 @@ class InitMemRefMutator : public IRMutator {
       }
     }
 
-    // Tile alias: a = b where b is a tile Var — share b's MemRef.
+    // Plain tile and InCore GM tensor aliases share the source MemRef.
     // Without this, the alias gets a fresh MemRef that is never written to,
     // breaking IfStmt return_vars that inherit the alias's empty MemRef.
-    if (auto value_var = As<Var>(new_value)) {
-      if (As<TileType>(op->var_->GetType())) {
+    if (auto value_var = AsVarLike(new_value)) {
+      if (As<TileType>(op->var_->GetType()) ||
+          (IsInCoreType(func_type_) && AsTensorTypeLike(op->var_->GetType()))) {
         auto result = ShareMemRefFrom(value_var, op, new_value);
         if (result) return result;
       }
@@ -911,6 +1104,7 @@ class InitMemRefMutator : public IRMutator {
       const auto& argument = launch->args_[launch->result_param_indices_[i]];
       auto result =
           std::make_shared<Var>(op->results_[i]->name_hint_, argument->GetType(), op->results_[i]->span_);
+      borrowed_.BindAlias(result, argument);
       var_map_[op->results_[i]] = result;
       launch->results_[i] = std::move(result);
     }
@@ -977,6 +1171,7 @@ class InitMemRefMutator : public IRMutator {
     new_for->iter_args_ = new_iter_args;
     new_for->body_ = new_body;
     new_for->return_vars_ = new_return_vars;
+    tuple_results_.JoinLoop(new_return_vars, new_iter_args, new_body);
 
     // Patch return_vars so each shares its iter_arg's MemRef (inherited from initValue).
     // This establishes the invariant that initValue/iter_arg/return_var all share the
@@ -1003,6 +1198,7 @@ class InitMemRefMutator : public IRMutator {
     auto result = IRMutator::VisitStmt_(op);
     auto loop = As<WhileStmt>(result);
     if (!loop || loop->return_vars_.empty()) return result;
+    tuple_results_.JoinLoop(loop->return_vars_, loop->iter_args_, loop->body_);
     // Match the ForStmt invariant: the result is the carried storage even if
     // the loop executes zero times. A fresh return MemRef would lose both
     // alias identity and initialization established before the loop.
@@ -1024,12 +1220,29 @@ class InitMemRefMutator : public IRMutator {
 
     auto then_yield = FindYieldStmt(new_if->then_body_);
     auto else_yield = new_if->else_body_.has_value() ? FindYieldStmt(new_if->else_body_.value()) : nullptr;
+    tuple_results_.JoinBranches(new_if, then_yield, else_yield);
     if (!then_yield && !else_yield) return result;
 
     auto get_yield_var = [&](size_t i) -> VarPtr {
-      VarPtr var = nullptr;
-      if (then_yield && i < then_yield->value_.size()) var = As<Var>(then_yield->value_[i]);
-      if (!var && else_yield && i < else_yield->value_.size()) var = As<Var>(else_yield->value_[i]);
+      auto then_var =
+          then_yield && i < then_yield->value_.size() ? AsVarLike(then_yield->value_[i]) : nullptr;
+      auto else_var =
+          else_yield && i < else_yield->value_.size() ? AsVarLike(else_yield->value_[i]) : nullptr;
+      // A GM phi aliases its source descriptor only when both paths yield
+      // that storage. PTO checks the corresponding descriptor SSA at emission.
+      if (AsTensorTypeLike(new_if->return_vars_[i]->GetType()) &&
+          (!then_var || !else_var ||
+           GetTypeMemRef(then_var->GetType()) != GetTypeMemRef(else_var->GetType()))) {
+        return nullptr;
+      }
+      auto var = then_var ? then_var : else_var;
+      if (auto tile = var ? As<TileType>(var->GetType()) : nullptr; tile && !tile->memref_) {
+        // Only a single borrowed slot can remain an alias after the join.
+        // Distinct slots need the ordinary allocated phi and branch copies:
+        // lifetime analysis cannot tie the selected handle to either slot.
+        auto root = borrowed_.Find(then_var);
+        if (!root || root != borrowed_.Find(else_var)) return nullptr;
+      }
       return var;
     };
     auto [patched, changed] = PatchReturnVarsFromYield(new_if->return_vars_, op->return_vars_, get_yield_var);
@@ -1054,12 +1267,16 @@ class InitMemRefMutator : public IRMutator {
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
       auto yield_var = get_yield_var(i);
-      auto yield_tile = yield_var ? GetTileTypeWithMemRef(yield_var->GetType()) : nullptr;
-      if (As<TileType>(new_return_vars[i]->GetType()) && yield_tile) {
-        auto new_type = CloneTypeWithMemRef(new_return_vars[i]->GetType(), yield_tile->memref_,
-                                            yield_tile->GetMemorySpace());
+      auto source = yield_var ? std::dynamic_pointer_cast<const ShapedType>(yield_var->GetType()) : nullptr;
+      const auto& result_type = new_return_vars[i]->GetType();
+      const bool share =
+          (As<TileType>(result_type) && yield_var && As<TileType>(yield_var->GetType())) ||
+          (IsInCoreType(func_type_) && AsTensorTypeLike(result_type) && source && source->memref_);
+      if (share) {
+        auto new_type = CloneTypeWithMemRef(result_type, source->memref_, source->GetMemorySpace());
         auto new_rv =
             std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
+        borrowed_.BindAlias(new_rv, yield_var);
         var_map_[old_return_vars[i]] = new_rv;
         patched.push_back(new_rv);
         changed = true;
@@ -1071,10 +1288,13 @@ class InitMemRefMutator : public IRMutator {
   }
 
   std::map<VarPtr, VarPtr> var_map_;
+  BorrowedTileRoots borrowed_;
   std::set<MemRefPtr> non_dense_view_memrefs_;
   const DeclaredAllocMap& declared_allocs_;
   const backend::BackendHandler* handler_ = nullptr;
   FunctionType func_type_ = FunctionType::InCore;
+  ProgramPtr program_;
+  TupleResultStorage tuple_results_;
   uint64_t next_id_ = 0;
 };
 
@@ -1091,10 +1311,10 @@ class InitMemRefMutator : public IRMutator {
  * Memory space is read from TileType::memory_space_ (set by InferTileMemorySpace).
  * Variables without memory_space default to DDR.
  */
-FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
+FunctionPtr TransformInitMemRef(const FunctionPtr& func, const ProgramPtr& program) {
   // Helper storage is borrowed from each launch caller; allocating here would
   // give the helper an unrelated UB/GM buffer instead of its supplied operand.
-  if (func->func_type_ == FunctionType::SIMT) return func;
+  if (func->func_type_ == FunctionType::SIMT || func->func_type_ == FunctionType::VF) return func;
   // Lowering may introduce constant SSA aliases after the early Simplify pass.
   // Normalize them with the shared transformation before building addresses,
   // including when InitMemRef is invoked outside the default pipeline.
@@ -1111,7 +1331,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // PTOAS level2 owns implicit-tmp materialization as part of PlanMemory. PyPTO
   // and DSA-RP instead emit fixed addresses and invoke level3. CI/TCVT scratch
   // requirements come from the backend, while TSORT32 scratch is level-driven.
-  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  const auto planner = GetFunctionMemoryPlanner(func);
   if (handler != nullptr && (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
     MaterializePtoScratchMutator materializer(target);
     normalized_func = materializer.VisitFunction(normalized_func);
@@ -1140,7 +1360,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // the author asked for — slot k is not slot j — is therefore carried into ptoas
   // rather than lost, which is the whole reason the multi-buffer form exists. A
   // single-slot declaration has no such counterpart and stays rejected.
-  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+  if (planner == MemoryPlanner::PtoAS) {
     for (const auto& [base, alloc] : declared_allocs) {
       CHECK(alloc.slot_count > 1)
           << "A single-slot declared allocation (pl.MemRef(\"" << base->name_hint_
@@ -1151,7 +1371,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
     }
   }
 
-  InitMemRefMutator mutator(declared_allocs, handler, normalized_func->func_type_);
+  InitMemRefMutator mutator(declared_allocs, handler, normalized_func->func_type_, program);
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());
@@ -1175,7 +1395,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
       value = std::move(*remapped);
     }
   }
-  VerifyRegMemoryInitialization(result_func);
+  VerifyRegMemoryInitialization(result_func, program);
 
   // Step 4: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
   memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/false);
@@ -1213,7 +1433,16 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef", kInitMemRefProperties); }
+Pass InitMemRef() {
+  return CreateProgramPass(
+      [](const ProgramPtr& program) {
+        return_lineage::ScopedTraceCache lineage_cache;
+        auto result = MutableCopy(program);
+        for (auto& [_, function] : result->functions_) function = TransformInitMemRef(function, program);
+        return ProgramPtr(result);
+      },
+      "InitMemRef", kInitMemRefProperties);
+}
 }  // namespace pass
 
 // ============================================================================
@@ -1227,7 +1456,40 @@ namespace {
  */
 class HasMemRefsVerifier : public IRVisitor {
  public:
-  explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics, ProgramPtr program)
+      : diagnostics_(diagnostics), program_(std::move(program)) {}
+
+  void VisitExpr_(const IterArgPtr& op) override {
+    IRVisitor::VisitExpr_(op);
+    TrackBufferLessAlias(op, op->initValue_);
+    tuple_results_.Copy(op, op->initValue_);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    TrackLoopResults(op->return_vars_, op->iter_args_);
+    tuple_results_.JoinLoop(op->return_vars_, op->iter_args_, op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    TrackLoopResults(op->return_vars_, op->iter_args_);
+    tuple_results_.JoinLoop(op->return_vars_, op->iter_args_, op->body_);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    auto then_yield = FindYieldStmt(op->then_body_);
+    auto else_yield = op->else_body_ ? FindYieldStmt(*op->else_body_) : nullptr;
+    if (!then_yield || !else_yield) return;
+    tuple_results_.JoinBranches(op, then_yield, else_yield);
+    for (size_t i = 0;
+         i < op->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size(); ++i) {
+      if (borrowed_.Find(then_yield->value_[i]) == borrowed_.Find(else_yield->value_[i])) {
+        TrackBufferLessAlias(op->return_vars_[i], then_yield->value_[i]);
+      }
+    }
+  }
 
   void VisitStmt_(const SimtLaunchStmtPtr& op) override {
     for (const auto& result : op->results_) {
@@ -1241,11 +1503,22 @@ class HasMemRefsVerifier : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op || !op->var_ || !op->var_->GetType()) return;
+    if (auto call = As<Call>(op->value_)) {
+      if (auto helper = ResolveVFCall(call, program_)) {
+        auto aliases = VFReturnedArguments(helper, call);
+        if (aliases.size() == 1) {
+          TrackBufferLessAlias(op->var_, aliases[0]);
+        } else {
+          tuple_results_.Record(op->var_, aliases, borrowed_);
+        }
+      }
+    }
+    tuple_results_.Copy(op->var_, op->value_);
+    if (auto storage = tuple_results_.Project(op->value_)) borrowed_.Bind(op->var_, storage->root);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
     if (tile_type && !tile_type->memref_.has_value()) {
-      if (IsBufferLessByDesign(op)) {
-        buffer_less_.insert(op->var_.get());
-      } else {
+      borrowed_.Bind(op->var_, borrowed_.Definition(op->var_, op->value_));
+      if (!borrowed_.Find(op->var_)) {
         diagnostics_.emplace_back(
             DiagnosticSeverity::Error, "HasMemRefs", 0,
             "TileType variable '" + op->var_->name_hint_ + "' has no MemRef initialized", op->var_->span_);
@@ -1255,16 +1528,21 @@ class HasMemRefsVerifier : public IRVisitor {
   }
 
  private:
-  // A cross-core tpop result (its data lives in the reserved C2V/V2C slot, not a
-  // tile MemRef) and any zero-copy view / plain alias chained off such a result
-  // legitimately carry no MemRef. Shares the rule with the MemRef-creating mutator
-  // via ProducesBufferLessTile; here a source is buffer-less iff it is tracked.
-  [[nodiscard]] bool IsBufferLessByDesign(const AssignStmtPtr& op) const {
-    return ProducesBufferLessTile(op->value_, [this](const Var* v) { return buffer_less_.count(v) > 0; });
+  void TrackBufferLessAlias(const VarPtr& var, const ExprPtr& source) {
+    auto tile = As<TileType>(var->GetType());
+    if (tile && !tile->memref_) borrowed_.BindAlias(var, source);
   }
 
-  std::set<const Var*> buffer_less_;
+  void TrackLoopResults(const std::vector<VarPtr>& results, const std::vector<IterArgPtr>& iter_args) {
+    for (size_t i = 0; i < results.size() && i < iter_args.size(); ++i) {
+      TrackBufferLessAlias(results[i], iter_args[i]);
+    }
+  }
+
+  BorrowedTileRoots borrowed_;
   std::vector<Diagnostic>& diagnostics_;
+  ProgramPtr program_;
+  TupleResultStorage tuple_results_;
 };
 
 }  // namespace
@@ -1275,9 +1553,10 @@ class HasMemRefsPropertyVerifierImpl : public PropertyVerifier {
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    return_lineage::ScopedTraceCache lineage_cache;
     for (const auto& [gv, func] : program->functions_) {
-      if (!func || !func->body_) continue;
-      HasMemRefsVerifier verifier(diagnostics);
+      if (!func || !func->body_ || func->func_type_ == FunctionType::VF) continue;
+      HasMemRefsVerifier verifier(diagnostics, program);
       verifier.VisitStmt(func->body_);
     }
   }

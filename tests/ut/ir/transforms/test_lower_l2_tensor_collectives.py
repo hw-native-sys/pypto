@@ -24,6 +24,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto._function_attrs import REQUIRE_CONTIGUOUS_OPERANDS_ATTR
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir, passes
 
 SIZE = 64
@@ -302,17 +303,14 @@ def test_kernel_signature_is_canonical_not_call_site_typed():
     kernel = _get_func(passes.lower_l2_tensor_collectives()(DistributedInput), _KERNEL_NAME)
     assert kernel is not None
     kinds = [type(p.type).__name__ for p in kernel.params]
-    # input and send_counts canonical to plain Tensor even though the call site
-    # passed DistributedTensors; the other three stay distributed, which is what
-    # supplies the CommCtx parameters. core_num is not a parameter at all: the
-    # kernel ABI is five operands plus the ctx suffix, so `args[5]` stays the
-    # CommContext the shared kernel template reads.
+    # Local input/receive counts need no context; remote target, signal and
+    # send counts each get their own context in the canonical suffix.
     assert kinds == [
         "TensorType",
         "DistributedTensorType",
         "DistributedTensorType",
-        "TensorType",
         "DistributedTensorType",
+        "TensorType",
     ], kinds
 
 
@@ -404,7 +402,7 @@ _REJECTED = {
         "",
         "tensor.slice",
     ),
-    # A slice's type carries no strides, so the type deducer cannot see this one.
+    # An implicit-stride parent requires tracing the slice back to its allocation.
     "static_strided_slice": (_STRIDED + "        x = s\n", "", "", "tensor.slice"),
     # A direct transpose has a non-ND type the deducer rejects; a reshape hides it.
     "transpose_behind_reshape": (
@@ -437,14 +435,6 @@ _REJECTED = {
         "",
         "",
         "a DN-layout tensor.slice",
-    ),
-    # A slice drops its parent's stride, so a padded parent must be caught at the parent.
-    "slice_of_padded_stride_parameter": (
-        f"        x = pl.slice(w, [{TOTAL}, {SIZE}], [0, 0])\n",
-        f"\n        w: pl.Tensor[[{2 * TOTAL}, {SIZE}], pl.FP32,"
-        f" pl.TensorView(stride=[{2 * SIZE}, 1], layout=pl.TensorLayout.ND)],",
-        "",
-        "a non-packed-stride parameter 'w'",
     ),
     # An ND view of a DN parameter lowers to a runtime transpose, which is not contiguous.
     "dn_parameter_behind_nd_view": (
@@ -514,6 +504,18 @@ def test_operand_not_provably_row_major_is_rejected(case):
     body, params, kernels, op = _REJECTED[case]
     with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(role="input", op=op)):
         passes.lower_l2_tensor_collectives()(_input_program(body, params, kernels))
+
+
+def test_slice_of_padded_stride_parameter_is_rejected_at_type_deduction():
+    # The slice retains the physical pitch, so the collective can validate its
+    # packing as soon as the call is constructed.
+    body = f"        x = pl.slice(w, [{TOTAL}, {SIZE}], [0, 0])\n"
+    params = (
+        f"\n        w: pl.Tensor[[{2 * TOTAL}, {SIZE}], pl.FP32,"
+        f" pl.TensorView(stride=[{2 * SIZE}, 1], layout=pl.TensorLayout.ND)],"
+    )
+    with pytest.raises(InvalidOperationError, match=rf"dim 0 has stride {2 * SIZE}, expected {SIZE}"):
+        _input_program(body, params)
 
 
 _ACCEPTED = {
@@ -909,7 +911,7 @@ def test_indexed_collective_lowers_local_receive_counts():
     assert kernel is not None
     assert isinstance(kernel.params[4].type, ir.TensorType)
     assert kernel.param_directions[4] == ir.ParamDirection.InOut
-    assert sum(isinstance(p.type, ir.DistributedTensorType) for p in kernel.params) == 2
+    assert sum(isinstance(p.type, ir.DistributedTensorType) for p in kernel.params) == 3
 
 
 @pytest.mark.parametrize("cores", [3, 5])

@@ -630,12 +630,9 @@ class DerivedScalarCollector : public IRVisitor {
 
 /// True when @p expr is built only from literals.
 ///
-/// The strictest replay-invariance test, and the one two checks still use rather
-/// than `ReplayInvariantSet`: a launch's `core_num` and a region allocation's
-/// shape. An invariant value would in fact be safe for both — they need the same
-/// "identical on every replay" property — but no reported case needs it, and
-/// widening a check that governs block counts and buffer addresses buys nothing
-/// for the risk. Deliberate, not an oversight.
+/// The strictest replay-invariance test, used for allocation shapes and launch
+/// widths. Launch widths additionally accept local resource-cohort queries;
+/// other scalar and metadata proofs do not relax the allocation-shape rule.
 [[nodiscard]] bool IsLiteralScalarExpr(const ExprPtr& expr) {
   if (!expr) return false;
   if (As<ConstInt>(expr) || As<ConstFloat>(expr) || As<ConstBool>(expr)) return true;
@@ -1104,12 +1101,15 @@ class RegionAllocationChecker : public IRVisitor {
 class LaunchSpecChecker : public IRVisitor {
  public:
   LaunchSpecChecker(FunctionPtr func, ProgramPtr program)
-      : func_(std::move(func)), program_(std::move(program)) {}
+      : func_(std::move(func)), program_(std::move(program)), invariant_(func_) {
+    invariant_.Collect(func_->body_);
+  }
 
  protected:
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
-    Check(alloc_batching::EffectiveCoreNum(op, Callee(op->op_)), op->span_);
+    auto callee = Callee(op->op_);
+    Check(alloc_batching::EffectiveCoreNum(op, callee), callee, op->span_);
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
@@ -1117,11 +1117,9 @@ class LaunchSpecChecker : public IRVisitor {
     // `core_num_` is the Submit's own field; the wrapper attr is the fallback,
     // matching SubmitToCallView's surfacing of kAttrCoreNum.
     ExprPtr core_num = op->core_num_.value_or(nullptr);
-    if (!core_num) {
-      auto callee = Callee(op->op_);
-      if (callee) core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
-    }
-    Check(core_num, op->span_);
+    auto callee = Callee(op->op_);
+    if (!core_num && callee) core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    Check(core_num, callee, op->span_);
   }
 
  private:
@@ -1131,8 +1129,12 @@ class LaunchSpecChecker : public IRVisitor {
     return program_->GetFunction(gvar->name_);
   }
 
-  void Check(const ExprPtr& core_num, const Span& span) const {
-    if (!core_num || IsLiteralScalarExpr(core_num)) return;
+  [[nodiscard]] bool IsResourceCountWidth(const ExprPtr& core_num, const FunctionPtr& callee) const {
+    return invariant_.IsResourceCount(core_num) || resource_counts_.Resolve(core_num, callee) != nullptr;
+  }
+
+  void Check(const ExprPtr& core_num, const FunctionPtr& callee, const Span& span) const {
+    if (!core_num || IsLiteralScalarExpr(core_num) || IsResourceCountWidth(core_num, callee)) return;
     CHECK_SPAN(false, span)
         << "Graph function '" << func_->name_
         << "' launches a task whose core_num is not a compile-time constant. Recording copies the "
@@ -1144,6 +1146,8 @@ class LaunchSpecChecker : public IRVisitor {
 
   FunctionPtr func_;
   ProgramPtr program_;
+  graph_replay::ReplayInvariantSet invariant_;
+  graph_replay::ResourceCountResolver resource_counts_;
 };
 
 void CheckRegionAllocations(const FunctionPtr& func) {
@@ -1767,7 +1771,7 @@ class ReturnOnlyPhiRewriter : public IRMutator {
   // cause. Reported here instead, where the function the user wrote can be named.
   const auto* ctx = PassContext::Current();
   const RuntimeKind runtime = ctx != nullptr ? ctx->GetRuntime() : kDefaultRuntimeKind;
-  if (runtime != RuntimeKind::HostBuildGraph) {
+  if (!IsHostBuildGraph(runtime)) {
     for (const auto& [gvar, func] : program->functions_) {
       if (!func || func->func_type_ != FunctionType::Graph) continue;
       CHECK_SPAN(false, func->span_)

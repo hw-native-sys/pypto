@@ -28,7 +28,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics.exceptions import InvalidOperationError, ParserSyntaxError
+from pypto.language.parser.diagnostics import InvalidOperationError, ParserSyntaxError
 
 _OP_TILE_GET_SUBBLOCK_IDX = ir.get_op("tile.get_subblock_idx").name
 

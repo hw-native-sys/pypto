@@ -29,6 +29,7 @@
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/spmd_launch_utils.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 
@@ -107,9 +108,12 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
     context->SetHardwareLoopReports(AnalyzeHardwareLoops(program, profile));
   }
 
+  CheckVFCalls(program, true);
+
   // Reuse the IR verifier for register ownership and hardware-loop contracts.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
+    ProgramPtr program;
     void VisitFunction(const ir::FunctionPtr& func) override {
       // A bare register parameter has no scope to trigger the check below and
       // would otherwise fall through to PTO's default pointer parameter ABI.
@@ -125,13 +129,14 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
       if (!diagnostics.empty()) {
         CHECK_SPAN(false, diagnostics.front().span) << diagnostics.front().message;
       }
-      VerifyRegMemoryInitialization(func);
+      VerifyRegMemoryInitialization(func, program);
       ir::IRVisitor::VisitFunction(func);
     }
 
     void VisitStmt_(const ir::RegScopeStmtPtr& op) override { ir::IRVisitor::VisitStmt_(op); }
     void VisitStmt_(const ir::ForStmtPtr& op) override { ir::IRVisitor::VisitStmt_(op); }
   } checker;
+  checker.program = program;
   checker.VisitProgram(program);
 }
 

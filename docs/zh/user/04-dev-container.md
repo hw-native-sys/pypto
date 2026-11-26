@@ -484,22 +484,10 @@ agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限�
 ### 在 CI 中维护发布镜像
 
 [`docker/images.json`](../../../docker/images.json) 是镜像维护入口。
-`Maintain Development Images` workflow 每天在 UTC 19:37（北京时间 03:37）运行；
-`main` 上的 `docker/`、工具链版本、构建约束或该 workflow 变化时也会触发，
-还可通过 **Run workflow** 手动运行。修改上述路径的 PR 在 GitHub 托管 runner 上运行配置检查和
-离线脚本测试。仅当 PR 来源仓库为 `hw-native-sys/pypto` 或明确认可的可信 fork `luohuan19/pypto` 时，
-才在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡分布式用例验证；其他 fork 跳过该 job。
-允许名单位于 workflow 的 `image.if` 条件中；新增仓库意味着允许其代码在持久化宿主机上执行，
-必须由维护者审核其可信性。
-PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用共享 runner 的 PR 构建前，
-管理员必须在 **Settings → Actions → General** 中设置 **Require approval for all external contributors**，
-并确保维护者只批准可信来源和经过审查的代码，包括 workflow 修改。这是仓库级策略，会影响所有外部 PR workflow；
-等待批准时，配置检查也不会运行。该设置不会隔离已经批准执行的代码。
-参见 [GitHub fork workflow 审批设置](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories)。
-定时任务在 workflow 合并到默认分支 `main` 后生效。匹配路径的改动合并到 `main` 时，
-也会立即触发构建发布；请在合并前配置 SWR Secrets。
-PR 不发布镜像，也不获取 SWR 凭据。
-硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
+从 **Actions → Maintain Development Images → Run workflow** 手动启动构建。
+每次运行先检查配置并执行离线脚本测试。在 `hw-native-sys/pypto` 中，工作流随后构建每个已启用的镜像，
+在指定的 NPU runner 上执行 doctor、单卡 decode 和双卡分布式用例。默认运行只构建、验证和清理。
+如需将验证通过的镜像发布到 SWR，启动时选择 `main` 分支并勾选 `publish`。
 
 当前启用三个原生镜像，均使用 CANN 9.2.0：
 
@@ -549,8 +537,7 @@ SWR 认证与 manifest 操作直接连接，不使用代理。登录和推送子
 升级 CANN 时，应一起修改 tag、digest、驱动要求和发布标签。
 
 每次构建前冻结 PyPTO 和 pypto-lib 的提交。PyPTO 的 `ref: main` 使用 workflow checkout 的提交，
-保证 Docker 配方与辅助脚本属于同一次事件快照。PR 使用准确的 head 提交，从 PR 来源仓库
-（包括 fork）克隆，不使用临时合并提交。显式指定的 PyPTO ref 仍使用配置中的来源仓库。
+保证 Docker 配方与辅助脚本对应本次手动运行选中的提交。显式指定的 PyPTO ref 仍使用配置中的来源仓库。
 其他 ref 和 pypto-lib ref 解析为完整提交 SHA。
 runtime 始终跟随 PyPTO 的 gitlink；PTO-ISA 跟随该 runtime 的 `pto_isa.pin`；
 PTOAS 跟随所选 PyPTO 的工具链版本。使用这些 SHA 使源码构建缓存失效，而不是传入可变的 `main`。

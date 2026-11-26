@@ -178,5 +178,61 @@ def test_reg_scope_builder_context_preserves_body_and_attrs():
     ir.assert_structural_equal(built.body, scope)
 
 
+def test_auto_sync_default_canonicalization_and_persistence():
+    span = ir.Span.unknown()
+    body = ir.SeqStmts([], span)
+    default = ir.RegScopeStmt("", body, span)
+    explicit = ir.RegScopeStmt("", body, span, attrs={"auto_sync": True})
+    manual = ir.RegScopeStmt("", body, span, attrs={"auto_sync": False})
+    assert default.auto_sync is True
+    assert explicit.attrs == {}
+    ir.assert_structural_equal(default, explicit)
+    assert manual.auto_sync is False
+    assert not ir.structural_equal(default, manual)
+    restored = ir.deserialize(ir.serialize(manual))
+    ir.assert_structural_equal(manual, restored)
+    assert isinstance(restored, ir.RegScopeStmt)
+    assert restored.auto_sync is False
+    assert "reg_scope(auto_sync=False)" in python_print(manual)
+
+
+@pytest.mark.parametrize("policy", [0, 1, "false"])
+def test_auto_sync_rejects_non_boolean_attribute(policy):
+    span = ir.Span.unknown()
+    with pytest.raises(ValueError, match="bool"):
+        ir.RegScopeStmt("", ir.SeqStmts([], span), span, attrs={"auto_sync": policy})
+
+
+@pytest.mark.parametrize("flatten_first", [False, True])
+def test_simplify_preserves_manual_policy_and_mem_barrier_statement(flatten_first):
+    span = ir.Span.unknown()
+    barrier = ir.create_op_call("reg.mem_bar", [], {"kind": "VST_VLD"}, span)
+    dead = ir.AssignStmt(
+        ir.Var("dead", ir.ScalarType(DataType.INT32), span), ir.ConstInt(1, DataType.INT32, span), span
+    )
+    scope = ir.RegScopeStmt(
+        "", ir.SeqStmts([dead, ir.EvalStmt(barrier, span)], span), span, attrs={"auto_sync": False}
+    )
+    program = ir.Program(
+        [ir.Function("main", [], [], scope, span, type=ir.FunctionType.InCore)], "test", span
+    )
+    with passes.PassContext([]):
+        if flatten_first:
+            program = passes.flatten_call_expr()(program)
+        after = passes.simplify()(program)
+    result = next(iter(after.functions.values())).body
+    assert isinstance(result, ir.RegScopeStmt)
+    assert result.auto_sync is False
+    statements = list(result.body.stmts) if isinstance(result.body, ir.SeqStmts) else [result.body]
+    assert len(statements) == 1
+    preserved = statements[0]
+    assert isinstance(preserved, ir.EvalStmt)
+    assert isinstance(preserved.expr, ir.Call)
+    assert preserved.expr.op.name == ir.get_op("reg.mem_bar").name
+    ir.assert_structural_equal(preserved.expr, barrier)
+    restored = ir.deserialize(ir.serialize(after))
+    ir.assert_structural_equal(after, restored)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

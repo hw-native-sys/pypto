@@ -16,6 +16,7 @@
 | **SyncOp** | UnknownType（屏障）；ScalarType（task / 启动形状查询） | 流水线屏障、同步、TaskId 与 SPMD 启动形状查询 | `src/ir/op/sync_ops/` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV 跨核通信 | `src/ir/op/sync_ops/cross_core.cpp` |
 | **PrefetchOp** | 不透明句柄 (opaque handle) | GM→L2 异步预取 | `src/ir/op/prefetch/prefetch_async.cpp` |
+| **DistributedOp** | GM 张量和不透明句柄 | [PUT 和 GET 的显式完成](../distributed_ops.md) | `src/ir/op/distributed/` |
 
 **主要特性**：流式 API、自动类型推导、kwargs 元数据、NumPy 风格广播、类型提升、动态维度（`kDynamicDim`）
 
@@ -49,83 +50,7 @@
 
 ### 类型化 Buffer 逐元素配方
 
-`backend/common/buffer_elementwise_recipes` 是逻辑到 Buffer 转换、显式操作数约束及
-原生助记符共用的生产表。`LowerTileToBuffer` 选择类型化配方 (typed recipe) 并创建
-实际的 Buffer 调用。直接 PTO 发射读取同一张表，不重建 Tile IR、不调用旧回调，
-也不选择存储位置。此表独立于旧后端回调注册。
-
-| 逻辑算子 | Buffer 算子 | 原生指令 | 输入 |
-| -------- | ----------- | -------- | ---- |
-| `tile.add` | `buffer.add` | `pto.tadd` | 2 |
-| `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
-| `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
-| `tile.div` | `buffer.div` | `pto.tdiv` | 2 |
-| `tile.maximum` | `buffer.maximum` | `pto.tmax` | 2 |
-| `tile.minimum` | `buffer.minimum` | `pto.tmin` | 2 |
-| `tile.abs` | `buffer.abs` | `pto.tabs` | 1 |
-| `tile.exp` | `buffer.exp` | `pto.texp` | 1 |
-| `tile.sqrt` | `buffer.sqrt` | `pto.tsqrt` | 1 |
-| `tile.neg` | `buffer.neg` | `pto.tneg` | 1 |
-| `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
-| `tile.log` | `buffer.log` | `pto.tlog` | 1 |
-| `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
-| `tile.adds` | `buffer.adds` | `pto.tadds` | buffer, scalar |
-| `tile.subs` | `buffer.subs` | `pto.tsubs` | buffer, scalar |
-| `tile.muls` | `buffer.muls` | `pto.tmuls` | buffer, scalar |
-| `tile.divs` | `buffer.divs` | `pto.tdivs` | buffer, scalar |
-| `tile.maximums` | `buffer.maximums` | `pto.tmaxs` | buffer, scalar |
-| `tile.minimums` | `buffer.minimums` | `pto.tmins` | buffer, scalar |
-| `tile.lrelu` | `buffer.lrelu` | `pto.tlrelu` | buffer, scalar |
-| `tile.full` | `buffer.full` | `pto.texpands` | scalar |
-
-每个调用以最终操作数表示目标，并返回 `Void`。源读取数据和元数据；目标写入
-有效数据区域并读取元数据。这不保证整个分配已初始化。所有 buffer 操作数必须具有
-相同的物理描述符；广播和部分合并语义由独立配方处理。这些算子仅供编译器内部
-使用，不新增公开 DSL 函数。
-
-除 `add`、`mul` 外的配方要求 FP32、1 或 2 维、静态 valid 范围、
-稠密行主序 Vec 存储、`none_box`、fractal 512，并且没有 padding 或 compact 模式。
-其 dtype 约束不会继承原生描述符格式化器的 FP16 支持。`add`/`mul` 要求
-FP16/FP32/INT32 操作数。自动转换及普通 GM 传输支持静态二维
-FP16/BF16/FP32/INT32 描述符；BF16 算术需要独立的原生配方。
-Ascend910 与 Ascend950 都使用这些契约。
-
-公开 `tile.full` 包装器同时接受数值字面量和已解析的标量常量，位置参数与关键字参数
-得到一致结果。浮点目标的整数占位常量使用 `ConstFloat`；显式指定类型的常量保留
-原始 dtype，直到降低阶段转换。Python 打印器将 `tile.full` 填充常量输出为
-`pl.const(value, dtype)`，使打印后重新解析仍保留填充值自身的 dtype，而不依赖 tile
-的 dtype。运行时填充值仍不支持。
-
-在 Buffer call 边界，标量操作数必须匹配目标元素 dtype，且不具有内存效果。
-降低阶段在构造该 call 之前转换受支持的源标量表达式，为有符号整数、
-INDEX、FP16、BF16 和 FP32 插入显式 `Cast`；INDEX 先转换为 INT64。
-其他标量源类型仍不支持。`tile.full(shape, dtype=..., value=...)` 的 shape/dtype
-用于选择目标，随后生成 `buffer.full(value_f32, destination)`。代码生成不修复标量类型：
-
-```python
-# Logical input: result = tile.adds(value, count_i32)
-scalar_f32 = ir.Cast(count_i32, DataType.FP32, span)
-# Buffer IR diagnostic notation; the internal op has no public DSL wrapper.
-buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
-```
-
-`div`、`log`、`recip` 保留可选布尔 kwarg `high_precision`。配方选择相应的原生
-精度属性，false 使用原生默认值，不隐式引入 workspace、复制或分配。`recip`
-要求源与目标存储不重叠，构造时拒绝两个位置使用同一句柄。`BufferIR` 验证对
-表中每个配方检查不同句柄的已分配范围：拒绝部分重叠，仅支持精确原地执行的
-配方可接受完全相同的窗口。独立的无地址分配不重叠；未知存储来源或位置需要
-后续配方。常量标量地址定义通过记忆化及整数位宽检查求值。直接发射消费此已
-验证约束，不执行分配或别名分析。
-
-表中配方接受 valid extent 为静态或运行时（`-1`）的稠密描述符；原生指令读取每个句柄
-当前的 valid 元数据，执行时各操作数的元数据必须一致。
-
-整数/位运算、`rsqrt` 及其可选 workspace、部分合并、广播、归约、
-随机生成和其他布局仍属于独立迁移工作。公开 API
-`backend.get_buffer_elementwise_recipe_names()` 从实际生产表返回排序的独立快照。
-列出的名称仅代表上述受限配方，不代表逻辑算子的全部形式。测试覆盖公开流水线
-转换、二进制往返、BufferIR 验证、显式目标身份和原生编译；这些验证不替代设备
-数值验收。
+有关支持的算子、数据类型约束和原生指令，请参阅[类型化 Buffer 逐元素配方](05-tensor-tile-ops.md#typed-buffer-elementwise-recipes)。
 
 ## 类型系统
 
@@ -159,6 +84,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `no_arg_writes()` | 已分类：不通过任何参数写入 | `.no_arg_writes()` |
 | `set_write_channel(c)` | 算子写入所走的硬件通路 | `.set_write_channel(WriteChannel::Dma)` |
 | `set_output_arity(N)` | 产生的值的个数；`N > 1` 表示结果是 `TupleType`——参见[多输出算子](09-multi_output_ops.md) | `.set_output_arity(2)` |
+| `set_tuple_result_alias(result, arg)` | 指定返回已有目标张量的元组元素 | `.set_tuple_result_alias(0, 0)` |
 | `set_workspace_arg(i)` | 第 `i` 个参数是编译器提供的暂存空间，而非结果 | `.set_workspace_arg(2)` |
 
 ### 参数效应（Argument effects）
@@ -246,12 +172,98 @@ REGISTER_OP("tensor.matmul")
 M/N/K 装箱严格兼容，同时允许累加器的有效 M/N 矩形以及 rhs 的有效 K 包含 PTO 根据
 lhs M/K 与 rhs N 实际计算的较小矩形。
 
+#### Cube 操作数类型配对（operand dtype pairs）
+
+Cube 能相乘的元素类型是一张硬件表，而不是“两边必须相同”的对称规则：
+`backend::kCubeOperandPairs`（`include/pypto/backend/common/cube_operand_types.h`）
+即 PyPTO 对 PTOAS `verifyMatmulTypeTriple` 与 pto-isa `npu/a5/TMatmul.hpp` 的复刻。
+
+| lhs x rhs | 累加器 | A2/A3 | A5 | 算子族 |
+| --------- | ------ | ----- | -- | ------ |
+| INT8 x INT8 | INT32 | 支持 | 支持 | matmul、gemv |
+| FP16 x FP16 | FP32 | 支持 | 支持 | matmul、gemv |
+| BF16 x BF16 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP32 x FP32 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP8E4M3FN x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv、mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv |
+| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv |
+| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv |
+| HF8 x HF8 | FP32 | 不支持 | 支持 | matmul、gemv |
+
+因此在 Ascend950 上，`tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、
+`tile.batch_matmul*`、`tensor.matmul` 与 `tensor.matmul_acc` 接受**两种顺序的
+FP8 混合操作数**；累加器、`matmul_acc` 的输入以及 `matmul_bias` 的 bias 仍为 FP32。
+`tf32_mode` 仍只支持 FP32，因此 FP8 操作数对会拒绝该参数。
+
+普通 GEMV 族——`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`——是该矩阵乘的
+`M == 1` 特化，并共用同一张表：`pto.tgemv`、`pto.tgemv.acc` 与 `pto.tgemv.bias`
+的元素类型都经由同一个 `verifyMatmulTypeTriple` 校验，其 a5 TileLib 模板也使用
+矩阵乘的 `MATMUL_*_DTYPES` 签名列表。因此 FP8 与 HF8 配对在这里同样可用，结果仍为
+FP32，`gemv_acc` 的累加器与 `gemv_bias` 的 bias 也仍为 FP32。**MX** GEMV 算子是另一条
+指令、另一张表，不在这些行的覆盖范围内。
+
+与矩阵乘不同，GEMV 的 dtype 校验（`ValidateGemvInputDtypes`，
+`src/ir/op/tile_ops/matmul.cpp`）是**封闭**白名单：GEMV 从未有过
+“两边 dtype 相同”这一历史兜底分支，因此表外配对在类型推导阶段就被拒绝，不会下达到 PTOAS。
+该校验把配对**逐条手写**，而不是去查 `FindCubeOperandPair`；同一文件中的
+`static_assert`（`HandWrittenGemvListMatchesCubeTable`）会在编译期双向校验手写列表与
+`kGemv` 行一致，并一并比对累加器 dtype。
+
+这条断言并非锦上添花。五行 FP8 / HF8 上的 `gemv` 族位还剩一个读者——codegen 的
+`CheckMatmulOperandArch`：它在 `kGemv` 行里查找操作数配对，**查不到就直接返回、不做校验**。
+于是“手写列表接受、但表里没有”的配对会悄悄失去“FP8 需要 a5 后端”这一拒绝，
+被下发到无法完成该乘法的硬件上。因此这个漂移方向在编译期就被钉死，而不是依赖评审发现。
+
+##### A5 GEMV：静态 valid 累加器桥接
+
+Ascend950 上的普通 GEMV 还需要在指令处**重新标注累加器类型**，这与操作数 dtype 无关。
+PTOAS v0.72 的 `verifyGemvTileOperandsA5` 会转调*矩阵乘*的操作数校验以复用 A5 布局规则，
+从而继承了它的形状规则——“static matmul tile shapes lhs[M,K], rhs[K,N], and dst[M,N]”。
+该规则比较 `getMatmulLogicalShapeVec`，而后者在类型的 valid 为动态时回退到*物理*尺寸。
+PyPTO 通用的 `pto.alloc_tile` 发出的是 `v_row=?, v_col=?`，真实尺寸由单独的
+`valid_row` / `valid_col` 操作数承载；而 GEMV 的结果必然是只有一个逻辑行的 16 行 FP32
+Acc 箱——于是该规则用 lhs 的 1 行去比 dst 的 16 行，在任何 dtype 下都拒绝 a5 的
+`pto.tgemv*`。A2/A3 不会走到这条规则：`verifyGemvTileOperandsA2A3` 使用
+`verifyGemvValidShapes`，只比较 *valid* 行。
+
+因此 `EmitStaticValidGemvAccView`（`src/backend/common/pto_ops_elementwise.cpp`）
+仅在 a5 上发出一个零拷贝的 `pto.treshape`，其*结果类型*携带累加器的静态 valid 尺寸——
+与 `pto.tquant.mx` 所用的桥接相同——并让 GEMV 的 `outs()`（以及 `.acc` 的 `ins()`
+累加器）指向该视图。累加器自身的分配与下游的 `pto.tstore` 保持不变，A2/A3 发出的指令
+逐字节不变。
+
+有两种情况刻意不做桥接：
+
+| 情况 | 原因 |
+| ---- | ---- |
+| 累加器的 valid 尺寸不是编译期常量 | 没有可用的静态类型；该由 PTOAS 报告，而不是由代码生成臆造常量 |
+| 累加器的 valid N 小于其物理 N | 静态的 dst N 会触发该规则的 `rhs logical N == dst logical N` 子句，而 rhs 类型的 valid 仍是动态的，该子句会读取 rhs 的*物理* N，从而引入新的不匹配。部分有效的 N 需要重新标注 GEMV 的每个操作数，而不只是累加器 |
+
+GEMV lhs 的物理 K 取决于操作数 dtype：Mat 到 Left 的提取（`TExtractToAVector`，
+pto-isa `npu/a5/TExtractCommon.hpp`）要求 `Cols % (512 / sizeof(dtype)) == 0`，
+即一个完整的 512 字节 K 块——1 字节操作数为 K = 512，2 字节为 256，4 字节为 128。
+
+该契约分两层实现，因为合法集合取决于编译目标，而类型推导看不到目标：类型推导
+（`ValidateMatmulOperandDataTypes`，`src/ir/op/type_inference.cpp`）接受表中的配对
+**或**两边 dtype 相同的配对——后者保留历史上“lhs 与 rhs 相同”的契约，使那些
+PTOAS 本来就会拒绝的类型仍像以前一样下达到后端；随后矩阵乘代码生成
+（`CheckMatmulOperandArch`，`src/backend/common/pto_ops_elementwise.cpp`）在 PTOAS
+之前拒绝当前目标不具备的表内配对（`a2a3` 上的 FP8 或 HF8 操作数），表外配对保持原样
+交给 PTOAS。
+
+当任一操作数为 FP8 或 HF8 时，`tensor.matmul` 省略 `out_dtype` 的默认值取累加器类型：
+类型提升会给出 FP8，而无缩放的 FIXPIPE 写回无法产生该类型，且混合配对的提升结果还会
+依赖操作数顺序。更宽的操作数配对保持原有的提升默认值。
+
+1 字节操作数的物理 K 必须是 32 的倍数（Left/Right fractal 沿 K 打包 32 字节）；
+有效 K 没有该限制。
+
 对于 Ascend950 上的二维 FP32 操作数，`matmul`、`matmul_acc` 和
 `tile.matmul_bias` 支持仅限关键字参数 `tf32_mode="round_even"` 或
 `tf32_mode="round_away"`。两者将输入舍入为 HF32（e8m10），仍使用 FP32 累加；
 中间值分别采用向偶数舍入或远离零舍入。省略该参数时保持普通 FP32 矩阵乘法。
 该设置贯穿 tensor 到 tile 的降级和自动 L0 分块，仅作用于指定操作。
-需要 PTOAS v0.74 或更新版本的 PTO/EmitC 路径，不支持 VPTO 降级。
+需要 PTOAS v0.77 或更新版本的 PTO/EmitC 路径，不支持 VPTO 降级。
 其他输入类型、非二维操作数和 Ascend910 会被拒绝。
 Torch 参考代码生成器会在 Tensor、Tile 和 Buffer IR 中按指定模式舍入两个乘法操作数；
 偏置与累加器的值保持 FP32。
@@ -362,7 +374,7 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 ### MX block-scale matmul（Ascend950）
 
 MX 使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` scale
-dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant MXFP8，以及显式转换后的 FP4×FP8 路径。
+dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant MXFP8 和原生打包 MXFP4。
 `InsertMxScaleAddr`（在 `InferTileMemorySpace` 之后）在操作数内存空间解析完成后插入内部 `tile.tget_scale_addr` 绑定。
 
 | IR / DSL | 说明 |
@@ -370,13 +382,19 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tile.load` 读取 `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | 源 TensorLayout 携带 MX scale GM layout。dtype 为 FP8E8M0，且不支持 strided source。公开 `pl.load` 在省略 target 时默认为 `Mat`；原始 IR 必须携带 `target_memory=Mat`。 |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move；硬件 layout 固定为左侧 row/row/32、右侧 col/col/32，源 Mat tile 与 layout override 必须完全匹配。 |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | 不支持；应先把 MX scale 数据加载到 Mat，再 move 到 scale 内存。 |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；两侧必须均为 FP8E4M3FN 或均为打包 FP4（任一格式），FP4/FP8 混合需显式 cast。FP4 shape 使用载体单位，推导沿连续轴展开为逻辑 M/K/N。FP8E8M0 scale 为 `[M, ceil(K/32)]` / `[ceil(K/32), N]`，FP32 Acc 为 `[M, N]`；两侧 scale 必须为不同 tile。物理逻辑维度要求 `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`（FP4 为 N % 64），并满足分块 tile 对齐。valid K 须保持物理 scale 组数。常量维执行数值检查，符号维后续由 PTOAS 验证。原生 FP4 依赖 PTOAS #1700，见 [FP4](../fp4.md)。 |
+| `tile.matmul_mx` / `pl.tile.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；两侧 FP8 操作数各自支持 FP8E4M3FN 或 FP8E5M2。打包 FP4 的两侧可分别选用任一格式，FP4/FP8 混合需显式 cast。FP4 shape 使用载体单位，推导沿连续轴展开为逻辑 M/K/N。FP8E8M0 scale 为 `[M, ceil(K/32)]` / `[ceil(K/32), N]`，FP32 Acc 为 `[M, N]`；两侧 scale 必须为不同 tile。物理逻辑维度要求 `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`（FP4 为 N % 64），并满足分块 tile 对齐。valid K 须保持物理 scale 组数。常量维执行数值检查，符号维后续由 PTOAS 验证。原生 FP4 依赖 PTOAS #1700，见 [FP4](../fp4.md)。 |
+| `tensor.matmul_mx` | 静态二维 FP8E4M3FN 或打包 FP4 数据，支持两种 FP4 格式混合。ND FP4 形状 `[M,K/2]` / `[K,N/2]`，DN 为 `[M/2,K]` / `[K/2,N]`；缩放和 FP32 `[M,N]` 输出按逻辑维度计。M/K/N 对齐为 16/64/32（FP4 为 32/64/64）。先直接加载到 Mat，再搬运至 Left/Right。 |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
 
 规范样例：`M=128,K=64,N=64`，进入算子的 A/B 均为 `FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
-GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。左侧输入可使用任一打包 FP4 格式，但必须先显式转换为 FP8；对齐 M↑16、K↑64、N↑32。
+GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。FP8 对齐要求为 M↑16、K↑64、N↑32。
+
+相同逻辑 M/K/N 下，原生 FP4 的 ND Tensor 数据形状为 `[128,32]` / `[64,32]`；
+scale 和 FP32 `[128,64]` 输出保留逻辑维度。两侧数据可分别选择 E2M1x2 或 E1M2x2，
+无需转换为 FP8。Tensor 路径要求 M↑32、K↑64、N↑64。若组合 FP4 与 FP8 操作数，
+则需先将 FP4 操作数显式转换为 FP8。
 
 MX tensor subview 是当前遗留限制。由于硬件路径无法表达 subview base
 offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose`、
@@ -390,10 +408,20 @@ FP8E8M0 shaped alias（用于 GM 分核暂存）。在完整的 scale layout con
 Torch E2M1 x2 张量与显式标注的 UINT8 载体在 JIT 和编译后调用中保留这些维度，
 不进行单位换算。
 
-两种打包 FP4 格式到 FP8 的显式转换均在 A5 上经 BF16 和 FP32 合法化。
-它仅对数据操作数进行数值转换，因此缩放因子不变。原生 FP4 tile 矩阵乘保持两侧打包格式。
-`pl.quant_mx` 支持 MXFP8，以及以 FP16/BF16 为源的 E2M1 MXFP4 量化；
+A5 对满足描述符条件的 E2M1→E4M3 使用直接转换；其他打包 FP4→FP8 转换经
+BF16/FP32 桥接。它仅对数据操作数进行数值转换，因此缩放因子不变。
+原生 FP4 Tensor 和 Tile 矩阵乘保持两侧打包格式。
+`pl.quant_mx` 可将 FP16/BF16/FP32 源量化为 MXFP8，将 FP16/BF16 源量化为 E2M1 MXFP4。
+在 A5 上，`dtype=pl.FP8E5M2` 对 A/B 两种输入方向均使用 OCP 缩放。
+tensor `pl.quant_mx` 的完整有效 scale 返回值保留 GM 中的 `MX_A_ZZ` 或 `MX_B_NN` 布局。
+完整 buffer 的 packed scale store 会自动合法化为不改变字节的单行 ND backing view。
+暂不支持部分 packed scale store，也可显式将完整 scale tile reshape 为单行 backing view 后写回。
 FP4 结果需通过受支持的 Mat 和 Left/Right 放置路径供 tile 矩阵乘使用。量化对齐与内存规划器要求见 [FP4](../fp4.md)。
+
+`pl.tile.quant_mx_raw(..., group_axis=1, canonical_axis1=True)` 支持物理列数大于有效列数的
+FP32 源 tile。有效行数至少为 2，有效列数须为 32 的倍数。UINT8 指数 tile 的有效形状为
+`[valid_rows, valid_cols/32]`，行步长按 32 字节对齐。两个 FP32 工作区均需连续存储有效元素，
+可使用无列填充的对齐多行，或对齐的单行。省略该参数时，指数仍采用 `[1, valid_rows*valid_cols/32]` 扁平形状。
 
 #### MX / Ascend950：pto-isa 约束
 
@@ -450,7 +478,7 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k
 在 `init_cond` 之前，这一步是由剥离的首个 K 步隐式完成的 —— 一条直线展开的
 `pl.tile.gemv` 会铸造出类型正确的累加器，代价是两个分支之间的一个 phi。
 
-### 累加器阶段（Accumulator phases，A2/A3）
+### 累加器阶段（Accumulator phases，A2/A3 和 A5）
 
 `tile.matmul`、`tile.matmul_acc`、`tile.gemv`、`tile.gemv_acc` 和
 `tile.gemv_bias` 的 `acc_phase` 可设为 `pl.AccPhase.Unspecified`（默认值）、
@@ -467,7 +495,7 @@ store 会检查未更新分块，而 MAD 并未设置这些分块的 unit flag�
 区域相匹配的累加器窗口，或保持部分更新，直到整个有效区域完成最终累加。
 
 在使用 unit flag 的路径上，最后一个累加生产者必须与
-`pl.store(..., st_phase=pl.STPhase.Final)` 配对。final 生产者负责置位，final
+`pl.store(..., st_phase=pl.STPhase.Final)`（A5 还支持 `pl.tpush_to_aiv(..., split=1, dst=..., st_phase=pl.STPhase.Final)`）配对。final 生产者负责置位，final
 store 负责检查并清位；普通 store 则有意保留默认的
 `pl.STPhase.Unspecified` 行为。PTO-ISA 的 check-only store phase 需要有序的
 多消费者生命周期，因此 PyPTO 不对外提供该阶段。编译器会双向校验所支持的
@@ -478,6 +506,10 @@ final 配对：应绑定 final 生产者的结果，并在同一个直线控制�
 完整配对是受支持的；尚未排空的 final 结果跨分支、循环或 scope 边界则会被拒绝。
 [`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) 保留该契约：中间 K 分块
 使用 `Partial`，只有最后一个分块使用 `Final`。显式阶段不会删除其他自动插入的同步。
+
+A5 上，`pl.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col])` 将完整 FP32 Acc 直接写入手工指定地址的 ND UB，各 AIV 接收一半行。`TINSERT` 保留目标行跨度，由调用者保证本地行列偏移有效。
+Final 生产者要求 `st_phase=pl.STPhase.Final`、完整 [M/2, N] 目标和零偏移；`TMOV` 执行 unit flag 检查与清位。不引入 TPipe 槽位或额外同步。
+AIV 等待对端后，在寄存器作用域读取连续接收视图之前调用 `pl.tile.mark_remote_written(view)`；仅将该视图的有效区间标记为已初始化，不标记整个底层分配，也不生成指令。由作者负责地址一致性与事件握手。
 
 存储检查遵循注册的原地操作与视图关系，包括 Final 更新之前创建的别名，以及
 直线代码中的 tuple 转发和嵌套 tuple 投影。分支选择保留可能来源，同时保留
@@ -670,6 +702,7 @@ SHARED，两个 kernel 中都会出现。屏障在 **`pl.pipeline` 内被拒绝*
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
 | `tile.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `split`，可选 `id` |
+| `tile.tpush_to_aiv_direct`（内部） | 3 (Acc, dst, offset) | 直接推送到对端 UB，不使用 FIFO | `split=1`，`st_phase` |
 | `tile.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `split`，可选 `id` |
 | `tile.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `split`，可选 `id` |
 | `tile.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `split`，可选 `id` |
@@ -680,8 +713,10 @@ SHARED，两个 kernel 中都会出现。屏障在 **`pl.pipeline` 内被拒绝*
 
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `system.aic_initialize_pipe` | 2 | 在 Cube 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id`，可选 `c2v_dtype`，可选 `pre_relu` |
-| `system.aiv_initialize_pipe` | 2 | 在 Vector 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id`，可选 `c2v_dtype`，可选 `pre_relu` |
+| `system.aic_initialize_pipe` | 2 | 在 Cube 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id`，可选 `c2v_dtype`，可选 `pre_relu`, `nosplit`, `acc_push_epilogue` |
+| `system.aiv_initialize_pipe` | 2 | 在 Vector 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id`，可选 `c2v_dtype`，可选 `pre_relu`, `nosplit`, `acc_push_epilogue` |
+| `system.set_quant_scalar` | 1 (FP32 标量) | Fixpipe 标量量化状态 | 可选 `id`，匹配 [Fixpipe epilogue](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-契约) |
+| `system.set_quant_vector` | 1 (Scaling INT64/UINT64 tile) | Fixpipe packed 向量控制字 | 可选 `id`，匹配 [Fixpipe epilogue](../passes/26-expand_mixed_kernel.md#c2v-fixpipe-契约) |
 
 - `slot_num`（设置时必须 > 0）显式指定 GM 环形缓冲区的槽数量；省略时由 PTOAS 取默认值（单向 8，双向每方向 4）。
 - `local_slot_num`（仅 a2/a3，必须 > 0 且 `<= slot_num`）显式指定本地槽数量。
@@ -743,6 +778,17 @@ class CrossCoreExample:
 ```
 
 参阅 [TPUSH/TPOP ISA 参考](../../reference/pto-isa/01-tpush_tpop.md) 和[缓冲区管理](../../reference/pto-isa/02-buffer_management.md)了解硬件细节。
+
+## 分布式 PUT 和 GET 的完成操作
+
+| 算子 | 返回值 |
+| ---- | ------ |
+| `pld.system.make_session(comm_ctx, *, engine=pld.CommEngine.URMA)` | 当前 AIV 的 session，可跨 peer 和传输方向复用 |
+| `pld.tensor.get_async_event(dst, peer, src, *, engine=pld.CommEngine.URMA)` | 本地目标张量的别名与完成事件组成的二元组 |
+| `pld.tile.get_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与本地目标张量共享存储 |
+| `pld.tile.put_async(dst, peer, src, session)` | `(dst_after, event)`，其中 `dst_after` 与远端目标窗口共享存储 |
+| `pld.system.wait_event(event[, session])` | 发起传输的核等待完成后获得的 BOOL 成功标志 |
+| `pld.system.defer_wait_event(event[, session])` | 将事件登记到发起传输的 task，由该 task 负责完成的语句 |
 
 ## PrefetchOp：GM→L2 异步预取
 
@@ -911,9 +957,11 @@ Warp 内协作操作包括 `vote_all/any/uni`、`vote_ballot`、
 `shuffle_idx/up/down/bfly` 和 `redux_add/min/max`。参见
 [协作操作契约](11-simt.md#warp-内协作操作)，了解活跃 lane、支持类型和 shuffle 宽度。
 
-原子操作 `atomic_add/min/max/exch/cas` 返回已初始化 GM/UB 存储的旧 INT32/FP32 值。
+原子操作 `atomic_add/sub/and/or/xor/min/max/exch/cas` 返回已初始化 GM/UB 存储的旧 INT32/FP32 值。
 `syncthreads`、`threadfence` 和 `threadfence_block` 返回 void。参见
 [原子与同步契约](11-simt.md#原子操作与同步)。
 
 标量数学、字节置换、高位乘法与显式饱和/舍入转换详见
 [SIMT 数学契约](11-simt.md#数学位操作与显式转换)。
+
+接口类型限制、`lanemask_*`、`bitcast`、shuffle 窗口与无符号比较见[覆盖矩阵](../codegen/06-simt-interface-coverage.md)。

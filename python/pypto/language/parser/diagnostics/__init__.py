@@ -7,10 +7,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Parser diagnostics and error reporting."""
+"""Parser diagnostics and error reporting.
 
-from .error_codes import ErrorCategory, ErrorCode, get_error_code
-from .exceptions import (
+The exception classes are frontend-common and live in
+``pypto.language.diagnostics``; this package re-exports them next to the
+parser-owned error codes and renderer."""
+
+from pypto.language.diagnostics import (
     BUG_CLASS_EXCEPTIONS,
     InvalidOperationError,
     ParserError,
@@ -22,6 +25,8 @@ from .exceptions import (
     UnsupportedFeatureError,
     concise_error_message,
 )
+
+from .error_codes import ErrorCategory, ErrorCode, get_error_code
 from .renderer import ErrorRenderer
 
 __all__ = [

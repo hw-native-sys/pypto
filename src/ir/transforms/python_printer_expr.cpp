@@ -37,6 +37,8 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/core/python_string.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
@@ -283,8 +285,8 @@ void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
 // Lowercase-snake-case names for ArgDirection used by the DSL helpers in
-// ``pypto.language.arg_direction`` (``pl.adir.<name>``). Kept in sync with
-// ``python/pypto/language/arg_direction.py::NAME_TO_DIRECTION``.
+// ``pypto.language.typing.arg_direction`` (``pl.adir.<name>``). Kept in sync with
+// ``python/pypto/language/typing/arg_direction.py::NAME_TO_DIRECTION``.
 static const char* ArgDirectionToDslName(ArgDirection dir) {
   switch (dir) {
     case ArgDirection::Input:
@@ -311,6 +313,17 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     stream_ << (std::any_cast<bool>(value) ? "True" : "False");
   } else if (t == typeid(std::string)) {
     PrintStringLiteral(std::any_cast<std::string>(value));
+  } else if (t == typeid(AccPushEpilogue)) {
+    stream_ << "{";
+    bool first = true;
+    for (const auto& [key, field] : std::any_cast<AccPushEpilogue>(value)) {
+      if (!first) stream_ << ", ";
+      first = false;
+      PrintStringLiteral(key);
+      stream_ << ": ";
+      PrintStringLiteral(field);
+    }
+    stream_ << "}";
   } else if (t == typeid(double)) {
     stream_ << FormatFloatLiteral(std::any_cast<double>(value));
   } else if (t == typeid(float)) {
@@ -533,17 +546,17 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
           << "' carries attrs[\"manual_dep_edges\"]; manual deps must be on Submit::deps_";
       // Zero-arg self.fn() needs no leading comma before the first kwarg, so
       // gate every kwarg separator on a shared flag rather than hard-coding
-      // ", " — otherwise self.fn(, device=...) breaks the round-trip.
+      // ", " — otherwise self.fn(, worker=...) breaks the round-trip.
       bool need_kwarg_comma = !op->args_.empty();
 
-      // Surface ``attrs["device"]`` (set by N3 parser on host_orch → chip_orch
-      // dispatches) as a ``device=<expr>`` kwarg so it round-trips through
+      // Surface ``attrs["worker"]`` (set by N3 parser on host_orch → chip_orch
+      // dispatches) as a ``worker=<expr>`` kwarg so it round-trips through
       // reparse and remains observable by the MaterializeCommDomainScopes pass.
       for (const auto& [k, v] : op->attrs_) {
-        if (k != kAttrDevice) continue;
+        if (k != kAttrWorker) continue;
         if (const auto* p = std::any_cast<ExprPtr>(&v)) {
           if (*p) {
-            stream_ << (need_kwarg_comma ? ", " : "") << "device=";
+            stream_ << (need_kwarg_comma ? ", " : "") << "worker=";
             VisitExpr(*p);
             need_kwarg_comma = true;
           }
@@ -558,7 +571,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       // other attr — ``arg_direction_overrides``, ``dummy_task``, any future
       // key — is rendered generically by ``PrintAttrValue`` into the same dict
       // (the round-trip safety net), so nothing is silently dropped. The sugar
-      // key already surfaced above (``device`` -> ``device=``) is skipped
+      // key already surfaced above (``worker`` -> ``worker=``) is skipped
       // here. The parser recovers the bespoke keys via dedicated extractors
       // and the rest via ``_parse_attr_value``.
       auto call_arg_directions = op->GetArgDirections();
@@ -567,7 +580,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       std::vector<const std::pair<std::string, std::any>*> generic_attrs;
       for (const auto& kv : op->attrs_) {
         const std::string& k = kv.first;
-        if (k == kAttrDevice) continue;                               // emitted as device=
+        if (k == kAttrWorker) continue;                               // emitted as worker=
         if (k == kAttrDumpVars || k == kAttrArgDirections) continue;  // bespoke emitters below
         generic_attrs.push_back(&kv);
       }
@@ -617,6 +630,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
+  // Keep the direct mailbox transfer behind the same public tpush entry
+  // point as the FIFO form. The extra operands are public keyword arguments;
+  // printing the internal spelling would not round-trip through the DSL.
+  const bool direct_tpush = IsOp(op, "tile.tpush_to_aiv_direct");
+  if (direct_tpush) op_name = "tile.tpush_to_aiv";
   // Keep the existing barrier IR while presenting its parameterized public
   // API. The native ops have no operands or kwargs; retain the legacy call
   // spelling for noncanonical calls rather than silently dropping metadata.
@@ -904,9 +922,25 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const bool mgather_kw_scratch = mgather && mgather_coalesce == 1 && op->args_.size() >= 3;
   const bool mgather_kw_valid = mgather && ((mgather_coalesce == 0 && op->args_.size() == 3) ||
                                             (mgather_coalesce == 1 && op->args_.size() == 4));
+  // tensor.gather's axis form stores (input, index) positionally and `dim` as a
+  // kwarg, but the public `gather(input, dim=None, index=None, ...)` wrapper's
+  // second positional slot is `dim`, not `index` (its signature mirrors
+  // `gather(input, dim, index)`, matching the flat-form positional call
+  // `gather(input, index)`). Printing `index` positionally there collides
+  // with the explicit `dim=` kwarg -- Python raises "got multiple values for
+  // argument 'dim'" before the wrapper body ever runs. Print `index` as a
+  // keyword too whenever `dim` is present so the call reparses.
+  const bool gather_kw_index = IsOp(op, "tensor.gather") && op->HasKwarg("dim") && op->args_.size() == 2;
+
+  const bool window_view = IsOp(op, "tensor.view") && (op->args_.size() == 4 || op->args_.size() == 5);
+
+  // The lane remains a dataflow operand; the DSL exposes it as a keyword.
+  const bool aiv_lane = (IsOp(op, "tile.tpush_to_aic") && op->args_.size() == 2) ||
+                        (IsOp(op, "tile.tpop_from_aic") && op->args_.size() == 1);
 
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
+    if (aiv_lane && i == op->args_.size() - 1) continue;
     if (gather_row_kw_valid && i == 5) continue;
     if (acc_kw_init_cond && i == 3) continue;
     if (ci_kw_tmp && i == 2) continue;
@@ -914,7 +948,17 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (sort32_kw_tmp && i == 2) continue;
     if (a2av_kw_core_num && i + 1 == op->args_.size()) continue;
     if (mgather && i >= 2) continue;
+    if (gather_kw_index && i == 1) continue;
     if (i > 0) stream_ << ", ";
+
+    if (window_view && i >= 2) {
+      constexpr const char* kWindowKeywords[] = {"offsets", "steps", "valid_shape"};
+      stream_ << kWindowKeywords[i - 2] << "=";
+    }
+    if (direct_tpush && i >= 1) {
+      constexpr const char* kDirectPushKeywords[] = {"dst", "offset"};
+      stream_ << kDirectPushKeywords[i - 1] << "=";
+    }
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
     if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {
@@ -931,7 +975,12 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   }
 
   // Print kwargs as keyword arguments
-  bool need_comma = !op->args_.empty();
+  bool need_comma = op->args_.size() > (aiv_lane ? 1U : 0U);
+  if (aiv_lane) {
+    stream_ << (need_comma ? ", " : "") << "aiv_subblockid=";
+    VisitExpr(op->args_.back());
+    need_comma = true;
+  }
   if (gather_row_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[5]);
@@ -970,6 +1019,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   if (mgather_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[mgather_coalesce == 1 ? 3 : 2]);
+    need_comma = true;
+  }
+  if (gather_kw_index) {
+    stream_ << (need_comma ? ", " : "") << "index=";
+    VisitExpr(op->args_[1]);
     need_comma = true;
   }
   if (IsOp(op, "system.task_dummy")) {
@@ -1020,7 +1074,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       int int_val = AnyCast<int>(value, "printing kwarg: " + key);
       // Print pipe kwargs as PipeType enum names for readability
       if (key == "set_pipe" || key == "wait_pipe" ||
-          (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait")))) {
+          (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") ||
+                             IsOp(op, "system.set_intra_block") || IsOp(op, "system.wait_intra_block")))) {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
       } else if (key == "mode") {
         stream_ << "'" << CastModeToString(int_val) << "'";
@@ -1029,6 +1084,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         // same way `mode` is restored, so a printed cast reparses as the call
         // the author would have written.
         stream_ << "'" << SaturationModeToName(int_val) << "'";
+      } else if (key == "compact" && IsOp(op, "tile.cast")) {
+        stream_ << prefix_ << ".CompactMode." << CompactModeToString(static_cast<CompactMode>(int_val));
       } else if (key == "atomic") {
         // Stored as int (the DSL casts AtomicType -> int before stashing on
         // kwargs_; nb::isinstance<AtomicType> in bindings does the same). The
@@ -1059,7 +1116,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       // spelling as a string attr. Restore the enum form so the printed call is
       // type-correct for static checkers and re-parses (the DSL rejects strings).
       const bool is_syncall = IsOp(op, "system.syncall");
-      const bool is_sync_event = IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait");
+      const bool is_sync_event = IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") ||
+                                 IsOp(op, "system.set_intra_block") || IsOp(op, "system.wait_intra_block");
       if (key == "core_type" && (is_syncall || is_sync_event)) {
         const char* kernel = CoreTypeToKernelMember(str_val, is_syncall);
         INTERNAL_CHECK_SPAN(kernel != nullptr, op->span_)
@@ -1067,9 +1125,13 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         stream_ << prefix_ << ".KernelType." << kernel;
       } else if (is_syncall && key == "mode") {
         stream_ << prefix_ << ".SyncAllMode." << AttrValueToEnumMember(str_val);
+      } else if (key == "init" && IsOp(op, "pld.tensor.alloc_window_buffer")) {
+        stream_ << QuotePythonString(str_val);
       } else {
         stream_ << "'" << str_val << "'";
       }
+    } else if (value.type() == typeid(AccPushEpilogue)) {
+      PrintAttrValue(value, op->span_);
     } else if (value.type() == typeid(double)) {
       stream_ << FormatFloatLiteral(AnyCast<double>(value, "printing kwarg: " + key));
     } else if (value.type() == typeid(float)) {

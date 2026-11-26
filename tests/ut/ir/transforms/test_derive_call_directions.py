@@ -1107,6 +1107,117 @@ class TestDeriveDirectionMatrix:
         After = passes.derive_call_directions()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_reshaped_aliases_share_prior_writer(self):
+        """Two full-buffer reshapes of one destination share a write dependency."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                tile = pl.load(x, [0, 0], [1, 64])
+                return pl.store(tile, [0, 0], out)
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 64], pl.FP32], dst: pl.Tensor[[64], pl.FP32]):
+                first = pl.reshape(dst, [1, 64])
+                self.kernel(x, first)
+                second = pl.reshape(dst, [1, 64])
+                self.kernel(x, second)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                tile = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                return pl.tile.store(tile, [0, 0], out)
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 64], pl.FP32], dst: pl.Tensor[[64], pl.FP32]):
+                first = pl.reshape(dst, [1, 64])
+                self.kernel(x, first, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                second = pl.reshape(dst, [1, 64])
+                self.kernel(x, second, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    @pytest.mark.parametrize("tuple_return", [False, True])
+    def test_return_with_no_shape_matched_root_preserves_prior_write(self, tuple_return):
+        """A view return keeps ordering even when its known root has a different shape."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                base: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                view: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return view
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def write(self, value: pl.Out[pl.Tensor[[1, 128], pl.FP32]]) -> pl.Tensor[[1, 128], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, b: pl.Tensor[[2, 64], pl.FP32]):
+                flat = pl.reshape(b, [1, 128])
+                pair = (flat, flat)
+                alias = pair[0]
+                returned = self.forward(b, alias)
+                self.write(returned)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def forward(
+                self,
+                base: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+                view: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                return view
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def write(self, value: pl.Out[pl.Tensor[[1, 128], pl.FP32]]) -> pl.Tensor[[1, 128], pl.FP32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, b: pl.Tensor[[2, 64], pl.FP32]):
+                flat = pl.reshape(b, [1, 128])
+                pair = (flat, flat)
+                alias = pair[0]
+                returned = self.forward(
+                    b, alias, attrs={"arg_directions": [pl.adir.output_existing, pl.adir.output_existing]}
+                )
+                self.write(returned, attrs={"arg_directions": [pl.adir.inout]})
+
+        def with_tuple_return(program):
+            source = ir.python_print(program)
+            begin = source.index("    def forward(")
+            end = source.index("\n    @pl.function(", begin)
+            forward = source[begin:end]
+            tensor = "pl.Tensor[[1, 128], pl.FP32]"
+            forward = forward.replace(f"-> {tensor}:", f"-> tuple[{tensor}, pl.Scalar[pl.INT64]]:")
+            forward = forward.replace("        return view", "        return view, 1")
+            source = source[:begin] + forward + source[end:]
+            return pl.parse_program(
+                source.replace(f"        returned: {tensor} =", "        returned, _marker =")
+            )
+
+        before, expected = (
+            (with_tuple_return(Before), with_tuple_return(Expected)) if tuple_return else (Before, Expected)
+        )
+        after = passes.derive_call_directions()(before)
+        ir.assert_structural_equal(after, expected)
+
     def test_out_param_enclosing_inout_declaration_promoted(self):
         """R-enclosing: explicit ``pl.InOut`` on the enclosing param promotes to ``InOut``.
 

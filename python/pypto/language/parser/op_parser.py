@@ -10,6 +10,7 @@
 """DSL operator dispatch, argument conversion and buffer metadata."""
 
 import ast
+import inspect
 from typing import Any, TypeGuard, cast
 
 from pypto.ir import op as ir_op
@@ -83,6 +84,22 @@ class OpParser:
                 "reg operations require RegScope; values cannot escape outside",
                 span=self.services.span_tracker.get_span(call),
             )
+        if name == "mem_bar":
+            span = self.services.span_tracker.get_span(call)
+            if len(call.args) == 1 and not call.keywords:
+                node = call.args[0]
+            elif not call.args and len(call.keywords) == 1 and call.keywords[0].arg == "kind":
+                node = call.keywords[0].value
+            else:
+                raise ParserSyntaxError("reg.mem_bar requires exactly one kind", span=span)
+            if references_ir_binding(node, self.services.scope_manager.lookup_var):
+                raise ParserSyntaxError("reg.mem_bar kind must be a compile-time string", span=span)
+            success, kind = self.services.expr_evaluator.try_eval_expr(node)
+            if not success or not isinstance(kind, str):
+                raise ParserSyntaxError("reg.mem_bar kind must be a compile-time string", span=span)
+            # String operands are attributes, not scalar IR expressions. Keep
+            # positional and printer-emitted keyword spellings equivalent.
+            return ir.create_op_call("reg.mem_bar", [], {"kind": kind}, span)
         return self.dispatch_op(_dsl_reg, "pl.reg", name, call, bind_call_args=True)
 
     def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:
@@ -104,6 +121,9 @@ class OpParser:
             "fma",
             "prmt",
             "mulhi",
+            "mul_i32toi64",
+            "div",
+            "rem",
             "ftoi",
             "itof",
         }:
@@ -117,6 +137,14 @@ class OpParser:
                 preserve_omitted_kwargs=True,
             )
         if name in {
+            "bitcast",
+            "ftof",
+            "trap",
+            "assert_",
+            "atomic_sub",
+            "atomic_and",
+            "atomic_or",
+            "atomic_xor",
             "atomic_add",
             "atomic_min",
             "atomic_max",
@@ -139,7 +167,16 @@ class OpParser:
         }:
             # The public wrappers own keyword binding and literal normalization,
             # just as they do for other schema-validated DSL operations.
-            return self.dispatch_op(_dsl_simt, "pl.simt", name, call)
+            return self.dispatch_op(
+                _dsl_simt,
+                "pl.simt",
+                name,
+                call,
+                expression_arg_indices=frozenset({0}) if name == "ftof" else frozenset(),
+                expression_keywords=frozenset({"value"}) if name == "ftof" else frozenset(),
+                preserve_omitted_kwargs=name
+                in {"atomic_min", "atomic_max", "redux_min", "redux_max", "ftof"},
+            )
         kwargs = self.parse_op_kwargs(call)
         args = call.args
         if name in {"thread_idx", "block_idx", "block_dim", "grid_dim"}:
@@ -168,7 +205,7 @@ class OpParser:
         return self.attrs.attach_op_attrs(result, self.attrs.parse_op_attrs(call))
 
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
-        """Parse operation call like pl.tensor.create_tensor() or pl.add().
+        """Parse operation call like pl.tensor.create() or pl.add().
 
         Args:
             call: Call AST node
@@ -179,7 +216,7 @@ class OpParser:
         func = call.func
 
         # Navigate through attribute chain to find operation
-        # e.g., pl.tensor.create_tensor -> ["pl", "tensor", "create_tensor"]
+        # e.g., pl.tensor.create -> ["pl", "tensor", "create"]
         # e.g., pl.add -> ["pl", "add"]
         attrs: list[str] = []
         node = func
@@ -565,8 +602,9 @@ class OpParser:
             if key == "attrs":
                 continue
 
-            # Handle dtype specially
-            if key in expression_keywords:
+            if key == "acc_push_epilogue" and isinstance(value, ast.Dict):
+                kwargs[key] = self.attrs.parse_acc_push_epilogue(value)
+            elif key in expression_keywords:
                 # Operand literals need the same dtype as positional operands;
                 # compile-time attributes still use the value parsing below.
                 kwargs[key] = self.callbacks.expression(value)
@@ -700,6 +738,7 @@ class OpParser:
         call: ast.Call,
         *,
         expression_args: bool = False,
+        expression_arg_indices: frozenset[int] = frozenset(),
         expression_keywords: frozenset[str] = frozenset(),
         preserve_omitted_kwargs: bool = False,
         bind_call_args: bool = False,
@@ -718,6 +757,7 @@ class OpParser:
             op_name: Name of the operation to look up on the module.
             call: Call AST node.
             expression_args: Parse all positional operands as typed IR expressions.
+            expression_arg_indices: Positional operand slots requiring typed expressions.
             expression_keywords: Keyword operands parsed as typed IR expressions.
             preserve_omitted_kwargs: Preserve implicit IR defaults during text round trips.
             bind_call_args: Evaluate nested register operands in source order.
@@ -734,10 +774,14 @@ class OpParser:
         # SIMT math requires typed scalar operands. Generic wrappers retain
         # Python numeric values for slots such as full/padding and choose their
         # own literal dtype, so keep the two argument contracts explicit.
-        parse_arg = self.callbacks.expression if expression_args else self.parse_op_positional_arg
+        # Mixed signatures such as ftof(value, dtype) need typed value operands
+        # while retaining dtype/enum resolution in their other positional slots.
         args: list[Any] = []
-        for arg in call.args:
-            value = parse_arg(arg)
+        for index, arg in enumerate(call.args):
+            if expression_args or index in expression_arg_indices:
+                value = self.callbacks.expression(arg)
+            else:
+                value = self.parse_op_positional_arg(arg)
             args.append(self.bind_call_arg(value) if bind_call_args else value)
         kwargs = self.parse_op_kwargs(
             call, expression_keywords=expression_keywords, bind_call_args=bind_call_args
@@ -751,7 +795,9 @@ class OpParser:
                 # DSL wrappers materialize conversion defaults, but raw IR may
                 # intentionally omit them. Keep only attributes present in the
                 # source so printing/reparsing preserves structural identity.
-                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in kwargs}
+                # Attributes such as ftof's dtype can also be passed positionally.
+                supplied = inspect.signature(op_func).bind(*args, **kwargs).arguments
+                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in supplied}
                 if len(explicit_kwargs) != len(result.kwargs):
                     result = ir.create_op_call(result.op.name, result.args, explicit_kwargs, span)
             return self.attrs.attach_op_attrs(result, attrs)
@@ -925,6 +971,13 @@ class OpParser:
         ``tile.mrgsort_format1``). IR builders take ``span=`` explicitly and
         accept raw ``ir.Expr`` arguments — no DSL wrap/unwrap round-trip.
         """
+        # The raw IR builders retain constructor aliases removed from the DSL.
+        if (module_name, op_name) in (("pl.tensor", "create_tensor"), ("pl.tile", "create_tile")):
+            raise InvalidOperationError(
+                f"{module_name}.{op_name} was removed",
+                span=self.services.span_tracker.get_span(call),
+                hint=f"Use pl.{op_name}(...) or {module_name}.create(...).",
+            )
         if not hasattr(module, op_name):
             raise InvalidOperationError(
                 f"Unknown {module_name} operation: {op_name}",
@@ -1054,7 +1107,7 @@ class OpParser:
 
         - ``alloc_window_buffer``: must be intercepted at assignment-LHS.
           Reaching here means it was used outside that context.
-        - ``world_size``: host-only.
+        - ``world_size`` and ``num_workers``: orchestration-level topology queries.
         """
         span = self.services.span_tracker.get_span(call)
 
@@ -1067,19 +1120,25 @@ class OpParser:
                 "(or the short form 'buf = pld.alloc_window_buffer(N)')",
             )
 
-        if op_name == "world_size":
-            in_device_scope = any(
-                self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+        if op_name in ("world_size", "num_workers"):
+            self.validate_host_or_cluster_scope(f"pld.system.{op_name}", span)
+
+    def validate_host_or_cluster_scope(self, op_name: str, span: ir.Span) -> None:
+        level = self.regions.effective_level
+        in_device_scope = any(
+            self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+        )
+        if (
+            level is None
+            or level.value not in (ir.Level.HOST.value, ir.Level.CLUSTER_0.value)
+            or in_device_scope
+        ):
+            raise ParserSyntaxError(
+                f"{op_name}() can only be called in HOST or CLUSTER_0 orchestration context "
+                f"(not inside InCore / SPMD scopes); current hierarchy level: {level}",
+                span=span,
+                hint="Call from a HOST or CLUSTER_0 orchestrator outside any nested device-side scope",
             )
-            if self.function.func_level != ir.Level.HOST or in_device_scope:
-                raise ParserSyntaxError(
-                    "pld.system.world_size() can only be called in HOST orchestration context "
-                    "(not inside InCore / SPMD scopes); "
-                    f"current function level: {self.function.func_level}",
-                    span=span,
-                    hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                    "on the enclosing function and call outside any nested device-side scope",
-                )
 
     def parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse ``pld.<op>(...)`` — 2-segment unified short form.
@@ -1180,7 +1239,7 @@ class OpParser:
 
         args = [self.callbacks.expression(arg) for arg in call.args]
         kwargs = self.parse_op_kwargs(call)
-        attrs = self.attrs.parse_op_attrs(call) or {}
+        attrs = self.attrs.parse_op_attrs(call, dispatch_placement=True) or {}
         self.check_builtin_op_printer_invariants(full_name, args, attrs, span)
         try:
             built = ir._create_internal_op_call(full_name, args, kwargs, span)
@@ -1203,7 +1262,7 @@ class OpParser:
         Keeps the accepted grammar equal to the printer's output, so this
         machine-only surface cannot be used to hand-build a dispatch that
         orchestration codegen would reject with an ``INTERNAL_CHECK`` (see
-        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``device`` attr
+        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``worker`` attr
         to resolve the rank expression, and one ``arg_directions`` entry per
         positional arg).
         """
@@ -1212,10 +1271,20 @@ class OpParser:
             f"{full_name} is reached by writing the public pld.{full_name.split('.', 1)[1]} "
             f"collective and letting LowerHostTensorCollectives lower it"
         )
-        if "device" not in attrs:
+        if "worker" in attrs and "device" in attrs:
             raise InvalidOperationError(
-                f"'pl.{full_name}' requires a device attr naming the dispatching rank "
-                f'(attrs={{"device": <rank>}})',
+                f"'pl.{full_name}' must use only one worker or device placement attr",
+                span=span,
+                hint=hint,
+            )
+        if "device" in attrs:
+            # Read older printer dumps; constructors perform the same wire/direct
+            # IR normalization while preserving the referenced expression object.
+            attrs["worker"] = attrs.pop("device")
+        if "worker" not in attrs:
+            raise InvalidOperationError(
+                f"'pl.{full_name}' requires a worker attr naming the dispatching child "
+                f'(attrs={{"worker": <rank>}})',
                 span=span,
                 hint=hint,
             )

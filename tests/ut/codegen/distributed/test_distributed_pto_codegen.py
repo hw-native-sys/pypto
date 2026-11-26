@@ -1482,7 +1482,7 @@ def test_rank_emits_pto_load_at_slot_2_plus_trunci():
     kWindowSlotStride = 16/8) then truncates to signless ``i32`` for PTOAS.
 
     Asserts that the emitted MLIR contains ``pto.load %argN[%cK] :
-    !pto.ptr<i64> -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
+    !pto.ptr<i64>, index -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
     is the nranks path).
     """
 
@@ -1497,7 +1497,7 @@ def test_rank_emits_pto_load_at_slot_2_plus_trunci():
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
     # rank lowering line.
-    assert "pto.load " in body and "!pto.ptr<i64> -> i64" in body, body
+    assert "pto.load " in body and "!pto.ptr<i64>, index -> i64" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body
     # rank does not shrui — only nranks does.
@@ -1524,7 +1524,7 @@ def test_nranks_emits_pto_load_plus_shrui_32_plus_trunci():
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
     # nranks lowering: pto.load + arith.shrui + arith.trunci.
-    assert "pto.load " in body and "!pto.ptr<i64> -> i64" in body, body
+    assert "pto.load " in body and "!pto.ptr<i64>, index -> i64" in body, body
     assert "arith.shrui" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body
@@ -1872,6 +1872,34 @@ def test_get_emits_comm_tget_with_staging_tile():
     assert "pto.barrier <PIPE_ALL>" in mlir
 
 
+def test_sync_put_get_keep_their_synchronous_lowering():
+    """V1 guardrail: the async URMA path must not change the sync put/get lowering.
+
+    The sync ops keep their PTOAS ``pto.comm.tput`` / ``pto.comm.tget`` calls
+    and never emit the URMA external helper. If a future change routes the sync
+    path through the async helper, or makes the async helper the default, this
+    test fails.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(dst, peer=peer, src=src)
+            pld.tensor.get(dst, peer=peer, src=src)
+
+    mlir = _generate_mlir_a5(P)
+    assert "pto.comm.tput(" in mlir, mlir
+    assert "pto.comm.tget(" in mlir, mlir
+    assert "pypto_urma_put_async" not in mlir, mlir
+    assert "pypto_urma_get_async" not in mlir, mlir
+
+
 def test_get_subregion_uses_offset_partition_views():
     """offset get lowers dst/src subregions to matching partition views."""
 
@@ -2179,7 +2207,7 @@ def test_put_async_emits_urma_helper_call():
         def kernel(
             self,
             dst: pld.DistributedTensor[[16, 64], pl.FP16],
-            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pl.Tensor[[16, 64], pl.FP16],
             peer: pl.Scalar[pl.INT32],
         ):
             pld.tensor.put_async(dst, peer, src)
@@ -2217,7 +2245,7 @@ def test_get_async_uses_the_get_symbol_and_element_bytes():
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            dst: pld.DistributedTensor[[8, 32], pl.FP32],
+            dst: pl.Tensor[[8, 32], pl.FP32],
             src: pld.DistributedTensor[[8, 32], pl.FP32],
             peer: pl.Scalar[pl.INT32],
         ):
@@ -2231,6 +2259,27 @@ def test_get_async_uses_the_get_symbol_and_element_bytes():
     # 8 * 32 * 4 bytes.
     assert "arith.constant 1024 : i64" in mlir, mlir
     assert "pto.comm.tget" not in mlir, mlir
+
+
+def test_get_async_plain_tensor_result_preserves_base_pointer():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pl.Tensor[[8, 32], pl.FP32],
+            src: pld.DistributedTensor[[8, 32], pl.FP32],
+        ):
+            result = pld.tensor.get_async(dst, 1, src)
+            pld.tensor.get_async(result, 1, src)
+
+    mlir = _generate_mlir_a5(P)
+    calls = [line.strip() for line in mlir.splitlines() if "func.call @pypto_urma_get_async_f32" in line]
+    assert len(calls) == 2, mlir
+    # Reusing the result must retain both dst's pointer and src's communication context.
+    for call in calls:
+        args = call.split("(", 1)[1].split(")", 1)[0].split(", ")
+        assert args[:4] == ["%__pypto_deferred_raw_args", "%arg2", "%arg0", "%arg1"], mlir
 
 
 def test_put_async_subregion_offsets_are_bytes_not_elements():
@@ -2247,7 +2296,7 @@ def test_put_async_subregion_offsets_are_bytes_not_elements():
         def kernel(
             self,
             dst: pld.DistributedTensor[[16, 64], pl.FP16],
-            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pl.Tensor[[16, 64], pl.FP16],
             peer: pl.Scalar[pl.INT32],
         ):
             pld.tensor.put_async(
@@ -2292,7 +2341,7 @@ def test_put_async_dynamic_subregion_guards_each_dimension():
         def kernel(
             self,
             dst: pld.DistributedTensor[[16, 64], pl.FP32],
-            src: pld.DistributedTensor[[16, 64], pl.FP32],
+            src: pl.Tensor[[16, 64], pl.FP32],
             col: pl.Scalar[pl.INT32],
         ):
             pld.tensor.put_async(
@@ -2308,7 +2357,37 @@ def test_put_async_dynamic_subregion_guards_each_dimension():
 
     assert "arith.cmpi sge" in mlir, mlir
     assert "arith.cmpi sle" in mlir, mlir
+    # The bounds check is `extent <= limit - off`, not `off + extent <= limit`:
+    # the sum can wrap for large runtime coordinates and pass the check.
+    assert "arith.subi" in mlir, mlir
     assert "arith.select" in mlir, mlir
+
+
+def test_put_async_above_urma_chunk_limit_emits_one_full_extent_call():
+    """A15: PyPTO emits one helper call with the full byte count.
+
+    The URMA runtime chunks transfers above ``kUrmaMaxWqeTransferBytes``
+    (256 MiB); PyPTO does not. This pins the boundary: a 256 MiB + 4 KiB
+    static transfer still lowers to a single ``func.call`` carrying the full
+    extent, not a compile-time chunk loop.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[65537, 1024], pl.FP32],
+            src: pld.DistributedTensor[[65537, 1024], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(dst, peer, src)
+
+    mlir = _generate_mlir_a5(P)
+    assert mlir.count("func.call @pypto_urma_put_async_f32") == 1, mlir
+    # 65537 x 1024 x 4 = 268,439,552 bytes = 256 MiB + 4 KiB.
+    assert "arith.constant 268439552 : i64" in mlir, mlir
+    assert "pto.comm.tput" not in mlir, mlir
 
 
 def test_put_async_rejects_non_a5_backend():
@@ -2327,6 +2406,24 @@ def test_put_async_rejects_non_a5_backend():
 
     with pytest.raises(ValueError, match="requires the A5 backend"):
         _generate_mlir(P)
+
+
+def test_put_async_rejects_subbyte_element_type_before_byte_offset_codegen():
+    """BOOL must fail at the async transfer boundary, before byte arithmetic."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.BOOL],
+            src: pld.DistributedTensor[[16, 64], pl.BOOL],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(dst, peer, src)
+
+    with pytest.raises(ValueError, match="byte-sized element types"):
+        _generate_mlir_a5(P)
 
 
 if __name__ == "__main__":

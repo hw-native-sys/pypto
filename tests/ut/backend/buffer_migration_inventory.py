@@ -253,6 +253,8 @@ MIGRATION_FAMILIES = (
             "tile.concat",
             "tile.extract",
             "tile.assemble",
+            # Direct cross-core FIXPIPE currently has a TileIR callback only.
+            "tile.tpush_to_aiv_direct",
         ),
         restricted=frozenset({"tile.move", "tile.cast", "tile.transpose"}),
     ),
@@ -264,6 +266,9 @@ MIGRATION_FAMILIES = (
             "tile.transpose_view",
             "tile.slice",
             "tile.set_validshape",
+            # This is an initialization-analysis annotation, not a migrated
+            # native BufferIR operation.
+            "tile.mark_remote_written",
         ),
         restricted=frozenset({"tile.reshape"}),
     ),
@@ -279,7 +284,7 @@ MIGRATION_FAMILIES = (
         ),
     ),
     MigrationFamily(
-        "G15: A5 MX and scale binding",
+        "G15: A5 quantization, MX and scale binding",
         (
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
@@ -287,6 +292,7 @@ MIGRATION_FAMILIES = (
             "tile.tget_scale_addr",
             "tile.tquant_mx_raw",
             "tile.tmov_x2zz",
+            "tile.dequant",
         ),
         targets=frozenset({backend.BackendType.Ascend950}),
     ),
@@ -345,6 +351,8 @@ MIGRATION_FAMILIES = (
             "system.cacheinvalid",
             "system.sync_set",
             "system.sync_wait",
+            "system.set_intra_block",
+            "system.wait_intra_block",
             "system.set_flag",
             "system.wait_flag",
             "system.set_ffts",
@@ -362,6 +370,8 @@ MIGRATION_FAMILIES = (
             "system.tfree_to_aiv",
             "system.aic_initialize_pipe",
             "system.aiv_initialize_pipe",
+            "system.set_quant_scalar",
+            "system.set_quant_vector",
             "system.reserve_buffer",
             "system.import_peer_buffer",
         ),

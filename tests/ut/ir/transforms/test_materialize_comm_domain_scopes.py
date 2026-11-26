@@ -204,8 +204,8 @@ def _assert_rank2_signal_type(value: ir.Expr, world_size_name: str) -> None:
 
 @pytest.mark.parametrize("pre_materialized", [False, True])
 @pytest.mark.parametrize("uses_urma", [False, True])
-def test_program_wide_engine_requirements(uses_urma, pre_materialized):
-    """Even an uncalled function contributes engines to every host domain."""
+def test_uncalled_collective_does_not_provision_domains(uses_urma, pre_materialized):
+    """Only uses reaching an allocation contribute its engine requirements."""
 
     @pl.program
     class Before:
@@ -246,17 +246,11 @@ def test_program_wide_engine_requirements(uses_urma, pre_materialized):
     after = passes.materialize_comm_domain_scopes()(program)
     scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
     assert len(scopes) == 2
-    assert all(list(scope.engines) == (["urma"] if uses_urma else []) for scope in scopes)
+    assert all(list(scope.engines) == [] for scope in scopes)
 
 
-def test_put_async_requests_the_urma_engine():
-    """An async transfer anywhere in the program provisions URMA on every domain.
-
-    The URMA descriptor is fixed at window-allocation time and the transfer has
-    no synchronous fallback, so a host domain that omits the engine would abort
-    at run time. The requirement therefore has to reach the IR ``engines``
-    field here — codegen only renders what this pass records.
-    """
+def test_uncalled_put_async_does_not_request_engines():
+    """An uncalled async transfer has no allocation to provision."""
 
     @pl.program
     class Before:
@@ -285,10 +279,10 @@ def test_put_async_requests_the_urma_engine():
     after = passes.materialize_comm_domain_scopes()(program)
     scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
     assert len(scopes) == 2
-    assert all(list(scope.engines) == ["urma"] for scope in scopes)
+    assert all(list(scope.engines) == [] for scope in scopes)
 
 
-def test_get_async_requests_the_urma_engine():
+def test_uncalled_get_async_does_not_request_engines():
     """GET is the second async op the engine scan must recognise."""
 
     @pl.program
@@ -318,7 +312,7 @@ def test_get_async_requests_the_urma_engine():
     after = passes.materialize_comm_domain_scopes()(program)
     scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
     assert len(scopes) == 2
-    assert all(list(scope.engines) == ["urma"] for scope in scopes)
+    assert all(list(scope.engines) == [] for scope in scopes)
 
 
 def test_single_alloc_all_devices_world_size_loop():
@@ -2111,6 +2105,65 @@ def test_verifier_flags_duplicate_slot_across_scopes():
     assert errors[0].rule_name == "CommDomainScopesMaterialized"
 
 
+# ---------------------------------------------------------------------------
+# Window declaration capacity checks
+# ---------------------------------------------------------------------------
+
+
+def _comm_domain_errors(program: ir.Program) -> list:
+    """Run the property verifier and return its error diagnostics."""
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.CommDomainScopesMaterialized)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+    return [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+
+
+def _build_async_window_program(
+    op_name: str,
+    dst_window_bytes: int,
+    src_window_bytes: int,
+) -> ir.Program:
+    """``host_orch -> chip_orch -> InCore kernel`` with two window views.
+
+    The parsed source lets the op name and byte counts be parameters. The
+    window-view capacity invariant is checked at materialization, independent of
+    which op (sync or async) consumes the views.
+    """
+    call = f"pld.tensor.{op_name}(dst, peer, src)"
+    return pl.parse_program(
+        textwrap.dedent(
+            f"""
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                    peer: pl.Scalar[pl.INT32],
+                ):
+                    {call}
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    self.kernel(dst, src, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    a = pld.alloc_window_buffer({dst_window_bytes})
+                    b = pld.alloc_window_buffer({src_window_bytes})
+                    x = pld.window(a, [16], dtype=pl.FP32)
+                    y = pld.window(b, [16], dtype=pl.FP32)
+                    self.chip(x, y, device=0)
+            """
+        )
+    )
+
+
 @pytest.mark.parametrize("explicit_layout", [False, True])
 def test_materialized_program_text_roundtrip(explicit_layout):
     """Print and parse a complete program without re-running any lowering pass."""
@@ -2358,6 +2411,235 @@ def test_signed_scope_attribute_roundtrip(value):
     assert scope.attrs["saved"] == value
     assert isinstance(scope.attrs["index_expr"], ir.ConstInt)
     assert scope.attrs["index_expr"].value == -1
+
+
+@pytest.mark.parametrize(
+    "source,init", [("device", ""), ("host", ""), ("host", "engram_l1"), ("host", 'table"\\\nkey')]
+)
+def test_window_memory_source_roundtrip(source, init):
+    base = ir.Var("table", ir.PtrType(), ir.Span.unknown())
+    window = ir.WindowBuffer(
+        base, ir.ConstInt(256, DataType.INT64, ir.Span.unknown()), memory_source=source, init=init
+    )
+    assert window.memory_source == source
+    restored = ir.deserialize(ir.serialize(window))
+    ir.assert_structural_equal(window, restored, enable_auto_mapping=True)
+
+
+def test_host_and_device_windows_have_separate_domains():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[64], pl.FP32]) -> pld.DistributedTensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
+            h = pld.alloc_window_buffer([64], dtype=pl.FP32, memory_source="host", init="engram_l1")
+            d = pld.alloc_window_buffer(256)
+            h2 = pld.alloc_window_buffer(256, memory_source="host")
+            ht = pld.window(h, [64], dtype=pl.FP32)
+            dt = pld.window(d, [64], dtype=pl.FP32)
+            ht2 = pld.window(h2, [64], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip(ht, device=r)
+                self.chip(dt, device=r)
+                self.chip(ht2, device=r)
+            return ht
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip(
+            self, x__ssa_v0: pld.DistributedTensor[[64], pl.FP32]
+        ) -> pld.DistributedTensor[[64], pl.FP32]:
+            return x__ssa_v0
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
+            with pl._dump.comm_domain(
+                name="comm_d0",
+                devices=[],
+                slots=[
+                    pl._dump.window_buffer(
+                        "h__ssa_v0_window",
+                        base="h__ssa_v0",
+                        size=pl.const(256, pl.INT64),
+                        load_from_host=False,
+                        store_to_host=False,
+                        memory_source="host",
+                        init="engram_l1",
+                    ),
+                    pl._dump.window_buffer(
+                        "h2__ssa_v0_window",
+                        base="h2__ssa_v0",
+                        size=256,
+                        load_from_host=False,
+                        store_to_host=False,
+                        memory_source="host",
+                    ),
+                ],
+            ):
+                with pl._dump.comm_domain(
+                    name="comm_d1",
+                    devices=[],
+                    slots=[
+                        pl._dump.window_buffer(
+                            "d__ssa_v0_window",
+                            base="d__ssa_v0",
+                            size=256,
+                            load_from_host=False,
+                            store_to_host=False,
+                        )
+                    ],
+                ):
+                    h__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
+                        pl.const(256, pl.INT64), name="h", init="engram_l1", memory_source="host"
+                    )
+                    d__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(256, name="d")
+                    h2__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(256, name="h2", memory_source="host")
+                    ht__ssa_v0: pld.DistributedTensor[
+                        [64], pl.FP32, pl._dump.window_ref("h__ssa_v0_window")
+                    ] = pl._dump.call(
+                        "pld.tensor.window",
+                        [h__ssa_v0, [64]],
+                        pld.DistributedTensor[[64], pl.FP32, pl._dump.window_ref("h__ssa_v0_window")],
+                        kwargs={"dtype": pl.FP32},
+                    )
+                    dt__ssa_v0: pld.DistributedTensor[
+                        [64], pl.FP32, pl._dump.window_ref("d__ssa_v0_window")
+                    ] = pl._dump.call(
+                        "pld.tensor.window",
+                        [d__ssa_v0, [64]],
+                        pld.DistributedTensor[[64], pl.FP32, pl._dump.window_ref("d__ssa_v0_window")],
+                        kwargs={"dtype": pl.FP32},
+                    )
+                    ht2__ssa_v0: pld.DistributedTensor[
+                        [64], pl.FP32, pl._dump.window_ref("h2__ssa_v0_window")
+                    ] = pl._dump.call(
+                        "pld.tensor.window",
+                        [h2__ssa_v0, [64]],
+                        pld.DistributedTensor[[64], pl.FP32, pl._dump.window_ref("h2__ssa_v0_window")],
+                        kwargs={"dtype": pl.FP32},
+                    )
+                    for r__idx_v0 in pl.range(pld.system.world_size()):
+                        self.chip(ht__ssa_v0, device=r__idx_v0)
+                        self.chip(dt__ssa_v0, device=r__idx_v0)
+                        self.chip(ht2__ssa_v0, device=r__idx_v0)
+                    return ht__ssa_v0
+
+    after = _apply(Before)
+    ir.assert_structural_equal(after, Expected)
+    scope = _get_func(after, "host").body
+    assert isinstance(scope, ir.CommDomainScopeStmt)
+    assert [slot.memory_source for slot in scope.slots] == ["host", "host"]
+    assert list(scope.engines) == []
+    assert scope.slots[0].init == "engram_l1"
+    ir.assert_structural_equal(
+        scope.slots[0], ir.deserialize(ir.serialize(scope.slots[0])), enable_auto_mapping=True
+    )
+    assert isinstance(scope.body, ir.CommDomainScopeStmt)
+    assert [slot.memory_source for slot in scope.body.slots] == ["device"]
+    assert list(scope.body.engines) == []
+    ir.assert_structural_equal(after, passes.materialize_comm_domain_scopes()(after))
+    restored = pl.parse(ir.python_print(after))
+    ir.assert_structural_equal(after, restored)
+    assert ir.structural_hash(after) == ir.structural_hash(restored)
+
+
+@pytest.mark.parametrize("source", ["cpu", "HOST", "", 1])
+def test_invalid_window_memory_source(source):
+    with pytest.raises((ValueError, TypeError), match="memory_source"):
+        dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source)
+
+
+@pytest.mark.parametrize("init,source", [("", "host"), (3, "host"), ("table", "device")])
+def test_invalid_window_init(init, source):
+    with pytest.raises((ValueError, TypeError), match="init"):
+        dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source, init=init)
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_materialize_rejects_window_view_exceeding_slot(op_name):
+    """A 64-byte view in a 60-byte logical slot is rejected at materialization."""
+    with pytest.raises(
+        ValueError, match=r"window view .* of 64 bytes exceeds backing window slot .* of 60 bytes"
+    ):
+        _apply(_build_async_window_program(op_name, 60, 64))
+
+
+def test_materialize_accepts_exact_and_overallocated_slot():
+    program = _apply(_build_async_window_program("put_async", 64, 128))
+    assert _comm_domain_errors(program) == []
+
+
+def test_materialize_rejects_alignment_padding_as_capacity():
+    """The 64-byte physical alignment of a 60-byte slot is not addressable."""
+    with pytest.raises(
+        ValueError, match=r"window view .* of 64 bytes exceeds backing window slot .* of 60 bytes"
+    ):
+        _apply(_build_async_window_program("put_async", 64, 60))
+
+
+def test_materialize_rejects_sync_only_oversized_window():
+    """The capacity invariant applies to synchronous transfers too."""
+    with pytest.raises(ValueError, match=r"window view .* of 64 bytes exceeds backing window slot"):
+        _apply(_build_async_window_program("put", 60, 64))
+
+
+def test_materialize_rejects_non_positive_window_extent():
+    """A zero static extent is invalid, not merely unverifiable."""
+    program = pl.parse_program(
+        textwrap.dedent(
+            """
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, dst: pld.DistributedTensor[[16], pl.FP32], peer: pl.Scalar[pl.INT32]):
+                    return dst
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(self, dst: pld.DistributedTensor[[16], pl.FP32]):
+                    self.kernel(dst, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    buf = pld.alloc_window_buffer(64)
+                    live = pld.window(buf, [16], dtype=pl.FP32)
+                    bad = pld.window(buf, [0], dtype=pl.FP32)
+                    self.chip(live, device=0)
+            """
+        )
+    )
+    with pytest.raises(ValueError, match="non-positive static extent"):
+        _apply(program)
+
+
+def test_materialize_rejects_negative_window_slot():
+    """A negative allocation size is invalid, not merely unverifiable."""
+    program = pl.parse_program(
+        textwrap.dedent(
+            """
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, dst: pld.DistributedTensor[[16], pl.FP32], peer: pl.Scalar[pl.INT32]):
+                    return dst
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(self, dst: pld.DistributedTensor[[16], pl.FP32]):
+                    self.kernel(dst, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    buf = pld.alloc_window_buffer(-64)
+                    data = pld.window(buf, [16], dtype=pl.FP32)
+                    self.chip(data, device=0)
+            """
+        )
+    )
+    with pytest.raises(ValueError, match="negative backing window slot"):
+        _apply(program)
 
 
 if __name__ == "__main__":

@@ -136,9 +136,8 @@ struct AccumulatorTileGeometry {
 ///   arithmetic the fallback already performs. So falling back is either
 ///   unreachable or identical, never a silent approximation.
 ///
-/// ``CompactMode`` is deliberately not a factor: PTO only widens the stride for
-/// its ``RowPlusOne`` mode, which PyPTO's ``CompactMode`` (``null`` / ``normal``)
-/// never spells, so ``normal`` addresses exactly like ``null``.
+/// ``CompactMode`` is deliberately not a factor here: ``normal`` addresses exactly
+/// like ``null`` in L0C. The padded ``row_plus_one`` layout is Vec-only.
 inline std::optional<AccumulatorTileGeometry> GetAccumulatorTileGeometry(const TileView& view,
                                                                          const std::vector<ExprPtr>& shape,
                                                                          const DataType& dtype) {
@@ -185,33 +184,22 @@ inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std:
   return true;
 }
 
-/// Return whether @p valid_shape is SplitVectorKernel's all-zero lane-1 sentinel.
-///
-/// `WithZeroValidShape` stamps every dimension of a cloned lane-1 op with a
-/// ConstInt 0 so the replay lane computes nothing. That zero is a marker, not an
-/// extent, and it must never reach a PTO type string as a static `v_row=0,
-/// v_col=0`: pto-isa declares `Tile::GetValidRow` / `GetValidCol` only for a
-/// static mask `> 0` and for `DYNAMIC`, so a static zero matches no overload and
-/// ccec cannot compile the tile. A caller that would otherwise render a static
-/// valid must leave it dynamic, which lowers to a runtime-zero extent and
-/// compiles — the replay lane discards the result either way.
-///
-/// The hazard reached three separate sites before this predicate existed
-/// (gh#1507 subview inference, gh#1649 `tile.slice` replay, gh#2870 the
-/// `pto.treshape` view type), so every new site that turns a valid_shape into a
-/// static type string must consult this rather than re-deriving the check.
-///
-/// Only the all-zero form is matched, and that is a scope limit rather than a
-/// safety claim. A single zero beside a real extent is equally unrepresentable:
-/// `GetValidRow` / `GetValidCol` each key on their own dimension, so
-/// `Tile<..., 8, 0, ...>` matches no `GetValidCol` overload either, and a
-/// valid_shape of `[8, 0]` still renders a static `v_col=0` today. That is left
-/// in place deliberately — `pto.treshape` default-constructs its destination and
-/// never assigns `ColMaskInternal`, so making a lone zero dimension dynamic
-/// would trade a compile error for a silent read of an uninitialized extent.
-/// Safe for this sentinel, whose result the replay lane discards; not safe for a
-/// zero of unknown origin. Establish where such a zero comes from before
-/// relaxing this (gh#2879).
+/// A zero in any dimension makes the valid region empty. Keep this separate
+/// from the all-zero replay marker: ordinary window intersection can also
+/// produce [rows, 0], without changing the physical allocation or sync protocol.
+inline bool HasZeroValidExtent(const std::vector<ExprPtr>& valid_shape) {
+  return std::any_of(valid_shape.begin(), valid_shape.end(), [](const ExprPtr& dim) {
+    auto value = As<ConstInt>(dim);
+    return value && value->value_ == 0;
+  });
+}
+
+/// Recognize SplitVectorKernel's all-zero replay marker. This is a provenance
+/// convention, not the general empty-region predicate; see HasZeroValidExtent.
+/// Subview inference must still distinguish this replay marker from an ordinary
+/// partially valid parent (gh#1507, gh#1649). Neither a single zero nor the marker
+/// can be encoded as a static PTO-ISA valid mask; dynamic views also need explicit
+/// initialization because TRESHAPE only aliases storage (gh#2870, gh#2879).
 inline bool IsZeroValidShapeSentinel(const std::vector<ExprPtr>& valid_shape) {
   if (valid_shape.empty()) {
     return false;
@@ -295,6 +283,11 @@ inline TileLayoutSpec GetImplicitTileLayout(const std::vector<ExprPtr>& shape,
         layout.blayout = TileLayout::row_major;
         layout.slayout = TileLayout::row_major;
         break;
+      case MemorySpace::Scaling:
+        // Packed Fixpipe control words use a flat layout regardless of shape.
+        layout.blayout = TileLayout::row_major;
+        layout.slayout = TileLayout::none_box;
+        break;
       case MemorySpace::RightScale:
         // ISA TileRightScale: ColMajor / ColMajor.
         layout.blayout = TileLayout::col_major;
@@ -327,6 +320,23 @@ inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
   implicit_view.valid_shape = shape;
   SetTileLayout(implicit_view, GetImplicitTileLayout(shape, memory_space));
   return implicit_view;
+}
+
+inline const char* ValidateFixpipeControlRow(const std::vector<ExprPtr>& shape, const TileView& view) {
+  const auto cols = shape.size() == 2 ? As<ConstInt>(shape[1]) : nullptr;
+  if (!cols || !IsConstValue(shape[0], 1) || cols->value_ <= 0 || cols->value_ % 16) {
+    return "requires shape [1, N] with N a positive multiple of 16 (128-byte alignment)";
+  }
+  const auto& valid = view.valid_shape.empty() ? shape : view.valid_shape;
+  if (valid.size() != 2 || !IsConstValue(valid[0], 1) || !IsConstValue(valid[1], cols->value_)) {
+    return "requires valid_shape to cover the full [1, N] shape";
+  }
+  const auto& stride = view.stride;
+  if (stride.empty() ||
+      (stride.size() == 2 && IsConstValue(stride[0], cols->value_) && IsConstValue(stride[1], 1))) {
+    return nullptr;
+  }
+  return "requires packed row-major stride [N, 1]";
 }
 
 /// Return whether TileView matches the printer's raw TileView() defaults.

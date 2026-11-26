@@ -12,6 +12,7 @@
 #include <any>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,12 +20,15 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -43,6 +47,50 @@ TypePtr DeduceI32ScalarType(const std::vector<ExprPtr>& args,
   (void)args;
   (void)kwargs;
   return std::make_shared<ScalarType>(DataType::INT32);
+}
+
+TypePtr DeduceInitializePipeType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  bool structured = false, shorthand = false;
+  std::optional<bool> nosplit;
+  for (const auto& [key, value] : kwargs) {
+    structured |= key == "acc_push_epilogue";
+    shorthand |= key == "c2v_dtype" || (key == "pre_relu" && AnyCast<bool>(value, "kwarg key: pre_relu"));
+    if (key == "nosplit") nosplit = AnyCast<bool>(value, "kwarg key: nosplit");
+  }
+  CHECK(!structured || !shorthand) << "acc_push_epilogue cannot be combined with c2v_dtype/pre_relu";
+  CHECK(!shorthand || !nosplit.has_value() || *nosplit) << "c2v_dtype requires nosplit=true";
+  for (const auto& [key, value] : kwargs) {
+    if (key != "acc_push_epilogue") continue;
+    const auto e = AnyCast<AccPushEpilogue>(value);
+    const auto error = ValidateAccPushEpilogue(e);
+    CHECK(error.empty()) << error;
+    CHECK(GetIntKwarg(kwargs, "dir_mask", -1) == 1) << "acc_push_epilogue requires dir_mask=1 (C2V only)";
+    CHECK(nosplit.value_or(false)) << "acc_push_epilogue requires nosplit=true";
+  }
+  return GetUnknownType();
+}
+
+TypePtr DeduceQuantConfigType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs, bool vector) {
+  CHECK(args.size() == 1) << "set_quant requires exactly one operand";
+  CHECK(GetIntKwarg(kwargs, "id", 0) >= 0) << "set_quant pipe id must be non-negative";
+  if (vector) {
+    auto tile = As<TileType>(args[0]->GetType());
+    CHECK(tile && tile->memory_space_ == MemorySpace::Scaling &&
+          (tile->dtype_ == DataType::UINT64 || tile->dtype_ == DataType::INT64))
+        << "set_quant_vector requires packed 64-bit controls in loc=scaling "
+           "(MemorySpace.Scaling), not a floating-point scale tile";
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    const auto error = tile_view_semantics::ValidateFixpipeControlRow(tile->shape_, view);
+    CHECK(!error) << "set_quant_vector " << error;
+    CHECK(view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box)
+        << "set_quant_vector requires unboxed row-major packed controls";
+  } else {
+    auto scalar = As<ScalarType>(args[0]->GetType());
+    CHECK(scalar && scalar->dtype_ == DataType::FP32) << "set_quant_scalar requires an FP32 scalar";
+  }
+  return GetUnknownType();
 }
 
 constexpr int kMaxUserCrossCoreEventId = 13;
@@ -107,6 +155,46 @@ TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
+// Named intra-block events have their own A5 contract; FFTS keeps 0..13/INDEX.
+TypePtr DeduceIntraBlockSyncType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  CHECK(args.size() <= 1) << op_name << " accepts at most one dynamic event-id operand, got " << args.size();
+  bool has_static_event_id = false;
+  bool has_pipe = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "event_id") {
+      const int event_id = AnyCast<int>(value, "kwarg key: event_id");
+      CHECK(event_id >= 0 && event_id <= 31)
+          << op_name << " static event_id must be in [0, 31] on A5, got " << event_id;
+      has_static_event_id = true;
+    } else if (key == "pipe") {
+      const int pipe = AnyCast<int>(value, "kwarg key: pipe");
+      CHECK(pipe == PipeType::FIX || pipe == PipeType::MTE1 || pipe == PipeType::MTE2 ||
+            pipe == PipeType::MTE3 || pipe == PipeType::V || pipe == PipeType::S)
+          << op_name << " pipe must be FIX, MTE1, MTE2, MTE3, V, or S on A5, got " << pipe;
+      has_pipe = true;
+    } else if (key == "core_type") {
+      const auto core_type = AnyCast<std::string>(value, "kwarg key: core_type");
+      CHECK(core_type == "aic" || core_type == "aiv")
+          << op_name << " core_type must be 'aic' or 'aiv', got '" << core_type << "'";
+    } else {
+      CHECK(false) << op_name << " does not support attribute '" << key << "'";
+    }
+  }
+  CHECK(has_pipe) << op_name << " requires a pipe attribute";
+  CHECK(has_static_event_id != (args.size() == 1))
+      << op_name << " requires exactly one static event_id attribute or dynamic event-id operand";
+  if (!args.empty()) {
+    auto type = As<ScalarType>(args[0]->GetType());
+    CHECK(type && (type->dtype_ == DataType::INT32 || type->dtype_ == DataType::INT64))
+        << op_name << " dynamic event id must have ScalarType(INT32) or ScalarType(INT64); got "
+        << (type ? type->dtype_.ToString() : args[0]->GetType()->TypeName())
+        << "; cast INDEX explicitly before calling";
+  }
+  return GetUnknownType();
+}
+
 }  // namespace
 
 // ============================================================================
@@ -148,6 +236,28 @@ REGISTER_OP("system.sync_wait")
       return DeduceCrossCoreSyncType(args, kwargs, "system.sync_wait", false);
     });
 
+REGISTER_OP("system.set_intra_block")
+    .set_description("Set a named intra-block synchronization event")
+    .set_op_category("CrossCoreOp")
+    .add_argument("event_id_dyn", "Optional dynamic event id (INT32 or INT64)")
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .set_attr<std::string>("core_type")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceIntraBlockSyncType(args, kwargs, "system.set_intra_block");
+    });
+
+REGISTER_OP("system.wait_intra_block")
+    .set_description("Wait for a named intra-block synchronization event")
+    .set_op_category("CrossCoreOp")
+    .add_argument("event_id_dyn", "Optional dynamic event id (INT32 or INT64)")
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .set_attr<std::string>("core_type")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceIntraBlockSyncType(args, kwargs, "system.wait_intra_block");
+    });
+
 // Release slot back to AIC producer (called by AIV consumer after tpop_from_aic)
 REGISTER_OP("system.tfree_to_aic")
     .set_description("Release ring buffer slot back to AIC producer")
@@ -185,7 +295,11 @@ REGISTER_OP("system.aic_initialize_pipe")
     .set_attr<int>("id")
     .set_attr<DataType>("c2v_dtype")
     .set_attr<bool>("pre_relu")
-    .f_deduce_type(DeduceUnknownType);
+    .set_attr<bool>("ptoas_plan_memory")
+    .set_attr<bool>("ptoas_buffer_id_sync")
+    .set_attr<bool>("nosplit")
+    .set_attr<AccPushEpilogue>("acc_push_epilogue")
+    .f_deduce_type(DeduceInitializePipeType);
 
 // Initialize pipe on AIV side
 REGISTER_OP("system.aiv_initialize_pipe")
@@ -202,7 +316,33 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .set_attr<int>("id")
     .set_attr<DataType>("c2v_dtype")
     .set_attr<bool>("pre_relu")
-    .f_deduce_type(DeduceUnknownType);
+    .set_attr<bool>("ptoas_plan_memory")
+    .set_attr<bool>("ptoas_buffer_id_sync")
+    .set_attr<bool>("nosplit")
+    .set_attr<AccPushEpilogue>("acc_push_epilogue")
+    .f_deduce_type(DeduceInitializePipeType);
+
+REGISTER_OP("system.set_quant_scalar")
+    .set_description("Set the FP32 scalar quantization state of a Fixpipe pipe")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("scale", "FP32 scalar scale")
+    .no_arg_writes()
+    .set_attr<int>("id")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceQuantConfigType(args, kwargs, false);
+    });
+
+REGISTER_OP("system.set_quant_vector")
+    .set_description("Set packed 64-bit per-channel Fixpipe quantization controls")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("controls", "Packed 64-bit loc=scaling tile")
+    .no_arg_writes()
+    .set_attr<int>("id")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceQuantConfigType(args, kwargs, true);
+    });
 
 // Reserve a named buffer in a kernel
 REGISTER_OP("system.reserve_buffer")

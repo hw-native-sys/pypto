@@ -21,6 +21,8 @@ import pypto.language as pl
 from pypto import DataType
 from pypto import ir as _ir
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
+from pypto.pypto_core import backend as _backend
+from pypto.pypto_core import ir as _ir_core
 
 # ---------------------------------------------------------------------------
 # DataType -> torch dtype string
@@ -136,6 +138,8 @@ class _PipeQueues:
         self.c2v_dtype = None
         self.pre_relu = False
         self.to_aiv = deque()
+        # Split queue keys are physical AIVs. Logical band selection must not
+        # change which producer/consumer FIFO frame advances.
         self.to_aiv_split = {c: {0: deque(), 1: deque()} for c in _SPLIT_CODES}
         self.to_aiv_dual_nosplit = {0: deque(), 1: deque()}
         self.to_aic = deque()
@@ -214,7 +218,7 @@ class _CrossCoreRuntime:
             self._cv.wait(timeout=min(0.05, remaining))
 
     @staticmethod
-    def _split_tile(tile, split, lane_stride=None):
+    def _split_tile(tile, split, lane_stride=None, *, valid_shape=None):
         # Partition a pushed tile between the two AIV lanes exactly the way the
         # compiler did: lane L owns [L * S, L * S + S) of the split axis, where S
         # is the partition stride (`lane_stride` when a ragged boundary was
@@ -236,7 +240,8 @@ class _CrossCoreRuntime:
                 f"Split mode {split} got an out-of-range lane stride {stride} for a {size}-wide "
                 f"axis (per-lane box {box_half})"
             )
-        valid_shape = getattr(tile, "_pypto_valid_shape", None)
+        if valid_shape is None:
+            valid_shape = getattr(tile, "_pypto_valid_shape", None)
         valid = int(valid_shape[dim]) if valid_shape is not None else size
         lane0 = min(valid, stride)
         lane1 = min(max(valid - stride, 0), stride)
@@ -268,7 +273,6 @@ class _CrossCoreRuntime:
             part0._pypto_full_shape = tuple(full0)
             part1._pypto_full_shape = tuple(full1)
 
-        valid_shape = getattr(tile, "_pypto_valid_shape", None)
         if valid_shape is not None:
             valid0 = list(int(s) for s in valid_shape)
             valid1 = list(int(s) for s in valid_shape)
@@ -303,11 +307,23 @@ class _CrossCoreRuntime:
 
         return merged
 
-    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0):
+    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0, *, valid_shape=None):
         split = int(split)
         lane_stride = int(lane_stride)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
+            if queues.c2v_dtype is not None:
+                valid_shape = None
+            if valid_shape is not None:
+                if split != 1 or lane_stride or tile.dtype != torch.float32:
+                    raise ValueError("A5 valid-row partition requires an UP_DOWN split of an FP32 tile")
+                rows, cols = _coerce_shape(valid_shape)
+                if not 0 < rows <= tile.shape[0] or rows % 2 or cols != tile.shape[1]:
+                    raise ValueError(
+                        "A5 valid-row partition requires positive even rows within the tile and full columns"
+                    )
+                valid_shape = (rows, cols)
+                lane_stride = rows // 2
             # Configuration follows the executed pipe initialization, so a
             # push delegated to an inline helper sees the same contract.
             if queues.c2v_dtype is not None:
@@ -322,16 +338,17 @@ class _CrossCoreRuntime:
                 else:
                     queues.to_aiv.append(_copy_region_attrs(tile, tile.clone()))
             elif split in _SPLIT_CODES:
-                lane0, lane1 = self._split_tile(tile, split, lane_stride)
-                queues.to_aiv_split[split][0].append(lane0)
-                queues.to_aiv_split[split][1].append(lane1)
+                frame = self._split_tile(tile, split, lane_stride, valid_shape=valid_shape)
+                queues.to_aiv_split[split][0].append(frame)
+                queues.to_aiv_split[split][1].append(frame)
             else:
                 raise ValueError(f"Unsupported split mode for push_to_aiv: {split}")
             self._cv.notify_all()
 
-    def pop_from_aic(self, split, pipe_id=0):
+    def pop_from_aic(self, split, pipe_id=0, aiv_subblockid=None):
         split = int(split)
-        lane = _get_subblock_idx()
+        physical_lane = _get_subblock_idx()
+        lane = physical_lane if aiv_subblockid is None else int(aiv_subblockid)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
             if split == 0:
@@ -348,19 +365,23 @@ class _CrossCoreRuntime:
             if split in _SPLIT_CODES:
                 if lane not in (0, 1):
                     raise ValueError(f"Split tpop_from_aic requires lane in {{0,1}}, got {lane}")
-                queue = queues.to_aiv_split[split][lane]
-                self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane, pipe_id)
-                return queue.popleft()
+                queue = queues.to_aiv_split[split][physical_lane]
+                self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, physical_lane, pipe_id)
+                part = queue.popleft()[lane]
+                # Each physical AIV has independent local storage, even when
+                # both readers choose the same logical band of a GM frame.
+                return _copy_region_attrs(part, part.clone())
             raise ValueError(f"Unsupported split mode for pop_from_aic: {split}")
 
-    def push_to_aic(self, tile, split, pipe_id=0):
+    def push_to_aic(self, tile, split, pipe_id=0, aiv_subblockid=None):
         split = int(split)
         if _is_odd_split(split):
             # pto-isa places lane 1's Vector -> Cube band at lane 1's own extent,
             # so the two only abut when the lanes are equal: there is no odd V2C
             # transport, and PTO codegen rejects these codes too.
             raise ValueError(f"Unsupported odd split mode for push_to_aic: {split}")
-        lane = _get_subblock_idx()
+        physical_lane = _get_subblock_idx()
+        lane = physical_lane if aiv_subblockid is None else int(aiv_subblockid)
         with self._cv:
             queues = self._pipes[int(pipe_id)]
             if split == 0:
@@ -375,7 +396,8 @@ class _CrossCoreRuntime:
             elif split in _SPLIT_CODES:
                 if lane not in (0, 1):
                     raise ValueError(f"Split tpush_to_aic requires lane in {{0,1}}, got {lane}")
-                queues.to_aic_split[split][lane].append(_copy_region_attrs(tile, tile.clone()))
+                payload = _copy_region_attrs(tile, tile.clone())
+                queues.to_aic_split[split][physical_lane].append((lane, payload))
             else:
                 raise ValueError(f"Unsupported split mode for push_to_aic: {split}")
             self._cv.notify_all()
@@ -413,8 +435,15 @@ class _CrossCoreRuntime:
                     lane,
                     pipe_id,
                 )
-                part0 = lane0_q.popleft()
-                part1 = lane1_q.popleft()
+                selection0, part0 = lane0_q.popleft()
+                selection1, part1 = lane1_q.popleft()
+                if selection0 == selection1:
+                    raise ValueError(
+                        f"Split tpop_from_aiv requires complementary logical lanes for each frame, "
+                        f"got {selection0} and {selection1}"
+                    )
+                if selection0 == 1:
+                    part0, part1 = part1, part0
                 return self._merge_tile(part0, part1, split)
             raise ValueError(f"Unsupported split mode for pop_from_aiv: {split}")
 
@@ -720,6 +749,21 @@ def _hf32_round(value, mode):
 def _hf32_matmul(lhs, rhs, mode):
     return torch.matmul(_hf32_round(lhs, mode), _hf32_round(rhs, mode))
 
+def _cube_matmul(lhs, rhs):
+    # The A5 Cube multiplies 1-byte float operands (FP8 E4M3FN / E5M2, HF8) and
+    # the mixed FP8 orders, always accumulating in FP32. Torch has no matmul
+    # kernel for those dtypes and refuses a mixed float pair outright, so widen
+    # both operands to FP32 first -- that is what the hardware computes anyway.
+    # Equal wide dtypes (FP16 / BF16 / FP32 / INT8) keep their native kernel so
+    # the reference preserves their rounding behaviour.
+    # Width comes from Tensor.element_size(), not torch.dtype.itemsize: the
+    # latter only exists from torch 2.1, while the package declares torch>=2.0.0
+    # (pyproject.toml) and guards every optional dtype with getattr elsewhere.
+    both_float = lhs.dtype.is_floating_point and rhs.dtype.is_floating_point
+    if both_float and (lhs.dtype != rhs.dtype or lhs.element_size() == 1):
+        return torch.matmul(lhs.float(), rhs.float())
+    return torch.matmul(lhs, rhs)
+
 def _buffer_matmul(lhs, rhs, destination, accumulate, tf32_mode=None):
     left = _buffer_active(lhs)
     right = _buffer_active(rhs)[:left.shape[1]]
@@ -758,6 +802,17 @@ def _tensor_slice(tensor, offsets, shapes, valid_shape=None):
         sliced._pypto_valid_shape = _coerce_shape(valid_shape)
         sliced._pypto_full_shape = shapes_t
     return sliced
+
+def _tensor_window(tensor, shape, offsets, steps, valid_shape=None):
+    shape = _coerce_shape(shape)
+    offsets = _coerce_shape(offsets)
+    steps = _coerce_shape(steps)
+    slices = tuple(slice(o, o + n * s, s) for o, n, s in zip(offsets, shape, steps))
+    result = tensor[slices]
+    if valid_shape is not None:
+        result._pypto_valid_shape = _coerce_shape(valid_shape)
+        result._pypto_full_shape = shape
+    return result
 
 def _tensor_view(tensor, shape, is_dn, valid_shape=None):
     shape = _coerce_shape(shape)
@@ -869,7 +924,7 @@ def _matmul_expr(lhs: str, rhs: str, kw: dict[str, Any]) -> str:
     mode = kw.get("tf32_mode")
     if mode is not None:
         return f"_hf32_matmul({lhs}, {rhs}, {mode!r})"
-    return f"torch.matmul({lhs}, {rhs})"
+    return f"_cube_matmul({lhs}, {rhs})"
 
 
 def _handle_tensor_matmul(a: list[str], kw: dict[str, Any]) -> str:
@@ -1038,12 +1093,15 @@ def _pipe_id_kwarg(kw: dict[str, Any]) -> str:
     return f", pipe_id={pipe_id}" if pipe_id else ""
 
 
-def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any]) -> str:
-    # The stride is emitted only when a ragged boundary was rebalanced, so every
-    # other kernel keeps the two-argument form.
+def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any], *, valid_shape: str | None = None) -> str:
+    # Generated boundaries can explicitly carry the stride used by their TPOP.
     stride = _lane_stride_kwarg(kw)
     stride_arg = f", {stride}" if stride else ""
-    return f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}{_pipe_id_kwarg(kw)})"
+    valid_shape_arg = f", valid_shape={valid_shape}" if valid_shape is not None else ""
+    return (
+        f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}"
+        f"{_pipe_id_kwarg(kw)}{valid_shape_arg})"
+    )
 
 
 def _handle_aic_initialize_pipe(_a: list[str], kw: dict[str, Any]) -> str:
@@ -1059,11 +1117,14 @@ def _handle_aic_initialize_pipe(_a: list[str], kw: dict[str, Any]) -> str:
 
 
 def _handle_tpush_to_aic(a: list[str], kw: dict[str, Any]) -> str:
-    return f"_cross_core_rt.push_to_aic({a[0]}, {_split_kwarg(kw)}{_pipe_id_kwarg(kw)})"
+    # Keep pipe_id's established positional slot when selecting a logical lane.
+    lane_arg = f", aiv_subblockid={a[1]}" if len(a) == 2 else ""
+    return f"_cross_core_rt.push_to_aic({a[0]}, {_split_kwarg(kw)}{_pipe_id_kwarg(kw)}{lane_arg})"
 
 
-def _handle_tpop_from_aic(_a: list[str], kw: dict[str, Any]) -> str:
-    return f"_cross_core_rt.pop_from_aic({_split_kwarg(kw)}{_pipe_id_kwarg(kw)})"
+def _handle_tpop_from_aic(a: list[str], kw: dict[str, Any]) -> str:
+    lane_arg = f", aiv_subblockid={a[0]}" if a else ""
+    return f"_cross_core_rt.pop_from_aic({_split_kwarg(kw)}{_pipe_id_kwarg(kw)}{lane_arg})"
 
 
 def _handle_tpop_from_aiv(_a: list[str], kw: dict[str, Any]) -> str:
@@ -1235,6 +1296,16 @@ def _register_expands(m: dict[str, OpHandler], prefix: str) -> None:
     m[f"{prefix}.col_expand_expdif"] = lambda a, _kw: f"torch.exp({a[0]} - {a[1]})"
 
 
+def _reject_named_intra_block(_args: list[str], _kwargs: dict[str, Any]) -> str:
+    # Ignoring these events is unsound when a mixed reference shares payloads
+    # between AIC/AIV threads. Event banks and native pipe ordering are not
+    # modeled here, so reject before starting any reference worker threads.
+    raise ValueError(
+        "torch_codegen cannot model named intra-block synchronization; "
+        "use the native PTO backend for programs with set_intra_block/wait_intra_block"
+    )
+
+
 def _register_ops() -> None:  # noqa: PLR0915
     m = _OP_MAP
 
@@ -1362,13 +1433,19 @@ def _register_ops() -> None:  # noqa: PLR0915
 
     # tile matmul variants — .float() to match hardware FP32 accumulation output
     m["tile.matmul"] = lambda a, kw: f"{_matmul_expr(a[0], a[1], kw)}.float()"
-    m["tile.batch_matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    # batch_matmul carries no tf32_mode, but shares tile.matmul's operand-pair
+    # contract, so it needs the same widening of 1-byte / mixed float operands.
+    m["tile.batch_matmul"] = lambda a, _kw: f"_cube_matmul({a[0]}, {a[1]}).float()"
     m["tile.matmul_acc"] = _tile_matmul_acc
     m["tile.batch_matmul_acc"] = _tile_matmul_acc
     m["tile.matmul_bias"] = lambda a, kw: f"({_matmul_expr(a[0], a[1], kw)}.float() + {a[2]})"
-    m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    # The GEMV family is the M==1 Cube matmul and shares its operand-pair table,
+    # so it needs the same widening of 1-byte / mixed float operands. gemv_acc
+    # reaches it through `_tile_matmul_acc` -> `_matmul_expr`; neither gemv form
+    # carries tf32_mode (an FP32-operand feature the ops do not expose).
+    m["tile.gemv"] = lambda a, _kw: f"_cube_matmul({a[0]}, {a[1]}).float()"
     m["tile.gemv_acc"] = _tile_matmul_acc
-    m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
+    m["tile.gemv_bias"] = lambda a, _kw: f"(_cube_matmul({a[0]}, {a[1]}).float() + {a[2]})"
 
     # tile ternary ops (third arg is workspace/tmp, ignore it)
     m["tile.prelu"] = lambda a, _kw: f"torch.where({a[0]} > 0, {a[0]}, {a[0]} * {a[1]})"
@@ -1492,6 +1569,9 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.tpop_from_aiv"] = _handle_tpop_from_aiv
     m["tile.get_subblock_idx"] = lambda _a, _kw: "_get_subblock_idx()"
 
+    m["system.set_intra_block"] = _reject_named_intra_block
+    m["system.wait_intra_block"] = _reject_named_intra_block
+
     # --- System ops (no-ops) ---
     for op_name in (
         "system.sync_src",
@@ -1592,7 +1672,11 @@ class TorchCodegen(_ir.IRVisitor):
     """Emit executable PyTorch code from PyPTO IR."""
 
     def __init__(
-        self, *, check_shapes: bool = False, group_meta: dict[str, dict[str, Any]] | None = None
+        self,
+        *,
+        check_shapes: bool = False,
+        group_meta: dict[str, dict[str, Any]] | None = None,
+        backend_type: _backend.BackendType | None = None,
     ) -> None:
         super().__init__()
         self._lines: list[str] = []
@@ -1610,6 +1694,12 @@ class TorchCodegen(_ir.IRVisitor):
         self._yield_targets: list[str] = []  # names to assign on yield
         self._check_shapes: bool = check_shapes
         self._group_meta: dict[str, dict[str, Any]] = group_meta or {}
+        if backend_type is None and _backend.is_backend_configured():
+            backend_type = _backend.get_backend_type()
+        self._hardware_c2v_split = False
+        if backend_type is not None:
+            handler = _backend.get_backend_instance(backend_type).get_handler()
+            self._hardware_c2v_split = handler.splits_cube_to_vector_transport_in_hardware()
 
     # -- helpers --
 
@@ -1922,6 +2012,18 @@ class TorchCodegen(_ir.IRVisitor):
             return False
         return True
 
+    def _tpush_valid_shape(self, tile_type: _ir.Type, kw: dict[str, Any]) -> str | None:
+        if not self._hardware_c2v_split or kw.get("split") != 1 or "lane_stride" in kw:
+            return None
+        if (
+            not isinstance(tile_type, _ir.TileType)
+            or _ir_core._get_a5_c2v_row_tail_box_stride(tile_type) is None
+        ):
+            return None
+        view = tile_type.get_effective_tile_view()
+        rows, cols = (self._visit_expr_str(dim) for dim in view.valid_shape)
+        return f"({rows}, {cols})"
+
     def visit_call(self, op: _ir.Call) -> None:
         _validate_reference_type(op.type)
         op_name = op.op.name
@@ -1934,7 +2036,9 @@ class TorchCodegen(_ir.IRVisitor):
         if self._visit_buffer_call(op, arg_strs):
             return
         if op_name == _ir.get_op("tensor.view").name:
-            if len(arg_strs) >= 2:
+            if len(arg_strs) >= 4:
+                self._expr_result = f"_tensor_window({', '.join(arg_strs)})"
+            elif len(arg_strs) >= 2:
                 result_view = getattr(op.type, "tensor_view", None)
                 is_dn = result_view is not None and result_view.layout == _ir.TensorLayout.DN
                 valid_shape = f", {arg_strs[2]}" if len(arg_strs) == 3 else ""
@@ -1947,6 +2051,9 @@ class TorchCodegen(_ir.IRVisitor):
                     self._expr_result = f"{arg_strs[0]}.mT"
                 else:
                     self._expr_result = arg_strs[0]
+        elif op_name == _ir.get_op("tile.tpush_to_aiv").name:
+            valid_shape = self._tpush_valid_shape(op.args[0].type, kw)
+            self._expr_result = _handle_tpush_to_aiv(arg_strs, kw, valid_shape=valid_shape)
         elif handler is not None:
             self._expr_result = handler(arg_strs, kw)
         elif isinstance(op.op, _ir.GlobalVar):
@@ -2216,6 +2323,7 @@ def _collect_pass_ir_files(ir_dir: str) -> list[Path]:
 
 def _build_codegen_entry(
     ir_file: Path,
+    backend_type: _backend.BackendType | None,
 ) -> tuple[_ir.Function, Callable[..., Any]]:
     binary_path = ir_file.with_suffix(".msgpack")
     parsed = _ir.deserialize(binary_path.read_bytes()) if binary_path.is_file() else pl.loads(str(ir_file))
@@ -2225,7 +2333,7 @@ def _build_codegen_entry(
         )
 
     entry_func = _select_entry_function(parsed)
-    code = torch_codegen(parsed, check_shapes=True)
+    code = torch_codegen(parsed, check_shapes=True, backend_type=backend_type)
     namespace: dict[str, Any] = {}
     exec(code, namespace)  # noqa: S102
 
@@ -2273,7 +2381,12 @@ def _compare_expected_tensors(
 # ---------------------------------------------------------------------------
 
 
-def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = False) -> str:
+def torch_codegen(
+    node: _ir.Program | _ir.Function,
+    *,
+    check_shapes: bool = False,
+    backend_type: _backend.BackendType | None = None,
+) -> str:
     """Emit executable PyTorch code from a PyPTO IR Program or Function.
 
     The generated code can be exec()'d with torch available to numerically
@@ -2283,6 +2396,7 @@ def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = Fals
         node: A Program or Function IR node
         check_shapes: If True, emit runtime assertions to verify that every
             tensor/tile variable's shape and dtype match the IR type annotations.
+        backend_type: Backend whose cross-core transport is replayed. Defaults to the configured backend.
 
     Returns:
         String of executable Python/PyTorch code
@@ -2291,7 +2405,7 @@ def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = Fals
     if isinstance(node, _ir.Program):
         group_meta = _build_group_meta(node)
 
-    cg = TorchCodegen(check_shapes=check_shapes, group_meta=group_meta)
+    cg = TorchCodegen(check_shapes=check_shapes, group_meta=group_meta, backend_type=backend_type)
     lines = [_PREAMBLE]
     if group_meta:
         lines.append(f"_GROUP_META.update({group_meta!r})")
@@ -2317,6 +2431,7 @@ def validate_pass_ir_codegen_results(
     *,
     rtol: float = 5e-2,
     atol: float = 5e-2,
+    backend_type: _backend.BackendType | None = None,
 ) -> None:
     """Validate torch_codegen correctness on each pass IR file in a directory.
 
@@ -2329,6 +2444,7 @@ def validate_pass_ir_codegen_results(
         expected: Expected tensors keyed by tensor name.
         rtol: Relative tolerance for ``torch.allclose``.
         atol: Absolute tolerance for ``torch.allclose``.
+        backend_type: Backend whose cross-core transport is replayed.
 
     Prints:
         Per-pass validation summary with max absolute differences.
@@ -2349,7 +2465,7 @@ def validate_pass_ir_codegen_results(
     ir_files = _collect_pass_ir_files(ir_dir)
 
     for ir_file in ir_files:
-        entry_func, entry = _build_codegen_entry(ir_file)
+        entry_func, entry = _build_codegen_entry(ir_file, backend_type)
         run_tensors = {k: v.clone() for k, v in validated_tensors.items()}
         args = [_resolve_tensor_from_dict(param.name_hint, run_tensors) for param in entry_func.params]
         entry(*args)

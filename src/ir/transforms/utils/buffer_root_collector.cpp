@@ -13,10 +13,13 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/hash.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -25,7 +28,9 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -37,13 +42,21 @@ using op_predicates::IsBuiltinOp;
 
 }  // namespace
 
-BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy ambiguous_policy)
-    : program_(std::move(program)), ambiguous_policy_(ambiguous_policy) {}
+BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy ambiguous_policy,
+                                         bool follow_reshape)
+    : program_(std::move(program)), ambiguous_policy_(ambiguous_policy), follow_reshape_(follow_reshape) {}
 
 void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
-    RecordRootCandidates(param, {param.get()});
+    RecordOwningRoot(param);
   }
+}
+
+void BufferRootCollector::VisitStmt(const StmtPtr& stmt) {
+  // Nested visits share the cache; the outermost visit clears it before a
+  // caller can mutate the Program or reuse this analysis for another one.
+  return_lineage::ScopedTraceCache lineage_cache;
+  IRVisitor::VisitStmt(stmt);
 }
 
 void BufferRootCollector::VisitStmt_(const IfStmtPtr& if_stmt) {
@@ -57,48 +70,78 @@ void BufferRootCollector::VisitStmt_(const IfStmtPtr& if_stmt) {
   for (size_t i = 0;
        i < if_stmt->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
        ++i) {
-    auto roots = ResolveRootCandidates(then_yield->value_[i]);
-    auto else_roots = ResolveRootCandidates(else_yield->value_[i]);
-    for (const Var* root : else_roots) {
-      if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
-    }
-    const bool unresolved = roots.empty() || IsAmbiguous(then_yield->value_[i]) ||
-                            IsAmbiguous(else_yield->value_[i]) ||
-                            ResolveRootCandidates(then_yield->value_[i]).empty() || else_roots.empty();
-    RecordRootCandidates(if_stmt->return_vars_[i], roots, unresolved);
+    const auto& then_value = then_yield->value_[i];
+    const auto& else_value = else_yield->value_[i];
+    const auto& then_roots = ResolveRootCandidates(then_value);
+    const auto& else_roots = ResolveRootCandidates(else_value);
+    const bool then_ambiguous = IsAmbiguous(then_value);
+    const bool else_ambiguous = IsAmbiguous(else_value);
+    const bool unresolved = then_roots.set == 0 || else_roots.set == 0 || then_ambiguous || else_ambiguous;
+    MergeRootCandidates(if_stmt->return_vars_[i], {then_roots, else_roots}, unresolved);
   }
 }
 
 void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
-  auto init_roots = InitializeLoopCarryRoots(for_stmt->iter_args_);
+  const auto trip_count = transform_utils::EvalConstTripCount(for_stmt);
+  InitializeLoopCarryRoots(for_stmt->iter_args_, for_stmt->body_, trip_count.value_or(2) > 1);
   IRVisitor::VisitStmt_(for_stmt);
-  RecordLoopReturnRoots(for_stmt->body_, for_stmt->return_vars_, init_roots,
-                        transform_utils::EvalConstTripCount(for_stmt).value_or(0) > 0);
+  RecordLoopReturnRoots(for_stmt->body_, for_stmt->return_vars_, for_stmt->iter_args_,
+                        trip_count.value_or(0) > 0);
 }
 
 void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
-  auto init_roots = InitializeLoopCarryRoots(while_stmt->iter_args_);
+  InitializeLoopCarryRoots(while_stmt->iter_args_, while_stmt->body_, /*may_repeat=*/true);
   IRVisitor::VisitStmt_(while_stmt);
   // A while condition may be false before the first iteration, so both the
   // initial and yielded roots remain possible.
-  RecordLoopReturnRoots(while_stmt->body_, while_stmt->return_vars_, init_roots,
+  RecordLoopReturnRoots(while_stmt->body_, while_stmt->return_vars_, while_stmt->iter_args_,
                         /*guaranteed_to_run=*/false);
 }
 
-std::vector<BufferRootCollector::RootCandidates> BufferRootCollector::InitializeLoopCarryRoots(
-    const std::vector<IterArgPtr>& iter_args) {
-  std::vector<RootCandidates> init_roots;
-  init_roots.reserve(iter_args.size());
-  for (const auto& iter_arg : iter_args) {
-    auto roots = ResolveRootCandidates(iter_arg->initValue_);
-    init_roots.push_back(roots);
-    RecordRootCandidates(iter_arg, roots, IsAmbiguous(iter_arg->initValue_));
+void BufferRootCollector::InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args,
+                                                   const StmtPtr& body, bool may_repeat) {
+  const auto yield =
+      follow_reshape_ && may_repeat && !iter_args.empty() ? transform_utils::GetLastYieldStmt(body) : nullptr;
+  std::unordered_map<const Var*, VarPtr> backedge_sources;
+  if (yield) {
+    // Index the straight-line aliases once. Their sources can have known
+    // storage even when the yielded SSA definitions have not been visited.
+    for (const auto& stmt : transform_utils::FlattenToStmts(body)) {
+      const auto assign = As<AssignStmt>(stmt);
+      if (!assign) continue;
+      auto value = assign->value_;
+      if (auto call = As<Call>(value); call && IsOp(call, "tensor.reshape") && !call->args_.empty()) {
+        value = call->args_.front();
+      }
+      const auto source = AsVarLike(value);
+      if (!source) continue;
+      const auto prior = backedge_sources.find(source.get());
+      backedge_sources.emplace(assign->var_.get(), prior == backedge_sources.end() ? source : prior->second);
+    }
   }
-  return init_roots;
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    const auto& iter_arg = iter_args[i];
+    const auto& init = iter_arg->initValue_;
+    ExprPtr next = yield && i < yield->value_.size() ? yield->value_[i] : nullptr;
+    if (const auto source = backedge_sources.find(AsVarLike(next).get()); source != backedge_sources.end()) {
+      next = source->second;
+    }
+    if (!next || next.get() == iter_arg.get()) {
+      ShareRootCandidates(iter_arg, init);
+      continue;
+    }
+
+    // The initializer alone does not prove the storage of an unknown backedge.
+    const auto& initial_roots = ResolveRootCandidates(init);
+    const auto& next_roots = ResolveRootCandidates(next);
+    const bool unresolved =
+        initial_roots.set == 0 || next_roots.set == 0 || IsAmbiguous(init) || IsAmbiguous(next);
+    MergeRootCandidates(iter_arg, {initial_roots, next_roots}, unresolved);
+  }
 }
 
 void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
-                                                const std::vector<RootCandidates>& init_roots,
+                                                const std::vector<IterArgPtr>& iter_args,
                                                 bool guaranteed_to_run) {
   // Resolve after visiting the body so fresh-rebind assignments already have
   // roots. An in-place yield of the IterArg still resolves to its init root.
@@ -106,15 +149,16 @@ void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::
   if (!yield) return;
 
   for (size_t i = 0; i < return_vars.size() && i < yield->value_.size(); ++i) {
-    auto roots = ResolveRootCandidates(yield->value_[i]);
-    bool unresolved = roots.empty() || IsAmbiguous(yield->value_[i]);
-    if (!guaranteed_to_run && i < init_roots.size()) {
-      if (init_roots[i].empty()) unresolved = true;
-      for (const Var* root : init_roots[i]) {
-        if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
-      }
+    const auto& value = yield->value_[i];
+    const auto& yielded_roots = ResolveRootCandidates(value);
+    bool unresolved = yielded_roots.set == 0 || IsAmbiguous(value);
+    if (!guaranteed_to_run && i < iter_args.size()) {
+      const auto& init_roots = ResolveRootCandidates(iter_args[i]);
+      unresolved = unresolved || init_roots.set == 0 || (follow_reshape_ && IsAmbiguous(iter_args[i]));
+      MergeRootCandidates(return_vars[i], {yielded_roots, init_roots}, unresolved);
+    } else {
+      BindRootCandidates(return_vars[i], yielded_roots, unresolved);
     }
-    RecordRootCandidates(return_vars[i], roots, unresolved);
   }
 }
 
@@ -123,43 +167,64 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
   // route it through the Call-shaped view so a task launch's Out/InOut roots are
   // tracked identically to a plain Call (results keyed on the stable binding
   // Var). The view preserves args_ and the TASK_ID-augmented return type, so the
-  // tuple path maps the submit-result projections to the callee's Out roots and
-  // leaves the trailing TASK_ID element unmapped
+  // tuple path maps tensor projections and leaves the trailing TASK_ID
+  // element unmapped
   // (see .claude/rules/pass-submit-awareness.md).
   if (auto call = transform_utils::AsCallOrSubmitView(assign->value_)) {
     const std::string& op_name = call->op_->name_;
-    if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
-      RecordRootCandidates(assign->var_, {assign->var_.get()});
+    if (auto helper = ResolveVFCall(call, program_)) {
+      auto aliases = VFReturnedArguments(helper, call);
+      if (As<TupleType>(call->GetType())) {
+        std::vector<OutputRoot> roots;
+        roots.reserve(aliases.size());
+        for (const auto& alias : aliases) {
+          roots.push_back({alias, ResolveRootCandidates(alias), IsAmbiguous(alias)});
+        }
+        tuple_output_roots_[assign->var_.get()] =
+            std::make_shared<const TupleOutputRoots>(TupleOutputRoots{nullptr, std::move(roots), {}});
+      } else if (!aliases.empty()) {
+        ShareRootCandidates(assign->var_, aliases[0]);
+      }
+    } else if (follow_reshape_ && IsOp(call, "tensor.reshape") && !call->args_.empty()) {
+      ShareRootCandidates(assign->var_, call->args_[0]);
+    } else if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
+      RecordOwningRoot(assign->var_, /*region_only=*/IsOp(call, "tensor.slice"));
     } else if (IsOp(call, "tensor.assemble")) {
       if (call->args_.size() == 3) {
-        RecordRootCandidates(assign->var_, ResolveRootCandidates(call->args_[0]),
-                             IsAmbiguous(call->args_[0]));
+        ShareRootCandidates(assign->var_, call->args_[0]);
       }
     } else if (!IsBuiltinOp(op_name)) {
       auto out_roots = CollectCallOutputRoots(call);
       if (As<TupleType>(call->GetType())) {
-        std::vector<RootInfo> roots;
-        roots.reserve(out_roots.size());
-        for (const auto& entry : out_roots) roots.push_back(entry.info);
-        tuple_output_roots_[assign->var_.get()] = std::move(roots);
-      } else {
-        auto info = SelectReturnRootInfo(out_roots, call->GetType());
-        if (!info.roots.empty()) {
-          RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
+        TupleOutputRoots tuple;
+        if (follow_reshape_) {
+          tuple.call = call;
+          // Collect a single fallback for all projections. The return type's
+          // arity does not affect the cost of recording a call.
+          for (const auto& output : out_roots) {
+            tuple.writable_roots = UnionCandidates(tuple.writable_roots, output.roots);
+          }
+        } else {
+          tuple.outputs = std::move(out_roots);
         }
+        tuple_output_roots_[assign->var_.get()] = std::make_shared<const TupleOutputRoots>(std::move(tuple));
+      } else {
+        RecordCallReturnRoots(assign->var_, out_roots, call);
       }
     }
   } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
     if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
       auto it = tuple_output_roots_.find(tuple_var.get());
-      if (it != tuple_output_roots_.end() && tuple_get->index_ < static_cast<int>(it->second.size()) &&
-          !it->second[tuple_get->index_].roots.empty()) {
-        const auto& info = it->second[tuple_get->index_];
-        RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
+      if (it != tuple_output_roots_.end() && tuple_get->index_ >= 0) {
+        const auto info = ResolveTupleOutputRoot(*it->second, static_cast<size_t>(tuple_get->index_));
+        BindRootCandidates(assign->var_, info.roots, info.ambiguous);
       }
     }
-  } else if (AsVarLike(assign->value_)) {
-    RecordRootCandidates(assign->var_, ResolveRootCandidates(assign->value_), IsAmbiguous(assign->value_));
+  } else if (auto source = AsVarLike(assign->value_)) {
+    if (auto it = tuple_output_roots_.find(source.get()); it != tuple_output_roots_.end()) {
+      tuple_output_roots_[assign->var_.get()] = it->second;
+    }
+    ShareRootCandidates(assign->var_, source);
   }
   IRVisitor::VisitStmt_(assign);
 }
@@ -170,16 +235,20 @@ void BufferRootCollector::VisitStmt_(const SimtLaunchStmtPtr& launch) {
   for (size_t i = 0; i < launch->results_.size(); ++i) {
     if (!AsTensorTypeLike(launch->results_[i]->GetType())) continue;
     const auto& argument = launch->args_[launch->result_param_indices_[i]];
-    RecordRootCandidates(launch->results_[i], ResolveRootCandidates(argument), IsAmbiguous(argument));
+    ShareRootCandidates(launch->results_[i], argument);
   }
   IRVisitor::VisitStmt_(launch);
 }
 
-BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(const ExprPtr& expr) const {
-  auto var = AsVarLike(expr);
-  if (!var) return {};
-  auto it = root_candidates_.find(var.get());
-  return it != root_candidates_.end() ? it->second : RootCandidates{};
+const BufferRootCollector::RootCandidates& BufferRootCollector::ResolveRootCandidates(
+    const ExprPtr& expr) const {
+  static const RootCandidates kNone;
+  const auto root = root_candidates_.find(AsVarLike(expr).get());
+  return root == root_candidates_.end() ? kNone : root->second;
+}
+
+void BufferRootCollector::ShareRootCandidates(const VarPtr& var, const ExprPtr& source) {
+  BindRootCandidates(var, ResolveRootCandidates(source), IsAmbiguous(source));
 }
 
 bool BufferRootCollector::IsAmbiguous(const ExprPtr& expr) const {
@@ -187,29 +256,66 @@ bool BufferRootCollector::IsAmbiguous(const ExprPtr& expr) const {
   return var && ambiguous_buffer_vars.count(var.get()) != 0;
 }
 
-void BufferRootCollector::RecordRootCandidates(const VarPtr& var, const RootCandidates& roots,
-                                               bool unresolved) {
-  if (!var) return;
-  RootCandidates unique;
-  unique.reserve(roots.size());
-  for (const Var* root : roots) {
-    if (root && std::find(unique.begin(), unique.end(), root) == unique.end()) unique.push_back(root);
-  }
-  if (unique.empty()) return;
+bool BufferRootCollector::HasStorageProof(const ExprPtr& expr) const {
+  const auto set = ResolveRootCandidates(expr).set;
+  // A slice root describes a dependency region, not its owning allocation.
+  return set != 0 && !IsAmbiguous(expr) && !root_sets_[set].region_only;
+}
 
-  root_candidates_[var.get()] = unique;
-  const bool ambiguous = unresolved || unique.size() > 1;
-  if (ambiguous) {
+void BufferRootCollector::RecordOwningRoot(const VarPtr& var, bool region_only) {
+  if (!var) return;
+  const auto [entry, inserted] = owning_sets_.try_emplace(var.get(), root_sets_.size());
+  if (inserted) root_sets_.push_back({var.get(), 0, 0, region_only});
+  BindRootCandidates(var, {entry->second, var.get()}, false);
+}
+
+void BufferRootCollector::BindRootCandidates(const VarPtr& var, const RootCandidates& roots,
+                                             bool unresolved) {
+  if (!var || roots.set == 0) return;
+  root_candidates_[var.get()] = roots;
+  if (unresolved || root_sets_[roots.set].root == nullptr) {
     ambiguous_buffer_vars.insert(var.get());
     if (ambiguous_policy_ == AmbiguousRootPolicy::kFirstOutput) {
-      buffer_roots[var.get()] = unique.front();
+      buffer_roots[var.get()] = roots.first;
     } else {
       buffer_roots.erase(var.get());
     }
   } else {
     ambiguous_buffer_vars.erase(var.get());
-    buffer_roots[var.get()] = unique.front();
+    buffer_roots[var.get()] = roots.first;
   }
+}
+
+void BufferRootCollector::MergeRootCandidates(const VarPtr& var, const std::vector<RootCandidates>& inputs,
+                                              bool unresolved) {
+  RootCandidates merged;
+  for (const auto& input : inputs) merged = UnionCandidates(merged, input);
+  BindRootCandidates(var, merged, unresolved);
+}
+
+BufferRootCollector::RootCandidates BufferRootCollector::UnionCandidates(RootCandidates left,
+                                                                         const RootCandidates& right) {
+  if (left.set == 0) return right;
+  left.set = UnionRootSets(left.set, right.set);
+  return left;
+}
+
+BufferRootCollector::RootSetId BufferRootCollector::RootSetOf(const Var* var) const {
+  const auto it = root_candidates_.find(var);
+  return it == root_candidates_.end() ? 0 : it->second.set;
+}
+
+size_t BufferRootCollector::RootSetPairHash::operator()(const RootSetPair& pair) const {
+  return hash_combine(pair.first, pair.second);
+}
+
+BufferRootCollector::RootSetId BufferRootCollector::UnionRootSets(RootSetId left, RootSetId right) {
+  if (left == 0 || left == right) return right;
+  if (right == 0) return left;
+  if (left > right) std::swap(left, right);
+  const auto [entry, inserted] = interned_sets_.try_emplace(RootSetPair{left, right}, root_sets_.size());
+  if (inserted) root_sets_.push_back({nullptr, left, right});
+  return entry->second;
 }
 
 std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOutputRoots(
@@ -223,30 +329,87 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
         callee->param_directions_[i] != ParamDirection::InOut) {
       continue;
     }
-    roots.push_back(OutputRoot{RootInfo{ResolveRootCandidates(call->args_[i]), IsAmbiguous(call->args_[i])},
-                               call->args_[i]->GetType()});
+    const auto& arg = call->args_[i];
+    roots.push_back({arg, ResolveRootCandidates(arg), IsAmbiguous(arg)});
   }
   return roots;
 }
 
-BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
-    const std::vector<OutputRoot>& out_roots, const TypePtr& return_type) const {
-  if (out_roots.empty()) return RootInfo{{}, false};
-  if (out_roots.size() == 1) return out_roots[0].info;
+BufferRootCollector::OutputRoot BufferRootCollector::ResolveTupleOutputRoot(const TupleOutputRoots& tuple,
+                                                                            size_t index) {
+  if (!tuple.call) return index < tuple.outputs.size() ? tuple.outputs[index] : OutputRoot{};
+
+  // Wide return types can be shared by many calls. Keep only their actual
+  // arguments and resolve a position when a projection is seen.
+  const auto type = As<TupleType>(tuple.call->GetType());
+  if (!type || index >= type->types_.size() || !AsTensorTypeLike(type->types_[index])) return {};
+  const auto callee = program_->GetFunction(tuple.call->op_->name_);
+  if (callee) {
+    const auto arg_count = tuple.call->args_.size();
+    const auto param = return_lineage::ReturnedParamIndexAt(callee, program_, index).value_or(arg_count);
+    if (param < arg_count) {
+      const auto& arg = tuple.call->args_[param];
+      const auto& roots = ResolveRootCandidates(arg);
+      if (HasStorageProof(arg)) return {arg, roots, false};
+      return {arg, UnionCandidates(roots, tuple.writable_roots), true};
+    }
+  }
+  return {nullptr, tuple.writable_roots, true};
+}
+
+void BufferRootCollector::RecordCallReturnRoots(const VarPtr& result,
+                                                const std::vector<OutputRoot>& out_roots,
+                                                const CallPtr& call) {
+  if (out_roots.empty()) return;
+  if (follow_reshape_ && AsTensorTypeLike(call->GetType())) {
+    const auto callee = program_->GetFunction(call->op_->name_);
+    RootCandidates candidates;
+    if (callee && callee->return_types_.size() == 1) {
+      const auto arg_count = call->args_.size();
+      const auto param = return_lineage::ReturnedParamIndex(callee, program_).value_or(arg_count);
+      if (param < arg_count) {
+        const auto& argument = call->args_[param];
+        if (HasStorageProof(argument)) {
+          ShareRootCandidates(result, argument);
+          return;
+        }
+        candidates = ResolveRootCandidates(argument);
+      }
+    }
+    // A reshape can change dimensions without moving the data. Only lineage
+    // proves the returned buffer. With incomplete lineage, retain the known
+    // writable candidates and keep their identity unresolved.
+    for (const auto& output : out_roots) {
+      candidates = UnionCandidates(candidates, output.roots);
+    }
+    BindRootCandidates(result, candidates, /*unresolved=*/true);
+    return;
+  }
+
+  if (out_roots.size() == 1) {
+    const auto& output = out_roots.front();
+    BindRootCandidates(result, output.roots, output.ambiguous);
+    return;
+  }
 
   const OutputRoot* match = nullptr;
   bool ambiguous = false;
   for (const auto& candidate : out_roots) {
-    if (!candidate.info.roots.empty() && TypesMatchShapeDtype(candidate.type, return_type)) {
-      if (match == nullptr) {
-        match = &candidate;
-      } else if (match->info.roots != candidate.info.roots ||
-                 match->info.ambiguous != candidate.info.ambiguous) {
-        ambiguous = true;
-      }
+    if (candidate.roots.set == 0 || !TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
+      continue;
+    }
+    if (!match) {
+      match = &candidate;
+    } else if (match->roots.set != candidate.roots.set || match->roots.first != candidate.roots.first ||
+               match->ambiguous != candidate.ambiguous) {
+      ambiguous = true;
     }
   }
-  if (match && !ambiguous) return match->info;
+  if (match && !ambiguous) {
+    BindRootCandidates(result, match->roots, match->ambiguous);
+    return;
+  }
+
   // No provable unambiguous type match (0 matches, or >1 distinct candidates).
   // The fallback depends on what the consumer needs when the owning buffer
   // can't be pinned down:
@@ -258,15 +421,15 @@ BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
   //                  so a later write to the returned var still promotes to
   //                  InOut; a null root would silently drop the WAW/InOut dep.
   if (ambiguous_policy_ == AmbiguousRootPolicy::kFirstOutput) {
-    return out_roots[0].info;
+    const auto& output = out_roots.front();
+    BindRootCandidates(result, output.roots, output.ambiguous);
   }
-  return RootInfo{{}, false};
 }
 
 bool BufferRootCollector::TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b) {
-  auto ta = As<TensorType>(a);
-  auto tb = As<TensorType>(b);
-  if (!ta || !tb) return false;
+  const auto ta = AsTensorTypeLike(a);
+  const auto tb = AsTensorTypeLike(b);
+  if (!ta || !tb || ta->GetKind() != tb->GetKind()) return false;
   if (ta->dtype_ != tb->dtype_) return false;
   if (ta->shape_.size() != tb->shape_.size()) return false;
   for (size_t i = 0; i < ta->shape_.size(); ++i) {

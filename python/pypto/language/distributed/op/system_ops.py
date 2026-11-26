@@ -9,10 +9,10 @@
 
 """``pld.system.*`` — distributed system-level op DSL wrappers.
 
-System-level ops cover host-only queries, CommContext scalar accessors, and
+System-level ops cover topology queries, CommContext scalar accessors, and
 cross-rank synchronisation primitives:
 
-* :func:`world_size` — host-only scalar returning the number of devices in the
+* :func:`world_size` — scalar returning the number of devices in the
   current distributed execution. Returns a :class:`Scalar` wrapping an
   :class:`ir.Expr` of type ``ScalarType(INT64)``. Codegen lowers each call
   site to the ``world_size`` kwarg bound in the host_orch signature.
@@ -37,28 +37,78 @@ Typical use sites for ``world_size``:
 from collections.abc import Sequence
 
 from pypto.ir.op.distributed import system_ops as _ir_system
-from pypto.language.typing import IntLike, Scalar
-from pypto.pypto_core.ir import Call, NotifyOp, WaitCmp
+from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Scalar
+from pypto.pypto_core.ir import Call, CommEngine, NotifyOp, WaitCmp
 
 from ..typing.comm_ctx import CommCtx
 from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap
 
 
+def make_session(comm_ctx: CommCtx, *, engine: CommEngine = CommEngine.URMA) -> AsyncSession:
+    """Create an AIV-local communication session that PUT and GET can reuse across peers.
+
+    Args:
+        comm_ctx: Communication context identifying the workspace.
+        engine: Communication engine. Currently only URMA is supported.
+
+    Returns:
+        An async session shared by submissions from this AIV.
+    """
+    return AsyncSession(expr=_ir_system.make_session(_unwrap(comm_ctx), engine=engine))
+
+
+def wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Scalar:
+    """Wait in the issuing kernel for a distributed PUT or GET to complete.
+
+    Args:
+        event: Completion event returned by the transfer.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
+
+    Returns:
+        A BOOL scalar indicating success. After success the kernel can read the GET destination or
+        reuse the PUT source.
+    """
+    return Scalar(expr=_ir_system.wait_event(_unwrap(event), _unwrap(session)))
+
+
+def defer_wait_event(event: AsyncEvent, session: AsyncSession | None = None) -> Call:
+    """Hand completion of a distributed transfer to the issuing task.
+
+    Args:
+        event: Completion event returned by the transfer.
+        session: Optional originating session for a tile transfer. Omit for tensor GET events.
+
+    Returns:
+        A statement call that registers the event. Dependent tasks can use the data after task
+        completion.
+    """
+    return _ir_system.defer_wait_event(_unwrap(event), _unwrap(session))
+
+
+def num_workers() -> Scalar:
+    """Return the immediate-child count as an INT64 Scalar.
+
+    HOST orchestrators count local devices; CLUSTER_0 orchestrators count
+    nodes. This is independent of a global communication domain's rank count.
+    Callable only in an orchestration context, outside InCore/SPMD scopes.
+    CLUSTER_0 parsing is supported; executable cluster lowering is not yet
+    available. In HOST codegen the value uses the existing world_size binding.
+    """
+    return Scalar(expr=_ir_system.num_workers())
+
+
 def world_size() -> Scalar:
     """Return the distributed world size as an ``INT64`` :class:`Scalar`.
 
-    Parser context (host-only, not inside a nested device-side scope) is
-    validated by the parser before this wrapper is invoked. The DSL-side
-    return wrapping lets call sites compose naturally with Python operators
+    The DSL-side return wrapping lets call sites compose naturally with Python operators
     (``pld.world_size() * 4``, ``pl.range(pld.world_size())``), which the
     parser's ``invoke_dsl`` unwraps back to the underlying Call.
 
     .. warning::
 
-       This function is callable **only** inside HOST-level orchestration
-       (``level=pl.Level.HOST, role=pl.Role.Orchestrator``). Calling it
-       inside InCore (``type=pl.FunctionType.InCore``) raises a parser error.
+       The parser accepts this call in HOST and CLUSTER_0 orchestration,
+       outside nested InCore and SPMD scopes.
 
     .. seealso::
 
@@ -207,4 +257,16 @@ def defer_wait(
     return _ir_system.defer_wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+__all__ = [
+    "defer_wait",
+    "defer_wait_event",
+    "get_comm_ctx",
+    "make_session",
+    "notify",
+    "nranks",
+    "num_workers",
+    "rank",
+    "wait",
+    "wait_event",
+    "world_size",
+]

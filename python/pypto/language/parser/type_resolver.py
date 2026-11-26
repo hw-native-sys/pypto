@@ -35,17 +35,6 @@ def _is_dump_call(node: object, name: str | None = None) -> TypeGuard[ast.Call]:
     )
 
 
-def _const_int_value(value: object) -> int | None:
-    """Extract integer value from a compile-time constant, or None."""
-    if isinstance(value, int):
-        return value
-    if isinstance(value, ir.ConstInt):
-        return value.value
-    if isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt):
-        return -value.operand.value
-    return None
-
-
 class _LocalDynamicSymbolRemapper(ir.IRMutator):
     """Rebind evaluated closure dimensions without mutating shared expressions."""
 
@@ -73,45 +62,20 @@ class _LocalDynamicSymbolRemapper(ir.IRMutator):
         return self.visit_expr(expr) if self.bindings else expr
 
 
-def _infer_implicit_tile_layout_from_shape(shape: "Sequence[ir.Expr | int]") -> "ir.TileLayout":
-    """Infer the block layout represented by omitted TileView syntax."""
-    if len(shape) != 2:
-        return ir.TileLayout.row_major
-    rows_value = _const_int_value(shape[0])
-    cols_value = _const_int_value(shape[1])
-    if rows_value is None or cols_value is None:
-        return ir.TileLayout.row_major
-    return ir.TileLayout.col_major if cols_value == 1 and rows_value > 1 else ir.TileLayout.row_major
-
-
 def _implicit_tile_view_defaults(
     shape: "Sequence[ir.Expr | int]",
     memory_space: "ir.MemorySpace | None" = None,
 ) -> "tuple[ir.TileLayout, ir.TileLayout, int]":
-    """Return (blayout, slayout, fractal) implicit defaults for a given shape + memory space."""
-    default_blayout = _infer_implicit_tile_layout_from_shape(shape)
-    default_slayout = ir.TileLayout.none_box
-    default_fractal = ir.TileView().fractal
-    if memory_space in (ir.MemorySpace.Mat, ir.MemorySpace.Left):
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.row_major
-    elif memory_space == ir.MemorySpace.Right:
-        default_slayout = ir.TileLayout.col_major
-    elif memory_space == ir.MemorySpace.Acc:
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.row_major
-        default_fractal = 1024
-    elif memory_space == ir.MemorySpace.LeftScale:
-        # ISA TileLeftScale: RowMajor / RowMajor, MX scale fractal size 32.
-        default_blayout = ir.TileLayout.row_major
-        default_slayout = ir.TileLayout.row_major
-        default_fractal = 32
-    elif memory_space == ir.MemorySpace.RightScale:
-        # ISA TileRightScale: ColMajor / ColMajor, MX scale fractal size 32.
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.col_major
-        default_fractal = 32
-    return default_blayout, default_slayout, default_fractal
+    """Return (blayout, slayout, fractal) implicit defaults for a given shape + memory space.
+
+    Thin alias over the shared table
+    (``pypto.language.typing.type_utils.implicit_tile_view_defaults``) — the
+    tracing frontend's annotation funnel materializes the same defaults, so
+    the table must have exactly one definition.
+    """
+    from pypto.language.typing.type_utils import implicit_tile_view_defaults  # noqa: PLC0415
+
+    return implicit_tile_view_defaults(shape, memory_space)
 
 
 if TYPE_CHECKING:
@@ -168,6 +132,8 @@ _MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,
     "AsyncEventType": ir.AsyncEventType.get,
     "AsyncEvent": ir.AsyncEventType.get,
+    "SqueezeStore": ir.RegType.ureg,
+    "SqueezeStoreType": ir.RegType.ureg,
     "AsyncSessionType": ir.AsyncSessionType.get,
     "AsyncSession": ir.AsyncSessionType.get,
     "CommCtxType": ir.CommCtxType.get,
@@ -257,6 +223,7 @@ class TypeResolver:
         "Bias": ir.MemorySpace.Bias,
         "LeftScale": ir.MemorySpace.LeftScale,
         "RightScale": ir.MemorySpace.RightScale,
+        "Scaling": ir.MemorySpace.Scaling,
         # Must mirror MemorySpaceToString (src/ir/memref.cpp) exactly: any name the
         # printer can emit has to parse back, or the round trip loses the space.
         "ScalarLocal": ir.MemorySpace.ScalarLocal,
@@ -347,7 +314,15 @@ class TypeResolver:
             )
         fields: dict[str, ast.expr] = dict(zip(("key", "base", "size"), node.args))
         for keyword in node.keywords:
-            if keyword.arg not in {"key", "base", "size", "load_from_host", "store_to_host"}:
+            if keyword.arg not in {
+                "key",
+                "base",
+                "size",
+                "load_from_host",
+                "store_to_host",
+                "memory_source",
+                "init",
+            }:
                 raise ParserTypeError("Unknown window_buffer keyword", span=self._get_span(keyword))
             if keyword.arg in fields:
                 raise ParserTypeError(
@@ -371,6 +346,19 @@ class TypeResolver:
                 f"Conflicting window_buffer descriptors for ID {identifier}", span=self._get_span(node)
             )
         self._window_buffer_nodes[identifier] = node
+
+    @staticmethod
+    def _resolve_window_source(fields: dict[str, ast.expr], span: ir.Span) -> tuple[str, str]:
+        """Validate physical backing and the optional runtime initialization key."""
+        source_node = fields.get("memory_source", ast.Constant(value="device"))
+        if not isinstance(source_node, ast.Constant) or source_node.value not in ("device", "host"):
+            raise ParserTypeError("window_buffer memory_source must be 'device' or 'host'", span=span)
+        init_node = fields.get("init", ast.Constant(value=""))
+        if not isinstance(init_node, ast.Constant) or not isinstance(init_node.value, str):
+            raise ParserTypeError("window_buffer init must be a string", span=span)
+        if init_node.value and source_node.value != "host":
+            raise ParserTypeError("window_buffer init requires memory_source='host'", span=span)
+        return source_node.value, init_node.value
 
     def resolve_window_buffer(self, node: ast.expr) -> ir.WindowBuffer:
         """Intern a printed window descriptor, preserving shared object identity."""
@@ -414,7 +402,16 @@ class TypeResolver:
         if _is_pl_yield_call(size_node):
             raise ParserTypeError("window_buffer size cannot contain pl.yield_()", span=span)
         size = self._parse_expression(size_node)
-        window = ir.WindowBuffer(base, size, flags["load_from_host"], flags["store_to_host"], span)
+        memory_source, init = self._resolve_window_source(fields, span)
+        window = ir.WindowBuffer(
+            base,
+            size,
+            flags["load_from_host"],
+            flags["store_to_host"],
+            span,
+            memory_source,
+            init,
+        )
         self._window_buffers[identifier] = (signature, window)
         return window
 
@@ -584,7 +581,12 @@ class TypeResolver:
             and node.value.attr == "_dump"
             and isinstance(node.value.value, ast.Name)
         ):
-            getters = {"WindowBuffer": ir.WindowBufferType.get, "Unknown": ir.UnknownType}
+            getters = {
+                "WindowBuffer": ir.WindowBufferType.get,
+                "Unknown": ir.UnknownType,
+                "UReg": ir.RegType.ureg,
+                "SqueezeStore": ir.RegType.ureg,
+            }
             getter = getters.get(node.attr)
             return getter() if getter is not None else None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
@@ -658,14 +660,16 @@ class TypeResolver:
                 if (
                     isinstance(kind_node, ast.Attribute)
                     and is_reg_kind
-                    and kind_node.attr in ("VecReg", "MaskReg")
+                    and kind_node.attr in ("VecReg", "MaskReg", "UReg")
                 ):
-                    kind = ir.RegKind.VecReg if kind_node.attr == "VecReg" else ir.RegKind.MaskReg
+                    kind = getattr(ir.RegKind, kind_node.attr)
                 else:
                     success, resolved_kind = self.expr_evaluator.try_eval_expr(kind_node)
                     if not success or not isinstance(resolved_kind, ir.RegKind):
                         raise ParserTypeError("Reg kind must be a RegKind", span=self._get_span(kind_node))
                     kind = resolved_kind
+            if kind == ir.RegKind.UReg:
+                raise ParserTypeError("UReg has no lanes or dtype", span=self._get_span(value))
             return ir.RegType(shape, self.resolve_dtype(dtype_node), kind)
 
         if type_name == "Array":
@@ -2328,13 +2332,18 @@ class TypeResolver:
         compact_modes = {
             "null": ir.CompactMode.null,
             "normal": ir.CompactMode.normal,
+            "row_plus_one": ir.CompactMode.row_plus_one,
         }
         if isinstance(node, ast.Attribute) and node.attr in compact_modes:
             return compact_modes[node.attr]
+        if isinstance(node, ast.Name):
+            success, value = self.expr_evaluator.try_eval_expr(node)
+            if success and isinstance(value, ir.CompactMode):
+                return value
         raise ParserTypeError(
             f"Unknown CompactMode value: {ast.unparse(node)}",
             span=self._get_span(node),
-            hint="Use pl.CompactMode.null or pl.CompactMode.normal",
+            hint="Use pl.CompactMode.null, pl.CompactMode.normal, or pl.CompactMode.row_plus_one",
         )
 
     @staticmethod

@@ -64,6 +64,10 @@ class ScopedTraceCache {
 /// @return index into ``func->params_``, or nullopt when not a param writeback.
 std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramPtr& program);
 
+/// Trace one return position using the shared map in an enclosing ScopedTraceCache.
+std::optional<size_t> ReturnedParamIndexAt(const FunctionPtr& func, const ProgramPtr& program,
+                                           size_t position);
+
 /// Per-position generalization of ReturnedParamIndex over all return values.
 /// External declarations resolve through their validated returned-parameter contract.
 ///

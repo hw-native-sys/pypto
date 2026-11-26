@@ -11,7 +11,7 @@
 - **For 循环**：在循环体内修改的变量
 - **混合 SSA/非 SSA**：保留现有的 SSA 结构，同时转换非 SSA 部分
 
-**需要**：TypeChecked 属性 (Property)（需在运行本 Pass 之前已建立，可通过属性验证/`VerificationInstrument` 等机制检查）。
+流水线入口通过 `TypeChecked` 校验结构类型。本 Pass 完成后，流水线校验 `SSAForm` 和 `AsyncHandleProvenance`。后者沿 event 的 SSA 定义查找提交操作，核对等待时指定的 session 是否与提交时一致。
 
 **使用时机**：在任何需要 SSA 形式的优化或分析之前运行此 Pass（如 OutlineIncoreScopes、内存优化 Pass）。
 

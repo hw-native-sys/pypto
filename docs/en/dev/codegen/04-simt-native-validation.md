@@ -20,25 +20,28 @@ exactly once. A private generated source artifact substitutes the native copy
 for a scheduled copy kernel and attaches it as `vpto_sources`. This is an ABI
 fixture, not evidence that PyPTO SIMT IR already lowers to executable code.
 
-The unchanged production path performs:
+This intrinsic-only fixture follows the production SIMT path.
 
-1. PTOAS VPTO LLVM export and external-symbol checking.
+1. PTOAS exports VPTO LLVM for Bisheng.
 2. Bisheng compilation of the helper and the C++ wrapper to device objects.
-3. Device linking with `kernel_entry` first, followed by ELF validation.
+3. The device linker resolves external references and places `kernel_entry` first. PyPTO validates the ELF.
 4. `.text` extraction, `CoreCallable` registration and persistent A5 execution.
 
 The probe checks GM address spaces, thread/register annotations, direct
 `LDG`/`STG` without UB staging, retention of the SIMT entry, and agreement
 between the linked callee size and the `VF_SIMT` size operand. LLVM export
 bypasses PTOAS' object-emission size patcher. This intrinsic-only fixture must
-compile correctly without patching. Arbitrary SIMT bodies, especially inline
-assembly that needs size repair, require a separate supported object-emission
-contract before they can use this path. P3 rejects inline assembly explicitly.
+compile correctly without patching. SIMT helpers containing inline assembly
+use the separate native object-emission path with launch-size validation/repair
+described in [SIMT lowering](05-simt-lowering.md). The paired `keep/resume`
+regression in `tests/ut/codegen/test_simt_codegen.py` exercises that path through
+the production compiler and final device linking for i32/i64/f16/bf16/f32.
+It checks both linked launch sizes; it does not execute on an NPU.
 
 ## Focused acceptance
 
-Build PyPTO and the pinned runtime in the current checkout. Configure the pinned
-PTOAS v0.74 and an A5 CANN/Bisheng toolchain. Keep runtime pin checking enabled.
+Build PyPTO and the pinned runtime in the current checkout. Configure the PTOAS version in
+`toolchain/versions.env` and an A5 CANN/Bisheng toolchain. Keep runtime pin checking enabled.
 The test uses the same opt-in gates as the [VF tests](03-vpto-vf-integration.md).
 
 The initial hardware acceptance passed on Ascend950DT with PTOAS v0.72,

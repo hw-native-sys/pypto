@@ -38,7 +38,7 @@ COMPUTE_FUNC_TYPES = frozenset({"AIC", "AIV", "InCore"})
 
 #: Left-to-right panel order. Spaces the backend reports but that are missing
 #: here are appended rather than dropped, so a new memory space still maps.
-SPACE_ORDER = ("Vec", "Mat", "Left", "LeftScale", "Right", "RightScale", "Acc", "Bias")
+SPACE_ORDER = ("Vec", "Mat", "Left", "LeftScale", "Right", "RightScale", "Acc", "Bias", "Scaling")
 
 #: Used when the dump's target architecture cannot be determined.
 DEFAULT_BACKEND = "Ascend910"

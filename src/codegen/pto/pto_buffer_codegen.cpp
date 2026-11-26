@@ -42,6 +42,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -50,6 +51,8 @@
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 #include "src/backend/common/pto_ops_internal.h"
+#include "src/codegen/pto/pto_scalar_floor_div_mod_plan.h"
+#include "src/codegen/pto/pto_tensor_view_plan.h"
 
 namespace pypto {
 namespace codegen {
@@ -464,10 +467,12 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   BufferEmissionPreflight preflight(func, GetBackendHandler()->GetPtoTargetArch() == "a2a3");
   preflight.VisitFunction(func);
   preflight.CheckReturns();
+  const auto tensor_views = PrepareTensorParameterViews(*func, /*buffer_ir=*/true, {});
 
   fs_.Reset();
   fs_.buffer_ir = true;
   fs_.current_function = func;
+  fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(func->body_, func->params_);
   // Match PTOParam's existing GM ABI: tensor pointers precede scalar values,
   // regardless of IR parameter order. The first GM recipe has static shapes,
   // so it needs no implicit trailing dynamic-shape parameters.
@@ -526,9 +531,7 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   fs_.constants_indent = GetIndent();
   auto saved_stream = std::move(stream_);
   stream_ = std::move(fs_.body_section);
-  // This shared GM prologue renders tensor shape/stride metadata only. No
-  // legacy on-chip allocation or handle-discovery helper runs on this path.
-  EmitMakeTensorViews(func);
+  EmitMakeTensorViews(tensor_views);
   if (func->body_) VisitStmt(func->body_);
   const std::string body = stream_.str();
   stream_ = std::move(saved_stream);
@@ -677,6 +680,7 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const auto buffer = call->args_[load ? 3 : 0];
     const auto offsets = As<ir::MakeTuple>(call->args_[1]);
     const auto extents = As<ir::MakeTuple>(call->args_[2]);
+    if (ir::tile_view_semantics::HasZeroValidExtent(extents->elements_)) return true;
     std::vector<std::string> offset_values;
     std::vector<std::string> extent_values;
     for (const auto& offset : offsets->elements_) {
@@ -688,13 +692,19 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const auto type = As<ir::TensorType>(tensor->GetType());
     const std::string partition_type = backend::pto_ops_detail::MakePartitionTensorViewType(
         backend::pto_ops_detail::GetDimStrings(extents->elements_), GetTypeString(type->dtype_));
+    // Cache the shared tensor view outside the guard so later accesses can
+    // reuse it without referring to a value defined only in this branch.
+    const auto tensor_view = GetOrCreateTensorView(tensor);
+    const bool guarded =
+        backend::pto_ops_detail::BeginNonEmptyRegion(extents->elements_, *this, extent_values);
     const std::string partition = backend::pto_ops_detail::EmitPartitionViewPTO(
-        tensor->name_hint_, GetOrCreateTensorView(tensor), GetTensorViewTypeString(type.get()),
-        partition_type, offset_values, extent_values, *this);
+        tensor->name_hint_, tensor_view, GetTensorViewTypeString(type.get()), partition_type, offset_values,
+        extent_values, *this);
     const std::string buffer_operand = GetExprAsCode(buffer) + " : " + GetExprTypeAnnotation(buffer);
     const std::string tensor_operand = partition + " : " + partition_type;
     Emit(load ? "pto.tload ins(" + tensor_operand + ") outs(" + buffer_operand + ")"
               : "pto.tstore ins(" + buffer_operand + ") outs(" + tensor_operand + ")");
+    backend::pto_ops_detail::EndNonEmptyRegion(guarded, *this);
   } else if (const auto* indexed = backend::FindBufferIndexedRecipe(call->op_->name_)) {
     if (indexed->compare) {
       // The complete scratch backing is an explicit effect operand. Native

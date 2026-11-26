@@ -11,9 +11,26 @@
 """Provider boundaries for direct preparation and immutable input capture."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from .contracts import KernelRequest, PreparationIdentity, PreparedKernel
+
+if TYPE_CHECKING:
+    from pypto.jit.specializer import SpecializeContext
+    from pypto.pypto_core.passes import RuntimeKind
+
+
+class ExternalJITBinding(Protocol):
+    """Uncached adapter between call-site specialization and an owned provider export.
+
+    This adapter may see JIT metadata; the provider itself receives only the
+    normalized request. It must retain published sources under output_dir for
+    lazy loading and attach the complete semantic and binary policies to context.
+    """
+
+    def prepare(
+        self, context: "SpecializeContext", platform: str, runtime: "RuntimeKind", output_dir: str
+    ) -> None: ...
 
 
 @dataclass(frozen=True)

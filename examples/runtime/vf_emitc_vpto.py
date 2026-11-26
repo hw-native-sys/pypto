@@ -122,10 +122,11 @@ def _prepare(directory: Path) -> CompiledProgram:
 def _check_tile_sync(directory: Path, wrapper: str) -> None:
     """Check the production caller/adapter contract without rewriting sources."""
     manifest = json.loads((directory / "vpto/body/manifest.json").read_text())
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["synchronization"] == "ptoas-insert-sync"
     assert manifest["effect_scope"] == "whole-tile"
     helper = manifest["helpers"][0]
+    assert helper["capture_base_indices"] == [0, 0, 0, -1]
     assert helper["parameter_effects"] == ["read", "read", "readwrite", "none"]
     assert helper["parameter_types"] == ["!pto.ptr<f32, ub>", "i32"]
     assert all(t.startswith("!pto.tile_buf<") for t in helper["caller_parameter_types"][:3])
@@ -188,7 +189,9 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
         calls.append(str(args[0]))
         return binary
 
-    def recorded_run(self: "KernelCompiler", cmd: list[str], output: Path, label: str) -> bytes:
+    def recorded_run(
+        self: "KernelCompiler", cmd: list[str], output: Path, label: str, *, env: dict[str, str] | None = None
+    ) -> bytes:
         evidence = root / f"compilation-{len(calls) + 1}"
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / f"{output.name}.command.txt").write_text(
@@ -198,7 +201,7 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
             if arg.startswith("--symbol-ordering-file="):
                 order = Path(arg.split("=", 1)[1])
                 (evidence / order.name).write_bytes(order.read_bytes())
-        binary = original_run(self, cmd, output, label)
+        binary = original_run(self, cmd, output, label, env=env)
         (evidence / output.name).write_bytes(binary)
         return binary
 

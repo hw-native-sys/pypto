@@ -4,6 +4,10 @@
 本文完整列出当前支持的 `pl.reg` 操作、参数、返回类型和 dtype 限制。
 下表中的所有操作名称均带有 `pl.reg.` 前缀。
 
+编译器在早期将每个寄存器作用域提取为 `FunctionType.VF` 设备辅助函数，
+`reg_scope()` 的前端语法不变。捕获的 Tile 和 Scalar 成为函数参数，Tile 别名可以
+返回，寄存器和局部 Scalar 保留在辅助函数内部。
+
 ## 作用域与寄存器值
 
 ```python
@@ -22,11 +26,41 @@ def kernel(
     z = pl.tile.add(out, out)
 ```
 
-`pl.reg_scope()` 不接受参数，没有 captures、结果列表或 yield，也不能嵌套。
+`pl.reg_scope(*, auto_sync=True)` 没有 captures、结果列表或 yield，也不能嵌套。
+`auto_sync` 必须是编译期 bool；省略或 `True` 保留 UB 屏障自动插入，
+`False` 选择显式同步。
 前端允许 InCore、AIV 设备上下文，包括 Opaque、Orchestration、Graph 函数内
 在 outlining 前显式声明的 InCore 作用域。`ExpandMixedKernel` 后，寄存器区域必须
 位于 AIV 函数内。禁止直接在调度代码中使用，也禁止在 RegScope 内嵌套调度作用域。
 显式配置非 A5 目标时拒绝；尚未选定目标时，目标检查延迟到编译阶段。
+
+### 显式 UB 屏障
+
+`pl.reg.mem_bar(kind: str) -> None` 仅允许作为寄存器作用域内的语句，
+精确生成 `pto.mem_bar "KIND"`，不能赋值、返回或作为表达式使用。
+`kind` 是大小写敏感的编译期字符串，无默认值：
+
+| 家族 | 可用类型 |
+| ---- | -------- |
+| VV | `VV_ALL`, `VST_VLD`, `VLD_VST`, `VST_VST` |
+| VS | `VS_ALL`, `VST_LD`, `VLD_ST`, `VST_ST` |
+| SV | `SV_ALL`, `ST_VLD`, `LD_VST`, `ST_VST` |
+| SS | `SS_ALL`, `ST_LD`, `LD_ST`, `ST_ST` |
+
+```python
+# tile is initialized local Vec storage captured from outside the scope.
+with pl.reg_scope(auto_sync=False):
+    value = pl.reg.load(tile, lanes=64)
+    pl.reg.mem_bar("VLD_VST")
+    tile = pl.reg.store(tile, value=value)
+    pl.reg.mem_bar("VST_VLD")
+    value = pl.reg.load(tile, lanes=64)
+```
+
+手动作用域由作者提供所有必要的 RAW/WAR/WAW 和跨迭代屏障；自动作用域
+也允许显式屏障。`ALL` 仅覆盖所属家族，`VV_ALL` 不覆盖标量访存。
+这些屏障只约束同一 vecscope 内的 UB 访问，不能替代跨作用域、DMA、GM
+或跨核同步。参见 [VF 编译契约](../codegen/03-vpto-vf-integration.md)。
 
 内联 helper 可以包含 `reg_scope` 并接收显式标注的 Vec Tile。展开时继承调用方的
 执行上下文，最终仍必须位于 AIV。寄存器值不能跨越 helper 边界，应返回由
@@ -40,8 +74,10 @@ def kernel(
 
 外部 Tile 和只读 Scalar 是隐式输入。寄存器与局部 Scalar 不能通过区域外使用、
 函数返回、循环结果、元组或向外部变量赋值逃逸；函数边界递归检查嵌套元组类型。Tile 操作数必须源于区域外；
-`store` 和 `scatter` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
-包括 `store` 和 `scatter`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
+`store` 和 `scatter` 返回的 Tile 别名可以在区域外使用。寄存器操作的返回值都必须赋给变量，
+包括 `store` 和 `scatter`。将 `squeeze_store_step` 返回的状态赋给变量，并在循环内通过
+`pl.yield_` 携带该状态。
+`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
 只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
@@ -93,7 +129,8 @@ API 表未列出的 dtype 均不代表已支持。
 非活动 lane 和块间空隙保留原值。静态边界检查包含最后一个跨步块，初始化检查
 仅认可实际写入的活动块。动态 offset 的运行时安全由调用者保证。内存效果查询返回
 包含空隙的保守包围区间，用于依赖和生命周期分析。
-PTOAS 接收 i16 stride 操作数，将 BF16 写入降为 `vsstb`。例如
+PyPTO 将 stride 生成为 `i16` 操作数，并传入与向量 lane 数相同的掩码。
+省略掩码时，PyPTO 生成 `PAT_ALL`。PTOAS 将 BF16 跨步写入降为 `vsstb`。例如
 `pl.reg.store(dst, 16, values, mask, block_stride=16)` 将 128 个 BF16 lane
 写入八个 NZ 面板，元素偏移为 `16, 272, ..., 1808`。首版不支持动态 stride 标量。
 静态初始化分析每次最多记录跨步写入的前 256 个块，使编译工作量不随 lane 数量无限增长。
@@ -344,33 +381,13 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 `projection_order_nested` 用例检查别名读取与写入的顺序。通过 `--cases` 选择这些
 用例，无需添加 `--direct-index`；它们始终使用直接投影。
 
-`intlv`/`dintlv` 两个输出的非活动 lane 均为零。当前固定及最低支持的 PTOAS v0.74
-已实现原生结果掩码（`b6945321`，
-[PTOAS #1732](https://github.com/hw-native-sys/PTOAS/issues/1732)），因此 PyPTO
-直接生成带 mask 的 interleave，不再附加结果补零 `vsel` 或用于补零的
-BF16→UINT16→BF16 转换。活动 BF16 值保持原始位模式。省略 mask 的调用仍降低为全活动
-mask，并保留融合机会。
+PyPTO 直接生成带 mask 的 interleave。`intlv`/`dintlv` 两个输出的非活动 lane
+均为零，活动 BF16 值保持原始位模式。省略 mask 时，所有 lane 均活动，并保留融合机会。
 
-独立的小向量排列缺陷 [PTOAS #1659](https://github.com/hw-native-sys/PTOAS/issues/1659)
-仍等待上游修复。保留或移除原补零逻辑均会出现该问题，包括省略 mask 和完整 mask；
-补零无法修复活动 lane 的错误排列。PyPTO 不为此新增 workaround，也不修改接受的
-lane 数范围。使用 PTOAS v0.74 的 A5 验证结果如下：
-
-| 寄存器 dtype | 物理 lane 数 | 已测试且失败的 VL | 已测试且通过的 VL |
-| ------------ | ------------ | ----------------- | ----------------- |
-| INT8, UINT8 | 256 | 8, 64, 128 | 256 |
-| FP16, BF16, INT16, UINT16 | 128 | 8, 64 | 128, 256 |
-| FP32, INT32, UINT32 | 64 | 8 | 64, 128, 256 |
-
-在失败长度下，`intlv` 丢失 high 输出的活动数据，`dintlv` 两个输出中来自第二条输入
-的部分位置错误。所有观测到的非活动 lane 均为零。BF16 VL128/256 的逐位检查通过，
-包括 NaN、无穷、次正规数和正负零。此表仅记录已测试矩阵，不是前端接受的全部偶数
-长度清单。
-
-`tests/st/runtime/vpto/test_reg_interleave_onboard.py` 检查生产代码的显式 mask 和
-省略 mask 路径，完整存储每个操作的两个输出，并检查空、部分、完整 mask、原始位模式
-和保护区域。默认使用上表中各 dtype 已通过验证的长度；显式指定 `--lanes` 也可独立
-复现已知的小 VL 失败。先在不占卡任务中构建，再在 A5 上执行保存的产物：
+`tests/st/runtime/vpto/test_reg_interleave_onboard.py` 检查显式和省略 mask 时的两个输出，
+包括原始位模式和保护区域。默认运行覆盖不短于单个物理寄存器的向量。
+短向量已用 PTOAS v0.77 通过编译检查，A5 数值验证仍待完成。
+可用 `--lanes 8` 执行定向硬件回归。先在不占卡时构建，再在 A5 上执行产物：
 
 ```bash
 task-submit --no-device --run \
@@ -378,12 +395,6 @@ task-submit --no-device --run \
 task-submit --device auto --run \
   'python tests/st/runtime/vpto/test_reg_interleave_onboard.py --worker build/interleave "$TASK_DEVICE"'
 ```
-
-复现 #1659 时，使用独立输出目录并以 `--dtypes FP32 --lanes 8` 构建，再通过 `--worker`
-执行；在 PTOAS 修复排列问题之前，数值检查会失败。两个命令均须使用当前 worktree
-的构建及匹配固定版本的 runtime/toolchain 环境。`manifest.json` 单独记录编译失败，
-`result.json` 记录逐输出的硬件检查。编译成功不代表数值正确，这些检查也不测量延迟
-或吞吐量。
 
 ```python
 # Inside a reg_scope, with matching UINT32 registers lo_a/lo_b/hi_a/hi_b:
@@ -406,7 +417,7 @@ scatter 的值必须匹配 Tile dtype。已有的连续 Vec Tile 几何约束仍
 不构成静态初始化证明。VF helper 保守捕获整个 Tile：gather 为 `read`，scatter 为
 `readwrite`。不同 dtype 的捕获通过同一 UB 基址派生出的对应类型指针访问。
 
-索引 codegen 依赖 PTOAS v0.74 或更新版本，对同一 vecscope 内未知的索引访存
+索引 codegen 依赖 PTOAS，对同一 vecscope 内未知的索引访存
 范围进行同步，包括 RAW、WAR 和 WAW 依赖。该版本包含
 [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 的修复，
 因此 PyPTO 不再为每次索引访问发射 `VV_ALL` 屏障。VF 依赖分析由 PTOAS 负责；
@@ -425,8 +436,9 @@ with pl.reg_scope():
 
 | API | 含义 |
 | --- | ---- |
-| `with ib.reg_scope(span=None):` | 在 Python IRBuilder 中打开寄存器区域。 |
+| `with ib.reg_scope(span=None, *, auto_sync=True):` | 在 Python IRBuilder 中打开寄存器区域。 |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | 构造命名操作。`op_name` 是如 `"reg.add"` 的注册名称；`args` 为 IR 操作数，`kwargs` 为操作属性。 |
+| `ib.emit_reg_mem_bar(kind, span=None)` | 构造无结果的显式 UB 同步屏障。 |
 | `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | 构造命名 store，返回目标 Tile 别名。 |
 | `ir.get_reg_op_spec(name)` | 查询操作的区域要求和 VMI emitter。 |
 | `ir.get_reg_memory_effect(call)` | 查询 load/store 的目标 Tile、已知根分配、读写类型、半开元素区间和可选 mask；未知根或区间端点仍表示未知。 |
@@ -436,8 +448,8 @@ Builder 与 DSL 共享类型及参数检查。完成函数时检查区域归属�
 验证手工 IR，`MixedKernelExpanded` 检查最终 AIV placement。内存效应查询保留
 mask，但不据此认定整个缓冲区已初始化或访问区间互不重叠。
 
-Python 文本语法不接受区域元数据。打印带非空 `name_hint` 或 `attrs` 的手工
-RegScope 会报错，避免丢失元数据；二进制序列化保留这些字段。空区域打印为 `pass`。
+手动同步区域打印为 `pl.reg_scope(auto_sync=False)`。其他非空属性或非空
+`name_hint` 会导致打印报错；二进制序列化保留这些字段。空区域打印为 `pass`。
 以上 API 列表表示当前前端支持范围；PTOAS 中没有对应上述 API 的指令尚未通过
 `pl.reg` 暴露。
 
@@ -475,3 +487,105 @@ PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费
 显式 mask 仍保证非活动结果为零；省略 mask 无需额外的结果清零选择指令。
 相邻的两次 BF16 load 后接无 mask 的 `dintlv` 因此可降低为 A5 `DINTLV_B16`，
 后续 `convert` 自动选择所需 EVEN/ODD 部分。物理转换部分仍由后端决定。
+
+## 保序压缩与连续写出
+
+`squeeze(value, mask)` 将选中的 lane 按原顺序压到寄存器开头。输入必须是一个
+完整的 256 字节 UINT16 或 UINT32 寄存器，分别为 128 或 64 个 lane，并提供同
+lane 数的 mask。只有选中元素组成的前缀有定义；写回时应使用选中数量对应的
+前缀 mask。该操作保持整数位模式，包括大于 `2**24` 的 UINT32。
+
+```python
+with pl.reg_scope():
+    value = pl.reg.load(src, lanes=64)  # UINT32 Tile
+    keep = pl.reg.active_mask(9, lanes=64)
+    packed = pl.reg.squeeze(value, keep)
+    out = pl.reg.store(dst, value=packed, mask=keep)
+```
+
+多批数据需要在 UB 中连续追加时，显式使用
+`squeeze_store_init/step/flush`。通过 `pl.range(..., init_values=...)`
+携带不透明状态，并在循环体中 yield 更新后的状态：
+
+```python
+with pl.reg_scope():
+    init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
+        value = pl.reg.load(src, offset=i * 64, lanes=64)
+        keep = pl.reg.active_mask(9, lanes=64)
+        next_ureg = pl.reg.squeeze_store_step(curr_ureg, dst, value, keep)
+        final_ureg = pl.yield_(next_ureg)
+    written = pl.reg.squeeze_store_flush(final_ureg, dst)
+    # dst[7:43] contains four selected prefixes, without gaps.
+```
+
+目标参数是 Tile，不是指针。只有 `init` 接收 `offset`，它在初始化时求值一次，
+以元素为单位、相对 Tile 连续视图起点计算，并叠加已有的 View `start_offset`。
+例如视图起点为 32、`offset=7` 时，从底层分配的第 39 个元素开始写。
+`step` 和 `flush` 不接收 offset，直接延续已有状态链。每次 `step` 使用与 `init` 相同的目标，
+mask 的 lane 数必须与 VecReg 一致。追加整个寄存器或已知前缀时，分别使用 full
+mask 或 prefix mask。squeeze 结果的尾部未定义，因此 mask 只能选择其中已定义的前缀。
+
+`init` 初始化 UReg 追加状态并返回不透明的 `RegKind.UReg` 值；它不初始化目标
+Tile。每次 `step` 必须消费当前循环携带的 UReg 值并返回后继值；循环通过 `init_values`
+和 `pl.yield_` 携带它。循环外消费 `pl.yield_` 绑定的循环结果（上例为 `final_ureg`），
+循环结束后恰好调用一次 `flush`。
+后端将状态链降低为一次 alignment 初始化、循环携带的 `!pto.align`、每轮
+`vstur "POST_UPDATE"` 和最后一次 `vstar`。`flush` 返回目标 Tile 的 alias，不会
+清零未写容量。调用方负责保证输出容量，并只读取已写入的前缀。
+
+输入可能没有任何数据块，例如某个批次没有候选元素。循环执行零次时，初始状态原样
+传给循环结果。已经初始化的链仍然需要恰好一次 flush，即使一次 step 都没有执行；
+此时追加零个元素，目标内容保持原值。没有 step 的顺序语句也遵循相同规则：
+
+```python
+with pl.reg_scope():
+    ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    written = pl.reg.squeeze_store_flush(ureg, dst)
+```
+
+这样，运行时数据块数量为零或非零都使用同一套 init/step/flush 契约，用户无需另写
+条件分支。编译器可以删除已经证明为空的循环，同时转发其初始状态。
+
+PTOAS 0.77 仍将 stored 形式的 VSQZ 标为纯操作，但该指令会推入供 VSTUR
+消费的 SQZN 计数。在 PTOAS 完成副作用建模前，验证器拒绝 value 和 mask 都是
+循环不变量的写入：至少一个输入必须在当前循环内加载或由循环变量推导。
+输入也可以来自循环携带的寄存器，由 `pl.yield_` 用这样的值更新。
+同一 RegScope 内多个 step 也不能复用等价的 value/mask 生产者，以免
+公共子表达式消除删掉必需的 SQZN 生产者。这包括对同一 value 使用等价的 full mask
+或 prefix mask 重复写出，即使这些 mask 分别构造。这是保守的后端限制，追加语义保持不变。
+
+在 A5 上使用 PTOAS 0.77 时，避免在同一 RegScope 内用相同 mask 追加两次从同一未修改地址
+加载的值。PTOAS 可能合并这两个 stored VSQZ，导致其中一个 VSTUR 缺少 SQZN 计数。
+也应避免在同一 RegScope 内关闭后重新开启流，因为 PTOAS 可能把第二次 AR 重置调度到
+第一次 VSTAR flush 之前。受影响用例及后续验证见
+[PTOAS #1779](https://github.com/hw-native-sys/PTOAS/issues/1779)。
+
+目标必须是静态一维 Vec Tile，或可以按行优先顺序无复制展平的二维 Vec Tile；
+dtype 与输入一致且为 UINT16/UINT32。默认连续布局和显式连续 stride 都可以：
+`[2, 64]` 配合 stride `[64, 1]` 合法，stride `[96, 1]` 有行间空隙，会被拒绝。
+长度为一的轴不产生间隔，单行、单列视图也支持。首版不支持 boxed、padding、compact
+和非退化列优先视图。仅改变 shape 不会让带间隔的视图变连续。
+offset 包含 Tile View 起点；入口检查静态容量边界。
+与动态 register store 相同，调用方必须保证运行时
+`offset + sum(selected_lanes) <= dst_capacity`。接口不会截断或扩容；写出序列
+前后的字节保持原值，后续会读取的尾部需要事先初始化。
+
+状态是局限于同一 RegScope 的线性值：每次只消费当前状态，用 step 的结果替换它，
+并在退出区域前恰好 flush 一次。状态不能通过函数返回或容器逃逸。活动链期间不得
+读写、重绑定目标或其别名。流的开启点只能被顺序 for 循环包围，通过 `init_values` 和
+`pl.yield_` 显式携带状态，最多嵌套四层。活动链要求直线控制流或顺序 for 循环，
+通过 lane mask 筛选。
+
+当前基于 AR 的 lowering 同时支持一条**活动**追加链。IR 支持 flush 后开启下一条链，
+实际执行受上述 PTOAS 0.77 调度限制。Ascend C 分别规定 load 和 store 非对齐寄存器上限为四个。
+squeeze-store 还使用共享 AR 状态。支持多条同时活动的 squeeze 链需要独立管理游标与计数，并验证后端；
+仅增加资源数量限制不能提供这一能力。参见[寄存器数量限制](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/ascendcopapi/docs/en/api/SIMD-API/basic_api/reg_vector_compute/register_data_types/UnalignRegForLoad-UnalignRegForStore.md)
+和 [squeeze-store 的 AR 语义](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/ascendcopapi/atlasascendc_api_07_0324.html)。
+
+squeeze-store 的对齐状态使用物理 micro 指令，含流的整个 register scope
+使用物理寄存器 codegen。当前支持完整 256 字节 load/store、
+标量广播、索引生成、位重解释、比较、选择、mask 生成与逻辑运算及 squeeze；
+其他操作和非完整寄存器形状会明确报错。验证器会拒绝含流的 scope 内的 `reg.add`。
+不含流的 scope 继续使用 VMI lowering，
+纯 `squeeze` 也走此路径。后续 PTOAS 提供流式 VMI 后，可以保持用户接口不变。

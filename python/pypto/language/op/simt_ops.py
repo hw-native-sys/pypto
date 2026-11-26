@@ -48,6 +48,56 @@ def lane_id() -> Scalar:
     return Scalar(expr=_simt.lane_id())
 
 
+def lanemask_eq() -> Scalar:
+    """Return the physical equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_eq())
+
+
+def lanemask_le() -> Scalar:
+    """Return the physical lower-or-equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_le())
+
+
+def lanemask_lt() -> Scalar:
+    """Return the physical lower-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_lt())
+
+
+def lanemask_ge() -> Scalar:
+    """Return the physical higher-or-equal-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_ge())
+
+
+def lanemask_gt() -> Scalar:
+    """Return the physical higher-lane mask as an INT32 bit carrier.
+
+    Bit i describes lane i relative to this lane; this is not an active-lane mask.
+    """
+    return Scalar(expr=_simt.lanemask_gt())
+
+
+def bitcast(value: Scalar | ir.Expr, dtype: DataType) -> Scalar:
+    """Reinterpret an unpacked numeric scalar as dtype without changing any bits.
+
+    Source and destination must have equal bit width: FP16/BF16/FP32 or
+    8/16/32/64-bit integers. NaN payloads and signed zero bits
+    are preserved; this is not a numerical conversion or a storage view.
+    """
+    return Scalar(expr=_simt.bitcast(_unwrap(value), dtype))
+
+
 def load(
     storage: Tensor | Tile | ir.Expr,
     indices: Sequence[int | Scalar | ir.Expr],
@@ -120,7 +170,7 @@ def vote_ballot(predicate: bool | Scalar | ir.Expr) -> Scalar:
 
 
 def redux_add(value: Scalar | ir.Expr) -> Scalar:
-    """Sum active-lane INT32 or FP32 values, returning the input dtype.
+    """Sum active-lane FP16/FP32 or 32-bit integer values, returning the input dtype.
 
     INT32 sums wrap at 32 bits.
     FP32 follows the target reduction order and special-value rules.
@@ -129,22 +179,24 @@ def redux_add(value: Scalar | ir.Expr) -> Scalar:
     return Scalar(expr=_simt.redux_add(_unwrap(value)))
 
 
-def redux_min(value: Scalar | ir.Expr) -> Scalar:
-    """Minimum active-lane INT32 (signed) or FP32 value, returning the input dtype.
+def redux_min(value: Scalar | ir.Expr, *, unsigned: bool = False) -> Scalar:
+    """Minimum active-lane FP16/FP32 or 32-bit integer value, returning the input dtype.
 
+    unsigned=True compares INT32 bit carriers as unsigned.
     FP32 follows the target reduction order and special-value rules.
     Uses the current active lanes and does not provide a memory fence.
     """
-    return Scalar(expr=_simt.redux_min(_unwrap(value)))
+    return Scalar(expr=_simt.redux_min(_unwrap(value), unsigned=unsigned))
 
 
-def redux_max(value: Scalar | ir.Expr) -> Scalar:
-    """Maximum active-lane INT32 (signed) or FP32 value, returning the input dtype.
+def redux_max(value: Scalar | ir.Expr, *, unsigned: bool = False) -> Scalar:
+    """Maximum active-lane FP16/FP32 or 32-bit integer value, returning the input dtype.
 
+    unsigned=True compares INT32 bit carriers as unsigned.
     FP32 follows the target reduction order and special-value rules.
     Uses the current active lanes and does not provide a memory fence.
     """
-    return Scalar(expr=_simt.redux_max(_unwrap(value)))
+    return Scalar(expr=_simt.redux_max(_unwrap(value), unsigned=unsigned))
 
 
 def _shuffle_control(value: int | Scalar | ir.Expr) -> int | ir.Expr:
@@ -157,48 +209,130 @@ def _shuffle_control(value: int | Scalar | ir.Expr) -> int | ir.Expr:
     return control
 
 
-def shuffle_idx(value: Scalar | ir.Expr, index: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
-    """Read an INT32 or FP32 value from a subgroup-relative lane index.
+def shuffle_idx(
+    value: Scalar | ir.Expr, index: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
+    """Read an FP16/FP32 or 32/64-bit integer value from a subgroup-relative lane index.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(index)
-    return Scalar(expr=_simt.shuffle_idx(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_idx(_unwrap(value), control, width=width, bound=bound))
 
 
-def shuffle_up(value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
-    """Read an INT32 or FP32 value from a lower lane in the subgroup.
+def shuffle_up(
+    value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
+    """Read an FP16/FP32 or 32/64-bit integer value from a lower lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(offset)
-    return Scalar(expr=_simt.shuffle_up(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_up(_unwrap(value), control, width=width, bound=bound))
 
 
-def shuffle_down(value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
-    """Read an INT32 or FP32 value from a higher lane in the subgroup.
+def shuffle_down(
+    value: Scalar | ir.Expr, offset: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
+    """Read an FP16/FP32 or 32/64-bit integer value from a higher lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(offset)
-    return Scalar(expr=_simt.shuffle_down(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_down(_unwrap(value), control, width=width, bound=bound))
 
 
-def shuffle_bfly(value: Scalar | ir.Expr, mask: int | Scalar | ir.Expr, *, width: int = 32) -> Scalar:
-    """Read an INT32 or FP32 value from the XOR-selected lane in the subgroup.
+def shuffle_bfly(
+    value: Scalar | ir.Expr, mask: int | Scalar | ir.Expr, *, width: int = 32, bound: int | None = None
+) -> Scalar:
+    """Read an FP16/FP32 or 32/64-bit integer value from the XOR-selected lane in the subgroup.
 
-    Width must be 16 or 32. The source must be an active lane inside the
-    subgroup; results for inactive or out-of-range sources are unspecified.
+    Width must be 16 or 32. Bound must be in [0, width); omitted means the full source window.
+    Out-of-window sources return the caller value; inactive sources are undefined.
     Lane controls are INT32. This operation does not provide a memory fence.
     """
     control = _shuffle_control(mask)
-    return Scalar(expr=_simt.shuffle_bfly(_unwrap(value), control, width=width))
+    return Scalar(expr=_simt.shuffle_bfly(_unwrap(value), control, width=width, bound=bound))
+
+
+def atomic_sub(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically subtract from an initialized element and return its old value.
+
+    Supports 32/64-bit integers and FP16/BF16/FP32; 64-bit atomics require GM.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_sub(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_and(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically apply bitwise AND to one initialized 32/64-bit integer element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_and(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_or(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically apply bitwise OR to one initialized 32/64-bit integer element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_or(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_xor(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically apply bitwise XOR to one initialized 32/64-bit integer element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_xor(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
 
 
 def atomic_add(
@@ -208,9 +342,10 @@ def atomic_add(
     *,
     l2cache: str | None = None,
 ) -> Scalar:
-    """Atomically add one initialized INT32/FP32 element and return its old value.
+    """Atomically add one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -223,17 +358,23 @@ def atomic_min(
     indices: Sequence[int | Scalar | ir.Expr],
     value: Scalar | ir.Expr,
     *,
+    unsigned: bool = False,
     l2cache: str | None = None,
 ) -> Scalar:
-    """Atomically min one initialized INT32/FP32 element and return its old value.
+    """Atomically min one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
-    INT32 comparison is signed; FP32 special values follow the target rules.
+    unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
     """
     coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
-    return Scalar(expr=_simt.atomic_min(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+    return Scalar(
+        expr=_simt.atomic_min(
+            _unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache, unsigned=unsigned
+        )
+    )
 
 
 def atomic_max(
@@ -241,17 +382,23 @@ def atomic_max(
     indices: Sequence[int | Scalar | ir.Expr],
     value: Scalar | ir.Expr,
     *,
+    unsigned: bool = False,
     l2cache: str | None = None,
 ) -> Scalar:
-    """Atomically max one initialized INT32/FP32 element and return its old value.
+    """Atomically max one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
-    INT32 comparison is signed; FP32 special values follow the target rules.
+    unsigned=True compares INT32 bit carriers as unsigned; FP32 special values follow the target rules.
     """
     coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
-    return Scalar(expr=_simt.atomic_max(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+    return Scalar(
+        expr=_simt.atomic_max(
+            _unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache, unsigned=unsigned
+        )
+    )
 
 
 def atomic_exch(
@@ -261,9 +408,10 @@ def atomic_exch(
     *,
     l2cache: str | None = None,
 ) -> Scalar:
-    """Atomically exch one initialized INT32/FP32 element and return its old value.
+    """Atomically exch one initialized 32/64-bit integer or FP16/BF16/FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     """
@@ -279,9 +427,10 @@ def atomic_cas(
     *,
     l2cache: str | None = None,
 ) -> Scalar:
-    """Atomically cas one initialized INT32/FP32 element and return its old value.
+    """Atomically cas one initialized 32/64-bit integer or FP32 element and return its old value.
 
     Operands must match the storage dtype. Indices use the storage logical layout.
+    All 64-bit atomics require GM storage; UB accepts only the narrower forms.
     The update is retained when the result is unused. No additional ordering or
     rendezvous is implied; l2cache is available only for GM storage.
     Comparison is bitwise, including FP32 NaN payloads and signed zeros.
@@ -454,23 +603,92 @@ def mulhi(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr, *, unsigned: bool = Fals
     return Scalar(expr=_simt.mulhi(_unwrap(lhs), _unwrap(rhs), unsigned=unsigned))
 
 
-def ftoi(value: Scalar | ir.Expr, *, rounding: str = "z", unsigned: bool = False) -> Scalar:
-    """Convert FP32 to a saturated INT32 bit carrier with explicit rounding.
+def ftoi(
+    value: Scalar | ir.Expr, *, dtype: DataType | None = None, rounding: str = "z", unsigned: bool = False
+) -> Scalar:
+    """Convert FP16/BF16/FP32 to a saturated 32/64-bit integer with explicit rounding.
 
-    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    The default destination is INT32. A 64-bit destination requires FP32 input.
     Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
-    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    z = toward zero. unsigned interprets signed integer carriers as unsigned; unsigned dtypes
+    always use unsigned conversion.
     Saturation is mandatory: out-of-range values clamp to the integer limits.
     NaN conversion follows the target contract; NaN payloads are not preserved.
     """
-    return Scalar(expr=_simt.ftoi(_unwrap(value), rounding=rounding, unsigned=unsigned))
+    return Scalar(expr=_simt.ftoi(_unwrap(value), dtype=dtype, rounding=rounding, unsigned=unsigned))
 
 
-def itof(value: Scalar | ir.Expr, *, rounding: str = "r", unsigned: bool = False) -> Scalar:
-    """Convert an INT32 bit carrier to FP32 with explicit rounding.
+def itof(
+    value: Scalar | ir.Expr, *, dtype: DataType | None = None, rounding: str = "r", unsigned: bool = False
+) -> Scalar:
+    """Convert a 32/64-bit integer to FP16/BF16/FP32 with explicit rounding.
 
-    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    The default destination is FP32. A 64-bit source requires FP32 output.
     Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
-    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    z = toward zero. unsigned interprets signed integer carriers as unsigned; unsigned dtypes
+    always use unsigned conversion.
     """
-    return Scalar(expr=_simt.itof(_unwrap(value), rounding=rounding, unsigned=unsigned))
+    return Scalar(expr=_simt.itof(_unwrap(value), dtype=dtype, rounding=rounding, unsigned=unsigned))
+
+
+def veccore_id() -> Scalar:
+    """Return the target vector core identifier as an INT32 scalar."""
+    return Scalar(expr=_simt.veccore_id())
+
+
+def trap() -> ir.Call:
+    """Request device termination at runtime.
+
+    Termination and host error reporting depend on the runtime; use explicit
+    control flow to guard unsafe accesses. This is not a compile-time assertion.
+    """
+    return _simt.trap()
+
+
+def assert_(cond: bool | Scalar | ir.Expr) -> ir.Call:
+    """Request a device trap when the BOOL runtime predicate is false.
+
+    Termination and host error reporting depend on the runtime; use explicit
+    control flow to guard unsafe accesses. This is not a compile-time assertion.
+    """
+    return _simt.assert_(cond if isinstance(cond, bool) else _unwrap(cond))
+
+
+def div(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr, *, precision: str = "intrinsic") -> Scalar:
+    """Divide FP32 operands with explicit target precision.
+
+    precision is intrinsic or precision_0ulp_ftz_true. The latter requests
+    the target 0-ULP division mode with flush-to-zero behavior on A5.
+    Ordinary / is unchanged; exceptional values follow target semantics.
+    """
+    return Scalar(expr=_simt.div(_unwrap(lhs), _unwrap(rhs), precision=precision))
+
+
+def rem(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr) -> Scalar:
+    """Return the FP32 remainder using a quotient truncated toward zero.
+
+    This follows fmod-style semantics, including the dividend sign; it is
+    distinct from Python floor modulo. Subnormals and signed zero are preserved.
+    A zero divisor, infinite dividend, or NaN operand produces NaN; a finite
+    dividend with an infinite divisor is returned unchanged.
+    """
+    return Scalar(expr=_simt.rem(_unwrap(lhs), _unwrap(rhs)))
+
+
+def mul_i32toi64(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr, *, unsigned: bool = False) -> Scalar:
+    """Return the widened INT32 product as an INT64 bit carrier.
+
+    unsigned=True zero-extends the two INT32 bit carriers before multiplication;
+    otherwise operands are sign-extended. The result retains all 64 product bits.
+    """
+    return Scalar(expr=_simt.mul_i32toi64(_unwrap(lhs), _unwrap(rhs), unsigned=unsigned))
+
+
+def ftof(value: Scalar | ir.Expr, dtype: DataType, *, rounding: str = "r", saturate: bool = False) -> Scalar:
+    """Convert between distinct FP16/BF16/FP32 formats with explicit rounding.
+
+    Rounding r/a/f/c/z is supported for every pair; o (round to odd) is
+    supported only for FP32 to FP16. saturate requests finite overflow clamping.
+    NaN and signed-zero handling follows the target conversion contract.
+    """
+    return Scalar(expr=_simt.ftof(_unwrap(value), dtype, rounding=rounding, saturate=saturate))

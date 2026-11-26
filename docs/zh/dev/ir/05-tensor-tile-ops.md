@@ -120,7 +120,7 @@ DSL 的 `_tile_common.py` 保存 `store` 和 `mscatter` 共用的张量类型参
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
-| **量化** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950 block-32 量化，返回 `{quant, FP8E8M0 scale}`。`dtype` 为 FP8E4M3FN 或 FP4E2M1X2（后者输入仅 FP16/BF16）。axis1 将 `[M,K]` 转为 FP4 `[M,K/2]`；axis0 将 `[N,K]` 转为 `[K,N/2]`。scale 仍为 `[M,K/32]` / `[K/32,N]`。要求完整有效区域、`K % 64 == 0`、axis1 `M % 16 == 0`、axis0 `N % 32 == 0`；FP4 axis0 因 ISA carrier 行跨度还要求 `N % 64 == 0`。默认 `quant_scale_alg="ocp"`；FP16/BF16 的 NV 仅支持 axis0。Packed FP4 使用 PYPTO 或 DSA_RP 内存规划器。[Pass 13](../passes/15-lower_composite_ops.md) 生成 TQUANT 和指数 X-to-ZZ TMOV。FP4 tile 结果需经受支持的 Mat→Left/Right 放置后用于 `matmul_mx`；tensor 级 MX 矩阵乘仍仅支持 FP8。 `pl.tile.quant_mx_raw` 暴露原生 TQUANT 和 UINT8 指数，无上述 scale 分块对齐限制：axis1 允许任意正 M 和 K%32（原生 FP4 K%64）；支持静态部分有效区域（axis1 物理列须等于有效列）。 |
+| **量化** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950 block-32 量化，返回 `{quant, FP8E8M0 scale}`。`dtype` 为 FP8E4M3FN（输入 FP16/BF16/FP32）或 FP4E2M1X2（输入仅 FP16/BF16）。axis1 将 `[M,K]` 转为 FP4 `[M,K/2]`；axis0 将 `[N,K]` 转为 `[K,N/2]`。scale 仍为 `[M,K/32]` / `[K/32,N]`。要求完整有效区域、`K % 64 == 0`、axis1 `M % 16 == 0`、axis0 `N % 32 == 0`；FP4 axis0 因 ISA carrier 行跨度还要求 `N % 64 == 0`。默认 `quant_scale_alg="ocp"`；FP16/BF16 的 NV 仅支持 axis0。Packed FP4 使用 PYPTO 或 DSA_RP 内存规划器。[Pass 13](../passes/15-lower_composite_ops.md) 生成 TQUANT 和指数 X-to-ZZ TMOV。FP4 tile 结果需经受支持的 Mat→Left/Right 放置后用于 `matmul_mx`；`tensor.matmul_mx` 也支持原生打包 FP4，逻辑 M/K/N 按 32/64/64 对齐（见 [FP4](../fp4.md)）。 `pl.tile.quant_mx_raw` 暴露原生 TQUANT 和 UINT8 指数，无上述 scale 分块对齐限制：axis1 允许任意正 M 和 K%32（原生 FP4 K%64）；支持静态部分有效区域（axis1 物理列须等于有效列）。 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |
@@ -145,6 +145,23 @@ Packed `FP4E2M1X2` 的 tile 字节别名需要 PYPTO 或 DSA_RP；PTOAS 0.65
 拒绝 FP4 `treshape`。InCore Tensor reinterpret 会降低为 tile 别名，因此有相同的
 planner 要求；编排层另支持 shape 相同的 FP4/字节别名。
 Carrier 单位约定与可用路径见 [FP4](../fp4.md)。
+
+### 逐行整数反量化（Ascend950）
+
+| 算子 | 输入 | 结果 |
+| ---- | ---- | ---- |
+| `tile.dequant` | 行主序有符号 INT8 或 INT16 tile，以及 FP32 scale 和 offset 列 tile | 物理形状和有效形状均与源 tile 相同的 FP32 tile |
+
+`pl.tile.dequant(src, scale, offset)` 生成 `pto.tdequant`，对每个有效元素计算
+`(float(src[i,j]) - offset[i,0]) * scale[i,0]`。scale 和 offset 均只有一列有效数据，
+有效行数与源 tile 相同。由于 PTO ISA 指令使用同一个模板类型，scale 和 offset 必须使用相同的物理形状和布局。
+系数视图（包括 reshape 和显式缩小有效形状的 subview）在降低前被复制到具有对齐物理行数且形状一致的 FP32 列 tile。
+拷贝按原视图的步长读取有效系数。
+
+A5 指令始终读取完整的 64 元素源向量，包括最后不足 64 列的部分。源 tile 的物理行须按 32 字节对齐，
+物理列数至少达到有效列数向上取整到 64 的倍数后的值。有效列数在运行时确定时，物理列数须为 64 的倍数。
+例如，对于形状为 `[16, 96]` 的张量，`pl.tile.load(src, [0, 0], [16, 128], valid_shape=[16, 96])`
+会分配所需的物理列数，并读取 96 列有效数据。
 
 ### tile.move 的结果 view
 
@@ -275,3 +292,85 @@ with ib.function("tile_computation") as f:
     result = ib.let("result", tile.store(tile_sum, [0, 0], output))
     ib.return_stmt(result)
 ```
+
+## 类型化 Buffer 逐元素配方 {#typed-buffer-elementwise-recipes}
+
+`backend/common/buffer_elementwise_recipes` 是逻辑到 Buffer 转换、显式操作数约束及
+原生助记符共用的生产表。`LowerTileToBuffer` 选择类型化配方 (typed recipe) 并创建
+实际的 Buffer 调用。直接 PTO 发射读取同一张表，不重建 Tile IR、不调用旧回调，
+也不选择存储位置。此表独立于旧后端回调注册。
+
+| 逻辑算子 | Buffer 算子 | 原生指令 | 输入 |
+| -------- | ----------- | -------- | ---- |
+| `tile.add` | `buffer.add` | `pto.tadd` | 2 |
+| `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
+| `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
+| `tile.div` | `buffer.div` | `pto.tdiv` | 2 |
+| `tile.maximum` | `buffer.maximum` | `pto.tmax` | 2 |
+| `tile.minimum` | `buffer.minimum` | `pto.tmin` | 2 |
+| `tile.abs` | `buffer.abs` | `pto.tabs` | 1 |
+| `tile.exp` | `buffer.exp` | `pto.texp` | 1 |
+| `tile.sqrt` | `buffer.sqrt` | `pto.tsqrt` | 1 |
+| `tile.neg` | `buffer.neg` | `pto.tneg` | 1 |
+| `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
+| `tile.log` | `buffer.log` | `pto.tlog` | 1 |
+| `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
+| `tile.adds` | `buffer.adds` | `pto.tadds` | buffer, scalar |
+| `tile.subs` | `buffer.subs` | `pto.tsubs` | buffer, scalar |
+| `tile.muls` | `buffer.muls` | `pto.tmuls` | buffer, scalar |
+| `tile.divs` | `buffer.divs` | `pto.tdivs` | buffer, scalar |
+| `tile.maximums` | `buffer.maximums` | `pto.tmaxs` | buffer, scalar |
+| `tile.minimums` | `buffer.minimums` | `pto.tmins` | buffer, scalar |
+| `tile.lrelu` | `buffer.lrelu` | `pto.tlrelu` | buffer, scalar |
+| `tile.full` | `buffer.full` | `pto.texpands` | scalar |
+
+每个调用以最终操作数表示目标，并返回 `Void`。源读取数据和元数据；目标写入
+有效数据区域并读取元数据。这不保证整个分配已初始化。所有 buffer 操作数必须具有
+相同的物理描述符；广播和部分合并语义由独立配方处理。这些算子仅供编译器内部
+使用，不新增公开 DSL 函数。
+
+除 `add`、`mul` 外的配方要求 FP32、1 或 2 维、静态 valid 范围、
+稠密行主序 Vec 存储、`none_box`、fractal 512，并且没有 padding 或 compact 模式。
+其 dtype 约束不会继承原生描述符格式化器的 FP16 支持。`add`/`mul` 要求
+FP16/FP32/INT32 操作数。自动转换及普通 GM 传输支持静态二维
+FP16/BF16/FP32/INT32 描述符；BF16 算术需要独立的原生配方。
+Ascend910 与 Ascend950 都使用这些契约。
+
+公开 `tile.full` 包装器同时接受数值字面量和已解析的标量常量，位置参数与关键字参数
+得到一致结果。浮点目标的整数占位常量使用 `ConstFloat`；显式指定类型的常量保留
+原始 dtype，直到降低阶段转换。Python 打印器将 `tile.full` 填充常量输出为
+`pl.const(value, dtype)`，使打印后重新解析仍保留填充值自身的 dtype，而不依赖 tile
+的 dtype。运行时填充值仍不支持。
+
+在 Ascend950 上，Tile 后端用标量逐元素写入来填充 INT64 或 UINT64 tile。A5 的向量广播指令最多支持 32 位整数元素。
+
+在 Buffer call 边界，标量操作数必须匹配目标元素 dtype，且不具有内存效果。
+降低阶段在构造该 call 之前转换受支持的源标量表达式，为有符号整数、
+INDEX、FP16、BF16 和 FP32 插入显式 `Cast`；INDEX 先转换为 INT64。
+其他标量源类型仍不支持。`tile.full(shape, dtype=..., value=...)` 的 shape/dtype
+用于选择目标，随后生成 `buffer.full(value_f32, destination)`。代码生成不修复标量类型：
+
+```python
+# Logical input: result = tile.adds(value, count_i32)
+scalar_f32 = ir.Cast(count_i32, DataType.FP32, span)
+# Buffer IR diagnostic notation; the internal op has no public DSL wrapper.
+buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
+```
+
+`div`、`log`、`recip` 保留可选布尔 kwarg `high_precision`。配方选择相应的原生
+精度属性，false 使用原生默认值，不隐式引入 workspace、复制或分配。`recip`
+要求源与目标存储不重叠，构造时拒绝两个位置使用同一句柄。`BufferIR` 验证对
+表中每个配方检查不同句柄的已分配范围：拒绝部分重叠，仅支持精确原地执行的
+配方可接受完全相同的窗口。独立的无地址分配不重叠；未知存储来源或位置需要
+后续配方。常量标量地址定义通过记忆化及整数位宽检查求值。直接发射消费此已
+验证约束，不执行分配或别名分析。
+
+表中配方接受 valid extent 为静态或运行时（`-1`）的稠密描述符；原生指令读取每个句柄
+当前的 valid 元数据，执行时各操作数的元数据必须一致。
+
+整数/位运算、`rsqrt` 及其可选 workspace、部分合并、广播、归约、
+随机生成和其他布局仍属于独立迁移工作。公开 API
+`backend.get_buffer_elementwise_recipe_names()` 从实际生产表返回排序的独立快照。
+列出的名称仅代表上述受限配方，不代表逻辑算子的全部形式。测试覆盖公开流水线
+转换、二进制往返、BufferIR 验证、显式目标身份和原生编译；这些验证不替代设备
+数值验收。

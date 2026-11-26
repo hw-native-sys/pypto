@@ -11,14 +11,14 @@
 
 /**
  * @file world_size.cpp
- * @brief ``pld.system.world_size`` — host-only IR op returning the L3 world size.
+ * @brief ``pld.system.world_size`` — distributed world-size query.
  *
  * Returns a scalar ``INT64`` value equal to the number of devices participating
  * in the current distributed execution (the ``world_size`` kwarg bound in the
  * host_orch signature at codegen time).
  *
  * The op takes no positional args, no kwargs, and no attrs; the parser is
- * responsible for ensuring the call appears inside a host-level orchestrator
+ * responsible for ensuring the call appears inside a HOST or CLUSTER_0 orchestrator
  * function body. The op itself only deduces its return type.
  */
 
@@ -49,13 +49,13 @@ TypePtr DeduceWorldSizeType(const std::vector<ExprPtr>& args,
 }  // namespace
 
 // ============================================================================
-// pld.system.world_size — host-only scalar producing the distributed world size
+// pld.system.world_size — scalar producing the distributed world size
 // ============================================================================
 
 REGISTER_OP("pld.system.world_size")
     .set_description(
         "Return the number of devices participating in the current distributed execution "
-        "as a scalar INT64. Host-only: must appear inside a host-level orchestrator function "
+        "as a scalar INT64. Allowed in a HOST or CLUSTER_0 orchestrator function "
         "body. Codegen lowers each call site to the ``world_size`` kwarg "
         "bound in the host_orch signature.")
     .set_op_category("DistributedOp")

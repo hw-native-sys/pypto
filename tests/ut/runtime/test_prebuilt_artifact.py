@@ -303,6 +303,29 @@ def test_distributed_manifest_must_cover_every_child(tmp_path, fake_runtime):
     fake_runtime.interface.ChipCallable.build.assert_not_called()
 
 
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("legacy_manifest", ["single", "parent", "child"])
+def test_pre_entry_validation_prebuilt_rejected_before_callable(
+    tmp_path, fake_runtime, platform, legacy_manifest
+):
+    """A byte-authenticated legacy READY artifact has no entry-validation proof."""
+    kind = BuildKind.SINGLE_CHIP if legacy_manifest == "single" else BuildKind.DISTRIBUTED
+    _generated(tmp_path, kind)
+    _prebuilt.prepare_prebuilt(tmp_path, platform, kind)
+    # Control: new manifests are loadable, including distributed children.
+    assert _prebuilt.read_prebuilt(tmp_path, platform, kind)
+    root = tmp_path / "next_levels/left" if legacy_manifest == "child" else tmp_path
+    manifest = root / _prebuilt.BINARY_MANIFEST
+    data = json.loads(manifest.read_text())
+    data["schema"] = 1
+    manifest.write_text(json.dumps(data))
+
+    with pytest.raises(ValueError, match="[Rr]ebuild"):
+        _prebuilt.load_prebuilt(tmp_path, platform, kind)
+    fake_runtime.interface.CoreCallable.build.assert_not_called()
+    fake_runtime.interface.ChipCallable.build.assert_not_called()
+
+
 def test_failed_child_never_publishes_ready_and_can_retry(tmp_path, fake_runtime):
     store, handle = _publish(tmp_path, BuildKind.DISTRIBUTED)
     runtime = ArtifactRuntime(store, handle, "a2a3sim", tmp_path / "runs")

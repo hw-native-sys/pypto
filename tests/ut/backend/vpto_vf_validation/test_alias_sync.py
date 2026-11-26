@@ -43,14 +43,14 @@ def helper_source(kind: str, offset: int, relation: str = "static") -> str:
         args += ", %offset: index"
         setup = ""
     elif relation == "derived":
-        setup += "\n    %other = pto.addptr %base, %offset : <f32, ub> -> <f32, ub>"
+        setup += "\n    %other = pto.addptr %base, %offset : <f32, ub>, index -> <f32, ub>"
         second_base, second_offset = "%other", "%zero"
 
     def store(value: str, base: str, index: str) -> str:
-        return f"pto.vmi.vstore {value}, {base}[{index}], %mask : {reg}, {ptr}, {mask}"
+        return f"pto.vmi.vstore {value}, {base}[{index}], %mask : {reg}, {ptr}, index, {mask}"
 
     def load(base: str, index: str) -> str:
-        return f"%loaded = pto.vmi.vload {base}[{index}] : {ptr} -> {reg}"
+        return f"%loaded = pto.vmi.vload {base}[{index}] : {ptr}, index -> {reg}"
 
     operations = {
         "wr": [
@@ -90,7 +90,11 @@ def compile_helper(directory: Path, source: str, *, enabled: bool = True) -> dic
     ptoas = require_ptoas()
     (directory / "helper.pto").write_text(source)
     run(directory, "version", [ptoas, "--version"])
-    flags = [*_vpto.PTOAS_FLAGS, f"--enable-vecscope-mem-bar={'true' if enabled else 'false'}"]
+    flags = [
+        *_vpto.PTOAS_FLAGS,
+        _vpto.LLVM_IR_FLAG,
+        f"--enable-vecscope-mem-bar={'true' if enabled else 'false'}",
+    ]
     run(
         directory,
         "lower",
@@ -175,9 +179,9 @@ def test_production_compiler_defers_to_ptoas(monkeypatch, kind, relation):
     original = compiler._run
     commands = []
 
-    def record(command, output, phase):
+    def record(command, output, phase, **kwargs):
         commands.append(command)
-        return original(command, output, phase)
+        return original(command, output, phase, **kwargs)
 
     monkeypatch.setattr(compiler, "_run", record)
     if relation == "dynamic" and kind in ("rw", "ww"):
@@ -187,7 +191,9 @@ def test_production_compiler_defers_to_ptoas(monkeypatch, kind, relation):
     else:
         objects = compiler._compile_vpto_helpers((str(source),), directory)
         assert len(objects) == 1 and objects[0].stat().st_size > 0
-        assert [Path(command[0]).name for command in commands] == ["ptoas", "bisheng"]
+        native, aliases = commands
+        assert Path(native[0]).name == "ptoas" and "--emit-vpto-device-object" in native
+        assert aliases[0] == compiler.sdk.ccec.linker_path and "-r" in aliases
 
 
 def masked_helper_source(kind: str, offset: int, mode: str) -> str:
@@ -240,10 +246,10 @@ def interleaved_helper_source(offset: int) -> str:
     ptr, reg, mask = "!pto.ptr<f32, ub>", "!pto.vmi.vreg<64xf32>", "!pto.vmi.mask<64xpred>"
 
     def load(name, base):
-        return f"%{name} = pto.vmi.vload %{base}[%zero] : {ptr} -> {reg}"
+        return f"%{name} = pto.vmi.vload %{base}[%zero] : {ptr}, index -> {reg}"
 
     def store(value, base, index, predicate):
-        return f"pto.vmi.vstore %{value}, %{base}[%{index}], %{predicate} : {reg}, {ptr}, {mask}"
+        return f"pto.vmi.vstore %{value}, %{base}[%{index}], %{predicate} : {reg}, {ptr}, index, {mask}"
 
     original = "\n      ".join(
         (

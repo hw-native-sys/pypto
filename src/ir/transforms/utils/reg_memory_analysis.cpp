@@ -26,10 +26,12 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir {
@@ -42,6 +44,7 @@ using Intervals = std::map<int64_t, int64_t>;
 // Views and store-result versions meet at their shared MemRef base identity.
 class RegisterRoots : public IRVisitor {
  public:
+  ProgramPtr program;
   std::set<const Var*> roots;
   // A dynamic write makes the allocation user-managed. Excluding the
   // whole alias group avoids rejecting a static read after a dynamic write.
@@ -49,8 +52,13 @@ class RegisterRoots : public IRVisitor {
 
  protected:
   void VisitExpr_(const CallPtr& call) override {
+    if (auto helper = ResolveVFCall(call, program)) {
+      VisitStmt(BindVFRegion(helper, call));
+      return;
+    }
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       auto effect = GetRegMemoryEffect(call);
       auto tile = As<TileType>(effect.target->GetType());
       if (effect.root) {
@@ -79,7 +87,8 @@ class RegisterRoots : public IRVisitor {
 // possibly-empty loop establishes no new definite initialization.
 class InitializationChecker : public IRVisitor {
  public:
-  explicit InitializationChecker(const std::set<const Var*>& roots) : roots_(roots) {}
+  explicit InitializationChecker(const std::set<const Var*>& roots, ProgramPtr program)
+      : roots_(roots), program_(std::move(program)) {}
   // Credit an input parameter or data-producing Tile result's valid region.
   // Unknown geometry contributes no proof; this never changes Tile metadata.
   void Initialize(const ExprPtr& expr) {
@@ -135,9 +144,9 @@ class InitializationChecker : public IRVisitor {
     // Check RHS reads before crediting the assignment's produced output.
     IRVisitor::VisitStmt_(stmt);
     auto call = As<Call>(stmt->value_);
-    if (!call) return;  // Plain aliases inherit the same root's state.
+    if (!call || ResolveVFCall(call, program_)) return;  // Alias returns establish no new initialization.
     if (IsOp(call, "reg.full_mask")) {
-      masks_[stmt->var_.get()] = As<RegType>(stmt->var_->GetType())->shape_;
+      masks_[stmt->var_.get()] = As<RegType>(stmt->var_->GetType())->GetShape();
     } else if (IsOp(call, "reg.active_mask")) {
       // Runtime counts may be zero, so they establish no definite initialized
       // prefix. Keep them unknown instead of assuming a constant operand.
@@ -146,7 +155,7 @@ class InitializationChecker : public IRVisitor {
       }
     }
     if (IsOp(call, "tile.create") || IsOp(call, "reg.store") || IsOp(call, "reg.scatter") ||
-        op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        IsOp(call, "reg.squeeze_store_flush") || op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
       return;
     }
     // An actual Tile-producing operation initializes its valid output region.
@@ -154,8 +163,23 @@ class InitializationChecker : public IRVisitor {
     Initialize(stmt->var_);
   }
   void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "tile.mark_remote_written")) {
+      // Record exactly the externally initialized view, not its backing pool.
+      Initialize(call->args_[0]);
+      return;
+    }
+    if (auto helper = ResolveVFCall(call, program_)) {
+      // Borrow the caller's current initialized intervals. InOut denotes a
+      // memory effect, not proof that the entire argument was initialized.
+      // Mask facts are keyed by local Var identity, so keep instantiated
+      // regions alive until this analysis ends to prevent pointer reuse.
+      bound_regions_.push_back(BindVFRegion(helper, call));
+      VisitStmt(bound_regions_.back());
+      return;
+    }
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter")) {
+        IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
+        IsOp(call, "reg.squeeze_store_flush")) {
       auto effect = GetRegMemoryEffect(call);
       if (!effect.root || !roots_.count(effect.root.get())) {
         IRVisitor::VisitExpr_(call);
@@ -180,7 +204,7 @@ class InitializationChecker : public IRVisitor {
             << "reg.load reads an uninitialized interval";
       } else {
         const auto reg = As<RegType>(call->args_[2]->GetType());
-        int64_t active = reg->shape_;
+        int64_t active = reg->GetShape();
         if (effect.mask) {
           auto mask = AsVarLike(effect.mask);
           auto it = masks_.find(mask.get());
@@ -293,6 +317,8 @@ class InitializationChecker : public IRVisitor {
   };
   // Borrowed from the collector, which outlives this function-local checker.
   const std::set<const Var*>& roots_;
+  ProgramPtr program_;
+  std::vector<RegScopeStmtPtr> bound_regions_;
   // Definite initialization, shared by all Tile aliases of a MemRef base.
   std::map<const Var*, Intervals> initialized_;
   // Known true-prefix lane counts for direct full_mask/active_mask results.
@@ -343,14 +369,15 @@ class InitializationChecker : public IRVisitor {
 };
 }  // namespace
 
-void VerifyRegMemoryInitialization(const FunctionPtr& function) {
+void VerifyRegMemoryInitialization(const FunctionPtr& function, const ProgramPtr& program) {
   // Runtime-bound declarations have no body to analyze.
-  if (!function || !function->body_) return;
+  if (!function || !function->body_ || function->func_type_ == FunctionType::VF) return;
   RegisterRoots collector;
+  collector.program = program;
   collector.VisitStmt(function->body_);
   for (auto root : collector.dynamic_roots) collector.roots.erase(root);
   if (collector.roots.empty()) return;
-  InitializationChecker checker(collector.roots);
+  InitializationChecker checker(collector.roots, program);
   // In/InOut contents come from the caller. Out parameters supply storage only
   // and must be written before a Reg load can consume their contents.
   for (size_t i = 0; i < function->params_.size(); ++i) {

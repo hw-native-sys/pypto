@@ -2,7 +2,16 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
-PyPTO requires PTOAS v0.74 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `27fe21756` pins PTO-ISA `83b1b2b52` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
+PyPTO requires PTOAS v0.78 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `a5349f4` pins PTO-ISA `45435c06` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
+
+PyPTO emits `index` for element offsets in pointer arithmetic, scalar memory
+accesses and VMI loads and stores. In `pto.vmi.vload` and `pto.vmi.vstore`,
+the offset type follows the UB pointer type. A masked store also prints the
+predicate type after `index`. Group and block strides have implicit types
+(`index` and `i16`, respectively).
+
+`tile.slice` emits both offsets and valid extents as `index` operands of
+`pto.subview`, including when the slice uses an integer scalar parameter.
 
 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) preserves logical rank-2 MX shapes, strides, and offsets. PTOAS constructs packed descriptors from `mx_a_zz` / `mx_b_nn`; do not relabel these views as ND.
 
@@ -13,7 +22,7 @@ A2/A3 remainder scratch must match the input dtype and be disjoint from its sour
 | TREM | 2 (PTOAS requirement) | `k*S + 8*ceil(S/256) + 8`, `k` = 3 for INT32, else 1 |
 | TREMS | 1 | `k*S + 8*ceil(S/256) + 8`, `k` = 2 for INT32, else 1 |
 
-`S` is the source row stride rounded to 8 elements. FP32 high-precision TREM requires the larger of that column count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 512*min(C, 8)`, where `C = max(valid_cols // 64, 1)`; use physical width to bound dynamic valid columns.
+`S` is the source row stride rounded to 8 elements. FP32 high-precision TREM requires the larger of that column count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0) + 640*min(C, 8)`, where `C = max(valid_cols // 64, 1)`. Use the physical width when the valid column count is dynamic.
 
 The ISA keeps INT32 intermediates in the scratch and never writes the sources.
 
@@ -39,6 +48,15 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 - **MemRef-based Allocation**: Maps IR MemRef objects to `pto.alloc_tile` operations
 - **Type-aware Conversion**: Derives tile_buf/tensor_view types from TileType metadata
 
+### Synchronization selection
+
+An outlined mixed A5 kernel can set `ptoas_buffer_id_sync=True` in both
+`aic_initialize_pipe` and `aiv_initialize_pipe`. The setting applies to the
+entire mixed module and selects PTOAS's `--enable-bufid_sync` flag. The emitted
+PTO records the selection for artifact rebuilds. Setting
+`ptoas_plan_memory=True` on both initializers also delegates that module's
+on-chip memory planning to PTOAS at `--pto-level=level2`.
+
 ### Generation Order
 
 Floating-point constants use decimal scientific notation for finite values and
@@ -52,7 +70,7 @@ Other dtypes receive a diagnostic rather than an invalid floating-point literal.
 The codegen generates MLIR in the following fixed order:
 
 1. **Constants**: `arith.constant` for index and float values
-2. **Tensor Views**: `pto.make_tensor_view` for all tensor parameters
+2. **Tensor Views**: `pto.make_tensor_view` for referenced GM tensor parameters that need views
 3. **Allocations**: `pto.alloc_tile` for all tile buffers (based on MemRef)
 4. **Operations**: Function body with load, compute, store operations
 
@@ -239,7 +257,9 @@ print(pto_code)
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
-| `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
+| `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / A5 BF16 NZ Vec-to-Mat inserts / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
+| `tile.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col], st_phase=...)` | A5 direct split-M FIXPIPE: `pto.tinsert`, or `pto.tmov` with `stPhase=final` for a complete final writeback |
+| `tile.mark_remote_written(tile)` | No instruction; records peer-initialized UB for register analysis |
 | `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc` (`src0 + src1 + carry`) |
@@ -252,14 +272,10 @@ print(pto_code)
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`; scalar is same-width signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
-**`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and the
-fallback `tile.assemble` path use `pto.subview`, a pure alias of the source tile (no
-data movement, no extra `pto.alloc_tile`).  `pto.subview` requires the
-result `tile_buf` to share `dtype`, `memory_space`, `blayout`, `slayout`,
-`fractal`, `pad`, and `compact` with the source — `DeduceTileSliceType` propagates
-those five `TileView` fields from the source so the produced `TileType`
-satisfies the constraints by construction.  Backend codegen also runs a
-`CheckSubviewTileCompat` guard at lowering time:
+**`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and fallback `tile.assemble` use `pto.subview`, a pure source alias with no data movement or extra `pto.alloc_tile`.
+The result `tile_buf` must share the source's `dtype`, `memory_space`, `blayout`, `slayout`, `fractal`, `pad`, and `compact`.
+`DeduceTileSliceType` propagates the five `TileView` fields to satisfy these constraints by construction.
+Backend codegen also runs a `CheckSubviewTileCompat` guard at lowering time:
 
 - Source and result must both carry an explicit `TileView`.
 - `dtype`, `blayout`, `slayout`, `fractal`, `pad`, and `compact` must match exactly.
@@ -282,6 +298,25 @@ existing whole-tile integer TMOV copies are preserved.
 On A2/A3, the insertion column offset must be 32-byte aligned (8 FP32 or
 16 FP16/BF16 elements). Codegen diagnoses a constant offset violating this
 restriction; callers must preserve it for dynamic offsets too.
+
+A5 BF16 Vec-to-Mat insertion with matching non-compact NZ layouts
+(`col_major`, `row_major`, fractal 512, no padding) also uses `pto.tinsert`
+on MTE3. It keeps the parent Mat tile's physical pitch, allowing successive
+16-row chunks to fill a 128-row target at row offsets 0, 16, ..., 112.
+The result must reuse the Mat target; a separate result is rejected because
+preserving the other target elements would require an unsupported Mat-to-Mat
+copy. The source valid column count and column offset must be compile-time
+multiples of 16: the NZ transfer copies whole 32-byte BF16 column blocks.
+The same alignment requirement applies to every `set_validshape` update of
+the source handle, including updates through aliases. This conservative check
+covers the whole function, including later updates and loop backedges; a
+dynamic or unaligned update is rejected even if a later update restores alignment.
+Use an explicit `FunctionType.AIV` function. Generic InCore expansion rejects
+this transfer because it cannot keep both handles on the vector core; an
+explicit AIC function is rejected by codegen as well.
+This path does not enable ND-to-NZ conversion, other dtypes, or A2/A3
+Vec-to-Mat insertion. Shared L1 lifetime and synchronization with a Cube
+consumer remain the mixed kernel's responsibility.
 
 **FIXPIPE epilogue on the Acc writeback.**  A *converting* `Acc → Mat` assemble
 and every `Acc → GM` store are the cube's fix-pipe draining L0C, which can
@@ -310,17 +345,11 @@ allow the validated `INT32 Acc → FP16 Mat` (`DEQF16`) form. Other scaled
 Acc-to-Mat dtype pairs remain rejected by `FixpipeEpilogueValid`; the wider
 per-backend tables continue to govern Acc-to-GM stores independently.
 
-**`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
-operand's `valid_row` / `valid_col` operands, so the operand must be a handle
-that has them: an alloc, an `scf.if` result, a cross-core pop slot.  A **view** —
-the `pto.subview` a `tile.slice` lowers to, or a `pto.treshape` — carries its
-valid extent in its own type instead, so ptoas rejects the op against one; PyPTO
-therefore rejects it first, with a message pointing at the slice.  View-ness is
-tracked at those emission sites rather than inferred from the rendered dims: a
-slice given a runtime `valid_shape` renders `v_row=?, v_col=?` exactly as an
-alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
-(it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
-or call `set_validshape` on the source tile before taking the view.
+**`tile.set_validshape` lowering.** PyPTO restricts user-facing validity mutation to supported mutable handles. Arbitrary slice/reshape views remain rejected, including runtime-valid slices; view identity is tracked independently of the rendered dimensions. Use `valid_shape=` on a slice or narrow its source first. Compiler-created dynamic descriptors can be initialized separately. Non-FP4 statically empty slices bind an address-only, full-window subview and initialize a dynamic reshape with the actual empty extent; this avoids static zero masks without allocating or copying payload data. Packed FP4 uses initialized addressed descriptors under the [FP4 slice restrictions](../fp4.md).
+
+**Empty valid regions.** Either valid dimension being zero denotes an empty region, regardless of physical allocation size. Empty/runtime-valid reshape and reinterpret descriptors use dynamic valid dimensions initialized by `pto.set_validshape` after `pto.treshape`; static positive dimensions retain their static encoding. Ordinary Tile/Buffer transfers skip static empty windows and guard runtime windows, preserving output identity and untouched destination data. Final-phase stores remain unconditional to clear the paired producer's unit flag; guard producer and store together in source when skipping a phased operation, subject to existing backend restrictions.
+
+PTOAS supports locally allocated, TPOP-derived, and contiguous subview-derived descriptors ([#1724](https://github.com/hw-native-sys/PTOAS/issues/1724), [#1706](https://github.com/hw-native-sys/PTOAS/issues/1706)). Codegen checks SSA ancestry while preserving slice offsets and distinct alias identities; inferred runtime slice validity is passed explicitly. Every slice ancestor must be contiguous; a full-width child cannot hide a strided parent. Strided windows and unknown/control-flow roots require materialization before descriptor initialization. `SplitVectorKernel` retains empty replay reshape/reinterpret/transpose aliases and TPOP/TPUSH/TFREE handshakes. Replacing these FIFO aliases with `tile.create` would allocate a full payload buffer.
 
 ### Cross-Core Operations → PTO Instructions
 
@@ -383,8 +412,8 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
   the *valid* region, since the ISA's matching assertion is compiled out in release builds. So a
   partial Acc-to-Vec transfer uses the full physical box for TPOP and for the TPUSH **columns**,
   whether the transfer is no-split or split, and restores the logical valid shape immediately on each
-  side of the transport — on the consumer side through a metadata-only `pto.treshape` (a frontend
-  tpop result is not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place).
+  side of the transport — on the consumer side through a metadata-only `pto.treshape` that
+  encodes the static logical extents without changing the transport descriptor.
   The split-axis extent is one exception: it stays per-lane on the TPOP operands, because that is
   what tells the ISA where lane 1's band begins — which is also why a per-lane extent the compiler
   could not verify must never get there. An explicit `pl.split_aiv` boundary whose split-axis extent is a
@@ -407,12 +436,17 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
   deferred one — so the box rows were never needed, and widening them skews the compact L0C read
   exactly as above (1792 of 2048 valid elements wrong for a 64-row box valid to 16 across
   `pl.split(UP_DOWN)`). A non-compact tile reads L0C at `Rows` whatever its `validRow`, so its split
-  transport keeps the full box. Where the push splits the rows between the lanes in hardware
-  (`BackendHandler::SplitsCubeToVectorTransportInHardware`, A5's dual-mode TMOV), the transported
-  rows *are* the lane partition, so a split push keeps the box and a compact tile whose two pitches
-  differ is **rejected** there. A *runtime* row extent is transported the same way: both the
-  `pl.split` and the `pl.split_aiv` forms then pop the full box (see the popped-tile rule above);
-  lane 1 loads its whole half, and the rows past the valid extent are stale but never treated as data.
+  transport keeps the full box. With a runtime extent, the A2/A3 consumer may pop the full box
+  and apply the valid extent after the pop.
+- On A5, a hand-written `split=1` C2V push of a compact FP32 Acc tail uses its valid rows when the
+  columns are full and the pipe has no dtype conversion or explicit lane stride. The consumer
+  reserves half the physical rows and uses the first `validRow // 2` rows in each slot. The
+  valid row count must be positive and even, including at runtime. A runtime tail whose box and
+  compact pitches always match keeps its box partition, which also supports odd row counts.
+  The lane stride recorded by
+  generated shard and standalone split passes preserves the physical partition chosen by their
+  lowering. For a physical partition, incompatible compact and box pitches still produce a
+  compile-time diagnostic.
 - When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store. The full-box Cube-to-Vector transport above overrides this for a statically-shaped, non-empty partial pop, because `pto.treshape` carries no valid-row/valid-col operands and so can only restore *static* logical extents.
 - For split consumers of a hand-written pop, `SplitVectorKernel` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
@@ -443,7 +477,8 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
 
 ### Tensor View Generation
 
-For each `TensorType` parameter, the codegen generates:
+Tile and Buffer codegen prepare entry views for referenced GM tensors, excluding raw workspace pointers.
+The emitter materializes `pto.make_tensor_view` operands from the prepared shape, strides, and layout:
 
 ```mlir
 %0 = pto.make_tensor_view %arg0,
@@ -456,7 +491,7 @@ For each `TensorType` parameter, the codegen generates:
 **Key aspects**:
 
 - Shape from `TensorType.shape_`
-- Strides computed as row-major: `[dim1, 1]` for 2D tensors
+- Explicit strides take precedence. A packed 2D ND view uses `[dim1, 1]`.
 - Constants (`%c32_index`, `%c1_index`) auto-generated, including any that appear only inside a composite shape/stride expression
 - Composite dims lower to arithmetic, e.g. `M * 2` → `arith.muli %M, %c2_index`
 - Tensor view type uses `?` for each dimension (e.g., `?x?xf32` for 2D)
@@ -464,13 +499,12 @@ For each `TensorType` parameter, the codegen generates:
 #### Layout Handling for 2D Tensors
 
 The `layout` attribute on `make_tensor_view` tells PTOAS the memory layout
-convention. The codegen determines shape, strides, and layout based on the
-tensor's IR type and shape:
+convention. View preparation uses the tensor's IR type and shape:
 
 | Case | Shape emitted | Strides emitted | Layout | Notes |
 | ---- | ------------- | --------------- | ------ | ----- |
 | ND `[R, C]` | `[R, C]` | `[C, 1]` | `nd` | Standard row-major |
-| DN `[R, C]` (both > 1) | `[C, R]` | `[1, C]` | `dn` | Shape swapped for PTOAS column-major convention |
+| DN `[R, C]` (both > 1) | `[R, C]` | `[1, R]` | `dn` | Packed column-major |
 | Column vector `[M, 1]` | `[M, 1]` | `[1, M]` | `dn` | Auto-detected, no DN annotation needed |
 
 **Column vector auto-DN**: Any 2D tensor whose last dimension is a compile-time
@@ -716,51 +750,7 @@ independently of PyPTO.
 
 ## Boxed Tile Extents
 
-Every `pto.alloc_tile` PyPTO emits is validated against the box grid PTOAS will
-check it against. PTO addresses a boxed tile one box at a time, so a tile whose
-*physical* extent is not a whole number of boxes has no address at all.
-
-The rule mirrors PTOAS' `verifyBoxedTileLayout` exactly:
-
-| Layout | Box (rows x cols) |
-| ------ | ----------------- |
-| fractal 1024 (`Acc`) | 16 x 16 |
-| fractal 512, `slayout = row_major` (`Mat` / `Left`) | 16 x (32 / sizeof(dtype)) |
-| fractal 512, `slayout = col_major` (`Right`, the transposed dual) | (32 / sizeof(dtype)) x 16 |
-| `slayout = none_box` | not boxed — no rule |
-
-with PTOAS' own exemptions kept: the *row* rule is skipped for `Vec` and for a
-single-row tile (the NZ map degenerates there), while the column rule always
-applies. The MX-scale fractal and sub-byte carriers are left to PTOAS, which
-diagnoses them itself.
-
-**Why here rather than in PTOAS.** PTOAS rejects the same shape, but its message
-names its own internals and offers no remedy:
-
-```text
-'pto.alloc_tile' op expects result boxed tile rows to be a multiple of innerRows (16), but got 100
-```
-
-Raising at the emission site instead reports the tile, the axis, the extent to
-reach, and how to reach it:
-
-```text
-a Mat tile of physical shape [100, 128] and dtype fp16 must be a whole number of
-16x16 fractal boxes, but its row extent 100 is not a multiple of 16. PTO addresses
-a boxed tile one box at a time, so a partial box has no address. The *logical*
-extent is free -- allocate 112 on that axis and declare 100 as the tile's
-valid_shape (`valid_shape=` on pl.load / pl.tile.create + pl.set_validshape),
-which moves and computes only the real data. A tensor-level pl.matmul /
-pl.matmul_acc does this for its M axis automatically.
-```
-
-`ComputeAllocTileFields` is the single choke point every allocation passes
-through — the per-variable declaration, the hoisted `extra_alloc_tiles`, and the
-control-flow paths alike — so the check sees exactly what is emitted and cannot
-drift from it. A tensor-level `pl.matmul` / `pl.matmul_acc` never trips it *on
-its M axis*, which is boxed for the user in
-[`ConvertTensorToTileOps`](../passes/13-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
-The axes that remain the user's responsibility are `K` and `N`.
+See [Boxed tile extent validation](07-boxed-tile-extents.md) for the layout-specific allocation checks, diagnostics, and remedy.
 
 ## Complete Example
 
@@ -888,6 +878,11 @@ The codegen:
 | `DataType::INT64` | `i64` |
 | `DataType::INT8` | `i8` |
 | `DataType::UINT8` | `ui8` |
+
+Tile and Buffer codegen prepare the signed `FloorDiv` and `FloorMod` lowering before function emission.
+A dividend proved non-negative from literals or enclosing loop bounds and a positive constant divisor
+permit `arith.divsi` or `arith.remsi` when the proof holds at the emitted width. Otherwise the emitter
+uses `arith.floordivsi` or a signed remainder with a sign correction.
 
 ### Scalar Boolean Casts
 

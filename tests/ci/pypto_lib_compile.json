@@ -42,13 +42,6 @@
     ]
   },
   {
-    "name": "models-deepseek_v4_1_flash-input_pack",
-    "entry": "models/deepseek_v4_1_flash/input_pack.py",
-    "platforms": [
-      "a5"
-    ]
-  },
-  {
     "name": "models-deepseek_v4_1_flash-lm_head",
     "entry": "models/deepseek_v4_1_flash/lm_head.py",
     "platforms": [

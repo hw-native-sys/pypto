@@ -44,14 +44,14 @@ from collections.abc import Sequence
 from typing import overload
 
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
-from pypto.language.typing import IntLike, Ptr
-from pypto.language.typing.tensor import Tensor
+from pypto.language.typing import AsyncEvent, IntLike, Ptr
+from pypto.language.typing.tensor import Tensor, TensorT
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, CommEngine, Expr, ReduceOp
 
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
+from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors, _wrap_async_transfer_result
 
 _ALLREDUCE_SIGNAL_MISSING = object()
 
@@ -173,15 +173,29 @@ def _compute_window_buffer_bytes(shape: list[int | Expr], dtype: DataType) -> in
 
 
 @overload
-def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr: ...
+def alloc_window_buffer(
+    size: IntLike, *, name: str = "", memory_source: str = "device", init: str | None = None
+) -> Ptr: ...
 
 
 @overload
-def alloc_window_buffer(shape: Sequence[IntLike], *, dtype: DataType, name: str = "") -> Ptr: ...
+def alloc_window_buffer(
+    shape: Sequence[IntLike],
+    *,
+    dtype: DataType,
+    name: str = "",
+    memory_source: str = "device",
+    init: str | None = None,
+) -> Ptr: ...
 
 
 def alloc_window_buffer(  # type: ignore[no-redef]
-    size: IntLike | Sequence[IntLike], *, dtype: DataType | None = None, name: str = ""
+    size: IntLike | Sequence[IntLike],
+    *,
+    dtype: DataType | None = None,
+    name: str = "",
+    memory_source: str = "device",
+    init: str | None = None,
 ) -> Ptr:
     """Declare a per-rank HCCL window-buffer in a comm-domain scope slot.
 
@@ -205,11 +219,21 @@ def alloc_window_buffer(  # type: ignore[no-redef]
     ``window()`` views across loop iterations.
 
     Args:
-        size: (Canonical form) Per-rank allocation size in **bytes**.
-        shape: (Convenience form) Per-rank shape as a sequence of per-dimension
-            sizes — ``int``, DSL ``Scalar``, or raw :class:`ir.Expr`.
+        size: Per-rank allocation. In the **canonical byte form**, the
+            allocation size in bytes — an ``int`` literal, a DSL ``Scalar``,
+            or a raw :class:`ir.Expr`. In the **shape+dtype convenience
+            form**, a ``list`` or ``tuple`` of per-dimension sizes (other
+            sequence types, such as ``range``, are not recognized and fall
+            through to the canonical-form branch); the byte size is then
+            computed automatically as ``product(size) x dtype.get_byte()``
+            and the call normalizes to the canonical byte form.
         dtype: (Convenience form, required) Element data type. Must be
             ``None`` (default) in the canonical byte form.
+        memory_source: Physical backing, "device" (default) or "host". Host domains
+            require A5 TMR and automatically allocate URMA resources for peer access.
+        init: Non-empty runtime source key for a Host window. Bind rank-ordered binary files or
+            contiguous CPU tensors through DistributedWorker(window_sources=...) after compilation.
+            Sources are copied only when the domain is created, not on reuse.
         name: Unique buffer identifier. The parser injects this from the LHS
             of the surrounding assignment
             (``buf = pld.tensor.alloc_window_buffer(...)``); users **must not**
@@ -224,9 +248,8 @@ def alloc_window_buffer(  # type: ignore[no-redef]
 
     .. note::
 
-       This function is callable only inside HOST-level orchestration
-       (``level=pl.Level.HOST, role=pl.Role.Orchestrator``). Calling it
-       inside InCore (``type=pl.FunctionType.InCore``) raises a parser error.
+       The parser accepts this call in HOST and CLUSTER_0 orchestration,
+       outside nested InCore and SPMD scopes.
 
     .. seealso::
 
@@ -235,7 +258,7 @@ def alloc_window_buffer(  # type: ignore[no-redef]
 
     Raises:
         ValueError: If ``name`` is empty (the parser must have injected it).
-        ValueError: If ``shape`` is a sequence but ``dtype`` is not provided.
+        ValueError: If ``size`` is a sequence but ``dtype`` is not provided.
         ValueError: If ``size`` is scalar but ``dtype`` is provided.
     """
     if not name:
@@ -252,7 +275,9 @@ def alloc_window_buffer(  # type: ignore[no-redef]
             )
         shape_normalized: list[int | Expr] = _normalize_intlike(size)
         byte_size: int | Expr = _compute_window_buffer_bytes(shape_normalized, dtype)
-        call = _ir_tensor.alloc_window_buffer(_unwrap(byte_size), name=name)
+        call = _ir_tensor.alloc_window_buffer(
+            _unwrap(byte_size), name=name, memory_source=memory_source, init=init
+        )
         return Ptr(expr=call)
 
     if dtype is not None:
@@ -261,7 +286,7 @@ def alloc_window_buffer(  # type: ignore[no-redef]
             "(list / tuple), not a scalar byte size"
         )
 
-    call = _ir_tensor.alloc_window_buffer(_unwrap(size), name=name)
+    call = _ir_tensor.alloc_window_buffer(_unwrap(size), name=name, memory_source=memory_source, init=init)
     return Ptr(expr=call)
 
 
@@ -583,7 +608,7 @@ def get(
 def put_async(
     dst: DistributedTensor,
     peer: IntLike,
-    src: DistributedTensor,
+    src: Tensor | DistributedTensor,
     dst_offsets: Sequence[IntLike] | None = None,
     src_offsets: Sequence[IntLike] | None = None,
     shape: Sequence[IntLike] | None = None,
@@ -592,8 +617,9 @@ def put_async(
 ) -> DistributedTensor:
     """Asynchronously write the local ``src`` into the peer rank's ``dst`` slice.
 
-    Both ``dst`` and ``src`` must be window-bound :class:`DistributedTensor`s;
-    V1 does not register ordinary tensors or stage through UB.
+    ``dst`` must be a window-bound :class:`DistributedTensor`; ``src`` may be
+    a plain :class:`Tensor` or a distributed tensor from another domain.
+    The caller supplies memory accessible to URMA; no registration or staging is added.
 
     Returns ``dst`` (the result aliases the destination). Returning does **not**
     mean the transfer completed: completion is owned by the enclosing task and
@@ -607,8 +633,17 @@ def put_async(
     when supplied, must be provided together and describe a contiguous GM
     range: skip leading singleton transfer dimensions, then require every
     dimension after the first non-singleton to span its full extent.
+
+    .. warning::
+
+       This dependency gate does not yet enforce completion: task-completion
+       integration (the enclosing task releasing the consumer) is still
+       pending (see ``docs/en/dev/distributed_ops.md``). A consumer scheduled
+       this way may run before the transfer lands. Do not rely on this
+       pattern for correctness until that integration ships.
     """
-    dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.put_async", dst=dst, src=src)
+    (dst_expr,) = _unwrap_distributed_tensors("pld.tensor.put_async", dst=dst)
+    src_expr = _unwrap(src)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tensor.put_async dst_offsets, src_offsets, and shape must be provided together")
@@ -630,8 +665,28 @@ def put_async(
     return DistributedTensor(expr=call)
 
 
+def get_async_event(
+    dst: TensorT, peer: IntLike, src: DistributedTensor, *, engine: CommEngine = CommEngine.URMA
+) -> tuple[TensorT, AsyncEvent]:
+    """Submit a single-peer GET of dense GM views and expose its completion event.
+
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        engine: Communication engine. Currently only URMA is supported.
+
+    Returns:
+        A pair containing an alias of dst and the pending AsyncEvent. Wait for the event before
+        reading dst in this kernel, or defer it to the task.
+    """
+    (src_expr,) = _unwrap_distributed_tensors("pld.tensor.get_async_event", src=src)
+    call = _ir_tensor.get_async_event(_unwrap(dst), _unwrap(peer), src_expr, engine=engine)
+    return _wrap_async_transfer_result(dst, call)
+
+
 def get_async(
-    dst: DistributedTensor,
+    dst: TensorT,
     peer: IntLike,
     src: DistributedTensor,
     dst_offsets: Sequence[IntLike] | None = None,
@@ -639,11 +694,12 @@ def get_async(
     shape: Sequence[IntLike] | None = None,
     *,
     engine: CommEngine = CommEngine.URMA,
-) -> DistributedTensor:
+) -> TensorT:
     """Asynchronously read the peer rank's ``src`` slice into local ``dst``.
 
-    Both ``dst`` and ``src`` must be window-bound :class:`DistributedTensor`s;
-    V1 does not register ordinary tensors or stage through UB.
+    ``src`` must be a window-bound :class:`DistributedTensor`; ``dst`` may be
+    a plain :class:`Tensor` or a distributed tensor from another domain.
+    The caller supplies memory accessible to URMA; no registration or staging is added.
 
     Returns ``dst`` (the result aliases the destination). Returning does **not**
     mean the data has arrived: completion is owned by the enclosing task and
@@ -656,8 +712,17 @@ def get_async(
     when supplied, must be provided together and describe a contiguous GM
     range: skip leading singleton transfer dimensions, then require every
     dimension after the first non-singleton to span its full extent.
+
+    .. warning::
+
+       This dependency gate does not yet enforce completion: task-completion
+       integration (the enclosing task releasing the consumer) is still
+       pending (see ``docs/en/dev/distributed_ops.md``). A consumer scheduled
+       this way may run before the transfer lands. Do not rely on this
+       pattern for correctness until that integration ships.
     """
-    dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.get_async", dst=dst, src=src)
+    (src_expr,) = _unwrap_distributed_tensors("pld.tensor.get_async", src=src)
+    dst_expr = _unwrap(dst)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tensor.get_async dst_offsets, src_offsets, and shape must be provided together")
@@ -676,7 +741,7 @@ def get_async(
             _normalize_intlike(shape),
             engine=engine,
         )
-    return DistributedTensor(expr=call)
+    return dst.__class__(expr=call)
 
 
 @overload
@@ -1287,6 +1352,7 @@ __all__ = [
     "broadcast",
     "get",
     "get_async",
+    "get_async_event",
     "put",
     "put_async",
     "remote_store",

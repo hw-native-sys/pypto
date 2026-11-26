@@ -38,8 +38,9 @@ def test_indexed_barrier(
         first, second, barrier = "vscatter", "vscatter", "vst.vst"
     elif hazard == "control":
         replacement = (
-            "      pto.vmi.vstore %x, %dst[%c0_index] : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>\n"
-            "      %reread = pto.vmi.vload %dst[%c0_index] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>"
+            "      pto.vmi.vstore %x, %dst[%c0_index] : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, index\n"
+            "      %reread = pto.vmi.vload %dst[%c0_index] : !pto.ptr<f32, ub>, index"
+            " -> !pto.vmi.vreg<64xf32>"
         )
         first, second, barrier = "vstsx1", "vldsx1", "vst.vld"
     else:
@@ -50,7 +51,7 @@ def test_indexed_barrier(
         # unknown upper bounds, so PTOAS may conservatively retain their barrier.
         source = source.replace(
             "    pto.vecscope {",
-            "    %other = pto.addptr %dst, %c256_index : <f32, ub> -> <f32, ub>\n    pto.vecscope {",
+            "    %other = pto.addptr %dst, %c256_index : <f32, ub>, index -> <f32, ub>\n    pto.vecscope {",
         )
         lines = replacement.splitlines()
         lines[1] = lines[1].replace("%dst", "%other")

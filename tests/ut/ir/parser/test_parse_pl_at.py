@@ -130,6 +130,31 @@ def test_parse_pl_at_nested():
     assert inner_scope.role == ir.Role.Orchestrator
 
 
+@pytest.mark.parametrize("level", ["HOST", "CLUSTER_0"])
+def test_topology_and_window_allocation_follow_inner_orchestration_level(level):
+    pl.parse(f"""
+@pl.function(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator)
+def orch():
+    with pl.at(level=pl.Level.{level}):
+        with pl.at(level=pl.Level.CHIP):
+            pass
+        ranks = pld.world_size()
+        workers = pld.num_workers()
+        buf = pld.alloc_window_buffer(ranks * workers)
+""")
+
+
+@pytest.mark.parametrize("expr", ["pld.world_size()", "pld.num_workers()", "pld.alloc_window_buffer(64)"])
+def test_inner_chip_scope_rejects_orchestration_intrinsics(expr):
+    with pytest.raises(ParserSyntaxError, match=r"Level\.CHIP\b"):
+        pl.parse(f"""
+@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+def orch():
+    with pl.at(level=pl.Level.CHIP):
+        value = {expr}
+""")
+
+
 # ─── Error cases ──────────────────────────────────────────────────────────
 
 

@@ -51,8 +51,8 @@ data = pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)
 结果窗口。`all_to_all_v` 还额外要求 `send_counts`（在这一层是窗口绑定的；
 对端只会从中拉取自己所需的那一个字，`[NR]` INT32 向量就是该缓冲区需要的全部
 内容）和
-`recv_counts`（窗口绑定，由内核填充）——五个窗口参数都必须位于同一个
-`CommDomainScopeStmt` 中，并且必须
+`recv_counts`（窗口绑定，由内核填充）——五个窗口参数可以位于不同的
+`CommDomainScopeStmt` 中，但分配必须
 两两互不相同（任意一对发生别名都是跨进程竞争，无论是 data 与 data、
 data 与 control，还是 control 与 control 之间）。
 
@@ -104,8 +104,10 @@ dispatch 可以完成 print -> parse 往返。它是仅供机器使用（machine
 
 ## 检查
 
-该 pass 要求两个参数都是已经 materialize 的 `DistributedTensorType` view，并且位于同一个
-`CommDomainScopeStmt` 中。host allreduce builtin 支持 FP16、FP32 上的
+该 pass 要求已经 materialize 的 `DistributedTensorType` view。每个远端操作数使用
+自己的通信上下文（context），包括 signal 和 send counts。data/target 的域决定启动 rank；
+纯 barrier 使用 signal 的域。域兼容性由调用者保证。dispatch 为访问到的每个域追加
+ordering token，包括只在本地访问的输入/输出域。host allreduce builtin 支持 FP16、FP32 上的
 `ReduceOp.Sum`、`Max`、`Min` 和 `Prod`，并支持任意正元素数量。它按 256 个
 元素分块，并把 FP16 和 FP32 的 ragged load 范围都对齐到 32 字节，不改变逻辑 tensor shape。
 signal 必须是 INT32 tensor，形状可以是 rank-1 `[world_size]` 或 rank-2

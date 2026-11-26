@@ -111,7 +111,8 @@ bool HasStatedLane(const CallPtr& call) {
   // the split_aiv placement override and the AivSplitValid verifier.
   if (IsPipeBarrier(call)) return call->HasKwarg("core_type");
   return IsOp(call, "system.syncall") || IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait") ||
-         IsOp(call, "system.set_flag") || IsOp(call, "system.wait_flag");
+         IsOp(call, "system.set_flag") || IsOp(call, "system.wait_flag") ||
+         IsOp(call, "system.set_intra_block") || IsOp(call, "system.wait_intra_block");
 }
 
 CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
@@ -165,7 +166,8 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   // typed AIC/AIV function. A mixed InCore kernel, however, needs an explicit
   // target so ExpandMixedKernel retains the set/wait on only that lane.
   if (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") || IsOp(op, "system.set_flag") ||
-      IsOp(op, "system.wait_flag")) {
+      IsOp(op, "system.wait_flag") || IsOp(op, "system.set_intra_block") ||
+      IsOp(op, "system.wait_intra_block")) {
     for (const auto& [key, value] : call->kwargs_) {
       if (key != "core_type") continue;
       const auto core_type = AnyCast<std::string>(value, "core_type");

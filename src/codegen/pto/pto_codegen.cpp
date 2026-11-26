@@ -30,6 +30,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -52,6 +53,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -61,11 +63,15 @@
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "src/codegen/pto/pto_scalar_floor_div_mod_plan.h"
+#include "src/codegen/pto/pto_tensor_view_plan.h"
 
 namespace pypto {
 namespace codegen {
@@ -262,6 +268,13 @@ std::string EscapeMlirString(const std::string& str) {
     }
   }
   return escaped;
+}
+
+// Parameter setup belongs to the function prologue; a frontend may only
+// have a source location for the individual parameter.
+const ir::Span* ParameterPrologueSpan(const ir::Function& function, const ir::Var& parameter) {
+  const auto& span = function.span_;
+  return span.is_valid() && !span.filename_.empty() ? &span : &parameter.span_;
 }
 
 // True when `inner` is a source range nested inside `outer` — the invariant a
@@ -814,12 +827,20 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 // the tuple-returning call is nested.
 class TupleConsumerCollector : public ir::IRVisitor {
  public:
+  explicit TupleConsumerCollector(ir::ProgramPtr program) : program_(std::move(program)) {}
   [[nodiscard]] std::map<const ir::Var*, std::vector<ir::VarPtr>> Take() { return std::move(index_); }
 
  protected:
   void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    auto call = As<ir::Call>(op->value_);
+    auto source = ir::AsVarLike(op->value_);
+    if (ir::ResolveVFCall(call, program_) || (source && aliases_.count(source.get()))) {
+      aliases_.insert(op->var_.get());
+    }
     if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
       if (auto base = As<ir::Var>(tge->tuple_); base && tge->index_ >= 0) {
+        // VF tuple elements are borrowed aliases, not hardware DPS destinations.
+        if (aliases_.count(base.get())) return;
         auto& elements = index_[base.get()];
         const auto index = static_cast<size_t>(tge->index_);
         if (elements.size() <= index) elements.resize(index + 1, nullptr);
@@ -839,6 +860,8 @@ class TupleConsumerCollector : public ir::IRVisitor {
 
  private:
   std::map<const ir::Var*, std::vector<ir::VarPtr>> index_;
+  ir::ProgramPtr program_;
+  std::set<const ir::Var*> aliases_;
 };
 
 }  // namespace
@@ -1052,7 +1075,12 @@ void PTOCodegen::RecordEntryHelperUse(const std::string& symbol) {
 }
 
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
+  ir::return_lineage::ScopedTraceCache lineage_cache;
   vf_helpers_.clear();
+  c2v_release_symbols_.clear();
+  vf_program_ = program;
+  bound_vf_regions_.clear();
+  vf_return_aliases_.clear();
   entry_helpers_.clear();
   entry_helper_uses_.clear();
   simt_functions_.clear();
@@ -1062,6 +1090,10 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   reg_addresses_.clear();
   reg_tuple_values_.clear();
   inside_reg_scope_ = false;
+  micro_reg_scope_ = false;
+  squeeze_destination_.reset();
+  squeeze_cursor_.clear();
+  squeeze_pointer_type_.clear();
   size_t incore_count = 0, aic_count = 0, aiv_count = 0;
   for (const auto& [_, function] : program->functions_) {
     incore_count += ir::IsInCoreType(function->func_type_);
@@ -1107,7 +1139,7 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   stream_ << "} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
-    if (func->func_type_ == ir::FunctionType::SIMT) continue;
+    if (func->func_type_ == ir::FunctionType::SIMT || func->func_type_ == ir::FunctionType::VF) continue;
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
         << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
@@ -1135,6 +1167,14 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
     }
   }
 
+  for (const auto& [type, symbol] : c2v_release_symbols_) {
+    for (const auto& [gvar, func] : program->functions_) {
+      CHECK_SPAN(func->name_ != symbol, func->span_) << "Reserved C2V release symbol: " << symbol;
+    }
+    stream_ << "  func.func private @" << symbol << "(%tile: " << type << ") attributes "
+            << "{pto.ptodsl.subkernel_helper = \"simd\", pto.tileop.effects = [\"readwrite\"]} {\n"
+               "    return\n  }\n";
+  }
   EmitDeferredCompletionAdapterDeclaration();
   EmitUrmaTransferAdapterDeclarations();
   for (const auto& helper : vf_helpers_) {
@@ -1246,7 +1286,7 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   // Read rankId (the low 32 bits of the (rankId, rankNum) 8-byte slot at
   // u64 index k_rank_idx).
   const std::string rk_pair = NewTemp();
-  Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64> -> i64");
+  Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64>, index -> i64");
   const std::string rk_i32 = NewTemp();
   Emit(rk_i32 + " = arith.trunci " + rk_pair + " : i64 to i32");
   const std::string rk_idx = NewTemp();
@@ -1256,13 +1296,13 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   const std::string lb_off = NewTemp();
   Emit(lb_off + " = arith.addi " + c_w + ", " + rk_idx + " : index");
   const std::string lbase = NewTemp();
-  Emit(lbase + " = pto.load " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64> -> i64");
+  Emit(lbase + " = pto.load " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64>, index -> i64");
 
   // peer_base = windowsIn[peer]
   const std::string pb_off = NewTemp();
   Emit(pb_off + " = arith.addi " + c_w + ", " + peer_ssa + " : index");
   const std::string pbase = NewTemp();
-  Emit(pbase + " = pto.load " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64> -> i64");
+  Emit(pbase + " = pto.load " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64>, index -> i64");
 
   // delta_bytes = peer_base - local_base; converted to an element offset
   // because pto.addptr takes element counts, not bytes.
@@ -1312,13 +1352,14 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   fs_.Reset();
   fs_.current_function = func;
+  fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(func->body_, func->params_);
 
   // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
   // not carry its DPS destinations in args_ — the parser desugars them into
   // separate AssignStmts — so an emitter has to look them up. Resolving each
   // call by rescanning the body would be O(body) per call.
   {
-    TupleConsumerCollector collector;
+    TupleConsumerCollector collector(vf_program_);
     collector.VisitStmt(func->body_);
     fs_.tuple_element_index = collector.Take();
   }
@@ -1391,7 +1432,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // distance, so the parameter would be unfillable there.
   const bool uses_l2_cache_offset =
       collector.UsesL2BypassLoad() && backend_->GetHandler()->GetPtoTargetArch() == "a2a3";
-  fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
+  const auto& ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
+  const auto tensor_views = PrepareTensorParameterViews(*func, /*buffer_ir=*/false, ffts_workspace_vars);
   if (uses_sdma_workspace) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
   }
@@ -1514,7 +1556,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     first_param = false;
     const auto& param = func->params_[tensor_param_indices[j]];
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
-    if (fs_.ffts_workspace_vars.count(param.get()) > 0) {
+    if (ffts_workspace_vars.count(param.get()) > 0) {
       auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
       INTERNAL_CHECK_SPAN(extent && tensor_type->dtype_ == DataType::INT64, param->span_)
           << "FFTS workspace must be a statically sized INT64 tensor";
@@ -1651,7 +1693,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         RecordGMSlotBufferSSA(GetVarName(var), tensor_type->dtype_);
         continue;
       }
-      if (fs_.ffts_workspace_vars.count(var.get()) > 0) continue;
+      if (ffts_workspace_vars.count(var.get()) > 0) continue;
       // LegalizeMxScaleTensorViews keeps MX TensorTypes in logical rank-2 form;
       // bind a parameter view like NZ so EmitMakeTensorViews / tile.load share
       // the same make_tensor_view (no hand-rolled EmitMxPhysicalView).
@@ -1699,6 +1741,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     if (auto tile_type = As<ir::TileType>(param->GetType());
         tile_type && tile_type->memory_space_ == ir::MemorySpace::Vec) {
+      SpanScope param_loc(this, ParameterPrologueSpan(*func, *param));
       const auto ptr = GetVarName(param);
       const auto addr = NewNamedTemp(param->name_hint_ + "_addr");
       Emit(addr + " = pto.castptr " + ptr + " : !pto.ptr<" + GetTypeString(tile_type->dtype_) +
@@ -1719,13 +1762,25 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     VisitStmt(func->body_);
   }
 
+  // A later textual update may execute before an insertion on a loop backedge.
+  // Conservatively require every update to a consumed descriptor to be aligned;
+  // an aligned write in another branch must not erase an unsafe possibility.
+  for (const auto& [source, span] : fs_.nz_insert_sources) {
+    CHECK_SPAN(fs_.unaligned_valid_column_updates.count(source) == 0, span)
+        << "tile.assemble: A5 BF16 NZ Vec->Mat insertion requires every valid column update to its "
+           "source handle (including aliases) to be a compile-time multiple of 16";
+  }
+
+  CHECK_SPAN(fs_.vf_received_tiles.empty() || !fs_.has_explicit_pipe_flags, func->span_)
+      << "VF C2V capture requires automatic caller synchronization; explicit pipe flags disable it";
   std::string body_content = stream_.str();
 
   // Render the prologue before flushing constants so constants unique to a
   // shape/stride expression (e.g. the 2 in M * 2) are declared before use.
   stream_.str("");
   stream_.clear();
-  EmitMakeTensorViews(func);
+  EmitMakeTensorViews(tensor_views);
+  SpanScope prologue_loc(this, &func->span_);
   EmitExtraAllocTiles();
   std::string prologue_content = stream_.str();
 
@@ -1785,165 +1840,43 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   }
 }
 
-void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
-  // RFC #1300 P7 (canonical codegen).
-  //
-  // Emit ``pto.make_tensor_view`` directly from the IR's canonical
-  // ``(shape, stride, layout)`` triple. There are no implicit swaps or
-  // post-emit dn_swap path here — every layout-aware transform (RFC §3.3
-  // canonical promotion, ``MaterializeTensorStrides``) has already run by the
-  // time codegen executes, so the IR's TensorView fields can be transcribed
-  // verbatim.
-  //
-  // The one exception is the ordinary ``[M, 1]`` column-vector special case:
-  // PTOAS *infers* DN for shape ``[M, 1]`` with degenerate strides regardless
-  // of an ND declaration, so codegen forces DN + ``[1, M]`` strides. MX
-  // layouts are explicit hardware contracts and bypass this legacy override.
-  ir::var_collectors::VarDefUseCollector body_vars;
-  if (func->body_) body_vars.VisitStmt(func->body_);
-
-  for (const auto& param : func->params_) {
-    auto tensor_type = ir::AsTensorTypeLike(param->GetType());
-    if (!tensor_type) continue;
-    // Core-group outlining keeps the complete public signature on both the
-    // AIC and AIV functions.  Do not materialize a view for a tensor that the
-    // outlined body does not reference: PTOAS cannot infer a non-ND layout for
-    // such an unused view (notably the MX scale tensors on the AIV cast side).
-    if (body_vars.var_uses.count(param.get()) == 0) continue;
-    if (!fs_.buffer_ir && param->name_hint_ == "__gm_pipe_buffer") continue;  // Legacy GM slot buffer
-    if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a raw pointer
-
-    // ptoas rejects a malformed view (bad strides / layout) on this line, so
-    // attribute it to the parameter that declared the tensor.
-    SpanScope param_loc(this, &param->span_);
-    std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
+void PTOCodegen::EmitMakeTensorViews(const std::vector<TensorParameterView>& views) {
+  for (const auto& view : views) {
+    const auto& param = view.parameter;
+    SpanScope param_loc(this, ParameterPrologueSpan(*fs_.current_function, *param));
+    const auto& tensor_type = view.type;
+    const auto& tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
-
-    // ``[..., M, 1]`` column-vector legacy path: PTOAS infers DN for any
-    // shape whose innermost dim is constant 1, so the codegen forces DN to
-    // match what ``tile.load`` produces (memory.cpp DeduceTileLoadType emits
-    // a ColMajor BLayout tile whenever the load shape ends with a constant 1
-    // — see test_tensor_expand_clone[broadcast_dim=2] where input
-    // ``[B, N, 1]`` is loaded into a ColMajor tile and PTOAS TLoad enforces
-    // ``tile.BLayout == tensor.Layout``).
-    // Packed FP4 dimensions count byte carriers. Preserve the declared ND/DN
-    // layout instead of interpreting a one-carrier width as a logical vector.
-    bool is_column_vector = false;
-    if (rank >= 2) {
-      auto last_dim = As<ir::ConstInt>(tensor_type->shape_.back());
-      if (last_dim && last_dim->value_ == 1) {
-        is_column_vector = true;
+    auto emit_index = [&](const ExprPtr& expr) {
+      if (const auto constant = As<ir::ConstInt>(expr)) {
+        return GetOrEmitConstant(constant->value_, DataType::INDEX);
       }
-    }
-
-    ir::TensorLayout layout = ir::TensorLayout::ND;
-    if (tensor_type->tensor_view_.has_value()) {
-      layout = tensor_type->tensor_view_->layout;
-    }
-    const bool force_column_vector_dn =
-        is_column_vector && !IsMxTensorLayout(layout) && !tensor_type->dtype_.IsPackedFp4();
-    if (force_column_vector_dn) layout = ir::TensorLayout::DN;
-
-    // Materialize one shape dimension as an MLIR SSA value.
-    auto get_shape_dim_mlir = [&](size_t dim_idx) -> std::string {
-      const auto& dim_expr = tensor_type->shape_[dim_idx];
-      if (auto const_int = As<ir::ConstInt>(dim_expr)) {
-        return GetOrEmitConstant(const_int->value_, DataType::INDEX);
-      }
-      return EmitCastToIndex(dim_expr, GetExprAsCode(dim_expr));
-    };
-    // Materialize a stride ExprPtr as an MLIR SSA value.
-    auto get_stride_mlir = [&](const ir::ExprPtr& stride_expr) -> std::string {
-      if (auto const_int = As<ir::ConstInt>(stride_expr)) {
-        return GetOrEmitConstant(const_int->value_, DataType::INDEX);
-      }
-      return EmitCastToIndex(stride_expr, GetExprAsCode(stride_expr));
-    };
-    // Precompute shape dim SSA names. Dynamic shape exprs may need cast SSA
-    // ops (``EmitCastToIndex``) emitted before the ``pto.make_tensor_view``
-    // line — materialize them all up-front so the main statement is a single
-    // contiguous line.
-    std::vector<std::string> shape_dim_names(rank);
-    for (size_t j = 0; j < rank; ++j) {
-      shape_dim_names[j] = get_shape_dim_mlir(j);
-    }
-
-    // Emit one stride multiply ``lhs * shape_dim_names[dim_idx]`` and return
-    // the resulting SSA, used for fallback stride derivation when
-    // ``tensor_view_->stride`` is empty.
-    auto emit_stride_mul = [&](const std::string& lhs, size_t dim_idx, size_t stride_slot) -> std::string {
-      std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride_slot));
-      Emit(mul_name + " = arith.muli " + lhs + ", " + shape_dim_names[dim_idx] + " : index");
-      return mul_name;
+      return EmitCastToIndex(expr, GetExprAsCode(expr));
     };
 
-    // Build the stride SSA names. Prefer explicit ``tensor_view_->stride``;
-    // fall back to canonical derivation per ``layout`` when absent
-    // (``MaterializeTensorStrides`` should normally have populated it by now,
-    // but the codegen tolerates absent strides for any path that constructs
-    // IR ad-hoc and skips the pipeline).
+    std::vector<std::string> shape_dim_names;
+    shape_dim_names.reserve(rank);
+    for (const auto& dim : tensor_type->shape_) shape_dim_names.push_back(emit_index(dim));
+
     std::vector<std::string> stride_names(rank);
-    const std::vector<ir::ExprPtr>* explicit_strides = nullptr;
-    if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
-      explicit_strides = &tensor_type->tensor_view_->stride;
-    }
-    if (explicit_strides != nullptr) {
-      CHECK(explicit_strides->size() == rank)
-          << "EmitMakeTensorViews: explicit stride rank " << explicit_strides->size()
-          << " does not match tensor shape rank " << rank;
-      for (size_t j = 0; j < rank; ++j) {
-        stride_names[j] = get_stride_mlir((*explicit_strides)[j]);
-      }
-    } else if (force_column_vector_dn) {
-      // Forced-DN ``[..., M, 1]`` legacy stride pattern (PTOAS column-vector
-      // convention): trailing pair degenerates to ``stride[rank-2]=1`` and
-      // ``stride[rank-1]=shape[rank-1]=1``; outer dims walk row-major over the
-      // ``M`` extent (``stride[rank-3]=shape[rank-2]``, ``stride[k-1]=stride[k]*shape[k]``).
-      // For rank 2 this collapses to the legacy ``[1, shape[0]]``.
-      stride_names[rank - 2] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      if (rank == 2) {
-        stride_names[rank - 1] = shape_dim_names[0];
+    using ShapeDim = TensorParameterView::ShapeDim;
+    for (const auto& stride : view.strides) {
+      auto& result = stride_names[stride.axis];
+      if (const auto* expr = std::get_if<ExprPtr>(&stride.value)) {
+        result = emit_index(*expr);
+      } else if (const auto* dim = std::get_if<ShapeDim>(&stride.value)) {
+        result = shape_dim_names[dim->axis];
       } else {
-        // rank >= 3: stride[rank-1] = shape[rank-1] (= 1), stride[rank-3] = shape[rank-2].
-        stride_names[rank - 1] = shape_dim_names[rank - 1];
-        stride_names[rank - 3] = shape_dim_names[rank - 2];
-        for (int j = static_cast<int>(rank) - 4; j >= 0; --j) {
-          size_t dim = static_cast<size_t>(j);
-          stride_names[dim] = emit_stride_mul(stride_names[dim + 1], dim + 1, dim);
-        }
-      }
-    } else if (layout == ir::TensorLayout::DN) {
-      CHECK(rank >= 2) << "EmitMakeTensorViews: DN layout requires rank >= 2, got " << rank;
-      // RFC §2.3 canonical DN: stride[-2]=1, stride[-1]=shape[-2], outer
-      // strides walk row-major over the DN-block volume. Use direct shape
-      // references for the trailing pair so 2D DN avoids a spurious
-      // ``arith.muli %c1, shape`` step.
-      stride_names[rank - 2] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      stride_names[rank - 1] = shape_dim_names[rank - 2];
-      if (rank >= 3) {
-        // stride[n-3] = shape[n-2] * shape[n-1] (one full DN-block volume).
-        stride_names[rank - 3] = emit_stride_mul(shape_dim_names[rank - 2], rank - 1, rank - 3);
-        for (int j = static_cast<int>(rank) - 4; j >= 0; --j) {
-          size_t dim = static_cast<size_t>(j);
-          stride_names[dim] = emit_stride_mul(stride_names[dim + 1], dim + 1, dim);
-        }
-      }
-    } else {
-      // Canonical ND (row-major): stride[-1]=1, stride[k]=stride[k+1]*shape[k+1].
-      // For rank 2 specifically, stride[0] = shape[1] directly (avoids a
-      // spurious ``arith.muli %c1, shape[1]`` step).
-      stride_names[rank - 1] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      if (rank >= 2) {
-        stride_names[rank - 2] = shape_dim_names[rank - 1];
-        for (int j = static_cast<int>(rank) - 3; j >= 0; --j) {
-          size_t dim = static_cast<size_t>(j);
-          stride_names[dim] = emit_stride_mul(stride_names[dim + 1], dim + 1, dim);
-        }
+        const auto& product = std::get<TensorParameterView::Product>(stride.value);
+        const auto* lhs_dim = std::get_if<ShapeDim>(&product.lhs);
+        const auto& lhs =
+            lhs_dim ? shape_dim_names[lhs_dim->axis] : stride_names[std::get<size_t>(product.lhs)];
+        result = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride.axis));
+        Emit(result + " = arith.muli " + lhs + ", " + shape_dim_names[product.rhs_shape_axis] + " : index");
       }
     }
 
-    // Buffer the statement so Emit() writes it as one line and can suffix the
-    // parameter's source location.
+    // Buffer the statement so Emit() writes it as one line.
     std::ostringstream view_line;
     view_line << tensor_view << " = pto.make_tensor_view ";
     view_line << GetVarName(param);
@@ -1966,7 +1899,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     view_line << "]";
 
     std::string layout_str = "nd";
-    switch (layout) {
+    switch (view.layout) {
       case ir::TensorLayout::DN:
         layout_str = "dn";
         break;
@@ -2731,6 +2664,17 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
 }
 
 void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::string& reshape_source) {
+  if (auto view = fs_.c2v_views.find(reshape_source); view != fs_.c2v_views.end()) {
+    const auto target = fs_.ssa_to_tile_type.find(ssa_name);
+    if (target != fs_.ssa_to_tile_type.end()) {
+      const auto& layout = target->second->tile_view_;
+      if (!layout ||
+          (layout->blayout == ir::TileLayout::row_major && layout->slayout == ir::TileLayout::none_box &&
+           layout->compact == ir::CompactMode::null)) {
+        fs_.c2v_views[ssa_name] = view->second;
+      }
+    }
+  }
   const auto source = fs_.tile_view_names.find(reshape_source);
   fs_.tile_view_names[ssa_name] = source != fs_.tile_view_names.end()
                                       ? source->second
@@ -2741,12 +2685,50 @@ bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
   return fs_.tile_view_names.count(ssa_name) > 0;
 }
 
+void PTOCodegen::RequireNZInsertSourceAlignment(const std::string& ssa_name, const ir::Span& span) {
+  fs_.nz_insert_sources.emplace(ssa_name, span);
+}
+
+void PTOCodegen::RecordTileValidColumnUpdate(const std::string& ssa_name, const ir::ExprPtr& valid_cols) {
+  const auto cols = As<ir::ConstInt>(valid_cols);
+  if (!cols || cols->value_ % 16 != 0) fs_.unaligned_valid_column_updates.insert(ssa_name);
+}
+
 void PTOCodegen::RegisterMutableTileName(const std::string& ssa_name) {
   fs_.mutable_tile_names.insert(ssa_name);
 }
 
 bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
   return fs_.mutable_tile_names.count(ssa_name) > 0;
+}
+
+void PTOCodegen::RegisterTpopTileName(const std::string& ssa_name, int c2v_pipe) {
+  fs_.tpop_tile_names.insert(ssa_name);
+  auto type = fs_.ssa_to_tile_type.find(ssa_name);
+  if (c2v_pipe >= 0 && separate_vf_ && type != fs_.ssa_to_tile_type.end()) {
+    const auto layout = ir::tile_view_semantics::GetEffectiveTileView(*type->second);
+    if (layout.blayout == ir::TileLayout::row_major && layout.slayout == ir::TileLayout::none_box &&
+        layout.compact == ir::CompactMode::null) {
+      fs_.c2v_views[ssa_name] = {ssa_name, c2v_pipe, 0};
+    }
+  }
+}
+
+void PTOCodegen::RecordC2VBuffer(int pipe, const std::string& handle, int slot_size, int slot_count) {
+  const auto it = fs_.vec_reservations.find(handle);
+  if (it != fs_.vec_reservations.end() && slot_count > 0 &&
+      static_cast<int64_t>(slot_size) * slot_count <= it->second.second - it->second.first) {
+    fs_.c2v_buffers[pipe] = {it->second, slot_size};
+  } else {
+    fs_.c2v_buffers.erase(pipe);
+  }
+}
+
+bool PTOCodegen::IsLocallyBoundTileName(const std::string& ssa_name) const {
+  const auto source = fs_.tile_view_names.find(ssa_name);
+  const auto& root = source == fs_.tile_view_names.end() ? ssa_name : source->second;
+  return IsMutableTileName(root) || fs_.tpop_tile_names.count(root) > 0 ||
+         fs_.locally_bound_subview_names.count(root) > 0;
 }
 
 std::string PTOCodegen::EnsureTileView(
@@ -2828,6 +2810,37 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
                                                 const SubviewMaterializationInfo& info) {
   fs_.subview_materializations[subview_ssa] = info;
+  // Definitions precede uses, so cache contiguous ancestry as each subview is
+  // emitted. Cropping columns across multiple rows retains the parent's pitch;
+  // reshaping that descriptor to the packed window size is illegal in PTOAS.
+  // Requiring the parent to be eligible keeps a later full-width child from
+  // hiding a strided ancestor, without repeatedly walking the chain or merging
+  // distinct offsets in tile_view_names (which would break alias checks).
+  const bool contiguous = info.view_rows == 1 || (info.source_cols > 0 && info.view_cols == info.source_cols);
+  // A flattened VF address can describe dense windows with a known start.
+  // Preserve the receive itself so aliases use the same symbolic VMI pointer.
+  auto parent = fs_.c2v_views.find(info.source_ssa);
+  if (contiguous && parent != fs_.c2v_views.end() && info.source_cols > 0) {
+    const auto row = As<ir::ConstInt>(info.row_offset);
+    const auto col = As<ir::ConstInt>(info.col_offset);
+    int64_t elements;
+    if (row && col && row->value_ >= 0 && col->value_ >= 0 &&
+        !__builtin_mul_overflow(row->value_, info.source_cols, &elements) &&
+        !__builtin_add_overflow(elements, col->value_, &elements)) {
+      const auto& type = fs_.ssa_to_tile_type.at(info.source_ssa);
+      auto bytes = ir::storage_size::StaticLogicalOffsetToByte(elements, type->dtype_);
+      if (bytes &&
+          *bytes <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - parent->second.byte_offset)) {
+        fs_.c2v_views[subview_ssa] = {parent->second.received, parent->second.pipe,
+                                      parent->second.byte_offset + static_cast<int64_t>(*bytes)};
+      }
+    }
+  }
+  if (contiguous && IsLocallyBoundTileName(info.source_ssa)) {
+    fs_.locally_bound_subview_names.insert(subview_ssa);
+  } else {
+    fs_.locally_bound_subview_names.erase(subview_ssa);
+  }
 }
 
 PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterialization(
@@ -2894,7 +2907,7 @@ std::string PTOCodegen::GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask) {
     region_ssa = NewTemp();
     const std::string elem_type = GetTypeString(fs_.gm_slot_buffer_dtype);
     Emit(region_ssa + " = pto.addptr " + fs_.gm_slot_buffer_ssa + ", " + offset_ssa + " : <" + elem_type +
-         "> -> <" + elem_type + ">");
+         ">, index -> <" + elem_type + ">");
   }
 
   fs_.gm_slot_buffer_region_by_pipe[key] = region_ssa;
@@ -2972,12 +2985,33 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         return;
       }
     }
-    if (As<ir::RegType>(op->var_->GetType()) && As<ir::TupleGetItemExpr>(op->value_)) {
+    if ((ir::IsVecRegType(op->var_->GetType()) || ir::IsMaskRegType(op->var_->GetType())) &&
+        As<ir::TupleGetItemExpr>(op->value_)) {
       BindVarToMlir(op->var_, GetExprAsCode(op->value_));
       return;
     }
   }
   auto call = As<ir::Call>(op->value_);
+  if (ir::IsOp(call, "tensor.dim")) {
+    BindVarToMlir(op->var_, GetExprAsCode(call));
+    return;
+  }
+  if (TryEmitVFCall(call, op->var_)) return;
+  if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
+    if (auto it = vf_return_aliases_.find(rhs.get()); it != vf_return_aliases_.end()) {
+      vf_return_aliases_[op->var_.get()] = it->second;
+      return;
+    }
+  }
+  if (auto item = ir::As<ir::TupleGetItemExpr>(op->value_)) {
+    if (auto tuple = ir::AsVarLike(item->tuple_); tuple && vf_return_aliases_.count(tuple.get())) {
+      const auto& values = vf_return_aliases_.at(tuple.get());
+      INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < values.size(), op->span_)
+          << "Internal error: VF return projection out of bounds";
+      BindVarToMlir(op->var_, GetExprAsCode(values[item->index_]));
+      return;
+    }
+  }
   if (TryEmitRegCall(call, op->var_)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
@@ -3043,12 +3077,20 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         // there is no MemRef to read. Register it before the op codegen runs so
         // GetCurrentResultTileBufTypeString() can emit the `-> type` annotation.
         result_tile_type = tile_type;
-        result_buf = NewNamedTemp(op->var_->name_hint_);
-        BindVarToMlir(op->var_, result_buf);
-        std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
-        if (!type_str.empty()) {
-          RegisterTileBufType(result_buf, type_str, tile_type);
+        const auto writeback = ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+        if (writeback && As<TileType>(call->args_[*writeback]->GetType())) {
+          // The result still borrows the input slot. Define a typed alias of
+          // that handle before the DPS emitter writes it; a fresh SSA name
+          // alone would leave its destination undefined. A view preserves
+          // result metadata such as fillpad's padding and full valid extent.
+          const auto source = GetExprAsCode(call->args_[*writeback]);
+          result_buf = EnsureTileView(source, GetSSATileBufType(source), tile_type, "writeback_view");
+        } else {
+          result_buf = NewNamedTemp(op->var_->name_hint_);
+          std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+          if (!type_str.empty()) RegisterTileBufType(result_buf, type_str, tile_type);
         }
+        BindVarToMlir(op->var_, result_buf);
       } else if (alias_array_update_to_input) {
         // array.update_element: alias the result Var to the input array's SSA so
         // the emitted pto.local_array_set mutates the same declare_local_array
@@ -3144,7 +3186,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         return;
       }
     } else if (auto tile_type = As<TileType>(op->var_->GetType());
-               tile_type && (!emit_tile_addr_ || IsParameterBackedTile(tile_type))) {
+               tile_type && (!tile_type->memref_ || !emit_tile_addr_ || IsParameterBackedTile(tile_type))) {
       // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS. `lhs` and
       // `rhs` denote the identical tile value, so `lhs` must resolve to `rhs`'s
       // CURRENT SSA binding. This matters when `rhs` is a view (tile.reshape /
@@ -3190,6 +3232,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 // ========================================================================
 
 void PTOCodegen::VisitExpr_(const CallPtr& op) {
+  if (TryEmitVFCall(op)) return;
   if (TryEmitSimtCall(op)) return;
   if (TryEmitRegCall(op, nullptr)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(op)) return;
@@ -3289,7 +3332,8 @@ std::string PTOCodegen::LocSuffix() const {
 }
 
 std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
-  if (auto item = As<ir::TupleGetItemExpr>(expr); item && As<ir::RegType>(item->GetType())) {
+  if (auto item = As<ir::TupleGetItemExpr>(expr);
+      item && (ir::IsVecRegType(item->GetType()) || ir::IsMaskRegType(item->GetType()))) {
     auto tuple = AsVarLike(item->tuple_);
     auto it = reg_tuple_values_.find(tuple.get());
     CHECK_SPAN(inside_reg_scope_ && it != reg_tuple_values_.end() && item->index_ >= 0 &&
@@ -3460,7 +3504,8 @@ void PTOCodegen::RegisterTensorView(const VarPtr& var, const std::string& tensor
   BindTensorView(var, tensor_view_name);
 }
 
-void PTOCodegen::RegisterBasePtr(const VarPtr& var, const std::string& ptr_name) {
+void PTOCodegen::RegisterBasePtr(const VarPtr& var, const std::string& ptr_name, bool window_origin) {
+  if (window_origin) fs_.window_origins.insert(ptr_name);
   if (var && !ptr_name.empty()) fs_.tensor_to_base_ptr[GetVarKey(var)] = ptr_name;
 }
 
@@ -3553,30 +3598,17 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
 
   auto c = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
 
-  // `pto.alloc_tile` conveys the valid extent through `valid_row` / `valid_col`
-  // operands, so ExtractTileTypeInfo always renders `v_row=?, v_col=?`. A view op
-  // that takes NO such operands — `pto.treshape` — cannot: PTOAS default-
-  // constructs its destination tile from the result type alone, so a dynamic
-  // valid leaves the tile's valid extent at zero and every consumer silently
-  // becomes a no-op. Render static valid dims whenever the view's effective
-  // valid_shape is statically known.
-  //
-  // This static-valid type string is the PTOAS-facing half of
-  // EmitStaticValidTileView (pto.tquant.mx / X-to-ZZ requireStaticShape): the
-  // treshape result type must carry concrete v_row/v_col, not `?`.
-  //
-  // The one valid_shape that must stay dynamic is the all-zero lane-1 replay
-  // sentinel: a static `v_row=0, v_col=0` has no pto-isa GetValidRow overload
-  // (see IsZeroValidShapeSentinel). Rendering it dynamic is what the sibling
-  // subview inference already does.
+  // Static zero has no PTO-ISA GetValidRow/GetValidCol overload. A dynamic
+  // view is initialized explicitly by its emitter, including the all-zero
+  // replay marker; a default-constructed reshape alone does not initialize it.
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
-  const bool zero_sentinel = ir::tile_view_semantics::IsZeroValidShapeSentinel(valid);
-  if (!zero_sentinel) {
+  const bool empty = ir::tile_view_semantics::HasZeroValidExtent(valid);
+  if (!empty) {
     if (valid.size() == 1) {
       // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
-      // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
-      // dynamic zero-valid extent and its consumers become silent no-ops.
+      // maps to rows=1, cols=shape[0]. Keep positive constant views static,
+      // including the implicit row, without a runtime metadata update.
       if (auto v_col = As<ir::ConstInt>(valid[0])) {
         c.v_row = 1;
         c.v_col = v_col->value_;

@@ -109,7 +109,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.cross_core_slot(slot_num=N)])` | `InCore` | InCore + 跨核 pipe 槽位数 |
 | `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
 | `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
-| `pl.graph("name", deps=[...]) as done` | `Graph` | 可录制的编排区域；deps/capture 是可选的外层任务元数据，必填名字标识提取函数 —— 见 [OutlineGraphScopes](../passes/09-outline_graph_scopes.md) |
+| `pl.graph("name", deps=[...]) as done` | `Graph` | 编排区域。HBG 用必填名字标识提取函数，deps/capture 描述外层任务。TMR 会[就地展开](../passes/01-lower_graph_for_runtime.md)该区域 |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd`（for-form 内嵌 `InCore`） | SPMD 多 block 派发——见 [pl.spmd](#plspmd-多-block-派发) |
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | 旧式 split 元数据作用于内层 InCore；混合 kernel 的非 NONE 分片会被拒绝 |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与显式 `pl.split_aiv` 区域组合 |

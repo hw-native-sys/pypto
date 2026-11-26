@@ -45,7 +45,7 @@ bool IsTileMoveEverSupported(MemorySpace src, MemorySpace dst) {
       // MTE1 feeds the cube operand and scale buffers. Mat -> Mat is absent:
       // there is no L1 -> L1 tmov.
       return dst == MemorySpace::Left || dst == MemorySpace::Right || dst == MemorySpace::Bias ||
-             dst == MemorySpace::LeftScale || dst == MemorySpace::RightScale;
+             dst == MemorySpace::LeftScale || dst == MemorySpace::RightScale || dst == MemorySpace::Scaling;
     case MemorySpace::Vec:
       // Vec -> Mat is A5-only; included because this is the union over targets.
       return dst == MemorySpace::Vec || dst == MemorySpace::Mat;
@@ -81,6 +81,7 @@ std::optional<MemorySpace> StagingSpaceForLoad(MemorySpace demand) {
     case MemorySpace::Bias:
     case MemorySpace::LeftScale:
     case MemorySpace::RightScale:
+    case MemorySpace::Scaling:
       // L1 is the only buffer a tload can fill that MTE1 can then move into the
       // cube operand buffers, so it is the staging space for all of them.
       return MemorySpace::Mat;
@@ -109,6 +110,8 @@ std::string MemorySpaceToString(MemorySpace space) {
       return "Bias";
     case MemorySpace::LeftScale:
       return "LeftScale";
+    case MemorySpace::Scaling:
+      return "Scaling";
     case MemorySpace::RightScale:
       return "RightScale";
     case MemorySpace::ScalarLocal:
@@ -127,6 +130,7 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   if (str == "Acc") return MemorySpace::Acc;
   if (str == "Bias") return MemorySpace::Bias;
   if (str == "LeftScale") return MemorySpace::LeftScale;
+  if (str == "Scaling") return MemorySpace::Scaling;
   if (str == "RightScale") return MemorySpace::RightScale;
   if (str == "ScalarLocal") return MemorySpace::ScalarLocal;
   throw pypto::ValueError("Unknown MemorySpace: " + str);
@@ -178,12 +182,15 @@ MemRef::MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size
 bool MemRef::MayAlias(const MemRefPtr& a, const MemRefPtr& b) {
   if (a->base_.get() != b->base_.get()) return false;
 
+  // InitMemRef uses zero when a GM extent or pitch is known only at runtime.
+  // An unknown extent cannot prove two windows of the same storage disjoint.
+  if (a->size_ == 0 || b->size_ == 0) return true;
   auto off_a = As<ConstInt>(a->byte_offset_);
   auto off_b = As<ConstInt>(b->byte_offset_);
   if (off_a && off_b) {
-    int64_t end_a = off_a->value_ + static_cast<int64_t>(a->size_);
-    int64_t end_b = off_b->value_ + static_cast<int64_t>(b->size_);
-    return off_a->value_ < end_b && off_b->value_ < end_a;
+    const auto ua = static_cast<uint64_t>(off_a->value_);
+    const auto ub = static_cast<uint64_t>(off_b->value_);
+    return off_a->value_ <= off_b->value_ ? ub - ua < a->size_ : ua - ub < b->size_;
   }
   return true;  // same base, symbolic offsets → conservatively alias
 }

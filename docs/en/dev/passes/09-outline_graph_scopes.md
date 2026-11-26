@@ -7,7 +7,9 @@ scope form and `@pl.jit.graph` converge into one representation.
 
 This pass transforms `GraphScopeStmt` nodes — produced by
 `with pl.graph("name"):` — into `Function(Graph)` definitions and replaces each
-scope with a Call or Submit to the outlined function.
+scope with a Call or Submit to the outlined function. In the default TMR
+pipeline, [LowerGraphForRuntime](01-lower_graph_for_runtime.md) lowers Graph
+scopes before this pass. HBG uses the outliner to prepare them for recording.
 
 Its entire purpose is convergence. After this pass, a region the user marked in
 place has the same shape as a function the user decorated with `@pl.jit.graph` —
@@ -23,6 +25,15 @@ appends parameters in capture order, whereas the decorator form uses the
 signature the user declared. The two boundaries are permutations of each other,
 which nothing downstream depends on — every consumer reads the parameters through
 `param_directions_`, not by position.
+
+Boundary direction inference follows local buffer aliases, including reshape
+and slice chains and in-place writeback results. Builtin writes and the declared
+directions of plain calls or submitted tasks apply to the captured backing
+tensor. Returned-parameter lineage follows call results and Submit tuple
+projections; fresh callee results keep independent storage. Bare tensor aliases
+and view construction do not read the payload: their consumers determine
+whether the boundary is `In`, `Out`, or `InOut`. Fresh arithmetic results have
+their own storage and do not propagate writes back to their inputs.
 
 `with pl.graph("layer", deps=[ready]) as done:` uses the generic scope
 `manual_dep_edges` and `task_id_var` attributes. The outliner consumes these as

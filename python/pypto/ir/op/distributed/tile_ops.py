@@ -22,6 +22,42 @@ from pypto.pypto_core.ir import AtomicType, Call, Expr, Span
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
+def put_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Span | None = None) -> Call:
+    """Submit a single-peer PUT from a dense local GM view to a remote window.
+
+    Args:
+        dst: Window-bound destination on the remote rank.
+        peer: Rank receiving the transfer.
+        src: Local GM source with the same shape and dtype as dst.
+        session: AIV-local URMA session created by pld.system.make_session.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A tuple-valued call returning the destination alias and completion event.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call("pld.tile.put_async", [dst, peer_expr, src, session], {}, actual_span)
+
+
+def get_async(dst: Expr, peer: int | Expr, src: Expr, session: Expr, *, span: Span | None = None) -> Call:
+    """Submit a single-peer GET from a remote window into a dense local GM view.
+
+    Args:
+        dst: Local GM destination with the same shape and dtype as src.
+        peer: Rank supplying the data.
+        src: Window-bound source on the remote rank.
+        session: AIV-local URMA session created by pld.system.make_session.
+        span: Source location for the call. Captured from the caller when omitted.
+
+    Returns:
+        A tuple-valued call returning the destination alias and completion event.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call("pld.tile.get_async", [dst, peer_expr, src, session], {}, actual_span)
+
+
 def remote_load(
     target: Expr,
     peer: Expr,
@@ -228,4 +264,12 @@ def get(
     return _ir_core.create_op_call("pld.tile.get", args, {}, actual_span)
 
 
-__all__ = ["get", "remote_load", "remote_store", "put", "_remote_load_with_physical_tail_padding"]
+__all__ = [
+    "get",
+    "get_async",
+    "put_async",
+    "remote_load",
+    "remote_store",
+    "put",
+    "_remote_load_with_physical_tail_padding",
+]

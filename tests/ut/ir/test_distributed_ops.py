@@ -26,15 +26,21 @@ from importlib import resources
 from typing import Any, cast
 
 import pypto
+import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir
 from pypto.ir.op.distributed import system_ops as dist_system_ops
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.ir.op.distributed import tile_ops as dist_tile_ops
+from pypto.language.distributed.op import system_ops as dsl_dist_system
 from pypto.language.distributed.op import tensor_ops as dsl_tensor_ops
+from pypto.language.distributed.op import tile_ops as dsl_dist_tile
 from pypto.language.distributed.op import unified_ops as dsl_unified
 from pypto.language.distributed.op.tensor_ops import _validate_chunk, _validate_pipeline
 from pypto.language.distributed.typing.distributed_tensor import DistributedTensor
+from pypto.language.typing import AsyncEvent, AsyncSession
+from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import ir as _ir
 
 
@@ -2874,26 +2880,32 @@ def test_put_async_returns_dst_type():
     ir.assert_structural_equal(call.type, dst.type)
 
 
-def test_put_async_rejects_plain_tensor_src():
-    """Both async endpoints are window-bound; a plain Tensor src is rejected."""
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize("surface", ["raw", "ir", "dsl"])
+@pytest.mark.parametrize("region", [False, True])
+def test_async_transfer_accepts_plain_local_tensor(op_name, surface, region):
+    """Local tensors are accepted through every API and preserve dst's type."""
     span = ir.Span.unknown()
-    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
-    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
-    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
-
-    with pytest.raises(ValueError, match="window-bound"):
-        ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
-
-
-def test_get_async_rejects_plain_tensor_dst():
-    """GET also requires a window-bound destination in V1."""
-    span = ir.Span.unknown()
-    dst = _make_tensor_var("dst", [16, 64], DataType.FP16, span)
-    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
-    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
-
-    with pytest.raises(ValueError, match="window-bound"):
-        ir.create_op_call("pld.tensor.get_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+    local = _make_tensor_var("local", [16, 64], DataType.FP16, span)
+    remote = _make_distributed_tensor_var("remote", [16, 64], DataType.FP16, span)
+    dst, src = (remote, local) if op_name == "put_async" else (local, remote)
+    kwargs = dict(dst_offsets=[1, 0], src_offsets=[2, 0], shape=[1, 64]) if region else {}
+    if surface == "raw":
+        args: list[ir.Expr] = [dst, ir.ConstInt(1, DataType.INT32, span), src]
+        args.extend(_make_shape_tuple(values, span) for values in kwargs.values())
+        call = ir.create_op_call(f"pld.tensor.{op_name}", args, {"engine": int(ir.CommEngine.URMA)}, span)
+    elif surface == "ir":
+        call = getattr(dist_tensor_ops, op_name)(dst, 1, src, **kwargs)
+    else:
+        local_wrapper = Tensor(expr=local)
+        remote_wrapper = DistributedTensor(expr=remote)
+        dst_wrapper, src_wrapper = (
+            (remote_wrapper, local_wrapper) if op_name == "put_async" else (local_wrapper, remote_wrapper)
+        )
+        result = getattr(dsl_tensor_ops, op_name)(dst_wrapper, 1, src_wrapper, **kwargs)
+        assert isinstance(result, DistributedTensor) == (op_name == "put_async")
+        call = result.unwrap()
+    ir.assert_structural_equal(call.type, dst.type)
 
 
 def test_async_transfer_requires_urma_engine():
@@ -3005,7 +3017,8 @@ def test_put_async_accepts_leading_dimension_subregion():
     ir.assert_structural_equal(call.type, dst.type)
 
 
-def test_put_async_rejects_non_dense_endpoint_view():
+@pytest.mark.parametrize("tensor_type", [ir.TensorType, ir.DistributedTensorType])
+def test_put_async_rejects_non_dense_endpoint_view(tensor_type):
     """A strided view is not one contiguous GM range; V1 has no packing."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", [2, 64], DataType.FP16, span)
@@ -3015,7 +3028,7 @@ def test_put_async_rejects_non_dense_endpoint_view():
     view = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
     src = ir.Var(
         "src",
-        ir.DistributedTensorType(shape, DataType.FP16, tensor_view=view),
+        tensor_type(shape, DataType.FP16, tensor_view=view),
         span,
     )
 
@@ -3023,7 +3036,8 @@ def test_put_async_rejects_non_dense_endpoint_view():
         ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
 
 
-def test_put_async_rejects_non_nd_implicit_layout():
+@pytest.mark.parametrize("tensor_type", [ir.TensorType, ir.DistributedTensorType])
+def test_put_async_rejects_non_nd_implicit_layout(tensor_type):
     """An implicit (empty-stride) DN/NZ view is not dense row-major."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
@@ -3032,7 +3046,7 @@ def test_put_async_rejects_non_nd_implicit_layout():
     view = ir.TensorView(layout=ir.TensorLayout.DN)
     src = ir.Var(
         "src",
-        ir.DistributedTensorType(shape, DataType.FP16, tensor_view=view),
+        tensor_type(shape, DataType.FP16, tensor_view=view),
         span,
     )
 
@@ -3206,6 +3220,52 @@ def test_async_transfer_engine_rejection_names_sdma_rdma(op_name):
         ir.create_op_call(f"pld.tensor.{op_name}", [dst, peer, src], {"engine": 0}, span)
 
 
+@pytest.mark.parametrize("name", ["pld.tensor.get_async_event", "pld.tile.get_async", "pld.tile.put_async"])
+def test_async_transfer_result_alias_and_effects(name):
+    assert _ir.get_op_output_arity(name) == 2
+    assert _ir.get_op_tuple_result_aliases(name) == {0: 0}
+    assert ir.get_op_arg_effect(name, 0) == ir.ArgEffect.ReadWrite
+    assert ir.get_op_arg_effect(name, 1) == ir.ArgEffect.Read
+    assert ir.get_op_arg_effect(name, 2) == ir.ArgEffect.Read
+    if name.startswith("pld.tile."):
+        assert _ir.get_op_mutable_session_arg(name) == 3
+        assert ir.get_op_arg_effect(name, 3) == ir.ArgEffect.ReadWrite
+
+
+def test_explicit_get_ir_operand_contracts():
+    span = ir.Span.unknown()
+    dst = _make_tensor_var("dst", [32], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [32], DataType.FP16, span)
+    ctx = dist_system_ops.get_comm_ctx(src)
+    session = dist_system_ops.make_session(ctx)
+    assert isinstance(session.type, ir.AsyncSessionType)
+    with pytest.raises(ValueError, match="CommCtx"):
+        dist_system_ops.make_session(dst)
+    with pytest.raises(TypeError, match="engine must be CommEngine"):
+        dist_system_ops.make_session(ctx, engine=cast(Any, 1))
+    for submit in (
+        lambda dst, peer, src: dist_tensor_ops.get_async_event(dst, peer, src),
+        lambda dst, peer, src: dist_tile_ops.get_async(dst, peer, src, session),
+    ):
+        with pytest.raises(ValueError, match="non-negative"):
+            submit(dst, -1, src)
+        with pytest.raises(ValueError, match="DistributedTensor"):
+            submit(dst, 0, dst)
+        with pytest.raises(ValueError, match="shape"):
+            submit(_make_tensor_var("short", [16], DataType.FP16, span), 0, src)
+    with pytest.raises(ValueError, match="AsyncSession"):
+        dist_tile_ops.get_async(dst, 0, src, ctx)
+    result = dist_tile_ops.get_async(dst, 0, src, session)
+    ir.assert_structural_equal(ir.TupleGetItemExpr(result, 0, span).type, dst.type)
+    event = ir.TupleGetItemExpr(result, 1, span)
+    assert isinstance(event.type, ir.AsyncEventType)
+    assert isinstance(dist_system_ops.defer_wait_event(event, session).type, ir.UnknownType)
+    with pytest.raises(ValueError, match="AsyncEvent"):
+        dist_system_ops.defer_wait_event(session)
+    with pytest.raises(ValueError, match="AsyncSession"):
+        dist_system_ops.defer_wait_event(event, ctx)
+
+
 def test_get_async_requires_region_args_together():
     """GET mirrors PUT: the three region arguments are all-or-nothing."""
     span = ir.Span.unknown()
@@ -3218,6 +3278,7 @@ def test_get_async_requires_region_args_together():
 
 
 @pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize("plain_local", [False, True])
 @pytest.mark.parametrize(
     "dst_shape, src_shape, dst_dtype, src_dtype, region, match",
     [
@@ -3230,12 +3291,17 @@ def test_get_async_requires_region_args_together():
     ],
 )
 def test_async_transfer_rejects_invalid_shape_or_region(
-    op_name, dst_shape, src_shape, dst_dtype, src_dtype, region, match
+    op_name, plain_local, dst_shape, src_shape, dst_dtype, src_dtype, region, match
 ):
     """Dtype/rank/full-slice shape and static-region bounds share the transfer validators."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", dst_shape, dst_dtype, span)
     src = _make_distributed_tensor_var("src", src_shape, src_dtype, span)
+    if plain_local:
+        if op_name == "put_async":
+            src = _make_tensor_var("src", src_shape, src_dtype, span)
+        else:
+            dst = _make_tensor_var("dst", dst_shape, dst_dtype, span)
     peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
     args: list[ir.Expr] = [dst, peer, src]
     if region is not None:
@@ -3272,6 +3338,235 @@ def test_async_transfer_rejects_unknown_atomic_kwarg(op_name):
             {"engine": int(ir.CommEngine.URMA), "atomic": 1},
             span,
         )
+
+
+# ---------------------------------------------------------------------------
+# pld.system.make_session / pld.tile.put_async / pld.system.wait_event
+# (V2 explicit session + event surface)
+# ---------------------------------------------------------------------------
+
+
+def _make_session(span):
+    """Build a session over a fresh comm context, as the DSL would."""
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    return dist_system_ops.make_session(ctx, span=span)
+
+
+def test_make_session_returns_async_session_type():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    assert isinstance(session.type, ir.AsyncSessionType)
+    assert session.type is ir.AsyncSessionType.get()
+
+
+def test_make_session_requires_comm_ctx():
+    """The session is built on a CommContext, not on the tensor itself."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    with pytest.raises(ValueError, match="CommCtx"):
+        ir.create_op_call("pld.system.make_session", [target], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_make_session_requires_urma_engine():
+    """V2 pins the engine exactly as V1 does: URMA only, rejected by name."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    with pytest.raises(ValueError, match="CommEngine.URMA"):
+        ir.create_op_call("pld.system.make_session", [ctx], {"engine": 0}, span)
+
+
+def test_make_session_rejects_the_old_peer_operand():
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = dist_system_ops.get_comm_ctx(target)
+    with pytest.raises(ValueError, match="exactly 1"):
+        ir.create_op_call(
+            "pld.system.make_session",
+            [ctx, ir.ConstInt(1, DataType.INT32, span)],
+            {"engine": int(ir.CommEngine.URMA)},
+            span,
+        )
+
+
+def test_tile_put_async_rejects_negative_peer():
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    with pytest.raises(ValueError, match="non-negative"):
+        dist_tile_ops.put_async(dst, -1, src, _make_session(span), span=span)
+
+
+def test_make_session_rejects_non_enum_engine_in_builder():
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    with pytest.raises(TypeError, match="CommEngine.URMA"):
+        dist_system_ops.make_session(ctx, engine=cast(Any, 1), span=span)
+
+
+def test_tile_put_async_returns_dst_alias_and_event():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    call = dist_tile_ops.put_async(dst, 1, src, session, span=span)
+    assert isinstance(call.type, ir.TupleType)
+    assert call.type.types[0] is dst.type
+    assert isinstance(call.type.types[1], ir.AsyncEventType)
+
+
+def test_tile_put_async_requires_session_handle():
+    """The session operand must be a handle even when the peer is a valid rank."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    peer = ir.ConstInt(1, DataType.INT32, span)
+    with pytest.raises(ValueError, match="AsyncSession"):
+        ir.create_op_call("pld.tile.put_async", [dst, peer, src, peer], {}, span)
+
+
+@pytest.mark.parametrize("operation", ["pld.tile.put_async", "pld.tile.get_async"])
+def test_tile_async_rejects_engine_kwarg(operation):
+    """Engine selection belongs to make_session on both transfer paths."""
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    remote = _make_distributed_tensor_var("remote", [16, 64], DataType.FP16, span)
+    local = _make_tensor_var("local", [16, 64], DataType.FP16, span)
+    dst, src = (remote, local) if operation == "pld.tile.put_async" else (local, remote)
+    with pytest.raises(ValueError, match="no kwargs"):
+        ir.create_op_call(
+            operation,
+            [dst, ir.ConstInt(1, DataType.INT32, span), src, session],
+            {"engine": int(ir.CommEngine.URMA)},
+            span,
+        )
+
+
+def test_tile_put_async_requires_peer_on_submission():
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    with pytest.raises(ValueError, match="dst, peer, src, session"):
+        ir.create_op_call("pld.tile.put_async", [dst, src, _make_session(span)], {}, span)
+
+
+def test_tile_put_async_requires_distributed_destination():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    with pytest.raises(ValueError, match="DistributedTensor"):
+        ir.create_op_call(
+            "pld.tile.put_async", [dst, ir.ConstInt(1, DataType.INT32, span), src, session], {}, span
+        )
+
+
+def test_tile_put_async_rejects_dtype_mismatch():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP32, span)
+    with pytest.raises(ValueError, match="same element type"):
+        ir.create_op_call(
+            "pld.tile.put_async", [dst, ir.ConstInt(1, DataType.INT32, span), src, session], {}, span
+        )
+
+
+def test_wait_event_returns_bool():
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    result = dist_tile_ops.put_async(dst, 1, src, session, span=span)
+    event = ir.TupleGetItemExpr(result, 1, span)
+
+    call = dist_system_ops.wait_event(event, session, span=span)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.BOOL
+
+
+def test_wait_event_rejects_swapped_operands():
+    """Event and session are distinct handle types, so the order is checked."""
+    span = ir.Span.unknown()
+    session = _make_session(span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    result = dist_tile_ops.put_async(dst, 1, src, session, span=span)
+    event = ir.TupleGetItemExpr(result, 1, span)
+
+    with pytest.raises(ValueError, match="AsyncEvent"):
+        ir.create_op_call("pld.system.wait_event", [session, event], {}, span)
+
+
+def test_v2_session_surface_roundtrips_through_printer():
+    """Printed IR re-parses to a structurally identical program.
+
+    Covers the DSL surface end to end: ``pld.system.make_session`` carries an
+    ``engine`` kwarg, and the two opaque handles (AsyncSession, AsyncEvent)
+    must print and re-parse as named types.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pl.Tensor[[16, 64], pl.FP16],
+        ):
+            ctx = pld.system.get_comm_ctx(dst)
+            session = pld.system.make_session(ctx)
+            _out, evt = pld.tile.put_async(dst, 1, src, session)
+            pld.system.wait_event(evt, session)
+
+    printed = str(Program)
+    assert "pld.system.make_session" in printed
+    assert "pld.tile.put_async" in printed
+    assert "pld.system.wait_event" in printed
+
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(reparsed, Program)
+
+
+def test_v2_dsl_wrappers_return_handle_types():
+    """The DSL layer returns AsyncSession / AsyncEvent wrappers, not raw Calls.
+
+    Exercised through the DSL wrappers directly rather than inside a
+    ``@pl.program``: a program body is *parsed* as DSL, so ordinary Python
+    (an assignment into a captured dict) is not valid there. The wrappers
+    accept raw ``ir.Expr`` through ``_unwrap``'s fallthrough.
+    """
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = dsl_dist_system.get_comm_ctx(DistributedTensor(expr=target))
+    session = dsl_dist_system.make_session(ctx)
+    assert isinstance(session, AsyncSession)
+
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+    out, event = dsl_dist_tile.put_async(DistributedTensor(expr=dst), 1, Tensor(expr=src), session)
+    assert isinstance(event, AsyncEvent)
+
+    assert isinstance(out, DistributedTensor)
+    out_field, event_field = out.unwrap(), event.unwrap()
+    assert isinstance(out_field, ir.TupleGetItemExpr) and isinstance(event_field, ir.TupleGetItemExpr)
+    assert (out_field.index, event_field.index) == (0, 1)
+    assert out_field.tuple is event_field.tuple
+
+    done = dsl_dist_system.wait_event(event, session)
+    assert isinstance(done.unwrap().type, ir.ScalarType)
+
+
+def test_v2_dsl_make_session_rejects_non_enum_engine():
+    """The DSL wrapper validates the engine before the IR builder sees it."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("win", [16, 64], DataType.FP16, span)
+    ctx = dsl_dist_system.get_comm_ctx(DistributedTensor(expr=target))
+    with pytest.raises(TypeError, match="CommEngine.URMA"):
+        dsl_dist_system.make_session(ctx, engine=cast(Any, "URMA"))
 
 
 if __name__ == "__main__":

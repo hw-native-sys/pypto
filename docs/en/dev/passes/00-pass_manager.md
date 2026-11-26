@@ -2,6 +2,11 @@
 
 Framework for organizing and executing IR transformation passes on Programs with property tracking, instrumentation, and strategy-based optimization pipelines.
 
+The initial scope-outlining stage runs `OutlineSimtScopes`, then
+`OutlineRegScopes`, before inlining, SSA conversion and mixed-kernel expansion.
+Both expose device helpers in the Program; VF helpers use synchronous calls
+and the existing parameter/return contracts.
+
 ## Overview
 
 | Component | Description |
@@ -59,7 +64,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `OrchestrationReferencesResolved` | Every non-builtin Call inside a `FunctionType::Orchestration` function targets a Function in the surrounding Program |
 | `TensorViewCanonical` | TensorView canonicality verified (weak: empty stride ok; strict: requires materialization, RFC #1300 §2.2) |
 | `ArrayNotEscaped` | ArrayType never appears as a function parameter or return type |
-| `CommDomainScopesMaterialized` | Host_orch bodies wrapped in CommDomainScopeStmts, and `pld.tensor.window` result types carry `DistributedTensorType::window_buffer_` back-references |
+| `CommDomainScopesMaterialized` | Host_orch bodies wrapped in CommDomainScopeStmts, `pld.tensor.window` result types carry `DistributedTensorType::window_buffer_` back-references |
 | `DistTensorCtxMaterialized` | No `pld.system.get_comm_ctx` survives outside host orchestration; every chip-orchestration / device communication context is an explicit CommCtxType SSA value traceable to a parameter |
 | `RuntimeScopesMaterialized` | Orchestration functions carry explicit RuntimeScopeStmt nodes, so codegen emits no implicit `SIMPLER_SCOPE()` wrappers |
 | `AssignTypeSymmetry` | Every singly-defined Var has `structural_equal(var->GetType(), value->GetType())` on its defining AssignStmt (memref excluded as an allocation detail; a pre-SSA rebind has no single defining value) |
@@ -108,7 +113,9 @@ struct PassProperties {
 
 | Pass | Required | Produced | Invalidated |
 | ---- | -------- | -------- | ----------- |
+| LowerGraphForRuntime | — | — | InlineFunctionsEliminated |
 | OutlineSimtScopes | — | — | SSAForm |
+| OutlineRegScopes | — | — | SSAForm |
 | InlineFunctions | — | InlineFunctionsEliminated | — |
 | UnrollLoops | — | UnrollResolved | — |
 | CtrlFlowTransform | — | StructuredCtrlFlow | — |
@@ -487,6 +494,12 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 ```
 
 ### Strategy Notes
+
+The `Default` pipeline starts with
+[LowerGraphForRuntime](01-lower_graph_for_runtime.md). It prepares Graph bodies
+for `InlineFunctions` on TMR and preserves them for outlining and boundary
+legalization on HBG. The scope outliners for SIMT and registers run before
+`InlineFunctions`.
 
 The PTO-oriented tile stage of `Default` is:
 

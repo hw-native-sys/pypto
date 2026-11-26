@@ -36,6 +36,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -711,6 +712,12 @@ class Projection {
     return Intern("attrs", "", std::move(fields));
   }
 
+  Id Value(const AccPushEpilogue& values) {
+    Fields fields;
+    for (const auto& [key, value] : values) fields.emplace_back(key, Value(value));
+    return Intern("AccPushEpilogue", "", std::move(fields));
+  }
+
   Id Value(const std::any& value) {
 #define PROJECT_ANY(...)                                                                              \
   if (value.type() == typeid(__VA_ARGS__)) {                                                          \
@@ -723,6 +730,7 @@ class Projection {
     PROJECT_ANY(float)
     PROJECT_ANY(DataType)
     PROJECT_ANY(SimtAxis)
+    PROJECT_ANY(AccPushEpilogue)
     PROJECT_ANY(MemorySpace)
     PROJECT_ANY(TensorLayout)
     PROJECT_ANY(TileLayout)
@@ -797,6 +805,33 @@ structural_comparison_detail::Inspection structural_comparison_detail::Inspect(c
   Inspection inspection;
   projection.Inspect(function, &inspection);
   return inspection;
+}
+
+struct structural_comparison_detail::TypeComparisonCache::Impl {
+  Arena arena;
+  std::unordered_map<TypePtr, Id> types;
+
+  Id Project(const TypePtr& type) {
+    if (const auto cached = types.find(type); cached != types.end()) {
+      return cached->second;
+    }
+    // Keep each root's binding scope independent, as structural_equal does.
+    Projection projection(arena, /*map_free=*/false);
+    const auto id = projection.Run(type);
+    types.emplace(type, id);
+    return id;
+  }
+};
+
+structural_comparison_detail::TypeComparisonCache::TypeComparisonCache() = default;
+structural_comparison_detail::TypeComparisonCache::~TypeComparisonCache() = default;
+
+bool structural_comparison_detail::TypeComparisonCache::Equal(const TypePtr& lhs, const TypePtr& rhs) {
+  if (lhs == rhs) return true;
+  if (!lhs || !rhs) return false;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  const auto lhs_id = impl_->Project(lhs);
+  return lhs_id == impl_->Project(rhs);
 }
 
 void verify_structural_bindings(const IRNodePtr& node) {

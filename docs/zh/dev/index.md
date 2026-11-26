@@ -34,6 +34,19 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 | [PTOAS 算子状态矩阵](ptoas-op-status.md) | 编译器当前会发射哪些 PTOAS 公开与兼容算子 |
 | [FP4](fp4.md) | 打包 E2M1x2/E1M2x2 类型、字节载体 ABI 与现有 E2M1 算子支持 |
 
+## 按需运行 A5 分布式 CI
+
+在以 `main` 为目标的开放 PR 中，等当前提交的自动 lint 通过后，在对话区新发一条 `/ci a5-distributed` 评论，
+即可对该 PR 的临时合并版本单独运行 `onboard-tests-a5-distributed`。
+若 lint 尚无运行记录、正在运行或已失败，请求会在设备排队前结束。lint 通过后需重新发送命令。
+PR 最新提交上的 `ci/a5-distributed` 检查链接到运行记录和测试产物。
+对同一 PR 提交重复发送命令会复用运行中或已成功的任务。若任务结束时未成功（包括超时），
+可重新发送命令，新请求会关闭该次运行遗留的检查。新检查会记录所属 PR 编号，即使工作流运行已删除，
+重新发命令也能关闭该 PR 遗留的检查。整条工作流重跑时，设备任务排队前就会显示本次尝试的检查。
+单独重试结果回写时，回写任务会直接完成先前挂起的检查。
+此任务仅由该评论命令触发。如果 PR 包含 `tests/st/distributed/test_l3_urma_async.py`，
+则使用两张 A5 卡运行测试并跳过四卡用例；否则运行占位测试。占位测试通过不代表已验证硬件行为。
+
 ## 评论触发完整 CI
 
 PR 专用 `CI` 工作流（`ci.yml`）在创建或更新时自动运行 `changes`、`toolchain`、`pre-commit` 和
@@ -107,8 +120,13 @@ head 未变时不会重新运行 lint；full 测试固定的主线合并版本�
 
 后续运行跳过两个 lint 任务，轻量门禁确认复用有效后再启动测试；版本校验和工具链
 准备仍会执行。Full 包括复用的 lint 结果、wheel 预热、单元、示例、代码生成、系统、分布式、pypto-lib
-以及 A5（含分布式）/模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
-时适用；`serving-guard` 仅在 `PTOAS_VERSION` 变更时适用。Wheel 预热失败不单独
+以及 A5 板上测试及模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
+时适用。变更 `PTOAS_VERSION` 的 PR 必须同时通过 `serving-guard-a2a3` 和 `serving-guard-a5`。
+两个任务调用 `hw-native-sys/pypto-serving@main` 的同一份 CI 工作流，分别选择 `unit-tests` 和
+`v41-a5-smoke`，并传入本次测试的 PyPTO
+合并提交 SHA。Runner、模型测试和设备配置由 serving 维护。在 PyPTO `main` 上手动启动 full 且不填写
+PR 参数时，测试的是触发时的提交，两个选中的 serving 任务都必须返回成功。
+Wheel 预热失败不单独
 阻止合入，因为测试任务可以自行构建；所有适用测试都必须成功。
 
 重测试仅定义在 `CI Full`（`ci-full.yml`）中，因此自动 PR 运行不会再创建整排重测试的
@@ -130,6 +148,7 @@ PR 保留原有 lint 检查，并在 PR 检查列表中以独立的 `full / <job
 这些状态不会向 lint 工作流增加任务。使用提交状态可避开 Actions 的 `GITHUB_TOKEN`
 创建检查记录时的分组及 Details 链接覆盖问题。排队和运行均显示 pending，由说明文字区分；
 跳过或中立结果显示 success，说明文字保留真实结论。只有 `ci/full` 判定必需测试是否通过。
+切换前测过的提交还可能显示历史状态 `full / serving-guard`。
 `CI Full Progress` 使用 GitHub 托管 runner，单个 full 运行时约每分钟读取 GitHub
 元数据并刷新检查，不执行 PR 代码，也不向测试任务提供写入 token。并发运行增多或
 共享 API 配额不足时降低刷新频率，预留 200 次请求给门禁发布器和其他自动化，

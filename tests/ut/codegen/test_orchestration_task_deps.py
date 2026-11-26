@@ -12,6 +12,7 @@
 import re
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from _orchestration_codegen_common import (
     _assert_orchestration_compiles,
@@ -1171,6 +1172,42 @@ def test_submit_allow_early_resolve_emits_hint():
     code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
     # The flagged producer (task 0) gets the hint; the plain consumer (task 1)
     # does not — so the call appears exactly once.
+    assert "params_t0.set_allow_early_resolve(true);" in code, code
+    assert code.count("set_allow_early_resolve(true)") == 1, code
+
+
+def test_submit_async_transfer_allow_early_resolve_emits_hint():
+    """A ``put_async`` kernel submitted with the hint carries it to codegen.
+
+    A17 (task 25.3 / RFC 141): the scheduler may pre-stage the transfer task's
+    consumers before it completes, but the transfer itself remains in the
+    InCore kernel body and completion still rides the task dependency. This
+    pins the orchestration-codegen half without A5 hardware.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+            return pld.tensor.put_async(dst, peer, src)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+            with pl.manual_scope():
+                out, _ = pl.submit(self.k, dst, src, peer, allow_early_resolve=True)
+            return out
+
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
     assert "params_t0.set_allow_early_resolve(true);" in code, code
     assert code.count("set_allow_early_resolve(true)") == 1, code
 

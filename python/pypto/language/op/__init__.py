@@ -34,6 +34,8 @@ from .system_ops import (
     aiv_initialize_pipe,
     import_peer_buffer,
     reserve_buffer,
+    set_quant_scalar,
+    set_quant_vector,
     tfree_to_aic,
     tfree_to_aiv,
     tpop_from_aic,
@@ -73,7 +75,6 @@ from .tile_ops import (
     aic_gather,
     aiv_shard,
     cmps,
-    create_tile,
     gatherb,
     gemv,
     gemv_acc,
@@ -100,6 +101,9 @@ from .tile_ops import (
     subc,
     subsc,
     tri,
+)
+from .tile_ops import (
+    create as create_tile,
 )
 from .tile_ops import (
     tmov_x2zz as tmov_x2zz,
@@ -336,6 +340,8 @@ __all__ = [
     "get_block_num",
     "get_subblock_idx",
     # Promoted system ops
+    "set_quant_scalar",
+    "set_quant_vector",
     "aic_initialize_pipe",
     "aiv_initialize_pipe",
     "import_peer_buffer",

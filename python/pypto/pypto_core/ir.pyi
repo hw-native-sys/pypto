@@ -327,17 +327,20 @@ class RegKind(enum.Enum):
     MaskReg = 1
     """Predicate register holding BOOL lanes."""
 
+    UReg = 2
+    """Linear squeeze-store alignment state."""
+
 class RegType(Type):
-    """Static logical register descriptor, independent of ShapedType storage."""
+    """Logical register descriptor, independent of ShapedType storage."""
 
-    shape: Final[int]
-    """Logical register lane count as declared by the shape argument."""
+    shape: Final[int | None]
+    """Logical register lane count, or None for UReg."""
 
-    lanes: Final[int]
+    lanes: Final[int | None]
     """Logical lane count (alias of shape)."""
 
-    dtype: Final[DataType]
-    """Register element data type."""
+    dtype: Final[DataType | None]
+    """Register element data type, or None for UReg."""
 
     kind: Final[RegKind]
     """Register descriptor kind."""
@@ -348,8 +351,13 @@ class RegType(Type):
         Args:
             shape: Logical lane count.
             dtype: Register element data type.
-            kind: Register descriptor kind.
+            kind: VecReg or MaskReg.
         """
+
+    @staticmethod
+    def ureg() -> RegType:
+        """Get the type of the linear squeeze-store state."""
+        ...
 
 class ShapedType(Type):
     """Base class for shaped types (tensors and tiles)."""
@@ -451,6 +459,9 @@ class CompactMode(enum.Enum):
 
     normal = ...
     """Compact valid-region layout."""
+
+    row_plus_one = ...
+    """Vec NZ with one padded row per panel."""
 
 class TensorView:
     """Tensor view representation with stride, layout, valid shape, and pad mode."""
@@ -556,8 +567,9 @@ class TensorType(ShapedType):
         """Create a tensor type with optional memory reference and tensor view.
 
         Args:
-            shape: Shape dimensions as Expr nodes or integers (ints are
-                auto-converted to ConstInt by the ``pypto.ir`` wrapper)
+            shape: Shape dimensions as Expr nodes or Python integers.
+                The native constructor converts integers to INDEX ConstInt
+                values and rejects bool elements.
             dtype: Element data type
             memref: Optional memory reference
             tensor_view: Optional tensor view information
@@ -696,8 +708,9 @@ class TileType(ShapedType):
         """Create a tile type with optional memory reference, tile view, and memory space.
 
         Args:
-            shape: Shape dimensions as Expr nodes or integers (ints are
-                auto-converted to ConstInt by the ``pypto.ir`` wrapper)
+            shape: Shape dimensions as Expr nodes or Python integers.
+                The native constructor converts integers to INDEX ConstInt
+                values and rejects bool elements.
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
@@ -861,6 +874,9 @@ class FunctionType(enum.Enum):
 
     SIMT = ...
     """Per-thread device helper launched inside an AIV task, returning void."""
+
+    VF = ...
+    """Synchronous register helper borrowing Tile storage; may return Tile aliases."""
 
 class SimtParamAccess:
     reads: bool
@@ -1047,6 +1063,8 @@ class MemorySpace(enum.Enum):
     """Bias buffer."""
     LeftScale = ...
     """L0A-side MX block-scale buffer (A5)."""
+    Scaling = ...
+    """Packed 64-bit Fixpipe control buffer (PTO loc=scaling)."""
     RightScale = ...
     """L0B-side MX block-scale buffer (A5)."""
 
@@ -1112,7 +1130,7 @@ class PrefetchAsyncContextType(Type):
         ...
 
 class AsyncEventType(Type):
-    """Singleton marker type for ``prefetch.async_prefetch`` outputs.
+    """Opaque event type shared by asynchronous prefetch and distributed PUT/GET.
 
     Opaque handle to an in-flight asynchronous DMA completion event. Paired
     with an :class:`AsyncSessionType` in ``prefetch.wait``; lowers to PTOAS
@@ -1126,7 +1144,7 @@ class AsyncEventType(Type):
         ...
 
 class AsyncSessionType(Type):
-    """Singleton marker type for ``prefetch.session`` outputs.
+    """Opaque session type shared by asynchronous prefetch and distributed PUT/GET.
 
     Opaque handle to the asynchronous DMA session an event belongs to. Paired
     with an :class:`AsyncEventType` in ``prefetch.wait``; lowers to PTOAS
@@ -1398,10 +1416,15 @@ class Call(Expr):
 
         - ``"arg_directions"`` -> ``list[ArgDirection]`` (use the
           :attr:`arg_directions` shortcut for typed access).
+        - ``"worker"`` -> ``Expr``: logical immediate-child selector.
+          Legacy ``"device"`` attrs normalize to ``"worker"`` with the same
+          expression identity; supplying both raises ValueError.
         """
 
     kwargs: Final[Mapping[str, Any]]
-    """Keyword arguments (metadata)."""
+    """Keyword arguments (metadata). Pipe init accepts a structured
+    ``acc_push_epilogue`` dict with ``layout``, ``quant`` and ``relu`` fields.
+    """
 
     @overload
     def __init__(self, op: Op, args: Sequence[Expr], span: Span) -> None:
@@ -1488,7 +1511,10 @@ class Call(Expr):
             args: List of argument expressions
             kwargs: Keyword arguments (metadata)
             attrs: Compiler-internal node metadata. Reserved keys:
-                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``;
+                ``"worker"`` -> ``Expr`` (logical child selector).
+                Legacy ``"device"`` attrs normalize to ``"worker"``;
+                competing placement attrs raise ValueError.
             type: Explicit result type
             span: Source location
         """
@@ -1606,7 +1632,10 @@ class Submit(Expr):
             deps: TaskId dependency expressions
             kwargs: Keyword arguments (metadata)
             attrs: Compiler-internal node metadata. Reserved keys:
-                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``;
+                ``"worker"`` -> ``Expr`` (logical child selector).
+                Legacy ``"device"`` attrs normalize to ``"worker"``;
+                competing placement attrs raise ValueError.
             type: Explicit result type
             span: Source location
             core_num: SPMD block count Expr (``pl.spmd_submit``); ``None`` for a
@@ -2494,6 +2523,9 @@ class RegScopeStmt(ScopeStmt):
     ) -> None:
         """Create a register lexical scope statement."""
 
+    @property
+    def auto_sync(self) -> bool: ...
+
 class HierarchyScopeStmt(ScopeStmt):
     """Hierarchy scope: distributed-hierarchy region."""
 
@@ -2949,6 +2981,12 @@ class WindowBuffer(Var):
     :attr:`tile.alloc`'s size argument and the runtime's
     ``CommBufferSpec.nbytes`` field)."""
 
+    init: Final[str]
+    """Runtime initialization source key; empty means no initialization."""
+
+    memory_source: Final[str]
+    """Physical backing: ``device`` (HBM) or ``host`` (DDR, URMA peer access)."""
+
     load_from_host: Final[bool]
     """``True`` if this slot participates in pre-fork H2D staging."""
 
@@ -2962,6 +3000,8 @@ class WindowBuffer(Var):
         load_from_host: bool = False,
         store_to_host: bool = False,
         span: Span = ...,
+        memory_source: str = "device",
+        init: str = "",
     ) -> None:
         """Create a WindowBuffer wrapping the given Ptr ``base`` Var."""
 
@@ -3212,7 +3252,17 @@ def create_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3237,7 +3287,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3272,7 +3332,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     type: Type,
     span: Span,
@@ -3300,7 +3370,7 @@ def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
     """
 
 def is_device_function_type(func_type: FunctionType) -> bool:
-    """Whether this function executes device IR, including a SIMT helper."""
+    """Whether this function executes device IR, including SIMT and VF helpers."""
     ...
 
 def is_incore_type(func_type: FunctionType) -> bool:
@@ -3350,6 +3420,10 @@ def is_op_registered(op_name: str) -> bool:
     Returns:
         True if the operator is registered, False otherwise
     """
+
+def _get_a5_c2v_row_tail_box_stride(type: Type) -> int | None:
+    """Return the box lane stride for an A5 compact FP32 C2V row tail, or None."""
+    ...
 
 def get_op(op_name: str) -> Op:
     """Get an operator instance by name.
@@ -3561,6 +3635,9 @@ def get_op_lane_invariant_arg(op_name: str, arg_index: int) -> LaneInvariantArg 
         Exception: If operator is not registered
     """
 
+def get_op_tuple_result_aliases(op_name: str) -> dict[int, int]:
+    """Map tuple result indices to the input tensor arguments they alias."""
+
 def get_op_output_arity(op_name: str) -> int:
     """Number of values an operator produces.
 
@@ -3579,12 +3656,14 @@ def get_op_output_arity(op_name: str) -> int:
         Exception: If operator is not registered
     """
 
+def get_op_mutable_session_arg(op_name: str) -> int | None:
+    """Index of the mutable AsyncSession argument, if present."""
+
 def op_arg_is_workspace(op_name: str, arg_index: int) -> bool:
     """Whether an argument is compiler-supplied scratch rather than a result.
 
-    A Functional-stage multi-output operator may write through an argument only when that
-    argument is declared a workspace; an undeclared written argument is a
-    destination tile leaked into the argument list.
+    A Functional-stage multi-output operator declares its written arguments as
+    workspace or as tensor operands returned through a specified tuple element.
 
     Args:
         op_name: Name of the operator
@@ -3654,8 +3733,11 @@ class IRBuilder:
     def end_simt_scope(self, span: Span, private_scalars: Sequence[Var] = ()) -> SimtScopeStmt:
         """End the transient SIMT region."""
 
-    def begin_reg_scope(self, span: Span) -> None:
+    def begin_reg_scope(self, span: Span, auto_sync: bool = True) -> None:
         """Begin an implicit-capture register region."""
+
+    def emit_reg_mem_bar(self, kind: str, span: Span) -> None:
+        """Emit an explicit UB ordering barrier in the current register scope."""
 
     def end_reg_scope(self, span: Span) -> Stmt:
         """End a register region and return the built RegScopeStmt."""

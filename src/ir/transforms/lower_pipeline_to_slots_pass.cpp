@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/transforms/utils/software_pipeline.h"
 #include "pypto/ir/type.h"
@@ -624,12 +625,13 @@ FunctionPtr TransformLowerPipelineToSlots(const FunctionPtr& func) {
 
   auto* ctx = PassContext::Current();
   if (ctx == nullptr) return func;
-  if (ctx->GetMemoryPlanner() == MemoryPlanner::PyPTO && ctx->GetEnableSoftwarePipeline()) {
+  const auto planner = GetFunctionMemoryPlanner(func);
+  if (planner == MemoryPlanner::PyPTO && ctx->GetEnableSoftwarePipeline()) {
     return LowerSoftwarePipeline(func);
   }
   // The opt-in fixed-address software pipeline and the existing PTOAS slot
   // rotation are separate paths. The default PyPTO planner still unrolls.
-  if (ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS) return func;
+  if (planner != MemoryPlanner::PtoAS) return func;
 
   SlotBindingMutator mutator;
   PinnedAllocCollector pinned(ctx->GetBackendHandler());

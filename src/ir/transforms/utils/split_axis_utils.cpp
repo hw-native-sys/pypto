@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -26,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -37,13 +39,17 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -619,6 +625,13 @@ CallPtr RebuildCallWithSplit(const CallPtr& call, int split_code) {
   if (!has_split) {
     new_kwargs.emplace_back("split", std::any(split_code));
   }
+  // Standalone split lowering has already assigned the matching AIV's box bands.
+  if (split_code == kSplitUpDown && IsOp(call, "tile.tpush_to_aiv") && !call->HasKwarg("lane_stride") &&
+      PassContext::Current()->GetBackendHandler()->SplitsCubeToVectorTransportInHardware()) {
+    if (auto stride = cross_core_pipe::GetA5C2VRowTailBoxStride(call->args_[0]->GetType())) {
+      new_kwargs.emplace_back("lane_stride", *stride);
+    }
+  }
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->GetType(), call->span_);
 }
 
@@ -721,6 +734,7 @@ std::optional<TileInfo> DiscoverElementSplit(const TileTypePtr& before, const Ti
     // Consumers must still check valid regions: equal eight-element boxes can
     // contain eight and six initialized values in the same lane.
     info.logical_step = LogicalLaneStep(input_info, lane_stride);
+    info.validity_lane = input_info.validity_lane;
     return info;
   }
   if (require_logical) return std::nullopt;
@@ -745,7 +759,9 @@ std::optional<TileInfo> DiscoverElementSplit(const TileTypePtr& before, const Ti
     axis = static_cast<int>(d);
   }
   if (axis < 0) return std::nullopt;
-  return TileInfo{after->shape_[axis], axis};
+  TileInfo info{after->shape_[axis], axis};
+  info.validity_lane = input_info.validity_lane;
+  return info;
 }
 
 std::optional<std::vector<TileInfo>> DiscoverTupleElementSplits(
@@ -843,8 +859,32 @@ void RejectDeferredPadFill(bool deferred, const CallPtr& call, const char* cross
          "itself";
 }
 
+ExprPtr PopLaneIndex(const CallPtr& call, const ExprPtr& physical_lane,
+                     const std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  if (call->args_.empty()) return physical_lane;
+  const auto& lane = call->args_.front();
+  if (auto constant = As<ConstInt>(lane)) return MakeIndexConst(constant->value_, lane->span_);
+  // Loop initializers are substituted before the backedge is processed. Use
+  // the replacement scalar bindings now so both edges see the same lane.
+  class RemapLane : public IRMutator {
+   public:
+    explicit RemapLane(const std::unordered_map<const Var*, VarPtr>& replacements)
+        : replacements_(replacements) {}
+
+   private:
+    ExprPtr VisitExpr_(const VarPtr& var) override {
+      auto it = replacements_.find(var.get());
+      return it == replacements_.end() ? var : it->second;
+    }
+    ExprPtr VisitExpr_(const IterArgPtr& arg) override { return VisitExpr_(VarPtr(arg)); }
+
+    const std::unordered_map<const Var*, VarPtr>& replacements_;
+  };
+  return MakeCast(RemapLane(var_replacements).VisitExpr(lane), DataType::INDEX, lane->span_);
+}
+
 CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int split_dim,
-                                   const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
+                                   const ExprPtr& pop_lane, const ExprPtr& lane_stride) {
   // NOT widened for a runtime extent, unlike the boundary ops in
   // LocalizeExplicitBoundaryValid. A hand-written tpop declares its own
   // valid_shape and its consumers inherit that declaration, so widening the pop
@@ -854,7 +894,10 @@ CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int spli
   // tests/st/runtime/cross_core/test_cross_core_split_parity.py, whose
   // xfailing params record what a runtime split-axis extent still gets wrong on
   // this path.
-  auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride);
+  // The transport's lane operand selects the GM band. Its valid extent must
+  // describe that same logical band, even when it differs from the physical
+  // AIV executing the pop. Shape metadata uses INDEX while PTOAS takes i64.
+  auto new_result_type = HalveTileShape(call->GetType(), split_dim, pop_lane, lane_stride);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -1098,10 +1141,27 @@ std::optional<TileInfo> PlanReshapeSplit(const CallPtr& call, const TileTypePtr&
   return std::nullopt;
 }
 
-StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
-                    std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
-                    const ExprPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements,
-                    const ExprPtr& lane_stride) {
+static std::vector<StmtPtr> ProcessStmtsImpl(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
+                                             std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
+                                             const ExprPtr& subblock_idx,
+                                             std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                             const ExprPtr& lane_stride,
+                                             const std::unordered_set<const Var*>& varying_lane_values);
+
+static bool HasFullSplitExtent(const TypePtr& type, int split_dim) {
+  auto tile = As<TileType>(type);
+  if (!tile || split_dim < 0 || static_cast<size_t>(split_dim) >= tile->shape_.size()) return false;
+  const auto valid = GetValidShape(tile);
+  return static_cast<size_t>(split_dim) < valid.size() &&
+         structural_equal(valid[split_dim], tile->shape_[split_dim]);
+}
+
+static StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
+                           std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
+                           const ExprPtr& subblock_idx,
+                           std::unordered_map<const Var*, VarPtr>& var_replacements,
+                           const ExprPtr& lane_stride,
+                           const std::unordered_set<const Var*>& varying_lane_values) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     if (auto projected = RetypeTrackedBinding(assign, tile_vars, var_replacements)) return projected;
 
@@ -1132,13 +1192,17 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     }
     if (IsOp(call, "tile.tpop_from_aic")) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
+      const auto pop_lane = PopLaneIndex(call, subblock_idx, var_replacements);
       auto new_call = RebuildTpopWithHalvedShape(
           call, ShardSplitCode(mode, call->GetType(), split_dim, lane_stride, op_name, call->span_),
-          split_dim, subblock_idx, lane_stride);
+          split_dim, pop_lane, lane_stride);
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
         TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim]), split_dim};
+        // A currently full half can be narrowed by a later consumer. Retain
+        // its selected lane even when today's extents do not depend on it.
+        if (!call->args_.empty()) info.validity_lane = pop_lane;
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
       }
@@ -1496,7 +1560,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
             reshape_step && !structural_equal(reshape_step, LaneStep(lane_stride, half_dim_size))
                 ? reshape_step
                 : lane_stride;
-        auto new_result_type = HalveTileShape(call->GetType(), result_split_dim, subblock_idx, result_stride);
+        const auto validity_lane = input_info.validity_lane ? input_info.validity_lane : subblock_idx;
+        auto new_result_type =
+            HalveTileShape(call->GetType(), result_split_dim, validity_lane, result_stride);
 
         const ExprPtr lane_step = reshape_info        ? LogicalLaneStep(*reshape_info, lane_stride)
                                   : distinct_capacity ? LogicalLaneStep(input_info, lane_stride)
@@ -1581,8 +1647,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
           // LocalizeTupleElementForSplit is a no-op on a tuple whose split_dim
           // is out of range.
           if (call->args_.size() >= 4) {
-            new_args[3] = LocalizeTupleElementForSplit(call->args_[3], slice_split_dim,
-                                                       tt->shape_[result_split_dim], lane_step, subblock_idx);
+            new_args[3] = LocalizeTupleElementForSplit(
+                call->args_[3], slice_split_dim, tt->shape_[result_split_dim], lane_step, validity_lane);
           }
         } else if (IsOp(call, "tile.set_validshape") && call->args_.size() == 3) {
           // args = (tile, valid_row, valid_col). Halving the result type alone
@@ -1600,7 +1666,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
           if (operand_idx < static_cast<int>(call->args_.size()) &&
               ValidOperandNeedsLocalize(call->args_[operand_idx], tt->shape_[result_split_dim], lane_step)) {
             new_args[operand_idx] = LocalizeValidDimForSplit(
-                call->args_[operand_idx], tt->shape_[result_split_dim], lane_step, subblock_idx);
+                call->args_[operand_idx], tt->shape_[result_split_dim], lane_step, validity_lane);
           }
         }
 
@@ -1672,7 +1738,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
             for (size_t d = 0; d < before_valid.size(); ++d) {
               const auto expected_valid =
                   static_cast<int>(d) == info.split_dim
-                      ? LocalizeValidDimForSplit(before_valid[d], tt->shape_[d], lane_step, subblock_idx)
+                      ? LocalizeValidDimForSplit(before_valid[d], tt->shape_[d], lane_step, validity_lane)
                       : before_valid[d];
               CHECK_SPAN(ProveValidExtentEqual(expected_valid, after_valid[d]) == ProofResult::kTrue,
                          call->span_)
@@ -1694,6 +1760,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
+        info.validity_lane = input_info.validity_lane;
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
         var_replacements[assign->var_.get()] = new_var;
@@ -1747,6 +1814,23 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     // instance whose pointer diverges from the one referenced by the rebuilt
     // loop body, breaking structural equality.
     std::vector<IterArgPtr> new_iter_args = RepairIterArgs(for_stmt->iter_args_, tile_vars, var_replacements);
+    // Full tiles can have identical types even when the scalar lane changes on
+    // the backedge. A companion carry follows the source on each iteration
+    // and lets a later narrowing use the correct lane, including zero trips.
+    std::vector<IterArgPtr> lane_args(varying_lane_values.empty() ? 0 : new_iter_args.size());
+    for (size_t i = 0; i < lane_args.size(); ++i) {
+      if (varying_lane_values.count(for_stmt->iter_args_[i].get()) == 0) continue;
+      const auto& tile_arg = new_iter_args[i];
+      auto it = tile_vars.find(tile_arg.get());
+      if (it == tile_vars.end() || !HasFullSplitExtent(tile_arg->GetType(), it->second.split_dim)) continue;
+      auto info = it->second;
+      auto initial_lane = info.validity_lane ? info.validity_lane : subblock_idx;
+      lane_args[i] = std::make_shared<IterArg>(tile_arg->name_hint_ + "_aiv_lane", initial_lane->GetType(),
+                                               initial_lane, tile_arg->span_);
+      info.validity_lane = lane_args[i];
+      tile_vars[tile_arg.get()] = info;
+      tile_vars[for_stmt->iter_args_[i].get()] = info;
+    }
     std::vector<VarPtr> new_return_vars = for_stmt->return_vars_;
     auto flat = std::vector<StmtPtr>();
     if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(for_stmt->body_)) {
@@ -1754,8 +1838,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     } else {
       flat.push_back(for_stmt->body_);
     }
-    auto new_body_stmts =
-        ProcessStmts(flat, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements, lane_stride);
+    auto new_body_stmts = ProcessStmtsImpl(flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
+                                           var_replacements, lane_stride, varying_lane_values);
     StmtPtr new_body = (new_body_stmts.size() == 1)
                            ? new_body_stmts[0]
                            : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
@@ -1770,8 +1854,37 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         << for_stmt->iter_args_.size() << " vs " << for_stmt->return_vars_.size();
     // The backedge is the third edge of the carry, and the only one the two
     // Repair* helpers do not touch.
-    ValidateCarryBackedge(new_body, new_iter_args, tile_vars, var_replacements, for_stmt->span_, lane_stride);
+    ValidateCarryBackedge(new_body, new_iter_args, tile_vars, var_replacements, for_stmt->span_, lane_stride,
+                          lane_args);
     new_return_vars = RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars, var_replacements);
+    if (!lane_args.empty()) {
+      new_body = transform_utils::RewriteLastYieldStmt(new_body, [&](const YieldStmtPtr& yield) -> StmtPtr {
+        auto values = yield->value_;
+        for (size_t i = 0; i < lane_args.size(); ++i) {
+          if (!lane_args[i]) continue;
+          const auto info = OperandSplitInfo(values[i], tile_vars, var_replacements);
+          INTERNAL_CHECK(info.has_value()) << "A lane companion requires a partitioned backedge";
+          const auto lane = info->validity_lane ? info->validity_lane : subblock_idx;
+          const auto& tile_exit = new_return_vars[i];
+          auto lane_exit = std::make_shared<Var>(tile_exit->name_hint_ + "_aiv_lane", lane_args[i]->GetType(),
+                                                 tile_exit->span_);
+          // Reuse the initial lane at the exit when the backedge simply
+          // forwards it. In other cases the scalar result selects the lane.
+          const auto& initial_lane = lane_args[i]->initValue_;
+          const ExprPtr exit_lane =
+              lane == lane_args[i] ? (initial_lane == subblock_idx ? nullptr : initial_lane) : lane_exit;
+          tile_vars[tile_exit.get()].validity_lane = exit_lane;
+          tile_vars[for_stmt->return_vars_[i].get()].validity_lane = exit_lane;
+          new_iter_args.push_back(lane_args[i]);
+          new_return_vars.push_back(lane_exit);
+          values.push_back(lane);
+        }
+        if (values.size() == yield->value_.size()) return yield;
+        auto result = MutableCopy(yield);
+        result->value_ = std::move(values);
+        return result;
+      });
+    }
     return loop_repair::RebuildForStmt(for_stmt, new_iter_args, new_body, new_return_vars);
   }
 
@@ -1782,8 +1895,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     } else {
       then_flat.push_back(if_stmt->then_body_);
     }
-    auto new_then = ProcessStmts(then_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                 var_replacements, lane_stride);
+    auto new_then = ProcessStmtsImpl(then_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
+                                     var_replacements, lane_stride, varying_lane_values);
     StmtPtr new_then_body =
         (new_then.size() == 1) ? new_then[0] : std::make_shared<SeqStmts>(new_then, if_stmt->span_);
 
@@ -1796,8 +1909,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       } else {
         else_flat.push_back(else_body);
       }
-      auto new_else_stmts = ProcessStmts(else_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                         var_replacements, lane_stride);
+      auto new_else_stmts = ProcessStmtsImpl(else_flat, mode, split_dim, tile_vars, is_aiv, subblock_idx,
+                                             var_replacements, lane_stride, varying_lane_values);
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
     }
@@ -1807,7 +1920,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     // following tile.store gets no lane offset and both AIV lanes write from
     // output row 0.
     auto new_return_vars = RepairIfReturnVars(if_stmt->return_vars_, new_then_body, new_else, tile_vars,
-                                              var_replacements, lane_stride, if_stmt->span_);
+                                              var_replacements, lane_stride, subblock_idx, if_stmt->span_);
     auto new_if = MutableCopy(if_stmt);
     new_if->then_body_ = new_then_body;
     new_if->else_body_ = new_else;
@@ -1816,8 +1929,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
   }
 
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
-    auto new_stmts = ProcessStmts(seq->stmts_, mode, split_dim, tile_vars, is_aiv, subblock_idx,
-                                  var_replacements, lane_stride);
+    auto new_stmts = ProcessStmtsImpl(seq->stmts_, mode, split_dim, tile_vars, is_aiv, subblock_idx,
+                                      var_replacements, lane_stride, varying_lane_values);
     return std::make_shared<SeqStmts>(new_stmts, seq->span_);
   }
 
@@ -1971,7 +2084,8 @@ std::shared_ptr<const TupleType> YieldedHalvedTupleType(
   return std::dynamic_pointer_cast<const TupleType>(it->second->GetType());
 }
 
-bool SameTileInfo(const TileInfo& a, const TileInfo& b, const ExprPtr& lane_stride) {
+bool SameTileInfo(const TileInfo& a, const TileInfo& b, const ExprPtr& lane_stride,
+                  bool compare_lane = true) {
   // Compare partition meaning, not whether its stride used an explicit override.
   if (a.tuple_elements || b.tuple_elements) {
     if (a.tuple_elements == b.tuple_elements) return true;
@@ -1983,7 +2097,11 @@ bool SameTileInfo(const TileInfo& a, const TileInfo& b, const ExprPtr& lane_stri
     }
     return true;
   }
-  return a.split_dim == b.split_dim && structural_equal(a.half_dim_size, b.half_dim_size) &&
+  const bool same_validity_lane =
+      !compare_lane || a.validity_lane == b.validity_lane ||
+      (a.validity_lane && b.validity_lane && structural_equal(a.validity_lane, b.validity_lane));
+  return same_validity_lane && a.split_dim == b.split_dim &&
+         structural_equal(a.half_dim_size, b.half_dim_size) &&
          structural_equal(LogicalLaneStep(a, lane_stride), LogicalLaneStep(b, lane_stride));
 }
 
@@ -1992,7 +2110,7 @@ bool SameTileInfo(const TileInfo& a, const TileInfo& b, const ExprPtr& lane_stri
 void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr>& new_iter_args,
                            const std::unordered_map<const Var*, TileInfo>& tile_vars,
                            const std::unordered_map<const Var*, VarPtr>& var_replacements, const Span& span,
-                           const ExprPtr& lane_stride) {
+                           const ExprPtr& lane_stride, const std::vector<IterArgPtr>& lane_args) {
   if (new_iter_args.empty()) return;
   auto yield = transform_utils::GetLastYieldStmt(new_body);
   // A loop that carries state ends in a Yield feeding every slot; anything else
@@ -2028,7 +2146,9 @@ void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr
     auto yielded = YieldedTileInfo(yield, i, tile_vars, var_replacements);
 
     if (!carry_is_lane_local && !yielded.has_value()) continue;
-    if (carry_is_lane_local && yielded.has_value() && SameTileInfo(carry_it->second, *yielded, lane_stride) &&
+    const bool compare_lane = i >= lane_args.size() || !lane_args[i];
+    if (carry_is_lane_local && yielded.has_value() &&
+        SameTileInfo(carry_it->second, *yielded, lane_stride, compare_lane) &&
         structural_equal(new_iter_args[i]->GetType(),
                          EffectiveOperandType(yield->value_[i], var_replacements))) {
       continue;
@@ -2074,11 +2194,12 @@ void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr
   }
 }
 
-std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
-                                       const std::optional<StmtPtr>& new_else_body,
+std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, StmtPtr& new_then_body,
+                                       std::optional<StmtPtr>& new_else_body,
                                        std::unordered_map<const Var*, TileInfo>& tile_vars,
                                        std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                       const ExprPtr& lane_stride, const Span& span) {
+                                       const ExprPtr& lane_stride, const ExprPtr& subblock_idx,
+                                       const Span& span) {
   std::vector<VarPtr> new_return_vars = return_vars;
   if (return_vars.empty()) return new_return_vars;
 
@@ -2093,6 +2214,8 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
 
   auto then_yield = transform_utils::GetLastYieldStmt(new_then_body);
   auto else_yield = transform_utils::GetLastYieldStmt(*new_else_body);
+  std::vector<VarPtr> merged_lanes;
+  std::vector<ExprPtr> then_lanes, else_lanes;
 
   for (size_t i = 0; i < new_return_vars.size(); ++i) {
     // A tuple merge needs matching exact types and element partition facts from
@@ -2135,10 +2258,15 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
     auto else_info = YieldedTileInfo(else_yield, i, tile_vars, var_replacements);
 
     if (!then_info.has_value() && !else_info.has_value()) continue;
-    CHECK_SPAN(then_info.has_value() && else_info.has_value() &&
-                   SameTileInfo(*then_info, *else_info, lane_stride) &&
-                   structural_equal(EffectiveOperandType(then_yield->value_[i], var_replacements),
-                                    EffectiveOperandType(else_yield->value_[i], var_replacements)),
+    const auto new_type = then_info ? EffectiveOperandType(then_yield->value_[i], var_replacements) : nullptr;
+    const bool same_info = then_info && else_info && SameTileInfo(*then_info, *else_info, lane_stride);
+    // Identical full tile types can merge even if later narrowing needs the
+    // branch's selected lane. Return that lane as a real scalar result.
+    const bool merge_lane = !same_info && subblock_idx && then_info && else_info &&
+                            HasFullSplitExtent(new_type, then_info->split_dim) &&
+                            SameTileInfo(*then_info, *else_info, lane_stride, /*compare_lane=*/false);
+    CHECK_SPAN(then_info.has_value() && else_info.has_value() && (same_info || merge_lane) &&
+                   structural_equal(new_type, EffectiveOperandType(else_yield->value_[i], var_replacements)),
                span)
         << "LowerAutoVectorSplit: the branches of an if inside the automatically split vector region "
            "disagree about merge variable '"
@@ -2149,31 +2277,188 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
            "derived the same way -- load or slice inside the region on both sides, or keep the value "
            "shared by both lanes on both sides -- or move the if outside the automatically split region.";
 
-    tile_vars[new_return_vars[i].get()] = *then_info;
-    auto new_type = EffectiveOperandType(then_yield->value_[i], var_replacements);
+    auto info = *then_info;
+    if (merge_lane) {
+      then_lanes.push_back(then_info->validity_lane ? then_info->validity_lane : subblock_idx);
+      else_lanes.push_back(else_info->validity_lane ? else_info->validity_lane : subblock_idx);
+      const auto& tile_merge = new_return_vars[i];
+      auto lane = std::make_shared<Var>(tile_merge->name_hint_ + "_aiv_lane", subblock_idx->GetType(),
+                                        tile_merge->span_);
+      info.validity_lane = lane;
+      merged_lanes.push_back(lane);
+    }
+    tile_vars[new_return_vars[i].get()] = info;
     if (new_type != new_return_vars[i]->GetType()) {
       auto new_return_var =
           std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
       new_return_vars[i] = new_return_var;
-      tile_vars[new_return_var.get()] = *then_info;
+      tile_vars[new_return_var.get()] = info;
       var_replacements[return_vars[i].get()] = new_return_var;
     }
   }
+  if (!merged_lanes.empty()) {
+    auto add_lane_yields = [](const StmtPtr& body, const std::vector<ExprPtr>& lanes) {
+      return transform_utils::RewriteLastYieldStmt(body, [&](const YieldStmtPtr& yield) -> StmtPtr {
+        auto result = MutableCopy(yield);
+        result->value_.insert(result->value_.end(), lanes.begin(), lanes.end());
+        return result;
+      });
+    };
+    new_then_body = add_lane_yields(new_then_body, then_lanes);
+    new_else_body = add_lane_yields(*new_else_body, else_lanes);
+    new_return_vars.insert(new_return_vars.end(), merged_lanes.begin(), merged_lanes.end());
+  }
   return new_return_vars;
 }
+
+namespace {
+
+// Propagate lane origins across initializers, backedges and branch yields.
+// A carry needs the companion only if its value can come from distinct
+// origins. A single fixed logical lane and physical-only carries stay intact.
+class VaryingLaneValues : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> Collect(const std::vector<StmtPtr>& stmts) {
+    for (const auto& stmt : stmts) VisitStmt(stmt);
+    for (const auto& [source, _] : successors_) {
+      if (!origins_.count(source) && !has_predecessor_.count(source)) {
+        Merge(source, LaneOrigins{nullptr, true});
+      }
+    }
+    while (!worklist_.empty()) {
+      const auto* value = worklist_.front();
+      worklist_.pop_front();
+      const auto next = successors_.find(value);
+      if (next == successors_.end()) continue;
+      const auto origin = origins_.at(value);
+      for (const auto* successor : next->second) Merge(successor, origin);
+    }
+    std::unordered_set<const Var*> varying;
+    for (const auto& [value, origin] : origins_) {
+      if (origin.explicit_lane && (origin.physical || origin.distinct_explicit_lanes)) {
+        varying.insert(value);
+      }
+    }
+    return varying;
+  }
+
+ private:
+  struct LaneOrigins {
+    ExprPtr explicit_lane;
+    bool physical = false;
+    bool distinct_explicit_lanes = false;
+  };
+
+  static bool CanCarryLane(const TypePtr& type) { return As<TileType>(type) || As<TupleType>(type); }
+
+  void Merge(const Var* value, const LaneOrigins& incoming) {
+    auto& origin = origins_[value];
+    const bool first_explicit_lane = !origin.explicit_lane && incoming.explicit_lane;
+    const bool new_physical = !origin.physical && incoming.physical;
+    const bool new_distinct = !origin.distinct_explicit_lanes &&
+                              (incoming.distinct_explicit_lanes ||
+                               (origin.explicit_lane && incoming.explicit_lane &&
+                                !structural_equal(origin.explicit_lane, incoming.explicit_lane)));
+    if (first_explicit_lane) origin.explicit_lane = incoming.explicit_lane;
+    origin.physical |= incoming.physical;
+    origin.distinct_explicit_lanes |= new_distinct;
+    if (first_explicit_lane || new_physical || new_distinct) worklist_.push_back(value);
+  }
+
+  void Link(const ExprPtr& source, const VarPtr& result) {
+    if (!source || !CanCarryLane(result->GetType())) return;
+    var_collectors::VarDefUseCollector refs;
+    refs.VisitExpr(source);
+    bool linked = false;
+    for (const auto* value : refs.var_uses) {
+      if (CanCarryLane(value->GetType())) {
+        successors_[value].push_back(result.get());
+        linked = true;
+      }
+    }
+    if (linked) {
+      has_predecessor_.insert(result.get());
+    } else {
+      Merge(result.get(), LaneOrigins{nullptr, true});
+    }
+  }
+
+  void LinkYields(const StmtPtr& body, const std::vector<VarPtr>& results) {
+    if (results.empty()) return;
+    const auto yield = transform_utils::GetLastYieldStmt(body);
+    if (!yield || yield->value_.size() != results.size()) return;
+    for (size_t i = 0; i < results.size(); ++i) Link(yield->value_[i], results[i]);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    const auto call = As<Call>(stmt->value_);
+    if (IsOp(call, "tile.tpop_from_aic") && !call->args_.empty()) {
+      Merge(stmt->var_.get(), LaneOrigins{call->args_.front()});
+    } else {
+      Link(stmt->value_, stmt->var_);
+    }
+  }
+
+  void VisitStmt_(const IfStmtPtr& stmt) override {
+    LinkYields(stmt->then_body_, stmt->return_vars_);
+    if (stmt->else_body_) LinkYields(*stmt->else_body_, stmt->return_vars_);
+    IRVisitor::VisitStmt_(stmt);
+  }
+
+  template <typename LoopPtr>
+  void LinkLoop(const LoopPtr& stmt) {
+    const auto yield = transform_utils::GetLastYieldStmt(stmt->body_);
+    if (stmt->iter_args_.size() != stmt->return_vars_.size()) return;
+    for (size_t i = 0; i < stmt->iter_args_.size(); ++i) {
+      const auto& arg = stmt->iter_args_[i];
+      Link(arg->initValue_, arg);
+      if (yield && i < yield->value_.size()) Link(yield->value_[i], arg);
+      Link(arg, stmt->return_vars_[i]);
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& stmt) override {
+    LinkLoop(stmt);
+    IRVisitor::VisitStmt_(stmt);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& stmt) override {
+    LinkLoop(stmt);
+    IRVisitor::VisitStmt_(stmt);
+  }
+
+  std::unordered_map<const Var*, std::vector<const Var*>> successors_;
+  std::unordered_map<const Var*, LaneOrigins> origins_;
+  std::unordered_set<const Var*> has_predecessor_;
+  std::deque<const Var*> worklist_;
+};
+
+static std::vector<StmtPtr> ProcessStmtsImpl(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
+                                             std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
+                                             const ExprPtr& subblock_idx,
+                                             std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                             const ExprPtr& lane_stride,
+                                             const std::unordered_set<const Var*>& varying_lane_values) {
+  std::vector<StmtPtr> result;
+  result.reserve(stmts.size());
+  for (const auto& stmt : stmts) {
+    result.push_back(ProcessStmt(stmt, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements,
+                                 lane_stride, varying_lane_values));
+  }
+  return result;
+}
+
+}  // namespace
 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
                                   std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
                                   const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements,
                                   const ExprPtr& lane_stride) {
-  std::vector<StmtPtr> result;
-  result.reserve(stmts.size());
-  for (const auto& stmt : stmts) {
-    result.push_back(
-        ProcessStmt(stmt, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements, lane_stride));
-  }
-  return result;
+  const auto varying_lane_values =
+      is_aiv && subblock_idx ? VaryingLaneValues().Collect(stmts) : std::unordered_set<const Var*>{};
+  return ProcessStmtsImpl(stmts, mode, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements,
+                          lane_stride, varying_lane_values);
 }
 
 SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) {

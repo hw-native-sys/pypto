@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from typing import Any, TypeVar, overload
 
 __all__ = [
-    "create_tensor",
     "create",
     "no_dep",
     "dump_tag",
@@ -213,9 +212,6 @@ def create(
     return Tensor(expr=call_expr)
 
 
-create_tensor = create
-
-
 def no_dep(tensor: Tensor) -> Tensor:
     """Mark a kernel-call argument as no-dependency (caller-site override).
 
@@ -397,7 +393,7 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
       ``cache=pl.CachePolicy.DEFAULT`` opts a single read back into the cache
       inside a bypassing scope.
 
-    Requires PTOAS >= v0.74. **On A2/A3** a declared read compiles to a
+    Requires PTOAS >= v0.77. **On A2/A3** a declared read compiles to a
     ``cache_policy`` attribute on ``pto.tload`` plus the device's no-cache alias
     offset, which the assembler adds to that one load's source address; the
     offset comes from the driver through the dispatch payload, and a device that
@@ -755,7 +751,7 @@ def matmul(
         b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul operation
@@ -786,9 +782,10 @@ def quant_mx(
         src: Source tensor. Must be a static-rank 2D FP16, BF16, or FP32 tensor.
         group_axis: Quantization group axis. Use ``1`` for A/LHS data and ``0``
             for B/RHS data.
-        dtype: Quantized MX data dtype. Defaults to ``FP8E4M3FN``.
+        dtype: Quantized MX data dtype. Defaults to ``FP8E4M3FN``. ``FP8E5M2`` uses OCP scaling.
             ``FP4E2M1X2`` requires FP16/BF16 input and halves the output's last dimension.
         quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
+            FP8E5M2 requires ``"ocp"``.
 
     Returns:
         A pair ``(data, scale)``. ``data`` is the quantized MX tensor and
@@ -813,17 +810,26 @@ def quant_mx(
 
 
 def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) -> Tensor:
-    """MXFP8 matrix multiplication returning an FP32 tensor.
+    """MXFP8/MXFP4 matrix multiplication returning an FP32 tensor.
 
-    Inputs must use the oriented outputs of :func:`quant_mx`: A data/scale as
-    ``[M, K]`` / ``MX_A_ZZ[M, K/32]`` and B data/scale as
-    ``[K, N]`` / ``MX_B_NN[K/32, N]``.
+    Both data tensors must be FP8E4M3FN or both packed FP4 (E2M1x2,
+    E1M2x2, or one of each). FP4 ND carriers have shapes ``[M, K/2]``
+    and ``[K, N/2]``; DN carriers have ``[M/2, K]`` and ``[K/2, N]``.
+    Each operand may independently use ND or DN. Scale shapes always count
+    logical values: ``[M, K/32]`` and ``[K/32, N]``. Both operands must have
+    matching logical valid K extents. For packed FP4, valid K must be
+    positive and use the same number of 32-element scale groups as physical K.
+    Packed A and B scale layouts require fully valid M and N respectively.
+    Row-major MX_A_ND scales may match a partial logical M. To form complete
+    pairs during the Mat load, the valid extent on axis 0 (ND) or axis 1 (DN)
+    must be provably even. Native FP4 requires Ascend950 and PTOAS v0.77 or a
+    compatible newer build.
 
     Args:
-        lhs: A-side quantized data tensor with shape ``[M, K]``.
+        lhs: A-side quantized data tensor (logical shape ``[M, K]``).
         lhs_scale: A-side ``MX_A_ZZ`` or row-major ``MX_A_ND`` FP8E8M0 scale tensor with shape
             ``[M, K/32]``.
-        rhs: B-side quantized data tensor with shape ``[K, N]``.
+        rhs: B-side quantized data tensor (logical shape ``[K, N]``).
         rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
             ``[K/32, N]``.
 
@@ -832,8 +838,8 @@ def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) ->
 
     Raises:
         ValueError: If the operands are not supported static 2D MX tensors, the
-            M/N/K dimensions are inconsistent, M is not divisible by 16, N is
-            not divisible by 32, K is not divisible by 64, or the scale tensors
+            M/N/K dimensions are inconsistent, M is not divisible by 16 (32 for FP4), N is
+            not divisible by 32 (64 for FP4), K is not divisible by 64, or the scale tensors
             have the wrong dtype, shape, or MX layout.
     """
     return Tensor(expr=_ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()))
@@ -872,7 +878,7 @@ def matmul_acc(
         b_trans: Whether to transpose rhs
         init_cond: Optional predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.77+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul_acc operation
@@ -2162,9 +2168,24 @@ def view(
     shape: Sequence[IntLike] | None = None,
     valid_shape: Sequence[IntLike] | None = None,
     *,
+    offsets: Sequence[IntLike] | None = None,
+    steps: Sequence[IntLike] | None = None,
     layout: TensorLayout | None = None,
 ) -> _TensorT:
     """Reinterpret a tensor over the same physical memory.
+
+    With ``offsets`` or ``steps``, select a same-rank window in the immediate
+    parent GM tensor. Coordinates and sampling steps are in parent elements.
+    Each window axis must fit the parent shape, and valid samples must fit the
+    parent valid region. Dynamic geometry must obey these bounds at runtime.
+    When a shape, offset, step or valid extent comes from a memory read, bind the
+    result to a scalar before constructing the window.
+    Window creation only describes addresses. A distributed tensor keeps its
+    window buffer. Scalar tensor reads and writes address elements using the
+    window strides. Tile load/store require a provable unit physical inner
+    stride (last axis for ND, penultimate for DN).
+    The source layout is preserved. Without window geometry, the following
+    shape/layout reinterpretation rules apply.
 
     At least one of ``shape`` or ``layout`` must be provided: ``shape`` derives
     canonical strides for the requested shape, ``layout`` derives the canonical
@@ -2173,12 +2194,15 @@ def view(
 
     Args:
         tensor: Source tensor.
-        shape: New shape for the view. Must be product-preserving unless
-            symbolic dimensions are present. Rank-zero views are not supported.
-        valid_shape: Explicit valid dimensions for a packed ND
+        shape: Window extents or new shape for a reinterpretation.
+            Static reinterpretation preserves the element count. The result must have at least one axis.
+        valid_shape: Window valid extents, or explicit valid dimensions for a packed ND
             leading-dimension collapse to 2D or contiguous-prefix linear
             collapse to ``[1, product(shape)]``. Required when either supported
             collapse reinterprets a source with partial validity.
+        offsets: Per-axis starting indices for an InCore ND/DN GM window.
+            Omitted offsets default to zero when steps are given.
+        steps: Positive per-axis sampling steps for the window. Defaults to one.
         layout: Target ``TensorLayout`` (ND or DN); DN requires rank at least 2.
             Orchestration supports ND shape reinterprets and shaped
             ND/MX_A_ZZ/MX_B_NN/MX_A_ND backing and consumer views for dynamic FP8E8M0
@@ -2196,6 +2220,8 @@ def view(
         tensor.unwrap(),
         None if shape is None else _normalize_intlike(shape),
         None if valid_shape is None else _normalize_intlike(valid_shape),
+        offsets=None if offsets is None else _normalize_intlike(offsets),
+        steps=None if steps is None else _normalize_intlike(steps),
         layout=layout,
     )
     return tensor.__class__(expr=call_expr)

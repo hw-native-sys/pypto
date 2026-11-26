@@ -7,7 +7,7 @@
 ## 可执行子集
 
 - A5 AIV 调用方，由 `SpecializeSimtHelpers` 特化常量三维 block 大小，最多 2,048 线程。
-- 借用的 GM Tensor 和 UB Vec Tile，元素类型为 FP32 或 INT32。Tile 需要仿射、
+- 借用的 GM Tensor 和 UB Vec Tile，元素类型采用支持的非 packed 数值类型。Tile 需要仿射、
   非分形布局。寻址使用物理 stride 和 Tile 起始偏移，逻辑 `valid_shape` 不替代物理 stride。
   借用的 `tile.slice`/reshape 视图句柄会被拒绝，因为其类型可能缺少父存储的物理行跨度。
   Launch 前须通过 `tile.extract` 将窗口物化到独立存储。视图来源会沿别名、条件分支结果
@@ -15,13 +15,13 @@
   原地 `tile.assemble` 的结果继承目标存储的来源：更新稠密存储仍受支持，更新视图仍会被拒绝。
   受支持存储的显式 stride 优先；
   稠密 DN Tensor 的后备 stride 仅交换末尾两个轴，批次轴保持在最外层。
-- FP32、INT32、INDEX、BOOL 标量及结构化 `if`、`for`、`while`。
+- FP16/BF16/FP32、8/16/32/64 位有符号/无符号整数、INDEX、BOOL 标量及结构化 `if`、`for`、`while`。
   有符号整数整除和取模保留向下取整语义；FP32 不等比较将 NaN 视为不等；
   数值转 BOOL 通过与零比较实现。
 - 线程、block、grid 坐标和维度，lane ID，以及标量读写。
   GM 缓存策略原样传递到原生 PTOAS 操作。
 
-无符号运算、其他存储类型、标量幂运算（`**`）、浮点向下整除/取模、提前 return、break/continue、
+FP8 与 packed 存储、标量幂运算（`**`）、浮点向下整除/取模、提前 return、break/continue、
 分形 Tile 布局和分组内核执行目前会给出明确诊断。CPU 仿真（`a5sim`）和其他
 设备后端不能执行这些原生 helper。与规范 IR 一致，调用方必须保证索引不越界，
 并发写入没有数据竞争。
@@ -49,8 +49,13 @@ InsertSync 负责，PyPTO 不在 launch 周围添加固定屏障。Launch 结果
 再将 `.text` 交给持久运行时。Helper 内容和编译器身份参与二进制缓存，目录迁移
 不依赖原 helper 路径。
 
-LLVM 导出绕过 PTOAS 对象级 SIMT 大小修复。当前子集使用内建指令（intrinsics）；
-包含内联汇编的 SIMT 模块在设备编译前被拒绝。验收测试比较链接后 `VF_SIMT`
+LLVM 导出绕过 PTOAS 对象级 SIMT 大小修复。仅使用内建指令（intrinsics）的 helper
+继续通过 LLVM 导出和 Bisheng 编译；
+包含内联汇编的 SIMT 模块使用 PTOAS 原生设备对象输出，
+由 PTOAS 验证或修复 `VF_SIMT` 长度。PyPTO 通过可重定位链接，为产物中的 `.vector`
+或 `_mix_aiv` ABI 符号添加逻辑名称别名，并显式向 PTOAS 传递所选 SDK 的 CANN 安装目录。
+原生对象选项参与缓存标识；编译或别名链接失败时，不会回退到未经长度校验的 LLVM 编译。
+该编译能力尚不意味着公开 `keep/resume` API。验收测试比较链接后每条 `VF_SIMT`
 大小与被调用符号大小。PyPTO 不修改设备指令字节。
 
 ## 定向验收
@@ -84,8 +89,9 @@ python tests/st/runtime/vpto/test_simt_ir_onboard.py --worker build/simt-ir-runt
 
 ## Warp 协作扩展
 
-支持活跃 lane 的 vote/ballot、INT32/FP32 shuffle（width 为 16 或 32），以及
-INT32/FP32 的 add/min/max redux；整数 min/max 显式使用 signed 比较。
+支持活跃 lane 的 vote/ballot、FP16/FP32 与 32/64 位整数 shuffle（width 为 16 或 32），
+以及 FP16/FP32 与 32 位整数 add/min/max redux；整数 min/max 根据无符号类型或显式标志
+选择 signed/unsigned 比较。
 参见[协作操作契约](../ir/11-simt.md#warp-内协作操作)。
 
 Warp 验收与上述 GM/UB 历史验收分开记录。
@@ -100,7 +106,8 @@ INT32/FP32 载荷以及 16/32 宽度，包括分支中的参与集合和非活�
 ## 原子与同步验收
 
 原生映射使用 `pto.atomic_add/min/max/exch/cas`、`pto.syncthreads`、
-`pto.threadfence` 和 `pto.threadfence_block`。整数 min/max 显式携带 `signed`。
+`pto.threadfence` 和 `pto.threadfence_block`。整数 min/max 显式携带 `signed` 或 `unsigned`，
+无符号整数类型自动使用 `unsigned` 比较。
 原子沿用标量访存的仿射元素偏移计算，再通过 `pto.addptr` 寻址；不暴露无类型字节
 地址或绕过分配的路径。所有原子目标均为 ReadWrite，即使未使用旧标量返回值。
 同步调用保持有序副作用，`no_arg_writes` 不表示纯函数。
@@ -113,9 +120,9 @@ INT32/FP32 载荷以及 16/32 宽度，包括分支中的参与集合和非活�
 | `syncthreads` 与两种 fence | LLVM workitem 同步/fence intrinsic | 四个 warp 的 UB/GM 发布与读取，以及后续 MTE 输出 |
 
 此矩阵已在 Ascend950DT_9581、PTOAS v0.72、CANN 9.3.0 及 runtime
-`391b2fbcd4dd053204a677662c39b6b7636e8043` 上验证。原子位置为自然对齐的 4 字节
-元素；UINT32/INT64、half/bfloat16、packed 值、可选顺序/scope 及跨 AIV 同步不属于
-当前前端契约。详见 [API 语义与限制](../ir/11-simt.md#原子操作与同步)。
+`391b2fbcd4dd053204a677662c39b6b7636e8043` 上验证。这些设备结果覆盖自然对齐的 4 字节原子元素。
+更宽类型及 half/bfloat16 现有独立编译覆盖，见[逐操作矩阵](06-simt-interface-coverage.md)。
+packed 值、可选顺序/scope 及跨 AIV 同步仍不属于当前前端契约。详见 [API 语义与限制](../ir/11-simt.md#原子操作与同步)。
 发布测试使用了会合，不能证明单独 fence 构成同步协议，也不承诺系统级可见性。
 
 `tests/st/runtime/vpto/test_simt_atomics_onboard.py` 提供竞争和屏障用例（15 项检查），
@@ -227,3 +234,45 @@ JIT 单元测试 `test_public_math_native_compile` 覆盖原生 LLVM 导出。
 LLVM 文本设备编译在调用 CANN Bisheng 前移除其不支持的 LLVM 内存效果属性，
 与 PTOAS 对象文件生成路径一致；保留指令、同步和其他属性。
 若清理后属性组为空，则同时移除该组及其引用，因为 LLVM 不接受空属性组。
+
+## 带跨度 GM 窗口与启动边界验收
+
+公开的[带步长拷贝示例](../../../../examples/advanced/07_simt_strided_copy.py)
+向 AIV helper 传入三个 `[8, 256]` 窗口：行跨度为 288 的 FP32 输入、跨度为 320 的
+FP32 输出，以及跨度为 352 的 INT32 线程标签。三个窗口的行、列原点均非零。
+`OptimizeOrchTensors` 将这些物理步长传播到 AIV 的只读及可写参数，SIMT 特化随后
+保留该元数据。修复前，helper 对三个窗口均使用逻辑跨度 256，导致第一行之后的寻址错误。
+
+验收用例使用三个轴的 `thread_idx`、`block_dim`、lane ID 和按线程跨步的循环。
+覆盖 `(n, 1, 1)`，其中 `n = 1, 256, 257, 512, 513, 1024, 1025, 2048`，另加 `(8, 4, 8)`。
+每种配置检查 `valid = 0, 1, 255, 256, 257, 2047, 2048` 和两组变化输入，合计
+**126 次精确设备比对**。检查包含两个完整输出父张量、全部未激活元素与外围保护区，
+并确认输入不变。编译阶段还验证每个链接后 SIMT launch 的长度。
+
+2026-11-16 的 A5 验证在 PTOAS v0.74、CANN 9.3.0 和固定 runtime
+`27fe21756a5230cc4cfe7e44fa360d07d782a111` 下通过全部 126 项检查。
+先在不占卡的情况下准备产物，再经队列分配设备执行：
+
+```bash
+python tests/st/runtime/vpto/test_simt_ir_onboard.py \
+  --strided-worker build/simt-strided
+
+task-submit --device auto --max-time 600 --run \
+  'python tests/st/runtime/vpto/test_simt_ir_onboard.py --strided-worker build/simt-strided "$TASK_DEVICE"'
+```
+
+`strided-artifacts.json` 记录已准备的产物目录；`strided-result.json` 记录每种配置的
+检查数、设备和 runtime pin。显式启用的 pytest 用例为 `test_simt_strided`，沿用前述
+验收用例的 build/persistent 开关。
+
+编译器生成的 AIV 内核要求切片参数的物理步长为静态值，且同一参数在所有调用处一致。
+跨度需要变化时，请传入完整父张量并使用相对父张量的索引。外部 C++ AIV 内核的参数
+内维为静态大小且未显式声明张量视图时，可使用运行时描述符中的步长。内维为动态大小时，
+只有所有输入路径均有 packed ND 存储才能使用运行时步长。显式参数视图仍需符合其存储约束。
+reshape 与指定形状的 ND 视图要求所有输入路径都使用紧密存储。
+嵌套切片、别名、元组投影、删除轴及手动 `Submit` 调用具有 pass 回归覆盖。打包短向量仍在
+当前可执行子集之外；本次验收不新增打包存储或 API。
+
+## 接口覆盖
+
+[SIMT 接口覆盖矩阵](06-simt-interface-coverage.md) 记录第一批新增接口、验证证据和任务 11.7 的剩余限制。

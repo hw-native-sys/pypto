@@ -26,6 +26,12 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
+A5 BF16 NZ Vec-to-Mat `tile.assemble` requires an explicit `FunctionType.AIV`
+function. This pass rejects it in a generic InCore function before core
+classification: dispatching from its Mat target would place the MTE3 insertion
+on AIC and can discard a vector-produced source. Explicit AIV functions bypass
+expansion and retain both handles for the native transfer.
+
 ### Dynamic parameter and return types
 
 Each generated AIC, AIV, and Group owns fresh parameter identities. Types that
@@ -386,6 +392,42 @@ For consumer-side cross-core tiles, the pass also ensures each `tile.tpop_*` has
 block without reordering independent `tpop` chains. When AIC must post-process a `tile.tpop_from_aiv` result with a
 same-side `tile.move` (for example Mat -> Left/Right/Bias), the generated `system.tfree_to_aiv(...)` is rewritten to
 free the canonical popped tile value and can be delayed past that carrier chain.
+
+In the default pipeline, the AIV body calls an outlined VF. Its declaration
+identifies the caller operand aliased by each returned Tile. A store using that
+result, including a tuple projection or a same-slot loop result, keeps the
+original receive live. A VF call with no return still consumes its arguments.
+When the pass runs on a raw `RegScope`, it follows physical writebacks such as
+`reg.store` and `reg.scatter` inside the scope. Releases preserve pop order within each
+pipe, so a later pop cannot return credit before an earlier live slot. Retiming
+an authored free preserves its explicit attributes.
+
+In Tile-only functions, a branch or loop that yields a locally received Vec Tile
+first copies the yielded value or view into independent storage. Its order is
+`tpop` → view/consumers → `tile.move` → `tfree` → `yield`. The branch result
+therefore survives the release, and later phi lowering never needs to read
+the freed slot. `yield` remains the final statement in the body.
+This automatic copy is limited to Vec receives on both backends. Yielding a
+locally received Mat Tile or its view is rejected before materialization:
+Mat-to-Mat `TMOV` is unsupported on A2/A3, and no portable Mat copy strategy is
+implemented here. Consume the Mat receive inside its defining branch or loop
+before yielding.
+
+In callers containing a VF call or raw `RegScope`, a receive created inside a
+branch or loop must be consumed there. The pass rejects a local borrow exported
+by `yield` or returned from the caller, including
+an outer receive or writeback alias returned inside a nested branch or loop. Freeing
+such a value before the terminator would invalidate the escaped alias. Materialize
+independent storage before exporting the value. An outer receive can pass through
+a branch or loop result only when every path retains the same slot, including
+the initial value of a zero-trip loop; joins with a different slot or independent
+storage are rejected. A nested body cannot receive on the same pipe while an
+outer receive is still outstanding, because its free would release the older
+slot. Finish the outer consumers and release that slot before entering the
+nested body, or use a different pipe. A nested body also cannot release an outer
+receive. These are compiler lifetime
+rules, not a proof of hardware completion: direct FIFO capture by VF remains
+unsupported until its runtime-pointer ABI and synchronization are qualified.
 
 For Ascend910 (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
 supported. In that case the pass keeps a single AIV kernel body, marks it for **dual AIV dispatch**, and later lowering
@@ -749,3 +791,13 @@ true last use of that tile.
 | Auto-generated pipe setup | Tensor-level mixed kernels do not need handwritten `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`; the pass derives them from cross-core tile ops |
 | Auto-generated tfree chains | Consumer-side split kernels insert missing `tfree` calls, rewrite them to free the canonical popped tile value, and delay obviously early frees within the same block without reordering independent `tpop` chains |
 | Max-slot-size policy | Uses `max(all tile byte sizes)` as the single `initialize_pipe.slot_size`, matching the backend assumption of one automatic reserve/import buffer per direction while preserving legacy bidirectional `dir_mask=3` behavior |
+
+## C2V Fixpipe contract
+
+A5 pipe initializers accept `nosplit` and `acc_push_epilogue={layout, quant, relu}`. All fields are required. Track matching epilogue, id, slot size/count and nosplit on both peers. The producer imports the consumer's named reserve buffer through identity SSA aliases.
+
+`nz2nd` yields an unboxed row-major Vec tile, and `nz2dn` an unboxed column-major tile. `nz2nz` uses a column-major block layout with a row-major sublayout and supports FP32 `no_convert` only.
+
+`no_convert` preserves FP32/INT32. `f32_f16` and `f32_bf16` convert FP32. `deqf16_scalar` and `deqf16_vec` convert INT32 to FP16. `qf322f16_pre_scalar` converts FP32 to FP16. ReLU is `no_relu` or `normal_relu` before quantization. Use an Acc input, `dir_mask=1`, `nosplit=true` and `split=0` for push/pop. Free inherits split and id from pop. Python defaults `nosplit` to true with an epilogue and leaves it omitted otherwise. The ND shorthand uses an FP32 Acc input. `c2v_dtype` selects an FP32, FP16 or BF16 payload and the pop uses the same type. `c2v_dtype` / `pre_relu` exclude a structured epilogue. Scalar controls are FP32. Move packed i64/u64 vector controls from unboxed row-major Mat to Scaling with the same layout. Use a full-valid `[1, N]` with positive `N` divisible by 16 and at least as large as the producer column count. The planner budgets 4 KiB for Scaling, separately from MX sidecars. Keep controls immutable through TPUSH and their allocations live to function end. Use a scalar setter for `deqf16_scalar` and `qf322f16_pre_scalar`, a vector setter for `deqf16_vec`, and no setter for other modes. Configure before TPUSH in the same block and for the same id. Prepare Scaling tiles before the vector setter, or repeat the setter after any operation that produces a Scaling tile. Control flow, another id's setter, and `pre_quant` writeback invalidate state. Pipelines containing setters and their ancestors run sequentially, including stage=1. For a vector-quantized 32×16 tile, pass `dir_mask=1, slot_size=1024, slot_num=2, id=0, nosplit=True, acc_push_epilogue={"layout": "nz2nd", "quant": "deqf16_vec", "relu": "no_relu"}` to both init calls. Omit `local_slot_num` on A5 and reserve `slot_size * slot_num` bytes on the consumer (2048 here). Set `pl.set_quant_vector(controls, id=0)` before the push and use `split=0` on both endpoints.
+
+`MixedKernelExpanded` checks payload type, physical layout, converted slot bytes, local ring capacity and peer ids. Current PTOAS needs one consumer tile type per id. NZ2NZ uses the canonical 512-byte Vec boxing. The verifier checks endpoint counts for straight-line code and simple Boolean branches, including shared arguments across Groups and per-launch bindings for literal Boolean arguments. Each Group that dispatches either Fixpipe endpoint must dispatch its matched peer. The pair may appear together in multiple Groups. It tracks retained slots across nested blocks and checks ring depth and FIFO release order. Place conditional launches in orchestration. Spmd wrappers forward arguments and dispatch their Group directly. For other manual control flow, balance messages on both peers. For an explicit non-ND layout, automatic A5 setup applies the same layout to both inits for Acc-only C2V transfers with `split=0` and no user-authored setup, with or without Buffer IR. For mixed directions, use separate explicit pipes or a row-major move followed by a real transpose. Omitted layouts use legacy transport. Transpose scratch uses its own SSA type. `ir::AccPushEpilogue` survives serialization, comparison/hash and printing. `PipeDirectionMetadata` records `acc_push_layouts`, `has_acc_push`, `has_non_acc_push`, `has_nonzero_split`, and `non_fp32_acc_push`. `CreateInitializePipe` emits the contract on both peers. GlobalTensor FIFO uses a separate contract. `test_c2v_fixpipe.py` covers peer validation, round trips and native PTOAS in both Buffer IR modes. JIT system tests compare non-square DN transpose views with exact integer goldens and a row-major transpose control. Explicit AIC/AIV JIT peers are declared with `jit.incore` and dispatched under `CORE_GROUP`.

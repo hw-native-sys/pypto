@@ -33,6 +33,7 @@ class RegionContext:
         self.flow = flow
         self.services = services
         self.scope_kind_stack: list[ir.ScopeKind] = []
+        self.effective_level: ir.Level | None = None
 
         # Set while parsing the body of an InCore scope the user declared with an
         # explicit ``optimizations=[pl.split(MODE)]`` — MODE included when it is
@@ -141,3 +142,16 @@ class RegionContext:
         finally:
             self.flow.loop_kind_stack.pop()
             self.split_aiv_mode_stack.pop()
+
+    @contextmanager
+    def distributed_hierarchy_context(
+        self, scope_kind: ir.ScopeKind, level: ir.Level | None
+    ) -> Generator[None, None, None]:
+        """Use the innermost hierarchy level while parsing the scope body."""
+        saved = self.effective_level
+        if scope_kind == ir.ScopeKind.Hierarchy:
+            self.effective_level = level
+        try:
+            yield
+        finally:
+            self.effective_level = saved

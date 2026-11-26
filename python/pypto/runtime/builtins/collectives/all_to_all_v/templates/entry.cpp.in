@@ -48,7 +48,7 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   // INDEX, and even `INT32 scalar + 1` promotes to INDEX), so the range check
   // belongs here at the runtime entry, not in the IR type.
   const int64_t requested_nranks = orch_args.scalar<int64_t>(0);
-  const int64_t requested_core_num = orch_args.scalar<int64_t>(2);
+  const int64_t requested_core_num = orch_args.scalar<int64_t>(4);
   if (requested_nranks <= 0 || requested_nranks > INT32_MAX) {
     rt_report_fatal(
         SIMPLER_ERROR_INVALID_ARGS, "all_to_all_v: nranks must be in [1, %d], got %lld", INT32_MAX,
@@ -88,7 +88,9 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   params.add_inout(signal);
   params.add_input(send_counts);
   params.add_inout(recv_counts);
-  params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
+  params.add_scalar(orch_args.scalar(1));  // Target context
+  params.add_scalar(orch_args.scalar(2));  // Signal context
+  params.add_scalar(orch_args.scalar(3));  // Send-count context
   params.launch_spec.{{launch_core_count_method}}(admitted_blocks);
   params.launch_spec.set_require_sync_start(true);
 
@@ -139,8 +141,8 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
   (void)orch_args;
   return OrchestrationConfig{
       // 5 window tensors + 1 per-rank ordering token + rank-count scalar +
-      // CommContext scalar + core_num scalar.
-      .expected_arg_count = 9,
+      // 3 remote-operand context scalars + core_num scalar.
+      .expected_arg_count = 11,
   };
 }
 

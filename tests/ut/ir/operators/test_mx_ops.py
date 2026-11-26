@@ -135,6 +135,194 @@ class TestTensorMatmulMx:
         with pytest.raises(ValueError, match="lhs_scale layout MX_A_ZZ"):
             ir.op.tensor.matmul_mx(lhs, bad_scale, rhs, rhs_scale)
 
+    @staticmethod
+    def _packed_operands(
+        lhs_dtype=pl.FP4E2M1X2,
+        rhs_dtype=pl.FP4E2M1X2,
+        lhs_layout=ir.TensorLayout.ND,
+        rhs_layout=ir.TensorLayout.ND,
+    ):
+        span = ir.Span.unknown()
+
+        def tensor(name, shape, dtype, layout):
+            return ir.Var(name, ir.TensorType(shape, dtype, tensor_view=ir.TensorView([], layout)), span)
+
+        # Logical [32, 128] @ [128, 192], independent of the carrier axis.
+        lhs_shape = [16, 128] if lhs_layout == ir.TensorLayout.DN else [32, 64]
+        rhs_shape = [64, 192] if rhs_layout == ir.TensorLayout.DN else [128, 96]
+        return [
+            tensor("lhs", lhs_shape, lhs_dtype, lhs_layout),
+            tensor("sa", [32, 4], pl.FP8E8M0, ir.TensorLayout.MX_A_ZZ),
+            tensor("rhs", rhs_shape, rhs_dtype, rhs_layout),
+            tensor("sb", [4, 192], pl.FP8E8M0, ir.TensorLayout.MX_B_NN),
+        ]
+
+    @pytest.mark.parametrize("lhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("rhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("lhs_layout", [ir.TensorLayout.ND, ir.TensorLayout.DN])
+    @pytest.mark.parametrize("rhs_layout", [ir.TensorLayout.ND, ir.TensorLayout.DN])
+    def test_packed_logical_geometry(self, lhs_dtype, rhs_dtype, lhs_layout, rhs_layout):
+        args = self._packed_operands(lhs_dtype, rhs_dtype, lhs_layout, rhs_layout)
+        call = ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == pl.FP32
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [32, 192]
+
+    def test_packed_partial_rows_preserved(self):
+        lhs, scale, rhs, rhs_scale = self._packed_operands(lhs_layout=ir.TensorLayout.DN)
+        assert isinstance(lhs.type, ir.TensorType) and isinstance(scale.type, ir.TensorType)
+        lhs_view = ir.TensorView(layout=ir.TensorLayout.DN, valid_shape=[8, 128])
+        scale_view = ir.TensorView(layout=ir.TensorLayout.MX_A_ND, valid_shape=[16, 4])
+        lhs = ir.Var("lhs", ir.TensorType(lhs.type.shape, lhs.type.dtype, tensor_view=lhs_view), lhs.span)
+        scale = ir.Var(
+            "sa", ir.TensorType(scale.type.shape, scale.type.dtype, tensor_view=scale_view), scale.span
+        )
+        result = ir.op.tensor.matmul_mx(lhs, scale, rhs, rhs_scale).type
+        assert isinstance(result, ir.TensorType) and result.tensor_view is not None
+        assert [dim.value for dim in result.tensor_view.valid_shape if isinstance(dim, ir.ConstInt)] == [
+            16,
+            192,
+        ]
+
+    def test_packed_valid_k_compares_logical_extents(self):
+        lhs, lhs_scale, rhs, rhs_scale = self._packed_operands()
+        assert isinstance(lhs.type, ir.TensorType) and isinstance(rhs.type, ir.TensorType)
+        # ND halves the lhs contraction extent but leaves the rhs K in values.
+        lhs = ir.Var(
+            "lhs",
+            ir.TensorType(
+                lhs.type.shape, lhs.type.dtype, tensor_view=ir.TensorView(layout=pl.ND, valid_shape=[32, 63])
+            ),
+            lhs.span,
+        )
+        rhs_matching = ir.Var(
+            "rhs",
+            ir.TensorType(
+                rhs.type.shape, rhs.type.dtype, tensor_view=ir.TensorView(layout=pl.ND, valid_shape=[126, 96])
+            ),
+            rhs.span,
+        )
+        assert isinstance(ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs_matching, rhs_scale).type, ir.TensorType)
+
+        rhs_mismatched = ir.Var(
+            "rhs",
+            ir.TensorType(
+                rhs.type.shape, rhs.type.dtype, tensor_view=ir.TensorView(layout=pl.ND, valid_shape=[124, 96])
+            ),
+            rhs.span,
+        )
+        with pytest.raises(ValueError, match="matching logical valid K.*lhs K=126 and rhs K=124"):
+            ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs_mismatched, rhs_scale)
+
+    @staticmethod
+    def _with_valid_shape(operand: ir.Var, layout, valid: list[int]) -> ir.Var:
+        assert isinstance(operand.type, ir.TensorType)
+        view = ir.TensorView(layout=layout, valid_shape=valid)
+        return ir.Var(
+            operand.name_hint,
+            ir.TensorType(operand.type.shape, operand.type.dtype, tensor_view=view),
+            operand.span,
+        )
+
+    @pytest.mark.parametrize(
+        "valid_k,message",
+        [(0, "requires positive logical valid K"), (64, "same scale-group count as physical K")],
+    )
+    def test_packed_rejects_invalid_scale_group_count(self, valid_k, message):
+        lhs, lhs_scale, rhs, rhs_scale = self._packed_operands()
+        lhs = self._with_valid_shape(lhs, pl.ND, [32, valid_k // 2])
+        rhs = self._with_valid_shape(rhs, pl.ND, [valid_k, 96])
+        with pytest.raises(ValueError, match=message):
+            ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+
+    @pytest.mark.parametrize(
+        "index,layout,valid,scale",
+        [
+            (0, pl.DN, [8, 128], "lhs_scale"),
+            (2, pl.ND, [128, 64], "rhs_scale"),
+        ],
+    )
+    def test_packed_rejects_partial_data_with_full_packed_scales(self, index, layout, valid, scale):
+        operands = self._packed_operands(lhs_layout=pl.DN)
+        operands[index] = self._with_valid_shape(operands[index], layout, valid)
+        with pytest.raises(ValueError, match=f"requires {scale} valid shape to match logical data validity"):
+            ir.op.tensor.matmul_mx(operands[0], operands[1], operands[2], operands[3])
+
+    @pytest.mark.parametrize(
+        "index,layout,valid,scale",
+        [
+            (1, pl.MX_A_ZZ, [16, 4], "lhs_scale"),
+            (3, pl.MX_B_NN, [4, 128], "rhs_scale"),
+        ],
+    )
+    def test_packed_rejects_partial_packed_scales(self, index, layout, valid, scale):
+        operands = self._packed_operands()
+        operands[index] = self._with_valid_shape(operands[index], layout, valid)
+        with pytest.raises(ValueError, match=f"requires {scale} to be fully valid"):
+            ir.op.tensor.matmul_mx(operands[0], operands[1], operands[2], operands[3])
+
+    def test_packed_mx_a_nd_requires_all_scale_groups(self):
+        lhs, lhs_scale, rhs, rhs_scale = self._packed_operands()
+        lhs_scale = self._with_valid_shape(lhs_scale, pl.MX_A_ND, [32, 2])
+        with pytest.raises(ValueError, match="requires lhs_scale valid shape to match logical data validity"):
+            ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+
+    @pytest.mark.parametrize(
+        "side,layout,valid,message",
+        [
+            (0, pl.ND, [15, 64], "even FP4 valid extent"),
+            (0, pl.DN, [16, 127], "even FP4 valid extent"),
+            (2, pl.ND, [127, 96], "even FP4 valid extent"),
+            (2, pl.DN, [64, 191], "even FP4 valid extent"),
+            (0, pl.ND, [32], "valid_shape rank"),
+            (2, pl.DN, [64, 192, 1], "valid_shape rank"),
+        ],
+    )
+    def test_rejects_invalid_data_valid_shape(self, side, layout, valid, message):
+        args = self._packed_operands(lhs_layout=layout, rhs_layout=layout)
+        operand = args[side]
+        assert isinstance(operand.type, ir.TensorType)
+        view = ir.TensorView(layout=layout, valid_shape=valid)
+        args[side] = ir.Var(
+            operand.name_hint,
+            ir.TensorType(operand.type.shape, operand.type.dtype, tensor_view=view),
+            operand.span,
+        )
+        with pytest.raises(ValueError, match=message):
+            ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+
+    @pytest.mark.parametrize("side", [0, 2])
+    def test_rejects_mixed_fp4_fp8(self, side):
+        args = self._packed_operands()
+        args[side] = ir.Var(
+            "fp8", ir.TensorType([32, 128] if side == 0 else [128, 192], pl.FP8E4M3FN), ir.Span.unknown()
+        )
+        with pytest.raises(ValueError, match="mixed FP4/FP8"):
+            ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+
+    @pytest.mark.parametrize(
+        "operand,shape,message",
+        [
+            (2, [64, 96], "matching K"),
+            (2, [128, 48], "logical N divisible by 64"),
+            (1, [32, 2], "lhs_scale shape"),
+            (3, [4, 96], "rhs_scale shape"),
+            (0, [24, 64], "M divisible by 16"),
+            (0, [16, 64], "logical M divisible by 32"),
+            (0, [32, 48], "matching K"),
+        ],
+    )
+    def test_rejects_invalid_packed_geometry(self, operand, shape, message):
+        args = self._packed_operands()
+        old = args[operand]
+        args[operand] = ir.Var(
+            old.name_hint,
+            ir.TensorType(shape, old.type.dtype, tensor_view=old.type.tensor_view),
+            ir.Span.unknown(),
+        )
+        with pytest.raises(ValueError, match=message):
+            ir.op.tensor.matmul_mx(args[0], args[1], args[2], args[3])
+
 
 class TestPackedFp4Shape:
     @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
@@ -185,6 +373,14 @@ class TestMatmulMxRegistry:
         assert tget["output_memory"] == "inherit_from_input"
 
 
+_MX_FP8_PAIRS = [
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
+
 class TestMatmulMxTypes:
     @staticmethod
     def _mx_operands(span, *, m=16, k=64, n=32, valid=None, dtype=DataType.FP8E4M3FN):
@@ -204,9 +400,12 @@ class TestMatmulMxTypes:
         rhs_scale = _tile("rhs_scale", [sk, n], DataType.FP8E8M0, valid_shape=[sk_v, n_v])
         return lhs, lhs_scale, rhs, rhs_scale
 
-    def test_type_deduction_and_variants(self):
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    def test_type_deduction_and_variants(self, lhs_dtype, rhs_dtype):
         span = ir.Span.unknown()
-        lhs, lhs_scale, rhs, rhs_scale = self._mx_operands(span)
+        _, lhs_scale, _, rhs_scale = self._mx_operands(span)
+        lhs = _tile("lhs", [16, 64], lhs_dtype)
+        rhs = _tile("rhs", [64, 32], rhs_dtype)
         call = ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
         call_type = call.type
         assert isinstance(call_type, ir.TileType)
@@ -276,22 +475,11 @@ class TestMatmulMxTypes:
 
     def test_rejects_wrong_dtypes_and_alignment(self):
         span = ir.Span.unknown()
-        # data must be FP8E4M3FN
-        with pytest.raises(ValueError, match="requires lhs dtype FP8E4M3FN") as exc_info:
-            ir.op.tile.matmul_mx(
-                ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E5M2), span),
-                ir.Var("ls", ir.TileType([16, 2], DataType.FP8E8M0), span),
-                ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span),
-                ir.Var("rs", ir.TileType([2, 32], DataType.FP8E8M0), span),
-                span,
-            )
-        assert "native FP4" not in str(exc_info.value)
-
-        lhs, lhs_scale, _, rhs_scale = self._mx_operands(span)
-        rhs_fp8e5m2 = ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span)
-        with pytest.raises(ValueError, match="requires rhs dtype FP8E4M3FN") as exc_info:
-            ir.op.tile.matmul_mx(lhs, lhs_scale, rhs_fp8e5m2, rhs_scale, span)
-        assert "native FP4" not in str(exc_info.value)
+        lhs, lhs_scale, rhs, rhs_scale = self._mx_operands(span, dtype=DataType.FP8E5M2)
+        with pytest.raises(ValueError, match="requires lhs dtype FP8E4M3FN, FP8E5M2, or packed FP4"):
+            ir.op.tile.matmul_mx(_tile("lhs", [16, 64], DataType.HF8), lhs_scale, rhs, rhs_scale, span)
+        with pytest.raises(ValueError, match="requires rhs dtype FP8E4M3FN, FP8E5M2, or packed FP4"):
+            ir.op.tile.matmul_mx(lhs, lhs_scale, _tile("rhs", [64, 32], DataType.FP16), rhs_scale, span)
 
         # scale must be FP8E8M0
         lhs, _, rhs, rhs_scale = self._mx_operands(span)
@@ -441,10 +629,11 @@ class TestMatmulMxTypes:
 
 
 class TestTGetScaleAddr:
-    def test_binds_and_rejects(self):
+    @pytest.mark.parametrize("dtype", [DataType.FP8E4M3FN, DataType.FP8E5M2])
+    def test_binds_and_rejects(self, dtype):
         span = ir.Span.unknown()
         dst = _tile("rbs", [2, 32], DataType.FP8E8M0, memory=ir.MemorySpace.RightScale)
-        src = _tile("rb", [64, 32], DataType.FP8E4M3FN, memory=ir.MemorySpace.Right)
+        src = _tile("rb", [64, 32], dtype, memory=ir.MemorySpace.Right)
         call = ir.op.tile.tget_scale_addr(dst, src, span)
         call_type = call.type
         assert isinstance(call_type, ir.TileType)

@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deferred_wait_contract.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/scalar_output_hoist.h"
@@ -253,6 +254,10 @@ class ParamReadCollector : public IRVisitor {
         if (it != aliases_.end()) aliases_.emplace(op->var_.get(), it->second);
       }
     }
+    // A bare tensor alias forwards storage without loading its payload.
+    // Scalar assignments and computed tensor values still carry real reads.
+    auto source = AsVarLike(op->value_);
+    if (source && AsTensorTypeLike(source->GetType()) && aliases_.count(source.get()) != 0) return;
     VisitExpr(op->value_);
   }
 
@@ -369,7 +374,11 @@ class ParamReadCollector : public IRVisitor {
     // walked as a read.
     const auto dst_slots = DestinationSlots(op);
     const auto callee_out_slots = CalleeWriteOnlySlots(op->op_, op->args_.size(), /*is_submit=*/false);
+    const bool is_view = op_predicates::IsBufferAliasingViewOp(op->op_->name_);
     for (size_t i = 0; i < op->args_.size(); ++i) {
+      // Constructing a view computes a descriptor, not a content read. Actual
+      // consumers of its tracked alias determine whether the capture is read.
+      if (is_view && i == 0) continue;
       // Skipping the whole operand, not just a bare Var in it, is deliberate:
       // the destination slot only ever holds the tensor being written, so
       // anything nested there is address computation, not a content read.
@@ -2565,6 +2574,60 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
   for (size_t i = 0; i < input_vars.size(); ++i) {
     var_to_idx[input_vars[i].get()] = i;
   }
+
+  // Resolve region-local views and writeback results to captured storage before
+  // collecting effects. The map belongs to this scope; fresh computations do
+  // not inherit an operand's identity. SSA definition order makes one pass
+  // sufficient for chains of aliases.
+  class ParamAliasCollector : public IRVisitor {
+   public:
+    ParamAliasCollector(std::unordered_map<const Var*, size_t>& aliases, ProgramPtr program)
+        : aliases_(aliases), program_(std::move(program)) {}
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      auto source = AliasSource(op->value_);
+      if (source && op->var_ && AsTensorTypeLike(op->var_->GetType())) {
+        auto it = aliases_.find(source.get());
+        if (it != aliases_.end()) aliases_.emplace(op->var_.get(), it->second);
+      }
+      if (op->var_ && As<TupleType>(op->var_->GetType())) tuple_defs_.emplace(op->var_.get(), op->value_);
+      IRVisitor::VisitStmt_(op);
+    }
+
+   private:
+    // Callee maps share a cache for this unchanged Program. Only returned
+    // parameters alias caller storage; fresh results and omitted Submit Out
+    // parameters have no caller-owned backing buffer.
+    VarPtr ReturnedSource(const ExprPtr& expr, size_t position) {
+      auto call = transform_utils::AsCallOrSubmitView(expr);
+      if (!call || !program_ || !As<GlobalVar>(call->op_)) return nullptr;
+      auto callee = program_->GetFunction(call->op_->name_);
+      if (!callee) return nullptr;
+      auto param = return_lineage::ReturnedParamIndexAt(callee, program_, position);
+      if (!param) return nullptr;
+      return AsVarLike(transform_utils::CallerSuppliedArg(call, callee, *param));
+    }
+
+    VarPtr AliasSource(const ExprPtr& expr) {
+      if (auto projection = As<TupleGetItemExpr>(expr)) {
+        ExprPtr tuple = projection->tuple_;
+        if (auto var = AsVarLike(tuple)) {
+          auto it = tuple_defs_.find(var.get());
+          if (it != tuple_defs_.end()) tuple = it->second;
+        }
+        return ReturnedSource(tuple, projection->index_);
+      }
+      if (auto source = AsVarLike(op_predicates::GetBufferAliasSource(expr))) return source;
+      return ReturnedSource(expr, 0);
+    }
+
+    std::unordered_map<const Var*, size_t>& aliases_;
+    ProgramPtr program_;
+    std::unordered_map<const Var*, ExprPtr> tuple_defs_;
+  };
+  return_lineage::ScopedTraceCache trace_cache;
+  ParamAliasCollector(var_to_idx, program_).VisitStmt(body);
 
   // Step 0: which captured vars does the body read? A written param earns
   // ``InOut`` only when it is also read; write-only earns ``Out``.

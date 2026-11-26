@@ -77,17 +77,27 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
     const auto& registry = OpRegistry::GetInstance();
     auto validated = [&registry](const char* op_name) { return registry.GetOp(op_name)->name_; };
     return std::unordered_set<std::string>{
-        validated("tile.tpush_to_aiv"), validated("tile.tpush_to_aic"), validated("tile.tpop_from_aic"),
-        validated("tile.tpop_from_aiv"), validated("tile.store"), validated("tile.assemble"),
-        validated("system.tfree_to_aic"), validated("system.tfree_to_aiv"),
-        validated("system.reserve_buffer"), validated("system.import_peer_buffer"),
+        validated("reg.mem_bar"), validated("tile.tpush_to_aiv"), validated("tile.tpush_to_aic"),
+        validated("tile.tpop_from_aic"), validated("tile.tpop_from_aiv"), validated("tile.store"),
+        validated("tile.assemble"), validated("tile.tpush_to_aiv_direct"),
+        validated("tile.mark_remote_written"), validated("system.tfree_to_aic"),
+        validated("system.tfree_to_aiv"), validated("system.reserve_buffer"),
+        validated("system.import_peer_buffer"),
+        // TPUSH reads quantization state outside the SSA use graph.
+        validated("system.set_quant_scalar"), validated("system.set_quant_vector"),
         validated("system.aic_initialize_pipe"), validated("system.aiv_initialize_pipe"),
+        validated("system.set_intra_block"), validated("system.wait_intra_block"),
         // Async transfers write the destination through
         // argument 0 (ReadWrite) and return that same buffer.
         // They are not RegOps, so the WritesAnyArg() fast path
         // above does not see their effect; without these entries
         // an unused-result assignment is deleted.
-        validated("pld.tensor.put_async"), validated("pld.tensor.get_async")};
+        validated("pld.tensor.put_async"), validated("pld.tensor.get_async"),
+        // Submission and in-kernel wait are observable even with unused SSA results.
+        // Session initialization and completion handoff are also observable.
+        validated("pld.system.make_session"), validated("pld.tensor.get_async_event"),
+        validated("pld.tile.get_async"), validated("pld.tile.put_async"), validated("pld.system.wait_event"),
+        validated("pld.system.defer_wait_event")};
   }();
   // A Submit launches an asynchronous task — intrinsically side-effecting
   // regardless of the kernel's body. Short-circuit so a Submit assignment is

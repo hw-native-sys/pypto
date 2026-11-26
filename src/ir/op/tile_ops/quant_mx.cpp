@@ -137,8 +137,9 @@ DataType ParseDtype(const std::vector<std::pair<std::string, std::any>>& kwargs)
   return dtype;
 }
 
-void CheckQuantAlgorithm(const std::vector<std::pair<std::string, std::any>>& kwargs, DataType src_dtype,
-                         int group_axis, const std::string& op_name, const Span& span) {
+std::string CheckQuantAlgorithm(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                DataType src_dtype, int group_axis, const std::string& op_name,
+                                const Span& span) {
   std::string algorithm = "ocp";
   for (const auto& [key, value] : kwargs) {
     if (key == "quant_scale_alg") algorithm = AnyCast<std::string>(value, "kwarg key: quant_scale_alg");
@@ -147,6 +148,7 @@ void CheckQuantAlgorithm(const std::vector<std::pair<std::string, std::any>>& kw
       << "The operator " << op_name << " requires quant_scale_alg 'ocp' or 'nv', but got " << algorithm;
   CHECK_SPAN(algorithm != "nv" || group_axis != 1 || src_dtype == DataType::FP32, span)
       << "The operator " << op_name << " does not support axis1 FP16/BF16 NV quantization in PTOAS";
+  return algorithm;
 }
 
 void CheckSrcBasics(const TileTypePtr& src_type, const std::string& op_name, const Span& span,
@@ -177,9 +179,17 @@ TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
 
   const DataType dtype = ParseDtype(kwargs);
   const int group_axis = ParseGroupAxis(kwargs, kOpName, span, /*required=*/true);
-  const MxQuantTypeInfo type_info = ResolveMxQuantType(dtype, kOpName, span);
+  const DataType dst_dtype =
+      dtype == DataType::FP8E5M2 ? dtype : ResolveMxQuantType(dtype, kOpName, span).public_dst_dtype;
   CheckFp4QuantSource(src_type, dtype, group_axis, kOpName, span);
-  CheckQuantAlgorithm(kwargs, src_type->dtype_, group_axis, kOpName, span);
+  const auto algorithm = CheckQuantAlgorithm(kwargs, src_type->dtype_, group_axis, kOpName, span);
+  if (dtype == DataType::FP8E5M2) {
+    CHECK_SPAN(algorithm == "ocp", span) << "The operator " << kOpName << " requires OCP for FP8E5M2";
+    const TileView source_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+    CHECK_SPAN(source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::none_box,
+               span)
+        << "The operator " << kOpName << " requires a row-major flat source for FP8E5M2 output";
+  }
 
   ExprPtr dim0 = src_type->shape_[0];
   ExprPtr dim1 = src_type->shape_[1];
@@ -211,7 +221,7 @@ TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
   dst_view.valid_shape = dst_shape;
   dst_view.blayout = TileLayout::row_major;
   dst_view.slayout = TileLayout::none_box;
-  auto dst_type = std::make_shared<TileType>(dst_shape, type_info.public_dst_dtype, std::nullopt, dst_view);
+  auto dst_type = std::make_shared<TileType>(dst_shape, dst_dtype, std::nullopt, dst_view);
 
   TileView scale_view;
   std::vector<ExprPtr> scale_shape;
@@ -248,9 +258,13 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
   const MxQuantTypeInfo type_info = ResolveMxQuantType(dtype, kOpName, span);
   CheckQuantAlgorithm(kwargs, src_type->dtype_, group_axis, kOpName, span);
   bool interleave = false;
+  bool canonical_axis1 = false;
   for (const auto& [key, value] : kwargs) {
     if (key == "interleave") interleave = AnyCast<bool>(value, "kwarg key: interleave");
+    if (key == "canonical_axis1") canonical_axis1 = AnyCast<bool>(value, "kwarg key: canonical_axis1");
   }
+  CHECK_SPAN(!canonical_axis1 || (group_axis == 1 && src_type->dtype_ == DataType::FP32), span)
+      << "The operator " << kOpName << " canonical_axis1 requires axis1 FP32 source";
   CHECK_SPAN(!interleave || (group_axis == 0 && src_type->dtype_ != DataType::FP32), span)
       << "The operator " << kOpName << " interleave requires axis0 FP16/BF16 source";
 
@@ -283,8 +297,14 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
         << " requires physical columns divisible by 64 for MXFP4 carrier row alignment";
   }
   if (group_axis == 1) {
-    CHECK_SPAN(valid_cols->value_ == dim1_const->value_, span)
-        << "The operator " << kOpName << " axis1 flat exponents require physical columns equal valid columns";
+    // PTOAS selects the legacy flat form when the exponent has one physical
+    // row and rejects a canonical exponent with only one valid row.
+    CHECK_SPAN(!canonical_axis1 || valid_rows->value_ > 1, span)
+        << "The operator " << kOpName << " canonical_axis1 requires at least two valid source rows";
+    CHECK_SPAN(canonical_axis1 || valid_cols->value_ == dim1_const->value_, span)
+        << "The operator " << kOpName
+        << " axis1 flat exponents require physical columns equal valid columns; "
+           "use canonical_axis1 for padded FP32 columns";
     CHECK_SPAN(valid_cols->value_ % kMXGroupSize == 0, span)
         << "The operator " << kOpName << " requires K divisible by " << kMXGroupSize
         << " for group_axis=1, but got " << valid_cols->value_;
@@ -310,10 +330,36 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(grouped_rows <= std::numeric_limits<int64_t>::max() / grouped_cols, span)
       << "The operator " << kOpName << " scale-group count overflows int64";
   const int64_t groups = grouped_rows * grouped_cols;
-  CHECK_SPAN(GetStaticElementCount(max_type, "max scratch", kOpName, span) == groups, span)
-      << "The operator " << kOpName << " requires max scratch valid element count " << groups;
-  CHECK_SPAN(GetStaticElementCount(scaling_type, "scaling scratch", kOpName, span) == groups, span)
-      << "The operator " << kOpName << " requires scaling scratch valid element count " << groups;
+  auto make_dim = [&](int64_t value) { return std::make_shared<ConstInt>(value, DataType::INDEX, span); };
+  if (canonical_axis1) {
+    // Both scratch descriptors address the same compact prefix in PTO-ISA.
+    // Flat storage permits small group counts per row, where the canonical
+    // scratch row would be narrower than a 32-byte Vec allocation unit.
+    constexpr int64_t kFp32ElementsPerVecBlock = 8;
+    const std::vector<ExprPtr> grouped_shape = {make_dim(grouped_rows), make_dim(grouped_cols)};
+    const std::vector<ExprPtr> flat_shape = {make_dim(1), make_dim(groups)};
+    auto check_scratch = [&](const TileTypePtr& type, const char* operand) {
+      const TileView view = tile_view_semantics::GetEffectiveTileView(*type);
+      const auto rows = type->shape_.size() == 2 ? As<ConstInt>(type->shape_[0]) : nullptr;
+      const auto cols = type->shape_.size() == 2 ? As<ConstInt>(type->shape_[1]) : nullptr;
+      const bool grouped = rows && cols && rows->value_ >= grouped_rows && cols->value_ == grouped_cols &&
+                           tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, grouped_shape);
+      const bool flat = rows && cols && rows->value_ == 1 && cols->value_ >= groups &&
+                        tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, flat_shape);
+      CHECK_SPAN((grouped || flat) && cols->value_ % kFp32ElementsPerVecBlock == 0, span)
+          << "The operator " << kOpName << " requires " << operand << " scratch to have valid shape ["
+          << grouped_rows << ", " << grouped_cols << "] or [1, " << groups
+          << "] in a compact physical prefix with a 32-byte aligned row; "
+             "use the flat shape when a grouped row is too narrow";
+    };
+    check_scratch(max_type, "max");
+    check_scratch(scaling_type, "scaling");
+  } else {
+    CHECK_SPAN(GetStaticElementCount(max_type, "max scratch", kOpName, span) == groups, span)
+        << "The operator " << kOpName << " requires max scratch valid element count " << groups;
+    CHECK_SPAN(GetStaticElementCount(scaling_type, "scaling scratch", kOpName, span) == groups, span)
+        << "The operator " << kOpName << " requires scaling scratch valid element count " << groups;
+  }
 
   TileView dst_view;
   std::vector<ExprPtr> dst_shape = src_type->shape_;
@@ -328,15 +374,16 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
   dst_view.slayout = TileLayout::none_box;
   auto raw_dst_type = std::make_shared<TileType>(dst_shape, type_info.raw_dst_dtype, std::nullopt, dst_view);
 
-  const int64_t aux_rows = group_axis == 0 ? grouped_rows : 1;
-  const int64_t aux_cols = group_axis == 0 ? grouped_cols : groups;
-  auto make_dim = [](int64_t v) { return std::make_shared<ConstInt>(v, DataType::INDEX, Span::unknown()); };
+  const bool grouped_exponents = group_axis == 0 || canonical_axis1;
+  const int64_t aux_rows = grouped_exponents ? grouped_rows : 1;
+  const int64_t aux_cols = grouped_exponents ? grouped_cols : groups;
   std::vector<ExprPtr> exp_shape = {make_dim(aux_rows), make_dim(aux_cols)};
   TileView exp_view;
   exp_view.valid_shape = exp_shape;
   if (group_axis == 0) {
     exp_shape[1] = src_type->shape_[1];
   } else {
+    if (canonical_axis1) exp_shape[0] = src_type->shape_[0];
     CHECK_SPAN(aux_cols <= std::numeric_limits<int64_t>::max() - 31, span)
         << "The operator " << kOpName << " padded exponent columns overflow int64";
     exp_shape[1] = make_dim((aux_cols + 31) / 32 * 32);
@@ -470,7 +517,8 @@ REGISTER_OP("tile.tquant_mx")
     .set_description(
         "MX block-32 dynamic quantization: TupleType{quantized data, e8m0_scale FP8E8M0}. "
         "LowerCompositeOps rewrites this into tile.tquant_mx_raw + tile.tmov_x2zz (value-returning), "
-        "then reinterpret/transpose_view to the public dtypes. dtype is FP8E4M3FN or FP4E2M1X2. group_axis "
+        "then reinterpret/transpose_view for FP8E4M3FN and FP4E2M1X2. FP8E5M2 uses OCP block scaling "
+        "and a native FP8E5M2 cast. group_axis "
         "is "
         "PTOAS grpAxis (1=A-side [M,K], 0=B-side [N,K] with transpose).")
     .add_argument("src", "Source tile (FP16/FP32/BF16, 2D)")
@@ -501,6 +549,7 @@ REGISTER_OP("tile.tquant_mx_raw")
     .set_attr<int>("group_axis")
     .set_attr<std::string>("quant_scale_alg")
     .set_attr<bool>("interleave")
+    .set_attr<bool>("canonical_axis1")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)

@@ -17,22 +17,24 @@ GM copy。它独立于 [`SimtLaunchStmt` lowering](05-simt-lowering.md)，
 为原生 copy，并以 `vpto_sources` 附加原生模块。这是 ABI 验证夹具，不代表
 PyPTO SIMT IR 已能 lowering 为可执行代码。
 
-未修改的生产路径完成以下步骤：
+该样例仅使用内建指令，生产环境的 SIMT 编译流程如下。
 
-1. PTOAS 导出 VPTO LLVM，并检查外部符号。
+1. PTOAS 导出供毕昇编译的 VPTO LLVM。
 2. 毕昇将 helper 和 C++ wrapper 编译成设备对象。
-3. 设备链接将 `kernel_entry` 排在首位，随后校验 ELF。
+3. 设备链接器解析外部引用，并将 `kernel_entry` 排在首位。随后由 PyPTO 校验 ELF。
 4. 提取 `.text`、注册 `CoreCallable`，通过持久化 A5 runtime 执行。
 
 探针检查 GM 地址空间、线程/寄存器注解、无 UB 中转的直接 `LDG`/`STG`、SIMT
 入口保留，以及链接后的 callee 大小与 `VF_SIMT` 长度操作数是否一致。LLVM 导出
 绕过了 PTOAS 对象生成阶段的长度修正器。本仅使用 intrinsic 的夹具必须在不修补
-二进制的情况下正确编译。通用 SIMT 函数，尤其是需要长度修正的内联汇编，必须先
-建立受支持的对象生成契约，才能使用这条路径。P3 明确拒绝内联汇编。
+二进制的情况下正确编译。包含内联汇编的 SIMT helper 走
+[SIMT lowering](05-simt-lowering.md) 中带有 launch 长度校验/修复的独立原生对象输出路径。
+`tests/ut/codegen/test_simt_codegen.py` 中配对的 `keep/resume` 回归通过生产编译器和最终
+设备链接验证 i32/i64/f16/bf16/f32，检查两次链接后 launch 的长度，不执行 NPU 运算。
 
 ## 聚焦验收
 
-在当前 checkout 构建 PyPTO 及固定版本的 runtime。配置固定的 PTOAS v0.74 和
+在当前 checkout 构建 PyPTO 及固定版本的 runtime。配置 `toolchain/versions.env` 指定的 PTOAS 和
 A5 CANN/毕昇工具链，并保持 runtime pin 检查开启。
 本测试复用 [VF 测试](03-vpto-vf-integration.md) 的显式启用开关。
 

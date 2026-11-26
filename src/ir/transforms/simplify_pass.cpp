@@ -557,12 +557,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
   SimplifyMutator(arith::Analyzer* analyzer, std::unordered_set<const Var*> multi_assigned,
                   std::unordered_set<const Var*> redefined, ReturnVarEscapeIndex* escapes,
-                  bool constants_only)
+                  bool constants_only, bool fold_constant_control_flow)
       : IRMutatorWithAnalyzer(analyzer),
         multi_assigned_(std::move(multi_assigned)),
         redefined_(std::move(redefined)),
         escapes_(escapes),
-        constants_only_(constants_only) {}
+        constants_only_(constants_only),
+        fold_constant_control_flow_(fold_constant_control_flow) {}
 
   /// Reconcile all domain links once, after their sizes have been resolved.
   /// A single function-wide non-evaluating sweep avoids repeatedly walking
@@ -777,7 +778,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     const bool is_pure_for = op->attrs_.empty() && op->kind_ == ForKind::Sequential &&
                              !call_presence_.Contains(new_start) && !call_presence_.Contains(new_stop) &&
                              !call_presence_.Contains(new_step);
-    if (!constants_only_ && is_pure_for && analyzer_->CanProveGreaterEqual(new_step, 1)) {
+    if ((!constants_only_ || fold_constant_control_flow_) && is_pure_for &&
+        analyzer_->CanProveGreaterEqual(new_step, 1)) {
       const Span& sp = op->span_;
       int trips = -1;
       if (analyzer_->CanProve(MakeLe(new_stop, new_start, sp))) {
@@ -1061,7 +1063,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // LiftBodyToReturnVars strips the kept branch's trailing YieldStmt and
     // remaps or materializes its return_vars so later uses remain well-defined.
     const auto selected_body = always_true ? new_then : new_else.value_or(nullptr);
-    if (!constants_only_ && (always_true || always_false) && !HasEffectfulYield(selected_body)) {
+    if ((!constants_only_ || fold_constant_control_flow_) && (always_true || always_false) &&
+        !HasEffectfulYield(selected_body)) {
       StmtPtr kept;
       if (always_true) {
         kept = new_then;
@@ -1655,6 +1658,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// InitMemRef shares constant propagation without changing the control-flow
   /// and carry structure used by the memory planner or unrelated symbolic math.
   bool constants_only_;
+  /// VF binding can prove branches and trip counts after ordinary Simplify.
+  /// Reuse its guarded If/For folds, including the single-trip nesting cap,
+  /// while retaining other constants-only guards and hardware-loop policy.
+  bool fold_constant_control_flow_;
 
   /// Scalar Vars bound via BindScalar / BindScalarBound, in bind order. Used
   /// by UnbindScalarsSince to scope bindings to the region they were made in.
@@ -1691,17 +1698,18 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   transform_utils::CallLikePresence call_presence_;
 };
 
-FunctionPtr TransformSimplify(const FunctionPtr& func, bool constants_only) {
+FunctionPtr TransformSimplify(const FunctionPtr& func, bool constants_only,
+                              bool fold_constant_control_flow = false) {
   MultiAssignCollector collector(func->params_);
   for (const auto& param : func->params_) collector.Define(param.get());
   collector.VisitStmt(func->body_);
 
   ReturnVarEscapeIndex escapes;
-  if (!constants_only) escapes.Index(func->body_);
+  if (!constants_only || fold_constant_control_flow) escapes.Index(func->body_);
 
   auto analyzer = std::make_shared<arith::Analyzer>();
   SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned), std::move(collector.redefined),
-                          &escapes, constants_only);
+                          &escapes, constants_only, fold_constant_control_flow);
   auto new_body = mutator.RemapFinalizedWindows(mutator.VisitStmt(func->body_));
 
   // Final step: drop every dead yielded slot — IfStmt phi return_vars and
@@ -1756,8 +1764,8 @@ ProgramPtr TransformSimplifyProgram(const ProgramPtr& program) {
 
 namespace transform_utils {
 
-FunctionPtr SimplifyFunction(const FunctionPtr& func, bool constants_only) {
-  return TransformSimplify(func, constants_only);
+FunctionPtr SimplifyFunction(const FunctionPtr& func, bool constants_only, bool fold_constant_control_flow) {
+  return TransformSimplify(func, constants_only, fold_constant_control_flow);
 }
 
 }  // namespace transform_utils

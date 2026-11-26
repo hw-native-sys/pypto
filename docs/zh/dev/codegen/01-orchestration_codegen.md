@@ -93,6 +93,12 @@ REGISTER_ORCHESTRATION_OP("tensor.slice", TensorSliceHandler);
 ```
 
 运行时 SDK 从 `build_config.py` 提供包含路径和辅助源文件。
+A5 上使用 `RuntimeKind.HOST_BUILD_GRAPH` 编译 Program 时，PyPTO 选择 Simpler 的
+`percounter` 实现。需要原有 A5 `host_build_graph` 实现时，显式选择
+`RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL`。A2/A3 的 HBG 延用 `host_build_graph`。
+每个 chip 子制品（包括内建集合通信）都会把实际实现写入 `kernel_config.py`。
+加载以前编好的制品时使用其中记录的实现。
+
 HBG 的编排 API 位于 `src/common/host_build_graph/host/orchestration/`；
 Graph 代码还会包含 `host_build_graph/host/graph_boundary_match.h`。
 内建入口模板通过 `current_orch_context()` 访问 HBG 上下文（Context），

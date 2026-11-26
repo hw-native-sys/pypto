@@ -62,9 +62,26 @@ pipe operations remain authoritative.
 ```text
 explicit split_aiv AIV/AIC -> stamp attrs, preserve body
 standalone AIV/AIC with split metadata -> lower standalone split body
+unsplit native C2V AIV -> share initialization, keep payload on AIV0
 unsplit AIV requiring dual dispatch -> build lane-1 handshake replay
 other functions -> unchanged
 ```
+
+## Native C2V initialization
+
+A native C2V-only pipe constructor synchronizes both AIV lanes even when
+`split=0` gives the payload to AIV0 only. For an unsplit AIV function with a
+leading C2V setup, no authored lane control and parameter-alias returns, this
+pass shares the buffer/pipe setup and sets `dual_aiv_dispatch=True`. A runtime
+lane predicate keeps TPOP, compute, stores and TFREE on AIV0; AIV1 returns the
+output parameters after setup. Data-valued returns require explicit `split_aiv`
+control. Explicit split/dual-dispatch functions and V2C paths are preserved.
+
+The backend forwards lane identity through a runtime parameter. Pinned PTOAS
+can mistake that for absent lane control and add a hardware-AIV0 prologue gate;
+the wrapper removes only that generated gate when dual dispatch and dynamic
+runtime control are verified. It retains the IR predicate, masks and sync tail,
+and rejects an unrecognized conflicting gate before native compilation.
 
 ## Algorithm — no-split dual-AIV dispatch
 

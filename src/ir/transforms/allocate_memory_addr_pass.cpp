@@ -57,6 +57,7 @@
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/per_kernel_memory_planner.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -260,10 +261,16 @@ class MemRefUpdateMutator : public IRMutator {
     }
 
     if (args_changed || kwargs_changed) {
-      // Reg stores/scatters alias their destination, including its resolved
-      // MemRef. Keeping the old result type loses the newly assigned address.
-      auto result_type =
-          (IsOp(op, "reg.store") || IsOp(op, "reg.scatter")) ? new_args[0]->GetType() : op->GetType();
+      // Register writebacks alias their declared destination, including its
+      // resolved MemRef. The destination is not necessarily argument zero.
+      auto result_type = op->GetType();
+      auto& registry = OpRegistry::GetInstance();
+      if (registry.IsRegistered(op->op_->name_)) {
+        const auto& entry = registry.GetEntry(op->op_->name_);
+        if (const auto reuse = entry.GetOutputReusesInputArg(); entry.GetRegSpec() && reuse) {
+          result_type = new_args[*reuse]->GetType();
+        }
+      }
       return std::make_shared<Call>(op->op_, std::move(new_args), std::move(new_kwargs), result_type,
                                     op->span_);
     }
@@ -595,6 +602,9 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
     return func;
   }
 
+  const auto planner = GetFunctionMemoryPlanner(func);
+  if (planner == MemoryPlanner::PtoAS) return func;
+
   // Obtain the allocation policy from the backend (or fall back to the default).
   auto policy = backend::BackendConfig::IsConfigured() ? backend::GetBackend()->CreateMemoryAllocatorPolicy()
                                                        : std::make_unique<DefaultMemoryAllocatorPolicy>();
@@ -606,9 +616,6 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 2: Collect all unique MemRef objects from TileType variables
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
   const RelativeMemRefOffsets relative_offsets = FoldRelativeMemRefOffsets(memrefs, func->body_);
-
-  const PassContext* context = PassContext::Current();
-  const MemoryPlanner planner = context == nullptr ? MemoryPlanner::PyPTO : context->GetMemoryPlanner();
 
   // Step 3: use the selected in-tree allocator. PTOAS never reaches this pass.
   std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;

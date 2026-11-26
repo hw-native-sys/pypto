@@ -179,7 +179,9 @@ void BindPass(nb::module_& m) {
       .value("SimtValid", IRProperty::SimtValid, "Canonical SIMT helper and launch contracts")
       .value("SimtOutputsMaterialized", IRProperty::SimtOutputsMaterialized,
              "Writable SIMT Tiles have dedicated initialized output storage")
-      .value("SimtSpecialized", IRProperty::SimtSpecialized, "SIMT helper resources match their launches");
+      .value("SimtSpecialized", IRProperty::SimtSpecialized, "SIMT helper resources match their launches")
+      .value("AsyncHandleProvenance", IRProperty::AsyncHandleProvenance,
+             "Distributed async events and sessions trace to matching SSA definitions");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -231,12 +233,16 @@ void BindPass(nb::module_& m) {
              "Task graph built on the AICPU, dependencies auto-derived through the TensorMap "
              "(default)")
       .value("HOST_BUILD_GRAPH", RuntimeKind::HostBuildGraph,
-             "Host CPU builds the whole task graph up front; required for Graph Execution");
+             "Host CPU builds the whole task graph up front; required for Graph Execution")
+      .value("HOST_BUILD_GRAPH_EXPERIMENTAL", RuntimeKind::HostBuildGraphExperimental,
+             "Explicit original A5 host graph implementation");
+
+  passes.def("is_host_build_graph", &IsHostBuildGraph, nb::arg("kind"));
 
   passes.def("runtime_kind_to_name", &RuntimeKindToName, nb::arg("kind"),
-             R"(Wire name written to RUNTIME_CONFIG["runtime"], e.g. "host_build_graph")");
+             R"(Application-facing runtime selection, e.g. "host_build_graph")");
   passes.def("runtime_kind_from_name", &RuntimeKindFromName, nb::arg("name"),
-             "Parse a RUNTIME_CONFIG[\"runtime\"] wire name back into a RuntimeKind");
+             "Parse an application-facing runtime selection into a RuntimeKind");
 
   // Bind DiagnosticPhase enum
   nb::enum_<DiagnosticPhase>(passes, "DiagnosticPhase",
@@ -420,6 +426,9 @@ void BindPass(nb::module_& m) {
       .def("get_passes", &PassPipeline::GetPasses, "Get copies of all passes in execution order");
 
   // Factory functions with snake_case names
+  passes.def("outline_reg_scopes", &pass::OutlineRegScopes,
+             "Outline register scopes into synchronous device helpers before SSA conversion");
+
   passes.def("outline_simt_scopes", &pass::OutlineSimtScopes,
              "Outline per-thread regions before SSA conversion");
 
@@ -508,7 +517,9 @@ void BindPass(nb::module_& m) {
       .value("BUFFER_DESCRIPTOR_MISMATCH", typecheck::ErrorType::BUFFER_DESCRIPTOR_MISMATCH,
              "Buffer descriptor or multi-buffer slot count mismatch")
       .value("TENSOR_LAYOUT_MISMATCH", typecheck::ErrorType::TENSOR_LAYOUT_MISMATCH,
-             "Call argument layout differs from the callee parameter's");
+             "Call argument layout differs from the callee parameter's")
+      .value("ASYNC_HANDLE_MISMATCH", typecheck::ErrorType::ASYNC_HANDLE_MISMATCH,
+             "A communication event or session has the wrong producer");
 
   // Bind NestedCallErrorType enum
   nb::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")
@@ -684,9 +695,11 @@ void BindPass(nb::module_& m) {
              "allreduce is skipped for LowerHostTensorCollectives. FP32-only for trig. Idempotent.");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
+  passes.def("lower_graph_for_runtime", &pass::LowerGraphForRuntime,
+             "Lower Graph functions and scopes for TMR before outlining and inlining. No-op on HBG.");
   passes.def("inline_functions", &pass::InlineFunctions,
              "Create a pass that eliminates FunctionType::Inline functions by splicing\n"
-             "their bodies at every call site. Runs as the first pipeline pass.\n"
+             "their bodies at every call site.\n"
              "Detects cycles in the Inline → Inline call graph and raises ValueError.\n"
              "Supports multi-return inline (emits MakeTuple at call site) and nested\n"
              "Inline-calls-Inline (iterates to fixpoint).");
@@ -894,11 +907,17 @@ void BindPass(nb::module_& m) {
           },
           nb::arg("stmt"), "Return the predecessor stmts of the given stmt in region order");
 
-  dep_analysis.def("build_stmt_dependency_graph", &stmt_dep::BuildStmtDependencyGraph, nb::arg("region"),
-                   nb::arg("program").none() = nb::none(),
-                   "Build a dataflow dependency graph over a region's top-level stmts. "
-                   "When `program` is provided, the InOut-use discipline is checked first "
-                   "and any violation raises pypto.Error (VerificationError).");
+  dep_analysis.def(
+      "build_stmt_dependency_graph",
+      [](const StmtPtr& region, const ProgramPtr& program) {
+        // Python callers always get the checked graph. Only the
+        // internal reorder driver has already checked discipline.
+        return stmt_dep::BuildStmtDependencyGraph(region, program);
+      },
+      nb::arg("region"), nb::arg("program").none() = nb::none(),
+      "Build a dataflow dependency graph over a region's top-level stmts. "
+      "When `program` is provided, the InOut-use discipline is checked first "
+      "and any violation raises pypto.Error (VerificationError).");
 
   dep_analysis.def("check_inout_use_discipline", &stmt_dep::CheckInOutUseDiscipline, nb::arg("region"),
                    nb::arg("program"),

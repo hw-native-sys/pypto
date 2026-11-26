@@ -22,16 +22,38 @@ the IR types so downstream codegen has O(1) access.
 ## Async workspace engines
 
 `CommDomainScopeStmt.engines` records the async workspace engines required by a
-communication domain. Before materializing domains, this pass scans every function
-in the Program once, including Call and Submit nodes. If any function uses
-`pld.tensor.indexed_all_to_all_v` or its lowered builtin, every materialized domain
-receives `engines=["urma"]`. Otherwise the list is empty.
+communication domain. Before grouping allocations, this pass traces engine uses
+through `Call`/`Submit` arguments, returned aliases, views and loop carries to
+each underlying window-buffer allocation. Uncalled functions do not configure
+unrelated buffers.
 
-This deliberately conservative policy includes unused functions and unrelated
-domains. Precise per-domain matching is deferred. Distributed codegen only emits
-`workspace_engines` from this IR field; it does not infer communication requirements.
-The field is preserved by structural comparison, serialization, and printed IR
-round trips.
+`put_async`/`get_async` require URMA on their remote operand. `remote_load`/
+`remote_store` and `put`/`get` require MTE on their remote operand, including
+lowered tile forms. An allocation requiring both is rejected, regardless of
+peer rank; two views of one allocation cannot be separated into different domains.
+MTE is an internal classification, not a runtime workspace-engine name.
+
+Domains are grouped by **device coverage, memory source and engine category**.
+Independent MTE and URMA buffers with identical coverage therefore get separate
+domains: MTE uses an empty workspace list, and URMA uses `engines=["urma"]`.
+Local-only buffers with no engine requirement join a compatible group: an
+otherwise URMA-only group can include them; when both categories are present,
+they join the default non-URMA group. Source order determines domain/slot order.
+
+Collectives contribute requirements per operand: ordinary collective remote
+payloads, signals and remotely read send counts require MTE; indexed all-to-all-v
+requires URMA only for its target, and MTE for signal and send counts. Local
+input, receive counts and index operands impose no remote-engine requirement.
+The same rules cover public ops, HOST builtins and synthesized CHIP kernels;
+lowered `notify` operations retain the signal's MTE requirement. Each remote
+operand receives its own context. Operands need not share a domain; callers
+ensure compatible participants, rank ordering and collective semantics.
+
+Re-running the pass refreshes requirements and splits existing scopes when
+needed, preserving the `WindowBuffer` objects referenced by tensor views.
+Distributed codegen only renders `workspace_engines` from the resulting IR;
+it does not infer requirements. Structural comparison, serialization and text
+round trips preserve the field.
 
 ## Position in the pipeline
 
@@ -106,9 +128,10 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    `shared_ptr<const WindowBuffer>`. Chip-orch / InCore parameter types are
    not touched.
 
-7. **Cluster into comm domains.** Walk the allocation list in source order;
-   append a slot to the first existing comm domain whose merged device
-   descriptor matches, or open a new one.
+7. **Cluster into comm domains.** Reject incompatible engine uses of one
+   allocation, then walk allocations in source order. Append a slot to the
+   matching device-coverage, memory-source and engine-category group, or open
+   a new one. Engine requirements are collected before this grouping.
 
 8. **Wrap the body in scope statements.** Build a chain of nested
    `CommDomainScopeStmt`s — one per comm domain, outer = first declared,
@@ -121,8 +144,12 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
 
 The pass raises `pypto::ValueError` (carrying the alloc's span) if:
 
+- An allocation is used by both URMA and MTE communication primitives.
 - An allocation has no `pld.tensor.window` materialisation (dead alloc).
 - An allocation has at least one view but no chip-orch dispatch consumes it.
+- A `pld.tensor.window` view's dense byte size (`product(shape) * dtype_bytes`)
+  exceeds its allocation's logical size. The physical cache-line alignment
+  padding is not addressable through a view.
 - The `device=` expression on a dispatch is something other than `ConstInt`
   or a recognised `pl.range` induction var.
 - Two allocations within the same comm domain share a `name_hint_` (the
@@ -144,6 +171,12 @@ After the pass:
 - Every `pld.tensor.window` result Var's type is a `DistributedTensorType` whose
   `window_buffer_` field points to the corresponding `WindowBuffer`, and the
   defining Call carries that same type — both sides of the assignment agree.
+- Each `pld.tensor.window` declaration is checked against its allocation's
+  logical byte size during materialization when both sizes are statically known.
+  Dynamic capacity is checked by host codegen at the window declaration,
+  independently of dispatch sites. Host operation support is checked in codegen:
+  slice/assemble accept only plain Tensor operands; view/reshape have no
+  registered host lowering.
 - Every host-level `pld.tensor.allreduce` call has two positional arguments
   after [`SynthesizeAllReduceSignals`](49-synthesize_allreduce_signals.md) runs.
   For an omitted user signal, the second argument is a synthesized Var produced
@@ -154,6 +187,11 @@ After the pass:
 - Chip-orchestration and InCore parameter types remain `nullopt` on
   `window_buffer_`. N7 codegen reads the back-reference at the *host_orch*
   dispatch site and threads the matching `CommContext` pointer explicitly.
+
+This pass validates capacity at window declarations rather than scanning
+expression or function return types across the Program. The property verifier checks
+comm-domain structure: nonempty slot lists, non-null slots, and unique slot
+ownership across scopes.
 
 ## Text round-trip
 
@@ -209,3 +247,98 @@ absent definitions are outside this contract. Legacy informational
 - DSL: [`pld.tensor.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
   [`pld.tensor.window`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
   [`pld.system.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py).
+
+## Host DDR windows
+
+`pld.alloc_window_buffer(size, memory_source="host")` selects Host DDR backing;
+`"device"` remains the default. The shape/dtype overload accepts the same keyword.
+`WindowBuffer.memory_source` preserves this property through cloning, serialization,
+and the private `window_buffer` text descriptor. Slots are grouped by both device
+coverage and memory source: Host and Device allocations never share a physical domain.
+
+Host codegen requests `AddressSpace.HOST` from Simpler. Host and Device buffers
+use the same per-allocation engine analysis and grouping rules described above.
+Host backing alone does not request URMA. The per-rank `device_context(rank)` accessor
+uses the engines already provisioned on the domain and tracks context lifetime.
+
+Runtime API capabilities are checked once when loading the generated entry during
+worker setup, including `initializer` support when needed; dispatch does not repeat
+signature inspection. Simpler validates the platform and runtime combination. The
+current runtime submodule includes Simpler #3146: with no workspace engines,
+A5 Host domains map local and peer windows for synchronous MTE reads on
+`tensormap_and_ringbuffer`, `host_build_graph`, and `percounter`. It also includes
+Simpler #3174, which preserves the local window base for Host URMA domains.
+
+Engine conflicts are rejected by this pass before domains are created. Separate
+buffers using MTE and URMA are separated even when their device coverage and
+memory source match. The check classifies the explicit primitives without
+inspecting peer values: local rank and single-rank peer `0` are not exemptions
+for conflicting uses of one buffer. Ordinary local loads/stores are outside
+these primitive families. Notify/wait, builtin internals and external kernels
+are outside this conflict check; their own domain and hardware contracts still
+apply. `MaterializeDistTensorCtx` only materializes contexts for the resulting
+domains.
+
+### Runtime source initialization
+
+Declare a runtime source key with `pld.alloc_window_buffer(size, memory_source="host",
+init="engram_l1")`. Compilation records the key and logical byte count; it never opens
+or reads files. After compilation, bind one open binary file per domain rank:
+
+```python
+from contextlib import ExitStack
+from pypto.runtime import DistributedWorker
+
+compiled = program.compile(...)  # no shard files needed here
+with ExitStack() as stack:
+    shard_files = [stack.enter_context(open(path, "rb")) for path in shard_paths]
+    with DistributedWorker(compiled, persistent=True, reset_persistent_windows=False,
+                           window_sources={"engram_l1": shard_files}) as worker:
+        worker(...)  # creates the domain and loads the files before submitting chip tasks
+        worker(...)  # reuses the loaded Host domain
+```
+
+`init` must be a non-empty string and is supported only for Host windows. The
+`window_sources` mapping belongs to the worker (also accepted by `compiled.prepare`).
+The source sequence follows **domain rank order**, including domains covering a subset
+of workers. Missing/unused source keys and a wrong rank count raise errors.
+
+The same mapping accepts contiguous CPU `torch.Tensor` sources, or a mixture of
+files and tensors: `window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`.
+Tensor data is copied as raw bytes, starting at its view's storage offset, without
+dtype conversion or a staging clone. BF16 and FP8 are supported. Non-CPU,
+noncontiguous, sparse, quantized, conjugate and negative views are rejected.
+The source must contain at least the logical window byte count; trailing bytes are
+ignored. Binding retains the tensor object, not a snapshot of its contents: data is
+read at domain creation, so keep sources stable until that dispatch completes.
+
+Codegen emits `(buffer_name, init_key, logical_nbytes)` bindings and calls the fixed
+`make_window_initializer` helper with the worker's source map. The helper creates an
+internal callback; Simpler invokes it after all rank mappings exist. For each binding,
+it copies `window_sources[init_key][domain_rank]` into the corresponding named
+buffer, using `domain.buffer_range(buffer_name)` for its byte offset. No Python
+function is generated from file handles or tensor contents.
+
+Simpler #2939 supplies the creation-time initializer. PyPTO reads each source from
+file offset zero directly into the named buffer's Host mapping, in bounded chunks,
+and restores the original file position. It copies exactly the logical byte count;
+alignment padding is untouched and trailing file bytes are ignored. A short file
+fails domain creation; all CPU memoryview exports are released so Simpler can roll
+back. No complete table-sized staging allocation is made. Files must be readable,
+seekable binary streams; the caller owns them and must keep them open until the
+first dispatch completes. Do not mutate or concurrently access these streams while
+initialization runs.
+
+Persistent reuse does not invoke the initializer, so files can be closed after the
+first successful dispatch. A newly created domain reads its files again. Without
+`persistent=True`, each dispatch creates and initializes a new domain, so keep the
+files open. Source bindings are snapshotted at worker creation; changing the original
+mapping/list does not reload a retained table. Create a new worker to load new data.
+
+Persistent execution validates memory source, workspace engines and initializer
+bindings when reusing domains. Host and Device windows use the same policy:
+`persistent=True` retains allocations, and `reset_persistent_windows` controls
+zeroing before reuse (enabled by default). Initialization is not repeated after
+zeroing. Set `reset_persistent_windows=False` to retain the loaded Engram table;
+this also disables reset for Device scratch/signal buffers, whose state the caller
+must then manage. Domain release remains owned by Simpler.

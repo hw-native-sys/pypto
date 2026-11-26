@@ -10,13 +10,16 @@
 """PTO codegen tests for MX quantization operators."""
 
 import re
+import subprocess
 from pathlib import Path
 
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.runtime import RunConfig
 
 _TQUANT_MX_RAW = ir.get_op("tile.tquant_mx_raw").name
@@ -35,6 +38,22 @@ def _generate_mlir(program):
         function for function in optimized.functions.values() if ir.is_incore_type(function.func_type)
     )
     return codegen.PTOCodegen().generate(ir.Program([target], target.name, optimized.span))
+
+
+def _assemble_a5(mlir, tmp_path):
+    ptoas = find_ptoas_binary()
+    if ptoas is None:
+        pytest.skip("PTOAS is not installed")
+    path = tmp_path / "kernel.pto"
+    path.write_text(mlir)
+    result = subprocess.run(
+        [str(ptoas), "--pto-arch=a5", "--pto-level=level3", str(path), "-o", "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
 
 
 def _allocation_range(mlir, name_fragment):
@@ -68,6 +87,63 @@ class TestQuantMxCodegen:
         assert "quant_type MXFP4_E2M1" in mlir
         assert "dtype=!pto.f4E2M1x2, rows=3, cols=32, v_row=3, v_col=32" in mlir
         assert "dtype=ui8, rows=1, cols=32, v_row=1, v_col=6" in mlir
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("algorithm", ["ocp", "nv"])
+    def test_canonical_axis1_compiles_with_padded_source(self, algorithm, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 128], pl.FP32],
+                out_quant: pl.Tensor[[16, 128], pl.INT8],
+                out_exp: pl.Tensor[[16, 32], pl.UINT8],
+            ):
+                values = pl.tile.set_validshape(pl.load(src, [0, 0], [16, 128]), 16, 64)
+                amax = pl.tile.create([1, 32], pl.FP32)
+                scaling = pl.tile.create([1, 32], pl.FP32)
+                quant, exp = pl.tile.quant_mx_raw(
+                    values, amax, scaling, group_axis=1, quant_scale_alg=algorithm, canonical_axis1=True
+                )
+                pl.store(quant, [0, 0], out_quant)
+                pl.store(exp, [0, 0], out_exp)
+
+        mlir = _generate_mlir(Program)
+        operation = next(line for line in mlir.splitlines() if "pto.tquant.mx" in line)
+        assert "dtype=f32, rows=16, cols=128, v_row=16, v_col=64" in operation
+        assert "dtype=i8, rows=16, cols=128, v_row=16, v_col=64" in operation
+        assert "dtype=ui8, rows=16, cols=32, v_row=16, v_col=2" in operation
+
+        cpp = _assemble_a5(mlir, tmp_path)
+        enum = {"ocp": "OcpMxFp8E4M3", "nv": "NvMxFp8E4M3"}[algorithm]
+        assert f"TQUANT<1, pto::MxQuantAlg::{enum}>" in cpp
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("axis", [0, 1])
+    def test_e5m2_quantization_compiles_a_native_cast(self, axis, tmp_path):
+        quant_shape = (32, 64) if axis == 1 else (64, 32)
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[32, 64], pl.BF16],
+                out_quant: pl.Tensor[quant_shape, pl.FP8E5M2],
+                out_scale: pl.Tensor[[1, 64], pl.FP8E8M0],
+            ):
+                values = pl.load(src, [0, 0], [32, 64])
+                quant, scale = pl.quant_mx(values, group_axis=axis, dtype=pl.FP8E5M2)
+                pl.store(quant, [0, 0], out_quant)
+                pl.store(pl.reshape(scale, [1, 64]), [0, 0], out_scale)
+
+        mlir = _generate_mlir(Program)
+        assert "pto.tquant.mx" not in mlir
+        assert "pto.trowmax" in mlir
+        assert any("pto.tcvt" in line and "f8E5M2" in line for line in mlir.splitlines())
+
+        assert "float8_e5m2_t" in _assemble_a5(mlir, tmp_path)
 
     @pytest.mark.parametrize("axis", [0, 1])
     def test_fp4_tensor_quant_materializes_carrier_output(self, axis):
@@ -237,6 +313,80 @@ class TestQuantMxCodegen:
         ranges = [_allocation_range(mlir, name) for name in ("tq_max", "tq_scaling", "tq_dst", "tq_exp")]
         for index, lhs in enumerate(ranges):
             assert all(lhs[1] <= rhs[0] or rhs[1] <= lhs[0] for rhs in ranges[index + 1 :])
+
+    @pytest.mark.parametrize("source", [pl.FP32, pl.FP16, pl.BF16])
+    @pytest.mark.parametrize(
+        ("group_axis", "algorithm"),
+        # Every combination PTOAS v0.72 accepts for MXFP8: axis0 takes both
+        # algorithms for all three source dtypes, axis1 takes NV only for FP32
+        # (its B16 flat NV path does not exist in the pinned pto-isa).
+        [(1, "ocp"), (0, "ocp"), (0, "nv"), (1, "nv")],
+    )
+    def test_mxfp8_source_and_algorithm_matrix(self, source, group_axis, algorithm):
+        src_rows, src_cols = (16, 64) if group_axis == 1 else (32, 64)
+        out_rows, out_cols = (16, 64) if group_axis == 1 else (64, 32)
+
+        def build():
+            @pl.program
+            class Program:
+                @pl.function(type=pl.FunctionType.InCore)
+                def main(
+                    self,
+                    src: pl.Tensor[[src_rows, src_cols], source],
+                    out: pl.Tensor[[out_rows, out_cols], pl.FP8E4M3FN],
+                ):
+                    quant, _scale = pl.quant_mx(
+                        pl.load(src, [0, 0], [src_rows, src_cols]),
+                        group_axis=group_axis,
+                        quant_scale_alg=algorithm,
+                    )
+                    pl.store(quant, [0, 0], out)
+
+            return Program
+
+        if algorithm == "nv" and group_axis == 1 and source != pl.FP32:
+            # The parser rejects it while deducing the op, before any codegen.
+            with pytest.raises(InvalidOperationError, match="axis1 FP16/BF16 NV"):
+                build()
+            return
+
+        mlir = _generate_mlir(build())
+        tquant = next(line for line in mlir.splitlines() if "pto.tquant.mx" in line)
+        assert "quant_type MXFP8" in tquant
+        assert f"grpAxis = #pto<mx_group_axis axis{group_axis}>" in tquant
+        assert ("quant_scale_alg nv" in tquant) == (algorithm == "nv")
+        # The max / scaling scratch carries the source dtype, and FP32 axis1
+        # rounds the scaling buffer to 64 elements against B16's 128.
+        dtype_str = {pl.FP32: "f32", pl.FP16: "f16", pl.BF16: "bf16"}[source]
+        scaling = next(line for line in mlir.splitlines() if "tq_scaling" in line and "alloc_tile" in line)
+        assert f"dtype={dtype_str}" in scaling
+        if group_axis == 1:
+            groups = src_rows * src_cols // 32
+            alignment = 64 if source == pl.FP32 else 128
+            expected = (groups + alignment - 1) // alignment * alignment
+            assert f"rows=1, cols={expected}" in scaling
+
+    def test_tensor_source_larger_than_ub_is_rejected(self):
+        """A whole-tensor quantization is not tiled — it has to fail loudly.
+
+        Tensor-layer ``pl.quant_mx`` converts its source into a single Vec tile,
+        so a GM tensor larger than UB has no lowering. There is no automatic
+        tiling, and the useful property is that the memory planner says so with
+        the actual and permitted byte counts rather than emitting a kernel that
+        overruns the buffer: a 256x512 BF16 source needs 413,696 bytes of Vec
+        against A5's 245,760. Callers tile the source themselves (load a block
+        per SPMD block, as the device tests do).
+        """
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[256, 512], pl.BF16]) -> pl.Tensor[[256, 512], pl.FP8E4M3FN]:
+                quant, _scale = pl.quant_mx(src, group_axis=1)
+                return quant
+
+        with pytest.raises(ValueError, match=r"Vec buffer usage \(\d+ bytes\) exceeds platform limit"):
+            _optimize(Program)
 
     def test_raw_is_value_returning_after_optimization(self):
         @pl.program

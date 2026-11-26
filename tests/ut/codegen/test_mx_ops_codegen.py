@@ -9,6 +9,12 @@
 
 """Codegen tests for MXFP8, native FP4, and explicit FP4-to-FP8 legalization."""
 
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -27,41 +33,162 @@ def _reset_backend_after_test():
     reset_for_testing()
 
 
-def _run_default_pipeline(program, backend_type=BackendType.Ascend950):
+def _run_default_pipeline(program, backend_type=BackendType.Ascend950, planner=passes.MemoryPlanner.PYPTO):
     """Run the Default pipeline for an explicitly selected backend."""
     reset_for_testing()
     set_backend_type(backend_type)
-    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+    with passes.PassContext([], memory_planner=planner):
         return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
 
-def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
+def _emit_incore_mlir(program, backend_type=BackendType.Ascend950, planner=passes.MemoryPlanner.PYPTO) -> str:
     """Run Default pipeline and concatenate AIC/AIV MLIR."""
-    optimized = _run_default_pipeline(program, backend_type)
+    optimized = _run_default_pipeline(program, backend_type, planner)
     parts: list[str] = []
     for func in optimized.functions.values():
         if func.func_type in (pl.FunctionType.Orchestration, pl.FunctionType.Group):
             continue
         single = ir.Program([func], func.name, optimized.span)
-        result = codegen.PTOCodegen().generate(single, emit_tile_addr=True)
+        result = codegen.PTOCodegen().generate(single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
         parts.append(result if isinstance(result, str) else "".join(result.values()))
     return "\n".join(parts)
 
 
-def _assemble_mx(mlir, tmp_path):
+def _assemble_mx(mlir, tmp_path, planner=passes.MemoryPlanner.PYPTO, *, require_native_views=True):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
     source = tmp_path / "mx.pto"
     output = tmp_path / "mx.cpp"
     source.write_text(mlir)
-    _run_ptoas(str(source), str(output), ["--pto-arch=a5", "--pto-level=level3"])
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), ["--pto-arch=a5", f"--pto-level={level}"])
     cpp = output.read_text()
     # Acceptance alone is insufficient: MX must retain its packed ISA layout,
     # rather than silently falling back to an ordinary ND GlobalTensor.
     for layout in ("mx_a_zz", "mx_b_nn"):
-        if f"#pto.layout<{layout}>" in mlir:
+        if require_native_views and f"#pto.layout<{layout}>" in mlir:
             assert f"pto::Layout::{layout.upper()}" in cpp
     return cpp
+
+
+_MX_FP8_PAIRS = [
+    pytest.param(pl.FP8E4M3FN, pl.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(pl.FP8E5M2, pl.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(pl.FP8E4M3FN, pl.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(pl.FP8E5M2, pl.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
+# tile_buf dtype spelling in emitted PTO, and the pto-isa C++ element type.
+_PTO_FP8_SPELLING = {pl.FP8E4M3FN: "f8E4M3FN", pl.FP8E5M2: "f8E5M2"}
+_ISA_FP8_SPELLING = {pl.FP8E4M3FN: "float8_e4m3_t", pl.FP8E5M2: "float8_e5m2_t"}
+
+
+def _simulate_mx_load(program, tmp_path, backing, tile_shape, major, scalar_args=()):
+    """Execute the generated TLOAD and return the Mat tile in logical order."""
+    compiler = shutil.which("g++-15")
+    if compiler is None:
+        pytest.skip("GCC 15 is required for the CPU simulator")
+    cpp = _assemble_mx(_emit_incore_mlir(program), tmp_path)
+
+    isa_root = os.environ.get("PTO_ISA_ROOT")
+    if isa_root:
+        include_dir = Path(isa_root) / "include"
+    else:
+        pytest.importorskip("simpler_setup")
+        from pypto.runtime import pto_isa_include_dir  # noqa: PLC0415
+
+        include_dir = pto_isa_include_dir()
+    assert (include_dir / "pto/pto-inst.hpp").is_file(), f"PTO-ISA headers missing in {include_dir}"
+
+    rows, cols = tile_shape
+    input_bytes = ", ".join(str(value) for value in backing)
+    args = "".join(f", {value}" for value in scalar_args)
+    source = tmp_path / "probe.cpp"
+    source.write_text(
+        "#include <array>\n#include <cstdint>\n#include <cstdio>\n"
+        + cpp
+        + f"""
+int main() {{
+    pto::NPU_MEMORY_INIT(pto::NPUArch::A5);
+    const std::array<uint8_t, {len(backing)}> raw{{{input_bytes}}};
+    std::array<float8_e8m0_t, raw.size()> input{{}};
+    for (size_t i = 0; i < input.size(); ++i) {{
+        input[i] = float8_e8m0_t::FromRaw(raw[i]);
+    }}
+    load_window(input.data(){args});
+
+    // The generated kernel places its sole Mat tile at byte offset zero.
+    Tile<TileType::Mat, float8_e8m0_t, {rows}, {cols}, BLayout::{major}, {rows}, {cols},
+         SLayout::{major}, 32, PadValue::Null, CompactMode::Null> tile;
+    TASSIGN(tile, 0);
+    for (int row = 0; row < {rows}; ++row) {{
+        for (int col = 0; col < {cols}; ++col) {{
+            std::printf("%u ", static_cast<unsigned>(tile.GetElement(row, col).RawData()));
+        }}
+    }}
+}}
+"""
+    )
+    binary = tmp_path / "probe"
+    result = subprocess.run(
+        [
+            compiler,
+            "-std=c++23",
+            "-pthread",
+            "-D__CPU_SIM",
+            "-DPTO_CPU_SIM_TARGET_A5",
+            "-D__DAV_CUBE__",
+            f"-I{include_dir}",
+            str(source),
+            "-o",
+            str(binary),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return [int(value) for value in subprocess.check_output([str(binary)], timeout=30).split()]
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("layout", ["MX_A_ZZ", "MX_B_NN"])
+@pytest.mark.parametrize("nonzero_offset", [False, True], ids=["parent-stride", "nonzero-offset"])
+def test_packed_mx_scale_subwindow_loads_expected_bytes(tmp_path, layout, nonzero_offset):
+    """Test origin within one block and parent stride across two blocks independently."""
+    # Both layouts store 16 outer lanes by 2 scale groups per physical fractal.
+    # A's outer dimension is rows; B's outer dimension is columns.
+    outer, groups = 64, 8
+    outer_start, group_start = (16, 2) if nonzero_offset else (0, 0)
+    outer_size, group_size = (16, 4) if nonzero_offset else (32, 4)
+    logical = np.arange(outer * groups).reshape(outer, groups) % 251
+    backing = logical.reshape(outer // 16, 16, groups // 2, 2).transpose(0, 2, 1, 3).ravel()
+    window = logical[outer_start : outer_start + outer_size, group_start : group_start + group_size]
+    if layout == "MX_A_ZZ":
+        shape, offset, sizes, major = (
+            (outer, groups),
+            (outer_start, group_start),
+            (outer_size, group_size),
+            "RowMajor",
+        )
+    else:
+        shape, offset, sizes, major = (
+            (groups, outer),
+            (group_start, outer_start),
+            (group_size, outer_size),
+            "ColMajor",
+        )
+        window = window.T
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def load_window(self, scales: pl.Tensor[[{shape[0]}, {shape[1]}], pl.FP8E8M0, pl.{layout}]):
+        _ = pl.load(scales, [{offset[0]}, {offset[1]}], [{sizes[0]}, {sizes[1]}], target_memory=pl.Mem.Mat)
+""")
+    actual = _simulate_mx_load(program, tmp_path, backing, sizes, major)
+    np.testing.assert_array_equal(np.array(actual).reshape(sizes), window)
 
 
 class TestMxMatmulCodegen:
@@ -154,6 +281,51 @@ class TestMxMatmulCodegen:
             assert f"Tile<TileType::Left, {cpp_dtype}, 32, 128," in cpp
             assert f"Tile<TileType::Right, {cpp_dtype}, 128, 64," in cpp
             assert "Tile<TileType::Acc, float, 32, 64," in cpp
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize(
+        "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+    )
+    @pytest.mark.parametrize("m", [32, 64])
+    @pytest.mark.parametrize("lhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("rhs_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("lhs_layout", [pl.ND, pl.DN])
+    @pytest.mark.parametrize("rhs_layout", [pl.ND, pl.DN])
+    def test_tensor_native_fp4_matmul(
+        self, lhs_dtype, rhs_dtype, lhs_layout, rhs_layout, planner, m, tmp_path
+    ):
+        lhs_rows, lhs_cols = (m // 2, 128) if lhs_layout == pl.DN else (m, 64)
+        rhs_rows, rhs_cols = (64, 192) if rhs_layout == pl.DN else (128, 96)
+        lhs_s0, lhs_s1 = (1, lhs_rows) if lhs_layout == pl.DN else (lhs_cols, 1)
+        rhs_s0, rhs_s1 = (1, rhs_rows) if rhs_layout == pl.DN else (rhs_cols, 1)
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[
+                    [lhs_rows, lhs_cols], lhs_dtype, pl.TensorView(stride=[lhs_s0, lhs_s1], layout=lhs_layout)
+                ],
+                sa: pl.Tensor[[m, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[
+                    [rhs_rows, rhs_cols], rhs_dtype, pl.TensorView(stride=[rhs_s0, rhs_s1], layout=rhs_layout)
+                ],
+                sb: pl.Tensor[[4, 192], pl.FP8E8M0, pl.MX_B_NN],
+            ) -> pl.Tensor[[m, 192], pl.FP32]:
+                return pl.matmul_mx(a, sa, b, sb)
+
+        mlir = _emit_incore_mlir(Program, planner=planner)
+        lhs_token = "f4E2M1x2" if lhs_dtype == pl.FP4E2M1X2 else "f4E1M2x2"
+        rhs_token = "f4E2M1x2" if rhs_dtype == pl.FP4E2M1X2 else "f4E1M2x2"
+        assert "pto.tcvt" not in mlir
+        assert f"loc=left, dtype=!pto.{lhs_token}, rows={m}, cols=128" in mlir
+        assert f"loc=right, dtype=!pto.{rhs_token}, rows=128, cols=192" in mlir
+        assert f"loc=acc, dtype=f32, rows={m}, cols=192" in mlir
+        assert "pto.tmatmul.mx" in mlir
+        assert mlir.count("pto.tget_scale_addr") == 2
+        cpp = _assemble_mx(mlir, tmp_path, planner)
+        assert "TMATMUL_MX(" in cpp
 
     @pytest.mark.parametrize(
         "memory, physical, valid",
@@ -473,22 +645,84 @@ class TestMxMatmulCodegen:
         assert any("#pto.layout<mx_b_nn>" in line for line in mx_views)
 
     @pytest.mark.ptoas_compile
-    def test_quant_mx_scale_store_preserves_native_layout_diagnostic(self, tmp_path):
+    @pytest.mark.parametrize("axis", [0, 1])
+    @pytest.mark.parametrize("dtype", [pl.FP8E4M3FN, pl.FP8E5M2, pl.FP4E2M1X2])
+    def test_tensor_quant_mx_returns_payload_and_packed_scale(self, axis, dtype, tmp_path):
+        rows = 16 if axis == 1 else (64 if dtype == pl.FP4E2M1X2 else 32)
+        src_dtype = pl.BF16 if dtype == pl.FP4E2M1X2 else pl.FP32
+        payload_rows, payload_cols = (rows, 64) if axis == 1 else (64, rows)
+        if dtype == pl.FP4E2M1X2:
+            payload_cols //= 2
+        scale_shape = (rows, 2) if axis == 1 else (2, rows)
+        scale_layout = pl.MX_A_ZZ if axis == 1 else pl.MX_B_NN
+
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
-            def main(self, src: pl.Tensor[[16, 64], pl.FP16]) -> pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ]:
-                _data, scale = pl.quant_mx(src, group_axis=1)
-                return scale
+            def main(
+                self, src: pl.Tensor[[rows, 64], src_dtype]
+            ) -> tuple[
+                pl.Tensor[[payload_rows, payload_cols], dtype],
+                pl.Tensor[scale_shape, pl.FP8E8M0, scale_layout],
+            ]:
+                data, scale = pl.quant_mx(src, group_axis=axis, dtype=dtype)
+                return data, scale
 
+        optimized = _run_default_pipeline(Program)
+        kernel = next(func for func in optimized.functions.values() if ir.is_incore_type(func.func_type))
+        scale_params = [
+            param.type
+            for param in kernel.params
+            if isinstance(param.type, ir.TensorType) and param.type.dtype == pl.FP8E8M0
+        ]
+        (scale_type,) = scale_params
+        assert isinstance(scale_type, ir.TensorType) and scale_type.tensor_view is not None
+        assert scale_type.tensor_view.layout == scale_layout
+        assert tuple(dim.value for dim in scale_type.shape if isinstance(dim, ir.ConstInt)) == scale_shape
         mlir = _emit_incore_mlir(Program)
-        # Direct Vec fractal-32 stores are rejected by both PTOAS v0.67 and v0.74.
-        # Changing the destination view must not hide the unsupported source layout.
-        with pytest.raises(RuntimeError, match="expects A5 vec tstore src layout"):
-            _assemble_mx(mlir, tmp_path)
+        cpp = _assemble_mx(mlir, tmp_path, require_native_views=False)
+        # The packed public GM view is metadata-only in this kernel; TSTORE
+        # uses the flat backing bytes, not an MX-layout GlobalTensor.
+        assert "TSTORE" in cpp and "pto::Layout::ND" in cpp
         stores = [line for line in mlir.splitlines() if "pto.tstore" in line and "!pto.f8E8M0" in line]
         assert len(stores) == 1
-        assert "!pto.partition_tensor_view<16x2x!pto.f8E8M0>" in stores[0]
+        assert "slayout=none_box" in stores[0]
+        assert f"!pto.partition_tensor_view<1x{rows * 2}x!pto.f8E8M0>" in stores[0]
+        assert f"#pto.layout<{'mx_a_zz' if axis == 1 else 'mx_b_nn'}>" in mlir
+
+    @pytest.mark.ptoas_compile
+    def test_full_quant_mx_scale_store_to_explicit_output(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[32, 128], pl.BF16], out: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ]
+            ):
+                _data, scale = pl.quant_mx(pl.load(src, [0, 0], [32, 128]), group_axis=1)
+                pl.store(scale, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        _assemble_mx(mlir, tmp_path, require_native_views=False)
+        stores = [line for line in mlir.splitlines() if "pto.tstore" in line and "!pto.f8E8M0" in line]
+        assert len(stores) == 1
+        assert "!pto.partition_tensor_view<1x128x!pto.f8E8M0>" in stores[0]
+
+    @pytest.mark.ptoas_compile
+    def test_partial_quant_mx_scale_store_preserves_native_layout_diagnostic(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[16, 64], pl.FP16], out: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]
+            ):
+                _data, scale = pl.quant_mx(pl.load(src, [0, 0], [16, 64]), group_axis=1)
+                pl.store(scale, [16, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        # A subset of a packed tensor need not be contiguous. Do not silently
+        # treat a partial window as a full ND byte-buffer write.
+        with pytest.raises(RuntimeError, match="expects A5 vec tstore src layout"):
+            _assemble_mx(mlir, tmp_path)
 
     @pytest.mark.parametrize("cast_layout", [None, pl.NZ], ids=["nd", "fused-nz"])
     def test_mxfp4_times_mxfp8_uses_explicit_lhs_cast(self, cast_layout):
@@ -683,6 +917,71 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         assert "pto.tmatmul.mx.bias" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    @pytest.mark.parametrize(
+        "compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)]
+    )
+    def test_every_fp8_pair_emits_its_own_operand_dtypes(
+        self, tmp_path, compile_with_ptoas, lhs_dtype, rhs_dtype
+    ):
+        """Each MX FP8 pair reaches PTOAS with per-side dtypes on data, scale-addr and matmul.
+
+        Operand placement is left to the compiler (no hand-written ``pl.move``), which
+        is the form the ``matmul_mx`` family is documented to accept and the only one
+        whose Bias staging PTOAS lowers.
+        """
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], lhs_dtype],
+                a_s: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], rhs_dtype],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                bias: pl.Tensor[[1, 32], pl.FP32],
+                out: pl.Tensor[[16, 32], pl.FP32],
+                out_acc: pl.Tensor[[16, 32], pl.FP32],
+                out_bias: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                lhs = pl.load(a, [0, 0], [16, 64])
+                lhs_scale = pl.load(a_s, [0, 0], [16, 2])
+                rhs = pl.load(b, [0, 0], [64, 32])
+                rhs_scale = pl.load(b_s, [0, 0], [2, 32])
+                bias_tile = pl.load(bias, [0, 0], [1, 32])
+                base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                pl.store(base, [0, 0], out)
+                pl.store(pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale), [0, 0], out_acc)
+                pl.store(pl.matmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias_tile), [0, 0], out_bias)
+
+        mlir = _emit_incore_mlir(Program)
+        lhs_pto = _PTO_FP8_SPELLING[lhs_dtype]
+        rhs_pto = _PTO_FP8_SPELLING[rhs_dtype]
+        assert f"loc=left, dtype={lhs_pto}," in mlir
+        assert f"loc=right, dtype={rhs_pto}," in mlir
+        # Each side's scale-addr derivation reads that side's own data dtype; a
+        # dtype hardcoded in the MX path would make the two sides agree wrongly.
+        tget_lines = [line for line in mlir.splitlines() if "pto.tget_scale_addr" in line]
+        left_tget = [line for line in tget_lines if "loc=left," in line]
+        right_tget = [line for line in tget_lines if "loc=right," in line]
+        assert len(left_tget) + len(right_tget) == len(tget_lines) == 2
+        assert f"loc=left, dtype={lhs_pto}," in left_tget[0]
+        assert f"loc=right, dtype={rhs_pto}," in right_tget[0]
+        for pto_op in ("pto.tmatmul.mx ", "pto.tmatmul.mx.acc ", "pto.tmatmul.mx.bias "):
+            line = next(line for line in mlir.splitlines() if pto_op in line)
+            assert f"loc=left, dtype={lhs_pto}," in line
+            assert f"loc=right, dtype={rhs_pto}," in line
+            assert "loc=acc, dtype=f32," in line
+        assert "loc=bias, dtype=f32," in mlir
+
+        if compile_with_ptoas:
+            cpp = _assemble_mx(mlir, tmp_path)
+            assert f"Tile<TileType::Left, {_ISA_FP8_SPELLING[lhs_dtype]}" in cpp
+            assert f"Tile<TileType::Right, {_ISA_FP8_SPELLING[rhs_dtype]}" in cpp
+            # base + acc + bias all lower to TMATMUL_MX overloads.
+            assert cpp.count("TMATMUL_MX(") == 3
 
 
 class TestMxANDScaleCodegen:

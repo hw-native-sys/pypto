@@ -4,6 +4,11 @@
 A5 (Ascend950). This page lists every supported `pl.reg` operation, its parameters,
 return type and dtype restrictions. All names in the tables have the `pl.reg.` prefix.
 
+The compiler outlines each register scope early into a `FunctionType.VF`
+device helper. The public `reg_scope()` syntax is unchanged. Captured Tiles
+and Scalars become function parameters; Tile aliases can be returned, while
+registers and local Scalars remain inside the helper.
+
 ## Scope and register values
 
 ```python
@@ -22,13 +27,46 @@ def kernel(
     z = pl.tile.add(out, out)
 ```
 
-`pl.reg_scope()` has no arguments, captures, result list or yield. Scopes cannot
+`pl.reg_scope(*, auto_sync=True)` has no captures, result list or yield.
+`auto_sync` must be a compile-time bool; omitted or `True` retains automatic
+UB barrier insertion, while `False` selects explicit synchronization. Scopes cannot
 nest. The frontend accepts InCore and AIV device contexts, including an explicit
 InCore scope inside an Opaque, Orchestration or Graph function before outlining.
 After `ExpandMixedKernel`, the region must belong to an AIV function. Direct use
 in orchestration code and orchestration scopes inside RegScope are rejected.
 Explicit non-A5 targets are rejected; target checks wait until compilation if no
 target has been selected.
+
+### Explicit UB barriers
+
+`pl.reg.mem_bar(kind: str) -> None` is a statement-only operation inside a
+register scope. It emits exactly `pto.mem_bar "KIND"`; it cannot be assigned,
+returned or used as an expression. `kind` is a case-sensitive compile-time
+string with no default:
+
+| Family | Accepted kinds |
+| ------ | -------------- |
+| VV | `VV_ALL`, `VST_VLD`, `VLD_VST`, `VST_VST` |
+| VS | `VS_ALL`, `VST_LD`, `VLD_ST`, `VST_ST` |
+| SV | `SV_ALL`, `ST_VLD`, `LD_VST`, `ST_VST` |
+| SS | `SS_ALL`, `ST_LD`, `LD_ST`, `ST_ST` |
+
+```python
+# tile is initialized local Vec storage captured from outside the scope.
+with pl.reg_scope(auto_sync=False):
+    value = pl.reg.load(tile, lanes=64)
+    pl.reg.mem_bar("VLD_VST")
+    tile = pl.reg.store(tile, value=value)
+    pl.reg.mem_bar("VST_VLD")
+    value = pl.reg.load(tile, lanes=64)
+```
+
+Manual scopes require the author to provide all necessary RAW/WAR/WAW and
+loop-carried barriers. Explicit barriers are also allowed in automatic scopes.
+`ALL` covers only its family: `VV_ALL` does not cover scalar memory operations.
+These barriers order UB accesses within one vecscope; they do not replace
+cross-scope, DMA, GM or cross-core synchronization. See the
+[VF compilation contract](../codegen/03-vpto-vf-integration.md).
 
 Inline helpers may contain `reg_scope` and accept explicitly typed Vec Tiles.
 They inherit their caller's execution context when expanded; final placement
@@ -46,8 +84,10 @@ Scalars cannot escape their defining region through later uses, function returns
 loop results, tuples or assignments to outer variables. Nested tuple types are
 checked at function boundaries too. Tile operands must
 originate outside the region; `store` and `scatter` return aliases usable after the region.
-Assign every operation result to a variable, including `store` and `scatter`; a bare store is
-rejected. For loop APIs and hardware-loop policy, see [statements](01-statements.md).
+Assign register operation results to variables, including `store` and
+`scatter`. Assign the state returned by `squeeze_store_step` and carry it
+through `pl.yield_` inside a loop. See [statements](01-statements.md) for loop
+APIs and hardware-loop policy.
 `pl.hardware_loop()` (`HardwareLoopPolicy.Require`) is restricted to this lexical
 scope, including when the loop has zero trips.
 The A5 codegen boundary and backend execution limitations are
@@ -102,7 +142,8 @@ Inactive lanes and gaps retain their prior contents. Static bounds include the
 last strided block; initialization checks credit only active written blocks.
 Dynamic offsets remain caller-managed. The memory-effect query returns the
 conservative bounding interval, including gaps, for dependency/lifetime analysis.
-PTOAS receives an i16 stride operand and lowers BF16 stores to `vsstb`.
+PyPTO emits the stride as an `i16` operand and a predicate with the vector's lane count.
+If the mask is omitted, PyPTO emits `PAT_ALL`. PTOAS lowers BF16 block-stride stores to `vsstb`.
 For example, `pl.reg.store(dst, 16, values, mask, block_stride=16)` writes
 128 BF16 lanes into eight NZ panels at element offsets `16, 272, ..., 1808`.
 Dynamic stride scalars are not exposed in this initial API.
@@ -124,6 +165,133 @@ Dynamic offsets and valid extents pass through when static checks cannot prove a
 violation. The caller owns their runtime bounds and initialization. A store does
 not enlarge `valid_shape`, allocate storage or create a snapshot: its result
 aliases the destination and has exactly the destination Tile type.
+
+## Stable compaction and dense stores
+
+`squeeze(value, mask)` packs selected lanes into the beginning of one register,
+preserving their order. It accepts one full 256-byte UINT16 or UINT32 register
+(128 or 64 lanes) and a matching mask. Only the selected prefix is defined; use
+a prefix mask of the selected count when storing it. Integer bits are preserved,
+including UINT32 values above `2**24`.
+
+```python
+with pl.reg_scope():
+    value = pl.reg.load(src, lanes=64)  # UINT32 Tile
+    keep = pl.reg.active_mask(9, lanes=64)
+    packed = pl.reg.squeeze(value, keep)
+    out = pl.reg.store(dst, value=packed, mask=keep)
+```
+
+Use the explicit `squeeze_store_init/step/flush` operations when successive
+chunks must append into one dense UB sequence. Carry the opaque state through
+the loop with `pl.range(..., init_values=...)` and yield each updated state:
+
+```python
+with pl.reg_scope():
+    init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
+        value = pl.reg.load(src, offset=i * 64, lanes=64)
+        keep = pl.reg.active_mask(9, lanes=64)
+        next_ureg = pl.reg.squeeze_store_step(curr_ureg, dst, value, keep)
+        final_ureg = pl.yield_(next_ureg)
+    written = pl.reg.squeeze_store_flush(final_ureg, dst)
+    # dst[7:43] contains four selected prefixes, without gaps.
+```
+
+The destination is a Tile, not a pointer. Only `init` accepts `offset`: it is
+evaluated once and counts elements from the Tile's contiguous view origin,
+including any existing View `start_offset`. For example, a view origin of 32
+and `offset=7` start at element 39 of the backing allocation. `step` and `flush`
+have no offset argument; they continue the existing chain. Each `step` must use the same
+destination as `init`, and its mask must match the VecReg lane count. Use a
+full or prefix mask when appending all lanes or a known prefix. A squeezed
+register has an undefined tail, so use a mask that selects only its defined
+prefix.
+
+`init` initializes the UReg append state and returns an opaque
+`RegKind.UReg` value; it does not initialize the destination Tile. Each
+`step` must consume the current loop-carried UReg value and returns its
+successor; the loop carries that value through `init_values` and `pl.yield_`.
+Outside the loop, consume the result bound by `pl.yield_` (`final_ureg` above).
+Call `flush` exactly once after the loop. The
+backend lowers the chain to one alignment initialization, loop-carried
+`!pto.align` passed through `vstur "POST_UPDATE"`, and one final `vstar`.
+`flush` returns an alias of the destination Tile; it does not zero unwritten
+capacity. The caller guarantees total output capacity and reads only the
+written prefix.
+
+An input can contain zero chunks, for example when a batch has no candidates.
+Zero iterations forward the initial state unchanged. A chain that has been
+initialized still requires exactly one flush, even when no step ran; it appends
+zero elements and preserves the destination. The same rule covers an empty
+straight-line sequence:
+
+```python
+with pl.reg_scope():
+    ureg = pl.reg.squeeze_store_init(dst, offset=7)
+    written = pl.reg.squeeze_store_flush(ureg, dst)
+```
+
+This keeps one init/step/flush contract for zero and nonzero runtime counts,
+without a separate user-side conditional. Proven empty loops can be removed
+while forwarding their initial state.
+
+PTOAS 0.77 treats the stored form of VSQZ as pure, although it pushes a
+SQZN count consumed by VSTUR. Until that effect is modeled in PTOAS, the verifier
+rejects loop-invariant value/mask pairs: load or derive at least one input inside
+the current loop. The input may come from a loop carry updated by such a value
+through `pl.yield_`. Reusing equivalent value/mask producers for multiple steps in
+one RegScope is also rejected to prevent commoning away a required SQZN producer.
+This includes repeated writes of one value with equivalent full or prefix masks,
+even when those masks were constructed separately.
+These are conservative backend restrictions, not a change to append semantics.
+
+With PTOAS 0.77 on A5, avoid using two loads from the same unchanged address
+with the same mask in one RegScope. PTOAS can merge their stored VSQZ producers,
+leaving a VSTUR without its SQZN count. Also avoid reopening a stream in the
+same RegScope. PTOAS can schedule the second AR reset before the first VSTAR
+flush. See [PTOAS #1779](https://github.com/hw-native-sys/PTOAS/issues/1779) for
+the affected cases and follow-up validation.
+
+The destination must be a static one-dimensional Vec Tile or a two-dimensional
+Vec Tile that can be flattened in row-major order without copying. UINT16/UINT32
+dtype must match the input. Both implicit dense layout and explicit dense strides
+are accepted: `[2, 64]` with stride `[64, 1]` is valid; stride `[96, 1]` has row
+gaps and is rejected. Singleton axes contribute no gap, including single-row or
+single-column views. Boxed, padded, compact and nondegenerate column-major views
+are unsupported. Changing shape alone does not make a strided view contiguous.
+Offsets include the Tile View origin and are checked against static capacity at
+entry. As with dynamic register stores, the caller
+must ensure `offset + sum(selected_lanes) <= dst_capacity` at runtime.
+There is no truncation or allocation growth. Bytes before and after the written
+sequence retain their contents; initialize any tail that will later be read.
+
+The state is linear and local to its RegScope: consume only the current state,
+replace it with the step result, and flush once before leaving the region. It
+cannot escape through a function return or container. Do not read, write or rebind
+the destination or its aliases while the chain is active. Every for loop
+enclosing a stream opening must be sequential. Carry state with `init_values` and
+`pl.yield_`, with at most four nested loop levels. Use lane masks for filtering
+while a chain is active. The active chain requires straight-line or sequential
+for-loop control flow.
+
+The current AR-based lowering supports one **active** append chain at a time.
+The IR supports sequential chains after flushing, subject to the PTOAS 0.77
+scheduling limitation above. Ascend C documents separate limits of four load
+and four store unalign registers. Squeeze-store also uses shared AR state.
+Supporting multiple live squeeze chains requires independent
+cursor/count management and backend validation; increasing a resource limit alone
+does not provide that support. See the [register limits](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/ascendcopapi/docs/en/api/SIMD-API/basic_api/reg_vector_compute/register_data_types/UnalignRegForLoad-UnalignRegForStore.md)
+and [squeeze-store AR semantics](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/ascendcopapi/atlasascendc_api_07_0324.html).
+
+Squeeze-store uses physical micro instructions for its alignment state. A
+register scope containing a stream uses physical register codegen throughout.
+It currently supports full 256-byte loads/stores,
+scalar broadcast, index generation, reinterpretation, comparisons, selection,
+mask generation/logic, and squeeze. Other operations or partial register shapes
+are diagnosed. The verifier rejects `reg.add` anywhere in a scope containing a
+stream. Scopes without streams retain ordinary VMI lowering, including
+pure `squeeze`. Future PTOAS stream-aware VMI can preserve this public API.
 
 ## Vector and mask generators
 
@@ -379,37 +547,15 @@ The extended runner's `projection_order_positional`, `projection_order_mixed`,
 `projection_order_nested` cases check aliased reads and writes. Select them with
 `--cases` without `--direct-index`; they always use direct projections.
 
-Both outputs of `intlv`/`dintlv` have zero in inactive lanes. The pinned/minimum
-PTOAS v0.74 implements native result masking (`b6945321`,
-[PTOAS #1732](https://github.com/hw-native-sys/PTOAS/issues/1732)), so PyPTO emits
-masked interleave directly, without additional result-clearing `vsel` operations
-or BF16-to-UINT16-to-BF16 compensation casts. Active BF16 values retain their bit
-patterns. Omitted-mask calls retain their all-active lowering and fusion opportunities.
+PyPTO emits masked interleave directly. Both outputs of `intlv`/`dintlv`
+have zero in inactive lanes and preserve the bit patterns of active BF16
+values. Omitting the mask enables all lanes and preserves fusion opportunities.
 
-The independent small-vector placement defect in
-[PTOAS #1659](https://github.com/hw-native-sys/PTOAS/issues/1659) remains upstream.
-It occurs with or without the former compensation, including omitted/full masks;
-zero selection cannot repair incorrectly arranged active lanes. PyPTO does not
-add another workaround or change accepted lane counts for this defect.
-A5 qualification with PTOAS v0.74 found the following results:
-
-| Register dtypes | Physical lanes | Tested failing VLs | Tested passing VLs |
-| --------------- | -------------- | ------------------ | ------------------ |
-| INT8, UINT8 | 256 | 8, 64, 128 | 256 |
-| FP16, BF16, INT16, UINT16 | 128 | 8, 64 | 128, 256 |
-| FP32, INT32, UINT32 | 64 | 8 | 64, 128, 256 |
-
-At the failing lengths, `intlv` loses active high-result data and `dintlv`
-misplaces the second-input portion of both results. All observed inactive lanes
-were zero. BF16 VL128/256 passed raw-bit checks, including NaNs, infinities,
-subnormals and signed zeros. This table records the tested matrix, not an
-exhaustive list of frontend-accepted even lengths.
-
-`tests/st/runtime/vpto/test_reg_interleave_onboard.py` checks the production
-masked and omitted-mask paths, storing both complete results of each operation.
-It checks empty/partial/full masks, raw bits and guard regions. By default it
-uses the passing lengths above for each dtype. Explicit `--lanes` values also
-allow the known small-VL failure to be reproduced independently. Build outside
+`tests/st/runtime/vpto/test_reg_interleave_onboard.py` checks both results for explicit and
+omitted masks, including raw bits and guard regions. The default run covers
+lengths at least as wide as one physical register. Short-vector code generation
+has compile coverage with PTOAS v0.77. A5 numerical validation for those lengths
+is pending. Use `--lanes 8` to run a targeted hardware regression. Build outside
 device allocation, then execute the saved artifacts on A5:
 
 ```bash
@@ -418,14 +564,6 @@ task-submit --no-device --run \
 task-submit --device auto --run \
   'python tests/st/runtime/vpto/test_reg_interleave_onboard.py --worker build/interleave "$TASK_DEVICE"'
 ```
-
-To reproduce #1659, build a separate output directory with `--dtypes FP32 --lanes 8`
-and execute it using `--worker`; its numerical checks fail until PTOAS fixes the
-placement. Use a current-worktree build and the pinned runtime/toolchain
-environment for both commands. `manifest.json` records compilation failures
-separately from the per-output hardware checks in `result.json`. Compilation
-success does not establish numerical correctness, and these checks provide no
-latency or throughput measurement.
 
 ```python
 # Inside a reg_scope, with matching UINT32 registers lo_a/lo_b/hi_a/hi_b:
@@ -453,7 +591,7 @@ they do not establish static initialization proofs. VF helpers capture the
 whole accessed Tile conservatively (`read` for gather, `readwrite` for scatter).
 Mixed-dtype captures use typed pointers derived from the same UB base.
 
-Indexed codegen relies on PTOAS v0.74 or newer to synchronize unknown indexed
+Indexed codegen relies on PTOAS to synchronize unknown indexed
 footprints within a vecscope, including RAW, WAR and WAW dependencies. This
 version includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730),
 so PyPTO emits no per-access `VV_ALL` fences. PTOAS owns VF dependency analysis;
@@ -472,8 +610,9 @@ with pl.reg_scope():
 
 | API | Meaning |
 | --- | ------- |
-| `with ib.reg_scope(span=None):` | Open a register region in Python IRBuilder. |
+| `with ib.reg_scope(span=None, *, auto_sync=True):` | Open a register region in Python IRBuilder. |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | Create a named register operation. `op_name` is the registered name such as `"reg.add"`; `args` contains IR operands, `kwargs` operation attributes. |
+| `ib.emit_reg_mem_bar(kind, span=None)` | Emit a statement-only explicit UB barrier. |
 | `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | Emit a named store and return the destination Tile alias. |
 | `ir.get_reg_op_spec(name)` | Inspect the operation's region requirement and VMI emitter. |
 | `ir.get_reg_memory_effect(call)` | Inspect a load/store's target Tile, known root allocation, read/write access, half-open element interval and optional mask. Unknown roots or interval endpoints remain unknown. |
@@ -484,8 +623,8 @@ function validates ownership; `RegScopeValid` validates manually constructed IR,
 and `MixedKernelExpanded` checks final AIV placement. Memory-effect inspection
 preserves masks without claiming full-buffer initialization or disjointness.
 
-Python text syntax does not accept scope metadata. Printing a manually constructed
-RegScope with nonempty `name_hint` or `attrs` raises an error to avoid losing
+Python printing emits `pl.reg_scope(auto_sync=False)` for a manual scope.
+Other nonempty attributes and nonempty `name_hint` raise an error to avoid losing
 metadata; binary serialization preserves those fields. Empty scopes print as
 `pass`. The API list above describes the supported frontend surface; PTOAS
 instructions without a corresponding listed API are not exposed through `pl.reg`.

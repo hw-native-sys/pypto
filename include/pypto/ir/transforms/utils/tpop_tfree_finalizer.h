@@ -22,6 +22,7 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
@@ -56,10 +57,15 @@ const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Va
 ///
 /// Ensures every generated tpop chain frees the canonical tile value and that
 /// each tfree stays at or after the tile's last use, including nested control
-/// flow bodies. Within each body, releases follow pop order per pipe: a later
+/// flow, outlined VF result aliases and physical writebacks in raw RegScopes. A
+/// receive in a VF caller may not escape its defining body through
+/// yield/return, including nested returns of enclosing aliases. Nested bodies
+/// must not receive on a pipe with an outstanding outer receive or release an
+/// outer receive. Within each body, releases follow pop order per pipe: a later
 /// tile cannot release its slot until the preceding FIFO prefix is finished.
 std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
-                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
+                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                        const ProgramPtr& program = nullptr);
 
 }  // namespace tpop_tfree
 }  // namespace ir

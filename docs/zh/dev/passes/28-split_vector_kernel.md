@@ -54,9 +54,24 @@ per-lane 形态（由上游 `LowerAutoVectorSplit` + `ExpandMixedKernel` 达成�
 ```text
 explicit split_aiv AIV/AIC -> stamp attrs, preserve body
 standalone AIV/AIC with split metadata -> lower standalone split body
+unsplit native C2V AIV -> share initialization, keep payload on AIV0
 unsplit AIV requiring dual dispatch -> build lane-1 handshake replay
 other functions -> unchanged
 ```
+
+## 原生 C2V 管道初始化
+
+原生 C2V-only 管道的构造函数会同步两个 AIV，即使 `split=0` 的负载仅由 AIV0
+消费。对于前导语句为 C2V 初始化、没有手写 lane 控制且返回值对应参数的未拆分
+AIV 函数，本 pass 将缓冲区和管道初始化放在公共部分，并设置
+`dual_aiv_dispatch=True`。运行时 lane 条件将 TPOP、计算、写回和 TFREE 限定在
+AIV0；AIV1 完成初始化后返回输出参数。返回独立计算值的程序需要显式
+`split_aiv` 控制。已有显式拆分、双 lane 分派和 V2C 路径保持原有语义。
+
+后端通过参数传递运行时 lane 编号。固定版本的 PTOAS 可能因此误判为没有 lane
+控制，并在函数序言额外添加硬件 AIV0 条件；包装层仅在确认双 lane 分派和动态
+运行时编号后移除该额外条件，保留 IR 条件、掩码设置和同步尾部。遇到无法识别的
+冲突条件会在原生编译前报告错误。
 
 ## 算法 —— 无拆分双 AIV 派发
 

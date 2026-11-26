@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Build contract for separately compiled, self-contained A5 VPTO helpers."""
+"""Build contract for separately compiled A5 VPTO helpers."""
 
 import re
 from collections.abc import Sequence
@@ -16,22 +16,27 @@ from typing import cast
 
 from . import _device_image
 
-# These options are also included in the binary cache identity. Keep LLVM
-# compilation separate from the C++ flags and retain PTOAS's validated device
-# profile. Generic-address-space on/off happened to produce identical code for
-# the add helper; this does not establish ABI equivalence for other helpers.
 PTOAS_FLAGS = (
     "--pto-arch=a5",
     "--pto-backend=vpto",
-    "--emit-vpto-llvm-ir",
     "--vmi-fastmath=false",
-    "--enable-vecscope-mem-bar=true",
 )
 # Tile operations can leave out-of-line functions before kernel_entry in the
 # caller object. Separate their sections so the linker can put the entry first;
 # the persistent loader starts at byte zero of the final .text payload.
 CALLER_FLAGS = ("-ffunction-sections",)
 LINK_SYMBOL_ORDER = ("kernel_entry",)
+
+LLVM_IR_FLAG = "--emit-vpto-llvm-ir"
+DEVICE_OBJECT_FLAG = "--emit-vpto-device-object"
+# Inline-assembly SIMT entries also require PTOAS's launch-size check and
+# deterministic scheduling. Ordinary register helpers use PTOAS's defaults.
+SIMT_OBJECT_FLAGS = (
+    "--vpto-fix-vfsimt-size=auto",
+    "--bisheng-vec-misched=on",
+)
+
+# Intrinsic-only SIMT helpers still compile their exported LLVM with Bisheng.
 DEVICE_FLAGS = (
     "--cce-aicore-arch=dav-c310-vec",
     "--cce-aicore-only",
@@ -44,6 +49,65 @@ DEVICE_FLAGS = (
     "-mllvm",
     "-cce-dyn-kernel-stack-size=true",
 )
+
+REG_AUTO_SYNC_PREFIX = "// pypto.reg_auto_sync:"
+
+
+def device_object_aliases(data: bytes) -> tuple[str, ...]:
+    """Expose logical names for native AIV functions emitted with a CANN ABI suffix."""
+    exports = _device_image.device_object_exports(data)
+    variants: dict[str, list[str]] = {}
+    for symbol in sorted(exports):
+        for suffix in (".vector", "_mix_aiv"):
+            if symbol.endswith(suffix):
+                variants.setdefault(symbol.removesuffix(suffix), []).append(symbol)
+                break
+    # An existing logical symbol takes precedence. Leave ambiguous references
+    # for the final device link, which also sees the caller and other helpers.
+    return tuple(
+        f"--defsym={name}={symbols[0]}"
+        for name, symbols in variants.items()
+        if name and name not in exports and len(symbols) == 1
+    )
+
+
+def snapshot_sources(sources: tuple[str, ...]) -> tuple[str, ...]:
+    """Capture helper contents for one cache lookup or compilation."""
+    return tuple(Path(source).read_text() for source in sources)
+
+
+def ptoas_flags_for_source(source_text: str, *, emit_llvm: bool = False) -> tuple[str, ...]:
+    """Select the helper's synchronization policy and output mode.
+
+    Reserved markers must be exact standalone comments in the file header.
+    Reject misplaced or malformed markers rather than silently compiling a
+    manual helper with a different synchronization policy.
+    """
+    markers: list[str] = []
+    in_header = True
+    for line in source_text.splitlines():
+        if "pypto.reg_auto_sync" in line:
+            if not in_header or line not in (REG_AUTO_SYNC_PREFIX + " true", REG_AUTO_SYNC_PREFIX + " false"):
+                raise ValueError("Invalid pypto.reg_auto_sync header marker")
+            markers.append(line)
+        if line.strip() and not line.lstrip().startswith("//"):
+            in_header = False
+    if len(markers) > 1:
+        raise ValueError("Duplicate pypto.reg_auto_sync header markers")
+    # Match the actual PTO entry attribute, not user function names, comments
+    # or string attributes that happen to mention the same spelling.
+    code_tokens = re.sub(
+        r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/',
+        lambda token: "pto.simt_entry" if token[0] == '"pto.simt_entry"' else " ",
+        source_text,
+        flags=re.DOTALL,
+    )
+    simt = re.search(r"[{,]\s*pto\.simt_entry\s*(?=[},=])", code_tokens)
+    if markers and simt:
+        raise ValueError("pypto.reg_auto_sync is not valid for SIMT helpers")
+    enabled = not markers or markers[0].endswith(" true")
+    mode = LLVM_IR_FLAG if simt or emit_llvm else DEVICE_OBJECT_FLAG
+    return (*PTOAS_FLAGS, mode, f"--enable-vecscope-mem-bar={str(enabled).lower()}")
 
 
 def prepare_llvm_for_bisheng(text: str) -> str:

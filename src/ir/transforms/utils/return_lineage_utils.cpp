@@ -232,6 +232,7 @@ struct TraceContext {
   std::unordered_set<const Function*> active_functions;
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> memo;
   std::unordered_map<const Function*, size_t> trailing_ctx_counts;
+  std::optional<structural_comparison_detail::TypeComparisonCache> type_comparisons;
   size_t query_depth = 0;
   bool require_terminal_returns = false;
   // Strict queries must not reuse maps computed without recursive validation.
@@ -249,6 +250,7 @@ struct TraceContext {
     strict_memo.clear();
     strict_tuple_memo.clear();
     trailing_ctx_counts.clear();
+    type_comparisons.reset();
   }
 };
 
@@ -422,7 +424,16 @@ ExprPtr ResolveTupleElement(const ExprPtr& tuple, int64_t position, const BodyIn
   }
 
   auto call = AsCallLike(source);
-  if (!call.args || IsBuiltinOp(call.op->name_)) return nullptr;
+  if (!call.args) return nullptr;
+  if (const auto* entry = LookupOpEntry(call.op)) {
+    // A functional tuple may return an existing GM destination alongside a
+    // fresh event. Only the declared element inherits the operand's lineage.
+    const auto& aliases = entry->GetTupleResultAliases();
+    auto alias = aliases.find(pos);
+    return alias != aliases.end() && alias->second < call.args->size() ? (*call.args)[alias->second]
+                                                                       : nullptr;
+  }
+  if (IsBuiltinOp(call.op->name_)) return nullptr;
   auto callee = program ? program->GetFunction(call.op->name_) : nullptr;
   if (!callee) return nullptr;
   // A single TupleType return occupies one flat slot. Strict HOST tracing
@@ -813,13 +824,17 @@ std::vector<std::optional<size_t>> TraceIndexedExprsToParamIndices(
   result.reserve(exprs.size());
   LineageMemo memo;
   memo.formal_param_count = formal_param_count;
+  // Callees and return sites share the same exact type projections within
+  // the enclosing trace scope.
+  auto& type_comparisons = Ctx().type_comparisons;
+  if (!type_comparisons) type_comparisons.emplace();
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
     if (expr) {
       auto lineage = TraceExpr(expr, index, param_indices, program, memo);
-      if (lineage.root &&
-          (!AsTensorTypeLike(expr->GetType()) ||
-           (lineage.returned_type && structural_equal(lineage.returned_type, lineage.root->GetType())))) {
+      if (lineage.root && (!AsTensorTypeLike(expr->GetType()) ||
+                           (lineage.returned_type &&
+                            type_comparisons->Equal(lineage.returned_type, lineage.root->GetType())))) {
         auto param_it = param_indices.find(lineage.root);
         if (param_it != param_indices.end()) idx = param_it->second;
       }
@@ -1162,8 +1177,14 @@ std::optional<size_t> ExplicitReturnedParamIndex(const FunctionPtr& func) {
 }
 
 std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramPtr& program) {
-  auto indices = ReturnedParamIndicesImpl(func, program);
-  return indices.empty() ? std::nullopt : indices[0];
+  return ReturnedParamIndexAt(func, program, 0);
+}
+
+std::optional<size_t> ReturnedParamIndexAt(const FunctionPtr& func, const ProgramPtr& program,
+                                           size_t position) {
+  TraceQueryGuard guard;
+  const auto& indices = CachedReturnedParamIndices(func, program);
+  return position < indices.size() ? indices[position] : std::nullopt;
 }
 
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program) {

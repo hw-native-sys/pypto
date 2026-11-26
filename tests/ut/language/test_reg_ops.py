@@ -535,5 +535,310 @@ def kernel(dst: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec]):
     ir.assert_structural_equal(direct, pl.parse(expected), enable_auto_mapping=True)
 
 
+def test_manual_reg_scope_mem_bar_roundtrip():
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]):
+        with pl.reg_scope(auto_sync=False):
+            x = pl.reg.load(src, lanes=64)
+            pl.reg.mem_bar("VLD_VST")
+            _out = pl.reg.store(src, value=x)
+
+    printed = python_print(kernel, format=False)
+    assert "auto_sync=False" in printed
+    assert "pl.reg.mem_bar(" in printed
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("option", ["1", "'false'", "None", "pl.const(0, pl.INT32)"])
+def test_reg_auto_sync_rejects_non_bool(option):
+    source = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def kernel():
+    with pl.reg_scope(auto_sync={option}):
+        pl.reg.mem_bar("VV_ALL")
+"""
+    with pytest.raises((ParserError, ValueError, TypeError), match="auto_sync|bool"):
+        pl.parse(source)
+
+
+def test_reg_mem_bar_value_rejected():
+    with pytest.raises((ParserError, ValueError, TypeError), match="mem_bar|statement|Assign"):
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel():
+            with pl.reg_scope():
+                _value = pl.reg.mem_bar("VV_ALL")
+
+
+@pytest.mark.parametrize("arguments", ["False", "unknown=False", "auto_sync=True, auto_sync=False"])
+def test_reg_auto_sync_rejects_invalid_arguments(arguments):
+    source = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def kernel():
+    with pl.reg_scope({arguments}):
+        pl.reg.mem_bar("VV_ALL")
+"""
+    with pytest.raises((ParserError, ValueError, TypeError, SyntaxError), match="auto_sync|keyword"):
+        pl.parse(source)
+
+
+def test_reg_auto_sync_compiletime_bool_and_default_normalization():
+    policy = False
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def manual():
+        with pl.reg_scope(auto_sync=policy):
+            pl.reg.mem_bar(kind="VV_ALL")
+
+    assert "auto_sync=False" in python_print(manual, format=False)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def automatic():
+        with pl.reg_scope(auto_sync=True):
+            pl.reg.mem_bar("VV_ALL")
+
+    assert "with pl.reg_scope():" in python_print(automatic, format=False)
+
+
+def test_reg_auto_sync_runtime_policy_rejected():
+    with pytest.raises((ParserError, ValueError, TypeError), match="auto_sync|compile-time"):
+        pl.parse("""
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(policy: pl.Scalar[pl.BOOL]):
+    with pl.reg_scope(auto_sync=policy):
+        pl.reg.mem_bar("VV_ALL")
+""")
+
+
+def test_squeeze_store_explicit_state_roundtrip():
+    kernel = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(
+    src: pl.Tile[[256], pl.UINT32, pl.MemorySpace.Vec],
+    dst: pl.Tile[[320], pl.UINT32, pl.MemorySpace.Vec],
+):
+    with pl.reg_scope():
+        init_ureg = pl.reg.squeeze_store_init(dst)
+        for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
+            value = pl.reg.load(src, offset=i * 64, lanes=64)
+            keep = pl.reg.active_mask(9, lanes=64)
+            next_ureg = pl.reg.squeeze_store_step(curr_ureg, dst, value, keep)
+            curr_ureg = pl.yield_(next_ureg)
+        written = pl.reg.squeeze_store_flush(curr_ureg, dst)
+        observed = pl.reg.load(dst, lanes=64)
+""")
+    printed = python_print(kernel, format=False)
+    assert printed.count("pl.reg.squeeze_store_init(") == 1
+    assert printed.count("pl.reg.squeeze_store_step(") == 1
+    assert printed.count("pl.reg.squeeze_store_flush(") == 1
+    assert "pl.reg.squeeze_store_init(dst" in printed
+    # Loop arguments and loop results may share a source spelling; the printer
+    # disambiguates their SSA names. Check operands without fixing that spelling.
+    assert ", dst, value, keep)" in printed
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
+
+
+def test_squeeze_store_operations_are_public_without_stream_handle():
+    assert callable(pl.reg.squeeze_store_init)
+    assert callable(pl.reg.squeeze_store_step)
+    assert callable(pl.reg.squeeze_store_flush)
+    assert not hasattr(pl.reg, "store_stream")
+    assert not hasattr(pl.reg, "StoreStream")
+    assert list(inspect.signature(pl.reg.squeeze_store_init).parameters) == ["dst", "offset"]
+    assert list(inspect.signature(pl.reg.squeeze_store_step).parameters) == [
+        "curr_ureg",
+        "dst",
+        "value",
+        "mask",
+    ]
+    assert list(inspect.signature(pl.reg.squeeze_store_flush).parameters) == ["final_ureg", "dst"]
+
+
+@pytest.mark.parametrize(
+    "shape,view",
+    [
+        ("[128]", ""),
+        ("[128]", ", pl.TileView(stride=[1])"),
+        ("[2, 64]", ""),
+        ("[2, 64]", ", pl.TileView(stride=[64, 1])"),
+        ("[1, 128]", ", pl.TileView(stride=[1024, 1])"),
+        ("[128, 1]", ""),
+    ],
+)
+def test_squeeze_store_accepts_flattenable_destination(shape, view):
+    # Explicit dense strides and implicit layout describe the same linear
+    # address sequence. A singleton axis contributes no physical gap.
+    function = pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+           dst: pl.Tile[{shape}, pl.UINT32, pl.MemorySpace.Vec{view}]):
+    with pl.reg_scope():
+        ureg = pl.reg.squeeze_store_init(dst, offset=7)
+        value = pl.reg.load(src, lanes=64)
+        keep = pl.reg.active_mask(3, lanes=64)
+        ureg = pl.reg.squeeze_store_step(ureg, dst, value, keep)
+        written = pl.reg.squeeze_store_flush(ureg, dst)
+""")
+    ir.assert_structural_equal(
+        function, pl.parse(python_print(function, format=False)), enable_auto_mapping=True
+    )
+
+
+@pytest.mark.parametrize(
+    "shape,view",
+    [
+        ("[128]", "pl.TileView(stride=[2])"),
+        ("[2, 64]", "pl.TileView(stride=[96, 1])"),
+        ("[2, 64]", "pl.TileView(stride=[1, 2], blayout=pl.TileLayout.col_major)"),
+        ("[2, 64]", "pl.TileView(pad=pl.PadValue.zero)"),
+        ("[2, 64]", "pl.TileView(slayout=pl.TileLayout.row_major)"),
+    ],
+)
+def test_squeeze_store_rejects_non_linear_destination(shape, view):
+    with pytest.raises((ParserError, ValueError), match="contiguous"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(dst: pl.Tile[{shape}, pl.UINT32, pl.MemorySpace.Vec, {view}]):
+    with pl.reg_scope():
+        ureg = pl.reg.squeeze_store_init(dst)
+        written = pl.reg.squeeze_store_flush(ureg, dst)
+""")
+
+
+@pytest.mark.parametrize(
+    "body,message",
+    [
+        ("other = pl.reg.squeeze_store_init(dst)", "cannot nest"),
+        ("observed = pl.reg.load(dst, lanes=64)", "Flush"),
+        ("pass", "must be flushed"),
+        ("return", "ReturnStmt is not supported"),
+        ("if True:\n            written = pl.reg.squeeze_store_flush(ureg, dst)", "conditionals"),
+        (
+            "first = pl.reg.squeeze_store_step(ureg, dst, value, keep)\n"
+            "        second = pl.reg.squeeze_store_step(ureg, dst, value, keep)\n"
+            "        written = pl.reg.squeeze_store_flush(second, dst)",
+            "consumed exactly once",
+        ),
+    ],
+)
+def test_squeeze_store_rejects_invalid_lifecycle(body, message):
+    with pytest.raises((ParserError, ValueError), match=message):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+           dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        value = pl.reg.load(src, lanes=64)
+        keep = pl.reg.active_mask(3, lanes=64)
+        ureg = pl.reg.squeeze_store_init(dst)
+        {body}
+""")
+
+
+def test_squeeze_store_allows_more_than_four_sequential_chains():
+    # The implementation restricts overlapping live chains, not the total
+    # number of init/flush pairs in a register scope.
+    pairs = "\n".join(
+        f"        state{i} = pl.reg.squeeze_store_init(dst, offset={i})\n"
+        f"        result{i} = pl.reg.squeeze_store_flush(state{i}, dst)"
+        for i in range(5)
+    )
+    function = pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+{pairs}
+""")
+    assert python_print(function, format=False).count("pl.reg.squeeze_store_init(") == 5
+
+
+def test_squeeze_store_rejects_add_before_opening_stream():
+    with pytest.raises(
+        (ParserError, ValueError), match=r"reg\.add is not supported in a RegScope with squeeze-store"
+    ):
+        pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+           dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        value = pl.reg.load(src, lanes=64)
+        added = pl.reg.add(value, value)
+        keep = pl.reg.full_mask(lanes=64)
+        initial = pl.reg.squeeze_store_init(dst)
+        updated = pl.reg.squeeze_store_step(initial, dst, added, keep)
+        written = pl.reg.squeeze_store_flush(updated, dst)
+""")
+
+
+@pytest.mark.parametrize("outer_loop", ["parallel", "unroll"])
+def test_squeeze_store_rejects_opening_inside_nonsequential_ancestor(outer_loop):
+    with pytest.raises((ParserError, ValueError), match="Squeeze-store writes require sequential loops"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+           dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        for i in pl.{outer_loop}(2):
+            for j in pl.range(2):
+                value = pl.reg.load(src, lanes=64)
+                keep = pl.reg.full_mask(lanes=64)
+                initial = pl.reg.squeeze_store_init(dst)
+                updated = pl.reg.squeeze_store_step(initial, dst, value, keep)
+                written = pl.reg.squeeze_store_flush(updated, dst)
+""")
+
+
+@pytest.mark.parametrize("mask_expression", ["pl.reg.full_mask(lanes=64)", "pl.reg.active_mask(3, lanes=64)"])
+def test_squeeze_store_rejects_equivalent_stored_producers(mask_expression):
+    # Distinct mask variables do not make two identical SQZ producers safe:
+    # PTOAS can merge them and lose the second required SQZN push.
+    with pytest.raises((ParserError, ValueError), match="common stored SQZ"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+           dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        value = pl.reg.load(src, lanes=64)
+        first_mask = {mask_expression}
+        second_mask = {mask_expression}
+        initial = pl.reg.squeeze_store_init(dst)
+        first = pl.reg.squeeze_store_step(initial, dst, value, first_mask)
+        second = pl.reg.squeeze_store_step(first, dst, value, second_mask)
+        written = pl.reg.squeeze_store_flush(second, dst)
+""")
+
+
+@pytest.mark.parametrize("source", ["outside", "carry", "empty_nested_loop"])
+def test_squeeze_store_rejects_loop_invariant_producers(source):
+    carried = source != "outside"
+    loop_args = "current, value" if carried else "current,"
+    initial_values = "initial, value" if carried else "initial,"
+    yield_names = "final, _last" if carried else "final"
+    yield_values = "updated, value" if carried else "updated"
+    inner_loop = ""
+    if source == "empty_nested_loop":
+        inner_loop = """
+            for j, (_cached,) in pl.range(0, 0, init_values=(value,)):
+                loaded = pl.reg.load(src, lanes=64)
+                nested_value = pl.yield_(loaded)"""
+        yield_values = "updated, nested_value"
+    with pytest.raises((ParserError, ValueError), match="loop-invariant"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
+           dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        value = pl.reg.load(src, lanes=64)
+        keep = pl.reg.active_mask(3, lanes=64)
+        initial = pl.reg.squeeze_store_init(dst)
+        for i, ({loop_args}) in pl.range(0, 4, init_values=({initial_values})):
+            updated = pl.reg.squeeze_store_step(current, dst, value, keep){inner_loop}
+            {yield_names} = pl.yield_({yield_values})
+        written = pl.reg.squeeze_store_flush(final, dst)
+""")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

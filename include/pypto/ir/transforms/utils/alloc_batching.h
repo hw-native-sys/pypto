@@ -29,6 +29,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/graph_replay_invariant.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 
 namespace pypto {
@@ -139,7 +140,11 @@ class GMPipeConsumerIndex {
     if (a.callee.get() != b.callee.get()) return false;
     const auto a_core = a.core_num ? transform_utils::EvalConstInt(a.core_num) : std::optional<int64_t>(1);
     const auto b_core = b.core_num ? transform_utils::EvalConstInt(b.core_num) : std::optional<int64_t>(1);
-    return a_core && b_core && *a_core == *b_core;
+    if (a_core && b_core) return *a_core == *b_core;
+    auto a_query = As<Call>(a.core_num);
+    auto b_query = As<Call>(b.core_num);
+    return graph_replay::IsResourceCountQuery(a_query) && graph_replay::IsResourceCountQuery(b_query) &&
+           a_query->op_->name_ == b_query->op_->name_;
   }
 
   struct CalleeLayout {
@@ -151,7 +156,7 @@ class GMPipeConsumerIndex {
    public:
     GraphCollector(const FunctionPtr& graph, ProgramPtr program,
                    std::unordered_map<const Function*, CalleeLayout>& layouts)
-        : program_(std::move(program)), layouts_(layouts) {
+        : graph_(graph), program_(std::move(program)), layouts_(layouts) {
       for (const auto& param : graph->params_) {
         if (AsTensorTypeLike(param->GetType())) consumers.emplace(param.get(), Consumer{});
       }
@@ -207,17 +212,23 @@ class GMPipeConsumerIndex {
           callee->func_type_ == FunctionType::AIC || callee->func_type_ == FunctionType::AIV;
       auto core = EffectiveCoreNum(call, callee);
       auto literal = core ? transform_utils::EvalConstInt(core) : std::optional<int64_t>(1);
+      // Reconstruct the query at the caller's allocation site. A Graph-local
+      // alias cannot escape its function even though its value is run-stable.
+      auto query = resource_counts_.Resolve(core, graph_);
+      if (!query) query = resource_counts_.Resolve(core, callee);
       auto& consumer = found->second;
-      if (!concrete || !literal || *literal <= 0) {
+      if (!concrete || (!query && (!literal || *literal <= 0))) {
         consumer.ambiguous = true;
         return;
       }
-      GMPipeCreateUse use{callee, core};
+      GMPipeCreateUse use{callee, query ? query : core};
       if (consumer.use && !SameUse(*consumer.use, use)) consumer.ambiguous = true;
       if (!consumer.use) consumer.use = std::move(use);
     }
 
+    FunctionPtr graph_;
     ProgramPtr program_;
+    graph_replay::ResourceCountResolver resource_counts_;
     std::unordered_map<const Function*, CalleeLayout>& layouts_;
   };
 

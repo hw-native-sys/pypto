@@ -290,12 +290,13 @@ runtime 中都能直接按类型解码数值。
 
 | 检查 | 原因 |
 | ---- | ---- |
-| 编译目标必须是 `host_build_graph` | `GraphTaskArgs` 与 `rt_submit_graph` 只存在于该 runtime 的 orchestration API，而 codegen 无条件发射它们；因此在默认的 `tensormap_and_ringbuffer` 下编译 Graph，产物会引用未声明的符号。在这里报错、指向用户自己写的函数，而不是让它变成生成代码里的 C++ 编译错误 |
+| 编译目标必须是 `host_build_graph` | `GraphTaskArgs` 和 `rt_submit_graph` 属于 HBG 编排接口。TMR 的 [LowerGraphForRuntime](01-lower_graph_for_runtime.md) 和 `InlineFunctions` 在此检查前消除 Graph 边界。本检查会报告自定义 TMR 流水线中残留的 Graph 边界 |
 | 至少 1 个张量形参 | 空边界的 graph 回放时无处可 patch，runtime 拒绝缓存 |
 | 至多 128 个张量形参 | `GRAPH_MAX_TENSOR_ARGS` —— 边界是定长的 `GraphTaskArgs` |
 | 至多 64 个标量形参 | `GRAPH_MAX_SCALAR_ARGS`。在 Step A 之后检查：Step A 会**新增**标量形参，所以上提前放得下的签名，上提后可能放不下 |
 | 不允许 runtime 分配边界输出 | `Out` 描述只写访问，调用方提供存储时合法。调用方向（call-site direction）支持 `OutputExisting` 和 `InOut`；拒绝请求新分配的 `ArgDirection::Output` |
 | 标量形参必须是 `In` | 边界标量按值传入、由调用点回放 |
+| 启动宽度必须是字面常量或 run 内不变的资源查询 | Graph 内的 `system.available_cluster_count()`、`system.available_aiv_count()` 及其简单别名读取本次编排固定的资源集合。外提的 GM pipe 分配会在调用方重建查询，不会引用 Graph 局部别名。边界标量决定的宽度仍被拒绝，因为录制的启动参数不会在各次调用间更新 |
 | 只能返回自己的形参 | 缓存调用跳过录制函数体，计算返回值因而不可用；`return c`（`c` 为 `InOut` 形参）是合法的别名。外层 Graph 完成号是独立的 Submit 结果，首次和缓存调用均有效 |
 | 每条路径录制的节点数在 1..1024 之间 | `graph_execution_storage_layout` 既拒绝 0 个节点，也拒绝超过 `GRAPH_MAX_NODES` 的。对允许的条件分支，较小的分支给出下界，较大的分支给出上界。循环内的 launch 按迭代次数计入而非按词法调用点计 1；`system.task_dummy` 也计入——它 lower 成 `rt_submit_dummy_task`，且 `ExpandManualPhaseFence` 会自动插入。分配同样会记节点。codegen 会收集一个语句列表里所有符合条件的 create（中间夹着 launch 不会打断批次），再按每次 `alloc_tensors` 最多 `kAllocTensorsArgs`（16）个打包。它的三条不合格规则里有两条在这里不可能触发（shape 读局部变量已被按非常量拒绝；SSA 下不可能出现已声明的 var），这些 create 是**精确**计数的。第三条可能触发——被注入的 GM pipe buffer 在其 `core_num` 读到 body-local 时会离开共享批次，而这只有 emitter 的 use-resolution 才知道——所以这类按最坏情况各计 1 个节点。批量大小和 GM-pipe 判定与 emitter 共用 `utils/alloc_batching.h`，而非各自重述。与本表其他检查不同，这一项在外提步骤**之后**才计数：Step C 会*移除*分配节点，按外提前的函数体计会拒掉本来放得下的 Graph，也会与 verifier 不一致——后者是从改写后的 IR 重新推导同一个计数的 |
 | 运行时循环 / 分支内不得有分配 | 每次分配都记一个节点，所以数量随调用变化就是拓扑随调用变化 |

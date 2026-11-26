@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -38,9 +39,11 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -97,6 +100,7 @@ std::optional<SplitMode> SplitModeFromInt(int split) {
 class CrossCoreSplitCollector : public IRVisitor {
  public:
   [[nodiscard]] std::optional<SplitMode> GetInferredMode() const { return inferred_mode_; }
+  [[nodiscard]] bool HasFixpipe() const { return has_fixpipe_; }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -111,8 +115,10 @@ class CrossCoreSplitCollector : public IRVisitor {
 
  private:
   std::optional<SplitMode> inferred_mode_;
+  bool has_fixpipe_ = false;
 
   void ConsiderCall(const CallPtr& call) {
+    has_fixpipe_ |= call && call->HasKwarg("acc_push_epilogue");
     if (!call || !call->op_ || !IsCrossCoreSplitOp(call->op_)) return;
 
     auto mode = SplitModeFromInt(call->GetKwarg<int>("split", 0));
@@ -144,9 +150,12 @@ std::optional<SplitMode> ResolveSplitMode(const FunctionPtr& func) {
     if (inferred_mode.has_value() && inferred_mode.value() != func_split_mode.value()) {
       throw pypto::ValueError("SplitVectorKernel found conflicting function split and cross-core op split");
     }
-    return func_split_mode;
+    inferred_mode = func_split_mode;
   }
 
+  CHECK_SPAN(!inferred_mode || !collector.HasFixpipe(), func->span_)
+      << "Structured Fixpipe requires an unsplit standalone kernel. Use separate kernels for split "
+         "transfers.";
   return inferred_mode;
 }
 
@@ -250,6 +259,9 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
   } else if (IsOp(call, "tile.transpose") || IsOp(call, "tile.fmods") || IsOp(call, "tile.rems") ||
              IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") || IsOp(call, "tile.row_sum") ||
              IsOp(call, "tile.row_prod")) {
+    // Metadata-only reshape/reinterpret/transpose views use the generic rebuild
+    // below: they must keep aliasing FIFO storage, even when their valid area is
+    // empty. Replacing them with tile.create allocates a full discarded payload.
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
     // hazard gh#1649 hit for subview slices. The replay result is discarded, so
@@ -310,8 +322,13 @@ struct NoSplitSharedPrefix {
 
 NoSplitSharedPrefix SplitNoSplitSharedPipeSetupPrefix(const std::vector<StmtPtr>& stmts) {
   NoSplitSharedPrefix result;
+  std::unordered_set<const Var*> setup_values;
   size_t prefix_len = 0;
-  while (prefix_len < stmts.size() && IsNoSplitSharedPipeSetupStmt(stmts[prefix_len])) {
+  while (prefix_len < stmts.size()) {
+    const auto assign = As<AssignStmt>(stmts[prefix_len]);
+    const auto alias = assign ? AsVarLike(assign->value_) : nullptr;
+    if (!IsNoSplitSharedPipeSetupStmt(stmts[prefix_len]) && !setup_values.count(alias.get())) break;
+    if (assign) setup_values.insert(assign->var_.get());
     result.shared_setup_stmts.push_back(stmts[prefix_len]);
     ++prefix_len;
   }
@@ -686,12 +703,86 @@ FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
   return new_func;
 }
 
+// Native C2V construction synchronizes both AIV lanes even when the FIFO
+// payload has one consumer. Keep setup outside lane control, and dispatch the
+// second lane only for that setup. Unlike GM-backed replay, it must not pop or
+// free a slot: the native no-split producer signals only the primary consumer.
+FunctionPtr ProcessNativeC2VInitialization(const FunctionPtr& func, const ProgramPtr& program) {
+  if (func->func_type_ != FunctionType::AIV || !backend::BackendConfig::IsConfigured() ||
+      PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer() ||
+      func->GetAttr<bool>(kAttrDualAivDispatch, false)) {
+    return nullptr;
+  }
+  auto stmts = transform_utils::FlattenToStmts(func->body_);
+  auto prefix = SplitNoSplitSharedPipeSetupPrefix(stmts);
+  bool has_c2v_init = false;
+  for (const auto& stmt : prefix.shared_setup_stmts) {
+    CallPtr call;
+    if (auto eval = As<EvalStmt>(stmt)) call = As<Call>(eval->expr_);
+    if (auto assign = As<AssignStmt>(stmt)) call = As<Call>(assign->value_);
+    if (call && IsOp(call, "system.aiv_initialize_pipe")) {
+      if (call->GetKwarg<int>("dir_mask", 0) != 1) return nullptr;
+      has_c2v_init = true;
+    }
+  }
+  if (!has_c2v_init) return nullptr;
+  cross_core_pipe::CrossCorePipeMetadata metadata;
+  cross_core_pipe::CollectCrossCorePipeMetadata(stmts, metadata);
+  if (metadata.v2c.has_ops) return nullptr;
+
+  class SubblockControlFinder : public IRVisitor {
+   public:
+    bool found = false;
+
+   protected:
+    void VisitExpr_(const CallPtr& call) override {
+      if (IsOp(call, "tile.get_subblock_idx")) found = true;
+      IRVisitor::VisitExpr_(call);
+    }
+  } control;
+  control.VisitStmt(func->body_);
+  if (control.found) return nullptr;
+
+  auto returned = return_lineage::ReturnedParamIndices(func, program);
+  CHECK_SPAN(returned.size() == func->return_types_.size(), func->span_)
+      << "Native no-split C2V initialization requires returns to alias parameters; "
+         "use explicit split_aiv control for data-valued returns";
+  std::vector<ExprPtr> inactive_returns;
+  for (const auto& index : returned) {
+    CHECK_SPAN(index && *index < func->params_.size(), func->span_)
+        << "Native no-split C2V initialization requires returns to alias parameters; "
+           "use explicit split_aiv control for data-valued returns";
+    inactive_returns.push_back(func->params_[*index]);
+  }
+
+  auto injected = InjectSubblockIdx(func, /*is_aiv=*/true);
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, func->span_);
+  auto primary = loop_repair::MakeBody(prefix.branch_stmts, func->span_);
+  auto inactive = std::make_shared<ReturnStmt>(inactive_returns, func->span_);
+  auto branch =
+      std::make_shared<IfStmt>(MakeEq(injected.subblock_idx_expr, zero, func->span_), primary,
+                               std::make_optional<StmtPtr>(inactive), std::vector<VarPtr>{}, func->span_);
+  std::vector<StmtPtr> body{injected.body_stmts.front()};
+  body.insert(body.end(), prefix.shared_setup_stmts.begin(), prefix.shared_setup_stmts.end());
+  body.push_back(branch);
+  auto [cloned, unused] = DeepClone(loop_repair::MakeBody(body, func->span_));
+  (void)unused;
+  auto result = MutableCopy(func);
+  result->body_ = cloned;
+  result->attrs_.erase(std::remove_if(result->attrs_.begin(), result->attrs_.end(),
+                                      [](const auto& attr) { return attr.first == kAttrDualAivDispatch; }),
+                       result->attrs_.end());
+  result->attrs_.emplace_back(kAttrDualAivDispatch, true);
+  return result;
+}
+
 }  // namespace
 
 namespace pass {
 
 Pass SplitVectorKernel() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    return_lineage::ScopedTraceCache return_cache;
     std::vector<FunctionPtr> new_functions;
     bool changed = false;
 
@@ -773,6 +864,12 @@ Pass SplitVectorKernel() {
           changed = true;
           continue;
         }
+      }
+
+      if (auto native_c2v = ProcessNativeC2VInitialization(func, program)) {
+        new_functions.push_back(native_c2v);
+        changed = true;
+        continue;
       }
 
       // No-split dual-AIV dispatch: the orthogonal Ascend910 path that replays

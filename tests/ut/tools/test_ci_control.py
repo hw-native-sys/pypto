@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,11 +94,10 @@ def needs(control):
     return result
 
 
-@pytest.mark.parametrize("job", ["system-tests", "onboard-tests-a5-distributed"])
+@pytest.mark.parametrize("job", ["system-tests", "onboard-tests-a5"])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_required_core_results_block_merge(control, needs, job, result):
-    # Moving the new A5 lane out of ci.yml must preserve its required status,
-    # including a skipped job: GitHub alone would treat that as satisfied.
+    # A skipped required job must still block the aggregate merge check.
     assert job in control.REQUIRED
     needs[job]["result"] = result
     with pytest.raises(ValueError, match=job):
@@ -111,14 +111,37 @@ def test_warmup_failure_does_not_hide_successful_tests(control, needs, job):
 
 
 @pytest.mark.parametrize(
-    "job,flag", [("docs-examples", "docs_changed"), ("serving-guard", "ptoas_version_changed")]
+    "job,flag",
+    [
+        ("docs-examples", "docs_changed"),
+        ("serving-guard-a2a3", "ptoas_version_changed"),
+        ("serving-guard-a5", "ptoas_version_changed"),
+    ],
 )
-def test_applicable_conditional_job_must_run(control, needs, job, flag):
+@pytest.mark.parametrize("result", ["skipped", "failure", "cancelled"])
+def test_applicable_conditional_job_must_run(control, needs, job, flag, result):
+    for name in control.CONDITIONAL:
+        needs[name]["result"] = "success"
+    for guard, output in control.SERVING_RESULTS.items():
+        needs[guard]["outputs"] = {output: "success"}
+    needs[job]["result"] = result
     needs["changes"]["outputs"][flag] = "true"
     with pytest.raises(ValueError, match=job):
         control.aggregate(needs)
     needs[job]["result"] = "success"
     control.aggregate(needs)
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("actual", ["skipped", "failure", "cancelled", None])
+def test_successful_call_requires_its_selected_serving_job(control, needs, platform, actual):
+    needs["changes"]["outputs"]["ptoas_version_changed"] = "true"
+    for name, output in control.SERVING_RESULTS.items():
+        needs[name] = {"result": "success", "outputs": {output: "success"}}
+    name = f"serving-guard-{platform}"
+    needs[name]["outputs"] = {f"{platform}-result": actual} if actual else {}
+    with pytest.raises(ValueError, match=name):
+        control.aggregate(needs)
 
 
 def test_unknown_classification_blocks_merge(control, needs):
@@ -861,6 +884,16 @@ def test_workflow_wiring_covers_every_full_job(control):
                 assert options["persist-credentials"] is False
             if step.get("uses") == "./.github/actions/setup-ci-job":
                 assert step["with"]["checkout-ref"] == "${{ needs.changes.outputs.checkout_sha }}"
+    for platform in ("a2a3", "a5"):
+        guard = jobs[f"serving-guard-{platform}"]
+        assert guard["uses"] == "hw-native-sys/pypto-serving/.github/workflows/ci.yml@main"
+        assert guard["with"] == {
+            "platform": platform,
+            "pypto-repository": "${{ github.repository }}",
+            "pypto-revision": "${{ needs.changes.outputs.checkout_sha }}",
+        }
+        assert guard["permissions"] == {"contents": "read"}
+        assert "needs.changes.outputs.ptoas_version_changed == 'true'" in guard["if"]
     # The full aggregate itself is not the required context: it is attached to
     # main in dispatch runs. Only trusted control jobs write the PR status.
     assert workflow["permissions"] == {"contents": "read"}
@@ -1937,6 +1970,47 @@ def test_same_or_older_attempt_url_cannot_preserve_success(control, monkeypatch,
     assert not control.newer_status_exists(REPO, 123, HEAD, run)
 
 
+@pytest.mark.parametrize("http_status", [404, 403, 503])
+def test_a5_missing_owner_requires_persisted_pr_identity(a5_control, a5_request, monkeypatch, http_status):
+    _, event, writes, outputs = a5_request
+
+    def check(check_id, key, status="in_progress", slug="github-actions"):
+        return {"id": check_id, "external_id": key, "status": status, "app": {"slug": slug}}
+
+    checks = [
+        check(81, "a5-pr-123:44"),
+        check(82, "a5-pr-123:44:2:81"),
+        check(83, "44:3:81"),
+        check(84, "a5-pr-124:44"),
+        check(85, "44"),
+        check(86, "a5-pr-123:44:4:81", "completed"),
+        check(87, "a5-pr-123:44", slug="other-app"),
+        check(88, "a5-pr-123:44:bad"),
+    ]
+    api = a5_control.api
+
+    def missing(path, *args, **kwargs):
+        if path.endswith("/actions/runs/44"):
+            raise subprocess.CalledProcessError(1, "gh", stderr=f"gh: error (HTTP {http_status})")
+        return api(path, *args, **kwargs)
+
+    monkeypatch.setattr(a5_control, "api", missing)
+    monkeypatch.setattr(
+        a5_control, "head_checks", lambda repo, head: checks if repo == REPO and head == HEAD else []
+    )
+    if http_status != 404:
+        with pytest.raises(subprocess.CalledProcessError):
+            a5_control.prepare(REPO, event)
+        assert not writes and not outputs
+        return
+    a5_control.prepare(REPO, event)
+    assert [(path, payload["conclusion"], kwargs["method"]) for path, payload, kwargs in writes[:-1]] == [
+        (f"repos/{REPO}/check-runs/{i}", "cancelled", "PATCH") for i in (81, 82)
+    ]
+    assert writes[-1][1]["external_id"] == "a5-pr-123:1234"
+    assert outputs == {"checkout_sha": MERGE, "check_id": "987"}
+
+
 @pytest.mark.parametrize("unfinished", [False, True])
 def test_duplicate_scan_splits_large_history_without_losing_old_reruns(control, monkeypatch, unfinished):
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -2650,15 +2724,22 @@ def test_progress_resolution_keeps_api_failure_for_retry(control, monkeypatch, p
         control.resolved_event(REPO, publication_event)
 
 
-def test_full_finalizer_explicitly_notifies_publishers_even_after_failure():
+def test_full_finalizer_validates_all_main_dispatches_and_only_notifies_for_prs():
     jobs = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())["jobs"]
     finalizer = jobs["full-result"]
     assert finalizer["runs-on"] == "ubuntu-latest"
     assert finalizer["permissions"]["actions"] == "write"
-    assert "github.ref == 'refs/heads/main'" in finalizer["if"]
+    assert finalizer["if"] == (
+        "always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+    )
+    aggregate = next(
+        step for step in finalizer["steps"] if step.get("run", "").endswith("ci_control.py aggregate")
+    )
+    assert "if" not in aggregate
+    assert aggregate["env"]["CI_NEEDS"] == "${{ toJSON(needs) }}"
     notifications = finalizer["steps"][-2:]
     for step, workflow in zip(notifications, ["ci-full-status.yml", "ci-full-progress.yml"]):
-        assert step["if"] == "always()"
+        assert step["if"] == "always() && inputs.pr_number != ''"
         assert f"gh workflow run {workflow}" in step["run"]
         assert "--ref main" in step["run"]
         assert 'run_id="$GITHUB_RUN_ID"' in step["run"]
@@ -2882,6 +2963,530 @@ def test_duplicate_scan_includes_legacy_and_current_full_only(control, monkeypat
     )
     point = datetime(2026, 11, 5, tzinfo=timezone.utc)
     assert control.unfinished_request_exists(REPO, title, point, point) == (path in control.FULL_WORKFLOWS)
+
+
+@pytest.fixture
+def a5_control(monkeypatch, controller):
+    monkeypatch.setitem(sys.modules, "ci_control", controller)
+    spec = importlib.util.spec_from_file_location(
+        "ci_a5_distributed", ROOT / ".github/scripts/ci_a5_distributed.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("GITHUB_RUN_ID", "1234")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    return module
+
+
+@pytest.fixture
+def a5_request(a5_control, monkeypatch, pr, event):
+    event["comment"]["body"] = a5_control.COMMAND
+    writes, outputs = [], {}
+
+    def api(path, payload=None, **kwargs):
+        if payload is not None:
+            writes.append((path, payload, kwargs))
+            return {"id": 987}
+        if path == f"repos/{REPO}/pulls/123":
+            return copy.deepcopy(pr)
+        if path == f"repos/{REPO}/git/ref/heads/main":
+            return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
+        if path == f"repos/{REPO}/git/commits/{MERGE}":
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+        pytest.fail(f"Unexpected API: {path}")
+
+    monkeypatch.setattr(a5_control, "api", api)
+    monkeypatch.setattr(a5_control, "head_checks", lambda *_: [])
+    monkeypatch.setattr(a5_control, "output", outputs.update)
+    monkeypatch.setattr(a5_control, "matching_lint_run", lambda *_: {"conclusion": "success"})
+    # The shared main-branch validators call the controller API directly.
+    monkeypatch.setattr(sys.modules["ci_control"], "api", api)
+    return pr, event, writes, outputs
+
+
+def test_a5_command_pins_merge_and_creates_independent_check(a5_control, a5_request):
+    _, event, writes, outputs = a5_request
+    # External/fork commenters have the same admission policy as /ci full.
+    event["comment"]["body"] = "  /ci a5-distributed\n"
+    a5_control.prepare(REPO, event)
+    assert outputs == {"checkout_sha": MERGE, "check_id": "987"}
+    assert len(writes) == 1
+    path, payload, _ = writes[0]
+    assert path == f"repos/{REPO}/check-runs"
+    assert payload["name"] == "ci/a5-distributed"
+    assert payload["head_sha"] == HEAD
+    assert payload["status"] == "in_progress"
+    assert payload["details_url"].endswith("/runs/1234/attempts/1")
+
+
+@pytest.mark.parametrize("status", ["missing", "in_progress", "failure", "cancelled"])
+def test_a5_requires_passing_lint_before_publishing_outputs(a5_control, a5_request, monkeypatch, status):
+    pr, event, writes, outputs = a5_request
+
+    def lint(repo, candidate, command):
+        assert repo == REPO and candidate == pr and command == "/ci a5-distributed"
+        if status in {"missing", "in_progress"}:
+            raise ValueError(f"Lint {status} before {command}")
+        return {"conclusion": status}
+
+    monkeypatch.setattr(a5_control, "matching_lint_run", lint)
+    with pytest.raises(ValueError, match="/ci a5-distributed"):
+        a5_control.prepare(REPO, event)
+    assert not writes and not outputs
+
+
+@pytest.mark.parametrize("case", ["suffix", "full", "edited", "issue"])
+def test_a5_ignores_unrelated_comments(a5_control, a5_request, monkeypatch, case):
+    _, event, writes, outputs = a5_request
+    if case == "suffix":
+        event["comment"]["body"] += " extra"
+    elif case == "full":
+        event["comment"]["body"] = "/ci full"
+    elif case == "edited":
+        event["action"] = "edited"
+    else:
+        del event["issue"]["pull_request"]
+    monkeypatch.setattr(a5_control, "api", lambda *a: pytest.fail("Ignored comments must not read or write"))
+    a5_control.prepare(REPO, event)
+    assert not writes and not outputs
+
+
+@pytest.mark.parametrize("case", ["integration", "closed", "repo", "deleted-fork", "conflict", "sha"])
+def test_a5_rejects_invalid_pr_before_writes(a5_control, a5_request, case):
+    pr, event, writes, outputs = a5_request
+    if case == "integration":
+        pr["base"]["ref"] = "integration/urma-ccu-test"
+    elif case == "closed":
+        pr["state"] = "closed"
+    elif case == "repo":
+        pr["base"]["repo"]["full_name"] = "different/repo"
+    elif case == "deleted-fork":
+        pr["head"]["repo"] = None
+    elif case == "conflict":
+        pr["mergeable"] = False
+    else:
+        pr["head"]["sha"] = "invalid"
+    with pytest.raises(ValueError):
+        a5_control.prepare(REPO, event)
+    assert not writes and not outputs
+
+
+@pytest.mark.parametrize(
+    "case", ["recovers", "head-changed", "base-changed", "during-lookup", "timeout", "api-failure"]
+)
+def test_a5_waits_only_for_consistent_merge(a5_control, a5_request, monkeypatch, case):
+    pr, event, writes, outputs = a5_request
+    api = a5_control.api
+    elapsed = [0]
+    monkeypatch.setattr(
+        a5_control,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+        ),
+    )
+
+    def delayed_api(path, payload=None, **kwargs):
+        result = api(path, payload, **kwargs)
+        if payload is not None:
+            return result
+        if path.endswith(f"/git/commits/{MERGE}"):
+            if case == "api-failure":
+                raise RuntimeError("API unavailable")
+            if case == "during-lookup":
+                pr["head"]["sha"] = "e" * 40
+            elif not elapsed[0] or case == "timeout":
+                result["parents"][0]["sha"] = "d" * 40
+        if elapsed[0] and case == "head-changed" and path.endswith("/pulls/123"):
+            result["head"]["sha"] = "e" * 40
+        if elapsed[0] and case == "base-changed" and "/git/ref/" in path:
+            result["object"]["sha"] = "f" * 40
+        return result
+
+    monkeypatch.setattr(sys.modules["ci_control"], "api", delayed_api)
+    monkeypatch.setattr(a5_control, "api", delayed_api)
+    if case == "recovers":
+        a5_control.prepare(REPO, event)
+        assert elapsed[0] == 5
+        assert outputs["checkout_sha"] == MERGE
+    else:
+        # Pin changes abort at the first observation. Only a stale merge waits until timeout.
+        error, message, seconds = {
+            "head-changed": (ValueError, "head or base changed", 5),
+            "base-changed": (ValueError, "head or base changed", 5),
+            "during-lookup": (ValueError, "changed during validation", 0),
+            "timeout": (ValueError, "test merge is not ready", 60),
+            "api-failure": (RuntimeError, "API unavailable", 0),
+        }[case]
+        with pytest.raises(error, match=message):
+            a5_control.prepare(REPO, event)
+        assert not writes and not outputs
+        assert elapsed[0] == seconds
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "skipped", "cancelled"])
+@pytest.mark.parametrize("job", ["changes", "toolchain", "onboard-tests-a5-distributed"])
+def test_a5_result_requires_every_dependency(a5_control, monkeypatch, result, job):
+    needs: dict[str, Any] = {name: {"result": "success"} for name in ("changes", "toolchain", a5_control.JOB)}
+    needs["changes"]["outputs"] = {"check_id": "987"}
+    needs[job]["result"] = result
+    writes = []
+    monkeypatch.setattr(a5_control, "api", lambda *args, **kwargs: writes.append((args, kwargs)))
+    if result == "success":
+        a5_control.finish(REPO, needs)
+    else:
+        with pytest.raises(ValueError, match="did not pass"):
+            a5_control.finish(REPO, needs)
+    (path, payload), kwargs = writes[0]
+    assert path == f"repos/{REPO}/check-runs/987"
+    assert kwargs == {"method": "PATCH"}
+    assert payload["details_url"].endswith("/attempts/1")
+    assert payload["status"] == "completed"
+    assert payload["conclusion"] == ("success" if result == "success" else "failure")
+
+
+def test_a5_output_failure_closes_orphan_check(a5_control, a5_request, monkeypatch):
+    _, event, writes, _ = a5_request
+
+    def broken_output(_):
+        raise OSError("outputs unavailable")
+
+    monkeypatch.setattr(a5_control, "output", broken_output)
+    with pytest.raises(OSError, match="outputs unavailable"):
+        a5_control.prepare(REPO, event)
+    path, payload, options = writes[-1]
+    assert path.endswith("/check-runs/987") and options == {"method": "PATCH"}
+    assert payload["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize("owner_key", ["1234", "a5-pr-123:1234"])
+@pytest.mark.parametrize("output_fails", [False, True])
+def test_a5_full_rerun_admission_publishes_progress(
+    a5_control, a5_request, monkeypatch, output_fails, owner_key
+):
+    _, event, writes, outputs = a5_request
+    original = {
+        "name": "ci/a5-distributed",
+        "id": 41,
+        "external_id": owner_key,
+        "app": {"slug": "github-actions", "id": 42},
+        "head_sha": HEAD,
+        "status": "completed",
+        "output": {"summary": None},
+    }
+    api = a5_control.api
+
+    def publish(values):
+        # prepare must create the current check before downstream jobs get the original ID.
+        assert len(writes) == 1 and writes[0][1]["status"] == "in_progress"
+        if output_fails:
+            raise OSError("outputs unavailable")
+        outputs.update(values)
+
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setattr(a5_control, "head_checks", lambda *_: [original])
+    monkeypatch.setattr(
+        a5_control, "api", lambda path, *a, **k: original if path.endswith("/41") else api(path, *a, **k)
+    )
+    monkeypatch.setattr(a5_control, "output", publish)
+    if output_fails:
+        with pytest.raises(OSError, match="outputs unavailable"):
+            a5_control.prepare(REPO, event)
+        path, payload, options = writes[1]
+        assert path.endswith("/check-runs/987") and options == {"method": "PATCH"}
+        assert payload["conclusion"] == "failure"
+    else:
+        a5_control.prepare(REPO, event)
+        assert outputs == {"checkout_sha": MERGE, "check_id": "41"}
+    assert writes[0][1]["external_id"] == f"{owner_key}:2:41"
+    assert writes[0][1]["details_url"].endswith("/attempts/2")
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress"])
+def test_a5_observer_yields_to_full_rerun_admission(a5_control, monkeypatch, state):
+    run = {
+        "id": 1234,
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "event": "issue_comment",
+        "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 17)",
+        "run_attempt": 2,
+        "status": "in_progress",
+    }
+    monkeypatch.setattr(a5_control, "api", lambda path: run)
+    monkeypatch.setattr(a5_control, "pages", lambda *_: [{"name": "changes", "status": state}])
+    monkeypatch.setattr(a5_control.time, "sleep", lambda _: pytest.fail("observer held the admission lock"))
+    a5_control.route_rerun(REPO, run)
+    a5_control.reopen(REPO, run)
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress", "completed"])
+@pytest.mark.parametrize("carried_device", [False, True])
+def test_a5_result_retry_does_not_request_the_writer_lock(a5_control, monkeypatch, state, carried_device):
+    run = {
+        "id": 1234,
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "event": "issue_comment",
+        "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 99)",
+        "run_attempt": 2,
+        "status": "in_progress",
+    }
+    jobs = [{"name": "result", "run_attempt": 2, "status": state}]
+    if carried_device:
+        jobs.append(
+            {"name": "onboard-tests-a5-distributed / check 41", "run_attempt": 2, "status": "completed"}
+        )
+    monkeypatch.setattr(a5_control, "api", lambda path: run)
+    monkeypatch.setattr(a5_control, "pages", lambda *_: jobs)
+    monkeypatch.setattr(a5_control.time, "sleep", lambda _: pytest.fail("waited for result"))
+    monkeypatch.setattr(a5_control, "output", lambda _: pytest.fail("requested the writer lock"))
+    a5_control.route_rerun(REPO, run)
+
+
+@pytest.mark.parametrize("status, attempts", [(503, 3), (403, 1)])
+def test_a5_check_update_has_bounded_retries(a5_control, monkeypatch, status, attempts):
+    calls = []
+
+    def unavailable(path, payload, **options):
+        calls.append((path, payload, options))
+        raise subprocess.CalledProcessError(1, "gh", stderr=f"request failed (HTTP {status})")
+
+    monkeypatch.setattr(a5_control, "api", unavailable)
+    monkeypatch.setattr(a5_control.time, "sleep", lambda _: None)
+    with pytest.raises(subprocess.CalledProcessError):
+        a5_control.update_check(REPO, "123", {"status": "completed"})
+    assert (
+        calls == [(f"repos/{REPO}/check-runs/123", {"status": "completed"}, {"method": "PATCH"})] * attempts
+    )
+
+
+def test_a5_device_rerun_refreshes_previous_attempt(a5_control, monkeypatch):
+    run = {
+        "id": 1234,
+        "run_attempt": 2,
+        "event": "issue_comment",
+        "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 17)",
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "status": "in_progress",
+    }
+    original = {
+        "id": 987,
+        "name": "ci/a5-distributed",
+        "external_id": "1234",
+        "status": "completed",
+        "output": {"summary": None},
+        "head_sha": HEAD,
+        "app": {"id": 42},
+    }
+    created = []
+
+    def api(path, payload=None, **kwargs):
+        if payload:
+            assert path.endswith("/check-runs")
+            created.append({**payload, "id": 988, "app": {"id": 42}})
+            return created[-1]
+        if path.endswith("/runs/1234"):
+            return run
+        assert path.endswith("/check-runs/987")
+        return original
+
+    monkeypatch.setattr(a5_control, "api", api)
+    monkeypatch.setattr(
+        a5_control,
+        "pages",
+        lambda _, key: [
+            {"name": "onboard-tests-a5-distributed / check 987", "run_attempt": 2, "status": "queued"}
+        ]
+        if key == "jobs"
+        else created,
+    )
+    routed = {}
+    monkeypatch.setattr(a5_control, "output", routed.update)
+    a5_control.route_rerun(REPO, run)
+    assert routed == {"number": "123"}
+    a5_control.reopen(REPO, run)
+    assert len(created) == 1 and created[0]["status"] == "in_progress"
+    assert created[0]["details_url"].endswith("/runs/1234/attempts/2")
+    assert created[0]["details_url"] in created[0]["output"]["summary"]
+    # A late observer or finalizer reuses the new attempt check, even after it completed.
+    created[0]["status"] = "completed"
+    assert a5_control.attempt_check(REPO, "987", "1234", "2") == "988"
+    assert len(created) == 1
+
+
+@pytest.mark.parametrize(
+    "state,conclusion,pr_number,reuse",
+    [
+        ("queued", None, 123, True),
+        ("in_progress", None, 123, True),
+        ("completed", "success", 123, True),
+        ("completed", "failure", 123, False),
+        ("completed", "cancelled", 123, False),
+        ("in_progress", None, 999, False),
+    ],
+)
+def test_a5_duplicate_command_admission(
+    a5_control, a5_request, monkeypatch, state, conclusion, pr_number, reuse
+):
+    _, event, writes, outputs = a5_request
+    url = a5_control.attempt_url(REPO, "44", "2")
+    check = {
+        "id": 88,
+        "status": "completed" if conclusion else "in_progress",
+        "external_id": "44:2:33",
+        "app": {"slug": "github-actions"},
+        "conclusion": conclusion,
+        **a5_control.attempt_fields(url, "Device result"),
+    }
+    run = {
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "event": "issue_comment",
+        "head_branch": "main",
+        "display_title": f"A5 distributed PR #{pr_number} (comment 12)",
+        "run_attempt": 2,
+        "status": state,
+        "conclusion": conclusion,
+    }
+    api = a5_control.api
+    monkeypatch.setattr(a5_control, "head_checks", lambda repo, head: [check] if head == HEAD else [])
+    monkeypatch.setattr(
+        a5_control, "api", lambda path, *args: run if path.endswith("/actions/runs/44") else api(path, *args)
+    )
+    a5_control.prepare(REPO, event)
+    assert bool(writes) == bool(outputs) == (not reuse)
+
+
+@pytest.mark.parametrize(
+    "conclusion",
+    [
+        "failure",
+        "cancelled",
+        "timed_out",
+        "stale",
+        "action_required",
+        "neutral",
+        "skipped",
+        "startup_failure",
+    ],
+)
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_a5_fresh_command_retires_interrupted_publisher(
+    a5_control, a5_request, monkeypatch, conclusion, cleanup_fails
+):
+    _, event, writes, outputs = a5_request
+    stale = {"id": 88, "external_id": "44", "app": {"slug": "github-actions"}, "status": "in_progress"}
+    checks = [stale, {**stale, "id": 89, "external_id": "44:2:88", "status": "completed"}]
+    run = {
+        "path": ".github/workflows/ci-a5-distributed.yml",
+        "event": "issue_comment",
+        "head_branch": "main",
+        "display_title": "A5 distributed PR #123 (comment 12)",
+        "run_attempt": 2,
+        "status": "completed",
+        "conclusion": conclusion,
+    }
+    api = a5_control.api
+
+    def retry_api(path, *args, **kwargs):
+        if path.endswith("/actions/runs/44"):
+            return run
+        if cleanup_fails and path.endswith("/check-runs/88"):
+            raise ValueError("Cleanup unavailable")
+        return api(path, *args, **kwargs)
+
+    monkeypatch.setattr(a5_control, "api", retry_api)
+    monkeypatch.setattr(a5_control, "head_checks", lambda repo, head: checks if head == HEAD else [])
+    if cleanup_fails:
+        with pytest.raises(ValueError, match="Cleanup unavailable"):
+            a5_control.prepare(REPO, event)
+        assert not writes and not outputs
+    else:
+        a5_control.prepare(REPO, event)
+        assert writes[0] == (
+            f"repos/{REPO}/check-runs/88",
+            {"status": "completed", "conclusion": "cancelled"},
+            {"method": "PATCH"},
+        )
+        assert len(writes) == 2 and writes[1][0] == f"repos/{REPO}/check-runs"
+        assert outputs == {"checkout_sha": MERGE, "check_id": "987"}
+
+
+@pytest.mark.parametrize("unfinished", ["original", "rerun", "both"])
+def test_a5_retry_finishes_pending_check(a5_control, monkeypatch, unfinished):
+    original: dict[str, Any] = {
+        "id": 41,
+        "external_id": "1234",
+        "name": "ci/a5-distributed",
+        "head_sha": HEAD,
+        "app": {"id": 42},
+        "output": {"summary": None},
+        "status": "completed" if unfinished == "rerun" else "in_progress",
+    }
+    earlier: dict[str, Any] = {**original, "id": 42, "external_id": "1234:2:41", "status": "in_progress"}
+    checks = [original] if unfinished == "original" else [earlier, original]
+    pending = checks[0]
+
+    def api(path, payload=None, *, method=None):
+        if payload is None:
+            assert path.endswith("/check-runs/41")
+            return original
+        assert method == "PATCH"
+        target = next(c for c in checks if path.endswith(f"/check-runs/{c['id']}"))
+        target.update(payload)
+
+    monkeypatch.setattr(a5_control, "api", api)
+    monkeypatch.setattr(a5_control, "head_checks", lambda *_: checks)
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+    needs: dict[str, Any] = {name: {"result": "success"} for name in ("changes", "toolchain", a5_control.JOB)}
+    needs["changes"]["outputs"] = {"check_id": "41"}
+    assert a5_control.attempt_check(REPO, "41", "1234", "3") == str(pending["id"])
+    a5_control.finish(REPO, needs)
+    assert all(check["status"] == "completed" for check in checks)
+    if unfinished == "both":
+        assert original["conclusion"] == "cancelled"
+    assert pending["conclusion"] == "success" and "/attempts/3)" in pending["output"]["summary"]
+    assert a5_control.attempt_check(REPO, "41", "1234", "3") == str(pending["id"])
+
+
+def test_a5_distributed_requires_its_own_comment(control):
+    job = "onboard-tests-a5-distributed"
+    full = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())["jobs"]
+    assert job not in full
+    assert job not in full["full-result"]["needs"]
+    assert job not in control.REQUIRED
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-a5-distributed.yml").read_text())
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"changes", "toolchain", "onboard-tests-a5-distributed", "result"}
+    assert set(workflow[True]) == {"issue_comment"}
+    assert "github.event.issue.number" in workflow["run-name"]
+    assert "contains(" in jobs["changes"]["if"]
+    assert jobs["changes"]["permissions"]["actions"] == "read"
+    assert jobs["changes"]["concurrency"] == {
+        "group": "ci-a5-admission-${{ github.event.issue.number }}",
+        "queue": "max",
+        "cancel-in-progress": False,
+    }
+    assert "concurrency" not in workflow
+    assert jobs["result"]["concurrency"] == jobs["changes"]["concurrency"]
+    observer = yaml.safe_load((ROOT / ".github/workflows/ci-a5-rerun.yml").read_text())["jobs"]
+    assert observer["progress"]["needs"] == "route"
+    assert observer["progress"]["concurrency"]["group"] == "ci-a5-admission-${{ needs.route.outputs.number }}"
+    assert jobs[job]["concurrency"]["cancel-in-progress"] is False
+    assert workflow["permissions"] == {}
+    for name in ("toolchain", "onboard-tests-a5-distributed"):
+        assert jobs[name]["permissions"] == {"contents": "read"}
+        assert "checkout_sha != ''" in jobs[name]["if"]
+    assert jobs["onboard-tests-a5-distributed"]["needs"] == ["changes", "toolchain"]
+    assert jobs["toolchain"]["steps"] == full["toolchain"]["steps"]
+    for name in ("changes", "result"):
+        checkout = jobs[name]["steps"][0]["with"]
+        assert checkout["ref"] == "${{ github.workflow_sha }}"
+        assert checkout["persist-credentials"] is False
+    assert jobs["result"]["if"].startswith("always()")
+    assert set(jobs["result"]["needs"]) == {"changes", "toolchain", "onboard-tests-a5-distributed"}
 
 
 if __name__ == "__main__":
