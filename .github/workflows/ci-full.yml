@@ -1980,7 +1980,7 @@ jobs:
         with:
           checkout-path: lib-checkout
 
-  # Serving owns the runner, setup and tests. Build this run's pinned PyPTO merge on both platforms.
+  # Both serving guards build this run's pinned PyPTO merge.
   serving-guard-a2a3:
     needs: [changes, toolchain, lint-gate]
     if: >-
@@ -1996,6 +1996,8 @@ jobs:
     uses: hw-native-sys/pypto-serving/.github/workflows/ci.yml@main
     with:
       platform: a2a3
+      # The npu-xp runners have the Qwen3 weights used by this guard.
+      a2a3-runner-labels: '["self-hosted", "linux", "npu-xp"]'
       pypto-repository: ${{ github.repository }}
       pypto-revision: ${{ needs.changes.outputs.checkout_sha }}
 

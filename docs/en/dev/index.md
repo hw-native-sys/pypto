@@ -161,8 +161,9 @@ Full includes the reused lint result, wheel warm-up, unit, example, codegen, sys
 pypto-lib and A5 onboard tests, plus simulator tests. Core tests execute even for documentation-only
 PRs. `docs-examples` applies when documentation changes. A `PTOAS_VERSION` change requires
 both `serving-guard-a2a3` and `serving-guard-a5` to pass. They select `unit-tests` and `v41-a5-smoke`, respectively,
-from the serving CI workflow on `hw-native-sys/pypto-serving@main` and pass the tested PyPTO merge SHA. Serving owns the runner,
-model tests and device configuration. A manual full run on PyPTO `main` without PR inputs tests the dispatched
+from the serving CI workflow on `hw-native-sys/pypto-serving@main` and pass the tested PyPTO merge SHA.
+PyPTO selects the `npu-xp` runner pool for A2/A3. Serving selects the A5 runner and maintains the model tests
+and device configuration. A manual full run on PyPTO `main` without PR inputs tests the dispatched
 commit and requires both selected serving jobs to report success.
 A failed wheel warm-up is advisory because test
 jobs build locally if necessary; every applicable test must succeed.

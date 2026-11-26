@@ -887,7 +887,10 @@ def test_workflow_wiring_covers_every_full_job(control):
     for platform in ("a2a3", "a5"):
         guard = jobs[f"serving-guard-{platform}"]
         assert guard["uses"] == "hw-native-sys/pypto-serving/.github/workflows/ci.yml@main"
-        assert guard["with"] == {
+        inputs = dict(guard["with"])
+        if platform == "a2a3":
+            assert json.loads(inputs.pop("a2a3-runner-labels")) == ["self-hosted", "linux", "npu-xp"]
+        assert inputs == {
             "platform": platform,
             "pypto-repository": "${{ github.repository }}",
             "pypto-revision": "${{ needs.changes.outputs.checkout_sha }}",
