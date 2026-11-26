@@ -9,6 +9,7 @@
 
 """Tile block queries and cross-core transfers."""
 
+from collections.abc import Sequence
 from typing import Any
 
 from pypto.pypto_core import DataType
@@ -20,10 +21,12 @@ from pypto.pypto_core.ir import (
     MemorySpace,
     ScalarType,
     Span,
+    STPhase,
 )
 
 from ..utils import (
     _get_span_or_capture,
+    _to_make_tuple,
 )
 
 
@@ -106,24 +109,48 @@ def tpush_to_aiv(
     split: int,
     lane_stride: int | None = None,
     id: int | None = None,
+    dst: Expr | None = None,
+    offset: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    st_phase: STPhase = STPhase.Unspecified,
     span: Span | None = None,
 ) -> Call:
-    """Push tile data from AIC to AIV via cross-core pipe.
+    """Push tile data from AIC to AIV, via a FIFO or a caller-addressed UB mailbox.
 
-    On A5, a hand-written untyped UP_DOWN push of a compact FP32 Acc uses
-    half the valid rows as the partition stride when the columns are full
-    and the valid row count is positive and even.
+    Without dst, preserves the existing cross-core pipe protocol. On A5, a
+    hand-written untyped UP_DOWN push of a compact FP32 Acc uses half the valid
+    rows as the partition stride when the columns are full and the valid row
+    count is positive and even.
 
     Args:
-        tile: Tile data to push
+        tile: Tile data to push.
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
-            axes over an odd extent)
-        lane_stride: Partition stride carried when a ragged boundary was
-            balanced across the two AIV lanes, or to preserve an existing box partition.
+            axes over an odd extent). Direct destinations currently require 1.
+        lane_stride: FIFO partition stride when a ragged boundary was balanced
+            across the two AIV lanes, or to preserve an existing box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
-        span: Optional source span
+        dst: Optional explicit peer ND FP32 Vec mailbox. On A5, selects direct
+            FIXPIPE instead of TPipe; the author manages addresses and events.
+        offset: Local destination row and column of this fragment. Defaults
+            to [0, 0] in direct mode; unsupported with FIFO.
+        st_phase: Unit-flag-aware direct FIXPIPE phase. Final requires a complete
+            half-M destination at zero offset. FIFO mode does not accept Final.
+        span: Optional source span.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
+    if dst is not None:
+        if id is not None or lane_stride is not None:
+            raise ValueError("Direct tpush_to_aiv with dst cannot use FIFO id or lane_stride")
+        indices = _to_make_tuple((0, 0) if offset is None else offset, actual_span)
+        # The direct transfer has no FIFO credit/token ownership; give the
+        # existing pipe-analysis passes an unambiguous internal operation.
+        return _ir_core.create_op_call(
+            "tile.tpush_to_aiv_direct",
+            [tile, dst, indices],
+            {"split": split, "st_phase": int(st_phase)},
+            actual_span,
+        )
+    if offset is not None or st_phase != STPhase.Unspecified:
+        raise ValueError("tpush_to_aiv offset/st_phase require an explicit dst")
     kwargs: dict[str, Any] = {"split": split}
     if lane_stride is not None:
         kwargs["lane_stride"] = lane_stride

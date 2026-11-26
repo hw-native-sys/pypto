@@ -258,6 +258,8 @@ print(pto_code)
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / A5 BF16 NZ Vec-to-Mat inserts / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
+| `tile.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col], st_phase=...)` | A5 direct split-M FIXPIPE: `pto.tinsert`, or `pto.tmov` with `stPhase=final` for a complete final writeback |
+| `tile.mark_remote_written(tile)` | No instruction; records peer-initialized UB for register analysis |
 | `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc` (`src0 + src1 + carry`) |
@@ -270,14 +272,10 @@ print(pto_code)
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`; scalar is same-width signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
-**`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and the
-fallback `tile.assemble` path use `pto.subview`, a pure alias of the source tile (no
-data movement, no extra `pto.alloc_tile`).  `pto.subview` requires the
-result `tile_buf` to share `dtype`, `memory_space`, `blayout`, `slayout`,
-`fractal`, `pad`, and `compact` with the source — `DeduceTileSliceType` propagates
-those five `TileView` fields from the source so the produced `TileType`
-satisfies the constraints by construction.  Backend codegen also runs a
-`CheckSubviewTileCompat` guard at lowering time:
+**`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and fallback `tile.assemble` use `pto.subview`, a pure source alias with no data movement or extra `pto.alloc_tile`.
+The result `tile_buf` must share the source's `dtype`, `memory_space`, `blayout`, `slayout`, `fractal`, `pad`, and `compact`.
+`DeduceTileSliceType` propagates the five `TileView` fields to satisfy these constraints by construction.
+Backend codegen also runs a `CheckSubviewTileCompat` guard at lowering time:
 
 - Source and result must both carry an explicit `TileView`.
 - `dtype`, `blayout`, `slayout`, `fractal`, `pad`, and `compact` must match exactly.
@@ -752,51 +750,7 @@ independently of PyPTO.
 
 ## Boxed Tile Extents
 
-Every `pto.alloc_tile` PyPTO emits is validated against the box grid PTOAS will
-check it against. PTO addresses a boxed tile one box at a time, so a tile whose
-*physical* extent is not a whole number of boxes has no address at all.
-
-The rule mirrors PTOAS' `verifyBoxedTileLayout` exactly:
-
-| Layout | Box (rows x cols) |
-| ------ | ----------------- |
-| fractal 1024 (`Acc`) | 16 x 16 |
-| fractal 512, `slayout = row_major` (`Mat` / `Left`) | 16 x (32 / sizeof(dtype)) |
-| fractal 512, `slayout = col_major` (`Right`, the transposed dual) | (32 / sizeof(dtype)) x 16 |
-| `slayout = none_box` | not boxed — no rule |
-
-with PTOAS' own exemptions kept: the *row* rule is skipped for `Vec` and for a
-single-row tile (the NZ map degenerates there), while the column rule always
-applies. The MX-scale fractal and sub-byte carriers are left to PTOAS, which
-diagnoses them itself.
-
-**Why here rather than in PTOAS.** PTOAS rejects the same shape, but its message
-names its own internals and offers no remedy:
-
-```text
-'pto.alloc_tile' op expects result boxed tile rows to be a multiple of innerRows (16), but got 100
-```
-
-Raising at the emission site instead reports the tile, the axis, the extent to
-reach, and how to reach it:
-
-```text
-a Mat tile of physical shape [100, 128] and dtype fp16 must be a whole number of
-16x16 fractal boxes, but its row extent 100 is not a multiple of 16. PTO addresses
-a boxed tile one box at a time, so a partial box has no address. The *logical*
-extent is free -- allocate 112 on that axis and declare 100 as the tile's
-valid_shape (`valid_shape=` on pl.load / pl.tile.create + pl.set_validshape),
-which moves and computes only the real data. A tensor-level pl.matmul /
-pl.matmul_acc does this for its M axis automatically.
-```
-
-`ComputeAllocTileFields` is the single choke point every allocation passes
-through — the per-variable declaration, the hoisted `extra_alloc_tiles`, and the
-control-flow paths alike — so the check sees exactly what is emitted and cannot
-drift from it. A tensor-level `pl.matmul` / `pl.matmul_acc` never trips it *on
-its M axis*, which is boxed for the user in
-[`ConvertTensorToTileOps`](../passes/13-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
-The axes that remain the user's responsibility are `K` and `N`.
+See [Boxed tile extent validation](07-boxed-tile-extents.md) for the layout-specific allocation checks, diagnostics, and remedy.
 
 ## Complete Example
 

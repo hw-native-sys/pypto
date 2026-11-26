@@ -21,6 +21,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
     AtomicType,
     CachePolicy,
+    Call,
     Expr,
     MemorySpace,
     PadValue,
@@ -261,7 +262,8 @@ def store(
             available on the Ascend910 (A2/A3) profile; it is not supported on
             A5, where an fp32 accumulator + cast is required instead.
         st_phase: Consumer-side unit-flag phase. A producer that finishes with
-            ``acc_phase=pl.AccPhase.Final`` must be consumed by a store with
+            ``acc_phase=pl.AccPhase.Final`` must be consumed by a final
+            store (or A5 direct ``tpush_to_aiv(..., dst=...)``) with
             ``st_phase=pl.STPhase.Final`` so the unit flag is cleared.
         pre_quant: Scale applied by the cube's FIXPIPE while it drains an ``Acc``
             tile to global memory — the write becomes ``out = tile * pre_quant``
@@ -369,6 +371,18 @@ def assemble(
         pre_relu=pre_relu,
     )
     return Tile(expr=call_expr)
+
+
+def mark_remote_written(tile: Tile) -> Call:
+    """Declare the valid region of a Vec tile initialized by a completed peer write.
+
+    Place this annotation after the explicit peer synchronization that makes
+    the data available. It emits no instruction or synchronization; it only
+    records the author's externally established initialized-memory contract for
+    register-scope analysis. The tile's address and valid region must match
+    the peer write, not the capacity of a larger backing allocation.
+    """
+    return _ir_ops.mark_remote_written(tile.unwrap())
 
 
 def gather_row(  # noqa: PLR0913

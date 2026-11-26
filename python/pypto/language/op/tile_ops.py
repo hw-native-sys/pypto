@@ -157,6 +157,7 @@ from ._tile_memory import fillpad_inplace as fillpad_inplace
 from ._tile_memory import full as full
 from ._tile_memory import gather_row as gather_row
 from ._tile_memory import load as load
+from ._tile_memory import mark_remote_written as mark_remote_written
 from ._tile_memory import move as move
 from ._tile_memory import random as random
 from ._tile_memory import read as read
@@ -214,6 +215,7 @@ __all__ = [
     "store",
     "assemble",
     "gather_row",
+    "mark_remote_written",
     "extract",
     "scatter_update",
     "concat",

@@ -37,6 +37,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -1667,6 +1668,51 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       // through the initialized descriptor rather than the full-valid carrier.
       codegen.RegisterSubviewMaterialization(codegen.GetCurrentResultTarget(), mat_info);
     }
+    return std::string("");
+  });
+
+  reg("tile.tpush_to_aiv_direct", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    CHECK_SPAN(codegen.GetBackendHandler()->GetPtoTargetArch() == "a5" && codegen.IsAICFunction(), op->span_)
+        << "Direct tpush_to_aiv requires an explicit A5 AIC function";
+    const auto& acc = op->args_[0];
+    const auto& dst = op->args_[1];
+    const auto offset = As<ir::MakeTuple>(op->args_[2]);
+    auto dst_code = codegen.GetExprAsCode(dst);
+    auto acc_code = codegen.GetExprAsCode(acc);
+    auto dst_type = codegen.GetExprTypeAnnotation(dst);
+    auto acc_type = codegen.GetExprTypeAnnotation(acc);
+    const std::string mode = "accToVecMode = #pto.acc_to_vec_mode<dual_mode_split_m>";
+    if (op->GetKwarg<int>("st_phase", 0) == static_cast<int>(ir::STPhase::kFinal)) {
+      // Final consumes the unit flag through the full-window TMOV instruction.
+      codegen.Emit("pto.tmov ins(" + acc_code + " : " + acc_type + ") outs(" + dst_code + " : " + dst_type +
+                   ") {" + mode + ", stPhase = #pto<st_phase final>}");
+    } else {
+      // This manually addressed primitive has an explicit in-bounds offset
+      // contract. Cast to index without the partition_view helper's runtime
+      // clamp: that would silently redirect an invalid hand-scheduled write
+      // and add scalar work to a known non-negative FIXPIPE offset.
+      auto index_code = [&](const ExprPtr& expr) {
+        if (auto value = As<ir::ConstInt>(expr)) {
+          return codegen.GetOrEmitConstant(value->value_, DataType::INDEX);
+        }
+        return codegen.EmitCastToIndex(expr, codegen.GetExprAsCode(expr));
+      };
+      auto row = index_code(offset->elements_[0]);
+      auto col = index_code(offset->elements_[1]);
+      // TINSERT, rather than a subview+TMOV, preserves the parent ND row
+      // stride and applies the offsets in each AIV's local address space.
+      codegen.Emit("pto.tinsert ins(" + acc_code + ", " + row + ", " + col + " : " + acc_type +
+                   ", index, index) outs(" + dst_code + " : " + dst_type + ") {" + mode + "}");
+    }
+    return std::string("");
+  });
+
+  reg("tile.mark_remote_written", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    CHECK_SPAN(codegen.GetBackendHandler()->GetPtoTargetArch() == "a5" && codegen.IsAIVFunction(), op->span_)
+        << "tile.mark_remote_written requires an explicit A5 AIV function";
+    // The peer write has already happened; this is an IR memory effect only.
     return std::string("");
   });
 

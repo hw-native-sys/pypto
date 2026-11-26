@@ -35,7 +35,7 @@ from pypto.ir.op.system_ops import (
 )
 from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PipeType, Span, STPhase
 
 from ..typing import Array, IntLike, Scalar, Tensor, Tile
 
@@ -399,33 +399,53 @@ def tpush_to_aiv(
     split: int,
     lane_stride: int | None = None,
     id: int | None = None,
+    dst: Tile | None = None,
+    offset: Sequence[IntLike] | None = None,
+    st_phase: STPhase = STPhase.Unspecified,
     span: Span | None = None,
 ) -> Call:
-    """Push tile data from AIC to AIV via cross-core pipe.
+    """Push tile data from AIC to AIV.
 
-    The Vector side receives it with [`tpop_from_aic`][pypto.language.system.tpop_from_aic] and releases the
-    slot with [`tfree_to_aic`][pypto.language.system.tfree_to_aic]; ``split`` and ``id`` must match across all
-    three.
+    Without ``dst``, the existing cross-core FIFO mode is unchanged: the
+    Vector side receives it with [`tpop_from_aic`][pypto.language.system.tpop_from_aic]
+    and releases the slot with [`tfree_to_aic`][pypto.language.system.tfree_to_aic].
+    ``split`` and ``id`` must match across all three.
 
-    For a hand-written A5 C2V pipe without dtype conversion, ``split=1`` divides a compact FP32 Acc row
-    tail with full columns at half its valid rows. The valid row count must be positive and even.
-    Each AIV reads ``valid_rows // 2`` rows from the start of its physical half-slot.
+    For a hand-written A5 C2V pipe without dtype conversion, ``split=1`` divides
+    a compact FP32 Acc row tail with full columns at half its positive even
+    valid row count. Each AIV reads half the rows from its physical half-slot.
+
+    With ``dst``, A5 instead pushes a fragment directly into a caller-addressed
+    ND FP32 Vec mailbox in both peer AIV UB spaces. ``split=1`` sends half the
+    FP32 Acc rows to each lane; ``offset`` addresses its local destination and
+    preserves the full mailbox row pitch. No FIFO, credit, token or ready/free
+    event is created. The author supplies the same peer addresses and manages
+    explicit synchronization, then calls ``tile.mark_remote_written`` on the
+    received view before register reads. Offsets must be in bounds at runtime;
+    no scalar clamp is inserted.
 
     Args:
-        tile: Tile to send. Its Cube-side buffer stays live until the consumer frees the slot.
+        tile: Tile to send. In FIFO mode its Cube-side buffer stays live
+            until the consumer frees the slot.
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
-            axes over an odd extent). Selects the axis along which the two AIV
-            lanes divide the tile, and how their extents relate; 0 sends it whole.
-        lane_stride: Partition stride carried when a ragged boundary was balanced
-            across the two AIV lanes, or to preserve an existing box partition.
-        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
-        span: Optional source span
+            axes over an odd extent). Direct mode currently supports only 1.
+        lane_stride: FIFO partition stride for a ragged boundary or existing box partition.
+        id: Optional frontend FIFO pipe id. Omit to use PTOAS default id 0.
+        dst: Explicit direct peer Vec mailbox; incompatible with id/lane_stride.
+        offset: Local destination [row, col] in direct mode, default [0, 0].
+        st_phase: Direct FIXPIPE writeback phase. With ``STPhase.Final``, the exact
+            Final accumulator must be drained to a complete [M/2, N] destination
+            at offset [0, 0], checking and clearing its hardware unit flag.
+        span: Optional source span.
     """
     return _ir_ops.tpush_to_aiv(
         tile.unwrap(),
         split=split,
         lane_stride=lane_stride,
         id=id,
+        dst=dst.unwrap() if dst is not None else None,
+        offset=None if offset is None else [x.unwrap() if isinstance(x, Scalar) else x for x in offset],
+        st_phase=st_phase,
         span=span,
     )
 

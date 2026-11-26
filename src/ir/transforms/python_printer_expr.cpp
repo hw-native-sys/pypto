@@ -630,6 +630,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
+  // Keep the direct mailbox transfer behind the same public tpush entry
+  // point as the FIFO form. The extra operands are public keyword arguments;
+  // printing the internal spelling would not round-trip through the DSL.
+  const bool direct_tpush = IsOp(op, "tile.tpush_to_aiv_direct");
+  if (direct_tpush) op_name = "tile.tpush_to_aiv";
   // Keep the existing barrier IR while presenting its parameterized public
   // API. The native ops have no operands or kwargs; retain the legacy call
   // spelling for noncanonical calls rather than silently dropping metadata.
@@ -949,6 +954,10 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (window_view && i >= 2) {
       constexpr const char* kWindowKeywords[] = {"offsets", "steps", "valid_shape"};
       stream_ << kWindowKeywords[i - 2] << "=";
+    }
+    if (direct_tpush && i >= 1) {
+      constexpr const char* kDirectPushKeywords[] = {"dst", "offset"};
+      stream_ << kDirectPushKeywords[i - 1] << "=";
     }
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)

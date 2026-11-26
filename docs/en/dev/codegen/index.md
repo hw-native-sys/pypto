@@ -9,6 +9,7 @@ IR to generated code. Anything that needs a decision was already decided by a pa
 | Page | What it covers |
 | ---- | -------------- |
 | [PTO Codegen](00-pto_codegen.md) | Generating PTO-ISA dialect MLIR from PyPTO IR |
+| [Boxed Tile Extents](07-boxed-tile-extents.md) | Allocation grid checks and diagnostics for physical tile extents |
 | [Orchestration Code Generation](01-orchestration_codegen.md) | Generating the host-side C++ that submits tasks to the runtime |
 | [PTO Kernel Wrapper Generation](02-kernel_wrapper.md) | Connecting ptoas-generated kernels to runtime dispatch |
 | [EmitC and VPTO VF Execution](03-vpto-vf-integration.md) | Separate VF helpers, synchronization contracts and persistent A5 execution |

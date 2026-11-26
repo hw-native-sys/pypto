@@ -378,6 +378,11 @@ def assemble(
     return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], kwargs, actual_span)
 
 
+def mark_remote_written(tile: Expr, *, span: Span | None = None) -> Call:
+    """Credit a completed peer write to a Vec view without emitting an instruction."""
+    return _ir_core.create_op_call("tile.mark_remote_written", [tile], {}, _get_span_or_capture(span))
+
+
 def gather_row(  # noqa: PLR0913
     dst: Expr,
     src: Expr,
