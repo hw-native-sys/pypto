@@ -43,7 +43,11 @@
 namespace pypto {
 namespace codegen {
 
-using GraphConfigScalarSlots = std::map<std::string, std::unordered_set<size_t>>;
+struct GraphInvocationConfig {
+  std::unordered_set<size_t> scalar_slots;
+  std::vector<std::string> binding_checks;
+};
+using GraphConfigs = std::map<std::string, GraphInvocationConfig>;
 
 std::string GraphFunctionSymbol(const std::string& func_name);
 
@@ -98,11 +102,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void SetInitialIndent(int indent);
   void SetTaskVarPrefix(std::string prefix);
 
-  void SetGraphScalarParams(const std::vector<ir::VarPtr>& params);
+  void SetGraphBoundaryParams(const std::vector<ir::VarPtr>& params);
 
-  const std::unordered_set<size_t>& GetGraphScalarValueReads() const;
+  GraphInvocationConfig GetGraphInvocationConfig() const;
 
-  void SetGraphConfigScalarSlots(GraphConfigScalarSlots slots);
+  void SetGraphConfigs(GraphConfigs configs);
 
   void ReserveDeclaredNames(const std::set<std::string>& names);
 
@@ -210,7 +214,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     /// (selective dump from ``pl.dump_tag`` / ``dumps=``). Set by
     /// VarPtr identity in the param builders — no name comparison.
     bool dump = false;
+    std::optional<std::string> graph_scalar_binding = std::nullopt;
   };
+
+  ParamEntry BuildScalarParam(const ir::ExprPtr& expr, std::string value) const;
 
   static std::vector<ParamEntry> ReorderTensorsBeforeScalars(std::vector<ParamEntry> params);
 
@@ -576,7 +583,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // Value reads freeze host computation into a Graph definition. Its caller
   // must declare those slots static so changed values invalidate replay.
   mutable std::unordered_set<size_t> graph_scalar_value_reads_;
-  GraphConfigScalarSlots graph_config_scalar_slots_;
+  GraphConfigs graph_configs_;
+  // Set only on the recorder body generator. The caller validates these tensor
+  // slots before each Graph invocation, while addresses still belong to that invocation.
+  std::optional<std::map<std::string, size_t>> graph_tensor_slots_;
+  std::vector<std::string> graph_binding_checks_;
+  int graph_control_depth_{0};
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;

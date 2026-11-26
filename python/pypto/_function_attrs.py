@@ -42,6 +42,8 @@ EXTERNAL_RETURN_PARAMS_ATTR = "external_return_params"
 # Required binary admission and completion policy for native callbacks.
 EXTERNAL_BINARY_POLICY_ATTR = "external_binary_policy"
 
+EXTERNAL_RUNTIME_ATTR = "external_runtime"
+
 # Bridge-generated host checker definition and symbol; see function.h.
 EXTERNAL_PREFLIGHT_SOURCE_ATTR = "external_preflight_source"
 EXTERNAL_PREFLIGHT_SYMBOL_ATTR = "external_preflight_symbol"
@@ -77,6 +79,7 @@ __all__ = [
     "EXTERNAL_PREFLIGHT_SOURCE_ATTR",
     "EXTERNAL_PREFLIGHT_SYMBOL_ATTR",
     "EXTERNAL_RETURN_PARAMS_ATTR",
+    "EXTERNAL_RUNTIME_ATTR",
     "EXTERNAL_SOURCE_ATTR",
     "REQUIRE_CONTIGUOUS_OPERANDS_ATTR",
     "SPLIT_AIV_ATTR",

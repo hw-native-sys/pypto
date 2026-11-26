@@ -422,7 +422,9 @@ void OrchestrationStmtCodegen::VisitStmt_(const ForStmtPtr& for_stmt) {
       slot_expr = "((" + loop_var + " - " + start_expr + ") / " + step_expr + ")";
     }
     current_loop_slot_exprs_.push_back(slot_expr);
+    ++graph_control_depth_;
     VisitStmt(for_stmt->body_);
+    --graph_control_depth_;
     current_loop_slot_exprs_.pop_back();
     current_return_vars_ = saved;
 
@@ -951,7 +953,9 @@ void OrchestrationStmtCodegen::VisitScopedBranchBody(const StmtPtr& body,
   // (suppressed inside a manual scope); visiting the body emits it 1:1.
   auto saved = current_return_vars_;
   current_return_vars_.assign(return_vars.begin(), return_vars.end());
+  ++graph_control_depth_;
   VisitStmt(body);
+  --graph_control_depth_;
   current_return_vars_ = saved;
 
   PopCppScope();

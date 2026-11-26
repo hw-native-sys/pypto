@@ -104,10 +104,14 @@ void OrchestrationStmtCodegen::SetInitialIndent(int indent) {
 /// it makes every generated identifier ambiguous to read and to grep.
 void OrchestrationStmtCodegen::SetTaskVarPrefix(std::string prefix) { task_var_prefix_ = std::move(prefix); }
 
-void OrchestrationStmtCodegen::SetGraphScalarParams(const std::vector<VarPtr>& params) {
+void OrchestrationStmtCodegen::SetGraphBoundaryParams(const std::vector<VarPtr>& params) {
+  graph_tensor_slots_.emplace();
   size_t scalar_index = 0;
   for (const auto& param : params) {
-    if (AsTensorTypeLike(param->GetType())) continue;
+    if (AsTensorTypeLike(param->GetType())) {
+      graph_tensor_slots_->emplace(GetVarName(param), graph_tensor_slots_->size());
+      continue;
+    }
     // A materialized device communication-context pointer travels in the same
     // replay-patched scalar ABI, although its IR type remains CommCtxType.
     if (As<ScalarType>(param->GetType()) || As<CommCtxType>(param->GetType())) {
@@ -117,13 +121,11 @@ void OrchestrationStmtCodegen::SetGraphScalarParams(const std::vector<VarPtr>& p
   }
 }
 
-const std::unordered_set<size_t>& OrchestrationStmtCodegen::GetGraphScalarValueReads() const {
-  return graph_scalar_value_reads_;
+GraphInvocationConfig OrchestrationStmtCodegen::GetGraphInvocationConfig() const {
+  return {graph_scalar_value_reads_, graph_binding_checks_};
 }
 
-void OrchestrationStmtCodegen::SetGraphConfigScalarSlots(GraphConfigScalarSlots slots) {
-  graph_config_scalar_slots_ = std::move(slots);
-}
+void OrchestrationStmtCodegen::SetGraphConfigs(GraphConfigs configs) { graph_configs_ = std::move(configs); }
 
 /// Reserve identifiers the emitted C++ function already declares outside the
 /// body this instance generates, so no body Var can be handed one of them.

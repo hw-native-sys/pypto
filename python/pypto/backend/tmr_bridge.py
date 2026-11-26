@@ -396,7 +396,7 @@ class TMRBridge:
     """Lower supported native functions to existing AIC/AIV/MIX task entries."""
 
     def lower(self, prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
-        if prepared.native_abi.name == "cannbotdsl.device_callable":
+        if target.runtime == "tmr" and prepared.native_abi.name == "cannbotdsl.device_callable":
             from .cannbotdsl_runtime import lower  # noqa: PLC0415
 
             return lower(prepared, target)
@@ -450,8 +450,8 @@ class MaterializedTask:
 def materialize(task: ExternalTask) -> Iterator[MaterializedTask]:
     """Own a private tree until compilation/runtime source publication finishes.
 
-    Only TMRBridge output is accepted: rebuilding it verifies provenance and all
-    paths before disk access. A fresh private directory has no inherited links.
+    Rebuilding with the target bridge verifies provenance and all paths before
+    disk access. A fresh private directory has no inherited links.
     Persistent artifact storage and provider caching are separate concerns.
     """
     with TemporaryDirectory(prefix="pypto-tmr-bridge-") as directory:
@@ -476,8 +476,14 @@ def publish(task: ExternalTask, output_dir: str | Path) -> MaterializedTask:
 
 
 def _write_materialized(task: ExternalTask, root: Path) -> MaterializedTask:
-    if task != TMRBridge().lower(task.prepared, task.target):
-        raise ContractError("TMR bridge: materialize requires unmodified bridge output")
+    if task.target.runtime == "percounter":
+        from .cannbotdsl_runtime import lower  # noqa: PLC0415
+
+        expected = lower(task.prepared, task.target)
+    else:
+        expected = TMRBridge().lower(task.prepared, task.target)
+    if task != expected:
+        raise ContractError("materialize requires unmodified bridge output")
     for source in task.source.files:
         path = root / source.path
         path.parent.mkdir(parents=True, exist_ok=True)

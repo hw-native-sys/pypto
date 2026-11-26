@@ -728,7 +728,16 @@ def _prepare_call(compiler, source=_CALL_SOURCE, request=None):
     return adapter.CANNBotDSLProvider().prepare(_kernel, _request() if request is None else request)
 
 
-def _compile_call(artifact, tmp_path, main, *, device=False, orchestration=False, extra_includes=()):
+def _compile_call(
+    artifact,
+    tmp_path,
+    main,
+    *,
+    device=False,
+    orchestration=False,
+    extra_includes=(),
+    runtime_name="tensormap_and_ringbuffer",
+):
     compiler = shutil.which("ccec") if device else shutil.which("g++-15") or shutil.which("g++")
     if compiler is None:
         pytest.skip("CANN device compiler unavailable" if device else "C++ compiler unavailable")
@@ -742,7 +751,7 @@ def _compile_call(artifact, tmp_path, main, *, device=False, orchestration=False
         # The runtime's declared header order selects TMR's TensorRef/Arg
         # implementation instead of a similarly named header from another ABI.
         src = root / "runtime/src"
-        runtime = src / "a5/runtime/tensormap_and_ringbuffer"
+        runtime = src / "a5/runtime" / runtime_name
         config = runpy.run_path(str(runtime / "build_config.py"))["BUILD_CONFIG"]["orchestration"]
         includes = [runtime / p for p in config["include_dirs"]] + includes
         includes += [
@@ -778,15 +787,18 @@ def _compile_call(artifact, tmp_path, main, *, device=False, orchestration=False
     return result, output
 
 
+@pytest.mark.parametrize("runtime_name", ["tensormap_and_ringbuffer", "percounter"])
 @pytest.mark.parametrize("bits", [0x80000000, 0x7FC12345, 0x3F800000])
 @pytest.mark.parametrize("reorder", [False, True])
-def test_call_adapter_packs_runtime_views_and_preserves_scalar_bits(compiler, tmp_path, bits, reorder):
+def test_call_adapter_packs_runtime_views_and_preserves_scalar_bits(
+    compiler, tmp_path, bits, reorder, runtime_name
+):
     source = _CALL_SOURCE
     if reorder:
         compiler.manifest["parameters"][:2] = reversed(compiler.manifest["parameters"][:2])
         source = source.replace("NativeTensor x, NativeTensor out", "NativeTensor out, NativeTensor x")
     prepared = _prepare_call(compiler, source)
-    artifact = build_call_adapter(prepared)
+    artifact = build_call_adapter(prepared, host_graph=runtime_name == "percounter")
     # Generated adapters are callable headers, not loadable runtime entries.
     assert artifact.entry == "call_adapter.hpp" and artifact.symbol.endswith("::invoke")
     assert b"kernel_entry" not in artifact.files[-1].content
@@ -799,7 +811,7 @@ def test_call_adapter_packs_runtime_views_and_preserves_scalar_bits(compiler, tm
 int main() {{
     float input[100]{{}}, output[120]{{}};
     for (int i = 0; i < 100; ++i) input[i] = float(i + 1);
-    simpler::tmr::Tensor x{{}}, out{{}};
+    simpler::{"hbg" if runtime_name == "percounter" else "tmr"}::Tensor x{{}}, out{{}};
     x.dtype = out.dtype = DataType::FLOAT32;
     x.buffer = {{uint64_t(input), sizeof(input)}}; x.ndims = 2;
     x.start_offset = 3; x.shapes[0] = 2; x.shapes[1] = 32;
@@ -823,7 +835,7 @@ int main() {{
     if (output[9] != input[5] || output[48] != input[44]) return 4;
 }}
 """
-    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True)
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True, runtime_name=runtime_name)
     assert result.returncode == 0, result.stderr
     executed = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
     assert executed.returncode == 0, executed.stderr
@@ -1073,13 +1085,15 @@ def _prepare_binding(compiler, tensor, *, element="f32", cpp_type="float"):
     return _prepare_call(compiler, source, request)
 
 
-def _run_binding_checker(artifact, tmp_path, body):
+def _run_binding_checker(artifact, tmp_path, body, *, runtime_name="tensormap_and_ringbuffer"):
+    namespace = "hbg" if runtime_name == "percounter" else "tmr"
     main = (
+        f"using Tensor = simpler::{namespace}::Tensor;\n"
         """
 #include <cstring>
 [[noreturn]] void assert_impl(const char* condition, const char*, int) { throw condition; }
 int main() {
-    simpler::tmr::Tensor x{}, out{};
+    Tensor x{}, out{};
     x.buffer = {0x1000, 4096}; x.ndims = 2; x.dtype = DataType::FLOAT32;
     x.shapes[0] = 2; x.shapes[1] = 32; x.strides[0] = 40; x.strides[1] = 1;
     x.start_offset = 3;
@@ -1096,13 +1110,14 @@ int main() {
 }}
 """
     )
-    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True)
+    result, binary = _compile_call(artifact, tmp_path, main, orchestration=True, runtime_name=runtime_name)
     assert result.returncode == 0, result.stderr
     result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, f"checker exited {result.returncode}: {result.stderr}"
 
 
-def test_binding_checker_rechecks_actual_arguments(compiler, tmp_path):
+@pytest.mark.parametrize("runtime_name", ["tensormap_and_ringbuffer", "percounter"])
+def test_binding_checker_rechecks_actual_arguments(compiler, tmp_path, runtime_name):
     artifact = build_binding_checker(_prepare_call(compiler))
     # One generated checker observes mutations between invocations. Assertions
     # must stay enabled under NDEBUG; no storage is dereferenced by the checker.
@@ -1144,6 +1159,31 @@ def test_binding_checker_rechecks_actual_arguments(compiler, tmp_path):
     }}
     args.add_scalar(1.0f); if (!rejects("argument counts")) return 21;
 """,
+        runtime_name=runtime_name,
+    )
+
+
+def test_percounter_bf16_rebinding_checks_offset_in_bytes(compiler, tmp_path):
+    compiler.cb.dtypes.bfloat16 = object()
+    tensor = TensorSpec((64,), DataType.BF16, strides=(1,), alignment=64)
+    artifact = build_binding_checker(
+        _prepare_binding(compiler, tensor, element="bf16", cpp_type="bfloat16_t")
+    )
+    _run_binding_checker(
+        artifact,
+        tmp_path,
+        """
+    x.ndims = out.ndims = 1;
+    x.dtype = out.dtype = DataType::BFLOAT16;
+    x.shapes[0] = out.shapes[0] = 64;
+    x.strides[0] = out.strides[0] = 1;
+    x.start_offset = out.start_offset = 0;
+    check();
+    x.buffer.addr = 0x8000; x.start_offset = 32; check();
+    x.start_offset = 1; if (!rejects("alignment")) return 1;
+    x.start_offset = 32; x.buffer.size = 191; if (!rejects("storage bounds")) return 2;
+""",
+        runtime_name="percounter",
     )
 
 
@@ -1888,6 +1928,53 @@ def test_runtime_rejects_inconsistent_local_ranges(compiler, overlap, declared_b
     prepared = _prepare_call(compiler)
     with pytest.raises(ContractError, match=match):
         TMRBridge().lower(prepared, _aiv_target(prepared))
+
+
+@pytest.mark.parametrize("host_graph", [False, True])
+def test_jit_binding_publishes_callback_for_selected_runtime(compiler, tmp_path, host_graph):
+    from pypto import passes  # noqa: PLC0415
+    from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding  # noqa: PLC0415
+    from pypto.jit.specializer import SpecializeContext, TensorMeta  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler)
+    _prepare_binding(compiler, TensorSpec((64,), DataType.FP32, strides=(1,), alignment=64))
+    context = SpecializeContext(
+        func_name="native",
+        source="",
+        func_type="extern",
+        level=None,
+        param_names=["alpha", "x", "out"],
+        tensor_meta={name: TensorMeta((64,), DataType.FP32) for name in ("x", "out")},
+        scalar_dtypes={"alpha": DataType.FP32},
+        py_globals={},
+    )
+    runtime = (
+        passes.RuntimeKind.HOST_BUILD_GRAPH if host_graph else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+    )
+    CANNBotDSLBinding(adapter.CANNBotDSLProvider(), _kernel).prepare(context, "a5", runtime, str(tmp_path))
+    assert context.external_runtime == ("percounter" if host_graph else "tensormap_and_ringbuffer")
+    assert context.external_aiv_source is not None
+    header = Path(context.external_aiv_source).with_name("call_adapter.hpp").read_text()
+    assert ("simpler::hbg::Tensor" if host_graph else "simpler::tmr::Tensor") in header
+    assert context.external_binary_policy == "a5-text-only"
+
+
+@pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
+def test_percounter_compiles_device_entry_with_pinned_runtime_headers(compiler, core, tmp_path):
+    pytest.importorskip("simpler_setup")
+    if not shutil.which("ccec"):
+        pytest.skip("A5 CCEC toolchain unavailable")
+    from pypto.backend.cannbotdsl_runtime import build_submitter, compile_task, lower  # noqa: PLC0415
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler, core)
+    prepared = _prepare_call(compiler)
+    task = lower(prepared, replace(_aiv_target(prepared), runtime="percounter"))
+    images = compile_task(task, KernelCompiler("a5"), pto_isa_root=str(tmp_path))
+    assert len(images) == len(prepared.execution.cores)
+    assert all(images)
+    with pytest.raises(ContractError, match="requires TMR"):
+        build_submitter((task,), (tuple(range(len(images))),))
 
 
 def test_aiv_bridge_owns_checked_source_and_requires_strict_compilation(compiler):

@@ -530,6 +530,9 @@ inline constexpr const char* kAttrExternalReturnParams = "external_return_params
 // Native callback binary admission and completion policy (string).
 inline constexpr const char* kAttrExternalBinaryPolicy = "external_binary_policy";
 
+/// Runtime implementation that owns a prepared callback's parameter ABI.
+inline constexpr const char* kAttrExternalRuntime = "external_runtime";
+
 /**
  * @brief Bridge-owned host C++ checker definition and its callable symbol (strings).
  *

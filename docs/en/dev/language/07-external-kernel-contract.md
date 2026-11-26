@@ -185,13 +185,22 @@ from that export; MIX produces one Group containing an AIC and a dual-lane AIV
 member. Ordinary PyPTO producers and consumers can surround the call.
 
 Use `compile(..., config=RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD))` or ordinary JIT execution
-with that configuration and the TMR runtime. `specialize()` and `lower()`
+with that configuration and either TMR or A5 default HBG (`percounter`). `specialize()` and `lower()`
 are currently unsupported for these bindings; inspect the compiled program instead. This first JIT subset requires positive
 static ND shapes, packed strides, a 64-byte-aligned first element, and an extent
 that occupies whole 64-byte cache lines. Shape/stride/alignment/bounds checks run
 before every submission, including loaded-program reuse; a signature is not
 proof about actual caller storage. Launch checks require one block without
 synchronized start. Unaligned or strided views and dynamic shapes fail explicitly.
+
+For HBG, compile inside `with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):`.
+An unconditional native call inside a recorded Graph must take its tensor operands from the
+legalized Graph boundary and launch a single static block. Scalars must be Graph arguments
+or literals. Pass the final view as a Graph
+argument if its descriptor would otherwise exist only in the recorder. PyPTO projects the
+device argument order onto the boundary and checks the actual views before every Graph
+submission, including cache hits. For conditional or repeated native calls, put the condition
+or loop around the Graph invocation. The ordered direct batch submitter uses TMR.
 
 Each compilation prepares afresh and owns its exported sources in a private
 subdirectory of the program output. A later `CompiledProgram.load()` remains valid

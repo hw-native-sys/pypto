@@ -57,6 +57,7 @@ from pypto._function_attrs import (
     EXTERNAL_PREFLIGHT_SOURCE_ATTR,
     EXTERNAL_PREFLIGHT_SYMBOL_ATTR,
     EXTERNAL_RETURN_PARAMS_ATTR,
+    EXTERNAL_RUNTIME_ATTR,
 )
 from pypto.language.typing.array import Array as _LangArray
 from pypto.language.typing.dynamic import DynVar as _LangDynVar
@@ -240,6 +241,7 @@ class SpecializeContext:
     external_preflight_source: str = ""
     external_preflight_symbol: str = ""
     external_binary_policy: str = "ordinary"
+    external_runtime: str = ""
     external_binding: ExternalJITBinding | None = None
 
     @property
@@ -2868,6 +2870,8 @@ class Specializer:
             dual_aiv_dispatch: bool = False,
         ) -> list[str]:
             function_attrs: list[str] = []
+            if ctx.external_runtime:
+                function_attrs.append(f'"{EXTERNAL_RUNTIME_ATTR}": {ctx.external_runtime!r}')
             if ctx.external_include_dirs:
                 encoded_include_dirs = encode_external_include_dirs(ctx.external_include_dirs)
                 function_attrs.append(f'"{EXTERNAL_INCLUDE_DIRS_ATTR}": {encoded_include_dirs!r}')

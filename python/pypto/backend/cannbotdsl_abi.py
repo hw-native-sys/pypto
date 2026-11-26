@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Compile-only CANNBotDSL call adapters for TMR argument storage.
+"""Compile-only CANNBotDSL call adapters for TMR and percounter argument storage.
 
 This module constructs native arguments, not runtime tasks. Generated adapters
 have no kernel_entry and cannot be passed to tmr_bridge.materialize() directly.
@@ -138,7 +138,7 @@ def _descriptor_lines(
         ),
         _assert_cpp(f"sizeof({element}) == {spec.dtype.get_byte()}", "tensor element width mismatch"),
         _assert_cpp(f"std::is_same_v<{element}, {logical_element}>", "tensor element dtype mismatch"),
-        # TMR's start_offset is in elements. Apply it once, including for empty
+        # Both runtime ABIs store start_offset in elements. Apply it once, including for empty
         # views; callers must prove address representability and storage bounds.
         f"    {name}.ptr = reinterpret_cast<decltype({name}.ptr)>("
         f"{tensor}.buffer.addr + {tensor}.start_offset * {spec.dtype.get_byte()}ULL);",
@@ -201,19 +201,19 @@ def _validate_call(prepared: PreparedKernel) -> dict[str, Any]:
         raise ContractError("CANNBotDSL adapter: kernel_entry is reserved for runtime dispatch")
     tensors, scalars = _slots(prepared)
     if len(tensors) > 32 or len(scalars) > 16:
-        raise ContractError("CANNBotDSL adapter: TMR supports at most 32 tensors and 16 scalars")
+        raise ContractError("CANNBotDSL adapter: runtime supports at most 32 tensors and 16 scalars")
     for parameter in prepared.contract.parameters:
         spec = parameter.type
         if isinstance(spec, TensorSpec):
             if not 1 <= len(spec.shape) <= 5:
-                raise ContractError("CANNBotDSL adapter: TMR tensor rank must be in 1..5")
+                raise ContractError("CANNBotDSL adapter: runtime tensor rank must be in 1..5")
         elif spec.dtype in (DataType.FP16, DataType.BF16):
             raise ContractError("CANNBotDSL adapter: half-width runtime scalars are not supported")
     return manifest
 
 
 def build_binding_checker(prepared: PreparedKernel) -> SourceArtifact:
-    """Generate a host checker for each invocation's actual TMR arguments.
+    """Generate a host checker for each invocation's actual runtime arguments.
 
     The caller must run the exported function on CoreTaskArgs before packing
     or submitting those same bindings, including on artifact cache hits. The
@@ -327,10 +327,10 @@ def build_conflict_checker(first: PreparedKernel, second: PreparedKernel) -> Sou
     )
 
 
-def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
+def build_call_adapter(prepared: PreparedKernel, *, host_graph: bool = False) -> SourceArtifact:
     """Own a compile-only device call adapter and its native dependencies.
 
-    The caller must supply valid TMR packed arguments (tensors first, scalars
+    The caller must supply valid packed arguments for the selected runtime (tensors first, scalars
     second), and run build_binding_checker's function on every invocation.
     This function validates declarations and the compiled ABI only; returning
     a SourceArtifact does not authorize runtime submission.
@@ -339,13 +339,16 @@ def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
     symbol = prepared.artifact.symbol
     tensors, scalars = _slots(prepared)
     namespace = f"pypto_cannbotdsl_{prepared_digest(prepared)}"
+    tensor_type = "simpler::hbg::Tensor" if host_graph else "simpler::tmr::Tensor"
     lines = [
         "#pragma once",
         "#include <cstddef>",
         "#include <cstdint>",
         "#include <tuple>",
         "#include <type_traits>",
-        '#include "tensormap_and_ringbuffer/tensor.h"',
+        '#include "host_build_graph/tensor.h"'
+        if host_graph
+        else '#include "tensormap_and_ringbuffer/tensor.h"',
         '#include "native/device_callable.hpp"',
         f"namespace {namespace} {{",
         "template<class> struct Signature;",
@@ -361,9 +364,7 @@ def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
         "__aicore__ inline void invoke(__gm__ int64_t* args) {",
     ]
     for index, slot in tensors.items():
-        lines.append(
-            f"    const auto& t{index} = *reinterpret_cast<__gm__ simpler::tmr::Tensor*>(args[{slot}]);"
-        )
+        lines.append(f"    const auto& t{index} = *reinterpret_cast<__gm__ {tensor_type}*>(args[{slot}]);")
     arguments: list[str] = []
     for position, (arg, item) in enumerate(zip(prepared.native_abi.parameters, manifest["parameters"])):
         typ, name = f"A{position}", f"a{position}"

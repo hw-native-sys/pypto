@@ -19,7 +19,7 @@ independently of automatic PyPTO JIT provider discovery.
 
 import pypto.language as pl
 import pytest
-from pypto import DataType
+from pypto import DataType, passes
 from pypto.backend.cannbotdsl_runtime import build_submitter, compile_task
 from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
@@ -487,7 +487,10 @@ def _jit_compute_chain(cb, kind):
 
 @pytest.mark.platforms("a5", reason="CANNBotDSL JIT requires A5 text-only callbacks")
 @pytest.mark.parametrize("kind", ["aic", "aiv", "mixed"])
-def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
+@pytest.mark.parametrize(
+    "runtime", [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH]
+)
+def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind, runtime):
     """Ordinary JIT producers and consumers surround real native Cube/SIMD work."""
     from dataclasses import replace  # noqa: PLC0415
 
@@ -503,7 +506,8 @@ def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
     x = torch.zeros((16, 16), dtype=torch.float32)
     y = torch.zeros_like(x)
     out = torch.empty_like(x)
-    compiled = chain.compile(a, b, x, y, out, config=config)
+    with passes.PassContext([], runtime=runtime):
+        compiled = chain.compile(a, b, x, y, out, config=config)
     del chain
     compiled.load()
     # Loading after compile() returns also verifies exported source ownership.
@@ -520,6 +524,89 @@ def test_cannbotdsl_jit_compute_chain(tmp_path, test_config, kind):
         vector = (x + y + 2) * (x + 1)
         lhs, rhs = {"aic": (product, product), "aiv": (vector, vector), "mixed": (product, vector)}[kind]
         torch.testing.assert_close(out, (lhs + rhs) * lhs, rtol=0, atol=0)
+
+
+@pytest.mark.platforms("a5", reason="CANNBotDSL Graph replay requires the A5 percounter runtime")
+def test_cannbotdsl_graph_rebinds_native_operands(tmp_path, test_config):
+    from dataclasses import replace  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+    _, native, _ = _compute_kernels(cb)
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, y: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        native(x, y, out)
+        return out
+
+    @pl.jit
+    def entry(x: pl.Tensor, y: pl.Tensor, first: pl.InOut[pl.Tensor], second: pl.InOut[pl.Tensor]):
+        first = stage(x, y, first)
+        second = stage(y, x, second)
+        return first, second
+
+    x = torch.arange(256, dtype=torch.float32)
+    y = x + 1
+    first = torch.full_like(x, float("nan"))
+    second = torch.full_like(y, float("nan"))
+    config = replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path))
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(x, y, first, second, config=config)
+    compiled.load()
+    if config.codegen_only:
+        return
+    compiled(x, y, first, second, config=config)
+    torch.testing.assert_close(first, (x + y) * x, rtol=0, atol=0)
+    torch.testing.assert_close(second, (x + y) * y, rtol=0, atol=0)
+
+
+@pytest.mark.platforms("a5", reason="CANNBotDSL BF16 view replay requires the A5 percounter runtime")
+def test_cannbotdsl_graph_checks_derived_bf16_view(tmp_path, test_config):
+    from dataclasses import replace  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    @cb.kernel
+    def copy_tile(x, out):
+        tile = cb.Buffer(cb.MemLoc.UB, cb.dtypes.bfloat16, cb.make_layout((64,)))
+        cb.mem_copy(tile, x)
+        cb.vec_sync_all()
+        cb.mem_copy(out, tile)
+        cb.vec_sync_all()
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor], offset: pl.Scalar[pl.INDEX]):
+        view = pl.tensor.slice(x, [64], [offset])
+        copy_tile(view, out)
+        return out
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor], step: pl.Scalar[pl.INDEX]):
+        for i in pl.range(2):
+            offset = i * step
+            out = stage(x, out, offset)
+        return out
+
+    x = torch.arange(128, dtype=torch.float32).bfloat16()
+    out = torch.empty(64, dtype=torch.bfloat16)
+    config = replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path))
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(x, out, 32, config=config)
+    compiled.load()
+    if config.codegen_only:
+        return
+    compiled(x, out, 32, config=config)
+    torch.testing.assert_close(out, x[32:96], rtol=0, atol=0)
+    # First invocation is aligned. The same graph's next view starts two bytes later.
+    with pytest.raises(RuntimeError, match="alignment"):
+        compiled(x, out, 1, config=config)
 
 
 @pytest.mark.platforms("a5", reason="CANNBotDSL JIT requires A5 text-only callbacks")

@@ -19,8 +19,9 @@ from pypto.jit.external.validation import ContractError
 from pypto.jit.specializer import SpecializeContext
 from pypto.pypto_core import passes
 
+from .cannbotdsl_runtime import lower
 from .external_bridge import RuntimeTarget
-from .tmr_bridge import _CAPABILITIES, TMRBridge, publish
+from .tmr_bridge import _CAPABILITIES, publish
 
 if TYPE_CHECKING:
     from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider
@@ -41,8 +42,11 @@ class CANNBotDSLBinding:
     def prepare(
         self, context: SpecializeContext, platform: str, runtime: passes.RuntimeKind, output_dir: str
     ) -> None:
-        if platform != "a5" or runtime != passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER:
-            raise ContractError("CANNBotDSL JIT requires platform a5 and the TMR runtime")
+        if platform != "a5" or runtime not in (
+            passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+            passes.RuntimeKind.HOST_BUILD_GRAPH,
+        ):
+            raise ContractError("CANNBotDSL JIT requires platform a5 and the TMR or percounter runtime")
         request = request_from_context(context, CompileTarget("a5", "ccec", "consumer-selected"))
         parameters: list[ParameterSpec] = []
         for parameter in request.parameters:
@@ -62,10 +66,15 @@ class CANNBotDSLBinding:
         prepared = self.provider.prepare(self.kernel, request)
         if prepared.request != request:
             raise ContractError("CANNBotDSL JIT provider returned a different request")
+        host_graph = runtime == passes.RuntimeKind.HOST_BUILD_GRAPH
         target = RuntimeTarget(
-            "tmr", "1", request.target, frozenset({("cannbotdsl.device_callable", 1)}), _CAPABILITIES
+            "percounter" if host_graph else "tmr",
+            "1",
+            request.target,
+            frozenset({("cannbotdsl.device_callable", 1)}),
+            _CAPABILITIES,
         )
-        task = TMRBridge().lower(prepared, target)
+        task = lower(prepared, target)
         # Lazy binary loading outlives this preparation call.
         native = publish(task, output_dir)
         entry = native.source
@@ -76,6 +85,7 @@ class CANNBotDSLBinding:
         context.external_dual_aiv_dispatch = execution.aiv_lanes == 2
         context.external_include_dirs = native.include_dirs
         context.external_contract = prepared.contract
+        context.external_runtime = "percounter" if host_graph else "tensormap_and_ringbuffer"
         symbol = f"{task.preflight_symbol}_jit"
         context.external_preflight_source = (
             task.preflight_source.removeprefix("#pragma once\n")

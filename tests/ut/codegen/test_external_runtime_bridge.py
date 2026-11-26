@@ -132,14 +132,14 @@ def _target(prepared):
     )
 
 
-def _compile_run(path: Path, source: str, *, includes: tuple[Path, ...] = ()) -> None:
+def _compile_run(
+    path: Path, source: str, *, includes: tuple[Path, ...] = (), runtime_name="tensormap_and_ringbuffer"
+) -> None:
     compiler = shutil.which("g++-15") or shutil.which("g++") or shutil.which("clang++")
     if compiler is None:
         pytest.skip("C++ compiler unavailable")
     path.write_text(source)
-    args = _runtime_include_args(
-        Path(__file__).resolve().parents[3], runtime_name="tensormap_and_ringbuffer", arch="a5"
-    )
+    args = _runtime_include_args(Path(__file__).resolve().parents[3], runtime_name=runtime_name, arch="a5")
     binary = path.with_suffix("")
     result = subprocess.run(
         [
@@ -424,6 +424,72 @@ class P:
         path = tmp_path / "main.cpp"
         path.write_text(output)
         _assert_orchestration_compiles(path, runtime_name="tensormap_and_ringbuffer", arch="a5")
+
+
+def test_graph_checks_rebound_native_arguments_in_device_order(tmp_path):
+    checker = """inline void verify_binding(const CoreTaskArgs& args) {
+    uint64_t bits[1]; args.pack_scalars(bits);
+    if (args.tensor(0).ref().buffer.addr != bits[0] ||
+        args.tensor(1).ref().buffer.addr == bits[0]) throw 1;
+}"""
+    attrs = dict(
+        external_runtime="percounter",
+        external_preflight_source=checker,
+        external_preflight_symbol="verify_binding",
+    )
+    native = tmp_path / "native.cpp"
+    native.touch()
+    program = pl.parse(f"""import pypto.language as pl
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(native)!r})
+    def native(self, x: pl.Tensor[[32], pl.FP32], scale: pl.Scalar[pl.INT64],
+               out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+        pl.func_attr({attrs!r})
+        ...
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def stage(self, out: pl.InOut[pl.Tensor[[32], pl.FP32]], scale: pl.Scalar[pl.INT64],
+              x: pl.Tensor[[32], pl.FP32]):
+        self.native(x, scale, out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def entry(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]],
+              scale: pl.Scalar[pl.INT64]):
+        self.stage(out, scale, x)
+""")
+    orch = _generate_orch_code(program)
+    source = tmp_path / "entry.cpp"
+    source.write_text(orch)
+    _assert_orchestration_compiles(source, runtime_name="percounter", arch="a5")
+    config = orch[orch.index("struct pypto_graph_stageConfig") : orch.index("static void pypto_graph_stage(")]
+    _compile_run(
+        tmp_path / "bindings.cpp",
+        '#include "types.h"\n#include "graph_config.h"\n'
+        + checker
+        + "\n"
+        + config
+        + """
+[[noreturn]] void assert_impl(const char* why, const char*, int) { throw why; }
+int main() {
+    simpler::hbg::Tensor x{}, out{};
+    for (uint64_t address : {4096, 8192}) {
+        x.buffer.addr = address;
+        out.buffer.addr = address + 1024;
+        GraphTaskArgs args;
+        args.add_output(out);
+        args.add_input(x);
+        args.add_scalar(address);
+        if (args.has_error()) return 2;
+        pypto_graph_stageConfig::check_bindings(args);
+        out.buffer.addr = address;
+        try { pypto_graph_stageConfig::check_bindings(args); return 1; }
+        catch (int) {}
+    }
+}
+""",
+        runtime_name="percounter",
+    )
 
 
 @pytest.mark.parametrize(
