@@ -741,6 +741,38 @@ def _build_self_peer(n_ranks: int):
     return _invalid_host_orch(n_ranks, _invalid_chip_orch(n_ranks, publish))
 
 
+def _build_tile_self_peer(n_ranks: int, *, use_get: bool):
+    """A tile-level PUT (`pypto_urma_gather_put`) or GET (`pypto_urma_scatter_get`)
+    whose peer is the issuing rank.
+
+    `pypto_urma_gather_put`'s guard checked `peer < 0 || peer >= rankNum` but
+    never `peer == rankId`, unlike `pypto_urma_transfer_impl` (the tensor
+    adapter, see `_build_self_peer` above). `pypto_urma_scatter_get` (merged
+    #3572) had the identical pre-existing gap.
+    """
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        session = pld.system.make_session(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        src = pl.tensor.view(data, [1, SIZE], offsets=[my_rank, 0])
+        dst = pl.tensor.view(data, [1, SIZE], offsets=[my_rank, 0])
+        if use_get:
+            _after, event = pld.tile.get_async(dst, my_rank, src, session)
+        else:
+            _after, event = pld.tile.put_async(dst, my_rank, src, session)
+        pld.system.defer_wait_event(event, session)
+        return data
+
+    return _invalid_host_orch(n_ranks, _invalid_chip_orch(n_ranks, publish))
+
+
 def _build_zero_length(n_ranks: int):
     """A PUT whose runtime transfer extent is zero."""
 
@@ -1385,6 +1417,18 @@ class TestL3UrmaAsync:
             pytest.skip(f"URMA async self-peer case needs {n_ranks} devices")
 
         _assert_invalid(test_config, device_ids, n_ranks, _build_self_peer, capfd)
+
+    @pytest.mark.parametrize("use_get", [False, True], ids=["gather_put", "scatter_get"])
+    def test_tile_self_peer_fails_loudly(self, test_config, device_ids, capfd, use_get):
+        """A tile-level PUT/GET addressed to the issuing rank is rejected — see
+        `_build_tile_self_peer` for the gap this regression-tests."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"Tile self-peer case needs {n_ranks} devices")
+
+        _assert_invalid(
+            test_config, device_ids, n_ranks, lambda n: _build_tile_self_peer(n, use_get=use_get), capfd
+        )
 
     def test_zero_length_fails_loudly(self, test_config, device_ids, capfd):
         """A runtime transfer extent of zero is rejected."""

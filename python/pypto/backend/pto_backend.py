@@ -473,6 +473,7 @@ static __aicore__ void pypto_urma_scatter_get(
   auto* comm = reinterpret_cast<__gm__ CommContext*>(comm_raw);
   const auto offset = reinterpret_cast<uint64_t>(src) - comm->windowsIn[comm->rankId];
   if (peer < 0 || static_cast<uint64_t>(peer) >= comm->rankNum ||
+      static_cast<uint64_t>(peer) == static_cast<uint64_t>(comm->rankId) ||
       nbytes <= 0 || nbytes > (256LL << 20) || offset > comm->winSize ||
       static_cast<uint64_t>(nbytes) > comm->winSize - offset) {
     pto2::detail::set_urma_error(async, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
@@ -517,6 +518,7 @@ static __aicore__ void pypto_urma_gather_put(
   // whichever endpoint is remote.
   const auto offset = reinterpret_cast<uint64_t>(dst) - comm->windowsIn[comm->rankId];
   if (peer < 0 || static_cast<uint64_t>(peer) >= comm->rankNum ||
+      static_cast<uint64_t>(peer) == static_cast<uint64_t>(comm->rankId) ||
       nbytes <= 0 || nbytes > (256LL << 20) || offset > comm->winSize ||
       static_cast<uint64_t>(nbytes) > comm->winSize - offset) {
     pto2::detail::set_urma_error(async, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
