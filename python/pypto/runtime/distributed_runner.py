@@ -36,6 +36,7 @@ import numpy as np
 import torch
 
 from .device_tensor import DeviceTensor, StackedDeviceTensor
+from .prepared_decode import load as load_prepared_decode
 from .runtime_base import Worker
 from .window_sources import normalize_window_sources
 
@@ -2096,13 +2097,15 @@ class DistributedWorker(Worker):
                 if missing_sources:
                     raise ValueError(f"Missing window_sources for Host window init keys: {missing_sources}")
                 consumed_sources |= source_keys
-                prepared_decode = None
-                if self._persistent and not self._reset_persistent_windows:
-                    from .prepared_decode import load as load_prepared_decode
-
-                    prepared_decode = load_prepared_decode(
-                        entry_fn, prog.output_dir / "orchestration" / "host_orch.py"
+                prepared_decode = (
+                    load_prepared_decode(
+                        entry_fn,
+                        prog.output_dir / "orchestration" / "host_orch.py",
+                        lease_cls=_RetainedDomainLease,
                     )
+                    if self._persistent and not self._reset_persistent_windows
+                    else None
+                )
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
                 consumed |= set(prog_callbacks)
@@ -2518,9 +2521,13 @@ class DistributedWorker(Worker):
             selection = tensors.pop(_PREPARED_DECODE_SELECTION, None)
             if selection is not None:
                 state["prepared_decode"].submit(
-                    selection, orch, call_config, tensors=tensors, callables=state["chip_cids"],
-                    sub_ids=state["sub_ids"], keepalive=keepalive, world=state["device_nums"],
-                    provider=domain_provider, program=program_id,
+                    selection,
+                    orch,
+                    call_config,
+                    state,
+                    tensors=tensors,
+                    keepalive=keepalive,
+                    provider=domain_provider,
                     registered_domains=domains_by_program.setdefault(program_id, {}),
                 )
                 return
@@ -3438,6 +3445,12 @@ class DistributedWorker(Worker):
                 if first_error is None:
                     first_error = exc
 
+    def _clear_prepared_decode_caches(self) -> None:
+        for state in self._states.values():
+            prepared_decode = state.get("prepared_decode")
+            if prepared_decode is not None:
+                prepared_decode.entries.clear()
+
     def close(self) -> None:
         """Release runtime resources, retrying incomplete Worker cleanup."""
         # Serialize the admission transition with submit() and prevent two
@@ -3498,10 +3511,7 @@ class DistributedWorker(Worker):
                 self._persistent_domains_by_program.clear()
                 if self._close_complete:
                     self._device_buffers.clear()
-                    for state in self._states.values():
-                        prepared_decode = state.get("prepared_decode")
-                        if prepared_decode is not None:
-                            prepared_decode.entries.clear()
+                    self._clear_prepared_decode_caches()
             if first_error is not None:
                 raise first_error
         finally:

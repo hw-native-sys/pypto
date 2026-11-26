@@ -27,6 +27,7 @@ import warnings
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -38,7 +39,7 @@ from pypto.ir import DistributedConfig
 from pypto.ir.compiled_program import _ParamInfo
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import DeviceTensor, StackedDeviceTensor
+from pypto.runtime import DeviceTensor, StackedDeviceTensor, prepared_decode
 from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_BEGIN,
     _L3_SWIMLANE_GRAPH_END,
@@ -4985,9 +4986,6 @@ def test_persistent_domain_identity_includes_source_and_workspace():
 
 
 def test_prepared_decode_defers_simpler_prepared_local_import(tmp_path, monkeypatch):
-    from hashlib import sha256
-    from pypto.runtime import prepared_decode
-
     orch_path = tmp_path / "host_orch.py"
     source = b"def entry(orch, *args, **kwargs):\n    pass\n"
     orch_path.write_bytes(source)

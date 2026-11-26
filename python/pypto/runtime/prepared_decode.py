@@ -9,11 +9,16 @@
 
 """Cache fixed decode rank bindings without caching submission authorization."""
 
+from __future__ import annotations
+
 import ast
+import importlib
 from collections import OrderedDict
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter_ns
+from typing import Any, cast
 
 import torch
 
@@ -21,141 +26,246 @@ from .device_tensor import DeviceTensor, StackedDeviceTensor
 
 # Exact orchestration sources audited for static domain specs, rank-only graph
 # construction, no scalar public args, and no cross-rank TaskHandle references.
-HOST_SOURCES = {
+HOST_SOURCES: set[str] = {
     "e4b07c15b7b6007f070bd1a9f03986436bc116ebb75695a708a703e7fbfdb380",  # wave13-p3a-head8-aligned-r3 one
     "b5b110960fee9fdea16908d1d7d3d810b27f5efc0a515ef43290e10d9d64ddfd",  # wave13-p3a-head8-aligned-r3 two
     "fcd9000ce64441a472ee4b06c1e60c5466c58787fc662d25f51461bb457102ef",  # wave13-p3b-drafter-tp8-r1 one
     "9fcbd4ace0c430420cf731405df386c434646d5029ca45064107b6e7d2e09028",  # wave13-p3b-drafter-tp8-r1 two
 }
 
+_OwnerRecord = tuple[tuple[int, int], Any]
+_CacheEntry = tuple[tuple[Any, ...], tuple[_OwnerRecord, ...], list[Any], tuple[tuple[str, Any], ...]]
+_Selection = tuple[Any, _CacheEntry | None]
 
-def _domain_scope(orch, registered, prefix, name, factory):
+
+def _domain_scope(
+    orch: Any,
+    registered: Mapping[str, Any],
+    prefix: str,
+    name: str,
+    factory: Callable[[], Any],
+    lease_cls: Callable[[Any], Any],
+) -> Any:
     namespaced = prefix + name
     previous = registered.get(name)
     if previous is None:
         return factory()
-    from .distributed_runner import _RetainedDomainLease
-
     handle = orch.get_domain(namespaced)
     if handle is not previous[1] or not handle.retain_after_run:
         raise RuntimeError("Prepared decode requires a retained domain")
-    return _RetainedDomainLease(handle)
+    return lease_cls(handle)
 
 
-def _host_key(value):
-    return (id(value), value.data_ptr(), value.untyped_storage()._cdata, tuple(value.shape),
-            value.stride(), value.dtype, value.is_shared())
+def _host_key(value: torch.Tensor) -> tuple[Any, ...]:
+    storage_cdata: Any = getattr(value.untyped_storage(), "_cdata")
+    return (
+        id(value),
+        value.data_ptr(),
+        storage_cdata,
+        tuple(value.shape),
+        value.stride(),
+        value.dtype,
+        value.is_shared(),
+    )
 
 
-def _binding_key(value):
+def _binding_key(value: Any) -> Any:
     if type(value) in (DeviceTensor, StackedDeviceTensor):
         return id(value)
     if type(value) is torch.Tensor:
-        return _host_key(value)
-    if type(value) is list and all(type(item) is torch.Tensor for item in value):
-        return tuple(map(_host_key, value))
+        return _host_key(cast(torch.Tensor, value))
+    if type(value) is list:
+        items = cast(list[Any], value)
+        if all(type(item) is torch.Tensor for item in items):
+            return tuple(_host_key(cast(torch.Tensor, item)) for item in items)
     raise TypeError("Unsupported prepared decode binding")
 
 
-def _owner_records(args):
+def _owner_records(args: Sequence[Any]) -> Iterator[_OwnerRecord]:
     for value in args:
         if type(value) is StackedDeviceTensor:
-            for shard, rank in zip(value.shards, value.worker_ids, strict=True):
+            stacked = cast(StackedDeviceTensor, value)
+            for shard, rank in zip(stacked.shards, stacked.worker_ids, strict=True):
                 yield (rank, shard.data_ptr - shard.byte_offset), shard.buffer
         elif type(value) is DeviceTensor:
-            yield (value.buffer.owner_worker_id, value.data_ptr - value.byte_offset), value.buffer
+            tensor = cast(DeviceTensor, value)
+            owner_rank = int(getattr(tensor.buffer, "owner_worker_id"))
+            yield (owner_rank, tensor.data_ptr - tensor.byte_offset), tensor.buffer
 
 
 class PrepareRanks(ast.NodeTransformer):
-    def visit_For(self, node):
+    def visit_For(self, node: ast.For) -> ast.AST:
         # The pinned entry contains only independent rank loops. The caller
         # executes each entire loop once on a cache miss to create snapshots.
-        return ast.copy_location(ast.If(
-            test=ast.UnaryOp(op=ast.Not(), operand=ast.Name(id="_cache_hit", ctx=ast.Load())),
-            body=[self.generic_visit(node)], orelse=[],
-        ), node)
+        return ast.copy_location(
+            ast.If(
+                test=ast.UnaryOp(op=ast.Not(), operand=ast.Name(id="_cache_hit", ctx=ast.Load())),
+                body=[cast(ast.stmt, self.generic_visit(node))],
+                orelse=[],
+            ),
+            node,
+        )
 
-    def visit_With(self, node):
+    def visit_With(self, node: ast.With) -> ast.AST:
         (item,) = node.items
         call = item.context_expr
+        if not isinstance(call, ast.Call):
+            raise ValueError("Prepared decode requires a domain context call")
         name = next(ast.literal_eval(k.value) for k in call.keywords if k.arg == "name")
         if any(isinstance(n, ast.Name) and n.id == "tensors" for n in ast.walk(call)):
             raise ValueError("Dynamic domain definitions need original admission")
+        factory_expr = ast.Lambda(
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+            ),
+            body=call,
+        )
         item.context_expr = ast.Call(
             func=ast.Name(id="_domain_scope", ctx=ast.Load()),
-            args=[ast.Name(id="orch", ctx=ast.Load()), ast.Name(id="_registered_domains", ctx=ast.Load()),
-                  ast.Name(id="_domain_prefix", ctx=ast.Load()), ast.Constant(name),
-                  ast.parse("lambda: None", mode="eval").body], keywords=[],
+            args=[
+                ast.Name(id="orch", ctx=ast.Load()),
+                ast.Name(id="_registered_domains", ctx=ast.Load()),
+                ast.Name(id="_domain_prefix", ctx=ast.Load()),
+                ast.Constant(name),
+                factory_expr,
+                ast.Name(id="_retained_lease", ctx=ast.Load()),
+            ],
+            keywords=[],
         )
-        item.context_expr.args[-1].body = call
-        node.body = [self.visit(stmt) for stmt in node.body]
+        node.body = [cast(ast.stmt, self.visit(stmt)) for stmt in node.body]
         return node
 
 
-def load(entry, path):
+def load(
+    entry: Callable[..., Any],
+    path: object,
+    lease_cls: Callable[[Any], Any] | None = None,
+) -> PreparedDecode | None:
     if not isinstance(path, Path) or not path.is_file():
         return None
     source = path.read_bytes()
-    if not isinstance(source, (bytes, bytearray)) or sha256(source).hexdigest() not in HOST_SOURCES:
+    if sha256(source).hexdigest() not in HOST_SOURCES:
         return None
     try:
-        from simpler.prepared_local import PreparedLocalChipTask
+        prepared_local = importlib.import_module("simpler.prepared_local")
     except ImportError:
         return None
+    task_cls: Any = getattr(prepared_local, "PreparedLocalChipTask", None)
+    if task_cls is None:
+        return None
+    entry_name = str(getattr(entry, "__name__"))
+    entry_globals = cast(dict[str, Any], getattr(entry, "__globals__"))
     tree = ast.parse(source, filename=str(path))
-    fn = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == entry.__name__)
-    fn.args.kwonlyargs.extend(
-        ast.arg(arg=name) for name in ("_cache_hit", "_domain_prefix", "_registered_domains", "_submit_chip")
+    fn = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == entry_name)
+    kwonly_names = (
+        "_cache_hit",
+        "_domain_prefix",
+        "_registered_domains",
+        "_retained_lease",
+        "_submit_chip",
     )
-    fn.args.kw_defaults.extend((None, None, None, None))
+    fn.args.kwonlyargs.extend(ast.arg(arg=name) for name in kwonly_names)
+    fn.args.kw_defaults.extend([None] * len(kwonly_names))
     PrepareRanks().visit(fn)
-    namespace = {**entry.__globals__, "_domain_scope": _domain_scope}
+    namespace: dict[str, Any] = {**entry_globals, "_domain_scope": _domain_scope}
     module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
     exec(compile(module, str(path), "exec"), namespace)
-    return PreparedDecode(namespace[entry.__name__], task_cls=PreparedLocalChipTask)
+    return PreparedDecode(namespace[entry_name], task_cls=task_cls, lease_cls=lease_cls)
 
 
 class PreparedDecode:
-    def __init__(self, prepare, *, task_cls):
+    def __init__(
+        self,
+        prepare: Callable[..., Any],
+        *,
+        task_cls: Callable[..., Any],
+        lease_cls: Callable[[Any], Any] | None = None,
+    ) -> None:
         self.prepare = prepare
         self._task_cls = task_cls
-        self.entries = OrderedDict()
-        self.trace = None
+        self._lease_cls = lease_cls
+        self.entries: OrderedDict[Any, _CacheEntry] = OrderedDict()
+        self.trace: list[dict[str, Any]] | None = None
         self.hits = 0
         self.misses = 0
 
-    def select(self, worker, state, tensors, config, args, slot):
-        if config is None or config.output_prefix or not worker._persistent or worker._reset_persistent_windows:
+    def select(
+        self,
+        worker: Any,
+        state: Mapping[str, Any],
+        tensors: Mapping[str, Any],
+        config: Any,
+        args: Sequence[Any],
+        slot: int,
+    ) -> _Selection | None:
+        if (
+            config is None
+            or config.output_prefix
+            or not worker._persistent
+            or worker._reset_persistent_windows
+        ):
             return None
         try:
-            key = (slot, tuple(map(_binding_key, tensors.values())))
+            key = (slot, tuple(_binding_key(v) for v in tensors.values()))
         except TypeError:
             return None
         entry = self.entries.get(key)
-        if entry is None or any(worker._device_buffers.get(key) is not owner for key, owner in entry[1]):
+        if entry is None or any(
+            worker._device_buffers.get(owner_key) is not owner for owner_key, owner in entry[1]
+        ):
             # Go through the original public validators on any miss or revoke.
             for info, arg in zip(state["param_infos"], args, strict=True):
                 worker._validate_prepared_dispatch_arg(info, arg)
             entry = None
         return key, entry
 
-    def submit(self, selection, orch, config, *, tensors, callables, sub_ids, keepalive, world, provider, program, registered_domains):
+    def submit(
+        self,
+        selection: _Selection,
+        orch: Any,
+        config: Any,
+        state: Mapping[str, Any],
+        *,
+        tensors: dict[str, Any],
+        keepalive: list[Any],
+        provider: Any,
+        registered_domains: dict[str, Any],
+    ) -> None:
         key, entry = selection
-        tasks = [] if entry is None else entry[2]
-        domains = orch._worker._live_domains
+        tasks: list[Any] = [] if entry is None else entry[2]
+        domains: Mapping[str, Any] = orch._worker._live_domains
+        program = str(state["persistent_id"])
+        world = int(state["device_nums"])
         prefix = f"{program}:"
         current = tuple((name, handle) for name, handle in domains.items() if name.startswith(prefix))
         if entry is not None and current != entry[3]:
             tasks = []
             entry = None
 
-        def record(orch, handle, args, _config, rank):
-            tasks.append(self._task_cls(orch, handle, args, rank))
+        def record(rec_orch: Any, handle: Any, rec_args: Any, _config: Any, rank: int) -> None:
+            tasks.append(self._task_cls(rec_orch, handle, rec_args, rank))
 
         roots = tuple(tensors.values()) if entry is None else entry[0]
-        self.prepare(orch, None, config, tensors=tensors, callables=callables, sub_ids=sub_ids,
-                     _keep=keepalive, world_size=world, _domain_provider=provider, _cache_hit=entry is not None,
-                     _domain_prefix=prefix, _registered_domains=registered_domains, _submit_chip=record)
+        self.prepare(
+            orch,
+            None,
+            config,
+            tensors=tensors,
+            callables=state["chip_cids"],
+            sub_ids=state["sub_ids"],
+            _keep=keepalive,
+            world_size=world,
+            _domain_provider=provider,
+            _cache_hit=entry is not None,
+            _domain_prefix=prefix,
+            _registered_domains=registered_domains,
+            _retained_lease=self._lease_cls,
+            _submit_chip=record,
+        )
         if entry is None:
             if [task._rank for task in tasks] != list(range(world)):
                 raise ValueError("Prepared decode requires one task for every rank in order")
@@ -163,7 +273,9 @@ class PreparedDecode:
             if len(self.entries) == 4:
                 self.entries.popitem(last=False)
             self.entries[key] = (
-                roots, tuple(_owner_records(roots)), tasks,
+                roots,
+                tuple(_owner_records(roots)),
+                tasks,
                 tuple((name, handle) for name, handle in domains.items() if name.startswith(prefix)),
             )
         else:
@@ -174,7 +286,7 @@ class PreparedDecode:
             for task in tasks:
                 task.submit(orch, config)
         else:
-            stamps = []
+            stamps: list[tuple[int, int]] = []
             for task in tasks:
                 begin = perf_counter_ns()
                 task.submit(orch, config)
