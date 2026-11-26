@@ -2147,6 +2147,13 @@ def _emit_unit(
     for helper in unit.helpers:
         local_files[f"vpto/{unit.name}/{helper.symbol}.pto"] = helper.source
     if unit.helpers:
+        # The manifest describes the caller's schedule; each VF has its own barrier policy.
+        attrs = unit.funcs[0].attrs
+        caller_sync = "ptoas-insert-sync"
+        if attrs.get("ptoas_manual_sync"):
+            caller_sync = "manual"
+        elif unit.is_group and attrs.get("ptoas_buffer_id_sync"):
+            caller_sync = "ptoas-buffer-id-sync"
         local_files[f"vpto/{unit.name}/manifest.json"] = (
             json.dumps(
                 {
@@ -2155,7 +2162,7 @@ def _emit_unit(
                     "target": "a5",
                     "core_type": "aiv",
                     "bridge": False,
-                    "synchronization": "ptoas-insert-sync",
+                    "synchronization": caller_sync,
                     "effect_scope": "whole-storage"
                     if any(h.kind == "simt" for h in unit.helpers)
                     else "whole-tile",

@@ -88,8 +88,6 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
   const int phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
-  CHECK(op_name != "tile.matmul_mx_bias" || phase == static_cast<int>(AccPhase::kUnspecified))
-      << "tile.matmul_mx_bias does not support acc_phase";
   CHECK(IsValidAccPhase(phase)) << op_name << " requires a valid acc_phase";
   CHECK(args.size() == 4) << "The operator " << op_name
                           << " requires exactly 4 arguments (lhs, lhs_scale, rhs, rhs_scale), but got "
@@ -288,6 +286,9 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
                                    const std::string& op_name) {
+  CHECK(GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified)) ==
+        static_cast<int>(AccPhase::kUnspecified))
+      << "tile.matmul_mx_bias does not support acc_phase";
   CHECK(args.size() == 5) << "The operator " << op_name
                           << " requires exactly 5 arguments (lhs, lhs_scale, rhs, rhs_scale, bias), but got "
                           << args.size();

@@ -1057,11 +1057,28 @@ def test_distinct_captured_views_preserve_shared_base(offset, reverse, tmp_path)
     assert helper.parameter_effects == ["readwrite", "read"]
 
 
-def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("attrs", "caller_sync"),
+    [
+        ({}, "ptoas-insert-sync"),
+        ({"ptoas_manual_sync": True}, "manual"),
+        ({"ptoas_buffer_id_sync": True}, "ptoas-insert-sync"),
+    ],
+)
+def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeypatch, attrs, caller_sync):
     program = build_kernel(masked=True)
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
     function = program.get_function("register_kernel")
     assert function is not None
+    function = ir.Function(
+        function.name,
+        function.params,
+        function.return_types,
+        function.body,
+        function.span,
+        type=function.func_type,
+        attrs=attrs,
+    )
     unit = pto_backend._CodegenUnit(
         name="register_kernel",
         pto_code=bundle.caller_source,
@@ -1078,7 +1095,7 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
     assert manifest["schema_version"] == 5
     assert manifest["entry_helpers"] == bundle.entry_helpers
     assert manifest["effect_scope"] == "whole-tile"
-    assert manifest["synchronization"] == "ptoas-insert-sync"
+    assert manifest["synchronization"] == caller_sync
     entry = manifest["helpers"][0]
     helper = bundle.helpers[0]
     assert entry["adapter_symbol"] == helper.adapter_symbol

@@ -270,7 +270,7 @@ def _pipeline_flag(
     return _ir_core.create_op_call(name, args, kwargs, _get_span_or_capture(span, frame_offset=2))
 
 
-def _cube_buf(name: str, pipe: PipeType, buf_id: int | Expr, span: Span | None) -> Call:
+def _cube_buf(name: str, pipe: object, buf_id: int | Expr, span: Span | None) -> Call:
     if not isinstance(pipe, PipeType) or pipe not in (PipeType.MTE2, PipeType.MTE1, PipeType.M):
         raise ValueError("Cube buffer locks require MTE2, MTE1 or M")
     if type(buf_id) is int:

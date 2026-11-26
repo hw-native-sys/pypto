@@ -742,6 +742,7 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
     reg(("system." + action).c_str(), [action](const ir::CallPtr& op, codegen::CodegenBase& base) {
       auto& cg = AsPto(base);
       CHECK_SPAN(cg.GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_) << "Buffer locks require A5";
+      CHECK_SPAN(!cg.IsAIVFunction(), op->span_) << "Cube buffer locks cannot execute on AIV";
       auto pipe = static_cast<ir::PipeType>(op->GetKwarg<int>("pipe"));
       const char* endpoint = pipe == ir::PipeType::MTE2   ? "TLOAD"
                              : pipe == ir::PipeType::MTE1 ? "TMOV_M2L"

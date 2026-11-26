@@ -316,3 +316,5 @@ phase `N` 的全部 `N_BRANCHES` 个 task，而非只等最后那个。
 也可以是值始终在此范围内的 INDEX 表达式。Tile 级 `pl.matmul_mx` 和
 `pl.matmul_mx_acc` 可以传入 `acc_phase=pl.AccPhase.Partial` 或
 `pl.AccPhase.Final` 标明硬件累加阶段；省略时仍生成默认的 MX 指令。
+
+MTE2、MTE1、M 分别对应 PTO 的 `TLOAD`、`TMOV_M2L`、`TMATMUL`，硬件模式固定为零。

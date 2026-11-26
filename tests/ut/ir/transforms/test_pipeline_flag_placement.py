@@ -68,6 +68,21 @@ class FlaggedPipeline:
             passes.canonicalize_io_order()(program)
 
 
+@pytest.mark.parametrize("operation", ["get_buf", "rls_buf"])
+def test_pipeline_scheduler_rejects_cube_locks_with_verification_disabled(operation):
+    program = pl.parse_program(f"""
+@pl.program
+class Manual:
+    @pl.function(strict_ssa=True)
+    def main(self):
+        for slot in pl.pipeline(0, 4, stage=1):
+            pl.system.{operation}(pl.PipeType.M, slot)
+""")
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(ValueError, match="Cube buffer locks cannot be used inside pl.pipeline"):
+            passes.canonicalize_io_order()(program)
+
+
 @pytest.mark.parametrize("pipe", ["MTE3", "V", "FIX", "ALL"])
 def test_barriers_inside_pipeline_rejected_before_scheduling(pipe):
     """A barrier has no operand, so nothing holds it in its authored position.

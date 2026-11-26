@@ -357,3 +357,5 @@ integer in [0, 15] or an INDEX expression whose value stays in that range.
 For tile-level MX accumulation, pass `acc_phase=pl.AccPhase.Partial` or
 `pl.AccPhase.Final` to `pl.matmul_mx` or `pl.matmul_mx_acc` to identify the
 hardware accumulation phase. Omitting it retains the default MX instruction.
+
+The MTE2, MTE1 and M endpoints lower to `TLOAD`, `TMOV_M2L` and `TMATMUL`, respectively; the hardware mode is always zero.

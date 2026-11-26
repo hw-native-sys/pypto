@@ -172,3 +172,21 @@ def test_authored_dynamic_cube_lock_reaches_ptoas(tmp_path):
 def test_invalid_cube_buffer_lock(pipe, buf_id, message):
     with pytest.raises(ValueError, match=message):
         pl.system.get_buf(pipe, buf_id)
+
+
+def test_explicit_aiv_cannot_acquire_cube_buffer(tmp_path):
+    @pl.program
+    class WrongLane:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self, slot: pl.Scalar[pl.INDEX]):
+            pl.func_attr({"ptoas_manual_sync": True})
+            pl.system.get_buf(pl.PipeType.M, slot)
+
+    with pytest.raises(Exception, match="Cube buffer locks cannot execute on AIV"):
+        ir.compile(
+            WrongLane,
+            output_dir=str(tmp_path),
+            backend_type=BackendType.Ascend950,
+            skip_ptoas=True,
+            dump_passes=False,
+        )

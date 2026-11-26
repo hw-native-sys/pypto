@@ -822,7 +822,7 @@ class TestMxMatmulCodegen:
                 acc = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Partial)
                 result = pl.matmul_mx_acc(acc, lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Final)
                 pl.system.rls_buf(pl.PipeType.M, 13)
-                pl.store(result, [0, 0], out)
+                pl.store(result, [0, 0], out, st_phase=pl.STPhase.Final)
 
         mlir = _emit_incore_mlir(Program)
         # Reuse unchanged bindings: a second bind would hoist across the first
