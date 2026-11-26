@@ -172,9 +172,9 @@ class RegionChecker : public IRVisitor {
       // Raw Call construction can bypass type deduction. Revalidate the actual
       // operands and compare the supplied result rather than trusting the type.
       try {
-        auto inferred =
-            OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_)->GetType();
-        if (!structural_equal(inferred, op->GetType())) {
+        auto validated = OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
+        if (region_) CheckRegisterMode(validated);
+        if (!structural_equal(validated->GetType(), op->GetType())) {
           Error("Register call result type mismatch", op->span_);
         }
       } catch (const pypto::Error& error) {
@@ -338,6 +338,104 @@ class RegionChecker : public IRVisitor {
     IRVisitor::VisitStmt_(op);
     blocked_ = prev;
   }
+  // Logical and physical registers have different PTO ABI types; a whole
+  // vecscope must use one mode, including its operands and tuple results.
+  void CheckPhysicalType(const TypePtr& type, const Span& span) {
+    if (auto reg = As<RegType>(type)) {
+      if (reg->GetRegKind() == RegKind::VecReg) {
+        const auto bytes = reg->GetDType().GetByte();
+        if (!bytes || 256 % bytes != 0 || reg->GetShape() != 256 / bytes) {
+          Error("Physical RegScope requires full 256-byte registers", span);
+        }
+      }
+      if (reg->GetRegKind() == RegKind::MaskReg && reg->GetShape() != 64 && reg->GetShape() != 128 &&
+          reg->GetShape() != 256) {
+        Error("Physical RegScope requires a full hardware mask", span);
+      }
+    } else if (auto tuple = As<TupleType>(type)) {
+      for (const auto& element : tuple->types_) CheckPhysicalType(element, span);
+    }
+  }
+
+  void CheckRegisterMode(const CallPtr& call) {
+    const auto& name = call->op_->name_;
+    const bool reduction = name == "reg.reduce_max" || name == "reg.reduce_sum";
+    const bool physical_reduction = reduction && GetKwargOr<bool>(call->kwargs_, "native", false);
+    const bool squeeze = name == "reg.squeeze_store_init" || name == "reg.squeeze_store_step" ||
+                         name == "reg.squeeze_store_flush";
+    const bool physical_only =
+        (name == "reg.load" && (call->HasKwarg("dtype") || call->HasKwarg("dist"))) ||
+        (name == "reg.store" &&
+         (call->HasKwarg("dist") || GetKwargOr<bool>(call->kwargs_, "post_update", false))) ||
+        (name == "reg.convert" && call->HasKwarg("part")) || physical_reduction || squeeze;
+    if (!region_->Native()) {
+      if (physical_only) Error(name + " requires reg_scope(native=True)", call->span_);
+      return;
+    }
+
+    if (reduction && !physical_reduction) {
+      Error(name + " requires a physical reduction result in native RegScope", call->span_);
+    }
+    if (name == "reg.convert" && !call->HasKwarg("part")) {
+      Error("Physical reg.convert requires mask, part and lanes", call->span_);
+    }
+    // Match the set of micro emitters. Reject logical-only operations before
+    // memory planning or backend code generation, not by changing the ABI.
+    static const std::set<std::string> supported = {"reg.mem_bar",
+                                                    "reg.load",
+                                                    "reg.store",
+                                                    "reg.convert",
+                                                    "reg.dintlv",
+                                                    "reg.intlv",
+                                                    "reg.gather",
+                                                    "reg.full_mask",
+                                                    "reg.active_mask",
+                                                    "reg.compare",
+                                                    "reg.compares",
+                                                    "reg.squeeze",
+                                                    "reg.select",
+                                                    "reg.interpret_cast",
+                                                    "reg.broadcast",
+                                                    "reg.index_gen",
+                                                    "reg.mask_and",
+                                                    "reg.mask_or",
+                                                    "reg.mask_xor",
+                                                    "reg.mask_not",
+                                                    "reg.mul",
+                                                    "reg.add",
+                                                    "reg.sub",
+                                                    "reg.maximum",
+                                                    "reg.minimum",
+                                                    "reg.div",
+                                                    "reg.exp",
+                                                    "reg.muls",
+                                                    "reg.shift_rights",
+                                                    "reg.reduce_max",
+                                                    "reg.reduce_sum",
+                                                    "reg.gather_lanes",
+                                                    "reg.squeeze_store_init",
+                                                    "reg.squeeze_store_step",
+                                                    "reg.squeeze_store_flush"};
+    if (!supported.count(name)) Error(name + " is not supported in physical RegScope", call->span_);
+    static const std::set<std::string> predicated_math = {
+        "reg.mul", "reg.add",  "reg.sub",          "reg.maximum",    "reg.minimum",   "reg.div",
+        "reg.exp", "reg.muls", "reg.shift_rights", "reg.reduce_max", "reg.reduce_sum"};
+    if (predicated_math.count(name)) {
+      auto predicate = call->args_.empty() ? nullptr : As<RegType>(call->args_.back()->GetType());
+      if (!predicate || predicate->GetRegKind() != RegKind::MaskReg) {
+        Error("Physical native math requires explicit predicate", call->span_);
+      }
+    }
+    if ((name == "reg.dintlv" || name == "reg.intlv") && call->args_.size() != 2) {
+      Error("Physical native interleave does not take a mask", call->span_);
+    }
+    if (name == "reg.broadcast" && !call->args_.empty() && !As<ScalarType>(call->args_[0]->GetType())) {
+      Error("Physical broadcast requires a scalar", call->span_);
+    }
+    CheckPhysicalType(call->GetType(), call->span_);
+    for (const auto& arg : call->args_) CheckPhysicalType(arg->GetType(), call->span_);
+  }
+
   void Error(const std::string& message, const Span& span) {
     diagnostics_.emplace_back(DiagnosticSeverity::Error, "RegScopeValid", 0, message, span);
   }
@@ -415,8 +513,7 @@ class SqueezeStreamChecker : public IRVisitor {
     } finder;
     finder.VisitStmt(scope->body_);
     if (!finder.found) return;
-    // A stream switches the entire RegScope to physical micro lowering.
-    // reg.add currently has only VMI lowering, even outside the active chain.
+    // Preserve the squeeze-stream restriction even outside the active chain.
     for (const auto& span : finder.add_spans) {
       Error("reg.add is not supported in a RegScope with squeeze-store", span);
     }

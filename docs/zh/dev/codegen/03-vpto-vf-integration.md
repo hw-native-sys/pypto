@@ -68,6 +68,11 @@ Masked store 使用 `readwrite`，表示未激活 lane 的内容需要保留，�
 PyPTO 不在调用前后添加固定的 `pipe_barrier(PIPE_ALL)`，正常的 kernel 尾部同步仍
 保留。调用边界契约依赖 A5 VF 完成语义，因此当前限定为 AIV helper。
 
+合并诊断输出与独立 VF helper 都根据 `RegScopeStmt` 的作用域属性选择寄存器 ABI。
+默认 `pl.reg_scope()` 生成逻辑 VMI；`pl.reg_scope(native=True)` 生成操作完整
+硬件寄存器的物理 micro-op。Codegen 不再通过单个调用推断模式，验证器会在下沉前
+检查物理专用算子及寄存器形状。该属性与自动同步策略相互独立。
+
 默认 `pl.reg_scope(auto_sync=True)` 模式下，PTOAS 负责 VF 依赖分析与屏障
 插入，包括通过 SSA 数据依赖证明的执行顺序。`pl.reg_scope(auto_sync=False)`
 为该 helper 传入 `--enable-vecscope-mem-bar=false`，由作者通过仅语句形式的

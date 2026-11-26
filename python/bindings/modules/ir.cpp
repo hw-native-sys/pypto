@@ -1999,6 +1999,8 @@ void BindIR(nb::module_& m) {
       scope_attrs_doc);
   reg_scope_stmt_class.def_prop_ro("auto_sync", &RegScopeStmt::AutoSync,
                                    "Whether PTOAS automatic vecscope synchronization is enabled");
+  reg_scope_stmt_class.def_prop_ro("native", &RegScopeStmt::Native,
+                                   "Whether the scope uses physical A5 registers");
 
   // GraphScopeStmt
   auto graph_scope_stmt_class = nb::class_<GraphScopeStmt, ScopeStmt>(

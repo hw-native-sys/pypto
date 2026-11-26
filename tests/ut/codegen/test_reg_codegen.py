@@ -18,7 +18,7 @@ from pypto.backend import pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
-from pypto.language.diagnostics import InvalidOperationError
+from pypto.language.diagnostics import InvalidOperationError, ParserError
 
 SPAN = ir.Span("register_kernel.py", 10, 1, 10, 60)
 
@@ -1420,7 +1420,7 @@ def squeeze_store_program(dtype="UINT32", lanes=64, trips=4, *, partial_load=Fal
 def squeeze_chunks():
     src = pl.tile.full([{lanes * 4}], pl.{dtype}, 17)
     dst = pl.tile.full([{lanes * 4 + 64}], pl.{dtype}, 123)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
         for i, (curr_ureg,) in pl.range(0, {trips}, init_values=(init_ureg,)):
             value = pl.reg.load(src, offset=i * {lanes}, lanes={lanes}){extra}
@@ -1464,11 +1464,11 @@ def test_squeeze_store_micro_compiles_with_ptoas(dtype, lanes, tmp_path):
     compile_review_pto(generate(squeeze_store_program(dtype, lanes)), tmp_path)
 
 
-def test_squeeze_store_codegen_recovers_after_failed_generation():
+def test_squeeze_store_rejects_partial_register_before_codegen():
     emitter = codegen.PTOCodegen()
-    # The partial load fails in micro lowering after init has set the stream state.
-    program = squeeze_store_program(partial_load=True)
-    with pytest.raises(ValueError, match="Squeeze-store micro lowering requires full 256-byte registers"):
+    # The partial load is now rejected before micro lowering starts.
+    with pytest.raises((ValueError, ParserError), match="Physical RegScope requires full 256-byte registers"):
+        program = squeeze_store_program(partial_load=True)
         emitter.generate(program, emit_tile_addr=False)
 
     source = emitter.generate(squeeze_store_program(), emit_tile_addr=False)
@@ -1488,7 +1488,7 @@ def test_squeeze_store_with_register_carry(tmp_path, nested):
 def squeeze_carried_value(rows: pl.Scalar[pl.INDEX]):
     src = pl.tile.full([256], pl.UINT32, 17)
     dst = pl.tile.full([320], pl.UINT32, 123)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         first = pl.reg.load(src, lanes=64)
         keep = pl.reg.active_mask(9, lanes=64)
         initial = pl.reg.squeeze_store_init(dst, offset=7)
@@ -1524,7 +1524,7 @@ def test_squeeze_store_offset_adds_view_origin_once(dtype, lanes, tmp_path):
 def view_origin(src: pl.Tile[[{lanes}], pl.{dtype}, pl.Mem.Vec],
                 dst: pl.Tile[[2, {lanes}], pl.{dtype}, pl.Mem.Vec,
                     pl.TileView(stride=[{lanes}, 1], start_offset=32)]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         initial = pl.reg.squeeze_store_init(dst, offset=7)
         value = pl.reg.load(src, lanes={lanes})
         keep = pl.reg.active_mask(3, lanes={lanes})
@@ -1569,7 +1569,7 @@ def test_squeeze_store_reopen_preserves_outlined_caller_storage(dtype, lanes, tm
 def reopen_stream():
     src = pl.tile.full([{2 * lanes}], pl.{dtype}, 17)
     dst = pl.tile.full([{4 * lanes}], pl.{dtype}, 123)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         initial = pl.reg.squeeze_store_init(dst, offset=7)
         for i, (current,) in pl.range(0, 2, init_values=(initial,)):
             value = pl.reg.load(src, offset=i * {lanes}, lanes={lanes})
@@ -1600,7 +1600,7 @@ def test_explicit_squeeze_state_supports_named_loop_carry():
 def squeeze_named_carry():
     src = pl.tile.full([256], pl.UINT32, 17)
     dst = pl.tile.full([320], pl.UINT32, 123)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         initial = pl.reg.squeeze_store_init(dst, offset=7)
         for i, (current,) in pl.range(0, 4, init_values=(initial,)):
             value = pl.reg.load(src, offset=i * 64, lanes=64)
@@ -1641,7 +1641,7 @@ def test_empty_explicit_squeeze_state_compiles(empty_loop, tmp_path):
 def empty_squeeze():
     src = pl.tile.full([64], pl.UINT32, 17)
     dst = pl.tile.full([128], pl.UINT32, 123)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         initial = pl.reg.squeeze_store_init(dst, offset=7)
 {loop}
         _flushed = pl.reg.squeeze_store_flush({final}, dst)
@@ -1655,10 +1655,6 @@ def empty_squeeze():
     assert source.count("pto.init_align") == source.count("pto.vstar") == 1
     assert "pto.vstur" not in source
     compile_review_pto(source, tmp_path)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
 
 
 def generate_native_test(function):
@@ -1679,10 +1675,10 @@ def test_native_quantized_load_convert(dtype):
 def native_decode():
     raw = pl.tile.full([64], pl.UINT8, 0)
     out = pl.tile.create([{lanes}], pl.{target}, target_memory=pl.Mem.Vec)
-    with pl.reg_scope():
-        raw_reg = pl.reg.load(raw, dtype=pl.{dtype}, lanes=256, dist="UNPK4", native=True)
+    with pl.reg_scope(native=True):
+        raw_reg = pl.reg.load(raw, dtype=pl.{dtype}, lanes=256, dist="UNPK4")
         mask8 = pl.reg.full_mask(lanes=256)
-        value = pl.reg.convert(raw_reg, mask8, dtype=pl.{target}, lanes={lanes}, part="PART_P0", native=True)
+        value = pl.reg.convert(raw_reg, mask8, dtype=pl.{target}, lanes={lanes}, part="PART_P0")
         out_mask = pl.reg.full_mask(lanes={lanes})
         written = pl.reg.store(out, 0, value, out_mask)
     result = pl.tile.add(written, written)
@@ -1705,23 +1701,23 @@ def native_pack():
     raw = pl.tile.full([128], pl.UINT8, 0)
     out = pl.tile.create([17*128], pl.BF16, target_memory=pl.Mem.Vec)
     packed_out = pl.tile.create([64], pl.BF16, target_memory=pl.Mem.Vec)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         m8 = pl.reg.full_mask(lanes=256)
         m32 = pl.reg.full_mask(lanes=64)
         m16 = pl.reg.full_mask(lanes=128)
-        raw0 = pl.reg.load(raw, 0, dtype=pl.FP8E4M3FN, lanes=256, dist="UNPK4", native=True)
-        raw1 = pl.reg.load(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, dist="UNPK4", native=True)
-        x0 = pl.reg.convert(raw0, m8, dtype=pl.FP32, lanes=64, part="PART_P0", native=True)
-        x1 = pl.reg.convert(raw1, m8, dtype=pl.FP32, lanes=64, part="PART_P0", native=True)
+        raw0 = pl.reg.load(raw, 0, dtype=pl.FP8E4M3FN, lanes=256, dist="UNPK4")
+        raw1 = pl.reg.load(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, dist="UNPK4")
+        x0 = pl.reg.convert(raw0, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
+        x1 = pl.reg.convert(raw1, m8, dtype=pl.FP32, lanes=64, part="PART_P0")
         b0 = pl.reg.convert(
-            x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False, native=True
+            x0, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False
         )
         b1 = pl.reg.convert(
-            x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False, native=True
+            x1, m32, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False
         )
         packed, unused = pl.reg.dintlv(b0, b1)
         written = pl.reg.store(out, 0, packed, m16, block_stride=17, post_update=True)
-        pk_written = pl.reg.store(packed_out, 0, b0, m32, dist="PK_B32", native=True)
+        pk_written = pl.reg.store(packed_out, 0, b0, m32, dist="PK_B32")
 """)
     source = generate_native_test(program)
     assert source.count('part = "PART_P0"') == 2
@@ -1740,10 +1736,10 @@ def test_native_scalar_load_and_store_compiles_with_ptoas(tmp_path):
 def native_scalar():
     src = pl.tile.full([8], pl.FP32, 1.0)
     dst = pl.tile.full([8], pl.FP32, 0.0)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         one = pl.reg.active_mask(1, lanes=64)
-        x = pl.reg.load(src, dtype=pl.FP32, lanes=64, dist="BRC_B32", native=True)
-        written = pl.reg.store(dst, 0, x, one, dist="ONEPT_B32", native=True)
+        x = pl.reg.load(src, dtype=pl.FP32, lanes=64, dist="BRC_B32")
+        written = pl.reg.store(dst, 0, x, one, dist="ONEPT_B32")
     y = pl.tile.add(written, written)
 """)
     source = generate_native_test(program)
@@ -1768,8 +1764,8 @@ def test_native_load_checks_physical_footprint(size, dtype, lanes, match):
 @pl.function(type=pl.FunctionType.AIV)
 def invalid_native():
     raw = pl.tile.full([{size}], pl.UINT8, 0)
-    with pl.reg_scope():
-        x = pl.reg.load(raw, dtype=pl.{dtype}, lanes={lanes}, dist="UNPK4", native=True)
+    with pl.reg_scope(native=True):
+        x = pl.reg.load(raw, dtype=pl.{dtype}, lanes={lanes}, dist="UNPK4")
 """)
 
 
@@ -1785,24 +1781,24 @@ def native_scale_reduction():
     scale_out = pl.tile.create([128], pl.BF16, target_memory=pl.Mem.Vec)
     src = pl.tile.full([64], pl.FP32, 1.0)
     dst = pl.tile.create([8], pl.FP32, target_memory=pl.Mem.Vec)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         m16 = pl.reg.full_mask(lanes=128)
         indices = pl.reg.index_gen(0, lanes=128, dtype=pl.UINT16)
         group = pl.reg.shift_rights(indices, 5, m16)
         scale_bits = pl.reg.gather(scale, group, m16)
-        e2b = pl.reg.load(scale, dtype=pl.BF16, lanes=128, dist="E2B_B16", native=True)
+        e2b = pl.reg.load(scale, dtype=pl.BF16, lanes=128, dist="E2B_B16")
         scale_bf = pl.reg.interpret_cast(scale_bits, dtype=pl.BF16)
         val = pl.reg.mul(scale_bf, e2b, m16)
         scale_written = pl.reg.store(scale_out, 0, val, m16)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         all32 = pl.reg.full_mask(lanes=64)
         one = pl.reg.active_mask(1, lanes=64)
-        x = pl.reg.load(src, dtype=pl.FP32, lanes=64, native=True)
-        mx = pl.reg.reduce_max(x, all32, native=True)
+        x = pl.reg.load(src, dtype=pl.FP32, lanes=64)
+        mx = pl.reg.reduce_max(x, all32)
         first = pl.reg.broadcast(0, lanes=64, dtype=pl.UINT32)
         rep = pl.reg.gather_lanes(mx, first)
-        total = pl.reg.reduce_sum(rep, all32, native=True, reassoc=True)
-        written = pl.reg.store(dst, 0, total, one, dist="ONEPT_B32", native=True)
+        total = pl.reg.reduce_sum(rep, all32, reassoc=True)
+        written = pl.reg.store(dst, 0, total, one, dist="ONEPT_B32")
 """)
     source = generate_native_test(program)
     for op in ("pto.vgather2", "pto.vmul", "pto.vcmax", "pto.vselr", "pto.vcadd"):
@@ -1821,9 +1817,9 @@ def native_math():
     src = pl.tile.full([64], pl.FP32, 1.0)
     other = pl.tile.full([64], pl.FP32, 2.0)
     out = pl.tile.create([64], pl.FP32, target_memory=pl.Mem.Vec)
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         heads = pl.reg.active_mask(32, lanes=64)
-        a = pl.reg.load(src, dtype=pl.FP32, lanes=64, native=True)
+        a = pl.reg.load(src, dtype=pl.FP32, lanes=64)
         b = pl.reg.load(other, lanes=64)
         scaled = pl.reg.muls(a, 0.0441941731, heads)
         mx = pl.reg.maximum(scaled, b, heads)
@@ -1832,7 +1828,7 @@ def native_math():
         mul = pl.reg.mul(exp, b, heads)
         added = pl.reg.add(mul, exp, heads)
         value = pl.reg.div(exp, added, heads)
-        written = pl.reg.store(out, 0, value, heads, native=True)
+        written = pl.reg.store(out, 0, value, heads)
         pl.reg.mem_bar("VST_VLD")
 """)
     source = generate_native_test(program)
@@ -1840,3 +1836,41 @@ def native_math():
         assert op in source
     assert 'pto.mem_bar "VST_VLD"' in source
     compile_review_pto(source, tmp_path)
+
+
+def test_native_scope_is_local_to_each_vecscope_and_vf_helper():
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def mixed_register_modes():
+    src = pl.tile.full([64], pl.FP32, 1.0)
+    physical_dst = pl.tile.create([64], pl.FP32, target_memory=pl.Mem.Vec)
+    logical_dst = pl.tile.create([8], pl.FP32, target_memory=pl.Mem.Vec)
+    with pl.reg_scope(native=True):
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+        r = pl.reg.mul(x, x, m)
+        p = pl.reg.store(physical_dst, value=r, mask=m)
+    with pl.reg_scope():
+        y = pl.reg.load(src, lanes=32)
+        n = pl.reg.full_mask(lanes=32)
+        s = pl.reg.reduce_sum(y, n, reassoc=True)
+        q = pl.reg.store(logical_dst, value=s)
+""")
+    assert isinstance(function, ir.Function)
+    with passes.PassContext([]):
+        program = passes.convert_to_ssa()(ir.Program([function], "MixedRegisterModes", SPAN))
+        combined = generate(passes.init_mem_ref()(program))
+        outlined = passes.init_mem_ref()(passes.outline_reg_scopes()(program))
+        bundle = codegen.PTOCodegen().generate_bundle(outlined, emit_source_loc=False)
+    assert "pto.vmul " in combined
+    assert "pto.vmi.vcadd " in combined
+    assert len(bundle.helpers) == 2
+    physical = next(helper.source for helper in bundle.helpers if "pto.vmul " in helper.source)
+    logical = next(helper.source for helper in bundle.helpers if "pto.vmi.vcadd " in helper.source)
+    assert "pto.vmi." not in physical
+    assert "!pto.vreg<64xf32>" in physical
+    assert "!pto.vmi.vreg<1xf32>" in logical
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -2525,6 +2525,8 @@ class RegScopeStmt(ScopeStmt):
 
     @property
     def auto_sync(self) -> bool: ...
+    @property
+    def native(self) -> bool: ...
 
 class HierarchyScopeStmt(ScopeStmt):
     """Hierarchy scope: distributed-hierarchy region."""
@@ -3733,7 +3735,7 @@ class IRBuilder:
     def end_simt_scope(self, span: Span, private_scalars: Sequence[Var] = ()) -> SimtScopeStmt:
         """End the transient SIMT region."""
 
-    def begin_reg_scope(self, span: Span, auto_sync: bool = True) -> None:
+    def begin_reg_scope(self, span: Span, auto_sync: bool = True, native: bool = False) -> None:
         """Begin an implicit-capture register region."""
 
     def emit_reg_mem_bar(self, kind: str, span: Span) -> None:

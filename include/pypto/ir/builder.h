@@ -310,7 +310,7 @@ class IRBuilder {
   void BeginSimtScope(const std::vector<ExprPtr>& block_dims, const Span& span);
   StmtPtr EndSimtScope(const Span& span, const std::vector<VarPtr>& private_scalars = {});
 
-  void BeginRegScope(const Span& span, bool auto_sync = true);
+  void BeginRegScope(const Span& span, bool auto_sync = true, bool native = false);
   void EmitRegMemBar(const std::string& kind, const Span& span);
   StmtPtr EndRegScope(const Span& span);
   VarPtr EmitReg(const std::string& name, const std::string& op_name, const std::vector<ExprPtr>& args,

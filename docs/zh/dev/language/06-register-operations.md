@@ -5,7 +5,7 @@
 下表中的所有操作名称均带有 `pl.reg.` 前缀。
 
 编译器在早期将每个寄存器作用域提取为 `FunctionType.VF` 设备辅助函数，
-`reg_scope()` 的前端语法不变。捕获的 Tile 和 Scalar 成为函数参数，Tile 别名可以
+默认 `reg_scope()` 使用逻辑 VMI，`native=True` 选择物理 micro lowering。捕获的 Tile 和 Scalar 成为函数参数，Tile 别名可以
 返回，寄存器和局部 Scalar 保留在辅助函数内部。
 
 ## 作用域与寄存器值
@@ -26,7 +26,7 @@ def kernel(
     z = pl.tile.add(out, out)
 ```
 
-`pl.reg_scope(*, auto_sync=True)` 没有 captures、结果列表或 yield，也不能嵌套。
+`pl.reg_scope(*, auto_sync=True, native=False)` 没有 captures、结果列表或 yield，也不能嵌套。
 `auto_sync` 必须是编译期 bool；省略或 `True` 保留 UB 屏障自动插入，
 `False` 选择显式同步。
 前端允许 InCore、AIV 设备上下文，包括 Opaque、Orchestration、Graph 函数内
@@ -417,7 +417,7 @@ with pl.reg_scope():
 
 | API | 含义 |
 | --- | ---- |
-| `with ib.reg_scope(span=None, *, auto_sync=True):` | 在 Python IRBuilder 中打开寄存器区域。 |
+| `with ib.reg_scope(span=None, *, auto_sync=True, native=False):` | 在 Python IRBuilder 中打开寄存器区域。 |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | 构造命名操作。`op_name` 是如 `"reg.add"` 的注册名称；`args` 为 IR 操作数，`kwargs` 为操作属性。 |
 | `ib.emit_reg_mem_bar(kind, span=None)` | 构造无结果的显式 UB 同步屏障。 |
 | `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | 构造命名 store，返回目标 Tile 别名。 |
@@ -429,7 +429,7 @@ Builder 与 DSL 共享类型及参数检查。完成函数时检查区域归属�
 验证手工 IR，`MixedKernelExpanded` 检查最终 AIV placement。内存效应查询保留
 mask，但不据此认定整个缓冲区已初始化或访问区间互不重叠。
 
-手动同步区域打印为 `pl.reg_scope(auto_sync=False)`。其他非空属性或非空
+打印时在 scope 上保留 `auto_sync=False` 和 `native=True`。其他非空属性或非空
 `name_hint` 会导致打印报错；二进制序列化保留这些字段。空区域打印为 `pass`。
 以上 API 列表表示当前前端支持范围；PTOAS 中没有对应上述 API 的指令尚未通过
 `pl.reg` 暴露。
@@ -489,7 +489,7 @@ with pl.reg_scope():
 携带不透明状态，并在循环体中 yield 更新后的状态：
 
 ```python
-with pl.reg_scope():
+with pl.reg_scope(native=True):
     init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
     for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
         value = pl.reg.load(src, offset=i * 64, lanes=64)
@@ -520,7 +520,7 @@ Tile。每次 `step` 必须消费当前循环携带的 UReg 值并返回后继�
 此时追加零个元素，目标内容保持原值。没有 step 的顺序语句也遵循相同规则：
 
 ```python
-with pl.reg_scope():
+with pl.reg_scope(native=True):
     ureg = pl.reg.squeeze_store_init(dst, offset=7)
     written = pl.reg.squeeze_store_flush(ureg, dst)
 ```
@@ -564,37 +564,36 @@ squeeze-store 还使用共享 AR 状态。支持多条同时活动的 squeeze �
 仅增加资源数量限制不能提供这一能力。参见[寄存器数量限制](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/ascendcopapi/docs/en/api/SIMD-API/basic_api/reg_vector_compute/register_data_types/UnalignRegForLoad-UnalignRegForStore.md)
 和 [squeeze-store 的 AR 语义](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/ascendcopapi/atlasascendc_api_07_0324.html)。
 
-squeeze-store 的对齐状态使用物理 micro 指令，含流的整个 register scope
-使用物理寄存器 codegen。当前支持完整 256 字节 load/store、
+squeeze-store 的对齐状态使用物理 micro 指令，必须在 `pl.reg_scope(native=True)` 中使用。当前支持完整 256 字节 load/store、
 标量广播、索引生成、位重解释、比较、选择、mask 生成与逻辑运算及 squeeze；
 其他操作和非完整寄存器形状会明确报错。验证器会拒绝含流的 scope 内的 `reg.add`。
-不含流的 scope 继续使用 VMI lowering，
-纯 `squeeze` 也走此路径。后续 PTOAS 提供流式 VMI 后，可以保持用户接口不变。
+默认 scope 继续使用 VMI lowering，纯 `squeeze` 也可走此路径。
 
 ### 显式物理寄存器模式（A5）
 
-逐指令移植 native VF kernel 时，可在 `pl.reg.load`、`pl.reg.convert` 和
-`pl.reg.store` 中指定 `native=True`。这些操作保留完整的
-256 字节物理寄存器，所在 `reg_scope` 采用 PTO micro lowering。普通
-逻辑寄存器接口及其默认 VMI lowering 不变；native scope 中的寄存器和
-掩码需对应完整硬件宽度。
+逐指令移植 native VF kernel 时，使用 `with pl.reg_scope(native=True):`。
+整个作用域采用 PTO micro-op ABI，向量寄存器必须为完整的 256 字节，mask
+也必须为完整硬件宽度。默认 `native=False` 使用逻辑 VMI；单个算子不会
+隐式切换模式。物理专用的 distribution、conversion part 和 strided
+post-update store 仅允许在物理作用域内使用。
+`native` 与 `auto_sync` 是相互独立的编译期布尔值。
 
-- `load(..., native=True, dtype=..., lanes=256, dist="UNPK4")` 读取 64 字节 FP4/FP8
+- `load(..., dtype=..., lanes=256, dist="UNPK4")` 读取 64 字节 FP4/FP8
   打包数据，得到 256-lane 寄存器。`BRC_B32` 读取一个 32 位元素，
   `E2B_B16` 读取八个 16 位 group scale，默认的 `NORM` 读取整个寄存器。
-- `convert(x, mask, native=True, dtype=..., lanes=..., part="PART_P0")` 支持 FP4 到 BF16
+- `convert(x, mask, dtype=..., lanes=..., part="PART_P0")` 支持 FP4 到 BF16
   或 FP8 到 FP32。FP32 到 BF16 使用 `PART_EVEN` 或 `PART_ODD`，舍入
   `R` 且关闭饱和，结果保留 128 个物理 lane。
 - 两个 BF16 物理寄存器可用 `dintlv` 收集偶数 lane；单个寄存器可用
-  `store(..., native=True, dist="PK_B32")` 紧凑写出偶数 lane。`ONEPT_B32`
+  `store(..., dist="PK_B32")` 紧凑写出偶数 lane。`ONEPT_B32`
   写出 lane 0。省略 `dist` 时按 mask 正常写回。
   `PK_B32` 使用 64-lane 的 32 位 mask，而非 128-lane mask。
-- `reduce_max(x, mask, native=True)` 和 `reduce_sum(x, mask, native=True, reassoc=True)`
+- `reduce_max(x, mask)` 和 `reduce_sum(x, mask, reassoc=True)`
   返回完整的 FP32 寄存器，归约结果位于 lane 0。
 
 偏移量以 backing Tile 元素为单位。边界与初始化检查遵循实际访存范围，
 而非未使用的物理 lane 数量。native scope 只支持明确实现的算子，
-其余算子会在 codegen 报错，不会静默切换到逻辑 VMI。
+其余算子会在验证阶段报错，不会静默切换到逻辑 VMI。
 
-`store(..., block_stride=N, post_update=True)` 选择 native stride store 的
+`store(..., block_stride=N, post_update=True)` 在物理作用域内选择 native stride store 的
 POST_UPDATE 编码，并丢弃更新后的临时指针，不改变 Tile view。

@@ -305,18 +305,18 @@ def _native_fp8_decode_body():
         raw = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.Mem.Vec), [256])
         dst = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.Mem.Vec), [1024])
         count = pl.cast(n, pl.INDEX)
-        with pl.reg_scope():
-            x = pl.reg.load(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, native=True, dist="UNPK4")
+        with pl.reg_scope(native=True):
+            x = pl.reg.load(raw, 64, dtype=pl.FP8E4M3FN, lanes=256, dist="UNPK4")
             bytes_mask = pl.reg.full_mask(lanes=256)
-            values = pl.reg.convert(x, bytes_mask, dtype=pl.FP32, lanes=64, native=True, part="PART_P0")
+            values = pl.reg.convert(x, bytes_mask, dtype=pl.FP32, lanes=64, part="PART_P0")
             full = pl.reg.full_mask(lanes=64)
             prefix = pl.reg.active_mask(count, lanes=64)
             one = pl.reg.active_mask(1, lanes=64)
-            maximum = pl.reg.reduce_max(values, full, native=True)
-            total = pl.reg.reduce_sum(values, prefix, native=True, reassoc=True)
-            dst = pl.reg.store(dst, 64, values, prefix, native=True)
-            dst = pl.reg.store(dst, 192, maximum, one, native=True, dist="ONEPT_B32")
-            dst = pl.reg.store(dst, 200, total, one, native=True, dist="ONEPT_B32")
+            maximum = pl.reg.reduce_max(values, full)
+            total = pl.reg.reduce_sum(values, prefix, reassoc=True)
+            dst = pl.reg.store(dst, 64, values, prefix)
+            dst = pl.reg.store(dst, 192, maximum, one, dist="ONEPT_B32")
+            dst = pl.reg.store(dst, 200, total, one, dist="ONEPT_B32")
         pl.store(pl.reshape(dst, [1, 1024]), [0, 0], out)
         return out
 

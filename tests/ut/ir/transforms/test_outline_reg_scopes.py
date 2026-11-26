@@ -1439,7 +1439,7 @@ class Kernel:
     def kernel(self):
         src = pl.tile.full([256], dtype=pl.UINT32, value=17)
         dst = pl.tile.full([320], dtype=pl.UINT32, value=123)
-        with pl.reg_scope():
+        with pl.reg_scope(native=True):
             init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
             for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
                 value = pl.reg.load(src, offset=i * 64, lanes=64)

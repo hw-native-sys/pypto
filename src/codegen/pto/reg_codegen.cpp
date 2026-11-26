@@ -54,7 +54,6 @@ class ScopeOperands : public IRVisitor {
  public:
   // Access sites whose Tile operands need an external UB pointer.
   std::vector<CallPtr> memory;
-  bool micro = false;
   // Store/control-flow result -> source view. Stores change bytes, not Tile
   // ownership; branch aliases additionally require both sources to agree.
   std::map<const Var*, VarPtr> aliases;
@@ -81,8 +80,6 @@ class ScopeOperands : public IRVisitor {
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    micro |= IsOp(call, "reg.squeeze_store_init") || GetKwargOr<bool>(call->kwargs_, "native", false) ||
-             GetKwargOr<bool>(call->kwargs_, "post_update", false);
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
         IsOp(call, "reg.squeeze_store_flush")) {
@@ -237,7 +234,7 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
     reg_addresses_[target.get()] = it->second;
   }
   inside_reg_scope_ = true;
-  micro_reg_scope_ = operands.micro;
+  micro_reg_scope_ = scope->Native();
   EmitStructural("pto.vecscope {");
   IncreaseIndent();
   VisitStmt(scope->body_);
@@ -327,8 +324,7 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
     auto tile = As<TileType>(args[0]->GetType());
     auto ptr_type = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
     auto zero = GetOrEmitConstant(int64_t{0}, DataType::INDEX);
-    const bool native = GetKwargOr<bool>(call->kwargs_, "native", false);
-    auto dist = native ? GetStringKwarg(call->kwargs_, "dist", "") : "";
+    auto dist = GetStringKwarg(call->kwargs_, "dist", "");
     // PTOAS spells ONEPT_B32 as 1PT_B32; an omitted NORM distribution
     // is the natural element-width store (NORM is only a load token).
     if (IsOp(call, "reg.store")) {
@@ -342,7 +338,7 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
     const auto attr = dist.empty() ? "" : " {dist = \"" + dist + "\"}";
     if (IsOp(call, "reg.load")) {
       auto result_type = As<RegType>(call->GetType());
-      if (native && result_type->GetDType() != tile->dtype_) {
+      if (result_type->GetDType() != tile->dtype_) {
         // Offset is in storage elements; only reinterpret the pointer after
         // addressing the original storage. Validation ensures equal byte widths.
         const auto typed = NewNamedTemp("native_load_ptr");
@@ -363,7 +359,7 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
               : GetRegTypeString(std::make_shared<RegType>(lanes, DataType::BOOL, RegKind::MaskReg));
       const auto block_stride = GetKwargOr<int>(call->kwargs_, "block_stride", 0);
       if (block_stride > 0) {
-        CHECK_SPAN(!native, call->span_) << "Native distribution and block_stride cannot be combined";
+        CHECK_SPAN(dist.empty(), call->span_) << "Native distribution and block_stride cannot be combined";
         const auto block = GetOrEmitConstant(static_cast<int64_t>(block_stride), DataType::INT16);
         const auto repeat = GetOrEmitConstant(int64_t{0}, DataType::INT16);
         const bool post = GetKwargOr<bool>(call->kwargs_, "post_update", false);
@@ -405,7 +401,7 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
   auto result_reg = As<RegType>(call->GetType());
   CHECK_SPAN(result_reg, call->span_) << "Unsupported result in squeeze-store micro lowering";
   auto result_type = GetRegTypeString(result_reg);
-  if (IsOp(call, "reg.convert") && GetKwargOr<bool>(call->kwargs_, "native", false)) {
+  if (IsOp(call, "reg.convert") && call->HasKwarg("part")) {
     std::string attrs = "{part = \"" + GetStringKwarg(call->kwargs_, "part", "") + "\"";
     if (!GetStringKwarg(call->kwargs_, "rounding", "").empty()) {
       attrs += R"(, rnd = "R", sat = "RS_DISABLE")";

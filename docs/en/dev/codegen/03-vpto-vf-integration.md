@@ -77,6 +77,13 @@ PyPTO adds no fixed `pipe_barrier(PIPE_ALL)` around the call. The normal kernel
 tail synchronization remains enabled. The boundary contract relies on A5 VF
 completion semantics and is restricted to AIV helpers.
 
+The lexical `RegScopeStmt` policy selects the register ABI in both combined
+diagnostic output and separate VF helpers. `pl.reg_scope()` emits logical VMI;
+`pl.reg_scope(native=True)` emits physical micro-ops on full hardware registers.
+Codegen does not infer this mode from individual calls. The verifier checks
+physical-only operations and register geometry before lowering. This policy
+is independent of automatic synchronization.
+
 In the default `pl.reg_scope(auto_sync=True)` mode, PTOAS owns VF dependency
 analysis and barrier placement, including ordering proved by SSA data dependencies.
 `pl.reg_scope(auto_sync=False)` passes `--enable-vecscope-mem-bar=false` for

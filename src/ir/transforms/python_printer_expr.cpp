@@ -1040,6 +1040,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   }
   for (const auto& [key, value] : op->kwargs_) {
     if (has_physical_remote_tail && key == "allow_physical_tail_padding") continue;
+    // Reduction shape is recovered from the lexical RegScope policy on parse.
+    if (key == "native" && (IsOp(op, "reg.reduce_max") || IsOp(op, "reg.reduce_sum"))) continue;
     // Inside a live SplitAivScopeStmt region the per-op ``split=`` int on
     // aiv_shard/aic_gather is redundant: the region node's mode is the
     // authoritative carrier and the parser re-stamps it from the enclosing

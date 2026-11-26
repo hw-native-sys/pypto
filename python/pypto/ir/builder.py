@@ -17,14 +17,20 @@ automatic span tracking via the inspect module.
 import builtins
 import inspect
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Generic, Protocol, TypeVar
 
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 
 from .type import _merge_annotation_metadata
-from .utils import _get_span_or_capture, _normalize_expr, _normalize_reg_block_stride, current_pinned_span
+from .utils import (
+    _get_span_or_capture,
+    _normalize_expr,
+    _normalize_reg_block_stride,
+    current_pinned_span,
+    use_reg_native_mode,
+)
 
 
 def _pinned_span_or_unknown(span: ir.Span | None) -> ir.Span:
@@ -350,14 +356,21 @@ class IRBuilder:
             self._builder.end_simt_scope(span, private_scalars)
 
     @contextmanager
-    def reg_scope(self, span: ir.Span | None = None, *, auto_sync: bool = True) -> Iterator[None]:
+    def reg_scope(
+        self, span: ir.Span | None = None, *, auto_sync: bool = True, native: bool = False
+    ) -> Iterator[None]:
         """Build a register region with implicit captures and no yields."""
         # The generator starts in contextlib.__enter__, one frame beyond the
         # usual wrapper caller. Skip that frame to retain the user's with line.
         begin_span = _get_span_or_capture(span, frame_offset=2)
         if type(auto_sync) is not bool:
             raise TypeError("reg_scope auto_sync must be a compile-time bool")
-        with self.scope(ir.ScopeKind.Reg, begin_span, attrs=[("auto_sync", False)] if not auto_sync else []):
+        if type(native) is not bool:
+            raise TypeError("reg_scope native must be a compile-time bool")
+        attrs = [("auto_sync", False)] if not auto_sync else []
+        if native:
+            attrs.append(("native", True))
+        with self.scope(ir.ScopeKind.Reg, begin_span, attrs=attrs):
             yield
 
     def emit_reg_mem_bar(self, kind: str, span: ir.Span | None = None) -> None:
@@ -657,8 +670,16 @@ class IRBuilder:
             attrs,
         )
         builder_obj = ScopeBuilder(self)
+        # Both the textual parser and direct Python IRBuilder use this scope
+        # context, so reduction wrappers see the same lexical ABI.
+        mode_context = (
+            use_reg_native_mode(dict(attrs or []).get("native") is True)
+            if scope_kind == ir.ScopeKind.Reg
+            else nullcontext()
+        )
         try:
-            yield builder_obj
+            with mode_context:
+                yield builder_obj
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)

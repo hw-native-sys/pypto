@@ -196,11 +196,28 @@ def test_auto_sync_default_canonicalization_and_persistence():
     assert "reg_scope(auto_sync=False)" in python_print(manual)
 
 
+def test_native_policy_canonicalization_and_persistence():
+    span = ir.Span.unknown()
+    body = ir.SeqStmts([], span)
+    default = ir.RegScopeStmt("", body, span)
+    explicit = ir.RegScopeStmt("", body, span, attrs={"native": False})
+    physical = ir.RegScopeStmt("", body, span, attrs={"native": True, "auto_sync": False})
+    assert not default.native
+    ir.assert_structural_equal(default, explicit)
+    assert physical.native and not physical.auto_sync
+    assert not ir.structural_equal(default, physical)
+    restored = ir.deserialize(ir.serialize(physical))
+    ir.assert_structural_equal(physical, restored)
+    assert isinstance(restored, ir.RegScopeStmt) and restored.native
+    assert "reg_scope(auto_sync=False, native=True)" in python_print(restored)
+
+
 @pytest.mark.parametrize("policy", [0, 1, "false"])
-def test_auto_sync_rejects_non_boolean_attribute(policy):
+@pytest.mark.parametrize("attribute", ["auto_sync", "native"])
+def test_reg_scope_rejects_non_boolean_attribute(policy, attribute):
     span = ir.Span.unknown()
     with pytest.raises(ValueError, match="bool"):
-        ir.RegScopeStmt("", ir.SeqStmts([], span), span, attrs={"auto_sync": policy})
+        ir.RegScopeStmt("", ir.SeqStmts([], span), span, attrs={attribute: policy})
 
 
 @pytest.mark.parametrize("flatten_first", [False, True])

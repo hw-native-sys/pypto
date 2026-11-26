@@ -42,7 +42,7 @@ def _stream_entry(bits, trips=7, destination_2d=False):
             )
             guarded = pl.tile.full([capacity], dtype=carrier, value=123)
             destination = pl.reinterpret_view(pl.reshape(guarded, destination_shape), dtype)
-            with pl.reg_scope():
+            with pl.reg_scope(native=True):
                 initial_ureg = pl.reg.squeeze_store_init(destination, offset=7)
                 for chunk, (curr_ureg,) in pl.range(0, trips, init_values=(initial_ureg,)):
                     value = pl.reg.load(source, offset=chunk * lanes, lanes=lanes)
@@ -85,7 +85,7 @@ def _append_entry(bits):
             count = pl.cast(pl.read(counts, [0]), pl.INDEX)
             guarded = pl.tile.full([capacity], dtype=carrier, value=123)
             destination = pl.reinterpret_view(guarded, dtype)
-            with pl.reg_scope():
+            with pl.reg_scope(native=True):
                 ureg = pl.reg.squeeze_store_init(destination, offset=7)
                 first = pl.reg.load(source, lanes=lanes)
                 full = pl.reg.full_mask(lanes=lanes)
@@ -142,7 +142,7 @@ def _runtime_rows_entry(bits):
                 rows = pl.cast(pl.read(row_counts, [sample]), pl.INDEX)
                 guarded = pl.tile.full([capacity], dtype=carrier, value=123)
                 destination = pl.reinterpret_view(guarded, dtype)
-                with pl.reg_scope():
+                with pl.reg_scope(native=True):
                     first = pl.reg.load(source, lanes=lanes)
                     keep = pl.reg.active_mask(9, lanes=lanes)
                     initial = pl.reg.squeeze_store_init(destination, offset=7)

@@ -939,6 +939,14 @@ class RegScopeStmt : public ScopeStmt {
     return true;
   }
 
+  /// Physical mode selects the micro-op ABI for the entire region.
+  [[nodiscard]] bool Native() const {
+    for (const auto& [key, value] : attrs_) {
+      if (key == "native") return std::any_cast<bool>(value);
+    }
+    return false;
+  }
+
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::RegScopeStmt; }
   [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Reg; }
   [[nodiscard]] std::string TypeName() const override { return "RegScopeStmt"; }
@@ -948,17 +956,21 @@ class RegScopeStmt : public ScopeStmt {
  private:
   static std::vector<std::pair<std::string, std::any>> NormalizeAttrs(
       std::vector<std::pair<std::string, std::any>> attrs) {
-    bool seen = false;
+    bool seen_sync = false, seen_native = false;
     attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
-                               [&seen](const auto& attr) {
-                                 if (attr.first != "auto_sync") return false;
-                                 CHECK(!seen) << "Duplicate auto_sync attribute";
+                               [&](const auto& attr) {
+                                 if (attr.first != "auto_sync" && attr.first != "native") return false;
+                                 bool& seen = attr.first == "auto_sync" ? seen_sync : seen_native;
+                                 CHECK(!seen) << "Duplicate " << attr.first << " attribute";
                                  seen = true;
                                  const auto* value = std::any_cast<bool>(&attr.second);
-                                 CHECK(value) << "RegScope auto_sync must be a bool";
-                                 return *value;
+                                 CHECK(value) << "RegScope " << attr.first << " must be a bool";
+                                 return *value == (attr.first == "auto_sync");
                                }),
                 attrs.end());
+    // Canonicalize policy order regardless of the DSL keyword order.
+    std::stable_sort(attrs.begin(), attrs.end(),
+                     [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
     return attrs;
   }
 };
