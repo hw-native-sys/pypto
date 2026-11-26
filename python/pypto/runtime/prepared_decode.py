@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Any, cast
+from typing import Any
 
 import torch
 
@@ -73,34 +73,36 @@ def _binding_key(value: Any) -> Any:
     if type(value) in (DeviceTensor, StackedDeviceTensor):
         return id(value)
     if type(value) is torch.Tensor:
-        return _host_key(cast(torch.Tensor, value))
+        return _host_key(value)
     if type(value) is list:
-        items = cast(list[Any], value)
+        items: list[Any] = value
         if all(type(item) is torch.Tensor for item in items):
-            return tuple(_host_key(cast(torch.Tensor, item)) for item in items)
+            return tuple(_host_key(item) for item in items)
     raise TypeError("Unsupported prepared decode binding")
 
 
 def _owner_records(args: Sequence[Any]) -> Iterator[_OwnerRecord]:
     for value in args:
         if type(value) is StackedDeviceTensor:
-            stacked = cast(StackedDeviceTensor, value)
-            for shard, rank in zip(stacked.shards, stacked.worker_ids, strict=True):
+            for shard, rank in zip(value.shards, value.worker_ids, strict=True):
                 yield (rank, shard.data_ptr - shard.byte_offset), shard.buffer
         elif type(value) is DeviceTensor:
-            tensor = cast(DeviceTensor, value)
-            owner_rank = int(getattr(tensor.buffer, "owner_worker_id"))
-            yield (owner_rank, tensor.data_ptr - tensor.byte_offset), tensor.buffer
+            owner_rank = int(getattr(value.buffer, "owner_worker_id"))
+            yield (owner_rank, value.data_ptr - value.byte_offset), value.buffer
 
 
 class PrepareRanks(ast.NodeTransformer):
     def visit_For(self, node: ast.For) -> ast.AST:
         # The pinned entry contains only independent rank loops. The caller
         # executes each entire loop once on a cache miss to create snapshots.
+        visited = self.generic_visit(node)
+        if not isinstance(visited, ast.stmt):
+            raise TypeError("Prepared decode rank loop must remain a statement")
+        body: list[ast.stmt] = [visited]
         return ast.copy_location(
             ast.If(
                 test=ast.UnaryOp(op=ast.Not(), operand=ast.Name(id="_cache_hit", ctx=ast.Load())),
-                body=[cast(ast.stmt, self.generic_visit(node))],
+                body=body,
                 orelse=[],
             ),
             node,
@@ -136,7 +138,13 @@ class PrepareRanks(ast.NodeTransformer):
             ],
             keywords=[],
         )
-        node.body = [cast(ast.stmt, self.visit(stmt)) for stmt in node.body]
+        body: list[ast.stmt] = []
+        for stmt in node.body:
+            visited = self.visit(stmt)
+            if not isinstance(visited, ast.stmt):
+                raise TypeError("Prepared decode body item must remain a statement")
+            body.append(visited)
+        node.body = body
         return node
 
 
@@ -158,7 +166,7 @@ def load(
     if task_cls is None:
         return None
     entry_name = str(getattr(entry, "__name__"))
-    entry_globals = cast(dict[str, Any], getattr(entry, "__globals__"))
+    entry_globals: dict[str, Any] = getattr(entry, "__globals__")
     tree = ast.parse(source, filename=str(path))
     fn = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == entry_name)
     kwonly_names = (
@@ -172,7 +180,8 @@ def load(
     fn.args.kw_defaults.extend([None] * len(kwonly_names))
     PrepareRanks().visit(fn)
     namespace: dict[str, Any] = {**entry_globals, "_domain_scope": _domain_scope}
-    module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
+    module_body: list[ast.stmt] = [fn]
+    module = ast.fix_missing_locations(ast.Module(body=module_body, type_ignores=[]))
     exec(compile(module, str(path), "exec"), namespace)
     return PreparedDecode(namespace[entry_name], task_cls=task_cls, lease_cls=lease_cls)
 

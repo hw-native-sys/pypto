@@ -33,13 +33,14 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pypto.runtime.prepared_decode
 import pytest
 import torch
 from pypto.ir import DistributedConfig
 from pypto.ir.compiled_program import _ParamInfo
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import DeviceTensor, StackedDeviceTensor, prepared_decode
+from pypto.runtime import DeviceTensor, StackedDeviceTensor
 from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_BEGIN,
     _L3_SWIMLANE_GRAPH_END,
@@ -4995,13 +4996,13 @@ def test_prepared_decode_defers_simpler_prepared_local_import(tmp_path, monkeypa
     stub_simpler.__path__ = []
     monkeypatch.setitem(sys.modules, "simpler", stub_simpler)
     monkeypatch.delitem(sys.modules, "simpler.prepared_local", raising=False)
-    monkeypatch.setattr(prepared_decode, "HOST_SOURCES", {digest})
+    monkeypatch.setattr(pypto.runtime.prepared_decode, "HOST_SOURCES", {digest})
 
     def entry(orch, *args, **kwargs):
         pass
 
-    assert prepared_decode.load(entry, orch_path) is None
-    assert prepared_decode.load(entry, tmp_path / "missing.py") is None
+    assert pypto.runtime.prepared_decode.load(entry, orch_path) is None
+    assert pypto.runtime.prepared_decode.load(entry, tmp_path / "missing.py") is None
 
 
 if __name__ == "__main__":
