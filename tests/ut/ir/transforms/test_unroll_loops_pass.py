@@ -136,7 +136,7 @@ class TestBasicUnroll:
         ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
 
     def test_unrolled_branches_yield_their_own_last_tile(self, tmp_path):
-        buf = pl.MemRef("buf", slots=4)
+        buf = pl.MemRef("buf", slots=2)
 
         @pl.program
         class Before:
@@ -151,15 +151,15 @@ class TestBasicUnroll:
                     for i in pl.unroll(2):
                         v: pl.Tile[[1, 64], pl.FP32, buf[i], pl.Mem.Vec] = pl.load(x, [i, 0], [1, 64])
                 else:
-                    for j in pl.unroll(3, 1, -1):
-                        v: pl.Tile[[1, 64], pl.FP32, buf[j], pl.Mem.Vec] = pl.load(x, [j - 2, 0], [1, 64])
+                    for j in pl.unroll(1, -1, -1):
+                        v: pl.Tile[[1, 64], pl.FP32, buf[j], pl.Mem.Vec] = pl.load(x, [j, 0], [1, 64])
                 return pl.store(v, [0, 0], y)
 
         func = _unroll_and_ssa(Before).get_function("main")
         assert func is not None
         branch, ret = ir.flatten_to_stmts(func.body)
         assert isinstance(branch, ir.IfStmt) and branch.else_body is not None
-        for arm, slot in ((branch.then_body, 1), (branch.else_body, 2)):
+        for arm, slot in ((branch.then_body, 1), (branch.else_body, 0)):
             *_, last, yielded = ir.flatten_to_stmts(arm)
             assert isinstance(last, ir.AssignStmt) and isinstance(yielded, ir.YieldStmt)
             assert yielded.value[0] is last.var

@@ -27,6 +27,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserTypeError
 
@@ -815,6 +816,120 @@ class TestSlots:
         # Each MemRef spans its OWN slot, so [offset, offset + size_) stays inside
         # the allocation and the two slots do not overlap for MayAlias.
         assert memrefs["t0"].size_ == memrefs["t1"].size_ == slot_size
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_branches_use_the_same_two_slots_in_reverse_order(self, planner, tmp_path):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    t: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    pl.store(a, [1, 0], out)
+                    chosen = pl.yield_(t)
+                else:
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    u: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    pl.store(b, [1, 0], out)
+                    chosen = pl.yield_(u)
+                return pl.store(chosen, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=planner):
+            ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_reuse_after_nested_branch_waits_for_joined_tile(self, planner, tmp_path):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    if flag > 1:
+                        keep: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                        inner = pl.yield_(keep)
+                    else:
+                        tmp: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                        inner = pl.yield_(tmp)
+                    chosen = pl.yield_(inner)
+                else:
+                    sibling: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    other: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    pl.store(sibling, [1, 0], out)
+                    chosen = pl.yield_(other)
+                overwrite: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                out = pl.store(overwrite, [1, 0], out)
+                return pl.store(chosen, [0, 0], out)
+
+        # Both planners must identify the write after the join. DSA-RP can report
+        # the copy into the result slot as the tile that write would clobber.
+        with pytest.raises(ValueError, match="and 'overwrite[^']*'.*live at the same time"):
+            with passes.PassContext([], memory_planner=planner):
+                ir.compile(
+                    Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True
+                )
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_two_yielded_tiles_can_swap_declared_slots(self, planner, ascend_backend):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[4, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[3, 64], pl.FP32]],
+            ) -> pl.Tensor[[3, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    first, second, repeated = pl.yield_(a, b, a)
+                else:
+                    c: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [2, 0], [1, 64])
+                    d: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [3, 0], [1, 64])
+                    first, second, repeated = pl.yield_(c, d, c)
+                out = pl.store(first, [0, 0], out)
+                out = pl.store(second, [1, 0], out)
+                return pl.store(repeated, [2, 0], out)
+
+        with passes.PassContext([], memory_planner=planner):
+            after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+
+        def address(var):
+            return _const_offset(var.type.memref)
+
+        # Replay writes at their allocated byte addresses. Two sequential moves
+        # around a swap lose the second source, even though the program compiles.
+        contents = {}
+        for stmt in ir.flatten_to_stmts(branch.else_body):
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+                if stmt.value.op.name == "tile.load":
+                    offsets = stmt.value.args[1]
+                    assert isinstance(offsets, ir.MakeTuple) and isinstance(offsets.elements[0], ir.ConstInt)
+                    contents[address(stmt.var)] = offsets.elements[0].value
+                elif stmt.value.op.name == "tile.move":
+                    contents[address(stmt.var)] = contents[address(stmt.value.args[0])]
+        assert [contents[address(var)] for var in branch.return_vars] == [2, 3, 2]
 
     def test_slot_size_is_the_largest_tile_on_any_slot(self):
         """Slots are uniform, so one slot must hold the biggest bound tile.

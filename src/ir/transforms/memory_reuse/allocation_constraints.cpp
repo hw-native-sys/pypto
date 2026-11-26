@@ -877,31 +877,47 @@ class IndependentlyBoundCollector : public IRVisitor {
 /// binding bypasses that path, so it is re-checked here. Touching is allowed —
 /// one tile's last read may be the statement that produces the next.
 ///
-/// Sorted sweep rather than a pairwise scan: a *valid* program is exactly one
-/// where every pair is disjoint, so a pairwise check never exits early and would
-/// be quadratic in the member count — which grows with the IR once a binding
-/// inside a loop body is unrolled.
+/// Two definitions on the same structured path keep their relative order
+/// whether then or else is visited first. Only opposite arms reverse. Sweep in
+/// then-first order, indexing earlier writers by else-first order. The smallest
+/// live key suffices to find a reachable conflict in O(N log N) total time.
 void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pinned_bases,
-                            const std::map<const Var*, std::pair<int, int>>& var_liveness) {
+                            const LifetimeAnalysisResult& lifetimes) {
   if (pinned_bases.empty()) return;
-  IndependentlyBoundCollector collector(pinned_bases, var_liveness);
+  IndependentlyBoundCollector collector(pinned_bases, lifetimes.var_liveness);
   collector.VisitStmt(body);
 
   for (auto& [slot, members] : collector.by_slot) {
     const Var* base = slot.base;
-    std::sort(members.begin(), members.end(),
-              [](const BoundMember& a, const BoundMember& b) { return a.def_point < b.def_point; });
-    for (size_t i = 1; i < members.size(); ++i) {
-      const BoundMember& prev = members[i - 1];
-      const BoundMember& cur = members[i];
-      CHECK_SPAN(prev.last_use_point <= cur.def_point, cur.var->span_)
-          << "Tiles '" << prev.var->name_hint_ << "' and '" << cur.var->name_hint_
-          << "' are both bound to the same slot of the declared allocation '" << base->name_hint_
-          << "' but are live at the same time (" << prev.var->name_hint_ << ": [" << prev.def_point << ", "
-          << prev.last_use_point << "], " << cur.var->name_hint_ << ": [" << cur.def_point << ", "
-          << cur.last_use_point
-          << "]). Sharing one slot would overwrite data that is still needed — put them on different "
-             "slots, declare separate allocations, or bind only tiles whose lifetimes do not overlap.";
+    std::sort(members.begin(), members.end(), [](const BoundMember& a, const BoundMember& b) {
+      if (a.def_point != b.def_point) return a.def_point < b.def_point;
+      // Simultaneous multi-result writes must see any still-live sibling output.
+      return a.last_use_point > b.last_use_point;
+    });
+    std::multimap<int, const BoundMember*> writers;
+    for (const BoundMember& cur : members) {
+      int order = cur.def_point;
+      // Asynchronous TPUSH reads can outlive a loop iteration in Scaling memory.
+      if (As<TileType>(cur.var->GetType())->memory_space_ != MemorySpace::Scaling &&
+          static_cast<size_t>(order) < lifetimes.else_first_offsets.size()) {
+        order += lifetimes.else_first_offsets[order];
+      }
+      while (!writers.empty() && writers.begin()->second->last_use_point <= cur.def_point) {
+        writers.erase(writers.begin());
+      }
+      if (!writers.empty()) {
+        const auto& [earlier_order, earlier] = *writers.begin();
+        const BoundMember& prev = *earlier;
+        CHECK_SPAN(earlier_order > order, cur.var->span_)
+            << "Tiles '" << prev.var->name_hint_ << "' and '" << cur.var->name_hint_
+            << "' are both bound to the same slot of the declared allocation '" << base->name_hint_
+            << "' but are live at the same time (" << prev.var->name_hint_ << ": [" << prev.def_point << ", "
+            << prev.last_use_point << "], " << cur.var->name_hint_ << ": [" << cur.def_point << ", "
+            << cur.last_use_point
+            << "]). Sharing one slot would overwrite data that is still needed — put them on different "
+               "slots, declare separate allocations, or bind only tiles whose lifetimes do not overlap.";
+      }
+      writers.emplace(order, &cur);
     }
   }
 }
@@ -980,7 +996,7 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     static_cast<void>(size);
     result.declared_allocation_bases.insert(base);
   }
-  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes);
   CollectAccessConstraints(func, lifetimes.var_sharing_groups, result);
   // Retirement needs tracked lifetimes and declared-allocation exclusions.
   // Keep this proof out of the shared, lifetime-free storage-selection path.

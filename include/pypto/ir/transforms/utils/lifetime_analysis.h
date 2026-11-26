@@ -56,6 +56,9 @@ struct LifetimeAnalysisResult {
   // must keep the legacy whole-buffer layout: subdividing other groups could
   // otherwise make an unsafe program reach codegen instead of overflowing.
   std::set<const Var*> subrange_unsafe_groups;
+  // Add to a statement's definition point to obtain the order with every if's
+  // else arm visited first. Points beyond the vector have zero displacement.
+  std::vector<int> else_first_offsets;
 };
 
 /**

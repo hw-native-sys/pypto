@@ -332,33 +332,13 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       return PatchIterArgsAndReturnVars(for_stmt, yield_stmt);
     }
 
-    // `pl.yield_` rebinds every carry simultaneously, so the copies that realize
-    // it must not observe each other's writes. Order them first.
-    std::vector<StmtPtr> spill_stmts;
-    const std::vector<size_t> order = OrderCarryCopies(&copies, carry_index, &spill_stmts);
-
-    // Build new yield values with moved vars substituted
-    std::vector<ExprPtr> new_yield_values = yield_stmt->value_;
-    for (const auto& copy : copies) {
-      new_yield_values[copy.index] = copy.moved_var;
-    }
-    auto new_yield = MutableCopy(yield_stmt);
-    new_yield->value_ = std::move(new_yield_values);
-
-    // A spill reads a carry buffer before any copy writes one, so every spill
-    // precedes every copy.
-    std::vector<StmtPtr> move_stmts = std::move(spill_stmts);
-    move_stmts.reserve(move_stmts.size() + order.size());
-    for (size_t idx : order) move_stmts.push_back(copies[idx].move_stmt);
-
-    // Insert tile.move stmts before yield and replace yield in body
-    auto new_body = InsertMovesAndReplaceYield(for_stmt->body_, new_yield, move_stmts);
+    auto new_body = InsertOrderedYieldCopies(for_stmt->body_, yield_stmt, &copies, carry_index);
 
     // Build intermediate ForStmt with new body, then patch iter_args/return_vars
     auto intermediate_for = MutableCopy(for_stmt);
     intermediate_for->body_ = new_body;
 
-    return PatchIterArgsAndReturnVars(intermediate_for, new_yield);
+    return PatchIterArgsAndReturnVars(intermediate_for, FindYieldStmt(new_body));
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
@@ -399,8 +379,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     // with different MemRefs.  When they differ, insert tile.move in the
     // branch whose MemRef ≠ the canonical target (then-branch is canonical).
     bool body_changed = false;
-    std::vector<std::pair<size_t, VarPtr>> else_moves;
-    std::vector<StmtPtr> else_move_stmts;
+    std::vector<CarryCopy> else_copies;
+    std::vector<MemRefPtr> targets(if_stmt->return_vars_.size());
     std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
@@ -434,6 +414,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       auto target_tile = then_tile ? then_tile : else_tile;
       auto target_memref = GetDefinedMemRef(target_tile);
       auto target_memory = target_tile->GetMemorySpace();
+      targets[i] = target_memref;
 
       // Check else branch: if MemRef differs from target, insert tile.move
       if (fixup_if_stmts_ && then_tile && else_tile) {
@@ -449,8 +430,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
                "both branches, or give the branches separate allocations.";
         if (arm == AddressRelation::kDifferent) {
           auto [moved_var, move_stmt] = CreateTileMove(else_var, target_memref, target_memory);
-          else_move_stmts.emplace_back(std::move(move_stmt));
-          else_moves.emplace_back(i, moved_var);
+          else_copies.push_back({i, else_var, std::move(moved_var), std::move(move_stmt), else_memref,
+                                 target_memref, target_memory});
           body_changed = true;
         }
       }
@@ -478,14 +459,30 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
     // Rebuild else body with tile.move stmts inserted before yield
     auto new_else_body = if_stmt->else_body_;
-    if (!else_moves.empty() && else_yield && if_stmt->else_body_.has_value()) {
-      std::vector<ExprPtr> new_else_yield_values = else_yield->value_;
-      for (const auto& [idx, moved_var] : else_moves) {
-        new_else_yield_values[idx] = moved_var;
+    if (!else_copies.empty()) {
+      const CarryRangeIndex targets_index(targets);
+      // A swap has distinct destinations but needs a temporary. Two different
+      // results assigned overlapping destinations cannot be preserved by reordering.
+      std::map<size_t, size_t> repeated;
+      for (const auto& copy : else_copies) {
+        if (repeated.count(copy.index)) continue;
+        targets_index.ForEachOverlapping(copy.dst_memref, [&](size_t other) {
+          if (other == copy.index) return;
+          const auto source = GetTypeMemRef(else_yield->value_.at(other)->GetType());
+          CHECK_SPAN(source && SamePhysicalWindow(*source, copy.src_memref) &&
+                         SamePhysicalWindow(targets[other], copy.dst_memref),
+                     if_stmt->span_)
+              << "Branch results '" << new_return_vars[copy.index]->name_hint_ << "' and '"
+              << new_return_vars[other]->name_hint_ << "' require overlapping destination slots";
+          // Repeated results share one transfer, including any spill that breaks a cycle.
+          repeated.emplace(other, copy.index);
+        });
       }
-      auto new_yield = MutableCopy(else_yield);
-      new_yield->value_ = std::move(new_else_yield_values);
-      new_else_body = InsertMovesAndReplaceYield(if_stmt->else_body_.value(), new_yield, else_move_stmts);
+      else_copies.erase(std::remove_if(else_copies.begin(), else_copies.end(),
+                                       [&](const CarryCopy& copy) { return repeated.count(copy.index); }),
+                        else_copies.end());
+      new_else_body =
+          InsertOrderedYieldCopies(*new_else_body, else_yield, &else_copies, targets_index, repeated);
     }
 
     auto new_if = MutableCopy(if_stmt);
@@ -730,12 +727,11 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       }
       const int64_t begin = offset->value_;
       const int64_t end = RangeEnd(begin, query->size_, query->span_);
-      // Entries are sorted by start, so the first candidate is the first one
-      // starting at or after `begin`, less the single earlier one that may still
-      // cover `begin`.
-      auto it = std::lower_bound(entries.begin(), entries.end(), begin,
-                                 [](const Entry& entry, int64_t value) { return entry.begin < value; });
-      if (it != entries.begin() && std::prev(it)->end > begin) --it;
+      // Branch results can repeat a destination. Start at the first prefix
+      // extending past begin so every overlapping writer is visited.
+      const auto& maxima = prefix_end_.at(base);
+      auto first = std::upper_bound(maxima.begin(), maxima.end(), begin);
+      auto it = entries.begin() + (first - maxima.begin());
       for (; it != entries.end() && it->begin < end; ++it) {
         if (it->end > begin) fn(it->index);
       }
@@ -791,6 +787,23 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     std::map<const Var*, std::vector<int64_t>> prefix_end_;
     std::map<const Var*, std::vector<size_t>> unpositioned_;
   };
+
+  // An if result tuple and a loop carry tuple both transfer simultaneously.
+  // Snapshot cycle victims before any write, then emit copies in dependency order.
+  StmtPtr InsertOrderedYieldCopies(const StmtPtr& body, const YieldStmtPtr& yield,
+                                   std::vector<CarryCopy>* copies, const CarryRangeIndex& destinations,
+                                   const std::map<size_t, size_t>& repeated = {}) {
+    std::vector<StmtPtr> moves;
+    const auto order = OrderCarryCopies(copies, destinations, &moves);
+    auto new_yield = MutableCopy(yield);
+    for (size_t idx : order) {
+      const auto& copy = (*copies)[idx];
+      new_yield->value_[copy.index] = copy.moved_var;
+      moves.push_back(copy.move_stmt);
+    }
+    for (const auto& [position, first] : repeated) new_yield->value_[position] = new_yield->value_[first];
+    return InsertMovesAndReplaceYield(body, new_yield, moves);
+  }
 
   /// The byte range each carry owns, indexed by iter_arg position (null when the
   /// carry is not a tile with a MemRef).
