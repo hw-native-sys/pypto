@@ -118,9 +118,9 @@ def replay(
             contains ``kernel_config.py``, ``orchestration/`` and ``kernels/``.
             An L3 distributed build (``orchestration/host_orch.py`` +
             ``next_levels/{rank}/`` + ``distributed_meta.json``) is detected
-            automatically and dispatched via
-            :meth:`~pypto.ir.DistributedCompiledProgram.from_dir`. Builds with external
-            communication windows require a prepared DistributedWorker to bind them.
+            automatically. ``replay()`` rejects builds that declare external communication
+            windows. Load those builds with :meth:`~pypto.ir.DistributedCompiledProgram.from_dir`,
+            recreate the domains on a prepared DistributedWorker, and pass ``domain.tensor(name)``.
         *tensors: Positional ``torch.Tensor`` (host), :class:`DeviceTensor`,
             or ctypes scalar arguments matching the orchestration entry's
             parameter order. Outputs are written in-place into the
