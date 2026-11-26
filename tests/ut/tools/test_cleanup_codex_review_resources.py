@@ -23,7 +23,8 @@ LABEL = "org.pypto.codex-review."
 
 
 @pytest.fixture
-def cleaner():
+def cleaner(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / ".github/scripts"))
     spec = importlib.util.spec_from_file_location(
         "cleanup_codex_review_resources", ROOT / ".github/scripts/cleanup_codex_review_resources.py"
     )
@@ -87,9 +88,12 @@ def add_attempt(host, run="100", attempt="1", *, status="completed", repository=
 
 
 @pytest.mark.parametrize("conclusion", ["cancelled", "failure", "success", "timed_out"])
-def test_completed_attempt_releases_containers_before_networks(cleaner, host, conclusion):
+@pytest.mark.parametrize(
+    "workflow", ["codex-review.yml", "codex-review-retarget.yml", "codex-review-retarget.yml@refs/heads/main"]
+)
+def test_completed_attempt_releases_containers_before_networks(cleaner, host, conclusion, workflow):
     add_attempt(host)
-    host["runs"][("100", "1")]["conclusion"] = conclusion
+    host["runs"][("100", "1")].update(conclusion=conclusion, path=f".github/workflows/{workflow}")
     cleaner.reconcile("owner/repo", "42")
     assert host["removed"] == [("container", "container-100-1"), ("network", "network-100-1")]
     cleaner.reconcile("owner/repo", "42")  # Cleanup is idempotent.
@@ -131,6 +135,9 @@ def test_unverifiable_owner_aborts_before_any_removal(cleaner, host, error):
         {"repository": {"id": 43, "full_name": "owner/repo"}},
         {"repository": {"id": 42, "full_name": "other/repo"}},
         {"path": ".github/workflows/ci.yml"},
+        {"path": ".github/workflows/codex-review-cleanup.yml"},
+        {"path": ".github/workflows/other.yml@refs/heads/main"},
+        {"path": None},
     ],
 )
 def test_wrong_github_identity_never_authorizes_removal(cleaner, host, change):

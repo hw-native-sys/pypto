@@ -264,8 +264,11 @@ webhook 地址或服务升级。
 `Codex Review` GitHub Actions 工作流仅审查目标分支为 `main` 的非草稿 PR，在其创建、重新打开、更新或标记为
 可审查（ready for review）时进行审查。工作流定义取自主分支的受信任版本，将 PR
 head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-hosted job）发布结果。
+这些 PR 事件创建四个检查。`prepare` 确认 PR 可审查后，`review`（Codex）和
+`gemini-review` 并行运行，共用的 `publish` 任务将各自成功的结果发布到被审查的提交。
+Gemini 审查从 merge base 到 head 的 diff，反馈以纯文本发布。自动批准仅依据 Codex 的审查。
 
-位置通过 diff 校验的问题会发布为行级审查评论，可以独立回复和标记解决。
+Codex 发现的问题在位置通过 diff 校验后会发布为行级审查评论，可以独立回复和标记解决。
 位于 diff 之外、没有位置或位置无效的问题会保留在审查总结中。diff 之外的
 已报告位置会在信息可用时链接到被审查的 head 或 merge-base 提交。可选的位置
 元数据请求失败时，问题仍保留在总结中，不附加行级锚点或不可用的链接。同一提交上，本工作流
@@ -301,8 +304,8 @@ PR 作者或具有 write、maintain、admin 权限的协作者可以在没有新
 Conversation 中发送命令。命令由 Actions 识别，不需要名为 `pypto-codex` 的
 GitHub 账号，也不会调用独立的 `@codex` Cloud 集成。
 
-评论触发的运行会先查找属于当前 PR、head 提交及目标分支的、可验证的
-`pull_request_target` Codex Review 运行。已排队或正在执行的运行会被复用；
+评论触发的运行会先查找 `Codex Review` 或 `Codex Review Retarget` 创建的
+`pull_request_target` 运行，并验证它对应当前 PR、head 提交及目标分支。已排队或正在执行的运行会被复用；
 已完成的运行会重跑**全部任务**（包括需要重新评估时的成功运行）。这样会更新
 PR 原有的 Actions 检查，并在同一次 attempt 中重新生成上下文和结果产物。
 评论本身仍会产生一个独立的短路由运行，其 Actions summary 会链接到选中的
@@ -331,7 +334,7 @@ PR 运行。同一个 PR 的准备任务会串行执行，最多保留 100 个�
 恢复准确的主会话；只有审查完整结束且结果校验通过后才更新会话检查点。凭据与配置仍是临时的。更换 runner 或删除这两个卷后，会使用
 完整的当前 GitHub 讨论开始新会话。复用会话可以保留之前的分析并可能利用提示词
 缓存，但不保证减少计费 token；长历史仍可能被压缩。每轮仍检查完整的当前 PR diff。
-关闭 PR 时会删除 `pypto-codex-sessions-<repository-id>-<pr-number>` 卷及其
+关闭 PR 时，独立的 `Codex Review Cleanup` 工作流会删除 `pypto-codex-sessions-<repository-id>-<pr-number>` 卷及其
 `-index` 配套卷，无论是否合并，也适用于草稿、机器人创建的 PR 和已禁用审查的情况。
 清理与审查共用 runner 锁。创建或恢复卷之前，可信宿主机查询会检查当前 PR 状态、
 head 和最近一次关闭事件；卷标签记录该关闭事件，使重新打开的 PR 开始新会话，
@@ -354,7 +357,7 @@ Runner 故障可能阻止 `always()` 步骤执行，下一次在同一宿主机�
 管理员通过仓库 Actions 变量 `CODEX_REVIEW_ENABLED` 启用或禁用审查。将其设为
 `true` 即可启用；删除该变量或设为其他值可以立即禁用。关闭事件触发的会话清理仍保持启用。
 
-审查任务（review job）需要标签为 `Linux`、`ARM64` 和 `cpu-codex` 的专用自托管
+两个审查任务（review job）都需要标签为 `Linux`、`ARM64` 和 `cpu-codex` 的专用自托管
 运行器（self-hosted runner）。以下资源由宿主机管理，不取自 PR：
 
 - GitHub CLI（`gh`），用于可信宿主机状态检查；其只读 token 不会传入模型容器
@@ -364,6 +367,14 @@ Runner 故障可能阻止 `always()` 步骤执行，下一次在同一宿主机�
 - 监听 relay 端口 `17895` 且健康的 `pypto-codex-proxy-relay` 容器
 - 仅监听 loopback 的 mixed proxy `127.0.0.1:7895`
 
+Gemini 使用宿主机入口 `~/.local/share/pypto-gemini-review/run review --model <model-id> <pr.diff> <results>`。
+`.github/workflows/codex-review.yml` 中的 `gemini-review` 任务选择模型，启动脚本需将
+`--model` 参数原样传给容器内的 `agy`。
+CI 将已授权的 base 和 head 获取到临时裸仓库，仅把 diff 传给启动脚本。脚本管理 Google OAuth、
+代理和固定镜像 `localhost:5000/pypto-gemini-review@sha256:886e02ba2f1612d52f7c4ec76ff8b6d25e1b8c586be90ee3c006fcf52af0b99e`。
+运行成功后，CI 只上传本次运行及尝试的 `response.txt`。账号需要重新授权时，在 runner 的 SSH
+终端执行 `~/.local/share/pypto-gemini-review/run login`。
+
 `.github/scripts/` 中的独立 CI 辅助脚本支持 Python 3.8 及更新版本。
 脚本延迟求值类型注解，避免导入时依赖 Python 3.9 的内置泛型或 Python 3.10 的联合类型
 运算符。该兼容范围仅限这些宿主机脚本；PyPTO 本身仍要求 Python 3.10 及更新版本。
@@ -371,7 +382,7 @@ Runner 故障可能阻止 `always()` 步骤执行，下一次在同一宿主机�
 辅助脚本测试检查。审查工作流使用宿主机解释器，不安装 Python，也不依赖审查容器内的
 Python 版本。
 
-每次审查都将 PR 的精确 head 检出到唯一目录中的全新完整 Git 仓库，不复用运行器
+每次 Codex 审查都将 PR 的精确 head 检出到唯一目录中的全新完整 Git 仓库，不复用运行器
 缓存的对象库。启动容器前，宿主机获取 base、head 和可信工作流提交的完整历史，
 拒绝浅克隆（shallow clone）和部分克隆（partial clone），验证可达对象齐全，并生成
 merge base 到 head 的完整 diff，包括二进制内容。如果缺少对象，任务会在审查开始前
@@ -383,12 +394,12 @@ Codex 在只读容器中以 UID/GID `1002:1003` 运行；仓库以只读方式�
 凭据中的任何完整长字符串值，工作流会拒绝发布；正常评论也会明确标记为由不可信
 PR 内容生成的自动化结果。
 
-审查结果上传最多尝试三次，每次限时两分钟。失败后分别等待 10 秒和 30 秒再重试，
+Codex 审查结果上传最多尝试三次，每次限时两分钟。失败后分别等待 10 秒和 30 秒再重试，
 并替换当前运行对应的同名残留产物。上传成功或任务取消后停止重试。如果三次均失败，
-审查任务也会失败，发布任务不会运行；仅完成模型审查不会使整个任务成功。
+Codex 检查会失败，成功的 Gemini 反馈仍可发布。
 
-由 ChatGPT 管理（ChatGPT-managed）的 Codex 凭据通过可信的每周或手动维护任务
-刷新。该任务不检出仓库，只在空的临时目录中运行，通过宿主机锁与审查任务串行，
+`Codex Auth Maintenance` 工作流每周刷新由 ChatGPT 管理（ChatGPT-managed）的 Codex 凭据，
+也可以通过 **Run workflow** 手动触发。该任务不检出仓库，在空的临时目录中运行，通过宿主机锁与审查任务串行，
 并原地更新持久凭据。PR 审查容器只接收临时快照，绝不会挂载或写入持久凭据。
 
 ### 自动批准
@@ -418,9 +429,9 @@ CI 检查和冲突。工作流不要求批准前 head 与 base 保持最新。
 批准后再次核对提交；若发布期间发生更新或核验失败，则撤销刚提交的审批。
 替代审查结果发布前会先撤销本工作流之前的自动审批，不修改人工审批。
 
-修改 PR 的 base 分支也会在审查前触发审批撤销。独立的 GitHub 托管任务只运行
+`Codex Review Retarget` 处理 PR 编辑事件。更换目标分支时，其 GitHub 托管任务只运行
 受信任工作流版本的代码，即使审查已禁用、PR 为草稿或由机器人修改目标分支，
-也会撤销本工作流之前的审批。符合条件的新审查只有在撤销成功后才启动。
+也会撤销之前的 Codex 审批。符合条件的新审查只有在撤销成功后才启动。
 仅修改标题或正文不会启动审查，也不会取消已有审查。撤销任务使用独立的并发组，
 新事件不会取消正在执行的撤销。GitHub 事件投递和任务调度
 是异步的，因此撤销审批与修改目标分支并非原子操作。

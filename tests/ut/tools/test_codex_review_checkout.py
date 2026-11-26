@@ -152,5 +152,58 @@ def test_preparation_and_container_use_fresh_checkout(review_steps):
     assert "src=$PWD,dst=/workspace,readonly" in container["run"]
 
 
+@pytest.mark.parametrize("launcher_exit", [0, 37])
+def test_gemini_workflow_reviews_the_pinned_diff_and_cleans_up(tmp_path, review_history, launcher_exit):
+    """Run the actual workflow commands with a fork-style history and a stand-in host launcher."""
+    origin, base, head, merge_base, _ = review_history
+    remote = tmp_path / "owner" / "repo.git"
+    remote.parent.mkdir()
+    git(tmp_path, "clone", "--bare", str(origin), str(remote))
+    workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/codex-review.yml"
+    job = yaml.safe_load(workflow_path.read_text())["jobs"]["gemini"]
+    assert job["permissions"] == {"contents": "read"}
+    diff, review, upload, cleanup = job["steps"]
+    outputs = tmp_path / "outputs"
+    env = os.environ | {
+        "GITHUB_SERVER_URL": tmp_path.as_uri(),
+        "GITHUB_REPOSITORY": "owner/repo",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(outputs),
+        "BASE_SHA": base,
+        "HEAD_SHA": head,
+        "HOME": str(tmp_path / "home"),
+        "GH_TOKEN": "test-host-token",
+        "GITHUB_TOKEN": "test-host-token",
+    }
+    subprocess.run(["bash", "-c", diff["run"]], env=env, check=True, capture_output=True)
+    workdir = Path(outputs.read_text().strip().removeprefix("path="))
+    expected = git(origin, "diff", "--binary", merge_base, head)
+    assert (workdir / "pr.diff").read_text().strip() == expected
+    assert "base-only.txt" not in expected
+
+    launcher = Path(env["HOME"]) / ".local/share/pypto-gemini-review/run"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "#!/bin/sh\nset -eu\n"
+        'test "$#" -eq 5\ntest "$1" = review\ntest "$2" = --model\ntest -n "$3"\n'
+        'test "$4" = "$PWD/pr.diff"\ntest -f "$4"\n'
+        'test -z "${GH_TOKEN-}${GITHUB_TOKEN-}"\n'
+        'mkdir "$5"\n'
+        'echo feedback >"$5/response.txt"\n'
+        "echo private-diagnostic >&2\n"
+        f"exit {launcher_exit}\n"
+    )
+    launcher.chmod(0o755)
+    env["REVIEW_DIR"] = str(workdir)
+    result = subprocess.run(["bash", "-c", review["run"]], env=env, capture_output=True, check=False)
+    assert result.returncode == launcher_exit and result.stdout == result.stderr == b""
+    assert (workdir / "results/response.txt").read_text() == "feedback\n"
+    assert upload["with"]["path"] == "${{ steps.diff.outputs.path }}/results/response.txt"
+    assert upload["with"]["name"] == "gemini-review-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert "if" not in upload and "always()" in cleanup["if"]
+    subprocess.run(["bash", "-c", cleanup["run"]], env=env, check=True)
+    assert not workdir.exists()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

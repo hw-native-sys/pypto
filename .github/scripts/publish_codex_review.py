@@ -11,6 +11,7 @@
 # Standalone CI helpers also run on hosts with Python 3.8.
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -23,6 +24,14 @@ from urllib.parse import quote
 MARKER = "<!-- pypto-codex-review -->"
 MAX_BYTES = 60000
 DIFF_READ_ERRORS = (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError)
+
+
+def is_review_workflow(path: object) -> bool:
+    """Match the caller workflow path reported by Actions, optionally suffixed with @ref."""
+    return isinstance(path, str) and path.split("@", 1)[0] in (
+        ".github/workflows/codex-review.yml",
+        ".github/workflows/codex-review-retarget.yml",
+    )
 
 
 def github_api(endpoint: str, payload: dict | None = None, *, paginate: bool = False) -> Any:
@@ -436,20 +445,45 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     return "Approved reviewed commit" if approve else f"Commented: {reason}"
 
 
+def publish_gemini(path: Path, repo: str, number: str, head: str, base: str, base_ref: str) -> str:
+    """Attach the runner's plain-text feedback as a comment on the reviewed commit."""
+    endpoint = pull_request_endpoint(repo, number)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
+        raise ValueError("Expected a regular Gemini response file of at most 60000 bytes")
+    feedback = path.read_text(encoding="utf-8").strip()
+    if not feedback:
+        raise ValueError("Gemini returned an empty response")
+    body = (
+        f"## Gemini Review\n\nReviewed `{head}` against base `{base}`.\n\n"
+        f"<pre>{html.escape(feedback, quote=False)}</pre>"
+    )
+    if len(body.encode()) > MAX_BYTES:
+        raise ValueError("Rendered Gemini review exceeds 60000 bytes")
+
+    pr = github_api(endpoint)
+    if not matches_revision(pr, head, base_ref):
+        return "Skipped obsolete or non-reviewable PR"
+    current_base = pr["base"]["sha"]
+    if current_base != base and merge_base_sha(repo, current_base, head) != merge_base_sha(repo, base, head):
+        return "Skipped Gemini review because the PR diff changed"
+    github_api(f"{endpoint}/reviews", {"commit_id": head, "event": "COMMENT", "body": body})
+    return "Posted Gemini review"
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--extract-session":
         print(extract_session(Path(sys.argv[2]), Path(sys.argv[3])))
     elif sys.argv[1] == "--revoke":
         revoke_approvals(os.environ["GH_REPO"], os.environ["PR_NUMBER"])
     else:
-        print(
-            publish(
-                Path(sys.argv[1]),
-                os.environ["GH_REPO"],
-                os.environ["PR_NUMBER"],
-                os.environ["REVIEW_HEAD_SHA"],
-                os.environ["REVIEW_BASE_SHA"],
-                os.environ["REVIEW_BASE_REF"],
-                os.environ.get("AUTO_APPROVE") == "true",
-            )
+        target = (
+            os.environ["GH_REPO"],
+            os.environ["PR_NUMBER"],
+            os.environ["REVIEW_HEAD_SHA"],
+            os.environ["REVIEW_BASE_SHA"],
+            os.environ["REVIEW_BASE_REF"],
         )
+        if sys.argv[1] == "--gemini":
+            print(publish_gemini(Path(sys.argv[2]), *target))
+        else:
+            print(publish(Path(sys.argv[1]), *target, enabled=os.environ.get("AUTO_APPROVE") == "true"))

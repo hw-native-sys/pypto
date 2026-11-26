@@ -19,9 +19,8 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from publish_codex_review import github_api
+from publish_codex_review import github_api, is_review_workflow
 
-WORKFLOW = ".github/workflows/codex-review.yml"
 MAX_CONTEXT_BYTES = 8 * 1024 * 1024
 CHECK_RUNS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -184,7 +183,7 @@ def matching_run(repo: str, run: dict, pr: dict) -> bool:
     """Require the workflow, base repository, and artifact-backed PR identity."""
     if not (
         run["event"] == "pull_request_target"
-        and run["path"].split("@", 1)[0] == WORKFLOW
+        and is_review_workflow(run["path"])
         and run["repository"]["full_name"] == repo
     ):
         return False

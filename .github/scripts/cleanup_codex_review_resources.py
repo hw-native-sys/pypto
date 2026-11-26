@@ -15,8 +15,9 @@ import os
 import re
 import subprocess
 
+from publish_codex_review import is_review_workflow
+
 LABEL = "org.pypto.codex-review."
-WORKFLOW = ".github/workflows/codex-review.yml"
 RESOURCE_FORMAT = (
     '[{{json .ID}},{{json (.Label "org.pypto.codex-review.run")}},'
     '{{json (.Label "org.pypto.codex-review.attempt")}}]'
@@ -70,7 +71,7 @@ def completed(repo: str, repository_id: str, run: str, attempt: str) -> bool:
         or record.get("run_attempt") != int(attempt)
         or record.get("repository", {}).get("id") != int(repository_id)
         or record.get("repository", {}).get("full_name", "").casefold() != repo.casefold()
-        or record.get("path") != WORKFLOW
+        or not is_review_workflow(record.get("path"))
     ):
         raise ValueError(f"Unexpected workflow identity for run {run}, attempt {attempt}")
     return record.get("status") == "completed"

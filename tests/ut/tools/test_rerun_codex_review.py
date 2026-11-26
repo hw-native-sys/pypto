@@ -124,6 +124,7 @@ def test_pr_change_before_rerun_aborts(router, pr, api, monkeypatch, field, valu
     [
         ("event", "issue_comment"),
         ("path", ".github/workflows/ci.yml"),
+        ("path", ".github/workflows/codex-review-cleanup.yml"),
         ("path", ".github/workflows/ci.yml@main"),
         ("repository", {"full_name": "other/repo"}),
     ],
@@ -135,8 +136,9 @@ def test_wrong_run_never_reads_artifact(router, run, pr, monkeypatch, field, val
 
 
 @pytest.mark.parametrize("suffix", ["", "@main", "@refs/heads/main", "@" + "b" * 40])
-def test_workflow_path_accepts_optional_ref(router, run, pr, monkeypatch, suffix):
-    run["path"] += suffix
+@pytest.mark.parametrize("workflow", ["codex-review", "codex-review-retarget"])
+def test_workflow_path_accepts_optional_ref(router, run, pr, monkeypatch, suffix, workflow):
+    run["path"] = f".github/workflows/{workflow}.yml{suffix}"
     verified = []
     monkeypatch.setattr(router, "snapshot_matches", lambda *args: verified.append(args) or True)
     assert router.matching_run("owner/repo", run, pr)
