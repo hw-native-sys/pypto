@@ -27,6 +27,15 @@ def _unroll_and_ssa(program):
     return passes.convert_to_ssa()(passes.unroll_loops()(program))
 
 
+def _declared_slot(stmt: ir.Stmt) -> int:
+    assert isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType)
+    memref = stmt.var.type.memref
+    assert memref is not None and memref.slot_index_ is not None
+    slot = Analyzer().simplify(memref.slot_index_)
+    assert isinstance(slot, ir.ConstInt)
+    return slot.value
+
+
 class TestBasicUnroll:
     """Tests for basic loop unrolling."""
 
@@ -87,10 +96,77 @@ class TestBasicUnroll:
         # Check its scope after UnrollLoops has replaced both indices.
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
             func = passes.unroll_loops()(Before).get_function("main")
+        assert func is not None
         *loads, ret = ir.flatten_to_stmts(func.body)
+        assert isinstance(ret, ir.ReturnStmt) and isinstance(ret.value[0], ir.Call)
+        assert isinstance(loads[-1], ir.AssignStmt)
         assert ret.value[0].args[0] is loads[-1].var
-        simplify = Analyzer().simplify
-        assert [simplify(load.var.type.memref.slot_index_).value for load in loads] == [1, 0, 3, 2]
+        assert [_declared_slot(load) for load in loads] == [1, 0, 3, 2]
+
+    def test_unrolled_tile_bindings_in_sibling_branches(self, tmp_path):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                y: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    for i in pl.unroll(2):
+                        v: pl.Tile[[1, 64], pl.FP32, buf[i], pl.Mem.Vec] = pl.load(x, [i, 0], [1, 64])
+                        y = pl.store(v, [i, 0], y)
+                else:
+                    keep: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    v: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    y = pl.store(keep, [1, 0], y)
+                    y = pl.store(v, [0, 0], y)
+                return y
+
+        func = _unroll_and_ssa(Before).get_function("main")
+        assert func is not None
+        branch = ir.flatten_to_stmts(func.body)[0]
+        assert isinstance(branch, ir.IfStmt) and branch.else_body is not None
+        # keep remains live across the second load, so giving both loads slot 1 is observable.
+        keep, other, *_ = ir.flatten_to_stmts(branch.else_body)
+        assert [_declared_slot(keep), _declared_slot(other)] == [1, 0]
+        ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
+
+    def test_unrolled_branches_yield_their_own_last_tile(self, tmp_path):
+        buf = pl.MemRef("buf", slots=4)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                y: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    for i in pl.unroll(2):
+                        v: pl.Tile[[1, 64], pl.FP32, buf[i], pl.Mem.Vec] = pl.load(x, [i, 0], [1, 64])
+                else:
+                    for j in pl.unroll(3, 1, -1):
+                        v: pl.Tile[[1, 64], pl.FP32, buf[j], pl.Mem.Vec] = pl.load(x, [j - 2, 0], [1, 64])
+                return pl.store(v, [0, 0], y)
+
+        func = _unroll_and_ssa(Before).get_function("main")
+        assert func is not None
+        branch, ret = ir.flatten_to_stmts(func.body)
+        assert isinstance(branch, ir.IfStmt) and branch.else_body is not None
+        for arm, slot in ((branch.then_body, 1), (branch.else_body, 2)):
+            *_, last, yielded = ir.flatten_to_stmts(arm)
+            assert isinstance(last, ir.AssignStmt) and isinstance(yielded, ir.YieldStmt)
+            assert yielded.value[0] is last.var
+            assert _declared_slot(last) == slot
+        assert isinstance(ret, ir.ReturnStmt) and isinstance(ret.value[0], ir.Call)
+        assert ret.value[0].args[0] is branch.return_vars[0]
+        ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
 
     def test_unroll_preserves_fixed_slot_accumulator(self):
         """Reassigning a tile with a fixed slot still updates its original binding before SSA."""
@@ -107,10 +183,13 @@ class TestBasicUnroll:
                 return acc
 
         after = passes.unroll_loops()(Before).get_function("main")
+        assert after is not None
         init, first, second, ret = ir.flatten_to_stmts(after.body)
-        assert first.var is first.value.args[0] is init.var
-        assert second.var is second.value.args[0] is init.var
-        assert ret.value[0] is init.var
+        assert isinstance(init, ir.AssignStmt)
+        for update in (first, second):
+            assert isinstance(update, ir.AssignStmt) and isinstance(update.value, ir.Call)
+            assert update.var is update.value.args[0] is init.var
+        assert isinstance(ret, ir.ReturnStmt) and ret.value[0] is init.var
 
     def test_unroll_preserves_enclosing_iter_arg(self):
         """The clone_def_vars=false path must also preserve external loop state."""

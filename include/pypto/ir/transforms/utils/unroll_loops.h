@@ -15,6 +15,9 @@
 #include "pypto/ir/function.h"
 
 namespace pypto::ir::transform_utils {
+/// Keep iteration-dependent storage on the declaring assignment when a mutable
+/// name spans conditional arms. The builder also needs this invariant before verification.
+StmtPtr PrepareUnrolledBranchBindings(const StmtPtr& body);
 /// Expand static unroll loops before isolated helper SSA conversion.
 FunctionPtr UnrollFunction(const FunctionPtr& function);
 // Substitute enclosing compile-time loop indices before extracting register scopes.

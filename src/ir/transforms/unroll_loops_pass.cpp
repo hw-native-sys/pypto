@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,6 +24,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -30,9 +32,11 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/transforms/utils/unroll_loops.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 
 namespace pypto {
 namespace ir {
@@ -48,6 +52,108 @@ constexpr int64_t kMaxUnrollIterations = 1024;
 int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
   return pipeline_loop::GetConstIntValue(expr, "UnrollLoops", what);
 }
+
+// A pre-SSA name can be assigned in both arms of an if. When its first
+// declaration selects a slot with an unrolled index, the slot constrains that
+// assignment. ConvertToSSA needs a shared name independent of either arm.
+class BranchSlotIndex : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> Find(const StmtPtr& body) {
+    VisitStmt(body);
+    std::unordered_set<const Var*> result;
+    if (indices_.empty()) return result;
+    for (const auto& [slot, vars] : cross_branch_) {
+      var_collectors::VarDefUseCollector refs;
+      refs.VisitExpr(slot);
+      for (const auto* ref : refs.var_uses) {
+        if (indices_.count(ref)) {
+          result.insert(vars.begin(), vars.end());
+          break;
+        }
+      }
+    }
+    return result;
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    VisitExpr(op->value_);
+    RecordSlot(op->var_, true);
+  }
+
+  void VisitExpr_(const VarPtr& op) override { RecordSlot(op, false); }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    VisitArm(op->then_body_);
+    if (op->else_body_) VisitArm(*op->else_body_);
+    for (const auto& var : op->return_vars_) VisitExpr(var);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if (op->kind_ == ForKind::Unroll) indices_.insert(op->loop_var_.get());
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void VisitArm(const StmtPtr& body) {
+    auto outer = arm_;
+    arm_ = body.get();
+    active_arms_.insert(arm_);
+    VisitStmt(body);
+    active_arms_.erase(arm_);
+    arm_ = outer;
+  }
+
+  void RecordSlot(const VarPtr& var, bool definition) {
+    auto tile = As<TileType>(var->GetType());
+    if (!tile || !tile->memref_ || !(*tile->memref_)->is_pinned_ || !(*tile->memref_)->slot_index_) return;
+    const auto& slot = *(*tile->memref_)->slot_index_;
+    if (!slot || As<ConstInt>(slot)) return;
+    if (definition) first_arm_.emplace(var.get(), arm_);
+    auto first = first_arm_.find(var.get());
+    if (first == first_arm_.end() || first->second == arm_) return;
+    // A read dominated by its declaration needs no new binding. A sibling
+    // assignment or a use after leaving the defining arm can see another value.
+    if (definition || (first->second && !active_arms_.count(first->second))) {
+      cross_branch_[slot].insert(var.get());
+    }
+  }
+
+  const Stmt* arm_{nullptr};
+  std::unordered_set<const Stmt*> active_arms_;
+  std::unordered_set<const Var*> indices_;
+  std::unordered_map<const Var*, const Stmt*> first_arm_;
+  std::unordered_map<ExprPtr, std::unordered_set<const Var*>> cross_branch_;
+};
+
+class BranchSlotMutator : public IRMutator {
+ public:
+  explicit BranchSlotMutator(std::unordered_set<const Var*> vars) : vars_(std::move(vars)) {}
+
+ protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto stmt = IRMutator::VisitStmt_(op);
+    if (!vars_.erase(op->var_.get())) return stmt;
+    auto decl = As<AssignStmt>(stmt);
+    auto var = std::make_shared<Var>(
+        decl->var_->name_hint_, CloneTypeWithMemRef(decl->var_->GetType(), std::nullopt), decl->var_->span_);
+    var_remap_[op->var_.get()] = var;
+    // Keep the declared storage on the producer, even for an annotated alias.
+    // All paths assign the same storage-neutral Var so ConvertToSSA can form a phi.
+    if (As<Call>(decl->value_) &&
+        GetTypeMemRef(decl->value_->GetType()) == GetTypeMemRef(decl->var_->GetType())) {
+      auto binding = MutableCopy(decl);
+      binding->var_ = var;
+      return binding;
+    }
+    auto bind = std::make_shared<AssignStmt>(var, decl->var_, op->span_);
+    return SeqStmts::Flatten({decl, bind}, op->span_);
+  }
+
+ private:
+  std::unordered_set<const Var*> vars_;
+};
 
 /**
  * @brief Mutator that expands ForStmt nodes with ForKind::Unroll into
@@ -123,7 +229,7 @@ class LoopUnrollMutator : public IRMutator {
     if (!op->leading_comments_.empty()) {
       AttachCommentsToFirstStmt(unrolled, op->leading_comments_);
     }
-    return std::make_shared<SeqStmts>(unrolled, op->span_);
+    return SeqStmts::Flatten(std::move(unrolled), op->span_);
   }
 
   // Prepend ``comments`` to the leading_comments of the first non-SeqStmts stmt
@@ -180,11 +286,15 @@ class LoopUnrollMutator : public IRMutator {
 }  // namespace
 
 namespace transform_utils {
+StmtPtr PrepareUnrolledBranchBindings(const StmtPtr& body) {
+  auto shared = BranchSlotIndex().Find(body);
+  return shared.empty() ? body : BranchSlotMutator(std::move(shared)).VisitStmt(body);
+}
+
 FunctionPtr UnrollFunction(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "UnrollLoops cannot run on null function";
 
-  LoopUnrollMutator mutator;
-  auto new_body = mutator.VisitStmt(func->body_);
+  auto new_body = LoopUnrollMutator().VisitStmt(PrepareUnrolledBranchBindings(func->body_));
 
   if (new_body.get() == func->body_.get()) {
     return func;  // No changes
@@ -214,11 +324,11 @@ FunctionPtr UnrollRegScopeAncestors(const FunctionPtr& func) {
     bool contains_scope_ = false;
   };
   Ancestors ancestors;
-  ancestors.VisitStmt(func->body_);
+  auto body = PrepareUnrolledBranchBindings(func->body_);
+  ancestors.VisitStmt(body);
   if (ancestors.loops.empty()) return func;
-  LoopUnrollMutator mutator(&ancestors.loops);
   auto result = MutableCopy(func);
-  result->body_ = mutator.VisitStmt(func->body_);
+  result->body_ = LoopUnrollMutator(&ancestors.loops).VisitStmt(body);
   return result;
 }
 

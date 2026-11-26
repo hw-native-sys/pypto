@@ -30,6 +30,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/unroll_loops.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 
@@ -97,6 +98,8 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
   // Build body from accumulated statements
   const auto& stmts = func_ctx->GetStmts();
   StmtPtr body = (stmts.size() == 1) ? stmts[0] : std::make_shared<SeqStmts>(stmts, end_span);
+
+  body = transform_utils::PrepareUnrolledBranchBindings(body);
 
   // Combine begin and end spans
   const Span& begin_span = func_ctx->GetBeginSpan();
