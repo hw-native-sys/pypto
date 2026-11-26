@@ -505,9 +505,15 @@ class YieldFixupMutator : public StorageBoundaryMutator {
               << "Branch results '" << new_return_vars[copy.index]->name_hint_ << "' and '"
               << new_return_vars[other]->name_hint_ << "' require overlapping destination slots";
           const bool distinct_views = sibling != copy.source;
-          if ((distinct_views && !can_rebuild) || (!distinct_views && !same_windows)) return;
-          auto it = transfers.try_emplace(copy.index, BranchTransfer{copy.source, {copy.index}}).first;
+          CallPtr sibling_slice;
+          if (distinct_views && !can_rebuild && aligned &&
+              CompareBaseAddress(targets[other], copy.dst_memref) == AddressRelation::kSame) {
+            sibling_slice = SliceFromCoveringSibling(cover, sibling);
+          }
+          if (distinct_views ? (!can_rebuild && !sibling_slice) : !same_windows) return;
+          auto it = transfers.try_emplace(copy.index, BranchTransfer{copy.source, {copy.index}, {}}).first;
           if (distinct_views) it->second.source = cover;
+          if (sibling_slice) it->second.sibling_slices.emplace(sibling.get(), sibling_slice);
           it->second.positions.push_back(other);
           repeated.insert(other);
         });
@@ -602,6 +608,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   struct BranchTransfer {
     VarPtr source;
     std::vector<size_t> positions;
+    std::map<const Var*, CallPtr> sibling_slices;
   };
 
   void RecordBranchView(const AssignStmtPtr& assignment) {
@@ -663,21 +670,63 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     return it == branch_views_.end() ? value : it->second.root;
   }
 
+  // Two slices at the same origin may be siblings even when one contains all the
+  // other's bytes. Recreate the smaller descriptor at offset zero in the moved
+  // sibling so both results depend on one write to the declared slot.
+  CallPtr SliceFromCoveringSibling(const VarPtr& cover, const VarPtr& value) const {
+    const auto large = branch_views_.find(cover.get());
+    const auto small = branch_views_.find(value.get());
+    if (large == branch_views_.end() || small == branch_views_.end()) return nullptr;
+    const auto& outer = large->second.call;
+    const auto& inner = small->second.call;
+    if (!IsOp(outer, "tile.slice") || !IsOp(inner, "tile.slice") ||
+        outer->args_.front() != inner->args_.front()) {
+      return nullptr;
+    }
+    const auto tile = GetTileTypeWithMemRef(cover->GetType());
+    const auto view = GetTileTypeWithMemRef(value->GetType());
+    if (outer->args_.size() > 4) {
+      const auto dropped = As<MakeTuple>(outer->args_[4]);
+      if (!dropped || !dropped->elements_.empty()) return nullptr;
+    }
+    const auto shape = As<MakeTuple>(inner->args_.at(1));
+    const auto parent = GetTileTypeWithMemRef(outer->args_.front()->GetType());
+    if (!shape || parent->shape_.size() != tile->shape_.size() ||
+        shape->elements_.size() != tile->shape_.size() ||
+        !ValidExtentsEqual(GetValidShape(tile), tile->shape_) ||
+        GetDefinedMemRef(view)->size_ > GetDefinedMemRef(tile)->size_ ||
+        CompareBaseAddress(GetDefinedMemRef(view), GetDefinedMemRef(tile)) != AddressRelation::kSame) {
+      return nullptr;
+    }
+    for (size_t i = 0; i < tile->shape_.size(); ++i) {
+      if (ProveValidExtentLessEqual(shape->elements_[i], tile->shape_[i]) != ProofResult::kTrue) {
+        return nullptr;
+      }
+    }
+    auto slice = MutableCopy(inner);
+    slice->args_[0] = cover;
+    slice->args_[2] = std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>(tile->shape_.size(), MakeZeroByteOffset()), inner->span_);
+    return slice;
+  }
+
   // Rebuild each original descriptor from the relocated data, retaining view operands
   // such as runtime valid extents. Cache shared prefixes and identical yield positions.
-  VarPtr RebuildBranchView(const VarPtr& value, std::map<const Var*, VarPtr>* rebuilt,
-                           std::vector<StmtPtr>* statements) const {
+  VarPtr RebuildBranchView(const VarPtr& value, const BranchTransfer& transfer,
+                           std::map<const Var*, VarPtr>* rebuilt, std::vector<StmtPtr>* statements) const {
     if (auto it = rebuilt->find(value.get()); it != rebuilt->end()) {
       return it->second;
     }
     const auto& original = branch_views_.at(value.get());
-    const auto& call = original.call;
+    const auto sibling = transfer.sibling_slices.find(value.get());
+    const auto& call = sibling == transfer.sibling_slices.end() ? original.call : sibling->second;
+    const auto offset = sibling == transfer.sibling_slices.end() ? original.offset : MakeZeroByteOffset();
     auto args = call->args_;
-    const auto parent = RebuildBranchView(AsVarLike(args.front()), rebuilt, statements);
+    const auto parent = RebuildBranchView(AsVarLike(args.front()), transfer, rebuilt, statements);
     args.front() = parent;
     const auto size = GetDefinedMemRef(GetTileTypeWithMemRef(value->GetType()))->size_;
-    const auto window = MakeAliasingMemRef(GetDefinedMemRef(GetTileTypeWithMemRef(parent->GetType())),
-                                           original.offset, size, value->span_);
+    const auto window = MakeAliasingMemRef(GetDefinedMemRef(GetTileTypeWithMemRef(parent->GetType())), offset,
+                                           size, value->span_);
     const auto type = CloneTypeWithMemRef(value->GetType(), window);
     const auto view = std::make_shared<Var>(value->name_hint_ + "_mv_view", type, value->span_);
     const auto expr =
@@ -942,7 +991,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       if (it == transfers.end()) continue;
       std::map<const Var*, VarPtr> rebuilt{{it->second.source.get(), copy.moved_var}};
       for (size_t position : it->second.positions) {
-        new_yield->value_[position] = RebuildBranchView(AsVarLike(yield->value_[position]), &rebuilt, &moves);
+        new_yield->value_[position] =
+            RebuildBranchView(AsVarLike(yield->value_[position]), it->second, &rebuilt, &moves);
       }
     }
     return InsertMovesAndReplaceYield(body, new_yield, moves);

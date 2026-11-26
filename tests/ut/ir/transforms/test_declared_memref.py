@@ -1008,6 +1008,56 @@ class TestSlots:
             (32, slice_dst),
         ]
 
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_branch_yields_only_covering_sibling_slices(self, planner, ascend_backend):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    a16 = pl.tile.slice(a, [1, 16], [0, 16])
+                    a32 = pl.tile.slice(a, [1, 32], [0, 16])
+                    short, wide = pl.yield_(a16, a32)
+                else:
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    b16 = pl.tile.slice(b, [1, 16], [0, 16])
+                    b32 = pl.tile.slice(b, [1, 32], [0, 16])
+                    short, wide = pl.yield_(b16, b32)
+                out = pl.store(short, [0, 0], out)
+                return pl.store(wide, [1, 0], out)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+        stmts = ir.flatten_to_stmts(branch.else_body)
+        (move,) = [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.move").name
+        ]
+        result = next(s for s in stmts if isinstance(s, ir.YieldStmt))
+
+        def window(var: ir.Expr) -> tuple[int, int]:
+            assert isinstance(var.type, ir.TileType) and var.type.memref is not None
+            return _const_offset(var.type.memref), var.type.memref.size_
+
+        # Transferring the 64-column parent would also write bytes outside both results.
+        assert window(move.var) == (16 * 4, 32 * 4)
+        assert [window(var) for var in result.value] == [(16 * 4, 16 * 4), (16 * 4, 32 * 4)]
+
     def test_slot_size_is_the_largest_tile_on_any_slot(self):
         """Slots are uniform, so one slot must hold the biggest bound tile.
 
