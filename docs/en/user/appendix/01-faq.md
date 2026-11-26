@@ -80,7 +80,7 @@ same rounding and overflow behaviour — the page proves it with a runnable chec
 
 | Limitation | Detail |
 | ---------- | ------ |
-| **Two co-live `MemRef` slots under PTOAS** | Rejected at codegen: ptoas mis-synchronizes a slot filled an iteration ahead of its read ([PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519): fixed in 0.63, broken again since 0.64). One slot live per iteration is the shape to write |
+| **Cross-iteration prefetch with two PTOAS slots** | Codegen rejects filling a slot for the next iteration. It accepts a rotating pair (`i % 2`, `(i + 1) % 2`) in a non-nested counted loop when each slot gets one unconditional full-tile load or fresh matmul result and both are read in that iteration. See [With explicit slots](../performance/04-incore.md#with-explicit-slots). |
 | **Hard `syncall` needs full occupancy** | A partial launch deadlocks on device (507018); PyPTO rejects it at compile time. Use `mode=pl.SyncAllMode.SOFT` at partial occupancy |
 | **Ring allreduce is not a one-argument change** | It needs an explicit `[2*(NR-1)+1, NR]` INT32 signal. `src` may be ragged (any `numel`, not necessarily divisible by `NR`) with a static or dynamic shape. See [Collectives](../distributed/01-collectives.md) |
 | **`memory_planner=PTOAS` and the memory map** | Allocation passes are skipped, so pass dumps carry no offsets for the tool to draw |

@@ -122,16 +122,15 @@ such a variable is not in scope.
 | Planner | Slot lowering | Two slots co-live in one iteration |
 | ------- | ------------- | ---------------------------------- |
 | `PYPTO` (default) | Baked addresses (`alloc_tile`) | Supported |
-| `PTOAS` | One `alloc_multi_tile` region + a `multi_tile_get` per use | **Rejected at codegen** |
+| `PTOAS` | One `alloc_multi_tile` region + a `multi_tile_get` per use | Supported for the rotating pair described below |
 
-The PTOAS refusal is deliberate and worth understanding before you design around it: ptoas
-has mis-synchronized two co-live slots in a loop. Older releases left the second slot's load
-unguarded against the next iteration's write, measured wrong on device. The pinned release
-still gets one form of the shape wrong, a slot filled an iteration ahead of its read, which
-produces wrong data or a device hang
-([PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519): fixed in ptoas 0.63, broken again since 0.64).
-**One slot live per iteration** is the shape the region form exists for, and it is the
-shape to write if you may switch planners.
+In a non-nested counted loop, use `i % 2` and `(i + 1) % 2` to select the two slots.
+On every iteration, each slot must receive exactly one unconditional full-tile write
+from a load or a fresh matmul result. Read both results in that same iteration.
+
+PyPTO rejects cross-iteration prefetch under PTOAS. For example, filling `(i + 1) % 2`
+for the next iteration while reading the previous iteration's data from `i % 2` can produce
+incorrect results or hang the device. See [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519).
 
 ## Seeing the on-chip budget
 
