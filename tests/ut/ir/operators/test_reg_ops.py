@@ -103,6 +103,30 @@ def test_fp8_conversion_requires_byte_reinterpretation_for_register_memory():
     assert reg_type(as_bytes).lanes == 64
 
 
+def test_us_b8_consumes_half_a_byte_register_at_the_end_of_a_tile():
+    src = ir.Var("src", ir.TileType([160], DataType.INT8, memory_space=ir.MemorySpace.Vec), SPAN)
+    loaded = call("load", [src, integer(32)], lanes=256, dist="US_B8")
+    assert reg_type(loaded).lanes == 256
+    effect = ir.get_reg_memory_effect(loaded)
+    assert (effect["begin"], effect["end"]) == (32, 160)
+    with pytest.raises(ValueError):
+        call("load", [src, integer(33)], lanes=256, dist="US_B8")
+    with pytest.raises(ValueError, match="256"):
+        call("load", [src, integer(0)], lanes=128, dist="US_B8")
+    with pytest.raises(ValueError, match="INT8"):
+        call("load", [tile(), integer(0)], lanes=256, dist="US_B8")
+
+
+def test_mask_bitcast_preserves_predicate_kind_and_validates_physical_width():
+    result = call("mask_bitcast", [mask(128)], lanes=256)
+    assert reg_type(result).kind == ir.RegKind.MaskReg
+    assert reg_type(result).lanes == 256
+    with pytest.raises(ValueError, match="MaskReg"):
+        call("mask_bitcast", [vec()], lanes=256)
+    with pytest.raises(ValueError, match="lanes"):
+        call("mask_bitcast", [mask(32)], lanes=256)
+
+
 def test_load_store_type_alias_and_effect():
     src = tile()
     loaded = call("load", [src, integer(8)], lanes=64)

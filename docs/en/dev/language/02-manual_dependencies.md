@@ -342,3 +342,18 @@ merges each output with its supplied buffer and merges the TaskId with an
 empty-path `task_dummy` carrying the original explicit dependencies. Thus a
 consumer using `deps=[tid]` remains ordered when the compute launch is skipped.
 See [LegalizeSpmdLaunches](../passes/45-legalize_spmd_launches.md).
+
+### A5 Cube buffer ownership
+
+For a kernel with a fully authored synchronization schedule, set
+`pl.func_attr({"ptoas_manual_sync": True})` on each member of the compilation
+group. This disables automatic PTOAS event and buffer-ID insertion for the
+whole group. The author must cover every pipeline dependency; do not combine
+this mode with `ptoas_buffer_id_sync` or use these locks inside `pl.pipeline`.
+
+`pl.system.get_buf(pipe, buf_id)` and `pl.system.rls_buf(pipe, buf_id)` acquire
+and release a hardware buffer in mode zero on MTE2, MTE1 or M. The ID is an
+integer in [0, 15] or an INDEX expression whose value stays in that range.
+For tile-level MX accumulation, pass `acc_phase=pl.AccPhase.Partial` or
+`pl.AccPhase.Final` to `pl.matmul_mx` or `pl.matmul_mx_acc` to identify the
+hardware accumulation phase. Omitting it retains the default MX instruction.

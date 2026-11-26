@@ -78,6 +78,11 @@ class PipelineLoopValidChecker : public IRVisitor {
                                     "them.",
                                 op->span_);
     }
+    if (in_pipeline_ && (IsOp(op, "system.get_buf") || IsOp(op, "system.rls_buf"))) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "PipelineLoopValid", 2,
+                                "Explicit Cube buffer locks cannot be reordered inside pl.pipeline",
+                                op->span_);
+    }
     if (in_pipeline_ && (IsOp(op, "system.set_flag") || IsOp(op, "system.wait_flag"))) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "PipelineLoopValid", 2,
                                 "Explicit set_flag/wait_flag in function '" + func_name_ +

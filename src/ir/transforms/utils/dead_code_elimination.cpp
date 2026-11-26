@@ -86,7 +86,8 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
         // TPUSH reads quantization state outside the SSA use graph.
         validated("system.set_quant_scalar"), validated("system.set_quant_vector"),
         validated("system.aic_initialize_pipe"), validated("system.aiv_initialize_pipe"),
-        validated("system.set_intra_block"), validated("system.wait_intra_block"),
+        validated("system.get_buf"), validated("system.rls_buf"), validated("system.set_intra_block"),
+        validated("system.wait_intra_block"),
         // Async transfers write the destination through
         // argument 0 (ReadWrite) and return that same buffer.
         // They are not RegOps, so the WritesAnyArg() fast path

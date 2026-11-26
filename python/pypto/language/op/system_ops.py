@@ -45,6 +45,8 @@ __all__ = [
     "SyncAllMode",
     "sync_src",
     "sync_dst",
+    "get_buf",
+    "rls_buf",
     "set_flag",
     "wait_flag",
     "sync_set",
@@ -87,6 +89,16 @@ def _kernel_or_none(core_type: KernelType | None, op_name: str) -> KernelType | 
         allowed=_SYNC_EVENT_KERNELS,
         hint=_SYNC_EVENT_MIX_HINT,
     )
+
+
+def get_buf(pipe: PipeType, buf_id: IntLike, *, span: Span | None = None) -> Call:
+    """Acquire buffer 0..15 on an A5 Cube pipe. Pair with rls_buf in the same manual schedule."""
+    return _ir_ops.get_buf(pipe, buf_id.unwrap() if isinstance(buf_id, Scalar) else buf_id, span=span)
+
+
+def rls_buf(pipe: PipeType, buf_id: IntLike, *, span: Span | None = None) -> Call:
+    """Release the matching buffer on MTE2, MTE1 or M."""
+    return _ir_ops.rls_buf(pipe, buf_id.unwrap() if isinstance(buf_id, Scalar) else buf_id, span=span)
 
 
 def set_flag(

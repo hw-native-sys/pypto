@@ -79,7 +79,8 @@ class ScopeOperands : public IRVisitor {
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    micro |= IsOp(call, "reg.squeeze_store_init");
+    micro |= IsOp(call, "reg.squeeze_store_init") || IsOp(call, "reg.mask_bitcast") ||
+             (IsOp(call, "reg.load") && ir::GetStringKwarg(call->kwargs_, "dist", "") == "US_B8");
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
         IsOp(call, "reg.squeeze_store_flush")) {
@@ -135,8 +136,8 @@ std::string PTOCodegen::GetRegTypeString(const ir::RegTypePtr& type) const {
   }
   if (micro_reg_scope_) {
     if (type->GetRegKind() == ir::RegKind::MaskReg) {
-      CHECK(type->GetShape() == 64 || type->GetShape() == 128)
-          << "Squeeze-store micro lowering requires 64- or 128-lane masks";
+      CHECK(type->GetShape() == 64 || type->GetShape() == 128 || type->GetShape() == 256)
+          << "Physical register lowering requires 64-, 128- or 256-lane masks";
       return "!pto.mask<b" + std::to_string(2048 / type->GetShape()) + ">";
     }
     CHECK(type->GetShape() * type->GetDType().GetByte() == 256)
@@ -327,7 +328,9 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
     auto ptr_type = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
     auto zero = GetOrEmitConstant(int64_t{0}, DataType::INDEX);
     if (IsOp(call, "reg.load")) {
-      Emit(name + " = pto.vlds " + base + "[" + zero + "] : " + ptr_type + ", index -> " +
+      const auto dist = GetStringKwarg(call->kwargs_, "dist", "");
+      const auto attr = dist.empty() ? std::string{} : " {dist = \"" + dist + "\"}";
+      Emit(name + " = pto.vlds " + base + "[" + zero + "]" + attr + " : " + ptr_type + ", index -> " +
            GetRegTypeString(As<RegType>(call->GetType())));
       bind();
     } else {
@@ -357,6 +360,15 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
     Emit(name + " = " + opcode + " " + value(args[0]) + ", " + value(args[1]) + ", " + value(args[2]) +
          ", \"" + GetStringKwarg(call->kwargs_, "predicate", "") + "\" : " + type(args[0]) + ", " +
          type(args[1]) + ", " + type(args[2]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.mask_bitcast")) {
+    Emit(name + " = pto.pbitcast " + value(args[0]) + " : " + type(args[0]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.shift_right") || IsOp(call, "reg.shift_left") || IsOp(call, "reg.bitwise_and")) {
+    CHECK_SPAN(args.size() == 3, call->span_) << "Physical register arithmetic requires an explicit mask";
+    const auto opcode = IsOp(call, "reg.shift_right")  ? "vshr"
+                        : IsOp(call, "reg.shift_left") ? "vshl"
+                                                       : "vand";
+    Emit(name + " = pto." + opcode + " " + value(args[0]) + ", " + value(args[1]) + ", " + value(args[2]) +
+         " : " + type(args[0]) + ", " + type(args[1]) + ", " + type(args[2]) + " -> " + result_type);
   } else if (IsOp(call, "reg.squeeze")) {
     Emit(name + " = pto.vsqz " + value(args[0]) + ", " + value(args[1]) + " : " + type(args[0]) + ", " +
          type(args[1]) + " -> " + result_type);
@@ -368,7 +380,25 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
   } else if (IsOp(call, "reg.broadcast")) {
     CHECK_SPAN(As<ScalarType>(args[0]->GetType()), call->span_)
         << "Squeeze-store micro broadcast requires a scalar";
-    Emit(name + " = pto.vbr " + value(args[0]) + " : " + type(args[0]) + " -> " + result_type);
+    const auto scalar = As<ScalarType>(args[0]->GetType());
+    if (scalar->dtype_.GetByte() != 1) {
+      Emit(name + " = pto.vbr " + value(args[0]) + " : " + type(args[0]) + " -> " + result_type);
+      bind();
+      return true;
+    }
+    auto scalar_type = RegisterElement(scalar->dtype_);
+    auto input = value(args[0]);
+    if (scalar_type != type(args[0])) {
+      auto cast = NewNamedTemp("broadcast_scalar");
+      Emit(cast + " = builtin.unrealized_conversion_cast " + input + " : " + type(args[0]) + " to " +
+           scalar_type);
+      input = cast;
+    }
+    const auto lanes = result_reg->GetShape();
+    auto mask = full_mask(lanes);
+    auto mask_type = GetRegTypeString(std::make_shared<RegType>(lanes, DataType::BOOL, RegKind::MaskReg));
+    Emit(name + " = pto.vdup " + input + ", " + mask + " : " + scalar_type + ", " + mask_type + " -> " +
+         result_type);
   } else if (IsOp(call, "reg.index_gen")) {
     auto input = value(args[0]);
     auto scalar_type = type(args[0]);

@@ -229,6 +229,16 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
 static void CheckMatmulOperandArch(const CallPtr& op, size_t lhs_index, size_t rhs_index,
                                    codegen::PTOCodegen& codegen);
 
+static std::string AccPhaseAttr(const CallPtr& op) {
+  const int acc_phase = op->GetKwarg<int>("acc_phase", static_cast<int>(ir::AccPhase::kUnspecified));
+  INTERNAL_CHECK_SPAN(ir::IsValidAccPhase(acc_phase), op->span_)
+      << op->op_->name_ << " acc_phase must encode AccPhase::kUnspecified, kPartial, or kFinal, got "
+      << acc_phase;
+  if (acc_phase == static_cast<int>(ir::AccPhase::kUnspecified)) return "";
+  return " {accPhase = #pto<acc_phase " + ir::AccPhaseToPTOString(static_cast<ir::AccPhase>(acc_phase)) +
+         ">}";
+}
+
 static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
                                       codegen::CodegenBase& codegen_base,
                                       std::optional<size_t> i32_operand_idx = std::nullopt) {
@@ -300,18 +310,9 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
       (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_bias"))
           ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
           : "";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + tf32_attr);
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + tf32_attr +
+               (ir::IsOp(op, "tile.matmul_mx") ? AccPhaseAttr(op) : ""));
   return "";
-}
-
-static std::string AccPhaseAttr(const CallPtr& op) {
-  const int acc_phase = op->GetKwarg<int>("acc_phase", static_cast<int>(ir::AccPhase::kUnspecified));
-  INTERNAL_CHECK_SPAN(ir::IsValidAccPhase(acc_phase), op->span_)
-      << op->op_->name_ << " acc_phase must encode AccPhase::kUnspecified, kPartial, or kFinal, got "
-      << acc_phase;
-  if (acc_phase == static_cast<int>(ir::AccPhase::kUnspecified)) return "";
-  return " {accPhase = #pto<acc_phase " + ir::AccPhaseToPTOString(static_cast<ir::AccPhase>(acc_phase)) +
-         ">}";
 }
 
 static std::string MatmulAttrs(const CallPtr& op, codegen::PTOCodegen& codegen) {
@@ -1611,7 +1612,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       acc_inst << ") outs(" << dst;
       if (!dst_type.empty()) acc_inst << " : " << dst_type;
       acc_inst << ")";
-      codegen.Emit(acc_inst.str());
+      codegen.Emit(acc_inst.str() + AccPhaseAttr(op));
       return "";
     };
   };

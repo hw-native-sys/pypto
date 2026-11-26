@@ -14,13 +14,28 @@ import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.backend import BackendType, pto_backend
-from pypto.backend._ptoas_config import PTOAS_BUFFER_ID_SYNC_MARKER
+from pypto.backend._ptoas_config import PTOAS_BUFFER_ID_SYNC_MARKER, sync_flags
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.runtime.debug import pto_rebuild
 
 
 def _member(**attrs) -> ir.Function:
     span = ir.Span.unknown()
     return ir.Function("peer", [], [], ir.SeqStmts([], span), span, attrs=attrs)
+
+
+def test_authored_cube_lock_schedule_requires_explicit_unanimous_opt_in():
+    module = 'module attributes {pto.target_arch = "a5"} {\n  pto.get_buf "TMATMUL", 13, 0\n}\n'
+    with pytest.raises(ValueError, match="require ptoas_manual_sync"):
+        pto_backend._apply_manual_sync([_member()], module)
+    with pytest.raises(ValueError, match="must agree"):
+        pto_backend._apply_manual_sync([_member(), _member(ptoas_manual_sync=True)], module)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        pto_backend._apply_manual_sync([_member(ptoas_manual_sync=True, ptoas_buffer_id_sync=True)], module)
+    marked = pto_backend._apply_manual_sync([_member(ptoas_manual_sync=True)], module)
+    assert pto_rebuild._ptoas_flags(marked) == ["--pto-level=level2"]
+    assert sync_flags(buffer_id_sync=False, manual_sync=True) == []
+    assert sync_flags(buffer_id_sync=False, manual_sync=False) == ["--enable-insert-sync"]
 
 
 def test_mixed_group_can_delegate_memory_planning_to_ptoas():
@@ -126,3 +141,34 @@ def test_buffer_id_sync_marker_requires_a5_pto():
             output_dir="unused",
             skip_ptoas=True,
         )
+
+
+@pytest.mark.ptoas_compile
+def test_authored_dynamic_cube_lock_reaches_ptoas(tmp_path):
+    @pl.program
+    class DynamicLocks:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(self, slot: pl.Scalar[pl.INDEX]):
+            pl.func_attr({"ptoas_manual_sync": True})
+            pl.system.get_buf(pl.PipeType.MTE2, slot)
+            pl.system.rls_buf(pl.PipeType.MTE1, slot)
+
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    ir.compile(DynamicLocks, output_dir=str(tmp_path), backend_type=BackendType.Ascend950, dump_passes=False)
+    (kernel,) = (tmp_path / "kernels").rglob("*.cpp")
+    cpp = kernel.read_text()
+    assert "get_buf(PIPE_MTE2," in cpp and "rls_buf(PIPE_MTE1," in cpp
+
+
+@pytest.mark.parametrize(
+    ("pipe", "buf_id", "message"),
+    [
+        (pl.PipeType.M, 16, "Buffer ID"),
+        (pl.PipeType.M, -1, "Buffer ID"),
+        (pl.PipeType.V, 0, "Cube buffer locks"),
+    ],
+)
+def test_invalid_cube_buffer_lock(pipe, buf_id, message):
+    with pytest.raises(ValueError, match=message):
+        pl.system.get_buf(pipe, buf_id)

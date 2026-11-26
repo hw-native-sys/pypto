@@ -104,6 +104,26 @@ def generate(program):
     return codegen.PTOCodegen().generate(program, emit_tile_addr=False, emit_source_loc=False)
 
 
+def test_physical_byte_load_and_predicate_view():
+    ib = IRBuilder()
+    with ib.function("physical_byte_load", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = ib.let("src", tile.full([128], dtype=DataType.INT8, value=1))
+        dst = ib.let("dst", tile.full([256], dtype=DataType.INT8, value=0))
+        with ib.reg_scope(SPAN, auto_sync=False):
+            data = ib.emit_reg("data", "reg.load", [src, integer(0)], {"lanes": 256, "dist": "US_B8"}, SPAN)
+            half = ib.emit_reg("half", "reg.full_mask", [], {"lanes": 128}, SPAN)
+            even = ib.emit_reg("even", "reg.mask_bitcast", [half], {"lanes": 256}, SPAN)
+            ib.emit_reg_store("written", dst, data, mask=even, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "PhysicalByteLoad", SPAN))
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    source = bundle.helpers[0].source
+    assert "// pypto.reg_physical_order: preserve" in source
+    assert 'dist = "US_B8"' in source and "pto.vlds" in source
+    assert "pto.pbitcast" in source and "!pto.mask<b16> -> !pto.mask<b8>" in source
+    assert "pto.vsts" in source
+
+
 def test_typed_load_store_and_external_tile_alias():
     mlir = generate(build_kernel())
     before, region = mlir.split("pto.vecscope {", 1)

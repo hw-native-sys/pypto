@@ -50,11 +50,7 @@ from typing import TYPE_CHECKING, Any, cast, get_args, get_origin
 if TYPE_CHECKING:
     from pypto.jit.external.protocols import ExternalJITBinding
 
-from pypto._external_source import (
-    EXTERNAL_INCLUDE_DIRS_ATTR,
-    EXTERNAL_VPTO_SOURCES_ATTR,
-    encode_external_paths,
-)
+from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import (
     DUAL_AIV_DISPATCH_ATTR,
     EXTERNAL_BINARY_POLICY_ATTR,
@@ -245,7 +241,6 @@ class SpecializeContext:
     external_preflight_symbol: str = ""
     external_binary_policy: str = "ordinary"
     external_binding: ExternalJITBinding | None = None
-    external_vpto_sources: tuple[str, ...] = ()
 
     @property
     def source_def_name(self) -> str:
@@ -2874,11 +2869,8 @@ class Specializer:
         ) -> list[str]:
             function_attrs: list[str] = []
             if ctx.external_include_dirs:
-                encoded_include_dirs = encode_external_paths(ctx.external_include_dirs)
+                encoded_include_dirs = encode_external_include_dirs(ctx.external_include_dirs)
                 function_attrs.append(f'"{EXTERNAL_INCLUDE_DIRS_ATTR}": {encoded_include_dirs!r}')
-            if core_upper == "AIV" and ctx.external_vpto_sources:
-                helpers = encode_external_paths(ctx.external_vpto_sources)
-                function_attrs.append(f'"{EXTERNAL_VPTO_SOURCES_ATTR}": {helpers!r}')
             if dual_aiv_dispatch:
                 function_attrs.append(f'"{DUAL_AIV_DISPATCH_ATTR}": True')
             attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
@@ -3102,7 +3094,6 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     return_metas: tuple[TensorMeta | None, ...] | None = None,
     peer_func_names: Mapping[str, str | None] | None = None,
     peer_func_scope_ambiguous: bool = False,
-    external_vpto_sources: tuple[str, ...] = (),
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -3198,7 +3189,6 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         external_aiv_source=external_aiv_source,
         external_dual_aiv_dispatch=external_dual_aiv_dispatch,
         external_include_dirs=external_include_dirs,
-        external_vpto_sources=external_vpto_sources,
     )
 
 

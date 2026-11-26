@@ -738,6 +738,21 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
     }
     return std::string("");
   };
+  for (const std::string action : {"get_buf", "rls_buf"}) {
+    reg(("system." + action).c_str(), [action](const ir::CallPtr& op, codegen::CodegenBase& base) {
+      auto& cg = AsPto(base);
+      CHECK_SPAN(cg.GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_) << "Buffer locks require A5";
+      auto pipe = static_cast<ir::PipeType>(op->GetKwarg<int>("pipe"));
+      const char* endpoint = pipe == ir::PipeType::MTE2   ? "TLOAD"
+                             : pipe == ir::PipeType::MTE1 ? "TMOV_M2L"
+                                                          : "TMATMUL";
+      auto id = ir::As<ir::ConstInt>(op->args_[0]);
+      const std::string instruction = "pto." + action + (id ? "" : "_dyn");
+      const auto operand = id ? std::to_string(id->value_) : EmitIndexOperand(cg, op->args_[0], "buffer id");
+      cg.Emit(instruction + " \"" + endpoint + "\", " + operand + ", 0");
+      return std::string("");
+    });
+  }
   reg("system.set_flag", [emit_flag](const ir::CallPtr& op, codegen::CodegenBase& base) {
     return emit_flag(op, base, "set_flag");
   });

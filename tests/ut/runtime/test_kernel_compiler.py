@@ -25,6 +25,7 @@ import pytest
 from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION
 from pypto.runtime._device_image import validate_device_image
 from pypto.runtime._stack_usage import validate_stack_usage
+from pypto.runtime._vpto import ptoas_flags_for_source
 from pypto.runtime.elf_parser import extract_text_section
 
 
@@ -1317,26 +1318,11 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-def test_vpto_scheduler_is_scoped_to_the_register_helper(compiler_module):
-    source = "// pypto.vpto_scheduler: off\nmodule {}"
-    flags = compiler_module._vpto.ptoas_flags_for_source(source)
-    assert "--vpto-scheduler=off" in flags
-    assert "--enable-vecscope-mem-bar=true" in flags
-    assert "--vpto-scheduler=off" not in compiler_module._vpto.ptoas_flags_for_source("module {}")
-    with pytest.raises(ValueError, match="Invalid pypto.vpto_scheduler"):
-        compiler_module._vpto.ptoas_flags_for_source(source.replace("off", "other"))
-
-
-def test_inline_register_helpers_cannot_silently_fall_back_to_native(compiler_module):
-    vpto = compiler_module._vpto
-    marker = "// pypto.vpto_link: inline"
-    with pytest.raises(ValueError, match="SIMT"):
-        vpto.ptoas_flags_for_source(marker + "\nmodule { func.func @f() attributes {pto.simt_entry} }")
-    with pytest.raises(ValueError, match="Invalid pypto.vpto_link"):
-        vpto.ptoas_flags_for_source("module {}\n" + marker)
-    with pytest.raises(ValueError, match="no PTOAS-generated"):
-        vpto.inline_register_ir("declare void @f()")
-    text = "declare void @opaque()\ndefine void @loop(ptr addrspace(6) %p) #0 {\n  ret void\n}\n"
-    actual = vpto.inline_register_ir(text)
-    assert "declare void @opaque()\n" in actual
-    assert "define void @loop(ptr addrspace(6) %p) #0 alwaysinline {" in actual
+def test_physical_register_order_is_opt_in_and_does_not_enable_external_sources():
+    key = "// pypto.reg_physical_order: preserve"
+    flag = "--vpto-scheduler=off"
+    assert flag in ptoas_flags_for_source(key + "\nmodule {}")
+    assert flag not in ptoas_flags_for_source("// pypto.reg_auto_sync: false\nmodule {}")
+    for text in ["module {}\n" + key, key + "\n" + key, key.replace("preserve", "other")]:
+        with pytest.raises(ValueError, match="reg_physical_order"):
+            ptoas_flags_for_source(text)

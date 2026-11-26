@@ -13,6 +13,16 @@ import os
 
 PTOAS_TIMEOUT_ENV = "PYPTO_PTOAS_TIMEOUT_SECONDS"
 PTOAS_BUFFER_ID_SYNC_MARKER = "// pypto.ptoas_buffer_id_sync"
+PTOAS_MANUAL_SYNC_MARKER = "// pypto.ptoas_manual_sync"
+
+
+def sync_flags(*, buffer_id_sync: bool, manual_sync: bool) -> list[str]:
+    """Automatic event insertion, automatic buffer IDs, and authored synchronization are exclusive."""
+    if manual_sync and buffer_id_sync:
+        raise ValueError("ptoas_manual_sync cannot be combined with ptoas_buffer_id_sync")
+    if manual_sync:
+        return []
+    return ["--enable-bufid_sync" if buffer_id_sync else "--enable-insert-sync"]
 
 
 def get_ptoas_timeout() -> int:
