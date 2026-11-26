@@ -21,7 +21,7 @@ from pypto import DataType, ir
 from pypto.ir.param_info import _extract_func_param_infos
 from pypto.pypto_core import codegen, passes
 from pypto.runtime import DomainBufferSpec
-from pypto.runtime.comm_domain import CommDomain, build_domain_layout
+from pypto.runtime.comm_domain import CommDomain, DomainState, build_domain_layout
 from pypto.runtime.distributed_args import decode_domain_ref, encode_domain_ref, pack_window_args
 
 
@@ -86,7 +86,7 @@ def test_actual_dispatch_values_follow_runtime_slots():
         specs = [DomainBufferSpec(k, (65,), DataType.UINT8) for k in ("p", "q")]
         owner = CommDomain(worker, (2, 0), build_domain_layout(specs)[0], "device", ())
         owner._ref = CommDomainRef(b"instance", id_, 1)
-        owner._state = "live"
+        owner._state = DomainState.LIVE
         worker._external_domains[owner.ref] = owner
         native = MagicMock()
         native.workers = (2, 0)
@@ -102,6 +102,7 @@ def test_actual_dispatch_values_follow_runtime_slots():
     module["TaskArgs"] = MagicMock
     module["_submit_chip"] = submit = MagicMock()
     (d, _), (e, _) = domains
+    # One ordering token per domain, but one context per window parameter, even for the same buffer twice.
     for a, b, expected in [
         (d.tensor("q"), d.tensor("p"), ["1/q", "1/p", "order/1", -7, 102, 102]),
         (e.tensor("p"), d.tensor("q"), ["2/p", "1/q", "order/2", "order/1", -7, 202, 102]),
@@ -277,3 +278,7 @@ def test_external_parameter_and_local_scratch_have_separate_bindings():
     assert 'CommBufferSpec(name="storage"' in generated
     assert "__domain_0[0].buffers[__slot_0].tensor(" in generated
     assert '__comm_d0[0].buffers["storage"].tensor(' in generated
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

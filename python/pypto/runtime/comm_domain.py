@@ -9,11 +9,10 @@
 
 """Worker-owned communication domains and their logical, named windows."""
 
-from __future__ import annotations
-
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import torch
@@ -101,21 +100,21 @@ def build_domain_layout(
 class DomainTensor:
     """Logical window view issued by CommDomain.tensor()."""
 
-    _owner: CommDomain
+    _owner: "CommDomain"
     buffer_index: int
 
     def __init__(self) -> None:
         raise TypeError("obtain a DomainTensor with domain.tensor(name)")
 
     @classmethod
-    def _from_slot(cls, owner: CommDomain, index: int) -> DomainTensor:
+    def _from_slot(cls, owner: "CommDomain", index: int) -> "DomainTensor":
         view = object.__new__(cls)
         object.__setattr__(view, "_owner", owner)
         object.__setattr__(view, "buffer_index", index)
         return view
 
     @property
-    def domain_ref(self) -> CommDomainRef:
+    def domain_ref(self) -> "CommDomainRef":
         return self._owner.ref
 
     @property
@@ -131,12 +130,21 @@ class DomainTensor:
         return self._owner.buffers[self.buffer_index].layout
 
 
+class DomainState(Enum):
+    CREATING = "creating"
+    LIVE = "live"
+    CLOSING = "closing"
+    INVALID = "invalid"
+    CLEANUP_FAILED = "cleanup_failed"
+    RELEASED = "released"
+
+
 class CommDomain:
     """Own a retained native domain and its per-member ordering buffers."""
 
     def __init__(
         self,
-        worker: DistributedWorker,
+        worker: "DistributedWorker",
         members: tuple[int, ...],
         slots: tuple[_Slot, ...],
         memory_source: str,
@@ -152,10 +160,10 @@ class CommDomain:
         self._native: Any = None
         self._creation_run: Any = None
         self._ref: CommDomainRef | None = None
-        self._state = "creating"
+        self._state = DomainState.CREATING
 
     @property
-    def ref(self) -> CommDomainRef:
+    def ref(self) -> "CommDomainRef":
         if self._ref is None:
             raise RuntimeError("domain has no published reference")
         return self._ref
@@ -173,13 +181,13 @@ class CommDomain:
         return self._views[name]
 
     def _require_live(self) -> None:
-        if self._state != "live":
-            raise RuntimeError(f"communication domain is {self._state}")
+        if self._state is not DomainState.LIVE:
+            raise RuntimeError(f"communication domain is {self._state.value}")
 
     def release(self) -> None:
         self._worker._release_external_domain(self)
 
-    def __enter__(self) -> CommDomain:
+    def __enter__(self) -> "CommDomain":
         self._require_live()
         return self
 
@@ -187,7 +195,7 @@ class CommDomain:
         self.release()
 
     def _free(self) -> None:
-        self._state = "closing"
+        self._state = DomainState.CLOSING
         try:
             if self._creation_run is not None:
                 # An interrupted submit can have accepted the callback before the owner
@@ -195,7 +203,10 @@ class CommDomain:
                 try:
                     self._creation_run.result()
                 except Exception:
-                    if not self._creation_run.done:
+                    if (
+                        not self._creation_run.done
+                        or getattr(self._creation_run, "_finalization_abandoned", False) is True
+                    ):
                         raise
                 self._creation_run = None
             if self._native is not None and not self._native.freed:
@@ -206,9 +217,9 @@ class CommDomain:
                 self._worker._w.release_buffer(token)
                 del self._tokens[rank]
         except BaseException:
-            self._state = "cleanup_failed"
+            self._state = DomainState.CLEANUP_FAILED
             raise
-        self._state = "released"
+        self._state = DomainState.RELEASED
 
     def _after_worker_close(self) -> None:
         # Simpler's whole-tree close owns abandoned runs and remaining buffers.
@@ -217,11 +228,11 @@ class CommDomain:
             raise RuntimeError("worker closed without confirming external domain reclamation")
         self._creation_run = None
         self._tokens.clear()
-        self._state = "released"
+        self._state = DomainState.RELEASED
 
 
 def allocate_external_domain(
-    worker: DistributedWorker,
+    worker: "DistributedWorker",
     members: Sequence[int],
     buffers: Sequence[DomainBufferSpec],
     memory_source: str,
@@ -287,7 +298,7 @@ def allocate_external_domain(
         domain._creation_run.result()
         domain._creation_run = None
         worker._external_domains[domain.ref] = domain
-        domain._state = "live"
+        domain._state = DomainState.LIVE
         return domain
     except BaseException:
         if domain._ref is not None:

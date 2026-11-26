@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 from pypto import DataType
 from pypto.runtime import DomainBufferSpec, DomainTensor
-from pypto.runtime.comm_domain import allocate_external_domain, build_domain_layout
+from pypto.runtime.comm_domain import DomainState, allocate_external_domain, build_domain_layout
 
 
 @pytest.mark.parametrize(
@@ -116,10 +116,14 @@ def test_cleanup_debt_keeps_tokens_until_native_free_is_confirmed():
     domain._tokens[0] = token = object()
     with pytest.raises(RuntimeError, match="has not completed"):
         domain._free()
-    assert domain._state == "cleanup_failed"
+    assert domain._state is DomainState.CLEANUP_FAILED
     assert domain._tokens[0] is token
     worker._w.release_buffer.assert_not_called()
     native.freed = True
     domain._free()
-    assert domain._state == "released"
+    assert domain._state is DomainState.RELEASED
     worker._w.release_buffer.assert_called_once_with(token)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

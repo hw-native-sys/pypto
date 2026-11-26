@@ -406,6 +406,7 @@ def _extract_func_param_infos(
 
     for i, (param, direction) in enumerate(zip(func.params, func.param_directions, strict=True)):
         param_type = param.type
+        # MaterializeDistTensorCtx appends one input context per window after all public HOST parameters.
         if host_entry and isinstance(param_type, CommCtxType) and any(p.is_distributed for p in param_infos):
             break
         shape: list[int] | None = None

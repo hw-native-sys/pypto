@@ -119,7 +119,8 @@ def replay(
             An L3 distributed build (``orchestration/host_orch.py`` +
             ``next_levels/{rank}/`` + ``distributed_meta.json``) is detected
             automatically and dispatched via
-            :meth:`~pypto.ir.DistributedCompiledProgram.from_dir`.
+            :meth:`~pypto.ir.DistributedCompiledProgram.from_dir`. Builds with external
+            communication windows require a prepared DistributedWorker to bind them.
         *tensors: Positional ``torch.Tensor`` (host), :class:`DeviceTensor`,
             or ctypes scalar arguments matching the orchestration entry's
             parameter order. Outputs are written in-place into the
@@ -185,8 +186,9 @@ def replay(
         )
         if any(p.is_distributed for p in compiled._get_metadata()[0]):
             raise ValueError(
-                "Replay requires external communication windows. Load the program with from_dir(), "
-                "recreate the domains and their sources on a DistributedWorker, and pass domain.tensor(name)."
+                "replay() cannot bind external communication windows. Load the program with from_dir(), "
+                "recreate their domains and sources on a prepared DistributedWorker, "
+                "and pass domain.tensor(name)."
             )
 
     named_tensors: list[tuple[str, torch.Tensor]] | None = None

@@ -15,6 +15,7 @@ The CLI separates card-free fixture/binary preparation from run-only acceptance.
 import argparse
 import io
 import json
+import sys
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -339,9 +340,10 @@ def run_prebuilt(root, devices, *, remote=False, persistent=False):
             assert torch.equal(pair_out[:n, 1], tables[1][:n, 0, :64])
             for first, second, select, expected in [
                 (a, b, 0, tables[0]),
-                (a, b, 1, tables[1]),
                 (b, a, 0, tables[1]),
+                (a, b, 1, tables[1]),
             ]:
+                out[:n].copy_(expected[:n].bitwise_not())
                 worker.submit(reader, first, select, second, out).result()
                 assert torch.equal(out[:n], expected[:n])
             # Bind two physically different domains to the same reader. All initialization
@@ -380,7 +382,7 @@ def test_shared_domain(test_config, device_ids, tmp_path):
     run_prebuilt(tmp_path, device_ids[:2], persistent=True)
 
 
-if __name__ == "__main__":
+def _run_phase() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("prepare", "local", "persistent", "peer", "prepare-large", "large"))
     parser.add_argument("directory", type=Path)
@@ -391,12 +393,34 @@ if __name__ == "__main__":
         prepare(options.directory, options.platform)
     elif options.phase == "prepare-large":
         prepare_large(options.directory, options.platform)
-    elif options.phase == "large":
-        run_large(options.directory, [int(d) for d in options.devices.split(",")])
     else:
-        run_prebuilt(
-            options.directory,
-            [int(d) for d in options.devices.split(",")],
-            remote=options.phase == "peer",
-            persistent=options.phase == "persistent",
-        )
+        if not options.devices:
+            parser.error(f"{options.phase} requires --devices")
+        try:
+            devices = [int(value) for value in options.devices.split(",")]
+        except ValueError:
+            parser.error("--devices expects comma-separated integer device IDs")
+        if any(device < 0 for device in devices) or len(set(devices)) != len(devices):
+            parser.error("--devices expects distinct non-negative device IDs")
+        if options.phase == "large":
+            if len(devices) != 4:
+                parser.error("large requires exactly four devices")
+            run_large(options.directory, devices)
+        else:
+            if options.phase == "peer" and len(devices) != 2:
+                parser.error("peer requires exactly two devices")
+            if len(devices) > 4:
+                parser.error(f"{options.phase} supports up to four devices")
+            run_prebuilt(
+                options.directory,
+                devices,
+                remote=options.phase == "peer",
+                persistent=options.phase == "persistent",
+            )
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        _run_phase()
+    else:
+        pytest.main([__file__, "-v"])

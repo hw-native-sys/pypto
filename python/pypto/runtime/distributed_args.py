@@ -9,15 +9,12 @@
 
 """Encode L3 argument pools and resolve external windows inside the active run."""
 
-from __future__ import annotations
-
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from .comm_domain import CommDomain, DomainTensor
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from simpler.comm_domain import CommDomainRef
     from simpler.task_interface import TaskArgs
 
@@ -32,13 +29,13 @@ def _uint64(value: int) -> int:
     return value
 
 
-def encode_domain_ref(ref: CommDomainRef) -> tuple[int, int, int]:
+def encode_domain_ref(ref: "CommDomainRef") -> tuple[int, int, int]:
     if len(ref.owner_instance_id) != 8:
         raise ValueError("expected an eight-byte domain owner")
     return int.from_bytes(ref.owner_instance_id, "little"), _uint64(ref.domain_id), _uint64(ref.generation)
 
 
-def decode_domain_ref(args: TaskArgs, offset: int) -> CommDomainRef:
+def decode_domain_ref(args: "TaskArgs", offset: int) -> "CommDomainRef":
     from simpler.comm_domain import CommDomainRef  # noqa: PLC0415
 
     return CommDomainRef(
@@ -49,7 +46,7 @@ def decode_domain_ref(args: TaskArgs, offset: int) -> CommDomainRef:
 WindowRequirement = tuple[bool, tuple[int, ...], str | None]
 
 
-def entry_window_requirements(entry: Any, params: Sequence[ParamInfo]) -> dict[int, WindowRequirement]:
+def entry_window_requirements(entry: Any, params: Sequence["ParamInfo"]) -> dict[int, WindowRequirement]:
     """Check the generated entry's window indices against its public parameter metadata."""
     requirements: dict[int, WindowRequirement] = cast(dict[str, Any], vars(entry)).get(
         "_window_requirements", {}
@@ -76,11 +73,11 @@ def validate_window_use(
 
 
 def pack_window_args(
-    params: Sequence[ParamInfo],
+    params: Sequence["ParamInfo"],
     args: Sequence[Any],
-    worker: DistributedWorker,
+    worker: "DistributedWorker",
     requirements: dict[int, WindowRequirement],
-) -> tuple[TaskArgs, tuple[CommDomain, ...]]:
+) -> tuple["TaskArgs", tuple[CommDomain, ...]]:
     """Pack scalar values and the context suffix for the existing HOST callback argument."""
     from simpler.task_interface import TaskArgs  # noqa: PLC0415
 

@@ -128,3 +128,5 @@ HOST orchestration passes distributed windows from the start of their named buff
 Submissions sharing a domain wait for the previous use to complete. Release
 and worker close also drain accepted uses. Cold reload requires callers to
 create the runtime resources and supply the windows again.
+
+An interrupted wait keeps the dispatch arguments and its domain alive. If native cancellation cannot confirm completion, the worker retains them until native teardown succeeds.

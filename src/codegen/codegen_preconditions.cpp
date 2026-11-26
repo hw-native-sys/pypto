@@ -70,7 +70,7 @@ class DistributedTensorUseCollector : public IRVisitor {
       // Only an actual local allocation/view requires an owning scope. Remote
       // operations and returned external windows may be entirely parameter-backed.
       has_windowing_ops |= IsOp(call, "pld.tensor.alloc_window_buffer") || IsOp(call, "pld.tensor.window") ||
-                           op_name.rfind("tensor.window", 0) == 0 || op_name == "tensor.alloc_window_buffer";
+                           op_name.rfind("tensor.window", 0) == 0;
     }
     IRVisitor::VisitExpr_(call);
   }

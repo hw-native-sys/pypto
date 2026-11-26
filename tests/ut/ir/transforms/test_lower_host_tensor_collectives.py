@@ -768,6 +768,19 @@ def test_host_allreduce_rejects_aliased_src_signal_windows():
         passes.lower_host_tensor_collectives()(program)
 
 
+def test_host_barrier_rejects_external_signal_without_local_scope():
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, signal: pld.DistributedTensor[[4], pl.INT32]):
+            pld.tensor.barrier(signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match="barrier signal requires a locally allocated window"):
+        passes.lower_host_tensor_collectives()(program)
+
+
 def test_host_barrier_lowers_to_builtin_world_size_loop():
     @pl.program
     class P:

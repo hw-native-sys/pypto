@@ -23,6 +23,7 @@
 namespace pypto::ir {
 
 struct ExternalWindowUse {
+  // An all-rank requirement is distinct from an empty set of observed workers.
   bool all_workers = false;
   std::vector<int64_t> workers;
   bool uses_urma = false;
@@ -30,6 +31,7 @@ struct ExternalWindowUse {
 };
 
 struct ExternalWindowAnalysis {
+  // Keys borrow Vars in the analyzed IR. Values and the keys of uses are full HOST parameter positions.
   std::unordered_map<const Var*, size_t> parameter_indices;
   std::unordered_map<size_t, ExternalWindowUse> uses;
 };

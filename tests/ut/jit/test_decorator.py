@@ -8480,12 +8480,13 @@ def test_constexpr_branch_preserves_multiple_yield_results(mode):
         ir.assert_structural_equal(value.type, ir.TensorType([8, width], DataType.FP32))
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def test_domain_tensor_sample_uses_only_logical_metadata():
-    from pypto.runtime.comm_domain import CommDomain, DomainBufferSpec, build_domain_layout  # noqa: PLC0415
+    from pypto.runtime.comm_domain import (  # noqa: PLC0415
+        CommDomain,
+        DomainBufferSpec,
+        DomainState,
+        build_domain_layout,
+    )
 
     @pl.jit.host
     def entry(
@@ -8497,7 +8498,7 @@ def test_domain_tensor_sample_uses_only_logical_metadata():
     def domain_view(names):
         slots, _ = build_domain_layout([DomainBufferSpec(name, (4,), pl.FP32) for name in names])
         domain = CommDomain(MagicMock(), (0,), slots, "device", ())
-        domain._state = "live"
+        domain._state = DomainState.LIVE
         return domain.tensor("weights")
 
     a = domain_view(["other", "weights"])
@@ -8509,3 +8510,7 @@ def test_domain_tensor_sample_uses_only_logical_metadata():
     assert (first.shape, first.dtype) == ((4,), pl.FP32)
     with pytest.raises(TypeError, match="parameter 'out'"):
         entry._bind_args((a, a), {})
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
