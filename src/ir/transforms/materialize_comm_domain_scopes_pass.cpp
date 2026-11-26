@@ -1194,12 +1194,12 @@ ExternalWindowAnalysis AnalyzeExternalWindows(const ProgramPtr& program, const F
   DispatchAnalyzer analyzer(collector.view_to_window, chips, collector.var_defs);
   const size_t first_ctx = host->params_.size() - host_plan.dist_param_indices.size();
   for (size_t i = 0; i < first_ctx; ++i) {
-    CHECK_SPAN(!IsA<CommCtxType>(host->params_[i]->GetType()), host->span_)
+    INTERNAL_CHECK_SPAN(!IsA<CommCtxType>(host->params_[i]->GetType()), host->span_)
         << "CommCtx must form the entry suffix";
   }
   for (size_t j = 0; j < host_plan.dist_param_indices.size(); ++j) {
     const auto& ctx = host->params_[first_ctx + j];
-    CHECK_SPAN(
+    INTERNAL_CHECK_SPAN(
         IsA<CommCtxType>(ctx->GetType()) && host->param_directions_[first_ctx + j] == ParamDirection::In,
         host->span_)
         << "Expected one input CommCtx suffix per DistributedTensor parameter";

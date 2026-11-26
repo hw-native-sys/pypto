@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, InternalError, ir
 from pypto.ir.param_info import _extract_func_param_infos
 from pypto.pypto_core import codegen, passes
 from pypto.runtime import DomainBufferSpec
@@ -71,6 +71,23 @@ def test_public_parameter_metadata_follows_source_order():
         ("b", True),
         ("x", False),
     ]
+
+
+def test_codegen_requires_materialized_context_suffix():
+    # A direct codegen call bypasses the pass that appends the HOST window contexts.
+    with pytest.raises(InternalError, match="Expected one input CommCtx suffix per DistributedTensor"):
+        codegen.DistributedCodegen().generate(Program)
+
+
+def test_codegen_rejects_context_before_materialized_suffix():
+    @pl.program
+    class ExtraContext:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, extra: pld.CommCtx, window: pld.DistributedTensor[[4], pl.FP32], ctx: pld.CommCtx):
+            return
+
+    with pytest.raises(InternalError, match="CommCtx must form the entry suffix"):
+        codegen.DistributedCodegen().generate(ExtraContext)
 
 
 def test_actual_dispatch_values_follow_runtime_slots():
