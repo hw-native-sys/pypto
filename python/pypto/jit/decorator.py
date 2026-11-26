@@ -460,7 +460,7 @@ class JITFunction:
         _cache: L1 in-memory cache: CacheKey → CompiledProgram (post-pass ir.Program wrapped).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - carries the declared extern compilation requirements
         self,
         func: Any,
         func_type: str | None = None,
@@ -472,6 +472,7 @@ class JITFunction:
         external_dual_aiv_dispatch: bool = False,
         external_include_dirs: tuple[str, ...] = (),
         external_binding: "ExternalJITBinding | None" = None,
+        external_vpto_sources: tuple[str, ...] = (),
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
@@ -484,6 +485,7 @@ class JITFunction:
         self._external_aiv_source = external_aiv_source
         self._external_dual_aiv_dispatch = external_dual_aiv_dispatch
         self._external_include_dirs = external_include_dirs
+        self._external_vpto_sources = external_vpto_sources
         self._external_binding = external_binding
         self._dep_graph_state: _CachedDepGraph | None = None
         self._cache: dict[CacheKey, Any] = {}  # CacheKey → CompiledProgram
@@ -679,8 +681,9 @@ class JITFunction:
     # ------------------------------------------------------------------
 
     def _external_source_paths(self) -> list[str]:
-        """Absolute paths of the C++ source(s) backing an external kernel dep."""
-        return [p for p in (self._external_aic_source, self._external_aiv_source) if p is not None]
+        """Ordered sources for the external kernel and its AIV device functions."""
+        members = (self._external_aic_source, self._external_aiv_source)
+        return [p for p in members if p is not None] + list(self._external_vpto_sources)
 
     @capture_namespaces()
     def _get_source_hash(self) -> str:
@@ -1914,6 +1917,7 @@ class JITFunction:
                     external_aiv_source=dep._external_aiv_source,
                     external_dual_aiv_dispatch=dep._external_dual_aiv_dispatch,
                     external_include_dirs=dep._external_include_dirs,
+                    external_vpto_sources=dep._external_vpto_sources,
                     requires_return_contract=key in plan.submitted,
                     return_metas=(
                         _tensor_meta.specialized_return_metas(
@@ -2347,6 +2351,9 @@ class _ExternKernelDecorator:
     specializer emits an AIC member, an AIV member, and a Group wrapper.
     Set ``dual_aiv_dispatch=True`` only when the external implementation is
     written for both AIV sub-lanes and uses the sub-block id to partition work.
+    An A5 AIV or mixed extern can link vector device functions from ``vpto_sources``.
+    Only the AIV member receives the helpers.
+
     Source and include paths may be absolute or relative to the Python file
     defining the signature stub.
     """
@@ -2361,6 +2368,7 @@ class _ExternKernelDecorator:
         aiv_source: str | Any = None,
         dual_aiv_dispatch: bool = False,
         include_dirs: Sequence[str | os.PathLike[str]] | None = None,
+        vpto_sources: Sequence[str | os.PathLike[str]] = (),
     ) -> Any:
         if core_type is None:
             core_type = "aiv"
@@ -2369,7 +2377,15 @@ class _ExternKernelDecorator:
         if dual_aiv_dispatch and core_type != "mixed":
             raise ValueError("@pl.jit.extern dual_aiv_dispatch=True requires core_type='mixed'")
 
+        if isinstance(vpto_sources, (str, bytes, os.PathLike)):
+            raise TypeError("vpto_sources must be a sequence of .pto file paths")
+        if vpto_sources and core_type == "aic":
+            raise ValueError("vpto_sources require an AIV or mixed extern kernel")
+
         def _make(f: Any) -> JITFunction:
+            helpers = tuple(_resolve_extern_source(p, f) for p in vpto_sources)
+            if any(not p.endswith(".pto") for p in helpers) or len(set(helpers)) != len(helpers):
+                raise ValueError("vpto_sources must name distinct .pto files")
             if core_type == "mixed":
                 if aic_source is None or aiv_source is None:
                     raise ValueError(
@@ -2393,6 +2409,7 @@ class _ExternKernelDecorator:
                 external_aiv_source=ext_aiv,
                 external_dual_aiv_dispatch=dual_aiv_dispatch,
                 external_include_dirs=ext_include_dirs,
+                external_vpto_sources=helpers,
             )
 
         if func is None:

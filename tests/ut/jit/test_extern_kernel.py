@@ -29,9 +29,11 @@ from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import generate
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.jit._artifact_manifest import BuildKind
 from pypto.jit.specializer import Specializer
 from pypto.pypto_core import codegen, ir
 from pypto.runtime import RunConfig
+from pypto.runtime._artifact_sources import package_generated_sources, read_kernel_config
 
 _KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
 _PAIR_ROWS = 16
@@ -636,6 +638,56 @@ def test_mixed_extern_include_dirs_reach_both_kernel_descriptors(tmp_path):
         assert member is not None
         assert json.loads(member.attrs[EXTERNAL_INCLUDE_DIRS_ATTR]) == expected
     assert config.count(f'"extra_include_dirs": {expected!r}') == 2
+
+
+def test_mixed_extern_vpto_helper_survives_packaging_and_invalidates_cache(tmp_path):
+    _write_kernel(tmp_path)
+    helper = tmp_path / "expand.pto"
+    helper.write_text("// old device function")
+    stub = tmp_path / "use_helper.py"
+    stub.write_text(
+        "import pypto.language as pl\n"
+        "@pl.jit.extern(core_type='mixed', aic_source='ext.cpp', aiv_source='ext.cpp', "
+        "vpto_sources=('expand.pto',), dual_aiv_dispatch=True)\n"
+        "def op(x: pl.Tensor, y: pl.Out[pl.Tensor]) -> pl.Tensor: ...\n"
+        "@pl.jit\n"
+        "def entry(x: pl.Tensor, y: pl.Out[pl.Tensor]) -> pl.Tensor:\n"
+        "    y = op(x, y)\n"
+        "    return y\n"
+    )
+    entry = _load_jit_module(stub).entry
+    old_hash = entry._get_source_hash()
+    old_persistent = entry._persistent_source_digest()
+    helper.write_text("// new device function")
+    assert entry._get_source_hash() != old_hash
+    assert entry._persistent_source_digest() != old_persistent
+
+    config, _ = _generate_external_config(entry, (torch.zeros(16), torch.zeros(16)), tmp_path)
+    root = tmp_path / "package"
+    root.mkdir()
+    (root / "kernel_config.py").write_text(config)
+    (root / "orchestration").mkdir()
+    orch = read_kernel_config(root / "kernel_config.py").ORCHESTRATION["source"]
+    Path(orch).write_text("// orchestrator")
+    package_generated_sources(root, BuildKind.SINGLE_CHIP)
+    moved = root.rename(tmp_path / "moved")
+    helper.unlink()
+    descriptors = read_kernel_config(moved / "kernel_config.py").KERNELS
+    aic, aiv = sorted(descriptors, key=lambda kernel: kernel["core_type"])
+    assert "vpto_sources" not in aic
+    (packaged,) = map(Path, aiv["vpto_sources"])
+    assert packaged.is_relative_to(moved)
+    assert packaged.read_text() == "// new device function"
+
+
+def test_extern_vpto_helpers_reject_cube_or_duplicate_sources(tmp_path):
+    cpp = _write_kernel(tmp_path)
+    helper = tmp_path / "expand.pto"
+    helper.touch()
+    with pytest.raises(ValueError, match="AIV or mixed"):
+        pl.jit.extern(core_type="aic", source=cpp, vpto_sources=[helper])
+    with pytest.raises(ValueError, match="distinct .pto files"):
+        pl.jit.extern(source=cpp, vpto_sources=[helper, helper])(lambda: None)
 
 
 def test_extern_relative_include_dirs_resolve_from_stub_file(tmp_path):

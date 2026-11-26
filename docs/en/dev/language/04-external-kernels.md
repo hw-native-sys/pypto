@@ -185,6 +185,12 @@ Paths resolve relative to the file defining the kernel. Editing the referenced
 `.cpp` changes the JIT cache key, so a kernel change triggers recompilation even
 though the Python stub is unchanged.
 
+For an A5 AIV or mixed extern, pass `vpto_sources=("kernels/expand.pto",)` to link PTO vector device functions into the AIV member. Paths resolve relative to the decorated stub, just like `source`. The helper sources participate in JIT cache identity and travel with a packaged artifact. Cube members do not link these functions.
+
+For register functions that must launch directly from the caller, add `// pypto.vpto_link: inline` to the PTO source header and declare the logical function name in C++. CCEC then compiles the scalar caller and PTO register loop together. This mode applies only to marked register modules.
+
+For an instruction-order-sensitive register helper, a standalone header comment `// pypto.vpto_scheduler: off` disables the VPTO scheduling pass for that file. It does not disable synchronization checks or control register allocation by the device compiler.
+
 ## Returned tensor identities
 
 An extern result aliases a tensor parameter supplied to the native kernel.

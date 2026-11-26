@@ -43,7 +43,11 @@ else:  # pragma: no cover - exercised only on Python < 3.11
     from importlib.abc import Traversable
 from typing import Any
 
-from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, decode_external_include_dirs
+from pypto._external_source import (
+    EXTERNAL_INCLUDE_DIRS_ATTR,
+    EXTERNAL_VPTO_SOURCES_ATTR,
+    decode_external_paths,
+)
 from pypto._function_attrs import (
     BUILTIN_TEMPLATE_DIR_ATTR,
     BUILTIN_TEMPLATE_VARS_ATTR,
@@ -1831,7 +1835,9 @@ def _external_source_of(func: _ir_core.Function) -> str | None:
 def _external_include_dirs_of(func: _ir_core.Function) -> tuple[str, ...]:
     """Return ordered include directories carried by a JIT external kernel."""
     try:
-        return decode_external_include_dirs(dict(func.attrs).get(EXTERNAL_INCLUDE_DIRS_ATTR))
+        return decode_external_paths(
+            dict(func.attrs).get(EXTERNAL_INCLUDE_DIRS_ATTR), EXTERNAL_INCLUDE_DIRS_ATTR
+        )
     except ValueError as e:
         raise RuntimeError(f"Invalid external include metadata on function '{func.name}': {e}") from e
 
@@ -2961,6 +2967,15 @@ def _generate_single_chip(
                             for unit in units
                             if unit.helpers
                             for func in unit.funcs
+                        }
+                        | {
+                            f.name: list(
+                                decode_external_paths(
+                                    f.attrs[EXTERNAL_VPTO_SOURCES_ATTR], EXTERNAL_VPTO_SOURCES_ATTR
+                                )
+                            )
+                            for f in transformed_program.functions.values()
+                            if EXTERNAL_VPTO_SOURCES_ATTR in f.attrs
                         },
                     ),
                 )

@@ -322,6 +322,7 @@ def build_contexts(
                 external_aiv_source=function._external_aiv_source,
                 external_dual_aiv_dispatch=function._external_dual_aiv_dispatch,
                 external_include_dirs=function._external_include_dirs,
+                external_vpto_sources=function._external_vpto_sources,
                 requires_return_contract=variant_id in submitted,
                 return_metas=(
                     _tensor_meta.specialized_return_metas(

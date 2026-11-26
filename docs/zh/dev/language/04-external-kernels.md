@@ -165,6 +165,12 @@ def pa_aiv(self, query: pl.Tensor, out: pl.Out[pl.Tensor]): ...
 路径相对于定义该 kernel 的文件解析。修改所引用的 `.cpp` 会改变 JIT 缓存键，因此即使
 Python stub 未变，kernel 变更也会触发重新编译。
 
+A5 的 AIV 或 mixed extern 可以使用 `vpto_sources=("kernels/expand.pto",)`，将 PTO 向量设备函数链接到 AIV 成员。与 `source` 一样，路径相对于声明装饰器的 Python 文件。辅助文件参与 JIT 缓存判定，随产物一同打包，不链接到 Cube 成员。
+
+需要在调用处直接发起向量函数时，在 PTO 源文件头部添加 `// pypto.vpto_link: inline`，并在 C++ 中声明其逻辑函数名。CCEC 会一起编译标量调用方和 PTO 寄存器循环。该设置只对带标记的寄存器模块生效。
+
+对于依赖指令顺序的寄存器函数，可在文件头单独写一行 `// pypto.vpto_scheduler: off`，仅对该文件关闭 VPTO 指令调度。该选项不关闭同步检查，也不控制设备编译器的寄存器分配。
+
 ## 返回 Tensor 的身份
 
 extern 的返回值是传入原生 kernel 的 Tensor 参数的别名（alias）。返回子集或调整

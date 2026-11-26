@@ -202,8 +202,7 @@ class KernelCompiler:
             raise ValueError("text_only requires platform='a5' without separately compiled VPTO helpers")
         if helpers:
             _vpto.validate_target(self.platform, core_type)
-            if _vpto_snapshot is None:
-                _vpto_snapshot = _vpto.snapshot_sources(helpers)
+        inline, separate = _vpto.partition_sources(helpers, _vpto_snapshot)
         if core_type not in ("aic", "aiv"):
             raise ValueError(f"Unknown core_type: {core_type!r}; expected 'aic' or 'aiv'")
         simulation = self.platform.endswith("sim")
@@ -231,9 +230,14 @@ class KernelCompiler:
         includes.extend(extra_include_dirs or [])
         with tempfile.TemporaryDirectory(prefix="pypto-incore-", dir=build_dir) as directory:
             output = Path(directory).absolute() / ("kernel.so" if simulation else "kernel.o")
+            import_flags: tuple[str, ...] = ()
+            if inline:
+                bc = self._compile_inline_vpto(inline, Path(directory).absolute())
+                import_flags = ("-Xclang", "-mlink-bitcode-file", "-Xclang", str(bc))
             cmd = [
                 toolchain.cxx_path,
                 *compile_flags,
+                *import_flags,
                 *(_vpto.CALLER_FLAGS if helpers or text_only else ()),
                 # CCEC otherwise keeps a frame-pointer save around VF calls even
                 # without spills. Still require compiler evidence of zero stack.
@@ -250,14 +254,19 @@ class KernelCompiler:
             assert self.sdk.ccec is not None, "Device linking requires the CCEC toolchain"
             linked = output.with_suffix(".elf")
             helper_objects = (
-                self._compile_vpto_helpers(helpers, Path(directory), _vpto_snapshot) if helpers else []
+                self._compile_vpto_helpers(
+                    tuple(path for path, _ in separate), Path(directory), tuple(text for _, text in separate)
+                )
+                if separate
+                else []
             )
             link_flags: list[str] = []
             if helpers or text_only:
                 order = Path(directory) / "entry.order"
                 order.write_text("\n".join(_vpto.LINK_SYMBOL_ORDER) + "\n")
                 link_flags.append(f"--symbol-ordering-file={order}")
-            if text_only:
+            if text_only or inline:
+                # Drop unused out-of-line copies of inlined register functions.
                 # CANN headers may define unused allocated data (g_tilingKey).
                 # GC removes only unreachable sections. Any surviving data
                 # remains an error: the persistent loader retains only .text.
@@ -338,6 +347,8 @@ class KernelCompiler:
             repr(_vpto.LINK_SYMBOL_ORDER),
             repr(self.sdk.ccec.get_compile_flags(core_type=core_type)),
         )
+        if any(_vpto.inline_requested(text) for text in snapshots):
+            metadata += ("inline-cc1-v1", str(Path(bisheng).with_name("llvm-link")))
         for item in metadata:
             payload = item.encode()
             digest.update(len(payload).to_bytes(8, "little"))
@@ -347,6 +358,31 @@ class KernelCompiler:
                 digest.update(len(payload).to_bytes(8, "little"))
                 digest.update(payload)
         return digest.hexdigest()
+
+    @staticmethod
+    def _vpto_compile_env(bisheng: str) -> dict[str, str]:
+        return {**os.environ, "ASCEND_HOME_PATH": str(Path(bisheng).parent.parent)}
+
+    def _compile_inline_vpto(self, sources: tuple[str, ...], directory: Path) -> Path:
+        """Import register loops before CCEC selects scalar and VF instructions."""
+        ptoas, bisheng = self._vpto_toolchain()
+        modules: list[str] = []
+        for i, source in enumerate(sources):
+            pto = directory / f"inline_{i}.pto"
+            ir = pto.with_suffix(".ll")
+            pto.write_text(source)
+            self._run(
+                [ptoas, str(pto), *_vpto.ptoas_flags_for_source(source, emit_llvm=True), "-o", str(ir)],
+                ir,
+                "VPTO inline LLVM emission",
+                env=self._vpto_compile_env(bisheng),
+            )
+            ir.write_text(_vpto.inline_register_ir(ir.read_text()))
+            modules.append(str(ir))
+        bitcode = directory / "inline_registers.bc"
+        command = [str(Path(bisheng).with_name("llvm-link")), *modules, "-o", str(bitcode)]
+        self._run(command, bitcode, "VPTO bitcode link")
+        return bitcode
 
     def _compile_vpto_helpers(
         self, sources: tuple[str, ...], directory: Path, snapshot: tuple[str, ...] | None = None
@@ -379,7 +415,7 @@ class KernelCompiler:
                 [ptoas, str(snapshot_path), *flags, "-o", str(native)],
                 native,
                 "VPTO native object compilation",
-                env={**os.environ, "ASCEND_HOME_PATH": str(Path(bisheng).parent.parent)},
+                env=self._vpto_compile_env(bisheng),
             )
             aliases = _vpto.device_object_aliases(native_data)
             assert self.sdk.ccec is not None

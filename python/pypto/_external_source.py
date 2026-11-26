@@ -25,27 +25,28 @@ _INCLUDE_RE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]', re.MULTILINE)
 # so the ordered path list is encoded as JSON and decoded by the backend before
 # emitting kernel_config.py.
 EXTERNAL_INCLUDE_DIRS_ATTR = "external_include_dirs"
+EXTERNAL_VPTO_SOURCES_ATTR = "external_vpto_sources"
 
 
-def encode_external_include_dirs(include_dirs: Iterable[str | Path]) -> str:
-    """Encode ordered external-kernel include directories for an IR attr."""
-    return json.dumps([str(path) for path in include_dirs], separators=(",", ":"))
+def encode_external_paths(paths: Iterable[str | Path]) -> str:
+    """Encode ordered external-kernel paths for an IR attr."""
+    return json.dumps([str(path) for path in paths], separators=(",", ":"))
 
 
-def decode_external_include_dirs(value: object) -> tuple[str, ...]:
-    """Decode and validate external-kernel include directories from an IR attr."""
+def decode_external_paths(value: object, attr: str) -> tuple[str, ...]:
+    """Decode and validate an external-kernel path list from an IR attr."""
     if value is None:
         return ()
     if not isinstance(value, str):
-        raise ValueError(f"{EXTERNAL_INCLUDE_DIRS_ATTR} must be a JSON string, got {type(value).__name__}")
+        raise ValueError(f"{attr} must be a JSON string, got {type(value).__name__}")
     try:
         decoded = json.loads(value)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid {EXTERNAL_INCLUDE_DIRS_ATTR} JSON: {e.msg}") from e
+        raise ValueError(f"Invalid {attr} JSON: {e.msg}") from e
     if not isinstance(decoded, list) or any(
         not isinstance(path, str) for path in cast("list[object]", decoded)
     ):
-        raise ValueError(f"{EXTERNAL_INCLUDE_DIRS_ATTR} must encode a list of strings, got {decoded!r}")
+        raise ValueError(f"{attr} must encode a list of strings, got {decoded!r}")
     return tuple(cast("list[str]", decoded))
 
 
@@ -143,9 +144,10 @@ def kernel_binary_cache_path(
 
 __all__ = [
     "EXTERNAL_INCLUDE_DIRS_ATTR",
+    "EXTERNAL_VPTO_SOURCES_ATTR",
     "collect_external_source_files",
-    "decode_external_include_dirs",
-    "encode_external_include_dirs",
+    "decode_external_paths",
+    "encode_external_paths",
     "external_source_digest",
     "kernel_binary_cache_path",
 ]

@@ -1315,3 +1315,28 @@ def test_reg_auto_sync_accepts_vf_name_containing_simt_entry(compiler_module):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_vpto_scheduler_is_scoped_to_the_register_helper(compiler_module):
+    source = "// pypto.vpto_scheduler: off\nmodule {}"
+    flags = compiler_module._vpto.ptoas_flags_for_source(source)
+    assert "--vpto-scheduler=off" in flags
+    assert "--enable-vecscope-mem-bar=true" in flags
+    assert "--vpto-scheduler=off" not in compiler_module._vpto.ptoas_flags_for_source("module {}")
+    with pytest.raises(ValueError, match="Invalid pypto.vpto_scheduler"):
+        compiler_module._vpto.ptoas_flags_for_source(source.replace("off", "other"))
+
+
+def test_inline_register_helpers_cannot_silently_fall_back_to_native(compiler_module):
+    vpto = compiler_module._vpto
+    marker = "// pypto.vpto_link: inline"
+    with pytest.raises(ValueError, match="SIMT"):
+        vpto.ptoas_flags_for_source(marker + "\nmodule { func.func @f() attributes {pto.simt_entry} }")
+    with pytest.raises(ValueError, match="Invalid pypto.vpto_link"):
+        vpto.ptoas_flags_for_source("module {}\n" + marker)
+    with pytest.raises(ValueError, match="no PTOAS-generated"):
+        vpto.inline_register_ir("declare void @f()")
+    text = "declare void @opaque()\ndefine void @loop(ptr addrspace(6) %p) #0 {\n  ret void\n}\n"
+    actual = vpto.inline_register_ir(text)
+    assert "declare void @opaque()\n" in actual
+    assert "define void @loop(ptr addrspace(6) %p) #0 alwaysinline {" in actual
