@@ -2438,6 +2438,277 @@ class Program:
 class TestSliceInputStrides:
     """Pattern 4: Attach parent-derived strides to In params for slice patterns."""
 
+    @pytest.mark.parametrize(("first", "second"), [("wide", "other"), ("other", "wide")])
+    @pytest.mark.parametrize("other_pitch", [256, 320, 384], ids=["packed", "same_pitch", "different_pitch"])
+    @pytest.mark.parametrize("operation", ["reshape", "view"])
+    @pytest.mark.parametrize("consumer", ["incore", "external_aiv"])
+    @pytest.mark.parametrize(
+        "source_view", ["x", "pl.tensor.slice(x, [8, W], [0, 0])"], ids=["parent", "full_slice"]
+    )
+    def test_dynamic_graph_reshape_requires_packed_sources(
+        self, tmp_path, first, second, other_pitch, operation, consumer, source_view
+    ):
+        # Each packed input supplies its own runtime width. The reshape must
+        # preserve that proof while rejecting a sliced input in either order.
+        annotation = "pl.FunctionType.InCore"
+        body = "tile = pl.tile.load(x, [0, 0], [1, 8])"
+        if consumer == "external_aiv":
+            cpp = tmp_path / "external.cpp"
+            cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+            annotation = f"pl.FunctionType.AIV, external_source={str(cpp)!r}"
+            body = "..."
+        other_view = "" if other_pitch == 256 else f", pl.TensorView(stride=[{other_pitch}, 1])"
+        before = pl.parse_program(f"""
+W = pl.dynamic("W")
+M = pl.dynamic("M")
+@pl.program
+class Program:
+    @pl.function(type={annotation})
+    def kernel(self, x: pl.Tensor[[4, M], pl.FP32]):
+        {body}
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward(self, x: pl.Tensor[[8, W], pl.FP32]):
+        reshaped = pl.tensor.{operation}({source_view}, [4, 2 * W])
+        self.kernel(reshaped)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, wide: pl.Tensor[[8, 320], pl.FP32],
+             other: pl.Tensor[[8, 256], pl.FP32{other_view}]):
+        self.forward({first})
+        self.forward({second})
+""")
+        if other_pitch == 256:
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), before)
+        else:
+            with pytest.raises(ValueError, match="physical strides|packed ND storage"):
+                passes.optimize_orch_tensors()(before)
+
+    @pytest.mark.parametrize("calls", [("wide",), ("wide", "other"), ("other", "wide")])
+    @pytest.mark.parametrize("operation", ["reshape", "view"])
+    @pytest.mark.parametrize("consumer", ["incore_window", "external_fixed"])
+    def test_dynamic_reshape_fixed_pitch_consumers_require_resolved_stride(
+        self, tmp_path, calls, operation, consumer
+    ):
+        annotation = "pl.FunctionType.InCore"
+        kernel_type = "pl.Tensor[[4, 128], pl.FP32]"
+        body = "tile = pl.tile.load(x, [1, 0], [1, 8])"
+        operand = "pl.tensor.slice(reshaped, [4, 128], [0, 0])"
+        if consumer == "external_fixed":
+            cpp = tmp_path / "external.cpp"
+            cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+            annotation = f"pl.FunctionType.AIV, external_source={str(cpp)!r}"
+            kernel_type = "pl.Tensor[[4, M], pl.FP32, pl.TensorView(stride=[512, 1])]"
+            body = "..."
+            operand = "reshaped"
+        call_statements = "\n".join(f"        self.forward({name})" for name in calls)
+        before = pl.parse_program(f"""
+W = pl.dynamic("W")
+M = pl.dynamic("M")
+@pl.program
+class Program:
+    @pl.function(type={annotation})
+    def kernel(self, x: {kernel_type}):
+        {body}
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward(self, x: pl.Tensor[[8, W], pl.FP32]):
+        reshaped = pl.tensor.{operation}(x, [4, 2 * W])
+        self.kernel({operand})
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, wide: pl.Tensor[[8, 320], pl.FP32], other: pl.Tensor[[8, 256], pl.FP32]):
+{call_statements}
+""")
+        # Even one 320-wide caller has a 640-element result pitch, which
+        # neither the static 128-wide kernel nor the explicit 512 ABI can use.
+        with pytest.raises(ValueError, match="physical strides|packed ND storage"):
+            passes.optimize_orch_tensors()(before)
+
+    @pytest.mark.parametrize(("first", "second"), [("wide", "other"), ("other", "wide")])
+    @pytest.mark.parametrize("other_pitch", [256, 320, 384], ids=["packed", "same_pitch", "conflict"])
+    @pytest.mark.parametrize("layout", ["ND", "DN"])
+    @pytest.mark.parametrize("path", ["direct", "transpose", "layout_view", "valid_shape", "row_slab"])
+    def test_graph_call_with_dynamic_incore_pitch(self, first, second, other_pitch, layout, path):
+        def tensor_type(extent, layout, pitch=None, rows=8):
+            shape = f"[{rows}, {extent}]" if layout == "ND" else f"[{extent}, {rows}]"
+            strides = ""
+            if pitch is not None:
+                dims = f"[{pitch}, 1]" if layout == "ND" else f"[1, {pitch}]"
+                strides = f"stride={dims}, "
+            return f"pl.Tensor[{shape}, pl.FP32, pl.TensorView({strides}layout=pl.TensorLayout.{layout})]"
+
+        target_layout = layout
+        target_rows = 8
+        operand = "x"
+        if path in ("transpose", "layout_view"):
+            target_layout = "DN" if layout == "ND" else "ND"
+            operand = (
+                "pl.tensor.transpose(x, -2, -1)"
+                if path == "transpose"
+                else f"pl.tensor.view(x, layout=pl.TensorLayout.{target_layout})"
+            )
+        elif path == "valid_shape":
+            operand = "pl.tensor.set_validshape(x, 1, 8)"
+        elif path == "row_slab":
+            target_rows = 4
+            shape = "[4, W]" if layout == "ND" else "[W, 4]"
+            operand = f"pl.tensor.slice(x, {shape}, [0, 0])"
+        other_type = tensor_type(256, layout, other_pitch if other_pitch != 256 else None)
+
+        def program(kernel_type):
+            return pl.parse_program(f"""
+W = pl.dynamic("W")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: {kernel_type}):
+        tile = pl.tile.load(x, [0, 0], [1, {target_rows}])
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward(self, x: {tensor_type("W", layout)}):
+        self.kernel({operand})
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, wide: {tensor_type(320, layout)}, other: {other_type}):
+        self.forward({first})
+        self.forward({second})
+""")
+
+        # Outlining copies the inferred (symbolic) strides of a transpose or layout-only view.
+        inferred_pitch = "W" if path in ("transpose", "layout_view") else None
+        before = program(tensor_type("W", target_layout, inferred_pitch, target_rows))
+        if other_pitch == 384:
+            with pytest.raises(ValueError, match="consistent physical strides"):
+                passes.optimize_orch_tensors()(before)
+        else:
+            expected = (
+                program(tensor_type("W", target_layout, 320, target_rows)) if other_pitch == 320 else before
+            )
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), expected)
+
+    @pytest.mark.parametrize(("first", "second"), [("wide", "other"), ("other", "wide")])
+    @pytest.mark.parametrize("storage", ["packed", "same_pitch_strided", "different_pitch_strided"])
+    @pytest.mark.parametrize("operation", ["reshape", "view"])
+    @pytest.mark.parametrize("consumer", ["incore", "aiv", "external_aiv"])
+    def test_graph_reshape_uses_result_pitch(self, tmp_path, first, second, storage, operation, consumer):
+        # A packed reshape has its own pitch. Pitched sources must still fail
+        # even when their input pitches happen to agree.
+        wide_shape, other_shape = [8, 256], [4, 512]
+        other_view = ""
+        if storage == "same_pitch_strided":
+            wide_shape, other_shape = [4, 512], [8, 256]
+            other_view = ", pl.TensorView(stride=[512, 1])"
+        elif storage == "different_pitch_strided":
+            other_view = ", pl.TensorView(stride=[640, 1])"
+        annotation = "pl.FunctionType.InCore" if consumer == "incore" else "pl.FunctionType.AIV"
+        body = "tile = pl.tile.load(x, [0, 0], [1, 8])"
+        if consumer == "external_aiv":
+            cpp = tmp_path / "external.cpp"
+            cpp.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+            annotation = f"pl.FunctionType.AIV, external_source={str(cpp)!r}"
+            body = "..."
+        before = pl.parse_program(f"""
+H = pl.dynamic("H")
+W = pl.dynamic("W")
+@pl.program
+class Program:
+    @pl.function(type={annotation})
+    def kernel(self, x: pl.Tensor[[4, 512], pl.FP32, pl.TensorView(stride=[512, 1])]):
+        {body}
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward(self, x: pl.Tensor[[H, W], pl.FP32]):
+        reshaped = pl.tensor.{operation}(x, [4, 512])
+        self.kernel(reshaped)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, wide: pl.Tensor[{wide_shape}, pl.FP32],
+             other: pl.Tensor[{other_shape}, pl.FP32{other_view}]):
+        self.forward({first})
+        self.forward({second})
+""")
+        if storage == "packed":
+            ir.assert_structural_equal(passes.optimize_orch_tensors()(before), before)
+        else:
+            with pytest.raises(ValueError, match="physical strides|packed ND storage"):
+                passes.optimize_orch_tensors()(before)
+
+    @pytest.mark.parametrize(("first", "second"), [("dense", "strided"), ("strided", "dense")])
+    @pytest.mark.parametrize(
+        "operand",
+        ["x", "pl.tensor.reshape(x, [16, 8192])", "pl.tensor.view(x, [16, 8192], layout=pl.TensorLayout.ND)"],
+        ids=["direct", "reshape", "shaped_view"],
+    )
+    def test_shared_graph_call_rejects_conflicting_incore_input_strides(self, first, second, operand):
+        kernel_shape = [32, 4096] if operand == "x" else [16, 8192]
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[{kernel_shape}, pl.FP32]):
+        tile = pl.tile.load(x, [1, 0], [1, 256])
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def forward(self, x: pl.Tensor[[32, 4096], pl.FP32]):
+        self.kernel({operand})
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, backing: pl.Tensor[[32, 32768], pl.FP32]):
+        dense = pl.tensor.reshape(pl.tensor.slice(backing, [4, 32768], [0, 0]), [32, 4096])
+        strided = pl.tensor.slice(backing, [32, 4096], [0, 0])
+        self.forward({first})
+        self.forward({second})
+""")
+        with pytest.raises(ValueError, match="consistent physical strides"):
+            passes.optimize_orch_tensors()(program)
+
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    @pytest.mark.parametrize("other_pitch", [256, 320], ids=["packed", "second_pitch"])
+    def test_shared_kernel_specializes_by_input_layout(self, submit, other_pitch):
+        # The first and third windows use different offsets into the same parent.
+        other_view = "" if other_pitch == 256 else f", pl.TensorView(stride=[{other_pitch}, 1])"
+
+        def kernel(name, view):
+            return f"""
+    @pl.function(type=pl.FunctionType.InCore)
+    def {name}(self, x: pl.Tensor[[8, 256], pl.FP32{view}]) -> pl.Tensor[[8, 256], pl.FP32]:
+        tile = pl.tile.load(x, [0, 0], [8, 256])
+        return x
+"""
+
+        def program(kernels, window, other):
+            calls = f"""self.{window}(left)
+        self.{other}(other)
+        self.{window}(right)"""
+            if submit:
+                calls = f"""with pl.manual_scope():
+            _, first = pl.submit(self.{window}, left)
+            _, second = pl.submit(self.{other}, other, deps=[first])
+            _, third = pl.submit(self.{window}, right, deps=[second])"""
+            return pl.parse_program(f"""
+@pl.program
+class Program:
+{kernels}
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[16, 288], pl.FP32], other: pl.Tensor[[8, 256], pl.FP32{other_view}]):
+        left = pl.tensor.slice(parent, [8, 256], [0, 0])
+        right = pl.tensor.slice(parent, [8, 256], [8, 32])
+        {calls}
+""")
+
+        # Exercise both an unannotated input and an already-inferred stride on a cloned kernel.
+        formal_view = "" if other_pitch == 256 else ", pl.TensorView(stride=[256, 1])"
+        before = program(kernel("kernel", formal_view), "kernel", "kernel")
+        window, other = (
+            ("kernel__stride_1", "kernel") if other_pitch == 256 else ("kernel", "kernel__stride_1")
+        )
+        kernels = kernel(window, ", pl.TensorView(stride=[288, 1])") + kernel(other, other_view)
+        expected = program(kernels, window, other)
+        after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, expected)
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(after), after)
+
     @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
     @pytest.mark.parametrize("direction", ["InOut", "Out"])
     @pytest.mark.parametrize("alias", [False, True], ids=["direct", "tuple_alias"])
