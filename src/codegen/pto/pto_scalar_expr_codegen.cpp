@@ -50,23 +50,15 @@ std::string PTOCodegen::EmitArithCmpi(const std::string& predicate, const std::s
 std::string PTOCodegen::EmitArithOperand(const ir::ExprPtr& expr, const std::string& wanted_mlir_type) {
   CHECK(!wanted_mlir_type.empty()) << "EmitArithOperand: empty wanted_mlir_type";
 
-  if (wanted_mlir_type == "index") {
-    if (auto ci = As<ir::ConstInt>(expr)) {
-      return GetOrEmitConstant(ci->value_, DataType::INDEX);
-    }
-  } else if (wanted_mlir_type == "i64") {
-    if (auto ci = As<ir::ConstInt>(expr)) {
-      return GetOrEmitConstant(ci->value_, DataType::INT64);
-    }
-  } else if (wanted_mlir_type == "i32") {
-    if (auto ci = As<ir::ConstInt>(expr)) {
+  if (auto ci = As<ir::ConstInt>(expr)) {
+    if (wanted_mlir_type == "index") return GetOrEmitConstant(ci->value_, DataType::INDEX);
+    if (wanted_mlir_type == "i64") return GetOrEmitConstant(ci->value_, DataType::INT64);
+    if (wanted_mlir_type == "i32") {
       return GetOrEmitConstant(static_cast<int64_t>(static_cast<int32_t>(ci->value_)), DataType::INT32);
     }
   }
 
-  VisitExpr(expr);
-  std::string ssa = fs_.current_expr_value;
-
+  std::string ssa = GetExprAsCode(expr);
   const ::pypto::DataType dt = ir::GetScalarDtype(expr);
   if (dt.IsFloat()) {
     CHECK(wanted_mlir_type == GetTypeString(dt)) << "EmitArithOperand: float type mismatch (want "
@@ -74,31 +66,22 @@ std::string PTOCodegen::EmitArithOperand(const ir::ExprPtr& expr, const std::str
     return ssa;
   }
 
-  std::string have_mlir = (dt == ::pypto::DataType::INDEX) ? "index" : GetTypeString(dt);
+  const std::string have_mlir = GetTypeString(dt);
   if (have_mlir == wanted_mlir_type) {
     return ssa;
   }
-  if (dt.IsUnsignedInt() && wanted_mlir_type == GetTypeString(dt).substr(1)) {
+  if (wanted_mlir_type == "index") return EmitCastToIndex(expr, ssa);
+  if (wanted_mlir_type == "i64") return EmitCastToI64(expr, ssa);
+  if (wanted_mlir_type == "i32") return EmitCastToI32(expr, ssa);
+  if (dt.IsUnsignedInt() && wanted_mlir_type == have_mlir.substr(1)) {
     const auto signless = NewTemp();
     Emit(signless + " = builtin.unrealized_conversion_cast " + ssa + " : " + have_mlir + " to " +
          wanted_mlir_type);
     return signless;
   }
-  if (wanted_mlir_type == "index") {
-    return EmitCastToIndex(expr, ssa);
-  }
-
-  std::string casted = NewTemp();
   if (have_mlir == "index") {
+    const auto casted = NewTemp();
     Emit(casted + " = arith.index_cast " + ssa + " : index to " + wanted_mlir_type);
-    return casted;
-  }
-  if (have_mlir == "i32" && wanted_mlir_type == "i64") {
-    Emit(casted + " = arith.extsi " + ssa + " : i32 to i64");
-    return casted;
-  }
-  if (have_mlir == "i64" && wanted_mlir_type == "i32") {
-    Emit(casted + " = arith.trunci " + ssa + " : i64 to i32");
     return casted;
   }
   CHECK(false) << "EmitArithOperand: unsupported cast from " << have_mlir << " to " << wanted_mlir_type;

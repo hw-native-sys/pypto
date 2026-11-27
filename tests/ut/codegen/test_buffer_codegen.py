@@ -226,12 +226,14 @@ def test_native_gm_runtime_windows_and_valid_casts_remain_inside_loop(tmp_path):
     source = ir.Var("source", tensor_type, SPAN)
     output = ir.Var("output", tensor_type, SPAN)
     rows = _scalar("rows", DataType.UINT8)
+    unused = ir.Var("unused", tensor_type, SPAN)
+    start = _scalar("start")
     index = _scalar("i")
     column = _scalar("column")
     buffer, allocation = _alloc("buffer", _type(shape=(256, 32), valid=(-1, -1)), [rows, _int(32)])
     loop = ir.ForStmt(
         index,
-        _int(0),
+        start,
         _int(2),
         _int(1),
         [],
@@ -250,13 +252,19 @@ def test_native_gm_runtime_windows_and_valid_casts_remain_inside_loop(tmp_path):
     )
     kernel = ir.Function(
         "kernel",
-        [rows, source, (output, ir.ParamDirection.Out)],
+        [rows, unused, source, start, (output, ir.ParamDirection.Out)],
         [tensor_type],
         ir.SeqStmts([loop, ir.ReturnStmt([output], SPAN)], SPAN),
         SPAN,
         type=ir.FunctionType.AIV,
     )
     text = _emit(ir.Program([kernel], "RuntimeGMWindows", SPAN))
+    # The unused tensor occupies slot 0 but needs no view. Both scalars retain
+    # their relative order after the tensor pointers, including the loop bound.
+    assert "func.func @kernel(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>, %arg2: !pto.ptr<f32>, " in text
+    assert "%arg3: ui8, %arg4: index)" in text
+    assert re.findall(r"pto.make_tensor_view (%arg\d+),", text) == ["%arg1", "%arg2"]
+    assert re.search(r"scf.for %\w+ = %arg4 to ", text)
     loop_position = text.index("scf.for")
     assert text.index("pto.alloc_tile") > loop_position
     partitions = re.findall(r"pto.partition_view [^\n]+", text)
@@ -265,11 +273,9 @@ def test_native_gm_runtime_windows_and_valid_casts_remain_inside_loop(tmp_path):
     for partition in partitions:
         extent = re.search(r"sizes = \[(%\w+),", partition)
         assert extent is not None
-        cast = re.search(rf"{re.escape(extent[1])} = arith.index_cast (%\w+) : i64 to index", text)
+        cast = re.search(rf"{re.escape(extent[1])} = arith\.index_castui (%\w+) : i8 to index", text)
         assert cast is not None
-        widen = re.search(rf"{re.escape(cast[1])} = arith.extui (%\w+) : i8 to i64", text)
-        assert widen is not None
-        assert f"{widen[1]} = builtin.unrealized_conversion_cast %arg2 : ui8 to i8" in text
+        assert f"{cast[1]} = builtin.unrealized_conversion_cast %arg3 : ui8 to i8" in text
         assert text.index(cast[0]) > loop_position
     assert len(_allocations(text)) == 1
     # This checks native syntax and unsigned dataflow, not numerical execution.
@@ -772,8 +778,26 @@ def test_native_unsigned_address_and_valid_operands_use_signless_integer_casts(t
     text = _emit(program, False)
     assert "ui32 to i32" in text
     assert re.search(r"arith\.extui %\w+ : i32 to i64", text)
-    assert re.search(r"arith\.index_cast %\w+ : i64 to index", text)
-    assert not re.search(r"arith\.(extui|index_cast) %\w+ : ui32", text)
+    assert re.search(r"arith\.index_castui %\w+ : i32 to index", text)
+    assert not re.search(r"arith\.(extui|index_castui) %\w+ : ui32", text)
+    _compile_native(tmp_path, text, addressed=True)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "conversion"),
+    [
+        (DataType.INT16, "arith.extsi %arg0 : i16 to i64"),
+        (DataType.UINT64, "builtin.unrealized_conversion_cast %arg0 : ui64 to i64"),
+        (DataType.INDEX, "arith.index_cast %arg0 : index to i64"),
+    ],
+)
+def test_native_buffer_address_uses_i64_operand(tmp_path, dtype, conversion):
+    address = _scalar("address", dtype)
+    _, allocation = _alloc("storage", address=address)
+    text = _emit(_program([allocation], [address]))
+    allocated_address = re.search(r"addr = (%\w+)", text)
+    assert allocated_address is not None
+    assert f"{allocated_address[1]} = {conversion}" in text
     _compile_native(tmp_path, text, addressed=True)
 
 
@@ -789,11 +813,9 @@ def test_native_uint8_valid_extents_preserve_the_high_bit(tmp_path):
     updated_valid = re.search(r"pto\.set_validshape %\w+, %\w+, (%\w+)", text)
     assert allocated_valid is not None and updated_valid is not None
     for extent in (allocated_valid[1], updated_valid[1]):
-        index_cast = re.search(rf"{re.escape(extent)} = arith\.index_cast (%\w+) : i64 to index", text)
+        index_cast = re.search(rf"{re.escape(extent)} = arith\.index_castui (%\w+) : i8 to index", text)
         assert index_cast is not None
-        extension = re.search(rf"{re.escape(index_cast[1])} = arith\.extui (%\w+) : i8 to i64", text)
-        assert extension is not None
-        assert f"{extension[1]} = builtin.unrealized_conversion_cast %arg0 : ui8 to i8" in text
+        assert f"{index_cast[1]} = builtin.unrealized_conversion_cast %arg0 : ui8 to i8" in text
     assert not re.search(r"arith\.index_cast %\w+ : i8 to index", text)
     _compile_native(tmp_path, text, addressed=False)
 

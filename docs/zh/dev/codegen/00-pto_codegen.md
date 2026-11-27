@@ -109,8 +109,8 @@ PTO codegen 和 wrapper 共享 `collect_tensor_shape_dyn_vars`，确定最后一
 
 `GenerateBufferFunction` 在发射前验证显式构造的 Buffer IR。GM 路径支持
 物理形状静态、紧密 ND 布局的二维 FP16/BF16/FP32/INT32/INT8 Tensor 参数，以及规范化的 Tensor
-参数返回值。它复用现有 GM 张量视图前缀和原生“Tensor 在前、标量在后”的
-ABI。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返回值。
+参数返回值。Tile 和 Buffer 共用入口准备逻辑，按 Tensor 在前、其余参数在后的顺序将声明参数映射到原生参数槽，
+保留组内声明顺序，并选择函数体需要的 GM 视图。未使用的 Tensor 仍占用参数槽。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返回值。
 
 `buffer.load` 和 `buffer.store` 将显式窗口发射为 `pto.partition_view`，
 随后发射 `pto.tload` 或 `pto.tstore`。目标、偏移和 valid extent 均来自
@@ -598,75 +598,21 @@ codegen 校验静态等大几何信息、region 固定基地址、
 
 ### 加载操作转换
 
-**PyPTO IR**:
-
-```python
-tile_a = pl.load(tensor_a, [0, 0], [32, 32])
-```
-
-**生成的 MLIR** (两个操作):
-
-```mlir
-# 1. Create partition view
-%3 = pto.partition_view %tensor_view, offsets = [%c0_index, %c0_index],
-                 sizes = [%c32_index, %c32_index]
-                 : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
-
-# 2. Load into tile buffer
-pto.tload ins(%3 : !pto.partition_tensor_view<32x32xf32>)
-          outs(%tile_buf : !pto.tile_buf<loc=vec, ...>)
-```
-
-**关键转换**:
-
-- 张量参数通过 tensor_view 查找
-- 偏移/大小来自 `tile.load` 参数
-- 输出 tile_buf 来自变量的 MemRef, 类型从 TileType 推导
+`tile.load` 使用 IR 中的偏移量和大小，通过 `pto.partition_view` 从张量参数的 GM 视图中选取窗口。
+`pto.tload` 将该窗口读入结果 tile buffer，其存储由 MemRef 指定，类型由 TileType 确定。
 
 ### 存储操作转换
 
-**PyPTO IR**:
-
-```python
-pl.store(tile_c, [0, 0], tensor_out)
-```
-
-**生成的 MLIR**:
-
-```mlir
-# 1. Create partition view for output
-%5 = pto.partition_view %output_view, offsets = [%c0_index, %c0_index],
-                 sizes = [%c32_index, %c32_index]
-                 : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
-
-# 2. Store from tile buffer
-pto.tstore ins(%tile_buf : !pto.tile_buf<loc=vec, ...>)
-           outs(%5 : !pto.partition_tensor_view<32x32xf32>)
-```
+`tile.store` 使用 `pto.partition_view` 选取目标窗口。
+`pto.tstore` 从源 tile buffer 读取数据并写入该窗口。
 
 ### 计算操作
 
 #### 示例: Tile 乘法
 
-PyPTO:
-
-```python
-tile_c = pl.mul(tile_a, tile_b)
-```
-
-MLIR:
-
-```mlir
-pto.tmul ins(%tile_a_buf : !pto.tile_buf<...>,
-             %tile_b_buf : !pto.tile_buf<...>)
-         outs(%tile_c_buf : !pto.tile_buf<...>)
-```
-
-**结果处理**:
-
-- 结果变量的 MemRef 决定输出 tile_buf
-- 输入操作数通过变量名查找解析
-- 所有 `ins`/`outs` 子句包含类型标注
+`tile.mul` 将两个输入变量解析为 tile buffer，供 `pto.tmul` 的 `ins` 子句使用；
+结果的 MemRef 提供 `outs` 子句所需的 buffer。两个子句都标注操作数类型。
+[完整示例](#完整示例) 展示了同一个内核中的两次加载、乘法和存储。
 
 ### 源码位置 (`loc`)
 

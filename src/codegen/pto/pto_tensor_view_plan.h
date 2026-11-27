@@ -45,10 +45,15 @@ struct TensorParameterView {
   std::vector<Stride> strides;
 };
 
-// Plan only entry GM views, in original parameter order. Raw pointers used by
-// runtime workspaces are excluded before any view is emitted.
-std::vector<TensorParameterView> PrepareTensorParameterViews(const ir::Function& func, bool buffer_ir,
-                                                             const std::set<const ir::Var*>& ffts_workspaces);
+struct EntryParameterPlan {
+  // Position in this vector is the native argument index. All declared arguments
+  // keep their ABI slot, including unused tensors and raw workspaces.
+  std::vector<ir::VarPtr> abi_order;
+  std::vector<TensorParameterView> views;
+};
+
+EntryParameterPlan PrepareEntryParameters(const ir::Function& func, bool buffer_ir,
+                                          const std::set<const ir::Var*>& ffts_workspaces);
 
 }  // namespace pypto::codegen
 

@@ -306,7 +306,10 @@ non-parameter GM views, cache-policy/atomic kwargs, and other transfer layouts
 require later recipes and are rejected explicitly.
 
 The initial emitter accepts unsigned scalar values directly as allocation
-addresses, GM offsets, or valid extents, preserving their unsigned value when widening.
+addresses, GM offsets, or valid extents. These operands follow the shared scalar
+conversion rules. A dynamic unsigned extent or offset is bridged to a signless
+integer and converted with `arith.index_castui`. Allocation addresses use `i64`;
+narrow unsigned addresses are zero-extended.
 Unsigned arithmetic and casts other than BOOL-to-integer, index-to-integer,
 and same-width integer conversions require a future native recipe and are rejected
 before emission. For loops require an `INDEX` induction variable and `INDEX` or signed
