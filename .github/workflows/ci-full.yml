@@ -1399,6 +1399,8 @@ jobs:
               --ignore=tests/st/runtime/framework_and_models/test_perf_swimlane.py \
               --ignore=tests/st/runtime/framework_and_models/test_graph_execution.py \
               --ignore=tests/st/runtime/kernel/test_torch_eager.py \
+              --ignore=tests/st/runtime/kernel/test_torch_capture.py \
+              --ignore=tests/st/runtime/kernel/test_torch_interop.py \
               --deselect=tests/st/runtime/framework_and_models/test_jit.py::TestJITExecution::test_persistent_cache_across_processes \
               --device=\$TASK_DEVICE --platform=a2a3"
 
@@ -1414,18 +1416,6 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/framework_and_models/test_jit.py::TestJITExecution::test_persistent_cache_across_processes \
               -v --device=\$TASK_DEVICE --platform=a2a3"
-
-      - name: Test Torch eager execution (isolated pytest invocation)
-        # The parent must stay device-free while fresh children borrow the NPU.
-        # Keep this separate from the direct-device suite for the same reason as
-        # the persistent-cache process test. Optional adapter/device prerequisites
-        # are reported as explicit skips, not as successful numerical execution.
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
-              tests/st/runtime/kernel/test_torch_eager.py \
-              -v -rs --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test paged-attention codegen (numeric compare, in device env)
         # tests/st/codegen runs device-free in the CPU codegen-tests job, but this
@@ -1508,6 +1498,54 @@ jobs:
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --forked"
+
+      - name: Test Torch kernel NPU execution (isolated pytest invocation)
+        # Install torch-npu and build the optional _torch_npu adapter after all
+        # non-Torch-NPU steps so it cannot affect earlier tests. Keep the parent
+        # pytest process device-free for eager and capture child processes, then
+        # run interop in a separate pytest invocation on the same card.
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          source activate.sh
+          TORCH_VER="$(python -c 'import importlib.metadata as m; print(m.version("torch"))')"
+          if command -v uv >/dev/null 2>&1; then
+            uv pip install \
+              --extra-index-url https://download.pytorch.org/whl/cpu \
+              --index-strategy unsafe-best-match \
+              "torch==${TORCH_VER}" 'torch-npu==2.10.0.post2'
+          else
+            pip install \
+              --extra-index-url https://download.pytorch.org/whl/cpu \
+              "torch==${TORCH_VER}" 'torch-npu==2.10.0.post2'
+          fi
+          PYPTO_PKG_DIR="$(python -c 'import pathlib, pypto; print(pathlib.Path(pypto.__file__).resolve().parent)')"
+          NANOBIND_CMAKE_DIR="$(python -m nanobind --cmake_dir)"
+          rm -rf build-torch-npu python/pypto/_torch_npu*.so
+          cmake -S . -B build-torch-npu -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPYPTO_DEBUG_INFO_LEVEL=1 \
+            -DPYPTO_BUILD_TORCH_NPU=ON \
+            -DPython_EXECUTABLE="$(command -v python)" \
+            -Dnanobind_DIR="$NANOBIND_CMAKE_DIR"
+          cmake --build build-torch-npu --target _torch_npu --parallel 16
+          cp -f python/pypto/_torch_npu*.so "$PYPTO_PKG_DIR/"
+          rm -rf build-torch-npu python/pypto/_torch_npu*.so
+          python -c '
+          import torch, torch_npu, pypto._torch_npu
+          assert torch.__version__.startswith("2.10.0"), torch.__version__
+          assert torch_npu.__version__.startswith("2.10.0.post2"), torch_npu.__version__
+          print("torch_npu adapter OK:", torch.__version__, torch_npu.__version__, pypto._torch_npu.__file__)
+          '
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && \
+              python -m pytest \
+                tests/st/runtime/kernel/test_torch_eager.py \
+                tests/st/runtime/kernel/test_torch_capture.py \
+                -v -rs --device=\$TASK_DEVICE --platform=a2a3 && \
+              python -m pytest \
+                tests/st/runtime/kernel/test_torch_interop.py \
+                -v -rs --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Kill orphaned task-submit tasks
         if: always()
