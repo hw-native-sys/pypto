@@ -863,19 +863,16 @@ ScopeOutliner::ScopeOutliner(std::string func_name, const std::unordered_map<con
  * current value — a reference after the last scope (the function's
  * ReturnStmt) resolves to the latest, never a stale intermediate.
  */
-ExprPtr ScopeOutliner::VisitExpr_(const VarPtr& op) {
-  auto it = store_target_renames_.find(op.get());
-  if (it != store_target_renames_.end()) {
-    return it->second;
-  }
-  return IRMutator::VisitExpr_(op);
-}
+ExprPtr ScopeOutliner::VisitExpr_(const VarPtr& op) { return ResolveCallerBinding(op); }
 
-ExprPtr ScopeOutliner::VisitExpr_(const IterArgPtr& op) {
-  // A post-store result replaces a use of the carry, not its header binding or
-  // initializer. Return the replacement before the base visitor rebuilds it.
-  auto it = store_target_renames_.find(op.get());
-  return it != store_target_renames_.end() ? it->second : IRMutator::VisitExpr_(op);
+ExprPtr ScopeOutliner::VisitExpr_(const IterArgPtr& op) { return ResolveCallerBinding(op); }
+
+ExprPtr ScopeOutliner::VisitVarDefinition(const VarPtr& var) {
+  // A definition can introduce a new identity when its type changes. A loop
+  // header also owns its initializer, which may now name an outlined result.
+  if (auto iter_arg = As<IterArg>(var)) return IRMutator::VisitExpr_(iter_arg);
+  if (auto plain_var = As<Var>(var)) return IRMutator::VisitExpr_(plain_var);
+  return IRMutator::VisitVarDefinition(var);
 }
 
 VarPtr ScopeOutliner::ResolveCallerBinding(const VarPtr& var) const {

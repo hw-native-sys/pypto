@@ -1718,5 +1718,62 @@ def test_build_directory_selects_placement_without_forcing_compilation(
     assert len(compile_calls) == 1
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_lower_keeps_view_binding_after_dispatch_predicate(ascend_backend):
+    """A predicate and the next outlined scope both read an existing dynamic view."""
+
+    @jit
+    def entry(
+        x: pl.Tensor[[8, 32], pl.INT32],
+        out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        state = pl.create_tensor([8, 32], pl.FP32)
+        view = pl.tensor.slice(x, [pl.tensor.dim(state, 0), 32], [0, 0])
+        with pl.at(level=pl.Level.CORE_GROUP) as _seed_tid:
+            seed = pl.tile.full([8, 32], dtype=pl.FP32, value=1.0)
+            pl.store(seed, [0, 0], state)
+        with pl.at(level=pl.Level.CORE_GROUP, predicate=(view[0, 0] > 0)):
+            val = pl.load(view, [0, 0], [8, 32])
+            pl.store(pl.cast(val, pl.FP32), [0, 0], out)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            val2 = pl.load(view, [0, 0], [8, 32])
+            pl.store(pl.cast(val2, pl.FP32), [0, 0], out)
+        return out
+
+    lowered = entry.lower(config=RunConfig(backend_type=ascend_backend, execution_mode=ExecutionMode.ONBOARD))
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.SSAForm)
+    props.insert(passes.IRProperty.UseAfterDef)
+    assert not passes.PropertyVerifierRegistry.verify(props, lowered)
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_lower_keeps_view_binding_after_tensor_assemble(ascend_backend):
+    """An ordinary orchestration op and a later outlined call share the view binding."""
+
+    @jit
+    def entry(
+        x: pl.Tensor[[8, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        state = pl.create_tensor([8, 32], pl.FP32)
+        view = pl.tensor.slice(x, [pl.tensor.dim(state, 0), 32], [0, 0])
+        with pl.at(level=pl.Level.CORE_GROUP) as _seed_tid:
+            seed = pl.load(x, [0, 0], [8, 32])
+            pl.store(seed, [0, 0], state)
+        out = pl.tensor.assemble(out, view, [0, 0])
+        with pl.at(level=pl.Level.CORE_GROUP):
+            lhs = pl.load(view, [0, 0], [8, 32])
+            rhs = pl.load(state, [0, 0], [8, 32])
+            pl.store(pl.add(lhs, rhs), [0, 0], out)
+        return out
+
+    lowered = entry.lower(config=RunConfig(backend_type=ascend_backend, execution_mode=ExecutionMode.ONBOARD))
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.SSAForm)
+    props.insert(passes.IRProperty.UseAfterDef)
+    assert not passes.PropertyVerifierRegistry.verify(props, lowered)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

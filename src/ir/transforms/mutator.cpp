@@ -146,7 +146,7 @@ FunctionPtr IRMutator::VisitFunction(const FunctionPtr& func) {
   bool params_changed = false;
   for (size_t i = 0; i < func->params_.size(); ++i) {
     INTERNAL_CHECK_SPAN(func->params_[i], func->span_) << "Function has null param at index " << i;
-    auto new_param_expr = ExprFunctor<ExprPtr>::VisitExpr(func->params_[i]);
+    auto new_param_expr = VisitVarDefinition(func->params_[i]);
     INTERNAL_CHECK_SPAN(new_param_expr, func->span_) << "Function param at index " << i << " mutated to null";
     auto new_param = As<Var>(new_param_expr);
     INTERNAL_CHECK_SPAN(new_param, func->span_)
@@ -194,6 +194,8 @@ FunctionPtr IRMutator::VisitFunction(const FunctionPtr& func) {
                                           func->func_type_, func->level_, func->role_, std::move(new_attrs),
                                           func->requires_runtime_binding_, func->ir_stage_);
 }
+
+ExprPtr IRMutator::VisitVarDefinition(const VarPtr& var) { return ExprFunctor<ExprPtr>::VisitExpr(var); }
 
 ExprPtr IRMutator::VisitExpr(const ExprPtr& expr) { return ExprFunctor<ExprPtr>::VisitExpr(expr); }
 
@@ -643,7 +645,7 @@ DEFINE_UNARY_MUTATOR(Cast)
 StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->var_, op->span_) << "AssignStmt has null var";
   INTERNAL_CHECK_SPAN(op->value_, op->span_) << "AssignStmt has null value";
-  auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->var_);
+  auto new_var_expr = VisitVarDefinition(op->var_);
   auto new_value = ExprFunctor<ExprPtr>::VisitExpr(op->value_);
   INTERNAL_CHECK_SPAN(new_var_expr, op->span_) << "AssignStmt var mutated to null";
   INTERNAL_CHECK_SPAN(new_value, op->span_) << "AssignStmt value mutated to null";
@@ -692,7 +694,7 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
   new_return_vars.reserve(op->return_vars_.size());
   for (size_t i = 0; i < op->return_vars_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->return_vars_[i], op->span_) << "IfStmt has null return_vars at index " << i;
-    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
+    auto new_var_expr = VisitVarDefinition(op->return_vars_[i]);
     INTERNAL_CHECK_SPAN(new_var_expr, op->span_) << "IfStmt return_vars at index " << i << " mutated to null";
     auto new_var = As<Var>(new_var_expr);
     INTERNAL_CHECK_SPAN(new_var, op->span_)
@@ -765,7 +767,7 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->start_, op->span_) << "ForStmt has null start";
   INTERNAL_CHECK_SPAN(op->stop_, op->span_) << "ForStmt has null stop";
   INTERNAL_CHECK_SPAN(op->step_, op->span_) << "ForStmt has null step";
-  auto new_loop_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->loop_var_);
+  auto new_loop_var_expr = VisitVarDefinition(op->loop_var_);
   INTERNAL_CHECK_SPAN(new_loop_var_expr, op->span_) << "ForStmt loop_var mutated to null";
   auto new_loop_var = As<Var>(new_loop_var_expr);
   INTERNAL_CHECK_SPAN(new_loop_var, op->span_) << "ForStmt loop_var is not a Var after mutation";
@@ -784,7 +786,7 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   new_iter_args.reserve(op->iter_args_.size());
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->iter_args_[i], op->span_) << "ForStmt has null iter_args at index " << i;
-    auto new_iter_arg_expr = ExprFunctor<ExprPtr>::VisitExpr(op->iter_args_[i]);
+    auto new_iter_arg_expr = VisitVarDefinition(op->iter_args_[i]);
     INTERNAL_CHECK_SPAN(new_iter_arg_expr, op->span_)
         << "ForStmt iter_args at index " << i << " mutated to null";
     auto new_iter_arg = As<IterArg>(std::static_pointer_cast<const IRNode>(new_iter_arg_expr));
@@ -820,7 +822,7 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   new_return_vars.reserve(op->return_vars_.size());
   for (size_t i = 0; i < op->return_vars_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->return_vars_[i], op->span_) << "ForStmt has null return_vars at index " << i;
-    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
+    auto new_var_expr = VisitVarDefinition(op->return_vars_[i]);
     INTERNAL_CHECK_SPAN(new_var_expr, op->span_)
         << "ForStmt return_vars at index " << i << " mutated to null";
     auto new_var = As<Var>(new_var_expr);
@@ -855,7 +857,7 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
   new_iter_args.reserve(op->iter_args_.size());
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->iter_args_[i], op->span_) << "WhileStmt has null iter_args at index " << i;
-    auto new_iter_arg_expr = ExprFunctor<ExprPtr>::VisitExpr(op->iter_args_[i]);
+    auto new_iter_arg_expr = VisitVarDefinition(op->iter_args_[i]);
     INTERNAL_CHECK_SPAN(new_iter_arg_expr, op->span_)
         << "WhileStmt iter_args at index " << i << " mutated to null";
     auto new_iter_arg = As<IterArg>(std::static_pointer_cast<const IRNode>(new_iter_arg_expr));
@@ -896,7 +898,7 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
   new_return_vars.reserve(op->return_vars_.size());
   for (size_t i = 0; i < op->return_vars_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->return_vars_[i], op->span_) << "WhileStmt has null return_vars at index " << i;
-    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
+    auto new_var_expr = VisitVarDefinition(op->return_vars_[i]);
     INTERNAL_CHECK_SPAN(new_var_expr, op->span_)
         << "WhileStmt return_vars at index " << i << " mutated to null";
     auto new_var = As<Var>(new_var_expr);

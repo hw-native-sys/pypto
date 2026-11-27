@@ -51,6 +51,9 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   StmtPtr VisitStmt(const StmtPtr& stmt) override;
 
  protected:
+  /// Visit a variable where its binding is introduced. By default this uses expression dispatch.
+  virtual ExprPtr VisitVarDefinition(const VarPtr& var);
+
   // Leaf nodes - return as-is by default
   ExprPtr VisitExpr_(const VarPtr& op) override;
   ExprPtr VisitExpr_(const IterArgPtr& op) override;

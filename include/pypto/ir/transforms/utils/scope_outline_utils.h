@@ -193,6 +193,7 @@ class ScopeOutliner : public IRMutator {
    */
   ExprPtr VisitExpr_(const VarPtr& op) override;
   ExprPtr VisitExpr_(const IterArgPtr& op) override;
+  ExprPtr VisitVarDefinition(const VarPtr& var) override;
 
   /**
    * @brief Process SeqStmts to analyze scope outputs using subsequent statements.
