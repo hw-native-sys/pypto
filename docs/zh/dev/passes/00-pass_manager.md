@@ -24,6 +24,19 @@ VF 辅助函数使用同步调用以及现有参数和返回契约。
 - **基于策略的流水线**：预配置的优化级别（`Default`）
 - **不可变变换**：返回新的 IR 节点，不就地修改
 
+## Linx Tile 降级
+
+选择 `BackendType.Linx` 后，流水线依次执行 `InlineFunctions`、`ConvertToSSA`、
+`Simplify`、`NormalizeStmtStructure` 和 `FlattenCallExpr`。
+`OutlineIncoreScopes` 提取计算 kernel。`ConvertTensorToTileOps` 插入 GM 加载和写回，
+保留显式输出参数的绑定。例如，对已有输出执行静态二维 FP32 张量加法，会生成两次
+GM 加载、一次 tile 加法和一次对该输出的写回。
+
+`LowerLinxTiles` 将尚未指定位置的加载结果和新建 tile 放入 Local，并沿 SSA 引用传播存储位置。
+发布操作消费 Local，生成 Shared。广播操作消费 Shared，生成保留原有效区的 Local。
+该 pass 检查每个 tile 操作使用的存储空间，例如加法和写回均需读取 Local。
+最后，`IRVerifier` 检查 InCore 张量算子是否已转换、类型是否匹配，以及变量的定义是否先于使用。
+
 ## IRProperty 系统
 
 ### IRProperty 枚举

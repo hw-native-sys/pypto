@@ -309,7 +309,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
 
 
 def lower(program: _ir_core.Program, *, backend_type: BackendType | None = None) -> _ir_core.Program:
-    """Run the target pass pipeline and return IR. Linx currently performs scalar normalization."""
+    """Run the target pass pipeline and return the lowered IR."""
     return _run_pass_pipeline(program, operation="lower", backend_type=backend_type).transformed_program
 
 

@@ -660,6 +660,10 @@ def auto_tile_matmul_l0() -> Pass:
     buffering. Explicit buffering attributes are preserved.
     """
 
+def lower_linx_tiles() -> Pass:
+    """Place Linx tile producers in Local storage and check tile operand spaces."""
+    ...
+
 def canonicalize_tile_slice() -> Pass:
     """Create a pass that lowers Mat-resident ``tile.slice`` into ``tile.extract``.
 
@@ -1179,6 +1183,7 @@ __all__ = [
     "legalize_tile_cast",
     "legalize_spmd_launches",
     "auto_tile_matmul_l0",
+    "lower_linx_tiles",
     "canonicalize_tile_slice",
     "infer_tile_memory_space",
     "insert_mx_scale_addr",

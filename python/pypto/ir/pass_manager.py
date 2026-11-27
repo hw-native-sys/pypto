@@ -109,6 +109,14 @@ _SCALAR_NORMALIZATION: tuple[PassFactory, ...] = (
 )
 
 
+def _verify_linx_ir() -> passes.Pass:
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.IncoreTileOps)
+    properties.insert(passes.IRProperty.TypeChecked)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    return passes.run_verifier(properties)
+
+
 @unique
 class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
@@ -177,7 +185,14 @@ class PassManager:
         if strategy != OptimizationStrategy.Default:
             raise ValueError(f"Unsupported optimization strategy: {strategy!r}")
         if linx:
-            return _SCALAR_NORMALIZATION
+            return (
+                passes.inline_functions,
+                *_SCALAR_NORMALIZATION,
+                passes.outline_incore_scopes,
+                passes.convert_tensor_to_tile_ops,
+                passes.lower_linx_tiles,
+                _verify_linx_ir,
+            )
         tensor_prefix_passes: tuple[PassFactory, ...] = (
             passes.outline_simt_scopes,
             passes.outline_reg_scopes,

@@ -72,8 +72,8 @@ may not recognize new artifacts containing `Ascend910`. Platform strings
 ## Linx superscalar backend
 
 Select `BackendType.Linx` with `ir.lower(program, backend_type=...)` for IR-only
-lowering. The initial pipeline converts to SSA, simplifies expressions,
-normalizes statement structure, and flattens nested calls. Instruments see the
+lowering. The pipeline lowers InCore tensor addition to GM loads, PE-local arithmetic,
+and a store to the output tensor. Instruments see the
 Linx backend through the active pass context. The process-wide PTO target is
 preserved. For a JIT function, use `fn.lower(config=RunConfig(backend_type=BackendType.Linx))`.
 PTO code generation and runtime launch are unavailable for Linx.

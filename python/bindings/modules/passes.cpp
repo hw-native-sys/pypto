@@ -646,6 +646,8 @@ void BindPass(nb::module_& m) {
              "reduction, and bias-capacity-bounded N-window reloads followed by Mat-to-Bias moves. Other\n"
              "already-L0-sized and unsupported regimes are left untouched;\n"
              "useful deferred cases emit PerfHint diagnostics.");
+  passes.def("lower_linx_tiles", &pass::LowerLinxTiles,
+             "Place Linx tile producers in Local storage and check tile operand spaces.");
   passes.def("canonicalize_tile_slice", &pass::CanonicalizeTileSlice,
              "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"
              "A tile.slice whose result tile is Mem.Mat (e.g. a batch-page slice emitted by\n"

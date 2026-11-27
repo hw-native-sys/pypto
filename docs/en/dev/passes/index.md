@@ -30,6 +30,8 @@ Keep the English and Chinese documentation synchronized.
 | ---- | -------------- |
 | [Pass, PassContext, PassPipeline, and PassManager](00-pass_manager.md) | Organizing and executing passes with property tracking, instrumentation, and strategy-based pipelines |
 
+The [Linx pipeline](00-pass_manager.md#linx-tile-lowering) runs its own tile placement after tensor conversion.
+
 ## Default pipeline
 
 | Order | Pass | What it does |
