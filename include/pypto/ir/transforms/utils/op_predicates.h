@@ -28,6 +28,9 @@ namespace op_predicates {
 /// Callers without a resolved target must conservatively pass is_a2a3=true.
 bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3);
 
+/// Whether a destination-passing load is a dense MX scale transfer.
+bool IsMxScaleGather(const CallPtr& call);
+
 /// Index of the argument a builtin *output-side* op binds its result to.
 ///
 /// These ops do not allocate: they bind a fresh SSA var to a buffer an existing

@@ -424,3 +424,34 @@ snapshot from this actual table. A listed name denotes the restricted recipe
 above, not every form of that logical operator. Tests exercise public lowering,
 binary round trips, BufferIR verification, explicit destination identities, and
 native compilation; they do not substitute for numerical device acceptance.
+
+## Loading MX scales into an existing tile
+
+On A5, `tile.gather_row(dst, src, dst_offset, src_offset, shapes)` loads a
+dense `MX_A_ND` FP8E8M0 source into a window of an existing A/ZZ Mat tile.
+Offsets use `[row, group]` and `transpose` must be `False`. `shapes` and
+`valid_shape` describe the transfer. The result aliases the entire
+destination and each write preserves its other windows. A distributed
+source uses the current rank's local tensor.
+
+The source and destination must be fully valid and packed. Each transfer
+must cover all groups and complete 16×2 scale boxes. Both group offsets
+are zero. The destination row offset is static and aligned to 16. The
+caller ensures a dynamic source row offset is in bounds.
+
+For a B scale assembled from two disjoint 128-row cache pages, load both
+pages as A/ZZ and then use `tile.transpose_view` to obtain the B/NN view
+of the same bytes:
+
+```python
+src = pl.tensor.view(k_scale, [cache_rows, 4], layout=pl.MX_A_ND)
+scale_zz: pl.Tile[
+    [256, 4], pl.FP8E8M0, pl.Mem.Mat,
+    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+] = pl.tile.create([256, 4], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+scale_zz = pl.tile.gather_row(scale_zz, src, [0, 0], [page0 * 128, 0], [128, 4])
+scale_zz = pl.tile.gather_row(scale_zz, src, [128, 0], [page1 * 128, 0], [128, 4])
+right_scale = pl.tile.move(pl.tile.transpose_view(scale_zz), target_memory=pl.Mem.RightScale)
+```
+
+Each `gather_row` lowers to one `MX_A_ND` TLOAD into the destination window.

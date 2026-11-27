@@ -394,22 +394,23 @@ def gather_row(  # noqa: PLR0913
     *,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
 ) -> Call:
-    """Load one GM row directly into a sub-region of an on-chip (Mat/Vec) tile.
+    """Load a GM window directly into a sub-region of an on-chip (Mat/Vec) tile.
 
-    Per-row primitive of the paged-gather lowering: emits ``pto.subview`` (of
-    ``dst``) + ``pto.partition_view`` (of ``src``) + ``pto.tload`` writing
-    GM -> the subview directly (no ``pto.tmov``). DPS — writes into ``dst`` in
-    place.
+    Emits ``pto.subview``, ``pto.partition_view`` and ``pto.tload`` to write
+    into ``dst`` in place. On A5, a packed ``MX_A_ND`` FP8E8M0 source can
+    write complete 16-by-2 scale boxes spanning all groups into an A/ZZ Mat
+    tile with ``transpose=False``. Both operands must be fully valid. MX
+    offsets are ``[row, group]`` with zero group offsets.
 
     Args:
         dst: Destination accumulator tile (Mat or Vec).
-        src: Source tensor in GM (TensorType).
+        src: Source tensor in GM, or a local distributed shard with ``MX_A_ND`` layout.
         dst_offset: ``[row, col]`` offset within ``dst``, or a MakeTuple.
         src_offset: ``[row, col]`` offset within the GM ``src``, or a MakeTuple.
-        shapes: GM row window shape ``[r, c]``, or a MakeTuple. Must be
+        shapes: GM window shape ``[r, c]``, or a MakeTuple. Must be
             compile-time constant.
-        valid_shape: Runtime transfer extent within ``shapes``, or a MakeTuple.
-            May hold runtime ``Scalar[INDEX]`` values. Defaults to ``shapes``.
+        valid_shape: Transfer extent within ``shapes``, or a MakeTuple.
+            Ordinary layouts may use runtime ``Scalar[INDEX]`` values. Defaults to ``shapes``.
         transpose: Place the GM row ``[r, c]`` as an L1 column ``[c, r]``.
         span: Optional source span for debugging (auto-captured if not provided).
 

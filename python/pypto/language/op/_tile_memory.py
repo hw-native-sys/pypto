@@ -395,28 +395,29 @@ def gather_row(  # noqa: PLR0913
     *,
     valid_shape: Sequence[IntLike] | None = None,
 ) -> Tile:
-    """Load one GM row directly into a sub-region of an on-chip tile (DPS).
+    """Load a GM window directly into a sub-region of an on-chip tile.
 
-    Per-row primitive of the paged-gather lowering: DMAs one GM row window
-    straight into ``dst`` at ``dst_offset`` (``pto.subview`` of ``dst`` +
-    ``pto.tload``, ``GM -> on-chip``, no ``pto.tmov``). The caller computes the
-    physical ``src_offset`` (block-table lookup + bias) and the ``dst_offset``
-    slot itself, so arbitrary gather logic stays in the kernel. Writes ``dst``
-    in place, so a loop-carried accumulator is filled row by row and feeds
-    ``pl.matmul`` directly — the tile-level counterpart of
-    ``pypto.language.op.tensor_ops.gather_row``.
+    The caller computes the physical ``src_offset`` and the destination slot.
+    Each call writes into ``dst`` in place and preserves the other windows.
+
+    On A5, a packed ``MX_A_ND`` FP8E8M0 tensor or local distributed shard can
+    fill a window of an A/ZZ Mat tile (row-major block and storage layouts,
+    fractal 32). Both operands must be fully valid. Use ``transpose=False``
+    and ``[row, group]`` offsets with zero group offsets. Static window and
+    transfer shapes must cover all groups and complete 16-by-2 scale boxes.
+    The destination row offset must be static and aligned to 16. The caller
+    must keep a dynamic source row offset in bounds.
 
     Args:
         dst: Destination on-chip accumulator tile (Mat/L1 or Vec/UB).
-        src: Source pool in GM (a ``Tensor``).
+        src: Source pool in GM (a ``Tensor`` or an ``MX_A_ND`` distributed tensor).
         dst_offset: ``[row, col]`` slot within ``dst`` to write.
         src_offset: ``[row, col]`` physical offset within the GM ``src``.
-        shapes: GM row window shape ``[r, c]`` (typically ``[1, size]``).
+        shapes: GM window shape ``[r, c]`` (typically ``[1, size]``).
             Must be compile-time constant.
         valid_shape: How much of that window to actually transfer, defaulting to
-            all of it. May hold runtime ``Scalar`` values, so a dynamic row count
-            leaves the tile's allocation and layout untouched. Not supported
-            together with ``transpose=True``.
+            all of it. Ordinary layouts may use runtime ``Scalar`` values.
+            Requires ``transpose=False``.
         transpose: Place the GM row ``[r, c]`` as an on-chip column ``[c, r]`` —
             fills a matmul ``b_trans`` B-operand without a GM round-trip
             (Mat/L1 only).

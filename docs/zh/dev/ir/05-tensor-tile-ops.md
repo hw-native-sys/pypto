@@ -374,3 +374,30 @@ buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
 列出的名称仅代表上述受限配方，不代表逻辑算子的全部形式。测试覆盖公开流水线
 转换、二进制往返、BufferIR 验证、显式目标身份和原生编译；这些验证不替代设备
 数值验收。
+
+## 加载 MX scale 到已有 tile
+
+在 A5 上，`tile.gather_row(dst, src, dst_offset, src_offset, shapes)` 可将稠密
+`MX_A_ND` FP8E8M0 源窗口加载到已有的 A/ZZ Mat tile。偏移使用 `[row, group]`，
+`transpose` 须为 `False`。`shapes` 和 `valid_shape` 描述本次传输。返回值是整个
+目标 tile 的别名，每次写入保留其他区域。分布式源使用当前 rank 的本地 tensor。
+
+源和目标都必须连续且完整有效。每次传输覆盖全部 group 及完整的 16×2 scale box。
+源和目标的 group 偏移均为零。目标行偏移须静态且对齐到 16。动态源行偏移由调用方
+保证在界内。
+
+对于两个分离的 128 行 K page，可以先加载到同一个 A/ZZ tile，再用
+`tile.transpose_view` 把相同字节解释为 B/NN。
+
+```python
+src = pl.tensor.view(k_scale, [cache_rows, 4], layout=pl.MX_A_ND)
+scale_zz: pl.Tile[
+    [256, 4], pl.FP8E8M0, pl.Mem.Mat,
+    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+] = pl.tile.create([256, 4], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+scale_zz = pl.tile.gather_row(scale_zz, src, [0, 0], [page0 * 128, 0], [128, 4])
+scale_zz = pl.tile.gather_row(scale_zz, src, [128, 0], [page1 * 128, 0], [128, 4])
+right_scale = pl.tile.move(pl.tile.transpose_view(scale_zz), target_memory=pl.Mem.RightScale)
+```
+
+每次 `gather_row` 生成一条 `MX_A_ND` TLOAD，直接写入目标子区间。

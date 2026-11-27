@@ -526,8 +526,21 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   INTERNAL_CHECK_SPAN(!transpose || (vr_const && vc_const), op->span_)
       << "Internal error: tile.gather_row transpose=True requires a static valid_shape";
 
-  std::string dst = codegen.GetCurrentResultTarget();
-  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  // An EvalStmt has no result target. Its write still goes to the buffer
+  // bound to the first operand, whose emitted type may differ from the IR type.
+  const auto dst_var = ir::AsVarLike(op->args_[0]);
+  INTERNAL_CHECK_SPAN(dst_var, op->span_) << "tile.gather_row dst must be a Var or IterArg";
+  const auto input_dst = codegen.LookupVarName(dst_var);
+  const auto input_dst_type = codegen.GetSSATileBufType(input_dst);
+  INTERNAL_CHECK_SPAN(!input_dst.empty() && !input_dst_type.empty(), op->span_)
+      << "Internal error: tile.gather_row dst '" << dst_var->name_hint_ << "' has no bound tile_buf";
+  // Only an assignment owns a result target. An earlier side-effecting
+  // EvalStmt can leave a buffer name in the emitter's result state.
+  const auto result_dst = codegen.GetCurrentResultVar() ? codegen.GetCurrentResultTarget() : std::string{};
+  const auto& dst = result_dst.empty() ? input_dst : result_dst;
+  const auto dst_type = codegen.GetSSATileBufType(dst);
+  INTERNAL_CHECK_SPAN(!dst_type.empty(), op->span_)
+      << "Internal error: tile.gather_row result target '" << dst << "' has no bound tile_buf";
   const auto pto_dst_offset = codegen::GetPtoTileCoordinates(*dst_tile_type, dst_off->elements_);
   std::string row_off = codegen.GetExprAsCode(pto_dst_offset[0]);
   std::string col_off = codegen.GetExprAsCode(pto_dst_offset[1]);
@@ -536,6 +549,14 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // per-row shape/valid.
   const auto dst_space = dst_tile_type->memory_space_.value_or(ir::MemorySpace::Mat);
   auto view_info = codegen::ExtractTileTypeInfo(*dst_tile_type, codegen.GetTypeString(dst_tile_type->dtype_));
+  const auto& source_view = src_tensor_type->tensor_view_;
+  const bool mx_scale = source_view.has_value() && source_view->layout == ir::TensorLayout::MX_A_ND;
+  if (mx_scale) {
+    CHECK_SPAN(codegen.GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_)
+        << "MX_A_ND gather requires A5";
+    CHECK_SPAN(!codegen.IsTileViewName(input_dst) && !codegen.IsTileViewName(dst), op->span_)
+        << "MX_A_ND gather destination must be a packed local Mat allocation";
+  }
 
   // In a boxed (NZ/fractal) layout — i.e. an L1/Mat matmul operand — the inner
   // box has a fixed granularity, and pto.subview requires the *physical* size to
@@ -586,12 +607,10 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::ostringstream sv;
   sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes ["
      << ir::As<ir::ConstInt>(pto_shape[0])->value_ << ", " << ir::As<ir::ConstInt>(pto_shape[1])->value_
-     << "] valid [" << dst_valid_codes[0] << ", " << dst_valid_codes[1] << "]";
-  if (!dst_type.empty() && !view_type.empty()) {
-    sv << " : " << dst_type << " -> " << view_type;
-  }
+     << "] valid [" << dst_valid_codes[0] << ", " << dst_valid_codes[1] << "] : " << dst_type << " -> "
+     << view_type;
   codegen.Emit(sv.str());
-  if (!view_type.empty()) codegen.RegisterTileBufType(dst_view, view_type);
+  codegen.RegisterTileBufType(dst_view, view_type);
 
   // GM source window -> partition_view, then tload into the subview. The
   // partition carries the *transfer extent*, not the static window — same as
@@ -654,9 +673,9 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   }
 
   std::ostringstream tload_line;
-  tload_line << "pto.tload ins(" << src_pview << " : " << partition_type << ") outs(" << dst_view;
-  if (!view_type.empty()) tload_line << " : " << view_type;
-  tload_line << ")";
+  tload_line << "pto.tload ins(" << src_pview << " : " << partition_type << ") outs(" << dst_view << " : "
+             << view_type << ")";
+  if (mx_scale) tload_line << " {layout = #pto.layout<mx_a_nd>}";
   codegen.Emit(tload_line.str());
   return "";
 }
