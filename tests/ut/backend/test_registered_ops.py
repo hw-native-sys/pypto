@@ -46,6 +46,8 @@ def test_backend_inventory_preserves_architecture_exclusions():
             "tile.matmul_mx",
             "tile.matmul_mx_acc",
             "tile.matmul_mx_bias",
+            "tile.bind_scale_addr",
+            "tile.extract_into",
             "tile.tget_scale_addr",
             "tile.tquant_mx_raw",
             "tile.tmov_x2zz",

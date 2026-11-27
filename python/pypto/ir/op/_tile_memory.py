@@ -918,6 +918,34 @@ def extract(
     )
 
 
+def bind_scale_addr(
+    payload: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    *,
+    target_memory: MemorySpace,
+    span: Span | None = None,
+) -> Call:
+    """Build the compiler-internal address binding for an empty MX scale tile."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.bind_scale_addr",
+        [payload, _to_make_tuple(shape, actual_span), _to_make_tuple(valid_shape, actual_span)],
+        {"target_memory": target_memory},
+        actual_span,
+    )
+
+
+def extract_into(
+    dst: Expr, src: Expr, index_row: int | Expr, index_col: int | Expr, span: Span | None = None
+) -> Call:
+    """Build the compiler-internal extraction into a bound MX scale tile."""
+    actual_span = _get_span_or_capture(span)
+    row_expr = _normalize_expr(index_row, actual_span, int_dtype=DataType.INDEX)
+    col_expr = _normalize_expr(index_col, actual_span, int_dtype=DataType.INDEX)
+    return _ir_core.create_op_call("tile.extract_into", [dst, src, row_expr, col_expr], {}, actual_span)
+
+
 def reshape(
     tile: Expr,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,

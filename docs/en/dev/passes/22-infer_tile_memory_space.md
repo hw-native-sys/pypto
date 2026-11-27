@@ -135,6 +135,8 @@ This is a conservative first subset of the broader residency behavior requested 
 
 Eligibility begins with private compiler provenance. `ConvertTensorToTileOps` marks every generated `GM → Mat` bridge load; the marker survives printing, flattening, and L0 auto-tiling until this phase consumes it. Phase 4 then proves that a marked load participates in either the exact stationary prefix or the read-only matmul panel fanout described above. A user-authored `tile.load(..., target_memory=Mat)` is not marked and is never hoisted by this optimization. This boundary keeps explicit tile programs under user control.
 
+For MX matmul, the panel fanout also recognizes staging into `LeftScale` and `RightScale` when the staged tiles feed the corresponding scale operands. The pass can hoist the whole Mat scale panel load while keeping its L0 scale staging inside the loop.
+
 The initial legality rules are intentionally strict:
 
 - the loop is `Sequential`, has constant bounds, positive step, and at least one iteration;

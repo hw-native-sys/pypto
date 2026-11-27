@@ -30,6 +30,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -383,13 +384,8 @@ REGISTER_OP("tile.matmul_mx_bias")
       return DeduceTileMatMulMxBiasType(args, kwargs, "tile.matmul_mx_bias");
     });
 
-TypePtr DeduceTileTGetScaleAddrType(const std::vector<ExprPtr>& args,
-                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                    const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name
-                          << " requires exactly 2 arguments (dst_scale, src), but got " << args.size();
-  auto dst_type = As<TileType>(args[0]->GetType());
-  auto src_type = As<TileType>(args[1]->GetType());
+static void CheckScaleAddressTypes(const TileTypePtr& dst_type, const TileTypePtr& src_type,
+                                   const std::string& op_name) {
   CHECK(dst_type) << "The operator " << op_name << " requires dst_scale to be a TileType";
   CHECK(src_type) << "The operator " << op_name << " requires src to be a TileType";
   // PTOAS treats ui8+loc=scaling as Fixpipe Scaling; LeftScale/RightScale must already
@@ -456,10 +452,6 @@ TypePtr DeduceTileTGetScaleAddrType(const std::vector<ExprPtr>& args,
   } else {
     apply_right_scale_shape();
   }
-
-  // Address-binding op: result reuses dst_scale tile type (same shape/dtype/space).
-  return std::make_shared<TileType>(dst_type->shape_, dst_type->dtype_, /*memref=*/std::nullopt,
-                                    dst_type->tile_view_, dst_type->memory_space_);
 }
 
 REGISTER_OP("tile.tget_scale_addr")
@@ -478,8 +470,46 @@ REGISTER_OP("tile.tget_scale_addr")
     // to analyses that order accesses.
     .set_arg_effect(0, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>&) {
+      CHECK(args.size() == 2) << "tile.tget_scale_addr requires dst_scale and src";
+      auto dst_type = As<TileType>(args[0]->GetType());
+      CheckScaleAddressTypes(dst_type, As<TileType>(args[1]->GetType()), "tile.tget_scale_addr");
+      return std::make_shared<TileType>(dst_type->shape_, dst_type->dtype_, std::nullopt,
+                                        dst_type->tile_view_, dst_type->memory_space_);
+    });
+
+REGISTER_OP("tile.bind_scale_addr")
+    .set_op_category("TileOp")
+    .set_description("Create an MX scale destination at the address derived from its payload tile")
+    .add_argument("payload", "Resolved Left or Right MX payload tile")
+    .add_argument("shape", "Physical shape of the scale destination")
+    .add_argument("valid_shape", "Valid shape of the scale destination")
+    .set_attr<MemorySpace>("target_memory")
+    .set_output_memory_from_kwarg("target_memory")
+    // The binding changes a tile handle without accessing payload or scale bytes.
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileTGetScaleAddrType(args, kwargs, "tile.tget_scale_addr");
+      CHECK(args.size() == 3) << "tile.bind_scale_addr requires payload, shape and valid_shape";
+      auto shape = As<MakeTuple>(args[1]);
+      auto valid = As<MakeTuple>(args[2]);
+      CHECK(shape && valid && shape->elements_.size() == 2 && valid->elements_.size() == 2)
+          << "tile.bind_scale_addr requires 2D shape and valid_shape tuples";
+      for (const auto& dim : shape->elements_) {
+        auto extent = As<ConstInt>(dim);
+        CHECK(extent && extent->value_ > 0) << "tile.bind_scale_addr requires positive static dimensions";
+      }
+      const auto space = GetKwargOr(kwargs, "target_memory", MemorySpace::Mat);
+      CHECK(space == MemorySpace::LeftScale || space == MemorySpace::RightScale)
+          << "tile.bind_scale_addr requires a LeftScale or RightScale destination";
+      TileView view;
+      view.valid_shape = valid->elements_;
+      tile_view_semantics::SetTileLayout(view,
+                                         tile_view_semantics::GetImplicitTileLayout(shape->elements_, space));
+      auto result =
+          std::make_shared<TileType>(shape->elements_, DataType::FP8E8M0, std::nullopt, view, space);
+      CheckScaleAddressTypes(result, As<TileType>(args[0]->GetType()), "tile.bind_scale_addr");
+      return result;
     });
 
 }  // namespace ir
