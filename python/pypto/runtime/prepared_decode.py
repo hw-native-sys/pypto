@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -71,13 +71,12 @@ def _host_key(value: torch.Tensor) -> tuple[Any, ...]:
 
 
 def _binding_key(value: Any) -> Any:
-    cls: type[Any] = type(value)
-    if cls in (DeviceTensor, StackedDeviceTensor):
+    if type(value) is DeviceTensor or type(value) is StackedDeviceTensor:
         return id(value)
-    if cls is torch.Tensor:
+    if type(value) is torch.Tensor:
         return _host_key(value)
-    if cls is list:
-        items: list[Any] = value
+    if type(value) is list:
+        items = cast(list[Any], value)
         if all(type(item) is torch.Tensor for item in items):
             return tuple(_host_key(item) for item in items)
     raise TypeError("Unsupported prepared decode binding")
