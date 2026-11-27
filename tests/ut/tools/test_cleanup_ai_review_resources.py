@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +24,10 @@ LABEL = "org.pypto.codex-review."
 
 
 @pytest.fixture
-def cleaner():
+def cleaner(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / ".github/scripts"))
     spec = importlib.util.spec_from_file_location(
-        "cleanup_codex_review_resources", ROOT / ".github/scripts/cleanup_codex_review_resources.py"
+        "cleanup_ai_review_resources", ROOT / ".github/scripts/cleanup_ai_review_resources.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -54,10 +56,11 @@ def host(cleaner, monkeypatch):
             assert ("--all" in args) == (kind == "container")
             if "--quiet" in args:
                 return "\n".join(state[kind])
-            assert args[-1] == cleaner.RESOURCE_FORMAT
             key, expected = args[args.index("--filter") + 1].removeprefix("label=").split("=")
+            prefix = key.removesuffix("repository")
+            assert args[-1] == cleaner.RESOURCE_FORMAT.replace(LABEL, prefix)
             return "\n".join(
-                json.dumps([identity, labels.get(LABEL + "run", ""), labels.get(LABEL + "attempt", "")])
+                json.dumps([identity, labels.get(prefix + "run", ""), labels.get(prefix + "attempt", "")])
                 for identity, labels in state[kind].items()
                 if labels.get(key) == expected
             )
@@ -80,16 +83,64 @@ def add_attempt(host, run="100", attempt="1", *, status="completed", repository=
         "id": int(run),
         "run_attempt": int(attempt),
         "repository": {"id": int(repository), "full_name": "owner/repo"},
-        "path": ".github/workflows/codex-review.yml",
+        "path": ".github/workflows/ai-review.yml",
         "status": status,
         "conclusion": "cancelled",
     }
 
 
-@pytest.mark.parametrize("conclusion", ["cancelled", "failure", "success", "timed_out"])
-def test_completed_attempt_releases_containers_before_networks(cleaner, host, conclusion):
+def test_gemini_cancellation_finishes_during_launcher_cleanup(cleaner, host, monkeypatch):
     add_attempt(host)
-    host["runs"][("100", "1")]["conclusion"] = conclusion
+    labels = {
+        "org.pypto.gemini-review.repository": "42",
+        "org.pypto.gemini-review.run": "100",
+        "org.pypto.gemini-review.attempt": "1",
+    }
+    host["container"].update({"gemini": labels, "sidecar": labels})
+    host["network"].update(
+        {
+            "private": labels,
+            "shared": {},
+            "other-attempt": dict(labels, **{"org.pypto.gemini-review.attempt": "2"}),
+        }
+    )
+    docker = cleaner.command
+    attempts = {"sidecar": 0, "private": 0}
+
+    def racing_docker(*args):
+        identity = args[-1]
+        if args[2] == "rm" and identity in attempts:
+            attempts[identity] += 1
+            if identity == "sidecar":
+                if attempts[identity] == 2:
+                    del host["container"][identity]  # The launcher finished the concurrent removal.
+                raise subprocess.CalledProcessError(1, args, stderr="container removal in progress")
+            if attempts[identity] == 1:
+                raise subprocess.CalledProcessError(1, args, stderr="network has active endpoints")
+        return docker(*args)
+
+    monkeypatch.setattr(cleaner, "command", racing_docker)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    cleaner.reconcile("owner/repo", "42", provider="gemini", current_attempt=("100", "1"))
+    assert attempts == {"sidecar": 2, "private": 2}
+    assert host["removed"] == [("container", "gemini"), ("network", "private")]
+    assert set(host["container"]) == {"container-100-1"}
+    assert set(host["network"]) == {"network-100-1", "shared", "other-attempt"}
+    assert all(call[0] != "gh" for call in host["calls"])
+
+
+@pytest.mark.parametrize(
+    "conclusion,workflow",
+    [
+        ("cancelled", "codex-review.yml"),
+        ("failure", "ai-review.yml"),
+        ("success", "ai-review-retarget.yml"),
+        ("timed_out", "ai-review-retarget.yml@refs/heads/main"),
+    ],
+)
+def test_completed_attempt_releases_containers_before_networks(cleaner, host, conclusion, workflow):
+    add_attempt(host)
+    host["runs"][("100", "1")].update(conclusion=conclusion, path=f".github/workflows/{workflow}")
     cleaner.reconcile("owner/repo", "42")
     assert host["removed"] == [("container", "container-100-1"), ("network", "network-100-1")]
     cleaner.reconcile("owner/repo", "42")  # Cleanup is idempotent.
@@ -130,7 +181,8 @@ def test_unverifiable_owner_aborts_before_any_removal(cleaner, host, error):
         {"run_attempt": 2},
         {"repository": {"id": 43, "full_name": "owner/repo"}},
         {"repository": {"id": 42, "full_name": "other/repo"}},
-        {"path": ".github/workflows/ci.yml"},
+        {"path": ".github/workflows/codex-review-cleanup.yml"},
+        {"path": None},
     ],
 )
 def test_wrong_github_identity_never_authorizes_removal(cleaner, host, change):
@@ -179,6 +231,7 @@ def test_failed_removal_rechecks_existence(cleaner, monkeypatch, kind, still_exi
         return "abc123" if still_exists else ""
 
     monkeypatch.setattr(cleaner, "command", command)
+    monkeypatch.setattr(cleaner, "REMOVAL_RETRY_SECONDS", 0)
     if still_exists:
         with pytest.raises(subprocess.CalledProcessError):
             cleaner.remove(kind, "abc123")
@@ -188,7 +241,7 @@ def test_failed_removal_rechecks_existence(cleaner, monkeypatch, kind, still_exi
 
 @pytest.fixture
 def workflow():
-    return yaml.safe_load((ROOT / ".github/workflows/codex-review.yml").read_text())
+    return yaml.safe_load((ROOT / ".github/workflows/ai-review.yml").read_text())
 
 
 @pytest.mark.parametrize("docker_fails", [False, True])
@@ -250,7 +303,7 @@ def test_workflow_records_identities_and_loads_trusted_cleaner(workflow):
     assert names.index("Remove review containers and network") < names.index("Remove review checkout")
     assert job["permissions"]["actions"] == "read"
     review = steps["Review in an isolated container"]["run"]
-    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/cleanup_codex_review_resources.py"' in review
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/cleanup_ai_review_resources.py"' in review
     assert review.index('python "$resource_cleaner"') < review.index("docker network create")
     # Every ephemeral container creation carries ownership, including session helpers.
     assert review.count('"${resource_labels[@]}"') == 6

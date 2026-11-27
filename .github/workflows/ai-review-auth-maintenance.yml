@@ -1,0 +1,96 @@
+name: AI Review Auth Maintenance
+
+on:
+  # Refresh both reviewer accounts outside any PR workspace.
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  auth-maintenance:
+    name: codex-auth-maintenance
+    if: (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true'
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 10
+    permissions: {}
+
+    steps:
+      - name: Refresh persistent Codex auth
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          codex_home=/home/ci-runner/.codex-ci
+          auth_file="$codex_home/auth.json"
+          auth_lock="$codex_home/auth.lock"
+          workdir=$(mktemp -d "$RUNNER_TEMP/codex-auth-refresh.XXXXXX")
+          log="$workdir/codex-auth-refresh.log"
+
+          cleanup() {
+            find "$workdir" -mindepth 1 -delete >/dev/null 2>&1 || true
+            rmdir "$workdir" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          if [ ! -f "$auth_file" ] || [ -L "$auth_file" ]; then
+            echo "Codex auth file is missing or is not a regular file" >&2
+            exit 1
+          fi
+          if [ -L "$auth_lock" ]; then
+            echo "Codex auth lock must not be a symbolic link" >&2
+            exit 1
+          fi
+
+          exec 9>"$auth_lock"
+          flock --exclusive 9
+          cd "$workdir"
+
+          # This fixed, trusted prompt runs without a repository or inherited
+          # Actions credentials. Codex refreshes auth.json in place if needed.
+          if ! env -i \
+            HOME=/home/ci-runner \
+            PATH=/home/ci-runner/.local/bin:/home/ci-runner/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
+            CODEX_HOME="$codex_home" \
+            HTTP_PROXY=http://127.0.0.1:7895 \
+            HTTPS_PROXY=http://127.0.0.1:7895 \
+            ALL_PROXY=http://127.0.0.1:7895 \
+            NO_PROXY=localhost,127.0.0.1,::1 \
+            codex \
+              --model gpt-6.1-sol \
+              --config 'model_reasoning_effort="low"' \
+              --sandbox read-only \
+              --ask-for-approval never \
+              exec --skip-git-repo-check \
+              'Reply with the single word OK. Do not use tools.' \
+              >/dev/null 2>"$log"
+          then
+            echo "Codex auth maintenance failed; details withheld because the log may contain credentials" >&2
+            exit 1
+          fi
+
+          jq --exit-status \
+            '.auth_mode == "chatgpt" and
+             (.tokens.access_token // "") != "" and
+             (.tokens.refresh_token // "") != "" and
+             (.last_refresh // "") != ""' \
+            "$auth_file" >/dev/null
+
+  gemini-auth-maintenance:
+    if: (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true'
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted Gemini session manager
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Refresh persistent Gemini authentication
+        run: python .github/scripts/run_gemini_review.py auth-maintenance --model gemini-4-neon-high

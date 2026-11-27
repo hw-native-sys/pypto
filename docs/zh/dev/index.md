@@ -137,7 +137,7 @@ skipped 检查。公共准备和 lint 任务以 `ci-full.yml` 为源，运行
 发布器同时接受拆分前 `ci.yml` 和拆分后 `ci-full.yml` 创建的 full 运行，并校验各自的
 工作流 ID。旧 run ID 仍可补写状态，原生 rerun 继续使用原工作流。跨工作流的新旧请求
 按原始创建时间比较，不使用互相独立的运行序号。自动 lint 运行不能发布 full 成功状态。
-main push 和不填写 PR 输入的手动运行使用 `CI Full`；Daily CI 和 Codex Review 的策略不变。
+main push 和不填写 PR 输入的手动运行使用 `CI Full`；Daily CI 和 AI Review 的策略不变。
 已生成的历史 skipped 检查不会被删除，新运行使用拆分后的清晰列表。`ci.yml` 的身份和 lint
 任务名称保持不变，使部署这个拆分的 PR 也能通过旧版 main 控制器复用 lint。
 
@@ -229,7 +229,7 @@ attempt 的状态仍会保留。较新 attempt 必须通过对应轮次的元数
 外部 `pr-rerun` 服务保持不变：仍可重跑符合条件的普通 PR CI，但不能发现和
 授权这些手动调度的 full 运行。
 
-`main` push、不含 PR 参数的手动 CI、Daily CI 和 Codex Review 保留原有策略。
+`main` push、不含 PR 参数的手动 CI、Daily CI 和 AI Review 保留原有策略。
 手动 PR 参数主要供评论处理器使用；四个参数均留空时，对 main 执行 CI。
 
 ### 管理员启用步骤
@@ -261,11 +261,16 @@ webhook 地址或服务升级。
 
 ## 自动 PR 审查
 
-`Codex Review` GitHub Actions 工作流仅审查目标分支为 `main` 的非草稿 PR，在其创建、重新打开、更新或标记为
+`AI Review` GitHub Actions 工作流仅审查目标分支为 `main` 的非草稿 PR，在其创建、重新打开、更新或标记为
 可审查（ready for review）时进行审查。工作流定义取自主分支的受信任版本，将 PR
 head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-hosted job）发布结果。
+这些 PR 事件创建四个检查。`prepare` 确认 PR 可审查后，`codex-review` 和
+`gemini-review` 并行运行，共用的 `publish` 任务将各自成功的结果发布到被审查的提交。
+两个模型都读取完整源码、从 merge base 到 head 的 diff 和本次 PR 讨论。两个模型均通过且 PR 满足审批条件时，
+`github-actions[bot]` 提交一份 **AI Review** 批准。Gemini 的反馈标为 **Gemini Review**，
+Codex 发现的问题标为 **Codex Review**。
 
-位置通过 diff 校验的问题会发布为行级审查评论，可以独立回复和标记解决。
+任一模型发现的问题在位置通过 diff 校验后会发布为行级审查评论，可以独立回复和标记解决。
 位于 diff 之外、没有位置或位置无效的问题会保留在审查总结中。diff 之外的
 已报告位置会在信息可用时链接到被审查的 head 或 merge-base 提交。可选的位置
 元数据请求失败时，问题仍保留在总结中，不附加行级锚点或不可用的链接。同一提交上，本工作流
@@ -276,8 +281,8 @@ head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-
 
 每轮审查都会获取当前 PR 描述、普通对话评论、review 正文以及全部行内讨论和回复，
 包括已解决（resolved）和过期（outdated）状态。这些内容作为审查证据，不能改变审查
-策略。Codex 必须结合专家解释和当前代码重新评估有争议的问题，并解释仍然存在的
-分歧。重复但仍有效的问题可以引用已有 Codex 讨论线程，不再创建重复行内评论；
+策略。两个模型都必须结合专家解释和当前代码重新评估有争议的问题，并解释仍然存在的
+分歧。重复但仍有效的问题可以引用同一模型先前的行级讨论线程，不再创建重复行内评论；
 该问题仍会阻止自动批准。模型根据历史讨论判断语义是否相同；发布器只接受当前 PR
 中由工作流机器人创建的根评论，并验证文件相同，或 PR 文件元数据明确记录旧评论
 所在文件已重命名为当前问题所在文件，不要求行号或 diff 侧相同。
@@ -292,25 +297,24 @@ PR 作者或具有 write、maintain、admin 权限的协作者可以在没有新
 （前面可以附上解释）：
 
 ```text
-@pypto-codex review
+/ai-review
 ```
 
 引用或代码块中的命令、编辑已有评论、机器人评论、普通 issue 评论以及其他用户
 的命令不会触发审查。引用文本与命令之间需要留一个空行；在该边界之前，
 即使后续行省略了 `>` 标记，也不会触发命令。行内回复会作为上下文读取，但不会触发工作流；请在
-Conversation 中发送命令。命令由 Actions 识别，不需要名为 `pypto-codex` 的
-GitHub 账号，也不会调用独立的 `@codex` Cloud 集成。
+Conversation 中发送命令。Actions 也支持原有的 `@pypto-codex review` 命令。
 
-评论触发的运行会先查找属于当前 PR、head 提交及目标分支的、可验证的
-`pull_request_target` Codex Review 运行。已排队或正在执行的运行会被复用；
+评论触发的运行会先查找 `AI Review` 或 `AI Review Retarget` 创建的
+`pull_request_target` 运行，并验证它对应当前 PR、head 提交及目标分支。已排队或正在执行的运行会被复用；
 已完成的运行会重跑**全部任务**（包括需要重新评估时的成功运行）。这样会更新
 PR 原有的 Actions 检查，并在同一次 attempt 中重新生成上下文和结果产物。
 评论本身仍会产生一个独立的短路由运行，其 Actions summary 会链接到选中的
 PR 运行。同一个 PR 的准备任务会串行执行，最多保留 100 个等待中的准备任务；
 队列已满时，新到达的任务会被取消。
 
-仓库需要配置 `CODEX_REVIEW_RERUN_TOKEN` secret：使用仅限本仓库、具有
-**Actions: write** 权限的专用细粒度 PAT。它只用于评论命令的可信准备步骤，
+将仓库 secret `AI_REVIEW_RERUN_TOKEN` 设为仅限本仓库、具有 **Actions: write** 权限的细粒度 PAT。
+未设置时会读取原有的 `CODEX_REVIEW_RERUN_TOKEN`。该 token 只用于评论命令的可信准备步骤，
 不会传入 PR checkout 或审查容器。缺少凭据或 API 请求失败会明确报错，
 避免静默保留旧的 PR 检查状态。只读查询使用具有 **Actions: read** 和 **Checks: read** 权限的
 `GITHUB_TOKEN`。
@@ -323,17 +327,18 @@ PR 运行。同一个 PR 的准备任务会串行执行，最多保留 100 个�
 也不会回退到独立审查。小型身份产物保留
 30 天，完整讨论快照仍只保留一天；旧运行可以通过未过期的讨论快照验证。
 若 GitHub 允许重跑的 30 天窗口内没有可验证的运行，则回退为独立审查，
-并明确提示它不会替换 PR 原有的 Actions 检查。重跑使用原运行的工作流版本，
-不会自动升级为新合并的工作流代码。
+并明确提示它不会替换 PR 原有的 Actions 检查。重跑使用原运行的工作流版本。
+审查命令跳过改名前仅使用 Codex 的运行。没有匹配的双模型运行时，命令会启动独立的 AI Review。
 
-对话记录（rollout）和 Codex 会话索引保存在专用 runner 的两个 Docker 卷中，
-按目标仓库 ID 和 PR 编号隔离。后续运行通过 `codex exec resume <session-id>`
-恢复准确的主会话；只有审查完整结束且结果校验通过后才更新会话检查点。凭据与配置仍是临时的。更换 runner 或删除这两个卷后，会使用
-完整的当前 GitHub 讨论开始新会话。复用会话可以保留之前的分析并可能利用提示词
-缓存，但不保证减少计费 token；长历史仍可能被压缩。每轮仍检查完整的当前 PR diff。
-关闭 PR 时会删除 `pypto-codex-sessions-<repository-id>-<pr-number>` 卷及其
-`-index` 配套卷，无论是否合并，也适用于草稿、机器人创建的 PR 和已禁用审查的情况。
-清理与审查共用 runner 锁。创建或恢复卷之前，可信宿主机查询会检查当前 PR 状态、
+每个模型在专用 runner 上分别使用两个 Docker 卷，按目标仓库 ID 和 PR 编号保存对话和检查点。
+Codex 通过 `codex exec resume` 恢复准确的根会话，Gemini 通过 `agy --conversation` 恢复保存的
+`conversation_id`。受信任的宿主机在更新检查点前校验实际返回的 ID。每轮都审查完整 diff、源码和最新讨论。
+更换 runner 或丢失持久卷后，审查会使用当前快照重新开始。
+
+关闭 PR 时，`AI Review Cleanup` 为两个模型分别删除
+`pypto-<provider>-sessions-<repository-id>-<pr-number>` 卷及其 `-index` 配套卷，
+无论是否合并，也适用于草稿、机器人创建的 PR 和已禁用审查的情况。
+每个模型的清理、审查和登录维护共用各自的 runner 锁。创建或恢复卷之前，可信宿主机查询会检查当前 PR 状态、
 head 和最近一次关闭事件；卷标签记录该关闭事件，使重新打开的 PR 开始新会话，
 延迟到达的清理保留新会话并删除旧卷。排队的审查发现 PR 已关闭、变为草稿或
 head 已更新时，会跳过审查和产物发布。GitHub 状态仍可能在读取后变化；排队的
@@ -351,10 +356,10 @@ Shell trap 和独立的 `always()` 步骤会删除本次尝试的容器、私有
 Runner 故障可能阻止 `always()` 步骤执行，下一次在同一宿主机启动的审查会回收
 遗留 Docker 资源，但不会回收宿主机故障遗留的临时凭据文件。
 
-管理员通过仓库 Actions 变量 `CODEX_REVIEW_ENABLED` 启用或禁用审查。将其设为
-`true` 即可启用；删除该变量或设为其他值可以立即禁用。关闭事件触发的会话清理仍保持启用。
+仓库 Actions 变量 `AI_REVIEW_ENABLED` 设为 `true` 时启用审查，设为 `false` 时禁用审查。
+未设置时会读取原有的 `CODEX_REVIEW_ENABLED`。关闭 PR 时均会清理会话。
 
-审查任务（review job）需要标签为 `Linux`、`ARM64` 和 `cpu-codex` 的专用自托管
+两个审查任务（review job）都需要标签为 `Linux`、`ARM64` 和 `cpu-codex` 的专用自托管
 运行器（self-hosted runner）。以下资源由宿主机管理，不取自 PR：
 
 - GitHub CLI（`gh`），用于可信宿主机状态检查；其只读 token 不会传入模型容器
@@ -364,6 +369,35 @@ Runner 故障可能阻止 `always()` 步骤执行，下一次在同一宿主机�
 - 监听 relay 端口 `17895` 且健康的 `pypto-codex-proxy-relay` 容器
 - 仅监听 loopback 的 mixed proxy `127.0.0.1:7895`
 
+Gemini 使用 runner 上已安装的 `~/.local/share/pypto-gemini-review/run`。启用前部署以下两个命令：
+
+```text
+run review-session --model MODEL --effort high --session-volume VOLUME [--conversation UUID] INPUT_DIR RESULTS_DIR
+run auth-maintenance --model MODEL
+```
+
+工作流选择 `gemini-4-neon-high` 和 high 推理强度。启动脚本沿用非 root 容器、临时 Google OAuth 副本、
+代理和固定镜像 `localhost:5000/pypto-gemini-review@sha256:886e02ba2f1612d52f7c4ec76ff8b6d25e1b8c586be90ee3c006fcf52af0b99e`。
+将输入目录的 `workspace`、`discussion.json`、`schema.json`、`pr.diff` 分别只读挂载到
+`/workspace`、`/review-discussion.json`、`/review-schema.json`、`/pr.diff`。
+runner 校验授权提交的完整 Git 对象，检出时禁用钩子，将仓库符号链接还原为记录目标的文本。
+指定的会话卷只保存当前 PR 的 Gemini 对话数据。独立检查点卷、持久登录态、其他 PR 的会话和 GitHub 凭据留在模型容器外。
+仅为每次运行新建的临时容器和专用网络设置 `org.pypto.gemini-review.` 前缀的
+`repository`、`run`、`attempt` 标签，分别取自启动器环境的 `GITHUB_REPOSITORY_ID`、`GITHUB_RUN_ID`、`GITHUB_RUN_ATTEMPT`。
+
+把受信任的 `INPUT_DIR/prompt.txt` 传给 `agy -p`，原样传入模型、推理强度、
+`--output-format json` 和 `--json-schema /review-schema.json`。从可信配置启动，禁用 PR 自带的指令、技能和命令。
+续聊时传入指定 UUID。原生 stdout 存入 `RESULTS_DIR/result.json`，stderr 单独私有保存，退出码原样返回。
+驱动校验 `SUCCESS`、会话 ID 和 `structured_output`，只上传提取的 `response.txt`。CLI 失败最多尝试三次。
+原有的 `run review` 可继续用于独立 diff 审查。原生响应格式见 [Antigravity CLI 无交互模式文档](https://antigravity.google/docs/cli/headless/)。
+
+部署验收使用独立测试卷和全新容器。同一 PR 恢复首轮会话并复述上轮随机值，换一个 PR 验证隔离；
+另验证模型能结合源文件和讨论给出带行号的问题，以及登录维护在无 PR 数据时可独立执行。
+在测试审查运行期间，使用同一组运行标识执行一次 `cleanup_ai_review_resources.py --current-gemini`。
+确认本次容器和专用网络已删除、会话卷仍在、共享代理仍然健康。遇到并发删除或网络端点正在脱离时，
+清理脚本会按原 Docker ID 重试，重试窗口为 20 秒。
+如 Google 要求重新交互授权，在 SSH 终端执行 `~/.local/share/pypto-gemini-review/run login`。
+
 `.github/scripts/` 中的独立 CI 辅助脚本支持 Python 3.8 及更新版本。
 脚本延迟求值类型注解，避免导入时依赖 Python 3.9 的内置泛型或 Python 3.10 的联合类型
 运算符。该兼容范围仅限这些宿主机脚本；PyPTO 本身仍要求 Python 3.10 及更新版本。
@@ -371,7 +405,7 @@ Runner 故障可能阻止 `always()` 步骤执行，下一次在同一宿主机�
 辅助脚本测试检查。审查工作流使用宿主机解释器，不安装 Python，也不依赖审查容器内的
 Python 版本。
 
-每次审查都将 PR 的精确 head 检出到唯一目录中的全新完整 Git 仓库，不复用运行器
+每次 Codex 审查都将 PR 的精确 head 检出到唯一目录中的全新完整 Git 仓库，不复用运行器
 缓存的对象库。启动容器前，宿主机获取 base、head 和可信工作流提交的完整历史，
 拒绝浅克隆（shallow clone）和部分克隆（partial clone），验证可达对象齐全，并生成
 merge base 到 head 的完整 diff，包括二进制内容。如果缺少对象，任务会在审查开始前
@@ -383,27 +417,27 @@ Codex 在只读容器中以 UID/GID `1002:1003` 运行；仓库以只读方式�
 凭据中的任何完整长字符串值，工作流会拒绝发布；正常评论也会明确标记为由不可信
 PR 内容生成的自动化结果。
 
-审查结果上传最多尝试三次，每次限时两分钟。失败后分别等待 10 秒和 30 秒再重试，
+两个模型的审查结果上传都最多尝试三次，每次限时两分钟。失败后分别等待 10 秒和 30 秒再重试，
 并替换当前运行对应的同名残留产物。上传成功或任务取消后停止重试。如果三次均失败，
-审查任务也会失败，发布任务不会运行；仅完成模型审查不会使整个任务成功。
+相应模型的检查会失败，另一模型已有的反馈仍可发布。
 
-由 ChatGPT 管理（ChatGPT-managed）的 Codex 凭据通过可信的每周或手动维护任务
-刷新。该任务不检出仓库，只在空的临时目录中运行，通过宿主机锁与审查任务串行，
-并原地更新持久凭据。PR 审查容器只接收临时快照，绝不会挂载或写入持久凭据。
+`AI Review Auth Maintenance` 每周运行，也可通过 **Run workflow** 手动触发。两个独立任务分别维护
+ChatGPT 和 Google 账号。Gemini 的 `auth-maintenance` 在空的可信环境中执行固定提示词，不挂载 PR 数据，
+需要刷新时在 OAuth 锁保护下保存凭据。常规审查容器仍只接收临时凭据副本。
 
 ### 自动批准
 
-设置 `CODEX_REVIEW_AUTO_APPROVE=true` 后，无问题的审查可以由
-`github-actions[bot]` 提交 `APPROVE` 审批。仓库 Actions 设置也必须允许
-GitHub Actions 创建和批准 PR。删除该变量或设为 `false` 可以单独关闭自动批准，
-审查结果仍会发布。仓库原有的必需 CI 检查仍然生效。
+在仓库 Actions 变量中设置 `AI_REVIEW_AUTO_APPROVE=true`，并允许 GitHub Actions 创建和批准 PR。
+将该变量设为 `false` 可只发布反馈。迁移时清除 `CODEX_REVIEW_AUTO_APPROVE`，
+这样手动重跑历史 Codex 单模型工作流时也无法发出批准。新变量未设置时，新工作流读取旧变量，
+审批仍要求两个模型均通过。仓库原有的必需 CI 检查仍然生效。
 由 `github-actions[bot]` 创建的 PR 只接收评论而不批准，因为 GitHub 不允许作者
 批准自己的 PR。
 
-工作流检出已授权快照对应的精确 head SHA，通过 `codex exec --output-schema` 请求
-结构化 JSON。Schema 和发布脚本取自提供工作流文件的提交（`github.workflow_sha`），
-与 PR 的 base 版本独立。发布器只有在完整审查返回
-`pass`、发现列表为空、且 head SHA、base 分支名和审查时的 merge base 均未改变时才批准。
+工作流检出已授权快照对应的精确 head SHA，通过 `codex exec --output-schema` 和 `agy --json-schema` 请求
+结构化 JSON。共用的提示词、Schema 和发布脚本取自提供工作流文件的提交（`github.workflow_sha`），
+与 PR 的 base 版本独立。发布器要求同一次运行、同一次尝试中的两个模型均返回有效的
+`pass` 和空的发现列表，并核对 head SHA、base 分支名和审查时的 merge base 均未改变。
 即使另一分支指向相同 SHA，修改目标分支也会使审查失效，因为被审查的目标分支已改变。
 无效、空白、超长、相互矛盾或不完整的输出均不会批准。
 发布器决定是否批准时，不读取分支保护规则、CI 结果或合并状态。
@@ -416,11 +450,12 @@ CI 检查和冲突。工作流不要求批准前 head 与 base 保持最新。
 如果无法核实 merge base，发布器仍会通过 `COMMENT` 总结发布审查发现，不附加未核实的
 行级位置，也不会批准。
 批准后再次核对提交；若发布期间发生更新或核验失败，则撤销刚提交的审批。
-替代审查结果发布前会先撤销本工作流之前的自动审批，不修改人工审批。
+重新审查时，即使模型失败或缺少结果文件，也会撤销本工作流之前的自动批准。
+另一模型已有的反馈照常发布，人工批准保留。
 
-修改 PR 的 base 分支也会在审查前触发审批撤销。独立的 GitHub 托管任务只运行
+`AI Review Retarget` 处理 PR 编辑事件。更换目标分支时，其 GitHub 托管任务只运行
 受信任工作流版本的代码，即使审查已禁用、PR 为草稿或由机器人修改目标分支，
-也会撤销本工作流之前的审批。符合条件的新审查只有在撤销成功后才启动。
+也会撤销之前的联合批准或历史 Codex 批准。符合条件的新审查只有在撤销成功后才启动。
 仅修改标题或正文不会启动审查，也不会取消已有审查。撤销任务使用独立的并发组，
 新事件不会取消正在执行的撤销。GitHub 事件投递和任务调度
 是异步的，因此撤销审批与修改目标分支并非原子操作。

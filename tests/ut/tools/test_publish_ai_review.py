@@ -25,8 +25,8 @@ BASE = "b" * 40
 @pytest.fixture
 def publisher():
     """Load the trusted publisher without importing the compiler extension."""
-    path = Path(__file__).resolve().parents[3] / ".github/scripts/publish_codex_review.py"
-    spec = importlib.util.spec_from_file_location("publish_codex_review", path)
+    path = Path(__file__).resolve().parents[3] / ".github/scripts/publish_ai_review.py"
+    spec = importlib.util.spec_from_file_location("publish_ai_review", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -345,17 +345,42 @@ def test_inline_size_budget(publisher, review_file, api, located_review):
     assert not api["posted"]
 
 
-def test_clean_review_approves_exact_commit_without_branch_rules(publisher, review_file, api):
-    """Bind a clean review to the examined commit without reading merge rules."""
-    assert publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True).startswith("Approved")
-    assert api["posted"][0]["event"] == "APPROVE"
-    assert api["posted"][0]["commit_id"] == HEAD
+@pytest.mark.parametrize("gemini", ["pass", "findings", "incomplete", "contradictory", "missing"])
+def test_joint_approval_on_reviewed_commit(publisher, review_file, api, tmp_path, gemini):
+    """Only two passing reviews of this revision produce one GitHub approval."""
+    target = ("owner/repo", "12", HEAD, BASE, "main")
+    verdict = None
+    if gemini != "missing":
+        feedback = tmp_path / "response.txt"
+        finding = {"title": "[P1] Empty input", "body": "The division has a zero denominator."}
+        feedback.write_text(
+            json.dumps(
+                {
+                    "verdict": "pass" if gemini == "contradictory" else gemini,
+                    "summary": "Gemini reviewed the diff.",
+                    "findings": [finding] if gemini in {"findings", "contradictory"} else [],
+                }
+            )
+        )
+        verdict = publisher.publish_gemini(feedback, *target)
+        assert verdict == ("incomplete" if gemini == "contradictory" else gemini)
+        assert api["posted"][0]["event"] == "COMMENT"
+        if gemini == "findings":
+            assert finding["body"] in api["posted"][0]["body"]
+    publisher.publish(review_file, *target, enabled=True, gemini_verdict=verdict)
+    approvals = [review for review in api["posted"] if review["event"] == "APPROVE"]
+    assert len(approvals) == (1 if gemini == "pass" else 0)
+    assert all(review["commit_id"] == HEAD for review in api["posted"])
+    if approvals:
+        assert (
+            "## AI Review" in approvals[0]["body"] and "Codex and Gemini both passed" in approvals[0]["body"]
+        )
 
 
 def test_actions_bot_authored_pr_is_comment_only(publisher, review_file, api):
     """Keep a clean review visible when the bot cannot approve its own PR."""
     api["pr"]["user"]["login"] = "github-actions[bot]"
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     assert api["posted"][0]["event"] == "COMMENT"
     assert "cannot approve its own pull request" in api["posted"][0]["body"]
 
@@ -367,7 +392,7 @@ def test_bodyless_prior_bot_approval_does_not_block_review(publisher, review_fil
         {"id": 1, "user": {"login": "github-actions[bot]"}, "state": "APPROVED", "body": body},
         {"id": 2, "user": {"login": "github-actions[bot]"}, "state": "APPROVED", "body": publisher.MARKER},
     ]
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     assert len(api["dismissed"]) == 1
     assert "/reviews/2/dismissals" in api["dismissed"][0][2]
     assert api["posted"][0]["event"] == "APPROVE"
@@ -385,7 +410,7 @@ def test_nonpassing_review_never_approves(publisher, review_file, api, verdict, 
     review_file.write_text(
         json.dumps({"verdict": verdict, "summary": "Needs attention", "findings": findings})
     )
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     assert api["posted"][0]["event"] == "COMMENT"
 
 
@@ -426,6 +451,57 @@ def test_symlink_rejected(publisher, review_file, api, tmp_path):
     assert not api["posted"]
 
 
+def test_gemini_posts_plain_text_on_reviewed_commit(publisher, api, tmp_path):
+    feedback = tmp_path / "response.txt"
+    feedback.write_text("Line 12: a < b\n</pre><img src='example'>")
+    api["pr"]["base"]["sha"] = "d" * 40  # Same merge base, so the reviewed diff is still current.
+    assert publisher.publish_gemini(feedback, "owner/repo", "12", HEAD, BASE, "main") == "incomplete"
+    (review,) = api["posted"]
+    assert review["event"] == "COMMENT" and review["commit_id"] == HEAD
+    assert "## Gemini Review" in review["body"]
+    assert "a &lt; b\n&lt;/pre&gt;&lt;img" in review["body"]
+    assert not api["dismissed"]
+
+
+def test_gemini_reuses_only_its_own_inline_thread(publisher, api, located_review, review_file):
+    location = {"path": "src/example.cpp", "line": 21, "side": "RIGHT"}
+    located_review(location, existing_comment_id=123)
+    thread = {
+        "id": 123,
+        "path": location["path"],
+        "user": {"login": "github-actions[bot]"},
+        "body": publisher.MARKER,
+    }
+    api["comments"] = [thread]
+    target = ("owner/repo", "12", HEAD, BASE, "main")
+    assert publisher.publish_gemini(review_file, *target) == "findings"
+    (inline,) = api["posted"][-1]["comments"]
+    assert inline["line"] == 21 and inline["body"].startswith(publisher.GEMINI_MARKER)
+    thread["body"] = inline["body"]
+    assert publisher.publish_gemini(review_file, *target) == "findings"
+    assert "comments" not in api["posted"][-1] and "#discussion_r123" in api["posted"][-1]["body"]
+
+
+@pytest.mark.parametrize("change", ["head", "merge_base"])
+def test_gemini_skips_stale_diff(publisher, api, review_file, change):
+    if change == "head":
+        api["pr"]["head"]["sha"] = "c" * 40
+    else:
+        api["pr"]["base"]["sha"] = "d" * 40
+        api["merge_base_changed"] = True
+    assert publisher.publish_gemini(review_file, "owner/repo", "12", HEAD, BASE, "main") is None
+    assert not api["posted"] and not api["dismissed"]
+
+
+@pytest.mark.parametrize("response", [b" \n", b"x" * 60001, b"<" * 20000, b"\xff"])
+def test_gemini_rejects_invalid_feedback(publisher, api, tmp_path, response):
+    feedback = tmp_path / "response.txt"
+    feedback.write_bytes(response)
+    with pytest.raises(ValueError):
+        publisher.publish_gemini(feedback, "owner/repo", "12", HEAD, BASE, "main")
+    assert not api["posted"] and not api["dismissed"]
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -445,7 +521,7 @@ def test_symlink_rejected(publisher, review_file, api, tmp_path):
 def test_policy_changes_require_human_review(publisher, review_file, api, path, rename):
     """Withhold approval for policy paths and their renamed originals."""
     api["files"] = [{"filename": "renamed.txt", "previous_filename": path} if rename else {"filename": path}]
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     assert api["posted"][0]["event"] == "COMMENT"
 
 
@@ -464,7 +540,9 @@ def test_review_gates_fail_closed(publisher, review_file, api, gate):
     if gate == "no_files":
         api["files"] = []
         api["pr"]["changed_files"] = 0
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", gate != "disabled")
+    publisher.publish(
+        review_file, "owner/repo", "12", HEAD, BASE, "main", gate != "disabled", gemini_verdict="pass"
+    )
     assert api["posted"][0]["event"] == "COMMENT"
 
 
@@ -485,7 +563,9 @@ def test_obsolete_or_closed_pr_skipped(publisher, review_file, api, change):
 def test_base_advance_does_not_invalidate_approval(publisher, review_file, api, base_change_at):
     """A base-branch commit must not invalidate a review of the same PR head."""
     api["base_change_at"] = base_change_at
-    assert publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True).startswith("Approved")
+    assert publisher.publish(
+        review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass"
+    ).startswith("Approved")
     assert api["pr"]["base"]["sha"] != BASE
     assert api["posted"][0]["event"] == "APPROVE"
     assert not api["dismissed"]
@@ -496,7 +576,7 @@ def test_merge_base_change_blocks_stale_approval(publisher, review_file, api, ba
     """Reject a base rewrite that changes the diff despite an unchanged PR head."""
     api["base_change_at"] = base_change_at
     api["merge_base_changed"] = True
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     if base_change_at == 3:
         assert api["posted"][0]["event"] == "APPROVE"
         assert len(api["dismissed"]) == 1
@@ -509,7 +589,7 @@ def test_merge_base_change_blocks_stale_approval(publisher, review_file, api, ba
 def test_invalid_merge_base_fails_closed(publisher, review_file, api):
     """Do not publish an approval from an invalid GitHub compare response."""
     api["invalid_merge_base"] = True
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     assert api["posted"][0]["event"] == "COMMENT"
 
 
@@ -528,7 +608,7 @@ def test_compare_failure_around_publication(publisher, review_file, api, monkeyp
         return request(endpoint, *args, **kwargs)
 
     monkeypatch.setattr(publisher, "github_api", fail_late_compare)
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     if failure_at == 3:
         assert api["posted"][0]["event"] == "COMMENT"
         assert not api["dismissed"]
@@ -576,7 +656,7 @@ def test_post_publication_pr_read_failure_dismisses_approval(publisher, review_f
         return request(endpoint, *args, **kwargs)
 
     monkeypatch.setattr(publisher, "github_api", fail_final_read)
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     assert api["posted"][0]["event"] == "APPROVE"
     assert len(api["dismissed"]) == 1
 
@@ -585,7 +665,7 @@ def test_post_publication_pr_read_failure_dismisses_approval(publisher, review_f
 def test_revision_races(publisher, review_file, api, change_at):
     """Skip or revoke approvals when the head changes around posting."""
     api["change_at"] = change_at
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     if change_at == 2:
         assert not api["posted"]
     else:
@@ -598,7 +678,7 @@ def test_revision_races(publisher, review_file, api, change_at):
 def test_same_sha_base_retarget_invalidates_review(publisher, review_file, api, retarget_at):
     """Detect base retargets even when the commit SHA stays unchanged."""
     api["retarget_at"] = retarget_at
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True, gemini_verdict="pass")
     assert api["pr"]["base"]["sha"] == BASE
     if retarget_at in {1, 2}:
         assert not api["posted"]
@@ -608,16 +688,20 @@ def test_same_sha_base_retarget_invalidates_review(publisher, review_file, api, 
         assert "/reviews/42/dismissals" in api["dismissed"][0][2]
 
 
-def test_invalid_replacement_revokes_only_our_approval(publisher, review_file, api):
+@pytest.mark.parametrize("missing", [False, True])
+def test_invalid_replacement_revokes_only_our_approval(publisher, review_file, api, missing):
     """Revoke our earlier approval before rejecting a bad replacement."""
     api["reviews"] = [
         {"id": 1, "user": {"login": "github-actions[bot]"}, "state": "APPROVED", "body": publisher.MARKER},
         {"id": 2, "user": {"login": "maintainer"}, "state": "APPROVED", "body": publisher.MARKER},
         {"id": 3, "user": {"login": "github-actions[bot]"}, "state": "APPROVED", "body": "Other workflow"},
     ]
-    review_file.write_text("not JSON")
-    with pytest.raises(ValueError):
-        publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    if missing:
+        publisher.publish(None, "owner/repo", "12", HEAD, BASE, "main", False)
+    else:
+        review_file.write_text("not JSON")
+        with pytest.raises(ValueError):
+            publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
     assert len(api["dismissed"]) == 1
     assert "/reviews/1/dismissals" in api["dismissed"][0][2]
     assert not api["posted"]
@@ -681,11 +765,17 @@ def test_revocation_errors_fail_closed(publisher, review_file, api, monkeypatch,
     assert not api["posted"]
 
 
+def load_workflow(name: str) -> dict:
+    path = Path(__file__).resolve().parents[3] / ".github/workflows" / f"{name}.yml"
+    config = yaml.safe_load(path.read_text())
+    if True in config:  # PyYAML reads the unquoted YAML 1.1 key `on` as True.
+        config["on"] = config.pop(True)
+    return config
+
+
 @pytest.fixture
 def workflow():
-    """Load the actual workflow to exercise its event and dependency expressions."""
-    path = Path(__file__).resolve().parents[3] / ".github/workflows/codex-review.yml"
-    return yaml.safe_load(path.read_text())
+    return load_workflow("ai-review")
 
 
 def workflow_expression(expression, context, *, cancelled=False, success=True):
@@ -702,12 +792,19 @@ def workflow_expression(expression, context, *, cancelled=False, success=True):
             assert isinstance(value, dict)
             return value.get(node.attr, {})
         if isinstance(node, ast.Call):
-            assert isinstance(node.func, ast.Name) and node.func.id in {"cancelled", "success"}
-            assert not node.args and not node.keywords
-            return cancelled if node.func.id == "cancelled" else success
+            assert isinstance(node.func, ast.Name) and not node.keywords
+            if node.func.id == "format":
+                template, *args = (evaluate(arg) for arg in node.args)
+                return template.format(*args)
+            assert not node.args
+            return {"always": True, "cancelled": cancelled, "success": success}[node.func.id]
         if isinstance(node, ast.BoolOp):
-            values = (bool(evaluate(value)) for value in node.values)
-            return all(values) if isinstance(node.op, ast.And) else any(values)
+            value = evaluate(node.values[0])
+            for operand in node.values[1:]:
+                if bool(value) == isinstance(node.op, ast.Or):
+                    break
+                value = evaluate(operand)
+            return value
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return not evaluate(node.operand)
         if isinstance(node, ast.Compare):
@@ -725,10 +822,48 @@ def workflow_expression(expression, context, *, cancelled=False, success=True):
         expression = expression[:-2]
     expression = expression.replace("&&", "and").replace("||", "or").replace("== false", "== False")
     expression = re.sub(r"!(?!=)", "not ", expression)
-    tree = ast.parse(expression.strip(), mode="eval")
+    tree = ast.parse(f"({expression.strip()})", mode="eval")
     # Actions adds success() unless the expression contains a status function.
-    has_status_function = any(isinstance(node, ast.Call) for node in ast.walk(tree))
+    has_status_function = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"always", "success", "cancelled"}
+        for node in ast.walk(tree)
+    )
     return (has_status_function or success) and evaluate(tree.body)
+
+
+def test_ordinary_prs_create_only_review_checks(workflow):
+    """GitHub filters the event before creating a run or registering any of its checks."""
+    assert workflow["on"] == {
+        "pull_request_target": {
+            "branches": ["main"],
+            "types": ["opened", "synchronize", "reopened", "ready_for_review"],
+        },
+        "issue_comment": {"types": ["created"]},
+        "workflow_call": None,
+    }
+    jobs = workflow["jobs"]
+    assert workflow["name"] == "AI Review"
+    assert {job.get("name", key) for key, job in jobs.items()} == {
+        "prepare",
+        "codex-review",
+        "gemini-review",
+        "publish",
+    }
+    assert "needs" not in jobs["prepare"]
+    assert jobs["review"]["needs"] == jobs["gemini"]["needs"] == "prepare"
+    assert jobs["review"]["if"] == jobs["gemini"]["if"]
+    assert set(jobs["publish"]["needs"]) == {"prepare", "review", "gemini"}
+
+
+def test_retarget_entry_requires_revocation_before_calling_review():
+    retarget_workflow = load_workflow("ai-review-retarget")
+    assert retarget_workflow["on"] == {"pull_request_target": {"types": ["edited"]}}
+    call = retarget_workflow["jobs"]["review"]
+    assert call["needs"] == "invalidate"
+    assert call["uses"] == "./.github/workflows/ai-review.yml"
+    assert "secrets" not in call
 
 
 @pytest.mark.parametrize(
@@ -749,12 +884,16 @@ def test_workflow_retarget_gates(
     workflow, action, retarget, actor, draft, enabled, invalidation, invalidates, reviews, base_ref
 ):
     """Retargets invalidate first and unrelated edits never enqueue review jobs."""
-    trigger = workflow.get("on", workflow.get(True))
-    assert "edited" in trigger["pull_request_target"]["types"]
+    retarget_workflow = load_workflow("ai-review-retarget")
+    invalidate = retarget_workflow["jobs"]["invalidate"]
+    call = retarget_workflow["jobs"]["review"]
+    caller = "ai-review-retarget" if action == "edited" else "ai-review"
     context = {
         "github": {
             "event_name": "pull_request_target",
-            "run_id": 12345,
+            "repository": "owner/repo",
+            "ref": "refs/heads/main",
+            "workflow_ref": f"owner/repo/.github/workflows/{caller}.yml@refs/heads/main",
             "event": {
                 "action": action,
                 "changes": {"base": {"ref": {"from": "main"}}} if retarget else {},
@@ -762,56 +901,90 @@ def test_workflow_retarget_gates(
                 "pull_request": {"draft": draft, "number": 12, "base": {"ref": base_ref}},
             },
         },
-        "vars": {"CODEX_REVIEW_ENABLED": enabled},
-        "needs": {"invalidate": {"result": invalidation}},
+        "vars": {"AI_REVIEW_ENABLED": enabled},
     }
-    assert bool(workflow_expression(workflow["jobs"]["invalidate"]["if"], context)) == invalidates
-    assert workflow["jobs"]["prepare"]["needs"] == "invalidate"
-    assert bool(workflow_expression(workflow["jobs"]["prepare"]["if"], context)) == (
-        reviews and base_ref == "main"
-    )
-    assert not workflow_expression(workflow["jobs"]["prepare"]["if"], context, cancelled=True)
+    assert bool(action == "edited" and workflow_expression(invalidate["if"], context)) == invalidates
+    prepare = workflow["jobs"]["prepare"]["if"]
+    if action == "edited":
+        # An unsuccessful or skipped prerequisite prevents a reusable-workflow call.
+        starts = workflow_expression(call["if"], context, success=invalidation == "success")
+    else:
+        starts = action in workflow["on"]["pull_request_target"]["types"]
+    assert bool(starts and workflow_expression(prepare, context)) == (reviews and base_ref == "main")
 
 
-@pytest.mark.parametrize("invalidation", ["skipped", "success"])
-@pytest.mark.parametrize("review", ["success", "failure", "skipped", "cancelled"])
-@pytest.mark.parametrize("cancelled", [False, True])
-@pytest.mark.parametrize("completed", ["true", ""])
-def test_publish_requires_successful_review_after_invalidation(
-    workflow, invalidation, review, cancelled, completed
+@pytest.mark.parametrize(
+    "codex,completed,gemini,cancelled,publish_codex,publish_gemini",
+    [
+        ("success", "true", "success", False, True, True),
+        ("success", "true", "failure", False, True, False),
+        ("failure", "true", "success", False, False, True),
+        ("success", "", "failure", False, False, False),
+        ("failure", "", "failure", False, False, False),
+        ("success", "true", "success", True, False, False),
+    ],
+)
+def test_publish_available_reviews(
+    workflow, codex, completed, gemini, cancelled, publish_codex, publish_gemini
 ):
-    """A skipped ancestor must not suppress publishing a successful review."""
     publish = workflow["jobs"]["publish"]
-    assert publish["needs"] == "review"
-    context = {"needs": {"review": {"result": review, "outputs": {"completed": completed}}}}
-    assert bool(
-        workflow_expression(
-            publish.get("if", "success()"),
-            context,
-            cancelled=cancelled,
-            success=invalidation == review == "success" and not cancelled,
-        )
-    ) == (review == "success" and not cancelled and completed == "true")
+    prepare_outputs = {"ready": "true"}
+    context = {
+        "needs": {
+            "prepare": {"result": "success", "outputs": prepare_outputs},
+            "review": {"result": codex, "outputs": {"completed": completed}},
+            "gemini": {"result": gemini, "outputs": {"completed": "true" if gemini == "success" else ""}},
+        },
+        "steps": {
+            "trusted": {"outcome": "success"},
+            "codex_result": {"outcome": "success" if publish_codex else "skipped"},
+            "gemini_result": {"outcome": gemini},
+            "gemini_feedback": {"outcome": gemini, "outputs": {"verdict": "pass"}},
+            "decision": {"outcome": "success" if publish_codex else "skipped"},
+        },
+    }
+    assert workflow_expression(
+        publish["if"], context, cancelled=cancelled, success=codex == gemini == "success"
+    )
+    steps = {step.get("id"): step for step in publish["steps"]}
+    for step, expected in (
+        ("codex_result", publish_codex),
+        ("decision", publish_codex),
+        ("gemini_result", publish_gemini),
+        ("gemini_feedback", publish_gemini),
+    ):
+        assert workflow_expression(steps[step]["if"], context, cancelled=cancelled, success=False) == expected
+    vote = steps["decision"]["env"]["GEMINI_VERDICT"]
+    assert workflow_expression(vote, context) == ("pass" if gemini == "success" else "")
+    withdraw = publish["steps"][-1]
+    assert "--withdraw-current" in withdraw["run"]
+    assert workflow_expression(withdraw["if"], context, cancelled=cancelled, success=False) == (
+        not publish_codex
+    )
+    prepare_outputs["ready"] = ""
+    assert not workflow_expression(publish["if"], context)
 
 
 def test_invalidation_is_independent_of_review_cancellation(workflow):
     """New review events cannot cancel a running approval revocation job."""
     assert "concurrency" not in workflow
-    jobs = workflow["jobs"]
-    assert jobs["invalidate"]["concurrency"]["cancel-in-progress"] is False
-    assert jobs["review"]["concurrency"]["cancel-in-progress"] is True
-    assert jobs["publish"]["concurrency"]["cancel-in-progress"] is True
-    groups = [jobs[name]["concurrency"]["group"] for name in ("invalidate", "review", "publish")]
-    assert len(set(groups)) == 3
+    retarget = load_workflow("ai-review-retarget")
+    assert "concurrency" not in retarget and "concurrency" not in retarget["jobs"]["review"]
+    revoke = retarget["jobs"]["invalidate"]["concurrency"]
+    review = workflow["jobs"]["review"]["concurrency"]
+    publish = workflow["jobs"]["publish"]["concurrency"]
+    assert revoke["cancel-in-progress"] is False
+    assert review["cancel-in-progress"] is True and publish["cancel-in-progress"] is False
+    assert len({revoke["group"], review["group"], publish["group"]}) == 3
 
 
 @pytest.mark.parametrize(
     "script_name",
     [
-        "publish_codex_review",
-        "prepare_codex_review",
-        "rerun_codex_review",
-        "manage_codex_review_session",
+        "publish_ai_review",
+        "prepare_ai_review",
+        "rerun_ai_review",
+        "manage_ai_review_session",
         "perf_guard",
     ],
 )
@@ -831,7 +1004,14 @@ def test_review_workflow_has_no_merge_permission(workflow):
     """Review publishing can approve but cannot write repository contents."""
     jobs = workflow["jobs"]
     assert jobs["publish"]["permissions"]["pull-requests"] == "write"
-    assert all(job["permissions"].get("contents") != "write" for job in jobs.values())
+    for config in (
+        workflow,
+        load_workflow("ai-review-retarget"),
+        load_workflow("ai-review-cleanup"),
+        load_workflow("ai-review-auth-maintenance"),
+    ):
+        assert config["permissions"] == {}
+        assert all(job["permissions"].get("contents") != "write" for job in config["jobs"].values())
 
 
 @pytest.mark.parametrize(
@@ -957,14 +1137,33 @@ def test_review_requires_authorized_context(workflow, ready, result):
     assert not workflow_expression(workflow["jobs"]["review"]["if"], context, cancelled=True)
 
 
+def test_comment_command_requires_a_trusted_caller(workflow):
+    context = {
+        "vars": {"CODEX_REVIEW_ENABLED": "true"},
+        "github": {
+            "event_name": "issue_comment",
+            "repository": "owner/repo",
+            "ref": "refs/heads/main",
+            "workflow_ref": "owner/repo/.github/workflows/ai-review.yml@refs/heads/main",
+            "event": {"issue": {"pull_request": {"url": "/pulls/1"}}, "sender": {"type": "User"}},
+        },
+    }
+    prepare = workflow["jobs"]["prepare"]["if"]
+    assert workflow_expression(prepare, context)
+    context["github"]["workflow_ref"] = "owner/repo/.github/workflows/other.yml@refs/heads/main"
+    assert not workflow_expression(prepare, context)
+
+
 def test_comment_trigger_and_session_isolation(workflow):
     """Only trusted default-branch comment events can enter the persistent review sandbox."""
-    trigger = workflow.get("on", workflow.get(True))
-    assert trigger["issue_comment"]["types"] == ["created"]
-    assert "pull_request_review_comment" not in trigger
     jobs = workflow["jobs"]
-    for name in ("prepare", "publish", "invalidate", "cleanup-sessions"):
-        checkout = next(step for step in jobs[name]["steps"] if "checkout@" in step.get("uses", ""))
+    for job in (
+        jobs["prepare"],
+        jobs["publish"],
+        load_workflow("ai-review-retarget")["jobs"]["invalidate"],
+        load_workflow("ai-review-cleanup")["jobs"]["cleanup-sessions"],
+    ):
+        checkout = next(step for step in job["steps"] if "checkout@" in step.get("uses", ""))
         assert checkout["with"]["ref"] == "${{ github.workflow_sha }}"
     review = next(
         step["run"] for step in jobs["review"]["steps"] if step["name"] == "Review in an isolated container"
@@ -978,39 +1177,39 @@ def test_comment_trigger_and_session_isolation(workflow):
     assert "GH_TOKEN" not in review
     assert jobs["prepare"]["permissions"]["pull-requests"] == "read"
     assert jobs["review"]["permissions"]["pull-requests"] == "read"
-    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/manage_codex_review_session.py"' in review
-    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_codex_review.py"' in review
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/manage_ai_review_session.py"' in review
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_ai_review.py"' in review
     assert review.index("flock --exclusive 9") < review.index("session_status=$(python")
     assert review.index("session_status=$(python") < review.index("docker run")
     upload = next(step for step in jobs["review"]["steps"] if step["name"] == "Upload review result")
-    assert upload["if"] == "steps.codex.outputs.completed == 'true'"
+    assert upload["if"] == "steps.model.outputs.completed == 'true'"
 
 
-@pytest.mark.parametrize("enabled", ["true", "false"])
-@pytest.mark.parametrize("draft", [True, False])
-@pytest.mark.parametrize("sender", ["Bot", "User"])
-@pytest.mark.parametrize("merged", [True, False])
-def test_close_cleanup_is_independent_of_review_eligibility(workflow, enabled, draft, sender, merged):
-    """Every close reaches trusted cleanup, with no model or active-review cancellation."""
-    context = {
-        "vars": {"CODEX_REVIEW_ENABLED": enabled},
-        "github": {
-            "event_name": "pull_request_target",
-            "event": {
-                "action": "closed",
-                "sender": {"type": sender},
-                "pull_request": {"draft": draft, "merged": merged},
-            },
-        },
-        "needs": {"invalidate": {"result": "skipped"}},
-    }
+def test_close_cleanup_is_independent_of_review_eligibility():
+    """Every close reaches trusted cleanup even with reviews disabled or the PR in draft."""
+    workflow = load_workflow("ai-review-cleanup")
+    assert workflow["on"] == {"pull_request_target": {"types": ["closed"]}}
+    assert set(workflow["jobs"]) == {"cleanup-sessions", "gemini-cleanup-sessions"}
+    gemini = workflow["jobs"]["gemini-cleanup-sessions"]
+    assert "if" not in gemini and "run_gemini_review.py cleanup" in gemini["steps"][-1]["run"]
     cleanup = workflow["jobs"]["cleanup-sessions"]
-    assert workflow_expression(cleanup["if"], context)
-    assert not workflow_expression(workflow["jobs"]["prepare"]["if"], context)
+    assert "if" not in cleanup
     assert "concurrency" not in cleanup
     run = cleanup["steps"][-1]["run"]
-    assert run.index("flock --exclusive 9") < run.index("manage_codex_review_session.py cleanup")
+    assert run.index("flock --exclusive 9") < run.index("manage_ai_review_session.py cleanup")
     assert "docker run" not in run
+
+
+def test_auth_maintenance_only_runs_on_schedule_or_dispatch():
+    workflow = load_workflow("ai-review-auth-maintenance")
+    assert set(workflow["on"]) == {"schedule", "workflow_dispatch"}
+    job = workflow["jobs"]["auth-maintenance"]
+    gemini = workflow["jobs"]["gemini-auth-maintenance"]
+    assert job["if"] == gemini["if"] and "auth-maintenance --model" in gemini["steps"][-1]["run"]
+    assert workflow_expression(job["if"], {"vars": {"CODEX_REVIEW_ENABLED": "true"}})
+    assert not workflow_expression(
+        job["if"], {"vars": {"AI_REVIEW_ENABLED": "false", "CODEX_REVIEW_ENABLED": "true"}}
+    )
 
 
 @pytest.mark.parametrize(
@@ -1075,7 +1274,7 @@ def test_review_upload_retries_preserve_publish_gate(
     steps = jobs["review"]["steps"]
     first = next(i for i, step in enumerate(steps) if step["name"] == "Upload review result")
     last = next(i for i, step in enumerate(steps) if step["name"] == "Remove review checkout")
-    context: dict[str, Any] = {"steps": {"codex": {"outputs": {"completed": "true" if completed else ""}}}}
+    context: dict[str, Any] = {"steps": {"model": {"outputs": {"completed": "true" if completed else ""}}}}
     cancelled = cancel_after == 0
     success = True
     attempts = 0
@@ -1100,14 +1299,16 @@ def test_review_upload_retries_preserve_publish_gate(
     assert attempts == len(outcomes)
     assert actual_waits == waits
     publish_context = {
+        "steps": {"trusted": {"outcome": "success"}},
         "needs": {
             "review": {
                 "result": "cancelled" if cancelled else "success" if success else "failure",
-                "outputs": context["steps"]["codex"]["outputs"],
+                "outputs": context["steps"]["model"]["outputs"],
             }
-        }
+        },
     }
-    assert bool(workflow_expression(jobs["publish"]["if"], publish_context, cancelled=cancelled)) == publishes
+    download = next(step for step in jobs["publish"]["steps"] if step.get("id") == "codex_result")
+    assert bool(workflow_expression(download["if"], publish_context, cancelled=cancelled)) == publishes
 
 
 def test_review_upload_attempts_replace_only_current_run_artifact(workflow):
@@ -1115,9 +1316,13 @@ def test_review_upload_attempts_replace_only_current_run_artifact(workflow):
     steps = workflow["jobs"]["review"]["steps"]
     uploads = [step for step in steps if step.get("id", "").startswith("upload_review")]
     assert len(uploads) == 3
+    gemini = workflow["jobs"]["gemini"]
+    assert uploads == [step for step in gemini["steps"] if step.get("id", "").startswith("upload_review")]
+    assert gemini["env"]["REVIEW_ARTIFACT_PREFIX"] == "gemini-review"
+    assert workflow["jobs"]["review"]["env"]["REVIEW_ARTIFACT_PREFIX"] == "codex-review"
     expected = {
-        "name": "codex-review-${{ github.run_id }}-${{ github.run_attempt }}",
-        "path": "${{ runner.temp }}/codex-review.json",
+        "name": "${{ env.REVIEW_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}",
+        "path": "${{ steps.model.outputs.artifact }}",
         "if-no-files-found": "error",
         "retention-days": 1,
         "compression-level": 9,

@@ -26,7 +26,7 @@ def manager(monkeypatch):
     scripts = Path(__file__).resolve().parents[3] / ".github/scripts"
     monkeypatch.syspath_prepend(str(scripts))
     spec = importlib.util.spec_from_file_location(
-        "manage_codex_review_session", scripts / "manage_codex_review_session.py"
+        "manage_ai_review_session", scripts / "manage_ai_review_session.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -59,7 +59,7 @@ def state(manager, monkeypatch):
     def docker(command, *, check=False, **kwargs):
         assert command[:2] == ["docker", "volume"]
         action, name = command[2], command[-1]
-        assert name in NAMES
+        assert name in NAMES or name in {n.replace("codex", "gemini") for n in NAMES}
         state["commands"].append((action, name))
         code, output, error = 0, "", ""
         if state["fail"] == action:
@@ -107,6 +107,22 @@ def test_stale_or_draft_review_creates_nothing(manager, state, change):
         state["pr"]["headRefOid"] = "b" * 40
     assert manager.manage_session("owner/repo", "12", "42", "review", HEAD) == "skipped"
     assert not state["commands"]
+
+
+def test_gemini_cleanup_and_reopen_are_isolated_from_codex(manager, state):
+    populate(manager, state)
+    codex_volumes = dict(state["volumes"])
+    assert manager.manage_session("owner/repo", "12", "42", "review", HEAD, provider="gemini") == "ready"
+    assert len(state["volumes"]) == 4
+    state["pr"]["state"] = "MERGED"
+    assert manager.manage_session("owner/repo", "12", "42", "cleanup", provider="gemini") == "removed"
+    assert state["volumes"] == codex_volumes
+    state["pr"].update(state="OPEN", timelineItems={"nodes": [{"id": "close-42"}]})
+    manager.manage_session("owner/repo", "12", "42", "review", HEAD, provider="gemini")
+    assert manager.manage_session("owner/repo", "12", "42", "cleanup", provider="gemini") == "retained"
+    assert state["volumes"]["pypto-gemini-sessions-42-12-index"] == {
+        "org.pypto.gemini-review.close-epoch": "closed:close-42"
+    }
 
 
 def test_new_review_reuses_only_matching_epoch(manager, state):

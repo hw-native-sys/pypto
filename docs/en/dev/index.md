@@ -294,7 +294,7 @@ The external `pr-rerun` service remains unchanged: it can still rerun eligible
 ordinary PR CI, but does not discover/authorize these dispatched full runs.
 
 `main` pushes and manual full runs without PR inputs execute `CI Full`.
-Daily CI and Codex Review keep their existing policies. Manual PR inputs are
+Daily CI and AI Review keep their existing policies. Manual PR inputs are
 intended for the comment handler; leave all four empty to run CI against main.
 Publishers accept full runs created in either `ci-full.yml` or the former
 combined `ci.yml`, verifying each path against its workflow ID. Older run IDs
@@ -338,12 +338,17 @@ This implementation targets the current PR merge flow, not merge queues;
 
 ## Automated PR Review
 
-The `Codex Review` GitHub Actions workflow reviews only non-draft pull requests targeting `main` when
+The `AI Review` GitHub Actions workflow reviews only non-draft pull requests targeting `main` when
 they are opened, reopened, updated, or marked ready for review. It uses the
 trusted workflow from the default branch, checks out the pull request head as
 untrusted input, and posts the result from a separate GitHub-hosted job.
+These PR events create four checks. After `prepare` authorizes the PR, `codex-review`
+and `gemini-review` run in parallel. The shared `publish` job posts each successful
+result on the reviewed commit. Both models receive the complete source, merge-base-to-head diff and discussion. When both
+models pass and the PR is eligible, `github-actions[bot]` submits one **AI Review**
+approval. Gemini feedback is labeled **Gemini Review** and Codex findings appear under **Codex Review**.
 
-Findings with verified diff locations appear as inline review comments, which
+Findings from either reviewer with verified diff locations appear as inline review comments, which
 can be replied to and resolved independently. Findings outside the diff, without
 a location, or with an invalid location remain in the review summary. Reported
 locations outside the diff link to the reviewed head or merge-base commit when
@@ -357,12 +362,11 @@ still prevents automatic approval.
 
 Every run fetches the current PR description, conversation comments, review
 bodies, and all inline threads and replies, including resolved/outdated state.
-These are evidence for the review, not authority to change its policy. Codex
-must reassess disputed findings against expert explanations and current code,
+Both reviewers use the discussion as evidence. They must reassess disputed findings against expert explanations and current code,
 and explain any remaining disagreement. A repeated actionable finding can cite
-its existing Codex thread instead of posting a new inline comment; it still
+its own existing thread instead of posting a new inline comment; it still
 prevents approval. The model judges semantic equivalence using the discussion;
-the publisher accepts only a workflow-bot root comment from this PR whose file
+the publisher verifies the reviewer marker and accepts only a workflow-bot root comment from this PR whose file
 matches the finding or was renamed to the finding's current file according to
 the PR file metadata. Matching line numbers or diff sides are not required.
 Missing or oversized discussion input fails the run rather
@@ -377,7 +381,7 @@ request another review without pushing for PRs targeting `main`. Add a **new PR 
 containing this exact command on its own line (explanations can precede it):
 
 ```text
-@pypto-codex review
+/ai-review
 ```
 
 Quoted/fenced commands, edited comments, bots, ordinary issue comments, and
@@ -385,11 +389,10 @@ commands from other users do not start a review. After quoted text, leave a
 blank line before the command: continuation lines remain inactive until that
 boundary, even when they omit the `>` marker. Inline replies are included
 as context but do not trigger the workflow: post the command in Conversation.
-The command is handled by Actions; it does not require a GitHub account named
-`pypto-codex` and does not invoke the separate `@codex` Cloud integration.
+Actions also accepts the existing `@pypto-codex review` command.
 
-The comment run first looks for a verifiable `pull_request_target` Codex Review
-run for this PR's current head and base branch. It reuses a queued/running run,
+The comment run first looks for a verifiable `pull_request_target` run from
+`AI Review` or `AI Review Retarget` for this PR's current head and base branch. It reuses a queued/running run,
 or reruns **all jobs** of a completed run (including successful runs when a new
 assessment is requested). This updates the existing PR Actions checks and
 rebuilds both context and result artifacts under the same attempt number.
@@ -398,8 +401,9 @@ summary links to the selected PR run. Requests for the same PR are serialized,
 with up to 100 pending preparation jobs retained; further arrivals are canceled
 when that queue is full.
 
-Configure the repository secret `CODEX_REVIEW_RERUN_TOKEN` with a dedicated
-fine-grained PAT restricted to this repository with **Actions: write**. It is
+Set the repository secret `AI_REVIEW_RERUN_TOKEN` to a fine-grained PAT with
+**Actions: write** for this repository. Existing installations can keep using
+`CODEX_REVIEW_RERUN_TOKEN` as a fallback. The token is
 used only by the trusted preparation step for comment commands, never passed
 to the PR checkout or review container. Missing credentials or API failures
 fail visibly instead of silently leaving PR checks unchanged. Read-only lookup
@@ -417,30 +421,27 @@ A small identity artifact is retained for 30 days; discussion content still
 expires after one day. Older runs can be verified from an unexpired discussion
 snapshot. If no verifiable run exists within GitHub's 30-day rerun window, the
 command falls back to standalone review and explicitly reports that existing
-PR Actions checks will not be replaced. Rerunning uses the original workflow
-revision; it does not upgrade an old run to newly merged workflow code.
+PR Actions checks will not be replaced. Reruns use the original workflow revision.
+Review commands skip pre-rename, Codex-only runs and start a standalone AI Review
+when no matching two-model workflow run exists.
 
-Conversation rollouts and the Codex session index persist in two Docker volumes
-on the dedicated runner, keyed by base repository ID and PR number. Later runs
-use `codex exec resume <session-id>` with the exact saved root session ID.
-The checkpoint is updated only after a completed, validated review. Credentials
-and configuration remain ephemeral. A runner change or removal of those volumes
-starts a fresh session with the complete current GitHub discussion. Session
-reuse preserves prior analysis and can benefit from prompt caching, but does
-not guarantee fewer billed tokens; long histories can be compacted. Each run
-still reviews the full current PR diff.
+Each reviewer keeps its own conversation and checkpoint in two Docker volumes, keyed by the
+base repository ID and PR number. Codex resumes the saved root session with `codex exec resume`.
+Gemini passes the saved `conversation_id` to `agy --conversation`. The trusted host checks the
+returned ID before advancing the checkpoint. Every turn checks the full diff, source and latest
+discussion. If the runner loses the volumes, both reviewers can start fresh using that snapshot.
 
-Closing a PR deletes its `pypto-codex-sessions-<repository-id>-<pr-number>`
-volume and `-index` companion, whether merged or unmerged, including draft or
-bot-authored PRs and when reviews are disabled. Cleanup and review use the same
-runner lock. Before creating or resuming volumes, a trusted host query checks
+When a PR closes, `AI Review Cleanup` deletes each reviewer's
+`pypto-<provider>-sessions-<repository-id>-<pr-number>` volume and its `-index` companion,
+whether merged or unmerged, including draft or
+bot-authored PRs and when reviews are disabled. Cleanup, review and credential maintenance share a separate runner lock for each provider. Before creating or resuming volumes, a trusted host query checks
 the live PR state/head and its latest close event. Volume labels record that
 close event, so a reopened PR starts fresh and delayed cleanup preserves its
 new session while removing older volumes. A queued review of a closed, draft,
 or superseded head skips without publishing an artifact. GitHub state can
 change after a read; queued review and cleanup jobs recheck under the lock.
 
-Ephemeral review containers and private networks carry repository, run and attempt
+Ephemeral review containers and private networks carry provider-specific repository, run and attempt
 labels. Their identities are recorded before startup. Shell traps and a separate
 `always()` step remove this attempt's containers, private network and credential
 snapshots, including when the review is cancelled. Session volumes and the shared
@@ -457,10 +458,10 @@ startup before any stale-resource deletion. A runner outage can prevent the
 on that host. It does not recover temporary credential files left by a host outage.
 
 Administrators enable or disable reviews with the repository Actions variable
-`CODEX_REVIEW_ENABLED`. Set it to `true` to enable reviews; unset it or use any
-other value to disable them immediately. Close-event session cleanup remains enabled.
+`AI_REVIEW_ENABLED`. Set it to `true` to enable reviews or `false` to disable them.
+If unset, the workflow reads `CODEX_REVIEW_ENABLED`. Close-event session cleanup runs in either case.
 
-The review job requires a dedicated self-hosted runner labelled `Linux`,
+Both review jobs require a dedicated self-hosted runner labelled `Linux`,
 `ARM64`, and `cpu-codex`. The runner provides the following host-managed
 resources, none of which come from the pull request:
 
@@ -472,6 +473,43 @@ resources, none of which come from the pull request:
 - a healthy `pypto-codex-proxy-relay` container on relay port `17895`
 - a loopback-only mixed proxy on `127.0.0.1:7895`
 
+The trusted Gemini driver calls the installed launcher at `~/.local/share/pypto-gemini-review/run`.
+Deploy these commands on the review runner before enabling the workflow:
+
+```text
+run review-session --model MODEL --effort high --session-volume VOLUME [--conversation UUID] INPUT_DIR RESULTS_DIR
+run auth-maintenance --model MODEL
+```
+
+The workflow selects `gemini-4-neon-high` and high reasoning effort. The launcher runs the pinned
+image `localhost:5000/pypto-gemini-review@sha256:886e02ba2f1612d52f7c4ec76ff8b6d25e1b8c586be90ee3c006fcf52af0b99e`
+as the existing non-root account with its Google OAuth snapshot and proxy. It mounts
+`INPUT_DIR/workspace`, `discussion.json`, `schema.json` and `pr.diff` read-only at `/workspace`,
+`/review-discussion.json`, `/review-schema.json` and `/pr.diff`. The runner fetches and verifies
+the authorized Git objects, disables checkout hooks, and materializes repository symlinks as text.
+Only the provider's conversation data belongs in the specified volume. Keep the separate checkpoint
+volume, persistent OAuth store, other PR sessions and GitHub credentials outside the model container.
+For CI, label only per-attempt containers and private networks using
+`org.pypto.gemini-review.repository`, `.run` and `.attempt` (all with the same prefix), populated from
+`GITHUB_REPOSITORY_ID`, `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` in the launcher's environment.
+
+Pass the trusted `INPUT_DIR/prompt.txt` to `agy -p` with the selected model, effort,
+`--output-format json` and `--json-schema /review-schema.json`. Use a trusted workspace configuration
+and opt out of repository-provided instructions, skills and commands. For a saved conversation pass
+the exact UUID. Save native stdout to `RESULTS_DIR/result.json` and keep stderr private. Propagate
+the CLI exit status. The driver validates `SUCCESS`, the conversation ID and `structured_output`;
+only the validated review is uploaded as `response.txt`. CLI failures can retry up to three times.
+The original `run review` remains available for standalone diff reviews. The native response format is described in the [Antigravity CLI headless reference](https://antigravity.google/docs/cli/headless/).
+
+For acceptance, use separate test volumes and fresh containers. Resume the first conversation
+and recall a random value from its previous turn. Start a second PR and check isolation. Verify a
+finding against a source file and the discussion, and test maintenance with no PR data.
+During a running test review, invoke `cleanup_ai_review_resources.py --current-gemini` once with the
+same run identifiers. Verify that its containers and private network disappear, its session volume
+remains and the shared relay stays healthy. The cleaner retries a still-present ID for up to
+20 seconds when Docker reports a concurrent removal or a network endpoint is still detaching.
+If Google requires interactive authorization, run `~/.local/share/pypto-gemini-review/run login` over SSH.
+
 The standalone CI helpers in `.github/scripts/` support Python 3.8 and newer.
 Their type annotations are deferred so importing them does not require Python
 3.9 built-in generics or Python 3.10 union operators. This compatibility is
@@ -481,7 +519,7 @@ dedicated Python 3.8 helper-test check. The review workflow uses the host
 interpreter and does not install Python or depend on the Python version inside
 the review container.
 
-Each review checks out the exact PR head into a fresh, full Git repository in a
+Each Codex review checks out the exact PR head into a fresh, full Git repository in a
 unique directory, without reusing the runner's cached object store. Before
 starting the container, the host fetches the complete base, head, and trusted
 workflow history, rejects shallow or partial clones, verifies reachable objects,
@@ -496,33 +534,31 @@ the separate publishing job. Review output is rejected if it contains an exact
 long-form value from the Codex credential and is labelled as automated,
 untrusted content when posted.
 
-Review result uploads have three attempts, each limited to two minutes. Failed
+Both reviewers share three result-upload attempts, each limited to two minutes. Failed
 attempts wait 10 and then 30 seconds before retrying, replacing any leftover
 artifact with the same run-specific name. Retries stop after a successful upload
-or cancellation. If all attempts fail, the review job fails and publishing does
-not run; a completed assessment alone does not make the job successful.
+or cancellation. If all attempts fail, that reviewer’s check fails. The other reviewer’s feedback can still be published.
 
-ChatGPT-managed Codex authentication is refreshed by a trusted weekly or manual
-maintenance run that has no checkout and uses an empty temporary directory.
-The refresh is serialized with reviews by a host lock and updates the persistent
-credential in place. Pull-request review containers receive only an ephemeral
-snapshot; they never mount or write the persistent credential.
+The `AI Review Auth Maintenance` workflow runs weekly or via **Run workflow**. Independent jobs
+check the ChatGPT and Google accounts. The Gemini launcher's `auth-maintenance` command runs a
+trusted prompt in an empty environment with no PR mounts and persists any required token refresh
+under its OAuth lock. Normal review containers continue to use temporary credential snapshots.
 
 ### Automatic approval
 
-Set `CODEX_REVIEW_AUTO_APPROVE=true` to allow clean reviews to submit an
-`APPROVE` review as `github-actions[bot]`. The repository's Actions settings
-must also allow GitHub Actions to create and approve pull requests. Disable
-only automatic approval by removing this variable or setting it to `false`;
-reviews continue to be posted. The repository's required CI checks still apply.
+Set the repository Actions variable `AI_REVIEW_AUTO_APPROVE=true` and allow GitHub Actions
+to create and approve pull requests. Set it to `false` for feedback only. During migration,
+clear `CODEX_REVIEW_AUTO_APPROVE` so manual reruns of historical Codex-only workflows
+cannot issue approvals. The new workflow falls back to that variable only when the new
+variable is unset and always requires both models. Required CI checks still apply.
 PRs authored by `github-actions[bot]` receive comments instead of approvals,
 because GitHub does not allow authors to approve their own PRs.
 
 The workflow checks out the authorized snapshot's exact head SHA and requests structured
-JSON through `codex exec --output-schema`. The schema and publishing script
+JSON through `codex exec --output-schema` and `agy --json-schema`. The shared prompt, schema and publisher
 come from the commit supplying the workflow file (`github.workflow_sha`),
-independently of the PR's base revision. The publisher approves only a complete
-`pass` with zero findings, after checking the head SHA, base branch name, and
+independently of the PR's base revision. The publisher requires two validated
+`pass` verdicts with empty findings from the same run and attempt, after checking the head SHA, base branch name, and
 reviewed merge base are unchanged. Retargeting to a different branch at the
 same SHA also invalidates the review, because the reviewed target branch has changed.
 Invalid, empty, oversized, inconsistent, or incomplete output never approves.
@@ -539,12 +575,13 @@ dismiss an approval if the merge base introduces new changes after publication.
 If merge-base verification fails, the publisher keeps findings visible in a
 `COMMENT` summary without unverified inline anchors, and withholds approval.
 The publisher checks revisions again after approval and dismisses its approval
-if an update raced with publication or verification failed. Replacement results
-first dismiss this workflow's previous approvals; human approvals are not modified.
+if an update raced with publication or verification failed. A replacement review
+withdraws this workflow's earlier approval even if a model fails or an artifact is missing.
+The other model's available feedback is still published. Human approvals are preserved.
 
-Changing a PR's base branch also triggers approval invalidation before review.
-A separate GitHub-hosted job runs only trusted workflow-revision code and
-revokes this workflow's earlier approvals, even when reviews are disabled, the
+`AI Review Retarget` handles PR edits. When the base branch changes,
+its GitHub-hosted job runs only trusted workflow-revision code and
+revokes earlier joint and historical Codex approvals, even when reviews are disabled, the
 PR is a draft, or a bot retargets it. A fresh eligible review starts only after
 invalidation succeeds. Title/body-only edits do not start review or cancel an
 existing review. Invalidation has a separate concurrency group that does not

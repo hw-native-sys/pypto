@@ -19,9 +19,8 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from publish_codex_review import github_api
+from publish_ai_review import github_api, is_review_workflow
 
-WORKFLOW = ".github/workflows/codex-review.yml"
 MAX_CONTEXT_BYTES = 8 * 1024 * 1024
 CHECK_RUNS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -74,14 +73,10 @@ def snapshot_matches(repo: str, run: dict, pr: dict) -> bool:
         page += 1
     candidates = []
     for artifact in artifacts:
-        for kind in ("codex-target", "codex-context"):
-            prefix = f"{kind}-{run['id']}-"
-            if (
-                artifact["name"].startswith(prefix)
-                and artifact["name"][len(prefix) :].isdigit()
-                and not artifact["expired"]
-            ):
-                candidates.append((int(artifact["name"][len(prefix) :]), kind == "codex-target", artifact))
+        # Older runs keep their original artifact names when GitHub reruns them.
+        match = re.fullmatch(rf"(?:ai-review|codex)-(target|context)-{run['id']}-([0-9]+)", artifact["name"])
+        if match and not artifact["expired"]:
+            candidates.append((int(match[2]), match[1] == "target", artifact))
     if not candidates:
         return False
     _, is_target, artifact = max(candidates, key=lambda item: item[:2])
@@ -181,10 +176,10 @@ def target_is_current(repo: str, pr: dict) -> bool:
 
 
 def matching_run(repo: str, run: dict, pr: dict) -> bool:
-    """Require the workflow, base repository, and artifact-backed PR identity."""
+    """Only rerun workflows that review with both models."""
     if not (
         run["event"] == "pull_request_target"
-        and run["path"].split("@", 1)[0] == WORKFLOW
+        and is_review_workflow(run["path"], include_legacy=False)
         and run["repository"]["full_name"] == repo
     ):
         return False
@@ -213,9 +208,9 @@ def route_review(repo: str, pr: dict) -> bool:
         if latest["status"] != "completed":
             report(f"Review already queued or running: {url}")
             return True
-        token = os.environ.get("CODEX_REVIEW_RERUN_TOKEN")
+        token = os.environ.get("AI_REVIEW_RERUN_TOKEN")
         if not token:
-            raise ValueError("Set CODEX_REVIEW_RERUN_TOKEN with repository Actions: write to rerun PR checks")
+            raise ValueError("Set AI_REVIEW_RERUN_TOKEN with repository Actions: write to rerun PR checks")
         # The rerun endpoint returns an empty 201 response, not JSON. Use a
         # dedicated token so workflow-trigger suppression cannot swallow the run.
         subprocess.run(

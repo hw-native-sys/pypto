@@ -1,0 +1,65 @@
+name: AI Review Cleanup
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  cleanup-sessions:
+    name: codex-cleanup-sessions
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Checkout trusted session manager
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Remove closed PR sessions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          command -v gh >/dev/null || { echo "GitHub CLI is required on the review runner" >&2; exit 1; }
+          auth_lock=/home/ci-runner/.codex-ci/auth.lock
+          if [ -L "$auth_lock" ]; then
+            echo "Codex auth lock must not be a symbolic link" >&2
+            exit 1
+          fi
+          exec 9>"$auth_lock"
+          flock --exclusive 9
+          python .github/scripts/manage_ai_review_session.py cleanup
+
+  gemini-cleanup-sessions:
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Checkout trusted Gemini session manager
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Remove the closed PR's Gemini session
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        run: python .github/scripts/run_gemini_review.py cleanup

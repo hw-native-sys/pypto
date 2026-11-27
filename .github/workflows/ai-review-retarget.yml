@@ -1,0 +1,50 @@
+name: AI Review Retarget
+
+on:
+  pull_request_target:
+    # Revoke the old approval even when the new target is outside main.
+    types: [edited]
+
+permissions: {}
+
+jobs:
+  invalidate:
+    if: github.event.changes.base
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: codex-invalidate-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted approval invalidator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Revoke approvals before reviewing a retargeted PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python .github/scripts/publish_ai_review.py --revoke
+
+  review:
+    name: Review new target
+    needs: invalidate
+    if: >-
+      (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.draft == false
+    # The called workflow narrows this token for each job.
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: write
+    uses: ./.github/workflows/ai-review.yml

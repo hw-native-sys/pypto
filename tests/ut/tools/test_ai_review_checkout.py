@@ -8,6 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """Exercise review checkout preparation with real Git histories and missing blobs."""
 
+import importlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -57,7 +59,7 @@ def review_history(tmp_path, monkeypatch):
 def review_steps():
     """Load the actual trusted shell steps instead of reimplementing preparation."""
     root = Path(__file__).resolve().parents[3]
-    workflow = yaml.safe_load((root / ".github/workflows/codex-review.yml").read_text())
+    workflow = yaml.safe_load((root / ".github/workflows/ai-review.yml").read_text())
     return {step["name"]: step for step in workflow["jobs"]["review"]["steps"]}
 
 
@@ -150,6 +152,161 @@ def test_preparation_and_container_use_fresh_checkout(review_steps):
         "Review in an isolated container"
     )
     assert "src=$PWD,dst=/workspace,readonly" in container["run"]
+
+
+def test_gemini_workflow_resumes_only_a_validated_pr_session(tmp_path, review_history, monkeypatch):
+    """Use real Git/launcher arguments and native envelopes; substitute only GitHub and the index volume."""
+    origin, base, head, merge_base, _ = review_history
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / ".github/scripts"))
+    driver = importlib.import_module("run_gemini_review")
+    job = yaml.safe_load((root / ".github/workflows/ai-review.yml").read_text())["jobs"]["gemini"]
+    steps = {step.get("id"): step for step in job["steps"]}
+    prepare = steps["workspace"]["run"]
+    remove = job["steps"][-1]["run"]
+    assert "run_gemini_review.py review --model gemini-4-neon-high --effort high" in steps["model"]["run"]
+    remote = tmp_path / "owner/repo.git"
+    remote.parent.mkdir()
+    git(tmp_path, "clone", "--bare", str(origin), str(remote))
+    for name, value in {
+        "GITHUB_SERVER_URL": tmp_path.as_uri(),
+        "GITHUB_REPOSITORY": "owner/repo",
+        "GH_REPO": "owner/repo",
+        "REPOSITORY_ID": "42",
+        "GITHUB_REPOSITORY_ID": "42",
+        "GITHUB_RUN_ID": "111",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "PR_NUMBER": "12",
+        "RUNNER_TEMP": str(tmp_path),
+        "BASE_SHA": base,
+        "HEAD_SHA": head,
+        "HOME": str(tmp_path / "home"),
+        "GH_TOKEN": "host-only",
+        "GITHUB_TOKEN": "host-only",
+        "ACTIONS_RUNTIME_TOKEN": "host-only",
+        "GITHUB_OUTPUT": str(tmp_path / "outputs"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    snapshot = tmp_path / "ai-review-context/discussion.json"
+    snapshot.parent.mkdir()
+    snapshot.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "number": 12,
+                "base": base,
+                "head": head,
+                "base_ref": "main",
+                "body": "review context",
+            }
+        )
+    )
+    session_id = "12345678-1234-1234-1234-123456789abc"
+    record = tmp_path / "native.json"
+    args_file = tmp_path / "arguments"
+    valid = {"verdict": "pass", "summary": "Examined all changes.", "findings": []}
+    native = {"status": "SUCCESS", "conversation_id": session_id, "structured_output": valid}
+    record.write_text(json.dumps(native))
+    launcher = Path.home() / ".local/share/pypto-gemini-review/run"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "#!/bin/bash\nset -eu\n"
+        'test -z "${GH_TOKEN-}${GITHUB_TOKEN-}${ACTIONS_RUNTIME_TOKEN-}${GITHUB_OUTPUT-}"\n'
+        f'printf "%s\\n" "$@" >"{args_file}"\n'
+        f'cp "{record}" "${{@: -1}}/result.json"\n'
+    )
+    launcher.chmod(0o755)
+    saved = {}
+
+    def checkpoint(name, session=None):
+        assert name == "pypto-gemini-sessions-42-12-index"
+        if session is not None:
+            saved[name] = session
+        return saved.get(name, "")
+
+    def authorize(repo, number, repo_id, mode, sha, *, provider):
+        assert (repo, number, repo_id, mode, sha, provider) == (
+            "owner/repo",
+            "12",
+            "42",
+            "review",
+            head,
+            "gemini",
+        )
+        return "ready"
+
+    monkeypatch.setattr(driver, "reconcile", lambda *args, **kwargs: None)
+    monkeypatch.setattr(driver, "checkpoint", checkpoint)
+    monkeypatch.setattr(driver, "manage_session", authorize)
+    for turn in ("new", "resume", "wrong_id", "failed_result"):
+        subprocess.run(["bash", "-c", prepare], check=True, capture_output=True)
+        workdir = Path((tmp_path / "outputs").read_text().splitlines()[-1].removeprefix("path="))
+        inputs = workdir / "input"
+        assert (inputs / "pr.diff").read_text().strip() == git(origin, "diff", "--binary", merge_base, head)
+        assert git(inputs / "workspace", "rev-parse", "HEAD") == head
+        assert (inputs / "workspace/python/pypto/ir/compile.py").is_file()
+        if turn == "wrong_id":
+            record.write_text(
+                json.dumps(dict(native, conversation_id="aaaaaaaa-1234-1234-1234-123456789abc"))
+            )
+            with pytest.raises(ValueError, match="requested conversation"):
+                driver.review(workdir, "gemini-4-neon-high", "high")
+            assert not (workdir / "response.txt").exists()
+        elif turn == "failed_result":
+            record.write_text(json.dumps(dict(native, status="ERROR")))
+            with pytest.raises(ValueError, match="did not complete"):
+                driver.review(workdir, "gemini-4-neon-high", "high")
+            assert not (workdir / "response.txt").exists()
+        else:
+            assert driver.review(workdir, "gemini-4-neon-high", "high")
+            assert json.loads((workdir / "response.txt").read_text()) == valid
+        args = args_file.read_text().splitlines()
+        assert args[:7] == [
+            "review-session",
+            "--model",
+            "gemini-4-neon-high",
+            "--effort",
+            "high",
+            "--session-volume",
+            "pypto-gemini-sessions-42-12",
+        ]
+        assert args[7:-2] == ([] if turn == "new" else ["--conversation", session_id])
+        assert saved == {"pypto-gemini-sessions-42-12-index": session_id}
+        assert (inputs / "discussion.json").read_bytes() == snapshot.read_bytes()
+        assert (inputs / "schema.json").read_bytes() == (root / ".github/ai-review-schema.json").read_bytes()
+        assert "review-discussion.json" in (inputs / "prompt.txt").read_text()
+        subprocess.run(["bash", "-c", remove], check=True, env=os.environ | {"REVIEW_DIR": str(workdir)})
+        assert not workdir.exists()
+
+
+def test_gemini_auth_maintenance_runs_without_pr_data(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    workflow = yaml.safe_load((root / ".github/workflows/ai-review-auth-maintenance.yml").read_text())
+    step = workflow["jobs"]["gemini-auth-maintenance"]["steps"][-1]
+    launcher = tmp_path / ".local/share/pypto-gemini-review/run"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "#!/bin/sh\nset -eu\n"
+        'test "$#" = 3 && test "$1" = auth-maintenance && test "$2" = --model\n'
+        'test -z "${GH_TOKEN-}${GITHUB_TOKEN-}${ACTIONS_RUNTIME_TOKEN-}" && test -z "$(ls -A)"\n'
+        f'pwd > "{tmp_path}/refreshed"\n'
+    )
+    launcher.chmod(0o755)
+    subprocess.run(
+        ["bash", "-c", step["run"]],
+        check=True,
+        cwd=root,
+        env=os.environ
+        | {
+            "HOME": str(tmp_path),
+            "RUNNER_TEMP": str(tmp_path),
+            "GH_TOKEN": "host-only",
+            "GITHUB_TOKEN": "host-only",
+            "ACTIONS_RUNTIME_TOKEN": "host-only",
+        },
+    )
+    empty = Path((tmp_path / "refreshed").read_text().strip())
+    assert empty.parent == tmp_path and not empty.exists()
 
 
 if __name__ == "__main__":

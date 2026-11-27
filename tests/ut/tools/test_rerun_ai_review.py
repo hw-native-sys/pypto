@@ -25,11 +25,11 @@ import yaml
 def router(monkeypatch):
     scripts = Path(__file__).resolve().parents[3] / ".github/scripts"
     monkeypatch.syspath_prepend(str(scripts))
-    spec = importlib.util.spec_from_file_location("rerun_codex_review", scripts / "rerun_codex_review.py")
+    spec = importlib.util.spec_from_file_location("rerun_ai_review", scripts / "rerun_ai_review.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setenv("CODEX_REVIEW_RERUN_TOKEN", "test-only-token")
+    monkeypatch.setenv("AI_REVIEW_RERUN_TOKEN", "test-only-token")
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.setattr(
         module.subprocess, "run", lambda *args, **kwargs: pytest.fail("Unexpected subprocess")
@@ -53,7 +53,7 @@ def run(pr):
     return {
         "id": 123,
         "event": "pull_request_target",
-        "path": ".github/workflows/codex-review.yml",
+        "path": ".github/workflows/ai-review.yml",
         "head_sha": pr["head"]["sha"],
         "head_branch": "feature",
         "head_repository": {"id": 12},
@@ -102,7 +102,7 @@ def test_rerun_all_jobs_uses_dedicated_token_and_empty_response(router, pr, api,
 @pytest.mark.parametrize("status", ["queued", "in_progress", "waiting", "pending", "requested"])
 def test_active_run_is_reused_without_rerun_token(router, pr, run, api, monkeypatch, status):
     run["status"] = status
-    monkeypatch.delenv("CODEX_REVIEW_RERUN_TOKEN")
+    monkeypatch.delenv("AI_REVIEW_RERUN_TOKEN")
     assert router.route_review("owner/repo", pr)
 
 
@@ -123,7 +123,7 @@ def test_pr_change_before_rerun_aborts(router, pr, api, monkeypatch, field, valu
     "field,value",
     [
         ("event", "issue_comment"),
-        ("path", ".github/workflows/ci.yml"),
+        ("path", ".github/workflows/codex-review-cleanup.yml"),
         ("path", ".github/workflows/ci.yml@main"),
         ("repository", {"full_name": "other/repo"}),
     ],
@@ -134,18 +134,24 @@ def test_wrong_run_never_reads_artifact(router, run, pr, monkeypatch, field, val
     assert not router.matching_run("owner/repo", run, pr)
 
 
-@pytest.mark.parametrize("suffix", ["", "@main", "@refs/heads/main", "@" + "b" * 40])
-def test_workflow_path_accepts_optional_ref(router, run, pr, monkeypatch, suffix):
-    run["path"] += suffix
-    verified = []
-    monkeypatch.setattr(router, "snapshot_matches", lambda *args: verified.append(args) or True)
-    assert router.matching_run("owner/repo", run, pr)
-    assert verified == [("owner/repo", run, pr)]
+@pytest.mark.parametrize(
+    "path,reruns",
+    [
+        ("codex-review.yml@" + "b" * 40, False),
+        ("ai-review-retarget.yml@refs/heads/main", True),
+    ],
+)
+def test_routes_only_to_two_model_workflows(router, run, pr, api, monkeypatch, path, reruns):
+    run["path"] = f".github/workflows/{path}"
+    requested = []
+    monkeypatch.setattr(router.subprocess, "run", lambda args, **kwargs: requested.append(args[-1]))
+    assert router.route_review("owner/repo", pr) is reruns
+    assert requested == (["repos/owner/repo/actions/runs/123/rerun"] if reruns else [])
 
 
 def test_missing_credential_is_an_error_not_silent_fallback(router, pr, api, monkeypatch):
-    monkeypatch.delenv("CODEX_REVIEW_RERUN_TOKEN")
-    with pytest.raises(ValueError, match="CODEX_REVIEW_RERUN_TOKEN"):
+    monkeypatch.delenv("AI_REVIEW_RERUN_TOKEN")
+    with pytest.raises(ValueError, match="AI_REVIEW_RERUN_TOKEN"):
         router.route_review("owner/repo", pr)
 
 
@@ -368,7 +374,11 @@ def install_snapshot(router, monkeypatch, pr, snapshot=None, name="discussion.js
 def test_fork_run_without_pr_links_verified_from_snapshot(router, run, pr, monkeypatch):
     install_snapshot(router, monkeypatch, pr)
     assert run["pull_requests"] == []
-    run.update(head_sha="b" * 40, head_branch="main", head_repository={"id": 999})
+    run.update(
+        head_sha="b" * 40,
+        head_branch="main",
+        head_repository={"id": 999},
+    )
     assert router.matching_run("owner/repo", run, pr)
 
 
@@ -398,7 +408,7 @@ def test_target_manifest_survives_expired_discussion(router, run, pr, monkeypatc
         "github_api",
         lambda endpoint: {
             "artifacts": [
-                {"id": 8, "name": "codex-context-123-1", "expired": True, "size_in_bytes": 100},
+                {"id": 8, "name": "ai-review-context-123-1", "expired": True, "size_in_bytes": 100},
                 {"id": 9, "name": "codex-target-123-1", "expired": False, "size_in_bytes": 100},
             ]
         },
@@ -414,7 +424,7 @@ def test_latest_attempt_identity_wins(router, run, pr, monkeypatch):
         lambda endpoint: {
             "artifacts": [
                 {"id": 7, "name": "codex-context-123-1", "expired": False, "size_in_bytes": 100},
-                {"id": 9, "name": "codex-target-123-2", "expired": False, "size_in_bytes": 100},
+                {"id": 9, "name": "ai-review-target-123-2", "expired": False, "size_in_bytes": 100},
             ]
         },
     )
@@ -442,20 +452,19 @@ def test_oversized_snapshot_is_rejected_before_download(router, run, pr, monkeyp
 
 def test_workflow_limits_token_to_trusted_step():
     root = Path(__file__).resolve().parents[3]
-    workflow = yaml.safe_load((root / ".github/workflows/codex-review.yml").read_text())
+    workflow = yaml.safe_load((root / ".github/workflows/ai-review.yml").read_text())
     jobs = workflow["jobs"]
     prepare = jobs["prepare"]
     assert prepare["permissions"]["actions"] == "read"
     assert prepare["permissions"]["checks"] == "read"
     assert prepare["concurrency"]["cancel-in-progress"] is False
     assert prepare["concurrency"]["queue"] == "max"
-    contexts = [step for step in prepare["steps"] if step.get("id") == "context"]
-    assert len(contexts) == 1
-    assert "issue_comment" in contexts[0]["env"]["CODEX_REVIEW_RERUN_TOKEN"]
-    assert "secrets.CODEX_REVIEW_RERUN_TOKEN" in contexts[0]["env"]["CODEX_REVIEW_RERUN_TOKEN"]
-    for name, job in jobs.items():
-        if name != "prepare":
-            assert "CODEX_REVIEW_RERUN_TOKEN" not in json.dumps(job)
+    context = next(step for step in prepare["steps"] if step.get("id") == "context")
+    assert context["env"]["AI_REVIEW_RERUN_TOKEN"] == (
+        "${{ github.event_name == 'issue_comment' && "
+        "(secrets.AI_REVIEW_RERUN_TOKEN || secrets.CODEX_REVIEW_RERUN_TOKEN) || '' }}"
+    )
+    assert all("REVIEW_RERUN_TOKEN" not in json.dumps(job) for name, job in jobs.items() if name != "prepare")
     identity = next(step for step in prepare["steps"] if step["name"] == "Upload review routing identity")
     discussion = next(step for step in prepare["steps"] if step["name"] == "Upload discussion snapshot")
     assert identity["with"]["retention-days"] == 30

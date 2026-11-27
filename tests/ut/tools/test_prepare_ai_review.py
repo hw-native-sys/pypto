@@ -20,7 +20,7 @@ import pytest
 def collector(monkeypatch):
     scripts = Path(__file__).resolve().parents[3] / ".github/scripts"
     monkeypatch.syspath_prepend(str(scripts))
-    spec = importlib.util.spec_from_file_location("prepare_codex_review", scripts / "prepare_codex_review.py")
+    spec = importlib.util.spec_from_file_location("prepare_ai_review", scripts / "prepare_ai_review.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -47,7 +47,7 @@ def comment_event():
     return {
         "action": "created",
         "issue": {"number": 2911, "pull_request": {"url": "url"}},
-        "comment": {"user": {"login": "author", "type": "User"}, "body": "@pypto-codex review"},
+        "comment": {"user": {"login": "author", "type": "User"}, "body": "/ai-review"},
     }
 
 
@@ -55,10 +55,10 @@ def comment_event():
     "body,expected",
     [
         ("@pypto-codex review", True),
-        ("Explanation first.\n\n@pypto-codex review\n", True),
+        ("Explanation first.\n\n/ai-review\n", True),
         ("@PYPTO-CODEX review", True),
         ("Please @pypto-codex review", False),
-        ("> @pypto-codex review", False),
+        ("> /ai-review", False),
         ("    @pypto-codex review", False),
         ("\t@pypto-codex review", False),
         ("  \t@pypto-codex review", False),
@@ -347,7 +347,9 @@ def test_prepare_writes_safe_outputs(collector, pr, comment_event, monkeypatch, 
         "head": "a" * 40,
         "base_ref": pr["base"]["ref"],
     }
-    assert outputs.read_text() == f"number=2911\nhead={'a' * 40}\nbase={'b' * 40}\nready=true\n"
+    assert outputs.read_text() == (
+        f"number=2911\nhead={'a' * 40}\nbase={'b' * 40}\nbase_ref={pr['base']['ref']}\nready=true\n"
+    )
 
 
 def test_oversized_context_not_silently_truncated(collector, pr, comment_event, monkeypatch, tmp_path):
