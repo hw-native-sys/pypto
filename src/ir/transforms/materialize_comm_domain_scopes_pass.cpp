@@ -223,6 +223,18 @@ std::array<bool, 2> EnginesFor(const BufferEngines& engines, const Var* buffer) 
   return it == engines.end() ? std::array<bool, 2>{} : it->second;
 }
 
+/// A host-orchestration function in PyPTO is declared as either
+/// ``@pl.function(type=FunctionType.Orchestration, level=Level.HOST)`` or
+/// (more common in distributed programs) ``@pl.function(level=Level.HOST,
+/// role=Role.Orchestrator)`` where ``func_type_`` may stay ``Opaque``. Accept
+/// either form so the pass works with the conventional host_orch declaration
+/// idiom used in distributed tests.
+[[nodiscard]] bool IsHostOrch(const FunctionPtr& func) {
+  if (!func || !func->level_.has_value() || *func->level_ != Level::HOST) return false;
+  return func->func_type_ == FunctionType::Orchestration ||
+         (func->role_.has_value() && *func->role_ == Role::Orchestrator);
+}
+
 // Collect effects per allocation, before compatible allocations are grouped.
 // Propagate callee requirements back to each actual argument independently;
 // caller facts never flow into shared formals and contaminate another call.
@@ -231,7 +243,7 @@ class BufferEngineCollector : public IRVisitor {
  public:
   explicit BufferEngineCollector(ProgramPtr program) : program_(std::move(program)) {}
 
-  BufferEngines Collect() {
+  BufferEngines Collect(bool contexts_materialized) {
     // Standalone invocations need not have normalized return statements yet.
     // Share the existing memoized lineage analysis across all callee queries.
     return_lineage::ScopedTraceCache lineage_cache;
@@ -239,11 +251,23 @@ class BufferEngineCollector : public IRVisitor {
       if (func->func_type_ == FunctionType::SIMT) continue;
       auto& plan = plans_[func->name_];
       plan.returned_param_indices = return_lineage::ReturnedParamIndices(func, program_);
+      const bool host_entry = IsHostOrch(func);
       for (size_t i = 0; i < func->params_.size(); ++i) {
         const auto& param = func->params_[i];
         if (!As<DistributedTensorType>(param->GetType())) continue;
         plan.dist_param_indices.push_back(i);
         plan.param_to_ctx[param.get()] = param;
+        if (host_entry) roots_[param.get()] = param;
+      }
+      if (contexts_materialized) {
+        // MaterializeDistTensorCtx appends one context per window, in parameter order.
+        const size_t first_ctx = func->params_.size() - plan.dist_param_indices.size();
+        for (size_t j = 0; j < plan.dist_param_indices.size(); ++j) {
+          const auto& ctx = func->params_[first_ctx + j];
+          if (IsA<CommCtxType>(ctx->GetType())) {
+            ctx_to_window_[ctx.get()] = func->params_[plan.dist_param_indices[j]].get();
+          }
+        }
       }
     }
     for (const auto& [gv, func] : program_->functions_) {
@@ -366,7 +390,9 @@ class BufferEngineCollector : public IRVisitor {
       if (auto query = As<Call>(ctx); IsOp(query, "pld.system.get_comm_ctx")) {
         if (const auto* window = Resolve(query->args_[0])) Record(window, 0);
       } else if (auto var = AsVarLike(ctx); var && visited.insert(var.get()).second) {
-        if (auto it = definitions.values.find(var.get()); it != definitions.values.end()) {
+        if (auto window = ctx_to_window_.find(var.get()); window != ctx_to_window_.end()) {
+          Record(window->second, 0);
+        } else if (auto it = definitions.values.find(var.get()); it != definitions.values.end()) {
           session_contexts_.insert(session_contexts_.end(), it->second.begin(), it->second.end());
         }
       }
@@ -389,6 +415,7 @@ class BufferEngineCollector : public IRVisitor {
   ProgramPtr program_;
   std::unordered_map<std::string, dist_tensor_alias::FunctionCtxPlan> plans_;
   const dist_tensor_alias::DistParamAliasCollector* aliases_ = nullptr;
+  std::unordered_map<const Var*, const Var*> ctx_to_window_;
   std::unordered_map<const Var*, VarPtr> roots_;
   std::unordered_map<const Var*, std::vector<const Var*>> callers_;
   BufferEngines engines_;
@@ -726,18 +753,6 @@ class DispatchAnalyzer : public IRVisitor {
   std::vector<ForStmtPtr> for_stack_;
   int repeating_scope_depth_ = 0;
 };
-
-/// A host-orchestration function in PyPTO is declared as either
-/// ``@pl.function(type=FunctionType.Orchestration, level=Level.HOST)`` or
-/// (more common in distributed programs) ``@pl.function(level=Level.HOST,
-/// role=Role.Orchestrator)`` where ``func_type_`` may stay ``Opaque``. Accept
-/// either form so the pass works with the conventional host_orch declaration
-/// idiom used in distributed tests.
-[[nodiscard]] bool IsHostOrch(const FunctionPtr& func) {
-  if (!func || !func->level_.has_value() || *func->level_ != Level::HOST) return false;
-  return func->func_type_ == FunctionType::Orchestration ||
-         (func->role_.has_value() && *func->role_ == Role::Orchestrator);
-}
 
 [[nodiscard]] bool IsChipOrch(const FunctionPtr& func) {
   if (!func || !func->level_.has_value() || *func->level_ != Level::CHIP) return false;
@@ -1207,13 +1222,11 @@ ExternalWindowAnalysis AnalyzeExternalWindows(const ProgramPtr& program, const F
   }
   analyzer.external_params = &result.parameter_indices;
   analyzer.VisitStmt(host->body_);
-  auto engines = BufferEngineCollector(program).Collect();
+  auto engines = BufferEngineCollector(program).Collect(/*contexts_materialized=*/true);
   for (const auto& [param, root] : host_plan.param_to_ctx) {
     size_t i = result.parameter_indices.at(param);
     const auto& devices = analyzer.external_devices[i];
     auto engine = EnginesFor(engines, param);
-    CHECK_SPAN(!(engine[0] && engine[1]), param->span_)
-        << "External window requires incompatible URMA and mapped peer access";
     result.uses.emplace(i, ExternalWindowUse{devices.is_all, devices.ToDevices(), engine[0], engine[1]});
   }
   return result;
@@ -1223,7 +1236,7 @@ namespace pass {
 
 Pass MaterializeCommDomainScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    const auto engines = BufferEngineCollector(program).Collect();
+    const auto engines = BufferEngineCollector(program).Collect(/*contexts_materialized=*/false);
     // Index chip-level Orchestration functions by name so the dispatch
     // analyzer can recognise host → chip Calls.
     std::map<std::string, FunctionPtr> chip_orchs;

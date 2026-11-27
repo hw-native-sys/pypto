@@ -27,7 +27,10 @@ External HOST parameters receive their buffer slot and domain from the entry ABI
 communication domain. Before grouping allocations, this pass traces engine uses
 through `Call`/`Submit` arguments, returned aliases, views and loop carries to
 each underlying window-buffer allocation. Uncalled functions do not configure
-unrelated buffers.
+unrelated buffers. Creating a URMA session requires URMA on the window that supplies
+its context, even when the session issues no transfers. For external HOST windows,
+codegen traces the materialized context parameter back to its paired window. An
+external window that also needs MTE is rejected even if HOST allocates other windows.
 
 Tensor `put_async`/`get_async` require URMA on their remote operand. A5 Scatter `pld.tile.get_async` also requires URMA on its local `DistributedTensor` destination so compatible source and destination windows share a registered memory region on each rank. `remote_load`/
 `remote_store` and `put`/`get` require MTE on their remote operand, including
