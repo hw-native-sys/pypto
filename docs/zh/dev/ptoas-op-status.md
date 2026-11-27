@@ -119,8 +119,8 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.subview | — | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.set_validshape | .SetValidShape | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | **Buffer-ID（2）** |  |  |  |  |  |  |  |  |
-| pto.get_buf | get_buf | internal | ✅ | — | — | — | — | 编译期/分配辅助，不独立建 ST |
-| pto.rls_buf | rls_buf | internal | ✅ | — | — | — | — | 编译期/分配辅助，不独立建 ST |
+| pto.get_buf | get_buf | internal | ✅ | — | — | — | — | A5 M/FIX 显式 `pl.system.get_buf`（mode 0），含动态 INDEX ID；CPU codegen/BiSheng 验证，尚无设备 ST |
+| pto.rls_buf | rls_buf | internal | ✅ | — | — | — | — | A5 M/FIX 显式 `pl.system.rls_buf`（mode 0），含动态 INDEX ID；CPU codegen/BiSheng 验证，尚无设备 ST |
 | **DMA 数据搬运（10）** |  |  |  |  |  |  |  |  |
 | pto.tload | TLOAD | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |

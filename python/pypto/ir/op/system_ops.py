@@ -294,6 +294,33 @@ def wait_flag(
     return _pipeline_flag("system.wait_flag", src_pipe, dst_pipe, event_id, core_type=core_type, span=span)
 
 
+def _buffer_lock(name: str, buf_id: int | Expr, pipe: object, span: Span | None) -> Call:
+    if not isinstance(pipe, PipeType):
+        raise TypeError(f"{name} pipe must be a PipeType")
+    if pipe not in (PipeType.M, PipeType.FIX):
+        raise ValueError(f"{name} currently supports only PIPE_M and PIPE_FIX")
+    actual_span = _get_span_or_capture(span, frame_offset=2)
+    if isinstance(buf_id, ConstInt):
+        buf_id = buf_id.value
+    if isinstance(buf_id, int) and not isinstance(buf_id, bool):
+        if not 0 <= buf_id <= 31:
+            raise ValueError(f"{name} buffer ID must be in [0, 31]")
+        buf_id = ConstInt(buf_id, DataType.INDEX, actual_span)
+    if not isinstance(buf_id, Expr):
+        raise TypeError(f"{name} buffer ID must be an int or INDEX expression")
+    return _ir_core.create_op_call(name, [buf_id], {"pipe": pipe}, actual_span)
+
+
+def get_buf(buf_id: int | Expr, *, pipe: PipeType, span: Span | None = None) -> Call:
+    """Acquire an A5 matrix/FIX hardware buffer token in mode 0."""
+    return _buffer_lock("system.get_buf", buf_id, pipe, span)
+
+
+def rls_buf(buf_id: int | Expr, *, pipe: PipeType, span: Span | None = None) -> Call:
+    """Release an A5 matrix/FIX hardware buffer token in mode 0."""
+    return _buffer_lock("system.rls_buf", buf_id, pipe, span)
+
+
 _MIN_FFTS_WORKSPACE_ELEMENTS = 256
 
 

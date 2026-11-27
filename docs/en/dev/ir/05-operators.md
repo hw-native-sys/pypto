@@ -674,23 +674,22 @@ follow — the restriction `set_flag` / `wait_flag` already carry.
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.set_flag` / `system.wait_flag` | Explicit intra-core pipeline event | `src_pipe`, `dst_pipe`, static `event_id` or one dynamic INDEX operand; optional `core_type` |
+| `system.get_buf` / `system.rls_buf` | A5 AIC hardware buffer token (mode 0) | One INDEX operand, static or dynamic in [0, 31]; `pipe` M or FIX |
 | `system.task_invalid` | Sentinel `TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
 | `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
 | `system.available_cluster_count` | This run's MIX cluster (= AIC) count, read from the device. Result `Scalar[INT32]` | None |
 | `system.available_aiv_count` | This run's standalone AIV core count, read from the device. Result `Scalar[INT32]` | None |
 
-The explicit flag calls have `UnknownType` and are retained as `EvalStmt(Call)`.
-`src_pipe` and `dst_pipe` are distinct concrete `PipeType` values (not `ALL`).
-Exactly one event form is present: a literal `event_id` in `[0, 7]`, or one
-`ScalarType(INDEX)` operand whose runtime value must stay in that range.
-`core_type` is optional `"aic"` / `"aiv"` IR metadata for mixed-kernel placement.
-Codegen emits `pto.set_flag` / `pto.wait_flag`, or the `_dyn` variants for an
-INDEX operand. A dynamic operand folded to a constant remains an operand and
-still emits the `_dyn` form; IR printing preserves it with `pl._dump.call`.
-The calls do not represent cross-core synchronization.
-The `PipelineLoopValid` verifier rejects either call inside a `ForKind::Pipeline`
-loop before pipeline scheduling. The scheduling passes also reject this placement
-when optional IR verification is disabled. Explicit flags work in ordinary loops.
+Explicit flag calls return `UnknownType` and are retained as `EvalStmt(Call)`.
+`src_pipe` and `dst_pipe` must be distinct concrete `PipeType` values (not `ALL`).
+Use either a literal `event_id` in `[0, 7]` or one `ScalarType(INDEX)` operand
+with the same runtime range. Optional `core_type` (`"aic"` / `"aiv"`) is IR metadata for mixed-kernel placement. Codegen emits `pto.set_flag` / `pto.wait_flag`, using
+`_dyn` for INDEX operands even when folded to constants; `pl._dump.call` preserves
+that operand form in printed IR. These calls do not synchronize cores.
+Explicit flags work in ordinary loops, but `PipelineLoopValid` and scheduling
+passes reject them in `ForKind::Pipeline` even with optional verification disabled.
+
+A5 buffer token operations return `UnknownType` with fixed CUBE affinity. EmitC maps M to `TMATMUL` and FIX to `TSTORE_ACC`, the only native operation kinds PTOAS 0.78 legalizes for `get_buf` / `rls_buf` and their `_dyn` variants. Like explicit flags, buffer tokens are rejected inside `pl.pipeline`.
 
 `system.syncall` has two modes, selected by its `mode` **IR attribute**; the Python surfaces spell them as `pl.SyncAllMode` members instead (see below). The **hard** form (attr `"hard"`, the default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (attr `"soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor containing at least 16 elements (64 bytes). Pass it as a kernel parameter so all blocks share one buffer; it must occupy an exclusive cache line and be zero-initialized before its first use.
 

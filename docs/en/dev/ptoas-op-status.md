@@ -148,8 +148,8 @@ output elements outside the valid rectangle.
 | pto.subview | — | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.set_validshape | .SetValidShape | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | **Buffer IDs (2)** |  |  |  |  |  |  |  |  |
-| pto.get_buf | get_buf | internal | ✅ | — | — | — | — | compile-time/allocation helper; no standalone ST |
-| pto.rls_buf | rls_buf | internal | ✅ | — | — | — | — | compile-time/allocation helper; no standalone ST |
+| pto.get_buf | get_buf | internal | ✅ | — | — | — | — | Explicit `pl.system.get_buf` on A5 M/FIX (mode 0), including dynamic INDEX IDs; CPU codegen/BiSheng validation, no device ST yet |
+| pto.rls_buf | rls_buf | internal | ✅ | — | — | — | — | Explicit `pl.system.rls_buf` on A5 M/FIX (mode 0), including dynamic INDEX IDs; CPU codegen/BiSheng validation, no device ST yet |
 | **DMA Data Movement (10)** |  |  |  |  |  |  |  |  |
 | pto.tload | TLOAD | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
