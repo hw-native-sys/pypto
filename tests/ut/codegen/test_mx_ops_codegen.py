@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import InternalError, ir
 from pypto.backend import BackendType, pto_backend, reset_for_testing, set_backend_type
 from pypto.backend._ptoas_fp4 import uses_native_fp4_mx
 from pypto.backend._ptoas_locate import find_ptoas_binary
@@ -1052,3 +1052,126 @@ class TestMxANDScaleCodegen:
         assert "#pto.layout<mx_a_zz>" not in mlir
         assert "pto.tload" in mlir
         assert "pto.tmov" not in mlir
+
+
+def _mx_scale_writeback_program(source_type="pl.Tensor", *, move_to_right=False):
+    consume = (
+        "_ = pl.tile.move(pl.tile.transpose_view(scale_zz), target_memory=pl.Mem.RightScale)"
+        if move_to_right
+        else ""
+    )
+    return pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def load_window(self, scales: {source_type}[[512, 4], pl.FP8E8M0], row: pl.Scalar[pl.INDEX]):
+        source = pl.tensor.view(scales, [512, 4], layout=pl.MX_A_ND)
+        scale_zz: pl.Tile[
+            [256, 4], pl.FP8E8M0, pl.Mem.Mat,
+            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+        ] = pl.tile.create([256, 4], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+        scale_zz = pl.tile.gather_row(scale_zz, source, [0, 0], [256, 0], [128, 4])
+        pl.tile.gather_row(scale_zz, source, [128, 0], [row, 0], [128, 4])
+        {consume}
+""")
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("source_type", ["pl.Tensor", "pld.DistributedTensor"])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_mx_scale_gather_writes_two_pages_into_one_tile(tmp_path, source_type, planner):
+    program = _mx_scale_writeback_program(source_type, move_to_right=True)
+    mlir = _emit_incore_mlir(program, planner=planner)
+    transfers = [line for line in mlir.splitlines() if "pto.tload " in line]
+    assert len(transfers) == 2
+    assert all("{layout = #pto.layout<mx_a_nd>}" in line for line in transfers)
+
+    cpp = _assemble_mx(mlir, tmp_path, planner)
+    assert cpp.count("TLOAD(") == 2
+    assert "pto::Layout::MX_A_ND" in cpp
+    assert "ScaleRight" in cpp
+
+
+def test_mx_scale_gather_eval_uses_its_own_destination():
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load_window(self, scales: pl.Tensor[[128, 4], pl.FP8E8M0]):
+            source = pl.tensor.view(scales, [128, 4], layout=pl.MX_A_ND)
+            scale_zz: pl.Tile[
+                [128, 4],
+                pl.FP8E8M0,
+                pl.Mem.Mat,
+                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+            ] = pl.tile.create([128, 4], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+            scratch = pl.tile.create([16, 16], dtype=pl.BF16, target_memory=pl.Mem.Mat)
+            # This EvalStmt can leave the scratch buffer in the result state.
+            pl.tile.set_validshape(scratch, 16, 16)
+            pl.tile.gather_row(scale_zz, source, [0, 0], [0, 0], [128, 4])
+
+    mlir = _emit_incore_mlir(Program)
+    lines = mlir.splitlines()
+    scratch_update = next(line for line in lines if "pto.set_validshape " in line)
+    scale_alloc = next(line for line in lines if " = pto.alloc_tile" in line and "dtype=!pto.f8E8M0" in line)
+    scale_ssa = scale_alloc.strip().split(" = ", 1)[0]
+    assert f"pto.set_validshape {scale_ssa}," not in scratch_update
+    assert f"pto.subview {scale_ssa}[" in mlir
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_mx_scale_gather_eval_rejects_slice_destination(planner):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load_window(self, scales: pl.Tensor[[256, 4], pl.FP8E8M0]):
+            source = pl.tensor.view(scales, [256, 4], layout=pl.MX_A_ND)
+            scale_zz: pl.Tile[
+                [256, 4],
+                pl.FP8E8M0,
+                pl.Mem.Mat,
+                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+            ] = pl.tile.create([256, 4], dtype=pl.FP8E8M0, target_memory=pl.Mem.Mat)
+            window = pl.tile.slice(scale_zz, [128, 4], [128, 0])
+            pl.tile.gather_row(window, source, [0, 0], [0, 0], [128, 4])
+
+    with pytest.raises(ValueError, match="MX_A_ND gather destination must be a packed local Mat allocation"):
+        _emit_incore_mlir(Program, planner=planner)
+
+
+def test_mx_scale_gather_eval_rejects_unbound_destination():
+    span = ir.Span.unknown()
+    source_type = ir.TensorType(
+        [128, 4], pl.FP8E8M0, tensor_view=ir.TensorView(layout=ir.TensorLayout.MX_A_ND)
+    )
+    source = ir.Var("source", source_type, span)
+    dst_type = ir.TileType(
+        [128, 4],
+        pl.FP8E8M0,
+        tile_view=ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.row_major, fractal=32),
+        memory_space=ir.MemorySpace.Mat,
+    )
+    # A well-typed tile operand without an emitted storage binding is malformed IR.
+    dst = ir.Var("unbound_scale", dst_type, span)
+    gather = ir.op.tile.gather_row(dst, source, [0, 0], [0, 0], [128, 4], span=span)
+    func = ir.Function("load_window", [source], [], ir.EvalStmt(gather, span), span, type=ir.FunctionType.AIC)
+    program = ir.Program([func], func.name, span)
+    set_backend_type(BackendType.Ascend950)
+
+    with pytest.raises(InternalError, match="tile.gather_row dst 'unbound_scale' has no bound tile_buf"):
+        codegen.PTOCodegen().generate(program)
+
+
+@pytest.mark.ptoas_compile
+def test_mx_scale_gather_two_pages_has_expected_b_nn_bytes(tmp_path):
+    rows = np.arange(512)[:, None]
+    groups = np.arange(4)[None, :]
+    source = (rows * 13 + groups * 59) % 251
+    actual = _simulate_mx_load(
+        _mx_scale_writeback_program(), tmp_path, source.ravel(), (4, 256), "ColMajor", scalar_args=(0,)
+    )
+    expected = np.concatenate((source[256:384], source[:128])).T
+    np.testing.assert_array_equal(np.array(actual).reshape(4, 256), expected)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

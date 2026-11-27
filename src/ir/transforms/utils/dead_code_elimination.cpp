@@ -29,6 +29,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -106,6 +107,8 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) value = assign->value_;
   if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) value = eval->expr_;
   if (value && As<Submit>(value)) return true;
+  // Destination-passing MX loads update the underlying tile even if the alias is unused.
+  if (op_predicates::IsMxScaleGather(As<Call>(value))) return true;
   const auto name = GetStmtOpName(stmt);
   const auto& registry = OpRegistry::GetInstance();
   if (registry.IsRegistered(name)) {

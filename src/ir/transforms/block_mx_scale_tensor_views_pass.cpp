@@ -62,6 +62,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -260,16 +261,13 @@ TypePtr BlockMxType(const TypePtr& type, const Span& span, bool logical_views) {
     if (!changed) return type;
     return std::make_shared<TupleType>(std::move(new_elements));
   }
-  if (As<DistributedTensorType>(type)) {
-    if (!IsMxTensorType(type)) return type;
-    CHECK_SPAN(false, span) << "MX layout is not supported on a distributed tensor yet. "
-                            << "Annotate the tensor as pl.ND.";
-  }
-  if (auto tensor_type = As<TensorType>(type)) {
-    if (!IsMxTensorType(type)) return type;
-    const auto& maybe_view = tensor_type->tensor_view_;
-    if (!maybe_view.has_value()) return type;
-    const TensorView& view = *maybe_view;
+  if (auto tensor_type = AsTensorTypeLike(type)) {
+    if (!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout)) return type;
+    const TensorView& view = *tensor_type->tensor_view_;
+    // MX_A_ND describes dense row-major bytes in each rank's local GM and
+    // keeps that shape. The packed layouts require separate distributed support.
+    CHECK_SPAN(view.layout == TensorLayout::MX_A_ND || !As<DistributedTensorType>(type), span)
+        << "Packed MX layout is not supported on a distributed tensor. Annotate it as pl.ND or pl.MX_A_ND.";
     auto blocked_shape = BlockMxShape(tensor_type->shape_, view.layout, span);
     if (view.layout == TensorLayout::MX_A_ND) return type;
     CHECK_SPAN(view.valid_shape.empty(), span)
@@ -485,10 +483,14 @@ class BlockMxMutator : public IRMutator {
     if (!mx_args.empty() && !is_function_call) {
       const bool is_store_destination = IsOp(op, "tile.store") && mx_args.size() == 1 && mx_args[0] == 2;
       const bool is_load_source = IsOp(op, "tile.load") && mx_args.size() == 1 && mx_args[0] == 0;
+      // MX_A_ND preserves its logical coordinates. Gather type inference already
+      // checks the complete-box window and the existing A/ZZ destination.
+      const bool is_gather_source =
+          op_predicates::IsMxScaleGather(op) && mx_args.size() == 1 && mx_args[0] == 1;
       const bool is_backing_alias = IsOp(op, "tensor.view") && mx_args.size() == 1 && mx_args[0] == 0;
-      CHECK_SPAN(is_load_source || is_store_destination || is_backing_alias, op->span_)
-          << "MX layout currently supports only 'tile.load', 'tile.store', and shaped FP8E8M0 "
-             "'tensor.view' backing aliases, but it is used by '"
+      CHECK_SPAN(is_load_source || is_gather_source || is_store_destination || is_backing_alias, op->span_)
+          << "MX layout currently supports only 'tile.load', 'tile.store', MX_A_ND 'tile.gather_row', "
+             "and shaped FP8E8M0 'tensor.view' backing aliases, but it is used by '"
           << op->op_->name_ << "' at argument " << mx_args[0] << ".";
       if (is_load_source) {
         new_args = BlockMxTileLoadArgs(op, std::move(new_args));
@@ -501,7 +503,7 @@ class BlockMxMutator : public IRMutator {
     }
 
     if (IsOp(op, "tensor.view") && IsMxTensorType(op->GetType())) {
-      auto output_type = As<TensorType>(op->GetType());
+      auto output_type = AsTensorTypeLike(op->GetType());
       INTERNAL_CHECK_SPAN(output_type, op->span_)
           << "Internal error: an MX tensor.view result must carry a TensorType";
       const auto& maybe_view = output_type->tensor_view_;

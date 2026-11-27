@@ -2130,11 +2130,10 @@ def gather_row(
     *,
     valid_shape: Sequence[IntLike] | None = None,
 ) -> Tensor | Tile:
-    """Gather one GM row into a sub-region of an on-chip accumulator (DPS).
+    """Load a GM window into a sub-region of an on-chip accumulator in place.
 
-    Dispatched on ``dst`` — the destination accumulator. ``src`` is a ``Tensor``
-    on both paths: this op always reads from global memory, so it is the
-    destination, not the source, that names the level.
+    Dispatches on the type of ``dst``. For a tile destination, see
+    ``pypto.language.op.tile_ops.gather_row`` for ``MX_A_ND`` requirements.
     """
     args = (src, dst_offset, src_offset, shapes, transpose)
     if isinstance(dst, Tensor):

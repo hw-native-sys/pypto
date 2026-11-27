@@ -28,6 +28,12 @@ namespace op_predicates {
 
 using core_affinity::CrossCoreRole;
 
+bool IsMxScaleGather(const CallPtr& call) {
+  if (!IsOp(call, "tile.gather_row") || call->args_.size() < 2) return false;
+  const auto src = AsTensorTypeLike(call->args_[1]->GetType());
+  return src && src->tensor_view_ && src->tensor_view_->layout == TensorLayout::MX_A_ND;
+}
+
 bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3) {
   if (!IsOp(call, "tile.cast") || call->args_.empty()) return false;
   const auto source = As<TileType>(call->args_[0]->GetType());

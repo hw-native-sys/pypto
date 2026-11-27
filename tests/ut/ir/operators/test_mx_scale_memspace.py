@@ -503,5 +503,39 @@ class TestMxScaleMemSpaces:
         assert "{layout = #pto.layout<mx_a_zz>}" in pto
 
 
+def test_mx_scale_gather_valid_window_returns_whole_destination():
+    source = _mx_tensor_var("source", 96, 4, ir.TensorLayout.MX_A_ND)
+    dst = _tile_var(
+        _const_shape(64, 4),
+        DataType.FP8E8M0,
+        memory=ir.MemorySpace.Mat,
+        view=ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.row_major, fractal=32),
+    )
+    result = tile.gather_row(dst, source, [32, 0], [80, 0], [32, 4], valid_shape=[16, 4])
+    ir.assert_structural_equal(result.type, dst.type)
+    assert result.op.name == ir.get_op("tile.gather_row").name
+
+
+@pytest.mark.parametrize(
+    ("offsets", "shapes", "dst_offset", "message"),
+    [
+        ([0, 0], [8, 4], [0, 0], "complete 16x2 scale boxes"),
+        ([0, 0], [16, 2], [0, 0], "full span of paired source and destination groups"),
+        ([80, 0], [32, 4], [0, 0], "outside the source"),
+        ([0, 0], [32, 4], [48, 0], "outside the destination"),
+    ],
+)
+def test_mx_scale_gather_rejects_invalid_writeback_windows(offsets, shapes, dst_offset, message):
+    source = _mx_tensor_var("source", 96, 4, ir.TensorLayout.MX_A_ND)
+    dst = _tile_var(
+        _const_shape(64, 4),
+        DataType.FP8E8M0,
+        memory=ir.MemorySpace.Mat,
+        view=ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.row_major, fractal=32),
+    )
+    with pytest.raises(ValueError, match=message):
+        tile.gather_row(dst, source, dst_offset, offsets, shapes)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
