@@ -1158,7 +1158,7 @@ std::vector<IterArgPtr> ScopeOutliner::MakeCarryIterArgs(const std::vector<BodyS
   iter_args.reserve(renames.size());
   for (const auto& rename : renames) {
     auto iter_arg = std::make_shared<IterArg>(GenerateFreshSSAName(rename.original->name_hint_, "iter"),
-                                              rename.original->GetType(), rename.seed, span);
+                                              rename.seed->GetType(), rename.seed, span);
     RegisterVar(iter_arg);
     iter_args.push_back(iter_arg);
   }
@@ -1171,7 +1171,7 @@ std::vector<VarPtr> ScopeOutliner::MakeCarryReturnVars(const std::vector<BodySto
   return_vars.reserve(renames.size());
   for (const auto& rename : renames) {
     auto return_var = std::make_shared<Var>(GenerateFreshSSAName(rename.original->name_hint_, "rv"),
-                                            rename.original->GetType(), span);
+                                            rename.seed->GetType(), span);
     RegisterVar(return_var);
     return_vars.push_back(return_var);
   }
@@ -1286,9 +1286,8 @@ void ScopeOutliner::SplitAlreadyCarried(const std::vector<BodyStoreRename>& rena
                                         std::vector<BodyStoreRename>* carried,
                                         std::vector<VarPtr>* carried_values) const {
   for (const auto& rename : renames) {
-    // The rename's seed comes from var_objects_, which holds the *pre-visit* Var
-    // objects, so match the original iter_args first and the visited ones second
-    // (IRMutator clones an IterArg whose initValue this pass renamed).
+    // A loop header's IterArg may have been rebuilt to use a renamed initializer.
+    // Compare the seed with both the original and the visited header bindings.
     size_t slot = FindIterArgSlot(iter_args, rename.seed.get());
     if (slot == std::string::npos) slot = FindIterArgSlot(visited_iter_args, rename.seed.get());
     if (slot == std::string::npos) {
@@ -1420,7 +1419,16 @@ StmtPtr ScopeOutliner::VisitStmt_(const IfStmtPtr& op) {
 
   StmtPtr result_then = new_then_body;
   std::optional<StmtPtr> result_else = new_else_body;
-  std::vector<VarPtr> new_return_vars = op->return_vars_;
+  // Existing results are definitions in the parent scope. Remap their types
+  // after rewinding branch-local stores, before publishing synthesized carries.
+  std::vector<VarPtr> new_return_vars;
+  new_return_vars.reserve(op->return_vars_.size() + renames.size());
+  for (const auto& return_var : op->return_vars_) {
+    INTERNAL_CHECK_SPAN(return_var, op->span_) << "IfStmt has a null return_var";
+    auto result_var = As<Var>(VisitVarDefinition(return_var));
+    INTERNAL_CHECK_SPAN(result_var, op->span_) << "IfStmt return_var did not resolve to a Var";
+    new_return_vars.push_back(std::move(result_var));
+  }
   if (!renames.empty()) {
     // An `if` that already returns values must have both branches yielding, so
     // the missing-else shortcut below is only sound when it returned nothing.
