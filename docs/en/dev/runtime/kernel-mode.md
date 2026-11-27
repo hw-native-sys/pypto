@@ -309,7 +309,7 @@ torch_npu.npu.synchronize()
 
 PyPTO queries the active ACL model using a non-draining stream lookup at each
 call. The session groups submissions by model and uses Simpler's same-build
-`_retain_model_resources(anchor)` interface to share one model destroy notice.
+`_register_model_destroy_notice(anchor)` interface to share one model destroy notice.
 Each invocation still owns its own preparation, argument snapshot and retained
 resources. Model addresses can be reused only after the previous destroy notice.
 No Python graph object is retained and no `NPUGraph` method is patched or wrapped.

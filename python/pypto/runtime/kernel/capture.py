@@ -36,7 +36,12 @@ class CaptureResources:
         native = getattr(submission, "_native_submission", None)
         if native is None:
             raise NotImplementedError("Kernel capture requires a Simpler native submission")
-        for method in ("_retain_model_resources", "_model_destroyed", "_release_model_resources", "cancel"):
+        for method in (
+            "_register_model_destroy_notice",
+            "_model_destroyed",
+            "_release_model_resources",
+            "cancel",
+        ):
             if not callable(getattr(native, method, None)):
                 raise NotImplementedError(f"Kernel capture requires Simpler native submission.{method}")
         self.native = native
@@ -56,7 +61,7 @@ class CaptureResources:
             anchor = None
         # The ticket already owns this object when preparation starts, including
         # failures after native allocation or destroy-notice registration.
-        self.native._retain_model_resources(anchor.native if anchor is not None else None)
+        self.native._register_model_destroy_notice(anchor.native if anchor is not None else None)
         self.retained = True
         if anchor is None:
             self.anchors[self.model] = self

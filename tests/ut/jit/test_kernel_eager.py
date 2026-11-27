@@ -401,7 +401,7 @@ def test_capture_partial_retention_failure_keeps_resources_until_checked_cleanup
     x, out = env.tensor(), env.tensor()
     copy_kernel(x, 1, out)
     env.state.drain()
-    original = env.api.PreparedSubmission._retain_model_resources
+    original = env.api.PreparedSubmission._register_model_destroy_notice
     error = ValueError("retention failed")
 
     def fail(submission, anchor=None):
@@ -409,7 +409,7 @@ def test_capture_partial_retention_failure_keeps_resources_until_checked_cleanup
             original(submission, anchor)
         raise error
 
-    monkeypatch.setattr(env.api.PreparedSubmission, "_retain_model_resources", fail)
+    monkeypatch.setattr(env.api.PreparedSubmission, "_register_model_destroy_notice", fail)
     env.capture = 42
     with pytest.raises(ValueError) as caught:
         copy_kernel(x, 2, out)

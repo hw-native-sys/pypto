@@ -511,7 +511,7 @@ def eager_env(monkeypatch):
             self.model_released = False
             self._native_submission = SimpleNamespace(
                 _submission=self,
-                _retain_model_resources=lambda anchor=None: self._retain_model_resources(
+                _register_model_destroy_notice=lambda anchor=None: self._register_model_destroy_notice(
                     anchor._submission if anchor is not None else None
                 ),
                 _model_destroyed=self._model_destroyed,
@@ -525,7 +525,7 @@ def eager_env(monkeypatch):
             self.cancelled = True
             return True
 
-        def _retain_model_resources(self, anchor=None):
+        def _register_model_destroy_notice(self, anchor=None):
             model = int(env.capture)
             assert model
             env.events.append(("capture.retain", model, anchor))

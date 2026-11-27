@@ -245,7 +245,7 @@ torch_npu.npu.synchronize()
 ```
 
 PyPTO 在每次调用时，通过不排空队列的 stream 查询获取当前 ACL model。session 按 model
-分组，使用 Simpler 同构建版本的 `_retain_model_resources(anchor)` 共享 model 销毁通知。
+分组，使用 Simpler 同构建版本的 `_register_model_destroy_notice(anchor)` 共享 model 销毁通知。
 每次调用仍独立持有 preparation、参数快照和资源。收到旧 model 的销毁通知后，其地址可被
 新 model 复用。PyPTO 不持有 Python graph 对象，也不修改或包装任何 `NPUGraph` 方法；
 capture begin/end、replay 和 reset 全由原生 torch_npu graph 上下文管理。
