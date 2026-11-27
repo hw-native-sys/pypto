@@ -36,6 +36,7 @@ import numpy as np
 import torch
 
 from .device_tensor import DeviceTensor, StackedDeviceTensor
+from .prepared_decode import load as load_prepared_decode
 from .runtime_base import Worker
 from .window_sources import normalize_window_sources
 
@@ -524,6 +525,7 @@ def _assemble_chip_callables(
 # ``@pl.jit.host`` orchestrator does not break dispatch (issue #1678). Keep in
 # sync with ``EmitEntryMarker`` in src/codegen/distributed/distributed_codegen.cpp.
 _ENTRY_MARKER = "_pypto_distributed_entry"
+_PREPARED_DECODE_SELECTION = "__runtime_opt_prepared_selection"
 
 
 def _load_orch_entry(output_dir: Path) -> tuple[Any, Any]:
@@ -2095,6 +2097,15 @@ class DistributedWorker(Worker):
                 if missing_sources:
                     raise ValueError(f"Missing window_sources for Host window init keys: {missing_sources}")
                 consumed_sources |= source_keys
+                prepared_decode = (
+                    load_prepared_decode(
+                        entry_fn,
+                        prog.output_dir / "orchestration" / "host_orch.py",
+                        lease_cls=_RetainedDomainLease,
+                    )
+                    if self._persistent and not self._reset_persistent_windows
+                    else None
+                )
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
                 consumed |= set(prog_callbacks)
@@ -2113,6 +2124,7 @@ class DistributedWorker(Worker):
                 self._states[prog] = {
                     "entry_fn": entry_fn,
                     "window_sources": {key: window_sources[key] for key in source_keys},
+                    "prepared_decode": prepared_decode,
                     "base_tensor_frames": tuple(base_tensor_frames),
                     "call_config": _make_call_config(prog._distributed_config),
                     "param_infos": tuple(prog._get_metadata()[0]),
@@ -2506,6 +2518,19 @@ class DistributedWorker(Worker):
             if program_domains and self._reset_persistent_windows:
                 self._reset_persistent_domains(orch, program_domains, reset_buffers)
             _reset_dfx_dispatch_state(orch, state["chip_cids"], dispatch_idx=self._dfx_dispatch_idx)
+            selection = tensors.pop(_PREPARED_DECODE_SELECTION, None)
+            if selection is not None:
+                state["prepared_decode"].submit(
+                    selection,
+                    orch,
+                    call_config,
+                    state,
+                    tensors=tensors,
+                    keepalive=keepalive,
+                    provider=domain_provider,
+                    registered_domains=domains_by_program.setdefault(program_id, {}),
+                )
+                return
             state["entry_fn"](
                 orch,
                 None,
@@ -2520,6 +2545,8 @@ class DistributedWorker(Worker):
             )
 
         try:
+            if _PREPARED_DECODE_SELECTION in tensors:
+                return self._w._submit_retained_decode(run_request, program_id)
             return self._w.submit(run_request)
         except Exception as exc:
             self._persistent_error = exc
@@ -3283,13 +3310,22 @@ class DistributedWorker(Worker):
             tensors.update(state["base_tensor_frames"][frame.slot_id])
             frame.keepalive.clear()
             frame.keepalive.extend((compiled, call_config, config, *args))
+            prepared_decode = state.get("prepared_decode")
             for info, arg in zip(param_infos, args, strict=True):
-                if info.shape is None:
-                    # Scalar parameter (e.g. seq_len): forwarded as-is to the entry.
-                    tensors[info.name] = arg
-                    continue
-                self._validate_prepared_dispatch_arg(info, arg)
                 tensors[info.name] = arg
+            selection = (
+                prepared_decode.select(self, state, tensors, call_config, args, frame.slot_id)
+                if prepared_decode is not None
+                and not two_pass_swimlane
+                and hasattr(self._w, "_submit_retained_decode")
+                else None
+            )
+            if selection is None:
+                for info, arg in zip(param_infos, args, strict=True):
+                    if info.shape is not None:
+                        self._validate_prepared_dispatch_arg(info, arg)
+            else:
+                tensors[_PREPARED_DECODE_SELECTION] = selection
 
             if two_pass_swimlane:
                 assert config is not None
@@ -3409,6 +3445,12 @@ class DistributedWorker(Worker):
                 if first_error is None:
                     first_error = exc
 
+    def _clear_prepared_decode_caches(self) -> None:
+        for state in self._states.values():
+            prepared_decode = state.get("prepared_decode")
+            if prepared_decode is not None:
+                prepared_decode.entries.clear()
+
     def close(self) -> None:
         """Release runtime resources, retrying incomplete Worker cleanup."""
         # Serialize the admission transition with submit() and prevent two
@@ -3469,6 +3511,7 @@ class DistributedWorker(Worker):
                 self._persistent_domains_by_program.clear()
                 if self._close_complete:
                     self._device_buffers.clear()
+                    self._clear_prepared_decode_caches()
             if first_error is not None:
                 raise first_error
         finally:

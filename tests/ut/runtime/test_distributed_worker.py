@@ -27,11 +27,13 @@ import warnings
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pypto.runtime.prepared_decode
 import pytest
 import torch
 from pypto.ir import DistributedConfig
@@ -4982,6 +4984,25 @@ def test_persistent_domain_identity_includes_source_and_workspace():
     host = DistributedWorker._persistent_domain_spec({**base, "memory_source": "host"})
     urma = DistributedWorker._persistent_domain_spec({**base, "workspace_engines": ("urma",)})
     assert len({device, host, urma}) == 3
+
+
+def test_prepared_decode_defers_simpler_prepared_local_import(tmp_path, monkeypatch):
+    orch_path = tmp_path / "host_orch.py"
+    source = b"def entry(orch, *args, **kwargs):\n    pass\n"
+    orch_path.write_bytes(source)
+    digest = sha256(source).hexdigest()
+
+    stub_simpler = ModuleType("simpler")
+    stub_simpler.__path__ = []
+    monkeypatch.setitem(sys.modules, "simpler", stub_simpler)
+    monkeypatch.delitem(sys.modules, "simpler.prepared_local", raising=False)
+    monkeypatch.setattr(pypto.runtime.prepared_decode, "HOST_SOURCES", {digest})
+
+    def entry(orch, *args, **kwargs):
+        pass
+
+    assert pypto.runtime.prepared_decode.load(entry, orch_path) is None
+    assert pypto.runtime.prepared_decode.load(entry, tmp_path / "missing.py") is None
 
 
 if __name__ == "__main__":
