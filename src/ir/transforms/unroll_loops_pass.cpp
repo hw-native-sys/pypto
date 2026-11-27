@@ -25,6 +25,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -54,21 +55,23 @@ int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
   return pipeline_loop::GetConstIntValue(expr, "UnrollLoops", what);
 }
 
-// A pre-SSA name can be assigned in both arms of an if. When its first
-// declaration selects a slot with an unrolled index, the slot constrains that
-// assignment. ConvertToSSA needs a shared name independent of either arm.
+// A pre-SSA name has the type of its first definition. When an assignment in
+// either arm selects a slot with an unrolled index, SSA needs a shared name
+// independent of that slot and each definition must retain its own storage.
 class BranchSlotIndex : public IRVisitor {
  public:
   std::unordered_set<const Var*> Find(const StmtPtr& body) {
     VisitStmt(body);
     std::unordered_set<const Var*> result;
-    if (indices_.empty()) return result;
-    for (const auto& [slot, vars] : cross_branch_) {
+    if (indices_.empty() || cross_branch_.empty()) return result;
+    for (const auto& [slot, vars] : slot_vars_) {
       var_collectors::VarDefUseCollector refs;
       refs.VisitExpr(slot);
       for (const auto* ref : refs.var_uses) {
         if (indices_.count(ref)) {
-          result.insert(vars.begin(), vars.end());
+          for (const auto* var : vars) {
+            if (cross_branch_.count(var)) result.insert(var);
+          }
           break;
         }
       }
@@ -79,10 +82,27 @@ class BranchSlotIndex : public IRVisitor {
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     VisitExpr(op->value_);
-    RecordSlot(op->var_, true);
+    const auto tile = As<TileType>(op->var_->GetType());
+    if (!tile || !tile->memref_ || !(*tile->memref_)->is_pinned_) return;
+
+    const auto* var = op->var_.get();
+    const auto first = first_arm_.emplace(var, arm_).first;
+    if (first->second != arm_) cross_branch_.insert(var);
+    // A fixed first declaration still establishes the defining arm. Later explicit
+    // annotations live on the RHS call or on the temporary for an annotated alias.
+    RecordSlot(var, *tile->memref_);
+    if (auto rhs = GetTypeMemRef(op->value_->GetType()); rhs && (*rhs)->is_pinned_) {
+      RecordSlot(var, *rhs);
+    }
   }
 
-  void VisitExpr_(const VarPtr& op) override { RecordSlot(op, false); }
+  void VisitExpr_(const VarPtr& op) override {
+    const auto first = first_arm_.find(op.get());
+    // A read dominated by its declaration still sees that arm's value.
+    if (first != first_arm_.end() && first->second && !active_arms_.count(first->second)) {
+      cross_branch_.insert(op.get());
+    }
+  }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     VisitExpr(op->condition_);
@@ -106,18 +126,9 @@ class BranchSlotIndex : public IRVisitor {
     arm_ = outer;
   }
 
-  void RecordSlot(const VarPtr& var, bool definition) {
-    auto tile = As<TileType>(var->GetType());
-    if (!tile || !tile->memref_ || !(*tile->memref_)->is_pinned_ || !(*tile->memref_)->slot_index_) return;
-    const auto& slot = *(*tile->memref_)->slot_index_;
-    if (!slot || As<ConstInt>(slot)) return;
-    if (definition) first_arm_.emplace(var.get(), arm_);
-    auto first = first_arm_.find(var.get());
-    if (first == first_arm_.end() || first->second == arm_) return;
-    // A read dominated by its declaration needs no new binding. A sibling
-    // assignment or a use after leaving the defining arm can see another value.
-    if (definition || (first->second && !active_arms_.count(first->second))) {
-      cross_branch_[slot].insert(var.get());
+  void RecordSlot(const Var* var, const MemRefPtr& memref) {
+    if (memref->slot_index_ && *memref->slot_index_ && !As<ConstInt>(*memref->slot_index_)) {
+      slot_vars_[*memref->slot_index_].insert(var);
     }
   }
 
@@ -125,7 +136,8 @@ class BranchSlotIndex : public IRVisitor {
   std::unordered_set<const Stmt*> active_arms_;
   std::unordered_set<const Var*> indices_;
   std::unordered_map<const Var*, const Stmt*> first_arm_;
-  std::unordered_map<ExprPtr, std::unordered_set<const Var*>> cross_branch_;
+  std::unordered_set<const Var*> cross_branch_;
+  std::unordered_map<ExprPtr, std::unordered_set<const Var*>> slot_vars_;
 };
 
 class BranchSlotMutator : public IRMutator {

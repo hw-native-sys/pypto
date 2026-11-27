@@ -135,6 +135,46 @@ class TestBasicUnroll:
         assert [_declared_slot(keep), _declared_slot(other)] == [1, 0]
         ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
 
+    def test_fixed_then_slot_with_unrolled_else_bindings(self, tmp_path):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                y: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    v: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    alias: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = v
+                    y = pl.store(alias, [1, 0], y)
+                else:
+                    keep: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    for i in pl.unroll(1):
+                        v: pl.Tile[[1, 64], pl.FP32, buf[i], pl.Mem.Vec] = pl.load(x, [i, 0], [1, 64])
+                        alias: pl.Tile[[1, 64], pl.FP32, buf[i], pl.Mem.Vec] = v
+                        y = pl.store(alias, [i, 0], y)
+                    y = pl.store(keep, [1, 0], y)
+                return y
+
+        func = _unroll_and_ssa(Before).get_function("main")
+        assert func is not None
+        branch = ir.flatten_to_stmts(func.body)[0]
+        assert isinstance(branch, ir.IfStmt) and branch.else_body is not None
+        # Check both assignment forms. The call and the annotated alias must each take
+        # their own slot, even though the mutable names first appeared with fixed slot 1.
+        for arm, slot in ((branch.then_body, 1), (branch.else_body, 0)):
+            bindings = {
+                stmt.var.name_hint.split("__ssa_")[0]: _declared_slot(stmt)
+                for stmt in ir.flatten_to_stmts(arm)
+                if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType)
+            }
+            assert bindings["v"] == bindings["alias"] == slot
+        ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
+
     def test_unrolled_branches_yield_their_own_last_tile(self, tmp_path):
         buf = pl.MemRef("buf", slots=2)
 
