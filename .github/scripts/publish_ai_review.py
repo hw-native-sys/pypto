@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import quote
 
 MARKER = "<!-- pypto-codex-review -->"
+GEMINI_MARKER = "<!-- pypto-gemini-review -->"
 MAX_BYTES = 60000
 DIFF_READ_ERRORS = (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError)
 
@@ -199,7 +200,7 @@ def summary_finding(finding: dict) -> str:
 
 
 def render_findings(
-    repo: str, endpoint: str, head: str, merge_base: str | None, findings: list
+    repo: str, endpoint: str, head: str, merge_base: str | None, findings: list, *, marker: str = MARKER
 ) -> tuple[str, list]:
     """Split findings into validated inline comments and a lossless summary fallback."""
     if not findings:
@@ -221,7 +222,7 @@ def render_findings(
         if item.get("id")
         and not item.get("in_reply_to_id")
         and (item.get("user") or {}).get("login") == "github-actions[bot]"
-        and (item.get("body") or "").startswith(MARKER)
+        and (item.get("body") or "").startswith(marker)
     }
     by_path = {item["filename"]: item for item in files}
     renames = {
@@ -235,7 +236,7 @@ def render_findings(
         for item in previous
         if (item.get("user") or {}).get("login") == "github-actions[bot]"
         and item.get("original_commit_id") == head
-        and (item.get("body") or "").startswith(MARKER)
+        and (item.get("body") or "").startswith(marker)
     }
     summary = ""
     comments = []
@@ -256,7 +257,8 @@ def render_findings(
             continue
         if location:
             path, line, side = location["path"], location["line"], location["side"]
-            body = f"{MARKER}\n{text}"
+            label = "**Gemini Review**\n\n" if marker == GEMINI_MARKER else ""
+            body = f"{marker}\n{label}{text}"
             key = (path, line, side, body)
             if (side, line) in anchors.get(path, set()):
                 if key in seen:
@@ -479,27 +481,51 @@ def publish_gemini(path: Path, repo: str, number: str, head: str, base: str, bas
     try:
         review = parse_review(feedback)
     except (ValueError, RecursionError):
-        # Older launchers return prose. Keep it visible without granting a vote.
-        verdict = "incomplete"
-    else:
-        verdict = review["verdict"]
-        feedback = "\n\n".join(
-            [review["summary"]] + [f"{finding['title']}\n{finding['body']}" for finding in review["findings"]]
-        )
-    body = (
-        f"## Gemini Review\n\nReviewed `{head}` against base `{base}`. Verdict: `{verdict}`.\n\n"
-        f"<pre>{html.escape(feedback, quote=False)}</pre>"
-    )
-    if len(body.encode()) > MAX_BYTES:
-        raise ValueError("Rendered Gemini review exceeds 60000 bytes")
-
+        # Older launchers returned prose. Preserve their feedback without granting a vote.
+        review = {"verdict": "incomplete", "summary": feedback, "findings": []}
     pr = github_api(endpoint)
     if not matches_revision(pr, head, base_ref):
         return None
+    merge_base = optional_merge_base_sha(repo, base, head)
     current_base = pr["base"]["sha"]
-    if current_base != base and merge_base_sha(repo, current_base, head) != merge_base_sha(repo, base, head):
+    if current_base != base:
+        current = optional_merge_base_sha(repo, current_base, head)
+        if current and merge_base and current != merge_base:
+            return None
+        if current is None:
+            merge_base = None
+    findings, comments = render_findings(
+        repo, endpoint, head, merge_base, review["findings"], marker=GEMINI_MARKER
+    )
+    latest = github_api(endpoint)
+    if not matches_revision(latest, head, base_ref):
         return None
-    github_api(f"{endpoint}/reviews", {"commit_id": head, "event": "COMMENT", "body": body})
+    if latest["base"]["sha"] != current_base:
+        current = optional_merge_base_sha(repo, latest["base"]["sha"], head)
+        if current and merge_base and current != merge_base:
+            return None
+        if current is None:
+            merge_base = None
+            findings, comments = render_findings(
+                repo, endpoint, head, None, review["findings"], marker=GEMINI_MARKER
+            )
+    verdict = review["verdict"] if merge_base else "incomplete"
+    body = (
+        f"{GEMINI_MARKER}\n## Gemini Review\n\nReviewed `{head}` against base `{base}`. "
+        f"Verdict: `{verdict}`.\n\n"
+        f"<pre>{html.escape(review['summary'], quote=False)}</pre>{findings}"
+    )
+    if len(body.encode()) + sum(len(comment["body"].encode()) for comment in comments) > MAX_BYTES:
+        raise ValueError("Rendered Gemini review exceeds 60000 bytes")
+    github_api(
+        f"{endpoint}/reviews",
+        {
+            "commit_id": head,
+            "event": "COMMENT",
+            "body": body,
+            **({"comments": comments} if comments else {}),
+        },
+    )
     return verdict
 
 

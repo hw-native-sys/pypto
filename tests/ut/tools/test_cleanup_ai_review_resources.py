@@ -26,7 +26,7 @@ LABEL = "org.pypto.codex-review."
 def cleaner(monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT / ".github/scripts"))
     spec = importlib.util.spec_from_file_location(
-        "cleanup_codex_review_resources", ROOT / ".github/scripts/cleanup_codex_review_resources.py"
+        "cleanup_ai_review_resources", ROOT / ".github/scripts/cleanup_ai_review_resources.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -55,10 +55,11 @@ def host(cleaner, monkeypatch):
             assert ("--all" in args) == (kind == "container")
             if "--quiet" in args:
                 return "\n".join(state[kind])
-            assert args[-1] == cleaner.RESOURCE_FORMAT
             key, expected = args[args.index("--filter") + 1].removeprefix("label=").split("=")
+            prefix = key.removesuffix("repository")
+            assert args[-1] == cleaner.RESOURCE_FORMAT.replace(LABEL, prefix)
             return "\n".join(
-                json.dumps([identity, labels.get(LABEL + "run", ""), labels.get(LABEL + "attempt", "")])
+                json.dumps([identity, labels.get(prefix + "run", ""), labels.get(prefix + "attempt", "")])
                 for identity, labels in state[kind].items()
                 if labels.get(key) == expected
             )
@@ -85,6 +86,20 @@ def add_attempt(host, run="100", attempt="1", *, status="completed", repository=
         "status": status,
         "conclusion": "cancelled",
     }
+
+
+def test_gemini_cancellation_removes_only_its_own_attempt(cleaner, host):
+    add_attempt(host)
+    labels = {
+        "org.pypto.gemini-review.repository": "42",
+        "org.pypto.gemini-review.run": "100",
+        "org.pypto.gemini-review.attempt": "1",
+    }
+    host["container"]["gemini"] = labels
+    host["network"]["other-attempt"] = dict(labels, **{"org.pypto.gemini-review.attempt": "2"})
+    cleaner.reconcile("owner/repo", "42", provider="gemini", current_attempt=("100", "1"))
+    assert host["removed"] == [("container", "gemini")]
+    assert all(call[0] != "gh" for call in host["calls"])
 
 
 @pytest.mark.parametrize(
@@ -260,7 +275,7 @@ def test_workflow_records_identities_and_loads_trusted_cleaner(workflow):
     assert names.index("Remove review containers and network") < names.index("Remove review checkout")
     assert job["permissions"]["actions"] == "read"
     review = steps["Review in an isolated container"]["run"]
-    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/cleanup_codex_review_resources.py"' in review
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/cleanup_ai_review_resources.py"' in review
     assert review.index('python "$resource_cleaner"') < review.index("docker network create")
     # Every ephemeral container creation carries ownership, including session helpers.
     assert review.count('"${resource_labels[@]}"') == 6

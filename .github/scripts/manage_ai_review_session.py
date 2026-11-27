@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Manage PR session volumes from trusted host code while the caller holds the auth lock."""
+"""Manage each reviewer's PR session volumes while the caller holds its host lock."""
 
 # Standalone CI helpers also run on hosts with Python 3.8.
 from __future__ import annotations
@@ -82,8 +82,12 @@ def volume_labels(name: str) -> dict | None:
     return labels or {}
 
 
-def manage_session(repo: str, number: str, repository_id: str, mode: str, head: str | None = None) -> str:
+def manage_session(
+    repo: str, number: str, repository_id: str, mode: str, head: str | None = None, *, provider: str = "codex"
+) -> str:
     """Reset stale epochs or remove closed sessions; caller holds the shared lock throughout."""
+    if provider not in {"codex", "gemini"}:
+        raise ValueError("Unknown review provider")
     if not re.fullmatch(r"[1-9][0-9]*", repository_id) or mode not in {"review", "cleanup"}:
         raise ValueError("Invalid repository ID or session-management mode")
     if mode == "review" and (head is None or not re.fullmatch(r"[0-9a-f]{40}", head)):
@@ -93,10 +97,11 @@ def manage_session(repo: str, number: str, repository_id: str, mode: str, head: 
     if mode == "review" and (closed or pr["isDraft"] or pr["headRefOid"] != head):
         return "skipped"
 
-    session_volume = f"pypto-codex-sessions-{repository_id}-{number}"
+    epoch_label = EPOCH_LABEL if provider == "codex" else "org.pypto.gemini-review.close-epoch"
+    session_volume = f"pypto-{provider}-sessions-{repository_id}-{number}"
     names = (session_volume, f"{session_volume}-index")
     labels = {name: volume_labels(name) for name in names}
-    current = all(value is not None and value.get(EPOCH_LABEL) == epoch for value in labels.values())
+    current = all(value is not None and value.get(epoch_label) == epoch for value in labels.values())
     if mode == "cleanup" and not closed and current:
         return "retained"
     if closed or not current:
@@ -108,7 +113,7 @@ def manage_session(repo: str, number: str, repository_id: str, mode: str, head: 
     if not current:
         for name in names:
             subprocess.run(
-                ["docker", "volume", "create", "--label", f"{EPOCH_LABEL}={epoch}", name],
+                ["docker", "volume", "create", "--label", f"{epoch_label}={epoch}", name],
                 check=True,
                 capture_output=True,
                 text=True,

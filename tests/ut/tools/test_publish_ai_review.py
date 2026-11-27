@@ -463,6 +463,25 @@ def test_gemini_posts_plain_text_on_reviewed_commit(publisher, api, tmp_path):
     assert not api["dismissed"]
 
 
+def test_gemini_reuses_only_its_own_inline_thread(publisher, api, located_review, review_file):
+    location = {"path": "src/example.cpp", "line": 21, "side": "RIGHT"}
+    located_review(location, existing_comment_id=123)
+    thread = {
+        "id": 123,
+        "path": location["path"],
+        "user": {"login": "github-actions[bot]"},
+        "body": publisher.MARKER,
+    }
+    api["comments"] = [thread]
+    target = ("owner/repo", "12", HEAD, BASE, "main")
+    assert publisher.publish_gemini(review_file, *target) == "findings"
+    (inline,) = api["posted"][-1]["comments"]
+    assert inline["line"] == 21 and inline["body"].startswith(publisher.GEMINI_MARKER)
+    thread["body"] = inline["body"]
+    assert publisher.publish_gemini(review_file, *target) == "findings"
+    assert "comments" not in api["posted"][-1] and "#discussion_r123" in api["posted"][-1]["body"]
+
+
 @pytest.mark.parametrize("change", ["head", "merge_base"])
 def test_gemini_skips_stale_diff(publisher, api, review_file, change):
     if change == "head":
@@ -914,7 +933,7 @@ def test_publish_available_reviews(
         "needs": {
             "prepare": {"result": "success", "outputs": prepare_outputs},
             "review": {"result": codex, "outputs": {"completed": completed}},
-            "gemini": {"result": gemini},
+            "gemini": {"result": gemini, "outputs": {"completed": "true" if gemini == "success" else ""}},
         },
         "steps": {
             "trusted": {"outcome": "success"},
@@ -965,7 +984,7 @@ def test_invalidation_is_independent_of_review_cancellation(workflow):
         "publish_ai_review",
         "prepare_ai_review",
         "rerun_ai_review",
-        "manage_codex_review_session",
+        "manage_ai_review_session",
         "perf_guard",
     ],
 )
@@ -988,8 +1007,8 @@ def test_review_workflow_has_no_merge_permission(workflow):
     for config in (
         workflow,
         load_workflow("ai-review-retarget"),
-        load_workflow("codex-review-cleanup"),
-        load_workflow("codex-auth-maintenance"),
+        load_workflow("ai-review-cleanup"),
+        load_workflow("ai-review-auth-maintenance"),
     ):
         assert config["permissions"] == {}
         assert all(job["permissions"].get("contents") != "write" for job in config["jobs"].values())
@@ -1142,7 +1161,7 @@ def test_comment_trigger_and_session_isolation(workflow):
         jobs["prepare"],
         jobs["publish"],
         load_workflow("ai-review-retarget")["jobs"]["invalidate"],
-        load_workflow("codex-review-cleanup")["jobs"]["cleanup-sessions"],
+        load_workflow("ai-review-cleanup")["jobs"]["cleanup-sessions"],
     ):
         checkout = next(step for step in job["steps"] if "checkout@" in step.get("uses", ""))
         assert checkout["with"]["ref"] == "${{ github.workflow_sha }}"
@@ -1158,31 +1177,35 @@ def test_comment_trigger_and_session_isolation(workflow):
     assert "GH_TOKEN" not in review
     assert jobs["prepare"]["permissions"]["pull-requests"] == "read"
     assert jobs["review"]["permissions"]["pull-requests"] == "read"
-    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/manage_codex_review_session.py"' in review
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/manage_ai_review_session.py"' in review
     assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_ai_review.py"' in review
     assert review.index("flock --exclusive 9") < review.index("session_status=$(python")
     assert review.index("session_status=$(python") < review.index("docker run")
     upload = next(step for step in jobs["review"]["steps"] if step["name"] == "Upload review result")
-    assert upload["if"] == "steps.codex.outputs.completed == 'true'"
+    assert upload["if"] == "steps.model.outputs.completed == 'true'"
 
 
 def test_close_cleanup_is_independent_of_review_eligibility():
     """Every close reaches trusted cleanup even with reviews disabled or the PR in draft."""
-    workflow = load_workflow("codex-review-cleanup")
+    workflow = load_workflow("ai-review-cleanup")
     assert workflow["on"] == {"pull_request_target": {"types": ["closed"]}}
-    assert set(workflow["jobs"]) == {"cleanup-sessions"}
+    assert set(workflow["jobs"]) == {"cleanup-sessions", "gemini-cleanup-sessions"}
+    gemini = workflow["jobs"]["gemini-cleanup-sessions"]
+    assert "if" not in gemini and "run_gemini_review.py cleanup" in gemini["steps"][-1]["run"]
     cleanup = workflow["jobs"]["cleanup-sessions"]
     assert "if" not in cleanup
     assert "concurrency" not in cleanup
     run = cleanup["steps"][-1]["run"]
-    assert run.index("flock --exclusive 9") < run.index("manage_codex_review_session.py cleanup")
+    assert run.index("flock --exclusive 9") < run.index("manage_ai_review_session.py cleanup")
     assert "docker run" not in run
 
 
 def test_auth_maintenance_only_runs_on_schedule_or_dispatch():
-    workflow = load_workflow("codex-auth-maintenance")
+    workflow = load_workflow("ai-review-auth-maintenance")
     assert set(workflow["on"]) == {"schedule", "workflow_dispatch"}
-    (job,) = workflow["jobs"].values()
+    job = workflow["jobs"]["auth-maintenance"]
+    gemini = workflow["jobs"]["gemini-auth-maintenance"]
+    assert job["if"] == gemini["if"] and "auth-maintenance --model" in gemini["steps"][-1]["run"]
     assert workflow_expression(job["if"], {"vars": {"CODEX_REVIEW_ENABLED": "true"}})
     assert not workflow_expression(
         job["if"], {"vars": {"AI_REVIEW_ENABLED": "false", "CODEX_REVIEW_ENABLED": "true"}}
@@ -1251,7 +1274,7 @@ def test_review_upload_retries_preserve_publish_gate(
     steps = jobs["review"]["steps"]
     first = next(i for i, step in enumerate(steps) if step["name"] == "Upload review result")
     last = next(i for i, step in enumerate(steps) if step["name"] == "Remove review checkout")
-    context: dict[str, Any] = {"steps": {"codex": {"outputs": {"completed": "true" if completed else ""}}}}
+    context: dict[str, Any] = {"steps": {"model": {"outputs": {"completed": "true" if completed else ""}}}}
     cancelled = cancel_after == 0
     success = True
     attempts = 0
@@ -1280,7 +1303,7 @@ def test_review_upload_retries_preserve_publish_gate(
         "needs": {
             "review": {
                 "result": "cancelled" if cancelled else "success" if success else "failure",
-                "outputs": context["steps"]["codex"]["outputs"],
+                "outputs": context["steps"]["model"]["outputs"],
             }
         },
     }
@@ -1293,9 +1316,13 @@ def test_review_upload_attempts_replace_only_current_run_artifact(workflow):
     steps = workflow["jobs"]["review"]["steps"]
     uploads = [step for step in steps if step.get("id", "").startswith("upload_review")]
     assert len(uploads) == 3
+    gemini = workflow["jobs"]["gemini"]
+    assert uploads == [step for step in gemini["steps"] if step.get("id", "").startswith("upload_review")]
+    assert gemini["env"]["REVIEW_ARTIFACT_PREFIX"] == "gemini-review"
+    assert workflow["jobs"]["review"]["env"]["REVIEW_ARTIFACT_PREFIX"] == "codex-review"
     expected = {
-        "name": "codex-review-${{ github.run_id }}-${{ github.run_attempt }}",
-        "path": "${{ runner.temp }}/codex-review.json",
+        "name": "${{ env.REVIEW_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}",
+        "path": "${{ steps.model.outputs.artifact }}",
         "if-no-files-found": "error",
         "retention-days": 1,
         "compression-level": 9,

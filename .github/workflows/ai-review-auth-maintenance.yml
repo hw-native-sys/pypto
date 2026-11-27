@@ -1,7 +1,7 @@
-name: Codex Auth Maintenance
+name: AI Review Auth Maintenance
 
 on:
-  # Refresh the persistent ChatGPT session outside any PR workspace.
+  # Refresh both reviewer accounts outside any PR workspace.
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -10,6 +10,7 @@ permissions: {}
 
 jobs:
   auth-maintenance:
+    name: codex-auth-maintenance
     if: (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true'
     runs-on: [self-hosted, Linux, ARM64, cpu-codex]
     timeout-minutes: 10
@@ -77,3 +78,19 @@ jobs:
              (.tokens.refresh_token // "") != "" and
              (.last_refresh // "") != ""' \
             "$auth_file" >/dev/null
+
+  gemini-auth-maintenance:
+    if: (vars.AI_REVIEW_ENABLED || vars.CODEX_REVIEW_ENABLED) == 'true'
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted Gemini session manager
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Refresh persistent Gemini authentication
+        run: python .github/scripts/run_gemini_review.py auth-maintenance --model gemini-4-neon-high

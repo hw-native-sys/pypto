@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 from publish_ai_review import is_review_workflow
 
@@ -29,7 +30,7 @@ def command(*args: str) -> str:
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30).stdout
 
 
-def resources(kind: str, repository_id: str) -> dict[str, tuple[str, str]]:
+def resources(kind: str, repository_id: str, label: str = LABEL) -> dict[str, tuple[str, str]]:
     """Read ownership directly from Docker labels; old unlabelled resources are out of scope."""
     options = ("--all",) if kind == "container" else ()
     output = command(
@@ -39,9 +40,9 @@ def resources(kind: str, repository_id: str) -> dict[str, tuple[str, str]]:
         "--no-trunc",
         *options,
         "--filter",
-        f"label={LABEL}repository={repository_id}",
+        f"label={label}repository={repository_id}",
         "--format",
-        RESOURCE_FORMAT,
+        RESOURCE_FORMAT.replace(LABEL, label),
     )
     result: dict[str, tuple[str, str]] = {}
     for line in output.splitlines():
@@ -77,16 +78,28 @@ def completed(repo: str, repository_id: str, run: str, attempt: str) -> bool:
     return record.get("status") == "completed"
 
 
-def reconcile(repo: str, repository_id: str) -> None:
+def reconcile(
+    repo: str, repository_id: str, *, provider: str = "codex", current_attempt: tuple[str, str] | None = None
+) -> None:
     """Verify all owners before deleting containers, then networks; never touch session volumes."""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or not re.fullmatch(
         r"[1-9][0-9]*", repository_id
     ):
         raise ValueError("Expected an owner/repository and a positive repository ID")
-    inventory = [(kind, resources(kind, repository_id)) for kind in ("container", "network")]
+    if provider not in {"codex", "gemini"} or (
+        current_attempt is not None
+        and not all(re.fullmatch(r"[1-9][0-9]*", part) for part in current_attempt)
+    ):
+        raise ValueError("Invalid provider or workflow attempt")
+    label = f"org.pypto.{provider}-review."
+    inventory = [(kind, resources(kind, repository_id, label)) for kind in ("container", "network")]
     owners = {owner for _, items in inventory for owner in items.values()}
     # API failure aborts before any deletion. Active or unknown attempts stay intact.
-    finished = {owner for owner in owners if completed(repo, repository_id, *owner)}
+    finished = (
+        {current_attempt}
+        if current_attempt
+        else {owner for owner in owners if completed(repo, repository_id, *owner)}
+    )
     for kind, items in inventory:
         for identity, owner in items.items():
             if owner in finished:
@@ -95,4 +108,14 @@ def reconcile(repo: str, repository_id: str) -> None:
 
 
 if __name__ == "__main__":
-    reconcile(os.environ["GH_REPO"], os.environ["REPOSITORY_ID"])
+    if sys.argv[1:] == ["--current-gemini"]:
+        reconcile(
+            os.environ["GITHUB_REPOSITORY"],
+            os.environ["GITHUB_REPOSITORY_ID"],
+            provider="gemini",
+            current_attempt=(os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]),
+        )
+    elif len(sys.argv) == 1:
+        reconcile(os.environ["GH_REPO"], os.environ["REPOSITORY_ID"])
+    else:
+        sys.exit("Unknown review cleanup command")
