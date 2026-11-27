@@ -16,12 +16,19 @@ jobs:
       pull-requests: read
       issues: read
     steps:
-      - name: Checkout trusted session manager
+      # On a fork merge, the trusted event commit can also be the PR's merge_commit_sha.
+      # Use checkout's default event revision and verify it before running cleanup.
+      - &checkout_cleanup_scripts
+        name: Check out trusted cleanup scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.workflow_sha }}
           persist-credentials: false
           sparse-checkout: .github/scripts
+      - &verify_cleanup_revision
+        name: Verify cleanup scripts match the workflow revision
+        env:
+          TRUSTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TRUSTED_WORKFLOW_SHA"
       - name: Remove closed PR sessions
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,12 +57,8 @@ jobs:
       pull-requests: read
       issues: read
     steps:
-      - name: Checkout trusted Gemini session manager
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-          sparse-checkout: .github/scripts
+      - *checkout_cleanup_scripts
+      - *verify_cleanup_revision
       - name: Remove the closed PR's Gemini session
         env:
           GH_TOKEN: ${{ github.token }}
