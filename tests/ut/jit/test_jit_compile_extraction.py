@@ -1740,11 +1740,13 @@ def test_lower_keeps_view_binding_after_dispatch_predicate(ascend_backend):
             pl.store(pl.cast(val2, pl.FP32), [0, 0], out)
         return out
 
-    lowered = entry.lower(config=RunConfig(backend_type=ascend_backend, execution_mode=ExecutionMode.ONBOARD))
+    config = RunConfig(backend_type=ascend_backend, execution_mode=ExecutionMode.ONBOARD)
+    lowered = entry.lower(config=config)
     props = passes.IRPropertySet()
     props.insert(passes.IRProperty.SSAForm)
     props.insert(passes.IRProperty.UseAfterDef)
     assert not passes.PropertyVerifierRegistry.verify(props, lowered)
+    assert isinstance(entry.compile(config=config), CompiledProgram)
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
@@ -1768,11 +1770,13 @@ def test_lower_keeps_view_binding_after_tensor_assemble(ascend_backend):
             pl.store(pl.add(lhs, rhs), [0, 0], out)
         return out
 
-    lowered = entry.lower(config=RunConfig(backend_type=ascend_backend, execution_mode=ExecutionMode.ONBOARD))
+    config = RunConfig(backend_type=ascend_backend, execution_mode=ExecutionMode.ONBOARD)
+    lowered = entry.lower(config=config)
     props = passes.IRPropertySet()
     props.insert(passes.IRProperty.SSAForm)
     props.insert(passes.IRProperty.UseAfterDef)
     assert not passes.PropertyVerifierRegistry.verify(props, lowered)
+    assert isinstance(entry.compile(config=config), CompiledProgram)
 
 
 if __name__ == "__main__":
