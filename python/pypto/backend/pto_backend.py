@@ -50,6 +50,7 @@ from pypto._function_attrs import (
     DUAL_AIV_DISPATCH_ATTR,
     EXTERNAL_BINARY_POLICY_ATTR,
     EXTERNAL_PREFLIGHT_SOURCE_ATTR,
+    EXTERNAL_RUNTIME_ATTR,
     EXTERNAL_SOURCE_ATTR,
 )
 from pypto._target import runtime_implementation_name
@@ -2806,10 +2807,12 @@ def _with_device_helpers(
 
 
 def _validate_external_bridge_runtime(program: _ir_core.Program, runtime: _passes.RuntimeKind) -> None:
-    if runtime != _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER and any(
-        EXTERNAL_PREFLIGHT_SOURCE_ATTR in f.attrs for f in program.functions.values()
-    ):
-        raise ValueError("External runtime bridge requires TENSORMAP_AND_RINGBUFFER")
+    for function in program.functions.values():
+        if EXTERNAL_PREFLIGHT_SOURCE_ATTR in function.attrs:
+            # Older artifacts and c_pointer checkers use the TMR tensor ABI.
+            required = function.attrs.get(EXTERNAL_RUNTIME_ATTR, "tensormap_and_ringbuffer")
+            if _runtime_name_for_codegen(runtime) != required:
+                raise ValueError(f"External runtime bridge for {function.name} requires {required}")
 
 
 def _generate_single_chip(

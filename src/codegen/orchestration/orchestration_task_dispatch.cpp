@@ -181,6 +181,23 @@ std::vector<OrchestrationStmtCodegen::ParamEntry> OrchestrationStmtCodegen::Reor
   return ordered;
 }
 
+OrchestrationStmtCodegen::ParamEntry OrchestrationStmtCodegen::BuildScalarParam(const ExprPtr& expr,
+                                                                                std::string value) const {
+  ParamEntry param{ArgDirection::Scalar, std::move(value)};
+  if (graph_tensor_slots_) {
+    if (auto var = AsVarLike(expr)) {
+      auto slot = graph_scalar_params_.find(var.get());
+      if (slot != graph_scalar_params_.end()) {
+        param.graph_scalar_binding = "args.scalar(" + std::to_string(slot->second) + ")";
+      }
+    } else {
+      // Call argument builders inline only scalar literals here.
+      param.graph_scalar_binding = param.value;
+    }
+  }
+  return param;
+}
+
 /// Build one ParamEntry from the call-site arg at `arg_idx`. Centralises the
 /// var/const/scalar dispatch that BuildTaskParams used to inline, so the
 /// per-callee-param iteration (which interleaves args-derived and
@@ -193,11 +210,11 @@ OrchestrationStmtCodegen::ParamEntry OrchestrationStmtCodegen::BuildOneArgParam(
   std::string var_name = TryGetVarName(arg);
   if (!var_name.empty()) {
     if (IsA<CommCtxType>(arg->GetType())) {
-      return {ArgDirection::Scalar, var_name};
+      return BuildScalarParam(arg, var_name);
     }
     if (auto scalar_type = As<ScalarType>(arg->GetType())) {
       std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-      return {ArgDirection::Scalar, EncodeScalarVar(arg, var_name, cpp_type)};
+      return BuildScalarParam(arg, EncodeScalarVar(arg, var_name, cpp_type));
     }
     std::string ext_name = GetExternalTensorName(var_name);
     return {call_arg_directions[arg_idx], ext_name};
@@ -205,15 +222,15 @@ OrchestrationStmtCodegen::ParamEntry OrchestrationStmtCodegen::BuildOneArgParam(
   if (auto const_int = As<ConstInt>(arg)) {
     std::string cpp_type = const_int->dtype().ToCTypeString();
     std::string value = FormatConstIntValue(const_int, cpp_type);
-    return {ArgDirection::Scalar, "(uint64_t)" + value};
+    return BuildScalarParam(arg, "(uint64_t)" + value);
   }
   if (auto const_float = As<ConstFloat>(arg)) {
     std::string cpp_type = const_float->dtype().ToCTypeString();
     std::string value = FormatConstFloatValue(const_float, cpp_type);
-    return {ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)};
+    return BuildScalarParam(arg, EncodeScalarConst(value, cpp_type));
   }
   if (auto const_bool = As<ConstBool>(arg)) {
-    return {ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"};
+    return BuildScalarParam(arg, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0");
   }
   INTERNAL_CHECK_SPAN(false, call->span_) << "Call to '" << callee_name << "' arg " << arg_idx
                                           << " is neither a variable nor a recognized constant literal "
@@ -571,13 +588,13 @@ std::vector<OrchestrationStmtCodegen::ParamEntry> OrchestrationStmtCodegen::Buil
       if (auto const_int = As<ConstInt>(inner_arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({ArgDirection::Scalar, "(uint64_t)" + value});
+        params.push_back(BuildScalarParam(inner_arg, "(uint64_t)" + value));
       } else if (auto const_float = As<ConstFloat>(inner_arg)) {
         std::string cpp_type = const_float->dtype().ToCTypeString();
         std::string value = FormatConstFloatValue(const_float, cpp_type);
-        params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
+        params.push_back(BuildScalarParam(inner_arg, EncodeScalarConst(value, cpp_type)));
       } else if (auto const_bool = As<ConstBool>(inner_arg)) {
-        params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+        params.push_back(BuildScalarParam(inner_arg, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"));
       } else {
         INTERNAL_CHECK_SPAN(false, inner_call->span_) << "Internal error: inner call arg " << inner_idx
                                                       << " is neither a variable nor a recognized constant";
@@ -605,12 +622,12 @@ std::vector<OrchestrationStmtCodegen::ParamEntry> OrchestrationStmtCodegen::Buil
 
     if (!var_name.empty()) {
       if (IsA<CommCtxType>(outer_arg->GetType())) {
-        params.push_back({ArgDirection::Scalar, var_name});
+        params.push_back(BuildScalarParam(outer_arg, var_name));
         continue;
       }
       if (auto scalar_type = As<ScalarType>(outer_arg->GetType())) {
         std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-        params.push_back({ArgDirection::Scalar, EncodeScalarVar(outer_arg, var_name, cpp_type)});
+        params.push_back(BuildScalarParam(outer_arg, EncodeScalarVar(outer_arg, var_name, cpp_type)));
         continue;
       }
 
@@ -632,13 +649,13 @@ std::vector<OrchestrationStmtCodegen::ParamEntry> OrchestrationStmtCodegen::Buil
     } else if (auto const_int = As<ConstInt>(outer_arg)) {
       std::string cpp_type = const_int->dtype().ToCTypeString();
       std::string value = FormatConstIntValue(const_int, cpp_type);
-      params.push_back({ArgDirection::Scalar, "(uint64_t)" + value});
+      params.push_back(BuildScalarParam(outer_arg, "(uint64_t)" + value));
     } else if (auto const_float = As<ConstFloat>(outer_arg)) {
       std::string cpp_type = const_float->dtype().ToCTypeString();
       std::string value = FormatConstFloatValue(const_float, cpp_type);
-      params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
+      params.push_back(BuildScalarParam(outer_arg, EncodeScalarConst(value, cpp_type)));
     } else if (auto const_bool = As<ConstBool>(outer_arg)) {
-      params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+      params.push_back(BuildScalarParam(outer_arg, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"));
     } else {
       INTERNAL_CHECK_SPAN(false, outer_call->span_)
           << "Outer call to wrapper '" << wrapper_func->name_ << "' arg " << outer_idx
@@ -931,6 +948,41 @@ void OrchestrationStmtCodegen::AppendExternalPreflight(TaskDispatchPlan& plan,
       << "External preflight requires a valid C++ checker symbol";
   CHECK_SPAN(kernel_func->HasAttr(kAttrExternalSource), kernel_func->span_)
       << "External preflight requires a native external source";
+  if (graph_tensor_slots_) {
+    CHECK_SPAN(kernel_func->GetAttr<std::string>(kAttrExternalRuntime, "") == "percounter",
+               kernel_func->span_)
+        << "Recorded Graph replay requires a percounter external binding";
+    CHECK_SPAN(graph_control_depth_ == 0 && !plan.call->HasAttr(kAttrPredicate), plan.call->span_)
+        << "Move the conditional or loop around the native call outside the recorded Graph";
+    const auto count = As<ConstInt>(plan.launch_core_num);
+    CHECK_SPAN(!plan.launch_sync_start && (!plan.launch_core_num || (count && count->value_ == 1)),
+               plan.call->span_)
+        << "CANNBotDSL Graph calls require one static block and no sync start";
+    // Recording substitutes synthetic tensor addresses. Project the final,
+    // wrapper-reordered ABI onto actual boundary slots and check at graph submit.
+    std::ostringstream check;
+    check << "        {\n            CoreTaskArgs bindings;\n";
+    for (const auto& param : plan.params) {
+      if (param.direction == ArgDirection::Scalar) {
+        CHECK_SPAN(param.graph_scalar_binding.has_value(), plan.call->span_)
+            << "Pass the native scalar as a Graph boundary argument or a literal for replay validation";
+        check << "            bindings.add_scalar(" << *param.graph_scalar_binding << ");\n";
+      } else {
+        auto slot = graph_tensor_slots_->find(param.value);
+        CHECK_SPAN(slot != graph_tensor_slots_->end(), plan.call->span_)
+            << "Cannot validate native tensor '" << param.value
+            << "' on Graph replay. Pass the final tensor view as a Graph boundary argument.";
+        check << "            bindings." << ArgDirectionToMethodName(param.direction) << "(args.tensor("
+              << slot->second << ").ref());\n";
+      }
+    }
+    check << "            " << symbol << "(bindings);\n        }\n";
+    auto source = check.str();
+    if (graph_binding_check_seen_.insert(source).second) {
+      graph_binding_checks_.push_back(std::move(source));
+    }
+    return;
+  }
   // pre_lines run after all arguments and launch settings, just before rt_submit.
   // The checker sees the final launch and tensor-first argument ordering, even
   // when an Spmd/Group wrapper permutes the caller's parameters.
@@ -1175,8 +1227,8 @@ void OrchestrationStmtCodegen::GenerateGraphCallCode(const CallPtr& call, const 
   // `rt_submit_graph(GraphFunction, const GraphTaskArgs&)` — the boundary
   // container is its own `Arg` instantiation, sized by GRAPH_MAX_*_ARGS.
   EmitTaskParamsDecl(task_var, "GraphTaskArgs");
-  const auto slots_it = graph_config_scalar_slots_.find(callee_func->name_);
-  INTERNAL_CHECK_SPAN(slots_it != graph_config_scalar_slots_.end(), call->span_)
+  const auto slots_it = graph_configs_.find(callee_func->name_);
+  INTERNAL_CHECK_SPAN(slots_it != graph_configs_.end(), call->span_)
       << "Internal error: Graph scalar usage was not collected for '" << callee_func->name_ << "'";
   const std::string config_var = task_var + "_config";
   EmitIndentedLine(GraphFunctionSymbol(callee_func->name_) + "Config " + config_var + ";");
@@ -1188,7 +1240,7 @@ void OrchestrationStmtCodegen::GenerateGraphCallCode(const CallPtr& call, const 
            "already exist so replay can patch their addresses.";
     const char* method = ArgDirectionToMethodName(p.direction);
     if (p.direction == ArgDirection::Scalar) {
-      if (slots_it->second.count(scalar_index)) {
+      if (slots_it->second.scalar_slots.count(scalar_index)) {
         EmitIndentedLine(config_var + ".scalar_" + std::to_string(scalar_index) + " = to_u64(" + p.value +
                          ");");
       }
@@ -1198,6 +1250,9 @@ void OrchestrationStmtCodegen::GenerateGraphCallCode(const CallPtr& call, const 
   }
   EmitSelectiveDumpCall(task_var, params);
   EmitManualDeps(call, task_var);
+  if (!slots_it->second.binding_checks.empty()) {
+    EmitIndentedLine(config_var + ".check_bindings(" + task_var + ");");
+  }
   EmitIndentedLine(config_var + ".boundary = pypto_graph_boundary_layout(" + task_var + ");");
   const std::string submit = "rt_submit_graph(&" + GraphFunctionSymbol(callee_func->name_) + ", " + task_var +
                              ", " + config_var + ")";

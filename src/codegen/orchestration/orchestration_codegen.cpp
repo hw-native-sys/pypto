@@ -310,8 +310,7 @@ std::string GenerateDynamicDimDefs(const std::vector<VarPtr>& params, const std:
 /// boundary parameter's origin through task argument forwarding. Converting it
 /// to an integer would freeze the recording invocation's value on every replay.
 std::string GenerateGraphFunctions(const ProgramPtr& program, const FunctionPtr& entry,
-                                   KernelRegistrations* registrations,
-                                   GraphConfigScalarSlots* static_scalar_slots) {
+                                   KernelRegistrations* registrations, GraphConfigs* graph_configs) {
   std::ostringstream oss;
   const auto graph_functions = CollectReferencedGraphFunctions(program, entry);
   if (graph_functions.empty()) return "";
@@ -375,7 +374,7 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
                                           /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
                                           /*dist_param_to_ctx_param=*/{});
     body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
-    body_codegen.SetGraphScalarParams(graph_func->params_);
+    body_codegen.SetGraphBoundaryParams(graph_func->params_);
     // The prologue below declares one C++ name per parameter. They are not in
     // ``param_name_set``, so reserve them explicitly or a body SSA rename will
     // shadow one (issue #2605; see ReserveDeclaredNames).
@@ -386,15 +385,21 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
     body_codegen.PrepareCrossScopeTaskIdHoists(graph_func->body_);
     body_codegen.SetInitialIndent(4);
     body_codegen.VisitStmt(graph_func->body_);
-    (*static_scalar_slots)[graph_func->name_] = body_codegen.GetGraphScalarValueReads();
-
+    auto& invocation = (*graph_configs)[graph_func->name_];
+    invocation = body_codegen.GetGraphInvocationConfig();
     // Construction values belong to Config; boundary scalar handles only forward
     // per-invocation values. Compare the same encoded bits that participate in the
     // key, including signed zero and NaN payloads of floating-point parameters.
-    const auto& read_slots = (*static_scalar_slots)[graph_func->name_];
+    const auto& read_slots = invocation.scalar_slots;
     const std::set<size_t> ordered_slots(read_slots.begin(), read_slots.end());
     const std::string config_type = GraphFunctionSymbol(graph_func->name_) + "Config";
     oss << "struct " << config_type << " : simpler::hbg::ConfigBase {\n";
+    if (!invocation.binding_checks.empty()) {
+      oss << "    static void check_bindings(const GraphTaskArgs& args) {\n";
+      oss << "        if (args.has_error()) return;\n";
+      for (const auto& check : invocation.binding_checks) oss << check;
+      oss << "    }\n";
+    }
     oss << "    std::vector<uint64_t> boundary;\n";
     std::string equality = "boundary == other.boundary";
     for (size_t slot : ordered_slots) {
@@ -560,10 +565,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetInitialIndent(4);
   // Generate Graph bodies first: their actual value reads determine which
   // boundary slots the entry must declare static for safe replay.
-  GraphConfigScalarSlots graph_config_scalar_slots;
-  const std::string graph_functions =
-      GenerateGraphFunctions(program, func, &registrations, &graph_config_scalar_slots);
-  stmt_codegen.SetGraphConfigScalarSlots(std::move(graph_config_scalar_slots));
+  GraphConfigs graph_configs;
+  const std::string graph_functions = GenerateGraphFunctions(program, func, &registrations, &graph_configs);
+  stmt_codegen.SetGraphConfigs(std::move(graph_configs));
   stmt_codegen.VisitStmt(func->body_);
 
   oss << GenerateIncludes(false, stmt_codegen.NeedsVectorInclude(), !graph_functions.empty());
@@ -578,10 +582,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     CHECK_SPAN(inserted || it->second == source, member->span_)
         << "External preflight symbol has conflicting definitions: " << symbol;
   }
-  // Recorded Graph tasks bypass the recorder on replay. Until Graph boundary
-  // validation carries these constraints, reject rather than checking just once.
-  CHECK_SPAN(graph_functions.empty() || external_checks.empty(), func->span_)
-      << "External runtime bridge does not yet support recorded Graph replay";
   for (const auto& [symbol, source] : external_checks) oss << source << "\n";
 
   oss << "extern \"C\" {\n\n";

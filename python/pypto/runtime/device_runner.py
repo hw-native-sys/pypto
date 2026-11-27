@@ -344,7 +344,7 @@ def _compile_single_kernel(
         cann_include = Path(sdk_root) / "asc" / "include"
         if not (cann_include / "c_api" / "asc_simd.h").is_file():
             raise ValueError(f"a5-text-only requires C API headers at {cann_include}")
-        includes.extend((str(cann_include), str(cann_include.parent)))
+        includes.extend((str(cann_include), str(cann_include.parent), str(Path(sdk_root) / "include")))
     helpers = _vpto.source_paths(kernel.get("vpto_sources"))
     if helpers:
         _vpto.validate_target(platform, core_type)

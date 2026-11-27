@@ -794,13 +794,6 @@ class ExprSubstituter : public IRMutator {
   const std::unordered_map<const Var*, ExprPtr>& binding_;
 };
 
-[[nodiscard]] ExprPtr SubstituteAtCallSite(const ExprPtr& expr,
-                                           const std::unordered_map<const Var*, ExprPtr>& binding) {
-  if (!expr) return expr;
-  ExprSubstituter substituter(binding);
-  return substituter.VisitExpr(expr);
-}
-
 /// Appends the hoisted scalars to a Graph function's signature.
 [[nodiscard]] FunctionPtr ExtendGraphSignature(const FunctionPtr& func, const GraphPlan& plan,
                                                const StmtPtr& new_body) {
@@ -1531,11 +1524,13 @@ class CallSiteExtender : public IRMutator {
     // scalars, and the argument append below walks that list, not this one.
     std::unordered_map<const Var*, ExprPtr> local_for;
     auto bind = [&](const HoistedValue& h) {
-      auto value = SubstituteAtCallSite(h.value, binding);
-      // Bind to a local so add_scalar receives an lvalue, which the runtime
-      // declares dynamic before turning it into a Graph boundary parameter.
+      ExprSubstituter substitute(binding);
+      auto value = substitute.VisitExpr(h.value);
+      // The new local belongs to the caller. Its value carries the instantiated
+      // type; the Graph parameter's MemRef may name a callee-local allocation
+      // or use a callee scalar in its byte offset.
       auto local = std::make_shared<Var>(h.param->name_hint_ + "__graph_arg" + std::to_string(next_local_++),
-                                         h.param->GetType(), h.param->span_);
+                                         value->GetType(), h.param->span_);
       pending_prefix_.push_back(std::make_shared<AssignStmt>(local, value, h.param->span_));
       local_for[h.param.get()] = local;
       // A later hoist may reference this one: the expressions were captured

@@ -19,6 +19,7 @@ from types import ModuleType, SimpleNamespace
 import pypto.language as pl
 import pytest
 from pypto import backend, passes
+from pypto.backend import pto_backend
 from pypto.backend.cannbotdsl_jit import CANNBotDSLBinding
 from pypto.jit._source import capture_namespaces
 from pypto.jit.external.compatibility import request_from_context
@@ -46,7 +47,10 @@ class _Binding:
     def prepare(self, context, platform, runtime, output_dir):
         ctx = context
         assert platform == "a5"
-        assert runtime == passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+        if runtime == passes.RuntimeKind.HOST_BUILD_GRAPH:
+            ctx.external_runtime = "percounter"
+        else:
+            assert runtime == passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         request = request_from_context(ctx, CompileTarget("a5", "ccec", "test"))
         self.requests.append(request)
         path = Path(output_dir) / "callback.cpp"
@@ -119,6 +123,8 @@ def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, native_a
     assert first is not second
     assert len(binding.requests) == 2
     assert not entry._cache
+    with pytest.raises(ValueError, match="requires tensormap_and_ringbuffer"):
+        pto_backend._validate_external_bridge_runtime(first.program, passes.RuntimeKind.HOST_BUILD_GRAPH)
     with pytest.raises(RuntimeError, match="cannot request recompilation"):
         entry._resolve_compiled((), {"config": config}, allow_signature_mode=True, _lookup_only=True)
     # A second preparation cannot replace the first program's owned export.
@@ -134,6 +140,195 @@ def test_binding_prepares_owned_variants_without_jit_cache(monkeypatch, native_a
     assert orchestration.count(".set_allow_early_resolve(false)") >= 2
     if core == "mixed":
         assert "MixedKernels" in orchestration
+
+
+@pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
+def test_hbg_graph_checks_actual_native_arguments_before_every_submit(
+    tmp_path, monkeypatch, native_api, core
+):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+    native = _Native(_Binding(core))
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        native(x, out)
+        return out
+
+    @pl.jit
+    def entry(x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+        for i in pl.range(2):
+            out = stage(x, out)
+        return out
+
+    config = RunConfig(
+        backend_type=backend.BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(config=config)
+    with pytest.raises(ValueError, match="requires percounter"):
+        pto_backend._validate_external_bridge_runtime(
+            compiled.program, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+        )
+    (orchestration,) = Path(compiled.output_dir).rglob("orchestration/*.cpp")
+    source = orchestration.read_text()
+    check = source.index(".check_bindings(")
+    assert check < source.index("rt_submit_graph(", check)
+    assert source.count("test_native_preflight(bindings);") == 1
+    assert "bindings.add_input(args.tensor(" in source
+    assert "percounter" in (Path(compiled.output_dir) / "kernel_config.py").read_text()
+
+
+def test_hbg_graph_validates_hoisted_view_at_each_call(tmp_path, native_api, monkeypatch):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+    native = _Native(_Binding("aiv"))
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor], offset: pl.Scalar[pl.INDEX]):
+        view = pl.tensor.slice(x, [64], [offset])
+        native(view, out)
+        return out
+
+    @pl.jit
+    def entry(
+        x: pl.Tensor[[128], pl.BF16], out: pl.InOut[pl.Tensor[[64], pl.BF16]], step: pl.Scalar[pl.INDEX]
+    ):
+        for i in pl.range(2):
+            offset = i * step
+            out = stage(x, out, offset)
+        return out
+
+    config = RunConfig(
+        backend_type=backend.BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(config=config)
+    (path,) = Path(compiled.output_dir).rglob("orchestration/*.cpp")
+    source = path.read_text()
+    check = source.index(".check_bindings(")
+    assert source.index(".view(") < check < source.index("rt_submit_graph(", check)
+
+
+@pytest.mark.parametrize("core", ["aiv", "mixed"])
+def test_hbg_graph_supports_producer_consumer_chain_with_hoisted_create(
+    tmp_path, native_api, monkeypatch, core
+):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+    native = _Native(_Binding(core))
+
+    @pl.jit.incore
+    def add_one(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return pl.store(pl.tile.adds(pl.load(x, [0, 0], [16, 16]), 1.0), [0, 0], out)
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        tmp = pl.create_tensor([16, 16], dtype=pl.FP32)
+        tmp = add_one(x, tmp)
+        native(tmp, out)
+        out = add_one(out, out)
+        return out
+
+    @pl.jit
+    def entry(x: pl.Tensor[[16, 16], pl.FP32], out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        return stage(x, out)
+
+    config = RunConfig(
+        backend_type=backend.BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(config=config)
+    (path,) = Path(compiled.output_dir).rglob("orchestration/*.cpp")
+    source = path.read_text()
+    check = source.index(".check_bindings(")
+    assert check < source.index("rt_submit_graph(", check)
+    assert source.count("test_native_preflight(bindings);") == 1
+    pto_backend._validate_external_bridge_runtime(compiled.program, passes.RuntimeKind.HOST_BUILD_GRAPH)
+    with pytest.raises(ValueError, match="requires percounter"):
+        pto_backend._validate_external_bridge_runtime(
+            compiled.program, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+        )
+
+
+@pytest.mark.parametrize(
+    "case,match",
+    [
+        ("loop", "Move the conditional or loop around the native call"),
+        ("core_num", "CANNBotDSL Graph calls require one static block"),
+        ("sync_start", "CANNBotDSL Graph calls require one static block"),
+        ("reshape", "Cannot validate native tensor"),
+    ],
+)
+def test_hbg_graph_rejects_uncheckable_native_patterns(tmp_path, native_api, monkeypatch, case, match):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+    native = _Native(_Binding("aiv"))
+
+    if case == "loop":
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            for _ in pl.range(2):
+                native(x, out)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+            return stage(x, out)
+
+    elif case == "core_num":
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            pl.spmd_submit(native, x, out, core_num=2)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+            return stage(x, out)
+
+    elif case == "sync_start":
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            pl.spmd_submit(native, x, out, core_num=1, sync_start=True)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+            return stage(x, out)
+
+    else:
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            flat = pl.reshape(x, [256])
+            native(flat, out)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[16, 16], pl.FP32], out: pl.InOut[pl.Tensor[[256], pl.FP32]]):
+            return stage(x, out)
+
+    config = RunConfig(
+        backend_type=backend.BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        with pytest.raises(RuntimeError, match=match):
+            entry.compile(config=config)
 
 
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
@@ -227,7 +422,7 @@ def test_cannbot_binding_rejects_unproven_cache_line_views(tmp_path, shape):
     [
         ("a5sim", passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER),
         ("a2a3", passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER),
-        ("a5", passes.RuntimeKind.HOST_BUILD_GRAPH),
+        ("a5", passes.RuntimeKind.HOST_BUILD_GRAPH_EXPERIMENTAL),
     ],
 )
 def test_cannbot_binding_rejects_unsupported_target(tmp_path, platform, runtime):

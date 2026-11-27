@@ -115,7 +115,7 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 每次准备都重新导出；由于尚未建立完整的 Python 闭包/输入快照，身份明确标记为不完整。
 因此该 provider 尚未注册到仅支持 capture 的 registry，也不声明 preparation 缓存复用。
 
-A5 TMR bridge 支持下述单 block AIC/AIV/MIX 子集的直接执行、普通 JIT 自动发现。
+A5 bridge 支持下述单 block AIC/AIV/MIX 子集的 TMR 直接执行，以及 TMR 和 A5 默认 HBG（`percounter`）上的普通 JIT 自动发现。
 完整输入捕获、持久复用及性能验收仍单独跟踪。准备和原生二进制编译不使用缓存。
 
 ### 普通 JIT 自动发现
@@ -150,10 +150,16 @@ PyPTO 不遍历原生函数体，导入 PyPTO 也不会导入 CANNBotDSL。
 包含一个 AIC 和双 lane AIV 成员的 Group。调用前后可以使用普通 PyPTO 生产者与消费者。
 
 使用 `compile(..., config=RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD))` 或携带相同配置的普通 JIT 执行，
-运行时必须为 TMR。绑定暂不支持 `specialize()`/`lower()`；可查看编译后的程序。首版要求正的静态
+运行时可选择 TMR 或 A5 默认 HBG（`percounter`）。绑定暂不支持 `specialize()`/`lower()`；可查看编译后的程序。首版要求正的静态
 ND shape、连续紧凑 strides、首元素地址 64 字节对齐，且整个视图占据完整的 64 字节缓存行。
 每次提交前均检查 shape/stride/alignment/存储边界，包括已加载程序的复用；签名不是实际
 存储的证明。启动检查要求单 block 且无同步启动。动态 shape、非连续或非对齐视图会明确失败。
+
+使用 HBG 时，在 `with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):` 作用域内编译。
+录制图中的原生调用须无条件执行，使用单个静态 block，所有 tensor 操作数都能映射到编译后的图边界。标量须为 Graph 参数或字面量。
+若视图只能在录制体内构建，请将最终视图作为 Graph 参数传入。编排按设备参数顺序从图边界取出实际视图，
+在每次提交 Graph 前执行绑定检查，覆盖首次录制与命中缓存的回放。条件或循环可放在调用 Graph 的外层。
+直接批量提交接口继续使用 TMR。
 
 每次编译重新准备，在程序输出目录的独立子目录保存拥有所有权的导出源码，因此准备结束后
 仍可调用 `CompiledProgram.load()`。由于 Python 闭包捕获尚不完整，含绑定的程序绕过两级
@@ -171,8 +177,8 @@ A5 系统测试在三种拓扑的真实 matmul/vec kernel 前后加入普通 JIT
 
 ### A5 AIC/AIV/MIX runtime 路径
 
-`TMRBridge.lower(prepared, target)` 在 `a5/ccec` 的 TMR v1 上支持
-`cannbotdsl.device_callable` v1。支持单 AIC、单 AIV，或一个硬件配对的 AIC + 两个
+`pypto.backend.cannbotdsl_runtime.lower(prepared, target)` 在 `a5/ccec` 的 TMR 或 `percounter` v1 上支持
+`cannbotdsl.device_callable` v1（`TMRBridge.lower` 仅转发 TMR 目标并拒绝 `percounter`）。支持单 AIC、单 AIV，或一个硬件配对的 AIC + 两个
 AIV 组（MIX）。要求无隐式 workspace，以及与导出器完全一致的资源、状态、加载和完成声明。
 支持 AIV UB 和 AIC L1/L0A/L0B/L0C 中静态且互不重叠的分配。Bridge 校验整数大小与偏移、
 空间和核的归属、对齐（UB 为 32 字节，Cube 空间为 512 字节）、容量和每个空间的精确最高使用地址。
